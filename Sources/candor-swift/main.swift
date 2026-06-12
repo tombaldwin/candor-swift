@@ -54,7 +54,15 @@ while let a = argIter.next() {
         print("<!-- \(engineVersion) · the agent contract for this installed version -->")
         print(doc, terminator: "")
         exit(0)
-    default: target = a
+    default:
+        // An unknown flag must FAIL, not become the scan path (a stale binary handed a newer
+        // doc's flag would scan a directory literally named after it; a typo'd --policy would
+        // silently drop the gate).
+        if a.hasPrefix("-") {
+            FileHandle.standardError.write("candor-swift: unknown flag \(a) (see --help)\n".data(using: .utf8)!)
+            exit(2)
+        }
+        target = a
     }
 }
 
