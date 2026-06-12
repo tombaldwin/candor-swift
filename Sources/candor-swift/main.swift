@@ -57,7 +57,7 @@ func isHarnessPath(_ p: String) -> Bool {
     let parts = p.split(separator: "/").map(String.init)
     if (parts.last ?? "") == "Package.swift" { return true } // the manifest is build config (build.rs analog)
     return parts.contains(".build")
-        || parts.contains(where: { $0.hasSuffix("Tests") || $0 == "Tests"
+        || parts.contains(where: { $0.hasSuffix("Tests") || $0 == "Tests" || $0.hasSuffix("TestHelpers")
             || $0 == "Benchmarks" || $0 == "Benchmark" || $0 == "Plugins" || $0 == "Examples" || $0 == "Snippets" })
 }
 var sourcePaths: [String] = []
@@ -299,7 +299,12 @@ final class DeclCollector: SyntaxVisitor {
     }
     override func visitPost(_ node: ActorDeclSyntax) { typeStack.removeLast() }
     override func visit(_ node: ExtensionDeclSyntax) -> SyntaxVisitorContinueKind {
-        let name = typeName(node.extendedType).name ?? "?"
+        // A non-identifier extended type (`extension [Foo]`, `extension Optional<X>`) needs a
+        // STABLE name — the old "?" fallback merged every such extension into one phantom unit
+        // ("?.name" showed up as a caller in the swift-argument-parser probe), cross-wiring their
+        // methods. The trimmed source text is unique per type; spaces drop for qual hygiene.
+        let name = typeName(node.extendedType).name
+            ?? node.extendedType.trimmedDescription.replacingOccurrences(of: " ", with: "")
         pushType(name, inheritance: node.inheritanceClause); return .visitChildren
     }
     override func visitPost(_ node: ExtensionDeclSyntax) { typeStack.removeLast() }
