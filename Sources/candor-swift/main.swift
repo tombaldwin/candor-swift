@@ -55,7 +55,10 @@ let rootDir = isDir.boolValue ? target : (target as NSString).deletingLastPathCo
 // Production sources only: tests are the harness's effects, not the package's (the family rule).
 func isHarnessPath(_ p: String) -> Bool {
     let parts = p.split(separator: "/").map(String.init)
-    return parts.contains(".build") || parts.contains(where: { $0.hasSuffix("Tests") || $0 == "Tests" })
+    if (parts.last ?? "") == "Package.swift" { return true } // the manifest is build config (build.rs analog)
+    return parts.contains(".build")
+        || parts.contains(where: { $0.hasSuffix("Tests") || $0 == "Tests"
+            || $0 == "Benchmarks" || $0 == "Benchmark" || $0 == "Plugins" || $0 == "Examples" || $0 == "Snippets" })
 }
 var sourcePaths: [String] = []
 if isDir.boolValue {
@@ -133,9 +136,13 @@ func kappaFree(name: String, argCount: Int) -> String? {
     case "getenv", "setenv", "unsetenv": return "Env"
     case "NSXPCConnection": return "Ipc"
     case "os_log": return "Log"
-    case "system", "posix_spawn", "execv", "execvp", "fork": return "Exec"
-    case "fopen", "open", "unlink", "mkdir", "rmdir", "rename": return "Fs"
-    case "socket", "connect", "bind", "listen": return "Net"
+    case "posix_spawn", "execv", "execvp": return "Exec"
+    case "fopen": return "Fs"
+    // NOTE deliberately ABSENT: the bare POSIX names (open/bind/connect/listen/socket/fork/
+    // system/mkdir/rename/unlink). As bare Swift identifiers they collide with ordinary local
+    // functions — the first real-repo sweep caught GRDB's local `bind(...)` fabricating Net onto
+    // its hottest Statement paths (214 fns transitively). Raw syscalls in Swift come through
+    // Darwin/Glibc imports the ledger names; under-report beats a wrong label.
     default:
         if name.hasPrefix(DB_FREE_PREFIX) { return "Db" }
         return nil
@@ -154,8 +161,12 @@ func kappaPropertyRead(root: String, path: [String]) -> String? {
 /// Modules the platform frontier owns (κ's actual job) — everything else imported is either in
 /// the κ module set or NAMED by the ledger.
 let PLATFORM_MODULES: Set<String> = ["Swift", "Foundation", "FoundationNetworking", "FoundationXML",
-    "Dispatch", "os", "OSLog", "Darwin", "Glibc", "Combine", "Observation", "SwiftUI", "AppKit",
-    "UIKit", "CoreFoundation", "System", "RegexBuilder", "Synchronization", "Testing", "XCTest"]
+    "Dispatch", "os", "OSLog", "Darwin", "Glibc", "Musl", "Android", "Bionic", "WASILibc", "WinSDK",
+    "CRT", "Builtin", "Combine", "Observation", "SwiftUI", "AppKit", "UIKit", "WatchKit",
+    "CoreFoundation", "CoreGraphics", "CoreLocation", "CoreServices", "MobileCoreServices",
+    "Security", "SystemConfiguration", "UniformTypeIdentifiers", "CryptoKit", "System",
+    "RegexBuilder", "Synchronization", "Testing", "XCTest", "PackageDescription", "PackagePlugin",
+    "ucrt", "wasi_pthread", "string_h", "zlibng", "SwiftShims"]
 let KAPPA_MODULES: Set<String> = ["Network", "SQLite3", "CoreData"]
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -550,6 +561,28 @@ var protocolMethods: [String: Set<String>] = [:]
 var conformers: [String: [String]] = [:]
 var localTypes: Set<String> = []
 var importCounts: [String: Int] = [:]
+// The package's OWN target modules (SPM convention: Sources/<TargetName>/) — an internal import is
+// local code the walk already analyzes, not a third-party blind spot (the sweep's ledger noise:
+// swift-log importing its own Logging target read as unknown).
+var internalModules: Set<String> = [pkgName]
+for sub in ["Sources", "Source"] {
+    let p = (rootDir as NSString).appendingPathComponent(sub)
+    if let entries = try? fm.contentsOfDirectory(atPath: p) {
+        for e in entries where !e.hasPrefix(".") { internalModules.insert(e) }
+    }
+}
+// Non-Sources layouts (GRDB/, Alamofire's Source/*.swift): the manifest's own target names are
+// the internal-module ground truth.
+if let manifest = try? String(contentsOfFile: (rootDir as NSString).appendingPathComponent("Package.swift"), encoding: .utf8) {
+    var search = manifest[...]
+    while let r = search.range(of: #"name:\s*"([^"]+)""#, options: .regularExpression) {
+        let m = String(search[r])
+        if let q1 = m.firstIndex(of: "\""), let q2 = m.lastIndex(of: "\""), q1 < q2 {
+            internalModules.insert(String(m[m.index(after: q1)..<q2]))
+        }
+        search = search[r.upperBound...]
+    }
+}
 
 var collectors: [DeclCollector] = []
 for p in sourcePaths {
@@ -705,7 +738,7 @@ FileHandle.standardError.write(
 
 // the κ-coverage ledger: imported modules outside the platform frontier that κ doesn't know —
 // INVISIBLE, not Unknown; named per scan (SPEC §7 item 14, canonical marker)
-let unlisted = importCounts.filter { !PLATFORM_MODULES.contains($0.key) && !KAPPA_MODULES.contains($0.key) }
+let unlisted = importCounts.filter { !PLATFORM_MODULES.contains($0.key) && !KAPPA_MODULES.contains($0.key) && !internalModules.contains($0.key) }
     .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
 if !unlisted.isEmpty {
     let shown = unlisted.prefix(8).map { "\($0.key) (\($0.value) import\($0.value == 1 ? "" : "s"))" }.joined(separator: ", ")
