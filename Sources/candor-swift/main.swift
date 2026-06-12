@@ -616,11 +616,14 @@ for sub in ["Sources", "Source"] {
         for e in entries where !e.hasPrefix(".") { internalModules.insert(e) }
     }
 }
-// Non-Sources layouts (GRDB/, Alamofire's Source/*.swift): the manifest's own target names are
-// the internal-module ground truth.
+// Non-Sources layouts (GRDB/, Alamofire's Source/*.swift): the manifest's own TARGET names are
+// the internal-module ground truth — and ONLY target declarations: a bare `name:` regex also
+// swallowed `.product(name: "NIOCore", …)` dependency products, silencing exactly the third-party
+// modules the κ ledger exists to name (vapor's whole NIO surface vanished from the disclosure).
 if let manifest = try? String(contentsOfFile: (rootDir as NSString).appendingPathComponent("Package.swift"), encoding: .utf8) {
     var search = manifest[...]
-    while let r = search.range(of: #"name:\s*"([^"]+)""#, options: .regularExpression) {
+    while let r = search.range(of: #"\.(executableTarget|testTarget|target|plugin|macro)\(\s*name:\s*"([^"]+)""#,
+                               options: .regularExpression) {
         let m = String(search[r])
         if let q1 = m.firstIndex(of: "\""), let q2 = m.lastIndex(of: "\""), q1 < q2 {
             internalModules.insert(String(m[m.index(after: q1)..<q2]))
