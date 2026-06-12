@@ -256,6 +256,7 @@ struct FnInfo {
     var body: Syntax?
     var enclosingType: String?
     var isMain: Bool = false
+    var isAccessor: Bool = false   // a computed-property/observer/lazy-init body (spec 0.5 unitKind)
 }
 
 func typeName(_ t: TypeSyntax) -> (name: String?, isFunction: Bool) {
@@ -369,6 +370,7 @@ final class DeclCollector: SyntaxVisitor {
                     var info = FnInfo(qual: qual, loc: loc(binding))
                     info.enclosingType = ty
                     info.body = b
+                    info.isAccessor = true
                     fns.append(info)
                 }
                 if let ann = binding.typeAnnotation {
@@ -897,6 +899,7 @@ let pathsAcc = propagate(pathsD, over: edges), tablesAcc = propagate(tablesD, ov
 let prefix = outPrefix ?? (rootDir as NSString).appendingPathComponent(".candor/report")
 try? fm.createDirectory(atPath: (prefix as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
 
+let accessorQuals = Set(allFns.filter { $0.isAccessor }.map { $0.qual })
 var entries: [[String: Any]] = []
 for qual in inferred.keys.sorted() {
     let inf = inferred[qual] ?? []
@@ -912,6 +915,7 @@ for qual in inferred.keys.sorted() {
         "calls": (edges[qual] ?? []).sorted(),
     ]
     if entryPoints.contains(qual) { e["entryPoint"] = true }
+    if accessorQuals.contains(qual) { e["unitKind"] = "accessor" }  // spec 0.5 draft, informative
     if let w = whyMap[qual], !w.isEmpty { e["unknownWhy"] = w.sorted() }
     if let h = hostsAcc[qual], !h.isEmpty { e["hosts"] = h.sorted() }
     if let c = cmdsAcc[qual], !c.isEmpty { e["cmds"] = c.sorted() }

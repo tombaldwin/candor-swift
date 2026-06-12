@@ -32,6 +32,16 @@ mkdir -p "$W/led" && printf 'import Alamofire\nfunc go() { _ = FileManager.defau
 grep -q "κ doesn't know.*Alamofire" "$W/led.err" && ok "κ ledger names the unlisted import" || bad "κ ledger"
 HASH=$(python3 -c "import json; print(json.load(open('$RPT'))['functions'][0].get('hash',''))")
 case "$HASH" in *"#"*) ok "hash join keys emitted (0.4 MUST)";; *) bad "hash emission";; esac
+# spec 0.5 draft: an accessor unit carries unitKind
+mkdir -p "$W/uk" && printf 'import Foundation\nstruct C { var v: Int { _ = FileManager.default.contents(atPath: "/x"); return 1 } }\nfunc plain() { _ = Date() }\n' > "$W/uk/m.swift"
+"$BIN" "$W/uk" --out "$W/uk/r" >/dev/null 2>&1
+UK=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/uk/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:e for e in r['functions']}
+print(by.get('C.v',{}).get('unitKind',''), by.get('plain',{}).get('unitKind','-none-'))")
+[ "$UK" = "accessor -none-" ] && ok "accessor unit carries unitKind; plain fn omits it" || bad "unitKind: got '$UK'"
+
 # --agents: the self-describing engine (the contract is a bundled resource)
 "$BIN" --agents > "$W/agents.out" 2>&1
 grep -q '<!-- candor-swift' "$W/agents.out" && ok "--agents prints the version header" || bad "--agents header"
