@@ -24,7 +24,7 @@ import SwiftSyntax
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.4.0"
+let engineVersion = "candor-swift-0.4.1"
 
 var target = "."
 var outPrefix: String? = nil
