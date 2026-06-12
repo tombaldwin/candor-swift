@@ -422,6 +422,7 @@ final class CallCollector: SyntaxVisitor {
     var protoTyped: [String: String]        // param -> local protocol
     let fields: [String: [String: (name: String?, isFunction: Bool)]]
     let localTypes: Set<String>
+    let localProtocols: Set<String> // local protocol names — a receiver typed as one is DISPATCH
     let returns: [String: String]   // unambiguous factory return types (the candor-scan move)
     var enclosingType: String?
     var calls: [Call] = []
@@ -437,12 +438,13 @@ final class CallCollector: SyntaxVisitor {
     var callbackInvoked: Set<String> = [] // fn-typed params INVOKED — deferred to callback-flow
 
     init(info: FnInfo, fields: [String: [String: (name: String?, isFunction: Bool)]], localTypes: Set<String>,
-         returns: [String: String]) {
+         localProtocols: Set<String>, returns: [String: String]) {
         self.vars = info.params
         self.fnTyped = info.fnTypedParams
         self.protoTyped = info.protoParams
         self.fields = fields
         self.localTypes = localTypes
+        self.localProtocols = localProtocols
         self.returns = returns
         self.enclosingType = info.enclosingType
         super.init(viewMode: .sourceAccurate)
@@ -473,6 +475,12 @@ final class CallCollector: SyntaxVisitor {
             let n = dr.baseName.text
             if n == "self" { return (enclosingType, true, []) }
             if let t = vars[n] { return (t, true, [n]) }
+            // IMPLICIT SELF: a bare identifier inside a method body can be a FIELD of the
+            // enclosing type (`handler.log(s)` ≡ `self.handler.log(s)`) — the protocol-field probe
+            // found dispatchers resolving as raw names and missing the field index entirely.
+            if let et = enclosingType, let f = fields[et]?[n], let ft = f.name {
+                return (ft, true, [n])
+            }
             return (n, false, [n])
         }
         if let ma = expr.as(MemberAccessExprSyntax.self) {
@@ -576,6 +584,12 @@ final class CallCollector: SyntaxVisitor {
             } else if let rt = base.root, localTypes.contains(rt) {
                 // typed local receiver: Type.method — resolve to the local unit
                 calls.append(Call(path: "\(rt).\(member)", leaf: member, strArg: lit, typed: true, args: argKinds(node)))
+            } else if let rt = base.root, localProtocols.contains(rt) {
+                // a PROTOCOL-typed receiver reached via a field/let/factory (`self.handler.log()`
+                // where `var handler: LogHandler`) — the params-only protoTyped path missed these
+                // ENTIRELY (not even Unknown — the density review's lever #1 turned out to be a
+                // soundness hole). Same bounded CHA / honest-Unknown as protocol params.
+                protoDispatches.append((rt, member))
             } else {
                 calls.append(Call(path: member, leaf: member, strArg: lit, typed: false))
             }
@@ -749,7 +763,8 @@ for f in allFns {
     if f.isMain { entryPoints.insert(f.qual) }
     edges[f.qual] = edges[f.qual] ?? []
     guard let body = f.body else { continue }
-    let cc = CallCollector(info: f, fields: fields, localTypes: localTypes, returns: returnsIdx)
+    let cc = CallCollector(info: f, fields: fields, localTypes: localTypes,
+                           localProtocols: Set(protocolMethods.keys), returns: returnsIdx)
     cc.walk(body)
     // accessor units: a property READ of a known accessor unit is an edge (the reader inherits
     // the getter's effects — `c.data` reaching the Fs inside `var data: Data { … }`)
