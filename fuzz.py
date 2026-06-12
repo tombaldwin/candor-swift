@@ -90,7 +90,8 @@ def run_seed(seed):
             f.write(src)
         out = os.path.join(d, "r")
         subprocess.run([BIN, d, "--out", out], capture_output=True)
-        rep = json.load(open(out + ".json"))
+        import glob as _g
+        rep = json.load(open(next(p for p in _g.glob(out + ".*.Swift.json") if "callgraph" not in p)))
         got = {e["fn"].split(".")[-1]: set(e["inferred"]) for e in rep["functions"]}
         fails = []
         for c in chain:

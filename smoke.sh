@@ -10,9 +10,10 @@ ok()   { echo "  ok   $1"; pass=$((pass+1)); }
 bad()  { echo "  FAIL $1"; fail=$((fail+1)); }
 
 "$BIN" conformance/Cases.swift --out "$W/r" 2>/dev/null
+RPT=$(ls "$W"/r.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
 EXPECTED="${CANDOR_SPEC:-../candor-spec}/conformance/expected.json"
 if [ -f "$EXPECTED" ]; then
-  N=$(python3 - "$EXPECTED" "$W/r.json" <<'PY'
+  N=$(python3 - "$EXPECTED" "$RPT" <<'PY'
 import json, sys
 exp = {k: set(v) for k, v in json.load(open(sys.argv[1])).items() if not k.startswith("_")}
 got = {e["fn"].split(".")[-1]: set(e.get("inferred", [])) for e in json.load(open(sys.argv[2]))["functions"]}
@@ -29,7 +30,7 @@ grep -q 'AS-EFF-006.*hop_a.*Net' "$W/gate.out" && ok "deny gate flags the transi
 mkdir -p "$W/led" && printf 'import Alamofire\nfunc go() { _ = FileManager.default.contents(atPath: "/x") }\nimport Foundation\n' > "$W/led/m.swift"
 "$BIN" "$W/led" --out "$W/led/r" 2>"$W/led.err"
 grep -q "κ doesn't know.*Alamofire" "$W/led.err" && ok "κ ledger names the unlisted import" || bad "κ ledger"
-HASH=$(python3 -c "import json; print(json.load(open('$W/r.json'))['functions'][0].get('hash',''))")
+HASH=$(python3 -c "import json; print(json.load(open('$RPT'))['functions'][0].get('hash',''))")
 case "$HASH" in *"#"*) ok "hash join keys emitted (0.4 MUST)";; *) bad "hash emission";; esac
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

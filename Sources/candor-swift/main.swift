@@ -251,6 +251,7 @@ final class DeclCollector: SyntaxVisitor {
     var fns: [FnInfo] = []
     var fields: [String: [String: (name: String?, isFunction: Bool)]] = [:] // Type -> field -> info
     var protocolMethods: [String: Set<String>] = [:]   // protocol -> declared method names
+    var returnsTmp: [String: String?] = [:]            // fn leaf -> return type (nil = ambiguous)
     var conformers: [String: [String]] = [:]           // protocol -> conforming local types
     var localTypes: Set<String> = []
     var imports: [String] = []
@@ -331,6 +332,15 @@ final class DeclCollector: SyntaxVisitor {
         return .visitChildren
     }
 
+    private func recordReturn(_ name: String, _ sig: FunctionSignatureSyntax) {
+        guard let rt = sig.returnClause.map({ typeName($0.type) }), let tn = rt.name else { return }
+        if let existing = returnsTmp[name] {
+            if existing != tn { returnsTmp[name] = String?.none } // ambiguous leaf — never guess
+        } else {
+            returnsTmp[name] = tn
+        }
+    }
+
     private func collect(_ name: String, sig: FunctionSignatureSyntax, body: CodeBlockSyntax?, node: some SyntaxProtocol) {
         var info = FnInfo(qual: typeStack.last.map { "\($0).\(name)" } ?? name, loc: loc(node))
         info.enclosingType = typeStack.last
@@ -348,6 +358,7 @@ final class DeclCollector: SyntaxVisitor {
     }
 
     override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
+        recordReturn(node.name.text, node.signature)
         collect(node.name.text, sig: node.signature, body: node.body, node: node)
         return .skipChildren // nested decls attribute lexically via the body walk (documented)
     }
@@ -369,6 +380,7 @@ final class CallCollector: SyntaxVisitor {
     var protoTyped: [String: String]        // param -> local protocol
     let fields: [String: [String: (name: String?, isFunction: Bool)]]
     let localTypes: Set<String>
+    let returns: [String: String]   // unambiguous factory return types (the candor-scan move)
     var enclosingType: String?
     var calls: [Call] = []
     var directEffects: Set<String> = []
@@ -380,19 +392,39 @@ final class CallCollector: SyntaxVisitor {
     var tables: Set<String> = []
     var protoDispatches: [(proto: String, member: String)] = []
 
-    init(info: FnInfo, fields: [String: [String: (name: String?, isFunction: Bool)]], localTypes: Set<String>) {
+    init(info: FnInfo, fields: [String: [String: (name: String?, isFunction: Bool)]], localTypes: Set<String>,
+         returns: [String: String]) {
         self.vars = info.params
         self.fnTyped = info.fnTypedParams
         self.protoTyped = info.protoParams
         self.fields = fields
         self.localTypes = localTypes
+        self.returns = returns
         self.enclosingType = info.enclosingType
         super.init(viewMode: .sourceAccurate)
     }
 
+    /// Peel the effect-transparent wrappers Swift puts around calls — `try`/`try?`/`await`/`!`/`?`.
+    /// (The GRDB interop probe: every `try statement.execute()` receiver failed to type because
+    /// the binding's initializer was a TryExpr, not the call itself.)
+    static func peel(_ expr: ExprSyntax) -> ExprSyntax {
+        var e = expr
+        while true {
+            if let t = e.as(TryExprSyntax.self) { e = t.expression; continue }
+            if let a = e.as(AwaitExprSyntax.self) { e = a.expression; continue }
+            if let f = e.as(ForceUnwrapExprSyntax.self) { e = f.expression; continue }
+            if let o = e.as(OptionalChainingExprSyntax.self) { e = o.expression; continue }
+            if let p = e.as(TupleExprSyntax.self), p.elements.count == 1, let only = p.elements.first {
+                e = only.expression; continue
+            }
+            return e
+        }
+    }
+
     /// The receiver chain's root: `FileManager.default.contents` -> ("FileManager", path). A root
     /// identifier resolves through vars (param/let types); `self` resolves to the enclosing type.
-    private func rootOf(_ expr: ExprSyntax) -> (root: String?, isVar: Bool, path: [String]) {
+    private func rootOf(_ raw: ExprSyntax) -> (root: String?, isVar: Bool, path: [String]) {
+        let expr = Self.peel(raw)
         if let dr = expr.as(DeclReferenceExprSyntax.self) {
             let n = dr.baseName.text
             if n == "self" { return (enclosingType, true, []) }
@@ -404,10 +436,16 @@ final class CallCollector: SyntaxVisitor {
             return (inner.root, inner.isVar, inner.path + [ma.declName.baseName.text])
         }
         if let call = expr.as(FunctionCallExprSyntax.self) {
-            // `Svc().act()` — a constructor call types the chain; other call results stay unknown.
-            if let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self),
-               ctor.baseName.text.first?.isUppercase == true {
-                return (ctor.baseName.text, true, [ctor.baseName.text])
+            // `Svc().act()` — a constructor call types the chain; a FACTORY's unambiguous return
+            // type does too (`db.makeStatement(...).execute()` — the GRDB shape).
+            if let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self) {
+                let n = ctor.baseName.text
+                if n.first?.isUppercase == true { return (n, true, [n]) }
+                if let rt = returns[n] { return (rt, true, [n]) }
+            }
+            if let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
+               let rt = returns[ma.declName.baseName.text] {
+                return (rt, true, [ma.declName.baseName.text])
             }
             return (nil, false, [])
         }
@@ -504,15 +542,16 @@ final class CallCollector: SyntaxVisitor {
                 let t = typeName(ann.type)
                 if t.isFunction { fnTyped.insert(name); vars.removeValue(forKey: name) }
                 else if let tn = t.name { vars[name] = tn }
-            } else if let v = binding.initializer?.value {
+            } else if let v0 = binding.initializer?.value {
+                let v = Self.peel(v0)
                 if v.is(ClosureExprSyntax.self) {
                     // visible local closure: body walks lexically; calling it adds nothing
                     fnTyped.remove(name)
                     vars.removeValue(forKey: name)
-                } else if let call = v.as(FunctionCallExprSyntax.self),
-                          let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self),
-                          ctor.baseName.text.first?.isUppercase == true {
-                    vars[name] = ctor.baseName.text
+                } else if v.is(FunctionCallExprSyntax.self) {
+                    // ctor or unambiguous factory — one resolver for both (rootOf handles peeling)
+                    let info = rootOf(v)
+                    if let t = info.root, info.isVar { vars[name] = t }
                 }
             }
         }
@@ -560,6 +599,7 @@ var fields: [String: [String: (name: String?, isFunction: Bool)]] = [:]
 var protocolMethods: [String: Set<String>] = [:]
 var conformers: [String: [String]] = [:]
 var localTypes: Set<String> = []
+var returnsIdx: [String: String] = [:]
 var importCounts: [String: Int] = [:]
 // The package's OWN target modules (SPM convention: Sources/<TargetName>/) — an internal import is
 // local code the walk already analyzes, not a third-party blind spot (the sweep's ledger noise:
@@ -593,7 +633,15 @@ for p in sourcePaths {
     c.walk(tree)
     collectors.append(c)
 }
+var returnsTmp: [String: String?] = [:]
 for c in collectors {
+    for (k, v) in c.returnsTmp {
+        if let existing = returnsTmp[k] {
+            if existing != v { returnsTmp[k] = String?.none }
+        } else {
+            returnsTmp[k] = v
+        }
+    }
     allFns.append(contentsOf: c.fns)
     for (t, fs) in c.fields { fields[t, default: [:]].merge(fs) { a, _ in a } }
     for (pn, ms) in c.protocolMethods { protocolMethods[pn, default: []].formUnion(ms) }
@@ -610,6 +658,8 @@ for f in allFns {
     if f.enclosingType == nil { freeFnByName[f.qual, default: []].append(f.qual) }
 }
 
+for (k, v) in returnsTmp { if let t = v { returnsIdx[k] = t } }
+
 var direct: [String: Set<String>] = [:]
 var edges: [String: Set<String>] = [:]
 var unresolvedSet: Set<String> = []
@@ -625,7 +675,7 @@ for f in allFns {
     if f.isMain { entryPoints.insert(f.qual) }
     edges[f.qual] = edges[f.qual] ?? []
     guard let body = f.body else { continue }
-    let cc = CallCollector(info: f, fields: fields, localTypes: localTypes)
+    let cc = CallCollector(info: f, fields: fields, localTypes: localTypes, returns: returnsIdx)
     cc.walk(body)
     direct[f.qual, default: []].formUnion(cc.directEffects)
     if !cc.directEffects.isEmpty { kappaSawClassified = true }
@@ -731,10 +781,16 @@ func writeJson(_ obj: Any, _ path: String) {
     let data = try! JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
     try! data.write(to: URL(fileURLWithPath: path))
 }
-writeJson(envelope, "\(prefix).json")
-writeJson(cg, "\(prefix).callgraph.json")
+// Family filename shape `<prefix>.<pkg>.Swift.json` — what candor_report::report_files DISCOVERS,
+// so the unmodified candor-query binary works on Swift reports (this engine's whole consumption
+// story; caught by the first query-interop probe: `show` couldn't find a `<prefix>.json`). The
+// pkg segment is dot-sanitized (`GRDB.swift` would otherwise split the <crate>.<kind> parse).
+let fileSafePkg = pkgName.replacingOccurrences(of: ".", with: "-")
+let reportPath = "\(prefix).\(fileSafePkg).Swift.json"
+writeJson(envelope, reportPath)
+writeJson(cg, "\(prefix).\(fileSafePkg).Swift.callgraph.json")
 FileHandle.standardError.write(
-    "candor-swift: wrote \(entries.count) effectful functions (\(allFns.count) analyzed, \(sourcePaths.count) files) to \(prefix).json\n".data(using: .utf8)!)
+    "candor-swift: wrote \(entries.count) effectful functions (\(allFns.count) analyzed, \(sourcePaths.count) files) to \(reportPath)\n".data(using: .utf8)!)
 
 // the κ-coverage ledger: imported modules outside the platform frontier that κ doesn't know —
 // INVISIBLE, not Unknown; named per scan (SPEC §7 item 14, canonical marker)
