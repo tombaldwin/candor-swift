@@ -1,18 +1,44 @@
 # Real-package sweep — robustness + analysis profile (2026-06-12)
 
-The Swift analog of the family's calibration sweeps: five popular packages cloned at HEAD, one scan
-each, first contact with real-world Swift. **Measures:** robustness, speed, profile plausibility,
-and the fabrication direction. **Not measured:** completeness ground truth (PROVE-IT's job).
+The Swift analog of the family's calibration sweeps: six popular packages cloned at HEAD, one scan
+each. **Measures:** robustness, speed, profile plausibility, and the fabrication direction.
+**Not measured:** completeness ground truth (PROVE-IT's job).
 
-| package | files | analyzed | effectful | profile (post-fix) | scan |
-|---|---:|---:|---:|---|---:|
-| swift-log | 12 | 143 | 30 | Unknown 30, Log 9 | 0.4s |
-| swift-argument-parser | 103 | 560 | 73 | Unknown 64, Fs 6, Exec 5, Env 4 | 1.4s |
-| swift-collections | 587 | 3643 | 665 | Unknown 662, Rand 141 | 7.5s |
-| Alamofire | 53 | 848 | 204 | Unknown 194, Net 16, Rand 3, Clock 3 | 1.6s |
-| GRDB.swift | 181 | 2678 | 731 | Unknown 587, **Db 506**, Rand 8, Fs 5 | 4.5s |
+## Current numbers (post recall fixes — accessors, implicit-self, protocol-field dispatch, NIO tier)
 
-## What the first run caught (all fixed same-day, the family thesis again)
+| package | files | analyzed | effectful | profile | receipt (κ ledger) | scan |
+|---|---:|---:|---:|---|---|---:|
+| swift-log | 12 | 177 | 33 | Unknown 33, Log 9 | clean | 0.35s |
+| swift-argument-parser | 89 | 778 | 79 | Unknown 75, Fs 2, Net 1, Exec 1 | C, FoundationEssentials | 1.3s |
+| swift-collections | 549 | 4436 | 750 | Unknown 747, Rand 47 | clean | 6.9s |
+| Alamofire | 53 | 1069 | 285 | Unknown 272, **Net 36**, Fs 16, Clock 4, Rand 3 | zlib | 1.6s |
+| GRDB.swift | 181 | 3092 | 952 | Unknown 746, **Db 713**, Rand 11, Fs 9, Clock 1 | SQLCipher (68 imports) | 4.6s |
+| vapor | 220 | 1545 | 126 | Unknown 99, Log 28, Env 20, Net 5, Clock 5, Exec 4, Fs 3 | 39 modules (HTTPTypes, NIO\*, RoutingKit…) | 2.3s |
+
+Spot-checks on the surprising cells: swift-argument-parser's `Net 1` is `ChangelogAuthors.run`
+(a repo tool fetching github.com), its `Fs 2` are the two doc-generator `validate`s, `Exec 1` is
+`executeCommand` — all real. GRDB's profile is what a SQLite wrapper should look like, and its
+ledger names SQLCipher (68 imports) as the disclosed invisible frontier. vapor's ledger naming 39
+unclassified NIO-ecosystem modules is the honest shape of a framework that delegates its I/O —
+chaining (reports for those packages via the family's deps convention) is the closure, not more κ.
+
+### Movement vs first contact (what each recall fix bought, measured)
+
+- **GRDB 731→952 effectful, Db 506→713**: implicit-self field resolution + protocol-field
+  dispatch — `self.db.execute(...)` through a protocol-typed field now resolves instead of
+  silently missing.
+- **Alamofire 204→285, Net 16→36**: accessor units (computed getters/observers are now analyzed
+  bodies) + callback-flow resolution at all-named call sites.
+- **vapor (new)**: scannable at all once the κ NIO tier landed (ClientBootstrap/Channel/HTTPClient
+  verbs → Net); Env 20 is its `Environment` plumbing, real.
+- **swift-argument-parser 73→79 effectful but Fs 6→2 / Exec 5→1 / Env 4→0**: the harness
+  exclusions (Examples/, Package.swift manifests, plugins) removed non-package code the first
+  sweep had wrongly counted as the library; the remaining carriers spot-check as real (above).
+- **swift-collections Rand 141→47**: same cause — benchmark/example harness code excluded; the
+  residual `Rand` (`shuffle`/`random` overloads consuming system entropy) is correct.
+- **swift-log 30→33**: accessor units surfaced three computed-property carriers.
+
+## What the FIRST run caught (all fixed same-day, the family thesis again)
 
 1. **A real fabrication: bare-POSIX κ names.** GRDB read `Net` on 214 functions — a database
    library. Root cause: classifying bare free calls named `bind`/`connect`/`open`/… as syscalls;
@@ -26,14 +52,17 @@ and the fabrication direction. **Not measured:** completeness ground truth (PROV
    (Musl, WinSDK, ucrt…) drowned the disclosure. Internal modules now come from `Sources/*` dir
    names + the manifest's own target names; the platform frontier covers the libc variants and
    Apple SDK frameworks. Post-fix the ledgers are high-signal: Alamofire names exactly `zlib`.
+4. **The Vapor ledger was silenced** by a bare `name:` regex swallowing `.product(name:)` names —
+   the target-only manifest regex restored the 39-module disclosure.
 
 ## The honest residual
 
-- **`Unknown` density is high by construction** (swift-log 30/30): Swift's protocol-witness and
-  closure-heavy style is this engine's calibration frontier, exactly like the TS engine's
-  zod-era flood — sound, loud, and the next precision lever (protocol-CHA only covers
-  narrow LOCAL conformances today; fn-typed members always read Unknown).
-- `Rand` on swift-collections is **correct**: `BitSet.random`/`shuffle` convenience overloads
-  genuinely consume system entropy (the verb-gated posture, same as the Rust `rand` rules).
-- GRDB's `Db 506` is the profile a SQLite wrapper should have; its Fs 5 (file-path APIs) and
-  Rand 8 (UUID/salts) spot-check plausibly.
+- **`Unknown` density is high by construction** (swift-log 33/33): measured across the family in
+  candor's `docs/unknown-density.md` — the dominant density is HONEST (closure callbacks invoked,
+  fn-typed members, over-bound dispatch). Closures stay opaque per the family rule; the §4
+  contract says Unknown, not a guess. Do not chase 0%.
+- swift-collections' residual `Rand 47` is **correct**: `BitSet.random`/`shuffle` convenience
+  overloads genuinely consume system entropy (the verb-gated posture, same as the Rust `rand`
+  rules).
+- The package name in the swift-collections report is `UnstableContainersPreview` — that is the
+  manifest's actual top-level package name at HEAD, not a bug.
