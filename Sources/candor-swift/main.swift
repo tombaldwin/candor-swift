@@ -24,6 +24,8 @@ import SwiftSyntax
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
+let engineVersion = "candor-swift-0.4.0"
+
 var target = "."
 var outPrefix: String? = nil
 var policyPath: String? = ProcessInfo.processInfo.environment["CANDOR_POLICY"]
@@ -35,10 +37,22 @@ while let a = argIter.next() {
     case "-h", "--help":
         print("""
         candor-swift — Swift effect scanner (candor-spec 0.4)
-        USAGE: candor-swift [<dir|file.swift>] [--out <prefix>] [--policy <file>]
+        USAGE: candor-swift [<dir|file.swift>] [--out <prefix>] [--policy <file>] [--agents]
           writes <prefix>.json (report, spec 0.4 envelope) + <prefix>.callgraph.json
           CANDOR_POLICY honoured when --policy absent; exit 1 on violation, 2 on unreadable policy.
+          --agents prints the agent contract for THIS build (the bundled AGENTS.md).
         """)
+        exit(0)
+    case "--agents":
+        // The agent contract for THE INSTALLED BUILD, bundled at build time — doc and engine
+        // cannot drift (the spec §2.1 version-trust rule applied to documentation).
+        guard let url = Bundle.module.url(forResource: "AGENTS", withExtension: "md"),
+              let doc = try? String(contentsOf: url, encoding: .utf8) else {
+            FileHandle.standardError.write("candor-swift: the bundled AGENTS.md is missing from this build\n".data(using: .utf8)!)
+            exit(2)
+        }
+        print("<!-- \(engineVersion) · the agent contract for this installed version -->")
+        print(doc, terminator: "")
         exit(0)
     default: target = a
     }
@@ -906,7 +920,7 @@ for qual in inferred.keys.sorted() {
     entries.append(e)
 }
 let envelope: [String: Any] = [
-    "candor": ["version": "candor-swift-0.4.0", "toolchain": "swiftsyntax", "spec": "0.4"],
+    "candor": ["version": engineVersion, "toolchain": "swiftsyntax", "spec": "0.4"],
     "package": pkgName,
     "functions": entries,
 ]

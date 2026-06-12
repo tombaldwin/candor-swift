@@ -32,5 +32,13 @@ mkdir -p "$W/led" && printf 'import Alamofire\nfunc go() { _ = FileManager.defau
 grep -q "κ doesn't know.*Alamofire" "$W/led.err" && ok "κ ledger names the unlisted import" || bad "κ ledger"
 HASH=$(python3 -c "import json; print(json.load(open('$RPT'))['functions'][0].get('hash',''))")
 case "$HASH" in *"#"*) ok "hash join keys emitted (0.4 MUST)";; *) bad "hash emission";; esac
+# --agents: the self-describing engine (the contract is a bundled resource)
+"$BIN" --agents > "$W/agents.out" 2>&1
+grep -q '<!-- candor-swift' "$W/agents.out" && ok "--agents prints the version header" || bad "--agents header"
+grep -q 'ships inside the binary' "$W/agents.out" && ok "--agents prints the installed contract" || bad "--agents contract"
+HERE_DIR="$(cd "$(dirname "$0")" && pwd)"
+cmp -s "$HERE_DIR/AGENTS.md" "$HERE_DIR/Sources/candor-swift/AGENTS.md" \
+  && ok "bundled AGENTS.md matches the repo doc (drift gate)" \
+  || bad "bundled AGENTS.md drifted — re-copy: cp AGENTS.md Sources/candor-swift/AGENTS.md"
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
