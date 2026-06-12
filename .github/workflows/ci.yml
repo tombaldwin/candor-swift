@@ -1,0 +1,23 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build
+        run: swift build
+      - name: Smoke (oracle needs the spec as a sibling)
+        run: |
+          git clone --depth 1 https://github.com/tombaldwin/candor-spec ../candor-spec
+          bash smoke.sh
+      - name: Soundness fuzzer (§7.13)
+        run: python3 fuzz.py
+      - name: Self-gate (§7.12 — the engine holds its own boundary)
+        run: |
+          printf 'deny Net Db Exec Ipc\n' > /tmp/gate.pol
+          .build/debug/candor-swift Sources --out /tmp/self --policy /tmp/gate.pol
