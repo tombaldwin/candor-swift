@@ -30,7 +30,7 @@ SINKS = {
 
 # Edge forms: how fn i reaches fn i+1 (or the sink). `unknown` forms must read Unknown in the
 # RECEIVING function instead of (or in addition to) the effect.
-FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field"]
+FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop"]
 
 
 def gen(seed):
@@ -71,6 +71,11 @@ def gen(seed):
             bodies[i] = (f"func recv{i}(_ cb: () -> Void) {{ cb() }}\n"
                          f"func {me}() {{ recv{i}({{ {callee}() }}) }}")
             expect_unknown.add(f"recv{i}")
+        elif form == "computed_prop":
+            # the accessor hole: a computed GETTER's body must be a unit, and reading the
+            # property must edge to it
+            bodies[i] = (f"struct G{i} {{ var v: Int {{ {callee}(); return 1 }} }}\n"
+                         f"func {me}() {{ _ = G{i}().v }}")
         elif form == "fn_field":
             bodies[i] = (f"struct D{i} {{ let f: () -> Void }}\n"
                          f"func hold{i}(_ d: D{i}) {{ d.f() }}\n"

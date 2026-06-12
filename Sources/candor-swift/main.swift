@@ -238,7 +238,7 @@ struct FnInfo {
     var params: [String: String] = [:]       // param name -> type name (concrete)
     var fnTypedParams: Set<String> = []      // params of function type
     var protoParams: [String: String] = [:]  // param name -> local protocol name
-    var body: CodeBlockSyntax?
+    var body: Syntax?
     var enclosingType: String?
     var isMain: Bool = false
 }
@@ -328,11 +328,34 @@ final class DeclCollector: SyntaxVisitor {
         return .skipChildren
     }
 
-    // Field types (for `self.f()` / `d.f()` resolution and fn-typed-field Unknown).
+    // Field types (for `self.f()` / `d.f()` resolution and fn-typed-field Unknown) — and ACCESSOR
+    // UNITS: a computed getter, get/set block, didSet/willSet observer, or lazy initializer has a
+    // BODY that runs (the fuzz probe found all four silently pure — the TS engine's property-arrow
+    // hole, Swift edition). Each body collects under `Type.property`; duplicate quals union.
     override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
         if let ty = typeStack.last {
             for binding in node.bindings {
                 guard let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
+                let qual = "\(ty).\(name)"
+                var accessorBodies: [Syntax] = []
+                if let ab = binding.accessorBlock {
+                    switch ab.accessors {
+                    case .getter(let items): accessorBodies.append(Syntax(items))
+                    case .accessors(let list):
+                        for acc in list {
+                            if let b = acc.body { accessorBodies.append(Syntax(b)) }
+                        }
+                    }
+                }
+                if node.modifiers.contains(where: { $0.name.text == "lazy" }), let init0 = binding.initializer {
+                    accessorBodies.append(Syntax(init0.value)) // lazy init runs at first ACCESS
+                }
+                for b in accessorBodies {
+                    var info = FnInfo(qual: qual, loc: loc(binding))
+                    info.enclosingType = ty
+                    info.body = b
+                    fns.append(info)
+                }
                 if let ann = binding.typeAnnotation {
                     let info = typeName(ann.type)
                     fields[ty, default: [:]][name] = info
@@ -359,7 +382,7 @@ final class DeclCollector: SyntaxVisitor {
     private func collect(_ name: String, sig: FunctionSignatureSyntax, body: CodeBlockSyntax?, node: some SyntaxProtocol) {
         var info = FnInfo(qual: typeStack.last.map { "\($0).\(name)" } ?? name, loc: loc(node))
         info.enclosingType = typeStack.last
-        info.body = body
+        info.body = body.map { Syntax($0) }
         info.isMain = name == "main"
         for p in sig.parameterClause.parameters {
             let pname = (p.secondName ?? p.firstName).text
@@ -406,6 +429,7 @@ final class CallCollector: SyntaxVisitor {
     var paths: Set<String> = []
     var tables: Set<String> = []
     var protoDispatches: [(proto: String, member: String)] = []
+    var propertyEdges: Set<String> = []   // `Type.member` candidates from property READS
 
     init(info: FnInfo, fields: [String: [String: (name: String?, isFunction: Bool)]], localTypes: Set<String>,
          returns: [String: String]) {
@@ -499,7 +523,15 @@ final class CallCollector: SyntaxVisitor {
         let lit = firstStringLiteral(node.arguments)
         if let dr = node.calledExpression.as(DeclReferenceExprSyntax.self) {
             let name = dr.baseName.text
-            if fnTyped.contains(name) {
+            if ["Data", "NSData", "String"].contains(name),
+               node.arguments.first?.label?.text == "contentsOf" {
+                let argText = node.arguments.description
+                if argText.contains("fileURLWithPath") {
+                    directEffects.insert("Fs")
+                } else {
+                    directEffects.formUnion(["Fs", "Net"]) // a URL value: file OR remote — one IS true
+                }
+            } else if fnTyped.contains(name) {
                 // a function-typed parameter invoked: §4 — could be anything
                 unresolved = true
                 why.insert("callback:\(name)")
@@ -538,12 +570,15 @@ final class CallCollector: SyntaxVisitor {
         return .visitChildren
     }
 
-    // effectful property READS (no call): ProcessInfo…environment, Date.now, pasteboards
+    // effectful property READS (no call): κ chains AND local accessor units (computed getters)
     override func visit(_ node: MemberAccessExprSyntax) -> SyntaxVisitorContinueKind {
         if node.parent?.is(FunctionCallExprSyntax.self) != true {
             let info = rootOf(ExprSyntax(node))
             if let root = info.root, let eff = kappaPropertyRead(root: root, path: info.path) {
                 directEffects.insert(eff)
+            }
+            if let root = info.root, localTypes.contains(root) {
+                propertyEdges.insert("\(root).\(node.declName.baseName.text)")
             }
         }
         return .visitChildren
@@ -695,6 +730,9 @@ for f in allFns {
     guard let body = f.body else { continue }
     let cc = CallCollector(info: f, fields: fields, localTypes: localTypes, returns: returnsIdx)
     cc.walk(body)
+    // accessor units: a property READ of a known accessor unit is an edge (the reader inherits
+    // the getter's effects — `c.data` reaching the Fs inside `var data: Data { … }`)
+    edges[f.qual, default: []].formUnion(cc.propertyEdges.filter { byQual.contains($0) })
     direct[f.qual, default: []].formUnion(cc.directEffects)
     if !cc.directEffects.isEmpty { kappaSawClassified = true }
     if cc.unresolved { direct[f.qual, default: []].insert("Unknown"); unresolvedSet.insert(f.qual) }
