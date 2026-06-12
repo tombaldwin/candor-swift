@@ -37,4 +37,4 @@ consumption (hashes are emitted, so candor-swift reports are already chainable *
 the read-only queries (§3.1), and the §7.13 soundness fuzzer — the fuzzer is the family's next ritual
 for this engine, and until it lands the §4 claim here is implemented but not adversarially tested.
 
-Licensed MIT OR Apache-2.0. Part of the [candor family](https://github.com/tombaldwin/candor).
+Licensed MIT OR Apache-2.0. Part of the [candor family](https://github.com/tombaldwin/candor) — [candor.poly.io](https://candor.poly.io).
