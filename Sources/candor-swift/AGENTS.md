@@ -10,6 +10,10 @@ this file is the Swift-specific surface.
 > for the *installed* build — always prefer that over a vendored or fetched copy, which can
 > describe a different candor-swift than the one you are running.
 
+A computed property's getter/setter/observer (and a `lazy` initializer) is its own unit, named
+`Type.property` and carrying `unitKind: "accessor"` (spec 0.5 draft, informative); ordinary
+functions omit the field.
+
 ## Produce a report
 
 ```sh
