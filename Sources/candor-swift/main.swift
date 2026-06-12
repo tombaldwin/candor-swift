@@ -237,6 +237,7 @@ struct FnInfo {
     var loc: String
     var params: [String: String] = [:]       // param name -> type name (concrete)
     var fnTypedParams: Set<String> = []      // params of function type
+    var fnTypedParamIndex: [String: Int] = [:] // fn-typed param name -> position
     var protoParams: [String: String] = [:]  // param name -> local protocol name
     var body: Syntax?
     var enclosingType: String?
@@ -384,10 +385,10 @@ final class DeclCollector: SyntaxVisitor {
         info.enclosingType = typeStack.last
         info.body = body.map { Syntax($0) }
         info.isMain = name == "main"
-        for p in sig.parameterClause.parameters {
+        for (idx, p) in sig.parameterClause.parameters.enumerated() {
             let pname = (p.secondName ?? p.firstName).text
             let t = typeName(p.type)
-            if t.isFunction { info.fnTypedParams.insert(pname) }
+            if t.isFunction { info.fnTypedParams.insert(pname); info.fnTypedParamIndex[pname] = idx }
             else if let tn = t.name {
                 if protocolMethods[tn] != nil { info.protoParams[pname] = tn } else { info.params[pname] = tn }
             }
@@ -410,7 +411,10 @@ final class DeclCollector: SyntaxVisitor {
 // Pass B — calls per function, with light local type inference
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-struct Call { var path: String; var leaf: String; var strArg: String?; var typed: Bool }
+/// One argument's disposition at a call site: a closure literal (its body is already charged to
+/// the passer lexically), a named reference (resolvable to a unit), or opaque.
+enum ArgKind { case closure, named(String), opaque }
+struct Call { var path: String; var leaf: String; var strArg: String?; var typed: Bool; var args: [ArgKind] = [] }
 
 final class CallCollector: SyntaxVisitor {
     var vars: [String: String]              // local/param -> concrete type
@@ -430,6 +434,7 @@ final class CallCollector: SyntaxVisitor {
     var tables: Set<String> = []
     var protoDispatches: [(proto: String, member: String)] = []
     var propertyEdges: Set<String> = []   // `Type.member` candidates from property READS
+    var callbackInvoked: Set<String> = [] // fn-typed params INVOKED — deferred to callback-flow
 
     init(info: FnInfo, fields: [String: [String: (name: String?, isFunction: Bool)]], localTypes: Set<String>,
          returns: [String: String]) {
@@ -491,6 +496,18 @@ final class CallCollector: SyntaxVisitor {
         return (nil, false, [])
     }
 
+    private func argKinds(_ node: FunctionCallExprSyntax) -> [ArgKind] {
+        var kinds: [ArgKind] = node.arguments.map { a in
+            let e = Self.peel(a.expression)
+            if e.is(ClosureExprSyntax.self) { return .closure }
+            if let dr = e.as(DeclReferenceExprSyntax.self) { return .named(dr.baseName.text) }
+            return .opaque
+        }
+        if node.trailingClosure != nil { kinds.append(.closure) }
+        for extra in node.additionalTrailingClosures { _ = extra; kinds.append(.closure) }
+        return kinds
+    }
+
     private func firstStringLiteral(_ args: LabeledExprListSyntax) -> String? {
         for a in args {
             guard let lit = a.expression.as(StringLiteralExprSyntax.self) else { continue }
@@ -532,14 +549,16 @@ final class CallCollector: SyntaxVisitor {
                     directEffects.formUnion(["Fs", "Net"]) // a URL value: file OR remote — one IS true
                 }
             } else if fnTyped.contains(name) {
-                // a function-typed parameter invoked: §4 — could be anything
-                unresolved = true
-                why.insert("callback:\(name)")
+                // a function-typed PARAM invoked — DEFERRED to callback-flow resolution: when
+                // every visible call site passes a closure (already charged to its passer
+                // lexically) or a named function (an edge), the Unknown is redundant; otherwise
+                // it stands (§4). The TS engine's callback_named move.
+                callbackInvoked.insert(name)
             } else if let eff = kappaFree(name: name, argCount: node.arguments.count) {
                 directEffects.insert(eff)
                 recordSurfaces(effect: eff, lit: lit)
             } else {
-                calls.append(Call(path: name, leaf: name, strArg: lit, typed: false))
+                calls.append(Call(path: name, leaf: name, strArg: lit, typed: false, args: argKinds(node)))
             }
         } else if let ma = node.calledExpression.as(MemberAccessExprSyntax.self) {
             let member = ma.declName.baseName.text
@@ -556,7 +575,7 @@ final class CallCollector: SyntaxVisitor {
                 recordSurfaces(effect: eff, lit: lit)
             } else if let rt = base.root, localTypes.contains(rt) {
                 // typed local receiver: Type.method — resolve to the local unit
-                calls.append(Call(path: "\(rt).\(member)", leaf: member, strArg: lit, typed: true))
+                calls.append(Call(path: "\(rt).\(member)", leaf: member, strArg: lit, typed: true, args: argKinds(node)))
             } else {
                 calls.append(Call(path: member, leaf: member, strArg: lit, typed: false))
             }
@@ -722,6 +741,8 @@ var pathsD: [String: Set<String>] = [:], tablesD: [String: Set<String>] = [:]
 var locOf: [String: String] = [:]
 var entryPoints: Set<String> = []
 var kappaSawClassified = false
+var callsiteArgs: [String: [[ArgKind]]] = [:]   // resolved target -> each call site's arg kinds
+var deferredCallbacks: [String: (indexes: Set<Int>, names: Set<String>)] = [:]
 
 for f in allFns {
     locOf[f.qual] = f.loc
@@ -742,11 +763,23 @@ for f in allFns {
     pathsD[f.qual, default: []].formUnion(cc.paths)
     tablesD[f.qual, default: []].formUnion(cc.tables)
 
+    // fn-typed params INVOKED: defer to callback-flow (resolved after all call sites are known)
+    if !cc.callbackInvoked.isEmpty {
+        var idxs = Set<Int>()
+        for n in cc.callbackInvoked {
+            if let i = f.fnTypedParamIndex[n] { idxs.insert(i) }
+        }
+        deferredCallbacks[f.qual] = (idxs, cc.callbackInvoked)
+    }
     for call in cc.calls {
         if call.typed {
-            if byQual.contains(call.path) { edges[f.qual, default: []].insert(call.path) }
+            if byQual.contains(call.path) {
+                edges[f.qual, default: []].insert(call.path)
+                callsiteArgs[call.path, default: []].append(call.args)
+            }
         } else if let targets = freeFnByName[call.path], targets.count == 1 {
             edges[f.qual, default: []].insert(targets[0])
+            callsiteArgs[targets[0], default: []].append(call.args)
         } else if localTypes.contains(call.path), byQual.contains("\(call.path).init") {
             // `_ = C0()` — a constructor call edges to the declared init (the fuzzer's init_wired
             // form caught this silent-pure hole on the harness's FIRST run: effects wired in an
@@ -772,6 +805,38 @@ for f in allFns {
             unresolvedSet.insert(f.qual)
             whyMap[f.qual, default: []].insert("dispatch:\(d.proto).\(d.member)")
         }
+    }
+}
+
+// Callback-flow resolution (the TS engine's callback_named, the Rust closure-flow slice): a
+// deferred fn-typed-param invocation drops its Unknown iff EVERY visible call site passes a
+// closure literal (charged to its passer lexically) or a NAMED local function (edged here).
+// No visible call site, a missing arg, or an opaque value: the §4 Unknown stands.
+for (fq, info) in deferredCallbacks {
+    let sites = callsiteArgs[fq] ?? []
+    var resolved = !sites.isEmpty
+    var namedTargets: Set<String> = []
+    outer: for site in sites {
+        for idx in info.indexes {
+            guard idx < site.count else { resolved = false; break outer }
+            switch site[idx] {
+            case .named(let n):
+                if let t = freeFnByName[n], t.count == 1 { namedTargets.insert(t[0]) }
+                else { resolved = false; break outer }
+            case .closure, .opaque:
+                // a CLOSURE arg stays opaque for the deferral (the Rust/TS rule — its body is
+                // charged to the passer, but the receiver still executes an unaddressable value:
+                // the §4 Unknown stands; the fuzzer caught the looser reading red-handed)
+                resolved = false; break outer
+            }
+        }
+    }
+    if resolved {
+        edges[fq, default: []].formUnion(namedTargets)
+    } else {
+        direct[fq, default: []].insert("Unknown")
+        unresolvedSet.insert(fq)
+        for n in info.names { whyMap[fq, default: []].insert("callback:\(n)") }
     }
 }
 
