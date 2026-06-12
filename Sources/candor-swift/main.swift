@@ -119,6 +119,15 @@ func kappaMember(root: String, member: String) -> String? {
     case "ContinuousClock", "SuspendingClock", "DispatchTime": return member == "now" ? "Clock" : nil
     case "NWConnection", "NWListener": return "Net"
     case "NSXPCConnection": return "Ipc"
+    // The NIO tier (the vapor probe's pointer: 84 NIOCore imports, all invisible). Verb-precise:
+    // channel/bootstrap wiring and socket reads/writes are Net; the pure ByteBuffer/EventLoop
+    // future algebra stays out (the builder discipline).
+    case "ClientBootstrap", "ServerBootstrap", "DatagramBootstrap", "NIOTSConnectionBootstrap":
+        return ["connect", "bind", "withConnectedSocket"].contains(member) ? "Net" : nil
+    case "Channel", "ChannelHandlerContext":
+        return ["write", "writeAndFlush", "read", "connect", "bind", "close", "flush"].contains(member) ? "Net" : nil
+    case "HTTPClient", "AsyncHTTPClient":
+        return ["execute", "get", "post", "put", "patch", "delete", "shutdown"].contains(member) ? "Net" : nil
     default:
         if RAND_ROOTS.contains(root) && member == "random" { return "Rand" }
         return nil
@@ -167,7 +176,8 @@ let PLATFORM_MODULES: Set<String> = ["Swift", "Foundation", "FoundationNetworkin
     "Security", "SystemConfiguration", "UniformTypeIdentifiers", "CryptoKit", "System",
     "RegexBuilder", "Synchronization", "Testing", "XCTest", "PackageDescription", "PackagePlugin",
     "ucrt", "wasi_pthread", "string_h", "zlibng", "SwiftShims"]
-let KAPPA_MODULES: Set<String> = ["Network", "SQLite3", "CoreData"]
+let KAPPA_MODULES: Set<String> = ["Network", "SQLite3", "CoreData",
+    "NIOCore", "NIOPosix", "NIOHTTP1", "NIOHTTP2", "NIOSSL", "NIOTransportServices", "AsyncHTTPClient"]
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // SQL tables — the SPEC §2 pinned extraction, token-for-token with the other three engines
