@@ -579,6 +579,11 @@ for f in allFns {
             if byQual.contains(call.path) { edges[f.qual, default: []].insert(call.path) }
         } else if let targets = freeFnByName[call.path], targets.count == 1 {
             edges[f.qual, default: []].insert(targets[0])
+        } else if localTypes.contains(call.path), byQual.contains("\(call.path).init") {
+            // `_ = C0()` — a constructor call edges to the declared init (the fuzzer's init_wired
+            // form caught this silent-pure hole on the harness's FIRST run: effects wired in an
+            // initializer vanished — the same hole the TS engine's got-dogfood found in ctors).
+            edges[f.qual, default: []].insert("\(call.path).init")
         } else if f.enclosingType != nil, byQual.contains("\(f.enclosingType!).\(call.leaf)") {
             // an unqualified call inside a type body reaches the sibling method
             edges[f.qual, default: []].insert("\(f.enclosingType!).\(call.leaf)")
