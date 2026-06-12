@@ -405,10 +405,17 @@ final class CallCollector: SyntaxVisitor {
 
     private func firstStringLiteral(_ args: LabeledExprListSyntax) -> String? {
         for a in args {
-            if let lit = a.expression.as(StringLiteralExprSyntax.self),
-               lit.segments.count == 1, let seg = lit.segments.first?.as(StringSegmentSyntax.self) {
-                return seg.content.text
+            guard let lit = a.expression.as(StringLiteralExprSyntax.self) else { continue }
+            // Concatenate ALL plain segments: the parser may split a literal around escapes, so a
+            // single-segment assumption silently dropped multi-line SQL (caught by the four-way
+            // conformance differential on this engine's first wiring). An INTERPOLATED literal
+            // (any non-plain segment) is runtime-computed — no literal claim, skip it.
+            var out = ""
+            var pure = true
+            for seg in lit.segments {
+                if let plain = seg.as(StringSegmentSyntax.self) { out += plain.content.text } else { pure = false; break }
             }
+            if pure { return decodeEscapes(out) }
         }
         return nil
     }
@@ -500,6 +507,28 @@ final class CallCollector: SyntaxVisitor {
         }
         return .visitChildren
     }
+}
+
+/// SwiftSyntax segment text is SOURCE-ACCURATE: `"a\nb"` arrives with a literal backslash-n.
+/// The four-way conformance differential caught this on the engine's FIRST wiring (the Java
+/// space-escape bug's twin: multi-line SQL glued, quoted identifiers kept their backslashes).
+func decodeEscapes(_ raw: String) -> String {
+    var out = ""
+    var it = raw.makeIterator()
+    while let c = it.next() {
+        guard c == "\\", let n = it.next() else { out.append(c); continue }
+        switch n {
+        case "n": out.append("\n")
+        case "t": out.append("\t")
+        case "r": out.append("\r")
+        case "0": out.append("\0")
+        case "\\": out.append("\\")
+        case "\"": out.append("\"")
+        case "'": out.append("'")
+        default: out.append(c); out.append(n) // unknown escape (\u{…} etc.): keep raw, never guess
+        }
+    }
+    return out
 }
 
 func hostPart(_ s: String) -> String {
