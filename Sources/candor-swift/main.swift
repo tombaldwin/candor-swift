@@ -60,7 +60,9 @@ while let a = argIter.next() {
         // rule applied to documentation), and unlike a Bundle.module resource it survives a binary
         // copied out of .build (the documented `cp .build/release/candor-swift …` install flow,
         // where the resource bundle is absent and Bundle.module would fatalError before any guard).
-        print("<!-- \(engineVersion) · the agent contract for this installed version -->")
+        // Canonical header shape `candor-<engine> <version>` (consistent across the family); the
+        // envelope keeps the hyphenated `engineVersion` as its build id.
+        print("<!-- \(engineVersion.replacingOccurrences(of: "candor-swift-", with: "candor-swift ")) · the agent contract for this installed version -->")
         // default terminator re-adds the single trailing newline a Swift multiline raw string strips
         // before its closing delimiter, so the served body matches AGENTS.md byte-for-byte.
         print(AGENTS_MD)
