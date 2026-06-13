@@ -24,7 +24,7 @@ import SwiftSyntax
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.4.4"
+let engineVersion = "candor-swift-0.4.5"
 
 var target = "."
 var outPrefix: String? = nil
@@ -221,8 +221,8 @@ func kappaPropertyRead(root: String, path: [String]) -> String? {
 /// fabricate the effect for its common case. The reference engines share this table verbatim.
 func classifyCommandHead(_ cmd: String) -> [String] {
     switch cmd.split(separator: "/").last.map(String.init) ?? cmd {
-    case "curl", "wget", "http", "ssh", "scp": return ["Net"]
-    case "psql", "mysql", "sqlite3", "mongosh", "redis-cli": return ["Db"]
+    case "curl", "wget", "http", "ssh", "scp", "sftp", "ftp", "telnet": return ["Net"]
+    case "psql", "mysql", "sqlite3", "mongosh", "mongo", "redis-cli", "cqlsh", "influx": return ["Db"]
     case "candor", "candor-run.sh", "candor-scan", "candor-query", "candor-java",
          "candor-classify", "candor-report", "cargo-candor": return ["Env", "Fs"]
     default: return []
