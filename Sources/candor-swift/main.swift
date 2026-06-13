@@ -507,12 +507,21 @@ final class DeclCollector: SyntaxVisitor {
         info.enclosingType = typeStack.last
         info.body = body.map { Syntax($0) }
         info.isMain = name == "main"
+        // Generic constraints `<T: P>` — a value param typed `T` then dispatches like a `P`-typed param.
+        var genericBounds: [String: String] = [:]
+        let genClause = Syntax(node).as(FunctionDeclSyntax.self)?.genericParameterClause
+            ?? Syntax(node).as(InitializerDeclSyntax.self)?.genericParameterClause
+        for gp in genClause?.parameters ?? [] {
+            if let it = gp.inheritedType, let bound = typeName(it).name { genericBounds[gp.name.text] = bound }
+        }
         for (idx, p) in sig.parameterClause.parameters.enumerated() {
             let pname = (p.secondName ?? p.firstName).text
             let t = typeName(p.type)
             if t.isFunction { info.fnTypedParams.insert(pname); info.fnTypedParamIndex[pname] = idx }
             else if let tn = t.name {
-                if protocolMethods[tn] != nil { info.protoParams[pname] = tn } else { info.params[pname] = tn }
+                // resolve a generic param to its protocol BOUND (`x: T` where `<T: Sender>` → dispatch P)
+                let resolved = genericBounds[tn] ?? tn
+                if protocolMethods[resolved] != nil { info.protoParams[pname] = resolved } else { info.params[pname] = tn }
             }
             else if let elem = arrayElementName(p.type) { info.arrayParams[pname] = elem }  // `p: [T]`
             else if let val = dictValueName(p.type) { info.dictParams[pname] = val }        // `p: [K: V]`
@@ -883,6 +892,19 @@ final class CallCollector: SyntaxVisitor {
             // computed callee (subscript, optional-chained value, …): §4 Unknown
             unresolved = true
             why.insert("call:computed")
+        }
+        return .visitChildren
+    }
+
+    // `guard let c = <expr>` / `if let c = <expr>` — type the unwrapped binding from the initializer
+    // (a factory call, subscript, cast, …) so `c.method()` resolves. A shorthand `guard let c` (no
+    // initializer) keeps the existing param/var type. The optional is stripped by typing the value.
+    override func visit(_ node: OptionalBindingConditionSyntax) -> SyntaxVisitorContinueKind {
+        if let name = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text,
+           let initVal = node.initializer?.value {
+            let info = rootOf(initVal)
+            if info.isVar, let t = info.root { vars[name] = t }
+            else if let elem = elementTypeOf(initVal) { arrayElem[name] = elem }
         }
         return .visitChildren
     }

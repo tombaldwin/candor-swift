@@ -153,6 +153,25 @@ by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 print('PASS' if by.get('sw')=={'Net'} and by.get('ic')=={'Net'} and 'intCase' not in by else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
 [ "$EN" = "PASS" ] && ok "enum case binding: switch/if-case .active(let c) types c (no fabrication on Int payload)" || bad "enum case binding: $EN"
 
+# generic protocol-bound param + guard/if-let factory binding
+mkdir -p "$W/gp" && cat > "$W/gp/m.swift" <<'SW'
+import Foundation
+final class Client { func send() { _ = URLSession.shared.dataTask(with: URL(string: "https://x")!) } }
+protocol Sender { func send() }
+struct Disk: Sender { func send() { try? FileManager.default.removeItem(atPath: "/x") } }
+func generic<T: Sender>(x: T) { x.send() }
+func makeC() -> Client? { Client() }
+func guardF() { guard let c = makeC() else { return }; c.send() }
+func ifLetF() { if let c = makeC() { c.send() } }
+SW
+"$BIN" "$W/gp" --out "$W/gp/r" >/dev/null 2>&1
+GP=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/gp/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+print('PASS' if by.get('generic')=={'Fs'} and by.get('guardF')=={'Net'} and by.get('ifLetF')=={'Net'} else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$GP" = "PASS" ] && ok "generic <T: P> param dispatches like P; guard/if-let factory binding types the value" || bad "generic/optional-binding: $GP"
+
 # --agents: the self-describing engine (the contract is embedded as a Swift constant). The drift
 # gate diffs the ACTUAL served contract (minus the version-header line) against AGENTS.md — testing
 # end to end, and catching a stale AgentsDoc.swift (regenerate: python3 gen-agents-doc.py).

@@ -30,7 +30,7 @@ SINKS = {
 
 # Edge forms: how fn i reaches fn i+1 (or the sink). `unknown` forms must read Unknown in the
 # RECEIVING function instead of (or in addition to) the effect.
-FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local", "iter", "for_each", "field_iter", "dict_iter", "subscript_recv", "cast_recv", "field_chain", "enum_bind"]
+FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local", "iter", "for_each", "field_iter", "dict_iter", "subscript_recv", "cast_recv", "field_chain", "enum_bind", "generic_proto", "guard_let"]
 
 
 def gen(seed):
@@ -112,6 +112,17 @@ def gen(seed):
             bodies[i] = (f"struct E{i} {{ func go() {{ {callee}() }} }}\n"
                          f"struct W{i} {{ let e = E{i}(); func run() {{ self.e.go() }} }}\n"
                          f"func {me}() {{ W{i}().run() }}")
+        elif form == "generic_proto":
+            # `func via<T: P>(x: T) { x.go() }` — a protocol-bounded generic dispatches like a P param
+            bodies[i] = (f"protocol P{i} {{ func go() }}\n"
+                         f"struct I{i}: P{i} {{ func go() {{ {callee}() }} }}\n"
+                         f"func via{i}<T: P{i}>(_ x: T) {{ x.go() }}\n"
+                         f"func {me}() {{ via{i}(I{i}()) }}")
+        elif form == "guard_let":
+            # `guard let y = factory() else {…}; y.go()` — type the unwrapped binding from the factory
+            bodies[i] = (f"struct G{i} {{ func go() {{ {callee}() }} }}\n"
+                         f"func make{i}() -> G{i}? {{ G{i}() }}\n"
+                         f"func {me}() {{ guard let y = make{i}() else {{ return }}; y.go() }}")
         elif form == "enum_bind":
             # `case .cN(let x): x.go()` — type the binding from the enum case's associated value type.
             # The case name is unique per instance (a name reused across enums is ambiguous → unbound).
