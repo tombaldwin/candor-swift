@@ -30,7 +30,7 @@ SINKS = {
 
 # Edge forms: how fn i reaches fn i+1 (or the sink). `unknown` forms must read Unknown in the
 # RECEIVING function instead of (or in addition to) the effect.
-FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local", "iter", "for_each", "field_iter", "dict_iter"]
+FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local", "iter", "for_each", "field_iter", "dict_iter", "subscript_recv", "cast_recv"]
 
 
 def gen(seed):
@@ -99,6 +99,14 @@ def gen(seed):
             # iterate a [K: V] — `for (k, v) in m` types v from the dictionary's value type
             bodies[i] = (f"struct V{i} {{ func go() {{ {callee}() }} }}\n"
                          f"func {me}() {{ let m: [String: V{i}] = [:]; for (_, v) in m {{ v.go() }} }}")
+        elif form == "subscript_recv":
+            # `xs[0].go()` — an array subscript yields the element type as the receiver
+            bodies[i] = (f"struct S{i} {{ func go() {{ {callee}() }} }}\n"
+                         f"func {me}() {{ let xs: [S{i}] = [S{i}()]; xs[0].go() }}")
+        elif form == "cast_recv":
+            # `(x as! T).go()` — the cast names the receiver type
+            bodies[i] = (f"struct A{i} {{ func go() {{ {callee}() }} }}\n"
+                         f"func {me}() {{ let x: Any = A{i}(); (x as! A{i}).go() }}")
         elif form == "opaque_local":
             # `me` reaches the sink ONLY by invoking a closure pulled from an opaque global slot —
             # no lexical closure in `me`, no edge. A fn-typed LOCAL whose origin is indeterminate is

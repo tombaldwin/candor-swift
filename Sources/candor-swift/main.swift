@@ -623,6 +623,27 @@ final class CallCollector: SyntaxVisitor {
             }
             return (nil, false, [])
         }
+        // `coll[i]` — an array subscript yields the element type, a dictionary subscript the value
+        // type (`cs[0].send()` / `d["k"]?.send()` resolved against the bare base and dropped to pure).
+        if let sub = expr.as(SubscriptCallExprSyntax.self) {
+            if let t = elementTypeOf(sub.calledExpression) ?? dictValueOf(sub.calledExpression) {
+                return (t, true, [])
+            }
+        }
+        // SwiftParser leaves operators UNFOLDED, so `x as! T` and `cond ? a : b` are SequenceExprs:
+        if let seq = expr.as(SequenceExprSyntax.self) {
+            let elems = Array(seq.elements)
+            // `x as! T` / `x as? T` → `[operand, unresolvedAsExpr, typeExpr]`: the type is the result.
+            if elems.count == 3, elems[1].is(UnresolvedAsExprSyntax.self),
+               let te = elems[2].as(TypeExprSyntax.self), let t = typeName(te.type).name {
+                return (t, true, [])
+            }
+            // `cond ? a : b` → `[cond, unresolvedTernaryExpr(then), elseExpr]`: both arms one type.
+            if elems.count == 3, let tern = elems[1].as(UnresolvedTernaryExprSyntax.self) {
+                let a = rootOf(tern.thenExpression), b = rootOf(elems[2])
+                if let ra = a.root, ra == b.root, a.isVar, b.isVar { return (ra, true, []) }
+            }
+        }
         return (nil, false, [])
     }
 
@@ -881,6 +902,10 @@ final class CallCollector: SyntaxVisitor {
                     // calls resolved against the bare identifier and dropped to pure; the inline
                     // `FileManager.default.removeItem` already classified Fs, the let-bound did not).
                     vars[name] = baseDR.baseName.text
+                } else if v.is(SequenceExprSyntax.self) || v.is(SubscriptCallExprSyntax.self) {
+                    // `let c = x as! T` / `let c = cond ? a : b` / `let c = cs[0]` — rootOf types these
+                    let info = rootOf(v0)
+                    if info.isVar, let t = info.root { vars[name] = t }
                 }
             }
         }

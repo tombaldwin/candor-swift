@@ -97,6 +97,26 @@ ok = (by.get('Pool.run')=={'Net'} and by.get('dictV')=={'Net'} and by.get('enume
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
 [ "$CT" = "PASS" ] && ok "collection typing: array fields, dict (k,v), enumerated(), filter-reuse (no fabrication on [String:Int])" || bad "collection typing: $CT"
 
+# receiver EXPRESSION typing: subscript, as!/as? cast, ternary (inline + let-bound) — all dropped to pure.
+mkdir -p "$W/rx" && cat > "$W/rx/m.swift" <<'SW'
+import Foundation
+final class Client { func send() { _ = URLSession.shared.dataTask(with: URL(string: "https://x")!) } }
+func sub(cs: [Client]) { cs[0].send() }
+func cast(x: Any) { (x as! Client).send() }
+func tern(a: Client, b: Client, f: Bool) { (f ? a : b).send() }
+func castLet(x: Any) { let c = x as! Client; c.send() }
+func castInt(x: Any) { _ = (x as! Int) + 1 }
+SW
+"$BIN" "$W/rx" --out "$W/rx/r" >/dev/null 2>&1
+RX=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/rx/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+ok = (by.get('sub')=={'Net'} and by.get('cast')=={'Net'} and by.get('tern')=={'Net'}
+      and by.get('castLet')=={'Net'} and 'castInt' not in by)
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$RX" = "PASS" ] && ok "receiver-expression typing: subscript, as! cast, ternary (no fabrication on as! Int)" || bad "receiver-expr typing: $RX"
+
 # --agents: the self-describing engine (the contract is embedded as a Swift constant). The drift
 # gate diffs the ACTUAL served contract (minus the version-header line) against AGENTS.md — testing
 # end to end, and catching a stale AgentsDoc.swift (regenerate: python3 gen-agents-doc.py).
