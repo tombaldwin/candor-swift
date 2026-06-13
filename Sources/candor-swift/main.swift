@@ -830,13 +830,14 @@ var kappaSawClassified = false
 var callsiteArgs: [String: [[ArgKind]]] = [:]   // resolved target -> each call site's arg kinds
 var deferredCallbacks: [String: (indexes: Set<Int>, names: Set<String>)] = [:]
 
+let localProtocolNames = Set(protocolMethods.keys)  // loop-invariant: build once, not per fn
 for f in allFns {
     locOf[f.qual] = f.loc
     if f.isMain { entryPoints.insert(f.qual) }
     edges[f.qual] = edges[f.qual] ?? []
     guard let body = f.body else { continue }
     let cc = CallCollector(info: f, fields: fields, localTypes: localTypes,
-                           localProtocols: Set(protocolMethods.keys), returns: returnsIdx)
+                           localProtocols: localProtocolNames, returns: returnsIdx)
     cc.walk(body)
     // accessor units: a property READ of a known accessor unit is an edge (the reader inherits
     // the getter's effects — `c.data` reaching the Fs inside `var data: Data { … }`)
