@@ -8,6 +8,9 @@ func net_connect() { _ = URLSession.shared.dataTask(with: URL(string: "http://ex
 func exec_spawn() { _ = Process() }
 // Exec-cliff refinement (spec §4 ⟨0.5⟩): a known literal head adds its effect; all engines must agree.
 func exec_curl() { _ = Process.launchedProcess(launchPath: "/usr/bin/curl", arguments: []) }
+// Exec-refinement reads the HEAD (argv[0]) only: a dynamic program with a literal ARGUMENT keeps the
+// bare cliff — "curl" in arguments must NOT fabricate Net (spec §4 ⟨0.5⟩: the head is argv[0]).
+func exec_dyn_head(tool: String) { _ = Process.launchedProcess(launchPath: tool, arguments: ["curl"]) }
 func env_read() { _ = ProcessInfo.processInfo.environment["PATH"] }
 func clock_now() { _ = Date() }
 func pure_fn() -> Int { 1 + 2 }
