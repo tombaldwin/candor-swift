@@ -30,7 +30,7 @@ SINKS = {
 
 # Edge forms: how fn i reaches fn i+1 (or the sink). `unknown` forms must read Unknown in the
 # RECEIVING function instead of (or in addition to) the effect.
-FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local", "iter", "for_each"]
+FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local", "iter", "for_each", "field_iter", "dict_iter"]
 
 
 def gen(seed):
@@ -90,6 +90,15 @@ def gen(seed):
             # same, through a `xs.forEach {{ x in x.go() }}` closure (the element-param typing path)
             bodies[i] = (f"struct F{i} {{ func go() {{ {callee}() }} }}\n"
                          f"func {me}() {{ let xs: [F{i}] = [F{i}()]; xs.forEach {{ x in x.go() }} }}")
+        elif form == "field_iter":
+            # iterate a STORED [E] field — `for x in self.items` types x from the field's element type
+            bodies[i] = (f"struct E{i} {{ func go() {{ {callee}() }} }}\n"
+                         f"struct H{i} {{ let xs: [E{i}] = [E{i}()]; func run() {{ for x in xs {{ x.go() }} }} }}\n"
+                         f"func {me}() {{ H{i}().run() }}")
+        elif form == "dict_iter":
+            # iterate a [K: V] — `for (k, v) in m` types v from the dictionary's value type
+            bodies[i] = (f"struct V{i} {{ func go() {{ {callee}() }} }}\n"
+                         f"func {me}() {{ let m: [String: V{i}] = [:]; for (_, v) in m {{ v.go() }} }}")
         elif form == "opaque_local":
             # `me` reaches the sink ONLY by invoking a closure pulled from an opaque global slot —
             # no lexical closure in `me`, no edge. A fn-typed LOCAL whose origin is indeterminate is

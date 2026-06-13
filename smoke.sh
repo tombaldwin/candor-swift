@@ -77,6 +77,26 @@ ok = by.get('forIn')=={'Net'} and by.get('forEachP')=={'Net'} and by.get('shorth
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
 [ "$IT" = "PASS" ] && ok "iteration-variable typing resolves the element's effects (for-in + forEach + \$0; no fabrication on [Int])" || bad "iteration typing: $IT"
 
+# collection typing completeness: array FIELDS, dict (k,v) iteration, enumerated(), transform reuse
+mkdir -p "$W/ct2" && cat > "$W/ct2/m.swift" <<'SW'
+import Foundation
+final class Client { func send() { _ = URLSession.shared.dataTask(with: URL(string: "https://x")!) } }
+struct Pool { let clients: [Client] = []; func run() { for c in clients { c.send() } } }
+func dictV(d: [String: Client]) { for (_, c) in d { c.send() } }
+func enumer(cs: [Client]) { for (_, c) in cs.enumerated() { c.send() } }
+func reuse(cs: [Client]) { let a = cs.filter { _ in true }; for c in a { c.send() } }
+func dictInt(d: [String: Int]) { for (_, n) in d { _ = n + 1 } }
+SW
+"$BIN" "$W/ct2" --out "$W/ct2/r" >/dev/null 2>&1
+CT=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/ct2/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+ok = (by.get('Pool.run')=={'Net'} and by.get('dictV')=={'Net'} and by.get('enumer')=={'Net'}
+      and by.get('reuse')=={'Net'} and 'dictInt' not in by)
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$CT" = "PASS" ] && ok "collection typing: array fields, dict (k,v), enumerated(), filter-reuse (no fabrication on [String:Int])" || bad "collection typing: $CT"
+
 # --agents: the self-describing engine (the contract is embedded as a Swift constant). The drift
 # gate diffs the ACTUAL served contract (minus the version-header line) against AGENTS.md — testing
 # end to end, and catching a stale AgentsDoc.swift (regenerate: python3 gen-agents-doc.py).

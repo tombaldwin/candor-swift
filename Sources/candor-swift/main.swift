@@ -308,6 +308,7 @@ struct FnInfo {
     var fnTypedParamIndex: [String: Int] = [:] // fn-typed param name -> position
     var protoParams: [String: String] = [:]  // param name -> local protocol name
     var arrayParams: [String: String] = [:]  // param name -> ELEMENT type (a `[T]` param, for `for x in p`)
+    var dictParams: [String: String] = [:]   // param name -> VALUE type (a `[K: V]` param, for `for (k,v)`)
     var body: Syntax?
     var enclosingType: String?
     var isMain: Bool = false
@@ -343,11 +344,28 @@ func arrayElementName(_ t: TypeSyntax) -> String? {
     return nil
 }
 
+/// The VALUE type name of a dictionary type: `[K: V]`/`Dictionary<K, V>` → `V` (peeling wrappers).
+/// `for (k, v) in dict { v.method() }` iterates (key, value) pairs, so the value carries the type.
+func dictValueName(_ t: TypeSyntax) -> String? {
+    if let d = t.as(DictionaryTypeSyntax.self) { return typeName(d.value).name }
+    if let opt = t.as(OptionalTypeSyntax.self) { return dictValueName(opt.wrappedType) }
+    if let att = t.as(AttributedTypeSyntax.self) { return dictValueName(att.baseType) }
+    if let some = t.as(SomeOrAnyTypeSyntax.self) { return dictValueName(some.constraint) }
+    if let gen = t.as(IdentifierTypeSyntax.self), let args = gen.genericArgumentClause,
+       gen.name.text == "Dictionary", args.arguments.count == 2,
+       let second = Array(args.arguments).last, let vt = second.argument.as(TypeSyntax.self) {
+        return typeName(vt).name
+    }
+    return nil
+}
+
 final class DeclCollector: SyntaxVisitor {
     var file: String
     var converter: SourceLocationConverter
     var fns: [FnInfo] = []
     var fields: [String: [String: (name: String?, isFunction: Bool)]] = [:] // Type -> field -> info
+    var fieldArrayElem: [String: [String: String]] = [:]  // Type -> field -> ELEMENT type (`[T]` field)
+    var fieldDictValue: [String: [String: String]] = [:]  // Type -> field -> VALUE type (`[K: V]` field)
     var protocolMethods: [String: Set<String>] = [:]   // protocol -> declared method names
     var returnsTmp: [String: String?] = [:]            // fn leaf -> return type (nil = ambiguous)
     var conformers: [String: [String]] = [:]           // protocol -> conforming local types
@@ -448,6 +466,8 @@ final class DeclCollector: SyntaxVisitor {
                 if let ann = binding.typeAnnotation {
                     let info = typeName(ann.type)
                     fields[ty, default: [:]][name] = info
+                    if let elem = arrayElementName(ann.type) { fieldArrayElem[ty, default: [:]][name] = elem }
+                    if let val = dictValueName(ann.type) { fieldDictValue[ty, default: [:]][name] = val }
                 } else if let initVal = binding.initializer?.value,
                           let call = initVal.as(FunctionCallExprSyntax.self),
                           let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self),
@@ -481,6 +501,7 @@ final class DeclCollector: SyntaxVisitor {
                 if protocolMethods[tn] != nil { info.protoParams[pname] = tn } else { info.params[pname] = tn }
             }
             else if let elem = arrayElementName(p.type) { info.arrayParams[pname] = elem }  // `p: [T]`
+            else if let val = dictValueName(p.type) { info.dictParams[pname] = val }        // `p: [K: V]`
         }
         fns.append(info)
     }
@@ -513,7 +534,10 @@ final class CallCollector: SyntaxVisitor {
                                             // PARAMS can defer to call-site flow (callers pass them).
     var protoTyped: [String: String]        // param -> local protocol
     var arrayElem: [String: String]         // name -> element type of a `[T]` local/param (loop typing)
+    var dictElem: [String: String]          // name -> VALUE type of a `[K: V]` local/param (dict loops)
     let fields: [String: [String: (name: String?, isFunction: Bool)]]
+    let fieldArrayElem: [String: [String: String]]  // Type -> field -> [T] element (self.field loops)
+    let fieldDictValue: [String: [String: String]]  // Type -> field -> [K: V] value
     let localTypes: Set<String>
     let localProtocols: Set<String> // local protocol names — a receiver typed as one is DISPATCH
     let returns: [String: String]   // unambiguous factory return types (the candor-scan move)
@@ -531,12 +555,16 @@ final class CallCollector: SyntaxVisitor {
     var callbackInvoked: Set<String> = [] // fn-typed params INVOKED — deferred to callback-flow
 
     init(info: FnInfo, fields: [String: [String: (name: String?, isFunction: Bool)]], localTypes: Set<String>,
-         localProtocols: Set<String>, returns: [String: String]) {
+         localProtocols: Set<String>, returns: [String: String],
+         fieldArrayElem: [String: [String: String]], fieldDictValue: [String: [String: String]]) {
         self.vars = info.params
         self.fnTyped = info.fnTypedParams
         self.protoTyped = info.protoParams
         self.arrayElem = info.arrayParams
+        self.dictElem = info.dictParams
         self.fields = fields
+        self.fieldArrayElem = fieldArrayElem
+        self.fieldDictValue = fieldDictValue
         self.localTypes = localTypes
         self.localProtocols = localProtocols
         self.returns = returns
@@ -642,19 +670,60 @@ final class CallCollector: SyntaxVisitor {
         }
     }
 
-    // The element type a sequence EXPRESSION yields per iteration: a bare identifier that is a `[T]`
-    // local/param. (A literal/computed sequence is left untyped — never guess.)
+    // The ELEMENT type a sequence yields per iteration. A `[T]` local/param/field; `self.field`; an
+    // element-PRESERVING transform (`coll.filter/sorted/reversed/prefix/…`) → coll's element. A
+    // literal/computed/transforming (map) sequence is left untyped — never guess.
     private func elementTypeOf(_ expr: ExprSyntax) -> String? {
-        if let dr = Self.peel(expr).as(DeclReferenceExprSyntax.self) { return arrayElem[dr.baseName.text] }
+        let e = Self.peel(expr)
+        if let dr = e.as(DeclReferenceExprSyntax.self) {
+            let n = dr.baseName.text
+            if let t = arrayElem[n] { return t }
+            if let et = enclosingType, let t = fieldArrayElem[et]?[n] { return t }  // implicit-self field
+            return nil
+        }
+        if let ma = e.as(MemberAccessExprSyntax.self),
+           ma.base?.as(DeclReferenceExprSyntax.self)?.baseName.text == "self",
+           let et = enclosingType, let t = fieldArrayElem[et]?[ma.declName.baseName.text] {
+            return t  // `for x in self.items`
+        }
+        if let call = e.as(FunctionCallExprSyntax.self),
+           let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
+           ["filter", "sorted", "reversed", "shuffled", "prefix", "suffix", "dropFirst", "dropLast", "lazy"]
+               .contains(ma.declName.baseName.text), let base = ma.base {
+            return elementTypeOf(base)  // element-preserving transform → same element type
+        }
         return nil
     }
 
-    // `for x in coll { … }` — type the loop variable from the collection's element type so its member
-    // calls resolve (else the receiver was untyped and dropped to pure — a §4 under-report).
+    // The VALUE type a `[K: V]` yields (its `.values`, or the `v` of a `(k, v)` iteration).
+    private func dictValueOf(_ expr: ExprSyntax) -> String? {
+        let e = Self.peel(expr)
+        if let dr = e.as(DeclReferenceExprSyntax.self) {
+            let n = dr.baseName.text
+            if let t = dictElem[n] { return t }
+            if let et = enclosingType, let t = fieldDictValue[et]?[n] { return t }
+        }
+        if let ma = e.as(MemberAccessExprSyntax.self),
+           ma.base?.as(DeclReferenceExprSyntax.self)?.baseName.text == "self",
+           let et = enclosingType, let t = fieldDictValue[et]?[ma.declName.baseName.text] { return t }
+        return nil
+    }
+
+    // `for x in coll` / `for (k, v) in dict` / `for (i, x) in coll.enumerated()` — type the iteration
+    // variable from the collection so its member calls resolve (else dropped to pure — §4 under-report).
     override func visit(_ node: ForStmtSyntax) -> SyntaxVisitorContinueKind {
-        if let name = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text,
-           let elem = elementTypeOf(node.sequence) {
-            vars[name] = elem
+        if let name = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
+            if let elem = elementTypeOf(node.sequence) { vars[name] = elem }
+        } else if let tup = node.pattern.as(TuplePatternSyntax.self), tup.elements.count == 2,
+                  let second = tup.elements.last?.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
+            if let v = dictValueOf(node.sequence) {
+                vars[second] = v  // for (key, value) in dict — value carries the type
+            } else if let call = Self.peel(node.sequence).as(FunctionCallExprSyntax.self),
+                      let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
+                      ma.declName.baseName.text == "enumerated", let base = ma.base,
+                      let elem = elementTypeOf(base) {
+                vars[second] = elem  // for (offset, element) in coll.enumerated()
+            }
         }
         return .visitChildren
     }
@@ -788,6 +857,7 @@ final class CallCollector: SyntaxVisitor {
                 }
                 else if let tn = t.name { vars[name] = tn }
                 else if let elem = arrayElementName(ann.type) { arrayElem[name] = elem }  // `let xs: [T]`
+                else if let val = dictValueName(ann.type) { dictElem[name] = val }        // `let m: [K: V]`
             } else if let v0 = binding.initializer?.value {
                 let v = Self.peel(v0)
                 if v.is(ClosureExprSyntax.self) {
@@ -799,6 +869,9 @@ final class CallCollector: SyntaxVisitor {
                     // ctor or unambiguous factory — one resolver for both (rootOf handles peeling)
                     let info = rootOf(v)
                     if let t = info.root, info.isVar { vars[name] = t }
+                    // a collection TRANSFORM result keeps the element type: `let active = cs.filter {…}`
+                    // (then `for c in active` resolves). Element-preserving transforms only.
+                    else if let elem = elementTypeOf(v0) { arrayElem[name] = elem }
                 } else if let ma = v.as(MemberAccessExprSyntax.self),
                           let baseDR = ma.base?.as(DeclReferenceExprSyntax.self),
                           baseDR.baseName.text.first?.isUppercase == true,
@@ -852,6 +925,8 @@ func hostPart(_ s: String) -> String {
 
 var allFns: [FnInfo] = []
 var fields: [String: [String: (name: String?, isFunction: Bool)]] = [:]
+var fieldArrayElem: [String: [String: String]] = [:]
+var fieldDictValue: [String: [String: String]] = [:]
 var protocolMethods: [String: Set<String>] = [:]
 var conformers: [String: [String]] = [:]
 var localTypes: Set<String> = []
@@ -903,6 +978,8 @@ for c in collectors {
     }
     allFns.append(contentsOf: c.fns)
     for (t, fs) in c.fields { fields[t, default: [:]].merge(fs) { a, _ in a } }
+    for (t, fs) in c.fieldArrayElem { fieldArrayElem[t, default: [:]].merge(fs) { a, _ in a } }
+    for (t, fs) in c.fieldDictValue { fieldDictValue[t, default: [:]].merge(fs) { a, _ in a } }
     for (pn, ms) in c.protocolMethods { protocolMethods[pn, default: []].formUnion(ms) }
     for (pn, ts) in c.conformers { conformers[pn, default: []].append(contentsOf: ts) }
     localTypes.formUnion(c.localTypes)
@@ -938,7 +1015,8 @@ for f in allFns {
     edges[f.qual] = edges[f.qual] ?? []
     guard let body = f.body else { continue }
     let cc = CallCollector(info: f, fields: fields, localTypes: localTypes,
-                           localProtocols: localProtocolNames, returns: returnsIdx)
+                           localProtocols: localProtocolNames, returns: returnsIdx,
+                           fieldArrayElem: fieldArrayElem, fieldDictValue: fieldDictValue)
     cc.walk(body)
     // accessor units: a property READ of a known accessor unit is an edge (the reader inherits
     // the getter's effects — `c.data` reaching the Fs inside `var data: Data { … }`)
