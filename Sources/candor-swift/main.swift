@@ -1013,7 +1013,10 @@ for f in allFns { cg[f.qual] = (edges[f.qual] ?? []).sorted() }  // §2.2: EVERY
 
 func writeJson(_ obj: Any, _ path: String) {
     let data = try! JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
-    try! data.write(to: URL(fileURLWithPath: path))
+    // `.atomic`: Foundation writes to an auxiliary file and renames into place, so a concurrent reader
+    // (a cross-engine candor-query / candor-ts merging this report as a sibling) never observes a
+    // half-written file — the same write invariant the Rust and TS backends now hold (write_atomic).
+    try! data.write(to: URL(fileURLWithPath: path), options: .atomic)
 }
 // Family filename shape `<prefix>.<pkg>.Swift.json` — what candor_report::report_files DISCOVERS,
 // so the unmodified candor-query binary works on Swift reports (this engine's whole consumption
