@@ -181,9 +181,28 @@ def gen(seed):
                          f"func {me}() {{ let cb: () -> Void = slot{i}!; cb() }}")
             expect_unknown.add(me)
     bystander = "func zzBystander(_ n: Int) -> Int { n * 2 }"
-    src = "import Foundation\n\n" + "\n".join(bodies) + "\n" + bystander + "\n"
+    src = "import Foundation\n\n" + "\n".join(bodies) + "\n" + bystander + "\n" + PRECISION_TRAPS + "\n"
     chain = [fn(i) for i in range(n + 1)]
     return src, chain, sink_eff, expect_unknown, forms
+
+
+# PRECISION TRAPS — pure functions that LOOK like they should trigger a receiver-typing heuristic but
+# must stay PURE. The fuzzer threads effects UP a chain (propagation); these guard the other direction —
+# that the heuristics never FABRICATE an effect (the worst bug, candor's cardinal sin). Each trap is a
+# real fabrication the adversarial review found (singleton accessor that vends a different type; a stored
+# field named like a κ property; a `vars`-leak across same-named loop bindings). Appended to every seed
+# (so they're checked under every form combination); the harness asserts NONE of TRAP_FNS is in the report.
+PRECISION_TRAPS = """
+final class PV { func go() {} }
+final class TrapCache { static let current: PV = PV(); func go() { _ = FileManager.default.contents(atPath: "/x") } }
+func trapSingleton() { let v = TrapCache.current; v.go() }                 // .current vends PV, not TrapCache → pure
+final class TrapTimer { let now: Date = Date(); func trapRead() { _ = self.now } }   // field named `now` → pure
+struct TrapBox { func data() {}; func write() {} }                          // methods named like κ members
+func trapBoxes() -> [TrapBox] { [] }
+func trapLeak() { let ss: [URLSession] = []; for s in ss { _ = s }; for s in trapBoxes() { s.data(); s.write() } }
+func trapDollar() { let ss: [URLSession] = []; ss.forEach { _ = $0 }; trapBoxes().map { $0.data() } }
+"""
+TRAP_FNS = ["trapSingleton", "trapRead", "trapLeak", "trapDollar"]
 
 
 def run_seed(seed):
@@ -207,6 +226,9 @@ def run_seed(seed):
                 fails.append(f"{u}: callback/field invocation must read Unknown, got {sorted(got.get(u, set()))}")
         if "zzBystander" in got:
             fails.append(f"zzBystander: precision twin leaked into the report: {sorted(got['zzBystander'])}")
+        for t in TRAP_FNS:
+            if t in got:
+                fails.append(f"{t}: PRECISION TRAP — a pure fn FABRICATED an effect {sorted(got[t])} via a receiver-typing heuristic")
         return fails, forms
     finally:
         shutil.rmtree(d, ignore_errors=True)

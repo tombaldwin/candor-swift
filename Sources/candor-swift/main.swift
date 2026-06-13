@@ -788,11 +788,25 @@ final class CallCollector: SyntaxVisitor {
         return nil
     }
 
+    // Drop EVERY type binding for `name`. A binder (loop var, closure param, `$0`, enum/tuple binding)
+    // that cannot determine a type must CLEAR any prior binding for the name, never leave it: `vars` is
+    // function-wide and never block-scoped, so a stale effectful binding (an earlier loop's
+    // `x: URLSession`) would otherwise leak into a later same-named, UNINFERABLE `x` and FABRICATE its
+    // effect (the review's `vars`-leak find — the worst direction). Clearing drops to honest pure (the
+    // safe direction). NOTE: still not true block scoping — a cleared binding also leaks OUTWARD, which
+    // can under-report (the safe direction), accepted over fabrication.
+    private func clearBinding(_ name: String) {
+        vars.removeValue(forKey: name)
+        arrayElem.removeValue(forKey: name)
+        dictElem.removeValue(forKey: name)
+        tupleElem.removeValue(forKey: name)
+    }
+
     // `for x in coll` / `for (k, v) in dict` / `for (i, x) in coll.enumerated()` — type the iteration
     // variable from the collection so its member calls resolve (else dropped to pure — §4 under-report).
     override func visit(_ node: ForStmtSyntax) -> SyntaxVisitorContinueKind {
         if let name = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
-            if let elem = elementTypeOf(node.sequence) { vars[name] = elem }
+            if let elem = elementTypeOf(node.sequence) { vars[name] = elem } else { clearBinding(name) }
         } else if let tup = node.pattern.as(TuplePatternSyntax.self), tup.elements.count == 2,
                   let second = tup.elements.last?.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
             if let v = dictValueOf(node.sequence) {
@@ -802,7 +816,7 @@ final class CallCollector: SyntaxVisitor {
                       ma.declName.baseName.text == "enumerated", let base = ma.base,
                       let elem = elementTypeOf(base) {
                 vars[second] = elem  // for (offset, element) in coll.enumerated()
-            }
+            } else { clearBinding(second) }
         }
         return .visitChildren
     }
@@ -814,33 +828,39 @@ final class CallCollector: SyntaxVisitor {
     private func typeForEachClosureParam(_ node: FunctionCallExprSyntax) {
         guard let ma = node.calledExpression.as(MemberAccessExprSyntax.self),
               ["forEach", "map", "filter", "compactMap", "flatMap", "first", "contains", "allSatisfy"].contains(ma.declName.baseName.text),
-              let base = ma.base, let elem = elementTypeOf(base) else { return }
+              let base = ma.base else { return }
         let closure = node.trailingClosure
             ?? node.arguments.lazy.compactMap { $0.expression.as(ClosureExprSyntax.self) }.first
         guard let closure else { return }
-        // explicit `{ x in … }` → first param; shorthand `{ $0.… }` → `$0`
-        if let shorthand = closure.signature?.parameterClause?.as(ClosureShorthandParameterListSyntax.self),
-           let first = shorthand.first {
-            vars[first.name.text] = elem
-        } else if let params = closure.signature?.parameterClause?.as(ClosureParameterClauseSyntax.self),
-                  let first = params.parameters.first {
-            vars[first.firstName.text] = elem
+        // the closure's element parameter: explicit `{ x in … }` → first param; shorthand `{ $0.… }` → `$0`
+        let paramName: String?
+        if let shorthand = closure.signature?.parameterClause?.as(ClosureShorthandParameterListSyntax.self), let first = shorthand.first {
+            paramName = first.name.text
+        } else if let params = closure.signature?.parameterClause?.as(ClosureParameterClauseSyntax.self), let first = params.parameters.first {
+            paramName = first.firstName.text
         } else if closure.signature == nil {
-            vars["$0"] = elem
-        }
+            paramName = "$0"
+        } else { paramName = nil }
+        guard let paramName else { return }
+        // type it from the receiver's element type, or CLEAR it (don't leak a prior `$0`/param binding
+        // into this closure when the element type is indeterminate — the review's `$0`-collision find).
+        if let elem = elementTypeOf(base) { vars[paramName] = elem } else { clearBinding(paramName) }
     }
 
     // `case .active(let c):` / `if case .active(let c) = …` — an enum case pattern is parsed as a call
     // `.active(let c)` (leading-dot member, a `let`-binding arg). Type the binding from the case's
     // associated value type so `c.method()` resolves (else it dropped to pure — a §4 under-report).
     private func typeEnumCaseBinding(_ node: FunctionCallExprSyntax) {
-        guard let ma = node.calledExpression.as(MemberAccessExprSyntax.self), ma.base == nil,
-              let t = enumCaseValueType[ma.declName.baseName.text] else { return }
+        guard let ma = node.calledExpression.as(MemberAccessExprSyntax.self), ma.base == nil else { return }
+        // `t` is nil for an AMBIGUOUS or unknown case name — then the binding must be CLEARED, not left:
+        // a prior `.live(let h): h=URLSession` binding would otherwise leak into `.dead(let h)` whose
+        // case is ambiguous and FABRICATE `h.data()` as Net (the review's whole-program `vars`-leak find).
+        let t = enumCaseValueType[ma.declName.baseName.text]
         for arg in node.arguments {
             if let pat = arg.expression.as(PatternExprSyntax.self),
                let vb = pat.pattern.as(ValueBindingPatternSyntax.self),
                let name = vb.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
-                vars[name] = t
+                if let t { vars[name] = t } else { clearBinding(name) }
             }
         }
     }
@@ -928,6 +948,7 @@ final class CallCollector: SyntaxVisitor {
             let info = rootOf(initVal)
             if info.isVar, let t = info.root { vars[name] = t }
             else if let elem = elementTypeOf(initVal) { arrayElem[name] = elem }
+            else { clearBinding(name) }  // can't type the unwrapped value → clear (don't leak a stale type)
         }
         return .visitChildren
     }
@@ -935,15 +956,22 @@ final class CallCollector: SyntaxVisitor {
     // effectful property READS (no call): κ chains AND local accessor units (computed getters)
     override func visit(_ node: MemberAccessExprSyntax) -> SyntaxVisitorContinueKind {
         if node.parent?.is(FunctionCallExprSyntax.self) != true {
-            let info = rootOf(ExprSyntax(node))
-            if let root = info.root, let eff = kappaPropertyRead(root: root, path: info.path) {
+            // The κ property-read uses the RECEIVER's type + the terminal member — NOT the field-walked
+            // whole node. rootOf(whole node) walks a terminal STORED field to its own type, so a pure
+            // read of a field named like a κ property (`let now: Date`; `let environment: ProcessInfo`;
+            // `let general: NSPasteboard`) would fabricate the effect (`self.now` → root "Date", path
+            // ["now"] → a bogus Clock). The receiver-rooted path matches the genuine reads
+            // (`ProcessInfo.processInfo.environment`, `Date.now`, `self.w.pinfo.environment`) without it.
+            let recv = node.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [])
+            if let root = recv.root,
+               let eff = kappaPropertyRead(root: root, path: recv.path + [node.declName.baseName.text]) {
                 directEffects.insert(eff)
             }
             // The accessor-unit edge uses the RECEIVER's type (rootOf of the BASE) — NOT the field-walked
             // whole node, whose root would be this property's own value type (`G().v` must edge to `G.v`,
             // the getter unit, not to `Int.v`). rootOf walks fields for method receivers; the terminal
             // property read here wants the type the property is read FROM.
-            let recvRoot = node.base.map { rootOf($0).root } ?? info.root
+            let recvRoot = recv.root
             if let root = recvRoot, localTypes.contains(root) {
                 propertyEdges.insert("\(root).\(node.declName.baseName.text)")
             }
@@ -960,7 +988,7 @@ final class CallCollector: SyntaxVisitor {
                 for (pe, ve) in zip(tp.elements, tupleInit.elements) {
                     guard let n = pe.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
                     let info = rootOf(ve.expression)
-                    if info.isVar, let t = info.root { vars[n] = t }
+                    if info.isVar, let t = info.root { vars[n] = t } else { clearBinding(n) }
                 }
                 continue
             }
@@ -1004,7 +1032,16 @@ final class CallCollector: SyntaxVisitor {
                     // type returns an instance of that type, so the var carries it (else its member
                     // calls resolved against the bare identifier and dropped to pure; the inline
                     // `FileManager.default.removeItem` already classified Fs, the let-bound did not).
-                    vars[name] = baseDR.baseName.text
+                    // BUT if the type RECORDS this accessor's real return type (`static let shared:
+                    // Settings = …`), use THAT — else binding `let s = Config.shared` to "Config" when
+                    // `.shared` vends a Settings FABRICATES a Config method's effect on s (review find).
+                    // The inline form already does this via rootOf's field-walk; match it here.
+                    let base = baseDR.baseName.text
+                    if let f = fields[base]?[ma.declName.baseName.text], let ft = f.name, !f.isFunction {
+                        vars[name] = ft
+                    } else {
+                        vars[name] = base
+                    }
                 } else if v.is(SequenceExprSyntax.self) || v.is(SubscriptCallExprSyntax.self) {
                     // `let c = x as! T` / `let c = cond ? a : b` / `let c = cs[0]` — rootOf types these
                     let info = rootOf(v0)
