@@ -6,6 +6,8 @@ import Foundation
 func fs_read() { _ = FileManager.default.contents(atPath: "/tmp/x") }
 func net_connect() { _ = URLSession.shared.dataTask(with: URL(string: "http://example.com")!) }
 func exec_spawn() { _ = Process() }
+// Exec-cliff refinement (spec §4 ⟨0.5⟩): a known literal head adds its effect; all engines must agree.
+func exec_curl() { _ = Process.launchedProcess(launchPath: "/usr/bin/curl", arguments: []) }
 func env_read() { _ = ProcessInfo.processInfo.environment["PATH"] }
 func clock_now() { _ = Date() }
 func pure_fn() -> Int { 1 + 2 }

@@ -20,7 +20,7 @@ got = {e["fn"].split(".")[-1]: set(e.get("inferred", [])) for e in json.load(ope
 print(sum(1 for c, e in exp.items() if got.get(c, set()) == e), "/", len(exp), sep="")
 PY
 )
-  [ "$N" = "20/20" ] && ok "conformance oracle $N" || bad "conformance oracle $N"
+  [ "$N" = "21/21" ] && ok "conformance oracle $N" || bad "conformance oracle $N"
 else
   echo "  skip conformance oracle (clone candor-spec as a sibling or set CANDOR_SPEC)"
 fi

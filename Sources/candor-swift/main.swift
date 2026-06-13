@@ -212,6 +212,23 @@ func kappaPropertyRead(root: String, path: [String]) -> String? {
     return nil
 }
 
+/// Refine the `Exec` cliff (spec §4 ⟨0.5⟩): the effects a literal, statically-known subprocess head
+/// implies, matched by basename. ADDED to a caller that already carries `Exec` (a subprocess is still
+/// spawned — `Exec` is never dropped); an unrecognised head returns [] and keeps the bare cliff. A
+/// candor engine reads Fs/Env only — spec §7 item 12 (the analyzer self-boundary) guarantees it, so
+/// that case is spec-supplied. Only UNAMBIGUOUS single-effect tools belong here: a multi-modal head
+/// (git status local vs git push Net; rsync local vs remote; make/npm run project code) would
+/// fabricate the effect for its common case. The reference engines share this table verbatim.
+func classifyCommandHead(_ cmd: String) -> [String] {
+    switch cmd.split(separator: "/").last.map(String.init) ?? cmd {
+    case "curl", "wget", "http", "ssh", "scp": return ["Net"]
+    case "psql", "mysql", "sqlite3", "mongosh", "redis-cli": return ["Db"]
+    case "candor", "candor-run.sh", "candor-scan", "candor-query", "candor-java",
+         "candor-classify", "candor-report", "cargo-candor": return ["Env", "Fs"]
+    default: return []
+    }
+}
+
 /// Modules the platform frontier owns (κ's actual job) — everything else imported is either in
 /// the κ module set or NAMED by the ledger.
 let PLATFORM_MODULES: Set<String> = ["Swift", "Foundation", "FoundationNetworking", "FoundationXML",
@@ -587,7 +604,11 @@ final class CallCollector: SyntaxVisitor {
         guard let lit else { return }
         switch effect {
         case "Net": hosts.insert(hostPart(lit))
-        case "Exec": cmds.insert(lit.split(separator: " ").first.map(String.init) ?? lit)
+        case "Exec":
+            let head = lit.split(separator: " ").first.map(String.init) ?? lit
+            cmds.insert(head)
+            // a known literal head refines the cliff (curl→Net, candor→Fs/Env); Exec stays
+            for e in classifyCommandHead(head) { directEffects.insert(e) }
         case "Fs": if lit.contains("/") || lit.hasPrefix(".") || lit.hasPrefix("~") { paths.insert(lit) }
         case "Db": for t in tablesInSql(lit) { tables.formUnion([t]) }
         default: break
