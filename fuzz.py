@@ -30,7 +30,7 @@ SINKS = {
 
 # Edge forms: how fn i reaches fn i+1 (or the sink). `unknown` forms must read Unknown in the
 # RECEIVING function instead of (or in addition to) the effect.
-FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local", "iter", "for_each", "field_iter", "dict_iter", "subscript_recv", "cast_recv"]
+FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local", "iter", "for_each", "field_iter", "dict_iter", "subscript_recv", "cast_recv", "field_chain"]
 
 
 def gen(seed):
@@ -107,6 +107,11 @@ def gen(seed):
             # `(x as! T).go()` — the cast names the receiver type
             bodies[i] = (f"struct A{i} {{ func go() {{ {callee}() }} }}\n"
                          f"func {me}() {{ let x: Any = A{i}(); (x as! A{i}).go() }}")
+        elif form == "field_chain":
+            # `self.field.go()` — resolve the method on the FIELD's type, not the enclosing type
+            bodies[i] = (f"struct E{i} {{ func go() {{ {callee}() }} }}\n"
+                         f"struct W{i} {{ let e = E{i}(); func run() {{ self.e.go() }} }}\n"
+                         f"func {me}() {{ W{i}().run() }}")
         elif form == "opaque_local":
             # `me` reaches the sink ONLY by invoking a closure pulled from an opaque global slot —
             # no lexical closure in `me`, no edge. A fn-typed LOCAL whose origin is indeterminate is

@@ -117,6 +117,23 @@ ok = (by.get('sub')=={'Net'} and by.get('cast')=={'Net'} and by.get('tern')=={'N
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
 [ "$RX" = "PASS" ] && ok "receiver-expression typing: subscript, as! cast, ternary (no fabrication on as! Int)" || bad "receiver-expr typing: $RX"
 
+# FIELD-CHAIN: `self.field.method()` / `outer.inner.method()` resolve the method on the FIELD's type,
+# not the enclosing/first type (explicit self.field and field-of-field chains dropped to pure before).
+mkdir -p "$W/fc" && cat > "$W/fc/m.swift" <<'SW'
+import Foundation
+final class Client { func send() { _ = URLSession.shared.dataTask(with: URL(string: "https://x")!) } }
+struct Inner { let c = Client() }
+final class Svc { let client = Client(); func go() { self.client.send() } }   // explicit self.field
+struct Outer { let inner = Inner(); func use() { inner.c.send() } }             // field-of-field
+SW
+"$BIN" "$W/fc" --out "$W/fc/r" >/dev/null 2>&1
+FC=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/fc/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+print('PASS' if by.get('Svc.go')=={'Net'} and by.get('Outer.use')=={'Net'} else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$FC" = "PASS" ] && ok "field-chain typing: self.field.method() + field-of-field resolve the field's type" || bad "field-chain typing: $FC"
+
 # --agents: the self-describing engine (the contract is embedded as a Swift constant). The drift
 # gate diffs the ACTUAL served contract (minus the version-header line) against AGENTS.md — testing
 # end to end, and catching a stale AgentsDoc.swift (regenerate: python3 gen-agents-doc.py).

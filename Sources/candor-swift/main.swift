@@ -607,7 +607,16 @@ final class CallCollector: SyntaxVisitor {
         }
         if let ma = expr.as(MemberAccessExprSyntax.self) {
             let inner = ma.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [])
-            return (inner.root, inner.isVar, inner.path + [ma.declName.baseName.text])
+            let member = ma.declName.baseName.text
+            // WALK THROUGH A FIELD: if the chain so far is a local type with `member` as a stored
+            // field, the chain's type becomes the FIELD's type — so `self.client.send()` /
+            // `outer.inner.save()` resolve the method on the field's type, not the enclosing type
+            // (explicit `self.field.method()` and field-of-field chains otherwise resolved against the
+            // wrong type and dropped to pure — the bare-identifier implicit-self path already did this).
+            if let rt = inner.root, let f = fields[rt]?[member], let ft = f.name, !f.isFunction {
+                return (ft, true, inner.path + [member])
+            }
+            return (inner.root, inner.isVar, inner.path + [member])
         }
         if let call = expr.as(FunctionCallExprSyntax.self) {
             // `Svc().act()` — a constructor call types the chain; a FACTORY's unambiguous return
@@ -852,7 +861,12 @@ final class CallCollector: SyntaxVisitor {
             if let root = info.root, let eff = kappaPropertyRead(root: root, path: info.path) {
                 directEffects.insert(eff)
             }
-            if let root = info.root, localTypes.contains(root) {
+            // The accessor-unit edge uses the RECEIVER's type (rootOf of the BASE) — NOT the field-walked
+            // whole node, whose root would be this property's own value type (`G().v` must edge to `G.v`,
+            // the getter unit, not to `Int.v`). rootOf walks fields for method receivers; the terminal
+            // property read here wants the type the property is read FROM.
+            let recvRoot = node.base.map { rootOf($0).root } ?? info.root
+            if let root = recvRoot, localTypes.contains(root) {
                 propertyEdges.insert("\(root).\(node.declName.baseName.text)")
             }
         }
