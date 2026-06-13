@@ -189,6 +189,27 @@ by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 print('PASS' if by.get('pos')=={'Net'} and by.get('named')=={'Net'} and by.get('destr')=={'Net'} and 'intTup' not in by else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
 [ "$TU" = "PASS" ] && ok "tuple typing: p.0 / p.c / let (a,_) destructure (no fabrication on (Int,Int))" || bad "tuple typing: $TU"
 
+# NESTED-RECEIVER composition: each indirection works alone; rootOf must thread the type through
+# several at once — field+subscript, cast+field, loop+field+subscript, deep field.field[0].field chains.
+mkdir -p "$W/ne" && cat > "$W/ne/m.swift" <<'SW'
+import Foundation
+final class Client { func send() { _ = URLSession.shared.dataTask(with: URL(string: "https://x")!) } }
+struct Pool { let clients: [Client] = [] }
+func fieldSub(p: Pool) { p.clients[0].send() }
+func castField(x: Any) { (x as! Pool).clients[0].send() }
+func loopFieldSub(ps: [Pool]) { for p in ps { p.clients[0].send() } }
+struct Wrap { let inner: [Pool] = [] }
+func deep(w: Wrap) { w.inner[0].clients[0].send() }
+SW
+"$BIN" "$W/ne" --out "$W/ne/r" >/dev/null 2>&1
+NE=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/ne/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+ok = all(by.get(f)=={'Net'} for f in ['fieldSub','castField','loopFieldSub','deep'])
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$NE" = "PASS" ] && ok "nested-receiver composition: field+subscript, cast+field, loop+field+sub, deep chain" || bad "nested composition: $NE"
+
 # --agents: the self-describing engine (the contract is embedded as a Swift constant). The drift
 # gate diffs the ACTUAL served contract (minus the version-header line) against AGENTS.md — testing
 # end to end, and catching a stale AgentsDoc.swift (regenerate: python3 gen-agents-doc.py).

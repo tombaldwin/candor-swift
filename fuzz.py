@@ -30,7 +30,27 @@ SINKS = {
 
 # Edge forms: how fn i reaches fn i+1 (or the sink). `unknown` forms must read Unknown in the
 # RECEIVING function instead of (or in addition to) the effect.
-FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local", "iter", "for_each", "field_iter", "dict_iter", "subscript_recv", "cast_recv", "field_chain", "enum_bind", "generic_proto", "guard_let", "tuple_recv"]
+FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local", "iter", "for_each", "field_iter", "dict_iter", "subscript_recv", "cast_recv", "field_chain", "enum_bind", "generic_proto", "guard_let", "tuple_recv", "field_subscript", "cast_field", "loop_field_subscript", "deep_nest"]
+
+
+def build_deep_nest(rng, i, me, callee):
+    """A RANDOM-DEPTH nested receiver: stack 2–4 struct wrappers (plain field or [E] array-field), then
+    navigate `v.inner.inner[0]….go()` down to the innermost struct whose go() reaches callee. Each
+    wrapper alone is covered by a single form; this checks rootOf threads a type through an arbitrary
+    chain of field/subscript indirections at once (the nested-receiver composition class)."""
+    depth = rng.randint(2, 4)
+    decls = [f"struct E{i}_0 {{ func go() {{ {callee}() }} }}"]
+    access, cur = "", f"E{i}_0"
+    for d in range(1, depth + 1):
+        t = f"E{i}_{d}"
+        if rng.random() < 0.5:
+            decls.append(f"struct {t} {{ let inner = {cur}() }}")
+            access = ".inner" + access
+        else:
+            decls.append(f"struct {t} {{ let inner: [{cur}] = [{cur}()] }}")
+            access = ".inner[0]" + access
+        cur = t
+    return "\n".join(decls) + f"\nfunc {me}() {{ let v = {cur}(); v{access}.go() }}"
 
 
 def gen(seed):
@@ -133,6 +153,24 @@ def gen(seed):
             bodies[i] = (f"struct P{i} {{ func go() {{ {callee}() }} }}\n"
                          f"enum N{i} {{ case c{i}(P{i}) }}\n"
                          f"func {me}() {{ let n = N{i}.c{i}(P{i}()); switch n {{ case .c{i}(let x): x.go() }} }}")
+        elif form == "deep_nest":
+            bodies[i] = build_deep_nest(rng, i, me, callee)
+        elif form == "field_subscript":
+            # NESTED receiver: `h.xs[0].go()` — a [E] FIELD of a typed local, then a subscript. Each
+            # indirection works alone; this checks rootOf threads the type through both at once.
+            bodies[i] = (f"struct E{i} {{ func go() {{ {callee}() }} }}\n"
+                         f"struct H{i} {{ let xs: [E{i}] = [E{i}()] }}\n"
+                         f"func {me}() {{ let h = H{i}(); h.xs[0].go() }}")
+        elif form == "cast_field":
+            # NESTED: `(x as! H).e.go()` — a cast, then a field-chain through the cast result.
+            bodies[i] = (f"struct E{i} {{ func go() {{ {callee}() }} }}\n"
+                         f"struct H{i} {{ let e = E{i}() }}\n"
+                         f"func {me}() {{ let x: Any = H{i}(); (x as! H{i}).e.go() }}")
+        elif form == "loop_field_subscript":
+            # NESTED: `for h in hs {{ h.xs[0].go() }}` — loop var typed, then its [E] field, then subscript.
+            bodies[i] = (f"struct E{i} {{ func go() {{ {callee}() }} }}\n"
+                         f"struct H{i} {{ let xs: [E{i}] = [E{i}()] }}\n"
+                         f"func {me}() {{ let hs: [H{i}] = [H{i}()]; for h in hs {{ h.xs[0].go() }} }}")
         elif form == "opaque_local":
             # `me` reaches the sink ONLY by invoking a closure pulled from an opaque global slot —
             # no lexical closure in `me`, no edge. A fn-typed LOCAL whose origin is indeterminate is

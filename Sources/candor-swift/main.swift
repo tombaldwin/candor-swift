@@ -762,10 +762,9 @@ final class CallCollector: SyntaxVisitor {
             if let et = enclosingType, let t = fieldArrayElem[et]?[n] { return t }  // implicit-self field
             return nil
         }
-        if let ma = e.as(MemberAccessExprSyntax.self),
-           ma.base?.as(DeclReferenceExprSyntax.self)?.baseName.text == "self",
-           let et = enclosingType, let t = fieldArrayElem[et]?[ma.declName.baseName.text] {
-            return t  // `for x in self.items`
+        if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base,
+           let bt = rootOf(base).root, let t = fieldArrayElem[bt]?[ma.declName.baseName.text] {
+            return t  // a `[E]` field of ANY typed receiver: `self.items` / `pool.clients` / `ps[0].items`
         }
         if let call = e.as(FunctionCallExprSyntax.self),
            let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
@@ -784,9 +783,8 @@ final class CallCollector: SyntaxVisitor {
             if let t = dictElem[n] { return t }
             if let et = enclosingType, let t = fieldDictValue[et]?[n] { return t }
         }
-        if let ma = e.as(MemberAccessExprSyntax.self),
-           ma.base?.as(DeclReferenceExprSyntax.self)?.baseName.text == "self",
-           let et = enclosingType, let t = fieldDictValue[et]?[ma.declName.baseName.text] { return t }
+        if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base,
+           let bt = rootOf(base).root, let t = fieldDictValue[bt]?[ma.declName.baseName.text] { return t }
         return nil
     }
 
