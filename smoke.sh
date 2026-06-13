@@ -134,6 +134,25 @@ by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 print('PASS' if by.get('Svc.go')=={'Net'} and by.get('Outer.use')=={'Net'} else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
 [ "$FC" = "PASS" ] && ok "field-chain typing: self.field.method() + field-of-field resolve the field's type" || bad "field-chain typing: $FC"
 
+# enum associated-value binding: `case .active(let c): c.send()` (switch + if-case) types c from the
+# case's payload type; ambiguous case names and non-effect payloads stay pure (never guess/fabricate).
+mkdir -p "$W/en" && cat > "$W/en/m.swift" <<'SW'
+import Foundation
+final class Client { func send() { _ = URLSession.shared.dataTask(with: URL(string: "https://x")!) } }
+enum St { case idle, active(Client) }
+func sw(s: St) { switch s { case .active(let c): c.send(); default: break } }
+func ic(s: St) { if case .active(let c) = s { c.send() } }
+enum N { case n(Int) }
+func intCase(x: N) { switch x { case .n(let v): _ = v + 1 } }
+SW
+"$BIN" "$W/en" --out "$W/en/r" >/dev/null 2>&1
+EN=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/en/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+print('PASS' if by.get('sw')=={'Net'} and by.get('ic')=={'Net'} and 'intCase' not in by else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$EN" = "PASS" ] && ok "enum case binding: switch/if-case .active(let c) types c (no fabrication on Int payload)" || bad "enum case binding: $EN"
+
 # --agents: the self-describing engine (the contract is embedded as a Swift constant). The drift
 # gate diffs the ACTUAL served contract (minus the version-header line) against AGENTS.md — testing
 # end to end, and catching a stale AgentsDoc.swift (regenerate: python3 gen-agents-doc.py).

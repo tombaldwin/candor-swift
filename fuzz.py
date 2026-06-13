@@ -30,7 +30,7 @@ SINKS = {
 
 # Edge forms: how fn i reaches fn i+1 (or the sink). `unknown` forms must read Unknown in the
 # RECEIVING function instead of (or in addition to) the effect.
-FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local", "iter", "for_each", "field_iter", "dict_iter", "subscript_recv", "cast_recv", "field_chain"]
+FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local", "iter", "for_each", "field_iter", "dict_iter", "subscript_recv", "cast_recv", "field_chain", "enum_bind"]
 
 
 def gen(seed):
@@ -112,6 +112,12 @@ def gen(seed):
             bodies[i] = (f"struct E{i} {{ func go() {{ {callee}() }} }}\n"
                          f"struct W{i} {{ let e = E{i}(); func run() {{ self.e.go() }} }}\n"
                          f"func {me}() {{ W{i}().run() }}")
+        elif form == "enum_bind":
+            # `case .cN(let x): x.go()` — type the binding from the enum case's associated value type.
+            # The case name is unique per instance (a name reused across enums is ambiguous → unbound).
+            bodies[i] = (f"struct P{i} {{ func go() {{ {callee}() }} }}\n"
+                         f"enum N{i} {{ case c{i}(P{i}) }}\n"
+                         f"func {me}() {{ let n = N{i}.c{i}(P{i}()); switch n {{ case .c{i}(let x): x.go() }} }}")
         elif form == "opaque_local":
             # `me` reaches the sink ONLY by invoking a closure pulled from an opaque global slot —
             # no lexical closure in `me`, no edge. A fn-typed LOCAL whose origin is indeterminate is

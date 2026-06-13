@@ -369,6 +369,7 @@ final class DeclCollector: SyntaxVisitor {
     var protocolMethods: [String: Set<String>] = [:]   // protocol -> declared method names
     var returnsTmp: [String: String?] = [:]            // fn leaf -> return type (nil = ambiguous)
     var conformers: [String: [String]] = [:]           // protocol -> conforming local types
+    var caseAssoc: [String: Set<String>] = [:]         // enum case -> single-associated-value type(s) seen
     var localTypes: Set<String> = []
     var imports: [String] = []
     private var typeStack: [String] = []
@@ -392,6 +393,19 @@ final class DeclCollector: SyntaxVisitor {
                 conformers[pname, default: []].append(name)
             }
         }
+    }
+
+    // Enum case associated-value types: `case active(Client)` → caseAssoc["active"] = {"Client"}.
+    // Used to type a `case .active(let c)` binding (switch/if-case) so `c.method()` resolves. Only the
+    // SINGLE-associated-value form is recorded; an unambiguous case name (one assoc type project-wide)
+    // is bindable, an ambiguous one (`.success(A)` vs `.success(B)`) is left unbound — never guess.
+    override func visit(_ node: EnumCaseDeclSyntax) -> SyntaxVisitorContinueKind {
+        for el in node.elements {
+            guard let params = el.parameterClause?.parameters, params.count == 1,
+                  let t = typeName(params.first!.type).name else { continue }
+            caseAssoc[el.name.text, default: []].insert(t)
+        }
+        return .visitChildren
     }
 
     override func visit(_ node: ImportDeclSyntax) -> SyntaxVisitorContinueKind {
@@ -541,6 +555,7 @@ final class CallCollector: SyntaxVisitor {
     let localTypes: Set<String>
     let localProtocols: Set<String> // local protocol names — a receiver typed as one is DISPATCH
     let returns: [String: String]   // unambiguous factory return types (the candor-scan move)
+    let enumCaseValueType: [String: String]  // unambiguous enum case -> associated value type
     var enclosingType: String?
     var calls: [Call] = []
     var directEffects: Set<String> = []
@@ -556,7 +571,9 @@ final class CallCollector: SyntaxVisitor {
 
     init(info: FnInfo, fields: [String: [String: (name: String?, isFunction: Bool)]], localTypes: Set<String>,
          localProtocols: Set<String>, returns: [String: String],
-         fieldArrayElem: [String: [String: String]], fieldDictValue: [String: [String: String]]) {
+         fieldArrayElem: [String: [String: String]], fieldDictValue: [String: [String: String]],
+         enumCaseValueType: [String: String]) {
+        self.enumCaseValueType = enumCaseValueType
         self.vars = info.params
         self.fnTyped = info.fnTypedParams
         self.protoTyped = info.protoParams
@@ -781,8 +798,24 @@ final class CallCollector: SyntaxVisitor {
         }
     }
 
+    // `case .active(let c):` / `if case .active(let c) = …` — an enum case pattern is parsed as a call
+    // `.active(let c)` (leading-dot member, a `let`-binding arg). Type the binding from the case's
+    // associated value type so `c.method()` resolves (else it dropped to pure — a §4 under-report).
+    private func typeEnumCaseBinding(_ node: FunctionCallExprSyntax) {
+        guard let ma = node.calledExpression.as(MemberAccessExprSyntax.self), ma.base == nil,
+              let t = enumCaseValueType[ma.declName.baseName.text] else { return }
+        for arg in node.arguments {
+            if let pat = arg.expression.as(PatternExprSyntax.self),
+               let vb = pat.pattern.as(ValueBindingPatternSyntax.self),
+               let name = vb.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
+                vars[name] = t
+            }
+        }
+    }
+
     override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
         typeForEachClosureParam(node)
+        typeEnumCaseBinding(node)
         let lit = firstStringLiteral(node.arguments)
         if let dr = node.calledExpression.as(DeclReferenceExprSyntax.self) {
             let name = dr.baseName.text
@@ -966,6 +999,7 @@ var allFns: [FnInfo] = []
 var fields: [String: [String: (name: String?, isFunction: Bool)]] = [:]
 var fieldArrayElem: [String: [String: String]] = [:]
 var fieldDictValue: [String: [String: String]] = [:]
+var caseAssocAll: [String: Set<String>] = [:]
 var protocolMethods: [String: Set<String>] = [:]
 var conformers: [String: [String]] = [:]
 var localTypes: Set<String> = []
@@ -1019,6 +1053,7 @@ for c in collectors {
     for (t, fs) in c.fields { fields[t, default: [:]].merge(fs) { a, _ in a } }
     for (t, fs) in c.fieldArrayElem { fieldArrayElem[t, default: [:]].merge(fs) { a, _ in a } }
     for (t, fs) in c.fieldDictValue { fieldDictValue[t, default: [:]].merge(fs) { a, _ in a } }
+    for (cn, ts) in c.caseAssoc { caseAssocAll[cn, default: []].formUnion(ts) }
     for (pn, ms) in c.protocolMethods { protocolMethods[pn, default: []].formUnion(ms) }
     for (pn, ts) in c.conformers { conformers[pn, default: []].append(contentsOf: ts) }
     localTypes.formUnion(c.localTypes)
@@ -1034,6 +1069,10 @@ for f in allFns {
 }
 
 for (k, v) in returnsTmp { if let t = v { returnsIdx[k] = t } }
+// An enum case binds a value type only when it is UNAMBIGUOUS project-wide (one assoc type) —
+// the same "never guess on an ambiguous leaf" discipline as the returns index.
+var enumCaseValueType: [String: String] = [:]
+for (cn, ts) in caseAssocAll where ts.count == 1 { enumCaseValueType[cn] = ts.first! }
 
 var direct: [String: Set<String>] = [:]
 var edges: [String: Set<String>] = [:]
@@ -1055,7 +1094,8 @@ for f in allFns {
     guard let body = f.body else { continue }
     let cc = CallCollector(info: f, fields: fields, localTypes: localTypes,
                            localProtocols: localProtocolNames, returns: returnsIdx,
-                           fieldArrayElem: fieldArrayElem, fieldDictValue: fieldDictValue)
+                           fieldArrayElem: fieldArrayElem, fieldDictValue: fieldDictValue,
+                           enumCaseValueType: enumCaseValueType)
     cc.walk(body)
     // accessor units: a property READ of a known accessor unit is an edge (the reader inherits
     // the getter's effects — `c.data` reaching the Fs inside `var data: Data { … }`)
