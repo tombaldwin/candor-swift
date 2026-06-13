@@ -42,6 +42,22 @@ by={e['fn']:e for e in r['functions']}
 print(by.get('C.v',{}).get('unitKind',''), by.get('plain',{}).get('unitKind','-none-'))")
 [ "$UK" = "accessor -none-" ] && ok "accessor unit carries unitKind; plain fn omits it" || bad "unitKind: got '$UK'"
 
+# a let-bound singleton accessor (FileManager.default / URLSession.shared) carries the base type, so
+# its member calls classify — the inline chain already did, the let-bound dropped to pure before.
+mkdir -p "$W/sg" && cat > "$W/sg/m.swift" <<'SW'
+import Foundation
+func letBound() { let fm = FileManager.default; try? fm.removeItem(atPath: "/x") }
+func inlineChain() { try? FileManager.default.removeItem(atPath: "/y") }
+func nonEffect() { let q = DispatchQueue.main; q.sync { } }
+SW
+"$BIN" "$W/sg" --out "$W/sg/r" >/dev/null 2>&1
+SG=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/sg/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+print('lb' if by.get('letBound')=={'Fs'} else 'X', 'in' if by.get('inlineChain')=={'Fs'} else 'X', 'ne' if 'nonEffect' not in by else 'X')")
+[ "$SG" = "lb in ne" ] && ok "let-bound singleton accessor classifies (no fabrication for non-effect types)" || bad "singleton accessor: got '$SG'"
+
 # --agents: the self-describing engine (the contract is embedded as a Swift constant). The drift
 # gate diffs the ACTUAL served contract (minus the version-header line) against AGENTS.md — testing
 # end to end, and catching a stale AgentsDoc.swift (regenerate: python3 gen-agents-doc.py).

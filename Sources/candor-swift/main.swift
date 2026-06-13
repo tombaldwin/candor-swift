@@ -149,6 +149,12 @@ let RAND_ROOTS: Set<String> = ["Int", "UInt", "Int8", "Int16", "Int32", "Int64",
     "UInt32", "UInt64", "Double", "Float", "Bool", "CGFloat"]
 let PROCESS_MEMBERS: Set<String> = ["run", "launch", "waitUntilExit", "terminate", "interrupt", "launchedProcess"]
 let DB_FREE_PREFIX = "sqlite3_"
+// Static singleton accessors that return an instance of their OWN type (Self by convention):
+// `FileManager.default`, `URLSession.shared`, `NSPasteboard.general`, `ProcessInfo.processInfo`,
+// `Database.shared` (a local singleton), … Binding one to a `let` must carry the base type so the
+// var's later member calls classify — `FileManager.default.removeItem` inline is Fs, but via a
+// `let fm = FileManager.default` it dropped to pure (the receiver typed as the bare identifier).
+let SINGLETON_ACCESSORS: Set<String> = ["default", "shared", "standard", "current", "general", "processInfo", "main"]
 
 /// Classify a member call `root.member(...)` (root = the receiver chain's base identifier or the
 /// receiver's inferred TYPE). Returns nil for the pure/unknown surface — never a guess.
@@ -730,6 +736,15 @@ final class CallCollector: SyntaxVisitor {
                     // ctor or unambiguous factory — one resolver for both (rootOf handles peeling)
                     let info = rootOf(v)
                     if let t = info.root, info.isVar { vars[name] = t }
+                } else if let ma = v.as(MemberAccessExprSyntax.self),
+                          let baseDR = ma.base?.as(DeclReferenceExprSyntax.self),
+                          baseDR.baseName.text.first?.isUppercase == true,
+                          SINGLETON_ACCESSORS.contains(ma.declName.baseName.text) {
+                    // `let fm = FileManager.default` / `URLSession.shared` — a singleton accessor on a
+                    // type returns an instance of that type, so the var carries it (else its member
+                    // calls resolved against the bare identifier and dropped to pure; the inline
+                    // `FileManager.default.removeItem` already classified Fs, the let-bound did not).
+                    vars[name] = baseDR.baseName.text
                 }
             }
         }
