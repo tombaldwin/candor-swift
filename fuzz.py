@@ -30,7 +30,7 @@ SINKS = {
 
 # Edge forms: how fn i reaches fn i+1 (or the sink). `unknown` forms must read Unknown in the
 # RECEIVING function instead of (or in addition to) the effect.
-FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local"]
+FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local", "iter", "for_each"]
 
 
 def gen(seed):
@@ -81,6 +81,15 @@ def gen(seed):
                          f"func hold{i}(_ d: D{i}) {{ d.f() }}\n"
                          f"func {me}() {{ hold{i}(D{i}(f: {{ {callee}() }})) }}")
             expect_unknown.add(f"hold{i}")
+        elif form == "iter":
+            # the effect reaches `callee` only through a `for x in xs` over a typed [E] collection —
+            # the loop variable must carry the element type or its `x.go()` drops to pure.
+            bodies[i] = (f"struct E{i} {{ func go() {{ {callee}() }} }}\n"
+                         f"func {me}() {{ let xs: [E{i}] = [E{i}()]; for x in xs {{ x.go() }} }}")
+        elif form == "for_each":
+            # same, through a `xs.forEach {{ x in x.go() }}` closure (the element-param typing path)
+            bodies[i] = (f"struct F{i} {{ func go() {{ {callee}() }} }}\n"
+                         f"func {me}() {{ let xs: [F{i}] = [F{i}()]; xs.forEach {{ x in x.go() }} }}")
         elif form == "opaque_local":
             # `me` reaches the sink ONLY by invoking a closure pulled from an opaque global slot —
             # no lexical closure in `me`, no edge. A fn-typed LOCAL whose origin is indeterminate is

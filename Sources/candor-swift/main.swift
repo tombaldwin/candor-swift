@@ -307,6 +307,7 @@ struct FnInfo {
     var fnTypedParams: Set<String> = []      // params of function type
     var fnTypedParamIndex: [String: Int] = [:] // fn-typed param name -> position
     var protoParams: [String: String] = [:]  // param name -> local protocol name
+    var arrayParams: [String: String] = [:]  // param name -> ELEMENT type (a `[T]` param, for `for x in p`)
     var body: Syntax?
     var enclosingType: String?
     var isMain: Bool = false
@@ -323,6 +324,23 @@ func typeName(_ t: TypeSyntax) -> (name: String?, isFunction: Bool) {
     }
     if let some = t.as(SomeOrAnyTypeSyntax.self) { return typeName(some.constraint) } // `some P` / `any P`
     return (nil, false)
+}
+
+/// The ELEMENT type name of a collection type: `[T]`/`Set<T>`/`Array<T>`/`ContiguousArray<T>` → `T`
+/// (peeling Optional/`some`/`any` wrappers). Used to type a `for x in coll`/`coll.forEach { x in … }`
+/// iteration variable so its member calls classify — without it, a loop/closure over a typed
+/// collection dropped its receiver to pure (a §4 under-report on a very common Swift shape).
+func arrayElementName(_ t: TypeSyntax) -> String? {
+    if let arr = t.as(ArrayTypeSyntax.self) { return typeName(arr.element).name }
+    if let opt = t.as(OptionalTypeSyntax.self) { return arrayElementName(opt.wrappedType) }
+    if let att = t.as(AttributedTypeSyntax.self) { return arrayElementName(att.baseType) }
+    if let some = t.as(SomeOrAnyTypeSyntax.self) { return arrayElementName(some.constraint) }
+    if let gen = t.as(IdentifierTypeSyntax.self), let args = gen.genericArgumentClause,
+       ["Array", "Set", "ContiguousArray", "ArraySlice"].contains(gen.name.text),
+       let first = args.arguments.first, let at = first.argument.as(TypeSyntax.self) {
+        return typeName(at).name
+    }
+    return nil
 }
 
 final class DeclCollector: SyntaxVisitor {
@@ -462,6 +480,7 @@ final class DeclCollector: SyntaxVisitor {
             else if let tn = t.name {
                 if protocolMethods[tn] != nil { info.protoParams[pname] = tn } else { info.params[pname] = tn }
             }
+            else if let elem = arrayElementName(p.type) { info.arrayParams[pname] = elem }  // `p: [T]`
         }
         fns.append(info)
     }
@@ -493,6 +512,7 @@ final class CallCollector: SyntaxVisitor {
                                             // closure): invoking one is §4 Unknown — only fn-typed
                                             // PARAMS can defer to call-site flow (callers pass them).
     var protoTyped: [String: String]        // param -> local protocol
+    var arrayElem: [String: String]         // name -> element type of a `[T]` local/param (loop typing)
     let fields: [String: [String: (name: String?, isFunction: Bool)]]
     let localTypes: Set<String>
     let localProtocols: Set<String> // local protocol names — a receiver typed as one is DISPATCH
@@ -515,6 +535,7 @@ final class CallCollector: SyntaxVisitor {
         self.vars = info.params
         self.fnTyped = info.fnTypedParams
         self.protoTyped = info.protoParams
+        self.arrayElem = info.arrayParams
         self.fields = fields
         self.localTypes = localTypes
         self.localProtocols = localProtocols
@@ -621,7 +642,48 @@ final class CallCollector: SyntaxVisitor {
         }
     }
 
+    // The element type a sequence EXPRESSION yields per iteration: a bare identifier that is a `[T]`
+    // local/param. (A literal/computed sequence is left untyped — never guess.)
+    private func elementTypeOf(_ expr: ExprSyntax) -> String? {
+        if let dr = Self.peel(expr).as(DeclReferenceExprSyntax.self) { return arrayElem[dr.baseName.text] }
+        return nil
+    }
+
+    // `for x in coll { … }` — type the loop variable from the collection's element type so its member
+    // calls resolve (else the receiver was untyped and dropped to pure — a §4 under-report).
+    override func visit(_ node: ForStmtSyntax) -> SyntaxVisitorContinueKind {
+        if let name = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text,
+           let elem = elementTypeOf(node.sequence) {
+            vars[name] = elem
+        }
+        return .visitChildren
+    }
+
+    // Closure-receiving collection methods that pass each ELEMENT as the closure's first argument:
+    // `coll.forEach/map/filter/compactMap/flatMap/first/contains/allSatisfy { x in x.method() }`.
+    // Type that closure parameter (or `$0`) from the receiver's element type, so the closure body —
+    // which charges lexically to the enclosing unit — resolves the element's member calls.
+    private func typeForEachClosureParam(_ node: FunctionCallExprSyntax) {
+        guard let ma = node.calledExpression.as(MemberAccessExprSyntax.self),
+              ["forEach", "map", "filter", "compactMap", "flatMap", "first", "contains", "allSatisfy"].contains(ma.declName.baseName.text),
+              let base = ma.base, let elem = elementTypeOf(base) else { return }
+        let closure = node.trailingClosure
+            ?? node.arguments.lazy.compactMap { $0.expression.as(ClosureExprSyntax.self) }.first
+        guard let closure else { return }
+        // explicit `{ x in … }` → first param; shorthand `{ $0.… }` → `$0`
+        if let shorthand = closure.signature?.parameterClause?.as(ClosureShorthandParameterListSyntax.self),
+           let first = shorthand.first {
+            vars[first.name.text] = elem
+        } else if let params = closure.signature?.parameterClause?.as(ClosureParameterClauseSyntax.self),
+                  let first = params.parameters.first {
+            vars[first.firstName.text] = elem
+        } else if closure.signature == nil {
+            vars["$0"] = elem
+        }
+    }
+
     override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
+        typeForEachClosureParam(node)
         let lit = firstStringLiteral(node.arguments)
         if let dr = node.calledExpression.as(DeclReferenceExprSyntax.self) {
             let name = dr.baseName.text
@@ -725,6 +787,7 @@ final class CallCollector: SyntaxVisitor {
                     }
                 }
                 else if let tn = t.name { vars[name] = tn }
+                else if let elem = arrayElementName(ann.type) { arrayElem[name] = elem }  // `let xs: [T]`
             } else if let v0 = binding.initializer?.value {
                 let v = Self.peel(v0)
                 if v.is(ClosureExprSyntax.self) {

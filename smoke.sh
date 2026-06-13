@@ -58,6 +58,25 @@ by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 print('lb' if by.get('letBound')=={'Fs'} else 'X', 'in' if by.get('inlineChain')=={'Fs'} else 'X', 'ne' if 'nonEffect' not in by else 'X')")
 [ "$SG" = "lb in ne" ] && ok "let-bound singleton accessor classifies (no fabrication for non-effect types)" || bad "singleton accessor: got '$SG'"
 
+# iterating a typed collection types the loop/closure variable, so the element's effectful member
+# calls classify (for-in AND forEach/map closures, explicit param AND $0) — was dropped to pure.
+mkdir -p "$W/it" && cat > "$W/it/m.swift" <<'SW'
+import Foundation
+final class Client { func send() { _ = URLSession.shared.dataTask(with: URL(string: "https://x")!) } }
+func forIn(cs: [Client]) { for c in cs { c.send() } }
+func forEachP(cs: [Client]) { cs.forEach { c in c.send() } }
+func shorthand(cs: [Client]) { cs.forEach { $0.send() } }
+func intLoop(ns: [Int]) { ns.forEach { n in _ = n + 1 } }
+SW
+"$BIN" "$W/it" --out "$W/it/r" >/dev/null 2>&1
+IT=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/it/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+ok = by.get('forIn')=={'Net'} and by.get('forEachP')=={'Net'} and by.get('shorthand')=={'Net'} and 'intLoop' not in by
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$IT" = "PASS" ] && ok "iteration-variable typing resolves the element's effects (for-in + forEach + \$0; no fabrication on [Int])" || bad "iteration typing: $IT"
+
 # --agents: the self-describing engine (the contract is embedded as a Swift constant). The drift
 # gate diffs the ACTUAL served contract (minus the version-header line) against AGENTS.md — testing
 # end to end, and catching a stale AgentsDoc.swift (regenerate: python3 gen-agents-doc.py).
