@@ -309,6 +309,7 @@ struct FnInfo {
     var protoParams: [String: String] = [:]  // param name -> local protocol name
     var arrayParams: [String: String] = [:]  // param name -> ELEMENT type (a `[T]` param, for `for x in p`)
     var dictParams: [String: String] = [:]   // param name -> VALUE type (a `[K: V]` param, for `for (k,v)`)
+    var tupleParams: [String: [String: String]] = [:]  // param -> tuple element types (`p.0`/`p.c`)
     var body: Syntax?
     var enclosingType: String?
     var isMain: Bool = false
@@ -342,6 +343,22 @@ func arrayElementName(_ t: TypeSyntax) -> String? {
         return typeName(at).name
     }
     return nil
+}
+
+/// A tuple type's element types keyed by BOTH position (`"0"`, `"1"`) and label (`"c"`): `(c: C, n: Int)`
+/// → `["0": "C", "c": "C", "1": "Int", "n": "Int"]`. Types `p.0` / `p.c` member accesses on a tuple.
+func tupleElements(_ t: TypeSyntax) -> [String: String] {
+    var e = t
+    if let opt = e.as(OptionalTypeSyntax.self) { e = opt.wrappedType }
+    if let att = e.as(AttributedTypeSyntax.self) { e = att.baseType }
+    guard let tup = e.as(TupleTypeSyntax.self), tup.elements.count >= 2 else { return [:] }
+    var out: [String: String] = [:]
+    for (i, el) in tup.elements.enumerated() {
+        guard let tn = typeName(el.type).name else { continue }
+        out[String(i)] = tn
+        if let label = el.firstName?.text, label != "_" { out[label] = tn }
+    }
+    return out
 }
 
 /// The VALUE type name of a dictionary type: `[K: V]`/`Dictionary<K, V>` → `V` (peeling wrappers).
@@ -525,6 +542,7 @@ final class DeclCollector: SyntaxVisitor {
             }
             else if let elem = arrayElementName(p.type) { info.arrayParams[pname] = elem }  // `p: [T]`
             else if let val = dictValueName(p.type) { info.dictParams[pname] = val }        // `p: [K: V]`
+            else { let te = tupleElements(p.type); if !te.isEmpty { info.tupleParams[pname] = te } }  // `p: (A, B)`
         }
         fns.append(info)
     }
@@ -558,6 +576,7 @@ final class CallCollector: SyntaxVisitor {
     var protoTyped: [String: String]        // param -> local protocol
     var arrayElem: [String: String]         // name -> element type of a `[T]` local/param (loop typing)
     var dictElem: [String: String]          // name -> VALUE type of a `[K: V]` local/param (dict loops)
+    var tupleElem: [String: [String: String]]  // name -> tuple element types (`p.0` / `p.c`)
     let fields: [String: [String: (name: String?, isFunction: Bool)]]
     let fieldArrayElem: [String: [String: String]]  // Type -> field -> [T] element (self.field loops)
     let fieldDictValue: [String: [String: String]]  // Type -> field -> [K: V] value
@@ -588,6 +607,7 @@ final class CallCollector: SyntaxVisitor {
         self.protoTyped = info.protoParams
         self.arrayElem = info.arrayParams
         self.dictElem = info.dictParams
+        self.tupleElem = info.tupleParams
         self.fields = fields
         self.fieldArrayElem = fieldArrayElem
         self.fieldDictValue = fieldDictValue
@@ -632,6 +652,11 @@ final class CallCollector: SyntaxVisitor {
             return (n, false, [n])
         }
         if let ma = expr.as(MemberAccessExprSyntax.self) {
+            // tuple element/member: `p.0` / `p.c` where p is a tuple-typed local/param
+            if let baseDR = ma.base?.as(DeclReferenceExprSyntax.self),
+               let elemType = tupleElem[baseDR.baseName.text]?[ma.declName.baseName.text] {
+                return (elemType, true, [])
+            }
             let inner = ma.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [])
             let member = ma.declName.baseName.text
             // WALK THROUGH A FIELD: if the chain so far is a local type with `member` as a stored
@@ -931,8 +956,19 @@ final class CallCollector: SyntaxVisitor {
     // `let s = Svc()` / `let s: Svc = …` / `let f = { … }` — local bindings type later calls
     override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
         for binding in node.bindings {
+            // `let (a, b) = (X(), Y())` — destructure: bind each name from the initializer tuple element
+            if let tp = binding.pattern.as(TuplePatternSyntax.self),
+               let tupleInit = binding.initializer?.value.as(TupleExprSyntax.self) {
+                for (pe, ve) in zip(tp.elements, tupleInit.elements) {
+                    guard let n = pe.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
+                    let info = rootOf(ve.expression)
+                    if info.isVar, let t = info.root { vars[n] = t }
+                }
+                continue
+            }
             guard let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
             if let ann = binding.typeAnnotation {
+                if !tupleElements(ann.type).isEmpty { tupleElem[name] = tupleElements(ann.type) }  // `let p: (A, B)`
                 let t = typeName(ann.type)
                 if t.isFunction {
                     fnTyped.insert(name); vars.removeValue(forKey: name)

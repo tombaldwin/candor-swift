@@ -30,7 +30,7 @@ SINKS = {
 
 # Edge forms: how fn i reaches fn i+1 (or the sink). `unknown` forms must read Unknown in the
 # RECEIVING function instead of (or in addition to) the effect.
-FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local", "iter", "for_each", "field_iter", "dict_iter", "subscript_recv", "cast_recv", "field_chain", "enum_bind", "generic_proto", "guard_let"]
+FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local", "iter", "for_each", "field_iter", "dict_iter", "subscript_recv", "cast_recv", "field_chain", "enum_bind", "generic_proto", "guard_let", "tuple_recv"]
 
 
 def gen(seed):
@@ -118,6 +118,10 @@ def gen(seed):
                          f"struct I{i}: P{i} {{ func go() {{ {callee}() }} }}\n"
                          f"func via{i}<T: P{i}>(_ x: T) {{ x.go() }}\n"
                          f"func {me}() {{ via{i}(I{i}()) }}")
+        elif form == "tuple_recv":
+            # `p.0.go()` — a tuple element is typed by position; the receiver resolves
+            bodies[i] = (f"struct T{i} {{ func go() {{ {callee}() }} }}\n"
+                         f"func {me}() {{ let p: (T{i}, Int) = (T{i}(), 1); p.0.go(); _ = p.1 }}")
         elif form == "guard_let":
             # `guard let y = factory() else {…}; y.go()` — type the unwrapped binding from the factory
             bodies[i] = (f"struct G{i} {{ func go() {{ {callee}() }} }}\n"

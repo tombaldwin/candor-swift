@@ -172,6 +172,23 @@ by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 print('PASS' if by.get('generic')=={'Fs'} and by.get('guardF')=={'Net'} and by.get('ifLetF')=={'Net'} else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
 [ "$GP" = "PASS" ] && ok "generic <T: P> param dispatches like P; guard/if-let factory binding types the value" || bad "generic/optional-binding: $GP"
 
+# tuple typing: positional `p.0`, named `p.c`, and destructure `let (a,_) = (...)` — receiver resolves.
+mkdir -p "$W/tu" && cat > "$W/tu/m.swift" <<'SW'
+import Foundation
+final class Client { func send() { _ = URLSession.shared.dataTask(with: URL(string: "https://x")!) } }
+func pos(p: (Client, Int)) { p.0.send() }
+func named(p: (c: Client, n: Int)) { p.c.send() }
+func destr() { let (a, b) = (Client(), 1); a.send(); _ = b }
+func intTup(p: (Int, Int)) { _ = p.0 + p.1 }
+SW
+"$BIN" "$W/tu" --out "$W/tu/r" >/dev/null 2>&1
+TU=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/tu/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+print('PASS' if by.get('pos')=={'Net'} and by.get('named')=={'Net'} and by.get('destr')=={'Net'} and 'intTup' not in by else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$TU" = "PASS" ] && ok "tuple typing: p.0 / p.c / let (a,_) destructure (no fabrication on (Int,Int))" || bad "tuple typing: $TU"
+
 # --agents: the self-describing engine (the contract is embedded as a Swift constant). The drift
 # gate diffs the ACTUAL served contract (minus the version-header line) against AGENTS.md — testing
 # end to end, and catching a stale AgentsDoc.swift (regenerate: python3 gen-agents-doc.py).
