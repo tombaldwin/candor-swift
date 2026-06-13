@@ -42,13 +42,16 @@ by={e['fn']:e for e in r['functions']}
 print(by.get('C.v',{}).get('unitKind',''), by.get('plain',{}).get('unitKind','-none-'))")
 [ "$UK" = "accessor -none-" ] && ok "accessor unit carries unitKind; plain fn omits it" || bad "unitKind: got '$UK'"
 
-# --agents: the self-describing engine (the contract is a bundled resource)
+# --agents: the self-describing engine (the contract is embedded as a Swift constant). The drift
+# gate diffs the ACTUAL served contract (minus the version-header line) against AGENTS.md — testing
+# end to end, and catching a stale AgentsDoc.swift (regenerate: python3 gen-agents-doc.py).
+HERE_DIR="$(cd "$(dirname "$0")" && pwd)"
 "$BIN" --agents > "$W/agents.out" 2>&1
 grep -q '<!-- candor-swift' "$W/agents.out" && ok "--agents prints the version header" || bad "--agents header"
-grep -q 'ships inside the binary' "$W/agents.out" && ok "--agents prints the installed contract" || bad "--agents contract"
-HERE_DIR="$(cd "$(dirname "$0")" && pwd)"
-cmp -s "$HERE_DIR/AGENTS.md" "$HERE_DIR/Sources/candor-swift/AGENTS.md" \
-  && ok "bundled AGENTS.md matches the repo doc (drift gate)" \
-  || bad "bundled AGENTS.md drifted — re-copy: cp AGENTS.md Sources/candor-swift/AGENTS.md"
+grep -q 'Using candor-swift' "$W/agents.out" && ok "--agents prints the installed contract" || bad "--agents contract"
+tail -n +2 "$W/agents.out" > "$W/agents.body"
+cmp -s "$HERE_DIR/AGENTS.md" "$W/agents.body" \
+  && ok "served --agents contract matches AGENTS.md (drift gate)" \
+  || bad "embedded contract drifted from AGENTS.md — regenerate: python3 gen-agents-doc.py"
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

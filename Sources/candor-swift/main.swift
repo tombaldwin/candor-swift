@@ -32,27 +32,38 @@ var policyPath: String? = ProcessInfo.processInfo.environment["CANDOR_POLICY"]
 var argIter = CommandLine.arguments.dropFirst().makeIterator()
 while let a = argIter.next() {
     switch a {
-    case "--out": outPrefix = argIter.next()
-    case "--policy": policyPath = argIter.next()
+    // A value-taking flag with no following value must FAIL, never silently take a nil: a trailing
+    // `--policy` (e.g. `--policy $POL` where $POL expanded empty) would otherwise CLOBBER the
+    // CANDOR_POLICY env gate with nil and exit 0 — the §6.2 'gateless green' state. exit 2.
+    case "--out":
+        guard let v = argIter.next(), !v.hasPrefix("-") else {
+            FileHandle.standardError.write("candor-swift: --out requires a value\n".data(using: .utf8)!); exit(2)
+        }
+        outPrefix = v
+    case "--policy":
+        guard let v = argIter.next(), !v.hasPrefix("-") else {
+            FileHandle.standardError.write("candor-swift: --policy requires a value\n".data(using: .utf8)!); exit(2)
+        }
+        policyPath = v
     case "-h", "--help":
         print("""
         candor-swift — Swift effect scanner (candor-spec 0.4)
         USAGE: candor-swift [<dir|file.swift>] [--out <prefix>] [--policy <file>] [--agents]
-          writes <prefix>.json (report, spec 0.4 envelope) + <prefix>.callgraph.json
+          writes <prefix>.<package>.Swift.json (report, spec 0.4 envelope) + a .callgraph.json sidecar
           CANDOR_POLICY honoured when --policy absent; exit 1 on violation, 2 on unreadable policy.
-          --agents prints the agent contract for THIS build (the bundled AGENTS.md).
+          --agents prints the agent contract for THIS build (the embedded AGENTS.md).
         """)
         exit(0)
     case "--agents":
-        // The agent contract for THE INSTALLED BUILD, bundled at build time — doc and engine
-        // cannot drift (the spec §2.1 version-trust rule applied to documentation).
-        guard let url = Bundle.module.url(forResource: "AGENTS", withExtension: "md"),
-              let doc = try? String(contentsOf: url, encoding: .utf8) else {
-            FileHandle.standardError.write("candor-swift: the bundled AGENTS.md is missing from this build\n".data(using: .utf8)!)
-            exit(2)
-        }
+        // The agent contract for THE INSTALLED BUILD, EMBEDDED at compile time (AgentsDoc.swift,
+        // generated from AGENTS.md) — doc and engine cannot drift (the spec §2.1 version-trust
+        // rule applied to documentation), and unlike a Bundle.module resource it survives a binary
+        // copied out of .build (the documented `cp .build/release/candor-swift …` install flow,
+        // where the resource bundle is absent and Bundle.module would fatalError before any guard).
         print("<!-- \(engineVersion) · the agent contract for this installed version -->")
-        print(doc, terminator: "")
+        // default terminator re-adds the single trailing newline a Swift multiline raw string strips
+        // before its closing delimiter, so the served body matches AGENTS.md byte-for-byte.
+        print(AGENTS_MD)
         exit(0)
     default:
         // An unknown flag must FAIL, not become the scan path (a stale binary handed a newer
@@ -78,9 +89,19 @@ let rootDir = isDir.boolValue ? target : (target as NSString).deletingLastPathCo
 func isHarnessPath(_ p: String) -> Bool {
     let parts = p.split(separator: "/").map(String.init)
     if (parts.last ?? "") == "Package.swift" { return true } // the manifest is build config (build.rs analog)
-    return parts.contains(".build")
-        || parts.contains(where: { $0.hasSuffix("Tests") || $0 == "Tests" || $0.hasSuffix("TestHelpers")
-            || $0 == "Benchmarks" || $0 == "Benchmark" || $0 == "Plugins" || $0 == "Examples" || $0 == "Snippets" })
+    if parts.contains(".build") { return true }              // build artifacts at any depth
+    // SPM's special directories (Tests/Plugins/Benchmarks/Examples/Snippets, and *Tests/*TestHelpers
+    // targets) are PACKAGE-ROOT siblings of Sources/. A directory with one of those names nested
+    // UNDER Sources/<target>/ is ordinary feature code (`Sources/App/Plugins/*.swift`) — excluding
+    // it silently drops production sources, the 'invisible, not Unknown' cardinal sin. So a marker
+    // counts as harness only when no `Sources` component precedes it.
+    let firstSources = parts.firstIndex(of: "Sources") ?? Int.max
+    func isMarker(_ s: String) -> Bool {
+        s == "Tests" || s.hasSuffix("Tests") || s.hasSuffix("TestHelpers")
+            || s == "Benchmarks" || s == "Benchmark" || s == "Plugins" || s == "Examples" || s == "Snippets"
+    }
+    for (i, c) in parts.enumerated() where i < firstSources && isMarker(c) { return true }
+    return false
 }
 var sourcePaths: [String] = []
 if isDir.boolValue {
@@ -443,6 +464,9 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
 final class CallCollector: SyntaxVisitor {
     var vars: [String: String]              // local/param -> concrete type
     var fnTyped: Set<String>                // function-typed locals/params
+    var opaqueFnLocals: Set<String> = []    // fn-typed LOCALS whose value is opaque (not a visible
+                                            // closure): invoking one is §4 Unknown — only fn-typed
+                                            // PARAMS can defer to call-site flow (callers pass them).
     var protoTyped: [String: String]        // param -> local protocol
     let fields: [String: [String: (name: String?, isFunction: Bool)]]
     let localTypes: Set<String>
@@ -580,6 +604,14 @@ final class CallCollector: SyntaxVisitor {
                 } else {
                     directEffects.formUnion(["Fs", "Net"]) // a URL value: file OR remote — one IS true
                 }
+            } else if opaqueFnLocals.contains(name) {
+                // an OPAQUE local fn-typed value invoked (`let cb: () -> Void = stored!; cb()`):
+                // its origin is indeterminate and it is NOT a parameter, so call-site flow can
+                // never resolve it — §4 Unknown, directly. (Without this it fell through to the
+                // param-deferral below and was silently resolved to pure whenever the enclosing
+                // function had any caller — a soundness hole the fuzzer's forms didn't cover.)
+                unresolved = true
+                why.insert("callback:\(name)")
             } else if fnTyped.contains(name) {
                 // a function-typed PARAM invoked — DEFERRED to callback-flow resolution: when
                 // every visible call site passes a closure (already charged to its passer
@@ -602,18 +634,23 @@ final class CallCollector: SyntaxVisitor {
             } else if let pr = ma.base?.as(DeclReferenceExprSyntax.self), protoTyped[pr.baseName.text] != nil {
                 // dispatch through a LOCAL protocol-typed param — bounded CHA or honest Unknown
                 protoDispatches.append((protoTyped[pr.baseName.text]!, member))
-            } else if let rt = base.root, let eff = kappaMember(root: rt, member: member) {
-                directEffects.insert(eff)
-                recordSurfaces(effect: eff, lit: lit)
             } else if let rt = base.root, localTypes.contains(rt) {
-                // typed local receiver: Type.method — resolve to the local unit
+                // typed local receiver: Type.method — resolve to the local unit. Checked BEFORE the
+                // κ classifier: a locally-declared type ALWAYS shadows the platform table, so a
+                // project's own `class Channel`/`HTTPClient` (common names) resolves to its real
+                // method instead of fabricating Net from the NIO tier (the GRDB `bind` lesson, for
+                // member calls). Under-report-don't-fabricate.
                 calls.append(Call(path: "\(rt).\(member)", leaf: member, strArg: lit, typed: true, args: argKinds(node)))
             } else if let rt = base.root, localProtocols.contains(rt) {
                 // a PROTOCOL-typed receiver reached via a field/let/factory (`self.handler.log()`
                 // where `var handler: LogHandler`) — the params-only protoTyped path missed these
                 // ENTIRELY (not even Unknown — the density review's lever #1 turned out to be a
-                // soundness hole). Same bounded CHA / honest-Unknown as protocol params.
+                // soundness hole). Same bounded CHA / honest-Unknown as protocol params. Also before
+                // κ: a local protocol shadows the platform table.
                 protoDispatches.append((rt, member))
+            } else if let rt = base.root, let eff = kappaMember(root: rt, member: member) {
+                directEffects.insert(eff)
+                recordSurfaces(effect: eff, lit: lit)
             } else {
                 calls.append(Call(path: member, leaf: member, strArg: lit, typed: false))
             }
@@ -647,13 +684,24 @@ final class CallCollector: SyntaxVisitor {
             guard let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
             if let ann = binding.typeAnnotation {
                 let t = typeName(ann.type)
-                if t.isFunction { fnTyped.insert(name); vars.removeValue(forKey: name) }
+                if t.isFunction {
+                    fnTyped.insert(name); vars.removeValue(forKey: name)
+                    // A fn-typed local: a VISIBLE closure initializer walks lexically (its effects
+                    // are already charged), so it is not opaque; anything else (a field/factory/
+                    // force-unwrap value, or no initializer) IS opaque — invoking it is Unknown.
+                    if let v0 = binding.initializer?.value, Self.peel(v0).is(ClosureExprSyntax.self) {
+                        opaqueFnLocals.remove(name)
+                    } else {
+                        opaqueFnLocals.insert(name)
+                    }
+                }
                 else if let tn = t.name { vars[name] = tn }
             } else if let v0 = binding.initializer?.value {
                 let v = Self.peel(v0)
                 if v.is(ClosureExprSyntax.self) {
                     // visible local closure: body walks lexically; calling it adds nothing
                     fnTyped.remove(name)
+                    opaqueFnLocals.remove(name)
                     vars.removeValue(forKey: name)
                 } else if v.is(FunctionCallExprSyntax.self) {
                     // ctor or unambiguous factory — one resolver for both (rootOf handles peeling)

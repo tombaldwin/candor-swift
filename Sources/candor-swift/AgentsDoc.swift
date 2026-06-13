@@ -1,3 +1,6 @@
+// GENERATED from AGENTS.md by gen-agents-doc.py — do not edit.
+// The agent contract, embedded so `--agents` needs no resource bundle (a copied binary has none).
+let AGENTS_MD = #####"""
 # Using candor-swift (instructions for an AI coding agent)
 
 You are working in a Swift package. **candor-swift** tells you, for every function, which side
@@ -6,7 +9,7 @@ inherited transitively through any chain of calls across files*. The language-ag
 contract is [candor-spec/AGENTS.md](https://github.com/tombaldwin/candor-spec/blob/main/AGENTS.md);
 this file is the Swift-specific surface.
 
-> **This document ships inside the binary's bundle.** `candor-swift --agents` prints the contract
+> **This document is embedded inside the binary.** `candor-swift --agents` prints the contract
 > for the *installed* build — always prefer that over a vendored or fetched copy, which can
 > describe a different candor-swift than the one you are running.
 
@@ -57,3 +60,4 @@ that line names.
   in an initializer were silently pure for one build).
 - The §7.13 soundness harness is `fuzz.py` (9 forms, deterministic seeds); run it after touching
   resolution.
+"""#####

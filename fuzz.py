@@ -30,7 +30,7 @@ SINKS = {
 
 # Edge forms: how fn i reaches fn i+1 (or the sink). `unknown` forms must read Unknown in the
 # RECEIVING function instead of (or in addition to) the effect.
-FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop"]
+FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local"]
 
 
 def gen(seed):
@@ -81,6 +81,15 @@ def gen(seed):
                          f"func hold{i}(_ d: D{i}) {{ d.f() }}\n"
                          f"func {me}() {{ hold{i}(D{i}(f: {{ {callee}() }})) }}")
             expect_unknown.add(f"hold{i}")
+        elif form == "opaque_local":
+            # `me` reaches the sink ONLY by invoking a closure pulled from an opaque global slot —
+            # no lexical closure in `me`, no edge. A fn-typed LOCAL whose origin is indeterminate is
+            # §4 Unknown (distinct from callback_recv's fn-typed PARAM). The wiring closure is
+            # charged to setup{i}, off-chain. Regression guard for the dropped-Unknown soundness hole.
+            bodies[i] = (f"var slot{i}: (() -> Void)? = nil\n"
+                         f"func setup{i}() {{ slot{i} = {{ {callee}() }} }}\n"
+                         f"func {me}() {{ let cb: () -> Void = slot{i}!; cb() }}")
+            expect_unknown.add(me)
     bystander = "func zzBystander(_ n: Int) -> Int { n * 2 }"
     src = "import Foundation\n\n" + "\n".join(bodies) + "\n" + bystander + "\n"
     chain = [fn(i) for i in range(n + 1)]
