@@ -79,6 +79,37 @@ schk() { python3 -c "import json,sys; d=json.load(open('$SRPT')); print(next((',
 [ "$(schk openDb)" = "Db" ] && ok "sqlite3_open -> Db (control fires)" || bad "sqlite3 control: openDb got $(schk openDb)"
 [ "$(schk sqlText)" = "absent" ] && ok "sqlite3_sql introspection stays pure (no fabricated Db)" || bad "sqlite3 fabrication: sqlText got $(schk sqlText)"
 [ "$(schk changes)" = "absent" ] && ok "sqlite3_changes introspection stays pure (no fabricated Db)" || bad "sqlite3 fabrication: changes got $(schk changes)"
+# PARAM-TYPE OVERLOAD RESOLUTION: same-name overloads must NOT merge their effects. (a) different ARITY —
+# a clock-reading 1-arg overload must not contaminate callers of a pure 2-arg overload. (b) SAME arity,
+# different param TYPE — a call routes to the overload its arg type matches (the SwiftDate compare bug:
+# `compare(_:DateComparisonType)` read the clock while `compare(toDate:granularity:)`/`compare(_:Date)`
+# were pure). A labeled call that omits defaulted params must still resolve (no false type-exclusion).
+cat > "$W/ov.swift" <<'SW'
+import Foundation
+struct A {}
+struct B {}
+struct Box {
+    func use(_ x: A) -> Int { return 0 }                              // PURE
+    func use(_ x: B) -> Int { let _ = Date(); return 1 }             // Clock (same arity, diff param type)
+    func viaA(_ a: A) -> Int { return use(a) }                       // PURE — must pick use(A)
+    func viaB(_ b: B) -> Int { return use(b) }                       // Clock — must pick use(B)
+    func cmp(toDate o: A, granularity g: Int) -> Int { return g }    // PURE (arity 2)
+    func cmp(_ k: String) -> Int { let _ = Date(); return 0 }        // Clock (arity 1)
+    func before(_ o: A) -> Bool { return cmp(toDate: o, granularity: 1) > 0 }  // PURE — arity-2 overload
+    func kind() -> Int { return cmp("x") }                           // Clock — arity-1 overload
+    func make(id: Int = 0, name: String) -> Int { let _ = Date(); return id }  // Clock (BODY); id defaulted
+    func make(_ raw: A) -> Int { return 0 }                         // pure 1-arg overload
+    func build() -> Int { return make(name: "n") }                  // Clock — labeled call omits defaulted id
+}
+SW
+"$BIN" "$W/ov.swift" --out "$W/ov" 2>/dev/null
+ORPT=$(ls "$W"/ov.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+ochk() { python3 -c "import json,sys; d=json.load(open('$ORPT')); print(next((','.join(sorted(f['inferred'])) for f in d['functions'] if f['fn']==sys.argv[1]), 'absent'))" "$1"; }
+[ "$(ochk Box.viaA)" = "absent" ] && ok "overload param-type: viaA(A) picks pure use(A) (no Clock)" || bad "overload param-type: viaA got $(ochk Box.viaA)"
+[ "$(ochk Box.viaB)" = "Clock" ]  && ok "overload param-type: viaB(B) picks use(B) -> Clock (control)" || bad "overload param-type: viaB got $(ochk Box.viaB)"
+[ "$(ochk Box.before)" = "absent" ] && ok "overload arity: before() picks pure 2-arg cmp (no Clock)" || bad "overload arity: before got $(ochk Box.before)"
+[ "$(ochk Box.kind)" = "Clock" ]  && ok "overload arity: kind() picks 1-arg cmp -> Clock (control)" || bad "overload arity: kind got $(ochk Box.kind)"
+[ "$(ochk Box.build)" = "Clock" ] && ok "overload defaults: labeled call omitting defaults still resolves (Clock kept)" || bad "overload defaults: build got $(ochk Box.build)"
 printf 'deny Net hop\n' > "$W/pol"
 "$BIN" conformance/Cases.swift --out "$W/r" --policy "$W/pol" >"$W/gate.out" 2>&1
 grep -q 'AS-EFF-006.*hop_a.*Net' "$W/gate.out" && ok "deny gate flags the transitive caller" || bad "deny gate"

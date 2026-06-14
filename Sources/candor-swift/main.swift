@@ -335,6 +335,11 @@ struct FnInfo {
     var simpleQual: String = ""   // the immediate "Type.name" form — receivers resolve to SIMPLE type
                                   // names, so call edges are matched simple→full through `qualBySimple`.
     var enclosingTypePath: String?    // FULL nested path of the enclosing type (for precise sibling edges)
+    var paramSig: [(type: String?, hasDefault: Bool, variadic: Bool)] = []  // ordered param signature for
+                                      // PARAM-TYPE overload resolution: distinguishes same-name overloads
+                                      // (`compare(_:Date)` vs `compare(_:DateComparisonType)`), including the
+                                      // same-arity ones arity/labels can't tell apart. `variadic` (a trailing
+                                      // `T...`) lifts the arg-count upper bound (`run(_:String,_:Binding?...)`).
     var loc: String
     var params: [String: String] = [:]       // param name -> type name (concrete)
     var fnTypedParams: Set<String> = []      // params of function type
@@ -584,6 +589,9 @@ final class DeclCollector: SyntaxVisitor {
         for (idx, p) in sig.parameterClause.parameters.enumerated() {
             let pname = (p.secondName ?? p.firstName).text
             let t = typeName(p.type)
+            // ordered signature for overload resolution: the param's simple type name (nil if unresolvable)
+            // and whether it has a default (so a call may legitimately omit it).
+            info.paramSig.append((t.name, p.defaultValue != nil, p.ellipsis != nil))
             if t.isFunction { info.fnTypedParams.insert(pname); info.fnTypedParamIndex[pname] = idx }
             else if let tn = t.name {
                 // resolve a generic param to its protocol BOUND (`x: T` where `<T: Sender>` → dispatch P)
@@ -615,7 +623,8 @@ final class DeclCollector: SyntaxVisitor {
 /// One argument's disposition at a call site: a closure literal (its body is already charged to
 /// the passer lexically), a named reference (resolvable to a unit), or opaque.
 enum ArgKind { case closure, named(String), opaque }
-struct Call { var path: String; var leaf: String; var strArg: String?; var typed: Bool; var args: [ArgKind] = [] }
+struct Call { var path: String; var leaf: String; var strArg: String?; var typed: Bool; var args: [ArgKind] = []
+              var argTypes: [String?] = [] }   // inferred simple type per positional arg (nil = unknown) — overloads
 
 final class CallCollector: SyntaxVisitor {
     var vars: [String: String]              // local/param -> concrete type
@@ -767,6 +776,38 @@ final class CallCollector: SyntaxVisitor {
         if node.trailingClosure != nil { kinds.append(.closure) }
         for extra in node.additionalTrailingClosures { _ = extra; kinds.append(.closure) }
         return kinds
+    }
+
+    /// Inferred simple type of each positional arg (nil = couldn't infer → matches any overload param).
+    /// Aligned 1:1 with `argKinds`: trailing closures contribute nil. Only CONFIDENT types are returned
+    /// (a resolved var/field chain or a literal) — a guess would wrongly exclude an overload (drop a real
+    /// effect), so when unsure it stays nil and the overload matcher keeps the edge (union, never drop).
+    private func argTypesOf(_ node: FunctionCallExprSyntax) -> [String?] {
+        // Type-match ONLY a FULLY-POSITIONAL call (no labels anywhere): then arg j aligns with param j
+        // exactly, so a confident type mismatch is real. The moment ANY arg is labeled, Swift may have
+        // omitted an earlier defaulted param (`init(medicationId:…)` skips a defaulted param 0), breaking
+        // positional alignment — so we infer NO types and fall back to arity-only (union, never a wrong
+        // exclusion). The platform-shadow case (`date.compare(aDate)`) is fully positional, so it still types.
+        let positional = !node.arguments.contains { $0.label != nil }
+        var ts: [String?] = node.arguments.map { a in positional ? self.argType(a.expression) : nil }
+        if node.trailingClosure != nil { ts.append(nil) }
+        for _ in node.additionalTrailingClosures { ts.append(nil) }
+        return ts
+    }
+
+    private func argType(_ raw: ExprSyntax) -> String? {
+        let e = Self.peel(raw)
+        if e.is(StringLiteralExprSyntax.self) { return "String" }
+        if e.is(IntegerLiteralExprSyntax.self) { return "Int" }
+        if e.is(FloatLiteralExprSyntax.self) { return "Double" }
+        if e.is(BooleanLiteralExprSyntax.self) { return "Bool" }
+        // a leading-dot enum/static member `.foo` — type is contextual (the param type), so it can never
+        // CONTRADICT an overload; leave nil so it matches any.
+        if let ma = e.as(MemberAccessExprSyntax.self), ma.base == nil { return nil }
+        // a var/let/param identifier, a field chain (`refDate.date`), a `T()` ctor, or a typed factory:
+        // rootOf resolves these to a concrete type ONLY when it tracked one (isVar) — trust just those.
+        let r = rootOf(e)
+        return r.isVar ? r.root : nil
     }
 
     private func firstStringLiteral(_ args: LabeledExprListSyntax) -> String? {
@@ -1012,7 +1053,7 @@ final class CallCollector: SyntaxVisitor {
                 directEffects.insert(eff)
                 recordSurfaces(effect: eff, lit: lit)
             } else {
-                calls.append(Call(path: name, leaf: name, strArg: lit, typed: false, args: argKinds(node)))
+                calls.append(Call(path: name, leaf: name, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node)))
             }
         } else if let ma = node.calledExpression.as(MemberAccessExprSyntax.self) {
             let member = ma.declName.baseName.text
@@ -1030,7 +1071,7 @@ final class CallCollector: SyntaxVisitor {
                 // project's own `class Channel`/`HTTPClient` (common names) resolves to its real
                 // method instead of fabricating Net from the NIO tier (the GRDB `bind` lesson, for
                 // member calls). Under-report-don't-fabricate.
-                calls.append(Call(path: "\(rt).\(member)", leaf: member, strArg: lit, typed: true, args: argKinds(node)))
+                calls.append(Call(path: "\(rt).\(member)", leaf: member, strArg: lit, typed: true, args: argKinds(node), argTypes: argTypesOf(node)))
             } else if let rt = base.root, localProtocols.contains(rt) {
                 // a PROTOCOL-typed receiver reached via a field/let/factory (`self.handler.log()`
                 // where `var handler: LogHandler`) — the params-only protoTyped path missed these
@@ -1042,7 +1083,7 @@ final class CallCollector: SyntaxVisitor {
                 directEffects.insert(eff)
                 recordSurfaces(effect: eff, lit: lit)
             } else {
-                calls.append(Call(path: member, leaf: member, strArg: lit, typed: false))
+                calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node)))
             }
         } else if node.calledExpression.is(ClosureExprSyntax.self) {
             // immediately-invoked closure: body walks lexically below — nothing to record
@@ -1280,6 +1321,62 @@ for c in collectors {
     staticFactoryFields.append(contentsOf: c.staticFactoryFields)
 }
 
+// PARAM-TYPE OVERLOAD RESOLUTION. The syntactic engine keys a method by NAME, so same-name overloads merge
+// into ONE node = the UNION of every overload body — fabricating an effectful overload's effect onto a pure
+// sibling (SwiftDate: the relative `compare(_:DateComparisonType)` reads the clock, so the pure
+// `compare(toDate:granularity:)` and ~13 callers inherited Clock; and `Date.compare(_:Date)` — Foundation's
+// pure compare — mis-resolved to the same-name+arity extension). Split overloaded names into per-SIGNATURE
+// nodes and route each call to the overload(s) its ARG TYPES are consistent with.
+// SAFETY (no regression / no new under-report): when arg types are UNKNOWN the call matches ALL
+// arity-compatible overloads — a UNION, exactly the old merged behaviour; an overload is excluded only on a
+// CONFIDENT arity/type mismatch; a call matching NONE is dropped (it targets a non-local/platform overload,
+// e.g. Foundation's compare). A name with ONE signature stays bare (qual unchanged → byte-identical).
+func sigStr(_ ps: [(type: String?, hasDefault: Bool, variadic: Bool)]) -> String {
+    "(" + ps.map { ($0.type ?? "_") + ($0.variadic ? "..." : "") }.joined(separator: ",") + ")"
+}
+var qualGroup: [String: Int] = [:]
+for f in allFns where !f.isAccessor { qualGroup[f.qual, default: 0] += 1 }
+let overloadedQuals = Set(qualGroup.filter { $0.value > 1 }.keys)
+var overloads: [String: [(qual: String, sig: [(type: String?, hasDefault: Bool, variadic: Bool)])]] = [:]
+var overloadedBases = Set<String>()
+if !overloadedQuals.isEmpty {
+    var seen: [String: Int] = [:]   // identical type-sigs get a positional suffix so they stay distinct nodes
+    for i in allFns.indices where !allFns[i].isAccessor && overloadedQuals.contains(allFns[i].qual) {
+        let base = allFns[i].simpleQual
+        overloadedBases.insert(base)
+        var suffix = sigStr(allFns[i].paramSig)
+        let dupKey = "\(allFns[i].qual)\(suffix)"
+        let n = seen[dupKey, default: 0]; seen[dupKey] = n + 1
+        if n > 0 { suffix += "#\(n)" }
+        overloads[base, default: []].append(("\(allFns[i].qual)\(suffix)", allFns[i].paramSig))
+        allFns[i].qual = "\(allFns[i].qual)\(suffix)"
+        allFns[i].simpleQual = "\(base)\(suffix)"
+    }
+}
+// Match a call (arg count + inferred arg types) to overload target qual(s). Empty ⇒ confident no local
+// overload matches ⇒ DROP. Non-empty ⇒ edge to all (one hit precise; several = sound union). A closure so
+// it captures `overloads`.
+let matchOverloads: (String, Int, [String?]) -> [String] = { base, argc, argTypes in
+    guard let cands = overloads[base] else { return [] }
+    var hits: [String] = []
+    for c in cands {
+        // arity by COUNT RANGE: a call must provide every REQUIRED param (not defaulted, not variadic) and
+        // no more than the total — independent of WHICH params a labeled call omitted. A trailing VARIADIC
+        // (`T...`) lifts the upper bound (it absorbs any number of args).
+        let variadicIdx = c.sig.firstIndex(where: { $0.variadic })
+        let required = c.sig.filter { !$0.hasDefault && !$0.variadic }.count
+        let upper = variadicIdx != nil ? Int.max : c.sig.count
+        if argc < required || argc > upper { continue }
+        var ok = true
+        let typeLimit = variadicIdx ?? c.sig.count   // don't positionally type-check at/after a variadic param
+        for j in 0..<min(argc, typeLimit) where j < argTypes.count {  // confident type mismatch (positional call)
+            if let at = argTypes[j], let pt = c.sig[j].type, at != pt { ok = false; break }
+        }
+        if ok { hits.append(c.qual) }
+    }
+    return hits
+}
+
 // name indexes for resolution — UNAMBIGUOUS only (the family's never-guess rule)
 var freeFnByName: [String: [String]] = [:]
 var byQual: Set<String> = []
@@ -1362,19 +1459,41 @@ for f in allFns {
         deferredCallbacks[f.qual] = (idxs, cc.callbackInvoked)
     }
     for call in cc.calls {
+        let argc = call.args.count
+        // helper: edge to a resolved overload target (no callsiteArgs for sibling/init forms which don't
+        // participate in callback-flow). For an overloaded base, matchOverloads returns 0 (drop), 1
+        // (precise) or several (sound union) full quals.
         if call.typed {
-            if let t = resolveQual(call.path) {
+            if overloadedBases.contains(call.path) {
+                for t in matchOverloads(call.path, argc, call.argTypes) {
+                    edges[f.qual, default: []].insert(t)
+                    callsiteArgs[t, default: []].append(call.args)
+                }
+            } else if let t = resolveQual(call.path) {
+                edges[f.qual, default: []].insert(t)
+                callsiteArgs[t, default: []].append(call.args)
+            }
+        } else if overloadedBases.contains(call.path) {     // an overloaded FREE function
+            for t in matchOverloads(call.path, argc, call.argTypes) {
                 edges[f.qual, default: []].insert(t)
                 callsiteArgs[t, default: []].append(call.args)
             }
         } else if let targets = freeFnByName[call.path], targets.count == 1 {
             edges[f.qual, default: []].insert(targets[0])
             callsiteArgs[targets[0], default: []].append(call.args)
+        } else if localTypes.contains(call.path), overloadedBases.contains("\(call.path).init") {
+            for t in matchOverloads("\(call.path).init", argc, call.argTypes) {
+                edges[f.qual, default: []].insert(t)
+            }
         } else if localTypes.contains(call.path), let t = resolveQual("\(call.path).init") {
             // `_ = C0()` — a constructor call edges to the declared init (the fuzzer's init_wired
             // form caught this silent-pure hole on the harness's FIRST run: effects wired in an
             // initializer vanished — the same hole the TS engine's got-dogfood found in ctors).
             edges[f.qual, default: []].insert(t)
+        } else if let et = f.enclosingType, overloadedBases.contains("\(et).\(call.leaf)") {  // overloaded sibling
+            for t in matchOverloads("\(et).\(call.leaf)", argc, call.argTypes) {
+                edges[f.qual, default: []].insert(t)
+            }
         } else if let ep = f.enclosingTypePath, byQual.contains("\(ep).\(call.leaf)") {
             // an unqualified call inside a type body reaches the sibling method — resolved against the
             // FULL enclosing path, so a nested type's sibling call hits its own member precisely (never
