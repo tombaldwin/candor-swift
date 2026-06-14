@@ -10,9 +10,20 @@ let package = Package(
         .package(url: "https://github.com/swiftlang/swift-syntax.git", from: "602.0.0"),
     ],
     targets: [
+        // The PURE cores (κ classifier + SwiftSyntax type helpers), factored out of the executable so
+        // they can be `@testable import`ed by CandorCoreTests — an executable target cannot. Same lint
+        // gate as the executable (-warnings-as-errors on OUR code, not the swift-syntax dependency).
+        .target(
+            name: "CandorCore",
+            dependencies: [
+                .product(name: "SwiftSyntax", package: "swift-syntax"),
+            ],
+            swiftSettings: [.unsafeFlags(["-warnings-as-errors"])]
+        ),
         .executableTarget(
             name: "candor-swift",
             dependencies: [
+                "CandorCore",
                 .product(name: "SwiftSyntax", package: "swift-syntax"),
                 .product(name: "SwiftParser", package: "swift-syntax"),
             ],
@@ -26,6 +37,15 @@ let package = Package(
             // dependency on a future toolchain can't break our build — only our own code gates. The
             // compiler's diagnostics are the gate; swiftlint isn't a required dependency.
             swiftSettings: [.unsafeFlags(["-warnings-as-errors"])]
+        ),
+        // Native unit tests over the extracted pure cores (XCTest ships with the toolchain — offline).
+        .testTarget(
+            name: "CandorCoreTests",
+            dependencies: [
+                "CandorCore",
+                .product(name: "SwiftSyntax", package: "swift-syntax"),
+                .product(name: "SwiftParser", package: "swift-syntax"), // construct a TypeSyntax from a string
+            ]
         ),
     ]
 )
