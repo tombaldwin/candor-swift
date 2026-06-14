@@ -20,10 +20,26 @@ got = {e["fn"].split(".")[-1]: set(e.get("inferred", [])) for e in json.load(ope
 print(sum(1 for c, e in exp.items() if got.get(c, set()) == e), "/", len(exp), sep="")
 PY
 )
-  [ "$N" = "21/21" ] && ok "conformance oracle $N" || bad "conformance oracle $N"
+  [ "$N" = "22/22" ] && ok "conformance oracle $N" || bad "conformance oracle $N"
 else
   echo "  skip conformance oracle (clone candor-spec as a sibling or set CANDOR_SPEC)"
 fi
+
+# Data/String(contentsOf: URL) reads file OR network — exactly one, scheme-dependent. A provably-file
+# URL is Fs, a literal http(s) URL is Net, but an INDETERMINATE url is honest Unknown — NEVER both
+# (asserting Fs+Net fabricates one; this caught candor fabricating Net on SwiftFormat's file config reads).
+cat > "$W/dt.swift" <<'SW'
+import Foundation
+func dt_file() { _ = try? Data(contentsOf: URL(fileURLWithPath: "/x")) }
+func dt_http() { _ = try? Data(contentsOf: URL(string: "https://h")!) }
+func dt_var(_ u: URL) { _ = try? Data(contentsOf: u) }
+SW
+"$BIN" "$W/dt.swift" --out "$W/dt" 2>/dev/null
+DRPT=$(ls "$W"/dt.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+dchk() { python3 -c "import json,sys; d=json.load(open('$DRPT')); print(next((','.join(sorted(f['inferred'])) for f in d['functions'] if f['fn'].endswith('.'+sys.argv[1]) or f['fn']==sys.argv[1]), 'absent'))" "$1"; }
+[ "$(dchk dt_file)" = "Fs" ]      && ok "contentsOf: file URL -> Fs"                        || bad "contentsOf: file URL -> Fs (got $(dchk dt_file))"
+[ "$(dchk dt_http)" = "Net" ]     && ok "contentsOf: http URL -> Net"                       || bad "contentsOf: http URL -> Net (got $(dchk dt_http))"
+[ "$(dchk dt_var)" = "Unknown" ]  && ok "contentsOf: indeterminate URL -> Unknown (no Fs+Net fabrication)" || bad "contentsOf: indeterminate -> Unknown (got $(dchk dt_var))"
 printf 'deny Net hop\n' > "$W/pol"
 "$BIN" conformance/Cases.swift --out "$W/r" --policy "$W/pol" >"$W/gate.out" 2>&1
 grep -q 'AS-EFF-006.*hop_a.*Net' "$W/gate.out" && ok "deny gate flags the transitive caller" || bad "deny gate"

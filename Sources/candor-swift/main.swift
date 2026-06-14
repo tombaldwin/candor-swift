@@ -873,11 +873,22 @@ final class CallCollector: SyntaxVisitor {
             let name = dr.baseName.text
             if ["Data", "NSData", "String"].contains(name),
                node.arguments.first?.label?.text == "contentsOf" {
+                // `Data/String(contentsOf: url)` reads from a URL that is EITHER a file (Fs) or a
+                // remote endpoint (Net) — exactly one is true, but which depends on the URL's scheme.
+                // Asserting BOTH (the old behaviour) always FABRICATES the wrong one — a file read
+                // reported Net, a network read reported Fs (the §1 cardinal sin; caught fabricating Net
+                // on SwiftFormat's config reads, where the URL is a fileURLWithPath from a helper).
+                // Resolve the scheme when it's statically provable; otherwise it's an indeterminate
+                // effect we can't categorise → honest `Unknown`, never a guess.
                 let argText = node.arguments.description
-                if argText.contains("fileURLWithPath") {
-                    directEffects.insert("Fs")
+                if argText.contains("fileURLWithPath") || argText.contains("filePath:") {
+                    directEffects.insert("Fs") // a provably-FILE URL
+                } else if argText.contains("\"http://") || argText.contains("\"https://")
+                            || argText.contains("\"ftp://") {
+                    directEffects.insert("Net") // a literal remote URL
                 } else {
-                    directEffects.formUnion(["Fs", "Net"]) // a URL value: file OR remote — one IS true
+                    unresolved = true // indeterminate scheme: I/O happens, category unprovable
+                    why.insert("contentsOf:indeterminate-url-scheme")
                 }
             } else if opaqueFnLocals.contains(name) {
                 // an OPAQUE local fn-typed value invoked (`let cb: () -> Void = stored!; cb()`):
