@@ -33,8 +33,24 @@ build of the target needed. Spec-0.4 obligations carried from day one: universal
 The κ table covers the **platform frontier** (Foundation, Network, Dispatch, os, sqlite3) — third-party
 packages contribute nothing and the ledger names them. Nested named functions attribute lexically to
 their enclosing unit (an over-approximation, the sound direction). Not yet ported: `CANDOR_DEPS`
-consumption (hashes are emitted, so candor-swift reports are already chainable *by* the other engines),
-the read-only queries (§3.1), and the §7.13 soundness fuzzer — the fuzzer is the family's next ritual
-for this engine, and until it lands the §4 claim here is implemented but not adversarially tested.
+consumption (hashes are emitted, so candor-swift reports are already chainable *by* the other engines)
+and the read-only queries (§3.1). The §7.13 soundness fuzzer **has** landed (`fuzz.py`) — it threads a
+known effect through receiver-typing idioms (singletons, fields, collections, casts, enum payloads,
+nested receivers) and asserts every reachable function is effect-or-`Unknown`, so the §4 claim here is
+now adversarially tested.
+
+## Development
+
+```sh
+swift build                  # build → .build/debug/candor-swift
+swift test                   # native unit tests (XCTest) over CandorCore: the κ classifier, the SQL/
+                             # command/host extractors, the SwiftSyntax type helpers, the propagation fixpoint
+bash smoke.sh                # end-to-end (the conformance oracle, the gate, the κ ledger)
+python3 fuzz.py              # the §7.13 soundness fuzzer (never silently pure)
+python3 fabrication_probe.py # the never-fabricate probe
+```
+
+The pure cores live in the **`CandorCore`** library target (unit-tested); the executable imports them.
+Compilation is gated by `-warnings-as-errors` (swiftSettings) — compiler warnings are build errors.
 
 Licensed MIT OR Apache-2.0. Part of the [candor family](https://github.com/tombaldwin/candor) — [candor.poly.io](https://candor.poly.io).
