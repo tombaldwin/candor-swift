@@ -396,5 +396,18 @@ tail -n +2 "$W/agents.out" > "$W/agents.body"
 cmp -s "$HERE_DIR/AGENTS.md" "$W/agents.body" \
   && ok "served --agents contract matches AGENTS.md (drift gate)" \
   || bad "embedded contract drifted from AGENTS.md — regenerate: python3 gen-agents-doc.py"
+
+# Write-failure is GRACEFUL, not a crash. A report write that can't happen (unwritable --out path)
+# used to `try!`-TRAP after the whole scan finished (SIGILL, no message). It must now exit 1 with a
+# named diagnostic instead — so a sandbox/CI write failure is a readable error, not a crash signal.
+cat > "$W/wf.swift" <<'SW'
+import Foundation
+func wf() { _ = FileManager.default }
+SW
+WF_ERR=$("$BIN" "$W/wf.swift" --out /proc/cannot/r 2>&1 >/dev/null); WF_CODE=$?
+{ [ "$WF_CODE" -eq 1 ] && echo "$WF_ERR" | grep -q "could not write report"; } \
+  && ok "unwritable --out path -> exit 1 + diagnostic (no try! trap)" \
+  || bad "unwritable --out should fail gracefully (code=$WF_CODE, err=$WF_ERR)"
+
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

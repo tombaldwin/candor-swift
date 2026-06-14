@@ -699,7 +699,13 @@ final class CallCollector: SyntaxVisitor {
 
     /// The receiver chain's root: `FileManager.default.contents` -> ("FileManager", path). A root
     /// identifier resolves through vars (param/let types); `self` resolves to the enclosing type.
-    private func rootOf(_ raw: ExprSyntax) -> (root: String?, isVar: Bool, path: [String]) {
+    private func rootOf(_ raw: ExprSyntax, _ depth: Int = 0) -> (root: String?, isVar: Bool, path: [String]) {
+        // Receiver chains recurse with the syntactic nesting (`a.b.c…`, ternary arms, subscript bases —
+        // the last via elementTypeOf/dictValueOf, which call back here). Real receivers nest <10 deep;
+        // a pathological/generated expression could otherwise overflow the stack. Past a generous bound,
+        // give up resolving the type (root = nil = untyped receiver) — the SAFE direction (the call may
+        // under-report, never a crash), exactly what an unresolvable receiver already yields.
+        if depth > 200 { return (nil, false, []) }
         let expr = Self.peel(raw)
         if let dr = expr.as(DeclReferenceExprSyntax.self) {
             let n = dr.baseName.text
@@ -722,7 +728,7 @@ final class CallCollector: SyntaxVisitor {
                let elemType = tupleElem[baseDR.baseName.text]?[ma.declName.baseName.text] {
                 return (elemType, true, [])
             }
-            let inner = ma.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [])
+            let inner = ma.base.map { rootOf($0, depth + 1) } ?? (root: nil, isVar: false, path: [])
             let member = ma.declName.baseName.text
             // WALK THROUGH A FIELD: if the chain so far is a local type with `member` as a stored
             // field, the chain's type becomes the FIELD's type — so `self.client.send()` /
@@ -751,7 +757,7 @@ final class CallCollector: SyntaxVisitor {
         // `coll[i]` — an array subscript yields the element type, a dictionary subscript the value
         // type (`cs[0].send()` / `d["k"]?.send()` resolved against the bare base and dropped to pure).
         if let sub = expr.as(SubscriptCallExprSyntax.self) {
-            if let t = elementTypeOf(sub.calledExpression) ?? dictValueOf(sub.calledExpression) {
+            if let t = elementTypeOf(sub.calledExpression, depth + 1) ?? dictValueOf(sub.calledExpression, depth + 1) {
                 return (t, true, [])
             }
         }
@@ -765,7 +771,7 @@ final class CallCollector: SyntaxVisitor {
             }
             // `cond ? a : b` → `[cond, unresolvedTernaryExpr(then), elseExpr]`: both arms one type.
             if elems.count == 3, let tern = elems[1].as(UnresolvedTernaryExprSyntax.self) {
-                let a = rootOf(tern.thenExpression), b = rootOf(elems[2])
+                let a = rootOf(tern.thenExpression, depth + 1), b = rootOf(elems[2], depth + 1)
                 if let ra = a.root, ra == b.root, a.isVar, b.isVar { return (ra, true, []) }
             }
         }
@@ -851,7 +857,8 @@ final class CallCollector: SyntaxVisitor {
     // The ELEMENT type a sequence yields per iteration. A `[T]` local/param/field; `self.field`; an
     // element-PRESERVING transform (`coll.filter/sorted/reversed/prefix/…`) → coll's element. A
     // literal/computed/transforming (map) sequence is left untyped — never guess.
-    private func elementTypeOf(_ expr: ExprSyntax) -> String? {
+    private func elementTypeOf(_ expr: ExprSyntax, _ depth: Int = 0) -> String? {
+        if depth > 200 { return nil }   // bounds the rootOf ⇄ elementTypeOf recursion (see rootOf)
         let e = Self.peel(expr)
         if let dr = e.as(DeclReferenceExprSyntax.self) {
             let n = dr.baseName.text
@@ -860,20 +867,21 @@ final class CallCollector: SyntaxVisitor {
             return nil
         }
         if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base,
-           let bt = rootOf(base).root, let t = fieldArrayElem[bt]?[ma.declName.baseName.text] {
+           let bt = rootOf(base, depth + 1).root, let t = fieldArrayElem[bt]?[ma.declName.baseName.text] {
             return t  // a `[E]` field of ANY typed receiver: `self.items` / `pool.clients` / `ps[0].items`
         }
         if let call = e.as(FunctionCallExprSyntax.self),
            let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
            ["filter", "sorted", "reversed", "shuffled", "prefix", "suffix", "dropFirst", "dropLast", "lazy"]
                .contains(ma.declName.baseName.text), let base = ma.base {
-            return elementTypeOf(base)  // element-preserving transform → same element type
+            return elementTypeOf(base, depth + 1)  // element-preserving transform → same element type
         }
         return nil
     }
 
     // The VALUE type a `[K: V]` yields (its `.values`, or the `v` of a `(k, v)` iteration).
-    private func dictValueOf(_ expr: ExprSyntax) -> String? {
+    private func dictValueOf(_ expr: ExprSyntax, _ depth: Int = 0) -> String? {
+        if depth > 200 { return nil }   // bounds the rootOf ⇄ dictValueOf recursion (see rootOf)
         let e = Self.peel(expr)
         if let dr = e.as(DeclReferenceExprSyntax.self) {
             let n = dr.baseName.text
@@ -881,7 +889,7 @@ final class CallCollector: SyntaxVisitor {
             if let et = enclosingType, let t = fieldDictValue[et]?[n] { return t }
         }
         if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base,
-           let bt = rootOf(base).root, let t = fieldDictValue[bt]?[ma.declName.baseName.text] { return t }
+           let bt = rootOf(base, depth + 1).root, let t = fieldDictValue[bt]?[ma.declName.baseName.text] { return t }
         return nil
     }
 
@@ -1626,11 +1634,25 @@ var cg: [String: [String]] = [:]
 for f in allFns { cg[f.qual] = (edges[f.qual] ?? []).sorted() }  // §2.2: EVERY analyzed fn a key
 
 func writeJson(_ obj: Any, _ path: String) {
-    let data = try! JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
+    // A write failure (read-only FS, no space, a non-existent --out dir, EACCES) used to `try!`-TRAP
+    // here — AFTER the whole scan completed — exiting with SIGILL and no message. Fail LOUD instead:
+    // name the path and the cause, exit 1, so CI sees a real error rather than a crash signal.
+    let data: Data
+    do {
+        data = try JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
+    } catch {
+        FileHandle.standardError.write("candor-swift: could not serialize report for \(path): \(error)\n".data(using: .utf8)!)
+        exit(1)
+    }
     // `.atomic`: Foundation writes to an auxiliary file and renames into place, so a concurrent reader
     // (a cross-engine candor-query / candor-ts merging this report as a sibling) never observes a
     // half-written file — the same write invariant the Rust and TS backends now hold (write_atomic).
-    try! data.write(to: URL(fileURLWithPath: path), options: .atomic)
+    do {
+        try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+    } catch {
+        FileHandle.standardError.write("candor-swift: could not write report to \(path): \(error)\n".data(using: .utf8)!)
+        exit(1)
+    }
 }
 // Family filename shape `<prefix>.<pkg>.Swift.json` — what candor_report::report_files DISCOVERS,
 // so the unmodified candor-query binary works on Swift reports (this engine's whole consumption
