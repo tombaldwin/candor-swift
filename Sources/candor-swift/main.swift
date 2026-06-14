@@ -149,6 +149,28 @@ let RAND_ROOTS: Set<String> = ["Int", "UInt", "Int8", "Int16", "Int32", "Int64",
     "UInt32", "UInt64", "Double", "Float", "Bool", "CGFloat"]
 let PROCESS_MEMBERS: Set<String> = ["run", "launch", "waitUntilExit", "terminate", "interrupt", "launchedProcess"]
 let DB_FREE_PREFIX = "sqlite3_"
+// sqlite3_* C functions that READ RESIDENT handle/statement state — they touch no database, issue no
+// query, advance no row: statement/column/param METADATA, change/rowid counters, error + version state,
+// backup progress. The `sqlite3_` prefix rule would paint them Db (a pure introspection getter reported
+// effectful — the cardinal sin; a SQLite.swift sweep caught Statement.description/columnCount/columnNames,
+// Connection.description/readonly/changes, Backup.pageCount all fabricating Db). They are subtracted FIRST.
+// NOT here (stay Db — real query work / result consumption): open*/exec/prepare*/step/reset/finalize,
+// the bind_* value setters, and column_text/int/double/blob/value/bytes/type (they read the stepped row).
+let SQLITE_PURE_INTROSPECTION: Set<String> = [
+    "sqlite3_sql", "sqlite3_expanded_sql", "sqlite3_normalized_sql",
+    "sqlite3_stmt_readonly", "sqlite3_stmt_busy", "sqlite3_stmt_isexplain",
+    "sqlite3_column_count", "sqlite3_data_count",
+    "sqlite3_column_name", "sqlite3_column_name16",
+    "sqlite3_column_decltype", "sqlite3_column_decltype16",
+    "sqlite3_column_database_name", "sqlite3_column_table_name", "sqlite3_column_origin_name",
+    "sqlite3_bind_parameter_count", "sqlite3_bind_parameter_name", "sqlite3_bind_parameter_index",
+    "sqlite3_db_filename", "sqlite3_db_readonly", "sqlite3_db_handle", "sqlite3_get_autocommit",
+    "sqlite3_changes", "sqlite3_changes64", "sqlite3_total_changes", "sqlite3_total_changes64",
+    "sqlite3_last_insert_rowid",
+    "sqlite3_errmsg", "sqlite3_errmsg16", "sqlite3_errcode", "sqlite3_extended_errcode", "sqlite3_errstr",
+    "sqlite3_libversion", "sqlite3_libversion_number", "sqlite3_sourceid",
+    "sqlite3_backup_pagecount", "sqlite3_backup_remaining",
+]
 // Static singleton accessors that return an instance of their OWN type (Self by convention):
 // `FileManager.default`, `URLSession.shared`, `NSPasteboard.general`, `ProcessInfo.processInfo`,
 // `Database.shared` (a local singleton), … Binding one to a `let` must carry the base type so the
@@ -204,6 +226,7 @@ func kappaFree(name: String, argCount: Int) -> String? {
     // its hottest Statement paths (214 fns transitively). Raw syscalls in Swift come through
     // Darwin/Glibc imports the ledger names; under-report beats a wrong label.
     default:
+        if SQLITE_PURE_INTROSPECTION.contains(name) { return nil }   // resident-state read — never Db
         if name.hasPrefix(DB_FREE_PREFIX) { return "Db" }
         return nil
     }

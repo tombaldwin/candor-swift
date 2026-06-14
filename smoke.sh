@@ -59,6 +59,26 @@ NRPT=$(ls "$W"/ns.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
 nchk() { python3 -c "import json,sys; d=json.load(open('$NRPT')); print(next((','.join(sorted(f['inferred'])) for f in d['functions'] if f['fn']==sys.argv[1]), 'absent'))" "$1"; }
 [ "$(nchk DiskStorage.Backend.store)" = "Fs" ]   && ok "nested-type keying: DiskStorage.Backend.store -> Fs (control fires)" || bad "nested keying control: got $(nchk DiskStorage.Backend.store)"
 [ "$(nchk MemoryStorage.Backend.store)" = "absent" ] && ok "nested-type keying: MemoryStorage.Backend.store stays pure (no same-name Fs collapse)" || bad "nested keying fabrication: MemoryStorage.Backend.store got $(nchk MemoryStorage.Backend.store)"
+# sqlite3_* PREFIX rule: real query ops are Db, but the pure C INTROSPECTION getters (sqlite3_sql /
+# _column_name / _changes / _db_filename / _errmsg) read resident handle state and touch no database —
+# the prefix rule fabricated Db on them (SQLite.swift sweep: Statement.description, Connection.changes…).
+cat > "$W/sq.swift" <<'SW'
+func sqlText(_ s: OpaquePointer) { let _ = sqlite3_sql(s) }              // PURE introspection
+func changes(_ d: OpaquePointer) { let _ = sqlite3_changes(d) }         // PURE
+func runStep(_ s: OpaquePointer) { let _ = sqlite3_step(s) }            // Db (real query)
+func openDb(_ d: inout OpaquePointer?) { let _ = sqlite3_open("/x", &d) } // Db
+func sqlite3_sql(_ s: OpaquePointer) -> UnsafePointer<CChar>? { return nil }
+func sqlite3_changes(_ d: OpaquePointer) -> Int32 { return 0 }
+func sqlite3_step(_ s: OpaquePointer) -> Int32 { return 0 }
+func sqlite3_open(_ p: String, _ d: inout OpaquePointer?) -> Int32 { return 0 }
+SW
+"$BIN" "$W/sq.swift" --out "$W/sq" 2>/dev/null
+SRPT=$(ls "$W"/sq.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+schk() { python3 -c "import json,sys; d=json.load(open('$SRPT')); print(next((','.join(sorted(f['inferred'])) for f in d['functions'] if f['fn']==sys.argv[1]), 'absent'))" "$1"; }
+[ "$(schk runStep)" = "Db" ] && ok "sqlite3_step -> Db (control fires)" || bad "sqlite3 control: runStep got $(schk runStep)"
+[ "$(schk openDb)" = "Db" ] && ok "sqlite3_open -> Db (control fires)" || bad "sqlite3 control: openDb got $(schk openDb)"
+[ "$(schk sqlText)" = "absent" ] && ok "sqlite3_sql introspection stays pure (no fabricated Db)" || bad "sqlite3 fabrication: sqlText got $(schk sqlText)"
+[ "$(schk changes)" = "absent" ] && ok "sqlite3_changes introspection stays pure (no fabricated Db)" || bad "sqlite3 fabrication: changes got $(schk changes)"
 printf 'deny Net hop\n' > "$W/pol"
 "$BIN" conformance/Cases.swift --out "$W/r" --policy "$W/pol" >"$W/gate.out" 2>&1
 grep -q 'AS-EFF-006.*hop_a.*Net' "$W/gate.out" && ok "deny gate flags the transitive caller" || bad "deny gate"
