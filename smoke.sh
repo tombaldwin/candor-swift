@@ -226,6 +226,87 @@ ok = all(by.get(f)=={'Net'} for f in ['fieldSub','castField','loopFieldSub','dee
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
 [ "$NE" = "PASS" ] && ok "nested-receiver composition: field+subscript, cast+field, loop+field+sub, deep chain" || bad "nested composition: $NE"
 
+# REGRESSION F1: a closure passed to a NON-iterator method (onComplete/sink/custom HOF) must CLEAR
+# its param so a prior same-named binding (loop var `request: URLSession`) can't leak in and fabricate.
+# The element closure of a whitelisted iterator stays TYPED; an explicit param annotation types precisely.
+mkdir -p "$W/f1" && cat > "$W/f1/m.swift" <<'SW'
+import Foundation
+struct API { func onComplete2(_ f: (URLRequest) -> Void) {}; func onEach(_ f: (URLSession) -> Void) {} }
+func leakRepro(api: API, sessions: [URLSession]) {
+    for request in sessions { _ = request.configuration }   // request: URLSession
+    api.onComplete2 { request in _ = request.httpMethod }    // param CLEARED — must NOT fabricate Net
+}
+func annotCtrl(api: API) { api.onEach { (s: URLSession) in _ = s.dataTask(with: URL(string:"https://x")!) } } // Net via annotation
+func iterCtrl(sessions: [URLSession]) { sessions.forEach { s in _ = s.dataTask(with: URL(string:"https://x")!) } } // Net via iterator element
+SW
+"$BIN" "$W/f1" --out "$W/f1/r" >/dev/null 2>&1
+F1=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/f1/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+ok = 'leakRepro' not in by and by.get('annotCtrl')=={'Net'} and by.get('iterCtrl')=={'Net'}
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$F1" = "PASS" ] && ok "F1: non-iterator closure param cleared (no leak-fabrication; annotation + iterator element still type)" || bad "F1 closure-param leak: $F1"
+
+# REGRESSION F2: an enum-case binding only types when the case is unambiguous AND the pattern's
+# ARITY matches the single-associated-value form. Two enums sharing a case name where only one is
+# single-payload — a multi-payload pattern must NOT bind the wrong enum's single-assoc type.
+mkdir -p "$W/f2" && cat > "$W/f2/m.swift" <<'SW'
+import Foundation
+enum AA { case live(URLSession) }
+enum BB { case live(Plain, Int) }
+struct Plain { func dataTask(with: URL) {} }
+func useBB(b: BB) { switch b { case .live(let c, _): c.dataTask(with: URL(string:"http://x")!) } }  // arity 2 — CLEAR, no fabrication
+func useAA(a: AA) { switch a { case .live(let c): _ = c.dataTask(with: URL(string:"http://x")!) } }   // arity 1 single-assoc — Net
+SW
+"$BIN" "$W/f2" --out "$W/f2/r" >/dev/null 2>&1
+F2=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/f2/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+ok = 'useBB' not in by and by.get('useAA')=={'Net'}
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$F2" = "PASS" ] && ok "F2: enum-case arity guard (multi-payload cleared; single-assoc still types)" || bad "F2 enum arity: $F2"
+
+# REGRESSION F3: a singleton vended by a free FACTORY (`static let shared = build()`) must carry the
+# factory's VENDED type, not the static's own type. The vended type's effects resolve; the static's
+# own-type effects must NOT fabricate onto the value.
+mkdir -p "$W/f3" && cat > "$W/f3/m.swift" <<'SW'
+import Foundation
+struct Registry { static let shared = build(); func run() { FileManager.default.removeItem(atPath: "/tmp/x") } }
+struct Plain3 { func run() {} }
+func build() -> Plain3 { Plain3() }
+func usesShared() { let r = Registry.shared; r.run() }            // r: Plain3 — pure, must NOT fabricate Fs
+struct Doer { func go() { FileManager.default.removeItem(atPath: "/tmp/y") } }
+func makeDoer() -> Doer { Doer() }
+struct Reg2 { static let shared = makeDoer() }
+func usesDoer() { let d = Reg2.shared; d.go() }                  // d: Doer — Fs CONTROL still resolves
+SW
+"$BIN" "$W/f3" --out "$W/f3/r" >/dev/null 2>&1
+F3=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/f3/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+ok = 'usesShared' not in by and by.get('usesDoer')=={'Fs'}
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$F3" = "PASS" ] && ok "F3: free-factory singleton vends real type (no base-type fabrication; effectful vended type resolves)" || bad "F3 factory singleton: $F3"
+
+# REGRESSION U1: String/Data(contentsOfFile:) takes a FILE PATH (no scheme) — UNCONDITIONALLY Fs.
+# The contentsOf: scheme-resolution guard keyed on `contentsOf` only, dropping contentsOfFile: to pure.
+mkdir -p "$W/u1" && cat > "$W/u1/m.swift" <<'SW'
+import Foundation
+func readFile(p: String) { _ = try? String(contentsOfFile: p, encoding: .utf8) }     // Fs
+func readData(p: String) { _ = try? Data(contentsOf: URL(fileURLWithPath: p)) }       // Fs CONTROL (contentsOf path still works)
+SW
+"$BIN" "$W/u1" --out "$W/u1/r" >/dev/null 2>&1
+U1=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/u1/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+ok = by.get('readFile')=={'Fs'} and by.get('readData')=={'Fs'}
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$U1" = "PASS" ] && ok "U1: String(contentsOfFile:) -> Fs (unconditional file read; contentsOf: still resolves)" || bad "U1 contentsOfFile: $U1"
+
 # --agents: the self-describing engine (the contract is embedded as a Swift constant). The drift
 # gate diffs the ACTUAL served contract (minus the version-header line) against AGENTS.md — testing
 # end to end, and catching a stale AgentsDoc.swift (regenerate: python3 gen-agents-doc.py).

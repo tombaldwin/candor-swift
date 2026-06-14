@@ -387,6 +387,9 @@ final class DeclCollector: SyntaxVisitor {
     var returnsTmp: [String: String?] = [:]            // fn leaf -> return type (nil = ambiguous)
     var conformers: [String: [String]] = [:]           // protocol -> conforming local types
     var caseAssoc: [String: Set<String>] = [:]         // enum case -> single-associated-value type(s) seen
+    // `static let shared = factory()` — Type.field -> factory leaf, resolved to the vended type AFTER
+    // the returns index is built (a free factory's return type isn't known during this first pass).
+    var staticFactoryFields: [(type: String, field: String, leaf: String)] = []
     var localTypes: Set<String> = []
     var imports: [String] = []
     private var typeStack: [String] = []
@@ -501,9 +504,16 @@ final class DeclCollector: SyntaxVisitor {
                     if let val = dictValueName(ann.type) { fieldDictValue[ty, default: [:]][name] = val }
                 } else if let initVal = binding.initializer?.value,
                           let call = initVal.as(FunctionCallExprSyntax.self),
-                          let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self),
-                          ctor.baseName.text.first?.isUppercase == true {
-                    fields[ty, default: [:]][name] = (ctor.baseName.text, false)
+                          let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self) {
+                    if ctor.baseName.text.first?.isUppercase == true {
+                        fields[ty, default: [:]][name] = (ctor.baseName.text, false)
+                    } else {
+                        // `static let shared = build()` — a free FACTORY (lowercase leaf), not a ctor.
+                        // Record the leaf; resolve to the vended type once the returns index exists so
+                        // `Type.shared`'s real type (not the static's own type) backs the binding (the
+                        // review's free-factory singleton find).
+                        staticFactoryFields.append((ty, name, ctor.baseName.text))
+                    }
                 }
             }
         }
@@ -821,30 +831,71 @@ final class CallCollector: SyntaxVisitor {
         return .visitChildren
     }
 
-    // Closure-receiving collection methods that pass each ELEMENT as the closure's first argument:
-    // `coll.forEach/map/filter/compactMap/flatMap/first/contains/allSatisfy { x in x.method() }`.
-    // Type that closure parameter (or `$0`) from the receiver's element type, so the closure body —
-    // which charges lexically to the enclosing unit — resolves the element's member calls.
-    private func typeForEachClosureParam(_ node: FunctionCallExprSyntax) {
-        guard let ma = node.calledExpression.as(MemberAccessExprSyntax.self),
-              ["forEach", "map", "filter", "compactMap", "flatMap", "first", "contains", "allSatisfy"].contains(ma.declName.baseName.text),
-              let base = ma.base else { return }
-        let closure = node.trailingClosure
-            ?? node.arguments.lazy.compactMap { $0.expression.as(ClosureExprSyntax.self) }.first
-        guard let closure else { return }
-        // the closure's element parameter: explicit `{ x in … }` → first param; shorthand `{ $0.… }` → `$0`
-        let paramName: String?
-        if let shorthand = closure.signature?.parameterClause?.as(ClosureShorthandParameterListSyntax.self), let first = shorthand.first {
-            paramName = first.name.text
-        } else if let params = closure.signature?.parameterClause?.as(ClosureParameterClauseSyntax.self), let first = params.parameters.first {
-            paramName = first.firstName.text
-        } else if closure.signature == nil {
-            paramName = "$0"
-        } else { paramName = nil }
-        guard let paramName else { return }
-        // type it from the receiver's element type, or CLEAR it (don't leak a prior `$0`/param binding
-        // into this closure when the element type is indeterminate — the review's `$0`-collision find).
-        if let elem = elementTypeOf(base) { vars[paramName] = elem } else { clearBinding(paramName) }
+    // The 8 element-yielding iterator methods: their closure's FIRST param is the receiver's element
+    // (`coll.forEach/map/filter/… { x in x.method() }`). For these — and ONLY these — the element
+    // param is TYPED from the receiver so the closure body (which charges lexically to the enclosing
+    // unit) resolves the element's member calls.
+    private static let ELEMENT_ITERATORS: Set<String> =
+        ["forEach", "map", "filter", "compactMap", "flatMap", "first", "contains", "allSatisfy"]
+
+    // Names a closure binds: explicit `{ (a, b) in … }`/`{ a, b in … }` → those names; shorthand
+    // `{ $0.… }` with no signature → `$0`/`$1`/`$2` (we can't tell arity, so clear the common few).
+    private func closureParamNames(_ closure: ClosureExprSyntax) -> [(name: String, annotated: String?)] {
+        if let params = closure.signature?.parameterClause?.as(ClosureParameterClauseSyntax.self) {
+            return params.parameters.map { p in
+                (p.firstName.text, p.type.flatMap { typeName($0).name })
+            }
+        }
+        if let shorthand = closure.signature?.parameterClause?.as(ClosureShorthandParameterListSyntax.self) {
+            return shorthand.map { ($0.name.text, nil) }
+        }
+        if closure.signature == nil {
+            // no signature → may use `$0`/`$1`/`$2` shorthand; clear the common few so a prior
+            // same-named binding can't leak in
+            return [("$0", nil), ("$1", nil), ("$2", nil)]
+        }
+        return []
+    }
+
+    // Every closure argument of EVERY call must have its params CLEARED so a prior same-named binding
+    // (a loop var `request: URLSession`, an earlier `$0`) cannot leak into the closure body and
+    // FABRICATE its effect — `vars` is function-wide (the review's closure-param `vars`-leak find).
+    // The sole exception: the FIRST param of the element closure of one of the 8 iterator methods is
+    // TYPED from the receiver's element type (so its member calls resolve). An explicit param type
+    // annotation (`{ (x: Foo) in }`) types that param precisely; otherwise the param is cleared.
+    private func typeClosureParams(_ node: FunctionCallExprSyntax) {
+        // collect EVERY closure argument: trailing, additional-trailing, and positional
+        var closures: [ClosureExprSyntax] = []
+        if let tc = node.trailingClosure { closures.append(tc) }
+        for atc in node.additionalTrailingClosures { closures.append(atc.closure) }
+        for arg in node.arguments {
+            if let c = Self.peel(arg.expression).as(ClosureExprSyntax.self) { closures.append(c) }
+        }
+        guard !closures.isEmpty else { return }
+
+        // is this the element closure of a whitelisted iterator? then its first param is typed.
+        let iteratorElem: String? = {
+            guard let ma = node.calledExpression.as(MemberAccessExprSyntax.self),
+                  Self.ELEMENT_ITERATORS.contains(ma.declName.baseName.text),
+                  let base = ma.base else { return nil }
+            return elementTypeOf(base)
+        }()
+        // the TRAILING closure (or first positional) is the iterator's element closure
+        let elemClosure = node.trailingClosure
+            ?? node.arguments.lazy.compactMap { Self.peel($0.expression).as(ClosureExprSyntax.self) }.first
+
+        for closure in closures {
+            let params = closureParamNames(closure)
+            for (i, p) in params.enumerated() {
+                if let annotated = p.annotated {
+                    vars[p.name] = annotated                 // explicit `{ (x: Foo) in }` — precise
+                } else if i == 0, let elem = iteratorElem, closure == elemClosure {
+                    vars[p.name] = elem                      // iterator element param — typed
+                } else {
+                    clearBinding(p.name)                     // every other param — CLEARED, never leak
+                }
+            }
+        }
     }
 
     // `case .active(let c):` / `if case .active(let c) = …` — an enum case pattern is parsed as a call
@@ -855,23 +906,36 @@ final class CallCollector: SyntaxVisitor {
         // `t` is nil for an AMBIGUOUS or unknown case name — then the binding must be CLEARED, not left:
         // a prior `.live(let h): h=URLSession` binding would otherwise leak into `.dead(let h)` whose
         // case is ambiguous and FABRICATE `h.data()` as Net (the review's whole-program `vars`-leak find).
-        let t = enumCaseValueType[ma.declName.baseName.text]
+        // ARITY GUARD: `enumCaseValueType` only records the SINGLE-associated-value form, so it may
+        // only type a pattern that ALSO has exactly one payload (`case .live(let c)`). A multi-payload
+        // pattern (`case .live(let c, _)`) belongs to a DIFFERENT enum sharing the case name — binding
+        // its first `let` to the single-assoc type FABRICATES (the review's enum-identity find).
+        // Mismatch (or ambiguous/unknown case) → CLEAR every binding, never leave a stale leak.
+        let singleAssoc = node.arguments.count == 1 ? enumCaseValueType[ma.declName.baseName.text] : nil
         for arg in node.arguments {
             if let pat = arg.expression.as(PatternExprSyntax.self),
                let vb = pat.pattern.as(ValueBindingPatternSyntax.self),
                let name = vb.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
-                if let t { vars[name] = t } else { clearBinding(name) }
+                if let singleAssoc { vars[name] = singleAssoc } else { clearBinding(name) }
             }
         }
     }
 
     override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
-        typeForEachClosureParam(node)
+        typeClosureParams(node)
         typeEnumCaseBinding(node)
         let lit = firstStringLiteral(node.arguments)
         if let dr = node.calledExpression.as(DeclReferenceExprSyntax.self) {
             let name = dr.baseName.text
             if ["Data", "NSData", "String"].contains(name),
+               node.arguments.first?.label?.text == "contentsOfFile" {
+                // `String(contentsOfFile: path, …)` / `Data(contentsOfFile:)` take a FILE PATH, not a
+                // URL — there is no scheme to resolve, so this is UNCONDITIONALLY a file read → Fs.
+                // (The `contentsOf:` scheme-resolution path below would have let it fall through to
+                // pure — the 1725d0a guard keyed on `contentsOf` only — the review's under-report find.)
+                directEffects.insert("Fs")
+                recordSurfaces(effect: "Fs", lit: lit)
+            } else if ["Data", "NSData", "String"].contains(name),
                node.arguments.first?.label?.text == "contentsOf" {
                 // `Data/String(contentsOf: url)` reads from a URL that is EITHER a file (Fs) or a
                 // remote endpoint (Net) — exactly one is true, but which depends on the URL's scheme.
@@ -1049,8 +1113,18 @@ final class CallCollector: SyntaxVisitor {
                     // The inline form already does this via rootOf's field-walk; match it here.
                     let base = baseDR.baseName.text
                     if let f = fields[base]?[ma.declName.baseName.text], let ft = f.name, !f.isFunction {
+                        // the type RECORDS the accessor's vended type (an explicit annotation, a ctor
+                        // init, or a resolved free factory) — use THAT, the real instance type.
                         vars[name] = ft
+                    } else if localTypes.contains(base) {
+                        // a LOCAL type whose `.shared`/`.default` vended type is NOT recorded: the
+                        // factory leaf was ambiguous/unknown, so we can't prove it vends Self. Binding
+                        // to `base` here would FABRICATE the static's own-type methods on the value (the
+                        // free-factory singleton find) — CLEAR instead (under-report over fabricate).
+                        clearBinding(name)
                     } else {
+                        // a PLATFORM accessor (`URLSession.shared`, `FileManager.default`) — these vend
+                        // Self by convention, so the var carries the base type (resolves its κ members).
                         vars[name] = base
                     }
                 } else if v.is(SequenceExprSyntax.self) || v.is(SubscriptCallExprSyntax.self) {
@@ -1104,6 +1178,7 @@ var fields: [String: [String: (name: String?, isFunction: Bool)]] = [:]
 var fieldArrayElem: [String: [String: String]] = [:]
 var fieldDictValue: [String: [String: String]] = [:]
 var caseAssocAll: [String: Set<String>] = [:]
+var staticFactoryFields: [(type: String, field: String, leaf: String)] = []
 var protocolMethods: [String: Set<String>] = [:]
 var conformers: [String: [String]] = [:]
 var localTypes: Set<String> = []
@@ -1162,6 +1237,7 @@ for c in collectors {
     for (pn, ts) in c.conformers { conformers[pn, default: []].append(contentsOf: ts) }
     localTypes.formUnion(c.localTypes)
     for m in c.imports { importCounts[m, default: 0] += 1 }
+    staticFactoryFields.append(contentsOf: c.staticFactoryFields)
 }
 
 // name indexes for resolution — UNAMBIGUOUS only (the family's never-guess rule)
@@ -1173,6 +1249,13 @@ for f in allFns {
 }
 
 for (k, v) in returnsTmp { if let t = v { returnsIdx[k] = t } }
+// `static let shared = factory()` — now that the returns index exists, resolve the factory's vended
+// type and record it as the field's type, so `let r = Type.shared` carries the REAL type (not the
+// static's own type — the review's free-factory singleton find). Only an UNAMBIGUOUS factory return
+// types it; an unknown leaf leaves the field unrecorded (the binder then clears rather than guessing).
+for (ty, field, leaf) in staticFactoryFields where fields[ty]?[field] == nil {
+    if let vended = returnsIdx[leaf] { fields[ty, default: [:]][field] = (vended, false) }
+}
 // An enum case binds a value type only when it is UNAMBIGUOUS project-wide (one assoc type) —
 // the same "never guess on an ambiguous leaf" discipline as the returns index.
 var enumCaseValueType: [String: String] = [:]
