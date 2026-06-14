@@ -1308,23 +1308,7 @@ for (fq, info) in deferredCallbacks {
     }
 }
 
-// fixpoint: effects + literal surfaces propagate over edges
-func propagate(_ seed: [String: Set<String>], over edges: [String: Set<String>]) -> [String: Set<String>] {
-    var acc = seed
-    var changed = true
-    while changed {
-        changed = false
-        for (caller, callees) in edges {
-            for callee in callees {
-                guard let add = acc[callee], !add.isEmpty else { continue }
-                let before = acc[caller]?.count ?? 0
-                acc[caller, default: []].formUnion(add)
-                if (acc[caller]?.count ?? 0) != before { changed = true }
-            }
-        }
-    }
-    return acc
-}
+// fixpoint: effects + literal surfaces propagate over edges (the pure `propagate` lives in CandorCore)
 let inferred = propagate(direct, over: edges)
 let hostsAcc = propagate(hostsD, over: edges), cmdsAcc = propagate(cmdsD, over: edges)
 let pathsAcc = propagate(pathsD, over: edges), tablesAcc = propagate(tablesD, over: edges)

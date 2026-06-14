@@ -97,4 +97,34 @@ final class ClassifierTests: XCTestCase {
         XCTAssertEqual(dictValueName(parseType("Dictionary<String, Worker>")), "Worker")
         XCTAssertNil(dictValueName(parseType("[Client]")))           // an array, not a dict
     }
+
+    // ── propagate (the effect/surface least-fixpoint) ─────────────────────────────────────────────
+    func testPropagateTransitive() {
+        let r = propagate(["c": ["Fs"]], over: ["a": ["b"], "b": ["c"]])
+        XCTAssertEqual(r["a"], ["Fs"])  // a -> b -> c
+        XCTAssertEqual(r["b"], ["Fs"])
+        XCTAssertEqual(r["c"], ["Fs"])
+    }
+
+    func testPropagateUnionsMultipleCallees() {
+        let r = propagate(["x": ["Net"], "y": ["Db"]], over: ["caller": ["x", "y"]])
+        XCTAssertEqual(r["caller"], ["Db", "Net"])
+    }
+
+    func testPropagateTerminatesOnCycle() {
+        let r = propagate(["a": ["Fs"]], over: ["a": ["b"], "b": ["a"]]) // a <-> b
+        XCTAssertEqual(r["a"], ["Fs"])
+        XCTAssertEqual(r["b"], ["Fs"])  // the cycle does not loop forever
+    }
+
+    func testPropagateWorksForLiteralSurfaces() {
+        // the same fixpoint carries literal surfaces (hosts/paths/…), not just effects
+        let r = propagate(["leaf": ["api.example.com"]], over: ["root": ["leaf"]])
+        XCTAssertEqual(r["root"], ["api.example.com"])
+    }
+
+    func testPropagatePureLeafStaysEmpty() {
+        let r = propagate([:], over: ["a": ["b"]])
+        XCTAssertNil(r["a"])  // nothing reachable carries a value
+    }
 }
