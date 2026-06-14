@@ -301,7 +301,17 @@ func tablesInSql(_ sql: String) -> [String] {
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 struct FnInfo {
-    var qual: String          // "Type.name" or "name"
+    var qual: String          // FULLY-QUALIFIED nested path: "Outer.Inner.name" / "Type.name" / "name".
+                              // Full path (not just the immediate enclosing type) so two same-named
+                              // NESTED types — `A.Backend.store` and `B.Backend.store` — are DISTINCT
+                              // symbols instead of collapsing to one `Backend.store` whose effect set is
+                              // the UNION of both bodies (which fabricates the effectful sibling's effect
+                              // onto the pure one — the cardinal sin; the Kingfisher MemoryStorage/
+                              // DiskStorage sweep). Top-level types have a single-element type stack, so
+                              // qual == simpleQual there — non-nested code is byte-identical.
+    var simpleQual: String = ""   // the immediate "Type.name" form — receivers resolve to SIMPLE type
+                                  // names, so call edges are matched simple→full through `qualBySimple`.
+    var enclosingTypePath: String?    // FULL nested path of the enclosing type (for precise sibling edges)
     var loc: String
     var params: [String: String] = [:]       // param name -> type name (concrete)
     var fnTypedParams: Set<String> = []      // params of function type
@@ -474,9 +484,11 @@ final class DeclCollector: SyntaxVisitor {
     // hole, Swift edition). Each body collects under `Type.property`; duplicate quals union.
     override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
         if let ty = typeStack.last {
+            let tyPath = typeStack.joined(separator: ".")
             for binding in node.bindings {
                 guard let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
-                let qual = "\(ty).\(name)"
+                let qual = "\(tyPath).\(name)"          // fully-qualified nested path
+                let simpleQual = "\(ty).\(name)"
                 var accessorBodies: [Syntax] = []
                 if let ab = binding.accessorBlock {
                     switch ab.accessors {
@@ -492,7 +504,9 @@ final class DeclCollector: SyntaxVisitor {
                 }
                 for b in accessorBodies {
                     var info = FnInfo(qual: qual, loc: loc(binding))
+                    info.simpleQual = simpleQual
                     info.enclosingType = ty
+                    info.enclosingTypePath = tyPath
                     info.body = b
                     info.isAccessor = true
                     fns.append(info)
@@ -530,8 +544,11 @@ final class DeclCollector: SyntaxVisitor {
     }
 
     private func collect(_ name: String, sig: FunctionSignatureSyntax, body: CodeBlockSyntax?, node: some SyntaxProtocol) {
-        var info = FnInfo(qual: typeStack.last.map { "\($0).\(name)" } ?? name, loc: loc(node))
+        let tyPath = typeStack.isEmpty ? nil : typeStack.joined(separator: ".")
+        var info = FnInfo(qual: tyPath.map { "\($0).\(name)" } ?? name, loc: loc(node))
+        info.simpleQual = typeStack.last.map { "\($0).\(name)" } ?? name
         info.enclosingType = typeStack.last
+        info.enclosingTypePath = tyPath
         info.body = body.map { Syntax($0) }
         info.isMain = name == "main"
         // Generic constraints `<T: P>` — a value param typed `T` then dispatches like a `P`-typed param.
@@ -1243,9 +1260,26 @@ for c in collectors {
 // name indexes for resolution — UNAMBIGUOUS only (the family's never-guess rule)
 var freeFnByName: [String: [String]] = [:]
 var byQual: Set<String> = []
+// Receivers resolve to SIMPLE type names (`vars`/`fields`/`typeName` are simple), but qual is now the
+// full nested path — so a typed call edge `Backend.store` (simple) is matched to the full qual through
+// this index. A simple key with exactly ONE full qual resolves precisely (the common non-colliding
+// nested type); a simple key with MULTIPLE full quals is a genuine same-named-nested collision that
+// simple-name resolution cannot disambiguate → the edge is dropped (honest under-report, NEVER a
+// fabricated effect). Top-level types: simple == full, so the direct `byQual` hit fires and behaviour
+// is unchanged.
+var qualBySimple: [String: Set<String>] = [:]
 for f in allFns {
     byQual.insert(f.qual)
+    if f.qual != f.simpleQual { qualBySimple[f.simpleQual, default: []].insert(f.qual) }
     if f.enclosingType == nil { freeFnByName[f.qual, default: []].append(f.qual) }
+}
+// Resolve a simple "Type.member" call target to a full nested qual: an exact full-qual hit (top-level,
+// already full), else the unique simple→full mapping, else nil (ambiguous/unknown → drop the edge).
+// A closure (not a global func) so it captures the main-actor-isolated indexes built just above.
+let resolveQual: (String) -> String? = { target in
+    if byQual.contains(target) { return target }
+    if let cands = qualBySimple[target], cands.count == 1 { return cands.first }
+    return nil
 }
 
 for (k, v) in returnsTmp { if let t = v { returnsIdx[k] = t } }
@@ -1286,7 +1320,7 @@ for f in allFns {
     cc.walk(body)
     // accessor units: a property READ of a known accessor unit is an edge (the reader inherits
     // the getter's effects — `c.data` reaching the Fs inside `var data: Data { … }`)
-    edges[f.qual, default: []].formUnion(cc.propertyEdges.filter { byQual.contains($0) })
+    edges[f.qual, default: []].formUnion(cc.propertyEdges.compactMap { resolveQual($0) })
     direct[f.qual, default: []].formUnion(cc.directEffects)
     if !cc.directEffects.isEmpty { kappaSawClassified = true }
     if cc.unresolved { direct[f.qual, default: []].insert("Unknown"); unresolvedSet.insert(f.qual) }
@@ -1306,21 +1340,23 @@ for f in allFns {
     }
     for call in cc.calls {
         if call.typed {
-            if byQual.contains(call.path) {
-                edges[f.qual, default: []].insert(call.path)
-                callsiteArgs[call.path, default: []].append(call.args)
+            if let t = resolveQual(call.path) {
+                edges[f.qual, default: []].insert(t)
+                callsiteArgs[t, default: []].append(call.args)
             }
         } else if let targets = freeFnByName[call.path], targets.count == 1 {
             edges[f.qual, default: []].insert(targets[0])
             callsiteArgs[targets[0], default: []].append(call.args)
-        } else if localTypes.contains(call.path), byQual.contains("\(call.path).init") {
+        } else if localTypes.contains(call.path), let t = resolveQual("\(call.path).init") {
             // `_ = C0()` — a constructor call edges to the declared init (the fuzzer's init_wired
             // form caught this silent-pure hole on the harness's FIRST run: effects wired in an
             // initializer vanished — the same hole the TS engine's got-dogfood found in ctors).
-            edges[f.qual, default: []].insert("\(call.path).init")
-        } else if f.enclosingType != nil, byQual.contains("\(f.enclosingType!).\(call.leaf)") {
-            // an unqualified call inside a type body reaches the sibling method
-            edges[f.qual, default: []].insert("\(f.enclosingType!).\(call.leaf)")
+            edges[f.qual, default: []].insert(t)
+        } else if let ep = f.enclosingTypePath, byQual.contains("\(ep).\(call.leaf)") {
+            // an unqualified call inside a type body reaches the sibling method — resolved against the
+            // FULL enclosing path, so a nested type's sibling call hits its own member precisely (never
+            // a same-named sibling under a different parent).
+            edges[f.qual, default: []].insert("\(ep).\(call.leaf)")
         }
         // otherwise: unresolvable bare member — stays out (under-report, never a guess); the κ
         // ledger and Unknown rules above carry the honesty.
@@ -1330,9 +1366,10 @@ for f in allFns {
     // method; resolve ≤12 conformers, otherwise honest Unknown.
     for d in cc.protoDispatches {
         guard protocolMethods[d.proto]?.contains(d.member) == true else { continue }
-        let impls = (conformers[d.proto] ?? []).filter { byQual.contains("\($0).\(d.member)") }
-        if !impls.isEmpty && impls.count <= 12 && impls.count == (conformers[d.proto] ?? []).count {
-            for t in impls { edges[f.qual, default: []].insert("\(t).\(d.member)") }
+        let conf = conformers[d.proto] ?? []
+        let impls = conf.compactMap { resolveQual("\($0).\(d.member)") }
+        if !impls.isEmpty && impls.count <= 12 && impls.count == conf.count {
+            for t in impls { edges[f.qual, default: []].insert(t) }
         } else {
             direct[f.qual, default: []].insert("Unknown")
             unresolvedSet.insert(f.qual)

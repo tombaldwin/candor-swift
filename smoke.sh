@@ -40,6 +40,25 @@ dchk() { python3 -c "import json,sys; d=json.load(open('$DRPT')); print(next((',
 [ "$(dchk dt_file)" = "Fs" ]      && ok "contentsOf: file URL -> Fs"                        || bad "contentsOf: file URL -> Fs (got $(dchk dt_file))"
 [ "$(dchk dt_http)" = "Net" ]     && ok "contentsOf: http URL -> Net"                       || bad "contentsOf: http URL -> Net (got $(dchk dt_http))"
 [ "$(dchk dt_var)" = "Unknown" ]  && ok "contentsOf: indeterminate URL -> Unknown (no Fs+Net fabrication)" || bad "contentsOf: indeterminate -> Unknown (got $(dchk dt_var))"
+# NESTED-TYPE SYMBOL KEYING: two same-named nested types (`MemoryStorage.Backend`, `DiskStorage.Backend`)
+# must be DISTINCT symbols. Keyed by the immediate enclosing type alone they collapse to one `Backend.store`
+# whose effect is the UNION of both bodies — fabricating DiskStorage's Fs onto MemoryStorage's pure store
+# (the Kingfisher sweep). Full nested-path quals keep them apart; the pure one stays pure, the Fs one fires.
+cat > "$W/ns.swift" <<'SW'
+import Foundation
+final class MemoryStorage { final class Backend {
+    func storeNoThrow() { let _ = 1 + 1 }
+    func store() { storeNoThrow() }                                   // PURE
+} }
+final class DiskStorage { final class Backend {
+    func store() { let _ = try? Data(contentsOf: URL(fileURLWithPath: "/x")) }  // Fs
+} }
+SW
+"$BIN" "$W/ns.swift" --out "$W/ns" 2>/dev/null
+NRPT=$(ls "$W"/ns.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+nchk() { python3 -c "import json,sys; d=json.load(open('$NRPT')); print(next((','.join(sorted(f['inferred'])) for f in d['functions'] if f['fn']==sys.argv[1]), 'absent'))" "$1"; }
+[ "$(nchk DiskStorage.Backend.store)" = "Fs" ]   && ok "nested-type keying: DiskStorage.Backend.store -> Fs (control fires)" || bad "nested keying control: got $(nchk DiskStorage.Backend.store)"
+[ "$(nchk MemoryStorage.Backend.store)" = "absent" ] && ok "nested-type keying: MemoryStorage.Backend.store stays pure (no same-name Fs collapse)" || bad "nested keying fabrication: MemoryStorage.Backend.store got $(nchk MemoryStorage.Backend.store)"
 printf 'deny Net hop\n' > "$W/pol"
 "$BIN" conformance/Cases.swift --out "$W/r" --policy "$W/pol" >"$W/gate.out" 2>&1
 grep -q 'AS-EFF-006.*hop_a.*Net' "$W/gate.out" && ok "deny gate flags the transitive caller" || bad "deny gate"
