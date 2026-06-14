@@ -624,7 +624,10 @@ final class DeclCollector: SyntaxVisitor {
 /// the passer lexically), a named reference (resolvable to a unit), or opaque.
 enum ArgKind { case closure, named(String), opaque }
 struct Call { var path: String; var leaf: String; var strArg: String?; var typed: Bool; var args: [ArgKind] = []
-              var argTypes: [String?] = [] }   // inferred simple type per positional arg (nil = unknown) — overloads
+              var argTypes: [String?] = []     // inferred simple type per positional arg (nil = unknown) — overloads
+              var unqualified: Bool = false }  // a bare DeclReference `name(…)` (free fn / ctor / self-sibling) —
+                                               // NOT a `recv.member(…)` whose receiver type couldn't be resolved
+                                               // (those must never be guessed onto a same-named sibling/free fn).
 
 final class CallCollector: SyntaxVisitor {
     var vars: [String: String]              // local/param -> concrete type
@@ -700,7 +703,10 @@ final class CallCollector: SyntaxVisitor {
         let expr = Self.peel(raw)
         if let dr = expr.as(DeclReferenceExprSyntax.self) {
             let n = dr.baseName.text
-            if n == "self" { return (enclosingType, true, []) }
+            // `self` (instance) and `Self` (the enclosing TYPE, used for `Self.staticMethod()`) both resolve
+            // to the enclosing type for member resolution — so `Self.decode(…)` is a precise typed call on the
+            // type, not a guessed bare member that would either drop or mis-link to a same-named sibling.
+            if n == "self" || n == "Self" { return (enclosingType, true, []) }
             if let t = vars[n] { return (t, true, [n]) }
             // IMPLICIT SELF: a bare identifier inside a method body can be a FIELD of the
             // enclosing type (`handler.log(s)` ≡ `self.handler.log(s)`) — the protocol-field probe
@@ -1053,7 +1059,7 @@ final class CallCollector: SyntaxVisitor {
                 directEffects.insert(eff)
                 recordSurfaces(effect: eff, lit: lit)
             } else {
-                calls.append(Call(path: name, leaf: name, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node)))
+                calls.append(Call(path: name, leaf: name, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), unqualified: true))
             }
         } else if let ma = node.calledExpression.as(MemberAccessExprSyntax.self) {
             let member = ma.declName.baseName.text
@@ -1473,35 +1479,42 @@ for f in allFns {
                 edges[f.qual, default: []].insert(t)
                 callsiteArgs[t, default: []].append(call.args)
             }
-        } else if overloadedBases.contains(call.path) {     // an overloaded FREE function
-            for t in matchOverloads(call.path, argc, call.argTypes) {
+        } else if call.unqualified {
+            // an UNQUALIFIED `name(…)` call: a free function, a constructor, or a self-sibling method. A
+            // `recv.member(…)` whose receiver type couldn't be resolved is NOT here — it must never be
+            // guessed onto a same-named sibling/free fn (Get's `handler.delegate?.urlSession?(…)` forwards
+            // to an EXTERNAL delegate; resolving it to self's `urlSession` overload cluster unioned a
+            // sibling's real Fs onto the pure forwarder — a fabrication).
+            if overloadedBases.contains(call.path) {            // an overloaded FREE function
+                for t in matchOverloads(call.path, argc, call.argTypes) {
+                    edges[f.qual, default: []].insert(t)
+                    callsiteArgs[t, default: []].append(call.args)
+                }
+            } else if let targets = freeFnByName[call.path], targets.count == 1 {
+                edges[f.qual, default: []].insert(targets[0])
+                callsiteArgs[targets[0], default: []].append(call.args)
+            } else if localTypes.contains(call.path), overloadedBases.contains("\(call.path).init") {
+                for t in matchOverloads("\(call.path).init", argc, call.argTypes) {
+                    edges[f.qual, default: []].insert(t)
+                }
+            } else if localTypes.contains(call.path), let t = resolveQual("\(call.path).init") {
+                // `_ = C0()` — a constructor call edges to the declared init (the fuzzer's init_wired
+                // form caught this silent-pure hole on the harness's FIRST run: effects wired in an
+                // initializer vanished — the same hole the TS engine's got-dogfood found in ctors).
                 edges[f.qual, default: []].insert(t)
-                callsiteArgs[t, default: []].append(call.args)
+            } else if let et = f.enclosingType, overloadedBases.contains("\(et).\(call.leaf)") {  // overloaded sibling
+                for t in matchOverloads("\(et).\(call.leaf)", argc, call.argTypes) {
+                    edges[f.qual, default: []].insert(t)
+                }
+            } else if let ep = f.enclosingTypePath, byQual.contains("\(ep).\(call.leaf)") {
+                // an unqualified call inside a type body reaches the sibling method — resolved against the
+                // FULL enclosing path, so a nested type's sibling call hits its own member precisely (never
+                // a same-named sibling under a different parent).
+                edges[f.qual, default: []].insert("\(ep).\(call.leaf)")
             }
-        } else if let targets = freeFnByName[call.path], targets.count == 1 {
-            edges[f.qual, default: []].insert(targets[0])
-            callsiteArgs[targets[0], default: []].append(call.args)
-        } else if localTypes.contains(call.path), overloadedBases.contains("\(call.path).init") {
-            for t in matchOverloads("\(call.path).init", argc, call.argTypes) {
-                edges[f.qual, default: []].insert(t)
-            }
-        } else if localTypes.contains(call.path), let t = resolveQual("\(call.path).init") {
-            // `_ = C0()` — a constructor call edges to the declared init (the fuzzer's init_wired
-            // form caught this silent-pure hole on the harness's FIRST run: effects wired in an
-            // initializer vanished — the same hole the TS engine's got-dogfood found in ctors).
-            edges[f.qual, default: []].insert(t)
-        } else if let et = f.enclosingType, overloadedBases.contains("\(et).\(call.leaf)") {  // overloaded sibling
-            for t in matchOverloads("\(et).\(call.leaf)", argc, call.argTypes) {
-                edges[f.qual, default: []].insert(t)
-            }
-        } else if let ep = f.enclosingTypePath, byQual.contains("\(ep).\(call.leaf)") {
-            // an unqualified call inside a type body reaches the sibling method — resolved against the
-            // FULL enclosing path, so a nested type's sibling call hits its own member precisely (never
-            // a same-named sibling under a different parent).
-            edges[f.qual, default: []].insert("\(ep).\(call.leaf)")
         }
-        // otherwise: unresolvable bare member — stays out (under-report, never a guess); the κ
-        // ledger and Unknown rules above carry the honesty.
+        // otherwise: unresolvable bare member (unresolved receiver) — stays out (under-report, never a
+        // guess); the κ ledger and Unknown rules above carry the honesty.
     }
 
     // Bounded CHA over local protocols (SPEC §4, 0.4): the protocol is local and declares the

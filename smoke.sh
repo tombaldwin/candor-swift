@@ -101,6 +101,12 @@ struct Box {
     func make(_ raw: A) -> Int { return 0 }                         // pure 1-arg overload
     func build() -> Int { return make(name: "n") }                  // Clock — labeled call omits defaulted id
 }
+struct Forwarder {
+    var sink: ExternalSink?                                          // ExternalSink not local → unresolved receiver
+    func cb(_ x: A) { let _ = Date() }                              // Clock — a real sibling overload
+    func cb(_ x: B) { }                                             // pure sibling overload
+    func forward(_ x: B) { sink?.cb(x) }                           // calls cb on the EXTERNAL sink — must NOT
+}                                                                   // resolve to self's `cb` overload cluster
 SW
 "$BIN" "$W/ov.swift" --out "$W/ov" 2>/dev/null
 ORPT=$(ls "$W"/ov.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
@@ -110,6 +116,8 @@ ochk() { python3 -c "import json,sys; d=json.load(open('$ORPT')); print(next((',
 [ "$(ochk Box.before)" = "absent" ] && ok "overload arity: before() picks pure 2-arg cmp (no Clock)" || bad "overload arity: before got $(ochk Box.before)"
 [ "$(ochk Box.kind)" = "Clock" ]  && ok "overload arity: kind() picks 1-arg cmp -> Clock (control)" || bad "overload arity: kind got $(ochk Box.kind)"
 [ "$(ochk Box.build)" = "Clock" ] && ok "overload defaults: labeled call omitting defaults still resolves (Clock kept)" || bad "overload defaults: build got $(ochk Box.build)"
+[ "$(ochk Forwarder.forward)" = "absent" ] && ok "member call on an unresolved receiver does NOT resolve to a self-sibling overload (Get fab)" || bad "unresolved-receiver member resolved to sibling: forward got $(ochk Forwarder.forward)"
+[ "$(ochk Forwarder.cb)" = "Clock" ] || [ "$(ochk 'Forwarder.cb(A)')" = "Clock" ] && ok "the real sibling overload Forwarder.cb(A) keeps its Clock" || bad "Forwarder.cb(A) lost Clock"
 printf 'deny Net hop\n' > "$W/pol"
 "$BIN" conformance/Cases.swift --out "$W/r" --policy "$W/pol" >"$W/gate.out" 2>&1
 grep -q 'AS-EFF-006.*hop_a.*Net' "$W/gate.out" && ok "deny gate flags the transitive caller" || bad "deny gate"
