@@ -178,6 +178,7 @@ final class DeclCollector: SyntaxVisitor {
     // the returns index is built (a free factory's return type isn't known during this first pass).
     var staticFactoryFields: [(type: String, field: String, leaf: String)] = []
     var localTypes: Set<String> = []
+    var dynamicMemberTypes: Set<String> = []   // `@dynamicMemberLookup`-annotated local types
     var imports: [String] = []
     private var typeStack: [String] = []
 
@@ -192,12 +193,21 @@ final class DeclCollector: SyntaxVisitor {
         return "\(file):\(l.line):\(l.column)"
     }
 
-    private func pushType(_ name: String, inheritance: InheritanceClauseSyntax?) {
+    private func pushType(_ name: String, inheritance: InheritanceClauseSyntax?, attributes: AttributeListSyntax? = nil) {
         typeStack.append(name)
         localTypes.insert(name)
         for inh in inheritance?.inheritedTypes ?? [] {
             if let pname = typeName(inh.type).name {
                 conformers[pname, default: []].append(name)
+            }
+        }
+        // `@dynamicMemberLookup` — a member access `p.x` on this type desugars to the dynamic
+        // subscript, whose effect cannot be statically pinned to the runtime member name. A read of
+        // an UNDECLARED member on such a type is honest Unknown (modeled in CallCollector).
+        for attr in attributes ?? [] {
+            if let a = attr.as(AttributeSyntax.self),
+               a.attributeName.trimmedDescription == "dynamicMemberLookup" {
+                dynamicMemberTypes.insert(name)
             }
         }
     }
@@ -220,19 +230,19 @@ final class DeclCollector: SyntaxVisitor {
         return .skipChildren
     }
     override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {
-        pushType(node.name.text, inheritance: node.inheritanceClause); return .visitChildren
+        pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes); return .visitChildren
     }
     override func visitPost(_ node: ClassDeclSyntax) { typeStack.removeLast() }
     override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind {
-        pushType(node.name.text, inheritance: node.inheritanceClause); return .visitChildren
+        pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes); return .visitChildren
     }
     override func visitPost(_ node: StructDeclSyntax) { typeStack.removeLast() }
     override func visit(_ node: EnumDeclSyntax) -> SyntaxVisitorContinueKind {
-        pushType(node.name.text, inheritance: node.inheritanceClause); return .visitChildren
+        pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes); return .visitChildren
     }
     override func visitPost(_ node: EnumDeclSyntax) { typeStack.removeLast() }
     override func visit(_ node: ActorDeclSyntax) -> SyntaxVisitorContinueKind {
-        pushType(node.name.text, inheritance: node.inheritanceClause); return .visitChildren
+        pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes); return .visitChildren
     }
     override func visitPost(_ node: ActorDeclSyntax) { typeStack.removeLast() }
     override func visit(_ node: ExtensionDeclSyntax) -> SyntaxVisitorContinueKind {
@@ -250,6 +260,18 @@ final class DeclCollector: SyntaxVisitor {
         var methods = Set<String>()
         for member in node.memberBlock.members {
             if let f = member.decl.as(FunctionDeclSyntax.self) { methods.insert(f.name.text) }
+            // PROPERTY requirements (`var payload: Int { get }`) and SUBSCRIPT requirements — recorded
+            // so a protocol-typed property/subscript READ can dispatch CHA to conformers' accessor units
+            // (the property-requirement dispatch hole: only function requirements were known).
+            else if let v = member.decl.as(VariableDeclSyntax.self) {
+                for b in v.bindings {
+                    if let n = b.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
+                        protocolMethods[node.name.text, default: []].insert(n)
+                    }
+                }
+            } else if member.decl.is(SubscriptDeclSyntax.self) {
+                protocolMethods[node.name.text, default: []].insert("subscript")
+            }
         }
         protocolMethods[node.name.text, default: []].formUnion(methods)
         return .skipChildren
@@ -262,6 +284,7 @@ final class DeclCollector: SyntaxVisitor {
     override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
         if let ty = typeStack.last {
             let tyPath = typeStack.joined(separator: ".")
+            let isStatic = node.modifiers.contains { $0.name.text == "static" || $0.name.text == "class" }
             for binding in node.bindings {
                 guard let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
                 let qual = "\(tyPath).\(name)"          // fully-qualified nested path
@@ -278,6 +301,16 @@ final class DeclCollector: SyntaxVisitor {
                 }
                 if node.modifiers.contains(where: { $0.name.text == "lazy" }), let init0 = binding.initializer {
                     accessorBodies.append(Syntax(init0.value)) // lazy init runs at first ACCESS
+                }
+                // `static let/var x = <expr>` — the initializer runs at FIRST ACCESS (Swift statics are
+                // lazy, like a JVM <clinit>), so its body is a unit charged to the first-touch read site
+                // (CallCollector edges a `Type.x` read to it). An INSTANCE stored property's init runs in
+                // the synthesized `init` (a different, already-collected unit) and is NOT first-touch —
+                // so only statics are collected here; lazy vars are already handled above.
+                if isStatic, binding.accessorBlock == nil,
+                   !node.modifiers.contains(where: { $0.name.text == "lazy" }),
+                   let init0 = binding.initializer {
+                    accessorBodies.append(Syntax(init0.value))
                 }
                 for b in accessorBodies {
                     var info = FnInfo(qual: qual, loc: loc(binding))
@@ -305,6 +338,31 @@ final class DeclCollector: SyntaxVisitor {
                         // review's free-factory singleton find).
                         staticFactoryFields.append((ty, name, ctor.baseName.text))
                     }
+                }
+            }
+        } else {
+            // TOP-LEVEL GLOBAL `let/var x = <expr>` — a global's initializer runs at first ACCESS
+            // (lazy, like a static), so it's a unit charged to the first bare-name read (`_ = x`).
+            // Only a stored global with an initializer; a computed global var is collected via the
+            // accessor branch above (which requires a type stack, so handle it here too).
+            for binding in node.bindings {
+                guard let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
+                var bodies: [Syntax] = []
+                if let ab = binding.accessorBlock {
+                    switch ab.accessors {
+                    case .getter(let items): bodies.append(Syntax(items))
+                    case .accessors(let list):
+                        for acc in list { if let b = acc.body { bodies.append(Syntax(b)) } }
+                    }
+                } else if let init0 = binding.initializer {
+                    bodies.append(Syntax(init0.value))
+                }
+                for b in bodies {
+                    var info = FnInfo(qual: name, loc: loc(binding))
+                    info.simpleQual = name
+                    info.body = b
+                    info.isAccessor = true
+                    fns.append(info)
                 }
             }
         }
@@ -352,6 +410,22 @@ final class DeclCollector: SyntaxVisitor {
             else { let te = tupleElements(p.type); if !te.isEmpty { info.tupleParams[pname] = te } }  // `p: (A, B)`
         }
         fns.append(info)
+        // DEFAULT-ARGUMENT expressions: `func f(_ x: T = effExpr())` — when a caller OMITS the arg the
+        // default expr runs. It only runs when `f` is CALLED, so its effects are a subset of what every
+        // call to `f` reaches — charging them to `f`'s unit (a same-qual accessor unit that unions in
+        // propagation) is sound and reaches every omitting caller. (Mislocates onto the callee rather
+        // than the caller — accepted, never silent-pure; the precise per-caller attribution would need
+        // call-site omission analysis, out of scope for this LOW-priority hole.)
+        for p in sig.parameterClause.parameters {
+            guard let dv = p.defaultValue?.value else { continue }
+            var d = FnInfo(qual: info.qual, loc: loc(node))
+            d.simpleQual = info.simpleQual
+            d.enclosingType = typeStack.last
+            d.enclosingTypePath = tyPath
+            d.body = Syntax(dv)
+            d.isAccessor = true
+            fns.append(d)
+        }
     }
 
     override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
@@ -361,6 +435,50 @@ final class DeclCollector: SyntaxVisitor {
     }
     override func visit(_ node: InitializerDeclSyntax) -> SyntaxVisitorContinueKind {
         collect("init", sig: node.signature, body: node.body, node: node)
+        return .skipChildren
+    }
+
+    // SUBSCRIPT accessor units (the silent-pure hole: `obj[i]` runs the getter/setter body, which
+    // had no visitor at all). A subscript collects under `Type.subscript`; a read `obj[i]` / write
+    // `obj[i] = v` edges to it (CallCollector models the SubscriptCallExpr). Getter AND setter bodies
+    // union — a read of an effectful setter over-approximates (the sound direction), as candor can't
+    // tell read vs write apart at every site (`obj[i] += 1` does both).
+    override func visit(_ node: SubscriptDeclSyntax) -> SyntaxVisitorContinueKind {
+        guard let ty = typeStack.last else { return .skipChildren }
+        let tyPath = typeStack.joined(separator: ".")
+        var bodies: [Syntax] = []
+        if let ab = node.accessorBlock {
+            switch ab.accessors {
+            case .getter(let items): bodies.append(Syntax(items))
+            case .accessors(let list):
+                for acc in list { if let b = acc.body { bodies.append(Syntax(b)) } }
+            }
+        }
+        for b in bodies {
+            var info = FnInfo(qual: "\(tyPath).subscript", loc: loc(node))
+            info.simpleQual = "\(ty).subscript"
+            info.enclosingType = ty
+            info.enclosingTypePath = tyPath
+            info.body = b
+            info.isAccessor = true
+            fns.append(info)
+        }
+        return .skipChildren
+    }
+
+    // `deinit` I/O (no visitor existed — its body was invisible). Collect under `Type.deinit`; the
+    // effect attributes to the deinit unit itself (it runs at scope-exit; there is no single caller
+    // site to charge, mirroring a JVM finalizer / the spec's scope-exit attribution).
+    override func visit(_ node: DeinitializerDeclSyntax) -> SyntaxVisitorContinueKind {
+        guard let ty = typeStack.last else { return .skipChildren }
+        let tyPath = typeStack.joined(separator: ".")
+        var info = FnInfo(qual: "\(tyPath).deinit", loc: loc(node))
+        info.simpleQual = "\(ty).deinit"
+        info.enclosingType = ty
+        info.enclosingTypePath = tyPath
+        info.body = node.body.map { Syntax($0) }
+        info.isAccessor = true
+        fns.append(info)
         return .skipChildren
     }
 }
@@ -405,13 +523,17 @@ final class CallCollector: SyntaxVisitor {
     var paths: Set<String> = []
     var tables: Set<String> = []
     var protoDispatches: [(proto: String, member: String)] = []
+    var protoPropReads: [(proto: String, member: String)] = []  // protocol PROPERTY/subscript reads — CHA
+    var globalReads: Set<String> = []     // bare-name reads — candidate edges to GLOBAL initializer units
     var propertyEdges: Set<String> = []   // `Type.member` candidates from property READS
     var callbackInvoked: Set<String> = [] // fn-typed params INVOKED — deferred to callback-flow
+    let dynamicMemberTypes: Set<String>   // `@dynamicMemberLookup` types — dynamic access is Unknown
 
     init(info: FnInfo, fields: [String: [String: (name: String?, isFunction: Bool)]], localTypes: Set<String>,
          localProtocols: Set<String>, returns: [String: String],
          fieldArrayElem: [String: [String: String]], fieldDictValue: [String: [String: String]],
-         enumCaseValueType: [String: String]) {
+         enumCaseValueType: [String: String], dynamicMemberTypes: Set<String>) {
+        self.dynamicMemberTypes = dynamicMemberTypes
         self.enumCaseValueType = enumCaseValueType
         self.vars = info.params
         self.fnTyped = info.fnTypedParams
@@ -659,6 +781,7 @@ final class CallCollector: SyntaxVisitor {
     // `for x in coll` / `for (k, v) in dict` / `for (i, x) in coll.enumerated()` — type the iteration
     // variable from the collection so its member calls resolve (else dropped to pure — §4 under-report).
     override func visit(_ node: ForStmtSyntax) -> SyntaxVisitorContinueKind {
+        modelImplicitIteration(node.sequence)
         if let name = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
             if let elem = elementTypeOf(node.sequence) { vars[name] = elem } else { clearBinding(name) }
         } else if let tup = node.pattern.as(TuplePatternSyntax.self), tup.elements.count == 2,
@@ -673,6 +796,20 @@ final class CallCollector: SyntaxVisitor {
             } else { clearBinding(second) }
         }
         return .visitChildren
+    }
+
+    // A `for x in seq` desugars to `var it = seq.makeIterator(); while let x = it.next() { … }` — two
+    // IMPLICIT calls. When `seq` is a LOCAL type (a custom `Sequence`/`IteratorProtocol`), edge to its
+    // `makeIterator`/`next` units so an effect reached only through iteration is charged (else silently
+    // pure — the highest-priority hole). A stdlib `[1,2,3]` / `0..<n` / dictionary resolves to NO local
+    // type, so no edge is added and the loop stays precisely pure. resolveQual drops any edge to a unit
+    // the type doesn't actually declare (a `Sequence` synthesising `makeIterator` from `next`, etc.).
+    private func modelImplicitIteration(_ sequence: ExprSyntax) {
+        let r = rootOf(sequence)
+        guard let t = r.root, r.isVar, localTypes.contains(t) else { return }
+        for m in ["makeIterator", "next"] {
+            calls.append(Call(path: "\(t).\(m)", leaf: m, strArg: nil, typed: true, args: [], argTypes: []))
+        }
     }
 
     // The 8 element-yielding iterator methods: their closure's FIRST param is the receiver's element
@@ -812,6 +949,11 @@ final class CallCollector: SyntaxVisitor {
                 // lexically) or a named function (an edge), the Unknown is redundant; otherwise
                 // it stands (§4). The TS engine's callback_named move.
                 callbackInvoked.insert(name)
+            } else if let t = vars[name], localTypes.contains(t) {
+                // `f()` where `f` is an INSTANCE of a local type — a `callAsFunction` invocation (Swift
+                // desugars `f(args)` on a non-function value to `f.callAsFunction(args)`). Edge to the
+                // type's callAsFunction unit (if it has one; resolveQual drops the edge otherwise).
+                calls.append(Call(path: "\(t).callAsFunction", leaf: "callAsFunction", strArg: lit, typed: true, args: argKinds(node), argTypes: argTypesOf(node)))
             } else if let eff = kappaFree(name: name, argCount: node.arguments.count) {
                 directEffects.insert(eff)
                 recordSurfaces(effect: eff, lit: lit)
@@ -891,9 +1033,92 @@ final class CallCollector: SyntaxVisitor {
             // the getter unit, not to `Int.v`). rootOf walks fields for method receivers; the terminal
             // property read here wants the type the property is read FROM.
             let recvRoot = recv.root
-            if let root = recvRoot, localTypes.contains(root) {
-                propertyEdges.insert("\(root).\(node.declName.baseName.text)")
+            let prop = node.declName.baseName.text
+            // a protocol-typed PARAM base (`p.payload` where `p: HasPayload`) — `protoTyped` holds the
+            // protocol, not `rootOf` (which leaves a proto param's root the bare name). Mirror the
+            // method-dispatch path's `protoTyped[…]` lookup before the localTypes/localProtocols checks.
+            if let baseDR = node.base?.as(DeclReferenceExprSyntax.self), let proto = protoTyped[baseDR.baseName.text] {
+                protoPropReads.append((proto, prop))
+            } else if let root = recvRoot, dynamicMemberTypes.contains(root), fields[root]?[prop] == nil {
+                // `@dynamicMemberLookup`: `p.x` for a non-stored `x` desugars to the dynamic subscript
+                // whose effect can't be pinned to the runtime member name — honest Unknown, never
+                // silent-pure (precise resolution is intractable; deferred-to-Unknown per the brief).
+                unresolved = true
+                why.insert("dynamicMemberLookup:\(root).\(prop)")
+            } else if let root = recvRoot, localTypes.contains(root) {
+                propertyEdges.insert("\(root).\(prop)")
+            } else if let root = recvRoot, localProtocols.contains(root) {
+                // PROTOCOL PROPERTY-REQUIREMENT dispatch: `p.payload` where `p` is a protocol-typed
+                // receiver — resolve to the conformers' `payload` accessor units (bounded CHA) or honest
+                // Unknown, exactly like a method dispatch. The CHA-as-method-requirement path (~line 1299)
+                // only knew FUNCTION requirements; a property requirement read was silently pure.
+                protoPropReads.append((root, prop))
             }
+        }
+        return .visitChildren
+    }
+
+    // Bare-name READ of a GLOBAL initializer unit (`_ = token`): a top-level `let token = <eff>()`
+    // runs its initializer at first access (lazy), so reading it edges to the `token` global unit.
+    // Collect candidate names that are NOT a local var/param/fn-typed binding (those shadow a global)
+    // and NOT the base of a member/call (handled by their own visitors); resolved in the fixpoint loop
+    // only when the name is a known global unit (so an ordinary identifier never fabricates an edge).
+    override func visit(_ node: DeclReferenceExprSyntax) -> SyntaxVisitorContinueKind {
+        let n = node.baseName.text
+        // skip when shadowed by a local binding, or when this reference is the callee/base of a call
+        // or member access (those expression forms charge through their own visitors).
+        if vars[n] != nil || fnTyped.contains(n) || arrayElem[n] != nil || dictElem[n] != nil { return .skipChildren }
+        if let p = node.parent {
+            if p.is(FunctionCallExprSyntax.self) || p.is(MemberAccessExprSyntax.self)
+                || p.is(SubscriptCallExprSyntax.self) { return .skipChildren }
+        }
+        globalReads.insert(n)
+        return .skipChildren
+    }
+
+    // OPERATOR OVERLOAD `a + b` — SwiftParser leaves operators unfolded, so this is a SequenceExpr
+    // `[lhs, BinaryOperatorExpr(+), rhs]`. The `+` resolves to an operator `func` decl (a `Type.+`
+    // static unit or a free `+` unit); resolve the operand's local type and edge to its operator unit
+    // (else leave it — a stdlib `Int + Int` has no local unit and stays pure). The fixpoint loop edges
+    // a typed `Type.op` call and an unqualified free-operator call.
+    override func visit(_ node: SequenceExprSyntax) -> SyntaxVisitorContinueKind {
+        let elems = Array(node.elements)
+        var i = 0
+        while i + 2 < elems.count + 1 && i + 1 < elems.count {
+            guard let op = elems[i + 1].as(BinaryOperatorExprSyntax.self) else { i += 1; continue }
+            let opName = op.operator.text
+            // resolve a local operand type from either side (the lhs first, then rhs)
+            let lt = rootOf(elems[i]), rt = i + 2 < elems.count ? rootOf(elems[i + 2]) : (root: nil, isVar: false, path: [])
+            var resolved = false
+            // a binary operator takes two args — supply two opaque arg slots so overloaded operator
+            // resolution (arity ≥ 2) keeps the edge.
+            let opArgs: [ArgKind] = [.opaque, .opaque], opTypes: [String?] = [lt.isVar ? lt.root : nil, rt.isVar ? rt.root : nil]
+            for cand in [lt.root, rt.root] {
+                if let t = cand, lt.isVar || rt.isVar, localTypes.contains(t) {
+                    calls.append(Call(path: "\(t).\(opName)", leaf: opName, strArg: nil, typed: true, args: opArgs, argTypes: opTypes))
+                    resolved = true; break
+                }
+            }
+            if !resolved {
+                // a FREE operator overload `func + (…)` — edge via the unqualified-name path (resolved to
+                // a unique free-fn unit, else dropped). Never fabricates: only fires if a `+` unit exists.
+                calls.append(Call(path: opName, leaf: opName, strArg: nil, typed: false, args: opArgs, argTypes: opTypes, unqualified: true))
+            }
+            i += 2
+        }
+        return .visitChildren
+    }
+
+    // `obj[i]` / `obj[i] = v` — a subscript ACCESS runs the subscript's getter/setter body (a
+    // `Type.subscript` unit). Resolve the base receiver's type; a local-type base edges to its
+    // subscript unit (read/write indistinguishable here — over-approximate to the union, the sound
+    // direction). A protocol-typed or untyped base is left to the existing postures (no fabrication).
+    override func visit(_ node: SubscriptCallExprSyntax) -> SyntaxVisitorContinueKind {
+        let base = rootOf(node.calledExpression)
+        if let rt = base.root, localTypes.contains(rt) {
+            propertyEdges.insert("\(rt).subscript")
+        } else if let rt = base.root, localProtocols.contains(rt) {
+            protoPropReads.append((rt, "subscript"))
         }
         return .visitChildren
     }
@@ -1026,6 +1251,7 @@ var staticFactoryFields: [(type: String, field: String, leaf: String)] = []
 var protocolMethods: [String: Set<String>] = [:]
 var conformers: [String: [String]] = [:]
 var localTypes: Set<String> = []
+var dynamicMemberTypes: Set<String> = []
 var returnsIdx: [String: String] = [:]
 var importCounts: [String: Int] = [:]
 // The package's OWN target modules (SPM convention: Sources/<TargetName>/) — an internal import is
@@ -1080,6 +1306,7 @@ for c in collectors {
     for (pn, ms) in c.protocolMethods { protocolMethods[pn, default: []].formUnion(ms) }
     for (pn, ts) in c.conformers { conformers[pn, default: []].append(contentsOf: ts) }
     localTypes.formUnion(c.localTypes)
+    dynamicMemberTypes.formUnion(c.dynamicMemberTypes)
     for m in c.imports { importCounts[m, default: 0] += 1 }
     staticFactoryFields.append(contentsOf: c.staticFactoryFields)
 }
@@ -1173,10 +1400,19 @@ var byQual: Set<String> = []
 // fabricated effect). Top-level types: simple == full, so the direct `byQual` hit fires and behaviour
 // is unchanged.
 var qualBySimple: [String: Set<String>] = [:]
+// Top-level GLOBAL initializer units (an accessor unit with a bare, dot-free qual) — a bare-name read
+// edges here. Kept distinct from free functions so a bare reference to a function name never resolves
+// as a global-init touch.
+var globalUnitNames: Set<String> = []
 for f in allFns {
     byQual.insert(f.qual)
     if f.qual != f.simpleQual { qualBySimple[f.simpleQual, default: []].insert(f.qual) }
-    if f.enclosingType == nil { freeFnByName[f.qual, default: []].append(f.qual) }
+    // accessor units (computed/global/default-expr bodies) are NOT callable free functions — they're
+    // reached by property/global-read edges, so they must not pollute the free-fn name index (a
+    // same-qual default-expr accessor unit otherwise made its function's name AMBIGUOUS, dropping every
+    // call edge to it — the hole-9 default-arg fix's own footgun).
+    if f.enclosingType == nil && !f.isAccessor { freeFnByName[f.qual, default: []].append(f.qual) }
+    if f.isAccessor && f.enclosingType == nil && !f.qual.contains(".") { globalUnitNames.insert(f.qual) }
 }
 // Resolve a simple "Type.member" call target to a full nested qual: an exact full-qual hit (top-level,
 // already full), else the unique simple→full mapping, else nil (ambiguous/unknown → drop the edge).
@@ -1221,11 +1457,13 @@ for f in allFns {
     let cc = CallCollector(info: f, fields: fields, localTypes: localTypes,
                            localProtocols: localProtocolNames, returns: returnsIdx,
                            fieldArrayElem: fieldArrayElem, fieldDictValue: fieldDictValue,
-                           enumCaseValueType: enumCaseValueType)
+                           enumCaseValueType: enumCaseValueType, dynamicMemberTypes: dynamicMemberTypes)
     cc.walk(body)
     // accessor units: a property READ of a known accessor unit is an edge (the reader inherits
     // the getter's effects — `c.data` reaching the Fs inside `var data: Data { … }`)
     edges[f.qual, default: []].formUnion(cc.propertyEdges.compactMap { resolveQual($0) })
+    // a bare-name read that names a GLOBAL initializer unit charges its first-touch effects here
+    edges[f.qual, default: []].formUnion(cc.globalReads.filter { globalUnitNames.contains($0) && $0 != f.qual })
     direct[f.qual, default: []].formUnion(cc.directEffects)
     if !cc.directEffects.isEmpty { kappaSawClassified = true }
     if cc.unresolved { direct[f.qual, default: []].insert("Unknown"); unresolvedSet.insert(f.qual) }
@@ -1308,6 +1546,25 @@ for f in allFns {
             direct[f.qual, default: []].insert("Unknown")
             unresolvedSet.insert(f.qual)
             whyMap[f.qual, default: []].insert("dispatch:\(d.proto).\(d.member)")
+        }
+    }
+    // CHA for protocol PROPERTY/subscript reads — identical bounded resolution to method dispatch,
+    // but the conformer units are accessor units (`Type.payload` / `Type.subscript`). A conformer
+    // satisfying the requirement with a STORED property has no accessor unit (pure, contributes
+    // nothing) — so `impls.count == conf.count` would wrongly force Unknown when SOME conformers are
+    // stored. Instead require every conformer to be a KNOWN local type and edge to whichever accessor
+    // units exist; an unresolvable/unbounded conformer set is honest Unknown.
+    for d in cc.protoPropReads {
+        guard protocolMethods[d.proto]?.contains(d.member) == true else { continue }
+        let conf = conformers[d.proto] ?? []
+        if conf.isEmpty || conf.count > 12 {
+            direct[f.qual, default: []].insert("Unknown")
+            unresolvedSet.insert(f.qual)
+            whyMap[f.qual, default: []].insert("dispatch:\(d.proto).\(d.member)")
+            continue
+        }
+        for c in conf {
+            if let t = resolveQual("\(c).\(d.member)") { edges[f.qual, default: []].insert(t) }
         }
     }
 }

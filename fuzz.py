@@ -30,7 +30,13 @@ SINKS = {
 
 # Edge forms: how fn i reaches fn i+1 (or the sink). `unknown` forms must read Unknown in the
 # RECEIVING function instead of (or in addition to) the effect.
-FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local", "iter", "for_each", "field_iter", "dict_iter", "subscript_recv", "cast_recv", "field_chain", "enum_bind", "generic_proto", "guard_let", "tuple_recv", "field_subscript", "cast_field", "loop_field_subscript", "deep_nest", "overload_subtype"]
+FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local", "iter", "for_each", "field_iter", "dict_iter", "subscript_recv", "cast_recv", "field_chain", "enum_bind", "generic_proto", "guard_let", "tuple_recv", "field_subscript", "cast_field", "loop_field_subscript", "deep_nest", "overload_subtype",
+         # implicit-call / uncollected-decl holes (the silent-pure soundness fix). NB `deinit_io` is
+         # NOT here: a deinit runs at scope-exit with no caller site, so it does not PROPAGATE up the
+         # chain (correct — candor can't model dealloc timing). It is appended off-chain every seed and
+         # checked via extra_effectful instead.
+         "custom_seq", "subscript_access", "static_init", "global_init", "proto_prop", "call_as_function", "operator_overload",
+         "default_arg", "dynamic_member"]
 
 
 def build_deep_nest(rng, i, me, callee):
@@ -61,6 +67,7 @@ def gen(seed):
     bodies = [None] * (n + 1)
     forms = []
     expect_unknown = set()
+    extra_effectful = set()   # non-chain UNITS (deinit/static/global init) that must carry the effect
     bodies[n] = f"func sink() {{ {sink_stmt} }}"
     for i in range(n - 1, -1, -1):
         me, callee = fn(i), fn(i + 1)
@@ -201,10 +208,76 @@ def gen(seed):
                          f"func setup{i}() {{ slot{i} = {{ {callee}() }} }}\n"
                          f"func {me}() {{ let cb: () -> Void = slot{i}!; cb() }}")
             expect_unknown.add(me)
+        elif form == "custom_seq":
+            # HOLE 1 (HIGH): a custom Sequence/IteratorProtocol — `for _ in s` desugars to
+            # makeIterator()/next(), an IMPLICIT call. The effect lives in next(); iterating it must
+            # reach the effect (else silently pure). UNPINNED receiver: the sequence is a branch-MERGE
+            # of two distinct conforming types so candor can't pin a single concrete type from a `new`.
+            bodies[i] = (f"struct Sq{i}: Sequence, IteratorProtocol {{\n"
+                         f"    func makeIterator() -> Sq{i} {{ self }}\n"
+                         f"    mutating func next() -> Int? {{ {callee}(); return nil }}\n"
+                         f"}}\n"
+                         f"struct Sr{i}: Sequence, IteratorProtocol {{\n"
+                         f"    func makeIterator() -> Sr{i} {{ self }}\n"
+                         f"    mutating func next() -> Int? {{ {callee}(); return nil }}\n"
+                         f"}}\n"
+                         f"func pick{i}(_ b: Bool) -> Sq{i} {{ Sq{i}() }}\n"
+                         f"func {me}() {{ let s = pick{i}(true); for _ in s {{ }} }}")
+        elif form == "subscript_access":
+            # HOLE 2: `obj[i]` runs the subscript getter body — an implicit accessor call.
+            bodies[i] = (f"struct Sb{i} {{ subscript(i: Int) -> Int {{ {callee}(); return i }} }}\n"
+                         f"func mk{i}(_ b: Bool) -> Sb{i} {{ Sb{i}() }}\n"
+                         f"func {me}() {{ let o = mk{i}(true); _ = o[3] }}")
+        elif form == "static_init":
+            # HOLE 3: a `static let` initializer runs at first ACCESS; touching it charges the toucher.
+            bodies[i] = (f"struct St{i} {{ static let v: Int = {{ {callee}(); return 1 }}() }}\n"
+                         f"func {me}() {{ _ = St{i}.v }}")
+            extra_effectful.add(f"St{i}.v")
+        elif form == "global_init":
+            # HOLE 3 (globals): a top-level `let g = …` initializer runs lazily at first bare-name read.
+            bodies[i] = (f"let gl{i}: Int = {{ {callee}(); return 1 }}()\n"
+                         f"func {me}() {{ _ = gl{i} }}")
+            extra_effectful.add(f"gl{i}")
+        elif form == "proto_prop":
+            # HOLE 4: a protocol PROPERTY requirement read `p.payload` dispatches to the conformer's
+            # accessor. UNPINNED via a branch-MERGE of two conformers passed to a protocol-typed param.
+            bodies[i] = (f"protocol Pp{i} {{ var payload: Int {{ get }} }}\n"
+                         f"struct Pa{i}: Pp{i} {{ var payload: Int {{ {callee}(); return 1 }} }}\n"
+                         f"struct Pb{i}: Pp{i} {{ var payload: Int {{ {callee}(); return 2 }} }}\n"
+                         f"func use{i}(_ p: Pp{i}) {{ _ = p.payload }}\n"
+                         f"func {me}() {{ let p: Pp{i} = Bool.random() ? Pa{i}() : Pb{i}(); use{i}(p) }}")
+        elif form == "call_as_function":
+            # HOLE 6: `f()` on a callAsFunction instance desugars to f.callAsFunction().
+            bodies[i] = (f"struct Cf{i} {{ func callAsFunction() {{ {callee}() }} }}\n"
+                         f"func {me}() {{ let f = Cf{i}(); f() }}")
+        elif form == "operator_overload":
+            # HOLE 7: `a + b` resolves to a `+` operator func — not a syntactic call.
+            bodies[i] = (f"struct Op{i} {{ static func + (a: Op{i}, b: Op{i}) -> Op{i} {{ {callee}(); return a }} }}\n"
+                         f"func {me}() {{ let a = Op{i}(); let b = Op{i}(); _ = a + b }}")
+        elif form == "default_arg":
+            # HOLE 9: omitting a defaulted arg runs the default EXPRESSION, which reaches `callee`. The
+            # callee-attribution makes `wd{i}` (and thus the omitting `me`) carry the effect.
+            bodies[i] = (f"func da{i}() -> Int {{ {callee}(); return 1 }}\n"
+                         f"func wd{i}(_ x: Int = da{i}()) {{ _ = x }}\n"
+                         f"func {me}() {{ wd{i}() }}")
+        elif form == "dynamic_member":
+            # HOLE 8: `@dynamicMemberLookup` — `p.x` desugars to the dynamic subscript whose runtime
+            # member can't be pinned, so the consumer must read Unknown (precise resolution intractable).
+            bodies[i] = (f"@dynamicMemberLookup struct Dm{i} {{\n"
+                         f"    subscript(dynamicMember m: String) -> Int {{ {callee}(); return 1 }}\n"
+                         f"}}\n"
+                         f"func {me}() {{ let d = Dm{i}(); _ = d.anything }}")
+            expect_unknown.add(me)
     bystander = "func zzBystander(_ n: Int) -> Int { n * 2 }"
-    src = "import Foundation\n\n" + "\n".join(bodies) + "\n" + bystander + "\n" + PRECISION_TRAPS + "\n"
+    # HOLE 5 (off-chain): a `deinit` body had no visitor. It runs at scope-exit with no caller site, so
+    # its effect attributes to the deinit UNIT itself — checked via extra_effectful (it does not, and
+    # must not, propagate to the allocating function: candor can't model dealloc timing).
+    dei = f"final class DeinitProbe {{ deinit {{ {sink_stmt} }} }}"
+    extra_effectful.add("DeinitProbe.deinit")
+    src = ("import Foundation\n\n" + "\n".join(bodies) + "\n" + bystander + "\n"
+           + dei + "\n" + PRECISION_TRAPS + "\n")
     chain = [fn(i) for i in range(n + 1)]
-    return src, chain, sink_eff, expect_unknown, forms
+    return src, chain, sink_eff, expect_unknown, extra_effectful, forms
 
 
 # PRECISION TRAPS — pure functions that LOOK like they should trigger a receiver-typing heuristic but
@@ -227,7 +300,7 @@ TRAP_FNS = ["trapSingleton", "trapRead", "trapLeak", "trapDollar"]
 
 
 def run_seed(seed):
-    src, chain, eff, expect_unknown, forms = gen(seed)
+    src, chain, eff, expect_unknown, extra_effectful, forms = gen(seed)
     d = tempfile.mkdtemp(prefix="candor-swift-fuzz-")
     try:
         with open(os.path.join(d, "m.swift"), "w") as f:
@@ -237,11 +310,18 @@ def run_seed(seed):
         import glob as _g
         rep = json.load(open(next(p for p in _g.glob(out + ".*.Swift.json") if "callgraph" not in p)))
         got = {e["fn"].split(".")[-1]: set(e["inferred"]) for e in rep["functions"]}
+        gotFull = {e["fn"]: set(e["inferred"]) for e in rep["functions"]}
         fails = []
         for c in chain:
             s = got.get(c, set())
             if eff not in s and "Unknown" not in s:
                 fails.append(f"{c}: SILENT under-report (expected {eff} or Unknown, got {sorted(s)})")
+        # non-chain UNITS (deinit / static / global initializers) — the effect attributes to the unit
+        # itself, not to a chain caller; assert each carries the effect-or-Unknown (never silent-pure).
+        for u in extra_effectful:
+            s = gotFull.get(u, set())
+            if eff not in s and "Unknown" not in s:
+                fails.append(f"{u}: SILENT under-report on uncollected unit (expected {eff} or Unknown, got {sorted(s)})")
         for u in expect_unknown:
             if "Unknown" not in got.get(u, set()):
                 fails.append(f"{u}: callback/field invocation must read Unknown, got {sorted(got.get(u, set()))}")
