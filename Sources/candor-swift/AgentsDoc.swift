@@ -29,13 +29,23 @@ Writes `<dir>/.candor/report.json` (spec-0.5 envelope) and `.candor/report.callg
 (EVERY analyzed function a key — pure ones included, SPEC §2.2). Add `--policy <file>` (or
 `CANDOR_POLICY`) to enforce a §6.2 policy: exit 1 on violation, 2 LOUDLY on an unreadable policy.
 
+**Already installed? Report the version, then ask before upgrading.** If this project already has
+candor — a `.candor/` report dir, or `candor-swift` built/on PATH — do this BEFORE you scan. Run
+`candor-swift --version` (offline) and TELL THE USER plainly which build they're on, e.g. "This
+project is on candor-swift 0.5.1 (spec 0.5)". (On an older build that predates `--version`, read
+`candor.version`/`candor.spec` from an existing `.candor/report*.json` instead.)
+
 **Staying current — candor can't check for you, *you* can.** candor never makes a network call to
 see if it's out of date: its own policy is `deny Net` (it's an effect auditor — phoning home would
 make it perform the exact effect it exists to forbid). So the version check is *your* job, not the
 tool's. `candor-swift --version` prints the installed build + the spec contract it speaks (offline,
 two lines: `candor-swift <ver> (spec <SPEC>)` then the upgrade incantation). Then YOU (you have
-network; candor doesn't) compare against the latest GitHub release and, if it's behind, upgrade with
-`git pull && swift build -c release`.
+network; candor doesn't) compare the installed version against the latest GitHub release
+([github.com/tombaldwin/candor-swift/releases](https://github.com/tombaldwin/candor-swift/releases)).
+If it's behind, **ASK the user before upgrading** — e.g. "candor-swift 0.5.2 is available (you're on
+0.5.1) — upgrade before I scan?" — and run `git pull && swift build -c release` only if they agree.
+Never upgrade silently. If it's current or the user declines, just proceed with the build they have;
+if candor isn't installed at all, install it normally (clone + build, below).
 
 **Report shape:** `{ "candor": {…, "spec": "0.5"}, "package": "<name>", "functions": [...] }` — an
 ARRAY of entries keyed `fn` (`Type.method` for members, bare `name` for free functions), each with
