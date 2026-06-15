@@ -12,6 +12,8 @@ swift build -c release
 .build/release/candor-swift --version              # installed build + spec contract (offline) + upgrade line
 ```
 
+**Staying current:** check your installed version and upgrade — [candor/AGENTS.md §2a](https://github.com/tombaldwin/candor/blob/main/AGENTS.md#2a-staying-current--check-the-version-upgrade). `candor-swift --version` prints the build, the spec, and the upgrade one-liner (offline; candor never phones home).
+
 Built on [SwiftSyntax](https://github.com/swiftlang/swift-syntax) — syntactic, like `candor-scan`: no
 build of the target needed. Spec-0.5 obligations carried from day one: universal `hash` emission
 (`pkg#qual`, so reports chain as `CANDOR_DEPS` siblings of the other engines), the **κ-coverage ledger**
