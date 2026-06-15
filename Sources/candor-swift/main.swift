@@ -1415,10 +1415,15 @@ func warnRule(_ why: String, _ line: String) {
 func parsePolicy(_ text: String) -> (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidRule]) {
     var deny: [DenyRule] = [], allow: [AllowRule] = [], forbid: [ForbidRule] = []
     for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+        // The §6.2 token separator is ASCII whitespace ONLY. `.whitespaces`/`Character.isWhitespace` are
+        // Unicode — they'd split a NBSP/ideographic space that Java drops (a gateless-green divergence;
+        // adversarial DSL review). `isASCII && isWhitespace` keeps space/tab/CR/LF/VT/FF and excludes the
+        // non-ASCII spaces, so a NBSP stays part of its token → the rule is malformed and dropped.
+        let asciiWS = CharacterSet(charactersIn: " \t\n\u{0B}\u{0C}\r")
         let line = rawLine.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0]
-            .trimmingCharacters(in: .whitespaces)
+            .trimmingCharacters(in: asciiWS)
         if line.isEmpty { continue }
-        let t = line.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        let t = line.split(whereSeparator: { $0.isASCII && $0.isWhitespace }).map(String.init)
         switch t[0] {
         case "deny":
             var effects: [String] = []; var scope = ""
