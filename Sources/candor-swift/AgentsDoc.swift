@@ -25,11 +25,11 @@ git clone --depth 1 https://github.com/tombaldwin/candor-swift /tmp/candor-swift
 /tmp/candor-swift/.build/release/candor-swift <package-dir>     # Tests/ and .build/ excluded
 ```
 
-Writes `<dir>/.candor/report.json` (spec-0.4 envelope) and `.candor/report.callgraph.json`
+Writes `<dir>/.candor/report.json` (spec-0.5 envelope) and `.candor/report.callgraph.json`
 (EVERY analyzed function a key — pure ones included, SPEC §2.2). Add `--policy <file>` (or
 `CANDOR_POLICY`) to enforce a §6.2 policy: exit 1 on violation, 2 LOUDLY on an unreadable policy.
 
-**Report shape:** `{ "candor": {…, "spec": "0.4"}, "package": "<name>", "functions": [...] }` — an
+**Report shape:** `{ "candor": {…, "spec": "0.5"}, "package": "<name>", "functions": [...] }` — an
 ARRAY of entries keyed `fn` (`Type.method` for members, bare `name` for free functions), each with
 `inferred` (full transitive set) / `direct` / `unresolved` / `hash` (`pkg#qual`, the §2 chain key)
 / optional `hosts`/`cmds`/`paths`/`tables`. Only effectful-or-unresolved functions appear; a

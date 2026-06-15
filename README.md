@@ -1,6 +1,6 @@
 # candor-swift
 
-**The Swift implementation of [candor-spec](https://github.com/tombaldwin/candor-spec) 0.4** — per-function
+**The Swift implementation of [candor-spec](https://github.com/tombaldwin/candor-spec) 0.5** — per-function
 side effects (Net/Fs/Db/Exec/Env/Clock/Ipc/Log/Rand/Clipboard), transitively across the call graph, with
 the §6.2 policy gate. The fourth engine in the candor family (Rust · JVM · TypeScript · Swift), written
 from the spec and validated against the shared conformance oracle: **20/20 on first run**.
@@ -12,7 +12,7 @@ swift build -c release
 ```
 
 Built on [SwiftSyntax](https://github.com/swiftlang/swift-syntax) — syntactic, like `candor-scan`: no
-build of the target needed. Spec-0.4 obligations carried from day one: universal `hash` emission
+build of the target needed. Spec-0.5 obligations carried from day one: universal `hash` emission
 (`pkg#qual`, so reports chain as `CANDOR_DEPS` siblings of the other engines), the **κ-coverage ledger**
 (`κ doesn't know N modules this code imports…` — unlisted third-party modules are INVISIBLE, not
 `Unknown`, and the receipt names them per scan), and the four literal surfaces (`hosts`/`cmds`/`paths`/

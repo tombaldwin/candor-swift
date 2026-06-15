@@ -1,4 +1,4 @@
-// candor-swift — the Swift implementation of candor-spec 0.4.
+// candor-swift — the Swift implementation of candor-spec 0.5.
 //
 // Architecture mirrors candor-scan (the syntactic reference engine): pass A indexes declarations
 // (units, field types, protocols + conformers, imports), pass B collects each function's calls
@@ -6,7 +6,7 @@
 // to the least fixpoint, and emits the §2 envelope + §2.2 call-graph sidecar. The §4 trust
 // contract is the core: a call through a function-typed value, an unresolvable member, or a local
 // protocol's dispatch with no visible conformer contributes Unknown — never silent purity.
-// Spec 0.4 MUSTs carried from day one: universal `hash` emission (pkg#qual), the §7.14 κ-coverage
+// Spec 0.5 MUSTs carried from day one: universal `hash` emission (pkg#qual), the §7.14 κ-coverage
 // ledger (imports the classifier doesn't know, named per scan), and literal surfaces
 // (hosts/cmds/paths/tables) because the §6.2 policy gate enforces `allow` rules.
 //
@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.4.5"
+let engineVersion = "candor-swift-0.5.0"
 
 var target = "."
 var outPrefix: String? = nil
@@ -48,9 +48,9 @@ while let a = argIter.next() {
         policyPath = v
     case "-h", "--help":
         print("""
-        candor-swift — Swift effect scanner (candor-spec 0.4)
+        candor-swift — Swift effect scanner (candor-spec 0.5)
         USAGE: candor-swift [<dir|file.swift>] [--out <prefix>] [--policy <file>] [--agents]
-          writes <prefix>.<package>.Swift.json (report, spec 0.4 envelope) + a .callgraph.json sidecar
+          writes <prefix>.<package>.Swift.json (report, spec 0.5 envelope) + a .callgraph.json sidecar
           CANDOR_POLICY honoured when --policy absent; exit 1 on violation, 2 on unreadable policy.
           --agents prints the agent contract for THIS build (the embedded AGENTS.md).
         """)
@@ -1260,7 +1260,7 @@ for f in allFns {
         // guess); the κ ledger and Unknown rules above carry the honesty.
     }
 
-    // Bounded CHA over local protocols (SPEC §4, 0.4): the protocol is local and declares the
+    // Bounded CHA over local protocols (SPEC §4, 0.5): the protocol is local and declares the
     // method; resolve ≤12 conformers, otherwise honest Unknown.
     for d in cc.protoDispatches {
         guard protocolMethods[d.proto]?.contains(d.member) == true else { continue }
@@ -1314,7 +1314,7 @@ let hostsAcc = propagate(hostsD, over: edges), cmdsAcc = propagate(cmdsD, over: 
 let pathsAcc = propagate(pathsD, over: edges), tablesAcc = propagate(tablesD, over: edges)
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// Report (§2 envelope, spec 0.4) + sidecar (§2.2) + receipt + κ ledger (§7.14)
+// Report (§2 envelope, spec 0.5) + sidecar (§2.2) + receipt + κ ledger (§7.14)
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 let prefix = outPrefix ?? (rootDir as NSString).appendingPathComponent(".candor/report")
@@ -1332,7 +1332,7 @@ for qual in inferred.keys.sorted() {
         "direct": (direct[qual] ?? []).sorted(),
         "declared": [], "undeclared": [], "overdeclared": [],
         "unresolved": inf.contains("Unknown"),
-        "hash": "\(pkgName)#\(qual)",   // 0.4 MUST: every report is chainable
+        "hash": "\(pkgName)#\(qual)",   // 0.5 MUST: every report is chainable
         "calls": (edges[qual] ?? []).sorted(),
     ]
     if entryPoints.contains(qual) { e["entryPoint"] = true }
@@ -1345,7 +1345,7 @@ for qual in inferred.keys.sorted() {
     entries.append(e)
 }
 let envelope: [String: Any] = [
-    "candor": ["version": engineVersion, "toolchain": "swiftsyntax", "spec": "0.4"],
+    "candor": ["version": engineVersion, "toolchain": "swiftsyntax", "spec": "0.5"],
     "package": pkgName,
     "functions": entries,
 ]
