@@ -29,10 +29,13 @@ Writes `<dir>/.candor/report.json` (spec-0.5 envelope) and `.candor/report.callg
 (EVERY analyzed function a key — pure ones included, SPEC §2.2). Add `--policy <file>` (or
 `CANDOR_POLICY`) to enforce a §6.2 policy: exit 1 on violation, 2 LOUDLY on an unreadable policy.
 
-**Check you're current.** `candor-swift --version` prints the installed build + the spec contract
-it speaks (offline, two lines). `candor-swift --check-update` does ONE 4-second GET to the GitHub
-releases API and tells you if a newer build exists (degrading to a one-line stderr notice on any
-network failure — never hangs, never traps). Run `--check-update` before trusting an old report.
+**Staying current — candor can't check for you, *you* can.** candor never makes a network call to
+see if it's out of date: its own policy is `deny Net` (it's an effect auditor — phoning home would
+make it perform the exact effect it exists to forbid). So the version check is *your* job, not the
+tool's. `candor-swift --version` prints the installed build + the spec contract it speaks (offline,
+two lines: `candor-swift <ver> (spec <SPEC>)` then the upgrade incantation). Then YOU (you have
+network; candor doesn't) compare against the latest GitHub release and, if it's behind, upgrade with
+`git pull && swift build -c release`.
 
 **Report shape:** `{ "candor": {…, "spec": "0.5"}, "package": "<name>", "functions": [...] }` — an
 ARRAY of entries keyed `fn` (`Type.method` for members, bare `name` for free functions), each with

@@ -27,58 +27,11 @@ import CandorCore
 
 let engineVersion = "candor-swift-0.5.0"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
-// and `--version`/`--check-update`, derived by stripping the engine prefix so the two can't drift.
+// and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
 // The spec contract version this engine speaks — the SAME literal that stamps the §2 envelope's `spec`
 // field (see the envelope below), reused so `--version` and the report can never disagree.
 let specVersion = "0.5"
-
-// The ONLY network touch in the engine, reached solely by `--check-update` (candor's own policy is
-// `deny Net`; an update check is the agent's affordance, not the scanner's). One synchronous GET to
-// GitHub's latest-release API with a HARD 4s timeout, folded to `nil` on ANY failure — no network,
-// timeout, non-2xx, rate-limit, unparseable, or a missing `tag_name`. The caller turns `nil` into a
-// graceful one-line stderr notice; this NEVER hangs, NEVER traps. main.swift's top level is
-// synchronous, so the async URLSession call is awaited on a DispatchSemaphore.
-func fetchLatestRelease() -> String? {
-    guard let url = URL(string: "https://api.github.com/repos/tombaldwin/candor-swift/releases/latest")
-    else { return nil }
-    let cfg = URLSessionConfiguration.ephemeral
-    cfg.timeoutIntervalForRequest = 4   // hard ceiling — never hang
-    cfg.timeoutIntervalForResource = 4
-    let session = URLSession(configuration: cfg)
-    var req = URLRequest(url: url)
-    req.setValue("candor-swift", forHTTPHeaderField: "User-Agent")  // GitHub's API requires a UA
-    req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-
-    let sem = DispatchSemaphore(value: 0)
-    // A lock-guarded box so the value crosses the URLSession callback queue back to this synchronous
-    // frame without tripping Swift 6's Sendable-capture check on a bare `var`.
-    let box = ResultBox()
-    let task = session.dataTask(with: req) { data, response, _ in
-        defer { sem.signal() }
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-              let data = data,
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let tag = obj["tag_name"] as? String else { return }
-        // tags are like "v0.5.0" — strip a leading "v" to the bare release semver.
-        box.value = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
-    }
-    task.resume()
-    // Belt-and-braces wait ceiling in case the URLSession timeout is itself delayed: 5s ≥ the 4s
-    // request timeout, so a healthy timeout fires first and we still degrade gracefully.
-    if sem.wait(timeout: .now() + 5) == .timedOut { task.cancel(); return nil }
-    return box.value
-}
-
-/// Thread-safe holder for `fetchLatestRelease`'s out-of-callback result (Swift 6 Sendable compliance).
-final class ResultBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var _value: String? = nil
-    var value: String? {
-        get { lock.lock(); defer { lock.unlock() }; return _value }
-        set { lock.lock(); defer { lock.unlock() }; _value = newValue }
-    }
-}
 
 var target = "."
 var outPrefix: String? = nil
@@ -107,7 +60,6 @@ while let a = argIter.next() {
           CANDOR_POLICY honoured when --policy absent; exit 1 on violation, 2 on unreadable policy.
           --agents         prints the agent contract for THIS build (the embedded AGENTS.md).
           --version        print the installed build + spec contract (offline) and the upgrade line.
-          --check-update   print the version, then ask GitHub (one 4s GET) if a newer build exists.
         """)
         exit(0)
     case "--version":
@@ -116,22 +68,6 @@ while let a = argIter.next() {
         // specVersion) so this can never drift from the report envelope.
         print("candor-swift \(releaseVersion) (spec \(specVersion))")
         print("upgrade: git pull && swift build -c release")
-        exit(0)
-    case "--check-update":
-        // OPT-IN network check — the ONLY arm that touches the network. Prints the version line, then
-        // does one 4s GET and degrades to a one-line stderr notice on ANY failure (still exit 0).
-        print("candor-swift \(releaseVersion) (spec \(specVersion))")
-        if let latest = fetchLatestRelease() {
-            if versionGreater(latest, releaseVersion) {
-                print("candor-swift \(releaseVersion) -> \(latest) available")
-                print("run: git pull && swift build -c release")
-            } else {
-                print("up to date (latest is \(latest))")
-            }
-        } else {
-            FileHandle.standardError.write(
-                "candor-swift: could not reach api.github.com to check for updates\n".data(using: .utf8)!)
-        }
         exit(0)
     case "--agents":
         // The agent contract for THE INSTALLED BUILD, EMBEDDED at compile time (AgentsDoc.swift,
