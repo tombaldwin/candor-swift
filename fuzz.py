@@ -30,7 +30,7 @@ SINKS = {
 
 # Edge forms: how fn i reaches fn i+1 (or the sink). `unknown` forms must read Unknown in the
 # RECEIVING function instead of (or in addition to) the effect.
-FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local", "iter", "for_each", "field_iter", "dict_iter", "subscript_recv", "cast_recv", "field_chain", "enum_bind", "generic_proto", "guard_let", "tuple_recv", "field_subscript", "cast_field", "loop_field_subscript", "deep_nest"]
+FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "proto", "callback_recv", "fn_field", "computed_prop", "opaque_local", "iter", "for_each", "field_iter", "dict_iter", "subscript_recv", "cast_recv", "field_chain", "enum_bind", "generic_proto", "guard_let", "tuple_recv", "field_subscript", "cast_field", "loop_field_subscript", "deep_nest", "overload_subtype"]
 
 
 def build_deep_nest(rng, i, me, callee):
@@ -155,6 +155,27 @@ def gen(seed):
                          f"func {me}() {{ let n = N{i}.c{i}(P{i}()); switch n {{ case .c{i}(let x): x.go() }} }}")
         elif form == "deep_nest":
             bodies[i] = build_deep_nest(rng, i, me, callee)
+        elif form == "overload_subtype":
+            # SUBTYPE-BLIND OVERLOAD hole (the silent-pure cardinal violation): two same-name overloads
+            # on `Snk{i}` — `handle(_: An{i})` (a protocol param) reaches the effect, and a PURE sibling
+            # `handle(_: Int)`. The call passes a CONCRETE conformer (`Dg{i}: An{i}`), so its static arg
+            # type is `Dg{i}`, a strict subtype of the param `An{i}`. A raw `"Dg{i}" != "An{i}"` string
+            # mismatch excludes the effectful overload and, with no sibling matching, DROPS the edge → the
+            # caller comes back SILENTLY PURE. Subtype-aware matching must keep the effectful overload, so
+            # `me` reads the effect (or Unknown). Randomly pick base-class vs protocol conformer to also
+            # cover the class-inheritance arm of the subtype index.
+            if rng.random() < 0.5:
+                supertype = (f"protocol An{i} {{ func speak() }}\n"
+                             f"struct Dg{i}: An{i} {{ func speak() {{}} }}")
+            else:
+                supertype = (f"class An{i} {{ func speak() {{}} }}\n"
+                             f"class Dg{i}: An{i} {{ override func speak() {{}} }}")
+            bodies[i] = (f"{supertype}\n"
+                         f"struct Snk{i} {{\n"
+                         f"    func handle(_ a: An{i}) {{ {callee}() }}\n"
+                         f"    func handle(_ n: Int) {{ _ = n }}\n"
+                         f"}}\n"
+                         f"func {me}() {{ let d = Dg{i}(); Snk{i}().handle(d) }}")
         elif form == "field_subscript":
             # NESTED receiver: `h.xs[0].go()` — a [E] FIELD of a typed local, then a subscript. Each
             # indirection works alone; this checks rootOf threads the type through both at once.

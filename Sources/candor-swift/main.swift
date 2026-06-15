@@ -1116,9 +1116,24 @@ if !overloadedQuals.isEmpty {
         allFns[i].simpleQual = "\(base)\(suffix)"
     }
 }
+// SUBTYPE INDEX for overload matching. `conformers[P]` lists the types that declared `: P` (protocol
+// conformers AND class subclasses — `pushType` records both). Build the TRANSITIVE subtype set per
+// supertype so a strict subtype/conformer (`Dog` for `Animal`, `Puppy` for `Animal` via `Dog`) is
+// recognised, not just direct conformers. Used below: a string `!=` on type names is SUBTYPE-BLIND —
+// `"Dog" != "Animal"` would wrongly exclude the effectful `handle(_: Animal)` overload, and if no sibling
+// matched the edge was DROPPED and the caller came back SILENTLY PURE (the cardinal soundness violation).
+var subtypesOf: [String: Set<String>] = [:]   // supertype -> all (transitive) known subtypes/conformers
+for (sup, subs) in conformers {
+    var seen = Set<String>(), frontier = subs
+    while let s = frontier.popLast() {
+        if !seen.insert(s).inserted { continue }
+        if let more = conformers[s] { frontier.append(contentsOf: more) }
+    }
+    subtypesOf[sup, default: []].formUnion(seen)
+}
 // Match a call (arg count + inferred arg types) to overload target qual(s). Empty ⇒ confident no local
 // overload matches ⇒ DROP. Non-empty ⇒ edge to all (one hit precise; several = sound union). A closure so
-// it captures `overloads`.
+// it captures `overloads`/`subtypesOf`.
 let matchOverloads: (String, Int, [String?]) -> [String] = { base, argc, argTypes in
     guard let cands = overloads[base] else { return [] }
     var hits: [String] = []
@@ -1133,7 +1148,14 @@ let matchOverloads: (String, Int, [String?]) -> [String] = { base, argc, argType
         var ok = true
         let typeLimit = variadicIdx ?? c.sig.count   // don't positionally type-check at/after a variadic param
         for j in 0..<min(argc, typeLimit) where j < argTypes.count {  // confident type mismatch (positional call)
-            if let at = argTypes[j], let pt = c.sig[j].type, at != pt { ok = false; break }
+            // SUBTYPE-AWARE exclusion (soundness-first): exclude this overload ONLY when the arg type is
+            // PROVABLY NOT a subtype/conformer of the param type. `at == pt` matches; `at` ∈ the param's
+            // transitive subtype set matches (a concrete conformer/subclass passed where the base/protocol
+            // is declared). When the relation can't be proven, KEEP the overload (union its effects) rather
+            // than exclude — the safe over-approximate direction, never a silent-pure drop.
+            guard let at = argTypes[j], let pt = c.sig[j].type, at != pt else { continue }
+            if subtypesOf[pt]?.contains(at) == true { continue }   // arg is a known subtype/conformer of param
+            ok = false; break
         }
         if ok { hits.append(c.qual) }
     }
