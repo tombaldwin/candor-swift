@@ -9,6 +9,8 @@ from the spec and validated against the shared conformance oracle: **20/20 on fi
 swift build -c release
 .build/release/candor-swift <package-dir>          # writes <dir>/.candor/report.json + callgraph sidecar
 .build/release/candor-swift <dir> --policy gate.pol  # §6.2 deny/pure/allow/forbid; exit 1 on violation
+.build/release/candor-swift --version              # installed build + spec contract (offline) + upgrade line
+.build/release/candor-swift --check-update         # one 4s GET to GitHub releases: is a newer build out?
 ```
 
 Built on [SwiftSyntax](https://github.com/swiftlang/swift-syntax) — syntactic, like `candor-scan`: no

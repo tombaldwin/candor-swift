@@ -127,4 +127,14 @@ final class ClassifierTests: XCTestCase {
         let r = propagate([:], over: ["a": ["b"]])
         XCTAssertNil(r["a"])  // nothing reachable carries a value
     }
+
+    // ── versionGreater (the --check-update semver compare) ────────────────────────────────────────
+    func testVersionGreater() {
+        XCTAssertFalse(versionGreater("0.5.0", "0.5.0"))  // equal → not greater (→ "up to date")
+        XCTAssertTrue(versionGreater("0.5.1", "0.5.0"))   // patch newer
+        XCTAssertTrue(versionGreater("0.6.0", "0.5.0"))   // minor newer
+        XCTAssertTrue(versionGreater("0.6.0", "0.5.9"))   // numeric, not lexical (9 < 6.0's minor)
+        XCTAssertFalse(versionGreater("0.4.9", "0.5.0"))  // older
+        XCTAssertFalse(versionGreater("0.5", "0.5.0"))    // trailing-zero equality
+    }
 }
