@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.5.3"
+let engineVersion = "candor-swift-0.5.4"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -178,6 +178,15 @@ final class DeclCollector: SyntaxVisitor {
     // the returns index is built (a free factory's return type isn't known during this first pass).
     var staticFactoryFields: [(type: String, field: String, leaf: String)] = []
     var localTypes: Set<String> = []
+    // Types declared `@propertyWrapper`, and the wrapped stored properties per type
+    // (`wrappedProps["S"]["count"] = "Logged"`). A `@Logged var count` desugars `s.count` to
+    // `s._count.wrappedValue`; CallCollector edges the access to `Logged.wrappedValue` so an effectful
+    // wrapper accessor isn't silently pure. The attribute NAME is recorded raw (any uppercase-first
+    // property attribute); CallCollector confirms it against `propertyWrapperTypes` (unioned across all
+    // files) before edging, so a non-wrapper attribute / a wrapper declared in another file never
+    // fabricates and ordering can't matter.
+    var propertyWrapperTypes: Set<String> = []
+    var wrappedProps: [String: [String: String]] = [:]
     var dynamicMemberTypes: Set<String> = []   // `@dynamicMemberLookup`-annotated local types
     var imports: [String] = []
     private var typeStack: [String] = []
@@ -205,9 +214,13 @@ final class DeclCollector: SyntaxVisitor {
         // subscript, whose effect cannot be statically pinned to the runtime member name. A read of
         // an UNDECLARED member on such a type is honest Unknown (modeled in CallCollector).
         for attr in attributes ?? [] {
-            if let a = attr.as(AttributeSyntax.self),
-               a.attributeName.trimmedDescription == "dynamicMemberLookup" {
-                dynamicMemberTypes.insert(name)
+            if let a = attr.as(AttributeSyntax.self) {
+                let an = a.attributeName.trimmedDescription
+                if an == "dynamicMemberLookup" { dynamicMemberTypes.insert(name) }
+                // A `@propertyWrapper` type: `@Wrapper var p` desugars `p` to `_p.wrappedValue`, so a
+                // read/write of the wrapped property runs the wrapper's wrappedValue accessor. Record
+                // the wrapper TYPE so CallCollector can edge a wrapped-property access to it.
+                if an == "propertyWrapper" { propertyWrapperTypes.insert(name) }
             }
         }
     }
@@ -320,6 +333,19 @@ final class DeclCollector: SyntaxVisitor {
                     info.body = b
                     info.isAccessor = true
                     fns.append(info)
+                }
+                // A property-wrapper attribute (`@Logged var count`): record the wrapper TYPE so a read/
+                // write of `count` edges to `<Wrapper>.wrappedValue`. Any uppercase-first @-attribute is a
+                // candidate; CallCollector gates on `propertyWrapperTypes` so non-wrappers (@MainActor,
+                // @objc) and library wrappers (@Published — no local unit) never fabricate.
+                for attr in node.attributes {
+                    if let a = attr.as(AttributeSyntax.self) {
+                        let an = a.attributeName.trimmedDescription
+                        if an.first?.isUppercase == true {
+                            wrappedProps[ty, default: [:]][name] = an
+                            break
+                        }
+                    }
                 }
                 if let ann = binding.typeAnnotation {
                     let info = typeName(ann.type)
@@ -528,11 +554,16 @@ final class CallCollector: SyntaxVisitor {
     var propertyEdges: Set<String> = []   // `Type.member` candidates from property READS
     var callbackInvoked: Set<String> = [] // fn-typed params INVOKED — deferred to callback-flow
     let dynamicMemberTypes: Set<String>   // `@dynamicMemberLookup` types — dynamic access is Unknown
+    let propertyWrapperTypes: Set<String> // `@propertyWrapper` types — confirm a wrapped-property edge
+    let wrappedProps: [String: [String: String]]  // Type -> property -> wrapper type (`S.count -> Logged`)
 
     init(info: FnInfo, fields: [String: [String: (name: String?, isFunction: Bool)]], localTypes: Set<String>,
          localProtocols: Set<String>, returns: [String: String],
          fieldArrayElem: [String: [String: String]], fieldDictValue: [String: [String: String]],
-         enumCaseValueType: [String: String], dynamicMemberTypes: Set<String>) {
+         enumCaseValueType: [String: String], dynamicMemberTypes: Set<String>,
+         propertyWrapperTypes: Set<String>, wrappedProps: [String: [String: String]]) {
+        self.propertyWrapperTypes = propertyWrapperTypes
+        self.wrappedProps = wrappedProps
         self.dynamicMemberTypes = dynamicMemberTypes
         self.enumCaseValueType = enumCaseValueType
         self.vars = info.params
@@ -647,6 +678,19 @@ final class CallCollector: SyntaxVisitor {
             }
         }
         return (nil, false, [])
+    }
+
+    /// The Foundation file-write idiom `value.write(to: url)` — `Data.write(to:)` and
+    /// `String.write(to:)` persist to a FILE → Fs. It was unclassified (kappaMember keys on
+    /// FileManager/FileHandle, not the value being written), so a `data.write(to: url)` read silently
+    /// pure. GUARD the pure overloads `String` also has: `write(to: &TextOutputStream)` writes to an
+    /// in-memory sink and `write(_:)` (TextOutputStream conformance) appends to a string — neither is
+    /// file I/O. Both are distinguished by the `to:` argument being an INOUT expression (or absent),
+    /// so classify ONLY a `write(to:)` whose destination is a non-inout value. (Data has no such pure
+    /// overload; the guard is uniform and harmless there.)
+    private func isFileWrite(member: String, _ node: FunctionCallExprSyntax) -> Bool {
+        guard member == "write", let first = node.arguments.first, first.label?.text == "to" else { return false }
+        return !Self.peel(first.expression).is(InOutExprSyntax.self)
     }
 
     private func argKinds(_ node: FunctionCallExprSyntax) -> [ArgKind] {
@@ -984,6 +1028,11 @@ final class CallCollector: SyntaxVisitor {
                 // soundness hole). Same bounded CHA / honest-Unknown as protocol params. Also before
                 // κ: a local protocol shadows the platform table.
                 protoDispatches.append((rt, member))
+            } else if let rt = base.root, (rt == "Data" || rt == "String"), isFileWrite(member: member, node) {
+                // Data/String file write (`d.write(to: url)`) → Fs; the pure in-memory/TextOutputStream
+                // overloads are excluded by isFileWrite's inout/label guard (never fabricate).
+                directEffects.insert("Fs")
+                recordSurfaces(effect: "Fs", lit: lit)
             } else if let rt = base.root, let eff = kappaMember(root: rt, member: member) {
                 directEffects.insert(eff)
                 recordSurfaces(effect: eff, lit: lit)
@@ -1046,6 +1095,15 @@ final class CallCollector: SyntaxVisitor {
                 unresolved = true
                 why.insert("dynamicMemberLookup:\(root).\(prop)")
             } else if let root = recvRoot, localTypes.contains(root) {
+                // A PROPERTY-WRAPPED stored property (`@Logged var count`): `s.count` (read OR write)
+                // desugars to `s._count.wrappedValue` — edge to the wrapper's wrappedValue accessor unit
+                // so its I/O isn't silently pure. Gated on the attribute being a real `@propertyWrapper`
+                // type (confirmed across all files), so a non-wrapper attribute never fabricates. `count`
+                // itself is a stored property (no accessor unit), so the plain `S.count` edge below is
+                // inert here; the wrappedValue edge is the real one.
+                if let wrapper = wrappedProps[root]?[prop], propertyWrapperTypes.contains(wrapper) {
+                    propertyEdges.insert("\(wrapper).wrappedValue")
+                }
                 propertyEdges.insert("\(root).\(prop)")
             } else if let root = recvRoot, localProtocols.contains(root) {
                 // PROTOCOL PROPERTY-REQUIREMENT dispatch: `p.payload` where `p` is a protocol-typed
@@ -1252,6 +1310,8 @@ var protocolMethods: [String: Set<String>] = [:]
 var conformers: [String: [String]] = [:]
 var localTypes: Set<String> = []
 var dynamicMemberTypes: Set<String> = []
+var propertyWrapperTypes: Set<String> = []
+var wrappedProps: [String: [String: String]] = [:]
 var returnsIdx: [String: String] = [:]
 var importCounts: [String: Int] = [:]
 // The package's OWN target modules (SPM convention: Sources/<TargetName>/) — an internal import is
@@ -1307,6 +1367,8 @@ for c in collectors {
     for (pn, ts) in c.conformers { conformers[pn, default: []].append(contentsOf: ts) }
     localTypes.formUnion(c.localTypes)
     dynamicMemberTypes.formUnion(c.dynamicMemberTypes)
+    propertyWrapperTypes.formUnion(c.propertyWrapperTypes)
+    for (t, ps) in c.wrappedProps { wrappedProps[t, default: [:]].merge(ps) { a, _ in a } }
     for m in c.imports { importCounts[m, default: 0] += 1 }
     staticFactoryFields.append(contentsOf: c.staticFactoryFields)
 }
@@ -1457,7 +1519,8 @@ for f in allFns {
     let cc = CallCollector(info: f, fields: fields, localTypes: localTypes,
                            localProtocols: localProtocolNames, returns: returnsIdx,
                            fieldArrayElem: fieldArrayElem, fieldDictValue: fieldDictValue,
-                           enumCaseValueType: enumCaseValueType, dynamicMemberTypes: dynamicMemberTypes)
+                           enumCaseValueType: enumCaseValueType, dynamicMemberTypes: dynamicMemberTypes,
+                           propertyWrapperTypes: propertyWrapperTypes, wrappedProps: wrappedProps)
     cc.walk(body)
     // accessor units: a property READ of a known accessor unit is an edge (the reader inherits
     // the getter's effects — `c.data` reaching the Fs inside `var data: Data { … }`)

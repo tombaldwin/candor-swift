@@ -36,7 +36,7 @@ FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "pro
          # chain (correct — candor can't model dealloc timing). It is appended off-chain every seed and
          # checked via extra_effectful instead.
          "custom_seq", "subscript_access", "static_init", "global_init", "proto_prop", "call_as_function", "operator_overload",
-         "default_arg", "dynamic_member"]
+         "default_arg", "dynamic_member", "property_wrapper"]
 
 
 def build_deep_nest(rng, i, me, callee):
@@ -103,6 +103,15 @@ def gen(seed):
             # property must edge to it
             bodies[i] = (f"struct G{i} {{ var v: Int {{ {callee}(); return 1 }} }}\n"
                          f"func {me}() {{ _ = G{i}().v }}")
+        elif form == "property_wrapper":
+            # the @propertyWrapper desugar hole: reading `s.p` runs `_p.wrappedValue`, whose body
+            # reaches the callee. Pre-fix the wrapped-property read was silently pure (the access is
+            # neither a call nor a computed-property unit ON the wrapped type — the edge must go to the
+            # WRAPPER's wrappedValue accessor).
+            bodies[i] = (f"@propertyWrapper struct W{i} {{ let s: Int; init(wrappedValue: Int) {{ s = wrappedValue }}\n"
+                         f"  var wrappedValue: Int {{ {callee}(); return s }} }}\n"
+                         f"struct PW{i} {{ @W{i} var p: Int = 0 }}\n"
+                         f"func {me}() {{ _ = PW{i}().p }}")
         elif form == "fn_field":
             bodies[i] = (f"struct D{i} {{ let f: () -> Void }}\n"
                          f"func hold{i}(_ d: D{i}) {{ d.f() }}\n"
@@ -275,7 +284,7 @@ def gen(seed):
     dei = f"final class DeinitProbe {{ deinit {{ {sink_stmt} }} }}"
     extra_effectful.add("DeinitProbe.deinit")
     src = ("import Foundation\n\n" + "\n".join(bodies) + "\n" + bystander + "\n"
-           + dei + "\n" + PRECISION_TRAPS + "\n")
+           + dei + "\n" + PRECISION_TRAPS + "\n" + FILE_WRITE_POSITIVE + "\n")
     chain = [fn(i) for i in range(n + 1)]
     return src, chain, sink_eff, expect_unknown, extra_effectful, forms
 
@@ -295,8 +304,21 @@ struct TrapBox { func data() {}; func write() {} }                          // m
 func trapBoxes() -> [TrapBox] { [] }
 func trapLeak() { let ss: [URLSession] = []; for s in ss { _ = s }; for s in trapBoxes() { s.data(); s.write() } }
 func trapDollar() { let ss: [URLSession] = []; ss.forEach { _ = $0 }; trapBoxes().map { $0.data() } }
+// String's PURE write overloads — `write(to: &TextOutputStream)` (in-memory sink) and `write(_:)`
+// (TextOutputStream append) are NOT file I/O. The Data/String file-write classifier must exclude them
+// (the inout/label guard) — else it fabricates Fs.
+func trapWriteStream(_ s: String) { var o = ""; s.write(to: &o); _ = o }
+func trapWriteAppend() { var t = ""; t.write("x"); _ = t }
 """
-TRAP_FNS = ["trapSingleton", "trapRead", "trapLeak", "trapDollar"]
+TRAP_FNS = ["trapSingleton", "trapRead", "trapLeak", "trapDollar", "trapWriteStream", "trapWriteAppend"]
+
+# POSITIVE classifier fixture appended every seed: the Foundation file-write idiom `Data/String.write(to:
+# url)` persists to a FILE → Fs. Was unclassified (silent pure). Guarded by the trapWrite* twins above.
+FILE_WRITE_POSITIVE = """
+func fwData(_ d: Data, _ u: URL) { try? d.write(to: u) }
+func fwStr(_ s: String, _ u: URL) { try? s.write(to: u, atomically: true, encoding: .utf8) }
+"""
+FILE_WRITE_FNS = ["fwData", "fwStr"]  # must each carry Fs
 
 
 def run_seed(seed):
@@ -330,6 +352,9 @@ def run_seed(seed):
         for t in TRAP_FNS:
             if t in got:
                 fails.append(f"{t}: PRECISION TRAP — a pure fn FABRICATED an effect {sorted(got[t])} via a receiver-typing heuristic")
+        for t in FILE_WRITE_FNS:
+            if "Fs" not in got.get(t, set()):
+                fails.append(f"{t}: SILENT under-report — Data/String.write(to: url) must classify Fs, got {sorted(got.get(t, set()))}")
         return fails, forms
     finally:
         shutil.rmtree(d, ignore_errors=True)
