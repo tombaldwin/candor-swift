@@ -37,7 +37,7 @@ FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "pro
          # checked via extra_effectful instead.
          "custom_seq", "subscript_access", "static_init", "global_init", "proto_prop", "call_as_function", "operator_overload",
          "default_arg", "dynamic_member", "property_wrapper", "sorted_closure", "predicate_closure",
-         "field_init", "proto_default", "hof_ref", "keypath_getter", "implicit_self_read"]
+         "field_init", "proto_default", "hof_ref", "keypath_getter", "implicit_self_read", "free_operator"]
 
 
 def build_deep_nest(rng, i, me, callee):
@@ -151,6 +151,14 @@ def gen(seed):
             # the loop variable must carry the element type or its `x.go()` drops to pure.
             bodies[i] = (f"struct E{i} {{ func go() {{ {callee}() }} }}\n"
                          f"func {me}() {{ let xs: [E{i}] = [E{i}()]; for x in xs {{ x.go() }} }}")
+        elif form == "free_operator":
+            # a FREE (top-level) operator `func <> (a: Lo, b: Lo)` whose body reaches the callee, applied
+            # as `a <> b`. The operator def is a unit, but the application is a SequenceExpr, not a call —
+            # pre-fix the typed path edged a non-existent member `Lo.<>` and skipped the free path → silent.
+            bodies[i] = (f"struct Lo{i} {{}}\n"
+                         f"func <> (a: Lo{i}, b: Lo{i}) -> Lo{i} {{ {callee}(); return a }}\n"
+                         f"infix operator <>\n"
+                         f"func {me}() {{ _ = Lo{i}() <> Lo{i}() }}")
         elif form == "sorted_closure":
             # a NON-whitelisted element-closure HOF: `xs.sorted { $0.go2() < $1.go2() }`. The closure's
             # params are BOTH the receiver element; pre-fix only the 8-method whitelist typed `$0`, so a
@@ -361,9 +369,14 @@ func trapArgLocal() { let trapCfg = 7; trapTake(trapCfg) }
 // stay pure — the getter's nested `let` must not be collected as a stored-property initializer.
 struct TrapInit { var job: Int { let p = Process(); try? p.run(); return 0 } }
 func trapCtorOnly() { _ = TrapInit() }
+// operator regression: a same-named local FREE operator must NOT be edged by a STD operator over
+// non-local operands — `1 + 2` (Int) must stay pure even though a local `+(TrapOp,TrapOp)` exists.
+struct TrapOp { let n: Int }
+func + (a: TrapOp, b: TrapOp) -> TrapOp { _ = FileManager.default.contents(atPath: "/x"); return a }
+func trapStdAdd() -> Int { return 1 + 2 }
 """
 TRAP_FNS = ["trapSingleton", "trapRead", "trapLeak", "trapDollar", "trapWriteStream", "trapWriteAppend",
-            "trapShadow", "trapArgLocal", "trapCtorOnly"]
+            "trapShadow", "trapArgLocal", "trapCtorOnly", "trapStdAdd"]
 
 # POSITIVE classifier fixture appended every seed: the Foundation file-write idiom `Data/String.write(to:
 # url)` persists to a FILE → Fs. Was unclassified (silent pure). Guarded by the trapWrite* twins above.

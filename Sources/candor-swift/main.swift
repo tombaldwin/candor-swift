@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.5.7"
+let engineVersion = "candor-swift-0.5.8"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -1221,19 +1221,24 @@ final class CallCollector: SyntaxVisitor {
             let opName = op.operator.text
             // resolve a local operand type from either side (the lhs first, then rhs)
             let lt = rootOf(elems[i]), rt = i + 2 < elems.count ? rootOf(elems[i + 2]) : (root: nil, isVar: false, path: [])
-            var resolved = false
             // a binary operator takes two args — supply two opaque arg slots so overloaded operator
             // resolution (arity ≥ 2) keeps the edge.
             let opArgs: [ArgKind] = [.opaque, .opaque], opTypes: [String?] = [lt.isVar ? lt.root : nil, rt.isVar ? rt.root : nil]
+            var localOperand = false
             for cand in [lt.root, rt.root] {
                 if let t = cand, lt.isVar || rt.isVar, localTypes.contains(t) {
                     calls.append(Call(path: "\(t).\(opName)", leaf: opName, strArg: nil, typed: true, args: opArgs, argTypes: opTypes))
-                    resolved = true; break
+                    localOperand = true; break
                 }
             }
-            if !resolved {
-                // a FREE operator overload `func + (…)` — edge via the unqualified-name path (resolved to
-                // a unique free-fn unit, else dropped). Never fabricates: only fires if a `+` unit exists.
+            // When an operand is a LOCAL-typed value, ALSO try the FREE operator overload: a custom
+            // operator is most often a TOP-LEVEL `func + (a: V, b: V)` (a free fn named `+`), NOT a static
+            // member `V.+` — so the typed edge above (member form) missed it and an effectful free operator
+            // (`a + b`, `x += y`, a custom `<>`, a `log << msg` DSL) read silently PURE. Resolved by operand
+            // TYPE via matchOverloads. GATED on a local operand: without it, `1 + 2` over the std Int `+`
+            // would edge a same-named local `func +(V,V)` via the unique-free-fn path (which ignores arg
+            // types) — a fabrication. With confident local operand types, matchOverloads discriminates.
+            if localOperand {
                 calls.append(Call(path: opName, leaf: opName, strArg: nil, typed: false, args: opArgs, argTypes: opTypes, unqualified: true))
             }
             i += 2

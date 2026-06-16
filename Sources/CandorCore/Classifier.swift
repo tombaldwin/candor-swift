@@ -93,6 +93,13 @@ public func kappaMember(root: String, member: String) -> String? {
     case "ContinuousClock", "SuspendingClock", "DispatchTime": return member == "now" ? "Clock" : nil
     case "NWConnection", "NWListener": return "Net"
     case "NSXPCConnection": return "Ipc"
+    // CoreData persistence: NSManagedObjectContext.save/fetch/execute/count and the store-load/coordinator
+    // verbs hit the SQLite store — Db. The builder/algebra surface (NSFetchRequest construction, predicates,
+    // object property reads) is not a verb here, so it stays pure (the builder discipline).
+    case "NSManagedObjectContext":
+        return ["save", "fetch", "execute", "count", "performFetch", "executeFetchRequest"].contains(member) ? "Db" : nil
+    case "NSPersistentContainer", "NSPersistentStoreCoordinator":
+        return ["loadPersistentStores", "execute", "addPersistentStore", "performBackgroundTask"].contains(member) ? "Db" : nil
     // The NIO tier (the vapor probe's pointer: 84 NIOCore imports, all invisible). Verb-precise:
     // channel/bootstrap wiring and socket reads/writes are Net; the pure ByteBuffer/EventLoop
     // future algebra stays out (the builder discipline).
