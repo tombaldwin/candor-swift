@@ -36,7 +36,8 @@ FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "pro
          # chain (correct — candor can't model dealloc timing). It is appended off-chain every seed and
          # checked via extra_effectful instead.
          "custom_seq", "subscript_access", "static_init", "global_init", "proto_prop", "call_as_function", "operator_overload",
-         "default_arg", "dynamic_member", "property_wrapper", "sorted_closure", "predicate_closure"]
+         "default_arg", "dynamic_member", "property_wrapper", "sorted_closure", "predicate_closure",
+         "field_init", "proto_default", "hof_ref", "keypath_getter", "implicit_self_read"]
 
 
 def build_deep_nest(rng, i, me, callee):
@@ -103,6 +104,34 @@ def gen(seed):
             # property must edge to it
             bodies[i] = (f"struct G{i} {{ var v: Int {{ {callee}(); return 1 }} }}\n"
                          f"func {me}() {{ _ = G{i}().v }}")
+        elif form == "field_init":
+            # an INSTANCE stored-property initializer runs at construction; with a SYNTHESIZED init (no
+            # explicit init) it has no unit, so the effect was orphaned — `_ = Fi{i}()` must carry it.
+            bodies[i] = (f"func mk{i}() -> Int {{ {callee}(); return 1 }}\n"
+                         f"struct Fi{i} {{ let x = mk{i}() }}\n"
+                         f"func {me}() {{ _ = Fi{i}() }}")
+        elif form == "proto_default":
+            # a PROTOCOL-EXTENSION default method reached via a CONCRETE conformer receiver — the
+            # concrete type declares no override, so `j.act()` must fall back to the default body.
+            bodies[i] = (f"protocol Pd{i} {{}}\n"
+                         f"extension Pd{i} {{ func act() {{ {callee}() }} }}\n"
+                         f"struct Jd{i}: Pd{i} {{}}\n"
+                         f"func {me}(_ j: Jd{i}) {{ j.act() }}")
+        elif form == "hof_ref":
+            # a free FUNCTION passed BY REFERENCE to a non-local HOF (`xs.map(ref)`) is invoked by it —
+            # the reference must edge to the fn unit (only inline closures were walked pre-fix).
+            bodies[i] = (f"func ref{i}(_ x: Int) -> Int {{ {callee}(); return x }}\n"
+                         f"func {me}() {{ let xs = [1]; _ = xs.map(ref{i}) }}")
+        elif form == "keypath_getter":
+            # a KEY PATH to an effectful getter (`xs.map(\\.v)`) READS the property — runs its getter.
+            bodies[i] = (f"struct Kp{i} {{ var v: Int {{ {callee}(); return 0 }} }}\n"
+                         f"func {me}(_ xs: [Kp{i}]) {{ _ = xs.map(\\.v) }}")
+        elif form == "implicit_self_read":
+            # a BARE-name read of an effectful computed property inside the SAME type (`return v`, not
+            # `self.v`) runs the accessor — pre-fix only `self.v` edged; the bare read was silent-pure.
+            bodies[i] = (f"struct Is{i} {{ var v: Int {{ {callee}(); return 1 }}\n"
+                         f"  func use() -> Int {{ return v }} }}\n"
+                         f"func {me}(_ s: Is{i}) -> Int {{ return s.use() }}")
         elif form == "property_wrapper":
             # the @propertyWrapper desugar hole: reading `s.p` runs `_p.wrappedValue`, whose body
             # reaches the callee. Pre-fix the wrapped-property read was silently pure (the access is

@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.5.5"
+let engineVersion = "candor-swift-0.5.6"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -324,6 +324,23 @@ final class DeclCollector: SyntaxVisitor {
                    !node.modifiers.contains(where: { $0.name.text == "lazy" }),
                    let init0 = binding.initializer {
                     accessorBodies.append(Syntax(init0.value))
+                }
+                // An INSTANCE STORED property's initializer (`let session = makeSession()`) runs during
+                // CONSTRUCTION — in every init, before its body. With an EXPLICIT init the field init
+                // merges into that collected `<Type>.init` unit (duplicate quals union); but with a
+                // SYNTHESIZED init (no explicit init) there is no such unit and the initializer's effects
+                // were ORPHANED (a `let db = Connection(...)` dependency-wiring read pure at the
+                // construction site). Collect the initializer under `<Type>.init` so `Type()` edges to it
+                // either way. (Static/lazy are handled above as first-touch reads, not construction.)
+                if !isStatic, binding.accessorBlock == nil,
+                   !node.modifiers.contains(where: { $0.name.text == "lazy" }),
+                   let init0 = binding.initializer {
+                    var info = FnInfo(qual: "\(tyPath).init", loc: loc(binding))
+                    info.simpleQual = "\(ty).init"
+                    info.enclosingType = ty
+                    info.enclosingTypePath = tyPath
+                    info.body = Syntax(init0.value)
+                    fns.append(info)
                 }
                 for b in accessorBodies {
                     var info = FnInfo(qual: qual, loc: loc(binding))
@@ -962,6 +979,27 @@ final class CallCollector: SyntaxVisitor {
     override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
         typeClosureParams(node)
         typeEnumCaseBinding(node)
+        // A LOCAL function/method passed BY REFERENCE as an argument (`xs.map(loadFree)`,
+        // `xs.map(self.load)`) may be INVOKED by the callee, so its effects are reachable here. The
+        // precise callback-flow only resolves a LOCAL callee's invoked params; a non-local HOF (map/
+        // forEach/sorted) dropped the reference → silent-pure. Edge to the referenced unit (the Rust/TS
+        // engines' fn-as-value posture). A plain value identifier resolves to no unique fn unit (or is a
+        // local var/param, skipped) → dropped, never fabricated.
+        for arg in node.arguments {
+            let e = Self.peel(arg.expression)
+            if let dr = e.as(DeclReferenceExprSyntax.self) {
+                let n = dr.baseName.text
+                if vars[n] == nil && !fnTyped.contains(n) {
+                    calls.append(Call(path: n, leaf: n, strArg: nil, typed: false, unqualified: true))
+                }
+            } else if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base {
+                let recv = rootOf(base)
+                if let rt = recv.root, localTypes.contains(rt) {
+                    let m = ma.declName.baseName.text
+                    calls.append(Call(path: "\(rt).\(m)", leaf: m, strArg: nil, typed: true))
+                }
+            }
+        }
         let lit = firstStringLiteral(node.arguments)
         if let dr = node.calledExpression.as(DeclReferenceExprSyntax.self) {
             let name = dr.baseName.text
@@ -1143,6 +1181,14 @@ final class CallCollector: SyntaxVisitor {
             if p.is(FunctionCallExprSyntax.self) || p.is(MemberAccessExprSyntax.self)
                 || p.is(SubscriptCallExprSyntax.self) { return .skipChildren }
         }
+        // IMPLICIT-SELF property read: a bare `token` inside a method of a type that DECLARES `token` as a
+        // computed/lazy property is `self.token` — reading it RUNS the accessor. The MemberAccess visitor
+        // only fires for the explicit `self.token`; a bare read routed solely to globalReads missed the
+        // accessor unit (an effectful lazy/computed property came back pure). Edge to the enclosing type's
+        // `<Type>.token` accessor unit — resolveQual drops it unless `token` is a real accessor unit on
+        // THIS type (a plain stored field, or a name belonging to another type, resolves to nothing → no
+        // fabrication), exactly as the explicit-self path does.
+        if let et = enclosingType { propertyEdges.insert("\(et).\(n)") }
         globalReads.insert(n)
         return .skipChildren
     }
@@ -1191,6 +1237,30 @@ final class CallCollector: SyntaxVisitor {
         } else if let rt = base.root, localProtocols.contains(rt) {
             protoPropReads.append((rt, "subscript"))
         }
+        return .visitChildren
+    }
+
+    // KEY PATH to a property accessor (`\KP.heavy`, `obj[keyPath: \KP.heavy]`, `xs.map(\.heavy)`):
+    // applying a key path READS the property — it runs its getter. No visitor saw `KeyPathExprSyntax`, so
+    // an effectful getter reached via a key path was silent-pure. Resolve the path's TERMINAL property on
+    // its root type and edge to that accessor unit. Explicit root (`\KP.heavy`) gives the type directly;
+    // an implicit root (`\.heavy` as a `map`/`filter`/… argument) takes the receiver's ELEMENT type. A
+    // non-local / unresolved root edges nothing (resolveQual drops it — no fabrication).
+    override func visit(_ node: KeyPathExprSyntax) -> SyntaxVisitorContinueKind {
+        guard let lastProp = node.components.last?.component
+                .as(KeyPathPropertyComponentSyntax.self)?.declName.baseName.text else { return .visitChildren }
+        var rootType: String? = node.root.flatMap { typeName($0).name }
+        if rootType == nil {
+            // implicit root: the key path is the argument of an element-iterator call `recv.map(\.prop)` —
+            // its type is the receiver's element. Walk to the enclosing call and type from its receiver.
+            var p: Syntax? = node.parent
+            while let cur = p, !cur.is(FunctionCallExprSyntax.self) { p = cur.parent }
+            if let call = p?.as(FunctionCallExprSyntax.self),
+               let ma = call.calledExpression.as(MemberAccessExprSyntax.self), let base = ma.base {
+                rootType = elementTypeOf(base)
+            }
+        }
+        if let rt = rootType, localTypes.contains(rt) { propertyEdges.insert("\(rt).\(lastProp)") }
         return .visitChildren
     }
 
@@ -1433,6 +1503,12 @@ for (sup, subs) in conformers {
     }
     subtypesOf[sup, default: []].formUnion(seen)
 }
+// INVERSE: type -> its (transitive) supertypes — the protocols it conforms to and classes it extends.
+// Used to resolve a PROTOCOL-EXTENSION DEFAULT method reached via a CONCRETE receiver (`j.emit()` where
+// `j: Job`, Job: Logging, and Logging's extension defaults `emit`): Job declares no `emit`, so the typed
+// `Job.emit` doesn't resolve and the call read pure — fall back to the default body on a conformed super.
+var supertypesOf: [String: Set<String>] = [:]
+for (sup, subs) in subtypesOf { for s in subs { supertypesOf[s, default: []].insert(sup) } }
 // Match a call (arg count + inferred arg types) to overload target qual(s). Empty ⇒ confident no local
 // overload matches ⇒ DROP. Non-empty ⇒ edge to all (one hit precise; several = sound union). A closure so
 // it captures `overloads`/`subtypesOf`.
@@ -1571,6 +1647,21 @@ for f in allFns {
             } else if let t = resolveQual(call.path) {
                 edges[f.qual, default: []].insert(t)
                 callsiteArgs[t, default: []].append(call.args)
+            } else if let dot = call.path.lastIndex(of: "."),
+                      localTypes.contains(String(call.path[..<dot])) {
+                // PROTOCOL-EXTENSION DEFAULT via a CONCRETE receiver: `Job.emit` didn't resolve (Job
+                // declares no `emit`), but Job conforms to a protocol whose EXTENSION defaults `emit`.
+                // Edge to the default body on each conformed supertype that provides it (bounded by the
+                // few protocols a type conforms to; a sound union if more than one). Resolves only REAL
+                // `<Proto>.<member>` units — a member no conformed protocol defaults edges nothing.
+                let type = String(call.path[..<dot])
+                let member = String(call.path[call.path.index(after: dot)...])
+                for sup in supertypesOf[type] ?? [] {
+                    if let t = resolveQual("\(sup).\(member)") {
+                        edges[f.qual, default: []].insert(t)
+                        callsiteArgs[t, default: []].append(call.args)
+                    }
+                }
             }
         } else if call.unqualified {
             // an UNQUALIFIED `name(…)` call: a free function, a constructor, or a self-sibling method. A
