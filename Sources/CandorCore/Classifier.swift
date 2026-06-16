@@ -119,6 +119,10 @@ public func kappaMember(root: String, member: String) -> String? {
 public func kappaFree(name: String, argCount: Int) -> String? {
     switch name {
     case "Date": return argCount == 0 ? "Clock" : nil // Date() reads the clock; Date(timeInterval…) is arithmetic
+    case "NSDate": return argCount == 0 ? "Clock" : nil // the legacy twin of Date() (no-arg = current time)
+    case "CACurrentMediaTime", "mach_absolute_time": return "Clock" // monotonic clock reads (QuartzCore / mach)
+    case "NSLog": return "Log"  // Foundation structured logging to the unified log/ASL (not plain stdout)
+    case "Pipe": return "Ipc"   // constructs an OS pipe for inter-process stdio wiring (the IPC intent)
     case "UUID": return argCount == 0 ? "Rand" : nil  // UUID() draws v4 entropy; UUID(uuidString:) is a pure parse
     case "FileHandle": return argCount > 0 ? "Fs" : nil // FileHandle(forReadingAtPath:/forWritingTo:/…) OPENS an
         // fd (Fs). The member read/write surface is handled in kappaMember; the std accessors
@@ -151,6 +155,9 @@ public func kappaPropertyRead(root: String, path: [String]) -> String? {
     if root == "ProcessInfo" && path.contains("systemUptime") { return "Clock" } // monotonic clock read
     if root == "ProcessInfo" && path.contains("hostName") { return "Env" }       // machine-identity read
     if root == "Date" && path.contains("now") { return "Clock" }
+    // ContinuousClock/SuspendingClock `.now` — the idiomatic Swift 5.7+ monotonic-clock read is the
+    // PROPERTY form (`ContinuousClock().now`, `clock.now`, `ContinuousClock.now`), not a `.now()` call.
+    if (root == "ContinuousClock" || root == "SuspendingClock") && path.contains("now") { return "Clock" }
     if (root == "NSPasteboard" || root == "UIPasteboard") && path.contains("general") { return "Clipboard" }
     return nil
 }

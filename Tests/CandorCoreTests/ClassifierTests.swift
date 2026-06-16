@@ -42,7 +42,14 @@ final class ClassifierTests: XCTestCase {
         XCTAssertEqual(kappaFree(name: "getenv", argCount: 1), "Env")
         XCTAssertEqual(kappaFree(name: "sqlite3_exec", argCount: 3), "Db") // sqlite3_ prefix → Db
         XCTAssertNil(kappaFree(name: "sqlite3_changes", argCount: 1))      // resident-state read → never Db
+        XCTAssertEqual(kappaFree(name: "NSDate", argCount: 0), "Clock")    // legacy Date() twin
+        XCTAssertEqual(kappaFree(name: "CACurrentMediaTime", argCount: 0), "Clock")
+        XCTAssertEqual(kappaFree(name: "NSLog", argCount: 1), "Log")
+        XCTAssertEqual(kappaFree(name: "Pipe", argCount: 0), "Ipc")
         XCTAssertNil(kappaFree(name: "myLocalHelper", argCount: 0))
+        // property-read clock surface: ContinuousClock/SuspendingClock `.now`
+        XCTAssertEqual(kappaPropertyRead(root: "ContinuousClock", path: ["now"]), "Clock")
+        XCTAssertEqual(kappaPropertyRead(root: "SuspendingClock", path: ["now"]), "Clock")
     }
 
     func testKappaPropertyRead() {
