@@ -332,7 +332,8 @@ def gen(seed):
     dei = f"final class DeinitProbe {{ deinit {{ {sink_stmt} }} }}"
     extra_effectful.add("DeinitProbe.deinit")
     src = ("import Foundation\n\n" + "\n".join(bodies) + "\n" + bystander + "\n"
-           + dei + "\n" + PRECISION_TRAPS + "\n" + FILE_WRITE_POSITIVE + "\n")
+           + dei + "\n" + PRECISION_TRAPS + "\n" + FILE_WRITE_POSITIVE + "\n"
+           + CONCURRENCY_POSITIVE + "\n")
     chain = [fn(i) for i in range(n + 1)]
     return src, chain, sink_eff, expect_unknown, extra_effectful, forms
 
@@ -396,6 +397,19 @@ func fwToFile(_ d: Data) { try? d.write(toFile: "/x", options: []) }
 """
 FILE_WRITE_FNS = ["fwData", "fwStr", "fwToFile"]  # must each carry Fs
 
+# POSITIVE concurrency fixture appended every seed: a `for await x in <AsyncStream/AsyncThrowingStream>`
+# consumer must type the loop var from the stream's element so `x.cgo()` reaches the effect (was
+# silent-pure — the structured-concurrency element-typing hole); an explicit loop-var annotation
+# (`for await x: T in s`) likewise; and `Process.launchedTaskWithExecutableURL` is a process spawn → Exec.
+CONCURRENCY_POSITIVE = """
+struct CItem { func cgo() { _ = FileManager.default.contents(atPath: "/tmp/x") } }
+func forAwaitParam(_ s: AsyncStream<CItem>) async { for await x in s { x.cgo() } }
+func forTryAwaitParam(_ s: AsyncThrowingStream<CItem, Error>) async throws { for try await x in s { x.cgo() } }
+func forAwaitAnnot(_ s: AsyncStream<CItem>) async { for await x: CItem in s { x.cgo() } }
+func launchedURLExec() throws { _ = try Process.launchedTaskWithExecutableURL(URL(fileURLWithPath: "/bin/ls"), arguments: [], terminationHandler: nil) }
+"""
+CONCURRENCY_FNS = {"forAwaitParam": "Fs", "forTryAwaitParam": "Fs", "forAwaitAnnot": "Fs", "launchedURLExec": "Exec"}
+
 
 def run_seed(seed):
     src, chain, eff, expect_unknown, extra_effectful, forms = gen(seed)
@@ -431,6 +445,9 @@ def run_seed(seed):
         for t in FILE_WRITE_FNS:
             if "Fs" not in got.get(t, set()):
                 fails.append(f"{t}: SILENT under-report — Data/String.write(to: url) must classify Fs, got {sorted(got.get(t, set()))}")
+        for t, e in CONCURRENCY_FNS.items():
+            if e not in got.get(t, set()):
+                fails.append(f"{t}: SILENT under-report — concurrency consumer must classify {e}, got {sorted(got.get(t, set()))}")
         return fails, forms
     finally:
         shutil.rmtree(d, ignore_errors=True)

@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.5.10"
+let engineVersion = "candor-swift-0.5.11"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -449,13 +449,18 @@ final class DeclCollector: SyntaxVisitor {
             // and whether it has a default (so a call may legitimately omit it).
             info.paramSig.append((t.name, p.defaultValue != nil, p.ellipsis != nil))
             if t.isFunction { info.fnTypedParams.insert(pname); info.fnTypedParamIndex[pname] = idx }
+            // Container ELEMENT extraction runs before the plain-typed-param branch: a generic container
+            // (`Array<T>`/`Set<T>`/`AsyncStream<T>`/`TaskGroup<T>`) has a non-nil simple name, so without
+            // this it landed in `params` as the useless container name and `for x in p` left the loop var
+            // untyped — the structured-concurrency `for await x in stream` silent-pure hole. `[T]`/`[K:V]`
+            // (no simple name) were already reaching here; this just also catches the angle-bracket forms.
+            else if let elem = arrayElementName(p.type) { info.arrayParams[pname] = elem }  // `[T]`/`AsyncStream<T>`/…
+            else if let val = dictValueName(p.type) { info.dictParams[pname] = val }        // `[K: V]`/`Dictionary<K,V>`
             else if let tn = t.name {
                 // resolve a generic param to its protocol BOUND (`x: T` where `<T: Sender>` → dispatch P)
                 let resolved = genericBounds[tn] ?? tn
                 if protocolMethods[resolved] != nil { info.protoParams[pname] = resolved } else { info.params[pname] = tn }
             }
-            else if let elem = arrayElementName(p.type) { info.arrayParams[pname] = elem }  // `p: [T]`
-            else if let val = dictValueName(p.type) { info.dictParams[pname] = val }        // `p: [K: V]`
             else { let te = tupleElements(p.type); if !te.isEmpty { info.tupleParams[pname] = te } }  // `p: (A, B)`
         }
         fns.append(info)
@@ -862,7 +867,12 @@ final class CallCollector: SyntaxVisitor {
     override func visit(_ node: ForStmtSyntax) -> SyntaxVisitorContinueKind {
         modelImplicitIteration(node.sequence)
         if let name = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
-            if let elem = elementTypeOf(node.sequence) { vars[name] = elem } else { clearBinding(name) }
+            // An EXPLICIT loop-var annotation (`for await x: Item in s`) names the element type directly —
+            // honor it over the sequence's inferred element, so an unpinned/async sequence whose element
+            // type candor can't infer still types the loop var (was ignored → `x.member()` silent-pure).
+            if let ann = node.typeAnnotation, let tn = typeName(ann.type).name {
+                vars[name] = tn
+            } else if let elem = elementTypeOf(node.sequence) { vars[name] = elem } else { clearBinding(name) }
         } else if let tup = node.pattern.as(TuplePatternSyntax.self), tup.elements.count == 2,
                   let second = tup.elements.last?.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
             if let v = dictValueOf(node.sequence) {

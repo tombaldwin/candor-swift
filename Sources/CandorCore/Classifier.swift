@@ -48,7 +48,8 @@ public let NET_MEMBERS: Set<String> = ["dataTask", "data", "upload", "download",
 public let LOG_MEMBERS: Set<String> = ["trace", "debug", "info", "notice", "warning", "error", "critical", "fault", "log"]
 public let RAND_ROOTS: Set<String> = ["Int", "UInt", "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16",
     "UInt32", "UInt64", "Double", "Float", "Bool", "CGFloat"]
-public let PROCESS_MEMBERS: Set<String> = ["run", "launch", "waitUntilExit", "terminate", "interrupt", "launchedProcess"]
+public let PROCESS_MEMBERS: Set<String> = ["run", "launch", "waitUntilExit", "terminate", "interrupt",
+                                           "launchedProcess", "launchedTaskWithExecutableURL"]
 public let DB_FREE_PREFIX = "sqlite3_"
 // sqlite3_* C functions that READ RESIDENT handle/statement state — they touch no database, issue no
 // query, advance no row: statement/column/param METADATA, change/rowid counters, error + version state,
@@ -266,7 +267,12 @@ public func arrayElementName(_ t: TypeSyntax) -> String? {
     if let att = t.as(AttributedTypeSyntax.self) { return arrayElementName(att.baseType) }
     if let some = t.as(SomeOrAnyTypeSyntax.self) { return arrayElementName(some.constraint) }
     if let gen = t.as(IdentifierTypeSyntax.self), let args = gen.genericArgumentClause,
-       ["Array", "Set", "ContiguousArray", "ArraySlice"].contains(gen.name.text),
+       // The async-sequence/task-group element is also the FIRST generic argument: `for await x in s`
+       // over an `AsyncStream<E>`/`AsyncThrowingStream<E, _>`/`TaskGroup<E>`/`ThrowingTaskGroup<E, _>`
+       // yields an `E` — without these the loop var was untyped and `x.member()` read silent-pure (a
+       // structured-concurrency consumer hole found by a Swift-concurrency sweep).
+       ["Array", "Set", "ContiguousArray", "ArraySlice",
+        "AsyncStream", "AsyncThrowingStream", "TaskGroup", "ThrowingTaskGroup"].contains(gen.name.text),
        let first = args.arguments.first, let at = first.argument.as(TypeSyntax.self) {
         return typeName(at).name
     }
