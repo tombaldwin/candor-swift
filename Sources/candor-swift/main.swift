@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.5.6"
+let engineVersion = "candor-swift-0.5.7"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -332,7 +332,13 @@ final class DeclCollector: SyntaxVisitor {
                 // were ORPHANED (a `let db = Connection(...)` dependency-wiring read pure at the
                 // construction site). Collect the initializer under `<Type>.init` so `Type()` edges to it
                 // either way. (Static/lazy are handled above as first-touch reads, not construction.)
-                if !isStatic, binding.accessorBlock == nil,
+                // GATE on the binding being a DIRECT type member (parent is a MemberBlockItem). The
+                // visitor descends into accessor bodies (returns .visitChildren), so a `let p = Process()`
+                // NESTED in a computed getter is re-visited here with `typeStack.last` still the enclosing
+                // type — and (no accessorBlock + an initializer) it satisfied this S-init shape, fabricating
+                // the getter's effect onto `<Type>.init`/construction even when the property is never read.
+                if node.parent?.is(MemberBlockItemSyntax.self) == true,
+                   !isStatic, binding.accessorBlock == nil,
                    !node.modifiers.contains(where: { $0.name.text == "lazy" }),
                    let init0 = binding.initializer {
                     var info = FnInfo(qual: "\(tyPath).init", loc: loc(binding))
@@ -568,6 +574,9 @@ final class CallCollector: SyntaxVisitor {
     var protoDispatches: [(proto: String, member: String)] = []
     var protoPropReads: [(proto: String, member: String)] = []  // protocol PROPERTY/subscript reads — CHA
     var globalReads: Set<String> = []     // bare-name reads — candidate edges to GLOBAL initializer units
+    var boundLocals: Set<String> = []     // EVERY local binding name (even literal/unresolved-type ones,
+                                          // which `vars` drops) — so a bare read / fn-ref of a SHADOWING
+                                          // local isn't mistaken for an implicit-self property or a free fn
     var propertyEdges: Set<String> = []   // `Type.member` candidates from property READS
     var callbackInvoked: Set<String> = [] // fn-typed params INVOKED — deferred to callback-flow
     let dynamicMemberTypes: Set<String>   // `@dynamicMemberLookup` types — dynamic access is Unknown
@@ -989,7 +998,10 @@ final class CallCollector: SyntaxVisitor {
             let e = Self.peel(arg.expression)
             if let dr = e.as(DeclReferenceExprSyntax.self) {
                 let n = dr.baseName.text
-                if vars[n] == nil && !fnTyped.contains(n) {
+                // skip a bound LOCAL (a value, not a free-fn reference) — `vars` drops literal-typed
+                // locals, so `boundLocals` guards them too, else passing such a local fabricates a
+                // same-named free fn's effect.
+                if vars[n] == nil && !fnTyped.contains(n) && !boundLocals.contains(n) {
                     calls.append(Call(path: n, leaf: n, strArg: nil, typed: false, unqualified: true))
                 }
             } else if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base {
@@ -1188,7 +1200,10 @@ final class CallCollector: SyntaxVisitor {
         // `<Type>.token` accessor unit — resolveQual drops it unless `token` is a real accessor unit on
         // THIS type (a plain stored field, or a name belonging to another type, resolves to nothing → no
         // fabrication), exactly as the explicit-self path does.
-        if let et = enclosingType { propertyEdges.insert("\(et).\(n)") }
+        // ...unless `n` is a LOCAL binding (a literal/arithmetic-bound `let n = …` that `vars` drops
+        // because its type didn't resolve) — then the bare read is the local, NOT `self.n`; edging to the
+        // enclosing type's `n` accessor would FABRICATE its effect (regression). boundLocals tracks these.
+        if let et = enclosingType, !boundLocals.contains(n) { propertyEdges.insert("\(et).\(n)") }
         globalReads.insert(n)
         return .skipChildren
     }
@@ -1272,12 +1287,14 @@ final class CallCollector: SyntaxVisitor {
                let tupleInit = binding.initializer?.value.as(TupleExprSyntax.self) {
                 for (pe, ve) in zip(tp.elements, tupleInit.elements) {
                     guard let n = pe.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
+                    boundLocals.insert(n)
                     let info = rootOf(ve.expression)
                     if info.isVar, let t = info.root { vars[n] = t } else { clearBinding(n) }
                 }
                 continue
             }
             guard let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
+            boundLocals.insert(name)  // record the SHADOW (any local, even a literal-typed one `vars` drops)
             if let ann = binding.typeAnnotation {
                 if !tupleElements(ann.type).isEmpty { tupleElem[name] = tupleElements(ann.type) }  // `let p: (A, B)`
                 let t = typeName(ann.type)

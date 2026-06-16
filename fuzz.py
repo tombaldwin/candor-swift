@@ -349,8 +349,21 @@ func trapDollar() { let ss: [URLSession] = []; ss.forEach { _ = $0 }; trapBoxes(
 // (the inout/label guard) — else it fabricates Fs.
 func trapWriteStream(_ s: String) { var o = ""; s.write(to: &o); _ = o }
 func trapWriteAppend() { var t = ""; t.write("x"); _ = t }
+// S6 regression: a LITERAL-bound local shadowing an effectful computed property — the bare read is the
+// LOCAL, not `self.token`, so it must NOT edge to the property's accessor.
+struct TrapShadow { var token: Int { _ = FileManager.default.contents(atPath: "/x"); return 0 }
+    func trapShadow() -> Int { let token = 42; return token + 1 } }
+// S3 regression: a literal-bound local passed as an arg must not be read as a same-named free fn.
+func trapCfg() { _ = FileManager.default.contents(atPath: "/x") }
+func trapTake(_ x: Int) {}
+func trapArgLocal() { let trapCfg = 7; trapTake(trapCfg) }
+// S-init regression: constructing a type whose effect lives only in a computed GETTER (never read) must
+// stay pure — the getter's nested `let` must not be collected as a stored-property initializer.
+struct TrapInit { var job: Int { let p = Process(); try? p.run(); return 0 } }
+func trapCtorOnly() { _ = TrapInit() }
 """
-TRAP_FNS = ["trapSingleton", "trapRead", "trapLeak", "trapDollar", "trapWriteStream", "trapWriteAppend"]
+TRAP_FNS = ["trapSingleton", "trapRead", "trapLeak", "trapDollar", "trapWriteStream", "trapWriteAppend",
+            "trapShadow", "trapArgLocal", "trapCtorOnly"]
 
 # POSITIVE classifier fixture appended every seed: the Foundation file-write idiom `Data/String.write(to:
 # url)` persists to a FILE → Fs. Was unclassified (silent pure). Guarded by the trapWrite* twins above.
