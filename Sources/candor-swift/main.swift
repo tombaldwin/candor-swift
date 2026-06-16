@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.5.9"
+let engineVersion = "candor-swift-0.5.10"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -559,6 +559,9 @@ final class CallCollector: SyntaxVisitor {
     let fieldArrayElem: [String: [String: String]]  // Type -> field -> [T] element (self.field loops)
     let fieldDictValue: [String: [String: String]]  // Type -> field -> [K: V] value
     let localTypes: Set<String>
+    let localFreeFns: Set<String>   // local free-function names — a bare `name(...)` call to one is the
+                                    // project's OWN fn, so the platform free-call classifier (kappaFree)
+                                    // must NOT fire (else a local `func NSLog`/`Pipe`-ctor fabricates)
     let localProtocols: Set<String> // local protocol names — a receiver typed as one is DISPATCH
     let returns: [String: String]   // unambiguous factory return types (the candor-scan move)
     let enumCaseValueType: [String: String]  // unambiguous enum case -> associated value type
@@ -587,7 +590,9 @@ final class CallCollector: SyntaxVisitor {
          localProtocols: Set<String>, returns: [String: String],
          fieldArrayElem: [String: [String: String]], fieldDictValue: [String: [String: String]],
          enumCaseValueType: [String: String], dynamicMemberTypes: Set<String>,
-         propertyWrapperTypes: Set<String>, wrappedProps: [String: [String: String]]) {
+         propertyWrapperTypes: Set<String>, wrappedProps: [String: [String: String]],
+         localFreeFns: Set<String>) {
+        self.localFreeFns = localFreeFns
         self.propertyWrapperTypes = propertyWrapperTypes
         self.wrappedProps = wrappedProps
         self.dynamicMemberTypes = dynamicMemberTypes
@@ -715,8 +720,12 @@ final class CallCollector: SyntaxVisitor {
     /// so classify ONLY a `write(to:)` whose destination is a non-inout value. (Data has no such pure
     /// overload; the guard is uniform and harmless there.)
     private func isFileWrite(member: String, _ node: FunctionCallExprSyntax) -> Bool {
-        guard member == "write", let first = node.arguments.first, first.label?.text == "to" else { return false }
-        return !Self.peel(first.expression).is(InOutExprSyntax.self)
+        guard member == "write", let first = node.arguments.first else { return false }
+        // `write(toFile: path, …)` (the path-STRING overload of Data/String/NSData) is UNAMBIGUOUSLY a
+        // file write — there is no TextOutputStream variant for it, so no inout guard needed.
+        if first.label?.text == "toFile" { return true }
+        // `write(to: url)` — Fs, unless the destination is an inout TextOutputStream (the in-memory sink).
+        return first.label?.text == "to" && !Self.peel(first.expression).is(InOutExprSyntax.self)
     }
 
     private func argKinds(_ node: FunctionCallExprSyntax) -> [ArgKind] {
@@ -1061,7 +1070,13 @@ final class CallCollector: SyntaxVisitor {
                 // desugars `f(args)` on a non-function value to `f.callAsFunction(args)`). Edge to the
                 // type's callAsFunction unit (if it has one; resolveQual drops the edge otherwise).
                 calls.append(Call(path: "\(t).callAsFunction", leaf: "callAsFunction", strArg: lit, typed: true, args: argKinds(node), argTypes: argTypesOf(node)))
-            } else if let eff = kappaFree(name: name, argCount: node.arguments.count) {
+            } else if !localTypes.contains(name), !localFreeFns.contains(name),
+                      let eff = kappaFree(name: name, argCount: node.arguments.count) {
+                // A LOCALLY-declared type ctor (`Pipe()` where `class Pipe`) or free fn (`NSLog(...)` where
+                // `func NSLog`) ALWAYS shadows the platform free-call table — else a project's own
+                // `Pipe`/`NSDate`/`NSLog`/`CACurrentMediaTime` fabricates Ipc/Clock/Log (the cardinal sin;
+                // the same shadow discipline the member-call path applies via `localTypes`). When shadowed
+                // it falls through to the unqualified Call below, which resolves to the local def.
                 directEffects.insert(eff)
                 recordSurfaces(effect: eff, lit: lit)
             } else {
@@ -1136,7 +1151,9 @@ final class CallCollector: SyntaxVisitor {
             // ["now"] → a bogus Clock). The receiver-rooted path matches the genuine reads
             // (`ProcessInfo.processInfo.environment`, `Date.now`, `self.w.pinfo.environment`) without it.
             let recv = node.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [])
-            if let root = recv.root,
+            if let root = recv.root, !localTypes.contains(root),
+               // a LOCAL type named like a platform clock/env owner (`struct ContinuousClock { let now }`)
+               // must not have its property read classified — the local def shadows the platform table.
                let eff = kappaPropertyRead(root: root, path: recv.path + [node.declName.baseName.text]) {
                 directEffects.insert(eff)
             }
@@ -1631,7 +1648,8 @@ for f in allFns {
                            localProtocols: localProtocolNames, returns: returnsIdx,
                            fieldArrayElem: fieldArrayElem, fieldDictValue: fieldDictValue,
                            enumCaseValueType: enumCaseValueType, dynamicMemberTypes: dynamicMemberTypes,
-                           propertyWrapperTypes: propertyWrapperTypes, wrappedProps: wrappedProps)
+                           propertyWrapperTypes: propertyWrapperTypes, wrappedProps: wrappedProps,
+                           localFreeFns: Set(freeFnByName.keys))
     cc.walk(body)
     // accessor units: a property READ of a known accessor unit is an edge (the reader inherits
     // the getter's effects — `c.data` reaching the Fs inside `var data: Data { … }`)

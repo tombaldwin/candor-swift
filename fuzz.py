@@ -374,17 +374,27 @@ func trapCtorOnly() { _ = TrapInit() }
 struct TrapOp { let n: Int }
 func + (a: TrapOp, b: TrapOp) -> TrapOp { _ = FileManager.default.contents(atPath: "/x"); return a }
 func trapStdAdd() -> Int { return 1 + 2 }
+// classifier-SHADOW regression: a LOCAL type/free-fn named like a platform free-call / property-read
+// owner must NOT be classified — the local def shadows the platform table (else Ipc/Clock/Log fabrication).
+final class Pipe {}
+func trapLocalPipe() { _ = Pipe() }
+func NSLog(_ s: String) -> Int { s.count }
+func trapLocalNSLog() { _ = NSLog("x") }
+struct ContinuousClock { let now: Int = 0 }
+func trapLocalClock(_ c: ContinuousClock) -> Int { return c.now }
 """
 TRAP_FNS = ["trapSingleton", "trapRead", "trapLeak", "trapDollar", "trapWriteStream", "trapWriteAppend",
-            "trapShadow", "trapArgLocal", "trapCtorOnly", "trapStdAdd"]
+            "trapShadow", "trapArgLocal", "trapCtorOnly", "trapStdAdd",
+            "trapLocalPipe", "trapLocalNSLog", "trapLocalClock"]
 
 # POSITIVE classifier fixture appended every seed: the Foundation file-write idiom `Data/String.write(to:
 # url)` persists to a FILE → Fs. Was unclassified (silent pure). Guarded by the trapWrite* twins above.
 FILE_WRITE_POSITIVE = """
 func fwData(_ d: Data, _ u: URL) { try? d.write(to: u) }
 func fwStr(_ s: String, _ u: URL) { try? s.write(to: u, atomically: true, encoding: .utf8) }
+func fwToFile(_ d: Data) { try? d.write(toFile: "/x", options: []) }
 """
-FILE_WRITE_FNS = ["fwData", "fwStr"]  # must each carry Fs
+FILE_WRITE_FNS = ["fwData", "fwStr", "fwToFile"]  # must each carry Fs
 
 
 def run_seed(seed):
