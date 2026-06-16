@@ -62,15 +62,16 @@ nchk() { python3 -c "import json,sys; d=json.load(open('$NRPT')); print(next((',
 # sqlite3_* PREFIX rule: real query ops are Db, but the pure C INTROSPECTION getters (sqlite3_sql /
 # _column_name / _changes / _db_filename / _errmsg) read resident handle state and touch no database —
 # the prefix rule fabricated Db on them (SQLite.swift sweep: Statement.description, Connection.changes…).
+# The sqlite3_* symbols come from `import SQLite3` (a C module) — they are NOT locally declared. Do NOT
+# add local `func sqlite3_*` stubs here: candor parses (it does not type-check), so the calls resolve
+# without them, and a local decl would (correctly) SHADOW the platform free-call table — the same
+# project-owns-the-name guard the trapLocal* fuzzer forms pin (a local `func NSLog`/`Pipe` must not
+# fabricate). With stubs this would be the WRONG test — a pure local fn classified Db is a fabrication.
 cat > "$W/sq.swift" <<'SW'
 func sqlText(_ s: OpaquePointer) { let _ = sqlite3_sql(s) }              // PURE introspection
 func changes(_ d: OpaquePointer) { let _ = sqlite3_changes(d) }         // PURE
 func runStep(_ s: OpaquePointer) { let _ = sqlite3_step(s) }            // Db (real query)
 func openDb(_ d: inout OpaquePointer?) { let _ = sqlite3_open("/x", &d) } // Db
-func sqlite3_sql(_ s: OpaquePointer) -> UnsafePointer<CChar>? { return nil }
-func sqlite3_changes(_ d: OpaquePointer) -> Int32 { return 0 }
-func sqlite3_step(_ s: OpaquePointer) -> Int32 { return 0 }
-func sqlite3_open(_ p: String, _ d: inout OpaquePointer?) -> Int32 { return 0 }
 SW
 "$BIN" "$W/sq.swift" --out "$W/sq" 2>/dev/null
 SRPT=$(ls "$W"/sq.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
