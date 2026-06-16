@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.5.4"
+let engineVersion = "candor-swift-0.5.5"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -861,7 +861,17 @@ final class CallCollector: SyntaxVisitor {
     // param is TYPED from the receiver so the closure body (which charges lexically to the enclosing
     // unit) resolves the element's member calls.
     private static let ELEMENT_ITERATORS: Set<String> =
-        ["forEach", "map", "filter", "compactMap", "flatMap", "first", "contains", "allSatisfy"]
+        ["forEach", "map", "filter", "compactMap", "flatMap", "first", "contains", "allSatisfy",
+         // single-element-param predicate HOFs (closure is `(Element) -> Bool`): an effectful
+         // `$0.member` inside these was silent-pure because the param stayed untyped (the 8-method
+         // whitelist was too narrow). `drop`/`prefix` only carry a closure in the `(while:)` form
+         // (the count forms have no closure, so typeClosureParams self-skips).
+         "drop", "prefix", "firstIndex", "lastIndex", "last", "partition", "removeAll", "split"]
+    // Methods whose closure params are ALL the receiver's element (`sorted(by:)`/`min(by:)`/`max(by:)`
+    // take `(Element, Element) -> Bool`) — type EVERY param, not just the first, so `$0.x < $1.x`
+    // resolves both sides. (reduce is deliberately ABSENT: its closure is `(Acc, Element)` — the first
+    // param is the accumulator, so element-typing it would mistype the fold state.)
+    private static let ELEMENT_PAIR_ITERATORS: Set<String> = ["sorted", "min", "max"]
 
     // Names a closure binds: explicit `{ (a, b) in … }`/`{ a, b in … }` → those names; shorthand
     // `{ $0.… }` with no signature → `$0`/`$1`/`$2` (we can't tell arity, so clear the common few).
@@ -899,9 +909,11 @@ final class CallCollector: SyntaxVisitor {
         guard !closures.isEmpty else { return }
 
         // is this the element closure of a whitelisted iterator? then its first param is typed.
+        let iteratorMethod: String? = (node.calledExpression.as(MemberAccessExprSyntax.self))?.declName.baseName.text
+        let pairIterator = iteratorMethod.map(Self.ELEMENT_PAIR_ITERATORS.contains) ?? false
         let iteratorElem: String? = {
             guard let ma = node.calledExpression.as(MemberAccessExprSyntax.self),
-                  Self.ELEMENT_ITERATORS.contains(ma.declName.baseName.text),
+                  Self.ELEMENT_ITERATORS.contains(ma.declName.baseName.text) || pairIterator,
                   let base = ma.base else { return nil }
             return elementTypeOf(base)
         }()
@@ -914,8 +926,9 @@ final class CallCollector: SyntaxVisitor {
             for (i, p) in params.enumerated() {
                 if let annotated = p.annotated {
                     vars[p.name] = annotated                 // explicit `{ (x: Foo) in }` — precise
-                } else if i == 0, let elem = iteratorElem, closure == elemClosure {
-                    vars[p.name] = elem                      // iterator element param — typed
+                } else if (i == 0 || pairIterator), let elem = iteratorElem, closure == elemClosure {
+                    vars[p.name] = elem                      // iterator element param — typed (both params
+                    // for a pair-iterator like sorted/min/max; only the first for the rest)
                 } else {
                     clearBinding(p.name)                     // every other param — CLEARED, never leak
                 }

@@ -112,6 +112,10 @@ public func kappaMember(root: String, member: String) -> String? {
 public func kappaFree(name: String, argCount: Int) -> String? {
     switch name {
     case "Date": return argCount == 0 ? "Clock" : nil // Date() reads the clock; Date(timeInterval…) is arithmetic
+    case "UUID": return argCount == 0 ? "Rand" : nil  // UUID() draws v4 entropy; UUID(uuidString:) is a pure parse
+    case "FileHandle": return argCount > 0 ? "Fs" : nil // FileHandle(forReadingAtPath:/forWritingTo:/…) OPENS an
+        // fd (Fs). The member read/write surface is handled in kappaMember; the std accessors
+        // (.standardError/.standardOutput) are zero-arg STATIC properties, not this ctor, so they stay pure.
     case "Process": return "Exec"   // constructing the subprocess handle is the Exec intent (Command::new)
     case "NWConnection", "NWListener": return "Net"
     case "SystemRandomNumberGenerator": return "Rand"
@@ -137,6 +141,8 @@ public func kappaFree(name: String, argCount: Int) -> String? {
 /// pasteboard accessors. Checked on member-access chains outside call position.
 public func kappaPropertyRead(root: String, path: [String]) -> String? {
     if root == "ProcessInfo" && path.contains("environment") { return "Env" }
+    if root == "ProcessInfo" && path.contains("systemUptime") { return "Clock" } // monotonic clock read
+    if root == "ProcessInfo" && path.contains("hostName") { return "Env" }       // machine-identity read
     if root == "Date" && path.contains("now") { return "Clock" }
     if (root == "NSPasteboard" || root == "UIPasteboard") && path.contains("general") { return "Clipboard" }
     return nil

@@ -36,7 +36,7 @@ FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "pro
          # chain (correct — candor can't model dealloc timing). It is appended off-chain every seed and
          # checked via extra_effectful instead.
          "custom_seq", "subscript_access", "static_init", "global_init", "proto_prop", "call_as_function", "operator_overload",
-         "default_arg", "dynamic_member", "property_wrapper"]
+         "default_arg", "dynamic_member", "property_wrapper", "sorted_closure", "predicate_closure"]
 
 
 def build_deep_nest(rng, i, me, callee):
@@ -122,6 +122,17 @@ def gen(seed):
             # the loop variable must carry the element type or its `x.go()` drops to pure.
             bodies[i] = (f"struct E{i} {{ func go() {{ {callee}() }} }}\n"
                          f"func {me}() {{ let xs: [E{i}] = [E{i}()]; for x in xs {{ x.go() }} }}")
+        elif form == "sorted_closure":
+            # a NON-whitelisted element-closure HOF: `xs.sorted { $0.go2() < $1.go2() }`. The closure's
+            # params are BOTH the receiver element; pre-fix only the 8-method whitelist typed `$0`, so a
+            # `sorted`/`min`/`max` (pair) or `drop`/`firstIndex` (single) closure left `$0`/`$1` untyped and
+            # the effectful member call went silent-pure. `go2` returns Int so it composes in the predicate.
+            bodies[i] = (f"struct So{i} {{ func go2() -> Int {{ {callee}(); return 0 }} }}\n"
+                         f"func {me}() {{ let xs: [So{i}] = [So{i}(), So{i}()]; _ = xs.sorted {{ $0.go2() < $1.go2() }} }}")
+        elif form == "predicate_closure":
+            # single-element predicate HOF (`drop(while:)`/`firstIndex(where:)`): `$0` is the element.
+            bodies[i] = (f"struct Pr{i} {{ func ok() -> Bool {{ {callee}(); return true }} }}\n"
+                         f"func {me}() {{ let xs: [Pr{i}] = [Pr{i}()]; _ = xs.firstIndex {{ $0.ok() }} }}")
         elif form == "for_each":
             # same, through a `xs.forEach {{ x in x.go() }}` closure (the element-param typing path)
             bodies[i] = (f"struct F{i} {{ func go() {{ {callee}() }} }}\n"
