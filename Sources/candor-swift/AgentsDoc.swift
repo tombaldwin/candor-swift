@@ -65,7 +65,13 @@ conclude a function is pure while `unresolved` is true. **And the curated-κ cav
 classifier covers the platform frontier (Foundation, Network, Dispatch, os, sqlite3) — a
 third-party package contributes NOTHING, invisible, not `Unknown`. The receipt **names these per
 scan** (`κ doesn't know N modules this code imports…`): never conclude "no effect" through a module
-that line names.
+that line names. Each function ALSO carries an **`invisible`** list — the κ-unknown modules it
+(transitively) makes an unresolved call into — so `inferred` is never an unqualified claim PER
+FUNCTION: `inferred: []` with a non-empty `invisible` means "pure as far as candor could see, but it
+could not see through these" (a LOWER bound), not "pure". Because the Swift engine is parse-only it
+attributes at FILE granularity — it names every κ-unknown module in the function's import scope where
+the function has an unresolved external reach, not the single resolved package — so `invisible` is an
+honest over-approximation of the blind set, never a silent-pure.
 
 ## Swift-specific things to know
 

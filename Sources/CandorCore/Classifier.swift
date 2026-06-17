@@ -116,6 +116,32 @@ public func kappaMember(root: String, member: String) -> String? {
     }
 }
 
+// The Net forms whose DESTINATION is (conceptually) carried by THIS call — the URL/host is an argument
+// of the call itself (`URLSession.data(from:)`, `bootstrap.connect(host:)`, `HTTPClient.get(url:)`,
+// `NWConnection(host:)`). For these, a Net classification with NO captured host literal means the endpoint
+// is structurally INVISIBLE (a runtime-built URL/host), so the fn's Net surface is INCOMPLETE — it can't
+// be certified against an `allow Net <hosts>` allowlist even when a *sibling* call's benign host IS
+// visible, else the benign literal MASKS the invisible forbidden endpoint (the masking gate-evasion;
+// candor-java 0.5.29 / candor-rust / candor-ts share this). USE-verbs on an already-established socket
+// (`Channel.write/read/flush`, an `NWConnection` instance's `.send/.receive`) are NOT here: their
+// destination was fixed at connect/ctor time — possibly in ANOTHER function that captured the host — so a
+// missing literal at the use-site is the legitimate split-construct/use shape, never the masking signal.
+public func isNetEstablishingMember(root: String, member: String) -> Bool {
+    switch root {
+    case "URLSession": return NET_MEMBERS.contains(member)
+    case "ClientBootstrap", "ServerBootstrap", "DatagramBootstrap", "NIOTSConnectionBootstrap":
+        return ["connect", "bind", "withConnectedSocket"].contains(member)
+    case "Channel", "ChannelHandlerContext": return ["connect", "bind"].contains(member) // write/read/flush = USE
+    case "HTTPClient", "AsyncHTTPClient":
+        return ["execute", "get", "post", "put", "patch", "delete"].contains(member)     // shutdown = teardown
+    default: return false
+    }
+}
+/// The free-call/ctor Net forms whose host is an argument of the construction (`NWConnection(host:)`).
+public func isNetEstablishingFree(name: String) -> Bool {
+    return name == "NWConnection" || name == "NWListener"
+}
+
 /// Classify a free-function or constructor call by name.
 public func kappaFree(name: String, argCount: Int) -> String? {
     switch name {

@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.5.11"
+let engineVersion = "candor-swift-0.5.12"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -579,6 +579,10 @@ final class CallCollector: SyntaxVisitor {
     var cmds: Set<String> = []
     var paths: Set<String> = []
     var tables: Set<String> = []
+    // Effects whose literal SURFACE is structurally incomplete (a host-establishing Net call with no
+    // captured host — the masking guard; see isNetEstablishingMember). Propagated transitively; an
+    // allowlisted-effect gate fails CLOSED on an incomplete surface (AS-EFF-008).
+    var incompleteSurfaces: Set<String> = []
     var protoDispatches: [(proto: String, member: String)] = []
     var protoPropReads: [(proto: String, member: String)] = []  // protocol PROPERTY/subscript reads — CHA
     var globalReads: Set<String> = []     // bare-name reads — candidate edges to GLOBAL initializer units
@@ -1089,6 +1093,7 @@ final class CallCollector: SyntaxVisitor {
                 // it falls through to the unqualified Call below, which resolves to the local def.
                 directEffects.insert(eff)
                 recordSurfaces(effect: eff, lit: lit)
+                if eff == "Net", lit == nil, isNetEstablishingFree(name: name) { incompleteSurfaces.insert("Net") }
             } else {
                 calls.append(Call(path: name, leaf: name, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), unqualified: true))
             }
@@ -1124,6 +1129,7 @@ final class CallCollector: SyntaxVisitor {
             } else if let rt = base.root, let eff = kappaMember(root: rt, member: member) {
                 directEffects.insert(eff)
                 recordSurfaces(effect: eff, lit: lit)
+                if eff == "Net", lit == nil, isNetEstablishingMember(root: rt, member: member) { incompleteSurfaces.insert("Net") }
             } else {
                 calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node)))
             }
@@ -1446,6 +1452,7 @@ var propertyWrapperTypes: Set<String> = []
 var wrappedProps: [String: [String: String]] = [:]
 var returnsIdx: [String: String] = [:]
 var importCounts: [String: Int] = [:]
+var fileImports: [String: [String]] = [:]   // file (rel path) -> modules it imports (per-fn blind disclosure)
 // The package's OWN target modules (SPM convention: Sources/<TargetName>/) — an internal import is
 // local code the walk already analyzes, not a third-party blind spot (the sweep's ledger noise:
 // swift-log importing its own Logging target read as unknown).
@@ -1502,6 +1509,7 @@ for c in collectors {
     propertyWrapperTypes.formUnion(c.propertyWrapperTypes)
     for (t, ps) in c.wrappedProps { wrappedProps[t, default: [:]].merge(ps) { a, _ in a } }
     for m in c.imports { importCounts[m, default: 0] += 1 }
+    fileImports[c.file] = c.imports
     staticFactoryFields.append(contentsOf: c.staticFactoryFields)
 }
 
@@ -1642,6 +1650,12 @@ var unresolvedSet: Set<String> = []
 var whyMap: [String: Set<String>] = [:]
 var hostsD: [String: Set<String>] = [:], cmdsD: [String: Set<String>] = [:]
 var pathsD: [String: Set<String>] = [:], tablesD: [String: Set<String>] = [:]
+var incompleteD: [String: Set<String>] = [:]   // fn -> effects with a structurally-incomplete surface (masking)
+var blindDirect: [String: Set<String>] = [:]    // fn -> blind modules it DIRECTLY reaches (per-fn `invisible`)
+// The κ-unknown modules this code imports (the ledger's set, hoisted for per-fn `invisible` attribution):
+// not a platform-frontier module, not a κ tier, not an internal target — effects through them are INVISIBLE.
+let blindModules = Set(importCounts.keys.filter {
+    !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !internalModules.contains($0) })
 var locOf: [String: String] = [:]
 var entryPoints: Set<String> = []
 var kappaSawClassified = false
@@ -1674,6 +1688,7 @@ for f in allFns {
     cmdsD[f.qual, default: []].formUnion(cc.cmds)
     pathsD[f.qual, default: []].formUnion(cc.paths)
     tablesD[f.qual, default: []].formUnion(cc.tables)
+    if !cc.incompleteSurfaces.isEmpty { incompleteD[f.qual, default: []].formUnion(cc.incompleteSurfaces) }
 
     // fn-typed params INVOKED: defer to callback-flow (resolved after all call sites are known)
     if !cc.callbackInvoked.isEmpty {
@@ -1685,6 +1700,11 @@ for f in allFns {
     }
     for call in cc.calls {
         let argc = call.args.count
+        // A call that resolves to NO local edge is a reach into code the syntactic engine can't see — a
+        // third-party blind module (NOT a fabrication: under-report, never a guess). Track it per call so
+        // the per-fn `invisible` disclosure can name the blind modules in the fn's import scope. A call
+        // that DOES resolve to a local unit is covered by transitive propagation of that unit's invisible.
+        var resolved = false
         // helper: edge to a resolved overload target (no callsiteArgs for sibling/init forms which don't
         // participate in callback-flow). For an overloaded base, matchOverloads returns 0 (drop), 1
         // (precise) or several (sound union) full quals.
@@ -1693,10 +1713,12 @@ for f in allFns {
                 for t in matchOverloads(call.path, argc, call.argTypes) {
                     edges[f.qual, default: []].insert(t)
                     callsiteArgs[t, default: []].append(call.args)
+                    resolved = true
                 }
             } else if let t = resolveQual(call.path) {
                 edges[f.qual, default: []].insert(t)
                 callsiteArgs[t, default: []].append(call.args)
+                resolved = true
             } else if let dot = call.path.lastIndex(of: "."),
                       localTypes.contains(String(call.path[..<dot])) {
                 // PROTOCOL-EXTENSION DEFAULT via a CONCRETE receiver: `Job.emit` didn't resolve (Job
@@ -1710,6 +1732,7 @@ for f in allFns {
                     if let t = resolveQual("\(sup).\(member)") {
                         edges[f.qual, default: []].insert(t)
                         callsiteArgs[t, default: []].append(call.args)
+                        resolved = true
                     }
                 }
             }
@@ -1723,13 +1746,16 @@ for f in allFns {
                 for t in matchOverloads(call.path, argc, call.argTypes) {
                     edges[f.qual, default: []].insert(t)
                     callsiteArgs[t, default: []].append(call.args)
+                    resolved = true
                 }
             } else if let targets = freeFnByName[call.path], targets.count == 1 {
                 edges[f.qual, default: []].insert(targets[0])
                 callsiteArgs[targets[0], default: []].append(call.args)
+                resolved = true
             } else if localTypes.contains(call.path), overloadedBases.contains("\(call.path).init") {
                 for t in matchOverloads("\(call.path).init", argc, call.argTypes) {
                     edges[f.qual, default: []].insert(t)
+                    resolved = true
                 }
             } else if localTypes.contains(call.path), let t = resolveQual("\(call.path).init") {
                 // `_ = C0()` — a constructor call edges to the declared init (the fuzzer's init_wired
@@ -1739,16 +1765,27 @@ for f in allFns {
             } else if let et = f.enclosingType, overloadedBases.contains("\(et).\(call.leaf)") {  // overloaded sibling
                 for t in matchOverloads("\(et).\(call.leaf)", argc, call.argTypes) {
                     edges[f.qual, default: []].insert(t)
+                    resolved = true
                 }
             } else if let ep = f.enclosingTypePath, byQual.contains("\(ep).\(call.leaf)") {
                 // an unqualified call inside a type body reaches the sibling method — resolved against the
                 // FULL enclosing path, so a nested type's sibling call hits its own member precisely (never
                 // a same-named sibling under a different parent).
                 edges[f.qual, default: []].insert("\(ep).\(call.leaf)")
+                resolved = true
             }
         }
         // otherwise: unresolvable bare member (unresolved receiver) — stays out (under-report, never a
         // guess); the κ ledger and Unknown rules above carry the honesty.
+        // A call that resolved to no local edge reaches a blind module — disclose the fn's blind imports
+        // (file-granular: the syntactic engine can't pin WHICH import a dropped call lands in, so it names
+        // every κ-unknown module in scope — an honest LOWER bound on the purity claim, never silent-pure).
+        if !resolved {
+            let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+            for m in fileImports[file] ?? [] where blindModules.contains(m) {
+                blindDirect[f.qual, default: []].insert(m)
+            }
+        }
     }
 
     // Bounded CHA over local protocols (SPEC §4, 0.5): the protocol is local and declares the
@@ -1822,6 +1859,10 @@ for (fq, info) in deferredCallbacks {
 let inferred = propagate(direct, over: edges)
 let hostsAcc = propagate(hostsD, over: edges), cmdsAcc = propagate(cmdsD, over: edges)
 let pathsAcc = propagate(pathsD, over: edges), tablesAcc = propagate(tablesD, over: edges)
+// the masking surface-incompleteness and the per-fn blind-module disclosure propagate the SAME way: a
+// caller transitively reaches a callee's invisible endpoint / blind module, so it inherits the flag/set.
+let incompleteAcc = propagate(incompleteD, over: edges)
+let invisibleAcc = propagate(blindDirect, over: edges)
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // Report (§2 envelope, spec 0.5) + sidecar (§2.2) + receipt + κ ledger (§7.14)
@@ -1832,9 +1873,13 @@ try? fm.createDirectory(atPath: (prefix as NSString).deletingLastPathComponent, 
 
 let accessorQuals = Set(allFns.filter { $0.isAccessor }.map { $0.qual })
 var entries: [[String: Any]] = []
-for qual in inferred.keys.sorted() {
+// A pure fn that reaches a blind module is NOT in `inferred` (no effect seeds it), but it must still
+// appear — carrying `invisible` — so `inferred: []` is never an unqualified pure claim. Union the keys.
+let reportQuals = Set(inferred.keys).union(invisibleAcc.keys)
+for qual in reportQuals.sorted() {
     let inf = inferred[qual] ?? []
-    if inf.isEmpty { continue }
+    let invisible = (invisibleAcc[qual] ?? []).sorted()
+    if inf.isEmpty && invisible.isEmpty { continue }
     var e: [String: Any] = [
         "fn": qual,
         "loc": locOf[qual] ?? "",
@@ -1852,6 +1897,10 @@ for qual in inferred.keys.sorted() {
     if let c = cmdsAcc[qual], !c.isEmpty { e["cmds"] = c.sorted() }
     if let p = pathsAcc[qual], !p.isEmpty { e["paths"] = p.sorted() }
     if let t = tablesAcc[qual], !t.isEmpty, inf.contains("Db") { e["tables"] = t.sorted() }
+    // the per-fn blind-spot disclosure: the κ-unknown modules this fn (transitively) reaches an
+    // unresolved call into. Qualifies `inferred` — `inferred: []` + non-empty `invisible` = "pure as far
+    // as candor could see, but it could not see through these" (a lower bound, file-granular for Swift).
+    if !invisible.isEmpty { e["invisible"] = invisible }
     entries.append(e)
 }
 let envelope: [String: Any] = [
@@ -2025,7 +2074,11 @@ if let pp = policyPath {
             case "Db": surface = tablesAcc[qual] ?? []
             default: surface = pathsAcc[qual] ?? []
             }
-            if surface.isEmpty {
+            // An INCOMPLETE surface — a host-establishing Net call with a structurally-invisible host —
+            // can't be certified even when visible hosts cover the allowlist, else the benign literal MASKS
+            // the invisible forbidden endpoint (the masking gate-evasion; candor-java 0.5.29 / rust / ts).
+            let surfaceIncomplete = incompleteAcc[qual]?.contains(r.effect) ?? false
+            if surface.isEmpty || surfaceIncomplete {
                 violations.append("[AS-EFF-008] `\(qual)` performs \(r.effect) with no visible literal — the surface cannot be certified: `\(r.raw)`")
             } else {
                 let bad = surface.filter { !literalAllowed(r.effect, $0, r.values) }.sorted()

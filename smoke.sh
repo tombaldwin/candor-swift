@@ -410,5 +410,52 @@ WF_ERR=$("$BIN" "$W/wf.swift" --out /proc/cannot/r 2>&1 >/dev/null); WF_CODE=$?
   && ok "unwritable --out path -> exit 1 + diagnostic (no try! trap)" \
   || bad "unwritable --out should fail gracefully (code=$WF_CODE, err=$WF_ERR)"
 
+# MASKING gate-evasion (AS-EFF-008): a fn with one captured BENIGN host AND one structurally-invisible
+# Net reach (URLSession to a runtime URL) must NOT certify under `allow Net <benign>` — the benign literal
+# would otherwise MASK the invisible forbidden endpoint. A clean fn with only the benign host DOES certify.
+mkdir -p "$W/mask" && cat > "$W/mask/m.swift" <<'SW'
+import Foundation
+import Network
+func mask(_ url: URL) {
+    let c = NWConnection(host: "benign.internal", port: 443, using: .tls)
+    c.start(queue: .main)
+    _ = URLSession.shared.dataTask(with: url)   // Net, host INVISIBLE — masks under the allowlist
+}
+func clean() {
+    let c = NWConnection(host: "benign.internal", port: 443, using: .tls)
+    c.start(queue: .main)
+}
+SW
+printf 'allow Net benign.internal\n' > "$W/mask/pol"
+"$BIN" "$W/mask" --out "$W/mask/r" --policy "$W/mask/pol" > "$W/mask/gate.out" 2>/dev/null
+{ grep -q 'AS-EFF-008.*`mask`.*cannot be certified' "$W/mask/gate.out" \
+  && ! grep -q '`clean`' "$W/mask/gate.out"; } \
+  && ok "masking guard: invisible-host Net fails closed under an allowlist; the clean host certifies" \
+  || bad "masking guard: $(cat "$W/mask/gate.out")"
+
+# Per-fn `invisible` disclosure: a pure-LOOKING fn that reaches a blind (κ-unknown) module via an
+# unresolved external call carries `invisible:[module]` (so `inferred:[]` is never an unqualified pure
+# claim); it propagates to a transitive caller; a purely-LOCAL pure fn in the same file is NOT tagged.
+mkdir -p "$W/inv" && cat > "$W/inv/m.swift" <<'SW'
+import Foundation
+import SomeBlindNetLib
+func fetch() { let c = BlindClient(); c.send("payload") }   // unresolved external reach → invisible
+func caller() { fetch() }                                   // transitive → inherits invisible
+func leaf() -> Int { return 1 }
+func localOnly() -> Int { return leaf() + leaf() }          // only a resolved local sibling → NOT tagged
+func adder(_ a: Int, _ b: Int) -> Int { return a + b }      // pure, no calls → omitted
+SW
+"$BIN" "$W/inv" --out "$W/inv/r" >/dev/null 2>&1
+INVRPT=$(ls "$W"/inv/r.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+INV=$(python3 -c "
+import json
+d=json.load(open('$INVRPT'))
+by={e['fn']: e for e in d['functions']}
+fetch_ok = by.get('fetch',{}).get('invisible')==['SomeBlindNetLib'] and by['fetch']['inferred']==[]
+caller_ok = by.get('caller',{}).get('invisible')==['SomeBlindNetLib']
+local_absent = 'localOnly' not in by and 'adder' not in by
+print('PASS' if (fetch_ok and caller_ok and local_absent) else 'FAIL '+repr({k:v.get('invisible') for k,v in by.items()}))")
+[ "$INV" = "PASS" ] && ok "invisible disclosure: blind-module reach tagged + propagated; local-only fn not tagged" || bad "invisible disclosure: $INV"
+
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
