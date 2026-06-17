@@ -33,6 +33,17 @@ final class ClassifierTests: XCTestCase {
         XCTAssertEqual(kappaMember(root: "Int", member: "random"), "Rand")
         XCTAssertNil(kappaMember(root: "FileManager", member: "path"))     // pure accessor, not in FS_MEMBERS
         XCTAssertNil(kappaMember(root: "SomeLocalType", member: "save"))   // unknown root → no guess
+        // sweep [33]: pasteboard capability/metadata QUERIES are pure (no clipboard data touched) — the
+        // whole-owner rule fabricated Clipboard on them; real verbs still classify.
+        XCTAssertEqual(kappaMember(root: "NSPasteboard", member: "setString"), "Clipboard")
+        XCTAssertEqual(kappaMember(root: "NSPasteboard", member: "clearContents"), "Clipboard")
+        XCTAssertNil(kappaMember(root: "NSPasteboard", member: "canReadObject"))
+        XCTAssertNil(kappaMember(root: "UIPasteboard", member: "availableType"))
+        // sweep [34]: NWConnection cancel/batch perform no I/O; send/start still Net.
+        XCTAssertEqual(kappaMember(root: "NWConnection", member: "send"), "Net")
+        XCTAssertEqual(kappaMember(root: "NWConnection", member: "start"), "Net")
+        XCTAssertNil(kappaMember(root: "NWConnection", member: "cancel"))
+        XCTAssertNil(kappaMember(root: "NWConnection", member: "batch"))
     }
 
     func testKappaFree() {
@@ -47,9 +58,28 @@ final class ClassifierTests: XCTestCase {
         XCTAssertEqual(kappaFree(name: "NSLog", argCount: 1), "Log")
         XCTAssertEqual(kappaFree(name: "Pipe", argCount: 0), "Ipc")
         XCTAssertNil(kappaFree(name: "myLocalHelper", argCount: 0))
+        // sweep [20]: DNS resolution is Net (rust/java/ts classify it; swift floored it silently)
+        XCTAssertEqual(kappaFree(name: "getaddrinfo", argCount: 4), "Net")
+        XCTAssertEqual(kappaFree(name: "getnameinfo", argCount: 7), "Net")
+        XCTAssertEqual(kappaFree(name: "gethostbyname", argCount: 1), "Net")
         // property-read clock surface: ContinuousClock/SuspendingClock `.now`
         XCTAssertEqual(kappaPropertyRead(root: "ContinuousClock", path: ["now"]), "Clock")
         XCTAssertEqual(kappaPropertyRead(root: "SuspendingClock", path: ["now"]), "Clock")
+    }
+
+    // ── establishing-call predicates (the AS-EFF-008 masking guard, generalized to all 4 effects) ──
+    func testEstablishingPredicates() {
+        // Net (member): URLSession verbs + bootstrap connect/bind establish; Channel use-verbs do not.
+        XCTAssertTrue(isEstablishingMember(effect: "Net", root: "URLSession", member: "data"))
+        XCTAssertFalse(isEstablishingMember(effect: "Net", root: "Channel", member: "write"))
+        // Fs (member): FileManager path ops establish; FileHandle read/write are USE (path at ctor).
+        XCTAssertTrue(isEstablishingMember(effect: "Fs", root: "FileManager", member: "removeItem"))
+        XCTAssertFalse(isEstablishingMember(effect: "Fs", root: "FileHandle", member: "write"))
+        // Free: Fs FileHandle/fopen, Exec posix_spawn/execv*, Db sqlite3_* establish; Process() ctor does not.
+        XCTAssertTrue(isEstablishingFree(effect: "Fs", name: "fopen"))
+        XCTAssertTrue(isEstablishingFree(effect: "Exec", name: "execvp"))
+        XCTAssertTrue(isEstablishingFree(effect: "Db", name: "sqlite3_prepare_v2"))
+        XCTAssertFalse(isEstablishingFree(effect: "Exec", name: "Process"))
     }
 
     func testKappaPropertyRead() {

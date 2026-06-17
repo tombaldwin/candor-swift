@@ -79,6 +79,15 @@ public let SQLITE_PURE_INTROSPECTION: Set<String> = [
 // var's later member calls classify — `FileManager.default.removeItem` inline is Fs, but via a
 // `let fm = FileManager.default` it dropped to pure (the receiver typed as the bare identifier).
 public let SINGLETON_ACCESSORS: Set<String> = ["default", "shared", "standard", "current", "general", "processInfo", "main"]
+// NSPasteboard/UIPasteboard methods that READ no clipboard data and WRITE nothing — capability/metadata
+// queries (the whole-owner Clipboard rule fabricated on them; sweep [33]). Subtracted FIRST, like
+// SQLITE_PURE_INTROSPECTION. Real verbs stay Clipboard: writeObjects/setString/setData/clearContents/
+// declareTypes/string(forType:)/data(forType:)/readObjects(forClasses:)/pasteboardItems/prepareForNewContents.
+public let PASTEBOARD_PURE_QUERIES: Set<String> = ["canReadObject", "canReadItem", "availableType"]
+// NWConnection/NWListener members that perform NO network I/O on their own: cancel/forceCancel tear the
+// connection down, batch{} brackets other calls (sweep [34]). Real verbs stay Net: send/receive/
+// receiveMessage/start/restart/cancelCurrentEndpoint.
+public let NW_PURE_VERBS: Set<String> = ["cancel", "forceCancel", "batch"]
 
 /// Classify a member call `root.member(...)` (root = the receiver chain's base identifier or the
 /// receiver's inferred TYPE). Returns nil for the pure/unknown surface — never a guess.
@@ -89,10 +98,18 @@ public func kappaMember(root: String, member: String) -> String? {
     case "URLSession": return NET_MEMBERS.contains(member) ? "Net" : nil
     case "Process": return PROCESS_MEMBERS.contains(member) ? "Exec" : nil
     case "Logger", "OSLog": return LOG_MEMBERS.contains(member) ? "Log" : nil
-    case "NSPasteboard", "UIPasteboard": return "Clipboard"
+    case "NSPasteboard", "UIPasteboard":
+        // PURE capability/metadata queries read no clipboard data — exclude them (the whole-owner rule
+        // fabricated Clipboard on these, the cardinal sin; sweep [33]). Unknown verbs stay Clipboard
+        // (sound over-approx). `.types`/`.changeCount`/`.name` are PROPERTY reads handled elsewhere.
+        return PASTEBOARD_PURE_QUERIES.contains(member) ? nil : "Clipboard"
     case "Date": return member == "now" ? "Clock" : nil
     case "ContinuousClock", "SuspendingClock", "DispatchTime": return member == "now" ? "Clock" : nil
-    case "NWConnection", "NWListener": return "Net"
+    case "NWConnection", "NWListener":
+        // cancel/forceCancel TEAR DOWN (no bytes), batch{} is a pure grouping bracket (the I/O is in the
+        // closure, attributed separately) — the whole-owner rule fabricated Net on them (sweep [34]).
+        // send/receive/start/restart stay Net; unknown verbs stay Net (sound over-approx).
+        return NW_PURE_VERBS.contains(member) ? nil : "Net"
     case "NSXPCConnection": return "Ipc"
     // CoreData persistence: NSManagedObjectContext.save/fetch/execute/count and the store-load/coordinator
     // verbs hit the SQLite store — Db. The builder/algebra surface (NSFetchRequest construction, predicates,
@@ -142,6 +159,34 @@ public func isNetEstablishingFree(name: String) -> Bool {
     return name == "NWConnection" || name == "NWListener"
 }
 
+// The masking guard generalizes from Net to ALL FOUR allowlisted effects (Net/Fs/Exec/Db): for each, a
+// classify at an ESTABLISHING form (the resource LOCATOR — host / path / command / SQL — is conceptually an
+// argument of THIS call) with no captured literal means the locator is structurally INVISIBLE, so the
+// effect's surface is incomplete and the gate must fail closed (else a benign co-literal masks the runtime
+// destination — the AS-EFF-008 evasion, fixed for Net only in 0.5.12; sweep [14]/[15]). USE-verbs whose
+// locator was fixed earlier (a FileHandle's read/write — path set at the ctor; a Process's run — command
+// set via .executableURL/.arguments properties) are NOT establishing: a missing literal there is the
+// legitimate split-construct/use shape. Net/Fs reach establishing MEMBER forms in κ; Exec/Db establish at
+// FREE calls (posix_spawn/execv*, sqlite3_*).
+public func isEstablishingMember(effect: String, root: String, member: String) -> Bool {
+    switch effect {
+    case "Net": return isNetEstablishingMember(root: root, member: member)
+    case "Fs":  return root == "FileManager" && FS_MEMBERS.contains(member) // atPath:/at:/to: is an arg;
+        // FileHandle.read/write are USE (the path was fixed at the FileHandle(for…:) ctor) — not establishing.
+    default:    return false
+    }
+}
+public func isEstablishingFree(effect: String, name: String) -> Bool {
+    switch effect {
+    case "Net":  return isNetEstablishingFree(name: name)
+    case "Fs":   return name == "FileHandle" || name == "fopen"                       // path arg
+    case "Exec": return name == "posix_spawn" || name == "execv" || name == "execvp"  // path arg (Process() ctor
+        // takes NO command — set via .executableURL/.arguments — so the ctor is not establishing)
+    case "Db":   return name.hasPrefix(DB_FREE_PREFIX)                                // sqlite3_exec/prepare take SQL
+    default:     return false
+    }
+}
+
 /// Classify a free-function or constructor call by name.
 public func kappaFree(name: String, argCount: Int) -> String? {
     switch name {
@@ -159,6 +204,10 @@ public func kappaFree(name: String, argCount: Int) -> String? {
     case "SystemRandomNumberGenerator": return "Rand"
     case "arc4random", "arc4random_uniform", "getentropy": return "Rand"
     case "getenv", "setenv", "unsetenv": return "Env"
+    // DNS resolution is Net (rust/java/ts all classify it; swift floored it silently — sweep [20]). These
+    // are POSIX/Darwin/Glibc free calls; the call site already shadow-guards a local fn of the same name.
+    case "getaddrinfo", "getnameinfo", "gethostbyname", "gethostbyname2", "gethostbyaddr",
+         "gethostbyname_r", "gethostbyaddr_r", "getaddrinfo_a": return "Net"
     case "NSXPCConnection": return "Ipc"
     case "os_log": return "Log"
     case "posix_spawn", "execv", "execvp": return "Exec"

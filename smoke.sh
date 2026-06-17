@@ -433,6 +433,23 @@ printf 'allow Net benign.internal\n' > "$W/mask/pol"
   && ok "masking guard: invisible-host Net fails closed under an allowlist; the clean host certifies" \
   || bad "masking guard: $(cat "$W/mask/gate.out")"
 
+# Masking is NOT Net-only (sweep [14]/[15]): an Fs path-establishing call with a runtime (invisible) path
+# masked by a benign allowlisted literal must ALSO fail closed. `cleanFs` (benign literal only) certifies.
+mkdir -p "$W/maskfs" && cat > "$W/maskfs/m.swift" <<'SW'
+import Foundation
+func maskFs(_ p: String) {
+    try? FileManager.default.removeItem(atPath: "/var/app/ok.txt")   // benign literal path (captured)
+    try? FileManager.default.removeItem(atPath: p)                    // runtime path — structurally INVISIBLE
+}
+func cleanFs() { try? FileManager.default.removeItem(atPath: "/var/app/ok.txt") }
+SW
+printf 'allow Fs /var/app\n' > "$W/maskfs/pol"
+"$BIN" "$W/maskfs" --out "$W/maskfs/r" --policy "$W/maskfs/pol" > "$W/maskfs/gate.out" 2>/dev/null
+{ grep -q 'AS-EFF-008.*`maskFs`.*cannot be certified' "$W/maskfs/gate.out" \
+  && ! grep -q '`cleanFs`' "$W/maskfs/gate.out"; } \
+  && ok "masking guard generalizes to Fs: invisible-path Fs fails closed; the clean path certifies" \
+  || bad "Fs masking guard: $(cat "$W/maskfs/gate.out")"
+
 # Per-fn `invisible` disclosure: a pure-LOOKING fn that reaches a blind (κ-unknown) module via an
 # unresolved external call carries `invisible:[module]` (so `inferred:[]` is never an unqualified pure
 # claim); it propagates to a transitive caller; a purely-LOCAL pure fn in the same file is NOT tagged.
@@ -444,6 +461,8 @@ func caller() { fetch() }                                   // transitive → in
 func leaf() -> Int { return 1 }
 func localOnly() -> Int { return leaf() + leaf() }          // only a resolved local sibling → NOT tagged
 func adder(_ a: Int, _ b: Int) -> Int { return a + b }      // pure, no calls → omitted
+func usesStdlib(_ s: String) -> String { return s.uppercased() }  // κ-known-pure MEMBER call → NOT tagged
+func usesPlatform(_ p: NSPasteboard) -> Bool { return p.canReadObject(forClasses: [], options: nil) }  // ditto
 SW
 "$BIN" "$W/inv" --out "$W/inv/r" >/dev/null 2>&1
 INVRPT=$(ls "$W"/inv/r.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
@@ -453,9 +472,36 @@ d=json.load(open('$INVRPT'))
 by={e['fn']: e for e in d['functions']}
 fetch_ok = by.get('fetch',{}).get('invisible')==['SomeBlindNetLib'] and by['fetch']['inferred']==[]
 caller_ok = by.get('caller',{}).get('invisible')==['SomeBlindNetLib']
-local_absent = 'localOnly' not in by and 'adder' not in by
-print('PASS' if (fetch_ok and caller_ok and local_absent) else 'FAIL '+repr({k:v.get('invisible') for k,v in by.items()}))")
-[ "$INV" = "PASS" ] && ok "invisible disclosure: blind-module reach tagged + propagated; local-only fn not tagged" || bad "invisible disclosure: $INV"
+# the over-disclosure guard (sweep [33]/[36]): a κ-known-pure MEMBER call is NOT a blind reach, even in a
+# file importing a blind module — only an unqualified free/ctor reach is. localOnly/adder pure & omitted.
+no_overdisclose = all(n not in by for n in ('localOnly','adder','usesStdlib','usesPlatform'))
+print('PASS' if (fetch_ok and caller_ok and no_overdisclose) else 'FAIL '+repr({k:v.get('invisible') for k,v in by.items()}))")
+[ "$INV" = "PASS" ] && ok "invisible disclosure: blind free/ctor reach tagged + propagated; κ-pure member calls NOT over-disclosed" || bad "invisible disclosure: $INV"
+
+# DNS resolution classifies as Net (sweep [20]: was floored silently while rust/java/ts classify it).
+mkdir -p "$W/dns" && cat > "$W/dns/m.swift" <<'SW'
+import Foundation
+func resolve(_ h: String) -> Int32 {
+    var hints = addrinfo(); var res: UnsafeMutablePointer<addrinfo>? = nil
+    let rc = getaddrinfo(h, "80", &hints, &res); freeaddrinfo(res); return rc
+}
+SW
+"$BIN" "$W/dns" --out "$W/dns/r" >/dev/null 2>&1
+DNSRPT=$(ls "$W"/dns/r.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+DNS=$(python3 -c "
+import json
+by={e['fn']:set(e.get('inferred',[])) for e in json.load(open('$DNSRPT'))['functions']}
+print('PASS' if 'Net' in by.get('resolve',set()) else 'FAIL '+repr(by.get('resolve','absent')))")
+[ "$DNS" = "PASS" ] && ok "DNS (getaddrinfo) classifies as Net" || bad "DNS classify: $DNS"
+
+# Policy parser splits on bare \r (classic-Mac) line endings (sweep [16]/[17]): a multi-rule policy with
+# bare-CR endings must NOT collapse to the first rule. `deny Exec hop` is rule 2, AFTER a bare \r.
+mkdir -p "$W/cr" && printf 'import Foundation\nfunc hop() { _ = Process() }\n' > "$W/cr/m.swift"
+printf 'deny Clock nope\rdeny Exec hop\rdeny Net nope2\r' > "$W/cr/pol"
+"$BIN" "$W/cr" --out "$W/cr/r" --policy "$W/cr/pol" > "$W/cr/gate.out" 2>/dev/null
+grep -q 'AS-EFF-006.*`hop`.*Exec' "$W/cr/gate.out" \
+  && ok "policy parser splits bare-CR line endings (rule after \\\\r is not dropped)" \
+  || bad "bare-CR policy parse: $(cat "$W/cr/gate.out")"
 
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

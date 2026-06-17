@@ -37,7 +37,8 @@ FORMS = ["direct", "closure", "method", "init_wired", "nested_fn", "sched", "pro
          # checked via extra_effectful instead.
          "custom_seq", "subscript_access", "static_init", "global_init", "proto_prop", "call_as_function", "operator_overload",
          "default_arg", "dynamic_member", "property_wrapper", "sorted_closure", "predicate_closure",
-         "field_init", "proto_default", "hof_ref", "keypath_getter", "implicit_self_read", "free_operator"]
+         "field_init", "proto_default", "hof_ref", "keypath_getter", "implicit_self_read", "free_operator",
+         "prefix_operator", "postfix_operator"]
 
 
 def build_deep_nest(rng, i, me, callee):
@@ -159,6 +160,20 @@ def gen(seed):
                          f"func <> (a: Lo{i}, b: Lo{i}) -> Lo{i} {{ {callee}(); return a }}\n"
                          f"infix operator <>\n"
                          f"func {me}() {{ _ = Lo{i}() <> Lo{i}() }}")
+        elif form == "prefix_operator":
+            # a PREFIX operator `prefix func ~> (x: Lo)` whose body reaches the callee, applied as `~>x`.
+            # SwiftParser yields a PrefixOperatorExpr (NOT a SequenceExpr); pre-fix the binary-only resolver
+            # missed it and the effectful unary operator read silently pure (sweep [35]).
+            bodies[i] = (f"struct Lo{i} {{}}\n"
+                         f"prefix operator ~>\n"
+                         f"prefix func ~> (x: Lo{i}) {{ {callee}() }}\n"
+                         f"func {me}() {{ let v = Lo{i}(); ~>v }}")
+        elif form == "postfix_operator":
+            # the POSTFIX twin: `postfix func <!> (x: Lo)` applied as `x<!>` (a PostfixOperatorExpr).
+            bodies[i] = (f"struct Lo{i} {{}}\n"
+                         f"postfix operator <!>\n"
+                         f"postfix func <!> (x: Lo{i}) {{ {callee}() }}\n"
+                         f"func {me}() {{ let v = Lo{i}(); v<!> }}")
         elif form == "sorted_closure":
             # a NON-whitelisted element-closure HOF: `xs.sorted { $0.go2() < $1.go2() }`. The closure's
             # params are BOTH the receiver element; pre-fix only the 8-method whitelist typed `$0`, so a

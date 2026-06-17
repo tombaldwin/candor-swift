@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.5.12"
+let engineVersion = "candor-swift-0.5.13"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -1046,6 +1046,7 @@ final class CallCollector: SyntaxVisitor {
                 // pure — the 1725d0a guard keyed on `contentsOf` only — the review's under-report find.)
                 directEffects.insert("Fs")
                 recordSurfaces(effect: "Fs", lit: lit)
+                if lit == nil { incompleteSurfaces.insert("Fs") }  // path is the arg → invisible if not literal (masking)
             } else if ["Data", "NSData", "String"].contains(name),
                node.arguments.first?.label?.text == "contentsOf" {
                 // `Data/String(contentsOf: url)` reads from a URL that is EITHER a file (Fs) or a
@@ -1093,7 +1094,7 @@ final class CallCollector: SyntaxVisitor {
                 // it falls through to the unqualified Call below, which resolves to the local def.
                 directEffects.insert(eff)
                 recordSurfaces(effect: eff, lit: lit)
-                if eff == "Net", lit == nil, isNetEstablishingFree(name: name) { incompleteSurfaces.insert("Net") }
+                if lit == nil, isEstablishingFree(effect: eff, name: name) { incompleteSurfaces.insert(eff) }
             } else {
                 calls.append(Call(path: name, leaf: name, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), unqualified: true))
             }
@@ -1126,10 +1127,11 @@ final class CallCollector: SyntaxVisitor {
                 // overloads are excluded by isFileWrite's inout/label guard (never fabricate).
                 directEffects.insert("Fs")
                 recordSurfaces(effect: "Fs", lit: lit)
+                if lit == nil { incompleteSurfaces.insert("Fs") }  // write destination is the arg → invisible if not literal
             } else if let rt = base.root, let eff = kappaMember(root: rt, member: member) {
                 directEffects.insert(eff)
                 recordSurfaces(effect: eff, lit: lit)
-                if eff == "Net", lit == nil, isNetEstablishingMember(root: rt, member: member) { incompleteSurfaces.insert("Net") }
+                if lit == nil, isEstablishingMember(effect: eff, root: rt, member: member) { incompleteSurfaces.insert(eff) }
             } else {
                 calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node)))
             }
@@ -1277,6 +1279,26 @@ final class CallCollector: SyntaxVisitor {
             i += 2
         }
         return .visitChildren
+    }
+
+    // PREFIX (`~>x`) / POSTFIX (`x<!>`) operator overloads — SwiftParser leaves these as their own
+    // PrefixOperatorExpr / PostfixOperatorExpr nodes (NOT inside a SequenceExpr), so the binary-only
+    // resolver above missed them and an effectful custom unary operator read silently PURE (sweep [35]).
+    // Same posture as the binary case: resolve the single operand's LOCAL type, edge to `Type.<op>` and
+    // (gated on a local operand, to avoid fabricating a same-named local op onto `-x`/`!x` over std types)
+    // the FREE `<op>` overload, with one opaque arg so arity-1 overload resolution keeps the edge.
+    override func visit(_ node: PrefixOperatorExprSyntax) -> SyntaxVisitorContinueKind {
+        resolveUnaryOperator(node.operator.text, node.expression); return .visitChildren
+    }
+    override func visit(_ node: PostfixOperatorExprSyntax) -> SyntaxVisitorContinueKind {
+        resolveUnaryOperator(node.operator.text, node.expression); return .visitChildren
+    }
+    private func resolveUnaryOperator(_ opName: String, _ operand: ExprSyntax) {
+        let ot = rootOf(operand)
+        guard let t = ot.root, ot.isVar, localTypes.contains(t) else { return }  // std operand → no local op
+        let opArgs: [ArgKind] = [.opaque], opTypes: [String?] = [t]
+        calls.append(Call(path: "\(t).\(opName)", leaf: opName, strArg: nil, typed: true, args: opArgs, argTypes: opTypes))
+        calls.append(Call(path: opName, leaf: opName, strArg: nil, typed: false, args: opArgs, argTypes: opTypes, unqualified: true))
     }
 
     // `obj[i]` / `obj[i] = v` — a subscript ACCESS runs the subscript's getter/setter body (a
@@ -1757,11 +1779,16 @@ for f in allFns {
                     edges[f.qual, default: []].insert(t)
                     resolved = true
                 }
-            } else if localTypes.contains(call.path), let t = resolveQual("\(call.path).init") {
+            } else if localTypes.contains(call.path) {
                 // `_ = C0()` — a constructor call edges to the declared init (the fuzzer's init_wired
                 // form caught this silent-pure hole on the harness's FIRST run: effects wired in an
                 // initializer vanished — the same hole the TS engine's got-dogfood found in ctors).
-                edges[f.qual, default: []].insert(t)
+                // Constructing a local type is a fully-resolved LOCAL reach (touches no κ-unknown module),
+                // so mark resolved REGARDLESS of whether an explicit `init` unit exists — a synthesized
+                // init has no unit to edge to but the construction is still local; without this the caller
+                // was falsely tagged `invisible` (the over-disclosure regression, sweep [36]).
+                if let t = resolveQual("\(call.path).init") { edges[f.qual, default: []].insert(t) }
+                resolved = true
             } else if let et = f.enclosingType, overloadedBases.contains("\(et).\(call.leaf)") {  // overloaded sibling
                 for t in matchOverloads("\(et).\(call.leaf)", argc, call.argTypes) {
                     edges[f.qual, default: []].insert(t)
@@ -1777,10 +1804,15 @@ for f in allFns {
         }
         // otherwise: unresolvable bare member (unresolved receiver) — stays out (under-report, never a
         // guess); the κ ledger and Unknown rules above carry the honesty.
-        // A call that resolved to no local edge reaches a blind module — disclose the fn's blind imports
-        // (file-granular: the syntactic engine can't pin WHICH import a dropped call lands in, so it names
-        // every κ-unknown module in scope — an honest LOWER bound on the purity claim, never silent-pure).
-        if !resolved {
+        // A call that resolved to no local edge AND is an UNQUALIFIED free-call/ctor reaches a blind module
+        // — disclose the fn's blind imports (file-granular: the syntactic engine can't pin WHICH import a
+        // dropped call lands in, so it names every κ-unknown module in scope — an honest LOWER bound).
+        // ONLY unqualified calls count: a bare MEMBER call (`str.uppercased()`, `p.canReadObject()`) on a
+        // κ-known-pure or stdlib receiver also resolves to no local edge but is NOT a blind reach — counting
+        // it tagged every function touching a stdlib method in a blind-importing file (rampant false
+        // uncertainty, sweep [33]/[36]). The construction (`BlindClient()`) / free call into a blind lib is
+        // the honest signal; a member-only blind receiver is covered by the scan-level κ-ledger.
+        if !resolved && call.unqualified {
             let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
             for m in fileImports[file] ?? [] where blindModules.contains(m) {
                 blindDirect[f.qual, default: []].insert(m)
@@ -1973,7 +2005,13 @@ func warnRule(_ why: String, _ line: String) {
 
 func parsePolicy(_ text: String) -> (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidRule]) {
     var deny: [DenyRule] = [], allow: [AllowRule] = [], forbid: [ForbidRule] = []
-    for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+    // Split LINES on \n / \r\n / bare \r — the three forms Java's Files.readAllLines (the reference parser)
+    // breaks on. Splitting on \n ONLY let a classic-Mac (bare-\r) file collapse to ONE line: \r is also an
+    // in-line ASCII-ws token separator (§6.2), so every rule after the first was glued into the first rule's
+    // tokens and dropped — a gateless-green divergence (sweep [16]/[17]). Normalize first; \v/\f stay in-line
+    // token separators (Java's readLine does not break on them either).
+    let normalized = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+    for rawLine in normalized.split(separator: "\n", omittingEmptySubsequences: false) {
         // The §6.2 token separator is ASCII whitespace ONLY. `.whitespaces`/`Character.isWhitespace` are
         // Unicode — they'd split a NBSP/ideographic space that Java drops (a gateless-green divergence;
         // adversarial DSL review). `isASCII && isWhitespace` keeps space/tab/CR/LF/VT/FF and excludes the

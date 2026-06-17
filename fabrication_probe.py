@@ -56,6 +56,16 @@ CASES = [
     ("processinfo", "_ pi: ProcessInfo",
      ["pi.processName", "pi.arguments", "pi.processIdentifier"],
      ['pi.environment["P"]'], "Env"),
+    # NSPasteboard — the Clipboard handle (sweep [33]). canReadObject/canReadItem/availableType are pure
+    # capability/metadata queries; setString/clearContents/writeObjects touch the clipboard.
+    ("pasteboard", "_ pb: NSPasteboard",
+     ["pb.canReadObject(forClasses: [], options: nil)", "pb.availableType(from: [])"],
+     ['pb.setString("x", forType: .string)'], "Clipboard"),
+    # NWConnection — the Net handle (sweep [34]). cancel/forceCancel tear down and batch{} brackets; only
+    # send/receive/start are the wire.
+    ("nwconnection", "_ c: NWConnection",
+     ["c.cancel()", "c.forceCancel()"],
+     ['c.start(queue: .main)'], "Net"),
 ]
 
 
