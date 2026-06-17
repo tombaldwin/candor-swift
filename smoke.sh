@@ -371,6 +371,30 @@ ok = 'usesShared' not in by and by.get('usesDoer')=={'Fs'}
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
 [ "$F3" = "PASS" ] && ok "F3: free-factory singleton vends real type (no base-type fabrication; effectful vended type resolves)" || bad "F3 factory singleton: $F3"
 
+# REGRESSION F4: a NESTED func (or closure-bound let) SHADOWS a same-named module-level/sibling free
+# fn. Swift resolves a bare `helper()` to the innermost (local) decl — whose body attributes lexically.
+# Edging it ALSO to the module-level free fn would FABRICATE that fn's effects onto a pure caller
+# (the call-graph-key-collision class; the local unit is never registered, so freeFnByName has a single
+# WRONG candidate). The pure callers must NOT inherit Fs; a real caller of the free fn still must.
+mkdir -p "$W/f4" && cat > "$W/f4/m.swift" <<'SW'
+import Foundation
+func helper() { try? FileManager.default.removeItem(atPath: "/tmp/x") }      // module-level Fs
+func writer() { try? FileManager.default.removeItem(atPath: "/tmp/y") }      // module-level Fs
+func pureLocalFunc() { func helper() { let _ = 1 + 1 }; helper() }           // local shadow — pure
+func pureLocalLet()  { let writer = { let _ = 1 + 1 }; writer() }            // closure-let shadow — pure
+func realFreeCall()  { helper() }                                            // genuine reach — Fs
+func effectfulLocal() { func doWrite() { try? FileManager.default.removeItem(atPath: "/tmp/z") }; doWrite() } // lexical — Fs
+SW
+"$BIN" "$W/f4" --out "$W/f4/r" >/dev/null 2>&1
+F4=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/f4/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+ok = ('pureLocalFunc' not in by and 'pureLocalLet' not in by
+      and by.get('realFreeCall')=={'Fs'} and by.get('effectfulLocal')=={'Fs'})
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$F4" = "PASS" ] && ok "F4: local func / closure-let shadow no fabrication (key-collision class; genuine reach + lexical effect still resolve)" || bad "F4 shadow collision: $F4"
+
 # REGRESSION U1: String/Data(contentsOfFile:) takes a FILE PATH (no scheme) — UNCONDITIONALLY Fs.
 # The contentsOf: scheme-resolution guard keyed on `contentsOf` only, dropping contentsOfFile: to pure.
 mkdir -p "$W/u1" && cat > "$W/u1/m.swift" <<'SW'

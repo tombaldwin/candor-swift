@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.5.14"
+let engineVersion = "candor-swift-0.5.15"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -589,6 +589,11 @@ final class CallCollector: SyntaxVisitor {
     var boundLocals: Set<String> = []     // EVERY local binding name (even literal/unresolved-type ones,
                                           // which `vars` drops) — so a bare read / fn-ref of a SHADOWING
                                           // local isn't mistaken for an implicit-self property or a free fn
+    var localFuncs: Set<String> = []      // NESTED `func` names declared in this unit's body. Their bodies
+                                          // attribute lexically (DeclCollector skips them; we walk them here),
+                                          // so a bare `helper()` call to a local func must NOT also edge to a
+                                          // SAME-NAMED module-level/sibling free fn — that fabricates the
+                                          // free fn's effects onto a caller whose local `helper` shadows it.
     var propertyEdges: Set<String> = []   // `Type.member` candidates from property READS
     var callbackInvoked: Set<String> = [] // fn-typed params INVOKED — deferred to callback-flow
     let dynamicMemberTypes: Set<String>   // `@dynamicMemberLookup` types — dynamic access is Unknown
@@ -1340,6 +1345,16 @@ final class CallCollector: SyntaxVisitor {
     }
 
     // `let s = Svc()` / `let s: Svc = …` / `let f = { … }` — local bindings type later calls
+    // A NESTED `func` declared in this unit's body. DeclCollector skips it (it mints no unit of its
+    // own); its effects attribute LEXICALLY to this enclosing unit — so we KEEP WALKING the body
+    // (`.visitChildren`) to fold them in. Record the name so a bare `helper()` call below resolves to
+    // THIS local func (shadowing) and is NOT also edged to a same-named module-level/sibling free fn —
+    // which would fabricate the free fn's effects onto a caller whose local `helper` shadows it.
+    override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
+        localFuncs.insert(node.name.text)
+        return .visitChildren
+    }
+
     override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
         for binding in node.bindings {
             // `let (a, b) = (X(), Y())` — destructure: bind each name from the initializer tuple element
@@ -1721,6 +1736,13 @@ for f in allFns {
         deferredCallbacks[f.qual] = (idxs, cc.callbackInvoked)
     }
     for call in cc.calls {
+        // SHADOW GUARD: an UNQUALIFIED bare-name call (`helper()`) whose name is a NESTED func or a
+        // closure-bound local in THIS unit resolves to that local — whose body already attributes
+        // lexically here. Edging it ALSO to a same-named module-level/sibling free fn would FABRICATE
+        // that free fn's effects onto this caller (the call-graph-key-collision class: the local unit is
+        // never registered, so `freeFnByName[name]` has a single — wrong — candidate). Drop the edge.
+        if call.unqualified, !call.typed,
+           cc.localFuncs.contains(call.path) || cc.boundLocals.contains(call.path) { continue }
         let argc = call.args.count
         // A call that resolves to NO local edge is a reach into code the syntactic engine can't see — a
         // third-party blind module (NOT a fabrication: under-report, never a guess). Track it per call so
