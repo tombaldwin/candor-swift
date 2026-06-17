@@ -42,7 +42,10 @@ public let FS_MEMBERS: Set<String> = ["contents", "contentsOfDirectory", "create
     "moveItem", "attributesOfItem", "fileExists", "createDirectory", "subpathsOfDirectory", "isReadableFile",
     "isWritableFile", "replaceItem", "linkItem", "destinationOfSymbolicLink", "createSymbolicLink",
     "enumerator", "subpaths", "changeCurrentDirectoryPath", "currentDirectoryPath", "temporaryDirectory",
-    "urls", "url", "homeDirectoryForCurrentUser"]
+    "urls", "url", "homeDirectoryForCurrentUser",
+    // contentsEqual reads BOTH files byte-by-byte; attributesOfFileSystem statfs's the live volume —
+    // real Fs I/O that read silent-pure under the covered-module floor (model the member, not drop coverage).
+    "contentsEqual", "attributesOfFileSystem"]
 public let NET_MEMBERS: Set<String> = ["dataTask", "data", "upload", "download", "bytes", "webSocketTask",
     "uploadTask", "downloadTask", "streamTask"]
 public let LOG_MEMBERS: Set<String> = ["trace", "debug", "info", "notice", "warning", "error", "critical", "fault", "log"]

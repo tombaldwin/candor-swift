@@ -29,6 +29,10 @@ final class ClassifierTests: XCTestCase {
         XCTAssertEqual(kappaMember(root: "FileManager", member: "removeItem"), "Fs")
         XCTAssertEqual(kappaMember(root: "URLSession", member: "dataTask"), "Net")
         XCTAssertEqual(kappaMember(root: "Process", member: "run"), "Exec")
+        // covered-module precision: contentsEqual reads both files, attributesOfFileSystem statfs's the
+        // volume — both real Fs I/O that read silent-pure before being modeled.
+        XCTAssertEqual(kappaMember(root: "FileManager", member: "contentsEqual"), "Fs")
+        XCTAssertEqual(kappaMember(root: "FileManager", member: "attributesOfFileSystem"), "Fs")
         XCTAssertEqual(kappaMember(root: "Logger", member: "info"), "Log")
         XCTAssertEqual(kappaMember(root: "Int", member: "random"), "Rand")
         XCTAssertNil(kappaMember(root: "FileManager", member: "path"))     // pure accessor, not in FS_MEMBERS
