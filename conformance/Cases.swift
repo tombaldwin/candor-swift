@@ -1,6 +1,7 @@
 // Cross-impl conformance fixtures (Swift) — mirrors candor-spec's rust/java/ts Cases with the SAME
 // intended effects; the Part-1 oracle (expected.json) is the pass/fail target, like every engine.
 import Foundation
+import SQLite3
 
 // --- direct vocabulary ------------------------------------------------------------------------------
 func fs_read() { _ = FileManager.default.contents(atPath: "/tmp/x") }
@@ -13,6 +14,10 @@ func exec_curl() { _ = Process.launchedProcess(launchPath: "/usr/bin/curl", argu
 func exec_dyn_head(tool: String) { _ = Process.launchedProcess(launchPath: tool, arguments: ["curl"]) }
 func env_read() { _ = ProcessInfo.processInfo.environment["PATH"] }
 func clock_now() { _ = Date() }
+// Rand: stdlib CSPRNG draw (Int.random uses SystemRandomNumberGenerator).
+func rand_gen() { _ = Int.random(in: 0..<100) }
+// Db: SQLite3 C API — sqlite3_open is the store-open boundary (SwiftSyntax parses without linking).
+func db_query() { var db: OpaquePointer?; _ = sqlite3_open("x.db", &db) }
 func pure_fn() -> Int { 1 + 2 }
 
 // --- the trust contract: an unanalysable call is Unknown --------------------------------------------
