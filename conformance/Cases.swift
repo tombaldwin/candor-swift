@@ -18,6 +18,7 @@ func clock_now() { _ = Date() }
 func rand_gen() { _ = Int.random(in: 0..<100) }
 // Db: SQLite3 C API — sqlite3_open is the store-open boundary (SwiftSyntax parses without linking).
 func db_query() { var db: OpaquePointer?; _ = sqlite3_open("x.db", &db) }
+func log_msg() { NSLog("m") }
 func pure_fn() -> Int { 1 + 2 }
 
 // --- the trust contract: an unanalysable call is Unknown --------------------------------------------
