@@ -217,6 +217,9 @@ public func isEstablishingFree(effect: String, name: String) -> Bool {
         || name == "File" || name == "Folder"                                        // Files: path arg
     case "Exec": return name == "posix_spawn" || name == "execv" || name == "execvp"  // path arg (Process() ctor
         // takes NO command — set via .executableURL/.arguments — so the ctor is not establishing)
+        || name == "shellOut"   // ShellOut's `shellOut(to:)` takes the command as its arg → establishing;
+        // a MASKED (runtime) command must mark Exec incomplete (fail-closed) like posix_spawn, else
+        // `shellOut(to: runtimeVar)` evades an `allow Exec` allowlist (gate-masking sweep, 2026-06-18).
     case "Db":   return name.hasPrefix(DB_FREE_PREFIX)                                // sqlite3_exec/prepare take SQL
     default:     return false
     }

@@ -635,6 +635,26 @@ printf 'allow Fs /var/app\n' > "$W/maskfs/pol"
   && ok "masking guard generalizes to Fs: invisible-path Fs fails closed; the clean path certifies" \
   || bad "Fs masking guard: $(cat "$W/maskfs/gate.out")"
 
+# Masking generalizes to Exec via ShellOut (gate-masking cross-engine sweep, 2026-06-18): shellOut(to:)
+# takes the command as its ARG → establishing, so a MASKED (runtime) command beside a benign literal must
+# FAIL closed under `allow Exec <benign>` — else `shellOut(to: runtimeVar)` evades the allowlist (shellOut
+# was classified Exec but was MISSING from the Exec establishing set). `cleanSh` (literal only) certifies.
+mkdir -p "$W/masksh" && cat > "$W/masksh/m.swift" <<'SW'
+import Foundation
+import ShellOut
+func maskSh(_ c: String) {
+    let _ = try? shellOut(to: "ls")   // benign literal command (captured)
+    let _ = try? shellOut(to: c)      // runtime command — structurally INVISIBLE
+}
+func cleanSh() { let _ = try? shellOut(to: "ls") }
+SW
+printf 'allow Exec ls\n' > "$W/masksh/pol"
+"$BIN" "$W/masksh" --out "$W/masksh/r" --policy "$W/masksh/pol" > "$W/masksh/gate.out" 2>/dev/null
+{ grep -q 'AS-EFF-008.*`maskSh`.*cannot be certified' "$W/masksh/gate.out" \
+  && ! grep -q '`cleanSh`' "$W/masksh/gate.out"; } \
+  && ok "masking guard generalizes to Exec/shellOut: masked command fails closed; the clean command certifies" \
+  || bad "Exec/shellOut masking guard: $(cat "$W/masksh/gate.out")"
+
 # Two-path Fs masking (HIGH gate-evasion): a multi-locator op (copyItem/createSymbolicLink/…) captures
 # only the FIRST path as the surface, so a literal SOURCE masks a runtime DESTINATION. The gate must
 # inspect EVERY locator: incomplete unless ALL are literals. `exfilCopy`/`clobberLink` (masked dst/src)
