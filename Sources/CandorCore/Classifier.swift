@@ -66,6 +66,15 @@ public let FS_TWO_PATH_MEMBERS: [String: [Set<String>]] = [
 ]
 public let NET_MEMBERS: Set<String> = ["dataTask", "data", "upload", "download", "bytes", "webSocketTask",
     "uploadTask", "downloadTask", "streamTask"]
+// JohnSundell's `Files` package (a third-party Fs wrapper the κ ledger discloses as `invisible` on
+// every consuming app — Publish reaches 81 of them). The `File`/`Folder`/`Storage` types' OWN API does
+// the syscalls: read/write/append/delete/move/copy/rename and the create* factories. The Files-specific
+// verbs are modeled; the PATH/NAME/URL property reads and the `subfolders`/`files` SEQUENCE builders stay
+// out (lazy iterators, not a verb here — the builder discipline). `File`/`Folder` are common type names,
+// so a project's OWN `struct File` (in declaredTypes) shadows this — never a fabrication on a local type.
+public let FILES_MEMBERS: Set<String> = ["read", "readAsString", "readAsInt", "readAsDictionary",
+    "write", "append", "delete", "move", "moveContents", "copy", "rename", "empty",
+    "createFile", "createFileIfNeeded", "createSubfolder", "createSubfolderIfNeeded", "managedBy"]
 public let LOG_MEMBERS: Set<String> = ["trace", "debug", "info", "notice", "warning", "error", "critical", "fault", "log"]
 public let RAND_ROOTS: Set<String> = ["Int", "UInt", "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16",
     "UInt32", "UInt64", "Double", "Float", "Bool", "CGFloat"]
@@ -117,6 +126,10 @@ public func kappaMember(root: String, member: String) -> String? {
     case "FileManager", "FileHandle": return FS_MEMBERS.contains(member) || member == "readToEnd"
         || member == "write" || member == "read" ? "Fs" : nil
     case "URLSession": return NET_MEMBERS.contains(member) ? "Net" : nil
+    // JohnSundell's Files (third-party Fs wrapper). The pure builder/property surface (path/name/url/
+    // subfolders/files/nameExcludingExtension) is not a verb → stays out. A LOCAL `File`/`Folder`/`Storage`
+    // type shadows this in the driver (declaredTypes), so this only fires on the real package's types.
+    case "File", "Folder", "Storage": return FILES_MEMBERS.contains(member) ? "Fs" : nil
     case "Process": return PROCESS_MEMBERS.contains(member) ? "Exec" : nil
     case "Logger", "OSLog": return LOG_MEMBERS.contains(member) ? "Log" : nil
     case "NSPasteboard", "UIPasteboard":
@@ -201,6 +214,7 @@ public func isEstablishingFree(effect: String, name: String) -> Bool {
     switch effect {
     case "Net":  return isNetEstablishingFree(name: name)
     case "Fs":   return name == "FileHandle" || name == "fopen"                       // path arg
+        || name == "File" || name == "Folder"                                        // Files: path arg
     case "Exec": return name == "posix_spawn" || name == "execv" || name == "execvp"  // path arg (Process() ctor
         // takes NO command — set via .executableURL/.arguments — so the ctor is not establishing)
     case "Db":   return name.hasPrefix(DB_FREE_PREFIX)                                // sqlite3_exec/prepare take SQL
@@ -221,6 +235,14 @@ public func kappaFree(name: String, argCount: Int) -> String? {
         // fd (Fs). The member read/write surface is handled in kappaMember; the std accessors
         // (.standardError/.standardOutput) are zero-arg STATIC properties, not this ctor, so they stay pure.
     case "Process": return "Exec"   // constructing the subprocess handle is the Exec intent (Command::new)
+    // JohnSundell's Files: `File(path:)` / `Folder(path:)` RESOLVE the path against the live filesystem
+    // (the throwing init fails when it does not exist) — a real stat → Fs. The 0-arg form does not exist
+    // (path is required), so any call is the resolving ctor. A LOCAL `struct File`/`Folder` shadows this
+    // (localFreeFns / declaredTypes guard at the call site), so a project's own File() never fabricates.
+    case "File", "Folder": return argCount > 0 ? "Fs" : nil
+    // JohnSundell's ShellOut: `shellOut(to:)` runs a subprocess via /bin/bash → Exec. A distinctive,
+    // collision-unlikely name; a local `func shellOut` (localFreeFns) still shadows it (never fabricate).
+    case "shellOut": return "Exec"
     case "NWConnection", "NWListener": return "Net"
     case "SystemRandomNumberGenerator": return "Rand"
     case "arc4random", "arc4random_uniform", "getentropy": return "Rand"

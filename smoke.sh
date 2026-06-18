@@ -760,5 +760,92 @@ ok = all(by.get(f)=={'Fs'} for f in eff) and all(f not in by for f in pure)
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
 [ "$IC" = "PASS" ] && ok "implicit-conversion edges: description-via-interpolation/String(describing:)/print + literal-init + Comparable-via-sorted carry Fs; pure witnesses + Int/[Int] stay pure (no fabrication)" || bad "implicit-conversion: $IC"
 
+# EXTENSION OF A PLATFORM EFFECTFUL TYPE: `extension Process { func go() { launch() } }` — an implicit/
+# explicit-self call to a κ-platform member is a REAL effect, NOT a project method. `pushType` adds the
+# extended type to localTypes (so sibling helpers resolve) but the shadow guard keyed on localTypes treated
+# `self.launch()` as a local dispatch resolving to nothing → silent-pure (the ShellOut `launchBash` cardinal
+# sin: its Process.launch()/Pipe-Exec was lost, the whole point of the library). Only a DECLARED type
+# (declaredTypes) shadows κ; an extension-ONLY κ-platform type falls through to the κ table. Controls: a
+# locally-DECLARED type extended with the SAME platform name still shadows (no fabrication on project code).
+mkdir -p "$W/ex" && cat > "$W/ex/m.swift" <<'SW'
+import Foundation
+extension Process {
+    func goSelf() { self.launch() }              // Exec (explicit self)
+    func goImplicit() { launch() }               // Exec (implicit self)
+}
+extension URLSession {
+    func fetchSelf() async throws { _ = try await self.data(from: URL(string: "https://h")!) }  // Net
+}
+extension FileManager {
+    func nukeSelf() throws { try self.removeItem(atPath: "/tmp/x") }                              // Fs
+}
+SW
+# A project's OWN type DECLARED locally must shadow the platform κ table even when extended with a
+# platform-collision name — scanned SEPARATELY (a real project can't both declare `struct Process` AND
+# extend the platform Process — they are the same symbol; merging the files into one scan is the conflated
+# case where the local declaration legitimately wins for the WHOLE scan).
+mkdir -p "$W/exs" && cat > "$W/exs/m.swift" <<'SW'
+import Foundation
+struct Process { func launch() {} }
+extension Process { func goLocal() { self.launch() }      // PURE — declared locally, shadows κ
+                    func goLocalImplicit() { launch() } }  // PURE
+SW
+"$BIN" "$W/ex" --out "$W/ex/r" >/dev/null 2>&1
+"$BIN" "$W/exs" --out "$W/exs/r" >/dev/null 2>&1
+EXRPT=$(ls "$W"/ex/r.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+EXSRPT=$(ls "$W"/exs/r.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+EX=$(python3 -c "
+import json
+by={e['fn']:set(e.get('inferred',[])) for e in json.load(open('$EXRPT'))['functions']}
+sb={e['fn']:set(e.get('inferred',[])) for e in json.load(open('$EXSRPT'))['functions']}
+want={'Process.goSelf':{'Exec'},'Process.goImplicit':{'Exec'},'URLSession.fetchSelf':{'Net'},'FileManager.nukeSelf':{'Fs'}}
+shadow=['Process.goLocal','Process.goLocalImplicit']
+ok = all(by.get(k)==v for k,v in want.items()) and all(k not in sb for k in shadow)
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()})+' shadow='+repr({k:sorted(v) for k,v in sb.items()}))")
+[ "$EX" = "PASS" ] && ok "extension of platform type: self.launch()/data()/removeItem() in extension Process/URLSession/FileManager carry Exec/Net/Fs; a DECLARED-local same-name type still shadows (no fabrication)" || bad "extension-platform-self: $EX"
+
+# THIRD-PARTY Fs/Exec PACKAGES (the differential): JohnSundell's `Files` (File/Folder/Storage do real Fs)
+# and `ShellOut` (shellOut(to:) runs /bin/bash) read silent-pure as `invisible` third-party modules. Model
+# the EFFECTFUL members (read/write/delete/createFile/ctors → Fs; shellOut → Exec); the pure surface
+# (`.path` property, builders) stays pure. Controls: a project's OWN `struct File`/`func shellOut` shadows.
+mkdir -p "$W/fl" && cat > "$W/fl/m.swift" <<'SW'
+import Foundation
+import Files
+import ShellOut
+func flRead(_ f: File) throws { _ = try f.read() }                    // Fs
+func flWrite(_ f: File) throws { try f.write("hi") }                  // Fs
+func flDelete(_ f: File) throws { try f.delete() }                    // Fs
+func flCreate(_ d: Folder) throws { _ = try d.createFile(named: "x") } // Fs
+func flOpenFile() throws { _ = try File(path: "/x") }                 // Fs (ctor resolves path)
+func flOpenFolder() throws { _ = try Folder(path: "/x") }            // Fs (ctor)
+func flPath(_ f: File) -> String { return f.path }                   // PURE (property read)
+func flShell() throws { try shellOut(to: "ls") }                     // Exec
+SW
+# project's OWN File/Folder/shellOut shadow the package models — scanned SEPARATELY (a local declaration
+# of File/Folder/shellOut is the project's own symbol for the WHOLE scan; the package types can't coexist).
+mkdir -p "$W/fls" && cat > "$W/fls/m.swift" <<'SW'
+import Foundation
+struct File { func read() -> Int { 1 }; var path: String { "p" } }
+struct Folder { func createFile(named: String) -> Int { 0 } }
+func shellOut(to s: String) -> Int { 0 }
+func locRead(_ f: File) -> Int { f.read() }                          // PURE
+func locCreate(_ d: Folder) -> Int { d.createFile(named: "x") }     // PURE
+func locShell() -> Int { shellOut(to: "x") }                        // PURE
+SW
+"$BIN" "$W/fl" --out "$W/fl/r" >/dev/null 2>&1
+"$BIN" "$W/fls" --out "$W/fls/r" >/dev/null 2>&1
+FLRPT=$(ls "$W"/fl/r.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+FLSRPT=$(ls "$W"/fls/r.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+FL=$(python3 -c "
+import json
+by={e['fn']:set(e.get('inferred',[])) for e in json.load(open('$FLRPT'))['functions']}
+sb={e['fn']:set(e.get('inferred',[])) for e in json.load(open('$FLSRPT'))['functions']}
+fs=['flRead','flWrite','flDelete','flCreate','flOpenFile','flOpenFolder']
+ok = all(by.get(f)=={'Fs'} for f in fs) and by.get('flShell')=={'Exec'} \
+     and 'flPath' not in by \
+     and all(k not in sb for k in ['locRead','locCreate','locShell'])
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()})+' shadow='+repr({k:sorted(v) for k,v in sb.items()}))")
+[ "$FL" = "PASS" ] && ok "third-party Fs/Exec packages: Files File/Folder read/write/delete/createFile/ctors -> Fs, ShellOut shellOut(to:) -> Exec; .path property + local File/Folder/shellOut stay pure (no fabrication)" || bad "Files/ShellOut coverage: $FL"
+
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

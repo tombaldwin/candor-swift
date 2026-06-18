@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.5.19"
+let engineVersion = "candor-swift-0.5.20"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -191,6 +191,14 @@ final class DeclCollector: SyntaxVisitor {
     // the returns index is built (a free factory's return type isn't known during this first pass).
     var staticFactoryFields: [(type: String, field: String, leaf: String)] = []
     var localTypes: Set<String> = []
+    // Types with a REAL local definition (class/struct/enum/actor/protocol) — a SUBSET of localTypes,
+    // which also carries types that only ever appear in an `extension`. An `extension Process { … }` adds
+    // "Process" to localTypes (so its members resolve to any sibling helpers) but NOT to declaredTypes —
+    // it does not redefine the platform type. The shadow discipline (a project's own `class Channel` must
+    // not fabricate NIO Net) keys on `declaredTypes`: a member call on an extension-ONLY κ-platform type
+    // (`self.launch()` inside `extension Process`) that resolves to no local unit falls through to the κ
+    // table instead of reading silent-pure (the ShellOut cardinal-sin: `Process.launch` was lost).
+    var declaredTypes: Set<String> = []
     // Types declared `@propertyWrapper`, and the wrapped stored properties per type
     // (`wrappedProps["S"]["count"] = "Logged"`). A `@Logged var count` desugars `s.count` to
     // `s._count.wrappedValue`; CallCollector edges the access to `Logged.wrappedValue` so an effectful
@@ -237,9 +245,13 @@ final class DeclCollector: SyntaxVisitor {
         return "\(file):\(l.line):\(l.column)"
     }
 
-    private func pushType(_ name: String, inheritance: InheritanceClauseSyntax?, attributes: AttributeListSyntax? = nil) {
+    private func pushType(_ name: String, inheritance: InheritanceClauseSyntax?, attributes: AttributeListSyntax? = nil,
+                          isExtension: Bool = false) {
         typeStack.append(name)
         localTypes.insert(name)
+        // An `extension` does not DECLARE the type — it adds to whatever (possibly platform) type already
+        // exists. Only a real definition shadows the κ table (see declaredTypes' note).
+        if !isExtension { declaredTypes.insert(name) }
         for inh in inheritance?.inheritedTypes ?? [] {
             if let pname = typeName(inh.type).name {
                 conformers[pname, default: []].append(name)
@@ -309,7 +321,7 @@ final class DeclCollector: SyntaxVisitor {
         // methods. The trimmed source text is unique per type; spaces drop for qual hygiene.
         let name = typeName(node.extendedType).name
             ?? node.extendedType.trimmedDescription.replacingOccurrences(of: " ", with: "")
-        pushType(name, inheritance: node.inheritanceClause); return .visitChildren
+        pushType(name, inheritance: node.inheritanceClause, isExtension: true); return .visitChildren
     }
     override func visitPost(_ node: ExtensionDeclSyntax) { typeStack.removeLast() }
 
@@ -691,6 +703,9 @@ final class CallCollector: SyntaxVisitor {
     let fieldArrayElem: [String: [String: String]]  // Type -> field -> [T] element (self.field loops)
     let fieldDictValue: [String: [String: String]]  // Type -> field -> [K: V] value
     let localTypes: Set<String>
+    let declaredTypes: Set<String>  // types with a REAL local definition (NOT extension-only) — the shadow
+                                    // discipline keys on this so a member call on an extension-only κ-platform
+                                    // type (`self.launch()` in `extension Process`) reaches the κ table.
     let localFreeFns: Set<String>   // local free-function names — a bare `name(...)` call to one is the
                                     // project's OWN fn, so the platform free-call classifier (kappaFree)
                                     // must NOT fire (else a local `func NSLog`/`Pipe`-ctor fabricates)
@@ -736,6 +751,7 @@ final class CallCollector: SyntaxVisitor {
     let closureFields: [String: Set<String>]   // FINDING 2 — Type -> stored closure-property names (own unit)
 
     init(info: FnInfo, fields: [String: [String: (name: String?, isFunction: Bool)]], localTypes: Set<String>,
+         declaredTypes: Set<String>,
          localProtocols: Set<String>, returns: [String: String],
          fieldArrayElem: [String: [String: String]], fieldDictValue: [String: [String: String]],
          enumCaseValueType: [String: String], dynamicMemberTypes: Set<String>,
@@ -762,6 +778,7 @@ final class CallCollector: SyntaxVisitor {
         self.fieldArrayElem = fieldArrayElem
         self.fieldDictValue = fieldDictValue
         self.localTypes = localTypes
+        self.declaredTypes = declaredTypes
         self.localProtocols = localProtocols
         self.returns = returns
         self.enclosingType = info.enclosingType
@@ -1381,6 +1398,16 @@ final class CallCollector: SyntaxVisitor {
                 // desugars `f(args)` on a non-function value to `f.callAsFunction(args)`). Edge to the
                 // type's callAsFunction unit (if it has one; resolveQual drops the edge otherwise).
                 calls.append(Call(path: "\(t).callAsFunction", leaf: "callAsFunction", strArg: lit, typed: true, args: argKinds(node), argTypes: argTypesOf(node)))
+            } else if let et = enclosingType, !boundLocals.contains(name), !localFreeFns.contains(name),
+                      !declaredTypes.contains(et), let eff = kappaMember(root: et, member: name) {
+                // an IMPLICIT-self member call inside an `extension <κ-platform-type>`: `launch()` inside
+                // `extension Process` is `self.launch()` → Exec (the ShellOut `launchBash` cardinal-sin: it
+                // read silent-pure). Mirrors the explicit-self path (line ~1417). Only fires when the
+                // enclosing type is NOT declared locally (an extension of the real platform type) and the κ
+                // table knows the member — a declared type shadows κ, a local free fn / shadowing local wins.
+                directEffects.insert(eff)
+                recordSurfaces(effect: eff, lit: lit)
+                if lit == nil, isEstablishingMember(effect: eff, root: et, member: name) { incompleteSurfaces.insert(eff) }
             } else if !localTypes.contains(name), !localFreeFns.contains(name),
                       let eff = kappaFree(name: dealias(name), argCount: node.arguments.count) {
                 // A LOCALLY-declared type ctor (`Pipe()` where `class Pipe`) or free fn (`NSLog(...)` where
@@ -1414,7 +1441,12 @@ final class CallCollector: SyntaxVisitor {
             } else if let pr = ma.base?.as(DeclReferenceExprSyntax.self), protoTyped[pr.baseName.text] != nil {
                 // dispatch through a LOCAL protocol-typed param — bounded CHA or honest Unknown
                 protoDispatches.append((protoTyped[pr.baseName.text]!, member))
-            } else if let rt = base.root, localTypes.contains(rt) {
+            } else if let rt = base.root, localTypes.contains(rt),
+                      // An extension-ONLY κ-platform type does NOT shadow: `self.launch()` inside
+                      // `extension Process` is a real Exec, not a project method (the ShellOut cardinal-sin —
+                      // it read silent-pure). Only a DECLARED type (or a κ-unknown extension target) takes
+                      // the local-dispatch path; a declared type still shadows κ (the GRDB `bind` lesson).
+                      (declaredTypes.contains(rt) || kappaMember(root: rt, member: member) == nil) {
                 // typed local receiver: Type.method — resolve to the local unit. Checked BEFORE the
                 // κ classifier: a locally-declared type ALWAYS shadows the platform table, so a
                 // project's own `class Channel`/`HTTPClient` (common names) resolves to its real
@@ -1934,6 +1966,7 @@ var staticFactoryFields: [(type: String, field: String, leaf: String)] = []
 var protocolMethods: [String: Set<String>] = [:]
 var conformers: [String: [String]] = [:]
 var localTypes: Set<String> = []
+var declaredTypes: Set<String> = []
 var typeAliases: [String: String] = [:]
 var dynamicMemberTypes: Set<String> = []
 var propertyWrapperTypes: Set<String> = []
@@ -2004,6 +2037,7 @@ for c in collectors {
     for (pn, ms) in c.protocolMethods { protocolMethods[pn, default: []].formUnion(ms) }
     for (pn, ts) in c.conformers { conformers[pn, default: []].append(contentsOf: ts) }
     localTypes.formUnion(c.localTypes)
+    declaredTypes.formUnion(c.declaredTypes)
     for (a, u) in c.typeAliases { typeAliases[a] = u }   // last-writer-wins (a redeclared alias is rare)
     dynamicMemberTypes.formUnion(c.dynamicMemberTypes)
     propertyWrapperTypes.formUnion(c.propertyWrapperTypes)
@@ -2185,6 +2219,7 @@ for f in allFns {
     edges[f.qual] = edges[f.qual] ?? []
     guard let body = f.body else { continue }
     let cc = CallCollector(info: f, fields: fields, localTypes: localTypes,
+                           declaredTypes: declaredTypes,
                            localProtocols: localProtocolNames, returns: returnsIdx,
                            fieldArrayElem: fieldArrayElem, fieldDictValue: fieldDictValue,
                            enumCaseValueType: enumCaseValueType, dynamicMemberTypes: dynamicMemberTypes,
