@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.5.15"
+let engineVersion = "candor-swift-0.5.16"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -188,6 +188,12 @@ final class DeclCollector: SyntaxVisitor {
     var propertyWrapperTypes: Set<String> = []
     var wrappedProps: [String: [String: String]] = [:]
     var dynamicMemberTypes: Set<String> = []   // `@dynamicMemberLookup`-annotated local types
+    // LOCAL `typealias Name = Underlying` declarations (name -> the underlying type's SIMPLE name). The
+    // κ classifier keys on the LITERAL type spelling, so an alias (`typealias Proc = Process`) evaded it
+    // and a `Proc()`/`FM.default` reach read silent-pure. Resolved through in CallCollector before the κ
+    // table and type resolution so `Proc`→`Process`→Exec, `FM`→`FileManager`→Fs. Only a simple-identifier
+    // underlying type is recorded (a function-type/generic/tuple alias has no κ-relevant single name).
+    var typeAliases: [String: String] = [:]
     var imports: [String] = []
     private var typeStack: [String] = []
 
@@ -240,6 +246,15 @@ final class DeclCollector: SyntaxVisitor {
 
     override func visit(_ node: ImportDeclSyntax) -> SyntaxVisitorContinueKind {
         if let first = node.path.first { imports.append(first.name.text) }
+        return .skipChildren
+    }
+    // `typealias Proc = Process` — record name -> underlying SIMPLE type name. Only a resolvable simple
+    // name (peeling Optional/some/any/single-tuple) is recorded; a function/generic/tuple alias is left
+    // out (no single κ-relevant type). The CallCollector resolves a receiver/type spelling through these.
+    override func visit(_ node: TypeAliasDeclSyntax) -> SyntaxVisitorContinueKind {
+        if let underlying = typeName(node.initializer.value).name {
+            typeAliases[node.name.text] = underlying
+        }
         return .skipChildren
     }
     override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {
@@ -556,6 +571,12 @@ final class CallCollector: SyntaxVisitor {
     var opaqueFnLocals: Set<String> = []    // fn-typed LOCALS whose value is opaque (not a visible
                                             // closure): invoking one is §4 Unknown — only fn-typed
                                             // PARAMS can defer to call-site flow (callers pass them).
+    var fnValueAlias: [String: String] = [:] // INFERRED-type fn-value locals bound to a NAMED local fn
+                                            // (`let g = eff`): invoking `g()` edges to `eff` (the real
+                                            // unit — more precise than Unknown). The README §4 contract
+                                            // ("a function-typed value invoked reads Unknown — never silent
+                                            // purity") held only WITH an explicit annotation; an inferred
+                                            // `let g = eff` fell through untracked and read silent-pure.
     var protoTyped: [String: String]        // param -> local protocol
     var arrayElem: [String: String]         // name -> element type of a `[T]` local/param (loop typing)
     var dictElem: [String: String]          // name -> VALUE type of a `[K: V]` local/param (dict loops)
@@ -599,13 +620,15 @@ final class CallCollector: SyntaxVisitor {
     let dynamicMemberTypes: Set<String>   // `@dynamicMemberLookup` types — dynamic access is Unknown
     let propertyWrapperTypes: Set<String> // `@propertyWrapper` types — confirm a wrapped-property edge
     let wrappedProps: [String: [String: String]]  // Type -> property -> wrapper type (`S.count -> Logged`)
+    let typeAliases: [String: String]     // `typealias Proc = Process` — name -> underlying simple type
 
     init(info: FnInfo, fields: [String: [String: (name: String?, isFunction: Bool)]], localTypes: Set<String>,
          localProtocols: Set<String>, returns: [String: String],
          fieldArrayElem: [String: [String: String]], fieldDictValue: [String: [String: String]],
          enumCaseValueType: [String: String], dynamicMemberTypes: Set<String>,
          propertyWrapperTypes: Set<String>, wrappedProps: [String: [String: String]],
-         localFreeFns: Set<String>) {
+         localFreeFns: Set<String>, typeAliases: [String: String]) {
+        self.typeAliases = typeAliases
         self.localFreeFns = localFreeFns
         self.propertyWrapperTypes = propertyWrapperTypes
         self.wrappedProps = wrappedProps
@@ -644,6 +667,28 @@ final class CallCollector: SyntaxVisitor {
         }
     }
 
+    /// Resolve a type spelling through LOCAL typealiases (`Proc` → `Process`), bounded against a cycle.
+    /// A LOCAL type shadows an alias of the same name (the never-fabricate discipline: the project's own
+    /// type wins, exactly as the κ shadow rules do). A non-alias name returns unchanged.
+    private func dealias(_ name: String) -> String {
+        var n = name, hops = 0
+        while !localTypes.contains(n), let u = typeAliases[n], u != n, hops < 16 { n = u; hops += 1 }
+        return n
+    }
+
+    /// The dotted TYPE-PATH spelled by a member-access chain of plain identifiers — `Outer.Inner` →
+    /// "Outer.Inner". Returns nil if any link is not a bare identifier (a value receiver, a call, a
+    /// subscript) — so only a genuine nested-type reference (`Outer.Inner()`) resolves, never a value
+    /// chain (`obj.field`). Used to recognise a nested-type constructor whose callee is a MemberAccess.
+    private func dottedTypePath(_ node: Syntax) -> String? {
+        if let dr = node.as(DeclReferenceExprSyntax.self) { return dr.baseName.text }
+        if let ma = node.as(MemberAccessExprSyntax.self), let base = ma.base,
+           let head = dottedTypePath(Syntax(base)) {
+            return "\(head).\(ma.declName.baseName.text)"
+        }
+        return nil
+    }
+
     /// The receiver chain's root: `FileManager.default.contents` -> ("FileManager", path). A root
     /// identifier resolves through vars (param/let types); `self` resolves to the enclosing type.
     private func rootOf(_ raw: ExprSyntax, _ depth: Int = 0) -> (root: String?, isVar: Bool, path: [String]) {
@@ -667,7 +712,9 @@ final class CallCollector: SyntaxVisitor {
             if let et = enclosingType, let f = fields[et]?[n], let ft = f.name {
                 return (ft, true, [n])
             }
-            return (n, false, [n])
+            // a bare TYPE/alias reference (`FM.default`, the base of a static-member chain): resolve a
+            // typealias to its underlying type so κ keys on the real spelling (`FM`→`FileManager`).
+            return (dealias(n), false, [n])
         }
         if let ma = expr.as(MemberAccessExprSyntax.self) {
             // tuple element/member: `p.0` / `p.c` where p is a tuple-typed local/param
@@ -692,8 +739,18 @@ final class CallCollector: SyntaxVisitor {
             // type does too (`db.makeStatement(...).execute()` — the GRDB shape).
             if let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self) {
                 let n = ctor.baseName.text
-                if n.first?.isUppercase == true { return (n, true, [n]) }
+                // `Proc()` where `typealias Proc = Process` — the ctor types the value as the aliased
+                // type so its members classify (`p.run()`→Exec). A LOCAL type shadows (dealias no-ops).
+                if n.first?.isUppercase == true { return (dealias(n), true, [n]) }
                 if let rt = returns[n] { return (rt, true, [n]) }
+            }
+            // `Outer.Inner()` — a NESTED-TYPE constructor: the callee is a member-access spelling a dotted
+            // TYPE path (`Outer.Inner`), not a factory member. When that dotted path is a known local type,
+            // the value carries it so its methods resolve (`let i = Outer.Inner(); i.wipe()` → Fs). Checked
+            // BEFORE the factory-return path so a nested ctor isn't mistaken for a `.member`-named factory.
+            if let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
+               let dotted = dottedTypePath(Syntax(ma)), localTypes.contains(dealias(dotted)) {
+                return (dealias(dotted), true, [ma.declName.baseName.text])
             }
             if let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
                let rt = returns[ma.declName.baseName.text] {
@@ -1071,6 +1128,12 @@ final class CallCollector: SyntaxVisitor {
                     unresolved = true // indeterminate scheme: I/O happens, category unprovable
                     why.insert("contentsOf:indeterminate-url-scheme")
                 }
+            } else if let target = fnValueAlias[name] {
+                // an INFERRED-type fn-value local invoked (`let g = eff; g()`): edge to the aliased local
+                // fn (the real unit). Emit as an unqualified free-call so the fixpoint resolver links it to
+                // `eff` via freeFnByName (unique by construction — only known-fn names enter fnValueAlias).
+                calls.append(Call(path: target, leaf: target, strArg: lit, typed: false,
+                                  args: argKinds(node), argTypes: argTypesOf(node), unqualified: true))
             } else if opaqueFnLocals.contains(name) {
                 // an OPAQUE local fn-typed value invoked (`let cb: () -> Void = stored!; cb()`):
                 // its origin is indeterminate and it is NOT a parameter, so call-site flow can
@@ -1091,15 +1154,18 @@ final class CallCollector: SyntaxVisitor {
                 // type's callAsFunction unit (if it has one; resolveQual drops the edge otherwise).
                 calls.append(Call(path: "\(t).callAsFunction", leaf: "callAsFunction", strArg: lit, typed: true, args: argKinds(node), argTypes: argTypesOf(node)))
             } else if !localTypes.contains(name), !localFreeFns.contains(name),
-                      let eff = kappaFree(name: name, argCount: node.arguments.count) {
+                      let eff = kappaFree(name: dealias(name), argCount: node.arguments.count) {
                 // A LOCALLY-declared type ctor (`Pipe()` where `class Pipe`) or free fn (`NSLog(...)` where
                 // `func NSLog`) ALWAYS shadows the platform free-call table — else a project's own
                 // `Pipe`/`NSDate`/`NSLog`/`CACurrentMediaTime` fabricates Ipc/Clock/Log (the cardinal sin;
                 // the same shadow discipline the member-call path applies via `localTypes`). When shadowed
                 // it falls through to the unqualified Call below, which resolves to the local def.
+                // `dealias(name)` resolves a typealias-named ctor (`Proc()`→`Process`→Exec) before κ; a
+                // local type/free fn already short-circuited above, so an alias never overrides the project.
+                let aliasName = dealias(name)
                 directEffects.insert(eff)
                 recordSurfaces(effect: eff, lit: lit)
-                if lit == nil, isEstablishingFree(effect: eff, name: name) { incompleteSurfaces.insert(eff) }
+                if lit == nil, isEstablishingFree(effect: eff, name: aliasName) { incompleteSurfaces.insert(eff) }
             } else {
                 calls.append(Call(path: name, leaf: name, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), unqualified: true))
             }
@@ -1127,7 +1193,14 @@ final class CallCollector: SyntaxVisitor {
                 // soundness hole). Same bounded CHA / honest-Unknown as protocol params. Also before
                 // κ: a local protocol shadows the platform table.
                 protoDispatches.append((rt, member))
-            } else if let rt = base.root, (rt == "Data" || rt == "String"), isFileWrite(member: member, node) {
+            } else if ((base.root == "Data" || base.root == "String")
+                       // a STRING-LITERAL receiver IS a String (`"data".write(toFile:…)`): rootOf can't type a
+                       // literal (no var/decl), so the `Data`/`String` branch missed it and the file write read
+                       // silent-pure. A literal base has the same write(toFile:)/write(to:) surface as a typed
+                       // String, so classify it identically (isFileWrite's inout/label guard still excludes the
+                       // pure TextOutputStream overloads — never fabricate).
+                       || (ma.base.map { Self.peel($0).is(StringLiteralExprSyntax.self) } ?? false)),
+                      isFileWrite(member: member, node) {
                 // Data/String file write (`d.write(to: url)`) → Fs; the pure in-memory/TextOutputStream
                 // overloads are excluded by isFileWrite's inout/label guard (never fabricate).
                 directEffects.insert("Fs")
@@ -1433,6 +1506,16 @@ final class CallCollector: SyntaxVisitor {
                     // `let c = x as! T` / `let c = cond ? a : b` / `let c = cs[0]` — rootOf types these
                     let info = rootOf(v0)
                     if info.isVar, let t = info.root { vars[name] = t }
+                } else if let dr = v.as(DeclReferenceExprSyntax.self),
+                          localFreeFns.contains(dr.baseName.text),
+                          vars[dr.baseName.text] == nil, !boundLocals.contains(dr.baseName.text) {
+                    // INFERRED-type FUNCTION VALUE: `let g = eff` where `eff` is a known local free fn (and
+                    // NOT shadowed by a local var/binding of the same name). Without an explicit `: () -> Void`
+                    // annotation this fell through untracked and `g()` read silent-pure — violating the README
+                    // §4 contract that "a function-typed value invoked reads Unknown — never silent purity".
+                    // Alias `g`→`eff` so invoking `g()` edges to the REAL unit (more precise than Unknown).
+                    // Gated on the RHS being a known local FN name, so an ordinary value copy never fabricates.
+                    fnValueAlias[name] = dr.baseName.text
                 }
             }
         }
@@ -1484,6 +1567,7 @@ var staticFactoryFields: [(type: String, field: String, leaf: String)] = []
 var protocolMethods: [String: Set<String>] = [:]
 var conformers: [String: [String]] = [:]
 var localTypes: Set<String> = []
+var typeAliases: [String: String] = [:]
 var dynamicMemberTypes: Set<String> = []
 var propertyWrapperTypes: Set<String> = []
 var wrappedProps: [String: [String: String]] = [:]
@@ -1542,6 +1626,7 @@ for c in collectors {
     for (pn, ms) in c.protocolMethods { protocolMethods[pn, default: []].formUnion(ms) }
     for (pn, ts) in c.conformers { conformers[pn, default: []].append(contentsOf: ts) }
     localTypes.formUnion(c.localTypes)
+    for (a, u) in c.typeAliases { typeAliases[a] = u }   // last-writer-wins (a redeclared alias is rare)
     dynamicMemberTypes.formUnion(c.dynamicMemberTypes)
     propertyWrapperTypes.formUnion(c.propertyWrapperTypes)
     for (t, ps) in c.wrappedProps { wrappedProps[t, default: [:]].merge(ps) { a, _ in a } }
@@ -1710,7 +1795,7 @@ for f in allFns {
                            fieldArrayElem: fieldArrayElem, fieldDictValue: fieldDictValue,
                            enumCaseValueType: enumCaseValueType, dynamicMemberTypes: dynamicMemberTypes,
                            propertyWrapperTypes: propertyWrapperTypes, wrappedProps: wrappedProps,
-                           localFreeFns: Set(freeFnByName.keys))
+                           localFreeFns: Set(freeFnByName.keys), typeAliases: typeAliases)
     cc.walk(body)
     // accessor units: a property READ of a known accessor unit is an edge (the reader inherits
     // the getter's effects — `c.data` reaching the Fs inside `var data: Data { … }`)

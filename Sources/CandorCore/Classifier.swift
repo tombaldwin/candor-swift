@@ -328,6 +328,14 @@ public func typeName(_ t: TypeSyntax) -> (name: String?, isFunction: Bool) {
     if let opt = t.as(OptionalTypeSyntax.self) { return typeName(opt.wrappedType) }
     if let att = t.as(AttributedTypeSyntax.self) { return typeName(att.baseType) }
     if t.is(FunctionTypeSyntax.self) { return (nil, true) }
+    // A QUALIFIED/NESTED type path `Outer.Inner` (MemberTypeSyntax): produce the dotted spelling so a
+    // receiver typed `Outer.Inner` matches the nested type's unit key `Outer.Inner.method` (DeclCollector
+    // keys an `extension Outer.Inner` under that same trimmed dotted name). A module-qualified stdlib type
+    // (`Foundation.Date`) also yields a dotted name the κ table doesn't know → under-report, never a guess.
+    if let mem = t.as(MemberTypeSyntax.self) {
+        let head = typeName(mem.baseType).name
+        return (head.map { "\($0).\(mem.name.text)" } ?? mem.name.text, false)
+    }
     if let tup = t.as(TupleTypeSyntax.self), tup.elements.count == 1, let only = tup.elements.first {
         return typeName(only.type)
     }

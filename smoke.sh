@@ -411,6 +411,89 @@ ok = by.get('readFile')=={'Fs'} and by.get('readData')=={'Fs'}
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
 [ "$U1" = "PASS" ] && ok "U1: String(contentsOfFile:) -> Fs (unconditional file read; contentsOf: still resolves)" || bad "U1 contentsOfFile: $U1"
 
+# REGRESSION N1: a method on a NESTED type (`extension Outer.Inner { func wipe() }`), called from
+# OUTSIDE via a `Outer.Inner`-typed PARAM or a `Outer.Inner()` CTOR binding, must resolve to the nested
+# unit `Outer.Inner.wipe` (Fs) — the qualified-nested receiver couldn't bind before and read silent-pure.
+# Controls: a same-named TOP-LEVEL `Inner` with a PURE method must NOT inherit the nested Fs (no fabrication).
+mkdir -p "$W/n1" && cat > "$W/n1/m.swift" <<'SW'
+import Foundation
+struct Outer { struct Inner {} }
+extension Outer.Inner { func wipe() { try? FileManager.default.removeItem(atPath:"/tmp/x") } }
+func s_param(i: Outer.Inner) { i.wipe() }                 // Fs via nested-type param
+func s_ctor() { let i = Outer.Inner(); i.wipe() }         // Fs via nested-type ctor
+struct Inner { func wipe() {} }                            // a DISTINCT top-level Inner — PURE
+func topCtrl() { let i = Inner(); i.wipe() }              // must stay pure (no nested Fs fabrication)
+SW
+"$BIN" "$W/n1" --out "$W/n1/r" >/dev/null 2>&1
+N1=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/n1/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+ok = by.get('s_param')=={'Fs'} and by.get('s_ctor')=={'Fs'} and 'topCtrl' not in by
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$N1" = "PASS" ] && ok "N1: nested-type method resolves via param + ctor (Outer.Inner.wipe Fs; distinct top-level Inner stays pure)" || bad "N1 nested-type: $N1"
+
+# REGRESSION N2: a typealiased receiver/type must resolve THROUGH the alias before the κ classifier
+# (`typealias Proc = Process` → Exec; `typealias FM = FileManager` → Fs) — the κ table keys on the literal
+# spelling, so an alias evaded it and hid Exec/Fs. Control: an alias to a LOCAL type with a PURE method
+# must NOT fabricate, and a same-named LOCAL type shadows an alias (never overridden).
+mkdir -p "$W/n2" && cat > "$W/n2/m.swift" <<'SW'
+import Foundation
+typealias Proc = Process
+func aliasExec() { let p = Proc(); p.launchPath="/bin/ls"; try? p.run() }   // Exec through the alias
+typealias FM = FileManager
+func aliasFs() { try? FM.default.removeItem(atPath:"/tmp/z") }              // Fs through the alias
+struct Widget { func run() {} }
+typealias W2 = Widget
+func aliasLocalCtrl() { let w = W2(); w.run() }                            // alias to a PURE local — stays pure
+SW
+"$BIN" "$W/n2" --out "$W/n2/r" >/dev/null 2>&1
+N2=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/n2/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+ok = by.get('aliasExec')=={'Exec'} and by.get('aliasFs')=={'Fs'} and 'aliasLocalCtrl' not in by
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$N2" = "PASS" ] && ok "N2: typealiased receiver resolves through alias (Proc->Exec, FM->Fs; alias-to-pure-local stays pure)" || bad "N2 typealias: $N2"
+
+# REGRESSION N3: an INFERRED-type fn-value local bound to a NAMED local fn (`let g = eff`) invoked
+# `g()` must edge to `eff` (the real unit — better than Unknown), honoring the README §4 contract that a
+# function-typed value invoked is NEVER silent pure. The explicit-annotation form (`let g: ()->Void = eff`)
+# already disclosed Unknown — keep it. Control: a let bound to an ordinary VALUE (not a fn) must NOT edge.
+mkdir -p "$W/n3" && cat > "$W/n3/m.swift" <<'SW'
+import Foundation
+func eff() { try? FileManager.default.removeItem(atPath:"/tmp/x") }
+func varTyped() { let g: () -> Void = eff; g() }    // Unknown (annotated, opaque) — contract held
+func varInfer() { let g = eff; g() }                // Fs — resolves to eff's real edge (was silent-pure)
+func plainVal() { let x = 41; _ = x + 1 }           // a value copy, NOT a fn — must stay pure (no fabrication)
+SW
+"$BIN" "$W/n3" --out "$W/n3/r" >/dev/null 2>&1
+N3=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/n3/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+ok = by.get('varTyped')=={'Unknown'} and by.get('varInfer')=={'Fs'} and 'plainVal' not in by
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$N3" = "PASS" ] && ok "N3: inferred-type fn-value 'let g = eff; g()' resolves to eff (Fs); annotated stays Unknown; value copy pure" || bad "N3 fn-value infer: $N3"
+
+# REGRESSION N4: a STRING-LITERAL receiver `.write(toFile:)`/`.write(to:)` is a String file write -> Fs
+# (the `isFileWrite` gate keyed only on a String-TYPED identifier). Control: the pure `write(to:&stream)`
+# TextOutputStream overload must NOT be classified Fs (the inout guard still excludes it — no fabrication).
+mkdir -p "$W/n4" && cat > "$W/n4/m.swift" <<'SW'
+import Foundation
+func litWrite() { try? "data".write(toFile:"/tmp/z", atomically:true, encoding:.utf8) }   // Fs (literal receiver)
+func litUrl() { try? "data".write(to: URL(fileURLWithPath:"/tmp/z"), atomically:true, encoding:.utf8) } // Fs (to: file)
+func litStream(s: inout String) { "data".write(to: &s) }                                   // PURE TextOutputStream sink
+SW
+"$BIN" "$W/n4" --out "$W/n4/r" >/dev/null 2>&1
+N4=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/n4/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+ok = by.get('litWrite')=={'Fs'} and by.get('litUrl')=={'Fs'} and 'litStream' not in by
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$N4" = "PASS" ] && ok "N4: string-literal receiver write(toFile:)/write(to:file) -> Fs; inout TextOutputStream sink stays pure" || bad "N4 literal write: $N4"
+
 # --agents: the self-describing engine (the contract is embedded as a Swift constant). The drift
 # gate diffs the ACTUAL served contract (minus the version-header line) against AGENTS.md — testing
 # end to end, and catching a stale AgentsDoc.swift (regenerate: python3 gen-agents-doc.py).
