@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.5.21"
+let engineVersion = "candor-swift-0.5.22"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -1286,6 +1286,11 @@ final class CallCollector: SyntaxVisitor {
         // stringify their operands through `description` / `debugDescription`. Edge each LOCAL-typed
         // operand to its witness; an Int/String/external/unresolvable operand edges nothing (stays pure).
         modelStringificationCall(node)
+        // VECTOR 2b — the WRITER side: `print(x, to: &s)` / `value.write(to: &s)` drive the destination
+        // stream's `TextOutputStream.write`. modelStringificationCall edges the arg-side `description`;
+        // this edges the writer's `write` (the cross-engine write!/fmt::Write blind spot — silent in the
+        // rust deep/scan engines too, fixed there).
+        modelOutputStreamCall(node)
         // VECTOR 4 — `coll.sorted()` / `.max()` / `.min()` over a local element type runs its `<`.
         edgeComparableWitness(node)
         // A LOCAL function/method passed BY REFERENCE as an argument (`xs.map(loadFree)`,
@@ -1717,6 +1722,32 @@ final class CallCollector: SyntaxVisitor {
     private func edgeStringWitness(_ operand: ExprSyntax, reflecting: Bool) {
         guard let t = localTypeOfOperand(operand) else { return }
         propertyEdges.insert("\(t).\(reflecting ? "debugDescription" : "description")")
+    }
+
+    /// The WRITER side of formatting: a destination stream passed as `to: &stream` to `print`/`debugPrint`/
+    /// `dump` or to a `value.write(to:)` drives `<stream>.write` (the `TextOutputStream` conformance). The
+    /// arg-side (`description`) is modeled by `modelStringificationCall`; the writer's effectful `write` was
+    /// dropped — silent-pure (the cross-engine write!/fmt::Write writer-side blind spot; the rust deep and
+    /// scan engines had it too). Edge to the stream's local `write` (resolve-or-skip: a std `String` sink or
+    /// an unresolved operand edges nothing → no fabrication). Gated to the stream-output callees so an
+    /// unrelated `f(x, to: &y)` is never mistaken for a stream write.
+    private func modelOutputStreamCall(_ node: FunctionCallExprSyntax) {
+        let leaf: String?
+        if let dr = node.calledExpression.as(DeclReferenceExprSyntax.self) {
+            leaf = dr.baseName.text
+        } else if let ma = node.calledExpression.as(MemberAccessExprSyntax.self) {
+            leaf = ma.declName.baseName.text
+        } else {
+            leaf = nil
+        }
+        guard let leaf, ["print", "debugPrint", "dump", "write"].contains(leaf) else { return }
+        // a project's OWN `print`/`debugPrint`/`dump` shadows the stdlib free fn — don't model.
+        if leaf != "write", localFreeFns.contains(leaf) || localFuncs.contains(leaf) { return }
+        for arg in node.arguments where arg.label?.text == "to" {
+            guard let io = Self.peel(arg.expression).as(InOutExprSyntax.self) else { continue }
+            guard let t = localTypeOfOperand(io.expression) else { continue }
+            calls.append(Call(path: "\(t).write", leaf: "write", strArg: nil, typed: true))
+        }
     }
 
     // VECTOR 1 — STRING INTERPOLATION `"row=\(w)"`. Each `\(expr)` segment implicitly invokes the

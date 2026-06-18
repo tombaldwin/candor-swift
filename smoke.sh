@@ -494,6 +494,26 @@ ok = by.get('litWrite')=={'Fs'} and by.get('litUrl')=={'Fs'} and 'litStream' not
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
 [ "$N4" = "PASS" ] && ok "N4: string-literal receiver write(toFile:)/write(to:file) -> Fs; inout TextOutputStream sink stays pure" || bad "N4 literal write: $N4"
 
+# REGRESSION N4b (cross-engine write!/fmt::Write writer-side sweep, 2026-06-18): an EFFECTFUL custom
+# TextOutputStream reached via `print(x, to: &s)` or `value.write(to: &s)` must charge the stream's
+# `write` — it was silent-pure (the same shared blind spot the rust deep+scan engines had). A std String
+# sink stays pure (no fabrication).
+mkdir -p "$W/n4b" && cat > "$W/n4b/m.swift" <<'SW'
+import Foundation
+struct LoudStream: TextOutputStream { mutating func write(_ s: String) { _ = FileManager.default.contents(atPath: "/tmp/x") } }
+func viaPrintTo() { var s = LoudStream(); print("hi", to: &s) }      // Fs (print drives LoudStream.write)
+func viaWriteTo() { var s = LoudStream(); "hello".write(to: &s) }    // Fs (String.write(to:) drives s.write)
+func viaStdString() { var out = ""; print("hi", to: &out) }         // PURE (std String sink)
+SW
+"$BIN" "$W/n4b" --out "$W/n4b/r" >/dev/null 2>&1
+N4B=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/n4b/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+ok = 'Fs' in by.get('viaPrintTo',set()) and 'Fs' in by.get('viaWriteTo',set()) and 'viaStdString' not in by
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$N4B" = "PASS" ] && ok "N4b: effectful TextOutputStream via print(to:)/write(to:) -> Fs; std String sink stays pure" || bad "N4b writer side: $N4B"
+
 # REGRESSION S1 (FINDING 1): an effectful custom Sequence/IteratorProtocol returned behind an OPAQUE
 # (`some Sequence`) or ERASED (`AnySequence`) type must NOT read silent-pure at the CONSUMER that iterates
 # it. When the builder body returns a CONCRETE LOCAL iterable the iteration edges to its `next` (precise Fs);
