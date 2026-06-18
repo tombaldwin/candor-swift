@@ -1,4 +1,4 @@
-// candor-swift — the Swift implementation of candor-spec 0.5.
+// candor-swift — the Swift implementation of candor-spec 0.6.
 //
 // Architecture mirrors candor-scan (the syntactic reference engine): pass A indexes declarations
 // (units, field types, protocols + conformers, imports), pass B collects each function's calls
@@ -25,13 +25,13 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.5.22"
+let engineVersion = "candor-swift-0.5.23"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
 // The spec contract version this engine speaks — the SAME literal that stamps the §2 envelope's `spec`
 // field (see the envelope below), reused so `--version` and the report can never disagree.
-let specVersion = "0.5"
+let specVersion = "0.6"
 
 var target = "."
 var outPrefix: String? = nil
