@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.5.16"
+let engineVersion = "candor-swift-0.5.17"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -163,6 +163,19 @@ struct FnInfo {
     var isAccessor: Bool = false   // a computed-property/observer/lazy-init body (spec 0.5 unitKind)
 }
 
+// Collects the expression of every explicit `return <expr>` inside a body (Finding 1: pinning a function's
+// concrete returned iterable type). Does NOT descend into nested closures/functions — a `return` there
+// belongs to that inner scope, not the function whose concrete result type we're resolving.
+final class ReturnExprWalker: SyntaxVisitor {
+    var exprs: [ExprSyntax] = []
+    override func visit(_ node: ReturnStmtSyntax) -> SyntaxVisitorContinueKind {
+        if let e = node.expression { exprs.append(e) }
+        return .visitChildren
+    }
+    override func visit(_ node: ClosureExprSyntax) -> SyntaxVisitorContinueKind { .skipChildren }
+    override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind { .skipChildren }
+}
+
 final class DeclCollector: SyntaxVisitor {
     var file: String
     var converter: SourceLocationConverter
@@ -195,6 +208,22 @@ final class DeclCollector: SyntaxVisitor {
     // underlying type is recorded (a function-type/generic/tuple alias has no κ-relevant single name).
     var typeAliases: [String: String] = [:]
     var imports: [String] = []
+    // FINDING 1 — opaque/erased effectful Sequence builders. A function whose DECLARED return type is an
+    // opaque (`some Sequence`) or erased (`AnySequence`) iterable hides its concrete iterator from callers:
+    // a `for x in builder()` runs a `next()` candor can't pin to a unit. Two indexes drive the precise-or-
+    // honest fix at the iteration site:
+    //   opaqueSeqLeaves      — leaf names whose return type is such an opaque/erased iterable
+    //   seqConcreteRetTmp    — leaf -> the CONCRETE LOCAL type its body returns (`return FileEater()`, or
+    //                          `AnySequence(FileEater())` peeled through the eraser), nil = ambiguous/none.
+    // When the concrete type resolves, the iteration site edges to its `next` (precise); otherwise it reads
+    // Unknown (honest). Keyed by leaf (the call site sees `b.build(…)` — the member name).
+    var opaqueSeqLeaves: Set<String> = []
+    var seqConcreteRetTmp: [String: String?] = [:]
+    // FINDING 2 — stored effectful closure PROPERTIES. `let f: (Int)->Void = { … }` charges its closure
+    // body to `<Type>.init`; invoking `f(0)` / `map(f)` reached NOTHING. Collect the closure initializer as
+    // its OWN property-scoped accessor unit `<Type>.f` (so a pure closure property contributes nothing — no
+    // flood), and record the property name so CallCollector can edge an invocation to it.
+    var closureFields: [String: Set<String>] = [:]   // Type -> stored closure-property names (with a `<Type>.<prop>` unit)
     private var typeStack: [String] = []
 
     init(file: String, tree: SourceFileSyntax) {
@@ -363,6 +392,27 @@ final class DeclCollector: SyntaxVisitor {
                     info.body = Syntax(init0.value)
                     fns.append(info)
                 }
+                // FINDING 2 — a stored CLOSURE-valued property (`let f: (Int)->Void = { … }`): the closure
+                // body runs when the property is INVOKED (`f(0)` / `map(f)`), not at construction. Collect it
+                // as its OWN property-scoped accessor unit `<Type>.f` so an invocation can edge to JUST this
+                // closure's effects (property-scoped — a pure closure property's unit is pure, contributing
+                // nothing; no flood, no fabrication). Record the name so CallCollector recognises the
+                // invocation. GATE on a DIRECT type member (not a closure nested in a getter, like the
+                // S-init guard above) and an initializer that is genuinely a CLOSURE literal.
+                if node.parent?.is(MemberBlockItemSyntax.self) == true,
+                   binding.accessorBlock == nil,
+                   !node.modifiers.contains(where: { $0.name.text == "lazy" }),
+                   let init0 = binding.initializer,
+                   init0.value.as(ClosureExprSyntax.self) != nil {
+                    var info = FnInfo(qual: qual, loc: loc(binding))
+                    info.simpleQual = simpleQual
+                    info.enclosingType = ty
+                    info.enclosingTypePath = tyPath
+                    info.body = Syntax(init0.value)
+                    info.isAccessor = true
+                    fns.append(info)
+                    closureFields[ty, default: []].insert(name)
+                }
                 for b in accessorBodies {
                     var info = FnInfo(qual: qual, loc: loc(binding))
                     info.simpleQual = simpleQual
@@ -442,6 +492,61 @@ final class DeclCollector: SyntaxVisitor {
         }
     }
 
+    // FINDING 1 — a function returning an OPAQUE/ERASED iterable (`some Sequence` / `AnySequence`). Record
+    // the leaf as opaque-seq, and try to pin the CONCRETE LOCAL type its body returns so the iteration site
+    // can edge precisely to that type's `next`. The concrete type is the body's single returned expression:
+    // a local ctor `FileEater()` (direct), or `AnySequence(FileEater())` (peeled through the eraser ctor).
+    // Ambiguity across multiple `return`s → nil (never guess); the site then reads honest Unknown.
+    private func recordOpaqueSeqReturn(_ name: String, _ sig: FunctionSignatureSyntax, body: CodeBlockSyntax?) {
+        guard let rc = sig.returnClause, opaqueIterableName(rc.type) != nil else { return }
+        // Key by the SIMPLE qual `Type.method` (top-level free fn: bare name) — the iteration site
+        // resolves the receiver type, so a same-named `build` on a different type can't collide (the leaf-
+        // keyed version cross-contaminated `Builder.build` with `PureBuilder.build`/`MethodRef.build`).
+        let key = typeStack.last.map { "\($0).\(name)" } ?? name
+        opaqueSeqLeaves.insert(key)
+        guard let body else { return }
+        // collect every returned expression: an explicit `return <expr>` and an implicit single-expr body.
+        var returns: [ExprSyntax] = []
+        if body.statements.count == 1, let only = body.statements.first?.item.as(ExprSyntax.self) {
+            returns.append(only)   // implicit single-expression return (`{ FileEater() }`)
+        }
+        let walker = ReturnExprWalker(viewMode: .sourceAccurate)
+        walker.walk(body)
+        returns.append(contentsOf: walker.exprs)
+        var concrete: String? = nil
+        for r in returns {
+            guard let t = concreteIterableType(r) else { seqConcreteRetTmp[key] = String?.none; return }
+            if let c = concrete, c != t { seqConcreteRetTmp[key] = String?.none; return }
+            concrete = t
+        }
+        if let c = concrete {
+            if let existing = seqConcreteRetTmp[key] {
+                if existing != c { seqConcreteRetTmp[key] = String?.none }   // ambiguous (overloads on same type)
+            } else { seqConcreteRetTmp[key] = c }
+        } else if seqConcreteRetTmp[key] == nil {
+            seqConcreteRetTmp[key] = String?.none   // opaque return, no resolvable concrete body → Unknown site
+        }
+    }
+
+    /// The CONCRETE LOCAL type produced by a returned expression: a ctor `FileEater()` → "FileEater", or an
+    /// eraser ctor `AnySequence(FileEater())` / `AnyIterator(it)` → the single arg's local ctor type. Returns
+    /// nil when the concrete type can't be pinned (a variable, a factory, a non-local type) — caller treats
+    /// nil as "iteration site reads Unknown". Only a LOCAL constructed type is returned (never a guess).
+    private func concreteIterableType(_ raw: ExprSyntax) -> String? {
+        let e = CallCollector.peel(raw)
+        guard let call = e.as(FunctionCallExprSyntax.self),
+              let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self),
+              ctor.baseName.text.first?.isUppercase == true else { return nil }
+        let n = ctor.baseName.text
+        // an eraser ctor `AnySequence(<concrete>)` — peel to the single concrete-ctor argument (the local
+        // type check happens in the driver where the global localTypes set is complete).
+        if ERASED_ITERABLES.contains(n), call.arguments.count == 1,
+           let arg = call.arguments.first?.expression {
+            return concreteIterableType(arg)
+        }
+        return n   // a constructed type name; the driver gates it on being a known LOCAL type
+    }
+
     private func collect(_ name: String, sig: FunctionSignatureSyntax, body: CodeBlockSyntax?, node: some SyntaxProtocol) {
         let tyPath = typeStack.isEmpty ? nil : typeStack.joined(separator: ".")
         var info = FnInfo(qual: tyPath.map { "\($0).\(name)" } ?? name, loc: loc(node))
@@ -499,6 +604,7 @@ final class DeclCollector: SyntaxVisitor {
 
     override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
         recordReturn(node.name.text, node.signature)
+        recordOpaqueSeqReturn(node.name.text, node.signature, body: node.body)
         collect(node.name.text, sig: node.signature, body: node.body, node: node)
         return .skipChildren // nested decls attribute lexically via the body walk (documented)
     }
@@ -621,13 +727,25 @@ final class CallCollector: SyntaxVisitor {
     let propertyWrapperTypes: Set<String> // `@propertyWrapper` types — confirm a wrapped-property edge
     let wrappedProps: [String: [String: String]]  // Type -> property -> wrapper type (`S.count -> Logged`)
     let typeAliases: [String: String]     // `typealias Proc = Process` — name -> underlying simple type
+    // FINDING 1 — opaque/erased iterable builders. `opaqueSeqBuilders` = leaf names whose declared return is
+    // `some Sequence`/`AnySequence` with NO resolvable concrete local type (iterating the result is Unknown);
+    // `seqBuilderConcrete` = leaf -> the CONCRETE LOCAL iterable type its body returns (iterating edges to
+    // that type's `next`/`makeIterator` — precise). Built in the driver after the global localTypes set.
+    let opaqueSeqBuilders: Set<String>
+    let seqBuilderConcrete: [String: String]
+    let closureFields: [String: Set<String>]   // FINDING 2 — Type -> stored closure-property names (own unit)
 
     init(info: FnInfo, fields: [String: [String: (name: String?, isFunction: Bool)]], localTypes: Set<String>,
          localProtocols: Set<String>, returns: [String: String],
          fieldArrayElem: [String: [String: String]], fieldDictValue: [String: [String: String]],
          enumCaseValueType: [String: String], dynamicMemberTypes: Set<String>,
          propertyWrapperTypes: Set<String>, wrappedProps: [String: [String: String]],
-         localFreeFns: Set<String>, typeAliases: [String: String]) {
+         localFreeFns: Set<String>, typeAliases: [String: String],
+         opaqueSeqBuilders: Set<String>, seqBuilderConcrete: [String: String],
+         closureFields: [String: Set<String>]) {
+        self.opaqueSeqBuilders = opaqueSeqBuilders
+        self.seqBuilderConcrete = seqBuilderConcrete
+        self.closureFields = closureFields
         self.typeAliases = typeAliases
         self.localFreeFns = localFreeFns
         self.propertyWrapperTypes = propertyWrapperTypes
@@ -961,9 +1079,46 @@ final class CallCollector: SyntaxVisitor {
     // the type doesn't actually declare (a `Sequence` synthesising `makeIterator` from `next`, etc.).
     private func modelImplicitIteration(_ sequence: ExprSyntax) {
         let r = rootOf(sequence)
-        guard let t = r.root, r.isVar, localTypes.contains(t) else { return }
-        for m in ["makeIterator", "next"] {
-            calls.append(Call(path: "\(t).\(m)", leaf: m, strArg: nil, typed: true, args: [], argTypes: []))
+        if let t = r.root, r.isVar, localTypes.contains(t) {
+            for m in ["makeIterator", "next"] {
+                calls.append(Call(path: "\(t).\(m)", leaf: m, strArg: nil, typed: true, args: [], argTypes: []))
+            }
+            return
+        }
+        // FINDING 1 — iterating the RESULT of an opaque/erased Sequence builder (`for _ in b.build(…)` where
+        // `build() -> some Sequence`). The opaque return hid the concrete iterator from rootOf (it peels to
+        // the bare protocol name, not a local type), so the loop read silent-pure. Identify the builder by
+        // its callee leaf: if its body returns a CONCRETE LOCAL iterable, edge to that type's next/makeIterator
+        // (precise); otherwise the concrete iterator is genuinely unknowable → honest Unknown, never pure.
+        let peeled = Self.peel(sequence)
+        guard let call = peeled.as(FunctionCallExprSyntax.self) else { return }
+        // Resolve the builder's KEY (`Type.method`, or a bare free-fn name) — the same simple-qual key the
+        // DeclCollector recorded — so a same-named builder on another type never cross-resolves.
+        var key: String? = nil
+        if let ma = call.calledExpression.as(MemberAccessExprSyntax.self) {
+            let leaf = ma.declName.baseName.text
+            if let base = ma.base {
+                let recv = rootOf(base)
+                if let rt = recv.root { key = "\(rt).\(leaf)" }   // `b.build(…)` → Builder.build
+            } else if let et = enclosingType {
+                key = "\(et).\(leaf)"   // implicit-self `.build(…)` (rare in a for-in head)
+            }
+        } else if let dr = call.calledExpression.as(DeclReferenceExprSyntax.self) {
+            let leaf = dr.baseName.text
+            // a bare `build(…)` is a self-sibling method (key on the enclosing type) OR a free fn (bare leaf).
+            // Try the enclosing-type key first; fall back to the bare free-fn key.
+            if let et = enclosingType, (seqBuilderConcrete["\(et).\(leaf)"] != nil || opaqueSeqBuilders.contains("\(et).\(leaf)")) {
+                key = "\(et).\(leaf)"
+            } else { key = leaf }
+        }
+        guard let key else { return }
+        if let concrete = seqBuilderConcrete[key] {
+            for m in ["makeIterator", "next"] {
+                calls.append(Call(path: "\(concrete).\(m)", leaf: m, strArg: nil, typed: true, args: [], argTypes: []))
+            }
+        } else if opaqueSeqBuilders.contains(key) {
+            unresolved = true
+            why.insert("opaque-sequence:\(key)")
         }
     }
 
@@ -1087,12 +1242,30 @@ final class CallCollector: SyntaxVisitor {
                 // locals, so `boundLocals` guards them too, else passing such a local fabricates a
                 // same-named free fn's effect.
                 if vars[n] == nil && !fnTyped.contains(n) && !boundLocals.contains(n) {
-                    calls.append(Call(path: n, leaf: n, strArg: nil, typed: false, unqualified: true))
+                    // FINDING 2 — `xs.map(transform)` where `transform` is a stored CLOSURE PROPERTY of the
+                    // enclosing type: passing it as a fn-ref to a HOF that invokes it reaches the closure's
+                    // effects. Edge to the property-scoped unit `<Type>.transform` (its own collected unit).
+                    // Implicit-self property, so it's NOT a free-fn ref — guard before the free-call emit.
+                    if let et = enclosingType, closureFields[et]?.contains(n) == true {
+                        propertyEdges.insert("\(et).\(n)")
+                    } else if let et = enclosingType, let f = fields[et]?[n], f.isFunction {
+                        // a function-typed FIELD passed by ref that is NOT a resolvable local closure
+                        // (assigned in init / no initializer) — the invoked value is unaddressable → Unknown.
+                        unresolved = true; why.insert("dispatch:\(et).\(n)")
+                    } else {
+                        calls.append(Call(path: n, leaf: n, strArg: nil, typed: false, unqualified: true))
+                    }
                 }
             } else if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base {
                 let recv = rootOf(base)
-                if let rt = recv.root, localTypes.contains(rt) {
-                    let m = ma.declName.baseName.text
+                let m = ma.declName.baseName.text
+                if let rt = recv.root, closureFields[rt]?.contains(m) == true {
+                    // `xs.map(obj.transform)` — an explicit closure-property ref on a local receiver.
+                    propertyEdges.insert("\(rt).\(m)")
+                } else if let rt = recv.root, let f = fields[rt]?[m], f.isFunction {
+                    // a non-closure function-typed field passed by ref → unaddressable invocation → Unknown.
+                    unresolved = true; why.insert("dispatch:\(rt).\(m)")
+                } else if let rt = recv.root, localTypes.contains(rt) {
                     calls.append(Call(path: "\(rt).\(m)", leaf: m, strArg: nil, typed: true))
                 }
             }
@@ -1148,6 +1321,18 @@ final class CallCollector: SyntaxVisitor {
                 // lexically) or a named function (an edge), the Unknown is redundant; otherwise
                 // it stands (§4). The TS engine's callback_named move.
                 callbackInvoked.insert(name)
+            } else if let et = enclosingType, !boundLocals.contains(name), closureFields[et]?.contains(name) == true {
+                // FINDING 2 — a bare `f(0)` invoking a stored CLOSURE PROPERTY of the enclosing type
+                // (`self.f` implicit): the closure body runs. Edge to its property-scoped unit `<Type>.f` so
+                // the closure's effects are reached (was silent-pure — the deferred/direct closure-property
+                // hole). Guarded against a shadowing local `f` (boundLocals), which is a different value.
+                propertyEdges.insert("\(et).\(name)")
+            } else if let et = enclosingType, !boundLocals.contains(name),
+                      let f = fields[et]?[name], f.isFunction {
+                // a bare invocation of a function-typed FIELD that is NOT a resolvable local closure
+                // (assigned in init / no initializer) — the value is unaddressable → honest Unknown.
+                unresolved = true
+                why.insert("dispatch:\(et).\(name)")
             } else if let t = vars[name], localTypes.contains(t) {
                 // `f()` where `f` is an INSTANCE of a local type — a `callAsFunction` invocation (Swift
                 // desugars `f(args)` on a non-function value to `f.callAsFunction(args)`). Edge to the
@@ -1174,8 +1359,15 @@ final class CallCollector: SyntaxVisitor {
             let base = ma.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [])
             // a function-typed FIELD invoked (`d.f()` where f: () -> Void) — the unknown_dyn case
             if let rt = base.root, let f = fields[rt]?[member], f.isFunction {
-                unresolved = true
-                why.insert("dispatch:\(rt).\(member)")
+                // FINDING 2 — `obj.f()` where `f` is a stored CLOSURE PROPERTY (a resolvable local closure
+                // unit `<Type>.f`): edge to that unit (its closure's effects), precise instead of Unknown.
+                // A function-typed field WITHOUT a closure unit (assigned in init / no init) stays Unknown.
+                if closureFields[rt]?.contains(member) == true {
+                    propertyEdges.insert("\(rt).\(member)")
+                } else {
+                    unresolved = true
+                    why.insert("dispatch:\(rt).\(member)")
+                }
             } else if let pr = ma.base?.as(DeclReferenceExprSyntax.self), protoTyped[pr.baseName.text] != nil {
                 // dispatch through a LOCAL protocol-typed param — bounded CHA or honest Unknown
                 protoDispatches.append((protoTyped[pr.baseName.text]!, member))
@@ -1610,7 +1802,18 @@ for p in sourcePaths {
     collectors.append(c)
 }
 var returnsTmp: [String: String?] = [:]
+// FINDING 1 — aggregate the opaque/erased Sequence builder indexes across files.
+var opaqueSeqLeaves: Set<String> = []
+var seqConcreteTmp: [String: String?] = [:]
+var closureFields: [String: Set<String>] = [:]   // FINDING 2 — Type -> closure-property names (own unit)
 for c in collectors {
+    opaqueSeqLeaves.formUnion(c.opaqueSeqLeaves)
+    for (k, v) in c.seqConcreteRetTmp {
+        if let existing = seqConcreteTmp[k] {
+            if existing != v { seqConcreteTmp[k] = String?.none }   // ambiguous across files — never guess
+        } else { seqConcreteTmp[k] = v }
+    }
+    for (t, ps) in c.closureFields { closureFields[t, default: []].formUnion(ps) }
     for (k, v) in c.returnsTmp {
         if let existing = returnsTmp[k] {
             if existing != v { returnsTmp[k] = String?.none }
@@ -1633,6 +1836,22 @@ for c in collectors {
     for m in c.imports { importCounts[m, default: 0] += 1 }
     fileImports[c.file] = c.imports
     staticFactoryFields.append(contentsOf: c.staticFactoryFields)
+}
+
+// FINDING 1 — resolve the opaque/erased Sequence builder indexes now that the GLOBAL localTypes set is
+// complete. A leaf whose body returns an unambiguous CONCRETE LOCAL iterable → `seqBuilderConcrete` (the
+// iteration site edges to that type's `next`, precise); any other opaque-seq leaf (ambiguous body, a
+// non-local concrete type, or an erased value that can't be pinned) → `opaqueSeqBuilders` (the iteration
+// site reads honest Unknown). A leaf that is BOTH an opaque-seq builder AND something else (an overload
+// returning a plain type) stays in opaqueSeqBuilders only via this disjoint split — Unknown is the safe side.
+var seqBuilderConcrete: [String: String] = [:]
+var opaqueSeqBuilders: Set<String> = []
+for leaf in opaqueSeqLeaves {
+    if let some = seqConcreteTmp[leaf], let concrete = some, localTypes.contains(concrete) {
+        seqBuilderConcrete[leaf] = concrete
+    } else {
+        opaqueSeqBuilders.insert(leaf)
+    }
 }
 
 // PARAM-TYPE OVERLOAD RESOLUTION. The syntactic engine keys a method by NAME, so same-name overloads merge
@@ -1795,7 +2014,9 @@ for f in allFns {
                            fieldArrayElem: fieldArrayElem, fieldDictValue: fieldDictValue,
                            enumCaseValueType: enumCaseValueType, dynamicMemberTypes: dynamicMemberTypes,
                            propertyWrapperTypes: propertyWrapperTypes, wrappedProps: wrappedProps,
-                           localFreeFns: Set(freeFnByName.keys), typeAliases: typeAliases)
+                           localFreeFns: Set(freeFnByName.keys), typeAliases: typeAliases,
+                           opaqueSeqBuilders: opaqueSeqBuilders, seqBuilderConcrete: seqBuilderConcrete,
+                           closureFields: closureFields)
     cc.walk(body)
     // accessor units: a property READ of a known accessor unit is an edge (the reader inherits
     // the getter's effects — `c.data` reaching the Fs inside `var data: Data { … }`)

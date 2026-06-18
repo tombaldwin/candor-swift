@@ -365,6 +365,35 @@ public func arrayElementName(_ t: TypeSyntax) -> String? {
     return nil
 }
 
+/// Protocol/erased-type spellings whose VALUES are iterable but whose CONCRETE iterator type is hidden:
+/// `some Sequence` / `any IteratorProtocol` (the constraint, peeled by typeName to the bare protocol name)
+/// and the type-erasing wrappers `AnySequence` / `AnyIterator` / `AnyCollection` / `AnyAsyncSequence`. A
+/// `for x in <value of this type>` runs a `next()` that candor cannot pin to a concrete local unit — so
+/// forcing it must read Unknown, never silent-pure (Finding 1: opaque/erased effectful Sequence builders).
+public let ITERABLE_PROTOCOLS: Set<String> =
+    ["Sequence", "IteratorProtocol", "Collection", "BidirectionalCollection", "RandomAccessCollection",
+     "MutableCollection", "RangeReplaceableCollection", "AsyncSequence", "AsyncIteratorProtocol",
+     "LazySequenceProtocol", "LazyCollectionProtocol"]
+public let ERASED_ITERABLES: Set<String> =
+    ["AnySequence", "AnyIterator", "AnyCollection", "AnyBidirectionalCollection", "AnyAsyncSequence"]
+
+/// Is `t` an OPAQUE (`some Sequence`) or ERASED (`AnySequence`) iterable whose concrete element-iterator
+/// type is hidden? Returns the constraint/wrapper name when so, else nil. Used to decide whether iterating
+/// a value of this type can be pinned to a concrete local `next`/`makeIterator` unit (precise) or must be
+/// honest Unknown. Peels Optional/Attributed wrappers so `(some Sequence)?` still classifies.
+public func opaqueIterableName(_ t: TypeSyntax) -> String? {
+    if let opt = t.as(OptionalTypeSyntax.self) { return opaqueIterableName(opt.wrappedType) }
+    if let att = t.as(AttributedTypeSyntax.self) { return opaqueIterableName(att.baseType) }
+    if let some = t.as(SomeOrAnyTypeSyntax.self) {
+        // `some P` / `any P` — opaque/existential. The hidden iterator is unknowable from the signature.
+        if let n = typeName(some.constraint).name, ITERABLE_PROTOCOLS.contains(n) { return n }
+        return nil
+    }
+    // a bare `AnySequence<E>` / `AnyIterator<E>` identifier (the erasing wrapper, generic args ignored)
+    if let id = t.as(IdentifierTypeSyntax.self), ERASED_ITERABLES.contains(id.name.text) { return id.name.text }
+    return nil
+}
+
 /// A tuple type's element types keyed by BOTH position (`"0"`, `"1"`) and label (`"c"`): `(c: C, n: Int)`
 /// → `["0": "C", "c": "C", "1": "Int", "n": "Int"]`. Types `p.0` / `p.c` member accesses on a tuple.
 public func tupleElements(_ t: TypeSyntax) -> [String: String] {

@@ -494,6 +494,83 @@ ok = by.get('litWrite')=={'Fs'} and by.get('litUrl')=={'Fs'} and 'litStream' not
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
 [ "$N4" = "PASS" ] && ok "N4: string-literal receiver write(toFile:)/write(to:file) -> Fs; inout TextOutputStream sink stays pure" || bad "N4 literal write: $N4"
 
+# REGRESSION S1 (FINDING 1): an effectful custom Sequence/IteratorProtocol returned behind an OPAQUE
+# (`some Sequence`) or ERASED (`AnySequence`) type must NOT read silent-pure at the CONSUMER that iterates
+# it. When the builder body returns a CONCRETE LOCAL iterable the iteration edges to its `next` (precise Fs);
+# when the concrete type is genuinely unresolvable it reads honest Unknown. Controls: a PURE opaque sequence
+# forced stays pure (no fabrication); the concrete-return form still classifies Fs.
+mkdir -p "$W/s1" && cat > "$W/s1/m.swift" <<'SW'
+import Foundation
+struct FileEater: Sequence, IteratorProtocol {
+    mutating func next() -> Bool? { try? FileManager.default.removeItem(atPath:"/t"); return nil }
+}
+struct Builder {
+    func build(_ xs:[Int]) -> some Sequence<Bool> { FileEater() }
+    func buildAny(_ xs:[Int]) -> AnySequence<Bool> { AnySequence(FileEater()) }
+    func buildConcrete(_ xs:[Int]) -> FileEater { FileEater() }
+}
+struct Runner {
+    func run(_ b: Builder) { for _ in b.build([1]) {} }            // Fs (precise via FileEater.next)
+    func runAny(_ b: Builder) { for _ in b.buildAny([1]) {} }      // Fs (precise, eraser peeled)
+    func runConcrete(_ b: Builder) { for _ in b.buildConcrete([1]) {} }  // Fs (concrete return)
+}
+func makeExternalSeq() -> some Sequence<Int> { stride(from:0,to:3,by:1) }   // returns a non-local stdlib seq
+struct Honest { func run() { for _ in makeExternalSeq() {} } }              // Unknown (honest, unresolvable)
+struct PureEater: Sequence, IteratorProtocol { mutating func next() -> Int? { return nil } }
+struct PureBuilder { func build() -> some Sequence<Int> { PureEater() } }
+struct PureRunner { func run(_ b: PureBuilder) { for _ in b.build() {} } }   // PURE (no fabrication)
+SW
+"$BIN" "$W/s1" --out "$W/s1/r" >/dev/null 2>&1
+S1=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/s1/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+ok = (by.get('Runner.run')=={'Fs'} and by.get('Runner.runAny')=={'Fs'} and by.get('Runner.runConcrete')=={'Fs'}
+      and by.get('Honest.run')=={'Unknown'} and 'PureRunner.run' not in by and 'PureBuilder.build' not in by)
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items() if k.split('.')[0] in ('Runner','Honest','PureRunner','PureBuilder')}))")
+[ "$S1" = "PASS" ] && ok "S1: opaque/erased effectful Sequence forced -> Fs (precise) or Unknown (honest); pure opaque seq stays pure" || bad "S1 opaque-sequence: $S1"
+
+# REGRESSION S2 (FINDING 2): invoking a stored effectful CLOSURE PROPERTY must reach the closure's effects —
+# whether INVOKED directly (`f(0)`), via the implicit-self bare form, via an explicit receiver (`obj.f()`),
+# or passed as a fn-ref to a HOF that invokes it (`map(transform)`). Property-scoped: a PURE closure property
+# contributes nothing (no flood, no fabrication). A method-reference (`map(zap)`) still resolves (control).
+mkdir -p "$W/s2" && cat > "$W/s2/m.swift" <<'SW'
+import Foundation
+struct Holder {
+    let transform: (Int)->Void = { _ in try? FileManager.default.removeItem(atPath:"/t") }
+    func build(_ xs:[Int]) { _ = xs.lazy.map(transform) }    // Fs (closure prop passed to map)
+}
+struct Direct {
+    let f: (Int)->Void = { _ in try? FileManager.default.removeItem(atPath:"/t") }
+    func call() { f(0) }                                     // Fs (bare invoke)
+}
+struct ViaRecv {
+    let g: (Int)->Void = { _ in try? FileManager.default.removeItem(atPath:"/t") }
+    func call(_ o: ViaRecv) { o.g(0) }                       // Fs (explicit receiver invoke)
+}
+struct MethodRef {
+    func zap(_ x:Int) { try? FileManager.default.removeItem(atPath:"/t") }
+    func build(_ xs:[Int]) { _ = xs.map(zap) }               // Fs (method-ref control)
+}
+struct PureHolder {
+    let transform: (Int)->Void = { _ in print($0) }
+    func build(_ xs:[Int]) { _ = xs.lazy.map(transform) }    // PURE (no fabrication)
+}
+struct PureDirect {
+    let f: (Int)->Void = { _ in _ = $0 }
+    func call() { f(0) }                                     // PURE (no fabrication)
+}
+SW
+"$BIN" "$W/s2" --out "$W/s2/r" >/dev/null 2>&1
+S2=$(python3 -c "
+import json,glob
+r=json.load(open([p for p in glob.glob('$W/s2/r.*.json') if 'callgraph' not in p][0]))
+by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
+ok = (by.get('Holder.build')=={'Fs'} and by.get('Direct.call')=={'Fs'} and by.get('ViaRecv.call')=={'Fs'}
+      and by.get('MethodRef.build')=={'Fs'} and 'PureHolder.build' not in by and 'PureDirect.call' not in by)
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items() if k.split('.')[0] in ('Holder','Direct','ViaRecv','MethodRef','PureHolder','PureDirect')}))")
+[ "$S2" = "PASS" ] && ok "S2: invoked stored closure property reaches Fs (bare/receiver/map-ref); method-ref control Fs; pure closure prop stays pure" || bad "S2 closure-property: $S2"
+
 # --agents: the self-describing engine (the contract is embedded as a Swift constant). The drift
 # gate diffs the ACTUAL served contract (minus the version-header line) against AGENTS.md — testing
 # end to end, and catching a stale AgentsDoc.swift (regenerate: python3 gen-agents-doc.py).
