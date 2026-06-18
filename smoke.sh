@@ -635,6 +635,25 @@ printf 'allow Fs /var/app\n' > "$W/maskfs/pol"
   && ok "masking guard generalizes to Fs: invisible-path Fs fails closed; the clean path certifies" \
   || bad "Fs masking guard: $(cat "$W/maskfs/gate.out")"
 
+# Two-path Fs masking (HIGH gate-evasion): a multi-locator op (copyItem/createSymbolicLink/…) captures
+# only the FIRST path as the surface, so a literal SOURCE masks a runtime DESTINATION. The gate must
+# inspect EVERY locator: incomplete unless ALL are literals. `exfilCopy`/`clobberLink` (masked dst/src)
+# must FAIL closed; `legitCopy` (BOTH literals, both under the allowlist) must still certify (no false
+# positive). Single-path `removeItem` is unchanged (literal certifies / masked fails — covered above).
+mkdir -p "$W/tpfs" && cat > "$W/tpfs/m.swift" <<'SW'
+import Foundation
+func exfilCopy(_ dst: String) { try? FileManager.default.copyItem(atPath: "/tmp/ok/src", toPath: dst) }   // masked dst
+func clobberLink(_ dst: String) { try? FileManager.default.createSymbolicLink(atPath: dst, withDestinationPath: "/tmp/ok/x") }
+func legitCopy() { try? FileManager.default.copyItem(atPath: "/tmp/ok/a", toPath: "/tmp/ok/b") }            // BOTH literal + allowed
+SW
+printf 'allow Fs /tmp/ok\n' > "$W/tpfs/pol"
+"$BIN" "$W/tpfs" --out "$W/tpfs/r" --policy "$W/tpfs/pol" > "$W/tpfs/gate.out" 2>/dev/null
+{ grep -q 'AS-EFF-008.*`exfilCopy`.*cannot be certified' "$W/tpfs/gate.out" \
+  && grep -q 'AS-EFF-008.*`clobberLink`.*cannot be certified' "$W/tpfs/gate.out" \
+  && ! grep -q '`legitCopy`' "$W/tpfs/gate.out"; } \
+  && ok "two-path Fs masking: masked dst/src fails closed; a two-literal copy under the allowlist certifies" \
+  || bad "two-path Fs masking guard: $(cat "$W/tpfs/gate.out")"
+
 # Per-fn `invisible` disclosure: a pure-LOOKING fn that reaches a blind (κ-unknown) module via an
 # unresolved external call carries `invisible:[module]` (so `inferred:[]` is never an unqualified pure
 # claim); it propagates to a transitive caller; a purely-LOCAL pure fn in the same file is NOT tagged.

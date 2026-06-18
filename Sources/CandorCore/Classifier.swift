@@ -45,7 +45,25 @@ public let FS_MEMBERS: Set<String> = ["contents", "contentsOfDirectory", "create
     "urls", "url", "homeDirectoryForCurrentUser",
     // contentsEqual reads BOTH files byte-by-byte; attributesOfFileSystem statfs's the live volume —
     // real Fs I/O that read silent-pure under the covered-module floor (model the member, not drop coverage).
-    "contentsEqual", "attributesOfFileSystem"]
+    "contentsEqual", "attributesOfFileSystem", "replaceItemAt"]
+
+// The FileManager members that take TWO (or more) path locators — a SOURCE and a DESTINATION — each
+// conceptually an argument of THIS call. The single-path establishing guard (capture the FIRST literal,
+// mark Fs incomplete only if NO literal exists) fails OPEN here: a literal source MASKS a runtime
+// destination (`copyItem(atPath: "/tmp/ok", toPath: dst)`), so the masked dst evades an `allow Fs`
+// allowlist (the AS-EFF-008 two-path gate-evasion). For these the gate must inspect EVERY locator: it
+// is incomplete unless ALL locators are static literals. Maps member -> the ORDERED set of accepted
+// locator label-spellings (path AND url forms); `replaceItemAt`'s source is the FIRST positional
+// (unlabeled) arg, encoded as the empty-string label "".
+public let FS_TWO_PATH_MEMBERS: [String: [Set<String>]] = [
+    "copyItem":           [["atPath", "at"], ["toPath", "to"]],
+    "moveItem":           [["atPath", "at"], ["toPath", "to"]],
+    "linkItem":           [["atPath", "at"], ["toPath", "to"]],
+    "createSymbolicLink": [["atPath", "at"], ["withDestinationPath", "withDestinationURL"]],
+    "contentsEqual":      [["atPath"], ["andPath"]],
+    "replaceItem":        [["at"], ["withItemAt"]],
+    "replaceItemAt":      [[""], ["withItemAt"]],
+]
 public let NET_MEMBERS: Set<String> = ["dataTask", "data", "upload", "download", "bytes", "webSocketTask",
     "uploadTask", "downloadTask", "streamTask"]
 public let LOG_MEMBERS: Set<String> = ["trace", "debug", "info", "notice", "warning", "error", "critical", "fault", "log"]

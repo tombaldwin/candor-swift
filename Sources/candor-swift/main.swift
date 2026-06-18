@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.5.17"
+let engineVersion = "candor-swift-0.5.18"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -978,6 +978,43 @@ final class CallCollector: SyntaxVisitor {
         return nil
     }
 
+    // The static string literal of the argument whose label is in `labels` (the empty string "" matches
+    // the first UNLABELED positional arg — `replaceItemAt`'s source). Same pure-segment discipline as
+    // firstStringLiteral: an interpolated/computed value yields nil (no literal claim). Returns nil if
+    // no matching arg or it is not a plain literal.
+    private func literalForLabel(_ args: LabeledExprListSyntax, _ labels: Set<String>) -> String? {
+        for a in args {
+            let lab = a.label?.text ?? ""
+            guard labels.contains(lab) else { continue }
+            guard let lit = a.expression.as(StringLiteralExprSyntax.self) else { return nil }
+            var out = ""
+            for seg in lit.segments {
+                if let plain = seg.as(StringSegmentSyntax.self) { out += plain.content.text } else { return nil }
+            }
+            return decodeEscapes(out)
+        }
+        return nil
+    }
+
+    // A two-path Fs op (copyItem/moveItem/createSymbolicLink/…): inspect EVERY required path locator, not
+    // just the first. Capture each locator's literal as an Fs surface, and report Fs INCOMPLETE if ANY
+    // locator is non-literal — so a literal source can't MASK a runtime destination (the two-path gate
+    // evasion). Returns true if `member` is a two-path op (handled here), false to fall back to the
+    // single-locator path. Mutates paths/incompleteSurfaces directly.
+    private func recordTwoPathFs(member: String, _ args: LabeledExprListSyntax) -> Bool {
+        guard let locators = FS_TWO_PATH_MEMBERS[member] else { return false }
+        var anyMissing = false
+        for spelling in locators {
+            if let lit = literalForLabel(args, spelling) {
+                if lit.contains("/") || lit.hasPrefix(".") || lit.hasPrefix("~") { paths.insert(lit) }
+            } else {
+                anyMissing = true  // this required locator is runtime-built (or absent) → invisible
+            }
+        }
+        if anyMissing { incompleteSurfaces.insert("Fs") }
+        return true
+    }
+
     private func recordSurfaces(effect: String, lit: String?) {
         guard let lit else { return }
         switch effect {
@@ -1400,8 +1437,16 @@ final class CallCollector: SyntaxVisitor {
                 if lit == nil { incompleteSurfaces.insert("Fs") }  // write destination is the arg → invisible if not literal
             } else if let rt = base.root, let eff = kappaMember(root: rt, member: member) {
                 directEffects.insert(eff)
-                recordSurfaces(effect: eff, lit: lit)
-                if lit == nil, isEstablishingMember(effect: eff, root: rt, member: member) { incompleteSurfaces.insert(eff) }
+                // A two-path Fs op (copyItem/moveItem/createSymbolicLink/…) carries a SOURCE *and* a
+                // DESTINATION locator; the single-`lit` guard below captures only the first, so a literal
+                // source would MASK a runtime destination (the two-path gate-evasion). Inspect EVERY
+                // locator: capture all literals, mark Fs incomplete if any locator is non-literal.
+                if eff == "Fs", rt == "FileManager", recordTwoPathFs(member: member, node.arguments) {
+                    // handled — surfaces + incompleteness recorded per-locator
+                } else {
+                    recordSurfaces(effect: eff, lit: lit)
+                    if lit == nil, isEstablishingMember(effect: eff, root: rt, member: member) { incompleteSurfaces.insert(eff) }
+                }
             } else {
                 calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node)))
             }
