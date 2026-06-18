@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.5.18"
+let engineVersion = "candor-swift-0.5.19"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -1265,6 +1265,12 @@ final class CallCollector: SyntaxVisitor {
     override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
         typeClosureParams(node)
         typeEnumCaseBinding(node)
+        // VECTOR 2 — `String(describing: x)` / `String(reflecting: x)` and `print(x)` / `debugPrint(x)`
+        // stringify their operands through `description` / `debugDescription`. Edge each LOCAL-typed
+        // operand to its witness; an Int/String/external/unresolvable operand edges nothing (stays pure).
+        modelStringificationCall(node)
+        // VECTOR 4 — `coll.sorted()` / `.max()` / `.min()` over a local element type runs its `<`.
+        edgeComparableWitness(node)
         // A LOCAL function/method passed BY REFERENCE as an argument (`xs.map(loadFree)`,
         // `xs.map(self.load)`) may be INVOKED by the callee, so its effects are reachable here. The
         // precise callback-flow only resolves a LOCAL callee's invoked params; a non-local HOF (map/
@@ -1654,6 +1660,123 @@ final class CallCollector: SyntaxVisitor {
         return .visitChildren
     }
 
+    // ── IMPLICIT-CONVERSION / COERCION edges ─────────────────────────────────────────────────────────
+    // An effect reached through an IMPLICIT protocol-witness conversion (a `CustomStringConvertible`
+    // `description`, an `ExpressibleBy*Literal` init, a `Comparable` `<`) is NEVER spelled at the call
+    // site — yet it RUNS. A fn reported PURE while such a witness performs I/O is the cardinal sin.
+    // GOVERNING RULE: resolve the OPERAND's TYPE to its LOCAL witness and edge ONLY when local; an
+    // unresolvable-type operand gets NO edge (stays pure — never flood with Unknown); a PURE witness
+    // contributes nothing (resolveQual finds the unit, propagation adds no effect). NEVER fabricate.
+
+    /// The LOCAL type of an operand expression, or nil. Trusts ONLY a confidently-resolved value type
+    /// (`rootOf(...).isVar`) that is a known LOCAL type — exactly the discipline the operator/KeyPath
+    /// paths use. An Int/String/external-typed or unresolvable operand → nil → NO edge (stays pure).
+    private func localTypeOfOperand(_ raw: ExprSyntax) -> String? {
+        let r = rootOf(raw)
+        guard r.isVar, let t = r.root, localTypes.contains(t) else { return nil }
+        return t
+    }
+
+    /// Edge an interpolation/`String(describing:)`/`print` operand to its local type's stringification
+    /// witness. `reflecting` picks `debugDescription` (the `CustomDebugStringConvertible` witness), else
+    /// `description`. A property READ (the getter runs) — `propertyEdges`/resolveQual drop it when the
+    /// type declares no such accessor unit (a stored property, or a synthesised/external witness) → no
+    /// fabrication; a PURE `description` accessor contributes nothing.
+    private func edgeStringWitness(_ operand: ExprSyntax, reflecting: Bool) {
+        guard let t = localTypeOfOperand(operand) else { return }
+        propertyEdges.insert("\(t).\(reflecting ? "debugDescription" : "description")")
+    }
+
+    // VECTOR 1 — STRING INTERPOLATION `"row=\(w)"`. Each `\(expr)` segment implicitly invokes the
+    // operand type's `description` (its `CustomStringConvertible` witness) — SwiftParser models the
+    // segment as an ExpressionSegmentSyntax holding the operand. An operand of a LOCAL type edges to
+    // `Type.description`; an Int/String/external/unresolvable operand edges nothing (stays pure). There
+    // is no source spelling for `\(reflecting:)` interpolation, so interpolation only ever drives
+    // `description` (debugDescription comes via `String(reflecting:)` / `debugPrint`, Vector 2).
+    override func visit(_ node: StringLiteralExprSyntax) -> SyntaxVisitorContinueKind {
+        for seg in node.segments {
+            guard let expr = seg.as(ExpressionSegmentSyntax.self) else { continue }
+            for arg in expr.expressions { edgeStringWitness(arg.expression, reflecting: false) }
+        }
+        return .visitChildren
+    }
+
+    // VECTOR 3 — `ExpressibleBy*Literal` init at a TYPE-ANNOTATED literal binding `let v: W = "lit"` /
+    // `= 42` / `= [..]` / `= [k: v]`. The literal coerces through `W`'s `init(stringLiteral:)` /
+    // `init(integerLiteral:)` / `init(arrayLiteral:)` / `init(dictionaryLiteral:)` — which RUNS. When
+    // `W` is a LOCAL type, edge to `W.init` (a typed call; the driver routes it through arity/overload
+    // resolution and drops it if `W` declares no init — synthesised/external → no fabrication; a PURE
+    // init contributes nothing). The literal TYPE is supplied so a 1-arg overload matcher can route.
+    private func edgeLiteralInit(annotation: TypeSyntax, value: ExprSyntax) {
+        guard let t = typeName(annotation).name, localTypes.contains(dealias(t)) else { return }
+        let lt = literalKind(Self.peel(value))
+        guard lt != nil else { return }
+        let ty = dealias(t)
+        calls.append(Call(path: "\(ty).init", leaf: "init", strArg: nil, typed: true,
+                          args: [.opaque], argTypes: [lt]))
+    }
+    /// The synthetic operand type of a coercible LITERAL expression (`"x"`→String, `42`→Int, …), or nil
+    /// if the value is not a bare literal (a call/identifier is an ordinary init, not a literal coercion).
+    private func literalKind(_ e: ExprSyntax) -> String? {
+        if e.is(StringLiteralExprSyntax.self) { return "String" }
+        if e.is(IntegerLiteralExprSyntax.self) { return "Int" }
+        if e.is(FloatLiteralExprSyntax.self) { return "Double" }
+        if e.is(BooleanLiteralExprSyntax.self) { return "Bool" }
+        if e.is(ArrayExprSyntax.self) { return "Array" }
+        if e.is(DictionaryExprSyntax.self) { return "Dictionary" }
+        return nil
+    }
+
+    // VECTOR 4 — `Comparable` via `sorted()` / `max()` / `min()`. Ordering an array of a local type runs
+    // that type's `<` (its `Comparable` witness, most often a `static func <`). `coll.sorted()` /
+    // `.max()` / `.min()` (the NO-CLOSURE forms — a `(by:)` closure supplies its OWN comparator, charged
+    // lexically) over a LOCAL element type edges to `Element.<`. A stdlib `[Int]`/`[String]` element has
+    // no local `<` unit (resolveQual drops it) → stays pure. matchOverloads/resolveQual route the typed
+    // `Element.<` call; a PURE `<` contributes nothing.
+    private static let COMPARABLE_ORDERERS: Set<String> = ["sorted", "max", "min"]
+    private func edgeComparableWitness(_ node: FunctionCallExprSyntax) {
+        guard let ma = node.calledExpression.as(MemberAccessExprSyntax.self),
+              Self.COMPARABLE_ORDERERS.contains(ma.declName.baseName.text), let base = ma.base else { return }
+        // a `(by:)`/`(into:)` etc. closure form supplies its own comparator — no implicit `<` runs.
+        if node.arguments.contains(where: { Self.peel($0.expression).is(ClosureExprSyntax.self) })
+            || node.trailingClosure != nil { return }
+        guard let elem = elementTypeOf(base), localTypes.contains(elem) else { return }
+        // the `<` witness is EITHER a `static func <` member (`Element.<`) OR a top-level free
+        // `func <(a: Element, b: Element)` — emit both forms, exactly as the binary-operator visitor does.
+        // The free form is gated on a CONFIDENT local element type (argTypes), so matchOverloads routes by
+        // type and never fabricates a same-named local `<` onto a stdlib `[Int].sorted()`.
+        calls.append(Call(path: "\(elem).<", leaf: "<", strArg: nil, typed: true,
+                          args: [.opaque, .opaque], argTypes: [elem, elem]))
+        calls.append(Call(path: "<", leaf: "<", strArg: nil, typed: false,
+                          args: [.opaque, .opaque], argTypes: [elem, elem], unqualified: true))
+    }
+
+    // VECTOR 2 — explicit stringification calls that run an operand's `description`/`debugDescription`:
+    //   `String(describing: x)` / `String(reflecting: x)` — the `reflecting:` label picks debugDescription
+    //   `print(x, …)` / `debugPrint(x, …)` — print uses description, debugPrint uses debugDescription
+    // A `String(...)` call with neither label is an ordinary String init (not a coercion) → skipped. A
+    // LOCAL-typed operand edges to its witness; an Int/String/external/unresolvable operand → no edge.
+    // GUARD: `print`/`debugPrint` shadowed by a local fn of the same name is the project's own — skip.
+    private func modelStringificationCall(_ node: FunctionCallExprSyntax) {
+        guard let dr = node.calledExpression.as(DeclReferenceExprSyntax.self) else { return }
+        let name = dr.baseName.text
+        switch name {
+        case "String":
+            for arg in node.arguments {
+                if arg.label?.text == "describing" { edgeStringWitness(arg.expression, reflecting: false) }
+                else if arg.label?.text == "reflecting" { edgeStringWitness(arg.expression, reflecting: true) }
+            }
+        case "print", "debugPrint":
+            // a project's OWN `func print`/`debugPrint` shadows the stdlib free fn — don't model coercion.
+            if localFreeFns.contains(name) || localFuncs.contains(name) { return }
+            let reflecting = name == "debugPrint"
+            for arg in node.arguments where arg.label == nil {  // skip separator:/terminator:/to: trailing labels
+                edgeStringWitness(arg.expression, reflecting: reflecting)
+            }
+        default: return
+        }
+    }
+
     // `let s = Svc()` / `let s: Svc = …` / `let f = { … }` — local bindings type later calls
     // A NESTED `func` declared in this unit's body. DeclCollector skips it (it mints no unit of its
     // own); its effects attribute LEXICALLY to this enclosing unit — so we KEEP WALKING the body
@@ -1677,6 +1800,13 @@ final class CallCollector: SyntaxVisitor {
                     if info.isVar, let t = info.root { vars[n] = t } else { clearBinding(n) }
                 }
                 continue
+            }
+            // VECTOR 3 — `let v: W = "lit"` / `let _: W = 42` / `= [..]`: a literal at a type-annotated
+            // binding coerces through `W`'s `ExpressibleBy*Literal` init, which RUNS. Edge to `W.init` when
+            // `W` is local + the value is a bare literal (a non-literal initializer is an ordinary init).
+            // Runs BEFORE the name guard so a WILDCARD binding (`let _: W = "lit"`, common) is covered too.
+            if let ann = binding.typeAnnotation, let v0 = binding.initializer?.value {
+                edgeLiteralInit(annotation: ann.type, value: v0)
             }
             guard let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
             boundLocals.insert(name)  // record the SHADOW (any local, even a literal-typed one `vars` drops)

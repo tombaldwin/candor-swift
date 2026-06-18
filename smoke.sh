@@ -707,5 +707,58 @@ grep -q 'AS-EFF-006.*`hop`.*Exec' "$W/cr/gate.out" \
   && ok "policy parser splits bare-CR line endings (rule after \\\\r is not dropped)" \
   || bad "bare-CR policy parse: $(cat "$W/cr/gate.out")"
 
+# IMPLICIT-CONVERSION / COERCION edges: an effect reached through a protocol WITNESS (CustomStringConvertible
+# `description`, ExpressibleBy*Literal `init`, Comparable `<`) is never spelled at the call site but RUNS — a
+# fn reported pure while the witness does I/O is the cardinal sin. The witness is edged ONLY when the operand's
+# TYPE resolves to a LOCAL type that declares it; a non-local (Int/String/external) operand stays pure; a PURE
+# witness contributes nothing. Covers all 4 vectors + their no-fabrication controls.
+mkdir -p "$W/ic" && cat > "$W/ic/m.swift" <<'SW'
+import Foundation
+// effectful description (the realistic format(w) shape from the brief)
+struct W: CustomStringConvertible {
+    var description: String { try? FileManager.default.removeItem(atPath: "/tmp/x"); return "w" }
+    var debugDescription: String { try? FileManager.default.removeItem(atPath: "/tmp/d"); return "d" }
+}
+func fmtInterp(_ w: W) -> String { return "row=\(w)" }          // V1 interpolation -> description -> Fs
+func fmtDescribing(_ w: W) { _ = String(describing: w) }        // V2 String(describing:) -> description -> Fs
+func fmtReflecting(_ w: W) { _ = String(reflecting: w) }        // V2 String(reflecting:) -> debugDescription -> Fs
+func fmtPrint(_ w: W) { print(w) }                              // V2 print -> description -> Fs
+// effectful ExpressibleBy*Literal init
+struct Lit: ExpressibleByStringLiteral {
+    init(stringLiteral value: String) { try? FileManager.default.removeItem(atPath: "/tmp/lit") }
+}
+func makeLit() { let _: Lit = "hi" }                            // V3 literal init -> Fs
+// effectful Comparable < reached via sorted()
+struct Item: Comparable {
+    let n: Int
+    static func < (a: Item, b: Item) -> Bool { try? FileManager.default.removeItem(atPath: "/tmp/c"); return a.n < b.n }
+    static func == (a: Item, b: Item) -> Bool { return a.n == b.n }
+}
+func sortItems(_ xs: [Item]) -> [Item] { return xs.sorted() }   // V4 Comparable via sorted() -> Fs
+// ── NO-FABRICATION CONTROLS ──
+struct PW: CustomStringConvertible { var description: String { return "pure" } }
+func fmtPureDesc(_ p: PW) -> String { return "x=\(p)" }         // pure description -> pure
+struct PLit: ExpressibleByStringLiteral { init(stringLiteral value: String) { } }
+func makePureLit() { let _: PLit = "hi" }                       // pure literal init -> pure
+struct PItem: Comparable {
+    let n: Int
+    static func < (a: PItem, b: PItem) -> Bool { return a.n < b.n }
+    static func == (a: PItem, b: PItem) -> Bool { return a.n == b.n }
+}
+func sortPureItems(_ xs: [PItem]) -> [PItem] { return xs.sorted() }  // pure < -> pure
+func fmtInt(_ i: Int) -> String { return "n=\(i)" }             // interpolate Int (non-local witness) -> pure
+func sortInts(_ xs: [Int]) -> [Int] { return xs.sorted() }      // sort [Int] (non-local <) -> pure
+SW
+"$BIN" "$W/ic" --out "$W/ic/r" >/dev/null 2>&1
+ICRPT=$(ls "$W"/ic/r.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+IC=$(python3 -c "
+import json
+by={e['fn']:set(e.get('inferred',[])) for e in json.load(open('$ICRPT'))['functions']}
+eff = ['fmtInterp','fmtDescribing','fmtReflecting','fmtPrint','makeLit','sortItems']
+pure = ['fmtPureDesc','makePureLit','sortPureItems','fmtInt','sortInts']
+ok = all(by.get(f)=={'Fs'} for f in eff) and all(f not in by for f in pure)
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$IC" = "PASS" ] && ok "implicit-conversion edges: description-via-interpolation/String(describing:)/print + literal-init + Comparable-via-sorted carry Fs; pure witnesses + Int/[Int] stay pure (no fabrication)" || bad "implicit-conversion: $IC"
+
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
