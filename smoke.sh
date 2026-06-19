@@ -10,7 +10,7 @@ ok()   { echo "  ok   $1"; pass=$((pass+1)); }
 bad()  { echo "  FAIL $1"; fail=$((fail+1)); }
 
 "$BIN" conformance/Cases.swift --out "$W/r" 2>/dev/null
-RPT=$(ls "$W"/r.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+RPT=$(ls "$W"/r.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
 EXPECTED="${CANDOR_SPEC:-../candor-spec}/conformance/expected.json"
 if [ -f "$EXPECTED" ]; then
   N=$(python3 - "$EXPECTED" "$RPT" <<'PY'
@@ -36,7 +36,7 @@ func dt_http() { _ = try? Data(contentsOf: URL(string: "https://h")!) }
 func dt_var(_ u: URL) { _ = try? Data(contentsOf: u) }
 SW
 "$BIN" "$W/dt.swift" --out "$W/dt" 2>/dev/null
-DRPT=$(ls "$W"/dt.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+DRPT=$(ls "$W"/dt.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
 dchk() { python3 -c "import json,sys; d=json.load(open('$DRPT')); print(next((','.join(sorted(f['inferred'])) for f in d['functions'] if f['fn'].endswith('.'+sys.argv[1]) or f['fn']==sys.argv[1]), 'absent'))" "$1"; }
 [ "$(dchk dt_file)" = "Fs" ]      && ok "contentsOf: file URL -> Fs"                        || bad "contentsOf: file URL -> Fs (got $(dchk dt_file))"
 [ "$(dchk dt_http)" = "Net" ]     && ok "contentsOf: http URL -> Net"                       || bad "contentsOf: http URL -> Net (got $(dchk dt_http))"
@@ -56,7 +56,7 @@ final class DiskStorage { final class Backend {
 } }
 SW
 "$BIN" "$W/ns.swift" --out "$W/ns" 2>/dev/null
-NRPT=$(ls "$W"/ns.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+NRPT=$(ls "$W"/ns.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
 nchk() { python3 -c "import json,sys; d=json.load(open('$NRPT')); print(next((','.join(sorted(f['inferred'])) for f in d['functions'] if f['fn']==sys.argv[1]), 'absent'))" "$1"; }
 [ "$(nchk DiskStorage.Backend.store)" = "Fs" ]   && ok "nested-type keying: DiskStorage.Backend.store -> Fs (control fires)" || bad "nested keying control: got $(nchk DiskStorage.Backend.store)"
 [ "$(nchk MemoryStorage.Backend.store)" = "absent" ] && ok "nested-type keying: MemoryStorage.Backend.store stays pure (no same-name Fs collapse)" || bad "nested keying fabrication: MemoryStorage.Backend.store got $(nchk MemoryStorage.Backend.store)"
@@ -75,7 +75,7 @@ func runStep(_ s: OpaquePointer) { let _ = sqlite3_step(s) }            // Db (r
 func openDb(_ d: inout OpaquePointer?) { let _ = sqlite3_open("/x", &d) } // Db
 SW
 "$BIN" "$W/sq.swift" --out "$W/sq" 2>/dev/null
-SRPT=$(ls "$W"/sq.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+SRPT=$(ls "$W"/sq.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
 schk() { python3 -c "import json,sys; d=json.load(open('$SRPT')); print(next((','.join(sorted(f['inferred'])) for f in d['functions'] if f['fn']==sys.argv[1]), 'absent'))" "$1"; }
 [ "$(schk runStep)" = "Db" ] && ok "sqlite3_step -> Db (control fires)" || bad "sqlite3 control: runStep got $(schk runStep)"
 [ "$(schk openDb)" = "Db" ] && ok "sqlite3_open -> Db (control fires)" || bad "sqlite3 control: openDb got $(schk openDb)"
@@ -111,7 +111,7 @@ struct Forwarder {
 }                                                                   // resolve to self's `cb` overload cluster
 SW
 "$BIN" "$W/ov.swift" --out "$W/ov" 2>/dev/null
-ORPT=$(ls "$W"/ov.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+ORPT=$(ls "$W"/ov.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
 ochk() { python3 -c "import json,sys; d=json.load(open('$ORPT')); print(next((','.join(sorted(f['inferred'])) for f in d['functions'] if f['fn']==sys.argv[1]), 'absent'))" "$1"; }
 [ "$(ochk Box.viaA)" = "absent" ] && ok "overload param-type: viaA(A) picks pure use(A) (no Clock)" || bad "overload param-type: viaA got $(ochk Box.viaA)"
 [ "$(ochk Box.viaB)" = "Clock" ]  && ok "overload param-type: viaB(B) picks use(B) -> Clock (control)" || bad "overload param-type: viaB got $(ochk Box.viaB)"
@@ -133,7 +133,7 @@ mkdir -p "$W/uk" && printf 'import Foundation\nstruct C { var v: Int { _ = FileM
 "$BIN" "$W/uk" --out "$W/uk/r" >/dev/null 2>&1
 UK=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/uk/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/uk/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:e for e in r['functions']}
 print(by.get('C.v',{}).get('unitKind',''), by.get('plain',{}).get('unitKind','-none-'))")
 [ "$UK" = "accessor -none-" ] && ok "accessor unit carries unitKind; plain fn omits it" || bad "unitKind: got '$UK'"
@@ -149,7 +149,7 @@ SW
 "$BIN" "$W/sg" --out "$W/sg/r" >/dev/null 2>&1
 SG=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/sg/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/sg/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 print('lb' if by.get('letBound')=={'Fs'} else 'X', 'in' if by.get('inlineChain')=={'Fs'} else 'X', 'ne' if 'nonEffect' not in by else 'X')")
 [ "$SG" = "lb in ne" ] && ok "let-bound singleton accessor classifies (no fabrication for non-effect types)" || bad "singleton accessor: got '$SG'"
@@ -167,7 +167,7 @@ SW
 "$BIN" "$W/it" --out "$W/it/r" >/dev/null 2>&1
 IT=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/it/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/it/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 ok = by.get('forIn')=={'Net'} and by.get('forEachP')=={'Net'} and by.get('shorthand')=={'Net'} and 'intLoop' not in by
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
@@ -186,7 +186,7 @@ SW
 "$BIN" "$W/ct2" --out "$W/ct2/r" >/dev/null 2>&1
 CT=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/ct2/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/ct2/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 ok = (by.get('Pool.run')=={'Net'} and by.get('dictV')=={'Net'} and by.get('enumer')=={'Net'}
       and by.get('reuse')=={'Net'} and 'dictInt' not in by)
@@ -206,7 +206,7 @@ SW
 "$BIN" "$W/rx" --out "$W/rx/r" >/dev/null 2>&1
 RX=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/rx/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/rx/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 ok = (by.get('sub')=={'Net'} and by.get('cast')=={'Net'} and by.get('tern')=={'Net'}
       and by.get('castLet')=={'Net'} and 'castInt' not in by)
@@ -225,7 +225,7 @@ SW
 "$BIN" "$W/fc" --out "$W/fc/r" >/dev/null 2>&1
 FC=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/fc/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/fc/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 print('PASS' if by.get('Svc.go')=={'Net'} and by.get('Outer.use')=={'Net'} else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
 [ "$FC" = "PASS" ] && ok "field-chain typing: self.field.method() + field-of-field resolve the field's type" || bad "field-chain typing: $FC"
@@ -244,7 +244,7 @@ SW
 "$BIN" "$W/en" --out "$W/en/r" >/dev/null 2>&1
 EN=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/en/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/en/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 print('PASS' if by.get('sw')=={'Net'} and by.get('ic')=={'Net'} and 'intCase' not in by else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
 [ "$EN" = "PASS" ] && ok "enum case binding: switch/if-case .active(let c) types c (no fabrication on Int payload)" || bad "enum case binding: $EN"
@@ -263,7 +263,7 @@ SW
 "$BIN" "$W/gp" --out "$W/gp/r" >/dev/null 2>&1
 GP=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/gp/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/gp/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 print('PASS' if by.get('generic')=={'Fs'} and by.get('guardF')=={'Net'} and by.get('ifLetF')=={'Net'} else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
 [ "$GP" = "PASS" ] && ok "generic <T: P> param dispatches like P; guard/if-let factory binding types the value" || bad "generic/optional-binding: $GP"
@@ -280,7 +280,7 @@ SW
 "$BIN" "$W/tu" --out "$W/tu/r" >/dev/null 2>&1
 TU=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/tu/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/tu/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 print('PASS' if by.get('pos')=={'Net'} and by.get('named')=={'Net'} and by.get('destr')=={'Net'} and 'intTup' not in by else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
 [ "$TU" = "PASS" ] && ok "tuple typing: p.0 / p.c / let (a,_) destructure (no fabrication on (Int,Int))" || bad "tuple typing: $TU"
@@ -300,7 +300,7 @@ SW
 "$BIN" "$W/ne" --out "$W/ne/r" >/dev/null 2>&1
 NE=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/ne/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/ne/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 ok = all(by.get(f)=={'Net'} for f in ['fieldSub','castField','loopFieldSub','deep'])
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
@@ -322,7 +322,7 @@ SW
 "$BIN" "$W/f1" --out "$W/f1/r" >/dev/null 2>&1
 F1=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/f1/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/f1/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 ok = 'leakRepro' not in by and by.get('annotCtrl')=={'Net'} and by.get('iterCtrl')=={'Net'}
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
@@ -342,7 +342,7 @@ SW
 "$BIN" "$W/f2" --out "$W/f2/r" >/dev/null 2>&1
 F2=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/f2/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/f2/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 ok = 'useBB' not in by and by.get('useAA')=={'Net'}
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
@@ -365,7 +365,7 @@ SW
 "$BIN" "$W/f3" --out "$W/f3/r" >/dev/null 2>&1
 F3=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/f3/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/f3/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 ok = 'usesShared' not in by and by.get('usesDoer')=={'Fs'}
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
@@ -388,7 +388,7 @@ SW
 "$BIN" "$W/f4" --out "$W/f4/r" >/dev/null 2>&1
 F4=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/f4/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/f4/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 ok = ('pureLocalFunc' not in by and 'pureLocalLet' not in by
       and by.get('realFreeCall')=={'Fs'} and by.get('effectfulLocal')=={'Fs'})
@@ -405,7 +405,7 @@ SW
 "$BIN" "$W/u1" --out "$W/u1/r" >/dev/null 2>&1
 U1=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/u1/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/u1/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 ok = by.get('readFile')=={'Fs'} and by.get('readData')=={'Fs'}
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
@@ -427,7 +427,7 @@ SW
 "$BIN" "$W/n1" --out "$W/n1/r" >/dev/null 2>&1
 N1=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/n1/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/n1/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 ok = by.get('s_param')=={'Fs'} and by.get('s_ctor')=={'Fs'} and 'topCtrl' not in by
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
@@ -450,7 +450,7 @@ SW
 "$BIN" "$W/n2" --out "$W/n2/r" >/dev/null 2>&1
 N2=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/n2/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/n2/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 ok = by.get('aliasExec')=={'Exec'} and by.get('aliasFs')=={'Fs'} and 'aliasLocalCtrl' not in by
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
@@ -470,7 +470,7 @@ SW
 "$BIN" "$W/n3" --out "$W/n3/r" >/dev/null 2>&1
 N3=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/n3/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/n3/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 ok = by.get('varTyped')=={'Unknown'} and by.get('varInfer')=={'Fs'} and 'plainVal' not in by
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
@@ -488,7 +488,7 @@ SW
 "$BIN" "$W/n4" --out "$W/n4/r" >/dev/null 2>&1
 N4=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/n4/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/n4/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 ok = by.get('litWrite')=={'Fs'} and by.get('litUrl')=={'Fs'} and 'litStream' not in by
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
@@ -508,7 +508,7 @@ SW
 "$BIN" "$W/n4b" --out "$W/n4b/r" >/dev/null 2>&1
 N4B=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/n4b/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/n4b/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 ok = 'Fs' in by.get('viaPrintTo',set()) and 'Fs' in by.get('viaWriteTo',set()) and 'viaStdString' not in by
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
@@ -543,7 +543,7 @@ SW
 "$BIN" "$W/s1" --out "$W/s1/r" >/dev/null 2>&1
 S1=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/s1/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/s1/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 ok = (by.get('Runner.run')=={'Fs'} and by.get('Runner.runAny')=={'Fs'} and by.get('Runner.runConcrete')=={'Fs'}
       and by.get('Honest.run')=={'Unknown'} and 'PureRunner.run' not in by and 'PureBuilder.build' not in by)
@@ -584,7 +584,7 @@ SW
 "$BIN" "$W/s2" --out "$W/s2/r" >/dev/null 2>&1
 S2=$(python3 -c "
 import json,glob
-r=json.load(open([p for p in glob.glob('$W/s2/r.*.json') if 'callgraph' not in p][0]))
+r=json.load(open([p for p in glob.glob('$W/s2/r.*.json') if 'callgraph' not in p and 'hierarchy' not in p][0]))
 by={e['fn']:set(e.get('inferred',[])) for e in r['functions']}
 ok = (by.get('Holder.build')=={'Fs'} and by.get('Direct.call')=={'Fs'} and by.get('ViaRecv.call')=={'Fs'}
       and by.get('MethodRef.build')=={'Fs'} and 'PureHolder.build' not in by and 'PureDirect.call' not in by)
@@ -709,7 +709,7 @@ func usesStdlib(_ s: String) -> String { return s.uppercased() }  // κ-known-pu
 func usesPlatform(_ p: NSPasteboard) -> Bool { return p.canReadObject(forClasses: [], options: nil) }  // ditto
 SW
 "$BIN" "$W/inv" --out "$W/inv/r" >/dev/null 2>&1
-INVRPT=$(ls "$W"/inv/r.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+INVRPT=$(ls "$W"/inv/r.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
 INV=$(python3 -c "
 import json
 d=json.load(open('$INVRPT'))
@@ -731,7 +731,7 @@ func resolve(_ h: String) -> Int32 {
 }
 SW
 "$BIN" "$W/dns" --out "$W/dns/r" >/dev/null 2>&1
-DNSRPT=$(ls "$W"/dns/r.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+DNSRPT=$(ls "$W"/dns/r.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
 DNS=$(python3 -c "
 import json
 by={e['fn']:set(e.get('inferred',[])) for e in json.load(open('$DNSRPT'))['functions']}
@@ -790,7 +790,7 @@ func fmtInt(_ i: Int) -> String { return "n=\(i)" }             // interpolate I
 func sortInts(_ xs: [Int]) -> [Int] { return xs.sorted() }      // sort [Int] (non-local <) -> pure
 SW
 "$BIN" "$W/ic" --out "$W/ic/r" >/dev/null 2>&1
-ICRPT=$(ls "$W"/ic/r.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+ICRPT=$(ls "$W"/ic/r.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
 IC=$(python3 -c "
 import json
 by={e['fn']:set(e.get('inferred',[])) for e in json.load(open('$ICRPT'))['functions']}
@@ -832,8 +832,8 @@ extension Process { func goLocal() { self.launch() }      // PURE — declared l
 SW
 "$BIN" "$W/ex" --out "$W/ex/r" >/dev/null 2>&1
 "$BIN" "$W/exs" --out "$W/exs/r" >/dev/null 2>&1
-EXRPT=$(ls "$W"/ex/r.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
-EXSRPT=$(ls "$W"/exs/r.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+EXRPT=$(ls "$W"/ex/r.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
+EXSRPT=$(ls "$W"/exs/r.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
 EX=$(python3 -c "
 import json
 by={e['fn']:set(e.get('inferred',[])) for e in json.load(open('$EXRPT'))['functions']}
@@ -874,8 +874,8 @@ func locShell() -> Int { shellOut(to: "x") }                        // PURE
 SW
 "$BIN" "$W/fl" --out "$W/fl/r" >/dev/null 2>&1
 "$BIN" "$W/fls" --out "$W/fls/r" >/dev/null 2>&1
-FLRPT=$(ls "$W"/fl/r.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
-FLSRPT=$(ls "$W"/fls/r.*.Swift.json 2>/dev/null | grep -v callgraph | head -1)
+FLRPT=$(ls "$W"/fl/r.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
+FLSRPT=$(ls "$W"/fls/r.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
 FL=$(python3 -c "
 import json
 by={e['fn']:set(e.get('inferred',[])) for e in json.load(open('$FLRPT'))['functions']}
