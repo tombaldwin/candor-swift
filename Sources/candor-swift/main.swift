@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.5.23"
+let engineVersion = "candor-swift-0.5.24"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -1172,7 +1172,7 @@ final class CallCollector: SyntaxVisitor {
             }
         } else if opaqueSeqBuilders.contains(key) {
             unresolved = true
-            why.insert("opaque-sequence:\(key)")
+            why.insert("callback:opaque-sequence:\(key)") // opaque iteration (makeIterator/next on an unresolved iterator) — owner-less, ≈ opaque callback; canonical `callback:` (SPEC §4 ⟨0.7⟩)
         }
     }
 
@@ -1498,7 +1498,7 @@ final class CallCollector: SyntaxVisitor {
         } else {
             // computed callee (subscript, optional-chained value, …): §4 Unknown
             unresolved = true
-            why.insert("call:computed")
+            why.insert("callback:computed") // a computed/unresolved callee value (subscript, optional-chained, …) — owner-less unresolved invocation; canonical `callback:` (SPEC §4 ⟨0.7⟩)
         }
         return .visitChildren
     }
