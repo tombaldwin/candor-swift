@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.5.24"
+let engineVersion = "candor-swift-0.5.25"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -2541,6 +2541,16 @@ let fileSafePkg = pkgName.replacingOccurrences(of: ".", with: "-")
 let reportPath = "\(prefix).\(fileSafePkg).Swift.json"
 writeJson(envelope, reportPath)
 writeJson(cg, "\(prefix).\(fileSafePkg).Swift.callgraph.json")
+// Type-hierarchy sidecar (SPEC §4 / 0.7): each local type -> its declared supertypes/protocols, by
+// INVERTING `conformers` (supertype -> subtypes, from pushType). Lets candor-query's dispatch-frontier
+// (callers --include-unknown) resolve whether a confirmed reacher overrides a `dispatch:` owner. Keyed by
+// the bare type name — matching this engine's `Type.member` fn quals + `dispatch:Type.member` reasons.
+var typeHierarchy: [String: [String]] = [:]
+for (sup, subs) in conformers {
+    for sub in subs { typeHierarchy[sub, default: []].append(sup) }
+}
+for k in typeHierarchy.keys { typeHierarchy[k] = Array(Set(typeHierarchy[k]!)).sorted() }
+writeJson(typeHierarchy, "\(prefix).\(fileSafePkg).Swift.hierarchy.json")
 FileHandle.standardError.write(
     "candor-swift: wrote \(entries.count) effectful functions (\(allFns.count) analyzed, \(sourcePaths.count) files) to \(reportPath)\n".data(using: .utf8)!)
 
