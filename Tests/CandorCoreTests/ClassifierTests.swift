@@ -90,6 +90,13 @@ final class ClassifierTests: XCTestCase {
         XCTAssertEqual(kappaPropertyRead(root: "ProcessInfo", path: ["processInfo", "environment"]), "Env")
         XCTAssertEqual(kappaPropertyRead(root: "Date", path: ["now"]), "Clock")
         XCTAssertNil(kappaPropertyRead(root: "Foo", path: ["bar"]))
+        // FileManager PROPERTY-form FS reads were dead in the property path (real-world dogfood vein:
+        // `FileManager.default.currentDirectoryPath` read silent-pure). They're in FS_MEMBERS but were
+        // only reachable via the method-call classifier — the property path had no FileManager case.
+        XCTAssertEqual(kappaPropertyRead(root: "FileManager", path: ["default", "currentDirectoryPath"]), "Fs")
+        XCTAssertEqual(kappaPropertyRead(root: "FileManager", path: ["default", "temporaryDirectory"]), "Fs")
+        XCTAssertEqual(kappaPropertyRead(root: "FileManager", path: ["default", "homeDirectoryForCurrentUser"]), "Fs")
+        XCTAssertNil(kappaPropertyRead(root: "FileManager", path: ["default", "delegate"]))  // not an FS member → pure
     }
 
     // ── classifyCommandHead (§4 Exec refinement — UNAMBIGUOUS tools only) ─────────────────────────

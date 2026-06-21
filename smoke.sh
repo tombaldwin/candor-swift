@@ -887,5 +887,50 @@ ok = all(by.get(f)=={'Fs'} for f in fs) and by.get('flShell')=={'Exec'} \
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()})+' shadow='+repr({k:sorted(v) for k,v in sb.items()}))")
 [ "$FL" = "PASS" ] && ok "third-party Fs/Exec packages: Files File/Folder read/write/delete/createFile/ctors -> Fs, ShellOut shellOut(to:) -> Exec; .path property + local File/Folder/shellOut stay pure (no fabrication)" || bad "Files/ShellOut coverage: $FL"
 
+# EXTENSION-OF-PLATFORM-TYPE must NOT shadow the κ table (real-world dogfood vein: SwiftLint's
+# `extension ProcessInfo {}` silently zeroed ALL Env detection project-wide; FileManager property reads
+# were also dead). An extension ADDS members — the platform type's effectful members still exist — so
+# the property-read κ-path gates shadowing on declaredTypes (real defs), not localTypes (incl. extensions).
+cat > "$W/ext.swift" <<'SW'
+import Foundation
+extension ProcessInfo { var candorHelper: Int { 1 } }
+extension FileManager { var candorHelper: Int { 1 } }
+func extEnv() { _ = ProcessInfo.processInfo.environment["X"] }   // Env (survives the extension)
+func extCwd() { _ = FileManager.default.currentDirectoryPath }   // Fs (property-form, survives)
+SW
+"$BIN" "$W/ext.swift" --out "$W/ext" 2>/dev/null
+ERPT=$(ls "$W"/ext.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
+echk() { python3 -c "import json,sys; d=json.load(open('$ERPT')); print(next((','.join(sorted(f['inferred'])) for f in d['functions'] if f['fn']==sys.argv[1]), 'absent'))" "$1"; }
+[ "$(echk extEnv)" = "Env" ] && ok "extension ProcessInfo does NOT shadow its κ table — env read still Env (dogfood vein)" || bad "extension-shadow Env: got $(echk extEnv)"
+[ "$(echk extCwd)" = "Fs" ]  && ok "extension FileManager + property-form currentDirectoryPath -> Fs (dogfood vein)"      || bad "extension-shadow/property Fs: got $(echk extCwd)"
+# anti-fabrication control: a REAL local decl of the same name SHADOWS the platform table (stays pure).
+cat > "$W/shd.swift" <<'SW'
+struct ProcessInfo { let processInfo = Inner(); struct Inner { let environment = [String: String]() } }
+func locEnv() { _ = ProcessInfo.processInfo.environment["X"] }   // PURE — a real local decl shadows κ
+SW
+"$BIN" "$W/shd.swift" --out "$W/shd" 2>/dev/null
+SHRPT=$(ls "$W"/shd.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
+shchk() { python3 -c "import json,sys; d=json.load(open('$SHRPT')); print(next((','.join(sorted(f['inferred'])) for f in d['functions'] if f['fn']==sys.argv[1]), 'absent'))" "$1"; }
+[ "$(shchk locEnv)" = "absent" ] && ok "a REAL local ProcessInfo decl still shadows the κ table (no fabrication)" || bad "local-shadow control: locEnv got $(shchk locEnv)"
+
+# `.write(to:)` Fs must survive (a) a Foundation Data-PRODUCER receiver (`encode(...)` / `.data(using:)`,
+# inline / via let / via guard-let) and (b) a project `extension Data`. Real-world dogfood vein: SwiftLint's
+# `extension Data` made `data.write(to:)` resolve to a phantom local Data.write (pure), and the encoder/
+# data(using:) chains read silent-pure because rootOf typed them by the chain root, not the Data result.
+cat > "$W/bw.swift" <<'SW'
+import Foundation
+extension Data { var candorX: Int { 1 } }   // an extension must NOT shadow Data's file-write κ effect
+func bwInline() throws { try JSONEncoder().encode([1]).write(to: URL(fileURLWithPath: "/x")) }
+func bwLocal(s: String) throws { let d = s.data(using: .utf8); try d?.write(to: URL(fileURLWithPath: "/x")) }
+func bwGuard(s: String) throws { guard let d = s.data(using: .utf8) else { return }; try d.write(to: URL(fileURLWithPath: "/x")) }
+func bwParam(data: Data) throws { try data.write(to: URL(fileURLWithPath: "/x")) }
+SW
+"$BIN" "$W/bw.swift" --out "$W/bw" 2>/dev/null
+BWRPT=$(ls "$W"/bw.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
+bwchk() { python3 -c "import json,sys; d=json.load(open('$BWRPT')); print(next((','.join(sorted(f['inferred'])) for f in d['functions'] if f['fn']==sys.argv[1]), 'absent'))" "$1"; }
+for f in bwInline bwLocal bwGuard bwParam; do
+  [ "$(bwchk $f)" = "Fs" ] && ok "write(to:) Fs survives Data-producer/extension: $f" || bad "write(to:) Fs: $f got $(bwchk $f)"
+done
+
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

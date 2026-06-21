@@ -281,6 +281,11 @@ public func kappaPropertyRead(root: String, path: [String]) -> String? {
     // PROPERTY form (`ContinuousClock().now`, `clock.now`, `ContinuousClock.now`), not a `.now()` call.
     if (root == "ContinuousClock" || root == "SuspendingClock") && path.contains("now") { return "Clock" }
     if (root == "NSPasteboard" || root == "UIPasteboard") && path.contains("general") { return "Clipboard" }
+    // FileManager property-form FS reads (`currentDirectoryPath`, `temporaryDirectory`,
+    // `homeDirectoryForCurrentUser`): these are PROPERTIES, not calls, so they never reach the
+    // method-call FS classifier — they live in FS_MEMBERS but were dead in the property-read path
+    // (a real-world dogfood vein: `FileManager.default.currentDirectoryPath` read silent-pure).
+    if root == "FileManager", let m = path.last, FS_MEMBERS.contains(m) { return "Fs" }
     return nil
 }
 
@@ -303,7 +308,7 @@ public func classifyCommandHead(_ cmd: String) -> [String] {
 
 /// Modules the platform frontier owns (κ's actual job) — everything else imported is either in
 /// the κ module set or NAMED by the ledger.
-public let PLATFORM_MODULES: Set<String> = ["Swift", "Foundation", "FoundationNetworking", "FoundationXML",
+public let PLATFORM_MODULES: Set<String> = ["Swift", "Foundation", "FoundationEssentials", "FoundationNetworking", "FoundationXML",
     "Dispatch", "os", "OSLog", "Darwin", "Glibc", "Musl", "Android", "Bionic", "WASILibc", "WinSDK",
     "CRT", "Builtin", "Combine", "Observation", "SwiftUI", "AppKit", "UIKit", "WatchKit",
     "CoreFoundation", "CoreGraphics", "CoreLocation", "CoreServices", "MobileCoreServices",

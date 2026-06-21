@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.7.1"
+let engineVersion = "candor-swift-0.7.2"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -934,6 +934,23 @@ final class CallCollector: SyntaxVisitor {
         return first.label?.text == "to" && !Self.peel(first.expression).is(InOutExprSyntax.self)
     }
 
+    /// A Foundation `Data`-PRODUCING call: `<encoder>.encode(_:)` (JSON/PropertyList/…) or
+    /// `<string>.data(using:)`. Such a value is `Data`, so `.write(to:)` on it is a real file write — but
+    /// rootOf types the chain by its ROOT (the encoder / the string), missing the Data result, so
+    /// `JSONEncoder().encode(...).write(to:)` and `s.data(using:.utf8).write(to:)` read silent-pure (a
+    /// real-world dogfood vein). Used at the write site AND when typing a `let` bound to such a call.
+    private func producesFoundationData(_ raw: ExprSyntax?) -> Bool {
+        guard let raw = raw,
+              let call = Self.peel(raw).as(FunctionCallExprSyntax.self),
+              let ma = call.calledExpression.as(MemberAccessExprSyntax.self) else { return false }
+        let m = ma.declName.baseName.text
+        // `.encode(_:)` (unlabeled first arg) is the Data-returning encoder method; `.encode(to:)` is the
+        // Encodable witness (returns Void) and must NOT match — gate on the absent label.
+        if m == "encode", call.arguments.first?.label == nil { return true }
+        if m == "data", call.arguments.first?.label?.text == "using" { return true }  // String.data(using:) -> Data
+        return false
+    }
+
     private func argKinds(_ node: FunctionCallExprSyntax) -> [ArgKind] {
         var kinds: [ArgKind] = node.arguments.map { a in
             let e = Self.peel(a.expression)
@@ -1451,7 +1468,11 @@ final class CallCollector: SyntaxVisitor {
                       // `extension Process` is a real Exec, not a project method (the ShellOut cardinal-sin —
                       // it read silent-pure). Only a DECLARED type (or a κ-unknown extension target) takes
                       // the local-dispatch path; a declared type still shadows κ (the GRDB `bind` lesson).
-                      (declaredTypes.contains(rt) || kappaMember(root: rt, member: member) == nil) {
+                      // `isFileWrite` is the OTHER κ signal (file writes aren't kappaMembers): a project
+                      // `extension Data {…}` must not shadow `data.write(to:)`→Fs (a real-world dogfood vein:
+                      // SwiftLint has `extension Data`, which silently dropped every Data/String file write).
+                      (declaredTypes.contains(rt)
+                       || (kappaMember(root: rt, member: member) == nil && !isFileWrite(member: member, node))) {
                 // typed local receiver: Type.method — resolve to the local unit. Checked BEFORE the
                 // κ classifier: a locally-declared type ALWAYS shadows the platform table, so a
                 // project's own `class Channel`/`HTTPClient` (common names) resolves to its real
@@ -1471,7 +1492,10 @@ final class CallCollector: SyntaxVisitor {
                        // silent-pure. A literal base has the same write(toFile:)/write(to:) surface as a typed
                        // String, so classify it identically (isFileWrite's inout/label guard still excludes the
                        // pure TextOutputStream overloads — never fabricate).
-                       || (ma.base.map { Self.peel($0).is(StringLiteralExprSyntax.self) } ?? false)),
+                       || (ma.base.map { Self.peel($0).is(StringLiteralExprSyntax.self) } ?? false)
+                       // an INLINE Data producer: `JSONEncoder().encode(...).write(to:)` — the value is Data
+                       // (the chain root is the encoder, not Data), the dogfood "serialize-then-write" vein.
+                       || producesFoundationData(ma.base)),
                       isFileWrite(member: member, node) {
                 // Data/String file write (`d.write(to: url)`) → Fs; the pure in-memory/TextOutputStream
                 // overloads are excluded by isFileWrite's inout/label guard (never fabricate).
@@ -1509,10 +1533,15 @@ final class CallCollector: SyntaxVisitor {
     override func visit(_ node: OptionalBindingConditionSyntax) -> SyntaxVisitorContinueKind {
         if let name = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text,
            let initVal = node.initializer?.value {
-            let info = rootOf(initVal)
-            if info.isVar, let t = info.root { vars[name] = t }
-            else if let elem = elementTypeOf(initVal) { arrayElem[name] = elem }
-            else { clearBinding(name) }  // can't type the unwrapped value → clear (don't leak a stale type)
+            // `guard let d = s.data(using:.utf8)` / `= enc.encode(x)` — the unwrapped value is Data, so a
+            // later `d.write(to:)` is Fs (the via-optional-binding dogfood vein; matches the plain-`let` path).
+            if producesFoundationData(initVal) { vars[name] = "Data" }
+            else {
+                let info = rootOf(initVal)
+                if info.isVar, let t = info.root { vars[name] = t }
+                else if let elem = elementTypeOf(initVal) { arrayElem[name] = elem }
+                else { clearBinding(name) }  // can't type the unwrapped value → clear (don't leak a stale type)
+            }
         }
         return .visitChildren
     }
@@ -1527,9 +1556,12 @@ final class CallCollector: SyntaxVisitor {
             // ["now"] → a bogus Clock). The receiver-rooted path matches the genuine reads
             // (`ProcessInfo.processInfo.environment`, `Date.now`, `self.w.pinfo.environment`) without it.
             let recv = node.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [])
-            if let root = recv.root, !localTypes.contains(root),
-               // a LOCAL type named like a platform clock/env owner (`struct ContinuousClock { let now }`)
-               // must not have its property read classified — the local def shadows the platform table.
+            if let root = recv.root, !declaredTypes.contains(root),
+               // a REAL local type named like a platform clock/env owner (`struct ContinuousClock { let now }`)
+               // shadows the κ table; an EXTENSION of a platform type (`extension ProcessInfo {…}`) does NOT
+               // — it's in localTypes but not declaredTypes. Gate on declaredTypes (parity with the method
+               // κ-path) so env/fs property reads aren't silently zeroed project-wide by such an extension
+               // (the real-world dogfood vein: `extension ProcessInfo` nulled all Env detection).
                let eff = kappaPropertyRead(root: root, path: recv.path + [node.declName.baseName.text]) {
                 directEffects.insert(eff)
             }
@@ -1898,12 +1930,17 @@ final class CallCollector: SyntaxVisitor {
                     opaqueFnLocals.remove(name)
                     vars.removeValue(forKey: name)
                 } else if v.is(FunctionCallExprSyntax.self) {
-                    // ctor or unambiguous factory — one resolver for both (rootOf handles peeling)
-                    let info = rootOf(v)
-                    if let t = info.root, info.isVar { vars[name] = t }
-                    // a collection TRANSFORM result keeps the element type: `let active = cs.filter {…}`
-                    // (then `for c in active` resolves). Element-preserving transforms only.
-                    else if let elem = elementTypeOf(v0) { arrayElem[name] = elem }
+                    // a Foundation Data producer (`let d = s.data(using:.utf8)` / `= enc.encode(x)`) types
+                    // the local as Data, so a later `d.write(to:)` is Fs (the via-local dogfood vein).
+                    if producesFoundationData(v0) { vars[name] = "Data" }
+                    else {
+                        // ctor or unambiguous factory — one resolver for both (rootOf handles peeling)
+                        let info = rootOf(v)
+                        if let t = info.root, info.isVar { vars[name] = t }
+                        // a collection TRANSFORM result keeps the element type: `let active = cs.filter {…}`
+                        // (then `for c in active` resolves). Element-preserving transforms only.
+                        else if let elem = elementTypeOf(v0) { arrayElem[name] = elem }
+                    }
                 } else if let ma = v.as(MemberAccessExprSyntax.self),
                           let baseDR = ma.base?.as(DeclReferenceExprSyntax.self),
                           baseDR.baseName.text.first?.isUppercase == true,
