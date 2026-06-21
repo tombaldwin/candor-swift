@@ -2473,7 +2473,74 @@ let prefix = outPrefix ?? (rootDir as NSString).appendingPathComponent(".candor/
 try? fm.createDirectory(atPath: (prefix as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
 
 let accessorQuals = Set(allFns.filter { $0.isAccessor }.map { $0.qual })
-var entries: [[String: Any]] = []
+// ── The candor domain model (candor-spec/MODEL.md) — candor-swift's named realization of the shared
+// vocabulary. Independently derived (NO shared code across engines — that independence is what the
+// conformance differential proves); mirrors candor-java's `io.poly.candor.model` and Rust's candor-report
+// structs. These types OWN the §2 wire serialization, so the entry/envelope shape lives in one place.
+enum Effect: String, CaseIterable {
+    case clipboard = "Clipboard", clock = "Clock", db = "Db", env = "Env", exec = "Exec"
+    case fs = "Fs", ipc = "Ipc", log = "Log", net = "Net", rand = "Rand", unknown = "Unknown"
+    var specName: String { rawValue }
+    var isTrustMarker: Bool { self == .unknown }                                 // SPEC §4: Unknown is not an effect
+    var isBoundary: Bool { switch self { case .db, .net, .exec, .fs, .ipc, .clipboard: return true; default: return false } }
+    var isAmbient: Bool { switch self { case .log, .clock, .rand, .env: return true; default: return false } }
+    static func from(_ name: String) -> Effect? { Effect(rawValue: name) }
+}
+// A set of effects (SEMANTICS §1). Wire form = spec-name-sorted names — which, for this vocabulary, is the
+// same lexicographic order a `Set<String>.sorted()` produced, so adoption is byte-identical.
+struct EffectSet {
+    private(set) var effects: Set<Effect>
+    init(_ effects: Set<Effect> = []) { self.effects = effects }
+    init(names: some Sequence<String>) { self.effects = Set(names.compactMap(Effect.from)) }
+    var isEmpty: Bool { effects.isEmpty }
+    func contains(_ e: Effect) -> Bool { effects.contains(e) }
+    func toNames() -> [String] { effects.map { $0.specName }.sorted() }
+}
+// Which engine produced a report and which contract it conforms to (§2.1).
+struct Provenance {
+    let version: String, toolchain: String, spec: String
+    func toJSON() -> [String: Any] { ["version": version, "toolchain": toolchain, "spec": spec] }
+}
+// The per-unit report entry (§2). candor-swift is analyze-only, so declared/undeclared/overdeclared are
+// always empty (no DI-conformance pass) — kept in the wire shape for cross-engine schema parity.
+struct Effector {
+    let fn: String, loc: String
+    let inferred: EffectSet, direct: EffectSet
+    let unresolved: Bool, hash: String, calls: [String]
+    var entryPoint = false
+    var unitKind: String? = nil
+    var unknownWhy: [String]? = nil
+    var hosts: [String]? = nil, cmds: [String]? = nil, paths: [String]? = nil, tables: [String]? = nil
+    var invisible: [String]? = nil   // per-fn blind-spot disclosure: κ-unknown modules reached (qualifies `inferred`)
+    func toJSON() -> [String: Any] {
+        var e: [String: Any] = [
+            "fn": fn, "loc": loc,
+            "inferred": inferred.toNames(), "direct": direct.toNames(),
+            "declared": [String](), "undeclared": [String](), "overdeclared": [String](),
+            "unresolved": unresolved,
+            "hash": hash,                       // 0.5 MUST: every report is chainable
+            "calls": calls,
+        ]
+        if entryPoint { e["entryPoint"] = true }
+        if let k = unitKind { e["unitKind"] = k }   // spec 0.5 draft, informative
+        if let w = unknownWhy, !w.isEmpty { e["unknownWhy"] = w }
+        if let h = hosts, !h.isEmpty { e["hosts"] = h }
+        if let c = cmds, !c.isEmpty { e["cmds"] = c }
+        if let p = paths, !p.isEmpty { e["paths"] = p }
+        if let t = tables, !t.isEmpty { e["tables"] = t }
+        if let v = invisible, !v.isEmpty { e["invisible"] = v }
+        return e
+    }
+}
+// The §2 envelope: provenance + the package + the effectors.
+struct Report {
+    let provenance: Provenance, package: String, effectors: [Effector]
+    func toJSON() -> [String: Any] {
+        ["candor": provenance.toJSON(), "package": package, "functions": effectors.map { $0.toJSON() }]
+    }
+}
+
+var effectors: [Effector] = []
 // A pure fn that reaches a blind module is NOT in `inferred` (no effect seeds it), but it must still
 // appear — carrying `invisible` — so `inferred: []` is never an unqualified pure claim. Union the keys.
 let reportQuals = Set(inferred.keys).union(invisibleAcc.keys)
@@ -2481,34 +2548,25 @@ for qual in reportQuals.sorted() {
     let inf = inferred[qual] ?? []
     let invisible = (invisibleAcc[qual] ?? []).sorted()
     if inf.isEmpty && invisible.isEmpty { continue }
-    var e: [String: Any] = [
-        "fn": qual,
-        "loc": locOf[qual] ?? "",
-        "inferred": inf.sorted(),
-        "direct": (direct[qual] ?? []).sorted(),
-        "declared": [], "undeclared": [], "overdeclared": [],
-        "unresolved": inf.contains("Unknown"),
-        "hash": "\(pkgName)#\(qual)",   // 0.5 MUST: every report is chainable
-        "calls": (edges[qual] ?? []).sorted(),
-    ]
-    if entryPoints.contains(qual) { e["entryPoint"] = true }
-    if accessorQuals.contains(qual) { e["unitKind"] = "accessor" }  // spec 0.5 draft, informative
-    if let w = whyMap[qual], !w.isEmpty { e["unknownWhy"] = w.sorted() }
-    if let h = hostsAcc[qual], !h.isEmpty { e["hosts"] = h.sorted() }
-    if let c = cmdsAcc[qual], !c.isEmpty { e["cmds"] = c.sorted() }
-    if let p = pathsAcc[qual], !p.isEmpty { e["paths"] = p.sorted() }
-    if let t = tablesAcc[qual], !t.isEmpty, inf.contains("Db") { e["tables"] = t.sorted() }
-    // the per-fn blind-spot disclosure: the κ-unknown modules this fn (transitively) reaches an
-    // unresolved call into. Qualifies `inferred` — `inferred: []` + non-empty `invisible` = "pure as far
-    // as candor could see, but it could not see through these" (a lower bound, file-granular for Swift).
-    if !invisible.isEmpty { e["invisible"] = invisible }
-    entries.append(e)
+    var ef = Effector(
+        fn: qual, loc: locOf[qual] ?? "",
+        inferred: EffectSet(names: inf), direct: EffectSet(names: direct[qual] ?? []),
+        unresolved: inf.contains("Unknown"), hash: "\(pkgName)#\(qual)",
+        calls: (edges[qual] ?? []).sorted())
+    if entryPoints.contains(qual) { ef.entryPoint = true }
+    if accessorQuals.contains(qual) { ef.unitKind = "accessor" }
+    if let w = whyMap[qual], !w.isEmpty { ef.unknownWhy = w.sorted() }
+    if let h = hostsAcc[qual], !h.isEmpty { ef.hosts = h.sorted() }
+    if let c = cmdsAcc[qual], !c.isEmpty { ef.cmds = c.sorted() }
+    if let p = pathsAcc[qual], !p.isEmpty { ef.paths = p.sorted() }
+    if let t = tablesAcc[qual], !t.isEmpty, inf.contains("Db") { ef.tables = t.sorted() }
+    if !invisible.isEmpty { ef.invisible = invisible }
+    effectors.append(ef)
 }
-let envelope: [String: Any] = [
-    "candor": ["version": engineVersion, "toolchain": "swiftsyntax", "spec": specVersion],
-    "package": pkgName,
-    "functions": entries,
-]
+let report = Report(
+    provenance: Provenance(version: engineVersion, toolchain: "swiftsyntax", spec: specVersion),
+    package: pkgName, effectors: effectors)
+let envelope: [String: Any] = report.toJSON()
 var cg: [String: [String]] = [:]
 for f in allFns { cg[f.qual] = (edges[f.qual] ?? []).sorted() }  // §2.2: EVERY analyzed fn a key
 
@@ -2552,7 +2610,7 @@ for (sup, subs) in conformers {
 for k in typeHierarchy.keys { typeHierarchy[k] = Array(Set(typeHierarchy[k]!)).sorted() }
 writeJson(typeHierarchy, "\(prefix).\(fileSafePkg).Swift.hierarchy.json")
 FileHandle.standardError.write(
-    "candor-swift: wrote \(entries.count) effectful functions (\(allFns.count) analyzed, \(sourcePaths.count) files) to \(reportPath)\n".data(using: .utf8)!)
+    "candor-swift: wrote \(effectors.count) effectful functions (\(allFns.count) analyzed, \(sourcePaths.count) files) to \(reportPath)\n".data(using: .utf8)!)
 
 // the κ-coverage ledger: imported modules outside the platform frontier that κ doesn't know —
 // INVISIBLE, not Unknown; named per scan (SPEC §7 item 14, canonical marker)
