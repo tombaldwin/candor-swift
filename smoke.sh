@@ -932,5 +932,32 @@ for f in bwInline bwLocal bwGuard bwParam; do
   [ "$(bwchk $f)" = "Fs" ] && ok "write(to:) Fs survives Data-producer/extension: $f" || bad "write(to:) Fs: $f got $(bwchk $f)"
 done
 
+# INHERITED-INTO-PROJECT vein, conforms-to-EXTERNAL-protocol shape: a project entity `class X: Model`
+# (FluentKit, external/unmodeled) inherits save/query/find from the Model extension — called on the project
+# type the owner is X (no body), so it read SILENT (the Vapor-template dogfood vein). Fluent CRUD verbs →
+# Db (modeled like CoreData); an UNMODELED external conformance → Unknown (general fix); a real project
+# method + a synthesized std-protocol method (Codable.encode) stay pure (no fabrication / no false Unknown).
+cat > "$W/fl.swift" <<'SW'
+import Fluent
+final class Todo: Model { func mine() -> Int { 1 } }
+final class Other: SomeUnknownProto { func foo() -> Int { 2 } }
+struct Pt: Codable, Hashable { var x: Int }
+func fSave(t: Todo) async throws { try await t.save(on: 0) }
+func fQuery() async throws { _ = try await Todo.query(on: 0).all() }
+func fFind() async throws { _ = try await Todo.find(0, on: 0) }
+func fMine(t: Todo) -> Int { t.mine() }
+func fOther(o: Other) -> Int { o.bar() }
+func fOtherFoo(o: Other) -> Int { o.foo() }
+func fEnc(p: Pt, e: Encoder) throws { try p.encode(to: e) }
+SW
+"$BIN" "$W/fl.swift" --out "$W/fl" 2>/dev/null
+FLRPT=$(ls "$W"/fl.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
+flchk() { python3 -c "import json,sys; d=json.load(open('$FLRPT')); print(next((','.join(sorted(f['inferred'])) for f in d['functions'] if f['fn']==sys.argv[1]), 'pure'))" "$1"; }
+for f in fSave fQuery fFind; do case "$(flchk $f)" in *Db*) ok "Fluent inherited $f -> Db (was silent — dogfood vein)";; *) bad "Fluent $f: $(flchk $f)";; esac; done
+[ "$(flchk fMine)" = "pure" ]   && ok "a real project method on a Model type stays pure (no fabrication)"            || bad "Fluent mine: $(flchk fMine)"
+[ "$(flchk fOther)" = "Unknown" ] && ok "inherited method from an UNMODELED external proto -> Unknown (general vein fix)" || bad "external-proto Unknown: $(flchk fOther)"
+[ "$(flchk fOtherFoo)" = "pure" ] && ok "a real project method on an external-conforming type stays pure"              || bad "external-proto project method: $(flchk fOtherFoo)"
+[ "$(flchk fEnc)" = "pure" ]    && ok "a synthesized std-protocol method (Codable.encode) stays pure (no false Unknown)" || bad "Codable encode: $(flchk fEnc)"
+
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.7.2"
+let engineVersion = "candor-swift-0.7.3"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -2360,6 +2360,28 @@ for f in allFns {
                     if let t = resolveQual("\(sup).\(member)") {
                         edges[f.qual, default: []].insert(t)
                         callsiteArgs[t, default: []].append(call.args)
+                        resolved = true
+                    }
+                }
+                // No LOCAL supertype default resolved. If the type conforms to / inherits an EXTERNAL
+                // base (a super not declared locally — `final class Todo: Model` where Model is FluentKit's),
+                // the member is inherited from that external base's extension → it must NOT read silent (the
+                // inherited-into-project vein, conforms-to-external-protocol shape; found corpus-testing the
+                // Vapor template — `todo.save(on:)`/`Todo.query(on:)` read pure). A MODELED external
+                // protocol's verb is classified (Fluent `Model` CRUD → Db); an unmodeled external base whose
+                // body candor can't see → Unknown. This fires ONLY when `member` resolved to NO project unit
+                // (a same-named project method took resolveQual above), so it never fabricates over real
+                // project code. Std value protocols (Codable/Equatable/…) are excluded — their synthesized
+                // requirements are pure, so disclosing Unknown there would be false over-disclosure.
+                if !resolved {
+                    let extSupers = (supertypesOf[type] ?? []).filter { !localTypes.contains($0) }
+                    if let eff = extSupers.compactMap({ FLUENT_MODEL_PROTOCOLS.contains($0) ? fluentModelEffect(member) : nil }).first {
+                        direct[f.qual, default: []].insert(eff)
+                        resolved = true
+                    } else if let sup = extSupers.first(where: { !STD_PURE_PROTOCOLS.contains($0) }) {
+                        direct[f.qual, default: []].insert("Unknown")
+                        unresolvedSet.insert(f.qual)
+                        whyMap[f.qual, default: []].insert("dispatch:\(sup).\(member)")
                         resolved = true
                     }
                 }

@@ -289,6 +289,37 @@ public func kappaPropertyRead(root: String, path: [String]) -> String? {
     return nil
 }
 
+/// Fluent (Vapor's ORM) persistence verbs → Db. A project entity `final class X: Model` INHERITS these
+/// from FluentKit's `Model` protocol extension; called on the project type (`x.save(on:)`,
+/// `X.query(on:)`, `X.find(_:on:)`) the owner resolves to X with no body, so without modeling they read
+/// silent (the inherited-into-project vein, conforms-to-external-protocol shape — found corpus-testing
+/// the Vapor template). Modeled like CoreData's NSManagedObjectContext. The query-builder chain
+/// (`X.query(on:).filter(..).all()`) hits the DB at the terminal, but the chain ROOT `X.query` is the
+/// modeled entry on the project type, so classifying it catches the operation; the lazy builder verbs
+/// (filter/sort/with/limit) are on the external QueryBuilder, not the Model type, so they're not here.
+public let FLUENT_MODEL_PROTOCOLS: Set<String> = ["Model"]
+public func fluentModelEffect(_ member: String) -> String? {
+    ["save", "create", "update", "delete", "restore", "query", "find",
+     "all", "first", "count", "exists", "paginate", "aggregate"].contains(member) ? "Db" : nil
+}
+
+/// Std protocols whose synthesized/value requirements are PURE. When a project type conforms to an
+/// EXTERNAL supertype and an inherited method doesn't resolve to a project body, the engine discloses
+/// Unknown (the inherited-into-project vein) — but a SYNTHESIZED requirement of these protocols
+/// (`x.encode(to:)`, `x.hash(into:)`) is pure, so disclosing Unknown there would be false over-disclosure
+/// across the many types conforming to them. A HAND-WRITTEN requirement has a project body → resolves
+/// normally; only the synthesized (bodyless) case reaches the fallback, and for these it stays pure.
+public let STD_PURE_PROTOCOLS: Set<String> = [
+    "Codable", "Encodable", "Decodable", "Equatable", "Hashable", "Sendable", "Comparable",
+    "Identifiable", "CaseIterable", "RawRepresentable", "CustomStringConvertible",
+    "CustomDebugStringConvertible", "Error", "Strideable", "OptionSet", "AdditiveArithmetic",
+    // Iteration protocols: their default requirement (`makeIterator`) is pure; an EFFECTFUL `next()` is a
+    // project body captured by the dedicated iterator-forcing path, so the external-super fallback must
+    // not disclose Unknown for them (it false-flagged a pure custom Sequence — the S1 smoke case).
+    "Sequence", "IteratorProtocol", "Collection", "BidirectionalCollection", "RandomAccessCollection",
+    "MutableCollection", "RangeReplaceableCollection", "AsyncSequence", "AsyncIteratorProtocol",
+]
+
 /// Refine the `Exec` cliff (spec §4 ⟨0.5⟩): the effects a literal, statically-known subprocess head
 /// implies, matched by basename. ADDED to a caller that already carries `Exec` (a subprocess is still
 /// spawned — `Exec` is never dropped); an unrecognised head returns [] and keeps the bare cliff. A
