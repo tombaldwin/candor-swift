@@ -1,6 +1,7 @@
 // GENERATED from AGENTS.md by gen-agents-doc.py — do not edit.
 // The agent contract, embedded so `--agents` needs no resource bundle (a copied binary has none).
 let AGENTS_MD = #####"""
+<!-- MAINTAINERS: this is the canonical doc. After editing it, regenerate the embedded Swift copy in the SAME commit or CI's drift gate (smoke.sh) fails: python3 gen-agents-doc.py -->
 # Using candor-swift (instructions for an AI coding agent)
 
 You are working in a Swift package. **candor-swift** tells you, for every function, which side
