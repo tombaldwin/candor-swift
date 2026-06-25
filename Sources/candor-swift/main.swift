@@ -2670,6 +2670,18 @@ for k in typeHierarchy.keys { typeHierarchy[k] = Array(Set(typeHierarchy[k]!)).s
 writeJson(typeHierarchy, "\(prefix).\(fileSafePkg).Swift.hierarchy.json")
 FileHandle.standardError.write(
     "candor-swift: wrote \(effectors.count) effectful functions (\(allFns.count) analyzed, \(sourcePaths.count) files) to \(reportPath)\n".data(using: .utf8)!)
+do {
+    // Effect breakdown — make the result visible at a glance, not just a count + a file path.
+    var counts: [String: Int] = [:]
+    for e in effectors { for x in e.inferred.toNames() { counts[x, default: 0] += 1 } }
+    let breakdown = ["Net", "Fs", "Db", "Exec", "Ipc", "Env", "Clipboard", "Clock", "Log", "Rand"]
+        .filter { counts[$0] != nil }.map { "\($0) \(counts[$0]!)" }.joined(separator: " · ")
+    let unknown = counts["Unknown"] ?? 0
+    if !breakdown.isEmpty || unknown > 0 {
+        let u = unknown > 0 ? "\(breakdown.isEmpty ? "" : "   ·   ")Unknown \(unknown) (disclosed)" : ""
+        FileHandle.standardError.write("  \(breakdown)\(u)\n".data(using: .utf8)!)
+    }
+}
 
 // the κ-coverage ledger: imported modules outside the platform frontier that κ doesn't know —
 // INVISIBLE, not Unknown; named per scan (SPEC §7 item 14, canonical marker)
