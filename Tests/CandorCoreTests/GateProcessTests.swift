@@ -43,6 +43,23 @@ final class GateProcessTests: XCTestCase {
         return root
     }
 
+    /// A throwaway package whose single source file is exactly `body` (the caller controls the effect /
+    /// syntax). Returns the package root. For the adversarial / surface cases that `makeNetFixture`'s
+    /// fixed Net body can't express (a broken parse, an empty dir, a folded NWConnection port).
+    private func makeFixture(_ body: String) throws -> URL {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-fix-\(UUID().uuidString)")
+        let srcDir = root.appendingPathComponent("Sources/App")
+        try FileManager.default.createDirectory(at: srcDir, withIntermediateDirectories: true)
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "App", targets: [.executableTarget(name: "App")])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try body.write(to: srcDir.appendingPathComponent("main.swift"), atomically: true, encoding: .utf8)
+        return root
+    }
+
     /// Run the binary; return (stdout, stderr, exitCode). Spawns directly (no SPM rebuild of the fixture —
     /// candor-swift is a syntactic scan, it never builds its target).
     private func run(_ binary: URL, _ args: [String]) throws -> (out: String, err: String, code: Int32) {
@@ -177,5 +194,248 @@ final class GateProcessTests: XCTestCase {
         _ = try run(bin, [root.path])
         XCTAssertTrue(FileManager.default.fileExists(atPath: candor.path),
                       "a default (file-writing) run must create .candor/")
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // CLI behaviour matrix — exit codes + stdout/stderr contract over the BUILT binary.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+
+    // ── G1: a bare scan WRITES report file(s) under .candor/ and exits 0 ────────────────────────────
+    func testBareScanWritesReportAndExitsZero() throws {
+        let bin = try binaryURL()
+        let root = try makeNetFixture(qual: "Billing", urlLiteral: "https://api.stripe.com/v1/charges")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let r = try run(bin, [root.path])
+        XCTAssertEqual(r.code, 0, "a bare scan with no policy is exit 0 — stderr: \(r.err)")
+        let candor = root.appendingPathComponent(".candor")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: candor.path), "bare scan must write .candor/")
+        let reports = try FileManager.default.contentsOfDirectory(atPath: candor.path)
+            .filter { $0.hasSuffix(".Swift.json") }
+        XCTAssertFalse(reports.isEmpty, "expected a <pkg>.Swift.json report; .candor/ held: \(reports)")
+    }
+
+    // ── G2: `--json` (no policy) prints PARSEABLE JSON, writes NO files, exits 0 ─────────────────────
+    func testJsonNoPolicyParsesAndWritesNothing() throws {
+        let bin = try binaryURL()
+        let root = try makeNetFixture(qual: "Billing", urlLiteral: "https://api.stripe.com/v1/charges")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let r = try run(bin, [root.path, "--json"])
+        XCTAssertEqual(r.code, 0, "clean --json scan is exit 0 — stderr: \(r.err)")
+        let obj = try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any]
+        XCTAssertNotNil(obj?["candor"], "stdout must be the §2 envelope")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(".candor").path),
+                       "--json must write no files")
+    }
+
+    // ── G3: `--json --policy <clean>` keeps stdout pure JSON and exits 0 (the green twin of F1) ──────
+    func testJsonPolicyCleanIsPureJsonExitZero() throws {
+        let bin = try binaryURL()
+        let root = try makeNetFixture(qual: "Billing", urlLiteral: "https://api.stripe.com/v1/charges")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let policy = root.appendingPathComponent("policy.txt")
+        try "allow Net api.stripe.com\n".write(to: policy, atomically: true, encoding: .utf8)
+
+        let r = try run(bin, [root.path, "--json", "--policy", policy.path])
+        XCTAssertEqual(r.code, 0, "a covered surface is a clean gate — stderr: \(r.err)")
+        let obj = try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any]
+        XCTAssertNotNil(obj?["candor"], "stdout must remain the clean §2 envelope")
+        XCTAssertTrue(r.err.contains("policy ✓"), "expected the clean-gate marker on stderr; got: \(r.err)")
+    }
+
+    // ── G4: `--policy <violating>` → 1 ; `--policy <clean>` → 0 (non-json file-writing path) ─────────
+    func testPolicyExitCodesFileWritingPath() throws {
+        let bin = try binaryURL()
+        let root = try makeNetFixture(qual: "Billing", urlLiteral: "https://api.stripe.com/v1/charges")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bad = root.appendingPathComponent("bad.pol"), ok = root.appendingPathComponent("ok.pol")
+        try "deny Net\n".write(to: bad, atomically: true, encoding: .utf8)        // denies Net everywhere
+        try "allow Net api.stripe.com\n".write(to: ok, atomically: true, encoding: .utf8)
+
+        XCTAssertEqual(try run(bin, [root.path, "--policy", bad.path]).code, 1, "deny Net must exit 1")
+        XCTAssertEqual(try run(bin, [root.path, "--policy", ok.path]).code, 0, "a covered allow exits 0")
+    }
+
+    // ── G5: a MISSING / unreadable policy must NEVER go green — exit 2 (the §6.2 gateless-green guard) ─
+    func testMissingPolicyExitsTwo() throws {
+        let bin = try binaryURL()
+        let root = try makeNetFixture(qual: "Billing", urlLiteral: "https://api.stripe.com/v1/charges")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let missing = root.appendingPathComponent("does-not-exist.pol")
+
+        let r = try run(bin, [root.path, "--policy", missing.path])
+        XCTAssertEqual(r.code, 2, "an unreadable policy is exit 2, never green — stderr: \(r.err)")
+        XCTAssertTrue(r.err.contains("gate NOT enforced"), "must say the gate didn't run; stderr: \(r.err)")
+    }
+
+    // ── G6: a trailing valueless `--policy` / `--out` must FAIL (exit 2), never clobber-then-green ───
+    func testTrailingValuelessFlagsExitTwo() throws {
+        let bin = try binaryURL()
+        let root = try makeNetFixture(qual: "Billing", urlLiteral: "https://api.stripe.com/v1/charges")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // `--policy` with no following value would otherwise nil-clobber the gate and exit 0.
+        let p = try run(bin, [root.path, "--policy"])
+        XCTAssertEqual(p.code, 2, "valueless --policy must exit 2; stderr: \(p.err)")
+        XCTAssertTrue(p.err.contains("--policy requires a value"), "stderr: \(p.err)")
+        // and the next-token-is-a-flag form (`--policy --json`) must not consume `--json` as the path.
+        let pf = try run(bin, [root.path, "--policy", "--json"])
+        XCTAssertEqual(pf.code, 2, "`--policy --json` must reject --json as a value; stderr: \(pf.err)")
+        let o = try run(bin, [root.path, "--out"])
+        XCTAssertEqual(o.code, 2, "valueless --out must exit 2; stderr: \(o.err)")
+        XCTAssertTrue(o.err.contains("--out requires a value"), "stderr: \(o.err)")
+    }
+
+    // ── G7: `--version` / `-V` print `candor-swift <ver> (spec <X>)` and exit 0 ─────────────────────
+    func testVersionFlag() throws {
+        let bin = try binaryURL()
+        for flag in ["--version", "-V"] {
+            let r = try run(bin, [flag])
+            XCTAssertEqual(r.code, 0, "\(flag) exits 0")
+            XCTAssertTrue(r.out.range(of: #"^candor-swift \d+\.\d+\.\d+ \(spec \d+\.\d+\)"#,
+                                      options: .regularExpression) != nil,
+                          "\(flag) first line must be `candor-swift <ver> (spec <X>)`; got: \(r.out)")
+        }
+    }
+
+    // ── G8: `--help` / `-h` print usage and exit 0 ──────────────────────────────────────────────────
+    func testHelpFlag() throws {
+        let bin = try binaryURL()
+        for flag in ["--help", "-h"] {
+            let r = try run(bin, [flag])
+            XCTAssertEqual(r.code, 0, "\(flag) exits 0")
+            XCTAssertTrue(r.out.contains("USAGE"), "\(flag) must print usage; got: \(r.out)")
+        }
+    }
+
+    // ── G9: an unknown flag, and a missing scan path, both exit 2 (never become a literal scan path) ─
+    func testUnknownFlagAndMissingPathExitTwo() throws {
+        let bin = try binaryURL()
+        let bogus = try run(bin, ["--bogus"])
+        XCTAssertEqual(bogus.code, 2, "an unknown flag must exit 2, not scan a dir named --bogus")
+        XCTAssertTrue(bogus.err.contains("unknown flag"), "stderr: \(bogus.err)")
+
+        let missing = try run(bin, ["/no/such/path/\(UUID().uuidString)"])
+        XCTAssertEqual(missing.code, 2, "a non-existent scan path must exit 2")
+        XCTAssertTrue(missing.err.contains("no such path"), "stderr: \(missing.err)")
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Host surface — the port stays IN the surface (conformance [4e]); matching ignores it.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// The `hosts` surface for `qual` in a `--json` report (the §2 functions[] entry).
+    private func hostsSurface(_ bin: URL, _ root: URL, qual: String) throws -> [String] {
+        let r = try run(bin, [root.path, "--json"])
+        XCTAssertEqual(r.code, 0, "scan must succeed — stderr: \(r.err)")
+        let obj = try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any]
+        let fns = obj?["functions"] as? [[String: Any]] ?? []
+        let entry = fns.first { ($0["fn"] as? String) == qual }
+        return (entry?["hosts"] as? [String]) ?? []
+    }
+
+    // ── H1: a `host:port` STRING URL keeps the port in the recorded surface ([4e]) ──────────────────
+    func testStringUrlKeepsPortInSurface() throws {
+        let bin = try binaryURL()
+        let root = try makeNetFixture(qual: "Billing", urlLiteral: "https://api.stripe.com:8443/v1/charges")
+        defer { try? FileManager.default.removeItem(at: root) }
+        XCTAssertEqual(try hostsSurface(bin, root, qual: "Billing.charge"), ["api.stripe.com:8443"],
+                       "the explicit :8443 must be part of the §2 host surface")
+    }
+
+    // ── H2: NWConnection(host:,port:) FOLDS the separate port arg into the host:port surface ([4e]) ──
+    func testNWConnectionFoldsSeparatePortIntoSurface() throws {
+        let bin = try binaryURL()
+        let root = try makeFixture("""
+        import Foundation
+        import Network
+        struct Telemetry {
+            func emit() {
+                let c = NWConnection(host: "metrics.example.com", port: 9090)
+                c.start(queue: .main)
+            }
+        }
+        Telemetry().emit()
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        XCTAssertEqual(try hostsSurface(bin, root, qual: "Telemetry.emit"), ["metrics.example.com:9090"],
+                       "the separate `port: 9090` must fold into the host:port surface")
+    }
+
+    // ── H3: `allow Net <host>` matches a reached `host:port` (port-insensitive matching) ─────────────
+    // The surface KEEPS the port (H2), but the gate MATCHES ignoring it — a bare-host allow covers it.
+    func testAllowBareHostCoversFoldedPortSurface() throws {
+        let bin = try binaryURL()
+        let root = try makeFixture("""
+        import Foundation
+        import Network
+        struct Telemetry {
+            func emit() {
+                let c = NWConnection(host: "metrics.example.com", port: 9090)
+                c.start(queue: .main)
+            }
+        }
+        Telemetry().emit()
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let policy = root.appendingPathComponent("policy.txt")
+        try "allow Net metrics.example.com\n".write(to: policy, atomically: true, encoding: .utf8)
+
+        let r = try run(bin, [root.path, "--json", "--policy", policy.path])
+        XCTAssertEqual(r.code, 0, "a bare-host allow must cover the :9090 surface — stderr: \(r.err)")
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+    // Adversarial inputs — no crash; valid rules still enforce alongside the garbage.
+    // ════════════════════════════════════════════════════════════════════════════════════════════════
+
+    // ── A1: a syntactically-broken .swift file is tolerated (SwiftParser recovers), no crash ─────────
+    func testBrokenSwiftFileDoesNotCrash() throws {
+        let bin = try binaryURL()
+        let root = try makeFixture("""
+        import Foundation
+        struct Broken {
+            func oops( {            // unbalanced paren — deliberately un-parseable
+                let x = URLSession.shared.dataTask(with: "https://api.example.com/x"
+            }
+        // missing closing brace
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try run(bin, [root.path, "--json"])
+        // The contract is "no crash" — a clean exit (0/1/2), not a signal. A SIGILL/SIGSEGV surfaces as a
+        // termination status >= 128; any of those is a failure of the no-crash invariant.
+        XCTAssertLessThan(r.code, 128, "a broken parse must not crash the scanner — exit was \(r.code), stderr: \(r.err)")
+    }
+
+    // ── A2: an empty directory scans cleanly without crashing (no Swift sources → exit 2, a clean error) ─
+    func testEmptyDirDoesNotCrash() throws {
+        let bin = try binaryURL()
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-empty-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try run(bin, [root.path])
+        XCTAssertEqual(r.code, 2, "an empty dir has no Swift sources — a clean exit-2 error, not a crash")
+        XCTAssertTrue(r.err.contains("no Swift sources"), "stderr: \(r.err)")
+    }
+
+    // ── A3: a malformed policy line is warned-and-skipped; valid rules in the SAME file still enforce ─
+    func testMalformedPolicyLineSkippedValidRulesStillEnforce() throws {
+        let bin = try binaryURL()
+        let root = try makeNetFixture(qual: "Billing", urlLiteral: "https://api.stripe.com/v1/charges")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let policy = root.appendingPathComponent("policy.txt")
+        // line 1 garbage (unknown rule kind), line 2 garbage (allow with no values), line 3 a REAL deny.
+        try """
+        frobnicate Net everything
+        allow Net
+        deny Net
+        """.write(to: policy, atomically: true, encoding: .utf8)
+
+        let r = try run(bin, [root.path, "--json", "--policy", policy.path])
+        XCTAssertEqual(r.code, 1, "the valid `deny Net` must still fire despite the garbage lines — stderr: \(r.err)")
+        XCTAssertTrue(r.err.contains("ignoring policy rule"), "malformed lines must be warned-and-skipped; stderr: \(r.err)")
+        XCTAssertTrue(r.err.contains("AS-EFF-006"), "the surviving deny must produce a violation; stderr: \(r.err)")
     }
 }
