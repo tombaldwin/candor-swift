@@ -54,12 +54,18 @@ while let a = argIter.next() {
         policyPath = v
     case "-h", "--help":
         print("""
-        candor-swift — Swift effect scanner (candor-spec 0.5)
-        USAGE: candor-swift [<dir|file.swift>] [--out <prefix>] [--policy <file>] [--agents]
-          writes <prefix>.<package>.Swift.json (report, spec 0.5 envelope) + a .callgraph.json sidecar
-          CANDOR_POLICY honoured when --policy absent; exit 1 on violation, 2 on unreadable policy.
-          --agents         prints the agent contract for THIS build (the embedded AGENTS.md).
-          --version        print the installed build + spec contract (offline) and the upgrade line.
+        candor-swift \(releaseVersion) — Swift effect scanner (candor-spec \(specVersion))
+
+        USAGE: candor-swift [<dir|file.swift>] [--out <prefix>] [--policy <file>] [--agents] [--version]
+
+          <target>          a dir or a single .swift file to scan (default: .)
+          --out <prefix>    write the report to <prefix>.<package>.Swift.json + a .callgraph.json sidecar
+          --policy <file>   enforce a policy file (deny/pure/allow/forbid, candor-spec §6.2) — exit 1 on a violation, 2 if unreadable; honours $CANDOR_POLICY when the flag is absent
+          --agents          print the agent contract for this build (AGENTS.md)
+          --version         print the build and spec version (offline)
+          -h, --help        show this help
+
+        See https://github.com/tombaldwin/candor
         """)
         exit(0)
     case "--version":
