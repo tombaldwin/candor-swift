@@ -25,7 +25,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.7.4"
+let engineVersion = "candor-swift-0.7.5"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -2025,12 +2025,27 @@ func decodeEscapes(_ raw: String) -> String {
     return out
 }
 
+/// The hostname part of a `host[:port]` literal — scheme and path stripped, then the trailing `:port`
+/// dropped so `allow Net api.stripe.com` covers a reached `api.stripe.com:443` (SPEC §6.2: a Net host
+/// matches by hostname with the port ignored). IPv6-aware, mirroring Rust's `host_part`: a bracketed
+/// `[host]:port` yields the bracketed host, and a BARE IPv6 literal (>1 colon, no brackets) has no port
+/// to strip and is returned whole — a naive first-colon split would collapse every `2001:db8::*` to
+/// `2001`, accepting any address in that block. A hostname/IPv4 `host`/`host:port` (≤1 colon) splits at
+/// the colon. Was a live cross-engine gate-verdict divergence: Swift kept the port, Rust/Java/TS didn't.
 func hostPart(_ s: String) -> String {
     var h = s
     for scheme in ["https://", "http://", "wss://", "ws://", "tcp://"] where h.hasPrefix(scheme) {
         h = String(h.dropFirst(scheme.count))
     }
     if let slash = h.firstIndex(of: "/") { h = String(h[..<slash]) }
+    if h.hasPrefix("[") {
+        // `[ipv6]` or `[ipv6]:port` — the host is between the brackets.
+        let inner = String(h.dropFirst())
+        if let close = inner.firstIndex(of: "]") { return String(inner[..<close]) }
+        return inner
+    }
+    if h.filter({ $0 == ":" }).count > 1 { return h }  // bare IPv6 literal — no port suffix to strip
+    if let colon = h.firstIndex(of: ":") { return String(h[..<colon]) }
     return h
 }
 
@@ -2289,7 +2304,6 @@ let blindModules = Set(importCounts.keys.filter {
     !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !internalModules.contains($0) })
 var locOf: [String: String] = [:]
 var entryPoints: Set<String> = []
-var kappaSawClassified = false
 var callsiteArgs: [String: [[ArgKind]]] = [:]   // resolved target -> each call site's arg kinds
 var deferredCallbacks: [String: (indexes: Set<Int>, names: Set<String>)] = [:]
 
@@ -2315,7 +2329,6 @@ for f in allFns {
     // a bare-name read that names a GLOBAL initializer unit charges its first-touch effects here
     edges[f.qual, default: []].formUnion(cc.globalReads.filter { globalUnitNames.contains($0) && $0 != f.qual })
     direct[f.qual, default: []].formUnion(cc.directEffects)
-    if !cc.directEffects.isEmpty { kappaSawClassified = true }
     if cc.unresolved { direct[f.qual, default: []].insert("Unknown"); unresolvedSet.insert(f.qual) }
     whyMap[f.qual, default: []].formUnion(cc.why)
     hostsD[f.qual, default: []].formUnion(cc.hosts)
@@ -2542,7 +2555,6 @@ let invisibleAcc = propagate(blindDirect, over: edges)
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 let prefix = outPrefix ?? (rootDir as NSString).appendingPathComponent(".candor/report")
-try? fm.createDirectory(atPath: (prefix as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
 
 let accessorQuals = Set(allFns.filter { $0.isAccessor }.map { $0.qual })
 // ── The candor domain model (candor-spec/MODEL.md) — candor-swift's named realization of the shared
@@ -2685,6 +2697,9 @@ if wantJson {
     FileHandle.standardOutput.write(data)
     FileHandle.standardOutput.write("\n".data(using: .utf8)!)
 } else {
+    // Create `.candor/` (or the --out parent) only on the file-writing path — --json is documented as
+    // writing NO files, so it must not leave an empty directory behind as a side effect.
+    try? fm.createDirectory(atPath: (prefix as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
     writeJson(envelope, reportPath)
     writeJson(cg, "\(prefix).\(fileSafePkg).Swift.callgraph.json")
     // Type-hierarchy sidecar (SPEC §4 / 0.7): each local type -> its declared supertypes/protocols, by
@@ -2722,7 +2737,6 @@ if !unlisted.isEmpty {
         ("candor-swift: κ doesn't know \(unlisted.count) module\(unlisted.count == 1 ? "" : "s") this code imports — "
          + "effects through \(unlisted.count == 1 ? "it are" : "them are") INVISIBLE (not Unknown): \(shown)\(more)\n").data(using: .utf8)!)
 }
-_ = kappaSawClassified
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // §6.2 policy gate (deny / pure / allow / forbid) — token-for-token with the family parsers
@@ -2788,11 +2802,14 @@ func parsePolicy(_ text: String) -> (deny: [DenyRule], allow: [AllowRule], forbi
     return (deny, allow, forbid)
 }
 
-/// §6.2 scope match: segment run over ".", last segment a prefix.
+/// §6.2 scope match: segment run, last segment a prefix. Segments split on BOTH `.` and `::` (empty
+/// parts filtered), mirroring Rust/Java's `name_segments` — so a shared `::`-scoped policy (Rust/Swift
+/// path syntax) matches Swift names too, not just dotted ones. Splitting on `:` is safe: a `:` only ever
+/// appears in a `::` separator in these names, so it never over-segments (no spurious match).
 func scopeMatches(_ name: String, _ scope: String) -> Bool {
     if scope.isEmpty { return true }
-    let segs = name.split(separator: ".").map(String.init)
-    let parts = scope.split(separator: ".").map(String.init)
+    let segs = name.split(whereSeparator: { $0 == "." || $0 == ":" }).map(String.init)
+    let parts = scope.split(whereSeparator: { $0 == "." || $0 == ":" }).map(String.init)
     if parts.isEmpty || parts.count > segs.count { return false }
     let last = parts[parts.count - 1], initParts = parts.dropLast()
     outer: for i in 0...(segs.count - parts.count) {
@@ -2853,7 +2870,12 @@ if let pp = policyPath {
             // the invisible forbidden endpoint (the masking gate-evasion; candor-java 0.5.29 / rust / ts).
             let surfaceIncomplete = incompleteAcc[qual]?.contains(r.effect) ?? false
             if surface.isEmpty || surfaceIncomplete {
-                violations.append("[AS-EFF-008] `\(qual)` performs \(r.effect) with no visible literal — the surface cannot be certified: `\(r.raw)`")
+                // Two distinct failures share AS-EFF-008: no literal AT ALL, vs the MASKING case where a
+                // visible literal exists but coexists with a structurally-invisible endpoint it can't cover for.
+                let why = surface.isEmpty
+                    ? "performs \(r.effect) with no visible literal — the surface cannot be certified"
+                    : "reaches a structurally-invisible \(r.effect) endpoint a visible literal cannot mask"
+                violations.append("[AS-EFF-008] `\(qual)` \(why): `\(r.raw)`")
             } else {
                 let bad = surface.filter { !literalAllowed(r.effect, $0, r.values) }.sorted()
                 if !bad.isEmpty {
@@ -2875,7 +2897,10 @@ if let pp = policyPath {
             }
         }
     }
-    for v in violations { print(v) }
+    // Violation lines are diagnostics, not the report — route them to STDERR so `--json --policy p`
+    // keeps stdout a single clean JSON document (a violation line on stdout broke `… | jq`). The human
+    // summary already goes to stderr, so emit here unconditionally (not only when --json).
+    for v in violations { FileHandle.standardError.write((v + "\n").data(using: .utf8)!) }
     if violations.isEmpty {
         FileHandle.standardError.write("candor-swift: policy ✓\n".data(using: .utf8)!)
     } else {
