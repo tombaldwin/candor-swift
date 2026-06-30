@@ -35,6 +35,7 @@ let specVersion = "0.7"
 
 var target = "."
 var outPrefix: String? = nil
+var wantJson = false
 var policyPath: String? = ProcessInfo.processInfo.environment["CANDOR_POLICY"]
 var argIter = CommandLine.arguments.dropFirst().makeIterator()
 while let a = argIter.next() {
@@ -47,6 +48,11 @@ while let a = argIter.next() {
             FileHandle.standardError.write("candor-swift: --out requires a value\n".data(using: .utf8)!); exit(2)
         }
         outPrefix = v
+    case "--json":
+        // Print the §2 envelope to STDOUT instead of writing the report file(s)/sidecars (matching the
+        // candor-scan reference). The §6.2 policy gate below STILL runs and keeps its exit codes —
+        // `--json --policy p` prints the report AND exits 1 on a violation.
+        wantJson = true
     case "--policy":
         guard let v = argIter.next(), !v.hasPrefix("-") else {
             FileHandle.standardError.write("candor-swift: --policy requires a value\n".data(using: .utf8)!); exit(2)
@@ -56,19 +62,20 @@ while let a = argIter.next() {
         print("""
         candor-swift \(releaseVersion) — Swift effect scanner (candor-spec \(specVersion))
 
-        USAGE: candor-swift [<dir|file.swift>] [--out <prefix>] [--policy <file>] [--agents] [--version]
+        USAGE: candor-swift [<dir|file.swift>] [--out <prefix>] [--json] [--policy <file>] [--agents] [--version]
 
           <target>          a dir or a single .swift file to scan (default: .)
           --out <prefix>    write the report to <prefix>.<package>.Swift.json + a .callgraph.json sidecar
+          --json            print the report as JSON to stdout (instead of writing files)
           --policy <file>   enforce a policy file (deny/pure/allow/forbid, candor-spec §6.2) — exit 1 on a violation, 2 if unreadable; honours $CANDOR_POLICY when the flag is absent
           --agents          print the agent contract for this build (AGENTS.md)
-          --version         print the build and spec version (offline)
+          -V, --version     print the build and spec version (offline)
           -h, --help        show this help
 
         See https://github.com/tombaldwin/candor
         """)
         exit(0)
-    case "--version":
+    case "--version", "-V":
         // Two lines, fully OFFLINE: the installed build + the spec contract it speaks, then the
         // upgrade incantation. Both fields reuse the single sources of truth (releaseVersion /
         // specVersion) so this can never drift from the report envelope.
@@ -2662,21 +2669,36 @@ func writeJson(_ obj: Any, _ path: String) {
 // pkg segment is dot-sanitized (`GRDB.swift` would otherwise split the <crate>.<kind> parse).
 let fileSafePkg = pkgName.replacingOccurrences(of: ".", with: "-")
 let reportPath = "\(prefix).\(fileSafePkg).Swift.json"
-writeJson(envelope, reportPath)
-writeJson(cg, "\(prefix).\(fileSafePkg).Swift.callgraph.json")
-// Type-hierarchy sidecar (SPEC §4 / 0.7): each local type -> its declared supertypes/protocols, by
-// INVERTING `conformers` (supertype -> subtypes, from pushType). Lets candor-query's dispatch-frontier
-// (callers --include-unknown) resolve whether a confirmed reacher overrides a `dispatch:` owner. Keyed by
-// the bare type name — matching this engine's `Type.member` fn quals + `dispatch:Type.member` reasons.
-var typeHierarchy: [String: [String]] = [:]
-for (sup, subs) in conformers {
-    for sub in subs { typeHierarchy[sub, default: []].append(sup) }
-}
-for k in typeHierarchy.keys { typeHierarchy[k] = Array(Set(typeHierarchy[k]!)).sorted() }
-writeJson(typeHierarchy, "\(prefix).\(fileSafePkg).Swift.hierarchy.json")
-FileHandle.standardError.write(
-    "candor-swift: wrote \(effectors.count) effectful functions (\(allFns.count) analyzed, \(sourcePaths.count) files) to \(reportPath)\n".data(using: .utf8)!)
-do {
+if wantJson {
+    // --json: emit the §2 envelope to STDOUT and write NO report file(s)/sidecars (the candor-scan
+    // reference behaviour). The κ-coverage ledger and the §6.2 policy gate below STILL run (the gate
+    // keeps its exit codes), so `--json --policy p` prints the report AND exits 1 on a violation.
+    // Serialize exactly as writeJson does (pretty + sorted keys) so the stdout document is byte-for-byte
+    // the report file's content.
+    let data: Data
+    do {
+        data = try JSONSerialization.data(withJSONObject: envelope, options: [.prettyPrinted, .sortedKeys])
+    } catch {
+        FileHandle.standardError.write("candor-swift: could not serialize report: \(error)\n".data(using: .utf8)!)
+        exit(1)
+    }
+    FileHandle.standardOutput.write(data)
+    FileHandle.standardOutput.write("\n".data(using: .utf8)!)
+} else {
+    writeJson(envelope, reportPath)
+    writeJson(cg, "\(prefix).\(fileSafePkg).Swift.callgraph.json")
+    // Type-hierarchy sidecar (SPEC §4 / 0.7): each local type -> its declared supertypes/protocols, by
+    // INVERTING `conformers` (supertype -> subtypes, from pushType). Lets candor-query's dispatch-frontier
+    // (callers --include-unknown) resolve whether a confirmed reacher overrides a `dispatch:` owner. Keyed by
+    // the bare type name — matching this engine's `Type.member` fn quals + `dispatch:Type.member` reasons.
+    var typeHierarchy: [String: [String]] = [:]
+    for (sup, subs) in conformers {
+        for sub in subs { typeHierarchy[sub, default: []].append(sup) }
+    }
+    for k in typeHierarchy.keys { typeHierarchy[k] = Array(Set(typeHierarchy[k]!)).sorted() }
+    writeJson(typeHierarchy, "\(prefix).\(fileSafePkg).Swift.hierarchy.json")
+    FileHandle.standardError.write(
+        "candor-swift: wrote \(effectors.count) effectful functions (\(allFns.count) analyzed, \(sourcePaths.count) files) to \(reportPath)\n".data(using: .utf8)!)
     // Effect breakdown — make the result visible at a glance, not just a count + a file path.
     var counts: [String: Int] = [:]
     for e in effectors { for x in e.inferred.toNames() { counts[x, default: 0] += 1 } }
