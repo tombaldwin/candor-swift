@@ -1043,6 +1043,15 @@ final class CallCollector: SyntaxVisitor {
         return nil
     }
 
+    // The integer-literal value of a labeled arg (`port: 8080` → "8080"), for folding a separate port
+    // argument into the host:port surface — NWConnection(host:"…", port: 8080) and similar two-arg Net APIs.
+    private func intLiteralForLabel(_ args: LabeledExprListSyntax, _ label: String) -> String? {
+        for a in args where (a.label?.text ?? "") == label {
+            if let lit = a.expression.as(IntegerLiteralExprSyntax.self) { return lit.literal.text }
+        }
+        return nil
+    }
+
     // A two-path Fs op (copyItem/moveItem/createSymbolicLink/…): inspect EVERY required path locator, not
     // just the first. Capture each locator's literal as an Fs surface, and report Fs INCOMPLETE if ANY
     // locator is non-literal — so a literal source can't MASK a runtime destination (the two-path gate
@@ -1062,10 +1071,16 @@ final class CallCollector: SyntaxVisitor {
         return true
     }
 
-    private func recordSurfaces(effect: String, lit: String?) {
+    private func recordSurfaces(effect: String, lit: String?, args: LabeledExprListSyntax? = nil) {
         guard let lit else { return }
         switch effect {
-        case "Net": hosts.insert(hostPart(lit))
+        case "Net":
+            var h = hostPort(lit)
+            // Fold a SEPARATE integer port arg (NWConnection(host: "…", port: 8080)) into host:port, so the
+            // surface reads like the URL-string forms the other engines see (conformance §2 [4e]). Skipped
+            // when the host already carries a colon (an embedded port, or an IPv6 literal).
+            if !h.contains(":"), let args, let p = intLiteralForLabel(args, "port") { h = "\(h):\(p)" }
+            hosts.insert(h)
         case "Exec":
             let head = lit.split(separator: " ").first.map(String.init) ?? lit
             cmds.insert(head)
@@ -1441,7 +1456,7 @@ final class CallCollector: SyntaxVisitor {
                 // enclosing type is NOT declared locally (an extension of the real platform type) and the κ
                 // table knows the member — a declared type shadows κ, a local free fn / shadowing local wins.
                 directEffects.insert(eff)
-                recordSurfaces(effect: eff, lit: lit)
+                recordSurfaces(effect: eff, lit: lit, args: node.arguments)
                 if lit == nil, isEstablishingMember(effect: eff, root: et, member: name) { incompleteSurfaces.insert(eff) }
             } else if !localTypes.contains(name), !localFreeFns.contains(name),
                       let eff = kappaFree(name: dealias(name), argCount: node.arguments.count) {
@@ -1454,7 +1469,7 @@ final class CallCollector: SyntaxVisitor {
                 // local type/free fn already short-circuited above, so an alias never overrides the project.
                 let aliasName = dealias(name)
                 directEffects.insert(eff)
-                recordSurfaces(effect: eff, lit: lit)
+                recordSurfaces(effect: eff, lit: lit, args: node.arguments)
                 if lit == nil, isEstablishingFree(effect: eff, name: aliasName) { incompleteSurfaces.insert(eff) }
             } else {
                 calls.append(Call(path: name, leaf: name, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), unqualified: true))
@@ -1524,7 +1539,7 @@ final class CallCollector: SyntaxVisitor {
                 if eff == "Fs", rt == "FileManager", recordTwoPathFs(member: member, node.arguments) {
                     // handled — surfaces + incompleteness recorded per-locator
                 } else {
-                    recordSurfaces(effect: eff, lit: lit)
+                    recordSurfaces(effect: eff, lit: lit, args: node.arguments)
                     if lit == nil, isEstablishingMember(effect: eff, root: rt, member: member) { incompleteSurfaces.insert(eff) }
                 }
             } else {
@@ -2032,12 +2047,23 @@ func decodeEscapes(_ raw: String) -> String {
 /// to strip and is returned whole — a naive first-colon split would collapse every `2001:db8::*` to
 /// `2001`, accepting any address in that block. A hostname/IPv4 `host`/`host:port` (≤1 colon) splits at
 /// the colon. Was a live cross-engine gate-verdict divergence: Swift kept the port, Rust/Java/TS didn't.
-func hostPart(_ s: String) -> String {
+// The §2 host SURFACE value: scheme + path stripped, but the statically-known PORT KEPT
+// (`https://api.example.com:8080/x` → `api.example.com:8080`) — the conformance suite's [4e] pins that
+// the port is part of the surface, so it must NOT be dropped here.
+func hostPort(_ s: String) -> String {
     var h = s
     for scheme in ["https://", "http://", "wss://", "ws://", "tcp://"] where h.hasPrefix(scheme) {
         h = String(h.dropFirst(scheme.count))
     }
     if let slash = h.firstIndex(of: "/") { h = String(h[..<slash]) }
+    return h
+}
+
+// `hostPort` with the :port ALSO stripped — for port-INSENSITIVE policy matching (spec §6.2: a Net host
+// matches by hostname with the port ignored, `api.stripe.com` allows `api.stripe.com:443`). Used only at
+// match time (both the allow value and the reached surface are stripped), never on the stored surface.
+func hostPart(_ s: String) -> String {
+    let h = hostPort(s)
     if h.hasPrefix("[") {
         // `[ipv6]` or `[ipv6]:port` — the host is between the brackets.
         let inner = String(h.dropFirst())
