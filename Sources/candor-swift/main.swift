@@ -31,12 +31,13 @@ let engineVersion = "candor-swift-0.7.5"
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
 // The spec contract version this engine speaks — the SAME literal that stamps the §2 envelope's `spec`
 // field (see the envelope below), reused so `--version` and the report can never disagree.
-let specVersion = "0.7"
+let specVersion = "0.8"
 
 var target = "."
 var outPrefix: String? = nil
 var wantJson = false
 var policyPath: String? = ProcessInfo.processInfo.environment["CANDOR_POLICY"]
+var gateJsonPath: String? = nil
 var argIter = CommandLine.arguments.dropFirst().makeIterator()
 while let a = argIter.next() {
     switch a {
@@ -58,16 +59,23 @@ while let a = argIter.next() {
             FileHandle.standardError.write("candor-swift: --policy requires a value\n".data(using: .utf8)!); exit(2)
         }
         policyPath = v
+    case "--gate-json":
+        // The structured gate verdict target (candor-spec §3.3 ⟨0.8⟩). Valueless fails closed like --policy.
+        guard let v = argIter.next(), !v.hasPrefix("-") else {
+            FileHandle.standardError.write("candor-swift: --gate-json requires a value\n".data(using: .utf8)!); exit(2)
+        }
+        gateJsonPath = v
     case "-h", "--help":
         print("""
         candor-swift \(releaseVersion) — Swift effect scanner (candor-spec \(specVersion))
 
-        USAGE: candor-swift [<dir|file.swift>] [--out <prefix>] [--json] [--policy <file>] [--agents] [--version]
+        USAGE: candor-swift [<dir|file.swift>] [--out <prefix>] [--json] [--policy <file>] [--gate-json <file>] [--agents] [--version]
 
           <target>          a dir or a single .swift file to scan (default: .)
           --out <prefix>    write the report to <prefix>.<package>.Swift.json + a .callgraph.json sidecar
           --json            print the report as JSON to stdout (instead of writing files)
           --policy <file>   enforce a policy file (deny/pure/allow/forbid, candor-spec §6.2) — exit 1 on a violation, 2 if unreadable; honours $CANDOR_POLICY when the flag is absent
+          --gate-json <f>   write the structured gate verdict { spec, ok, violations } as JSON (candor-spec §3.3)
           --agents          print the agent contract for this build (AGENTS.md)
           -V, --version     print the build and spec version (offline)
           -h, --help        show this help
@@ -2867,20 +2875,40 @@ func literalAllowed(_ effect: String, _ reached: String, _ values: [String]) -> 
     }
 }
 
+// A structured gate violation (candor-spec §3.3 ⟨0.8⟩): `effects` is the specific effect set the violation
+// concerns — the denied set (006), the allowed effect (008), or [] (009 layer-flow); `detail` is the message
+// BODY (no `[AS-EFF-00x]` prefix — the rule carries the code). The console prints `[rule] detail`; --gate-json
+// serializes the records verbatim. Written from the SAME list that sets the exit code, so it can't disagree.
+typealias GateViolation = (rule: String, fn: String, effects: [String], detail: String)
+func writeGateVerdict(_ violations: [GateViolation], to path: String) {
+    let dict: [String: Any] = [
+        "spec": specVersion,
+        "ok": violations.isEmpty,
+        "violations": violations.map { ["rule": $0.rule, "fn": $0.fn, "effects": $0.effects, "detail": $0.detail] as [String: Any] },
+    ]
+    if path == "-" {
+        if let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys]),
+           let s = String(data: data, encoding: .utf8) { print(s) }
+    } else {
+        writeJson(dict, path)
+    }
+}
+
+var gateViolations: [GateViolation] = []
 if let pp = policyPath {
     guard let text = try? String(contentsOfFile: pp, encoding: .utf8) else {
         FileHandle.standardError.write("candor-swift: policy \(pp) could not be read; gate NOT enforced\n".data(using: .utf8)!)
         exit(2)
     }
     let pol = parsePolicy(text)
-    var violations: [String] = []
     for qual in inferred.keys.sorted() {
         let inf = inferred[qual] ?? []
         if inf.isEmpty { continue }
         for r in pol.deny where scopeMatches(qual, r.scope) {
             let hits = r.effects.isEmpty ? inf.sorted() : inf.sorted().filter { r.effects.contains($0) }
             if !hits.isEmpty {
-                violations.append("[AS-EFF-006] `\(qual)` performs { \(hits.joined(separator: ", ")) }, forbidden by policy: `\(r.raw)`")
+                gateViolations.append((rule: "AS-EFF-006", fn: qual, effects: hits,
+                    detail: "`\(qual)` performs { \(hits.joined(separator: ", ")) }, forbidden by policy: `\(r.raw)`"))
             }
         }
         for r in pol.allow where scopeMatches(qual, r.scope) && inf.contains(r.effect) {
@@ -2901,11 +2929,12 @@ if let pp = policyPath {
                 let why = surface.isEmpty
                     ? "performs \(r.effect) with no visible literal — the surface cannot be certified"
                     : "reaches a structurally-invisible \(r.effect) endpoint a visible literal cannot mask"
-                violations.append("[AS-EFF-008] `\(qual)` \(why): `\(r.raw)`")
+                gateViolations.append((rule: "AS-EFF-008", fn: qual, effects: [r.effect], detail: "`\(qual)` \(why): `\(r.raw)`"))
             } else {
                 let bad = surface.filter { !literalAllowed(r.effect, $0, r.values) }.sorted()
                 if !bad.isEmpty {
-                    violations.append("[AS-EFF-008] `\(qual)` reaches { \(bad.joined(separator: ", ")) } outside the allowlist: `\(r.raw)`")
+                    gateViolations.append((rule: "AS-EFF-008", fn: qual, effects: [r.effect],
+                        detail: "`\(qual)` reaches { \(bad.joined(separator: ", ")) } outside the allowlist: `\(r.raw)`"))
                 }
             }
         }
@@ -2916,7 +2945,8 @@ if let pp = policyPath {
             while let cur = stack.popLast() {
                 if !seen.insert(cur).inserted { continue }
                 if scopeMatches(cur, r.to) {
-                    violations.append("[AS-EFF-009] `\(fn)` (scope `\(r.from)`) transitively reaches `\(cur)` in forbidden scope `\(r.to)`: `\(r.raw)`")
+                    gateViolations.append((rule: "AS-EFF-009", fn: fn, effects: [],
+                        detail: "`\(fn)` (scope `\(r.from)`) transitively reaches `\(cur)` in forbidden scope `\(r.to)`: `\(r.raw)`"))
                     break
                 }
                 stack.append(contentsOf: cg[cur] ?? [])
@@ -2924,13 +2954,17 @@ if let pp = policyPath {
         }
     }
     // Violation lines are diagnostics, not the report — route them to STDERR so `--json --policy p`
-    // keeps stdout a single clean JSON document (a violation line on stdout broke `… | jq`). The human
-    // summary already goes to stderr, so emit here unconditionally (not only when --json).
-    for v in violations { FileHandle.standardError.write((v + "\n").data(using: .utf8)!) }
-    if violations.isEmpty {
+    // keeps stdout a single clean JSON document (a violation line on stdout broke `… | jq`).
+    for v in gateViolations { FileHandle.standardError.write(("[\(v.rule)] \(v.detail)\n").data(using: .utf8)!) }
+}
+// --gate-json ⟨0.8⟩: the machine verdict, from the SAME gateViolations that set the exit code — written
+// BEFORE the exit below (ok:true,[] when no gate is configured). Unreadable policy already exited 2 above.
+if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp) }
+if policyPath != nil {
+    if gateViolations.isEmpty {
         FileHandle.standardError.write("candor-swift: policy ✓\n".data(using: .utf8)!)
     } else {
-        FileHandle.standardError.write("candor-swift: \(violations.count) policy violation(s)\n".data(using: .utf8)!)
+        FileHandle.standardError.write("candor-swift: \(gateViolations.count) policy violation(s)\n".data(using: .utf8)!)
         exit(1)
     }
 }

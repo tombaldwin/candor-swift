@@ -438,4 +438,35 @@ final class GateProcessTests: XCTestCase {
         XCTAssertTrue(r.err.contains("ignoring policy rule"), "malformed lines must be warned-and-skipped; stderr: \(r.err)")
         XCTAssertTrue(r.err.contains("AS-EFF-006"), "the surviving deny must produce a violation; stderr: \(r.err)")
     }
+
+    // ── --gate-json ⟨0.8⟩: the structured gate verdict, faithful to the exit code ─────────────────
+    func testGateJsonWritesTheStructuredVerdict() throws {
+        let bin = try binaryURL()
+        let root = try makeNetFixture(qual: "Billing", urlLiteral: "https://evil.example.com/x")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let policy = root.appendingPathComponent("policy.txt")
+        try "deny Net\n".write(to: policy, atomically: true, encoding: .utf8)
+        let gate = root.appendingPathComponent("gate.json")
+
+        let r = try run(bin, [root.path, "--policy", policy.path, "--gate-json", gate.path])
+        XCTAssertEqual(r.code, 1, "a deny-Net violation exits 1 — stderr: \(r.err)")
+
+        let data = try Data(contentsOf: gate)
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        XCTAssertEqual(obj?["spec"] as? String, "0.8", "verdict declares the spec version")
+        XCTAssertEqual(obj?["ok"] as? Bool, false, "ok:false on a failing gate")
+        let viols = obj?["violations"] as? [[String: Any]] ?? []
+        XCTAssertEqual(viols.count, 1, "one violation")
+        XCTAssertEqual(viols.first?["rule"] as? String, "AS-EFF-006")
+        XCTAssertEqual(viols.first?["effects"] as? [String], ["Net"], "effects = the denied set")
+        XCTAssertTrue((viols.first?["fn"] as? String ?? "").contains("charge"), "names the violating fn")
+    }
+
+    func testGateJsonValuelessFailsClosed() throws {
+        let bin = try binaryURL()
+        let root = try makeFixture("func pure() {}\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try run(bin, [root.path, "--gate-json"])
+        XCTAssertEqual(r.code, 2, "a valueless --gate-json must fail (exit 2) — stderr: \(r.err)")
+    }
 }
