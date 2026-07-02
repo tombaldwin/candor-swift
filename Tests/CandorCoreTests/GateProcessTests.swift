@@ -483,6 +483,49 @@ final class GateProcessTests: XCTestCase {
         XCTAssertTrue(r.err.contains("could not write --gate-json"), "the failure is disclosed on stderr: \(r.err)")
     }
 
+    // ── .candor/config (§config): target-anchored, env-overridden, fail-closed ──────────────────
+    func testCandorConfigDrivesTheGateEnvOverridesAndTypoFailsClosed() throws {
+        let bin = try binaryURL()
+        let root = try makeNetFixture(qual: "Billing", urlLiteral: "https://x.example/x")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let denyNet = root.appendingPathComponent("deny-net.policy")
+        try "deny Net\n".write(to: denyNet, atomically: true, encoding: .utf8)
+        let denyDb = root.appendingPathComponent("deny-db.policy")
+        try "deny Db\n".write(to: denyDb, atomically: true, encoding: .utf8)
+        let candorDir = root.appendingPathComponent(".candor")
+        try FileManager.default.createDirectory(at: candorDir, withIntermediateDirectories: true)
+        try "policy \(denyNet.path)\npolcy typo\n".write(to: candorDir.appendingPathComponent("config"), atomically: true, encoding: .utf8)
+
+        // (a) the checked-in config drives the gate — no flag, no env — discovered via the target's ancestors
+        let r = try run(bin, [root.path, "--out", root.appendingPathComponent("r").path])
+        XCTAssertEqual(r.code, 1, "the config-supplied deny-Net gates the scan — stderr: \(r.err)")
+        XCTAssertTrue(r.err.contains("AS-EFF-006"), "the violation is reported: \(r.err)")
+        XCTAssertTrue(r.err.contains("unknown config key 'polcy'"), "typo protection warns: \(r.err)")
+
+        // (b) CANDOR_POLICY env overrides the config (a passing deny-Db wins over the config's deny-Net)
+        let p = Process()
+        p.executableURL = bin
+        p.arguments = [root.path, "--out", root.appendingPathComponent("r2").path]
+        var env = ProcessInfo.processInfo.environment
+        env["CANDOR_POLICY"] = denyDb.path
+        p.environment = env
+        try p.run(); p.waitUntilExit()
+        XCTAssertEqual(p.terminationStatus, 0, "CANDOR_POLICY env overrides the config")
+
+        // (c) a set-but-unusable CANDOR_CONFIG fails closed (exit 2)
+        let p2 = Process()
+        p2.executableURL = bin
+        p2.arguments = [root.path, "--out", root.appendingPathComponent("r3").path]
+        var env2 = ProcessInfo.processInfo.environment
+        env2["CANDOR_CONFIG"] = root.appendingPathComponent("no-such").path
+        p2.environment = env2
+        let errPipe = Pipe(); p2.standardError = errPipe; p2.standardOutput = Pipe()
+        try p2.run()
+        _ = errPipe.fileHandleForReading.readDataToEndOfFile()
+        p2.waitUntilExit()
+        XCTAssertEqual(p2.terminationStatus, 2, "a typo'd CANDOR_CONFIG must fail closed")
+    }
+
     func testGateJsonDashStreamsAPureVerdictToStdout() throws {
         // `--gate-json -` (the §3.3 pipe form the other three engines accept) was rejected by the
         // dash-guard; it must stream the verdict as PURE stdout JSON, AS-EFF lines on stderr.

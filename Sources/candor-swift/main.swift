@@ -117,6 +117,64 @@ while let a = argIter.next() {
     }
 }
 
+// ── .candor/config (candor-spec §config): the checked-in floor under the CANDOR_* env vars ─────────
+// Discovery is anchored to the SCAN TARGET (walk up from the target dir to the repo root's
+// .candor/config), never the CWD; $CANDOR_CONFIG overrides discovery. Precedence: CLI flag →
+// CANDOR_* env → this file → default. FAIL-CLOSED when configured-but-unusable (exit 2 — the §6.2
+// unreadable-policy posture); only genuine absence is empty. Shared key vocabulary — candor-swift
+// consumes `policy` (no report chaining yet, so `deps` is inert like the java-only gate keys); a key
+// OUTSIDE the vocabulary warns (typo protection: a misspelt `policy` must not silently drop the gate).
+let candorConfigKeys: Set<String> = ["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps"]
+func loadCandorConfig(targetPath: String) -> [String: String] {
+    var file: String? = nil
+    if let override = ProcessInfo.processInfo.environment["CANDOR_CONFIG"] {
+        var isDir: ObjCBool = false
+        if !FileManager.default.fileExists(atPath: override, isDirectory: &isDir) || isDir.boolValue {
+            FileHandle.standardError.write("candor-swift: CANDOR_CONFIG set but \(override) is not a readable file — failing (exit 2)\n".data(using: .utf8)!)
+            exit(2)
+        }
+        file = override
+    } else {
+        var dir = URL(fileURLWithPath: targetPath).standardizedFileURL
+        var isDir: ObjCBool = false
+        if !(FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDir) && isDir.boolValue) {
+            dir = dir.deletingLastPathComponent()
+        }
+        while true {
+            let cand = dir.appendingPathComponent(".candor/config").path
+            if FileManager.default.fileExists(atPath: cand) { file = cand; break }
+            let parent = dir.deletingLastPathComponent()
+            if parent.path == dir.path { break }
+            dir = parent
+        }
+        if file == nil, FileManager.default.fileExists(atPath: ".candor/config") { file = ".candor/config" }
+        if file == nil { return [:] }
+    }
+    guard let text = try? String(contentsOfFile: file!, encoding: .utf8) else {
+        FileHandle.standardError.write("candor-swift: config \(file!) exists but could not be read — failing (exit 2)\n".data(using: .utf8)!)
+        exit(2)
+    }
+    var cfg: [String: String] = [:]
+    for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
+        let line = raw.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0]
+            .trimmingCharacters(in: .whitespaces)
+        if line.isEmpty { continue }
+        let parts = line.split(maxSplits: 1, whereSeparator: { $0 == " " || $0 == "\t" })
+        let key = parts[0].lowercased()
+        let val = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespaces) : ""
+        if !candorConfigKeys.contains(key) {
+            FileHandle.standardError.write("candor-swift: ignoring unknown config key '\(key)' in \(file!)\n".data(using: .utf8)!)
+            continue
+        }
+        cfg[key] = val
+    }
+    return cfg
+}
+let candorConfig = loadCandorConfig(targetPath: target)
+// The --policy flag / CANDOR_POLICY env already populated policyPath; the config is the floor. A bare
+// `policy` line ("" value) means configured-with-empty → the unreadable-policy path fails loud.
+if policyPath == nil, let p = candorConfig["policy"] { policyPath = p }
+
 let fm = FileManager.default
 var isDir: ObjCBool = false
 guard fm.fileExists(atPath: target, isDirectory: &isDir) else {
