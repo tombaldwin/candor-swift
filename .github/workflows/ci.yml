@@ -21,7 +21,9 @@ jobs:
       - name: Build
         run: swift build
       - name: Unit tests (CandorCore — the extracted pure classifier + type helpers)
-        run: swift test
+        # `script` gives swift test a TTY → line-buffered output → a hang shows the LAST test started
+        # in the live log (block-buffered output vanishes on cancel — learned the hard way, 2026-07-02).
+        run: script -q /dev/null swift test
       - name: Smoke (oracle needs the spec as a sibling)
         run: |
           git clone --depth 1 https://github.com/tombaldwin/candor-spec ../candor-spec
