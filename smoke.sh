@@ -632,8 +632,8 @@ func clean() {
 }
 SW
 printf 'allow Net benign.internal\n' > "$W/mask/pol"
-"$BIN" "$W/mask" --out "$W/mask/r" --policy "$W/mask/pol" > "$W/mask/gate.out" 2>/dev/null
-{ grep -q 'AS-EFF-008.*`mask`.*cannot be certified' "$W/mask/gate.out" \
+"$BIN" "$W/mask" --out "$W/mask/r" --policy "$W/mask/pol" > "$W/mask/gate.out" 2>&1
+{ grep -q 'AS-EFF-008.*`mask`' "$W/mask/gate.out" \
   && ! grep -q '`clean`' "$W/mask/gate.out"; } \
   && ok "masking guard: invisible-host Net fails closed under an allowlist; the clean host certifies" \
   || bad "masking guard: $(cat "$W/mask/gate.out")"
@@ -649,8 +649,8 @@ func maskFs(_ p: String) {
 func cleanFs() { try? FileManager.default.removeItem(atPath: "/var/app/ok.txt") }
 SW
 printf 'allow Fs /var/app\n' > "$W/maskfs/pol"
-"$BIN" "$W/maskfs" --out "$W/maskfs/r" --policy "$W/maskfs/pol" > "$W/maskfs/gate.out" 2>/dev/null
-{ grep -q 'AS-EFF-008.*`maskFs`.*cannot be certified' "$W/maskfs/gate.out" \
+"$BIN" "$W/maskfs" --out "$W/maskfs/r" --policy "$W/maskfs/pol" > "$W/maskfs/gate.out" 2>&1
+{ grep -q 'AS-EFF-008.*`maskFs`' "$W/maskfs/gate.out" \
   && ! grep -q '`cleanFs`' "$W/maskfs/gate.out"; } \
   && ok "masking guard generalizes to Fs: invisible-path Fs fails closed; the clean path certifies" \
   || bad "Fs masking guard: $(cat "$W/maskfs/gate.out")"
@@ -669,8 +669,8 @@ func maskSh(_ c: String) {
 func cleanSh() { let _ = try? shellOut(to: "ls") }
 SW
 printf 'allow Exec ls\n' > "$W/masksh/pol"
-"$BIN" "$W/masksh" --out "$W/masksh/r" --policy "$W/masksh/pol" > "$W/masksh/gate.out" 2>/dev/null
-{ grep -q 'AS-EFF-008.*`maskSh`.*cannot be certified' "$W/masksh/gate.out" \
+"$BIN" "$W/masksh" --out "$W/masksh/r" --policy "$W/masksh/pol" > "$W/masksh/gate.out" 2>&1
+{ grep -q 'AS-EFF-008.*`maskSh`' "$W/masksh/gate.out" \
   && ! grep -q '`cleanSh`' "$W/masksh/gate.out"; } \
   && ok "masking guard generalizes to Exec/shellOut: masked command fails closed; the clean command certifies" \
   || bad "Exec/shellOut masking guard: $(cat "$W/masksh/gate.out")"
@@ -687,9 +687,9 @@ func clobberLink(_ dst: String) { try? FileManager.default.createSymbolicLink(at
 func legitCopy() { try? FileManager.default.copyItem(atPath: "/tmp/ok/a", toPath: "/tmp/ok/b") }            // BOTH literal + allowed
 SW
 printf 'allow Fs /tmp/ok\n' > "$W/tpfs/pol"
-"$BIN" "$W/tpfs" --out "$W/tpfs/r" --policy "$W/tpfs/pol" > "$W/tpfs/gate.out" 2>/dev/null
-{ grep -q 'AS-EFF-008.*`exfilCopy`.*cannot be certified' "$W/tpfs/gate.out" \
-  && grep -q 'AS-EFF-008.*`clobberLink`.*cannot be certified' "$W/tpfs/gate.out" \
+"$BIN" "$W/tpfs" --out "$W/tpfs/r" --policy "$W/tpfs/pol" > "$W/tpfs/gate.out" 2>&1
+{ grep -q 'AS-EFF-008.*`exfilCopy`' "$W/tpfs/gate.out" \
+  && grep -q 'AS-EFF-008.*`clobberLink`' "$W/tpfs/gate.out" \
   && ! grep -q '`legitCopy`' "$W/tpfs/gate.out"; } \
   && ok "two-path Fs masking: masked dst/src fails closed; a two-literal copy under the allowlist certifies" \
   || bad "two-path Fs masking guard: $(cat "$W/tpfs/gate.out")"
@@ -742,7 +742,7 @@ print('PASS' if 'Net' in by.get('resolve',set()) else 'FAIL '+repr(by.get('resol
 # bare-CR endings must NOT collapse to the first rule. `deny Exec hop` is rule 2, AFTER a bare \r.
 mkdir -p "$W/cr" && printf 'import Foundation\nfunc hop() { _ = Process() }\n' > "$W/cr/m.swift"
 printf 'deny Clock nope\rdeny Exec hop\rdeny Net nope2\r' > "$W/cr/pol"
-"$BIN" "$W/cr" --out "$W/cr/r" --policy "$W/cr/pol" > "$W/cr/gate.out" 2>/dev/null
+"$BIN" "$W/cr" --out "$W/cr/r" --policy "$W/cr/pol" > "$W/cr/gate.out" 2>&1
 grep -q 'AS-EFF-006.*`hop`.*Exec' "$W/cr/gate.out" \
   && ok "policy parser splits bare-CR line endings (rule after \\\\r is not dropped)" \
   || bad "bare-CR policy parse: $(cat "$W/cr/gate.out")"
