@@ -135,16 +135,21 @@ func loadCandorConfig(targetPath: String) -> [String: String] {
         }
         file = override
     } else {
-        var dir = URL(fileURLWithPath: targetPath).standardizedFileURL
+        // STRING-based ancestor walk (NSString.deletingLastPathComponent), NOT URL's: URL's
+        // deletingLastPathComponent at the root ("/" → "/..") varies across Foundation versions — one
+        // toolchain clamps, another appends forever, which spun this walk INFINITELY on CI runners
+        // (every spawn hung until XCTest's 10-min allowance SIGKILLed it) while terminating locally.
+        // The string API is documented stable ("/" → "/"); the hop cap is belt-and-braces.
+        var dir = (URL(fileURLWithPath: targetPath).standardizedFileURL.path as NSString).standardizingPath
         var isDir: ObjCBool = false
-        if !(FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDir) && isDir.boolValue) {
-            dir = dir.deletingLastPathComponent()
+        if !(FileManager.default.fileExists(atPath: dir, isDirectory: &isDir) && isDir.boolValue) {
+            dir = (dir as NSString).deletingLastPathComponent
         }
-        while true {
-            let cand = dir.appendingPathComponent(".candor/config").path
+        for _ in 0..<64 {
+            let cand = (dir as NSString).appendingPathComponent(".candor/config")
             if FileManager.default.fileExists(atPath: cand) { file = cand; break }
-            let parent = dir.deletingLastPathComponent()
-            if parent.path == dir.path { break }
+            let parent = (dir as NSString).deletingLastPathComponent
+            if parent == dir || parent.isEmpty { break }
             dir = parent
         }
         if file == nil, FileManager.default.fileExists(atPath: ".candor/config") { file = ".candor/config" }
