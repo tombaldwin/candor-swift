@@ -13,6 +13,9 @@ on:
 jobs:
   test:
     runs-on: macos-15
+    # A healthy run is ~3 min (SwiftSyntax ships prebuilt binaries); anything past 20 is a hung runner
+    # — kill it rather than burn 6h of 10x-billed macOS minutes (observed live, twice, 2026-07-02).
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - name: Build
