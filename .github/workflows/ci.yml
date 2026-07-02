@@ -1,4 +1,10 @@
 name: ci
+# Superseded runs are cancelled — a swift CI run is ~20-40 min (SwiftSyntax compile), and without
+# this a push-per-hour day left runs stacked in_progress for hours (observed live).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches: [main]
