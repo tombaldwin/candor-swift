@@ -60,8 +60,10 @@ while let a = argIter.next() {
         }
         policyPath = v
     case "--gate-json":
-        // The structured gate verdict target (candor-spec §3.3 ⟨0.8⟩). Valueless fails closed like --policy.
-        guard let v = argIter.next(), !v.hasPrefix("-") else {
+        // The structured gate verdict target (candor-spec §3.3 ⟨0.8⟩). Valueless or flag-shaped fails
+        // closed like --policy — but `-` (stream the verdict to stdout, the §3.3 pipe form the other
+        // three engines accept) is valid; the old guard rejected it, a cross-engine divergence.
+        guard let v = argIter.next(), v == "-" || !v.hasPrefix("-") else {
             FileHandle.standardError.write("candor-swift: --gate-json requires a value\n".data(using: .utf8)!); exit(2)
         }
         gateJsonPath = v
@@ -2890,7 +2892,15 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String) {
         if let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys]),
            let s = String(data: data, encoding: .utf8) { print(s) }
     } else {
-        writeJson(dict, path)
+        // The verdict is a SURFACING side-output and MUST NOT change the gate's exit code — writeJson's
+        // failure path exits 1, which turned a PASSING gate into a red check when the path was unwritable
+        // (max-review find). One stderr line instead; the process keeps the gate's true exit.
+        do {
+            let data = try JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        } catch {
+            FileHandle.standardError.write("candor-swift: could not write --gate-json \(path): \(error.localizedDescription)\n".data(using: .utf8)!)
+        }
     }
 }
 

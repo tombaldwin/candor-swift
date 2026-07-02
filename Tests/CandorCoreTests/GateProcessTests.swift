@@ -469,4 +469,32 @@ final class GateProcessTests: XCTestCase {
         let r = try run(bin, [root.path, "--gate-json"])
         XCTAssertEqual(r.code, 2, "a valueless --gate-json must fail (exit 2) — stderr: \(r.err)")
     }
+
+    // ── --gate-json robustness (max-review findings 7 + 10) ────────────────────────────────────────
+    func testGateJsonUnwritablePathDoesNotChangeTheGateVerdict() throws {
+        // The verdict is a surfacing side-output: an unwritable path used to route through writeJson's
+        // exit(1), turning a PASSING gate into a red check. It must be one stderr line, exit unchanged.
+        let bin = try binaryURL()
+        let root = try makeFixture("func pure() {}\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bad = root.appendingPathComponent("no/such/dir/gate.json")
+        let r = try run(bin, [root.path, "--gate-json", bad.path])
+        XCTAssertEqual(r.code, 0, "a clean gateless run stays exit 0 despite the unwritable verdict path — stderr: \(r.err)")
+        XCTAssertTrue(r.err.contains("could not write --gate-json"), "the failure is disclosed on stderr: \(r.err)")
+    }
+
+    func testGateJsonDashStreamsAPureVerdictToStdout() throws {
+        // `--gate-json -` (the §3.3 pipe form the other three engines accept) was rejected by the
+        // dash-guard; it must stream the verdict as PURE stdout JSON, AS-EFF lines on stderr.
+        let bin = try binaryURL()
+        let root = try makeNetFixture(qual: "Billing", urlLiteral: "https://evil.example.com/x")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let policy = root.appendingPathComponent("policy.txt")
+        try "deny Net\n".write(to: policy, atomically: true, encoding: .utf8)
+        let r = try run(bin, [root.path, "--policy", policy.path, "--gate-json", "-"])
+        XCTAssertEqual(r.code, 1)
+        let obj = try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any]
+        XCTAssertEqual(obj?["ok"] as? Bool, false, "stdout parses as the pure verdict — stdout: \(r.out.prefix(200))")
+        XCTAssertTrue(r.err.contains("AS-EFF-006"), "the AS-EFF line goes to stderr: \(r.err)")
+    }
 }
