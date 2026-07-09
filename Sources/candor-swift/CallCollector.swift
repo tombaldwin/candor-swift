@@ -733,7 +733,7 @@ final class CallCollector: SyntaxVisitor {
                 // `Data/String(contentsOf: url)` reads from a URL that is EITHER a file (Fs) or a
                 // remote endpoint (Net) — exactly one is true, but which depends on the URL's scheme.
                 // Asserting BOTH (the old behaviour) always FABRICATES the wrong one — a file read
-                // reported Net, a network read reported Fs (the §1 cardinal sin; caught fabricating Net
+                // reported Net, a network read reported Fs (a fabrication — the precision failure; caught fabricating Net
                 // on SwiftFormat's config reads, where the URL is a fileURLWithPath from a helper).
                 // Resolve the scheme when it's statically provable; otherwise it's an indeterminate
                 // effect we can't categorise → honest `Unknown`, never a guess.
@@ -799,7 +799,7 @@ final class CallCollector: SyntaxVisitor {
                       let eff = kappaFree(name: dealias(name), argCount: node.arguments.count) {
                 // A LOCALLY-declared type ctor (`Pipe()` where `class Pipe`) or free fn (`NSLog(...)` where
                 // `func NSLog`) ALWAYS shadows the platform free-call table — else a project's own
-                // `Pipe`/`NSDate`/`NSLog`/`CACurrentMediaTime` fabricates Ipc/Clock/Log (the cardinal sin;
+                // `Pipe`/`NSDate`/`NSLog`/`CACurrentMediaTime` fabricates Ipc/Clock/Log (the precision failure;
                 // the same shadow discipline the member-call path applies via `localTypes`). When shadowed
                 // it falls through to the unqualified Call below, which resolves to the local def.
                 // `dealias(name)` resolves a typealias-named ctor (`Proc()`→`Process`→Exec) before κ; a

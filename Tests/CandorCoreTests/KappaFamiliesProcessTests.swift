@@ -52,7 +52,7 @@ final class KappaFamiliesProcessTests: XCTestCase {
     // ── the anti-fabrication twins: a PROJECT type declaring a modeled name shadows the κ row ──────
     // One twin per family (TESTING.md §2.3). Every call below is on a locally-DECLARED type (or its
     // ctor), so the shadow discipline (declaredTypes / localFreeFns) must keep all of them pure —
-    // any effect here is a fabrication on project code, the cardinal sin.
+    // any effect here is a fabrication on project code — the precision failure.
     func testProjectTypesShadowingKappaNamesStayPure() throws {
         let by = try scan("""
         import Foundation

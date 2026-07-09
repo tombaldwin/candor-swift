@@ -106,7 +106,7 @@ public let DB_FREE_PREFIX = "sqlite3_"
 // sqlite3_* C functions that READ RESIDENT handle/statement state — they touch no database, issue no
 // query, advance no row: statement/column/param METADATA, change/rowid counters, error + version state,
 // backup progress. The `sqlite3_` prefix rule would paint them Db (a pure introspection getter reported
-// effectful — the cardinal sin; a SQLite.swift sweep caught Statement.description/columnCount/columnNames,
+// effectful — a fabrication, the precision failure; a SQLite.swift sweep caught Statement.description/columnCount/columnNames,
 // Connection.description/readonly/changes, Backup.pageCount all fabricating Db). They are subtracted FIRST.
 // NOT here (stay Db — real query work / result consumption): open*/exec/prepare*/step/reset/finalize,
 // the bind_* value setters, and column_text/int/double/blob/value/bytes/type (they read the stepped row).
@@ -156,7 +156,7 @@ public func kappaMember(root: String, member: String) -> String? {
     case "Logger", "OSLog": return LOG_MEMBERS.contains(member) ? "Log" : nil
     case "NSPasteboard", "UIPasteboard":
         // PURE capability/metadata queries read no clipboard data — exclude them (the whole-owner rule
-        // fabricated Clipboard on these, the cardinal sin; sweep [33]). Unknown verbs stay Clipboard
+        // fabricated Clipboard on these — the precision failure; sweep [33]). Unknown verbs stay Clipboard
         // (sound over-approx). `.types`/`.changeCount`/`.name` are PROPERTY reads handled elsewhere.
         return PASTEBOARD_PURE_QUERIES.contains(member) ? nil : "Clipboard"
     // UserDefaults: every listed verb reads/writes the plist-backed store → Fs (covered-module sweep,

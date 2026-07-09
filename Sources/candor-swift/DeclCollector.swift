@@ -16,7 +16,7 @@ struct FnInfo {
                               // NESTED types — `A.Backend.store` and `B.Backend.store` — are DISTINCT
                               // symbols instead of collapsing to one `Backend.store` whose effect set is
                               // the UNION of both bodies (which fabricates the effectful sibling's effect
-                              // onto the pure one — the cardinal sin; the Kingfisher MemoryStorage/
+                              // onto the pure one — a fabrication, the precision failure; the Kingfisher MemoryStorage/
                               // DiskStorage sweep). Top-level types have a single-element type stack, so
                               // qual == simpleQual there — non-nested code is byte-identical.
     var simpleQual: String = ""   // the immediate "Type.name" form — receivers resolve to SIMPLE type
