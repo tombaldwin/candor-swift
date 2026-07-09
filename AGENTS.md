@@ -28,8 +28,10 @@ Writes `<dir>/.candor/report.<pkg>.Swift.json` (the spec-0.8 envelope) plus two 
 and `report.<pkg>.Swift.hierarchy.json` (each local type → its declared supertypes/protocols, for
 dispatch-frontier queries). Add `--policy <file>` (or `CANDOR_POLICY`, or a checked-in
 `.candor/config` with a `policy` line — discovered by walking UP from the scan TARGET, never the
-CWD) to enforce a §6.2 policy: exit 1 on violation, 2 LOUDLY on an unreadable policy.
-`--gate-json <file|->` additionally writes the structured §3.3 verdict `{ spec, ok, violations }`.
+CWD) to enforce a §6.2 policy: exit 1 on violation, 2 LOUDLY on an unreadable policy. A `pure` rule
+forbids every *effect* but not the `Unknown` trust marker — `deny Unknown <scope>` is the explicit
+strictness knob. `--gate-json <file|->` additionally writes the structured §3.3 verdict
+`{ spec, ok, violations }`.
 
 **Chain sibling reports** with `CANDOR_DEPS=<report paths>` (or a checked-in config `deps` line —
 whitespace/colon/comma-separated; a relative config value anchors to the config's home dir): an
@@ -54,8 +56,9 @@ two lines: `candor-swift <ver> (spec <SPEC>)` then the upgrade incantation). The
 network; candor doesn't) compare the installed version against the latest GitHub release
 ([github.com/tombaldwin/candor-swift/releases](https://github.com/tombaldwin/candor-swift/releases)).
 If it's behind, **ASK the user before upgrading** — e.g. "candor-swift 0.8.2 is available (you're on
-0.8.1) — upgrade before I scan?" — and run `git pull && swift build -c release` only if they agree.
-Never upgrade silently. If it's current or the user declines, just proceed with the build they have;
+0.8.1) — upgrade before I scan?" — and only if they agree, check out the latest RELEASE TAG and build:
+`git fetch --tags && git checkout <latest vX.Y.Z> && swift build -c release` (a release tag, never a
+bare `git pull` of main — an untagged HEAD is not a released build). Never upgrade silently. If it's current or the user declines, just proceed with the build they have;
 if candor isn't installed at all, install it normally (clone + build, below).
 
 **Report shape:** `{ "candor": {…, "spec": "0.8"}, "package": "<name>", "functions": [...] }` — an
@@ -83,7 +86,7 @@ FUNCTION: `inferred: []` with a non-empty `invisible` means "pure as far as cand
 could not see through these" (a LOWER bound), not "pure". Because the Swift engine is parse-only it
 attributes at FILE granularity — it names every κ-unknown module in the function's import scope where
 the function has an unresolved external reach, not the single resolved package — so `invisible` is an
-honest over-approximation of the blind set, never a silent-pure.
+over-approximation of the blind set (disclosed, never a silent-pure).
 
 ## Swift-specific things to know
 
@@ -91,7 +94,7 @@ honest over-approximation of the blind set, never a silent-pure.
   scheduling function (the family's closure-attribution rule); nested named functions likewise
   attribute to their enclosing unit (a documented over-approximation, the sound direction).
 - **Protocol dispatch is bounded CHA** (≤12 local conformers, the family bound) — `store.save()`
-  on an injected local protocol resolves to the conformers, or reads honest `Unknown`.
+  on an injected local protocol resolves to the conformers, or reads disclosed `Unknown`.
 - **Constructors are edges**: `_ = C()` reaches `C.init` (the fuzzer's first catch — effects wired
   in an initializer were silently pure for one build).
 - The §7.13 soundness harness is `fuzz.py` (9 forms, deterministic seeds); run it after touching

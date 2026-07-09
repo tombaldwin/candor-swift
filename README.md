@@ -2,8 +2,11 @@
 
 **The Swift implementation of [candor-spec](https://github.com/tombaldwin/candor-spec) 0.8** — per-function
 side effects (Net/Fs/Db/Exec/Env/Clock/Ipc/Log/Rand/Clipboard), transitively across the call graph, with
-the §6.2 policy gate. The fourth engine in the candor family (Rust · JVM · TypeScript · Swift), written
+the §6.2 policy gate. One of the candor family's four code engines (JVM · Rust · TypeScript · Swift —
+[candor-java](https://github.com/tombaldwin/candor-java) is the reference engine — plus
+[candor-agents](https://github.com/tombaldwin/candor-agents) for agent fleets), written
 from the spec and validated against the shared conformance oracle: **20/20 on first run**.
+Changes per release: [CHANGELOG.md](CHANGELOG.md).
 
 ```sh
 swift build -c release
@@ -27,19 +30,24 @@ build of the target needed. Spec obligations carried from day one: universal `ha
 (`pkg#qual`, so reports chain as `CANDOR_DEPS` siblings of the other engines), the **κ-coverage ledger**
 (`κ doesn't know N modules this code imports…` — unlisted third-party modules are INVISIBLE, not
 `Unknown`, and the receipt names them per scan), and the four literal surfaces (`hosts`/`cmds`/`paths`/
-`tables`, with the SPEC §2 SQL table extraction token-for-token).
+`tables`, with the SPEC §2 SQL table extraction token-for-token). Net hosts are captured at
+ESTABLISHING forms only (connect/ctor); a string arg at a use-verb (`writeAndFlush`) is payload,
+never a host.
 
 ## The trust contract (§4), Swift edition
 
 - A **function-typed value invoked** (`let f: () -> Void` param, a closure-typed field `d.f()`) reads
   `Unknown` — never silent purity. `unknownWhy` names each origin (`callback:f`, `dispatch:Dyn.f`).
 - **Dispatch through a local protocol** resolves to the visible conformers when narrow (≤12, the family's
-  shared CHA bound) and reads honest `Unknown` otherwise.
+  shared CHA bound) and reads disclosed `Unknown` otherwise.
+- A **`pure` policy rule forbids every effect, not `Unknown`** — the §4 trust marker is AS-EFF-003's
+  concern, and `deny Unknown <scope>` is the explicit strictness knob where a boundary must also
+  exclude uncertainty.
 - **Closures attribute lexically** (a `DispatchQueue.async { … }` body charges the scheduler — the
   family's closure-attribution rule), and local-receiver method calls resolve through param/let/ctor
   type inference.
 
-## Honest v0 bounds (item 7)
+## Known v0 bounds (item 7)
 
 The κ table covers the **platform frontier** (Foundation, Network, Dispatch, os, sqlite3) — third-party
 packages contribute nothing and the ledger names them, unless a chained sibling report covers them:

@@ -618,6 +618,14 @@ STALE=$(grep -oE 'spec[^0-9A-Za-z]{1,4}[0-9]+\.[0-9]+' "$HERE_DIR/AGENTS.md" | g
 grep -qF "candor-spec) $BSPEC" "$HERE_DIR/README.md" \
   && ok "README's candor-spec version matches the binary ($BSPEC)" \
   || bad "README spec drift: expected 'candor-spec) $BSPEC' in README.md"
+# FAMILY-PHRASE gate (docs review 2026-07-09): the family attribution must stay current — candor-java is
+# the REFERENCE engine (the 2026-06-18 repositioning) — and both docs must carry the binary's spec claim.
+# The "fourth engine (Rust · JVM · TypeScript · Swift)" framing sat stale in the README; grep it dead.
+{ grep -q "spec $BSPEC" "$HERE_DIR/AGENTS.md" \
+  && grep -Eq "candor-java.{0,60}reference engine" "$HERE_DIR/README.md" \
+  && ! grep -qi "fourth engine" "$HERE_DIR/README.md"; } \
+  && ok "family phrases: AGENTS speaks spec $BSPEC; README names candor-java the reference engine" \
+  || bad "family-phrase drift: AGENTS must say 'spec $BSPEC'; README must attribute the reference engine to candor-java (and drop 'fourth engine')"
 
 # Write-failure is GRACEFUL, not a crash. A report write that can't happen (unwritable --out path)
 # used to `try!`-TRAP after the whole scan finished (SIGILL, no message). It must now exit 1 with a

@@ -92,7 +92,9 @@ while let a = argIter.next() {
         // upgrade incantation. Both fields reuse the single sources of truth (releaseVersion /
         // specVersion) so this can never drift from the report envelope.
         print("candor-swift \(releaseVersion) (spec \(specVersion))")
-        print("upgrade: git pull && swift build -c release")
+        // Release-tag upgrades only (the family's deliberate-release rule — umbrella AGENTS §2a):
+        // a bare `git pull` of main would build an untagged, unreleased HEAD.
+        print("upgrade: git fetch --tags && git checkout <latest vX.Y.Z> && swift build -c release")
         exit(0)
     case "--agents":
         // The agent contract for THE INSTALLED BUILD, EMBEDDED at compile time (AgentsDoc.swift,
