@@ -602,6 +602,14 @@ tail -n +2 "$W/agents.out" > "$W/agents.body"
 cmp -s "$HERE_DIR/AGENTS.md" "$W/agents.body" \
   && ok "served --agents contract matches AGENTS.md (drift gate)" \
   || bad "embedded contract drifted from AGENTS.md — regenerate: python3 gen-agents-doc.py"
+# SPEC-STRING drift: every `spec <X>` claim in AGENTS.md must match the spec the BINARY declares. The
+# embedded==file gate above can't catch a COHERENT stale pair (an 0.8 binary shipped an AGENTS.md still
+# claiming spec 0.7 — v0.8.3). Case-sensitive: the uppercase `SPEC §…` section refs are not versions.
+BSPEC=$("$BIN" --version 2>/dev/null | sed -nE 's/.*\(spec ([0-9.]+)\).*/\1/p' | head -1)
+STALE=$(grep -oE 'spec[^0-9A-Za-z]{1,4}[0-9]+\.[0-9]+' "$HERE_DIR/AGENTS.md" | grep -v "$BSPEC" || true)
+{ [ -n "$BSPEC" ] && [ -z "$STALE" ]; } \
+  && ok "AGENTS.md spec strings all match the binary's declared spec ($BSPEC)" \
+  || bad "AGENTS.md spec drift (binary declares spec ${BSPEC:-???}): ${STALE:-no spec string found}"
 
 # Write-failure is GRACEFUL, not a crash. A report write that can't happen (unwritable --out path)
 # used to `try!`-TRAP after the whole scan finished (SIGILL, no message). It must now exit 1 with a

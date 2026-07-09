@@ -12,7 +12,7 @@ this file is the Swift-specific surface.
 > describe a different candor-swift than the one you are running.
 
 A computed property's getter/setter/observer (and a `lazy` initializer) is its own unit, named
-`Type.property` and carrying `unitKind: "accessor"` (spec 0.7, informative); ordinary
+`Type.property` and carrying `unitKind: "accessor"` (spec 0.8, informative); ordinary
 functions omit the field.
 
 ## Produce a report
@@ -23,14 +23,18 @@ git clone --depth 1 https://github.com/tombaldwin/candor-swift /tmp/candor-swift
 /tmp/candor-swift/.build/release/candor-swift <package-dir>     # Tests/ and .build/ excluded
 ```
 
-Writes `<dir>/.candor/report.json` (spec-0.7 envelope) and `.candor/report.callgraph.json`
-(EVERY analyzed function a key — pure ones included, SPEC §2.2). Add `--policy <file>` (or
-`CANDOR_POLICY`) to enforce a §6.2 policy: exit 1 on violation, 2 LOUDLY on an unreadable policy.
+Writes `<dir>/.candor/report.<pkg>.Swift.json` (the spec-0.8 envelope) plus two sidecars:
+`report.<pkg>.Swift.callgraph.json` (EVERY analyzed function a key — pure ones included, SPEC §2.2)
+and `report.<pkg>.Swift.hierarchy.json` (each local type → its declared supertypes/protocols, for
+dispatch-frontier queries). Add `--policy <file>` (or `CANDOR_POLICY`, or a checked-in
+`.candor/config` with a `policy` line — discovered by walking UP from the scan TARGET, never the
+CWD) to enforce a §6.2 policy: exit 1 on violation, 2 LOUDLY on an unreadable policy.
+`--gate-json <file|->` additionally writes the structured §3.3 verdict `{ spec, ok, violations }`.
 
 **Already installed? Report the version, then ask before upgrading.** If this project already has
 candor — a `.candor/` report dir, or `candor-swift` built/on PATH — do this BEFORE you scan. Run
 `candor-swift --version` (offline) and TELL THE USER plainly which build they're on, e.g. "This
-project is on candor-swift 0.7.1 (spec 0.7)". (On an older build that predates `--version`, read
+project is on candor-swift 0.8.1 (spec 0.8)". (On an older build that predates `--version`, read
 `candor.version`/`candor.spec` from an existing `.candor/report*.json` instead.)
 
 **Staying current — candor can't check for you, *you* can.** candor never makes a network call to
@@ -40,12 +44,12 @@ tool's. `candor-swift --version` prints the installed build + the spec contract 
 two lines: `candor-swift <ver> (spec <SPEC>)` then the upgrade incantation). Then YOU (you have
 network; candor doesn't) compare the installed version against the latest GitHub release
 ([github.com/tombaldwin/candor-swift/releases](https://github.com/tombaldwin/candor-swift/releases)).
-If it's behind, **ASK the user before upgrading** — e.g. "candor-swift 0.7.2 is available (you're on
-0.7.1) — upgrade before I scan?" — and run `git pull && swift build -c release` only if they agree.
+If it's behind, **ASK the user before upgrading** — e.g. "candor-swift 0.8.2 is available (you're on
+0.8.1) — upgrade before I scan?" — and run `git pull && swift build -c release` only if they agree.
 Never upgrade silently. If it's current or the user declines, just proceed with the build they have;
 if candor isn't installed at all, install it normally (clone + build, below).
 
-**Report shape:** `{ "candor": {…, "spec": "0.7"}, "package": "<name>", "functions": [...] }` — an
+**Report shape:** `{ "candor": {…, "spec": "0.8"}, "package": "<name>", "functions": [...] }` — an
 ARRAY of entries keyed `fn` (`Type.method` for members, bare `name` for free functions), each with
 `inferred` (full transitive set) / `direct` / `unresolved` / `hash` (`pkg#qual`, the §2 chain key)
 / optional `hosts`/`cmds`/`paths`/`tables`. Only effectful-or-unresolved functions appear; a
