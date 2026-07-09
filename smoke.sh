@@ -1128,6 +1128,35 @@ PY
 )
 [ "$NU" = "PASS" ] && ok "Net surface: establishing ctor captures host:port; a use-verb payload literal is NOT a host" || bad "Net use-verb surface: $NU"
 
+# ── parsepolicy: the §6.2 grammar dump (conformance PART 4's diffable witness — swift was the loud
+# skip until it landed). Hermetic mini-battery of the cases the engines used to disagree on: inline
+# comment, pure, duplicate-token dedup, the glued arrow; normalized exactly as run.sh PART 4 does.
+cat > "$W/pp.pol" <<'POL'
+deny Net Db domain
+deny Net Net                # duplicate effects dedup to a set
+pure parse
+allow Net in billing api.stripe.com api.stripe.com hooks.stripe.com
+forbid app::web -> app::db
+forbid glued->arrow
+deny Exec # inline comment stripped, scope stays empty
+POL
+"$BIN" parsepolicy "$W/pp.pol" > "$W/pp.json" 2>/dev/null || bad "parsepolicy errored on the mini-battery"
+PP=$(python3 - "$W/pp.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+deny   = sorted((tuple(sorted(r["effects"])), r["scope"]) for r in d["deny"])
+allow  = sorted((r["effect"], r["scope"], tuple(sorted(r["values"]))) for r in d["allow"])
+forbid = sorted((r["from"], r["to"]) for r in d["forbid"])
+want = (sorted([(("Db", "Net"), "domain"), (("Net",), ""), ((), "parse"), (("Exec",), "")]),
+        [("Net", "billing", ("api.stripe.com", "hooks.stripe.com"))],
+        [("app::web", "app::db")])
+print("PASS" if (deny, allow, forbid) == want else f"FAIL {deny} {allow} {forbid}")
+PY
+)
+[ "$PP" = "PASS" ] && ok "parsepolicy: canonical §6.2 dump (dedup, inline comment, pure, glued-arrow drop)" || bad "parsepolicy: $PP"
+"$BIN" parsepolicy >/dev/null 2>&1; [ $? -eq 2 ] && ok "parsepolicy without a file exits 2 (usage)" || bad "parsepolicy no-arg exit"
+"$BIN" parsepolicy "$W/no-such.pol" >/dev/null 2>&1; [ $? -eq 2 ] && ok "parsepolicy on an unreadable file exits 2" || bad "parsepolicy unreadable exit"
+
 # ── AS-EFF-005 baseline guard (SPEC §7 item 5; candor-java's checkBaseline semantics, Baseline.swift):
 # gain→1, clean→0, absent→0+note, cross-build→2 WITHOUT evaluating, unparseable→2.
 mkdir -p "$W/bl/afterd"

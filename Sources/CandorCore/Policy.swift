@@ -104,7 +104,10 @@ public func parsePolicy(_ text: String) -> (deny: [DenyRule], allow: [AllowRule]
                 if EFFECTS.contains(tok) || tok == "Unknown" { effects.append(tok) } else { scope = tok; break }
             }
             if effects.isEmpty { warnRule("deny names no known effect", line); continue }
-            deny.append(DenyRule(effects: effects.sorted(), scope: scope, raw: line))
+            // Duplicate effect tokens dedup to a SET (`deny Net Net` ≡ `deny Net`) — the reference
+            // parser's EffectSet semantics; without it the parsepolicy dump (conformance PART 4)
+            // diverges on the battery's duplicate-token case. Gate verdicts were already unaffected.
+            deny.append(DenyRule(effects: Array(Set(effects)).sorted(), scope: scope, raw: line))
         case "pure":
             deny.append(DenyRule(effects: [], scope: t.count > 1 ? t[1] : "", raw: line))
         case "allow":
@@ -116,7 +119,8 @@ public func parsePolicy(_ text: String) -> (deny: [DenyRule], allow: [AllowRule]
             if t[2] == "in" { scope = t.count > 3 ? t[3] : ""; vi = 4 }
             let values = Array(t.dropFirst(vi))
             if values.isEmpty { warnRule("allow names no values", line); continue }
-            allow.append(AllowRule(effect: t[1], scope: scope, values: values.sorted(), raw: line))
+            // Duplicate values dedup (the reference parser's TreeSet) — same PART 4 parity as deny.
+            allow.append(AllowRule(effect: t[1], scope: scope, values: Array(Set(values)).sorted(), raw: line))
         case "forbid":
             let a = t.count > 1 ? t[1] : "", arrow = t.count > 2 ? t[2] : "", b = t.count > 3 ? t[3] : ""
             if a.isEmpty || arrow != "->" || b.isEmpty { warnRule("want `forbid <scope> -> <scope>`", line); continue }

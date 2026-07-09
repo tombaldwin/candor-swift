@@ -35,6 +35,48 @@ let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", wit
 // field (see the envelope below), reused so `--version` and the report can never disagree.
 let specVersion = "0.8"
 
+// `parsepolicy <file>` — dump the parsed §6.2 policy as canonical JSON, the SAME shape candor-java's
+// Query.policyJson / candor-query / candor-ts emit: {"deny":[{effects,scope}], "allow":[{effect,scope,
+// values}], "forbid":[{from,to}]}. Not a user workflow; it exists so the cross-impl conformance suite
+// (PART 4) can diff this engine's grammar parse against the family and prove SPEC §6.2 means the same
+// thing in every engine — candor-swift was PART 4's loud skip until this landed. Handled before the
+// flag loop (a subcommand, like the reference engine's args[0] dispatch — never a scan target).
+if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "parsepolicy" {
+    guard CommandLine.arguments.count >= 3 else {
+        FileHandle.standardError.write("usage: candor-swift parsepolicy <policy-file>\n".data(using: .utf8)!)
+        exit(2)
+    }
+    let polPath = CommandLine.arguments[2]
+    guard let polText = try? String(contentsOfFile: polPath, encoding: .utf8) else {
+        FileHandle.standardError.write("candor-swift: cannot read policy \(polPath)\n".data(using: .utf8)!)
+        exit(2)
+    }
+    let pol = parsePolicy(polText)
+    // Deterministic entry order: each list sorted by its serialized JSON (the reference engine's
+    // byJson comparator) — the conformance differential normalizes anyway; this keeps raw dumps diffable.
+    func sortedByJson(_ xs: [[String: Any]]) -> [[String: Any]] {
+        func key(_ d: [String: Any]) -> String {
+            guard let data = try? JSONSerialization.data(withJSONObject: d, options: [.sortedKeys]) else { return "" }
+            return String(data: data, encoding: .utf8) ?? ""
+        }
+        return xs.sorted { key($0) < key($1) }
+    }
+    let polDict: [String: Any] = [
+        "deny": sortedByJson(pol.deny.map { ["effects": $0.effects, "scope": $0.scope] }),
+        "allow": sortedByJson(pol.allow.map { ["effect": $0.effect, "scope": $0.scope, "values": $0.values] }),
+        "forbid": sortedByJson(pol.forbid.map { ["from": $0.from, "to": $0.to] }),
+    ]
+    // DEFENSIVE, deliberately uncovered (TESTING.md §6): the dict holds only strings/arrays — the
+    // same cannot-fire arm as writeJson's.
+    guard let polData = try? JSONSerialization.data(withJSONObject: polDict, options: [.prettyPrinted, .sortedKeys]),
+          let polJson = String(data: polData, encoding: .utf8) else {
+        FileHandle.standardError.write("candor-swift: could not serialize the policy dump\n".data(using: .utf8)!)
+        exit(2)
+    }
+    print(polJson)
+    exit(0)
+}
+
 var target = "."
 var outPrefix: String? = nil
 var wantJson = false
@@ -74,6 +116,7 @@ while let a = argIter.next() {
         candor-swift \(releaseVersion) — Swift effect scanner (candor-spec \(specVersion))
 
         USAGE: candor-swift [<dir|file.swift>] [--out <prefix>] [--json] [--policy <file>] [--gate-json <file>] [--agents] [--version]
+               candor-swift parsepolicy <policy-file>     # dump the parsed §6.2 policy as canonical JSON (the conformance grammar-diff witness)
 
           <target>          a dir or a single .swift file to scan (default: .)
           --out <prefix>    write the report to <prefix>.<package>.Swift.json + a .callgraph.json sidecar

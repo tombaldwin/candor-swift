@@ -69,6 +69,19 @@ final class PolicyTests: XCTestCase {
         XCTAssertEqual(p.deny[0].effects, ["Unknown"])
     }
 
+    func testDenyDuplicateEffectTokensDedupToASet() {
+        // `deny Net Net` ≡ `deny Net` — the reference parser's EffectSet semantics; the battery's
+        // duplicate-token case would otherwise split the PART 4 grammar differential.
+        let p = parsePolicy("deny Net Net")
+        XCTAssertEqual(p.deny[0].effects, ["Net"])
+    }
+
+    func testAllowDuplicateValuesDedup() {
+        // `allow Net dup dup` keeps one value — the reference parser's TreeSet semantics.
+        let p = parsePolicy("allow Net dup.example.com dup.example.com")
+        XCTAssertEqual(p.allow[0].values, ["dup.example.com"])
+    }
+
     func testAllowRequiresValues() {
         XCTAssertTrue(parsePolicy("allow Net").allow.isEmpty)
         XCTAssertTrue(parsePolicy("allow Net in scope").allow.isEmpty)   // `in <scope>` but no values
