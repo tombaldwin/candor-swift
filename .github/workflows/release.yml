@@ -1,0 +1,43 @@
+name: release
+# Tag-driven release with the engineVersion guard: pushing vX.Y.Z asserts main.swift's engineVersion
+# constant is "candor-swift-X.Y.Z" BEFORE anything ships — the recurring footgun was a tag cut against
+# a binary still stamping the previous version (the report's build id would then lie about the release).
+# Gates (swift test + smoke) rerun here even though CI ran them on the commit: the tag may be cut later,
+# against a spec floor that has moved.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    # Same budget as CI: a healthy run is ~3 min; past 20 is a hung runner (observed live, twice).
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Tag must equal the engineVersion constant
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          if ! grep -q "^let engineVersion = \"candor-swift-${VER}\"$" Sources/candor-swift/main.swift; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match main.swift's engineVersion:"
+            grep -n 'let engineVersion' Sources/candor-swift/main.swift
+            exit 1
+          fi
+      - name: Build
+        run: swift build
+      - name: Unit tests
+        # `script` gives swift test a TTY → line-buffered output, so a hang names the last test started.
+        run: script -q /dev/null swift test
+      - name: Smoke (oracle needs the spec as a sibling — same pin as ci.yml)
+        run: |
+          git clone https://github.com/tombaldwin/candor-spec ../candor-spec
+          git -C ../candor-spec checkout --quiet eccfac71a9dc00bfa7e29d648c7d761d77d91b9a
+          bash smoke.sh
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
