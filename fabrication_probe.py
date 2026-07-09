@@ -66,6 +66,16 @@ CASES = [
     ("nwconnection", "_ c: NWConnection",
      ["c.cancel()", "c.forceCancel()"],
      ['c.start(queue: .main)'], "Net"),
+    # UserDefaults — the plist-backed local store (covered-module sweep 2026-07-09). volatileDomainNames /
+    # volatileDomain(forName:) read IN-MEMORY domains (no store access); the forKey accessors touch disk.
+    ("userdefaults", "_ d: UserDefaults",
+     ["d.volatileDomainNames", 'd.volatileDomain(forName: "n")'],
+     ['d.set(true, forKey: "k")', 'd.string(forKey: "k")'], "Fs"),
+    # Bundle — a resource LOOKUP stats the bundle on disk; identifier/info metadata is served from the
+    # already-loaded in-memory Info.plist (pure).
+    ("bundle", "_ b: Bundle",
+     ["b.bundleIdentifier", 'b.object(forInfoDictionaryKey: "k")'],
+     ['b.url(forResource: "cfg", withExtension: "json")'], "Fs"),
 ]
 
 

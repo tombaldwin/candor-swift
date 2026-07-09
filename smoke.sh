@@ -959,5 +959,54 @@ for f in fSave fQuery fFind; do case "$(flchk $f)" in *Db*) ok "Fluent inherited
 [ "$(flchk fOtherFoo)" = "pure" ] && ok "a real project method on an external-conforming type stays pure"              || bad "external-proto project method: $(flchk fOtherFoo)"
 [ "$(flchk fEnc)" = "pure" ]    && ok "a synthesized std-protocol method (Codable.encode) stays pure (no false Unknown)" || bad "Codable encode: $(flchk fEnc)"
 
+# COVERED-MODULE κ sweep (2026-07-09): UserDefaults / Keychain SecItem* / Bundle resource lookups live in
+# PLATFORM_MODULES (Foundation/Security — no ledger naming, no Unknown), so unmodeled they read SILENT-PURE:
+# the covered-module cardinal-sin shape (candor-java's Panache lesson). All → Fs (family decision:
+# UserDefaults = file-backed store; SecItem* = system secure store, NOT Db — Db is reserved for
+# query-capable datastores; Bundle url/path(forResource:) = on-disk stat). Pure surface stays pure.
+mkdir -p "$W/ud" && cat > "$W/ud/m.swift" <<'SW'
+import Foundation
+import Security
+func udWrite() { UserDefaults.standard.set(true, forKey: "seen") }                 // Fs (singleton chain)
+func udRead(_ d: UserDefaults) -> String? { d.string(forKey: "name") }            // Fs (param receiver)
+func udLet() { let d = UserDefaults.standard; d.removeObject(forKey: "k") }       // Fs (let-bound singleton)
+func udVolatile(_ d: UserDefaults) -> [String] { d.volatileDomainNames }          // PURE (in-memory domain)
+func kcAdd(_ q: CFDictionary) { _ = SecItemAdd(q, nil) }                          // Fs (Keychain CRUD)
+func kcFind(_ q: CFDictionary) { _ = SecItemCopyMatching(q, nil) }                // Fs
+func bunRes() -> URL? { Bundle.main.url(forResource: "cfg", withExtension: "json") } // Fs (disk lookup)
+func bunPath(_ b: Bundle) -> String? { b.path(forResource: "cfg", ofType: "json") }  // Fs
+func bunMeta(_ b: Bundle) -> String? { b.bundleIdentifier }                          // PURE (in-memory metadata)
+SW
+"$BIN" "$W/ud" --out "$W/ud/r" >/dev/null 2>&1
+UDRPT=$(ls "$W"/ud/r.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
+UD=$(python3 -c "
+import json
+by={e['fn']:set(e.get('inferred',[])) for e in json.load(open('$UDRPT'))['functions']}
+fs=['udWrite','udRead','udLet','kcAdd','kcFind','bunRes','bunPath']
+pure=['udVolatile','bunMeta']
+ok = all(by.get(f)=={'Fs'} for f in fs) and all(f not in by for f in pure)
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$UD" = "PASS" ] && ok "covered-module sweep: UserDefaults/SecItem*/Bundle-resource -> Fs; volatile-domain + bundle metadata stay pure" || bad "UserDefaults/Keychain/Bundle sweep: $UD"
+
+# anti-fabrication TWINS (scanned separately — a local decl owns the name for the whole scan): a project's
+# OWN UserDefaults/Bundle type and a local func SecItemAdd must stay pure (the shadow discipline —
+# declaredTypes for member calls, localFreeFns for free calls; the GRDB `bind` lesson applied to this batch).
+mkdir -p "$W/uds" && cat > "$W/uds/m.swift" <<'SW'
+struct UserDefaults { static let standard = UserDefaults(); func set(_ v: Bool, forKey k: String) {} }
+struct Bundle { static let main = Bundle(); func url(forResource r: String, withExtension e: String) -> Int? { nil } }
+func SecItemAdd(_ a: Int, _ b: Int) -> Int { 0 }
+func twinUd() { UserDefaults.standard.set(true, forKey: "seen") }        // PURE — project type shadows κ
+func twinBun() { _ = Bundle.main.url(forResource: "cfg", withExtension: "json") }  // PURE
+func twinKc() { _ = SecItemAdd(1, 2) }                                   // PURE — local free fn shadows κ
+SW
+"$BIN" "$W/uds" --out "$W/uds/r" >/dev/null 2>&1
+UDSRPT=$(ls "$W"/uds/r.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
+UDS=$(python3 -c "
+import json
+by={e['fn']:set(e.get('inferred',[])) for e in json.load(open('$UDSRPT'))['functions']}
+ok = all(f not in by for f in ['twinUd','twinBun','twinKc'])
+print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
+[ "$UDS" = "PASS" ] && ok "covered-module sweep twins: local UserDefaults/Bundle/SecItemAdd shadow κ (no fabrication)" || bad "UserDefaults/Keychain/Bundle twins: $UDS"
+
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

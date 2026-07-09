@@ -48,6 +48,23 @@ final class ClassifierTests: XCTestCase {
         XCTAssertEqual(kappaMember(root: "NWConnection", member: "start"), "Net")
         XCTAssertNil(kappaMember(root: "NWConnection", member: "cancel"))
         XCTAssertNil(kappaMember(root: "NWConnection", member: "batch"))
+        // covered-module sweep (2026-07-09): UserDefaults is the plist-backed store — every access verb
+        // is Fs; the in-memory volatile-domain surface stays pure (verb-precision, never whole-owner).
+        XCTAssertEqual(kappaMember(root: "UserDefaults", member: "set"), "Fs")
+        XCTAssertEqual(kappaMember(root: "UserDefaults", member: "string"), "Fs")
+        XCTAssertEqual(kappaMember(root: "UserDefaults", member: "object"), "Fs")
+        XCTAssertEqual(kappaMember(root: "UserDefaults", member: "removeObject"), "Fs")
+        XCTAssertEqual(kappaMember(root: "UserDefaults", member: "synchronize"), "Fs")
+        XCTAssertEqual(kappaMember(root: "UserDefaults", member: "register"), "Fs")
+        XCTAssertNil(kappaMember(root: "UserDefaults", member: "volatileDomain"))       // in-memory
+        XCTAssertNil(kappaMember(root: "UserDefaults", member: "volatileDomainNames"))  // in-memory
+        // Bundle resource lookups stat the bundle on disk → Fs; metadata reads are in-memory (pure).
+        XCTAssertEqual(kappaMember(root: "Bundle", member: "url"), "Fs")
+        XCTAssertEqual(kappaMember(root: "Bundle", member: "path"), "Fs")
+        XCTAssertEqual(kappaMember(root: "Bundle", member: "urls"), "Fs")
+        XCTAssertEqual(kappaMember(root: "Bundle", member: "paths"), "Fs")
+        XCTAssertNil(kappaMember(root: "Bundle", member: "bundleIdentifier"))
+        XCTAssertNil(kappaMember(root: "Bundle", member: "object"))  // object(forInfoDictionaryKey:) — in-memory
     }
 
     func testKappaFree() {
@@ -69,6 +86,14 @@ final class ClassifierTests: XCTestCase {
         // property-read clock surface: ContinuousClock/SuspendingClock `.now`
         XCTAssertEqual(kappaPropertyRead(root: "ContinuousClock", path: ["now"]), "Clock")
         XCTAssertEqual(kappaPropertyRead(root: "SuspendingClock", path: ["now"]), "Clock")
+        // covered-module sweep (2026-07-09): the Keychain CRUD free fns (import Security — a PLATFORM
+        // module, so unmodeled they read silent-pure) → Fs (system secure store; NOT Db by family decision).
+        XCTAssertEqual(kappaFree(name: "SecItemAdd", argCount: 2), "Fs")
+        XCTAssertEqual(kappaFree(name: "SecItemCopyMatching", argCount: 2), "Fs")
+        XCTAssertEqual(kappaFree(name: "SecItemUpdate", argCount: 2), "Fs")
+        XCTAssertEqual(kappaFree(name: "SecItemDelete", argCount: 1), "Fs")
+        // adjacent Security surface deliberately unmodeled: key algebra is in-memory (no store access).
+        XCTAssertNil(kappaFree(name: "SecKeyCreateRandomKey", argCount: 2))
     }
 
     // ── establishing-call predicates (the AS-EFF-008 masking guard, generalized to all 4 effects) ──

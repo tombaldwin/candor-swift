@@ -66,6 +66,28 @@ public let FS_TWO_PATH_MEMBERS: [String: [Set<String>]] = [
 ]
 public let NET_MEMBERS: Set<String> = ["dataTask", "data", "upload", "download", "bytes", "webSocketTask",
     "uploadTask", "downloadTask", "streamTask"]
+// κ batch — the COVERED-MODULE silent-pure sweep (2026-07-09). Foundation/Security are PLATFORM_MODULES:
+// they get no ledger naming and no Unknown, so an unmodeled effectful member there reads SILENT-PURE —
+// the exact covered-module cardinal-sin shape (candor-java's Panache lesson, Swift edition). Modeled → Fs:
+//   • UserDefaults — a FILE-BACKED local store (a plist under Library/Preferences); every read/write verb
+//     touches (or schedules a touch of) that file. Fs, not Db — the family reserves Db for query-capable
+//     datastores (FAMILY DECISION, 2026-07-09).
+//   • SecItem* Keychain free functions (kappaFree) — the system SECURE STORE (a SQLite-backed system
+//     service, but not query-capable from the API) → Fs, same decision.
+//   • Bundle RESOURCE LOOKUPS (url/path(forResource:) & plurals) — a live on-disk stat/search → Fs.
+// DELIBERATE NON-MODELS (checked, not forgotten): NotificationCenter (in-process pub/sub — no effect in
+// the vocabulary); CLLocationManager (location has no vocabulary match); Bundle METADATA property reads
+// (bundleIdentifier/infoDictionary/bundlePath — served from the already-loaded in-memory Info.plist, not
+// a disk verb); UserDefaults(suiteName:) ctor (the ACCESS verbs below carry the effect — modeling the
+// handle ctor would double-report and `Bundle(for:)`-style in-memory ctors would risk fabrication).
+// Verb-precise (the family discipline); a project's OWN `UserDefaults`/`Bundle` type shadows via
+// declaredTypes, a local `func SecItemAdd` via localFreeFns — never a fabrication on project code.
+public let USER_DEFAULTS_MEMBERS: Set<String> = ["set", "object", "string", "stringArray", "array",
+    "dictionary", "data", "bool", "integer", "float", "double", "url", "value", "removeObject",
+    "synchronize", "register", "dictionaryRepresentation",
+    "persistentDomain", "setPersistentDomain", "removePersistentDomain"]
+public let BUNDLE_RESOURCE_MEMBERS: Set<String> = ["url", "urls", "path", "paths"]
+// (the Keychain SecItem* free functions live as explicit kappaFree cases — one source of truth)
 // JohnSundell's `Files` package (a third-party Fs wrapper the κ ledger discloses as `invisible` on
 // every consuming app — Publish reaches 81 of them). The `File`/`Folder`/`Storage` types' OWN API does
 // the syscalls: read/write/append/delete/move/copy/rename and the create* factories. The Files-specific
@@ -137,6 +159,13 @@ public func kappaMember(root: String, member: String) -> String? {
         // fabricated Clipboard on these, the cardinal sin; sweep [33]). Unknown verbs stay Clipboard
         // (sound over-approx). `.types`/`.changeCount`/`.name` are PROPERTY reads handled elsewhere.
         return PASTEBOARD_PURE_QUERIES.contains(member) ? nil : "Clipboard"
+    // UserDefaults: every listed verb reads/writes the plist-backed store → Fs (covered-module sweep,
+    // 2026-07-09). `volatileDomain(forName:)`/`volatileDomainNames` are IN-MEMORY domains — not listed,
+    // stay pure. `let d = UserDefaults.standard` carries the type (SINGLETON_ACCESSORS has "standard").
+    case "UserDefaults": return USER_DEFAULTS_MEMBERS.contains(member) ? "Fs" : nil
+    // Bundle resource lookups (`Bundle.main.url(forResource:withExtension:)`) stat/search the bundle on
+    // disk → Fs. Metadata property reads (bundleIdentifier/infoDictionary) are in-memory — stay pure.
+    case "Bundle": return BUNDLE_RESOURCE_MEMBERS.contains(member) ? "Fs" : nil
     case "Date": return member == "now" ? "Clock" : nil
     case "ContinuousClock", "SuspendingClock", "DispatchTime": return member == "now" ? "Clock" : nil
     case "NWConnection", "NWListener":
@@ -250,6 +279,11 @@ public func kappaFree(name: String, argCount: Int) -> String? {
     case "SystemRandomNumberGenerator": return "Rand"
     case "arc4random", "arc4random_uniform", "getentropy": return "Rand"
     case "getenv", "setenv", "unsetenv": return "Env"
+    // The Keychain C surface (`import Security` — a PLATFORM module, so unmodeled calls read silent-pure,
+    // the covered-module cardinal-sin shape). The four CRUD entry points → Fs (system secure store; NOT
+    // Db — the family reserves Db for query-capable datastores). Distinctive PascalCase C names; a local
+    // `func SecItemAdd` still shadows via the call site's localFreeFns guard (never fabricate).
+    case "SecItemAdd", "SecItemCopyMatching", "SecItemUpdate", "SecItemDelete": return "Fs"
     // DNS resolution is Net (rust/java/ts all classify it; swift floored it silently — sweep [20]). These
     // are POSIX/Darwin/Glibc free calls; the call site already shadow-guards a local fn of the same name.
     case "getaddrinfo", "getnameinfo", "gethostbyname", "gethostbyname2", "gethostbyaddr",
