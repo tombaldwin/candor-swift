@@ -52,7 +52,12 @@ func evaluateGate(_ pol: (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidR
             let inf = inferred[qual] ?? []
             if inf.isEmpty { continue }
             for r in pol.deny where scopeMatches(qual, r.scope) {
-                let hits = r.effects.isEmpty ? inf.sorted() : inf.sorted().filter { r.effects.contains($0) }
+                // `pure` (empty forbidden set) forbids every EFFECT — not `Unknown`, the §4 trust
+                // marker (AS-EFF-003's concern; `deny Unknown <scope>` is the explicit knob). The
+                // reference engine, the rust engines and candor-ts exclude it identically; this
+                // engine wrongly counted an Unknown-only fn as a `pure` violation until 2026-07-09.
+                let hits = r.effects.isEmpty ? inf.sorted().filter { $0 != "Unknown" }
+                                             : inf.sorted().filter { r.effects.contains($0) }
                 if !hits.isEmpty {
                     gateViolations.append((rule: "AS-EFF-006", fn: qual, effects: hits,
                         detail: "`\(qual)` performs { \(hits.joined(separator: ", ")) }, forbidden by policy: `\(r.raw)`"))

@@ -1083,6 +1083,16 @@ echo '{not json' > "$W/ch/garbage.json"
 CANDOR_DEPS="$W/ch/garbage.json" "$BIN" "$W/ch/app" --out "$W/ch/badrep" >/dev/null 2>&1
 [ $? -eq 2 ] && ok "chaining [d] an unparseable dep report fails closed (exit 2)" || bad "chaining garbage-report exit: $?"
 
+# ── `pure` vs Unknown (family ruling, 2026-07-09): pure forbids every EFFECT, not the §4 Unknown
+# marker (AS-EFF-003's concern; `deny Unknown <scope>` is the explicit knob). This engine wrongly
+# counted an Unknown-only fn as a pure violation — a cross-engine verdict split on the same policy.
+mkdir -p "$W/pu"
+printf 'import Foundation\nfunc entry(_ f: () -> Void) { f() }\n' > "$W/pu/a.swift"
+printf 'pure\n' > "$W/pu/pure.policy"; printf 'deny Unknown\n' > "$W/pu/unknown.policy"
+"$BIN" "$W/pu" --out "$W/pu/o1" --policy "$W/pu/pure.policy" >/dev/null 2>&1
+[ $? -eq 0 ] && ok "pure passes an Unknown-only fn (Unknown is not an effect)" || bad "pure fired on an Unknown-only fn"
+"$BIN" "$W/pu" --out "$W/pu/o2" --policy "$W/pu/unknown.policy" >/dev/null 2>&1
+[ $? -eq 1 ] && ok "deny Unknown remains the strictness knob (fires, exit 1)" || bad "deny Unknown did not fire"
 
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
