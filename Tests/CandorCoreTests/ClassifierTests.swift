@@ -96,6 +96,75 @@ final class ClassifierTests: XCTestCase {
         XCTAssertNil(kappaFree(name: "SecKeyCreateRandomKey", argCount: 2))
     }
 
+    // ── κ member VERB TABLES, table-driven (TESTING.md §2.3: where the rule is a member/verb table,
+    // walk the WHOLE list so a typo un-classifies loudly — the CoreData/NIO rows were validated once
+    // by a corpus sweep and then pinned by nothing). Each family: every modeled verb on every owner
+    // root → the effect, plus a builder/algebra member that must stay out (the builder discipline).
+    func testKappaMemberTableCoreData() {
+        // NSManagedObjectContext: the store-touching verbs → Db.
+        for verb in ["save", "fetch", "execute", "count", "performFetch", "executeFetchRequest"] {
+            XCTAssertEqual(kappaMember(root: "NSManagedObjectContext", member: verb), "Db",
+                           "NSManagedObjectContext.\(verb) must classify Db")
+        }
+        // builder/algebra surface stays pure (NSFetchRequest construction, object reads).
+        XCTAssertNil(kappaMember(root: "NSManagedObjectContext", member: "object"))
+        XCTAssertNil(kappaMember(root: "NSManagedObjectContext", member: "registeredObjects"))
+        // container/coordinator store verbs → Db; the pure viewContext accessor stays out.
+        for root in ["NSPersistentContainer", "NSPersistentStoreCoordinator"] {
+            for verb in ["loadPersistentStores", "execute", "addPersistentStore", "performBackgroundTask"] {
+                XCTAssertEqual(kappaMember(root: root, member: verb), "Db", "\(root).\(verb) must classify Db")
+            }
+            XCTAssertNil(kappaMember(root: root, member: "viewContext"), "\(root).viewContext is a pure accessor")
+        }
+    }
+
+    func testKappaMemberTableNIO() {
+        // bootstrap wiring verbs → Net across all four bootstrap owners.
+        for root in ["ClientBootstrap", "ServerBootstrap", "DatagramBootstrap", "NIOTSConnectionBootstrap"] {
+            for verb in ["connect", "bind", "withConnectedSocket"] {
+                XCTAssertEqual(kappaMember(root: root, member: verb), "Net", "\(root).\(verb) must classify Net")
+            }
+            XCTAssertNil(kappaMember(root: root, member: "channelOption"), "\(root) option-builder stays pure")
+        }
+        // channel socket verbs → Net; the pure EventLoop/future algebra stays out.
+        for root in ["Channel", "ChannelHandlerContext"] {
+            for verb in ["write", "writeAndFlush", "read", "connect", "bind", "close", "flush"] {
+                XCTAssertEqual(kappaMember(root: root, member: verb), "Net", "\(root).\(verb) must classify Net")
+            }
+            XCTAssertNil(kappaMember(root: root, member: "eventLoop"), "\(root).eventLoop is pure algebra")
+        }
+    }
+
+    func testKappaMemberTableAsyncHTTPClient() {
+        for root in ["HTTPClient", "AsyncHTTPClient"] {
+            for verb in ["execute", "get", "post", "put", "patch", "delete", "shutdown"] {
+                XCTAssertEqual(kappaMember(root: root, member: verb), "Net", "\(root).\(verb) must classify Net")
+            }
+            XCTAssertNil(kappaMember(root: root, member: "eventLoopGroup"), "\(root).eventLoopGroup stays pure")
+        }
+    }
+
+    // ── isNetEstablishingFree / the establishing rows the masking guard keys on (never executed
+    // in-repo before: the NWConnection/NWListener ctor is the free form whose host is a ctor arg) ──
+    func testNetEstablishingFreeAndMemberRows() {
+        XCTAssertTrue(isNetEstablishingFree(name: "NWConnection"))
+        XCTAssertTrue(isNetEstablishingFree(name: "NWListener"))
+        XCTAssertFalse(isNetEstablishingFree(name: "URLSession"), "not a ctor-carries-host form")
+        XCTAssertFalse(isNetEstablishingFree(name: "MyLocalType"))
+        // member rows: bootstrap connect/bind + HTTPClient verbs ESTABLISH; Channel use-verbs and
+        // HTTPClient.shutdown (teardown) do not — a missing literal there is the legitimate
+        // split-construct/use shape, never the masking signal.
+        for root in ["ClientBootstrap", "ServerBootstrap", "DatagramBootstrap", "NIOTSConnectionBootstrap"] {
+            XCTAssertTrue(isNetEstablishingMember(root: root, member: "connect"), "\(root).connect establishes")
+            XCTAssertTrue(isNetEstablishingMember(root: root, member: "bind"), "\(root).bind establishes")
+        }
+        for verb in ["execute", "get", "post", "put", "patch", "delete"] {
+            XCTAssertTrue(isNetEstablishingMember(root: "HTTPClient", member: verb), "HTTPClient.\(verb) establishes")
+        }
+        XCTAssertFalse(isNetEstablishingMember(root: "HTTPClient", member: "shutdown"), "teardown never establishes")
+        XCTAssertFalse(isNetEstablishingMember(root: "Channel", member: "writeAndFlush"), "USE-verb, not establishing")
+    }
+
     // ── establishing-call predicates (the AS-EFF-008 masking guard, generalized to all 4 effects) ──
     func testEstablishingPredicates() {
         // Net (member): URLSession verbs + bootstrap connect/bind establish; Channel use-verbs do not.
