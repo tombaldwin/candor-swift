@@ -12,19 +12,13 @@ enum Effect: String, CaseIterable {
     case clipboard = "Clipboard", clock = "Clock", db = "Db", env = "Env", exec = "Exec"
     case fs = "Fs", ipc = "Ipc", log = "Log", net = "Net", rand = "Rand", unknown = "Unknown"
     var specName: String { rawValue }
-    var isTrustMarker: Bool { self == .unknown }                                 // SPEC §4: Unknown is not an effect
-    var isBoundary: Bool { switch self { case .db, .net, .exec, .fs, .ipc, .clipboard: return true; default: return false } }
-    var isAmbient: Bool { switch self { case .log, .clock, .rand, .env: return true; default: return false } }
     static func from(_ name: String) -> Effect? { Effect(rawValue: name) }
 }
 // A set of effects (SEMANTICS §1). Wire form = spec-name-sorted names — which, for this vocabulary, is the
 // same lexicographic order a `Set<String>.sorted()` produced, so adoption is byte-identical.
 struct EffectSet {
     private(set) var effects: Set<Effect>
-    init(_ effects: Set<Effect> = []) { self.effects = effects }
     init(names: some Sequence<String>) { self.effects = Set(names.compactMap(Effect.from)) }
-    var isEmpty: Bool { effects.isEmpty }
-    func contains(_ e: Effect) -> Bool { effects.contains(e) }
     func toNames() -> [String] { effects.map { $0.specName }.sorted() }
 }
 // Which engine produced a report and which contract it conforms to (§2.1).
@@ -79,6 +73,9 @@ func writeJson(_ obj: Any, _ path: String) {
     do {
         data = try JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
     } catch {
+        // DEFENSIVE, deliberately uncovered (TESTING.md §6): the envelope is built in-process from
+        // String/Bool/[String] values only, which always serialize — this arm exists so a future
+        // non-plist value fails loud instead of trapping, and no test can reach it without mocks.
         FileHandle.standardError.write("candor-swift: could not serialize report for \(path): \(error)\n".data(using: .utf8)!)
         exit(1)
     }

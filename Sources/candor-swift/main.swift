@@ -240,6 +240,8 @@ if wantJson {
     do {
         data = try JSONSerialization.data(withJSONObject: envelope, options: [.prettyPrinted, .sortedKeys])
     } catch {
+        // DEFENSIVE, deliberately uncovered (TESTING.md §6): same arm as writeJson's — the envelope
+        // holds only plist-serializable values, so this cannot fire without an internal type bug.
         FileHandle.standardError.write("candor-swift: could not serialize report: \(error)\n".data(using: .utf8)!)
         exit(1)
     }

@@ -45,6 +45,9 @@ func loadCandorConfig(targetPath: String) -> [String: String] {
         // config (and its policy) to this scan. Genuine absence is simply "no config".
         if file == nil { return [:] }
     }
+    // DEFENSIVE fail-closed, deliberately uncovered (TESTING.md §6): reachable only in the race /
+    // permission gap between the fileExists probe above and this read (e.g. a 0000-mode config) —
+    // the CANDOR_CONFIG-names-no-file arm above is the tested fail-closed path.
     guard let text = try? String(contentsOfFile: file!, encoding: .utf8) else {
         FileHandle.standardError.write("candor-swift: config \(file!) exists but could not be read — failing (exit 2)\n".data(using: .utf8)!)
         exit(2)
