@@ -2,7 +2,9 @@
 """Fabrication probe for candor-swift — a precision regression guard (sibling of the soundness fuzzer
 fuzz.py and the family probes candor-{java,rust}/soundness/fabrication_probe.{py}).
 
-candor's CARDINAL SIN is FABRICATION: classifying a PURE function as effectful. candor-swift classifies
+candor's cardinal sin is the SILENT UNDER-REPORT (guarded by fuzz.py's effect-threading coverage); this
+probe guards the OPPOSITE direction: FABRICATION — a minted effect on a PURE function, the precision
+failure that poisons report trust. candor-swift classifies
 effect-bearing platform types by MEMBER (PROCESS_MEMBERS, the FileManager/URLSession/ProcessInfo tables),
 so a pure accessor on an effectful type must NOT inherit the type's effect. This probe pins that down — it
 is the over-report guard that complements fuzz.py's under-report (effect-threading) coverage.

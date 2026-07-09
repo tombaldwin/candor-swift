@@ -355,7 +355,8 @@ def gen(seed):
 
 # PRECISION TRAPS — pure functions that LOOK like they should trigger a receiver-typing heuristic but
 # must stay PURE. The fuzzer threads effects UP a chain (propagation); these guard the other direction —
-# that the heuristics never FABRICATE an effect (the worst bug, candor's cardinal sin). Each trap is a
+# that the heuristics never FABRICATE an effect (the precision failure — the opposite direction from
+# candor's cardinal sin, the silent under-report). Each trap is a
 # real fabrication the adversarial review found (singleton accessor that vends a different type; a stored
 # field named like a κ property; a `vars`-leak across same-named loop bindings). Appended to every seed
 # (so they're checked under every form combination); the harness asserts NONE of TRAP_FNS is in the report.
