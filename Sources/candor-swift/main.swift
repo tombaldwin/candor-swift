@@ -12,10 +12,11 @@
 // (hosts/cmds/paths/tables) because the §6.2 policy gate enforces `allow` rules.
 //
 // Known v0 honesty notes (item 7): the κ table covers the platform frontier (Foundation/Network/
-// Dispatch/os + sqlite3) — third-party packages are INVISIBLE and the ledger names them; nested
-// named functions attribute lexically to their enclosing unit (over-approximation, the sound
-// direction); no CANDOR_DEPS consumption yet (hash is emitted so reports are chainable by others);
-// the §7.13 soundness harness is not yet ported.
+// Dispatch/os + sqlite3) — third-party packages are INVISIBLE and the ledger names them, UNLESS a
+// chained sibling report covers them: CANDOR_DEPS / the config `deps` key (SPEC §2, Deps.swift) joins
+// an unresolved call into a covered package to that dep fn's recorded effects + literal surfaces
+// (stale producers downgrade to Unknown; an empty report is a purity claim); nested named functions
+// attribute lexically to their enclosing unit (over-approximation, the sound direction).
 
 import Foundation
 import SwiftParser
@@ -161,7 +162,13 @@ if let manifest = try? String(contentsOfFile: (rootDir as NSString).appendingPat
 // (Pass A / Pass B collectors live in DeclCollector.swift / CallCollector.swift;
 //  the two-pass drive lives in Driver.swift — called here.)
 
-let analysis = analyze(sourcePaths: sourcePaths, rootDir: rootDir, pkgName: pkgName)
+// Report chaining (SPEC §2, Deps.swift): CANDOR_DEPS overrides the config's `deps` key (the same
+// env-over-config precedence as `policy`). Fail-closed loading — a bad token/report exits 2 HERE,
+// before any analysis could silently read the dep as pure.
+let depsSpec = ProcessInfo.processInfo.environment["CANDOR_DEPS"] ?? candorConfig["deps"]
+let depsIndex = loadDepReports(spec: depsSpec, engineVersion: engineVersion)
+
+let analysis = analyze(sourcePaths: sourcePaths, rootDir: rootDir, pkgName: pkgName, deps: depsIndex)
 let allFns = analysis.allFns
 let conformers = analysis.conformers
 let importCounts = analysis.importCounts
@@ -269,8 +276,10 @@ if wantJson {
 }
 
 // the κ-coverage ledger: imported modules outside the platform frontier that κ doesn't know —
-// INVISIBLE, not Unknown; named per scan (SPEC §7 item 14, canonical marker)
-let unlisted = importCounts.filter { !PLATFORM_MODULES.contains($0.key) && !KAPPA_MODULES.contains($0.key) && !internalModules.contains($0.key) }
+// INVISIBLE, not Unknown; named per scan (SPEC §7 item 14, canonical marker). A package a chained
+// sibling report covers is EXEMPT (SPEC §2 rule 3) — including an all-pure dep's EMPTY report,
+// whose silence is its purity claim, so the ledger must not name it a blind spot.
+let unlisted = importCounts.filter { !PLATFORM_MODULES.contains($0.key) && !KAPPA_MODULES.contains($0.key) && !internalModules.contains($0.key) && !depsIndex.coveredPkgs.contains($0.key) }
     .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
 if !unlisted.isEmpty {
     let shown = unlisted.prefix(8).map { "\($0.key) (\($0.value) import\($0.value == 1 ? "" : "s"))" }.joined(separator: ", ")

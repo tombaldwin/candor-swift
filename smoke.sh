@@ -1024,5 +1024,65 @@ ok = all(f not in by for f in ['twinUd','twinBun','twinKc'])
 print('PASS' if ok else 'FAIL '+repr({k:sorted(v) for k,v in by.items()}))")
 [ "$UDS" = "PASS" ] && ok "covered-module sweep twins: local UserDefaults/Bundle/SecItemAdd shadow κ (no fabrication)" || bad "UserDefaults/Keychain/Bundle twins: $UDS"
 
+# CHAINING (SPEC §2 — CANDOR_DEPS + the config `deps` key): the conformance PART 14 dep+app shape.
+# (a) JOIN-INHERIT: the app fn inherits the dep fn's effects AND its literal Net surface, through both
+#     join shapes (bare free call -> pkg#leaf; member call on a resolved external owner -> pkg#Owner.leaf);
+# (b) STALE-DOWNGRADE: a doctored producing version reads Unknown, never a stale Net claim (§2.1);
+# (c) EMPTY-REPORT COVERAGE: an all-pure dep's empty report is a purity claim — pure + no κ-ledger naming;
+# (d) FAIL-CLOSED: a token naming no readable file / an unparseable report exits 2 (never silently pure).
+mkdir -p "$W/ch/dep/Sources/RatesDep" "$W/ch/app/Sources/App"
+printf '// swift-tools-version: 6.0\nimport PackageDescription\nlet package = Package(name: "RatesDep", targets: [.target(name: "RatesDep")])\n' > "$W/ch/dep/Package.swift"
+cat > "$W/ch/dep/Sources/RatesDep/Rates.swift" <<'SW'
+import Foundation
+public class RatesClient {
+    public init() {}
+    public func fetch() {
+        let t = URLSession.shared.dataTask(with: "http://rates.internal:7070/x") { _, _, _ in }
+        t.resume()
+    }
+}
+public func hit() { RatesClient().fetch() }
+SW
+printf '// swift-tools-version: 6.0\nimport PackageDescription\nlet package = Package(name: "App", targets: [.target(name: "App")])\n' > "$W/ch/app/Package.swift"
+cat > "$W/ch/app/Sources/App/App.swift" <<'SW'
+import RatesDep
+public func go() { hit() }
+public func goMember() {
+    let c = RatesClient()
+    c.fetch()
+}
+SW
+"$BIN" "$W/ch/dep" --out "$W/ch/depr" 2>/dev/null
+CHDEP="$W/ch/depr.RatesDep.Swift.json"
+python3 - "$CHDEP" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+s = json.loads(json.dumps(d)); s["candor"]["version"] = "candor-doctored-0.0.0"
+json.dump(s, open(sys.argv[1].replace(".json", "") + "_stale.json", "w"))
+e = json.loads(json.dumps(d)); e["functions"] = []
+json.dump(e, open(sys.argv[1].replace(".json", "") + "_empty.json", "w"))
+PYEOF
+chk_chain() { python3 -c "
+import json
+by = {f['fn']: f for f in json.load(open('$W/ch/$1.App.Swift.json'))['functions']}
+print('PASS' if ($2) else 'FAIL ' + repr({k: (v.get('inferred'), v.get('hosts')) for k, v in by.items()}))"; }
+CANDOR_DEPS="$CHDEP" "$BIN" "$W/ch/app" --out "$W/ch/fresh" 2>"$W/ch/fresh.err"
+CH=$(chk_chain fresh "all(by.get(f, {}).get('inferred') == ['Net'] and by[f].get('hosts') == ['rates.internal:7070'] for f in ['go', 'goMember'])")
+[ "$CH" = "PASS" ] && ok "chaining [a] join-inherit: both join shapes read exactly {Net} + the dep's host literal" || bad "chaining fresh: $CH"
+grep -q "κ doesn't know" "$W/ch/fresh.err" && bad "chaining fresh: covered package must not be in the κ ledger" || ok "chaining [a] the chained package is exempt from the κ ledger"
+CANDOR_DEPS="${CHDEP%.json}_stale.json" "$BIN" "$W/ch/app" --out "$W/ch/stale" 2>/dev/null
+CH=$(chk_chain stale "all(by.get(f, {}).get('inferred') == ['Unknown'] and by[f].get('hosts') is None for f in ['go', 'goMember'])")
+[ "$CH" = "PASS" ] && ok "chaining [b] stale-downgrade: a doctored producer version reads Unknown, never a stale Net claim" || bad "chaining stale: $CH"
+CANDOR_DEPS="${CHDEP%.json}_empty.json" "$BIN" "$W/ch/app" --out "$W/ch/empty" 2>"$W/ch/empty.err"
+CH=$(chk_chain empty "not by")
+[ "$CH" = "PASS" ] && ok "chaining [c] empty-report coverage: an all-pure dep's silence is a purity claim" || bad "chaining empty: $CH"
+grep -q "κ doesn't know" "$W/ch/empty.err" && bad "chaining empty: κ ledger must not name the covered package" || ok "chaining [c] the empty report still covers its package (ledger silent)"
+CANDOR_DEPS="$W/ch/no-such-report.json" "$BIN" "$W/ch/app" --out "$W/ch/badtok" >/dev/null 2>&1
+[ $? -eq 2 ] && ok "chaining [d] a deps token naming no readable file fails closed (exit 2)" || bad "chaining bad-token exit: $?"
+echo '{not json' > "$W/ch/garbage.json"
+CANDOR_DEPS="$W/ch/garbage.json" "$BIN" "$W/ch/app" --out "$W/ch/badrep" >/dev/null 2>&1
+[ $? -eq 2 ] && ok "chaining [d] an unparseable dep report fails closed (exit 2)" || bad "chaining garbage-report exit: $?"
+
+
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -15,9 +15,14 @@ import CandorCore
 enum ArgKind { case closure, named(String), opaque }
 struct Call { var path: String; var leaf: String; var strArg: String?; var typed: Bool; var args: [ArgKind] = []
               var argTypes: [String?] = []     // inferred simple type per positional arg (nil = unknown) — overloads
-              var unqualified: Bool = false }  // a bare DeclReference `name(…)` (free fn / ctor / self-sibling) —
+              var unqualified: Bool = false    // a bare DeclReference `name(…)` (free fn / ctor / self-sibling) —
                                                // NOT a `recv.member(…)` whose receiver type couldn't be resolved
                                                // (those must never be guessed onto a same-named sibling/free fn).
+              var extOwner: String? = nil }    // the RESOLVED receiver root of an otherwise-unmatched member
+                                               // call (`c.fetch()` where c: RatesClient, an external type) —
+                                               // carried ONLY for the §2 CANDOR_DEPS join key (`pkg#Owner.leaf`);
+                                               // never consulted by local resolution, so behaviour without a
+                                               // loaded dep report is unchanged.
 
 final class CallCollector: SyntaxVisitor {
     var vars: [String: String]              // local/param -> concrete type
@@ -866,7 +871,14 @@ final class CallCollector: SyntaxVisitor {
                     if lit == nil, isEstablishingMember(effect: eff, root: rt, member: member) { incompleteSurfaces.insert(eff) }
                 }
             } else {
-                calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node)))
+                // `extOwner` carries the CONFIDENTLY-resolved receiver root (a typed value chain, or a
+                // bare capitalized type reference — a static call `RatesClient.fetch()`) for the §2
+                // CANDOR_DEPS join. An unresolved lowercase receiver (`base.isVar == false` on a plain
+                // identifier that is just the receiver's own name) could only ever join by accident —
+                // dep quals lead with a type name — but keep the owner honest: only a tracked value
+                // (isVar) or a type-looking root qualifies.
+                let owner = base.root.flatMap { r in (base.isVar || r.first?.isUppercase == true) ? r : nil }
+                calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), extOwner: owner))
             }
         } else if node.calledExpression.is(ClosureExprSyntax.self) {
             // immediately-invoked closure: body walks lexically below — nothing to record

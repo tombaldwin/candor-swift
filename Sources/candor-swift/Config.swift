@@ -9,8 +9,9 @@ import Foundation
 // .candor/config), never the CWD; $CANDOR_CONFIG overrides discovery. Precedence: CLI flag →
 // CANDOR_* env → this file → default. FAIL-CLOSED when configured-but-unusable (exit 2 — the §6.2
 // unreadable-policy posture); only genuine absence is empty. Shared key vocabulary — candor-swift
-// consumes `policy` (no report chaining yet, so `deps` is inert like the java-only gate keys); a key
-// OUTSIDE the vocabulary warns (typo protection: a misspelt `policy` must not silently drop the gate).
+// consumes `policy` and `deps` (SPEC §2 report chaining, Deps.swift); the java-only gate keys stay
+// disclosed-inert. A key OUTSIDE the vocabulary warns (typo protection: a misspelt `policy` must not
+// silently drop the gate).
 let candorConfigKeys: Set<String> = ["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps"]
 func loadCandorConfig(targetPath: String) -> [String: String] {
     var file: String? = nil
@@ -73,12 +74,23 @@ func loadCandorConfig(targetPath: String) -> [String: String] {
     // containing `.candor/` dir first (a discovered config lives at <root>/.candor/config, and its values
     // are written root-relative — `policy .candor/gate.pol` names <root>/.candor/gate.pol, not
     // <root>/.candor/.candor/gate.pol). An EMPTY value stays empty (configured-with-empty fails loud).
+    var anchor = (file! as NSString).deletingLastPathComponent
+    if (anchor as NSString).lastPathComponent == ".candor" {
+        anchor = (anchor as NSString).deletingLastPathComponent
+    }
     if let p = cfg["policy"], !p.isEmpty, !(p as NSString).isAbsolutePath {
-        var anchor = (file! as NSString).deletingLastPathComponent
-        if (anchor as NSString).lastPathComponent == ".candor" {
-            anchor = (anchor as NSString).deletingLastPathComponent
-        }
         cfg["policy"] = (anchor as NSString).appendingPathComponent(p)
+    }
+    // `deps` is a path LIST (whitespace/colon/comma-separated, like CANDOR_DEPS) — anchor each
+    // relative token to the config's home dir (the dir containing `.candor/`), same rule as `policy`.
+    // Rejoined with spaces (the canonical separator); the loader re-splits identically.
+    if let d = cfg["deps"], !d.isEmpty {
+        cfg["deps"] = d.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == ":" || $0 == "," })
+            .map { tok -> String in
+                let t = String(tok)
+                return (t as NSString).isAbsolutePath ? t : (anchor as NSString).appendingPathComponent(t)
+            }
+            .joined(separator: " ")
     }
     return cfg
 }

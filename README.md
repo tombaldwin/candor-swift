@@ -42,11 +42,13 @@ build of the target needed. Spec obligations carried from day one: universal `ha
 ## Honest v0 bounds (item 7)
 
 The κ table covers the **platform frontier** (Foundation, Network, Dispatch, os, sqlite3) — third-party
-packages contribute nothing and the ledger names them. Nested named functions attribute lexically to
-their enclosing unit (an over-approximation, the sound direction). Not yet ported: `CANDOR_DEPS`
-consumption (hashes are emitted, so candor-swift reports are already chainable *by* the other engines)
-and the read-only queries (§3.1) — consume reports via `candor-query`, which discovers this engine's
-`report.<pkg>.Swift.json` + the `hierarchy` sidecar natively. The §7.13 soundness fuzzer **has** landed (`fuzz.py`) — it threads a
+packages contribute nothing and the ledger names them, unless a chained sibling report covers them:
+`CANDOR_DEPS` / the config `deps` key (SPEC §2) join an unresolved call into a covered package to that
+dep function's recorded effects + literal surfaces — a stale producer downgrades to `Unknown`, an
+all-pure dep's empty report is a purity claim, and a bad token/report fails closed (exit 2). Nested
+named functions attribute lexically to their enclosing unit (an over-approximation, the sound
+direction). Not yet ported: the read-only queries (§3.1) — consume reports via `candor-query`, which
+discovers this engine's `report.<pkg>.Swift.json` + the `hierarchy` sidecar natively. The §7.13 soundness fuzzer **has** landed (`fuzz.py`) — it threads a
 known effect through receiver-typing idioms (singletons, fields, collections, casts, enum payloads,
 nested receivers) and asserts every reachable function is effect-or-`Unknown`, so the §4 claim here is
 now adversarially tested.

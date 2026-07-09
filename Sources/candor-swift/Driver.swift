@@ -32,7 +32,7 @@ struct Analysis {
 // Drive the two passes
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-func analyze(sourcePaths: [String], rootDir: String, pkgName: String) -> Analysis {
+func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepIndex = DepIndex()) -> Analysis {
     let fm = FileManager.default
 
     var allFns: [FnInfo] = []
@@ -281,9 +281,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String) -> Analysi
     var incompleteD: [String: Set<String>] = [:]   // fn -> effects with a structurally-incomplete surface (masking)
     var blindDirect: [String: Set<String>] = [:]    // fn -> blind modules it DIRECTLY reaches (per-fn `invisible`)
     // The κ-unknown modules this code imports (the ledger's set, hoisted for per-fn `invisible` attribution):
-    // not a platform-frontier module, not a κ tier, not an internal target — effects through them are INVISIBLE.
+    // not a platform-frontier module, not a κ tier, not an internal target — effects through them are
+    // INVISIBLE. A module a chained sibling report COVERS is exempt (SPEC §2 rule 3): the report — even an
+    // EMPTY one — is the producer's claim over that package, so a joined-nothing call into it reads pure,
+    // not blind.
     let blindModules = Set(importCounts.keys.filter {
-        !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !internalModules.contains($0) })
+        !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !internalModules.contains($0)
+            && !deps.coveredPkgs.contains($0) })
     var locOf: [String: String] = [:]
     var entryPoints: Set<String> = []
     var callsiteArgs: [String: [[ArgKind]]] = [:]   // resolved target -> each call site's arg kinds
@@ -440,6 +444,48 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String) -> Analysi
             }
             // otherwise: unresolvable bare member (unresolved receiver) — stays out (under-report, never a
             // guess); the κ ledger and Unknown rules above carry the honesty.
+            // CANDOR_DEPS cross-package JOIN (SPEC §2), GATED: an unclassified call that resolved to NO
+            // local unit, in a file that IMPORTS a package a sibling report covers, inherits the dep fn's
+            // recorded effects + literal surfaces. Key shapes (§2 rule 1 — the way THIS engine names the
+            // call): a bare free call `hit()` → `M#hit`; a bare ctor `Rates()` → `M#Rates.init`; a member
+            // call on a resolved external owner `c.fetch()` / static `RatesClient.fetch()` → `M#Owner.leaf`;
+            // a module-qualified free call `RatesDep.hit()` (owner == the module) → `M#hit`. EXACTLY ONE
+            // hit across the file's covered imports joins — two candidates (or an index-ambiguous key) are
+            // dropped, never picked from. A local resolution above is always authoritative (never guess
+            // over project code), so this runs only when !resolved.
+            if !resolved, !deps.isEmpty, !call.typed {
+                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                var hits: [DepEntry] = []
+                for m in fileImports[file] ?? [] where deps.coveredPkgs.contains(m) {
+                    if call.unqualified {
+                        if let e = deps.lookup("\(m)#\(call.path)") ?? deps.lookup("\(m)#\(call.path).init") {
+                            hits.append(e)
+                        }
+                    } else if let owner = call.extOwner {
+                        if let e = deps.lookup("\(m)#\(owner).\(call.leaf)")
+                            ?? (owner == m ? deps.lookup("\(m)#\(call.leaf)") : nil) {
+                            hits.append(e)
+                        }
+                    }
+                }
+                if hits.count == 1, let de = hits.first {
+                    direct[f.qual, default: []].formUnion(de.effects)
+                    if de.effects.contains("Unknown") {
+                        unresolvedSet.insert(f.qual)
+                        if let why = de.whyReason { whyMap[f.qual, default: []].insert(why) }
+                    }
+                    hostsD[f.qual, default: []].formUnion(de.hosts)
+                    cmdsD[f.qual, default: []].formUnion(de.cmds)
+                    pathsD[f.qual, default: []].formUnion(de.paths)
+                    tablesD[f.qual, default: []].formUnion(de.tables)
+                    // inherit the dep fn's own honesty markers so the consumer's verdict stays qualified
+                    // across the chain boundary: its blind-module disclosure and its masking-incompleteness
+                    // (a benign literal HERE must not certify the dep's invisible runtime endpoint).
+                    if !de.invisible.isEmpty { blindDirect[f.qual, default: []].formUnion(de.invisible) }
+                    if !de.incomplete.isEmpty { incompleteD[f.qual, default: []].formUnion(de.incomplete) }
+                    resolved = true
+                }
+            }
             // A call that resolved to no local edge AND is an UNQUALIFIED free-call/ctor reaches a blind module
             // — disclose the fn's blind imports (file-granular: the syntactic engine can't pin WHICH import a
             // dropped call lands in, so it names every κ-unknown module in scope — an honest LOWER bound).
