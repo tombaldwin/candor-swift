@@ -9,9 +9,19 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Weekly spec-HEAD tracking (the spec-head job below): floor rises in candor-spec surface here,
+    # not as a red X on unrelated PRs (the push/PR jobs pin the spec).
+    - cron: '17 6 * * 1'
+
+# The spec commit the push/PR gates run against. Bump deliberately when adopting a floor rise; the
+# weekly spec-head job is the early-warning that HEAD has moved past this pin.
+env:
+  CANDOR_SPEC_PIN: eccfac71a9dc00bfa7e29d648c7d761d77d91b9a
 
 jobs:
   test:
+    if: github.event_name != 'schedule'
     runs-on: macos-15
     # A healthy run is ~3 min (SwiftSyntax ships prebuilt binaries); anything past 20 is a hung runner
     # — kill it rather than burn 6h of 10x-billed macOS minutes (observed live, twice, 2026-07-02).
@@ -24,9 +34,10 @@ jobs:
         # `script` gives swift test a TTY → line-buffered output → a hang shows the LAST test started
         # in the live log (block-buffered output vanishes on cancel — learned the hard way, 2026-07-02).
         run: script -q /dev/null swift test
-      - name: Smoke (oracle needs the spec as a sibling)
+      - name: Smoke (oracle needs the spec as a sibling — PINNED; spec-head tracks HEAD weekly)
         run: |
-          git clone --depth 1 https://github.com/tombaldwin/candor-spec ../candor-spec
+          git clone https://github.com/tombaldwin/candor-spec ../candor-spec
+          git -C ../candor-spec checkout --quiet "$CANDOR_SPEC_PIN"
           bash smoke.sh
       - name: Soundness fuzzer (§7.13)
         run: python3 fuzz.py
@@ -36,3 +47,49 @@ jobs:
         run: |
           printf 'deny Net Db Exec Ipc\n' > /tmp/gate.pol
           .build/debug/candor-swift Sources --out /tmp/self --policy /tmp/gate.pol
+
+  # Linux is in scope (Glibc/Musl sit in PLATFORM_MODULES) and swift-corelibs-foundation DIVERGES from
+  # Darwin Foundation — the URL.deletingLastPathComponent root-behaviour class (38fbc71) would have been
+  # caught here, not on a hung macOS runner.
+  linux:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    container: swift:6.1
+    # SwiftSyntax has NO prebuilt binaries for Linux — it compiles from source, so this job is the slow
+    # lane (~20-30 min). Budget accordingly; the concurrency group still cancels superseded runs.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Harness deps (the swift image is minimal — smoke/fuzz/probe need python3, the TTY wrapper `script` is util-linux)
+        run: apt-get update -qq && apt-get install -y -qq python3 util-linux >/dev/null
+      - name: Build
+        run: swift build
+      - name: Unit tests
+        # Same TTY treatment as macOS, in util-linux spelling: `script -qec "<cmd>" /dev/null`
+        # (-e propagates the child's exit code; the BSD `script -q /dev/null cmd` form doesn't parse here).
+        run: script -qec "swift test" /dev/null
+      - name: Smoke (pinned spec)
+        run: |
+          git clone https://github.com/tombaldwin/candor-spec ../candor-spec
+          git -C ../candor-spec checkout --quiet "$CANDOR_SPEC_PIN"
+          bash smoke.sh
+      - name: Soundness fuzzer (§7.13)
+        run: python3 fuzz.py
+      - name: Fabrication probe
+        run: python3 fabrication_probe.py
+
+  # Weekly early-warning lane: run the smoke oracle against candor-spec HEAD, so a floor rise (a new
+  # conformance case, a tightened expectation) surfaces as a scheduled red — without redding PRs, which
+  # stay pinned to CANDOR_SPEC_PIN. When this goes red: adapt, then bump the pin.
+  spec-head:
+    if: github.event_name == 'schedule'
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build
+        run: swift build
+      - name: Smoke against spec HEAD
+        run: |
+          git clone --depth 1 https://github.com/tombaldwin/candor-spec ../candor-spec
+          bash smoke.sh

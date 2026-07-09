@@ -2,7 +2,11 @@
 # candor-swift smoke: the conformance oracle + gate + ledger, end to end.
 set -uo pipefail
 cd "$(dirname "$0")"
-swift build 2>/dev/null || { echo "FAIL: build"; exit 1; }
+# Capture build diagnostics instead of discarding them (2>/dev/null hid the actual compiler error on a
+# failing CI run — the log said only "FAIL: build"); dump them on failure, stay quiet on success.
+BUILD_LOG=$(mktemp)
+swift build > "$BUILD_LOG" 2>&1 || { echo "FAIL: build — diagnostics:"; cat "$BUILD_LOG"; rm -f "$BUILD_LOG"; exit 1; }
+rm -f "$BUILD_LOG"
 BIN=.build/debug/candor-swift
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 pass=0; fail=0
