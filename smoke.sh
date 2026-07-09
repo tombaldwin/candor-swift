@@ -610,6 +610,10 @@ STALE=$(grep -oE 'spec[^0-9A-Za-z]{1,4}[0-9]+\.[0-9]+' "$HERE_DIR/AGENTS.md" | g
 { [ -n "$BSPEC" ] && [ -z "$STALE" ]; } \
   && ok "AGENTS.md spec strings all match the binary's declared spec ($BSPEC)" \
   || bad "AGENTS.md spec drift (binary declares spec ${BSPEC:-???}): ${STALE:-no spec string found}"
+# README's headline spec claim must match the binary too (it said 0.5 while the engine spoke 0.8).
+grep -qF "candor-spec) $BSPEC" "$HERE_DIR/README.md" \
+  && ok "README's candor-spec version matches the binary ($BSPEC)" \
+  || bad "README spec drift: expected 'candor-spec) $BSPEC' in README.md"
 
 # Write-failure is GRACEFUL, not a crash. A report write that can't happen (unwritable --out path)
 # used to `try!`-TRAP after the whole scan finished (SIGILL, no message). It must now exit 1 with a

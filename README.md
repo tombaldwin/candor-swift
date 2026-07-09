@@ -1,21 +1,29 @@
 # candor-swift
 
-**The Swift implementation of [candor-spec](https://github.com/tombaldwin/candor-spec) 0.5** — per-function
+**The Swift implementation of [candor-spec](https://github.com/tombaldwin/candor-spec) 0.8** — per-function
 side effects (Net/Fs/Db/Exec/Env/Clock/Ipc/Log/Rand/Clipboard), transitively across the call graph, with
 the §6.2 policy gate. The fourth engine in the candor family (Rust · JVM · TypeScript · Swift), written
 from the spec and validated against the shared conformance oracle: **20/20 on first run**.
 
 ```sh
 swift build -c release
-.build/release/candor-swift <package-dir>          # writes <dir>/.candor/report.json + callgraph sidecar
+.build/release/candor-swift <package-dir>            # writes <dir>/.candor/report.<pkg>.Swift.json
+                                                     #   + .callgraph.json / .hierarchy.json sidecars
 .build/release/candor-swift <dir> --policy gate.pol  # §6.2 deny/pure/allow/forbid; exit 1 on violation
-.build/release/candor-swift --version              # installed build + spec contract (offline) + upgrade line
+                                                     #   (or CANDOR_POLICY, or a checked-in .candor/config
+                                                     #   `policy` line — discovered from the TARGET's
+                                                     #   ancestors, never the CWD)
+.build/release/candor-swift <dir> --policy gate.pol --gate-json verdict.json
+                                                     # + the structured §3.3 verdict {spec, ok, violations}
+                                                     #   (`--gate-json -` streams it to stdout)
+.build/release/candor-swift --version                # installed build + spec contract (offline) + upgrade line
+.build/release/candor-swift --agents                 # the agent contract for THIS build (embedded AGENTS.md)
 ```
 
 **Staying current:** check your installed version and upgrade — [candor/AGENTS.md §2a](https://github.com/tombaldwin/candor/blob/main/AGENTS.md#2a-staying-current--check-the-version-upgrade). `candor-swift --version` prints the build, the spec, and the upgrade one-liner (offline; candor never phones home).
 
 Built on [SwiftSyntax](https://github.com/swiftlang/swift-syntax) — syntactic, like `candor-scan`: no
-build of the target needed. Spec-0.5 obligations carried from day one: universal `hash` emission
+build of the target needed. Spec obligations carried from day one: universal `hash` emission
 (`pkg#qual`, so reports chain as `CANDOR_DEPS` siblings of the other engines), the **κ-coverage ledger**
 (`κ doesn't know N modules this code imports…` — unlisted third-party modules are INVISIBLE, not
 `Unknown`, and the receipt names them per scan), and the four literal surfaces (`hosts`/`cmds`/`paths`/
@@ -37,7 +45,8 @@ The κ table covers the **platform frontier** (Foundation, Network, Dispatch, os
 packages contribute nothing and the ledger names them. Nested named functions attribute lexically to
 their enclosing unit (an over-approximation, the sound direction). Not yet ported: `CANDOR_DEPS`
 consumption (hashes are emitted, so candor-swift reports are already chainable *by* the other engines)
-and the read-only queries (§3.1). The §7.13 soundness fuzzer **has** landed (`fuzz.py`) — it threads a
+and the read-only queries (§3.1) — consume reports via `candor-query`, which discovers this engine's
+`report.<pkg>.Swift.json` + the `hierarchy` sidecar natively. The §7.13 soundness fuzzer **has** landed (`fuzz.py`) — it threads a
 known effect through receiver-typing idioms (singletons, fields, collections, casts, enum payloads,
 nested receivers) and asserts every reachable function is effect-or-`Unknown`, so the §4 claim here is
 now adversarially tested.

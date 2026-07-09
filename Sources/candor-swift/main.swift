@@ -1,4 +1,5 @@
-// candor-swift — the Swift implementation of candor-spec 0.7.
+// candor-swift — the Swift implementation of candor-spec (the declared contract is `specVersion` below;
+// smoke.sh gates AGENTS.md/README spec strings against it so prose can't silently go stale again).
 //
 // Architecture mirrors candor-scan (the syntactic reference engine): pass A indexes declarations
 // (units, field types, protocols + conformers, imports), pass B collects each function's calls
