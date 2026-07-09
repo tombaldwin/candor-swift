@@ -399,10 +399,18 @@ final class CallCollector: SyntaxVisitor {
         return true
     }
 
-    private func recordSurfaces(effect: String, lit: String?, args: LabeledExprListSyntax? = nil) {
+    // `netEstablishing`: the Net literal surface is captured ONLY at establishing forms (connect/bind/
+    // ctor — where the host is conceptually an argument of THIS call). At a USE verb on an established
+    // channel (`Channel.writeAndFlush("x")`, `NWConnection.send`) the string arg is a PAYLOAD, not a
+    // destination — capturing it minted a bogus host that could trip `allow Net` on data (found by the
+    // 2026-07-10 coverage wave; candor-java and candor-ts capture only at establishing forms). Fs/Exec/Db
+    // arms are unaffected: their shape guards (path chars, SQL statement keyword) already reject payloads.
+    private func recordSurfaces(effect: String, lit: String?, args: LabeledExprListSyntax? = nil,
+                                netEstablishing: Bool = true) {
         guard let lit else { return }
         switch effect {
         case "Net":
+            if !netEstablishing { break }
             var h = hostPort(lit)
             // Fold a SEPARATE integer port arg (NWConnection(host: "…", port: 8080)) into host:port, so the
             // surface reads like the URL-string forms the other engines see (conformance §2 [4e]). Skipped
@@ -783,9 +791,10 @@ final class CallCollector: SyntaxVisitor {
                 // read silent-pure). Mirrors the explicit-self path (line ~1417). Only fires when the
                 // enclosing type is NOT declared locally (an extension of the real platform type) and the κ
                 // table knows the member — a declared type shadows κ, a local free fn / shadowing local wins.
+                let est = isEstablishingMember(effect: eff, root: et, member: name)
                 directEffects.insert(eff)
-                recordSurfaces(effect: eff, lit: lit, args: node.arguments)
-                if lit == nil, isEstablishingMember(effect: eff, root: et, member: name) { incompleteSurfaces.insert(eff) }
+                recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
+                if lit == nil, est { incompleteSurfaces.insert(eff) }
             } else if !localTypes.contains(name), !localFreeFns.contains(name),
                       let eff = kappaFree(name: dealias(name), argCount: node.arguments.count) {
                 // A LOCALLY-declared type ctor (`Pipe()` where `class Pipe`) or free fn (`NSLog(...)` where
@@ -796,9 +805,10 @@ final class CallCollector: SyntaxVisitor {
                 // `dealias(name)` resolves a typealias-named ctor (`Proc()`→`Process`→Exec) before κ; a
                 // local type/free fn already short-circuited above, so an alias never overrides the project.
                 let aliasName = dealias(name)
+                let est = isEstablishingFree(effect: eff, name: aliasName)
                 directEffects.insert(eff)
-                recordSurfaces(effect: eff, lit: lit, args: node.arguments)
-                if lit == nil, isEstablishingFree(effect: eff, name: aliasName) { incompleteSurfaces.insert(eff) }
+                recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
+                if lit == nil, est { incompleteSurfaces.insert(eff) }
             } else {
                 calls.append(Call(path: name, leaf: name, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), unqualified: true))
             }
@@ -867,8 +877,9 @@ final class CallCollector: SyntaxVisitor {
                 if eff == "Fs", rt == "FileManager", recordTwoPathFs(member: member, node.arguments) {
                     // handled — surfaces + incompleteness recorded per-locator
                 } else {
-                    recordSurfaces(effect: eff, lit: lit, args: node.arguments)
-                    if lit == nil, isEstablishingMember(effect: eff, root: rt, member: member) { incompleteSurfaces.insert(eff) }
+                    let est = isEstablishingMember(effect: eff, root: rt, member: member)
+                    recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
+                    if lit == nil, est { incompleteSurfaces.insert(eff) }
                 }
             } else {
                 // `extOwner` carries the CONFIDENTLY-resolved receiver root (a typed value chain, or a

@@ -1094,5 +1094,31 @@ printf 'pure\n' > "$W/pu/pure.policy"; printf 'deny Unknown\n' > "$W/pu/unknown.
 "$BIN" "$W/pu" --out "$W/pu/o2" --policy "$W/pu/unknown.policy" >/dev/null 2>&1
 [ $? -eq 1 ] && ok "deny Unknown remains the strictness knob (fires, exit 1)" || bad "deny Unknown did not fire"
 
+# ── Net literal surface: ESTABLISHING forms only (family parity, 2026-07-10). A string arg at a USE
+# verb on an established channel (`Channel.writeAndFlush("x")`) is a PAYLOAD, not a destination —
+# capturing it minted a bogus host that could trip `allow Net` on data. candor-java and candor-ts
+# capture only at establishing forms (connect/ctor); pinned here after the coverage wave observed the
+# divergence. The establishing ctor's host:port capture must keep working (conformance [4e]).
+mkdir -p "$W/nu"
+cat > "$W/nu/a.swift" <<'EOF'
+import Foundation
+import Network
+import NIO
+func est() { _ = NWConnection(host: "real.host", port: 8080, using: .tcp) }
+func use(_ ch: Channel) { _ = ch.writeAndFlush("PAYLOAD-X") }
+EOF
+"$BIN" "$W/nu" --out "$W/nu/r" >/dev/null 2>&1
+NU=$(python3 - <<PY
+import json, glob
+p = [x for x in glob.glob("$W/nu/r.*.json") if "callgraph" not in x and "hierarchy" not in x][0]
+by = {f["fn"]: f for f in json.load(open(p))["functions"]}
+est_ok = by.get("est", {}).get("hosts") == ["real.host:8080"]
+use = by.get("use", {})
+use_ok = "Net" in use.get("inferred", []) and "PAYLOAD-X" not in (use.get("hosts") or [])
+print("PASS" if est_ok and use_ok else f"FAIL est={by.get('est')} use={use}")
+PY
+)
+[ "$NU" = "PASS" ] && ok "Net surface: establishing ctor captures host:port; a use-verb payload literal is NOT a host" || bad "Net use-verb surface: $NU"
+
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
