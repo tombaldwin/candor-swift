@@ -88,10 +88,12 @@ def fixture():
 def candor_bin():
     if os.environ.get("CS"):
         return os.environ["CS"]
-    for variant in ("release", "debug"):
-        p = os.path.join(ROOT, ".build", variant, "candor-swift")
-        if os.path.exists(p):
-            return p
+    # Prefer the most recently BUILT binary: the fixed release-first preference silently probed a STALE
+    # release build after a debug rebuild (the probe then judged old code — observed live, 2026-07-09).
+    cands = [p for v in ("release", "debug")
+             if os.path.exists(p := os.path.join(ROOT, ".build", v, "candor-swift"))]
+    if cands:
+        return max(cands, key=os.path.getmtime)
     # build debug
     subprocess.run(["swift", "build"], cwd=ROOT, check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -109,7 +111,10 @@ def main():
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         report = None
         for n in os.listdir(d):
-            if n.startswith("r.") and n.endswith(".json") and "callgraph" not in n:
+            # Exclude BOTH sidecars, like smoke.sh does: since the 0.7 hierarchy sidecar the scan also
+            # writes r.<pkg>.Swift.hierarchy.json, and os.listdir order is arbitrary — excluding only
+            # "callgraph" made ~half the runs load the hierarchy file and die (KeyError: 'functions').
+            if n.startswith("r.") and n.endswith(".json") and "callgraph" not in n and "hierarchy" not in n:
                 report = os.path.join(d, n)
                 break
         if not report:
