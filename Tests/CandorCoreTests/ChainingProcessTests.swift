@@ -269,6 +269,90 @@ final class ChainingProcessTests: XCTestCase {
                        "the unique tail2 key must still join — ambiguity is per-key")
     }
 
+    // ── CANDOR_DEPS naming a DIRECTORY (Deps.swift's walk mode): every *.json report under it loads,
+    // the callgraph/hierarchy SIDECARS are skipped by name, and the walk is deterministic (sorted) —
+    // this mode had zero coverage in any suite. Two dep packages prove multi-report loading; the
+    // sidecars sit beside them exactly as a real `--out` scan leaves them.
+    func testDepsDirectoryLoadsReportsAndSkipsSidecars() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fm = FileManager.default
+
+        // a SECOND dep package (GeoDep, Fs at a literal path) + an app importing both
+        let dep2 = root.appendingPathComponent("dep2")
+        try fm.createDirectory(at: dep2.appendingPathComponent("Sources/GeoDep"), withIntermediateDirectories: true)
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "GeoDep", targets: [.target(name: "GeoDep")])
+        """.write(to: dep2.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try """
+        import Foundation
+        public func locate() { _ = FileManager.default.contents(atPath: "/geo.db") }
+        """.write(to: dep2.appendingPathComponent("Sources/GeoDep/Geo.swift"), atomically: true, encoding: .utf8)
+        try """
+        import RatesDep
+        import GeoDep
+        public func go() { hit() }
+        public func find() { locate() }
+        """.write(to: app.appendingPathComponent("Sources/App/App.swift"), atomically: true, encoding: .utf8)
+
+        // scan both deps INTO one directory — each leaves its report + callgraph + hierarchy sidecars
+        let depDir = root.appendingPathComponent("depdir")
+        try fm.createDirectory(at: depDir, withIntermediateDirectories: true)
+        XCTAssertEqual(try run(bin, [dep.path, "--out", depDir.appendingPathComponent("dep").path]).code, 0)
+        XCTAssertEqual(try run(bin, [dep2.path, "--out", depDir.appendingPathComponent("dep2").path]).code, 0)
+        let listing = try fm.contentsOfDirectory(atPath: depDir.path)
+        XCTAssertTrue(listing.contains { $0.contains("callgraph") } && listing.contains { $0.contains("hierarchy") },
+                      "the fixture dir must hold the sidecars the walk has to skip; got \(listing)")
+
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path],
+                        env: ["CANDOR_DEPS": depDir.path])
+        XCTAssertEqual(r.code, 0, "a directory of reports (with sidecars) must load cleanly; stderr: \(r.err)")
+        let by = try fns(ofReport: root.appendingPathComponent("app-r.App.Swift.json"))
+        XCTAssertEqual(by["go"]?["inferred"] as? [String], ["Net"], "the RatesDep report in the dir must join")
+        XCTAssertEqual(by["find"]?["inferred"] as? [String], ["Fs"], "the GeoDep report in the dir must join too")
+        XCTAssertEqual(by["find"]?["paths"] as? [String], ["/geo.db"], "surfaces carry across the dir-loaded join")
+        XCTAssertFalse(r.err.contains("κ doesn't know"),
+                       "both packages are covered by the dir's reports — the ledger stays quiet: \(r.err)")
+    }
+
+    // an EMPTY directory is a configured-but-useless deps source: nothing loads, so the dep packages
+    // read blind again — but loading itself must not fail (a dir with no *.json is not an error, it
+    // is zero coverage; the fail-closed paths are per-file).
+    func testDepsEmptyDirectoryCoversNothing() throws {
+        let bin = try binaryURL()
+        let (root, _, app) = try makeChainFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let emptyDir = root.appendingPathComponent("empty-deps")
+        try FileManager.default.createDirectory(at: emptyDir, withIntermediateDirectories: true)
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path],
+                        env: ["CANDOR_DEPS": emptyDir.path])
+        XCTAssertEqual(r.code, 0, "an empty deps dir loads zero reports, not an error; stderr: \(r.err)")
+        XCTAssertTrue(r.err.contains("κ doesn't know") && r.err.contains("RatesDep"),
+                      "with no report loaded the dep package is blind again — the ledger names it: \(r.err)")
+    }
+
+    // an EXISTING report file the process cannot READ (chmod 000) must fail closed (exit 2) — the
+    // Deps.swift `fm.contents == nil` arm, distinct from not-found (token test above) and bad-JSON.
+    func testUnreadableDepReportFileExits2() throws {
+        try XCTSkipIf(geteuid() == 0, "root reads through 0000 permissions — the arm is untestable as root")
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        let locked = root.appendingPathComponent("locked.json")
+        try FileManager.default.copyItem(at: depReport, to: locked)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: locked.path) }
+
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path],
+                        env: ["CANDOR_DEPS": locked.path])
+        XCTAssertEqual(r.code, 2, "an existing-but-unreadable dep report must fail closed; stderr: \(r.err)")
+        XCTAssertTrue(r.err.contains("could not be read"), "the diagnostic names the read failure: \(r.err)")
+    }
+
     // ── config `deps` (relative → anchored to the config's home dir) + env precedence ─────────────
     func testConfigDepsKeyAnchorsRelativePathsAndEnvOverrides() throws {
         let bin = try binaryURL()
