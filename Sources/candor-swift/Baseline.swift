@@ -58,6 +58,14 @@ private func baselineFail(_ msg: String) -> Never {
 /// Exits 2 on invalid gate input (unparseable / versionless / cross-build baseline); returns []
 /// with a stderr note when the file is absent (guard not yet adopted).
 func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion: String) -> [GateViolation] {
+    // A configured-but-EMPTY value (bare `baseline` config line, CANDOR_BASELINE="") is invalid gate
+    // input, not an un-adopted guard: the user declared a ratchet and named no file. java/scan/ts all
+    // exit 2 here (verified 2026-07-10); swift briefly took the absent-file note path — family-aligned.
+    if path.isEmpty {
+        baselineFail("the baseline is configured but EMPTY (a bare `baseline` config line or an empty "
+            + "CANDOR_BASELINE) — a configured gate source must name a file (exit 2, the "
+            + "unreadable-policy class). Name a report path or remove the key.")
+    }
     guard let base = loadBaseline(path) else {
         if !FileManager.default.fileExists(atPath: path) {
             FileHandle.standardError.write(("candor-swift: CANDOR_BASELINE \(path) does not exist — the "

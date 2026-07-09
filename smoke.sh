@@ -1185,6 +1185,12 @@ CANDOR_BASELINE="$W/bl/doct.json" "$BIN" "$W/bl/afterd" --json > /dev/null 2>"$W
 echo '{not json' > "$W/bl/garb.json"
 CANDOR_BASELINE="$W/bl/garb.json" "$BIN" "$W/bl/afterd" --json > /dev/null 2>&1
 [ $? -eq 2 ] && ok "baseline guard: an unparseable baseline fails closed (exit 2)" || bad "baseline garbage did not exit 2"
+# configured-but-EMPTY value = invalid gate input, exit 2 (family ruling 2026-07-10: java/scan/ts all
+# exit 2; swift briefly took the absent-file note path — a declared ratchet naming no file is a broken
+# gate, never an inactive one). Covers both the env form and a bare `baseline` config line.
+CANDOR_BASELINE= "$BIN" "$W/bl/afterd" --json > /dev/null 2>"$W/bl/empty.err"; RC=$?
+{ [ $RC -eq 2 ] && grep -q 'configured but EMPTY' "$W/bl/empty.err"; } \
+  && ok "baseline guard: a configured-but-empty value fails closed (exit 2)" || bad "baseline empty: rc=$RC"
 
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
