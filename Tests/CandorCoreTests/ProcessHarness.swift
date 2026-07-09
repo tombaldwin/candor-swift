@@ -33,13 +33,15 @@ enum ProcessHarness {
     }
 
     /// Run the binary with a SANITIZED environment (no inherited CANDOR_* leaks into a fixture scan)
-    /// plus the given overrides. Reads BEFORE waitUntilExit (pipe-buffer deadlock guard).
-    static func run(_ binary: URL, _ args: [String], env: [String: String] = [:]) throws -> (out: String, err: String, code: Int32) {
+    /// plus the given overrides. `cwd` pins the working directory (the config-anchoring tests must
+    /// prove the CWD does NOT matter). Reads BEFORE waitUntilExit (pipe-buffer deadlock guard).
+    static func run(_ binary: URL, _ args: [String], env: [String: String] = [:], cwd: URL? = nil) throws -> (out: String, err: String, code: Int32) {
         let p = Process()
         p.executableURL = binary
         p.arguments = args
+        if let cwd { p.currentDirectoryURL = cwd }
         var environment = ProcessInfo.processInfo.environment
-        for k in ["CANDOR_POLICY", "CANDOR_CONFIG", "CANDOR_DEPS"] { environment.removeValue(forKey: k) }
+        for k in ["CANDOR_POLICY", "CANDOR_CONFIG", "CANDOR_DEPS", "CANDOR_BASELINE"] { environment.removeValue(forKey: k) }
         for (k, v) in env { environment[k] = v }
         p.environment = environment
         let outPipe = Pipe(), errPipe = Pipe()

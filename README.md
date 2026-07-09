@@ -19,6 +19,11 @@ swift build -c release
 .build/release/candor-swift <dir> --policy gate.pol --gate-json verdict.json
                                                      # + the structured §3.3 verdict {spec, ok, violations}
                                                      #   (`--gate-json -` streams it to stdout)
+CANDOR_BASELINE=base.json .build/release/candor-swift <dir>
+                                                     # AS-EFF-005 regression guard (or a config `baseline`
+                                                     #   line): an existing fn GAINING an effect vs the saved
+                                                     #   report fails (exit 1; new fns exempt; a corrupt or
+                                                     #   cross-build baseline refuses to evaluate, exit 2)
 .build/release/candor-swift --version                # installed build + spec contract (offline) + upgrade line
 .build/release/candor-swift --agents                 # the agent contract for THIS build (embedded AGENTS.md)
 ```

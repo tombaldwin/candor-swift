@@ -45,6 +45,14 @@ version) reads `Unknown`, never a stale effect claim; an all-pure dep's EMPTY re
 claim (the package is covered, not blind); a deps token naming no readable file — or an unparseable
 report — exits 2, fail-closed (a configured dep must never silently read pure).
 
+**Ratchet regressions** with `CANDOR_BASELINE=<saved report>` (or a checked-in config `baseline`
+line — a relative value anchors to the config's home dir): an existing function GAINING an effect
+versus the baseline is `[AS-EFF-005]`, exit 1 (new functions are exempt — reviewed as new code);
+the records join the `--gate-json` verdict. A baseline is comparable only to its PRODUCING build
+(§2.1): a corrupt, versionless, or cross-build baseline refuses to evaluate (exit 2, loud — never
+a silent skip, never a bogus violation wave); an absent file is a stderr note and the guard is
+inactive. Record one: `candor-swift <dir> --json > baseline.json`.
+
 **Already installed? Report the version, then ask before upgrading.** If this project already has
 candor — a `.candor/` report dir, or `candor-swift` built/on PATH — do this BEFORE you scan. Run
 `candor-swift --version` (offline) and TELL THE USER plainly which build they're on, e.g. "This

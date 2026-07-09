@@ -81,6 +81,10 @@ while let a = argIter.next() {
           --policy <file>   enforce a policy file (deny/pure/allow/forbid, candor-spec §6.2) — exit 1 on a violation, 2 if unreadable; honours $CANDOR_POLICY when the flag is absent
           --gate-json <f>   write the structured gate verdict { spec, ok, violations } as JSON (candor-spec §3.3)
           --agents          print the agent contract for this build (AGENTS.md)
+
+        CANDOR_BASELINE=<report> (or a .candor/config `baseline` line) enables the AS-EFF-005 regression
+        guard: an existing function GAINING an effect vs the saved report fails (exit 1); new functions are
+        exempt; a corrupt or cross-build baseline refuses to evaluate (exit 2); an absent file is a note.
           -V, --version     print the build and spec version (offline)
           -h, --help        show this help
 
@@ -300,24 +304,37 @@ if !unlisted.isEmpty {
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 var gateViolations: [GateViolation] = []
+// AS-EFF-005 baseline regression guard (SPEC §7 item 5, Baseline.swift) — checked FIRST, matching the
+// reference engine's checker order (candor-java runs checkBaseline before checkPolicy). CANDOR_BASELINE
+// env over the config `baseline` key (the same env-over-config precedence as `policy`; a relative
+// config value was anchored to the config's home dir in Config.swift). May exit 2 (invalid gate input:
+// unparseable / versionless / cross-build baseline); an ABSENT file is a note, guard inactive.
+var baselinePath: String? = ProcessInfo.processInfo.environment["CANDOR_BASELINE"]
+if baselinePath == nil, let b = candorConfig["baseline"] { baselinePath = b }
+if let bp = baselinePath {
+    gateViolations += checkBaseline(inferred: inferred, path: bp, engineVersion: engineVersion)
+}
 if let pp = policyPath {
     guard let text = try? String(contentsOfFile: pp, encoding: .utf8) else {
         FileHandle.standardError.write("candor-swift: policy \(pp) could not be read; gate NOT enforced\n".data(using: .utf8)!)
         exit(2)
     }
-    gateViolations = evaluateGate(parsePolicy(text), inferred: inferred, hostsAcc: hostsAcc,
-                                  cmdsAcc: cmdsAcc, pathsAcc: pathsAcc, tablesAcc: tablesAcc,
-                                  incompleteAcc: incompleteAcc, cg: cg)
-    // Violation lines are diagnostics, not the report — route them to STDERR so `--json --policy p`
-    // keeps stdout a single clean JSON document (a violation line on stdout broke `… | jq`).
-    for v in gateViolations { FileHandle.standardError.write(("[\(v.rule)] \(v.detail)\n").data(using: .utf8)!) }
+    gateViolations += evaluateGate(parsePolicy(text), inferred: inferred, hostsAcc: hostsAcc,
+                                   cmdsAcc: cmdsAcc, pathsAcc: pathsAcc, tablesAcc: tablesAcc,
+                                   incompleteAcc: incompleteAcc, cg: cg)
 }
+// Violation lines (baseline + policy) are diagnostics, not the report — route them to STDERR so
+// `--json --policy p` keeps stdout a single clean JSON document (a violation line on stdout broke `… | jq`).
+for v in gateViolations { FileHandle.standardError.write(("[\(v.rule)] \(v.detail)\n").data(using: .utf8)!) }
 // --gate-json ⟨0.8⟩: the machine verdict, from the SAME gateViolations that set the exit code — written
-// BEFORE the exit below (ok:true,[] when no gate is configured). Unreadable policy already exited 2 above.
+// BEFORE the exit below (ok:true,[] when no gate is configured). Unreadable policy already exited 2 above;
+// AS-EFF-005 records join the same list, so the verdict and the exit code can never disagree.
 if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVersion) }
-if policyPath != nil {
+if policyPath != nil || baselinePath != nil {
     if gateViolations.isEmpty {
-        FileHandle.standardError.write("candor-swift: policy ✓\n".data(using: .utf8)!)
+        if policyPath != nil {
+            FileHandle.standardError.write("candor-swift: policy ✓\n".data(using: .utf8)!)
+        }
     } else {
         FileHandle.standardError.write("candor-swift: \(gateViolations.count) policy violation(s)\n".data(using: .utf8)!)
         exit(1)

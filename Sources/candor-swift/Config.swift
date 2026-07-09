@@ -9,9 +9,9 @@ import Foundation
 // .candor/config), never the CWD; $CANDOR_CONFIG overrides discovery. Precedence: CLI flag →
 // CANDOR_* env → this file → default. FAIL-CLOSED when configured-but-unusable (exit 2 — the §6.2
 // unreadable-policy posture); only genuine absence is empty. Shared key vocabulary — candor-swift
-// consumes `policy` and `deps` (SPEC §2 report chaining, Deps.swift); the java-only gate keys stay
-// disclosed-inert. A key OUTSIDE the vocabulary warns (typo protection: a misspelt `policy` must not
-// silently drop the gate).
+// consumes `policy`, `baseline` (the AS-EFF-005 regression guard, Baseline.swift) and `deps` (SPEC §2
+// report chaining, Deps.swift); the remaining java-only gate keys stay disclosed-inert. A key OUTSIDE
+// the vocabulary warns (typo protection: a misspelt `policy` must not silently drop the gate).
 let candorConfigKeys: Set<String> = ["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps"]
 func loadCandorConfig(targetPath: String) -> [String: String] {
     var file: String? = nil
@@ -81,8 +81,10 @@ func loadCandorConfig(targetPath: String) -> [String: String] {
     if (anchor as NSString).lastPathComponent == ".candor" {
         anchor = (anchor as NSString).deletingLastPathComponent
     }
-    if let p = cfg["policy"], !p.isEmpty, !(p as NSString).isAbsolutePath {
-        cfg["policy"] = (anchor as NSString).appendingPathComponent(p)
+    for key in ["policy", "baseline"] {
+        if let p = cfg[key], !p.isEmpty, !(p as NSString).isAbsolutePath {
+            cfg[key] = (anchor as NSString).appendingPathComponent(p)
+        }
     }
     // `deps` is a path LIST (whitespace/colon/comma-separated, like CANDOR_DEPS) — anchor each
     // relative token to the config's home dir (the dir containing `.candor/`), same rule as `policy`.

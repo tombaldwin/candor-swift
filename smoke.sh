@@ -1128,5 +1128,34 @@ PY
 )
 [ "$NU" = "PASS" ] && ok "Net surface: establishing ctor captures host:port; a use-verb payload literal is NOT a host" || bad "Net use-verb surface: $NU"
 
+# ── AS-EFF-005 baseline guard (SPEC §7 item 5; candor-java's checkBaseline semantics, Baseline.swift):
+# gain→1, clean→0, absent→0+note, cross-build→2 WITHOUT evaluating, unparseable→2.
+mkdir -p "$W/bl/afterd"
+printf 'import Foundation\nstruct Billing { func charge() { _ = Date() } }\n' > "$W/bl/before.swift"
+printf 'import Foundation\nstruct Billing { func charge() { _ = Date(); try? FileManager.default.removeItem(atPath: "/x") } }\n' > "$W/bl/afterd/m.swift"
+"$BIN" "$W/bl/before.swift" --json > "$W/bl/base.json" 2>/dev/null
+CANDOR_BASELINE="$W/bl/base.json" "$BIN" "$W/bl/afterd" --json > /dev/null 2>"$W/bl/gain.err"; RC=$?
+{ [ $RC -eq 1 ] && grep -q 'AS-EFF-005.*Billing.charge.*gained effect { Fs }' "$W/bl/gain.err"; } \
+  && ok "baseline guard: an existing fn gaining an effect -> AS-EFF-005 + exit 1" \
+  || bad "baseline gain: rc=$RC $(cat "$W/bl/gain.err")"
+CANDOR_BASELINE="$W/bl/base.json" "$BIN" "$W/bl/before.swift" --json > /dev/null 2>&1
+[ $? -eq 0 ] && ok "baseline guard: no gain vs the saved baseline -> exit 0" || bad "baseline clean run failed"
+CANDOR_BASELINE="$W/bl/nope.json" "$BIN" "$W/bl/afterd" --json > /dev/null 2>"$W/bl/abs.err"; RC=$?
+{ [ $RC -eq 0 ] && grep -q 'regression guard is not active' "$W/bl/abs.err"; } \
+  && ok "baseline guard: absent baseline file -> note + exit 0 (guard inactive)" || bad "baseline absent: rc=$RC"
+python3 - "$W/bl/base.json" "$W/bl/doct.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["candor"]["version"] = "candor-doctored-0.0.0"
+json.dump(d, open(sys.argv[2], "w"))
+PY
+CANDOR_BASELINE="$W/bl/doct.json" "$BIN" "$W/bl/afterd" --json > /dev/null 2>"$W/bl/doct.err"; RC=$?
+{ [ $RC -eq 2 ] && grep -q 'produced by engine build candor-doctored' "$W/bl/doct.err" \
+  && ! grep -q '\[AS-EFF-005\]' "$W/bl/doct.err"; } \
+  && ok "baseline guard: a cross-build baseline refuses to evaluate (exit 2, no AS-EFF-005 wave)" \
+  || bad "baseline doctored: rc=$RC $(cat "$W/bl/doct.err")"
+echo '{not json' > "$W/bl/garb.json"
+CANDOR_BASELINE="$W/bl/garb.json" "$BIN" "$W/bl/afterd" --json > /dev/null 2>&1
+[ $? -eq 2 ] && ok "baseline guard: an unparseable baseline fails closed (exit 2)" || bad "baseline garbage did not exit 2"
+
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
