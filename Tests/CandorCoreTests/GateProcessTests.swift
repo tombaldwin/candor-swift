@@ -61,11 +61,13 @@ final class GateProcessTests: XCTestCase {
     }
 
     /// Run the binary; return (stdout, stderr, exitCode). Spawns directly (no SPM rebuild of the fixture —
-    /// candor-swift is a syntactic scan, it never builds its target).
-    private func run(_ binary: URL, _ args: [String]) throws -> (out: String, err: String, code: Int32) {
+    /// candor-swift is a syntactic scan, it never builds its target). `cwd` pins the working directory —
+    /// the config-discovery tests need to prove the CWD does NOT matter (spec §3.4 target-anchoring).
+    private func run(_ binary: URL, _ args: [String], cwd: URL? = nil) throws -> (out: String, err: String, code: Int32) {
         let p = Process()
         p.executableURL = binary
         p.arguments = args
+        if let cwd { p.currentDirectoryURL = cwd }
         let outPipe = Pipe(), errPipe = Pipe()
         p.standardOutput = outPipe
         p.standardError = errPipe
@@ -524,6 +526,56 @@ final class GateProcessTests: XCTestCase {
         _ = errPipe.fileHandleForReading.readDataToEndOfFile()
         p2.waitUntilExit()
         XCTAssertEqual(p2.terminationStatus, 2, "a typo'd CANDOR_CONFIG must fail closed")
+    }
+
+    // ── config discovery is TARGET-anchored, never CWD (spec §3.4) ─────────────────────────────────
+    // The old CWD fallback fired exactly when the CWD was OUTSIDE the target's ancestry — i.e. it applied
+    // an UNRELATED repo's config (and its policy) to this scan. Target in dir A, CWD in dir B with its own
+    // deny-everything config: B's config must NOT apply (exit 0, no gate, no "using config" line).
+    func testUnrelatedCwdConfigDoesNotApply() throws {
+        let bin = try binaryURL()
+        let target = try makeNetFixture(qual: "Billing", urlLiteral: "https://api.stripe.com/v1/charges")
+        defer { try? FileManager.default.removeItem(at: target) }
+        let other = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-othercwd-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: other) }
+        let otherCandor = other.appendingPathComponent(".candor")
+        try FileManager.default.createDirectory(at: otherCandor, withIntermediateDirectories: true)
+        let denyAll = other.appendingPathComponent("deny.pol")
+        try "deny Net\n".write(to: denyAll, atomically: true, encoding: .utf8)
+        try "policy \(denyAll.path)\n".write(to: otherCandor.appendingPathComponent("config"),
+                                             atomically: true, encoding: .utf8)
+
+        let r = try run(bin, [target.path, "--out", target.appendingPathComponent("r").path], cwd: other)
+        XCTAssertEqual(r.code, 0, "the CWD repo's config must NOT gate an unrelated target — stderr: \(r.err)")
+        XCTAssertFalse(r.err.contains("AS-EFF"), "no gate may fire from the CWD's config: \(r.err)")
+        XCTAssertFalse(r.err.contains("using config"), "no config was discovered for the TARGET: \(r.err)")
+    }
+
+    // ── a RELATIVE `policy` value in .candor/config resolves against the CONFIG's location ──────────
+    // (family decision 2026-07-09) `policy .candor/gate.pol` names <root>/.candor/gate.pol wherever the
+    // scan is invoked from — the old plain read resolved it against the invoker's CWD, so the same
+    // checked-in config exited 2 (unreadable policy) from any other directory. Also pins the discovery
+    // diagnostic: exactly which config governed the run is named on stderr.
+    func testConfigRelativePolicyResolvesAgainstConfigLocation() throws {
+        let bin = try binaryURL()
+        let target = try makeNetFixture(qual: "Billing", urlLiteral: "https://api.stripe.com/v1/charges")
+        defer { try? FileManager.default.removeItem(at: target) }
+        let candorDir = target.appendingPathComponent(".candor")
+        try FileManager.default.createDirectory(at: candorDir, withIntermediateDirectories: true)
+        try "deny Net\n".write(to: candorDir.appendingPathComponent("gate.pol"), atomically: true, encoding: .utf8)
+        try "policy .candor/gate.pol\n".write(to: candorDir.appendingPathComponent("config"),
+                                              atomically: true, encoding: .utf8)
+        let elsewhere = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-elsewhere-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: elsewhere) }
+
+        let r = try run(bin, [target.path, "--out", target.appendingPathComponent("r").path], cwd: elsewhere)
+        XCTAssertEqual(r.code, 1, "the config-relative deny-Net policy must gate from ANY cwd — stderr: \(r.err)")
+        XCTAssertTrue(r.err.contains("AS-EFF-006"), "the deny fires: \(r.err)")
+        XCTAssertTrue(r.err.contains("using config \(candorDir.appendingPathComponent("config").path)"),
+                      "the discovery diagnostic names the governing config: \(r.err)")
     }
 
     func testGateJsonDashStreamsAPureVerdictToStdout() throws {

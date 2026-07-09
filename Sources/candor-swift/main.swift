@@ -152,13 +152,18 @@ func loadCandorConfig(targetPath: String) -> [String: String] {
             if parent == dir || parent.isEmpty { break }
             dir = parent
         }
-        if file == nil, FileManager.default.fileExists(atPath: ".candor/config") { file = ".candor/config" }
+        // NO CWD fallback here (deleted): discovery is TARGET-anchored per SPEC §3.4 — a CWD probe only
+        // ever fired when the CWD was OUTSIDE the target's ancestry, i.e. it applied an UNRELATED repo's
+        // config (and its policy) to this scan. Genuine absence is simply "no config".
         if file == nil { return [:] }
     }
     guard let text = try? String(contentsOfFile: file!, encoding: .utf8) else {
         FileHandle.standardError.write("candor-swift: config \(file!) exists but could not be read — failing (exit 2)\n".data(using: .utf8)!)
         exit(2)
     }
+    // Name the config that governs this scan — an ancestor-walk discovery is otherwise invisible, and a
+    // surprising gate verdict ("where did that policy come from?") needs the provenance on stderr.
+    FileHandle.standardError.write("candor-swift: using config \(file!)\n".data(using: .utf8)!)
     var cfg: [String: String] = [:]
     for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
         let line = raw.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0]
@@ -172,6 +177,21 @@ func loadCandorConfig(targetPath: String) -> [String: String] {
             continue
         }
         cfg[key] = val
+    }
+    // FAMILY DECISION (2026-07-09): a RELATIVE path value in .candor/config resolves against the CONFIG
+    // FILE'S location — the config is checked in beside the paths it names, so `policy .candor/gate.pol`
+    // must work no matter where the scan is invoked from. Resolving against the CWD (the old behaviour,
+    // via the plain contentsOfFile read downstream) made the same checked-in config pass or exit 2
+    // depending on the invoker's directory. The anchor is the config file's directory, stepping OUT of a
+    // containing `.candor/` dir first (a discovered config lives at <root>/.candor/config, and its values
+    // are written root-relative — `policy .candor/gate.pol` names <root>/.candor/gate.pol, not
+    // <root>/.candor/.candor/gate.pol). An EMPTY value stays empty (configured-with-empty fails loud).
+    if let p = cfg["policy"], !p.isEmpty, !(p as NSString).isAbsolutePath {
+        var anchor = (file! as NSString).deletingLastPathComponent
+        if (anchor as NSString).lastPathComponent == ".candor" {
+            anchor = (anchor as NSString).deletingLastPathComponent
+        }
+        cfg["policy"] = (anchor as NSString).appendingPathComponent(p)
     }
     return cfg
 }
