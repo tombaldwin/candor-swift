@@ -37,7 +37,16 @@ jobs:
           git clone https://github.com/tombaldwin/candor-spec ../candor-spec
           git -C ../candor-spec checkout --quiet eccfac71a9dc00bfa7e29d648c7d761d77d91b9a
           bash smoke.sh
-      - name: Create the GitHub release
+      - name: Create the GitHub release (idempotent)
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+        # Create-or-keep: a release may ALREADY exist for this tag — cut by hand with curated notes (the
+        # richer ⚠/soundness write-ups this project uses), or by a re-run of this job. A bare
+        # `gh release create` then fails 422 "tag_name already exists" and reds the run for nothing (the
+        # gates above are what matter and already passed). Only auto-create when none exists.
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists — keeping it (gates passed; nothing to do)."
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          fi
