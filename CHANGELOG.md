@@ -7,6 +7,19 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.8.6] — 2026-07-10
+
+- ⚠ **The AS-EFF-005 baseline guard** (SPEC §7 item 5): `CANDOR_BASELINE` / the config `baseline`
+  key now gate — an existing fn gaining an effect vs a same-build baseline is a violation (exit 1);
+  a stale/provenance-less/unparseable or configured-but-EMPTY baseline is invalid gate input
+  (exit 2, no evaluation); an absent file is a note (guard inactive). Previously disclosed-inert.
+- **`parsepolicy`** subcommand: the §6.2 grammar witness, java-parity verified (building it fixed
+  a set-dedup parser gap — duplicate deny effects/allow values now dedupe like every other engine).
+  The cross-engine grammar differential (conformance PART 4) is hard four-way with this.
+- Docs: family framing (reference engine = candor-java), the payload-host and pure-vs-Unknown
+  rules in standing docs, release-tag upgrade guidance, identity drift gates, the cardinal-sin
+  comment ruling.
+
 ## [0.8.5] — 2026-07-09
 
 ### ⚠ Net hosts are captured at ESTABLISHING forms only (report-affecting)
