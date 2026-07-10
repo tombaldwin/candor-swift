@@ -7,6 +7,25 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.8.9] — 2026-07-10
+
+### ⚠ Property-wrapper `$`-projection and keypath reads charge their effects (soundness round — report-affecting)
+
+Two more accessor access-paths where the effectful accessor unit existed but the ACCESS SITE didn't edge to
+it, so the effect read silent-pure (register R24, R25):
+
+- **`m.$name`** — a property wrapper's `projectedValue` (the `$`-projection) is now edged, mirroring the
+  existing `wrappedValue` edging (an effectful projection was dropped while `wrappedValue` was charged).
+- **`h[keyPath: \.data]`** — applying a keypath via subscript READS the property; the implicit-root keypath
+  resolver only handled the element-iterator form (`xs.map(\.p)`), so a `[keyPath:]` subscript application —
+  whose root is the receiver's OWN type — was missed. Now resolved to the member's accessor unit.
+
+Both are the same class as R22/R23 (the accessor unit carried the effect; only the access edge was missing).
+The element-map keypath keeps working (no regression); a pure member read via `$`/keypath stays pure (no
+fabrication); `@dynamicMemberLookup` still discloses `Unknown` (sound — a member it can't pin to a name).
+swift-specific accessor surface. Gated by
+`DriverResolutionProcessTests.testProjectedValueAndKeyPathAccessorEffectsCharge`.
+
 ## [0.8.8] — 2026-07-10
 
 ### ⚠ Setter `newValue` is now typed — effects through it charge (soundness round — report-affecting)

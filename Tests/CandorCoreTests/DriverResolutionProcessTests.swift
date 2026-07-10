@@ -201,4 +201,34 @@ final class DriverResolutionProcessTests: XCTestCase {
         XCTAssertNil(by["viaPureSet"],
                      "a pure setter must not fabricate an effect onto its writer")
     }
+
+    // ── property-wrapper `$` projection + keypath application (soundness round 2026-07-10, R24 + R25) ──
+    // Two more accessor access-paths where the effectful accessor unit exists but the ACCESS SITE didn't
+    // edge to it: `m.$name` (the wrapper's projectedValue) and `h[keyPath: \.data]` (a keypath applied via
+    // subscript — root is the receiver's OWN type). Both read silent-pure. The element-map keypath
+    // (`xs.map(\.p)`) already worked and must stay working; a pure member via keypath must stay pure.
+    func testProjectedValueAndKeyPathAccessorEffectsCharge() throws {
+        let by = try scan("""
+        import Foundation
+        @propertyWrapper struct Tracker {
+            var wrappedValue: String
+            var projectedValue: String { try? wrappedValue.write(toFile: "/tmp/p", atomically: true, encoding: .utf8); return "" }  // Fs
+        }
+        class Model { @Tracker var name: String = "" }
+        class Holder { var data: String { (try? String(contentsOfFile: "/etc/hostname", encoding: .utf8)) ?? "" } }  // Fs
+        class Pure { var label: String { "x" } }
+        func viaProjected(_ m: Model) -> String { m.$name }              // R24: was silent → Fs
+        func viaKeyPath(_ h: Holder) -> String { h[keyPath: \\.data] }   // R25: was silent → Fs
+        func viaMapKeyPath(_ hs: [Holder]) -> [String] { hs.map(\\.data) } // pre-existing element case, still Fs
+        func viaKeyPathPure(_ p: Pure) -> String { p[keyPath: \\.label] } // control: pure via keypath stays pure
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaProjected"), ["Fs"],
+                       "a property-wrapper projectedValue reached via $-access must charge (was silent)")
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaKeyPath"), ["Fs"],
+                       "an effectful computed property read via h[keyPath: \\.p] must charge (was silent)")
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaMapKeyPath"), ["Fs"],
+                       "the element-map keypath case must still charge (no regression)")
+        XCTAssertNil(by["viaKeyPathPure"],
+                     "a pure computed property read via keypath must not fabricate an effect")
+    }
 }

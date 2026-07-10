@@ -963,7 +963,12 @@ final class CallCollector: SyntaxVisitor {
                 // type (confirmed across all files), so a non-wrapper attribute never fabricates. `count`
                 // itself is a stored property (no accessor unit), so the plain `S.count` edge below is
                 // inert here; the wrappedValue edge is the real one.
-                if let wrapper = wrappedProps[root]?[prop], propertyWrapperTypes.contains(wrapper) {
+                if prop.hasPrefix("$"), let wrapper = wrappedProps[root]?[String(prop.dropFirst())],
+                   propertyWrapperTypes.contains(wrapper) {
+                    // PROJECTED value: `m.$name` runs the wrapper's `projectedValue` accessor, not
+                    // `wrappedValue` — edge to that unit so an effectful projection isn't silently pure.
+                    propertyEdges.insert("\(wrapper).projectedValue")
+                } else if let wrapper = wrappedProps[root]?[prop], propertyWrapperTypes.contains(wrapper) {
                     propertyEdges.insert("\(wrapper).wrappedValue")
                 }
                 propertyEdges.insert("\(root).\(prop)")
@@ -1090,12 +1095,19 @@ final class CallCollector: SyntaxVisitor {
                 .as(KeyPathPropertyComponentSyntax.self)?.declName.baseName.text else { return .visitChildren }
         var rootType: String? = node.root.flatMap { typeName($0).name }
         if rootType == nil {
-            // implicit root: the key path is the argument of an element-iterator call `recv.map(\.prop)` —
-            // its type is the receiver's element. Walk to the enclosing call and type from its receiver.
+            // implicit root `\.prop`: two enclosing forms give the root type differently —
+            //  · `base[keyPath: \.prop]` — a SUBSCRIPT application: the root is the RECEIVER's OWN type.
+            //  · `recv.map(\.prop)` — an element-iterator call: the root is the receiver's ELEMENT type.
+            // Walk to whichever encloses first. (The subscript form read silent-pure: the old walk skipped
+            // straight past it to a FunctionCall — R25.)
             var p: Syntax? = node.parent
-            while let cur = p, !cur.is(FunctionCallExprSyntax.self) { p = cur.parent }
-            if let call = p?.as(FunctionCallExprSyntax.self),
-               let ma = call.calledExpression.as(MemberAccessExprSyntax.self), let base = ma.base {
+            while let cur = p, !cur.is(FunctionCallExprSyntax.self), !cur.is(SubscriptCallExprSyntax.self) {
+                p = cur.parent
+            }
+            if let sub = p?.as(SubscriptCallExprSyntax.self), sub.arguments.first?.label?.text == "keyPath" {
+                rootType = rootOf(sub.calledExpression).root      // `h[keyPath: \.prop]` → type of `h`
+            } else if let call = p?.as(FunctionCallExprSyntax.self),
+                      let ma = call.calledExpression.as(MemberAccessExprSyntax.self), let base = ma.base {
                 rootType = elementTypeOf(base)
             }
         }
