@@ -309,9 +309,25 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                opaqueSeqBuilders: opaqueSeqBuilders, seqBuilderConcrete: seqBuilderConcrete,
                                closureFields: closureFields)
         cc.walk(body)
-        // accessor units: a property READ of a known accessor unit is an edge (the reader inherits
-        // the getter's effects — `c.data` reaching the Fs inside `var data: Data { … }`)
-        edges[f.qual, default: []].formUnion(cc.propertyEdges.compactMap { resolveQual($0) })
+        // accessor units: a property READ/WRITE of a known accessor unit is an edge (the reader inherits
+        // the getter/observer/subscript's effects — `c.data` reaching the Fs inside `var data: Data { … }`).
+        // resolveQual matches the OWN type's `Type.member` unit; when the accessor is INHERITED (the body
+        // lives on a superclass or conformed protocol — `d.payload` where `payload`'s getter is on `Base`)
+        // the own-type key misses. Climb `supertypesOf` exactly as the method-call path does (an inherited
+        // METHOD already resolves this way) — else an effectful inherited accessor reads SILENT-PURE (the
+        // swift inherited-property-accessor vein: methods climbed, property/observer/subscript units did not).
+        // Only when the own key doesn't resolve — an override on the subclass wins (its unit resolves first),
+        // so we never fabricate over a real overriding accessor; a member no supertype defines edges nothing.
+        for pe in cc.propertyEdges {
+            if let t = resolveQual(pe) {
+                edges[f.qual, default: []].insert(t)
+            } else if let dot = pe.lastIndex(of: "."), localTypes.contains(String(pe[..<dot])) {
+                let type = String(pe[..<dot]), member = String(pe[pe.index(after: dot)...])
+                for sup in supertypesOf[type] ?? [] {
+                    if let t = resolveQual("\(sup).\(member)") { edges[f.qual, default: []].insert(t) }
+                }
+            }
+        }
         // a bare-name read that names a GLOBAL initializer unit charges its first-touch effects here
         edges[f.qual, default: []].formUnion(cc.globalReads.filter { globalUnitNames.contains($0) && $0 != f.qual })
         direct[f.qual, default: []].formUnion(cc.directEffects)

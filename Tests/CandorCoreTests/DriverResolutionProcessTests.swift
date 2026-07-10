@@ -126,4 +126,40 @@ final class DriverResolutionProcessTests: XCTestCase {
         XCTAssertEqual(ProcessHarness.inferred(by, "runner"), ["Unknown"],
                        "no visible call site — the fn-typed invocation must stay Unknown")
     }
+
+    // ── INHERITED PROPERTY ACCESSORS (soundness round 2026-07-10, R22) ─────────────────────────────
+    // An effectful computed property / didSet observer / subscript whose BODY lives on a SUPERCLASS read
+    // SILENT-PURE when accessed through a subclass: property-edge resolution matched only the OWN type's
+    // `Type.member` unit and — unlike the method-call path — did NOT climb `supertypesOf`. Methods climbed,
+    // property accessors did not. Fixed in Driver by mirroring the method climb for property edges.
+    func testInheritedPropertyAccessorEffectsClimbTheHierarchy() throws {
+        let by = try scan("""
+        import Foundation
+        class Base { var payload: Data { (try? Data(contentsOf: URL(fileURLWithPath: "/etc/hostname"))) ?? Data() } }  // Fs
+        class Derived: Base {}
+        class Mid: Base {}; class Leaf: Mid {}
+        class Tracked { var name: String = "" { didSet { try? name.write(toFile: "/tmp/a", atomically: true, encoding: .utf8) } } }  // Fs
+        class SubTracked: Tracked {}
+        class BaseM { func fetch() -> Data { (try? Data(contentsOf: URL(fileURLWithPath: "/etc/hostname"))) ?? Data() } }  // Fs
+        class DerivedM: BaseM {}
+        // a pure inherited property — the control that must NOT be fabricated onto its reader
+        class PureBase { var label: String { "x" } }
+        class PureDerived: PureBase {}
+        func viaInherited(_ d: Derived) -> Data { d.payload }        // was SILENT → Fs
+        func viaTwoLevel(_ l: Leaf) -> Data { l.payload }           // was SILENT → Fs (transitive climb)
+        func viaInheritedDidSet(_ s: SubTracked) { s.name = "y" }   // was SILENT → Fs (observer on write)
+        func viaInheritedMethod(_ d: DerivedM) -> Data { d.fetch() } // control: methods already climbed
+        func viaPure(_ p: PureDerived) -> String { p.label }        // control: must stay pure/omitted
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaInherited"), ["Fs"],
+                       "an inherited computed property's effect must reach the subclass reader (was silent-pure)")
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaTwoLevel"), ["Fs"],
+                       "a two-level-inherited computed property must climb transitively")
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaInheritedDidSet"), ["Fs"],
+                       "an inherited didSet observer runs on the subclass assignment")
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaInheritedMethod"), ["Fs"],
+                       "control: an inherited method already climbed")
+        XCTAssertNil(by["viaPure"],
+                     "a PURE inherited property must not fabricate an effect onto its reader")
+    }
 }

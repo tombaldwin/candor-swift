@@ -7,6 +7,22 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.8.7] — 2026-07-10
+
+### ⚠ Inherited property accessors now charge their effects (soundness round — report-affecting)
+
+An effectful **computed property**, **`didSet`/`willSet` observer**, or **subscript** whose body lives on a
+**superclass** read SILENT-PURE when accessed through a subclass: `d.payload` (where `payload`'s getter is on
+`Base`), `s.name = x` (an inherited observer), `l.payload` (two-level). Property-edge resolution matched only
+the accessed type's own `Type.member` accessor unit and — unlike the method-call path, which already climbs
+the type hierarchy — never consulted the supertypes. So a method inherited from a base was charged, but a
+property accessor inherited from the same base was dropped (the cardinal sin: a silent under-report). The
+fix mirrors the method climb for property edges (`supertypesOf`, transitive → two-level works); an override
+on the subclass still wins (its own unit resolves first, so nothing is fabricated), and a pure inherited
+property stays pure. Found by an adversarial soundness probe, not corpus/CI; gated by a twin regression
+(`DriverResolutionProcessTests.testInheritedPropertyAccessorEffectsClimbTheHierarchy`). candor-ts/java were
+checked and are sound (they climb) — swift-specific, not a shared blind spot. Register: R22 (CLOSED).
+
 ## [0.8.6] — 2026-07-10
 
 - ⚠ **The AS-EFF-005 baseline guard** (SPEC §7 item 5): `CANDOR_BASELINE` / the config `baseline`
