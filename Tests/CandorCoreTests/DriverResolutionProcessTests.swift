@@ -231,4 +231,33 @@ final class DriverResolutionProcessTests: XCTestCase {
         XCTAssertNil(by["viaKeyPathPure"],
                      "a pure computed property read via keypath must not fabricate an effect")
     }
+
+    // ── generic-constrained dispatch: where-clause + type-level bounds (soundness 2026-07-10, R26 + R27) ──
+    // The inline `<T: P>` bound already dispatched `x.method()` to P's conformers. Two forms were missed:
+    // the `where T: P` clause (R26) and a TYPE-level bound `struct Box<T: P> { let x: T }` reaching
+    // `x.method()` (R27 — the field typed `T` wasn't resolved to its bound). Both silent-pure.
+    func testGenericConstrainedDispatchWhereClauseAndTypeLevelBounds() throws {
+        let by = try scan("""
+        import Foundation
+        protocol Saver { func save() }
+        struct DiskSaver: Saver { func save() { try? "x".write(toFile: "/tmp/s", atomically: true, encoding: .utf8) } }  // Fs
+        func viaWhere<T>(_ x: T) where T: Saver { x.save() }             // R26: was silent → Fs
+        struct Pipe<T: Saver> { let item: T; func run() { item.save() } }
+        func viaTypeLevel(_ p: Pipe<DiskSaver>) { p.run() }              // R27: Pipe.run was silent → Fs
+        func viaInline<T: Saver>(_ x: T) { x.save() }                    // control: inline bound already worked
+        func viaUnconstrained<T>(_ x: T) -> T { x }                      // control: no dispatch → no effect
+        struct Plain<T> { let item: T }                                  // unconstrained type-level generic
+        func viaPlainField(_ p: Plain<DiskSaver>) -> DiskSaver { p.item } // control: no method call → pure
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaWhere"), ["Fs"],
+                       "a `where T: P` generic bound must dispatch like the inline `<T: P>` bound (was silent)")
+        XCTAssertEqual(ProcessHarness.inferred(by, "Pipe.run"), ["Fs"],
+                       "a stored field typed as the type's bounded generic param must dispatch (was silent)")
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaInline"), ["Fs"],
+                       "control: the inline `<T: P>` bound still dispatches")
+        XCTAssertNil(by["viaUnconstrained"],
+                     "an unconstrained generic with no dispatched call must stay pure (no fabrication)")
+        XCTAssertNil(by["viaPlainField"],
+                     "reading an unconstrained-generic field (no method call) must not fabricate an effect")
+    }
 }

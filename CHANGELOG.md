@@ -26,6 +26,13 @@ fabrication); `@dynamicMemberLookup` still discloses `Unknown` (sound — a memb
 swift-specific accessor surface. Gated by
 `DriverResolutionProcessTests.testProjectedValueAndKeyPathAccessorEffectsCharge`.
 
+Also, **generic-constrained dispatch** (register R26, R27): the inline `<T: P>` bound already dispatched
+`x.method()` to `P`'s conformers, but two forms were missed and read silent-pure — a **`where T: P`** clause
+(now collected alongside the inline clause), and a **type-level bound** `struct Box<T: P> { let x: T }`
+reaching `x.method()` (the field typed `T` now resolves to its bound `P`, so the existing protocol-typed-field
+dispatch fires). An unconstrained generic, and a bounded generic with no dispatched call, stay pure (no
+fabrication). Gated by `DriverResolutionProcessTests.testGenericConstrainedDispatchWhereClauseAndTypeLevelBounds`.
+
 ## [0.8.8] — 2026-07-10
 
 ### ⚠ Setter `newValue` is now typed — effects through it charge (soundness round — report-affecting)

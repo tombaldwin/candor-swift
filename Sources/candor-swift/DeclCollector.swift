@@ -59,6 +59,7 @@ final class DeclCollector: SyntaxVisitor {
     var converter: SourceLocationConverter
     var fns: [FnInfo] = []
     var fields: [String: [String: (name: String?, isFunction: Bool)]] = [:] // Type -> field -> info
+    var typeGenericBounds: [String: [String: String]] = [:]  // Type -> its generic param -> protocol bound
     var fieldArrayElem: [String: [String: String]] = [:]  // Type -> field -> ELEMENT type (`[T]` field)
     var fieldDictValue: [String: [String: String]] = [:]  // Type -> field -> VALUE type (`[K: V]` field)
     var protocolMethods: [String: Set<String>] = [:]   // protocol -> declared method names
@@ -176,19 +177,35 @@ final class DeclCollector: SyntaxVisitor {
         }
         return .skipChildren
     }
+    // TYPE-LEVEL generic bounds (`struct Pipe<T: Saver>` / `… where T: Saver`) — recorded so a stored field
+    // typed `T` resolves to its bound `Saver`, letting `item.save()` dispatch (else it read silent-pure, R27).
+    private func recordTypeGenerics(_ name: String, _ clause: GenericParameterClauseSyntax?, _ whereClause: GenericWhereClauseSyntax?) {
+        for gp in clause?.parameters ?? [] {
+            if let it = gp.inheritedType, let b = typeName(it).name { typeGenericBounds[name, default: [:]][gp.name.text] = b }
+        }
+        for req in whereClause?.requirements ?? [] {
+            guard case .conformanceRequirement(let c) = req.requirement,
+                  let l = typeName(c.leftType).name, let r = typeName(c.rightType).name else { continue }
+            typeGenericBounds[name, default: [:]][l] = r
+        }
+    }
     override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {
+        recordTypeGenerics(node.name.text, node.genericParameterClause, node.genericWhereClause)
         pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes); return .visitChildren
     }
     override func visitPost(_ node: ClassDeclSyntax) { typeStack.removeLast() }
     override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind {
+        recordTypeGenerics(node.name.text, node.genericParameterClause, node.genericWhereClause)
         pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes); return .visitChildren
     }
     override func visitPost(_ node: StructDeclSyntax) { typeStack.removeLast() }
     override func visit(_ node: EnumDeclSyntax) -> SyntaxVisitorContinueKind {
+        recordTypeGenerics(node.name.text, node.genericParameterClause, node.genericWhereClause)
         pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes); return .visitChildren
     }
     override func visitPost(_ node: EnumDeclSyntax) { typeStack.removeLast() }
     override func visit(_ node: ActorDeclSyntax) -> SyntaxVisitorContinueKind {
+        recordTypeGenerics(node.name.text, node.genericParameterClause, node.genericWhereClause)
         pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes); return .visitChildren
     }
     override func visitPost(_ node: ActorDeclSyntax) { typeStack.removeLast() }
@@ -341,7 +358,10 @@ final class DeclCollector: SyntaxVisitor {
                     }
                 }
                 if let ann = binding.typeAnnotation {
-                    let info = typeName(ann.type)
+                    var info = typeName(ann.type)
+                    // a field typed as the enclosing type's GENERIC PARAM resolves to its bound, so a
+                    // protocol-typed field dispatches (`Pipe<T: Saver>.item` → Saver → `item.save()` fires).
+                    if let tn = info.name, let bound = typeGenericBounds[ty]?[tn] { info = (bound, info.isFunction) }
                     fields[ty, default: [:]][name] = info
                     if let elem = arrayElementName(ann.type) { fieldArrayElem[ty, default: [:]][name] = elem }
                     if let val = dictValueName(ann.type) { fieldDictValue[ty, default: [:]][name] = val }
@@ -460,12 +480,21 @@ final class DeclCollector: SyntaxVisitor {
         info.enclosingTypePath = tyPath
         info.body = body.map { Syntax($0) }
         info.isMain = name == "main"
-        // Generic constraints `<T: P>` — a value param typed `T` then dispatches like a `P`-typed param.
+        // Generic constraints — a value param typed `T` then dispatches like its bound `P`-typed param.
+        // BOTH forms bind the same way: the inline `<T: P>` clause AND the `where T: P` clause (the latter
+        // was ignored, so `func f<T>(_ x: T) where T: P { x.method() }` read silent-pure — R26).
         var genericBounds: [String: String] = [:]
         let genClause = Syntax(node).as(FunctionDeclSyntax.self)?.genericParameterClause
             ?? Syntax(node).as(InitializerDeclSyntax.self)?.genericParameterClause
         for gp in genClause?.parameters ?? [] {
             if let it = gp.inheritedType, let bound = typeName(it).name { genericBounds[gp.name.text] = bound }
+        }
+        let whereClause = Syntax(node).as(FunctionDeclSyntax.self)?.genericWhereClause
+            ?? Syntax(node).as(InitializerDeclSyntax.self)?.genericWhereClause
+        for req in whereClause?.requirements ?? [] {
+            guard case .conformanceRequirement(let conf) = req.requirement,
+                  let lhs = typeName(conf.leftType).name, let rhs = typeName(conf.rightType).name else { continue }
+            genericBounds[lhs] = rhs   // `where T: P` — same binding as `<T: P>`
         }
         for (idx, p) in sig.parameterClause.parameters.enumerated() {
             let pname = (p.secondName ?? p.firstName).text
