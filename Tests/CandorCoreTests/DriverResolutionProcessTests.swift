@@ -281,4 +281,32 @@ final class DriverResolutionProcessTests: XCTestCase {
         XCTAssertNil(by["viaPureBuilder"],
                      "a pure @resultBuilder must not fabricate an effect onto its annotated func")
     }
+
+    // ── conditional conformance on a stdlib collection (soundness round 2026-07-11, R28) ───────────
+    // `extension Array: Saveable where Element: Saveable` reached via `xs.persist()` read silent-pure —
+    // two gaps: the array-receiver → `Array.persist` edge, AND the bare `forEach { $0.persist() }` over
+    // self (whose element is the bound `Saveable`) not dispatching. Both fixed. A PURE conditional
+    // conformance, and a std array method with a local Array extension present, must not fabricate.
+    func testConditionalConformanceOnArrayCollectionDispatches() throws {
+        let by = try scan("""
+        import Foundation
+        protocol Saveable { func persist() }
+        struct Item: Saveable { func persist() { try? "x".write(toFile: "/tmp/i", atomically: true, encoding: .utf8) } }  // Fs
+        extension Array: Saveable where Element: Saveable { func persist() { forEach { $0.persist() } } }
+        func viaConditional(_ xs: [Item]) { xs.persist() }             // R28 chain → Fs
+        // control: a PURE conditional-conformance extension must stay pure (no fabrication)
+        protocol Named { func label() -> String }
+        struct Tag: Named { func label() -> String { "t" } }           // pure
+        extension Array where Element: Named { func labels() -> [String] { map { $0.label() } } }
+        func viaPureConditional(_ xs: [Tag]) -> [String] { xs.labels() }  // must stay pure
+        // control: a std array method (forEach) with a local Array extension present must not disclose Unknown
+        func viaStdArrayMethod(_ xs: [Item]) { xs.forEach { $0.persist() } }  // Fs, and NOT Unknown
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaConditional"), ["Fs"],
+                       "the conditional-conformance chain xs.persist() → Array.persist → Item.persist must charge")
+        XCTAssertNil(by["viaPureConditional"],
+                     "a pure conditional conformance must not fabricate an effect")
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaStdArrayMethod"), ["Fs"],
+                       "a std array method with a local Array extension present must charge Fs and NOT disclose a spurious Unknown")
+    }
 }

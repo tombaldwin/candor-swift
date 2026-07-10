@@ -7,6 +7,22 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.8.10] — 2026-07-11
+
+### ⚠ Conditional conformance on a stdlib collection now dispatches (soundness R28 — report-affecting)
+
+`extension Array: Saveable where Element: Saveable { func persist() { forEach { $0.persist() } } }` reached
+via `xs.persist()` (xs: [Item]) read silent-pure — two coupled gaps, both fixed:
+- the **array-receiver edge**: `xs.persist()` now resolves to the local `Array.persist` extension unit (a
+  soft `resolveQual` edge, so a std array method like `xs.forEach` drops silently — no spurious Unknown);
+- the **self-element dispatch**: a bare `forEach { $0.persist() }` over `self` inside the extension now types
+  `$0` as the extension's element bound (`where Element: Saveable`), so it dispatches to the conformers.
+
+A pure conditional conformance stays pure (no fabrication); a std array method with a local Array extension
+present charges precisely (no Unknown). Gated by
+`DriverResolutionProcessTests.testConditionalConformanceOnArrayCollectionDispatches`. **This closes the last
+FIXABLE silent-under-report residual — only the fundamental syntactic-limit residuals (R2–R8) remain open.**
+
 ## [0.8.9] — 2026-07-10
 
 ### ⚠ Property-wrapper `$`-projection and keypath reads charge their effects (soundness round — report-affecting)

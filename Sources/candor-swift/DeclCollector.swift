@@ -40,6 +40,10 @@ struct FnInfo {
     var isMain: Bool = false
     var isAccessor: Bool = false   // a computed-property/observer/lazy-init body (spec 0.5 unitKind)
     var uppercaseAttrs: [String] = []   // capitalized @-attributes (a `@SomeBuilder` result-builder candidate)
+    // self's ELEMENT type when this method lives in a COLLECTION extension with an element bound
+    // (`extension Array where Element: Saveable` → "Saveable") — so a bare `forEach { $0.method() }`
+    // over `self` types `$0` and dispatches (the conditional-conformance vein, R28).
+    var selfElementType: String? = nil
 }
 
 // Collects the expression of every explicit `return <expr>` inside a body (Finding 1: pinning a function's
@@ -114,6 +118,9 @@ final class DeclCollector: SyntaxVisitor {
     // flood), and record the property name so CallCollector can edge an invocation to it.
     var closureFields: [String: Set<String>] = [:]   // Type -> stored closure-property names (with a `<Type>.<prop>` unit)
     private var typeStack: [String] = []
+    // parallel to typeStack: self's ELEMENT bound when the current scope is a COLLECTION extension with a
+    // `where Element: P` clause (`extension Array where Element: Saveable` → "Saveable"); nil otherwise.
+    private var selfElementStack: [String?] = []
 
     init(file: String, tree: SourceFileSyntax) {
         self.file = file
@@ -129,6 +136,7 @@ final class DeclCollector: SyntaxVisitor {
     private func pushType(_ name: String, inheritance: InheritanceClauseSyntax?, attributes: AttributeListSyntax? = nil,
                           isExtension: Bool = false) {
         typeStack.append(name)
+        selfElementStack.append(nil)   // extensions with a `where Element: P` overwrite this below
         localTypes.insert(name)
         // An `extension` does not DECLARE the type — it adds to whatever (possibly platform) type already
         // exists. Only a real definition shadows the κ table (see declaredTypes' note).
@@ -199,22 +207,22 @@ final class DeclCollector: SyntaxVisitor {
         recordTypeGenerics(node.name.text, node.genericParameterClause, node.genericWhereClause)
         pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes); return .visitChildren
     }
-    override func visitPost(_ node: ClassDeclSyntax) { typeStack.removeLast() }
+    override func visitPost(_ node: ClassDeclSyntax) { typeStack.removeLast(); selfElementStack.removeLast() }
     override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind {
         recordTypeGenerics(node.name.text, node.genericParameterClause, node.genericWhereClause)
         pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes); return .visitChildren
     }
-    override func visitPost(_ node: StructDeclSyntax) { typeStack.removeLast() }
+    override func visitPost(_ node: StructDeclSyntax) { typeStack.removeLast(); selfElementStack.removeLast() }
     override func visit(_ node: EnumDeclSyntax) -> SyntaxVisitorContinueKind {
         recordTypeGenerics(node.name.text, node.genericParameterClause, node.genericWhereClause)
         pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes); return .visitChildren
     }
-    override func visitPost(_ node: EnumDeclSyntax) { typeStack.removeLast() }
+    override func visitPost(_ node: EnumDeclSyntax) { typeStack.removeLast(); selfElementStack.removeLast() }
     override func visit(_ node: ActorDeclSyntax) -> SyntaxVisitorContinueKind {
         recordTypeGenerics(node.name.text, node.genericParameterClause, node.genericWhereClause)
         pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes); return .visitChildren
     }
-    override func visitPost(_ node: ActorDeclSyntax) { typeStack.removeLast() }
+    override func visitPost(_ node: ActorDeclSyntax) { typeStack.removeLast(); selfElementStack.removeLast() }
     override func visit(_ node: ExtensionDeclSyntax) -> SyntaxVisitorContinueKind {
         // A non-identifier extended type (`extension [Foo]`, `extension Optional<X>`) needs a
         // STABLE name — the old "?" fallback merged every such extension into one phantom unit
@@ -222,9 +230,18 @@ final class DeclCollector: SyntaxVisitor {
         // methods. The trimmed source text is unique per type; spaces drop for qual hygiene.
         let name = typeName(node.extendedType).name
             ?? node.extendedType.trimmedDescription.replacingOccurrences(of: " ", with: "")
-        pushType(name, inheritance: node.inheritanceClause, isExtension: true); return .visitChildren
+        pushType(name, inheritance: node.inheritanceClause, isExtension: true)
+        // A conditional-conformance extension of a COLLECTION (`extension Array where Element: Saveable`):
+        // record self's element bound so a bare `forEach { $0.persist() }` over self dispatches (R28). The
+        // element param is Swift's collection convention `Element`; a `where Element: P` requirement gives P.
+        for req in node.genericWhereClause?.requirements ?? [] {
+            guard case .conformanceRequirement(let c) = req.requirement,
+                  typeName(c.leftType).name == "Element", let bound = typeName(c.rightType).name else { continue }
+            selfElementStack[selfElementStack.count - 1] = bound
+        }
+        return .visitChildren
     }
-    override func visitPost(_ node: ExtensionDeclSyntax) { typeStack.removeLast() }
+    override func visitPost(_ node: ExtensionDeclSyntax) { typeStack.removeLast(); selfElementStack.removeLast() }
 
     override func visit(_ node: ProtocolDeclSyntax) -> SyntaxVisitorContinueKind {
         var methods = Set<String>()
@@ -484,6 +501,7 @@ final class DeclCollector: SyntaxVisitor {
         info.simpleQual = typeStack.last.map { "\($0).\(name)" } ?? name
         info.enclosingType = typeStack.last
         info.enclosingTypePath = tyPath
+        info.selfElementType = selfElementStack.last ?? nil   // collection-extension element bound, if any
         info.body = body.map { Syntax($0) }
         info.isMain = name == "main"
         // capture capitalized @-attributes on the func (`@EffBuilder`) — Driver edges to a result-builder

@@ -54,6 +54,7 @@ final class CallCollector: SyntaxVisitor {
     let returns: [String: String]   // unambiguous factory return types (the candor-scan move)
     let enumCaseValueType: [String: String]  // unambiguous enum case -> associated value type
     var enclosingType: String?
+    var selfElementType: String?   // self's element bound in a collection extension (R28)
     var calls: [Call] = []
     var directEffects: Set<String> = []
     var unresolved = false
@@ -110,6 +111,7 @@ final class CallCollector: SyntaxVisitor {
         self.dynamicMemberTypes = dynamicMemberTypes
         self.enumCaseValueType = enumCaseValueType
         self.vars = info.params
+        self.selfElementType = info.selfElementType
         self.fnTyped = info.fnTypedParams
         self.protoTyped = info.protoParams
         self.arrayElem = info.arrayParams
@@ -610,13 +612,23 @@ final class CallCollector: SyntaxVisitor {
         guard !closures.isEmpty else { return }
 
         // is this the element closure of a whitelisted iterator? then its first param is typed.
+        // Explicit receiver (`xs.forEach{…}`) OR bare/implicit-self (`forEach{…}` inside a Collection ext).
         let iteratorMethod: String? = (node.calledExpression.as(MemberAccessExprSyntax.self))?.declName.baseName.text
+            ?? node.calledExpression.as(DeclReferenceExprSyntax.self)?.baseName.text
         let pairIterator = iteratorMethod.map(Self.ELEMENT_PAIR_ITERATORS.contains) ?? false
         let iteratorElem: String? = {
-            guard let ma = node.calledExpression.as(MemberAccessExprSyntax.self),
-                  Self.ELEMENT_ITERATORS.contains(ma.declName.baseName.text) || pairIterator,
-                  let base = ma.base else { return nil }
-            return elementTypeOf(base)
+            if let ma = node.calledExpression.as(MemberAccessExprSyntax.self),
+               Self.ELEMENT_ITERATORS.contains(ma.declName.baseName.text) || pairIterator,
+               let base = ma.base {
+                return elementTypeOf(base)
+            }
+            // BARE element-iterator over implicit `self` — `forEach { $0.persist() }` inside
+            // `extension Array where Element: Saveable`: self's element is that bound (R28).
+            if let dr = node.calledExpression.as(DeclReferenceExprSyntax.self),
+               Self.ELEMENT_ITERATORS.contains(dr.baseName.text) || pairIterator {
+                return selfElementType
+            }
+            return nil
         }()
         // the TRAILING closure (or first positional) is the iterator's element closure
         let elemClosure = node.trailingClosure
@@ -829,6 +841,13 @@ final class CallCollector: SyntaxVisitor {
             } else if let pr = ma.base?.as(DeclReferenceExprSyntax.self), protoTyped[pr.baseName.text] != nil {
                 // dispatch through a LOCAL protocol-typed param — bounded CHA or honest Unknown
                 protoDispatches.append((protoTyped[pr.baseName.text]!, member))
+            } else if let baseDR = ma.base?.as(DeclReferenceExprSyntax.self),
+                      arrayElem[baseDR.baseName.text] != nil, localTypes.contains("Array") {
+                // an ARRAY receiver (`xs: [Item]`) calling a method a local `extension Array` provides —
+                // conditional conformance: `xs.persist()` → `Array.persist` (R28). Uses `propertyEdges` (a
+                // resolveQual soft edge) NOT a typed call, so a STD array method (`xs.forEach`, no
+                // `Array.forEach` unit) drops SILENTLY — no spurious Unknown, no fabrication.
+                propertyEdges.insert("Array.\(member)")
             } else if let rt = base.root, localTypes.contains(rt),
                       // An extension-ONLY κ-platform type does NOT shadow: `self.launch()` inside
                       // `extension Process` is a real Exec, not a project method (the ShellOut cardinal-sin —
