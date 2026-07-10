@@ -33,6 +33,14 @@ reaching `x.method()` (the field typed `T` now resolves to its bound `P`, so the
 dispatch fires). An unconstrained generic, and a bounded generic with no dispatched call, stay pure (no
 fabrication). Gated by `DriverResolutionProcessTests.testGenericConstrainedDispatchWhereClauseAndTypeLevelBounds`.
 
+And **`@resultBuilder`** (register R29): a func annotated `@SomeBuilder` has its body compiler-transformed
+into `SomeBuilder.buildBlock(...)` etc, so an effectful builder RUNS when the func is called — but that
+transform is implicit (no call site), so it read silent-pure. The annotated func now edges to the builder
+type's `build*` units. A pure builder adds nothing (no fabrication). Gated by
+`DriverResolutionProcessTests.testResultBuilderTransformChargesBuilderEffects`. (Known low residual R28:
+conditional conformance on a stdlib type — `extension Array: P where Element: P` reached via `xs.method()`
+— stays silent for now; a compound resolution, tracked in SOUNDNESS.md.)
+
 ## [0.8.8] — 2026-07-10
 
 ### ⚠ Setter `newValue` is now typed — effects through it charge (soundness round — report-affecting)

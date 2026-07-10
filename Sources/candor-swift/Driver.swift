@@ -48,6 +48,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var typeAliases: [String: String] = [:]
     var dynamicMemberTypes: Set<String> = []
     var propertyWrapperTypes: Set<String> = []
+    var resultBuilderTypes: Set<String> = []
     var wrappedProps: [String: [String: String]] = [:]
     var returnsIdx: [String: String] = [:]
     var importCounts: [String: Int] = [:]
@@ -119,6 +120,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (a, u) in c.typeAliases { typeAliases[a] = u }   // last-writer-wins (a redeclared alias is rare)
         dynamicMemberTypes.formUnion(c.dynamicMemberTypes)
         propertyWrapperTypes.formUnion(c.propertyWrapperTypes)
+        resultBuilderTypes.formUnion(c.resultBuilderTypes)
         for (t, ps) in c.wrappedProps { wrappedProps[t, default: [:]].merge(ps) { a, _ in a } }
         for m in c.imports { importCounts[m, default: 0] += 1 }
         fileImports[c.file] = c.imports
@@ -326,6 +328,17 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 for sup in supertypesOf[type] ?? [] {
                     if let t = resolveQual("\(sup).\(member)") { edges[f.qual, default: []].insert(t) }
                 }
+            }
+        }
+        // @resultBuilder: a func annotated `@SomeBuilder` (where SomeBuilder is a local `@resultBuilder`
+        // type) has its body transformed into `SomeBuilder.build*(…)` calls that RUN when the func is
+        // called — edge to the builder's build-method units so an effectful builder isn't silently pure
+        // (R29). resolveQual drops the build methods the builder doesn't define; a pure builder's methods
+        // contribute nothing (no flood, no fabrication).
+        for attr in f.uppercaseAttrs where resultBuilderTypes.contains(attr) {
+            for m in ["buildBlock", "buildExpression", "buildOptional", "buildEither", "buildArray",
+                      "buildFinalResult", "buildPartialBlock", "buildLimitedAvailability"] {
+                if let t = resolveQual("\(attr).\(m)") { edges[f.qual, default: []].insert(t) }
             }
         }
         // a bare-name read that names a GLOBAL initializer unit charges its first-touch effects here

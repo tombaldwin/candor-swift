@@ -39,6 +39,7 @@ struct FnInfo {
     var enclosingType: String?
     var isMain: Bool = false
     var isAccessor: Bool = false   // a computed-property/observer/lazy-init body (spec 0.5 unitKind)
+    var uppercaseAttrs: [String] = []   // capitalized @-attributes (a `@SomeBuilder` result-builder candidate)
 }
 
 // Collects the expression of every explicit `return <expr>` inside a body (Finding 1: pinning a function's
@@ -88,6 +89,7 @@ final class DeclCollector: SyntaxVisitor {
     var propertyWrapperTypes: Set<String> = []
     var wrappedProps: [String: [String: String]] = [:]
     var dynamicMemberTypes: Set<String> = []   // `@dynamicMemberLookup`-annotated local types
+    var resultBuilderTypes: Set<String> = []   // `@resultBuilder`-annotated local types
     // LOCAL `typealias Name = Underlying` declarations (name -> the underlying type's SIMPLE name). The
     // κ classifier keys on the LITERAL type spelling, so an alias (`typealias Proc = Process`) evaded it
     // and a `Proc()`/`FM.default` reach read silent-pure. Resolved through in CallCollector before the κ
@@ -147,6 +149,10 @@ final class DeclCollector: SyntaxVisitor {
                 // read/write of the wrapped property runs the wrapper's wrappedValue accessor. Record
                 // the wrapper TYPE so CallCollector can edge a wrapped-property access to it.
                 if an == "propertyWrapper" { propertyWrapperTypes.insert(name) }
+                // A `@resultBuilder` type: a func annotated `@ThisBuilder` has its body transformed into
+                // `ThisBuilder.buildBlock(...)` etc — so the builder's build methods RUN when the func is
+                // called. Record the type so Driver can edge such a func to its build* units (R29).
+                if an == "resultBuilder" { resultBuilderTypes.insert(name) }
             }
         }
     }
@@ -480,6 +486,14 @@ final class DeclCollector: SyntaxVisitor {
         info.enclosingTypePath = tyPath
         info.body = body.map { Syntax($0) }
         info.isMain = name == "main"
+        // capture capitalized @-attributes on the func (`@EffBuilder`) — Driver edges to a result-builder
+        // type's build methods once all `@resultBuilder` decls are known (declaration order is not assured).
+        for attr in Syntax(node).as(FunctionDeclSyntax.self)?.attributes ?? [] {
+            if let a = attr.as(AttributeSyntax.self) {
+                let an = a.attributeName.trimmedDescription
+                if an.first?.isUppercase == true { info.uppercaseAttrs.append(an) }
+            }
+        }
         // Generic constraints — a value param typed `T` then dispatches like its bound `P`-typed param.
         // BOTH forms bind the same way: the inline `<T: P>` clause AND the `where T: P` clause (the latter
         // was ignored, so `func f<T>(_ x: T) where T: P { x.method() }` read silent-pure — R26).

@@ -260,4 +260,25 @@ final class DriverResolutionProcessTests: XCTestCase {
         XCTAssertNil(by["viaPlainField"],
                      "reading an unconstrained-generic field (no method call) must not fabricate an effect")
     }
+
+    // ── @resultBuilder transform (soundness round 2026-07-10, R29) ─────────────────────────────────
+    // A func annotated `@SomeBuilder` has its body compiler-transformed into `SomeBuilder.buildBlock(...)`
+    // etc — so an effectful builder RUNS when the func is called. That transform is implicit (no call site),
+    // so an effectful buildBlock read silent-pure. Now the annotated func edges to the builder's build*
+    // units. A PURE builder adds nothing (no fabrication).
+    func testResultBuilderTransformChargesBuilderEffects() throws {
+        let by = try scan("""
+        import Foundation
+        @resultBuilder struct EffB { static func buildBlock(_ xs: Int...) -> Int { try? "x".write(toFile: "/tmp/e", atomically: true, encoding: .utf8); return 0 } }  // Fs
+        @resultBuilder struct PureB { static func buildBlock(_ xs: Int...) -> Int { 0 } }
+        @EffB func effBuilt() -> Int { 1 }
+        @PureB func pureBuilt() -> Int { 1 }
+        func viaEffBuilder() { _ = effBuilt() }     // was silent → Fs
+        func viaPureBuilder() { _ = pureBuilt() }   // control: pure builder must not fabricate
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaEffBuilder"), ["Fs"],
+                       "an effectful @resultBuilder buildBlock must charge when the annotated func is called")
+        XCTAssertNil(by["viaPureBuilder"],
+                     "a pure @resultBuilder must not fabricate an effect onto its annotated func")
+    }
 }
