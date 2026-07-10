@@ -7,6 +7,23 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.8.8] — 2026-07-10
+
+### ⚠ Setter `newValue` is now typed — effects through it charge (soundness round — report-affecting)
+
+An effect reached **through a setter's implicit value param** — `set { newValue.write(toFile: …) }` on a
+computed property or subscript, or a `willSet` observer — read SILENT-PURE, because `newValue` was never
+given a type, so a member call on it didn't resolve to the effectful method. Hit computed-property setters,
+subscript setters, `willSet`, and renamed setter params (`set(v)`). Fixed by seeding the accessor unit's
+`newValue` (or the named param) with the property/subscript element type (the same `params` typing regular
+parameters get). Effects where `newValue` is merely an ARG to an already-resolved call
+(`set { UserDefaults.standard.set(newValue, …) }`, `set { save(newValue) }`) already worked — this is the
+narrower *receiver* case. A pure setter still stays pure (no fabrication). Found by an adversarial
+operator/setter probe. The `==`/`+`/subscript-getter operator paths were probed and were already sound;
+candor-ts/kotlin/rust use explicit typed setter params (no implicit `newValue`), so this is swift-specific.
+Gated by `DriverResolutionProcessTests.testSetterNewValueIsTypedSoEffectsThroughItResolve`. Register: R23
+(CLOSED).
+
 ## [0.8.7] — 2026-07-10
 
 ### ⚠ Inherited property accessors now charge their effects (soundness round — report-affecting)

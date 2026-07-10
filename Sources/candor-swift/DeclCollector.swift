@@ -236,18 +236,31 @@ final class DeclCollector: SyntaxVisitor {
                 guard let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
                 let qual = "\(tyPath).\(name)"          // fully-qualified nested path
                 let simpleQual = "\(ty).\(name)"
-                var accessorBodies: [Syntax] = []
+                // the property's declared type — used to TYPE a setter's implicit param so an effect
+                // reached THROUGH it (`set { newValue.write(toFile:) }`) resolves (else newValue is an
+                // untyped bare identifier and the member call reads silent-pure). nil ⇒ inferred type, skip.
+                let propType = binding.typeAnnotation.flatMap { typeName($0.type).name }
+                // (body, the setter param to type as `propType`) — nil for a getter/lazy/static-init body.
+                var accessorBodies: [(body: Syntax, setterParam: String?)] = []
                 if let ab = binding.accessorBlock {
                     switch ab.accessors {
-                    case .getter(let items): accessorBodies.append(Syntax(items))
+                    case .getter(let items): accessorBodies.append((Syntax(items), nil))
                     case .accessors(let list):
                         for acc in list {
-                            if let b = acc.body { accessorBodies.append(Syntax(b)) }
+                            guard let b = acc.body else { continue }
+                            // set/willSet ⇒ `newValue`; didSet ⇒ `oldValue`; each renamable via `set(x)`.
+                            let sp: String?
+                            switch acc.accessorSpecifier.text {
+                            case "set", "willSet": sp = acc.parameters?.name.text ?? "newValue"
+                            case "didSet":         sp = acc.parameters?.name.text ?? "oldValue"
+                            default:               sp = nil   // get — no implicit value param
+                            }
+                            accessorBodies.append((Syntax(b), sp))
                         }
                     }
                 }
                 if node.modifiers.contains(where: { $0.name.text == "lazy" }), let init0 = binding.initializer {
-                    accessorBodies.append(Syntax(init0.value)) // lazy init runs at first ACCESS
+                    accessorBodies.append((Syntax(init0.value), nil)) // lazy init runs at first ACCESS
                 }
                 // `static let/var x = <expr>` — the initializer runs at FIRST ACCESS (Swift statics are
                 // lazy, like a JVM <clinit>), so its body is a unit charged to the first-touch read site
@@ -257,7 +270,7 @@ final class DeclCollector: SyntaxVisitor {
                 if isStatic, binding.accessorBlock == nil,
                    !node.modifiers.contains(where: { $0.name.text == "lazy" }),
                    let init0 = binding.initializer {
-                    accessorBodies.append(Syntax(init0.value))
+                    accessorBodies.append((Syntax(init0.value), nil))
                 }
                 // An INSTANCE STORED property's initializer (`let session = makeSession()`) runs during
                 // CONSTRUCTION — in every init, before its body. With an EXPLICIT init the field init
@@ -303,13 +316,15 @@ final class DeclCollector: SyntaxVisitor {
                     fns.append(info)
                     closureFields[ty, default: []].insert(name)
                 }
-                for b in accessorBodies {
+                for (b, setterParam) in accessorBodies {
                     var info = FnInfo(qual: qual, loc: loc(binding))
                     info.simpleQual = simpleQual
                     info.enclosingType = ty
                     info.enclosingTypePath = tyPath
                     info.body = b
                     info.isAccessor = true
+                    // type the setter's implicit value param so `newValue.effectfulMethod()` resolves
+                    if let sp = setterParam, let pt = propType { info.params[sp] = pt }
                     fns.append(info)
                 }
                 // A property-wrapper attribute (`@Logged var count`): record the wrapper TYPE so a read/
@@ -511,21 +526,34 @@ final class DeclCollector: SyntaxVisitor {
     override func visit(_ node: SubscriptDeclSyntax) -> SyntaxVisitorContinueKind {
         guard let ty = typeStack.last else { return .skipChildren }
         let tyPath = typeStack.joined(separator: ".")
-        var bodies: [Syntax] = []
+        // the element type — types the setter's implicit `newValue` so `newValue.effectfulMethod()` in a
+        // subscript setter resolves (else it read silent-pure, the property-setter hole, subscript edition).
+        let elemType = typeName(node.returnClause.type).name
+        var bodies: [(body: Syntax, setterParam: String?)] = []
         if let ab = node.accessorBlock {
             switch ab.accessors {
-            case .getter(let items): bodies.append(Syntax(items))
+            case .getter(let items): bodies.append((Syntax(items), nil))
             case .accessors(let list):
-                for acc in list { if let b = acc.body { bodies.append(Syntax(b)) } }
+                for acc in list {
+                    guard let b = acc.body else { continue }
+                    let sp: String?
+                    switch acc.accessorSpecifier.text {
+                    case "set", "willSet": sp = acc.parameters?.name.text ?? "newValue"
+                    case "didSet":         sp = acc.parameters?.name.text ?? "oldValue"
+                    default:               sp = nil
+                    }
+                    bodies.append((Syntax(b), sp))
+                }
             }
         }
-        for b in bodies {
+        for (b, setterParam) in bodies {
             var info = FnInfo(qual: "\(tyPath).subscript", loc: loc(node))
             info.simpleQual = "\(ty).subscript"
             info.enclosingType = ty
             info.enclosingTypePath = tyPath
             info.body = b
             info.isAccessor = true
+            if let sp = setterParam, let et = elemType { info.params[sp] = et }
             fns.append(info)
         }
         return .skipChildren

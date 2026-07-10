@@ -162,4 +162,43 @@ final class DriverResolutionProcessTests: XCTestCase {
         XCTAssertNil(by["viaPure"],
                      "a PURE inherited property must not fabricate an effect onto its reader")
     }
+
+    // ── SETTER `newValue` typing (soundness round 2026-07-10, R23) ─────────────────────────────────
+    // An effect reached THROUGH a setter's implicit value param (`set { newValue.write(toFile:) }`) read
+    // SILENT-PURE: `newValue` was never typed, so a member call on it didn't resolve. Hit computed-property
+    // setters, subscript setters, `willSet`, and named setter params. Fixed by seeding the accessor unit's
+    // `newValue`/named param with the property/subscript element type. Effects reached via an effectful
+    // free-fn/method call that merely takes newValue as an ARG already worked (this is the receiver case).
+    func testSetterNewValueIsTypedSoEffectsThroughItResolve() throws {
+        let by = try scan("""
+        import Foundation
+        class Cache { subscript(_ k: String) -> String {
+            get { "" }
+            set { try? newValue.write(toFile: "/tmp/s", atomically: true, encoding: .utf8) } } }  // Fs via newValue
+        class Prop { var slot: String {
+            get { "" }
+            set { try? newValue.write(toFile: "/tmp/p", atomically: true, encoding: .utf8) } } }
+        class Named { var slot: String {
+            get { "" }
+            set(v) { try? v.write(toFile: "/tmp/n", atomically: true, encoding: .utf8) } } }        // renamed param
+        class Will { var slot: String = "" {
+            willSet { try? newValue.write(toFile: "/tmp/w", atomically: true, encoding: .utf8) } } }
+        class PureSet { var x: String { get { "" } set { _ = newValue } } }                          // pure control
+        func viaSubscriptSet(_ c: Cache) { var c = c; c["k"] = "v" }    // was SILENT → Fs
+        func viaPropSet(_ p: Prop) { var p = p; p.slot = "v" }         // was SILENT → Fs
+        func viaNamedSet(_ n: Named) { var n = n; n.slot = "v" }       // named param typed too → Fs
+        func viaWillSet(_ w: Will) { var w = w; w.slot = "v" }         // observer via newValue → Fs
+        func viaPureSet(_ p: PureSet) { var p = p; p.x = "v" }         // control: must stay pure/omitted
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaSubscriptSet"), ["Fs"],
+                       "a subscript setter's effect reached through newValue must charge (was silent-pure)")
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaPropSet"), ["Fs"],
+                       "a computed-property setter's effect through newValue must charge")
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaNamedSet"), ["Fs"],
+                       "a renamed setter param (set(v)) is typed too")
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaWillSet"), ["Fs"],
+                       "a willSet observer's effect through newValue must charge")
+        XCTAssertNil(by["viaPureSet"],
+                     "a pure setter must not fabricate an effect onto its writer")
+    }
 }
