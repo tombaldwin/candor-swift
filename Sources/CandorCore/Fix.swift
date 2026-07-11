@@ -29,11 +29,12 @@ public struct Remedy {
     public let site: [String]
     public let deniedSpan: [String]
     public let hoistTo: [String]
+    public let hoistHigher: [String]
     public let policyAlternative: String
     public func toJSON() -> [String: Any] {
         [
             "fn": fn, "effect": effect, "layer": layer, "cleanHoist": cleanHoist,
-            "site": site, "deniedSpan": deniedSpan, "hoistTo": hoistTo,
+            "site": site, "deniedSpan": deniedSpan, "hoistTo": hoistTo, "hoistHigher": hoistHigher,
             "policyAlternative": policyAlternative,
         ]
     }
@@ -101,10 +102,25 @@ public func computeRemedy(start: String, effect: String, layer: String,
             }
         }
     }
+    // higher hoist options: allowed-layer transitive callers of the minimal frontier that also route the
+    // effect — hoisting higher keeps the frontier pure too, at the cost of threading through more signatures
+    // (FIX-SPEC: the trade-off, disclosed not hidden).
+    var higher = Set<String>()
+    var hseen = hoist
+    var hq = Array(hoist)
+    while !hq.isEmpty {
+        let cur = hq.removeFirst()
+        for caller in rev[cur] ?? [] {
+            guard let ce = byName[caller], ce.inferred.contains(effect),
+                  deniedLayer(caller, effect, deny) == nil, hseen.insert(caller).inserted else { continue }
+            higher.insert(caller)
+            hq.append(caller)
+        }
+    }
     let allowEdit = layer.isEmpty ? "allow \(effect)" : "allow \(effect) \(layer)"
     return Remedy(fn: start, effect: effect, layer: layer, cleanHoist: !hoist.isEmpty,
                   site: sites.sorted(), deniedSpan: deniedSpan.sorted(), hoistTo: hoist.sorted(),
-                  policyAlternative: allowEdit)
+                  hoistHigher: higher.sorted(), policyAlternative: allowEdit)
 }
 
 // The single-function fix. Returns nil if `target` matches no function; a `(crossing:false, reason)` no-op if

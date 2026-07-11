@@ -7,6 +7,16 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.8.12] — 2026-07-11
+
+### `fix`/`fix-gate`: the higher-hoist trade-off (FIX-SPEC's last refinement)
+
+Each remedy gains `hoistHigher` beside `hoistTo`: the allowed-layer transitive callers of the minimal
+frontier that also route the effect — every place you could originate it *further up* (hoisting higher keeps
+the frontier pure too, at the cost of threading through more signatures). `hoistTo` (the minimal fix) is
+unchanged. Byte-for-byte identical to candor-query/java/ts, pinned four-way by conformance PART 12b. Read-
+only, additive JSON field; not report- or verdict-affecting.
+
 ## [0.8.11] — 2026-07-11
 
 ### ✨ `fix` / `fix-gate` — the boundary fix reaches the fourth engine (FIX-SPEC P3)

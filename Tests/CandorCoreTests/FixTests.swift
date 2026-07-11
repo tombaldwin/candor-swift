@@ -38,6 +38,20 @@ final class FixTests: XCTestCase {
         XCTAssertEqual(r.policyAlternative, "allow Net domain")
     }
 
+    func testFixSurfacesHigherHoistTradeoff() {
+        // With an allowed-layer caller ABOVE the minimal frontier, the higher option is surfaced: the minimal
+        // hoist stays api.get, but main.run (which calls it, also allowed) is a higher place to originate Net.
+        var (byName, cg) = orderflow()
+        byName["main.run"] = FixFn(inferred: ["Net"], direct: [], calls: ["api.get"])
+        cg["main.run"] = ["api.get"]
+        let deny = parsePolicy("deny Net domain").deny
+        guard case let .remedy(r) = fix(target: "price", effect: "Net", byName: byName, cg: cg, deny: deny) else {
+            return XCTFail("expected a remedy")
+        }
+        XCTAssertEqual(r.hoistTo, ["api.get"], "minimal frontier unchanged")
+        XCTAssertEqual(r.hoistHigher, ["main.run"], "main.run is the higher hoist option")
+    }
+
     func testFixNonViolationIsANoOp() {
         let (byName, cg) = orderflow()
         let deny = parsePolicy("deny Net domain").deny
