@@ -7,6 +7,18 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.8.16] — 2026-07-11
+
+### ✨ Gate scans auto-disclose the provable-purity gap (no need to know to run `unverified`)
+
+A policy scan now emits the `unverified` disclosure automatically as a stderr note: after the gate verdict,
+any function in a `pure`/`deny <E>` scope that PASSES but is `Unknown` (an unresolvable call — the classic
+fn/closure-injected "port") is named, with the `deny <E> Unknown <scope>` upgrade that makes the layer PROVABLY
+clean. Closes the discovery gap — an author learns their "pure" layer isn't *provably* pure without knowing the
+`unverified` command exists. **Advisory only**: a note, never a violation, so the exit code, gate verdict, and
+`--gate-json` are untouched. Emitted from `main.swift` after `evaluateGate`. Mirrors candor-scan/java/ts
+(four-engine parity). Existing tests unchanged (128 + smoke 94 pass).
+
 ## [0.8.15] — 2026-07-11
 
 ### ✨ `unverified` — the provable-purity disclosure ported here (four-engine parity)

@@ -27,7 +27,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.8.15"
+let engineVersion = "candor-swift-0.8.16"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -377,6 +377,34 @@ if let pp = policyPath {
     gateViolations += evaluateGate(parsePolicy(text), inferred: inferred, hostsAcc: hostsAcc,
                                    cmdsAcc: cmdsAcc, pathsAcc: pathsAcc, tablesAcc: tablesAcc,
                                    incompleteAcc: incompleteAcc, cg: cg)
+    // Provable-purity DISCLOSURE (advisory — NEVER a violation, so the exit/verdict are untouched): functions
+    // in a pure/deny scope that PASS but are Unknown (the Unknown could hide the forbidden effect — a
+    // fn/closure-injected port). Surfaces the gap automatically (eval/fixloop/DISPATCH-NOTE.md).
+    let disclosePolicy = parsePolicy(text)
+    var purityHoles: [(String, String)] = []
+    for qual in inferred.keys.sorted() {
+        let inf = inferred[qual] ?? []
+        guard inf.contains("Unknown") else { continue }
+        for r in disclosePolicy.deny where scopeMatches(qual, r.scope) {
+            let violates = r.effects.isEmpty
+                ? inf.contains(where: { $0 != "Unknown" })
+                : r.effects.contains(where: { inf.contains($0) })
+            if violates { continue }
+            let suffix = r.scope.isEmpty ? "" : " \(r.scope)"
+            let upgrade = r.effects.isEmpty
+                ? "deny Unknown\(suffix)"
+                : "deny \(r.effects.sorted().joined(separator: " ")) Unknown\(suffix)"
+            purityHoles.append((qual, upgrade))
+            break
+        }
+    }
+    if !purityHoles.isEmpty {
+        FileHandle.standardError.write("candor-swift: note — \(purityHoles.count) function(s) PASS the policy but are Unknown (purity NOT verified — the Unknown could hide a forbidden effect):\n".data(using: .utf8)!)
+        for (fn, up) in purityHoles {
+            FileHandle.standardError.write("    `\(fn)`  → add  `\(up)`\n".data(using: .utf8)!)
+        }
+        FileHandle.standardError.write("  (advisory; add the upgrade(s) to REQUIRE provable purity, or run `candor-swift unverified` for detail — the gate verdict is unchanged)\n".data(using: .utf8)!)
+    }
 }
 // Violation lines (baseline + policy) are diagnostics, not the report — route them to STDERR so
 // `--json --policy p` keeps stdout a single clean JSON document (a violation line on stdout broke `… | jq`).
