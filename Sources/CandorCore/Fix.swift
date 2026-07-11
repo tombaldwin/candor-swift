@@ -105,20 +105,28 @@ public func computeRemedy(start: String, effect: String, layer: String,
     // higher hoist options: allowed-layer transitive callers of the minimal frontier that also route the
     // effect — hoisting higher keeps the frontier pure too, at the cost of threading through more signatures
     // (FIX-SPEC: the trade-off, disclosed not hidden).
+    // The SANDWICHED-layer check (/code-review): a hoist is CLEAN only if no forbidden fn sits ABOVE the
+    // frontier. If a denied fn calls into a hoist target, hoisting the effect there leaves that caller
+    // violating. Detected in the same climb that gathers `higher` (the allowed ancestors).
     var higher = Set<String>()
+    var sandwiched = false
     var hseen = hoist
     var hq = Array(hoist)
     while !hq.isEmpty {
         let cur = hq.removeFirst()
         for caller in rev[cur] ?? [] {
-            guard let ce = byName[caller], ce.inferred.contains(effect),
-                  deniedLayer(caller, effect, deny) == nil, hseen.insert(caller).inserted else { continue }
-            higher.insert(caller)
-            hq.append(caller)
+            guard let ce = byName[caller], ce.inferred.contains(effect) else { continue }
+            if deniedLayer(caller, effect, deny) != nil {
+                sandwiched = true
+            } else if hseen.insert(caller).inserted {
+                higher.insert(caller)
+                hq.append(caller)
+            }
         }
     }
+    let cleanHoist = !hoist.isEmpty && !sandwiched
     let allowEdit = layer.isEmpty ? "allow \(effect)" : "allow \(effect) \(layer)"
-    return Remedy(fn: start, effect: effect, layer: layer, cleanHoist: !hoist.isEmpty,
+    return Remedy(fn: start, effect: effect, layer: layer, cleanHoist: cleanHoist,
                   site: sites.sorted(), deniedSpan: deniedSpan.sorted(), hoistTo: hoist.sorted(),
                   hoistHigher: higher.sorted(), policyAlternative: allowEdit)
 }

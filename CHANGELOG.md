@@ -7,6 +7,17 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.8.14] — 2026-07-11
+
+### `fix`: the sandwiched-layer case is now handled (last correctness gap closed)
+
+When an ALLOWED layer is CALLED BY a forbidden one (`D1 → A → D2 → site`, deny on the D layer), hoisting the
+effect to the nearest allowed frontier `A` would leave `D1` still inheriting it. `cleanHoist` is now `false`
+in that case (a forbidden fn calls into the frontier), with a message that names the sandwich and offers the
+port/relax options — instead of a misleading "hoist to A". Detected in the same upward climb that gathers
+`hoistHigher`; identical across all four engines, pinned four-way by conformance PART 12b's sandwiched
+sub-check. Read-only; additive.
+
 ## [0.8.13] — 2026-07-11
 
 ### `fix`: fail loud on a corrupt report (from a high-effort /code-review)

@@ -96,6 +96,26 @@ final class FixTests: XCTestCase {
         XCTAssertEqual(r.fn, "repo.save")
     }
 
+    func testFixSandwichedLayerIsNotACleanHoist() {
+        // domain.top → api.mid → domain.inner → infra.fetch, deny Net domain. api.mid is the nearest allowed
+        // frontier but domain.top calls it → hoisting there leaves top violating → cleanHoist false.
+        let byName: [String: FixFn] = [
+            "domain.top": FixFn(inferred: ["Net"], direct: [], calls: ["api.mid"]),
+            "api.mid": FixFn(inferred: ["Net"], direct: [], calls: ["domain.inner"]),
+            "domain.inner": FixFn(inferred: ["Net"], direct: [], calls: ["infra.fetch"]),
+            "infra.fetch": FixFn(inferred: ["Net"], direct: ["Net"], calls: []),
+        ]
+        let cg: [String: [String]] = [
+            "domain.top": ["api.mid"], "api.mid": ["domain.inner"],
+            "domain.inner": ["infra.fetch"], "infra.fetch": [],
+        ]
+        let deny = parsePolicy("deny Net domain").deny
+        guard case let .remedy(r) = fix(target: "inner", effect: "Net", byName: byName, cg: cg, deny: deny) else {
+            return XCTFail("expected a remedy")
+        }
+        XCTAssertFalse(r.cleanHoist, "a sandwiched frontier is not a clean hoist")
+    }
+
     func testFixNoSuchFn() {
         let (byName, cg) = orderflow()
         let deny = parsePolicy("deny Net domain").deny
