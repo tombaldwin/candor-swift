@@ -82,6 +82,20 @@ final class FixTests: XCTestCase {
         XCTAssertTrue(remedies.isEmpty)
     }
 
+    func testFixPrefersTheEffectPerformingMatch() {
+        // `save` matches a pure `cache.save` and the effectful denied `repo.save` — resolve to the latter.
+        let byName: [String: FixFn] = [
+            "cache.save": FixFn(inferred: [], direct: [], calls: []),
+            "repo.save": FixFn(inferred: ["Net"], direct: ["Net"], calls: []),
+        ]
+        let cg: [String: [String]] = ["cache.save": [], "repo.save": []]
+        let deny = parsePolicy("deny Net repo").deny
+        guard case let .remedy(r) = fix(target: "save", effect: "Net", byName: byName, cg: cg, deny: deny) else {
+            return XCTFail("must resolve to the effectful match and find the crossing")
+        }
+        XCTAssertEqual(r.fn, "repo.save")
+    }
+
     func testFixNoSuchFn() {
         let (byName, cg) = orderflow()
         let deny = parsePolicy("deny Net domain").deny

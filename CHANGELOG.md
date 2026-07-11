@@ -7,6 +7,17 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.8.13] — 2026-07-11
+
+### `fix`: fail loud on a corrupt report (from a high-effort /code-review)
+
+The `fix`/`fix-gate` loader set `foundReport = true` BEFORE parsing, so a present-but-unparseable report
+(truncated / mid-write / missing `functions`) was treated as "found" and `fix-gate` emitted a silently-clean
+`{ok:true, remedies:[]}` over a report that exists but couldn't be read. The flag is now set only after a
+successful parse (and the corruption is disclosed on stderr), so a lone corrupt report fails loud (exit 2) —
+the fail-loud contract the file comment promises. Also aligns start resolution with the family (prefer an
+effect-performing match), already the case here — a regression test pins it.
+
 ## [0.8.12] — 2026-07-11
 
 ### `fix`/`fix-gate`: the higher-hoist trade-off (FIX-SPEC's last refinement)

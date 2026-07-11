@@ -42,11 +42,18 @@ private func loadFixModel(prefix: String) -> (byName: [String: FixFn], cg: [Stri
                 for (k, v) in obj { cg[k] = (v as? [Any])?.compactMap { $0 as? String } ?? [] }
             }
         } else if name.hasSuffix(".Swift.json") {
-            foundReport = true
+            // A report file is present but unparseable (truncated / mid-write / not a report) — FAIL LOUD,
+            // never read it as a silently-empty "no crossings". `foundReport` is set only AFTER a successful
+            // parse, so a lone corrupt report leaves it false → loadFixModel returns nil → exit 2.
+            // (/code-review — was `foundReport = true` before the guard.)
             guard let data = fm.contents(atPath: full),
                   let root = try? JSONSerialization.jsonObject(with: data),
                   let obj = root as? [String: Any],
-                  let fns = obj["functions"] as? [[String: Any]] else { continue }
+                  let fns = obj["functions"] as? [[String: Any]] else {
+                FileHandle.standardError.write("candor-swift fix: report `\(full)` could not be parsed — OMITTED.\n".data(using: .utf8)!)
+                continue
+            }
+            foundReport = true
             for e in fns {
                 guard let fn = e["fn"] as? String, !fn.isEmpty else { continue }
                 let inferred = Set((e["inferred"] as? [Any])?.compactMap { $0 as? String } ?? [])
