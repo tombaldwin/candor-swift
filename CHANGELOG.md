@@ -7,7 +7,15 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
-## [0.8.16] — 2026-07-11
+## [0.9.0] — 2026-07-11
+
+### spec 0.9 — the remedial-loop rung
+
+candor-swift now declares **spec `0.9`** (`specVersion` in `main.swift`; the envelope + `--gate-json`
+verdict carry it). 0.9 is a **tier-2 (pinned-tool-surface) rung** (candor-spec §"Conformance tiers"): no
+report-schema or verdict change — a 0.8 report/verdict is byte-identical under 0.9 — but the remedial loop
+(`fix`/`fix-gate`, `unverified`, and the gate auto-disclosure below) is now the pinned §3.1/§3.3 contract.
+**⚠ the `spec` string changed** — a consumer pinning `spec == "0.8"` must accept `0.9`.
 
 ### ✨ Gate scans auto-disclose the provable-purity gap (no need to know to run `unverified`)
 
