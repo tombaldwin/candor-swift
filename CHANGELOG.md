@@ -17,7 +17,9 @@ fn/closure-injected "port") is named, with the `deny <E> Unknown <scope>` upgrad
 clean. Closes the discovery gap — an author learns their "pure" layer isn't *provably* pure without knowing the
 `unverified` command exists. **Advisory only**: a note, never a violation, so the exit code, gate verdict, and
 `--gate-json` are untouched. Emitted from `main.swift` after `evaluateGate`. Mirrors candor-scan/java/ts
-(four-engine parity). Existing tests unchanged (128 + smoke 94 pass).
+(four-engine parity). Existing tests unchanged (128 + smoke 94 pass). The gate note and `unverified` share ONE
+predicate (`CandorCore.unverifiedHoleRule` + `ruleUpgrade`) — a single definition of a hole, so the two
+disclosure paths cannot drift (PART 12d pins it).
 
 ## [0.8.15] — 2026-07-11
 

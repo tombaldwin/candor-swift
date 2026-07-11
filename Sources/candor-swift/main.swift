@@ -380,22 +380,12 @@ if let pp = policyPath {
     // Provable-purity DISCLOSURE (advisory — NEVER a violation, so the exit/verdict are untouched): functions
     // in a pure/deny scope that PASS but are Unknown (the Unknown could hide the forbidden effect — a
     // fn/closure-injected port). Surfaces the gap automatically (eval/fixloop/DISPATCH-NOTE.md).
+    // Same predicate + upgrade as `candor-swift unverified` (CandorCore.unverifiedHoleRule) — one source of truth.
     let disclosePolicy = parsePolicy(text)
     var purityHoles: [(String, String)] = []
     for qual in inferred.keys.sorted() {
-        let inf = inferred[qual] ?? []
-        guard inf.contains("Unknown") else { continue }
-        for r in disclosePolicy.deny where scopeMatches(qual, r.scope) {
-            let violates = r.effects.isEmpty
-                ? inf.contains(where: { $0 != "Unknown" })
-                : r.effects.contains(where: { inf.contains($0) })
-            if violates { continue }
-            let suffix = r.scope.isEmpty ? "" : " \(r.scope)"
-            let upgrade = r.effects.isEmpty
-                ? "deny Unknown\(suffix)"
-                : "deny \(r.effects.sorted().joined(separator: " ")) Unknown\(suffix)"
-            purityHoles.append((qual, upgrade))
-            break
+        if let r = unverifiedHoleRule(qual, inferred[qual] ?? [], disclosePolicy.deny) {
+            purityHoles.append((qual, ruleUpgrade(r).upgrade))
         }
     }
     if !purityHoles.isEmpty {

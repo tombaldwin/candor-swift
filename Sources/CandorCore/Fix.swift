@@ -195,6 +195,36 @@ public struct UnverifiedHole {
     }
 }
 
+// Reconstruct a rule's source form and its `Unknown`-forbidding upgrade: (source, upgrade). `pure <scope>`
+// → ("pure <scope>", "deny Unknown <scope>"); `deny <E…> <scope>` → ("deny <E…> <scope>", "deny <E…> Unknown
+// <scope>"). Shared so the gate note and `unverified` name the identical upgrade.
+public func ruleUpgrade(_ r: DenyRule) -> (rule: String, upgrade: String) {
+    let suffix = r.scope.isEmpty ? "" : " \(r.scope)"
+    if r.effects.isEmpty {
+        return ("pure\(suffix)", "deny Unknown\(suffix)")
+    }
+    let effs = r.effects.sorted().joined(separator: " ")
+    return ("deny \(effs)\(suffix)", "deny \(effs) Unknown\(suffix)")
+}
+
+// The single predicate for a provable-purity hole (eval/fixloop/DISPATCH-NOTE.md): a function that is
+// `Unknown`, sits in a pure/deny scope, and PASSES that rule (carries none of its forbidden real effects) —
+// so its compliance is asserted but not verified (the Unknown could hide the very effect the rule forbids;
+// the classic case is a fn/closure-injected port). A *real* violation is the gate's job, not this. Returns
+// the first governing rule under which the function is such a hole, or nil. Shared by the gate note
+// (main.swift) and `unverified` so "what a hole is" has ONE definition (conformance PART 12d pins agreement).
+public func unverifiedHoleRule(_ fn: String, _ inferred: Set<String>, _ deny: [DenyRule]) -> DenyRule? {
+    guard inferred.contains("Unknown") else { return nil }
+    for r in deny {
+        guard scopeMatches(fn, r.scope) else { continue }
+        let violates = r.effects.isEmpty
+            ? inferred.contains(where: { $0 != "Unknown" })       // pure: any real effect is a violation
+            : r.effects.contains(where: { inferred.contains($0) }) // deny: a named effect is a violation
+        if !violates { return r }                                  // else a real violation the gate reports
+    }
+    return nil
+}
+
 // unverified: the PROVABLE-PURITY disclosure (eval/fixloop/DISPATCH-NOTE.md, mirrors candor-query). A
 // `pure`/`deny E` layer PASSES a function that carries none of its forbidden effects — but if that function is
 // `Unknown` (an unresolvable call), the pass is UNVERIFIED: the Unknown could hide the very effect the rule
@@ -202,27 +232,10 @@ public struct UnverifiedHole {
 public func unverified(_ fns: [UnverifiedFn], _ deny: [DenyRule]) -> (ok: Bool, holes: [UnverifiedHole]) {
     var holes: [UnverifiedHole] = []
     for e in fns {
-        guard e.inferred.contains("Unknown") else { continue }
-        for r in deny {
-            guard scopeMatches(e.fn, r.scope) else { continue }
-            let violates = r.effects.isEmpty
-                ? e.inferred.contains(where: { $0 != "Unknown" })          // pure: any real effect is a violation
-                : r.effects.contains(where: { e.inferred.contains($0) })    // deny: a named effect is a violation
-            if violates { continue }                                        // the gate handles a real violation
-            let suffix = r.scope.isEmpty ? "" : " \(r.scope)"
-            let rule: String
-            let upgrade: String
-            if r.effects.isEmpty {
-                rule = "pure\(suffix)"
-                upgrade = "deny Unknown\(suffix)"
-            } else {
-                let effs = r.effects.sorted().joined(separator: " ")
-                rule = "deny \(effs)\(suffix)"
-                upgrade = "deny \(effs) Unknown\(suffix)"
-            }
-            holes.append(UnverifiedHole(fn: e.fn, rule: rule, unknownWhy: e.unknownWhy, upgrade: upgrade))
-            break
-        }
+        // Same predicate + upgrade as the gate note (main.swift) — one source of truth for a hole.
+        guard let r = unverifiedHoleRule(e.fn, e.inferred, deny) else { continue }
+        let (rule, upgrade) = ruleUpgrade(r)
+        holes.append(UnverifiedHole(fn: e.fn, rule: rule, unknownWhy: e.unknownWhy, upgrade: upgrade))
     }
     return (holes.isEmpty, holes)
 }
