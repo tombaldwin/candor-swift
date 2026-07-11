@@ -7,6 +7,16 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.8.15] — 2026-07-11
+
+### ✨ `unverified` — the provable-purity disclosure ported here (four-engine parity)
+
+Ports candor-query's `unverified` (candor-query 0.8.10): a `pure`/`deny <E>` layer PASSES a function that has
+no such effect — but if that function is `Unknown` (an unresolvable call, e.g. a fn/closure-injected port), the
+pass is UNVERIFIED. Discloses each such function in a governed layer + the `deny <E> Unknown <scope>` upgrade
+that makes the layer PROVABLY clean. `--strict` → exit 1. JSON `{ok, unverified[]}`. Byte-for-byte the same
+disclosure as the other engines, pinned four-way by conformance PART 12c. Read-only; gate verdict untouched.
+
 ## [0.8.14] — 2026-07-11
 
 ### `fix`: the sandwiched-layer case is now handled (last correctness gap closed)

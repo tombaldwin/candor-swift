@@ -116,6 +116,20 @@ final class FixTests: XCTestCase {
         XCTAssertFalse(r.cleanHoist, "a sandwiched frontier is not a clean hoist")
     }
 
+    func testUnverifiedFlagsAnUnknownInScope() {
+        // domain.price is Unknown (a fn-value call) → `pure domain` PASSES it, but its purity is unverified.
+        let fns = [
+            UnverifiedFn(fn: "domain.price", inferred: ["Unknown"], unknownWhy: ["callback:fetch"]),
+            UnverifiedFn(fn: "domain.calc", inferred: [], unknownWhy: []),
+        ]
+        let deny = parsePolicy("pure domain").deny
+        let (ok, holes) = unverified(fns, deny)
+        XCTAssertFalse(ok)
+        XCTAssertEqual(holes.count, 1)
+        XCTAssertEqual(holes[0].fn, "domain.price")
+        XCTAssertEqual(holes[0].upgrade, "deny Unknown domain")
+    }
+
     func testFixNoSuchFn() {
         let (byName, cg) = orderflow()
         let deny = parsePolicy("deny Net domain").deny

@@ -77,6 +77,59 @@ private func loadDenyOrDie(_ policyPath: String, who: String) -> [DenyRule] {
     return parsePolicy(text).deny
 }
 
+// Load (fn, inferred, unknownWhy) from every `<prefix>*.Swift.json` report for the `unverified` check.
+private func loadUnverifiedFns(prefix: String) -> [UnverifiedFn]? {
+    let ns = prefix as NSString
+    let dirRaw = ns.deletingLastPathComponent
+    let dir = dirRaw.isEmpty ? "." : dirRaw
+    let base = ns.lastPathComponent
+    let fm = FileManager.default
+    guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return nil }
+    var out: [UnverifiedFn] = []
+    var found = false
+    for name in entries.sorted() where name.hasPrefix(base + ".") && name.hasSuffix(".Swift.json") {
+        guard let data = fm.contents(atPath: dir + "/" + name),
+              let root = try? JSONSerialization.jsonObject(with: data),
+              let obj = root as? [String: Any],
+              let fns = obj["functions"] as? [[String: Any]] else {
+            FileHandle.standardError.write("candor-swift unverified: report `\(dir)/\(name)` could not be parsed — OMITTED.\n".data(using: .utf8)!)
+            continue
+        }
+        found = true
+        for e in fns {
+            guard let fn = e["fn"] as? String, !fn.isEmpty else { continue }
+            let inferred = Set((e["inferred"] as? [Any])?.compactMap { $0 as? String } ?? [])
+            let why = (e["unknownWhy"] as? [Any])?.compactMap { $0 as? String } ?? []
+            out.append(UnverifiedFn(fn: fn, inferred: inferred, unknownWhy: why))
+        }
+    }
+    return found ? out : nil
+}
+
+// Dispatched from main.swift when argv[1] is `unverified`. JSON-only (like fix); `--strict` → exit 1 on a hole.
+func runUnverifiedCLI(_ args: [String]) -> Never {
+    var prefix: String?
+    var policy: String?
+    var strict = false
+    for a in args.dropFirst(2) {
+        switch a {
+        case "--strict": strict = true
+        case "--json": break // JSON-only surface; accepted harmlessly
+        default: if prefix == nil { prefix = a } else if policy == nil { policy = a }
+        }
+    }
+    guard let prefix, let policy else {
+        fixDie("usage: candor-swift unverified <report-prefix> <policy-file> [--strict]")
+    }
+    let deny = loadDenyOrDie(policy, who: "unverified")
+    guard let fns = loadUnverifiedFns(prefix: prefix) else {
+        fixDie("candor-swift unverified: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
+    }
+    let (ok, holes) = unverified(fns, deny)
+    emitJSON(["ok": ok, "unverified": holes.map { $0.toJSON() }])
+    exit(strict && !ok ? 1 : 0)
+}
+
 // Dispatched from main.swift when argv[1] is `fix` or `fix-gate` (before the scan flag loop).
 func runFixCLI(_ args: [String]) -> Never {
     let cmd = args[1]

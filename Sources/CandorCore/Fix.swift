@@ -173,6 +173,60 @@ public func fixGate(byName: [String: FixFn], cg: [String: [String]], deny: [Deny
     return (remedies.isEmpty, remedies)
 }
 
+// A per-function record the `unverified` check needs (fn name + inferred effects + the Unknown reasons).
+public struct UnverifiedFn {
+    public let fn: String
+    public let inferred: Set<String>
+    public let unknownWhy: [String]
+    public init(fn: String, inferred: Set<String>, unknownWhy: [String]) {
+        self.fn = fn
+        self.inferred = inferred
+        self.unknownWhy = unknownWhy
+    }
+}
+
+public struct UnverifiedHole {
+    public let fn: String
+    public let rule: String
+    public let unknownWhy: [String]
+    public let upgrade: String
+    public func toJSON() -> [String: Any] {
+        ["fn": fn, "rule": rule, "unknownWhy": unknownWhy, "upgrade": upgrade]
+    }
+}
+
+// unverified: the PROVABLE-PURITY disclosure (eval/fixloop/DISPATCH-NOTE.md, mirrors candor-query). A
+// `pure`/`deny E` layer PASSES a function that carries none of its forbidden effects — but if that function is
+// `Unknown` (an unresolvable call), the pass is UNVERIFIED: the Unknown could hide the very effect the rule
+// forbids (the fn/closure-port hole). Returns each such function + the `deny E Unknown <scope>` upgrade.
+public func unverified(_ fns: [UnverifiedFn], _ deny: [DenyRule]) -> (ok: Bool, holes: [UnverifiedHole]) {
+    var holes: [UnverifiedHole] = []
+    for e in fns {
+        guard e.inferred.contains("Unknown") else { continue }
+        for r in deny {
+            guard scopeMatches(e.fn, r.scope) else { continue }
+            let violates = r.effects.isEmpty
+                ? e.inferred.contains(where: { $0 != "Unknown" })          // pure: any real effect is a violation
+                : r.effects.contains(where: { e.inferred.contains($0) })    // deny: a named effect is a violation
+            if violates { continue }                                        // the gate handles a real violation
+            let suffix = r.scope.isEmpty ? "" : " \(r.scope)"
+            let rule: String
+            let upgrade: String
+            if r.effects.isEmpty {
+                rule = "pure\(suffix)"
+                upgrade = "deny Unknown\(suffix)"
+            } else {
+                let effs = r.effects.sorted().joined(separator: " ")
+                rule = "deny \(effs)\(suffix)"
+                upgrade = "deny \(effs) Unknown\(suffix)"
+            }
+            holes.append(UnverifiedHole(fn: e.fn, rule: rule, unknownWhy: e.unknownWhy, upgrade: upgrade))
+            break
+        }
+    }
+    return (holes.isEmpty, holes)
+}
+
 // The query name-match ladder (exact > segment-suffix > substring), same tiers as the family engines.
 func matchTier(_ name: String, _ q: String) -> Int {
     if name == q { return 3 }

@@ -78,8 +78,9 @@ candor-swift claims §4 (below), but read `unresolved` before trusting any speci
 general read-only queries (show/where/callers/whatif) point candor-query or candor-ts-query at these
 reports; candor-swift itself carries only two query subcommands, over a report a scan already wrote:
 
-    candor-swift fix      <report-prefix> <fn> <Effect> <policy-file>   # the boundary FIX (JSON)
-    candor-swift fix-gate <report-prefix> <policy-file>                 # a fix for EVERY crossing (JSON)
+    candor-swift fix        <report-prefix> <fn> <Effect> <policy-file>  # the boundary FIX (JSON)
+    candor-swift fix-gate   <report-prefix> <policy-file>               # a fix for EVERY crossing (JSON)
+    candor-swift unverified <report-prefix> <policy-file> [--strict]    # pure/deny layers that PASS but are Unknown (not PROVABLY clean)
 
 `fix` is the remedial inverse of the policy gate (integrations/FIX-SPEC.md): when a function performs
 an effect its layer forbids, it computes where the effect belongs (hoist it to the nearest allowed-
