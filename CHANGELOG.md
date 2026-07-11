@@ -7,6 +7,26 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.8.11] — 2026-07-11
+
+### ✨ `fix` / `fix-gate` — the boundary fix reaches the fourth engine (FIX-SPEC P3)
+
+candor-swift gains its first read-only query subcommands: `fix <report-prefix> <fn> <Effect> <policy>` and
+`fix-gate <report-prefix> <policy>` (JSON), the remedial inverse of the policy gate (integrations/FIX-SPEC.md).
+When a function performs an effect its architecture layer forbids, candor computes the *architectural remedy*
+— the direct call **site** to hoist, the forbidden-layer functions that become pure and thread the value (the
+**deniedSpan**), and the nearest allowed-layer caller (**hoistTo**) — plus the policy-relax alternative. The
+cut is **site-anchored** (walks up from the site through the denied layer), so the pure span is root-
+independent; `fix-gate` collapses the inheritors of one crossing to a single plan. Byte-for-byte the same
+remedy as candor-query / candor-java / candor-ts, now pinned four-way by candor-spec conformance **PART 12b**.
+
+The pure algorithm is `CandorCore/Fix.swift` (reusing the existing `scopeMatches` + deny/`pure` predicate); a
+small on-disk report + callgraph loader in `Sources/candor-swift/FixCLI.swift` reads a report a scan already
+wrote (candor-swift stays scan-first — read-only, no report/verdict change). A policy is required (the fix is
+defined relative to the boundary it crosses); an unreadable policy or a missing report fails loud (exit 2).
+Five `FixTests` pin the collapse, the single-function cut, the clean case, and the no-op branches. Not
+report- or verdict-affecting.
+
 ## [0.8.10] — 2026-07-11
 
 ### ⚠ Conditional conformance on a stdlib collection now dispatches (soundness R28 — report-affecting)

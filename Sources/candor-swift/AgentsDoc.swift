@@ -77,9 +77,20 @@ ARRAY of entries keyed `fn` (`Type.method` for members, bare `name` for free fun
 `inferred` (full transitive set) / `direct` / `unresolved` / `hash` (`pkg#qual`, the §2 chain key)
 / optional `hosts`/`cmds`/`paths`/`tables`. Only effectful-or-unresolved functions appear; a
 function in the SIDECAR but absent from the report is pure **as far as this engine resolved** —
-candor-swift claims §4 (below), but read `unresolved` before trusting any specific entry. No
-read-only query commands yet: compute blast radius from the callgraph sidecar (reverse the edge
-map, BFS — ~10 lines of any scripting language).
+candor-swift claims §4 (below), but read `unresolved` before trusting any specific entry. For the
+general read-only queries (show/where/callers/whatif) point candor-query or candor-ts-query at these
+reports; candor-swift itself carries only two query subcommands, over a report a scan already wrote:
+
+    candor-swift fix      <report-prefix> <fn> <Effect> <policy-file>   # the boundary FIX (JSON)
+    candor-swift fix-gate <report-prefix> <policy-file>                 # a fix for EVERY crossing (JSON)
+
+`fix` is the remedial inverse of the policy gate (integrations/FIX-SPEC.md): when a function performs
+an effect its layer forbids, it computes where the effect belongs (hoist it to the nearest allowed-
+layer caller) and which functions become pure and thread the value — `{ site, deniedSpan, hoistTo,
+layer, cleanHoist, policyAlternative }`, byte-for-byte the same remedy as candor-query/java/ts.
+`fix-gate` does every deny/`pure` crossing at once. Advisory: it names the structure, you write the
+code; a re-scan with the gate verifies. A policy is required (the fix is defined relative to the
+boundary it crosses); an unreadable policy or a missing report fails loud (exit 2).
 
 ## The trust rule — do not skip this
 

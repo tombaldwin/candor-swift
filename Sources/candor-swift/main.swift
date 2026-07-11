@@ -27,7 +27,7 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.8.10"
+let engineVersion = "candor-swift-0.8.11"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
@@ -75,6 +75,13 @@ if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "parsepolicy" {
     }
     print(polJson)
     exit(0)
+}
+
+// `fix` / `fix-gate` (integrations/FIX-SPEC.md) — the boundary remedy, a read-only query over a report a
+// scan already wrote (the remedial inverse of the gate). Handled here as a subcommand, like `parsepolicy`,
+// before the scan flag loop — never a scan target. The heavy lifting is in FixCLI.swift + CandorCore/Fix.swift.
+if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "fix" || CommandLine.arguments[1] == "fix-gate" {
+    runFixCLI(CommandLine.arguments)
 }
 
 var target = "."
