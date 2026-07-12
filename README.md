@@ -32,8 +32,8 @@ CANDOR_BASELINE=base.json .build/release/candor-swift <dir>
 
 Built on [SwiftSyntax](https://github.com/swiftlang/swift-syntax) — syntactic, like `candor-scan`: no
 build of the target needed. Spec obligations carried from day one: universal `hash` emission
-(`pkg#qual`, so reports chain as `CANDOR_DEPS` siblings of the other engines), the **κ-coverage ledger**
-(`κ doesn't know N modules this code imports…` — unlisted third-party modules are INVISIBLE, not
+(`pkg#qual`, so reports chain as `CANDOR_DEPS` siblings of the other engines), the **coverage ledger**
+(`candor's classifier doesn't cover N modules this code imports…` — unlisted third-party modules are INVISIBLE, not
 `Unknown`, and the receipt names them per scan), and the four literal surfaces (`hosts`/`cmds`/`paths`/
 `tables`, with the SPEC §2 SQL table extraction token-for-token). Net hosts are captured at
 ESTABLISHING forms only (connect/ctor); a string arg at a use-verb (`writeAndFlush`) is payload,
@@ -54,7 +54,7 @@ never a host.
 
 ## Known v0 bounds (item 7)
 
-The κ table covers the **platform frontier** (Foundation, Network, Dispatch, os, sqlite3) — third-party
+The classifier covers the **platform frontier** (Foundation, Network, Dispatch, os, sqlite3) — third-party
 packages contribute nothing and the ledger names them, unless a chained sibling report covers them:
 `CANDOR_DEPS` / the config `deps` key (SPEC §2) join an unresolved call into a covered package to that
 dep function's recorded effects + literal surfaces — a stale producer downgrades to `Unknown`, an
@@ -70,9 +70,9 @@ now adversarially tested.
 
 ```sh
 swift build                  # build → .build/debug/candor-swift
-swift test                   # native unit tests (XCTest) over CandorCore: the κ classifier, the SQL/
+swift test                   # native unit tests (XCTest) over CandorCore: the classifier, the SQL/
                              # command/host extractors, the SwiftSyntax type helpers, the propagation fixpoint
-bash smoke.sh                # end-to-end (the conformance oracle, the gate, the κ ledger)
+bash smoke.sh                # end-to-end (the conformance oracle, the gate, the coverage ledger)
 python3 fuzz.py              # the §7.13 soundness fuzzer (never silently pure)
 python3 fabrication_probe.py # the never-fabricate probe
 ```

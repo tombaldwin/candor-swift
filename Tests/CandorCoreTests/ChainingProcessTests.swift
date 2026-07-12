@@ -133,7 +133,7 @@ final class ChainingProcessTests: XCTestCase {
                            "\(fn) must inherit the dep's literal Net surface")
             XCTAssertNil(by[fn]?["invisible"], "a joined call is covered, not blind")
         }
-        XCTAssertFalse(r.err.contains("κ doesn't know"), "the covered package must not be in the κ ledger: \(r.err)")
+        XCTAssertFalse(r.err.contains("classifier doesn't cover"), "the covered package must not be in the κ ledger: \(r.err)")
     }
 
     // ── (b) STALE-DOWNGRADE: a doctored producing version is not trusted at the join ──────────────
@@ -198,7 +198,7 @@ final class ChainingProcessTests: XCTestCase {
         for fn in ["go", "goMember"] {
             XCTAssertNil(by[fn], "\(fn) must read PURE against an all-pure dep's empty report; got \(by[fn] ?? [:])")
         }
-        XCTAssertFalse(r.err.contains("κ doesn't know"),
+        XCTAssertFalse(r.err.contains("classifier doesn't cover"),
                        "an empty report still COVERS its package — the ledger must not name RatesDep: \(r.err)")
     }
 
@@ -212,7 +212,7 @@ final class ChainingProcessTests: XCTestCase {
         XCTAssertEqual(r.code, 0)
         let by = try fns(ofReport: root.appendingPathComponent("app-r.App.Swift.json"))
         XCTAssertEqual(by["go"]?["invisible"] as? [String], ["RatesDep"])
-        XCTAssertTrue(r.err.contains("κ doesn't know") && r.err.contains("RatesDep"), "ledger must name RatesDep")
+        XCTAssertTrue(r.err.contains("classifier doesn't cover") && r.err.contains("RatesDep"), "ledger must name RatesDep")
     }
 
     // ── fail-closed loading (the CANDOR_CONFIG posture) ───────────────────────────────────────────
@@ -314,7 +314,7 @@ final class ChainingProcessTests: XCTestCase {
         XCTAssertEqual(by["go"]?["inferred"] as? [String], ["Net"], "the RatesDep report in the dir must join")
         XCTAssertEqual(by["find"]?["inferred"] as? [String], ["Fs"], "the GeoDep report in the dir must join too")
         XCTAssertEqual(by["find"]?["paths"] as? [String], ["/geo.db"], "surfaces carry across the dir-loaded join")
-        XCTAssertFalse(r.err.contains("κ doesn't know"),
+        XCTAssertFalse(r.err.contains("classifier doesn't cover"),
                        "both packages are covered by the dir's reports — the ledger stays quiet: \(r.err)")
     }
 
@@ -330,7 +330,7 @@ final class ChainingProcessTests: XCTestCase {
         let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path],
                         env: ["CANDOR_DEPS": emptyDir.path])
         XCTAssertEqual(r.code, 0, "an empty deps dir loads zero reports, not an error; stderr: \(r.err)")
-        XCTAssertTrue(r.err.contains("κ doesn't know") && r.err.contains("RatesDep"),
+        XCTAssertTrue(r.err.contains("classifier doesn't cover") && r.err.contains("RatesDep"),
                       "with no report loaded the dep package is blind again — the ledger names it: \(r.err)")
     }
 

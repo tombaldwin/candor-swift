@@ -129,7 +129,7 @@ printf 'deny Net hop\n' > "$W/pol"
 grep -q 'AS-EFF-006.*hop_a.*Net' "$W/gate.out" && ok "deny gate flags the transitive caller" || bad "deny gate"
 mkdir -p "$W/led" && printf 'import Alamofire\nfunc go() { _ = FileManager.default.contents(atPath: "/x") }\nimport Foundation\n' > "$W/led/m.swift"
 "$BIN" "$W/led" --out "$W/led/r" 2>"$W/led.err"
-grep -q "κ doesn't know.*Alamofire" "$W/led.err" && ok "κ ledger names the unlisted import" || bad "κ ledger"
+grep -q "classifier doesn't cover.*Alamofire" "$W/led.err" && ok "coverage ledger names the unlisted import" || bad "coverage ledger"
 HASH=$(python3 -c "import json; print(json.load(open('$RPT'))['functions'][0].get('hash',''))")
 case "$HASH" in *"#"*) ok "hash join keys emitted (0.4 MUST)";; *) bad "hash emission";; esac
 # spec 0.5 draft: an accessor unit carries unitKind
@@ -1077,14 +1077,14 @@ print('PASS' if ($2) else 'FAIL ' + repr({k: (v.get('inferred'), v.get('hosts'))
 CANDOR_DEPS="$CHDEP" "$BIN" "$W/ch/app" --out "$W/ch/fresh" 2>"$W/ch/fresh.err"
 CH=$(chk_chain fresh "all(by.get(f, {}).get('inferred') == ['Net'] and by[f].get('hosts') == ['rates.internal:7070'] for f in ['go', 'goMember'])")
 [ "$CH" = "PASS" ] && ok "chaining [a] join-inherit: both join shapes read exactly {Net} + the dep's host literal" || bad "chaining fresh: $CH"
-grep -q "κ doesn't know" "$W/ch/fresh.err" && bad "chaining fresh: covered package must not be in the κ ledger" || ok "chaining [a] the chained package is exempt from the κ ledger"
+grep -q "classifier doesn't cover" "$W/ch/fresh.err" && bad "chaining fresh: covered package must not be in the coverage ledger" || ok "chaining [a] the chained package is exempt from the coverage ledger"
 CANDOR_DEPS="${CHDEP%.json}_stale.json" "$BIN" "$W/ch/app" --out "$W/ch/stale" 2>/dev/null
 CH=$(chk_chain stale "all(by.get(f, {}).get('inferred') == ['Unknown'] and by[f].get('hosts') is None for f in ['go', 'goMember'])")
 [ "$CH" = "PASS" ] && ok "chaining [b] stale-downgrade: a doctored producer version reads Unknown, never a stale Net claim" || bad "chaining stale: $CH"
 CANDOR_DEPS="${CHDEP%.json}_empty.json" "$BIN" "$W/ch/app" --out "$W/ch/empty" 2>"$W/ch/empty.err"
 CH=$(chk_chain empty "not by")
 [ "$CH" = "PASS" ] && ok "chaining [c] empty-report coverage: an all-pure dep's silence is a purity claim" || bad "chaining empty: $CH"
-grep -q "κ doesn't know" "$W/ch/empty.err" && bad "chaining empty: κ ledger must not name the covered package" || ok "chaining [c] the empty report still covers its package (ledger silent)"
+grep -q "classifier doesn't cover" "$W/ch/empty.err" && bad "chaining empty: coverage ledger must not name the covered package" || ok "chaining [c] the empty report still covers its package (ledger silent)"
 CANDOR_DEPS="$W/ch/no-such-report.json" "$BIN" "$W/ch/app" --out "$W/ch/badtok" >/dev/null 2>&1
 [ $? -eq 2 ] && ok "chaining [d] a deps token naming no readable file fails closed (exit 2)" || bad "chaining bad-token exit: $?"
 echo '{not json' > "$W/ch/garbage.json"

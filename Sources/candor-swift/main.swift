@@ -347,8 +347,9 @@ if wantJson {
     }
 }
 
-// the κ-coverage ledger: imported modules outside the platform frontier that κ doesn't know —
-// INVISIBLE, not Unknown; named per scan (SPEC §7 item 14, canonical marker). A package a chained
+// the coverage ledger: imported modules outside the platform frontier that the classifier doesn't
+// cover — INVISIBLE, not Unknown; named per scan (SPEC §7 item 14, canonical marker `classifier
+// doesn't cover`). A package a chained
 // sibling report covers is EXEMPT (SPEC §2 rule 3) — including an all-pure dep's EMPTY report,
 // whose silence is its purity claim, so the ledger must not name it a blind spot.
 let unlisted = importCounts.filter { !PLATFORM_MODULES.contains($0.key) && !KAPPA_MODULES.contains($0.key) && !internalModules.contains($0.key) && !depsIndex.coveredPkgs.contains($0.key) }
@@ -357,8 +358,8 @@ if !unlisted.isEmpty {
     let shown = unlisted.prefix(8).map { "\($0.key) (\($0.value) import\($0.value == 1 ? "" : "s"))" }.joined(separator: ", ")
     let more = unlisted.count > 8 ? " + \(unlisted.count - 8) more" : ""
     FileHandle.standardError.write(
-        ("candor-swift: κ doesn't know \(unlisted.count) module\(unlisted.count == 1 ? "" : "s") this code imports — "
-         + "effects through \(unlisted.count == 1 ? "it are" : "them are") INVISIBLE (not Unknown): \(shown)\(more)\n").data(using: .utf8)!)
+        ("candor-swift: candor's classifier doesn't cover \(unlisted.count) module\(unlisted.count == 1 ? "" : "s") this code imports — "
+         + "their effects are INVISIBLE to the scan (absent from the report, NOT a claim they're pure): \(shown)\(more)\n").data(using: .utf8)!)
 }
 
 

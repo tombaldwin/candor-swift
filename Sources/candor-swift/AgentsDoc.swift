@@ -39,7 +39,7 @@ strictness knob. `--gate-json <file|->` additionally writes the structured §3.3
 **Chain sibling reports** with `CANDOR_DEPS=<report paths>` (or a checked-in config `deps` line —
 whitespace/colon/comma-separated; a relative config value anchors to the config's home dir): an
 unresolved call into a package a loaded report covers inherits that dep function's effects AND its
-literal surfaces (SPEC §2) — scan the dep once, chain it everywhere; the κ ledger names what to scan
+literal surfaces (SPEC §2) — scan the dep once, chain it everywhere; the coverage ledger names what to scan
 next. Three trust rules at the join: a report from a DIFFERENT candor-swift build (or carrying no
 version) reads `Unknown`, never a stale effect claim; an all-pure dep's EMPTY report is a purity
 claim (the package is covered, not blind); a deps token naming no readable file — or an unparseable
@@ -98,16 +98,17 @@ boundary it crosses); an unreadable policy or a missing report fails loud (exit 
 `inferred` is authoritative for what candor-swift resolved. A call through a function-typed value
 (`let f: () -> Void` invoked, a closure-typed field `d.f()`) or a local protocol with no visible
 conformer reads `Unknown` — `unknownWhy` names each origin (`callback:f`, `dispatch:Dyn.f`). Never
-conclude a function is pure while `unresolved` is true. **And the curated-κ caveat:** the
+conclude a function is pure while `unresolved` is true. **And the coverage caveat:** the
 classifier covers the platform frontier (Foundation, Network, Dispatch, os, sqlite3) — a
 third-party package contributes NOTHING, invisible, not `Unknown`, UNLESS a chained sibling report
 covers it (`CANDOR_DEPS`, above — then its entries join and its silence is a purity claim). The
-receipt **names the rest per scan** (`κ doesn't know N modules this code imports…`): never conclude
-"no effect" through a module that line names. Each function ALSO carries an **`invisible`** list — the κ-unknown modules it
+receipt **names the rest per scan** (the coverage ledger: `candor's classifier doesn't cover N
+modules this code imports…`): never conclude "no effect" through a module that line names. Each
+function ALSO carries an **`invisible`** list — the uncovered modules it
 (transitively) makes an unresolved call into — so `inferred` is never an unqualified claim PER
 FUNCTION: `inferred: []` with a non-empty `invisible` means "pure as far as candor could see, but it
 could not see through these" (a LOWER bound), not "pure". Because the Swift engine is parse-only it
-attributes at FILE granularity — it names every κ-unknown module in the function's import scope where
+attributes at FILE granularity — it names every uncovered module in the function's import scope where
 the function has an unresolved external reach, not the single resolved package — so `invisible` is an
 over-approximation of the blind set (disclosed, never a silent-pure).
 

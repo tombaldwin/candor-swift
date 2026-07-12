@@ -20,6 +20,17 @@ conformance **PART 17**. This is a **version bump only** — no report-schema, c
 0.9 report/verdict is byte-identical under 0.10. **⚠ the `spec` string changed** — a consumer pinning
 `spec == "0.9"` must accept `0.10`.
 
+### coverage-ledger rename — drop the bare "κ" from user- and agent-facing surfaces
+
+The coverage-ledger stderr line no longer opens with the Greek letter **κ** — the first thing a cold
+user saw with no explanation. The line now reads `candor-swift: candor's classifier doesn't cover N
+module(s) this code imports — their effects are INVISIBLE to the scan (absent from the report, NOT a
+claim they're pure): …`, and the shared **machine marker every engine keys off is now `classifier
+doesn't cover`** (was `κ doesn't know`). README, AGENTS.md (+ the generated `AgentsDoc.swift`), and the
+internal ledger comment follow suit. κ survives only as internal maintainer vocabulary — code
+identifiers (`KAPPA_MODULES`, the κ table) and this changelog's history. No report bytes or gate
+verdicts change — this is a text/marker rename only.
+
 ## [0.9.0] — 2026-07-11
 
 ### spec 0.9 — the remedial-loop rung
