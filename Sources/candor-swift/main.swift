@@ -88,6 +88,12 @@ if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "fix" || Comman
 if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "unverified" {
     runUnverifiedCLI(CommandLine.arguments)
 }
+// `tour [<N>]` (SURFACE-BEST-FIND-DESIGN.md, P2) — the on-demand, top-N version of the cold-repo opener:
+// the N most surprising transitive reaches in an existing report, NO re-scan. A read-only query over a
+// report a scan wrote; a subcommand, before the scan flag loop. Delegates to CandorCore.bestFinds.
+if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "tour" {
+    runTourCLI(CommandLine.arguments)
+}
 
 var target = "."
 var outPrefix: String? = nil
@@ -132,8 +138,9 @@ while let a = argIter.next() {
                candor-swift fix <fn> <Effect> [--report <locator>] [--policy <file>] [--json]   # the boundary remedy (§3.3.1)
                candor-swift fix-gate          [--report <locator>] [--policy <file>] [--json]   # all crossings + remedies
                candor-swift unverified        [--report <locator>] [--policy <file>] [--json] [--strict]  # PASS-but-Unknown holes
+               candor-swift tour [<N>]         [--report <locator>] [--json]                    # the N most surprising reaches (default 10)
 
-          Query verbs (fix/fix-gate/unverified) follow the §3.3.1 canonical grammar: the report is
+          Query verbs (fix/fix-gate/unverified/tour) follow the §3.3.1 canonical grammar: the report is
           DISCOVERED by default (walk up from CWD for a .candor/ dir; CANDOR_REPORT overrides). --report
           <locator> overrides — a dir → <dir>/.candor/report, a *.json path → that report, else a prefix.
           --policy is a flag (honours CANDOR_POLICY then .candor/config). The old positional forms (a

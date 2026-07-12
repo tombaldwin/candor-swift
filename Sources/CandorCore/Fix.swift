@@ -12,10 +12,14 @@ public struct FixFn {
     public let inferred: Set<String>
     public let direct: Set<String>
     public let calls: [String]
-    public init(inferred: Set<String>, direct: Set<String>, calls: [String]) {
+    /// "file:line" from the §2 report envelope ("" when absent) — the `tour` verb's source callout uses it;
+    /// `fix`/`fix-gate` don't. Defaulted so existing constructions stay valid.
+    public let loc: String
+    public init(inferred: Set<String>, direct: Set<String>, calls: [String], loc: String = "") {
         self.inferred = inferred
         self.direct = direct
         self.calls = calls
+        self.loc = loc
     }
 }
 

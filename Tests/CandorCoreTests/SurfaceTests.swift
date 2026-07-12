@@ -75,4 +75,40 @@ final class SurfaceTests: XCTestCase {
         guard case .noEffects = surfaceBestFind(inferred: inferred, direct: direct, calls: calls)
         else { return XCTFail("expected noEffects") }
     }
+
+    /// The `tour` verb's top-N heuristic (CandorCore.bestFinds), the Swift port of the Rust
+    /// `best_finds`: two distinct benign candidates reach Net at different depths → the list names each
+    /// ONCE, ranked (deeper reach first — higher score), and `n` caps the list. Mirrors the reference
+    /// `dedup_one_row_per_function_top_n`. (The `syncState` intermediary is EFFECTY-named — `sync` — so it
+    /// never adds a row, making the surprising set exactly {Settings.load, Model.render}.)
+    func testBestFindsDedupOneRowPerFunctionTopN() {
+        var direct: [String: Set<String>] = [:]
+        var inferred: [String: Set<String>] = [:]
+        var calls: [String: Set<String>] = [:]
+
+        direct["NetLayer.doSend"] = set(["Net"])
+        inferred["NetLayer.doSend"] = set(["Net"])
+
+        // Settings.load — 3 hops (benign, deep → higher score). All intermediaries are EFFECTY-named
+        // (`syncState` → sync, `downloadStep` → download) so they don't add rows.
+        inferred["Core.syncState"] = set(["Net"]); calls["Core.syncState"] = set(["NetLayer.doSend"])
+        inferred["Core.downloadStep"] = set(["Net"]); calls["Core.downloadStep"] = set(["Core.syncState"])
+        inferred["Settings.load"] = set(["Net"]); calls["Settings.load"] = set(["Core.downloadStep"])
+
+        // Model.render — 1 hop (benign, shallow → lower score).
+        inferred["Model.render"] = set(["Net"]); calls["Model.render"] = set(["NetLayer.doSend"])
+
+        let loc: [String: String] = ["NetLayer.doSend": "Net.swift:9"]
+        let got = bestFinds(inferred: inferred, direct: direct, calls: calls, loc: loc, n: 10)
+        XCTAssertEqual(got.count, 2, "two distinct benign functions, one row each")
+        XCTAssertEqual(got[0].func_, "Settings.load")  // deeper reach ranks first
+        XCTAssertEqual(got[0].hops, 3)
+        XCTAssertEqual(got[0].source, "NetLayer.doSend")
+        XCTAssertEqual(got[0].sourceLoc, "Net.swift:9")
+        XCTAssertEqual(got[1].func_, "Model.render")
+        // `n` caps the list.
+        XCTAssertEqual(bestFinds(inferred: inferred, direct: direct, calls: calls, loc: loc, n: 1).count, 1)
+        // no function is listed twice.
+        XCTAssertEqual(Set(got.map { $0.func_ }).count, got.count)
+    }
 }

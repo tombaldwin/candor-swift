@@ -76,11 +76,12 @@ ARRAY of entries keyed `fn` (`Type.method` for members, bare `name` for free fun
 function in the SIDECAR but absent from the report is pure **as far as this engine resolved** —
 candor-swift claims §4 (below), but read `unresolved` before trusting any specific entry. For the
 general read-only queries (show/where/callers/whatif) point candor-query or candor-ts-query at these
-reports; candor-swift itself carries only two query subcommands, over a report a scan already wrote:
+reports; candor-swift itself carries a few query subcommands, over a report a scan already wrote:
 
     candor-swift fix        <report-prefix> <fn> <Effect> <policy-file>  # the boundary FIX (JSON)
     candor-swift fix-gate   <report-prefix> <policy-file>               # a fix for EVERY crossing (JSON)
     candor-swift unverified <report-prefix> <policy-file> [--strict]    # pure/deny layers that PASS but are Unknown (not PROVABLY clean)
+    candor-swift tour [<N>]                                             # the N most surprising transitive reaches (default 10; no policy)
 
 `fix` is the remedial inverse of the policy gate (integrations/FIX-SPEC.md): when a function performs
 an effect its layer forbids, it computes where the effect belongs (hoist it to the nearest allowed-
@@ -89,6 +90,10 @@ layer, cleanHoist, policyAlternative }`, byte-for-byte the same remedy as candor
 `fix-gate` does every deny/`pure` crossing at once. Advisory: it names the structure, you write the
 code; a re-scan with the gate verifies. A policy is required (the fix is defined relative to the
 boundary it crosses); an unreadable policy or a missing report fails loud (exit 2).
+`tour [<N>]` lists the N (default 10) most SURPRISING transitive reaches in the report — a benign-named
+function that reaches a scary effect a few hops down — each with a ready-to-run `candor path` command;
+`--json` for machines. No policy, read-only, the same heuristic as the scan-time note. A missing report
+fails loud (exit 2).
 
 ## The trust rule — do not skip this
 

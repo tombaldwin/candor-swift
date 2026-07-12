@@ -107,14 +107,17 @@ private func hopsFactor(_ hops: Int) -> Int {
     }
 }
 
-/// A scored candidate reach.
-struct SurfaceFind {
-    let func_: String
-    let effect: String
-    let hops: Int
-    let source: String
-    let benignToken: String
-    let score: Int
+/// A scored candidate reach. Public so the candor-swift target's `tour` verb can render it.
+public struct SurfaceFind {
+    public let func_: String
+    public let effect: String
+    public let hops: Int
+    public let source: String
+    /// "file:line" of the effect SOURCE, resolved from the caller's `loc` map ("" when absent) —
+    /// mirrors the Rust `Find.source_loc`. The scan-note emit renders `?` when this is empty.
+    public let sourceLoc: String
+    public let benignToken: String
+    public let score: Int
 }
 
 /// Test code — a Swift qual has no `::tests::` convention, but keep the reference's spirit: skip a fn
@@ -169,27 +172,31 @@ enum SurfaceResult {
     case winner(SurfaceFind)  // the winning reach
 }
 
-/// Compute the single most surprising reach.
-func surfaceBestFind(
+/// Compute the top-`n` most surprising reaches, most-surprising first. DEDUPED by function — each
+/// function appears at most once (its single highest-scoring reach). The list is empty when nothing
+/// clears the bar (the caller decides whether to emit the honest fallback vs nothing, using
+/// `surfaceAnyEffectful`).
+///
+/// Ranking (the tie-break, applied to the whole candidate pool before the per-function dedup + take):
+/// score DESC → hops ASC → qual ASC. With `n == 1` the result is BYTE-IDENTICAL to the old scan-time
+/// `bestFind` (the scan note + conformance PART 4f pin this). This is the Swift port of the Rust
+/// `candor_classify::surface::best_finds`; both the scan note and the `tour` verb delegate here so the
+/// ranking cannot drift.
+public func bestFinds(
     inferred: [String: Set<String>],
     direct: [String: Set<String>],
-    calls: [String: Set<String>]
-) -> SurfaceResult {
-    // Any function carrying a real (non-Unknown) effect makes the package "effectful" — governs
-    // whether we emit the fallback vs nothing.
-    var anyEffectful = false
-
+    calls: [String: Set<String>],
+    loc: [String: String],
+    n: Int
+) -> [SurfaceFind] {
     // Deterministic iteration: sort quals ascending so the tie-break (qual ascending) is stable and
     // dictionary order never leaks into the result.
     let quals = inferred.keys.sorted()
 
-    var best: SurfaceFind? = nil
+    var cands: [SurfaceFind] = []
 
     for f in quals {
         let inf = inferred[f] ?? []
-        if inf.contains(where: { $0 != "Unknown" }) {
-            anyEffectful = true
-        }
         if isTest(f) {
             continue
         }
@@ -217,31 +224,57 @@ func surfaceBestFind(
             if score == 0 {
                 continue
             }
-            let cand = SurfaceFind(
+            cands.append(SurfaceFind(
                 func_: f, effect: e, hops: hops, source: s,
-                benignToken: benign ?? "", score: score)
-            // Tie-break: higher score, then fewer hops, then qual ascending. Quals are iterated
-            // ascending and effects ascending, so a strict > keeps the first (smallest qual) winner.
-            let better: Bool
-            if let b = best {
-                better = cand.score > b.score || (cand.score == b.score && cand.hops < b.hops)
-                // equal score & hops: earlier qual already seen (ascending iteration) → keep it.
-            } else {
-                better = true
-            }
-            if better {
-                best = cand
-            }
+                sourceLoc: loc[s] ?? "", benignToken: benign ?? "", score: score))
         }
     }
 
-    if !anyEffectful {
-        return .noEffects
+    // Rank the whole pool: score DESC, hops ASC, qual ASC. Quals were iterated ascending and effects
+    // ascending, so on a full tie the first-pushed (smallest qual) candidate sorts first — matching the
+    // old `bestFind`'s "keep the earliest winner on an exact tie". A STABLE sort preserves that push
+    // order for full ties (Swift's `sort(by:)` is not guaranteed stable, so the comparator is total —
+    // qual is unique per function, but two effects of ONE function can tie on score+hops; the effects
+    // were pushed ascending, so keep that by breaking the final tie on `effect` ascending).
+    cands.sort { a, b in
+        if a.score != b.score { return a.score > b.score }
+        if a.hops != b.hops { return a.hops < b.hops }
+        if a.func_ != b.func_ { return a.func_ < b.func_ }
+        return a.effect < b.effect
     }
-    if let b = best {
+
+    // DEDUP by function — each function appears at most once (its single highest-scoring reach, the
+    // first one in ranked order). Then take up to `n` distinct functions.
+    var seenFns: Set<String> = []
+    var out: [SurfaceFind] = []
+    for c in cands {
+        if out.count >= n { break }
+        if seenFns.insert(c.func_).inserted {
+            out.append(c)
+        }
+    }
+    return out
+}
+
+/// Is the package EFFECTFUL — does ANY function carry a real (non-Unknown) effect? Governs whether the
+/// caller emits the honest "nothing hidden" fallback (effectful, but nothing clears the bar) vs nothing
+/// at all. Mirrors the Rust `any_effectful`.
+func surfaceAnyEffectful(_ inferred: [String: Set<String>]) -> Bool {
+    inferred.values.contains { $0.contains { $0 != "Unknown" } }
+}
+
+/// Compute the single most surprising reach — the scan-note view, expressed via `bestFinds(…, n: 1)`
+/// so the ranking cannot drift from `tour`. Returns the three-valued result the scan-note emit wants.
+func surfaceBestFind(
+    inferred: [String: Set<String>],
+    direct: [String: Set<String>],
+    calls: [String: Set<String>]
+) -> SurfaceResult {
+    let finds = bestFinds(inferred: inferred, direct: direct, calls: calls, loc: [:], n: 1)
+    if let b = finds.first {
         return .winner(b)
     }
-    return .fallback
+    return surfaceAnyEffectful(inferred) ? .fallback : .noEffects
 }
 
 /// Render the surface note to STDERR. `loc` maps qual → "file:line" for the source callout. The prefix
@@ -261,6 +294,9 @@ public func emitSurface(
             "candor: nothing hidden — every effect sits where its name says it should.\n"
                 .data(using: .utf8)!)
     case .winner(let f):
+        // `surfaceBestFind` computes with an empty `loc` (the note doesn't need per-candidate loc), so
+        // resolve the source's file:line HERE against the caller's `loc`, matching the prior behaviour
+        // (`?` when absent). `tour` uses `bestFinds`'s own `sourceLoc` instead.
         let whereS = loc[f.source] ?? "?"
         let hopWord = f.hops == 1 ? "hop" : "hops"
         let benignNote = f.benignToken.isEmpty

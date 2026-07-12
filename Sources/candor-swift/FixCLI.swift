@@ -37,7 +37,8 @@ private func mergeFixReport(_ full: String, into byName: inout [String: FixFn], 
         let inferred = Set((e["inferred"] as? [Any])?.compactMap { $0 as? String } ?? [])
         let direct = Set((e["direct"] as? [Any])?.compactMap { $0 as? String } ?? [])
         let calls = (e["calls"] as? [Any])?.compactMap { $0 as? String } ?? []
-        byName[fn] = FixFn(inferred: inferred, direct: direct, calls: calls)
+        let loc = e["loc"] as? String ?? ""
+        byName[fn] = FixFn(inferred: inferred, direct: direct, calls: calls, loc: loc)
     }
     return true
 }
@@ -376,6 +377,119 @@ func runUnverifiedCLI(_ args: [String]) -> Never {
     let (ok, holes) = unverified(fns, deny)
     emitJSON(["ok": ok, "unverified": holes.map { $0.toJSON() }])
     exit(q.strict && !ok ? 1 : 0)
+}
+
+// Dispatched from main.swift when argv[1] is `tour` (before the scan flag loop). §3.3.1 canonical grammar,
+// like fix-gate but with an OPTIONAL positional integer N (default 10):
+//   candor-swift tour [<N>] [--report <locator>] [--json]
+// Read-only: lists the N most SURPRISING transitive reaches in an existing report — NO re-scan. Delegates to
+// the SHARED CandorCore.bestFinds (the same heuristic the scan-note uses, so the ranking can't drift),
+// reading the §2 report + its §2.2 callgraph sidecar the scan already wrote. Fails LOUD (exit 2) if no
+// report resolves. Matches the Rust reference `candor-query tour` byte-for-byte (a conformance PART pins
+// this four-way).
+func runTourCLI(_ args: [String]) -> Never {
+    // The lone optional positional is N (how many to list); a non-integer is a usage error. `parseQueryArgs`
+    // with expectedVerbArgs: 1 peels it into verbArgs (an integer never `looksLikeReport`, so it is never
+    // mis-claimed as the deprecated leading report). `tour` takes no policy — the resolved policy is ignored.
+    let q = parseQueryArgs(args, expectedVerbArgs: 1)
+    var n = 10
+    if let first = q.verbArgs.first {
+        guard let v = Int(first), v >= 0 else {
+            fixDie("usage: candor-swift tour [<N>] [--report <locator>] [--json]   (N is a non-negative integer)")
+        }
+        n = v
+    }
+    guard let prefix = q.report else {
+        fixDie("candor-swift tour: no report — pass --report <locator> or run from a repo with a .candor/ dir (scan: candor-swift <dir>)")
+    }
+    // Load the report + callgraph the same way fix/fix-gate do (fail loud on a missing/typo'd report).
+    guard let model = loadFixModel(prefix: prefix) else {
+        fixDie("candor-swift tour: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
+    }
+
+    // Build the maps the heuristic wants from the report entries + the callgraph sidecar. `inferred`/`direct`/
+    // `loc` come from the report; `calls` prefers the callgraph sidecar (loadFixModel already falls back to the
+    // report's inline `calls` when the sidecar is absent), which records EVERY edge like the scan held in memory.
+    var inferred: [String: Set<String>] = [:]
+    var direct: [String: Set<String>] = [:]
+    var loc: [String: String] = [:]
+    for (fn, f) in model.byName {
+        inferred[fn] = f.inferred
+        if !f.direct.isEmpty { direct[fn] = f.direct }
+        if !f.loc.isEmpty { loc[fn] = f.loc }
+    }
+    var calls: [String: Set<String>] = [:]
+    for (k, v) in model.cg { calls[k] = Set(v) }
+
+    let finds = bestFinds(inferred: inferred, direct: direct, calls: calls, loc: loc, n: n)
+
+    // <crate> is the report prefix's basename (Rust: `prefix_base(pre)`) — e.g. `.candor/report` → `report`,
+    // `--out mycrate` → `mycrate`. Matches the Rust reference exactly.
+    let crateName = (prefix as NSString).lastPathComponent
+
+    if q.json {
+        // Pure JSON to stdout: {"reaches":[{"fn","effect","hops","source","loc","score"}, …]}.
+        let reaches: [[String: Any]] = finds.map { f in
+            ["fn": f.func_, "effect": f.effect, "hops": f.hops,
+             "source": f.source, "loc": f.sourceLoc, "score": f.score]
+        }
+        emitTourJSON(["reaches": reaches])
+        exit(0)
+    }
+
+    if finds.isEmpty {
+        // Effectful-but-nothing-surprising vs genuinely-pure both land here; either way the honest line is
+        // the useful answer (never a manufactured surprise) — mirrors the scan-note fallback.
+        print("candor: nothing hidden — every effect sits where its name says it should.")
+        exit(0)
+    }
+    let reachWord = finds.count == 1 ? "reach" : "reaches"
+    print("candor tour — the \(finds.count) most surprising \(reachWord) in \(crateName):")
+    for (i, f) in finds.enumerated() {
+        let hopWord = f.hops == 1 ? "hop" : "hops"
+        let whereS = f.sourceLoc.isEmpty ? "" : " (\(f.sourceLoc))"
+        print("  \(i + 1). `\(f.func_)` performs \(f.effect), \(f.hops) \(hopWord) away via `\(f.source)`\(whereS)")
+        print("     →  candor path \(f.func_) \(f.effect)")
+    }
+    exit(0)
+}
+
+// Serialize the tour `--json` payload to STDOUT as COMPACT JSON (one line), matching the Rust reference's
+// `serde_json::to_string(&json!({ "reaches": … }))` BYTE-FOR-BYTE. The reference wraps the reaches in a
+// `serde_json::Value`, whose object is a sorted map, so each reach's keys come out ALPHABETICALLY sorted:
+// effect, fn, hops, loc, score, source. Built by hand (JSONSerialization neither guarantees key order nor a
+// compact form), so this is emitted explicitly rather than via JSONSerialization.
+private func emitTourJSON(_ obj: [String: Any]) {
+    guard let reaches = obj["reaches"] as? [[String: Any]] else { fixDie("candor-swift tour: internal serialize error") }
+    func jstr(_ s: String) -> String {
+        // Minimal JSON string escaping (the fields are qualified names / effects / file:line — no control
+        // chars in practice, but escape the JSON-significant characters for correctness).
+        var out = "\""
+        for ch in s {
+            switch ch {
+            case "\"": out += "\\\""
+            case "\\": out += "\\\\"
+            case "\n": out += "\\n"
+            case "\t": out += "\\t"
+            case "\r": out += "\\r"
+            default: out.append(ch)
+            }
+        }
+        out += "\""
+        return out
+    }
+    var parts: [String] = []
+    for r in reaches {
+        let fn = r["fn"] as? String ?? ""
+        let effect = r["effect"] as? String ?? ""
+        let hops = r["hops"] as? Int ?? 0
+        let source = r["source"] as? String ?? ""
+        let loc = r["loc"] as? String ?? ""
+        let score = r["score"] as? Int ?? 0
+        // Keys ALPHABETICAL to match serde_json::Value's sorted-map output: effect, fn, hops, loc, score, source.
+        parts.append("{\"effect\":\(jstr(effect)),\"fn\":\(jstr(fn)),\"hops\":\(hops),\"loc\":\(jstr(loc)),\"score\":\(score),\"source\":\(jstr(source))}")
+    }
+    print("{\"reaches\":[\(parts.joined(separator: ","))]}")
 }
 
 // Dispatched from main.swift when argv[1] is `fix` or `fix-gate` (before the scan flag loop). §3.3.1:
