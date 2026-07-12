@@ -362,6 +362,13 @@ if !unlisted.isEmpty {
          + "their effects are INVISIBLE to the scan (absent from the report, NOT a claim they're pure): \(shown)\(more)\n").data(using: .utf8)!)
 }
 
+// The cold-repo hook (SURFACE-BEST-FIND-DESIGN.md, phase P3): ONE more stderr line naming the single
+// most surprising transitive reach + a ready-to-run `candor path` command — or an honest "nothing
+// hidden" fallback. Emitted right after the coverage ledger, from the same in-memory maps the report
+// was built from (inferred/direct effect sets + the `edges` call graph + locOf). Prefix is `candor:`
+// (brand voice) and the command is `candor path …` — identical on every engine (CandorCore/Surface.swift).
+emitSurface(inferred: inferred, direct: direct, calls: edges, loc: locOf)
+
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // §6.2 policy gate — parser in CandorCore/Policy.swift, execution in Gate.swift; the exit-code

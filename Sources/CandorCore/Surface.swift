@@ -1,0 +1,276 @@
+// Surface the single most SURPRISING transitive reach (the cold-repo hook).
+//
+// After the effect summary + κ ledger, candor-swift emits ONE more stderr line: the most surprising
+// transitive reach in the package + a ready-to-run `candor path` command. This is the Swift port of
+// candor-scan's `src/surface.rs` — SAME behaviour, so every engine surfaces the same reach on a shared
+// fixture (candor-rust/SURFACE-BEST-FIND-DESIGN.md, phase P3 cross-engine parity).
+//
+// Fully deterministic — pure call-graph + name analysis, NO LLM. A CANDIDATE is a function `F` that
+// INHERITS an effect `E` (E ∈ inferred[F] but E ∉ direct[F]); we BFS to the nearest local direct SOURCE
+// `S` and score by how surprising the reach is (a benign-named function reaching a scary effect). The
+// find is never *wrong*: `candor path` re-derives the chain and the gate is ground truth. When nothing
+// clears the bar we emit an honest "nothing hidden" fallback — never a manufactured surprise.
+//
+// Swift note: the qualified-name separator is `.` (e.g. `Settings.load`, `Foo.Bar.baz`), where the Rust
+// reference uses `::`. Everything else — the lexicons, the score, the tie-break, the emitted text — is
+// byte-for-byte the reference behaviour.
+
+import Foundation
+
+/// Name tokens that read as local / pure / config — a function whose leaf is named like this reaching a
+/// scary effect is the core surprise signal. COPIED verbatim from surface.rs's BENIGN.
+private let BENIGN: Set<String> = [
+    "settings", "config", "conf", "options", "opts", "util", "utils", "helper", "helpers", "model",
+    "models", "dto", "entity", "format", "fmt", "parse", "get", "load", "new", "default", "validate",
+    "valid", "render", "view", "build", "builder", "item", "entry", "record", "state", "context",
+    "ctx", "info", "meta", "data", "value", "node", "field", "name", "key", "id", "path", "kind",
+    "type", "status", "check", "init", "setup",
+]
+
+/// Name tokens that are effect-suggestive — a function in/near an effect-flavored context reaching that
+/// effect is EXPECTED, not surprising, so we EXCLUDE it. COPIED verbatim from surface.rs's EFFECTY.
+private let EFFECTY: Set<String> = [
+    "fetch", "http", "https", "client", "api", "sync", "request", "req", "download", "upload", "query",
+    "sql", "store", "save", "persist", "connect", "conn", "socket", "send", "recv", "read", "write",
+    "open", "file", "fs", "io", "net", "tcp", "udp", "dns", "url", "host", "port", "cmd", "command",
+    "shell", "process", "proc", "exec", "spawn", "env", "clock", "time", "now", "rand", "random",
+    "log", "logger", "trace", "db",
+]
+
+/// Split a qualified name (or a leaf) into lowercase tokens on `.`, `_` and camelCase boundaries.
+/// (The Rust reference also splits on `:`; a Swift qual uses `.` as its separator, so `.` is added and
+/// `:` is kept harmless — neither appears in a Swift member qual.)
+func surfaceTokenize(_ name: String) -> [String] {
+    var out: [String] = []
+    var cur = ""
+    var prevLower = false
+    for ch in name {
+        if ch == "_" || ch == ":" || ch == "." {
+            if !cur.isEmpty {
+                out.append(cur)
+                cur = ""
+            }
+            prevLower = false
+            continue
+        }
+        // camelCase boundary: a lower/digit followed by an upper starts a new token.
+        if ch.isUppercase && prevLower && !cur.isEmpty {
+            out.append(cur)
+            cur = ""
+        }
+        cur.append(Character(ch.lowercased()))
+        prevLower = ch.isLowercase || (ch.isNumber && ch.isASCII)
+    }
+    if !cur.isEmpty {
+        out.append(cur)
+    }
+    return out
+}
+
+/// The leaf (final `.` segment) of a qualified name.
+private func leaf(_ qual: String) -> String {
+    if let i = qual.range(of: ".", options: .backwards) {
+        return String(qual[i.upperBound...])
+    }
+    return qual
+}
+
+/// The module/type portion of a qualified name (everything before the leaf).
+private func moduleOf(_ qual: String) -> String {
+    if let i = qual.range(of: ".", options: .backwards) {
+        return String(qual[..<i.lowerBound])
+    }
+    return ""
+}
+
+/// First token of `name` that is in `lexicon`, or nil.
+private func hasToken(_ name: String, _ lexicon: Set<String>) -> String? {
+    surfaceTokenize(name).first { lexicon.contains($0) }
+}
+
+/// Salience of an effect — the boundary/security-relevant effects a reviewer cares about score higher.
+private func salience(_ effect: String) -> Int {
+    switch effect {
+    case "Net", "Exec", "Db", "Ipc": return 5
+    case "Fs", "Env": return 3
+    case "Clock", "Log", "Rand": return 1
+    default: return 0
+    }
+}
+
+private func hopsFactor(_ hops: Int) -> Int {
+    switch hops {
+    case 1: return 2
+    case 2...4: return 3
+    case 5...6: return 2
+    default: return 1  // ≥7 (hops is always ≥1 for an inherited reach)
+    }
+}
+
+/// A scored candidate reach.
+struct SurfaceFind {
+    let func_: String
+    let effect: String
+    let hops: Int
+    let source: String
+    let benignToken: String
+    let score: Int
+}
+
+/// Test code — a Swift qual has no `::tests::` convention, but keep the reference's spirit: skip a fn
+/// whose leaf or an enclosing segment reads as a test unit. Matches XCTest-style `test…` methods and a
+/// `Tests`/`Test`-suffixed enclosing type.
+private func isTest(_ qual: String) -> Bool {
+    for seg in qual.split(separator: ".") {
+        let s = String(seg)
+        if s.hasPrefix("test") { return true }
+        if s.hasSuffix("Tests") || s.hasSuffix("Test") { return true }
+    }
+    return false
+}
+
+/// BFS from `func_` over `calls` (follow callees, shortest hops) to the nearest function `S` with
+/// `effect` ∈ direct[S]. Returns (hops≥1, S). Only traverses through callees that transitively carry
+/// the effect, so the frontier stays on-effect (matches `candor path`'s walk).
+private func nearestSource(
+    _ func_: String,
+    _ effect: String,
+    _ direct: [String: Set<String>],
+    _ inferred: [String: Set<String>],
+    _ calls: [String: Set<String>]
+) -> (Int, String)? {
+    var seen: Set<String> = [func_]
+    var q: [(String, Int)] = [(func_, 0)]
+    var head = 0
+    while head < q.count {
+        let (cur, d) = q[head]
+        head += 1
+        // A direct source found at distance d≥1 is the nearest (BFS). The start `func_` itself is an
+        // INHERITED reach (E ∉ direct[func_]) so it never matches at d==0.
+        if d >= 1, direct[cur]?.contains(effect) == true {
+            return (d, cur)
+        }
+        if let cs = calls[cur] {
+            // Deterministic frontier order (sorted) — matches the Rust BTreeSet iteration so ties in
+            // BFS distance resolve identically across engines.
+            for c in cs.sorted() where !seen.contains(c) && inferred[c]?.contains(effect) == true {
+                seen.insert(c)
+                q.append((c, d + 1))
+            }
+        }
+    }
+    return nil
+}
+
+/// The three-valued result of `bestFind`, mirroring the Rust `Option<Option<Find>>`.
+enum SurfaceResult {
+    case noEffects            // ZERO effectful functions — caller emits nothing
+    case fallback             // effectful but no winner — caller emits the honest fallback
+    case winner(SurfaceFind)  // the winning reach
+}
+
+/// Compute the single most surprising reach.
+func surfaceBestFind(
+    inferred: [String: Set<String>],
+    direct: [String: Set<String>],
+    calls: [String: Set<String>]
+) -> SurfaceResult {
+    // Any function carrying a real (non-Unknown) effect makes the package "effectful" — governs
+    // whether we emit the fallback vs nothing.
+    var anyEffectful = false
+
+    // Deterministic iteration: sort quals ascending so the tie-break (qual ascending) is stable and
+    // dictionary order never leaks into the result.
+    let quals = inferred.keys.sorted()
+
+    var best: SurfaceFind? = nil
+
+    for f in quals {
+        let inf = inferred[f] ?? []
+        if inf.contains(where: { $0 != "Unknown" }) {
+            anyEffectful = true
+        }
+        if isTest(f) {
+            continue
+        }
+        let fLeaf = leaf(f)
+        let fMod = moduleOf(f)
+        // EXCLUDE the whole function if its leaf OR module reads effecty — its reach is obvious.
+        if hasToken(fLeaf, EFFECTY) != nil || hasToken(fMod, EFFECTY) != nil {
+            continue
+        }
+        let dir = direct[f] ?? []
+        // Candidate effects: inherited (in inferred, not direct), not Unknown. Sorted ascending.
+        let effects = inf.filter { $0 != "Unknown" && !dir.contains($0) }.sorted()
+        for e in effects {
+            let sal = salience(e)
+            if sal == 0 {
+                continue
+            }
+            guard let (hops, s) = nearestSource(f, e, direct, inferred, calls) else {
+                continue  // no LOCAL direct source — nothing to show
+            }
+            let benign = hasToken(fLeaf, BENIGN)
+            let benignity = benign != nil ? 3 : 1
+            let crossing = moduleOf(s) != fMod ? 2 : 1
+            let score = sal * benignity * hopsFactor(hops) * crossing
+            if score == 0 {
+                continue
+            }
+            let cand = SurfaceFind(
+                func_: f, effect: e, hops: hops, source: s,
+                benignToken: benign ?? "", score: score)
+            // Tie-break: higher score, then fewer hops, then qual ascending. Quals are iterated
+            // ascending and effects ascending, so a strict > keeps the first (smallest qual) winner.
+            let better: Bool
+            if let b = best {
+                better = cand.score > b.score || (cand.score == b.score && cand.hops < b.hops)
+                // equal score & hops: earlier qual already seen (ascending iteration) → keep it.
+            } else {
+                better = true
+            }
+            if better {
+                best = cand
+            }
+        }
+    }
+
+    if !anyEffectful {
+        return .noEffects
+    }
+    if let b = best {
+        return .winner(b)
+    }
+    return .fallback
+}
+
+/// Render the surface note to STDERR. `loc` maps qual → "file:line" for the source callout. The prefix
+/// is `candor:` (brand voice, NOT `candor-swift:`) and the command is `candor path …` — identical on
+/// every engine, so a reader sees the same opener whichever engine scanned.
+public func emitSurface(
+    inferred: [String: Set<String>],
+    direct: [String: Set<String>],
+    calls: [String: Set<String>],
+    loc: [String: String]
+) {
+    switch surfaceBestFind(inferred: inferred, direct: direct, calls: calls) {
+    case .noEffects:
+        break  // zero effectful functions — emit nothing
+    case .fallback:
+        FileHandle.standardError.write(
+            "candor: nothing hidden — every effect sits where its name says it should.\n"
+                .data(using: .utf8)!)
+    case .winner(let f):
+        let whereS = loc[f.source] ?? "?"
+        let hopWord = f.hops == 1 ? "hop" : "hops"
+        let benignNote = f.benignToken.isEmpty
+            ? ""
+            : "          a \"\(f.benignToken)\"-named function reaching \(f.effect).\n"
+        let line =
+            "candor: most surprising reach — `\(f.func_)` performs \(f.effect), "
+            + "\(f.hops) \(hopWord) away via `\(f.source)` (\(whereS)).\n"
+            + benignNote
+            + "          →  candor path \(f.func_) \(f.effect)\n"
+        FileHandle.standardError.write(line.data(using: .utf8)!)
+    }
+}
