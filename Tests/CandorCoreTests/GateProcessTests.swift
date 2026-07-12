@@ -455,7 +455,7 @@ final class GateProcessTests: XCTestCase {
 
         let data = try Data(contentsOf: gate)
         let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        XCTAssertEqual(obj?["spec"] as? String, "0.9", "verdict declares the spec version")
+        XCTAssertEqual(obj?["spec"] as? String, "0.10", "verdict declares the spec version")
         XCTAssertEqual(obj?["ok"] as? Bool, false, "ok:false on a failing gate")
         let viols = obj?["violations"] as? [[String: Any]] ?? []
         XCTAssertEqual(viols.count, 1, "one violation")

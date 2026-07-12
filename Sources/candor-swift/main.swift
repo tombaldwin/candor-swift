@@ -27,13 +27,13 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.9.0"
+let engineVersion = "candor-swift-0.10.0"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
 // The spec contract version this engine speaks — the SAME literal that stamps the §2 envelope's `spec`
 // field (see the envelope below), reused so `--version` and the report can never disagree.
-let specVersion = "0.9"
+let specVersion = "0.10"
 
 // `parsepolicy <file>` — dump the parsed §6.2 policy as canonical JSON, the SAME shape candor-java's
 // Query.policyJson / candor-query / candor-ts emit: {"deny":[{effects,scope}], "allow":[{effect,scope,

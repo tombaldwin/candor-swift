@@ -7,6 +7,19 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.10.0] — 2026-07-12
+
+### spec 0.10 — the canonical query grammar rung (§3.3.1)
+
+candor-swift now declares **spec `0.10`** (`specVersion` in `main.swift`; the envelope + `--gate-json`
+verdict carry it). 0.10 ratchets the conformance floor onto the newly-landed **§3.3.1 canonical query
+grammar**: report discovery + the canonical `--report`, `--json`, and `--policy` flag forms are the pinned
+§3.3.1 contract, and the old positional argument forms are **deprecated-but-still-accepted** (a scan or gate
+invoked the old way still works — the deprecation is documentation-level, no behaviour change). Pinned by
+conformance **PART 17**. This is a **version bump only** — no report-schema, classifier, or verdict change: a
+0.9 report/verdict is byte-identical under 0.10. **⚠ the `spec` string changed** — a consumer pinning
+`spec == "0.9"` must accept `0.10`.
+
 ## [0.9.0] — 2026-07-11
 
 ### spec 0.9 — the remedial-loop rung
