@@ -43,8 +43,9 @@ final class TourProcessTests: XCTestCase {
 
         let r = try ProcessHarness.run(binary, ["tour", "--report", prefix])
         XCTAssertEqual(r.code, 0, r.err)
-        // Header: crate is the prefix basename (`report`); 3 reaches → plural "reaches".
-        XCTAssertTrue(r.out.hasPrefix("candor tour — the 3 most surprising reaches in report:\n"), r.out)
+        // Header: crate is the report's `package` envelope field (`App`), NOT the prefix filename; 3
+        // reaches → plural "reaches".
+        XCTAssertTrue(r.out.hasPrefix("candor tour — the 3 most surprising reaches in App:\n"), r.out)
         // The benign-deep reach ranks first, with its ready-to-run command.
         XCTAssertTrue(r.out.contains("1. `Settings.load` performs Net, 3 hops away via `NetLayer.doSend`"), r.out)
         XCTAssertTrue(r.out.contains("→  candor path Settings.load Net"), r.out)
@@ -61,7 +62,7 @@ final class TourProcessTests: XCTestCase {
         let r = try ProcessHarness.run(binary, ["tour", "1", "--report", prefix])
         XCTAssertEqual(r.code, 0, r.err)
         // N=1 → singular "reach", exactly one numbered line, the top-scoring Settings.load.
-        XCTAssertTrue(r.out.hasPrefix("candor tour — the 1 most surprising reach in report:\n"), r.out)
+        XCTAssertTrue(r.out.hasPrefix("candor tour — the 1 most surprising reach in App:\n"), r.out)
         XCTAssertTrue(r.out.contains("1. `Settings.load`"), r.out)
         XCTAssertFalse(r.out.contains("2. `"), r.out)
     }
@@ -101,6 +102,39 @@ final class TourProcessTests: XCTestCase {
 
         let r = try ProcessHarness.run(binary, ["tour", "notanumber", "--report", prefix])
         XCTAssertEqual(r.code, 2, r.out)
-        XCTAssertTrue(r.err.contains("N is a non-negative integer"), r.err)
+        XCTAssertTrue(r.err.contains("N is a positive integer"), r.err)
+    }
+
+    /// `tour 0` must be a usage error (exit 2), never a false "nothing hidden" all-clear over an effectful
+    /// crate. N must be a positive integer ≥ 1 (matches the Rust reference, which now rejects `tour 0`).
+    func testTourRejectsZeroN() throws {
+        let binary = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage(fixture)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let prefix = try scanned(binary, root)
+
+        let r = try ProcessHarness.run(binary, ["tour", "0", "--report", prefix])
+        XCTAssertEqual(r.code, 2, r.out)
+        XCTAssertTrue(r.err.contains("N is a positive integer"), r.err)
+        // It must NOT have printed the honest-sounding all-clear.
+        XCTAssertFalse(r.out.contains("nothing hidden"), r.out)
+    }
+
+    /// `tour <report.json>` (a positional report path) is a grammar divergence from fix/fix-gate: `tour`
+    /// treats EVERY positional as N, so a non-integer report path → exit 2, never a silent N=10 default.
+    func testTourRejectsPositionalReport() throws {
+        let binary = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage(fixture)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let prefix = try scanned(binary, root)
+        // Point at a real report FILE positionally — it is a non-integer, so it must be rejected.
+        let reportFile = try XCTUnwrap(
+            FileManager.default.contentsOfDirectory(atPath: (prefix as NSString).deletingLastPathComponent)
+                .first { $0.hasSuffix(".Swift.json") && !$0.hasSuffix(".callgraph.json") })
+        let full = (prefix as NSString).deletingLastPathComponent + "/" + reportFile
+
+        let r = try ProcessHarness.run(binary, ["tour", full])
+        XCTAssertEqual(r.code, 2, r.out)
+        XCTAssertTrue(r.err.contains("N is a positive integer"), r.err)
     }
 }

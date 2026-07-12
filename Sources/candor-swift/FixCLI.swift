@@ -43,12 +43,24 @@ private func mergeFixReport(_ full: String, into byName: inout [String: FixFn], 
     return true
 }
 
-// Merge one `.callgraph.json` sidecar into `cg`.
+// Merge one `.callgraph.json` sidecar into `cg`. A PRESENT but corrupt/unreadable sidecar silently
+// shrinks the call graph — so tour/fix under-report reaches whose edges lived in the dropped file, and a
+// gate can go false-GREEN. Mirror Rust's `load_callgraph`: disclose on stderr when a sidecar that EXISTS
+// fails to read or parse (a genuinely MISSING sidecar is NOT passed here — that silent fallback is fine).
 private func mergeCallgraph(_ full: String, into cg: inout [String: [String]]) {
-    if let data = FileManager.default.contents(atPath: full),
-       let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-        for (k, v) in obj { cg[k] = (v as? [Any])?.compactMap { $0 as? String } ?? [] }
+    guard let data = FileManager.default.contents(atPath: full) else {
+        FileHandle.standardError.write(
+            "candor-swift: callgraph `\(full)` could not be read — its edges are OMITTED, so the call graph may be incomplete (tour/fix under-report)\n"
+                .data(using: .utf8)!)
+        return
     }
+    guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+        FileHandle.standardError.write(
+            "candor-swift: callgraph `\(full)` failed to parse — its edges are OMITTED, so the call graph may be incomplete (corrupt or mid-write); re-run the scan\n"
+                .data(using: .utf8)!)
+        return
+    }
+    for (k, v) in obj { cg[k] = (v as? [Any])?.compactMap { $0 as? String } ?? [] }
 }
 
 // Load every `<prefix>*.Swift.json` report (merging siblings) + the `.callgraph.json` sidecars for the graph.
@@ -387,19 +399,90 @@ func runUnverifiedCLI(_ args: [String]) -> Never {
 // reading the §2 report + its §2.2 callgraph sidecar the scan already wrote. Fails LOUD (exit 2) if no
 // report resolves. Matches the Rust reference `candor-query tour` byte-for-byte (a conformance PART pins
 // this four-way).
+// The parsed `tour` invocation. Unlike the fix/fix-gate/unverified grammar (parseQueryArgs), `tour` has
+// NO deprecated leading-report positional and NO policy: the single optional positional is N, and the
+// report comes ONLY from --report/discovery. Kept separate so `tour <report.json>` can never be silently
+// mis-read as a leading report with N defaulting to 10 — it is a non-integer positional → exit 2.
+private struct TourArgs {
+    var positional: String?   // the raw first positional (validated as N by the caller)
+    var report: String?       // resolved report prefix/path (nil ⇒ discovery failed, caller fails loud)
+    var json = false
+}
+
+// Parse `tour [<N>] [--report <locator>] [--json]`. Every positional is N (the caller validates it as a
+// positive integer). A second positional, or `--policy`/`--strict`, is a usage error (exit 2) — `tour`
+// takes neither. Mirrors the Rust reference: report from --report/discovery, N is the lone positional.
+private func parseTourArgs(_ args: [String]) -> TourArgs {
+    var t = TourArgs()
+    var reportFlag: String?
+    var positionals: [String] = []
+    var it = args.dropFirst(2).makeIterator()   // drop the binary name + the verb
+    while let a = it.next() {
+        switch a {
+        case "--json": t.json = true
+        case "--report":
+            guard let v = it.next() else { fixDie("candor-swift: --report requires a value") }
+            reportFlag = v
+        default:
+            if a.hasPrefix("-") { fixDie("candor-swift: unknown flag \(a)") }
+            positionals.append(a)
+        }
+    }
+    // At most ONE positional (N). A surplus positional is a usage error — never peeled as a report.
+    if positionals.count > 1 {
+        fixDie("usage: candor-swift tour [<N>] [--report <locator>] [--json]   (N is a positive integer ≥ 1)")
+    }
+    t.positional = positionals.first
+    // Resolve the report: --report flag → discovery. NO positional report (tour's grammar divergence).
+    t.report = reportFlag.map(resolveReportLocator) ?? discoverReportPrefix()
+    return t
+}
+
+// The report's `package` name (the §2 envelope field), or nil if absent/unreadable — the tour header
+// prefers it (meaningful, locator-independent) over the prefix basename. Mirrors Rust's `report_package`:
+// read the FIRST matching report for the prefix and return its non-empty `package`. Accepts a direct
+// `.json` locator or a `<prefix>.<pkg>.Swift.json` family prefix.
+private func reportPackage(prefix: String) -> String? {
+    let fm = FileManager.default
+    func packageOf(_ path: String) -> String? {
+        guard let data = fm.contents(atPath: path),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let pkg = obj["package"] as? String, !pkg.isEmpty else { return nil }
+        return pkg
+    }
+    var isDir: ObjCBool = false
+    if prefix.hasSuffix(".json"), fm.fileExists(atPath: prefix, isDirectory: &isDir), !isDir.boolValue {
+        return packageOf(prefix)
+    }
+    let ns = prefix as NSString
+    let dirRaw = ns.deletingLastPathComponent
+    let dir = dirRaw.isEmpty ? "." : dirRaw
+    let base = ns.lastPathComponent
+    guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return nil }
+    for name in entries.sorted()
+    where name.hasPrefix(base + ".") && name.hasSuffix(".Swift.json")
+        && !name.hasSuffix(".callgraph.json") && !name.hasSuffix(".hierarchy.json") {
+        if let pkg = packageOf(dir + "/" + name) { return pkg }
+    }
+    return nil
+}
+
 func runTourCLI(_ args: [String]) -> Never {
-    // The lone optional positional is N (how many to list); a non-integer is a usage error. `parseQueryArgs`
-    // with expectedVerbArgs: 1 peels it into verbArgs (an integer never `looksLikeReport`, so it is never
-    // mis-claimed as the deprecated leading report). `tour` takes no policy — the resolved policy is ignored.
-    let q = parseQueryArgs(args, expectedVerbArgs: 1)
+    // §3.3.1 grammar for `tour`: the single optional positional is N (how many to list), and EVERY
+    // positional is treated as N — there is NO deprecated leading-report positional (that is `tour`'s
+    // grammar divergence from fix/fix-gate). A non-integer positional (INCLUDING a report path) or N < 1
+    // is a usage error (exit 2). N must be a positive integer ≥ 1: `tour 0` would otherwise print a false
+    // "nothing hidden" all-clear over an effectful crate (the §4 cardinal sin). The report comes ONLY from
+    // `--report`/discovery. Matches the Rust reference `candor-query tour` byte-for-byte.
+    let t = parseTourArgs(args)
     var n = 10
-    if let first = q.verbArgs.first {
-        guard let v = Int(first), v >= 0 else {
-            fixDie("usage: candor-swift tour [<N>] [--report <locator>] [--json]   (N is a non-negative integer)")
+    if let first = t.positional {
+        guard let v = Int(first), v >= 1 else {
+            fixDie("usage: candor-swift tour [<N>] [--report <locator>] [--json]   (N is a positive integer ≥ 1)")
         }
         n = v
     }
-    guard let prefix = q.report else {
+    guard let prefix = t.report else {
         fixDie("candor-swift tour: no report — pass --report <locator> or run from a repo with a .candor/ dir (scan: candor-swift <dir>)")
     }
     // Load the report + callgraph the same way fix/fix-gate do (fail loud on a missing/typo'd report).
@@ -423,11 +506,12 @@ func runTourCLI(_ args: [String]) -> Never {
 
     let finds = bestFinds(inferred: inferred, direct: direct, calls: calls, loc: loc, n: n)
 
-    // <crate> is the report prefix's basename (Rust: `prefix_base(pre)`) — e.g. `.candor/report` → `report`,
-    // `--out mycrate` → `mycrate`. Matches the Rust reference exactly.
-    let crateName = (prefix as NSString).lastPathComponent
+    // The header names the report's PACKAGE (the §2 envelope field) — meaningful and locator-independent,
+    // so every engine and every --report form print the same crate (Rust: `report_package(pre)`). Falls
+    // back to the prefix basename (Rust: `prefix_base(pre)`) — e.g. `.candor/report` → `report`.
+    let crateName = reportPackage(prefix: prefix) ?? (prefix as NSString).lastPathComponent
 
-    if q.json {
+    if t.json {
         // Pure JSON to stdout: {"reaches":[{"fn","effect","hops","source","loc","score"}, …]}.
         let reaches: [[String: Any]] = finds.map { f in
             ["fn": f.func_, "effect": f.effect, "hops": f.hops,

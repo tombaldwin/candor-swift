@@ -1192,5 +1192,41 @@ CANDOR_BASELINE= "$BIN" "$W/bl/afterd" --json > /dev/null 2>"$W/bl/empty.err"; R
 { [ $RC -eq 2 ] && grep -q 'configured but EMPTY' "$W/bl/empty.err"; } \
   && ok "baseline guard: a configured-but-empty value fails closed (exit 2)" || bad "baseline empty: rc=$RC"
 
+# ── `tour` verb (FixCLI.runTourCLI) + isTest fix (CandorCore/Surface.swift) ──────────────────────────
+# The surface heuristic must key "test code" off the MODULE, never the leaf: a PRODUCTION fn whose leaf
+# begins "test" (`Manifest.testConnection`) reaching an effect IS surfaced; `tour 0` and a positional
+# report path are usage errors (exit 2) — never a false "nothing hidden" all-clear or a silent N=10.
+mkdir -p "$W/tour"
+cat > "$W/tour/m.swift" <<'SW'
+import Foundation
+import Network
+enum NetLayer { static func doSend() { let c = NWConnection(host: "h", port: 443, using: .tcp); c.start(queue: .main) } }
+struct Manifest { static func testConnection() { NetLayer.doSend() } }   // PRODUCTION fn, leaf begins "test"
+enum ManifestTests { static func testConnects() { NetLayer.doSend() } }   // real test suite — EXCLUDED
+SW
+"$BIN" "$W/tour/m.swift" --out "$W/tour/r" 2>/dev/null
+TOUT=$("$BIN" tour --report "$W/tour/r" 2>/dev/null)
+# The production test-prefixed fn IS surfaced…
+echo "$TOUT" | grep -q '`Manifest.testConnection` performs Net' \
+  && ok "tour: production Foo.testConnection (leaf 'test') is surfaced, not dropped" \
+  || bad "tour: Manifest.testConnection missing from the tour — over-broad isTest? got: $TOUT"
+# …and the real ManifestTests suite fn is NOT (module ends 'Tests').
+echo "$TOUT" | grep -q 'ManifestTests.testConnects' \
+  && bad "tour: ManifestTests.testConnects (a real test suite) leaked into the tour" \
+  || ok "tour: real *Tests suite fn is excluded (module-based isTest)"
+# Header names the report's `package` envelope field (the fixture's dir basename `tour`), not the filename.
+echo "$TOUT" | grep -q 'most surprising reach.* in tour:' \
+  && ok "tour: header uses the report package field (in tour:)" \
+  || bad "tour: header did not use the package field, got: $TOUT"
+# `tour 0` → exit 2, and it MUST NOT print the honest-sounding all-clear.
+Z=$("$BIN" tour 0 --report "$W/tour/r" 2>"$W/tour/z.err"); RC=$?
+{ [ $RC -eq 2 ] && grep -q 'positive integer' "$W/tour/z.err" && ! echo "$Z" | grep -q 'nothing hidden'; } \
+  && ok "tour 0 -> exit 2 (no false 'nothing hidden')" || bad "tour 0: rc=$RC out=$Z err=$(cat "$W/tour/z.err")"
+# A positional report path is a non-integer N → exit 2 (tour's grammar divergence: no positional report).
+RPT_TOUR=$(ls "$W"/tour/r.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
+"$BIN" tour "$RPT_TOUR" >/dev/null 2>"$W/tour/p.err"; RC=$?
+{ [ $RC -eq 2 ] && grep -q 'positive integer' "$W/tour/p.err"; } \
+  && ok "tour <report.json> (positional) -> exit 2 (N, not a report)" || bad "tour positional report: rc=$RC $(cat "$W/tour/p.err")"
+
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

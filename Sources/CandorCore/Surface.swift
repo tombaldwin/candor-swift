@@ -120,14 +120,24 @@ public struct SurfaceFind {
     public let score: Int
 }
 
-/// Test code — a Swift qual has no `::tests::` convention, but keep the reference's spirit: skip a fn
-/// whose leaf or an enclosing segment reads as a test unit. Matches XCTest-style `test…` methods and a
-/// `Tests`/`Test`-suffixed enclosing type.
+/// Test code — a Swift qual has no `::tests::` convention, so mirror the Rust reference's SPIRIT (a fn
+/// living in a test MODULE): exclude a fn ONLY when its module (the qual with the final leaf removed)
+/// indicates a test context. A non-leaf segment counts as a test context when it is, case-insensitively,
+/// exactly "test" or "tests", OR ends with "Test" or "Tests" (an XCTest-style `FooTests` suite type).
+///
+/// The LEAF (final segment) is NEVER considered — a PRODUCTION function like `Manifest.testConnection`
+/// (leaf begins "test") is real code, kept in the scan-note and tour. So: `Manifest.testConnection` is
+/// KEPT (module "Manifest"); `FooTests.testBar` is excluded (module "FooTests" ends "Tests");
+/// `App.tests.helper` is excluded (segment "tests"). Shared by the scan-note and the tour verb.
 private func isTest(_ qual: String) -> Bool {
-    for seg in qual.split(separator: ".") {
+    let segs = qual.split(separator: ".", omittingEmptySubsequences: false)
+    // Only the MODULE segments (everything before the final leaf) can flag test code.
+    guard segs.count >= 2 else { return false }
+    for seg in segs.dropLast() {
         let s = String(seg)
-        if s.hasPrefix("test") { return true }
-        if s.hasSuffix("Tests") || s.hasSuffix("Test") { return true }
+        let lower = s.lowercased()
+        if lower == "test" || lower == "tests" { return true }
+        if s.hasSuffix("Test") || s.hasSuffix("Tests") { return true }
     }
     return false
 }

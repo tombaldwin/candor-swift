@@ -52,6 +52,35 @@ final class SurfaceTests: XCTestCase {
         XCTAssertEqual(got.benignToken, "load")
     }
 
+    /// isTest must key off the MODULE (qual minus leaf), NEVER the leaf. A PRODUCTION function whose leaf
+    /// begins "test" — `Manifest.testConnection` — is real code and MUST surface; a fn in a `Tests`-suffixed
+    /// suite type (`AppTests.testFoo`) or a `.tests.` module segment (`App.tests.helper`) MUST be excluded.
+    func testProductionTestPrefixedFunctionIsNotExcluded() {
+        var direct: [String: Set<String>] = [:]
+        var inferred: [String: Set<String>] = [:]
+        var calls: [String: Set<String>] = [:]
+
+        // The real effect source.
+        direct["NetLayer.doSend"] = set(["Net"])
+        inferred["NetLayer.doSend"] = set(["Net"])
+
+        // PRODUCTION fn, leaf begins "test", module "Manifest" is NOT a test context → KEPT.
+        inferred["Manifest.testConnection"] = set(["Net"])
+        calls["Manifest.testConnection"] = set(["NetLayer.doSend"])
+
+        // A real test method inside a `Tests`-suffixed suite → EXCLUDED (module "AppTests" ends "Tests").
+        inferred["AppTests.testConnect"] = set(["Net"])
+        calls["AppTests.testConnect"] = set(["NetLayer.doSend"])
+
+        // A fn under a `.tests.` module segment → EXCLUDED (non-leaf segment "tests").
+        inferred["App.tests.helper"] = set(["Net"])
+        calls["App.tests.helper"] = set(["NetLayer.doSend"])
+
+        let got = bestFinds(inferred: inferred, direct: direct, calls: calls, loc: [:], n: 10)
+        XCTAssertEqual(got.map { $0.func_ }, ["Manifest.testConnection"],
+                       "only the production test-prefixed fn surfaces; the two test-module fns are excluded")
+    }
+
     func testFallbackWhenNothingQualifies() {
         // One effectful function, but it is a DIRECT source (not inherited) AND effecty-named — no
         // candidate qualifies → the honest fallback.
