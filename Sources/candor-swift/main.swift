@@ -129,6 +129,15 @@ while let a = argIter.next() {
 
         USAGE: candor-swift [<dir|file.swift>] [--out <prefix>] [--json] [--policy <file>] [--gate-json <file>] [--agents] [--version]
                candor-swift parsepolicy <policy-file>     # dump the parsed §6.2 policy as canonical JSON (the conformance grammar-diff witness)
+               candor-swift fix <fn> <Effect> [--report <locator>] [--policy <file>] [--json]   # the boundary remedy (§3.3.1)
+               candor-swift fix-gate          [--report <locator>] [--policy <file>] [--json]   # all crossings + remedies
+               candor-swift unverified        [--report <locator>] [--policy <file>] [--json] [--strict]  # PASS-but-Unknown holes
+
+          Query verbs (fix/fix-gate/unverified) follow the §3.3.1 canonical grammar: the report is
+          DISCOVERED by default (walk up from CWD for a .candor/ dir; CANDOR_REPORT overrides). --report
+          <locator> overrides — a dir → <dir>/.candor/report, a *.json path → that report, else a prefix.
+          --policy is a flag (honours CANDOR_POLICY then .candor/config). The old positional forms (a
+          leading report prefix, a positional policy) stay accepted as deprecated aliases (stderr note).
 
           <target>          a dir or a single .swift file to scan (default: .)
           --out <prefix>    write the report to <prefix>.<package>.Swift.json + a .callgraph.json sidecar
