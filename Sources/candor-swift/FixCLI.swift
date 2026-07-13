@@ -799,3 +799,160 @@ func runPathCLI(_ args: [String]) -> Never {
     }
     exit(0)
 }
+
+// ── `gains <current> <baseline> [--json]` (SPEC §5.1) ──────────────────────────────────────────────
+// The package-level SUPPLY-CHAIN alarm: every `<fn>\t<effect>` the surface GAINED between two reports
+// (current `inferred` minus baseline `inferred`, per fn), sorted. The two-positional comparative verb
+// (the family's §3.3.1 exception, like `diff`): both positionals ARE report locators, each resolved by
+// the shared 3-way rule — NO discovery, NO --report, NO policy. Read-only over reports scans already
+// wrote. Mirrors the Rust reference `candor-query gains` (diff.rs::cmd_gains): the default output is the
+// `fn\teffect` TSV, `--json` the {byFunction, gained} machine form a CI gate can alarm on when a
+// dependency update quietly gains a capability.
+
+// Parse one `functions`-envelope report into `inferredByFn`, UNIONING on a name collision — two sibling
+// reports can render a function with the same printed name, and an overwrite would drop one sibling's
+// effects, so a newly-gained Net could silently VANISH from `gains` (a supply-chain miss; mirrors the
+// Rust reference load_fninfo's union-not-overwrite rule). Returns false (with a stderr note) on an
+// unparseable / non-report file — the caller fails loud, never a silently-empty "no gains".
+private func mergeInferredReport(_ full: String, into inferredByFn: inout [String: Set<String>]) -> Bool {
+    guard let data = FileManager.default.contents(atPath: full),
+          let root = try? JSONSerialization.jsonObject(with: data),
+          let obj = root as? [String: Any],
+          let fns = obj["functions"] as? [[String: Any]] else {
+        FileHandle.standardError.write("candor-swift gains: report `\(full)` could not be parsed — OMITTED.\n".data(using: .utf8)!)
+        return false
+    }
+    for e in fns {
+        guard let fn = e["fn"] as? String, !fn.isEmpty else { continue }
+        let inferred = Set((e["inferred"] as? [Any])?.compactMap { $0 as? String } ?? [])
+        inferredByFn[fn, default: []].formUnion(inferred)
+    }
+    return true
+}
+
+// Load fn → inferred effects for every `<prefix>*.Swift.json` report (merging siblings). As in
+// loadFixModel, a `prefix` that is itself an existing regular `.json` file is loaded DIRECTLY (§3.3.1).
+// Returns nil when no report file is found — or when every found file failed to parse (the loadFixModel
+// house rule, stricter than the Rust reference's tolerant merge: a corrupt-only CURRENT locator must
+// never read as "zero gains", the false all-clear a gate built on this output would silently PASS on).
+private func loadInferredByFn(prefix: String) -> [String: Set<String>]? {
+    let fm = FileManager.default
+    var out: [String: Set<String>] = [:]
+    var found = false
+
+    var isDir: ObjCBool = false
+    if prefix.hasSuffix(".json"), fm.fileExists(atPath: prefix, isDirectory: &isDir), !isDir.boolValue {
+        return mergeInferredReport(prefix, into: &out) ? out : nil
+    }
+
+    let ns = prefix as NSString
+    let dirRaw = ns.deletingLastPathComponent
+    let dir = dirRaw.isEmpty ? "." : dirRaw
+    let base = ns.lastPathComponent
+    guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return nil }
+    for name in entries.sorted() where name.hasPrefix(base + ".") && name.hasSuffix(".Swift.json") {
+        if mergeInferredReport(dir + "/" + name, into: &out) { found = true }
+    }
+    return found ? out : nil
+}
+
+// The BASELINE callgraph for `origin` — SIDECAR-ONLY, deliberately NOT loadFixModel's inline-`calls`
+// fallback: `origin` keys "did this fn exist at the baseline" on the baseline GRAPH, and the inline
+// calls of the (effectful-only) report entries are an INCOMPLETE graph — a baseline-PURE fn is absent
+// from it, so the fallback would mark an EXISTING fn "new" and downgrade the supply-chain alarm to a
+// feature (a silent under-report). An absent sidecar stays an EMPTY graph → "unknown" (the JSON itself
+// discloses); a present-but-corrupt sidecar keeps mergeCallgraph's stderr disclosure. Mirrors the Rust
+// reference load_callgraph (sidecars only).
+private func loadCallgraphSidecars(prefix: String) -> [String: [String]] {
+    let fm = FileManager.default
+    var cg: [String: [String]] = [:]
+
+    var isDir: ObjCBool = false
+    if prefix.hasSuffix(".json"), fm.fileExists(atPath: prefix, isDirectory: &isDir), !isDir.boolValue {
+        let sidecar = ((prefix as NSString).deletingPathExtension) + ".callgraph.json"
+        if fm.fileExists(atPath: sidecar) { mergeCallgraph(sidecar, into: &cg) }
+        return cg
+    }
+
+    let ns = prefix as NSString
+    let dirRaw = ns.deletingLastPathComponent
+    let dir = dirRaw.isEmpty ? "." : dirRaw
+    let base = ns.lastPathComponent
+    guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return cg }
+    for name in entries.sorted() where name.hasPrefix(base + ".") && name.hasSuffix(".Swift.callgraph.json") {
+        mergeCallgraph(dir + "/" + name, into: &cg)
+    }
+    return cg
+}
+
+// Dispatched from main.swift when argv[1] is `gains`.
+func runGainsCLI(_ args: [String]) -> Never {
+    var wantJson = false
+    var positionals: [String] = []
+    var it = args.dropFirst(2).makeIterator()   // drop the binary name + the verb
+    while let a = it.next() {
+        switch a {
+        case "--json": wantJson = true
+        default:
+            if a.hasPrefix("-") { fixDie("candor-swift: unknown flag \(a)") }
+            positionals.append(a)
+        }
+    }
+    // Exactly TWO positionals (<current> <baseline>); a surplus is a usage error — never silently ignored.
+    guard positionals.count == 2 else {
+        fixDie("usage: candor-swift gains <current> <baseline> [--json]")
+    }
+    let curPre = resolveReportLocator(positionals[0])
+    let basePre = resolveReportLocator(positionals[1])
+    // A locator with no loadable report fails LOUD for BOTH sides (the family's diff/gains rule, and for
+    // the same reason): a typo'd CURRENT prefix shows zero gains (a gate built on this silently PASSES);
+    // a typo'd BASELINE shows every effect as newly gained.
+    guard let cur = loadInferredByFn(prefix: curPre) else {
+        fixDie("candor-swift gains: no report files at current prefix `\(curPre)` — check the path.")
+    }
+    guard let base = loadInferredByFn(prefix: basePre) else {
+        fixDie("candor-swift gains: no report files at baseline prefix `\(basePre)` — check the path.")
+    }
+
+    var out: [(fn: String, effect: String)] = []
+    for (fn, inf) in cur {
+        for e in inf.subtracting(base[fn] ?? []) { out.append((fn: fn, effect: e)) }
+    }
+    out.sort { $0.fn == $1.fn ? $0.effect < $1.effect : $0.fn < $1.fn }
+
+    if wantJson {
+        // The supply-chain alarm (SPEC §5.1): `gained` is the UNION of effects the surface gained between
+        // the two reports — a dependency that grew a Net/Exec reach between releases — with the
+        // per-function detail under `byFunction`.
+        //
+        // ⟨spec 0.12 staged⟩ each byFunction entry carries `origin` — the candor-gains prototype's key
+        // finding promoted into the open query. A gain on a fn that EXISTED at the baseline (shipped
+        // pure, now does Net — the supply-chain attack signal) is a different alarm from a NEW fn that
+        // does Net (a feature). Reports OMIT pure functions (SPEC §2), so existence is keyed on the
+        // baseline CALLGRAPH sidecar (a baseline-pure fn is a graph node with no report entry):
+        //   "existing" — in the baseline report, or a baseline-callgraph node (caller key or callee);
+        //   "new"      — a baseline callgraph WAS loaded and the fn is in neither (the fn did not
+        //                exist at the baseline);
+        //   "unknown"  — absent from the baseline report AND no baseline callgraph sidecar was found
+        //                (empty graph): existence is undecidable — DISCLOSED, never guessed (§4).
+        // JSON-only: the human `fn\teffect` TSV is a pinned consumer surface across the family
+        // (line-matched seen-file dedup) and stays byte-stable. Mirrors candor-rust cmd_gains.
+        let baseCg = loadCallgraphSidecars(prefix: basePre)
+        var baseCgNodes = Set(baseCg.keys)
+        for callees in baseCg.values { baseCgNodes.formUnion(callees) }
+        func originOf(_ fn: String) -> String {
+            if base[fn] != nil { return "existing" }
+            if baseCg.isEmpty { return "unknown" }
+            return baseCgNodes.contains(fn) ? "existing" : "new"
+        }
+        let gained = Set(out.map { $0.effect }).sorted()
+        let byFunction: [[String: Any]] = out.map {
+            // Keys ALPHABETICAL within each entry (emitJSON's .sortedKeys): effect, fn, origin.
+            ["effect": $0.effect, "fn": $0.fn, "origin": originOf($0.fn)]
+        }
+        emitJSON(["byFunction": byFunction, "gained": gained])
+        exit(0)
+    }
+    for p in out { print("\(p.fn)\t\(p.effect)") }
+    exit(0)
+}

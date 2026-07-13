@@ -86,6 +86,7 @@ reports; candor-swift itself carries a few query subcommands, over a report a sc
     candor-swift fix-gate   <report-prefix> <policy-file>               # a fix for EVERY crossing (JSON)
     candor-swift unverified <report-prefix> <policy-file> [--strict]    # pure/deny layers that PASS but are Unknown (not PROVABLY clean)
     candor-swift tour [<N>]                                             # the N most surprising transitive reaches (default 10; no policy)
+    candor-swift gains      <current> <baseline> [--json]              # effects the surface GAINED since the baseline (supply-chain alarm)
 
 `fix` is the remedial inverse of the policy gate (integrations/FIX-SPEC.md): when a function performs
 an effect its layer forbids, it computes where the effect belongs (hoist it to the nearest allowed-

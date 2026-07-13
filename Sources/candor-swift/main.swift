@@ -101,6 +101,13 @@ if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "tour" {
 if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "path" {
     runPathCLI(CommandLine.arguments)
 }
+// `gains <current> <baseline>` (SPEC §5.1) — the supply-chain alarm: every effect a fn GAINED between
+// two reports (current minus baseline). The two-positional comparative verb (§3.3.1 exception: NO
+// discovery — both positionals ARE report locators); read-only over reports scans already wrote; a
+// subcommand, before the scan flag loop. Mirrors the Rust reference `candor-query gains`.
+if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "gains" {
+    runGainsCLI(CommandLine.arguments)
+}
 
 var target = "."
 var outPrefix: String? = nil
@@ -147,6 +154,7 @@ while let a = argIter.next() {
                candor-swift fix-gate          [--report <locator>] [--policy <file>] [--json]   # all crossings + remedies
                candor-swift unverified        [--report <locator>] [--policy <file>] [--json] [--strict]  # PASS-but-Unknown holes
                candor-swift tour [<N>]         [--report <locator>] [--json]                    # the N most surprising reaches (default 10)
+               candor-swift gains <current> <baseline> [--json]                                 # effects gained between two reports — the supply-chain alarm (§5.1)
 
           Query verbs (fix/fix-gate/unverified/tour) follow the §3.3.1 canonical grammar: the report is
           DISCOVERED by default (walk up from CWD for a .candor/ dir; CANDOR_REPORT overrides). --report
