@@ -7,6 +7,50 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.11.0] — 2026-07-13
+
+### spec 0.11 — the surprising-reach surface rung (§3.1)
+
+candor-swift now declares **spec `0.11`** (`specVersion` in `main.swift`; the envelope + `--gate-json`
+verdict carry it). 0.11 is another tier-2 (pinned-tool-surface) rung: it promotes the **§3.1
+surprising-reach surface** into the pinned contract — the scan-time opener (the single most surprising
+transitive reach, a mundane-named function inheriting a boundary effect from hops away, with a
+ready-to-run `candor path` command) and the **`tour [N]`** verb (the same deterministic ranking on
+demand, top-N default 10, plus a pinned `--json` shape). One shared heuristic across the four engines,
+with a **salience floor** (`Clock`/`Log`/`Rand` never surface), **module-segment test exclusion**
+(drops `*Tests`/`tests::`, never a production `test_connection`), and the plain "nothing hidden"
+fallback over a manufactured surprise. Pinned four-way by conformance **PARTs 4f–4k**. No
+report-schema, classifier, or verdict change — a 0.10 report/verdict is byte-identical under 0.11.
+**⚠ the `spec` string changed** — a consumer pinning `spec == "0.10"` must accept `0.11`.
+
+### ✨ NEW `path` verb — the provenance chain to the nearest source
+
+`candor-swift path <fn> <effect>` walks the saved callgraph (BFS, sorted frontier) from a function to
+the **nearest source of an effect** and prints the human chain — byte-identical to the Rust
+reference — plus a `--json` form. This is the command the scan opener suggests; before 0.11 the swift
+engine printed the suggestion without having the verb, a dead end for cold readers.
+
+### Corrupt-report loudness parity
+
+A **located report that yields no trustworthy functions fails loudly** (exit 2) — found-but-corrupt is
+never an empty all-clear, while a well-formed `functions: []` stays a valid pure report. A
+missing/empty callgraph sidecar falls back to the report's inline `calls` (never a false "nothing
+hidden"); a present-but-corrupt sidecar gets a stderr disclosure; `tour 0` exits 2 instead of a false
+all-clear. Pinned by conformance PARTs 4h and 4k.
+
+### Plural `packages` tour-header label
+
+`reportPackage` honours the SPEC §2 plural `packages` envelope (the JVM shape): the tour header labels
+a multi-package report by the list's longest common dotted prefix (one entry verbatim; none shared →
+basename fallback), so a cross-engine query over a JVM report names the code, not the filename.
+Pinned by the conformance 4g addendum.
+
+### Coverage-ledger marker: `classifier doesn't cover`
+
+The de-jargoned ledger marker ships in this release — the [0.10.0] entry below describes the rename,
+but the κ retirement landed after the v0.10.0 tag, so 0.11.0 is the first release carrying it. A
+consumer grepping the old `κ doesn't know` marker must update to `classifier doesn't cover`.
+
 ## [0.10.0] — 2026-07-12
 
 ### spec 0.10 — the canonical query grammar rung (§3.3.1)
