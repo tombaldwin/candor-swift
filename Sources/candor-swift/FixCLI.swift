@@ -440,15 +440,20 @@ private func parseTourArgs(_ args: [String]) -> TourArgs {
 
 // The report's `package` name (the §2 envelope field), or nil if absent/unreadable — the tour header
 // prefers it (meaningful, locator-independent) over the prefix basename. Mirrors Rust's `report_package`:
-// read the FIRST matching report for the prefix and return its non-empty `package`. Accepts a direct
-// `.json` locator or a `<prefix>.<pkg>.Swift.json` family prefix.
+// read the FIRST matching report for the prefix and return its non-empty `package`. A `packages` PLURAL
+// envelope (the JVM shape, SPEC §2) is honoured too: one entry names it verbatim; several name their
+// longest common dotted prefix (`com.a.x` + `com.a.y` → `com.a`); none shared → nil (basename fallback).
+// Accepts a direct `.json` locator or a `<prefix>.<pkg>.Swift.json` family prefix.
 private func reportPackage(prefix: String) -> String? {
     let fm = FileManager.default
     func packageOf(_ path: String) -> String? {
         guard let data = fm.contents(atPath: path),
-              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let pkg = obj["package"] as? String, !pkg.isEmpty else { return nil }
-        return pkg
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        if let pkg = obj["package"] as? String, !pkg.isEmpty { return pkg }
+        if let pkgs = obj["packages"] as? [Any] {
+            return packagesLabel(pkgs.compactMap { $0 as? String }.filter { !$0.isEmpty })
+        }
+        return nil
     }
     var isDir: ObjCBool = false
     if prefix.hasSuffix(".json"), fm.fileExists(atPath: prefix, isDirectory: &isDir), !isDir.boolValue {
@@ -465,6 +470,23 @@ private func reportPackage(prefix: String) -> String? {
         if let pkg = packageOf(dir + "/" + name) { return pkg }
     }
     return nil
+}
+
+// The longest common dot-separated prefix of a plural `packages` list — whole segments only (`com.ab` +
+// `com.ac` share `com`, not `com.a`); nil when nothing is shared. Mirrors Rust's packages_label (tour.rs).
+private func packagesLabel(_ pkgs: [String]) -> String? {
+    guard let head = pkgs.first else { return nil }
+    if pkgs.count == 1 { return head }
+    let first = head.split(separator: ".", omittingEmptySubsequences: false)
+    var n = first.count
+    for p in pkgs.dropFirst() {
+        let segs = p.split(separator: ".", omittingEmptySubsequences: false)
+        var i = 0
+        while i < min(n, segs.count) && segs[i] == first[i] { i += 1 }
+        n = i
+        if n == 0 { return nil } // nothing shared — the basename fallback is more honest
+    }
+    return first[0..<n].joined(separator: ".")
 }
 
 func runTourCLI(_ args: [String]) -> Never {
