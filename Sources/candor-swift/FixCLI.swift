@@ -47,20 +47,24 @@ private func mergeFixReport(_ full: String, into byName: inout [String: FixFn], 
 // shrinks the call graph — so tour/fix under-report reaches whose edges lived in the dropped file, and a
 // gate can go false-GREEN. Mirror Rust's `load_callgraph`: disclose on stderr when a sidecar that EXISTS
 // fails to read or parse (a genuinely MISSING sidecar is NOT passed here — that silent fallback is fine).
-private func mergeCallgraph(_ full: String, into cg: inout [String: [String]]) {
+// Returns false on that read/parse failure so a caller who NEEDS a complete graph (gains `origin`) can
+// mark the merged result PARTIAL rather than trust it whole.
+@discardableResult
+private func mergeCallgraph(_ full: String, into cg: inout [String: [String]]) -> Bool {
     guard let data = FileManager.default.contents(atPath: full) else {
         FileHandle.standardError.write(
             "candor-swift: callgraph `\(full)` could not be read — its edges are OMITTED, so the call graph may be incomplete (tour/fix under-report)\n"
                 .data(using: .utf8)!)
-        return
+        return false
     }
     guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
         FileHandle.standardError.write(
             "candor-swift: callgraph `\(full)` failed to parse — its edges are OMITTED, so the call graph may be incomplete (corrupt or mid-write); re-run the scan\n"
                 .data(using: .utf8)!)
-        return
+        return false
     }
     for (k, v) in obj { cg[k] = (v as? [Any])?.compactMap { $0 as? String } ?? [] }
+    return true
 }
 
 // Load every `<prefix>*.Swift.json` report (merging siblings) + the `.callgraph.json` sidecars for the graph.
@@ -809,23 +813,44 @@ func runPathCLI(_ args: [String]) -> Never {
 // `fn\teffect` TSV, `--json` the {byFunction, gained} machine form a CI gate can alarm on when a
 // dependency update quietly gains a capability.
 
-// Parse one `functions`-envelope report into `inferredByFn`, UNIONING on a name collision — two sibling
-// reports can render a function with the same printed name, and an overwrite would drop one sibling's
-// effects, so a newly-gained Net could silently VANISH from `gains` (a supply-chain miss; mirrors the
-// Rust reference load_fninfo's union-not-overwrite rule). Returns false (with a stderr note) on an
-// unparseable / non-report file — the caller fails loud, never a silently-empty "no gains".
+// Parse one report into `inferredByFn`, UNIONING on a name collision — two sibling reports can render
+// a function with the same printed name, and an overwrite would drop one sibling's effects, so a
+// newly-gained Net could silently VANISH from `gains` (a supply-chain miss; mirrors the Rust reference
+// load_fninfo's union-not-overwrite rule). Accepts BOTH the §2 `{candor, functions}` envelope and the
+// legacy v0.1 bare-array form (the migration contract the Rust reference's report_entries honors — a
+// bare `[]` is a VALID clean-empty report the whole family answers on, not a parse failure). Returns
+// false (with a stderr note) on an unparseable / non-report file — the caller fails loud, never a
+// silently-empty "no gains". A NON-EMPTY entries array in which EVERY entry is unusable (no `fn`) is
+// the same failure, not an empty report: treating it as parsed would print {byFunction:[],gained:[]}
+// at exit 0 over a corrupt current — the false all-clear a gate silently PASSES on (the §4 cardinal sin).
 private func mergeInferredReport(_ full: String, into inferredByFn: inout [String: Set<String>]) -> Bool {
-    guard let data = FileManager.default.contents(atPath: full),
-          let root = try? JSONSerialization.jsonObject(with: data),
-          let obj = root as? [String: Any],
-          let fns = obj["functions"] as? [[String: Any]] else {
+    let entries: [Any]
+    if let data = FileManager.default.contents(atPath: full),
+       let root = try? JSONSerialization.jsonObject(with: data) {
+        if let obj = root as? [String: Any], let fns = obj["functions"] as? [Any] {
+            entries = fns                     // the §2 envelope
+        } else if let arr = root as? [Any] {
+            entries = arr                     // the legacy bare-array report
+        } else {
+            FileHandle.standardError.write("candor-swift gains: report `\(full)` could not be parsed — OMITTED.\n".data(using: .utf8)!)
+            return false
+        }
+    } else {
         FileHandle.standardError.write("candor-swift gains: report `\(full)` could not be parsed — OMITTED.\n".data(using: .utf8)!)
         return false
     }
-    for e in fns {
-        guard let fn = e["fn"] as? String, !fn.isEmpty else { continue }
-        let inferred = Set((e["inferred"] as? [Any])?.compactMap { $0 as? String } ?? [])
+    var usable = 0
+    for e in entries {
+        guard let d = e as? [String: Any], let fn = d["fn"] as? String, !fn.isEmpty else { continue }
+        let inferred = Set((d["inferred"] as? [Any])?.compactMap { $0 as? String } ?? [])
         inferredByFn[fn, default: []].formUnion(inferred)
+        usable += 1
+    }
+    if !entries.isEmpty && usable == 0 {
+        // A well-formed EMPTY functions array is a valid pure report; a non-empty one that yields
+        // ZERO usable entries is semantic corruption — fail loud, never an all-clear.
+        FileHandle.standardError.write("candor-swift gains: report `\(full)` has no usable functions — every entry was dropped (corrupt report); OMITTED.\n".data(using: .utf8)!)
+        return false
     }
     return true
 }
@@ -861,28 +886,61 @@ private func loadInferredByFn(prefix: String) -> [String: Set<String>]? {
 // calls of the (effectful-only) report entries are an INCOMPLETE graph — a baseline-PURE fn is absent
 // from it, so the fallback would mark an EXISTING fn "new" and downgrade the supply-chain alarm to a
 // feature (a silent under-report). An absent sidecar stays an EMPTY graph → "unknown" (the JSON itself
-// discloses); a present-but-corrupt sidecar keeps mergeCallgraph's stderr disclosure. Mirrors the Rust
+// discloses); a MATCHED sidecar that fails to read/parse keeps mergeCallgraph's stderr disclosure AND
+// flips `partial` — the merged graph is missing that file's nodes, so a fn absent from it is NOT
+// provably "new" (origin degrades to "unknown", never a mislabel). Absent ≠ partial. Mirrors the Rust
 // reference load_callgraph (sidecars only).
-private func loadCallgraphSidecars(prefix: String) -> [String: [String]] {
+private func loadCallgraphSidecars(prefix: String) -> (cg: [String: [String]], partial: Bool) {
     let fm = FileManager.default
     var cg: [String: [String]] = [:]
+    var partial = false
 
     var isDir: ObjCBool = false
     if prefix.hasSuffix(".json"), fm.fileExists(atPath: prefix, isDirectory: &isDir), !isDir.boolValue {
         let sidecar = ((prefix as NSString).deletingPathExtension) + ".callgraph.json"
-        if fm.fileExists(atPath: sidecar) { mergeCallgraph(sidecar, into: &cg) }
-        return cg
+        if fm.fileExists(atPath: sidecar), !mergeCallgraph(sidecar, into: &cg) { partial = true }
+        return (cg, partial)
     }
 
     let ns = prefix as NSString
     let dirRaw = ns.deletingLastPathComponent
     let dir = dirRaw.isEmpty ? "." : dirRaw
     let base = ns.lastPathComponent
-    guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return cg }
+    guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return (cg, partial) }
     for name in entries.sorted() where name.hasPrefix(base + ".") && name.hasSuffix(".Swift.callgraph.json") {
-        mergeCallgraph(dir + "/" + name, into: &cg)
+        if !mergeCallgraph(dir + "/" + name, into: &cg) { partial = true }
     }
-    return cg
+    return (cg, partial)
+}
+
+// The PRODUCING build of the report(s) at `prefix` — the §2.1 envelope `candor.version`, "" when
+// absent/unreadable (candor-ts's convention: the provenance fields are unconditional, empty = unknown;
+// a legacy bare-array report has no header). First sibling with a version wins — one prefix's siblings
+// are one scan's output. Mirrors candor-ts query-core reportVersion / candor-java reportVersion.
+private func gainsReportVersion(prefix: String) -> String {
+    let fm = FileManager.default
+    var files: [String] = []
+    var isDir: ObjCBool = false
+    if prefix.hasSuffix(".json"), fm.fileExists(atPath: prefix, isDirectory: &isDir), !isDir.boolValue {
+        files = [prefix]
+    } else {
+        let ns = prefix as NSString
+        let dirRaw = ns.deletingLastPathComponent
+        let dir = dirRaw.isEmpty ? "." : dirRaw
+        let base = ns.lastPathComponent
+        guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return "" }
+        files = entries.sorted()
+            .filter { $0.hasPrefix(base + ".") && $0.hasSuffix(".Swift.json") }
+            .map { dir + "/" + $0 }
+    }
+    for f in files {
+        guard let data = fm.contents(atPath: f),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let candor = obj["candor"] as? [String: Any],
+              let v = candor["version"] as? String, !v.isEmpty else { continue }
+        return v
+    }
+    return ""
 }
 
 // Dispatched from main.swift when argv[1] is `gains`.
@@ -914,6 +972,19 @@ func runGainsCLI(_ args: [String]) -> Never {
         fixDie("candor-swift gains: no report files at baseline prefix `\(basePre)` — check the path.")
     }
 
+    // §2.1 producing-build provenance — a DISCLOSURE, not a guard (unlike the baseline gate, gains still
+    // ANSWERS): a baseline is comparable only to reports from its own producing build, so when BOTH
+    // versions are known and differ, a "gained capability" may be the ENGINE reclassifying (a κ batch
+    // unmasking effects), not the dependency changing. One stderr ⚠ line + the unconditional
+    // baseline_version/engine_version JSON fields ("" = unknown). Mirrors candor-ts / candor-java gains.
+    let curVersion = gainsReportVersion(prefix: curPre)
+    let baseVersion = gainsReportVersion(prefix: basePre)
+    if !curVersion.isEmpty, !baseVersion.isEmpty, curVersion != baseVersion {
+        FileHandle.standardError.write(
+            "candor-swift: ⚠ baseline @\(baseVersion) ≠ engine @\(curVersion) — a \"gained capability\" may be the engine reclassifying, not the dependency changing. Regenerate both reports with one build to compare releases.\n"
+                .data(using: .utf8)!)
+    }
+
     var out: [(fn: String, effect: String)] = []
     for (fn, inf) in cur {
         for e in inf.subtracting(base[fn] ?? []) { out.append((fn: fn, effect: e)) }
@@ -931,26 +1002,32 @@ func runGainsCLI(_ args: [String]) -> Never {
         // does Net (a feature). Reports OMIT pure functions (SPEC §2), so existence is keyed on the
         // baseline CALLGRAPH sidecar (a baseline-pure fn is a graph node with no report entry):
         //   "existing" — in the baseline report, or a baseline-callgraph node (caller key or callee);
-        //   "new"      — a baseline callgraph WAS loaded and the fn is in neither (the fn did not
-        //                exist at the baseline);
-        //   "unknown"  — absent from the baseline report AND no baseline callgraph sidecar was found
-        //                (empty graph): existence is undecidable — DISCLOSED, never guessed (§4).
+        //   "new"      — a COMPLETE baseline callgraph was loaded and the fn is in neither (the fn
+        //                did not exist at the baseline);
+        //   "unknown"  — absent from the baseline report AND the graph is EMPTY (no sidecar found) OR
+        //                PARTIAL (a matched sidecar failed to read/parse and its nodes were dropped —
+        //                the fn may have lived in the dropped file): existence is undecidable —
+        //                DISCLOSED, never guessed (§4). A node still IN the partial graph stays
+        //                "existing"; only the negative claim degrades.
         // JSON-only: the human `fn\teffect` TSV is a pinned consumer surface across the family
         // (line-matched seen-file dedup) and stays byte-stable. Mirrors candor-rust cmd_gains.
-        let baseCg = loadCallgraphSidecars(prefix: basePre)
+        let (baseCg, baseCgPartial) = loadCallgraphSidecars(prefix: basePre)
         var baseCgNodes = Set(baseCg.keys)
         for callees in baseCg.values { baseCgNodes.formUnion(callees) }
         func originOf(_ fn: String) -> String {
             if base[fn] != nil { return "existing" }
-            if baseCg.isEmpty { return "unknown" }
-            return baseCgNodes.contains(fn) ? "existing" : "new"
+            if baseCgNodes.contains(fn) { return "existing" }
+            if baseCg.isEmpty || baseCgPartial { return "unknown" }
+            return "new"
         }
         let gained = Set(out.map { $0.effect }).sorted()
         let byFunction: [[String: Any]] = out.map {
             // Keys ALPHABETICAL within each entry (emitJSON's .sortedKeys): effect, fn, origin.
             ["effect": $0.effect, "fn": $0.fn, "origin": originOf($0.fn)]
         }
-        emitJSON(["byFunction": byFunction, "gained": gained])
+        // Top-level keys ALPHABETICAL too: baseline_version, byFunction, engine_version, gained.
+        emitJSON(["baseline_version": baseVersion, "byFunction": byFunction,
+                  "engine_version": curVersion, "gained": gained])
         exit(0)
     }
     for p in out { print("\(p.fn)\t\(p.effect)") }
