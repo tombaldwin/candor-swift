@@ -81,6 +81,24 @@ final class SurfaceTests: XCTestCase {
                        "only the production test-prefixed fn surfaces; the two test-module fns are excluded")
     }
 
+    /// Salience: a benign fn whose ONLY inherited reach is mundane (Clock/Log/Rand) must NOT be surfaced —
+    /// those score 0, so the package honestly falls back to "nothing hidden" rather than over-promising a
+    /// clock/log reach as "the most surprising find" (corpus-dogfood refinement; mirrors surface.rs).
+    func testMundaneClockLogRandNeverSurfaces() {
+        for eff in ["Clock", "Log", "Rand"] {
+            var direct: [String: Set<String>] = [:]
+            var inferred: [String: Set<String>] = [:]
+            var calls: [String: Set<String>] = [:]
+            // A benign-named fn inheriting only the mundane effect, with a real local direct source.
+            direct["Ticker.stamp"] = set([eff]); inferred["Ticker.stamp"] = set([eff])
+            inferred["Settings.load"] = set([eff]); calls["Settings.load"] = set(["Ticker.stamp"])
+            guard case .fallback = surfaceBestFind(inferred: inferred, direct: direct, calls: calls)
+            else { return XCTFail("expected the honest fallback for a \(eff)-only reach") }
+            XCTAssertTrue(bestFinds(inferred: inferred, direct: direct, calls: calls, loc: [:], n: 10).isEmpty,
+                          "\(eff) scores 0 salience — never a tour row")
+        }
+    }
+
     func testFallbackWhenNothingQualifies() {
         // One effectful function, but it is a DIRECT source (not inherited) AND effecty-named — no
         // candidate qualifies → the honest fallback.

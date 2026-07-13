@@ -94,6 +94,13 @@ if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "unverified" {
 if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "tour" {
     runTourCLI(CommandLine.arguments)
 }
+// `path <fn> <Effect>` (§3.1) — the read-only query the scan-note / `tour` opener points at: trace the
+// call chain by which a fn comes to perform an effect, down to the nearest DIRECT source. Report from
+// --report/discovery, NO policy; a subcommand, before the scan flag loop. Byte-for-byte the Rust
+// reference `candor-query path` (conformance PART 5 pins the shape four-way).
+if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "path" {
+    runPathCLI(CommandLine.arguments)
+}
 
 var target = "."
 var outPrefix: String? = nil
@@ -135,6 +142,7 @@ while let a = argIter.next() {
 
         USAGE: candor-swift [<dir|file.swift>] [--out <prefix>] [--json] [--policy <file>] [--gate-json <file>] [--agents] [--version]
                candor-swift parsepolicy <policy-file>     # dump the parsed §6.2 policy as canonical JSON (the conformance grammar-diff witness)
+               candor-swift path <fn> <Effect> [--report <locator>] [--json]                    # the call chain by which a fn comes to perform an effect (§3.1)
                candor-swift fix <fn> <Effect> [--report <locator>] [--policy <file>] [--json]   # the boundary remedy (§3.3.1)
                candor-swift fix-gate          [--report <locator>] [--policy <file>] [--json]   # all crossings + remedies
                candor-swift unverified        [--report <locator>] [--policy <file>] [--json] [--strict]  # PASS-but-Unknown holes

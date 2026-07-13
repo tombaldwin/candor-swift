@@ -627,3 +627,153 @@ func runFixCLI(_ args: [String]) -> Never {
         exit(0)
     }
 }
+
+// ── `path <fn> <Effect>` (SPEC §3.1) ────────────────────────────────────────────────────────────────
+// The read-only query the scan-note / `tour` opener names as its ready-to-run follow-up: trace the call
+// chain by which `<fn>` comes to perform `<Effect>`, from the function down to the nearest DIRECT source.
+// NO policy — it is a pure structural read over the report graph. Report from --report/discovery, `--json`
+// for the §3.1 pinned shape. Byte-for-byte the Rust reference `candor-query path` (callers.rs::cmd_path),
+// which conformance PART 5 pins four-way. Fails LOUD (exit 2) on a missing report / an unmatched fn.
+
+// The parsed `path` invocation: two leading positionals (<fn> <Effect>), a report from --report/discovery,
+// `--json`. Like `tour`, there is NO deprecated leading-report positional and NO policy — the report comes
+// ONLY from --report/discovery, so a report path can never be silently mis-read as the <fn> positional.
+private struct PathArgs {
+    var positionals: [String] = []   // [<fn>, <Effect>]
+    var report: String?              // resolved report prefix/path (nil ⇒ discovery failed, caller fails loud)
+    var json = false
+}
+
+// Parse `path <fn> <Effect> [--report <locator>] [--json]`. Exactly TWO positionals are required; a
+// surplus positional, or `--policy`/`--strict`, is a usage error (exit 2). Mirrors the Rust reference's
+// `Shape { verb_args: 2, has_policy: false }`: report from --report/discovery, the two positionals are
+// <fn> and <Effect>.
+private func parsePathArgs(_ args: [String]) -> PathArgs {
+    var p = PathArgs()
+    var reportFlag: String?
+    var positionals: [String] = []
+    var it = args.dropFirst(2).makeIterator()   // drop the binary name + the verb
+    while let a = it.next() {
+        switch a {
+        case "--json": p.json = true
+        case "--report":
+            guard let v = it.next() else { fixDie("candor-swift: --report requires a value") }
+            reportFlag = v
+        default:
+            if a.hasPrefix("-") { fixDie("candor-swift: unknown flag \(a)") }
+            positionals.append(a)
+        }
+    }
+    p.positionals = positionals
+    // Resolve the report: --report flag → discovery. NO positional report (like `tour`).
+    p.report = reportFlag.map(resolveReportLocator) ?? discoverReportPrefix()
+    return p
+}
+
+// Dispatched from main.swift when argv[1] is `path`. Loads the report + callgraph the same way fix/tour do,
+// resolves `<fn>` by exact-then-substring match (like the Rust reference), then BFS through the effect-
+// carrying call graph to the nearest DIRECT source, recording the chain.
+func runPathCLI(_ args: [String]) -> Never {
+    let p = parsePathArgs(args)
+    guard p.positionals.count == 2 else {
+        fixDie("usage: candor-swift path <fn-substring> <Effect> [--report <locator>] [--json]")
+    }
+    let (fnArg, effect) = (p.positionals[0], p.positionals[1])
+    guard let prefix = p.report else {
+        fixDie("candor-swift path: no report — pass --report <locator> or run from a repo with a .candor/ dir (scan: candor-swift <dir>)")
+    }
+    guard let model = loadFixModel(prefix: prefix) else {
+        fixDie("candor-swift path: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
+    }
+    let byName = model.byName
+    let cg = model.cg
+
+    // Resolve <fn>: EXACT name first, else the first (deterministic) fn whose qual CONTAINS the substring —
+    // mirrors the Rust reference (`find(func == arg).or_else(find(func.contains(arg)))`). Sorted so the
+    // substring fallback is stable across dictionary orderings.
+    let names = byName.keys.sorted()
+    let startName = names.first { $0 == fnArg } ?? names.first { $0.contains(fnArg) }
+    guard let start = startName else {
+        // Fail loud (exit 2) on an unmatched fn — never a silently-empty answer (matches the family).
+        fixDie("candor-swift path: no function matching '\(fnArg)'")
+    }
+    let startFn = byName[start]!
+
+    // The honest empty answer (NOT an error): the fn does not carry the effect at all. In --json mode emit
+    // the pinned {effect,fn,path:[]} object (a `jq` consumer would choke on human text on stdout); in human
+    // mode name it, matching the Rust wording, including the sorted inferred set for context.
+    if !startFn.inferred.contains(effect) {
+        if p.json {
+            emitJSON(["fn": start, "effect": effect, "path": [[String: Any]]()])
+        } else {
+            let inf = "[" + startFn.inferred.sorted().map { "\"\($0)\"" }.joined(separator: ", ") + "]"
+            print("\(start) does not perform \(effect)  (inferred: \(inf))")
+        }
+        exit(0)
+    }
+
+    // BFS through effect-carrying callees to the FIRST fn with the effect in its DIRECT set (the nearest
+    // local source). Traverse only through callees that transitively carry the effect (inferred), so the
+    // frontier stays on-effect — matches the scan-note's `nearestSource` and the Rust reference.
+    // `prev[x]` = the predecessor on the BFS tree; the start maps to "" (no predecessor — reconstruction
+    // stops there). A key's PRESENCE marks "visited", so the start is seeded before the walk.
+    var prev: [String: String] = [start: ""]
+    var queue: [String] = [start]
+    var head = 0
+    var source: String?
+    while head < queue.count {
+        let cur = queue[head]; head += 1
+        guard let f = byName[cur] else { continue }
+        if f.direct.contains(effect) { source = cur; break }
+        // Deterministic frontier order (sorted) so BFS-distance ties resolve identically across engines.
+        for c in (cg[cur] ?? []).sorted() where prev[c] == nil {
+            if let cf = byName[c], cf.inferred.contains(effect) {
+                prev[c] = cur
+                queue.append(c)
+            }
+        }
+    }
+
+    guard let src = source else {
+        // Reached via a cross-package call / Unknown — the honest empty-path answer (§3.1), not an error.
+        if p.json {
+            emitJSON(["fn": start, "effect": effect, "path": [[String: Any]]()])
+        } else {
+            print("\(start) performs \(effect) but its source is not a local function "
+                + "(cross-crate, or via Unknown) — not statically traceable.")
+        }
+        exit(0)
+    }
+
+    // Reconstruct the chain start → … → source.
+    var chain: [String] = []
+    var n = src
+    while !n.isEmpty {
+        chain.append(n)
+        n = prev[n] ?? ""
+    }
+    chain.reverse()
+
+    if p.json {
+        let steps: [[String: Any]] = chain.enumerated().map { (i, name) in
+            ["fn": name, "loc": byName[name]?.loc ?? "", "source": i == chain.count - 1]
+        }
+        emitJSON(["fn": start, "effect": effect, "path": steps])
+        exit(0)
+    }
+
+    // HUMAN: header, then the chain — each step indented one deeper (2 spaces per level, from level 1), the
+    // source step tagged `[<Effect> source @ file:line]` (or `[<Effect> source]` when loc is absent).
+    print("candor path — how `\(start)` comes to perform \(effect):\n")
+    for (i, name) in chain.enumerated() {
+        let indent = String(repeating: "  ", count: i + 1)
+        let arrow = i == 0 ? "" : "→ "
+        var tag = ""
+        if i == chain.count - 1 {
+            let loc = byName[name]?.loc ?? ""
+            tag = loc.isEmpty ? "   [\(effect) source]" : "   [\(effect) source @ \(loc)]"
+        }
+        print("\(indent)\(arrow)\(name)\(tag)")
+    }
+    exit(0)
+}

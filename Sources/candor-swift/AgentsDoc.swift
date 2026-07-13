@@ -81,6 +81,7 @@ candor-swift claims §4 (below), but read `unresolved` before trusting any speci
 general read-only queries (show/where/callers/whatif) point candor-query or candor-ts-query at these
 reports; candor-swift itself carries a few query subcommands, over a report a scan already wrote:
 
+    candor-swift path       <fn> <Effect>                              # the call chain by which a fn comes to perform an effect (no policy)
     candor-swift fix        <report-prefix> <fn> <Effect> <policy-file>  # the boundary FIX (JSON)
     candor-swift fix-gate   <report-prefix> <policy-file>               # a fix for EVERY crossing (JSON)
     candor-swift unverified <report-prefix> <policy-file> [--strict]    # pure/deny layers that PASS but are Unknown (not PROVABLY clean)
@@ -97,6 +98,12 @@ boundary it crosses); an unreadable policy or a missing report fails loud (exit 
 function that reaches a scary effect a few hops down — each with a ready-to-run `candor path` command;
 `--json` for machines. No policy, read-only, the same heuristic as the scan-time note. A missing report
 fails loud (exit 2).
+`path <fn> <Effect>` traces the call chain by which `<fn>` comes to perform `<Effect>` — from the
+function down to the nearest DIRECT source, each step indented one deeper, the source annotated
+`[<Effect> source @ file:line]`. It is the ready-to-run follow-up the scan-note / `tour` print. No
+policy, read-only; `--json` emits `{ effect, fn, path:[{ fn, loc, source }] }`. If the fn does not
+perform the effect (or the source is not a local function) the chain is honestly empty. A missing
+report or an unmatched fn fails loud (exit 2).
 
 ## The trust rule — do not skip this
 
