@@ -10,7 +10,7 @@ import Foundation
 // structs. These types OWN the §2 wire serialization, so the entry/envelope shape lives in one place.
 enum Effect: String, CaseIterable {
     case clipboard = "Clipboard", clock = "Clock", db = "Db", env = "Env", exec = "Exec"
-    case fs = "Fs", ipc = "Ipc", log = "Log", net = "Net", rand = "Rand", unknown = "Unknown"
+    case fs = "Fs", ipc = "Ipc", llm = "Llm", log = "Log", net = "Net", rand = "Rand", unknown = "Unknown"
     var specName: String { rawValue }
     static func from(_ name: String) -> Effect? { Effect(rawValue: name) }
 }

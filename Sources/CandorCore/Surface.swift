@@ -89,14 +89,14 @@ private func hasToken(_ name: String, _ lexicon: Set<String>) -> String? {
 }
 
 /// Salience of an effect — the boundary/security-relevant effects a reviewer cares about score higher:
-/// Net/Exec/Db/Ipc (sharpest), then Fs/Env (medium). Clock/Log/Rand — and anything else, including
+/// Net/Exec/Db/Ipc/Llm (sharpest), then Fs/Env (medium). Clock/Log/Rand — and anything else, including
 /// Unknown — score 0, so they are NEVER the opener. A "settings" method that reads the clock or logs is
 /// not a find a reviewer files away; calling it "the most surprising reach" over-promises. A repo whose
 /// only reaches are mundane honestly reports "nothing hidden" instead (corpus-dogfood refinement; mirrors
 /// candor-classify/src/surface.rs).
 private func salience(_ effect: String) -> Int {
     switch effect {
-    case "Net", "Exec", "Db", "Ipc": return 5
+    case "Net", "Exec", "Db", "Ipc", "Llm": return 5  // `Llm` ⟨0.13⟩ is a boundary reach — scores sharp
     case "Fs", "Env": return 3
     default: return 0
     }

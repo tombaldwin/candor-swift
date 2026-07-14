@@ -48,6 +48,40 @@ final class ClassifierTests: XCTestCase {
         XCTAssertEqual(kappaMember(root: "NWConnection", member: "start"), "Net")
         XCTAssertNil(kappaMember(root: "NWConnection", member: "cancel"))
         XCTAssertNil(kappaMember(root: "NWConnection", member: "batch"))
+        // §1 ⟨0.13⟩ `Llm` model-SDK surface: ANY call/ctor into a curated model client is Llm (the caller
+        // adds the companion Net) — no method-name gating (single-purpose clients).
+        XCTAssertEqual(kappaMember(root: "OpenAI", member: "chats"), "Llm")
+        XCTAssertEqual(kappaMember(root: "AnthropicClient", member: "messages"), "Llm")
+        XCTAssertEqual(kappaMember(root: "BedrockRuntimeClient", member: "converse"), "Llm")
+        XCTAssertEqual(kappaMember(root: "LanguageModelSession", member: "respond"), "Llm")  // Apple FoundationModels
+        XCTAssertEqual(kappaFree(name: "OpenAI", argCount: 1), "Llm")                        // OpenAI(apiToken:)
+        XCTAssertEqual(kappaFree(name: "LanguageModelSession", argCount: 0), "Llm")
+        XCTAssertNil(kappaMember(root: "URLSession", member: "chats"))                       // not a model client
+    }
+
+    // ── isModelHost — the §1 ⟨0.13⟩ host-literal refinement (mirrors candor-java's Literals.isModelHost) ──
+    func testIsModelHost() {
+        // the verbatim MODEL_HOSTS table (both cohere spellings)
+        for h in ["api.openai.com", "api.anthropic.com", "generativelanguage.googleapis.com",
+                  "api.mistral.ai", "api.cohere.ai", "api.cohere.com", "api.groq.com",
+                  "api.together.xyz", "api.perplexity.ai", "openrouter.ai"] {
+            XCTAssertTrue(isModelHost(h), "\(h) is a known model host")
+            XCTAssertTrue(isModelHost(h + ":443"), "port is stripped before the host match")
+            XCTAssertTrue(isModelHost(h.uppercased()), "the match is case-insensitive")
+        }
+        // a SUBDOMAIN of a listed host counts
+        XCTAssertTrue(isModelHost("eu.api.openai.com"))
+        XCTAssertFalse(isModelHost("openai.com.evil.example"), "a suffix that is not `.`-anchored must NOT match")
+        // Ollama: any host on port 11434 is the local model endpoint (host is irrelevant)
+        XCTAssertTrue(isModelHost("localhost:11434"))
+        XCTAssertTrue(isModelHost("127.0.0.1:11434"))
+        XCTAssertFalse(isModelHost("localhost:8080"), "a non-11434 local port is not Ollama")
+        // Bedrock: host CONTAINS "bedrock" AND ends .amazonaws.com
+        XCTAssertTrue(isModelHost("bedrock-runtime.us-east-1.amazonaws.com"))
+        XCTAssertFalse(isModelHost("s3.us-east-1.amazonaws.com"), "amazonaws without bedrock is not a model host")
+        XCTAssertFalse(isModelHost("bedrock.example.com"), "bedrock without amazonaws is not a model host")
+        // an unknown host stays bare Net
+        XCTAssertFalse(isModelHost("api.stripe.com"))
         // covered-module sweep (2026-07-09): UserDefaults is the plist-backed store — every access verb
         // is Fs; the in-memory volatile-domain surface stays pure (verb-precision, never whole-owner).
         XCTAssertEqual(kappaMember(root: "UserDefaults", member: "set"), "Fs")

@@ -66,7 +66,10 @@ func evaluateGate(_ pol: (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidR
             for r in pol.allow where scopeMatches(qual, r.scope) && inf.contains(r.effect) {
                 let surface: Set<String>
                 switch r.effect {
-                case "Net": surface = hostsAcc[qual] ?? []
+                // `Llm` ⟨0.13⟩ rides Net's host literal (SPEC §1) — `allow Llm <host…>` restricts which MODEL
+                // hosts a scope may reach, matched by hostname like Net. The reached surface is the SAME
+                // captured Net hosts (a model host WAS captured as a Net host literal).
+                case "Net", "Llm": surface = hostsAcc[qual] ?? []
                 case "Exec": surface = cmdsAcc[qual] ?? []
                 case "Db": surface = tablesAcc[qual] ?? []
                 default: surface = pathsAcc[qual] ?? []
@@ -74,7 +77,11 @@ func evaluateGate(_ pol: (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidR
                 // An INCOMPLETE surface — a host-establishing Net call with a structurally-invisible host —
                 // can't be certified even when visible hosts cover the allowlist, else the benign literal MASKS
                 // the invisible forbidden endpoint (the masking gate-evasion; candor-java 0.5.29 / rust / ts).
-                let surfaceIncomplete = incompleteAcc[qual]?.contains(r.effect) ?? false
+                // `Llm`'s incompleteness keys off "Net" (its surface IS the Net host surface): a runtime/masked
+                // host marks Net incomplete → `allow Llm` fails closed too, so a benign visible model host can't
+                // mask a runtime model host (candor-java's `incompleteAsLlm`; parity decision #3).
+                let incompleteKey = r.effect == "Llm" ? "Net" : r.effect
+                let surfaceIncomplete = incompleteAcc[qual]?.contains(incompleteKey) ?? false
                 if surface.isEmpty || surfaceIncomplete {
                     // Two distinct failures share AS-EFF-008: no literal AT ALL, vs the MASKING case where a
                     // visible literal exists but coexists with a structurally-invisible endpoint it can't cover for.

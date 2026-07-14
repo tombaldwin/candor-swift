@@ -418,6 +418,18 @@ final class CallCollector: SyntaxVisitor {
             // surface reads like the URL-string forms the other engines see (conformance §2 [4e]). Skipped
             // when the host already carries a colon (an embedded port, or an IPv6 literal).
             if !h.contains(":"), let args, let p = intLiteralForLabel(args, "port") { h = "\(h):\(p)" }
+            // SPEC §1 ⟨0.13⟩ `Llm` host-literal refinement: a known model host classifies `Llm` IN ADDITION
+            // to `Net` (Net never dropped), just as a jdbc URL classifies `Db`. `isModelHost` also covers the
+            // local Ollama `…:11434` endpoint and `*.bedrock*.amazonaws.com`.
+            if isModelHost(h) {
+                directEffects.insert("Llm")
+                // Ollama's local endpoint names a DOTLESS host (`localhost`/`127.0.0.1`) — the model signal
+                // is the `:11434` port, not the host. Add `Llm` but do NOT capture the host as a Net/Llm
+                // literal (matching candor-java's dotless-host gate): `allow Llm localhost` then has no
+                // certifiable surface and fails CLOSED. A DOTTED model host (api.openai.com, a bedrock
+                // runtime host) IS a real host literal → captured below like any Net host.
+                if !hostPart(h).contains(".") { break }
+            }
             hosts.insert(h)
         case "Exec":
             let head = lit.split(separator: " ").first.map(String.init) ?? lit
@@ -805,6 +817,7 @@ final class CallCollector: SyntaxVisitor {
                 // table knows the member — a declared type shadows κ, a local free fn / shadowing local wins.
                 let est = isEstablishingMember(effect: eff, root: et, member: name)
                 directEffects.insert(eff)
+                if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK call IS network I/O
                 recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
                 if lit == nil, est { incompleteSurfaces.insert(eff) }
             } else if !localTypes.contains(name), !localFreeFns.contains(name),
@@ -819,6 +832,7 @@ final class CallCollector: SyntaxVisitor {
                 let aliasName = dealias(name)
                 let est = isEstablishingFree(effect: eff, name: aliasName)
                 directEffects.insert(eff)
+                if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK ctor/call IS network I/O
                 recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
                 if lit == nil, est { incompleteSurfaces.insert(eff) }
             } else {
@@ -889,6 +903,7 @@ final class CallCollector: SyntaxVisitor {
                 if lit == nil { incompleteSurfaces.insert("Fs") }  // write destination is the arg → invisible if not literal
             } else if let rt = base.root, let eff = kappaMember(root: rt, member: member) {
                 directEffects.insert(eff)
+                if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK call IS network I/O
                 // A two-path Fs op (copyItem/moveItem/createSymbolicLink/…) carries a SOURCE *and* a
                 // DESTINATION locator; the single-`lit` guard below captures only the first, so a literal
                 // source would MASK a runtime destination (the two-path gate-evasion). Inspect EVERY

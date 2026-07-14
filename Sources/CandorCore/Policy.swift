@@ -68,8 +68,12 @@ public func hostPart(_ s: String) -> String {
 // §6.2 policy DSL (deny / pure / allow / forbid) — token-for-token with the family parsers
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-public let EFFECTS: Set<String> = ["Net", "Fs", "Db", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard"]
-public let ALLOW_EFFECTS: Set<String> = ["Net", "Exec", "Fs", "Db"]
+// SPEC §1 ⟨0.13⟩ `Llm` joins the vocabulary — a boundary effect (§6.1) refining Net the way Db does.
+public let EFFECTS: Set<String> = ["Net", "Fs", "Db", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard", "Llm"]
+// `Llm` ⟨0.13⟩ takes an `allow Llm <host…>` allowlist — it rides Net's host literal (a model host WAS
+// captured as a Net host), so it is allowlistable exactly like Net (matched by hostname; the gate keys
+// its incompleteness off Net's — a runtime/masked host fails `allow Llm` closed too).
+public let ALLOW_EFFECTS: Set<String> = ["Net", "Exec", "Fs", "Db", "Llm"]
 
 public struct DenyRule { public var effects: [String]; public var scope: String; public var raw: String }
 public struct AllowRule { public var effect: String; public var scope: String; public var values: [String]; public var raw: String }
@@ -113,7 +117,7 @@ public func parsePolicy(_ text: String) -> (deny: [DenyRule], allow: [AllowRule]
         case "allow":
             guard t.count >= 3 else { warnRule("allow names no values", line); continue }
             guard ALLOW_EFFECTS.contains(t[1]) else {
-                warnRule("allow supports only Net hosts / Exec commands / Fs paths / Db tables", line); continue
+                warnRule("allow supports only Net hosts / Llm hosts / Exec commands / Fs paths / Db tables", line); continue
             }
             var scope = ""; var vi = 2
             if t[2] == "in" { scope = t.count > 3 ? t[3] : ""; vi = 4 }
@@ -163,7 +167,8 @@ public func dbTableCovered(_ allowed: String, _ reached: String) -> Bool {
 }
 public func literalAllowed(_ effect: String, _ reached: String, _ values: [String]) -> Bool {
     switch effect {
-    case "Net": return values.contains { hostPart($0) == hostPart(reached) }
+    // `Llm` ⟨0.13⟩ rides Net's host literal — matched by hostname exactly like Net (SPEC §1).
+    case "Net", "Llm": return values.contains { hostPart($0) == hostPart(reached) }
     case "Exec": return values.contains { cmdBase($0) == cmdBase(reached) }
     case "Fs": return values.contains { pathCovered($0, reached) }
     case "Db": return values.contains { dbTableCovered($0, reached) }

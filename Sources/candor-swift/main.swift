@@ -361,7 +361,7 @@ if wantJson {
     // Effect breakdown — make the result visible at a glance, not just a count + a file path.
     var counts: [String: Int] = [:]
     for e in effectors { for x in e.inferred.toNames() { counts[x, default: 0] += 1 } }
-    let breakdown = ["Net", "Fs", "Db", "Exec", "Ipc", "Env", "Clipboard", "Clock", "Log", "Rand"]
+    let breakdown = ["Net", "Llm", "Fs", "Db", "Exec", "Ipc", "Env", "Clipboard", "Clock", "Log", "Rand"]
         .filter { counts[$0] != nil }.map { "\($0) \(counts[$0]!)" }.joined(separator: " · ")
     let unknown = counts["Unknown"] ?? 0
     if !breakdown.isEmpty || unknown > 0 {

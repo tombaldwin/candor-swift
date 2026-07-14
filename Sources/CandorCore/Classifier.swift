@@ -141,9 +141,78 @@ public let PASTEBOARD_PURE_QUERIES: Set<String> = ["canReadObject", "canReadItem
 // receiveMessage/start/restart/cancelCurrentEndpoint.
 public let NW_PURE_VERBS: Set<String> = ["cancel", "forceCancel", "batch"]
 
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// SPEC §1 ⟨0.13⟩ `Llm` — the model-provider boundary (refines Net the way `Db` refines a jdbc URL)
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+/// Known machine-learning MODEL-provider hosts — the SPEC §1 ⟨0.13⟩ `Llm` host-literal refinement: a
+/// statically-known Net request to one of these classifies `Llm` IN ADDITION to `Net` (Net is never
+/// dropped — a model call IS network I/O), just as a jdbc URL classifies `Db`. Matched by host,
+/// case-insensitive; a SUBDOMAIN of a listed host counts. The four reference engines share this table
+/// VERBATIM (candor-java's `Literals.MODEL_HOSTS`) so the `Net` boundary refines to `Llm` identically. An
+/// UNKNOWN host stays bare `Net` — never guessed. Curated STARTER set; the §7 coverage ledger discloses an
+/// uncovered provider like any other.
+public let MODEL_HOSTS: Set<String> = [
+    "api.openai.com",
+    "api.anthropic.com",
+    "generativelanguage.googleapis.com",
+    "api.mistral.ai",
+    "api.cohere.ai", "api.cohere.com",
+    "api.groq.com",
+    "api.together.xyz",
+    "api.perplexity.ai",
+    "openrouter.ai",
+]
+
+/// Whether an endpoint HOST literal is a known model provider (case-insensitive; a subdomain of a
+/// `MODEL_HOSTS` entry counts). Strips a `:port` suffix first. Two special forms carry their own rule:
+/// any host whose port is 11434 is a local Ollama endpoint (`localhost:11434`, `127.0.0.1:11434`); and an
+/// AWS Bedrock runtime host `bedrock*-runtime.<region>.amazonaws.com` (host contains "bedrock" AND ends
+/// `.amazonaws.com`). Mirrors candor-java's `Literals.isModelHost` exactly.
+public func isModelHost(_ hostLiteral: String) -> Bool {
+    // Ollama: a `:11434` port anywhere is the local model endpoint (keep it simple, per SPEC §1).
+    if let colon = hostLiteral.range(of: ":", options: .backwards),
+       hostLiteral[colon.upperBound...] == "11434" { return true }
+    let host = hostPart(hostLiteral).lowercased()
+    if MODEL_HOSTS.contains(host) { return true }
+    for m in MODEL_HOSTS where host.hasSuffix("." + m) { return true } // a subdomain of a known model host
+    // *.bedrock*.amazonaws.com — the AWS Bedrock runtime endpoint (bedrock-runtime.<region>.amazonaws.com).
+    if host.hasSuffix(".amazonaws.com") && host.contains("bedrock") { return true }
+    return false
+}
+
+/// Curated model-provider SDK modules — the SPEC §1 ⟨0.13⟩ `Llm` model-SDK surface. A call into one of
+/// these clients' types dispatches a request → `Llm` + `Net` (the caller adds Net; the client IS network
+/// I/O). Keyed by the distinctive CLIENT TYPE NAME the module exports (candor-swift's syntactic engine
+/// keys κ on type names, not resolved owners — the same mechanism as `NWConnection`/`HTTPClient`). Mirrors
+/// candor-java's `Rules.MODEL_SDK_PACKAGES` decision — NO method-name gating: ANY call into a model-SDK
+/// client type is a model dispatch (these clients are single-purpose). A curated STARTER set matching the
+/// Swift ecosystem; the §7 coverage ledger discloses an uncovered provider package like any other:
+///   • `OpenAI`             — MacPaw/OpenAI (module OpenAI)
+///   • `AnthropicClient`, `AnthropicSwiftClient`, `SwiftAnthropic` — swift-anthropic / AnthropicSwiftSDK
+///   • `BedrockRuntimeClient`, `BedrockRuntime` — the swift-aws-sdk Bedrock runtime module
+///   • `LLM`, `LangChain`   — langchain-swift invoke surfaces
+///   • `LanguageModelSession`, `SystemLanguageModel` — Apple's on-device FoundationModels (Apple
+///     Intelligence). An on-device model call is still `Llm` (the local-inference-counts decision, SPEC §1).
+///     NOTE (flagged for review): the FoundationModels client type names are the current public API
+///     (`LanguageModelSession`/`SystemLanguageModel`); confirm against the shipped SDK — a rename here only
+///     UNDER-reports (never fabricates on a project type, which `declaredTypes` shadows).
+/// A project's OWN type of one of these names shadows this via `declaredTypes`/`localTypes` — never a
+/// fabrication on local code, exactly like `Channel`/`HTTPClient`.
+public let MODEL_SDK_TYPES: Set<String> = [
+    "OpenAI",
+    "AnthropicClient", "AnthropicSwiftClient", "SwiftAnthropic",
+    "BedrockRuntimeClient", "BedrockRuntime",
+    "LLM", "LangChain",
+    "LanguageModelSession", "SystemLanguageModel",
+]
+
 /// Classify a member call `root.member(...)` (root = the receiver chain's base identifier or the
 /// receiver's inferred TYPE). Returns nil for the pure/unknown surface — never a guess.
 public func kappaMember(root: String, member: String) -> String? {
+    // §1 ⟨0.13⟩ model-SDK surface: ANY call into a curated model-provider client type is `Llm` (the
+    // caller adds the companion `Net`). No method-name gating — the clients are single-purpose.
+    if MODEL_SDK_TYPES.contains(root) { return "Llm" }
     switch root {
     case "FileManager", "FileHandle": return FS_MEMBERS.contains(member) || member == "readToEnd"
         || member == "write" || member == "read" ? "Fs" : nil
@@ -256,6 +325,10 @@ public func isEstablishingFree(effect: String, name: String) -> Bool {
 
 /// Classify a free-function or constructor call by name.
 public func kappaFree(name: String, argCount: Int) -> String? {
+    // §1 ⟨0.13⟩ model-SDK surface: constructing a curated model-provider client (`OpenAI(apiToken:)`,
+    // `LanguageModelSession()`) is the model dispatch entry → `Llm` (caller adds `Net`). A local type of
+    // the same name shadows this at the call site (localTypes/localFreeFns), like `Pipe`/`Process`.
+    if MODEL_SDK_TYPES.contains(name) { return "Llm" }
     switch name {
     case "Date": return argCount == 0 ? "Clock" : nil // Date() reads the clock; Date(timeInterval…) is arithmetic
     case "NSDate": return argCount == 0 ? "Clock" : nil // the legacy twin of Date() (no-arg = current time)
