@@ -7,6 +7,64 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.13.0] — 2026-07-14
+
+### ✨ NEW `Llm` effect — a model-provider call (boundary effect refining Net)
+
+candor-swift now classifies a call to an LLM/model provider as the **`Llm`** effect — a boundary
+effect that refines `Net` (the Db precedent: a specialised network reach kept distinct so a policy can
+name it), so an `Llm` call also carries `Net`. Two recognisers: the shared **model-host table**
+(`MODEL_HOSTS` + `isModelHost`, verbatim from the family — the OpenAI/Anthropic/Bedrock/Ollama-style
+endpoints, with Ollama pinned to the `:11434` loopback and Bedrock matched on the first service label,
+not an S3-bucket substring); and a curated **Swift model-SDK TYPE list** (MacPaw/OpenAI,
+AnthropicSwiftSDK, Bedrock, **plus Apple on-device FoundationModels** — `SystemLanguageModel` /
+`LanguageModelSession`, so local inference counts). The SDK table is keyed by type NAME — the syntactic
+engine can't resolve module owners — and a project's own same-named type SHADOWS it, so a local type is
+never fabricated as an `Llm`. `Llm` joins the boundary/salience/allow sets, and an `allow Llm` rides
+the `Net` host surface.
+
+### ✨ NEW `privacy/1` SPEC EXTENSION — Apple privacy-sensor effects + the manifest verb
+
+The first candor **spec extension** (SPEC.md §Versioning engine-extensions clause; contract in
+**SPEC-EXTENSION-privacy.md**) — swift-led and ecosystem-specific. It adds **six Apple privacy-sensor
+effects** — `Location` / `Camera` / `Mic` / `Contacts` / `Photos` / `Notify` — classified by the Apple
+framework TYPE a call reaches (`CLLocationManager`, `AVAudioRecorder`, `CNContactStore`,
+`PHPhotoLibrary`, `UNUserNotificationCenter`, `AVCaptureSession`), with the same declared-type shadow
+as the `Llm` SDK types (a local same-named type is not the framework's — no fabrication). AVFoundation
+capture reads the visible `.audio`/`.video` media-type (audio→`Mic`, video→`Camera`); an ambiguous
+capture OVER-discloses `{Camera, Mic}` — the privacy asymmetry (never UNDER-declare a sensor, the
+inverse of the never-fabricate rule) — and `AVAudioEngine` is member-gated to `.inputNode` so a
+playback-only engine carries no `Mic`. The six are boundary effects (containment + the sharp
+salience-5 set), gate-able by deny/containment but NOT allowlistable (no host literal, like
+`Ipc`/`Clipboard`) and not injection-class. The envelope discloses `extensions: ["privacy/1"]` **only
+when a privacy effect is active** — a plain report stays byte-unchanged.
+
+- **NEW `privacy-manifest` verb** — `candor-swift privacy-manifest [--report <locator>] [--verify
+  <Info.plist>] [--json]`. GENERATES the required Apple usage-description keys from the code's
+  transitive sensor reach, or VERIFIES an existing `Info.plist` against it: a reached capability the
+  manifest omits is the App-Store-rejection-shaped **under-declaration** (exit 1); a declared-but-unused
+  key is an over-declaration (warning, exit 0). The effect→key mapping and JSON shape are in
+  SPEC-EXTENSION-privacy.md; plist parse via `PropertyListSerialization` (XML + binary, fail-loud
+  exit 2). It reuses the query-verb report-locator + loud-load machinery (one source of truth).
+
+### `gains` loader loudness (follow-through on the 0.12 verb)
+
+Per-entry drops among otherwise-good entries are now DISCLOSED with a count (Rust wording); the loud
+loader mirrors the reference net rule per side — no files → exit 2, net-empty with any hard failure →
+exit 2 (tightening the previous exit-0 empty answer over a clean-empty + corrupt sibling), a partial
+merge tolerated with a "delta is computed over a PARTIAL side" summary.
+
+### spec 0.13 — the Llm + privacy-extension rung (§3.1)
+
+candor-swift now declares **spec `0.13`** (`specVersion` in `main.swift`; the envelope + `--gate-json`
+verdict carry it). 0.13 is another tier-2 (pinned-tool-surface) rung, additive over 0.12: it admits the
+`Llm` boundary effect and the `privacy/1` extension surface into the pinned contract. The `privacy/1`
+extension carries its OWN version (`"privacy/1"` in the envelope `extensions` array — independent of the
+spec string). **⚠ report bytes change** where an `Llm` or a privacy sensor is now classified (a call
+previously seen as plain `Net`, or unclassified, gains the refined effect), so an upgrade across 0.13 is
+baseline-invalidating; and **⚠ the `spec` string changed** — a consumer pinning `spec == "0.12"` must
+accept `0.13`.
+
 ## [0.12.0] — 2026-07-14
 
 ### ✨ NEW `gains` verb — the supply-chain alarm (this engine's first)
