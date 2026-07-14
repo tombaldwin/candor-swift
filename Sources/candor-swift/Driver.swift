@@ -93,6 +93,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var opaqueSeqLeaves: Set<String> = []
     var seqConcreteTmp: [String: String?] = [:]
     var closureFields: [String: Set<String>] = [:]   // FINDING 2 — Type -> closure-property names (own unit)
+    // CONST-STRING PROPAGATION — module/global + static string constants, aggregated across files. Same
+    // ambiguity rule: a name bound to ≥2 DIFFERENT literals (here, across files) → nil (never resolved).
+    var constStrings: [String: String?] = [:]
     for c in collectors {
         opaqueSeqLeaves.formUnion(c.opaqueSeqLeaves)
         for (k, v) in c.seqConcreteRetTmp {
@@ -101,6 +104,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             } else { seqConcreteTmp[k] = v }
         }
         for (t, ps) in c.closureFields { closureFields[t, default: []].formUnion(ps) }
+        for (k, v) in c.constStrings {
+            if let existing = constStrings[k] {
+                if existing != v { constStrings[k] = String?.none }   // ambiguous across files — never guess
+            } else { constStrings[k] = v }
+        }
         for (k, v) in c.returnsTmp {
             if let existing = returnsTmp[k] {
                 if existing != v { returnsTmp[k] = String?.none }
@@ -301,6 +309,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var deferredCallbacks: [String: (indexes: Set<Int>, names: Set<String>)] = [:]
 
     let localProtocolNames = Set(protocolMethods.keys)  // loop-invariant: build once, not per fn
+    // Collapse the const-string index: drop ambiguous (nil) names, keep only the unambiguous NAME→literal.
+    var globalConstStrings: [String: String] = [:]
+    for (k, v) in constStrings { if let v { globalConstStrings[k] = v } }
     for f in allFns {
         locOf[f.qual] = f.loc
         if f.isMain { entryPoints.insert(f.qual) }
@@ -314,7 +325,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                propertyWrapperTypes: propertyWrapperTypes, wrappedProps: wrappedProps,
                                localFreeFns: Set(freeFnByName.keys), typeAliases: typeAliases,
                                opaqueSeqBuilders: opaqueSeqBuilders, seqBuilderConcrete: seqBuilderConcrete,
-                               closureFields: closureFields)
+                               closureFields: closureFields, moduleConstStrings: globalConstStrings)
         cc.walk(body)
         // accessor units: a property READ/WRITE of a known accessor unit is an edge (the reader inherits
         // the getter/observer/subscript's effects — `c.data` reaching the Fs inside `var data: Data { … }`).

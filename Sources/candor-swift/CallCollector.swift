@@ -36,6 +36,13 @@ final class CallCollector: SyntaxVisitor {
                                             // ("a function-typed value invoked reads Unknown — never silent
                                             // purity") held only WITH an explicit annotation; an inferred
                                             // `let g = eff` fell through untracked and read silent-pure.
+    // CONST-STRING PROPAGATION — the module/global + static string-constant index (SIMPLE name → literal),
+    // shared read-only across all fn units. `localConstStrings` overlays it with a `let NAME = "literal"`
+    // bound INSIDE this fn body (a local const shadows a global of the same name). Both hold ONLY plain
+    // string literals of a `let`; used to resolve a bare/interpolation-prefix/concat-left host reference
+    // through the SAME host-refinement path as an inline literal — never a `var`, never a runtime value.
+    let moduleConstStrings: [String: String]
+    var localConstStrings: [String: String] = [:]
     var protoTyped: [String: String]        // param -> local protocol
     var arrayElem: [String: String]         // name -> element type of a `[T]` local/param (loop typing)
     var dictElem: [String: String]          // name -> VALUE type of a `[K: V]` local/param (dict loops)
@@ -100,7 +107,8 @@ final class CallCollector: SyntaxVisitor {
          propertyWrapperTypes: Set<String>, wrappedProps: [String: [String: String]],
          localFreeFns: Set<String>, typeAliases: [String: String],
          opaqueSeqBuilders: Set<String>, seqBuilderConcrete: [String: String],
-         closureFields: [String: Set<String>]) {
+         closureFields: [String: Set<String>], moduleConstStrings: [String: String] = [:]) {
+        self.moduleConstStrings = moduleConstStrings
         self.opaqueSeqBuilders = opaqueSeqBuilders
         self.seqBuilderConcrete = seqBuilderConcrete
         self.closureFields = closureFields
@@ -358,19 +366,104 @@ final class CallCollector: SyntaxVisitor {
         return nil  // no `for:`/positional media-type arg at all (a bare capture) → ambiguous
     }
 
+    // CONST-STRING PROPAGATION — the value of a KNOWN string constant named `name` (a local `let` shadows a
+    // module/global of the same name), or nil if it is not a resolvable const. Conservative: only names in
+    // the const-string indexes — a `var`, a runtime/computed value, an unknown name → nil (never guess).
+    private func constValue(_ name: String) -> String? {
+        localConstStrings[name] ?? moduleConstStrings[name]
+    }
+
+    // The PLAIN string-literal value of an expression (no interpolation), else nil. Same pure-segment
+    // discipline as firstStringLiteral; used to record a LOCAL `let NAME = "literal"` const.
+    private func plainStringLiteralValue(_ raw: ExprSyntax) -> String? {
+        guard let lit = Self.peel(raw).as(StringLiteralExprSyntax.self) else { return nil }
+        var out = ""
+        for seg in lit.segments {
+            if let plain = seg.as(StringSegmentSyntax.self) { out += plain.content.text } else { return nil }
+        }
+        return out
+    }
+
+    // Resolve an expression to a STATICALLY-KNOWN string when it is anchored on a string constant, so a
+    // const-built URL is refined through the SAME host path as an inline literal (SPEC §1: a statically-
+    // known model host classifies Llm). Handles exactly three const-anchored shapes:
+    //   • a bare const reference — `dataTask(with: apiBase)` → apiBase's value
+    //   • an interpolation whose FIRST segment is a const — `"\(apiBase)/chat"` → value + "/chat" tail
+    //   • a concatenation with a const-string LEFT operand — `apiBase + "/chat"` → value + tail
+    // A literal PREFIX before the interpolation (`"https://\(h)/x"`) is NOT const-anchored on the host (the
+    // host is the interpolated part, not the leading literal) → nil. A non-const reference → nil. The tail
+    // (plain segments / a literal right operand) is appended so the host part parses correctly; an
+    // interpolated/non-literal tail is dropped (only the host prefix matters for host extraction). Returns
+    // the resolved string (already escape-decoded) or nil to leave the arg unresolved (bare Net today).
+    private func resolveConstString(_ raw: ExprSyntax) -> String? {
+        let expr = Self.peel(raw)
+        // a bare const reference
+        if let dr = expr.as(DeclReferenceExprSyntax.self), let v = constValue(dr.baseName.text) {
+            return v
+        }
+        // an interpolation whose FIRST segment is `\(const)` — the URL prefix is the constant's value
+        if let lit = expr.as(StringLiteralExprSyntax.self) {
+            var segs = Array(lit.segments)
+            // The parser may emit a leading EMPTY plain segment before the first `\(…)`; skip it. A leading
+            // NON-EMPTY plain segment is a literal PREFIX — the host is NOT the const (e.g. `"https://\(h)/x"`)
+            // → not const-anchored, leave unresolved (soundness: never treat the interpolated tail as a host).
+            if let first = segs.first, let plain = first.as(StringSegmentSyntax.self) {
+                if plain.content.text.isEmpty { segs.removeFirst() } else { return nil }
+            }
+            guard let firstExpr = segs.first?.as(ExpressionSegmentSyntax.self),
+                  firstExpr.expressions.count == 1,
+                  let head = firstExpr.expressions.first?.expression.as(DeclReferenceExprSyntax.self),
+                  let v = constValue(head.baseName.text) else { return nil }
+            // Append the immediately-following PLAIN tail (`/chat`) so host:port/path parse correctly; stop
+            // at any further interpolation (a runtime tail can't be reconstructed, and host extraction only
+            // needs the const-anchored prefix).
+            var out = v
+            for seg in segs.dropFirst() {
+                if let plain = seg.as(StringSegmentSyntax.self) { out += plain.content.text } else { break }
+            }
+            return decodeEscapes(out)
+        }
+        // a concatenation `const + "..."` — const LEFT operand anchors the host
+        if let seq = expr.as(SequenceExprSyntax.self) {
+            let elems = Array(seq.elements)
+            if elems.count >= 3, let op = elems[1].as(BinaryOperatorExprSyntax.self), op.operator.text == "+",
+               let leftDR = Self.peel(elems[0]).as(DeclReferenceExprSyntax.self), let v = constValue(leftDR.baseName.text) {
+                // append a literal right operand's plain value (the path tail); a non-literal right → host only
+                if let rlit = Self.peel(elems[2]).as(StringLiteralExprSyntax.self) {
+                    var tail = ""
+                    var pure = true
+                    for seg in rlit.segments {
+                        if let plain = seg.as(StringSegmentSyntax.self) { tail += plain.content.text } else { pure = false; break }
+                    }
+                    if pure { return decodeEscapes(v + tail) }
+                }
+                return v
+            }
+        }
+        return nil
+    }
+
     private func firstStringLiteral(_ args: LabeledExprListSyntax) -> String? {
         for a in args {
-            guard let lit = a.expression.as(StringLiteralExprSyntax.self) else { continue }
+            guard let lit = a.expression.as(StringLiteralExprSyntax.self) else {
+                // CONST-STRING PROPAGATION — not a plain literal: try a const-anchored resolution (a bare
+                // const ref, or a const-left concatenation). An interpolation is a StringLiteralExpr and is
+                // handled in the loop body below, so only NON-literal args reach here.
+                if let v = resolveConstString(a.expression) { return v }
+                continue
+            }
             // Concatenate ALL plain segments: the parser may split a literal around escapes, so a
             // single-segment assumption silently dropped multi-line SQL (caught by the four-way
             // conformance differential on this engine's first wiring). An INTERPOLATED literal
-            // (any non-plain segment) is runtime-computed — no literal claim, skip it.
+            // (any non-plain segment) is runtime-computed — no literal claim as-is, but a
+            // const-anchored interpolation (`"\(apiBase)/chat"`) DOES resolve (const-string propagation).
             var out = ""
             var pure = true
             for seg in lit.segments {
                 if let plain = seg.as(StringSegmentSyntax.self) { out += plain.content.text } else { pure = false; break }
             }
             if pure { return decodeEscapes(out) }
+            if let v = resolveConstString(a.expression) { return v }
         }
         return nil
     }
@@ -1362,6 +1455,16 @@ final class CallCollector: SyntaxVisitor {
             }
             guard let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
             boundLocals.insert(name)  // record the SHADOW (any local, even a literal-typed one `vars` drops)
+            // CONST-STRING PROPAGATION — a LOCAL `let NAME = "literal"` string constant. Resolves a later
+            // const-anchored host in the SAME fn body (`let apiBase = "…"; dataTask(with: "\(apiBase)/x")`).
+            // ONLY a `let` with a PLAIN string-literal initializer and no accessor block. A `var` of the
+            // same name (reassignable) is explicitly EXCLUDED — remove any stale entry so it never resolves.
+            if node.bindingSpecifier.text == "let", binding.accessorBlock == nil,
+               let v0 = binding.initializer?.value, let sv = plainStringLiteralValue(v0) {
+                localConstStrings[name] = sv
+            } else {
+                localConstStrings.removeValue(forKey: name)
+            }
             if let ann = binding.typeAnnotation {
                 if !tupleElements(ann.type).isEmpty { tupleElem[name] = tupleElements(ann.type) }  // `let p: (A, B)`
                 let t = typeName(ann.type)

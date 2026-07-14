@@ -161,6 +161,107 @@ final class LlmProcessTests: XCTestCase {
         XCTAssertTrue(r.err.contains("AS-EFF-008"), "expected the allowlist masking violation; stderr: \(r.err)")
     }
 
+    // ── CONST-STRING PROPAGATION: a const-anchored model host resolves to Llm (parity with candor-java) ──
+    // A module/global `let apiBase = "…"` used via interpolation is the STATICALLY-KNOWN host — SPEC §1
+    // classifies Llm exactly as an inline literal does. Under-conformance before this: it read bare Net.
+    func testConstStringInterpolationResolvesModelHost() throws {
+        let by = try scan("""
+        import Foundation
+        let apiBase = "https://api.openai.com/v1"
+        func call() { _ = URLSession.shared.dataTask(with: "\\(apiBase)/chat") { _, _, _ in } }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "call"), ["Llm", "Net"],
+                       "a const-anchored interpolation of a model host is Llm + Net")
+        XCTAssertEqual(by["call"]?["hosts"] as? [String], ["api.openai.com"],
+                       "the resolved const host is captured as the Net literal")
+    }
+
+    // a BARE const reference (`dataTask(with: apiBase)`) resolves identically.
+    func testConstStringBareReferenceResolvesModelHost() throws {
+        let by = try scan("""
+        import Foundation
+        let apiBase = "https://api.openai.com/v1"
+        func call() { _ = URLSession.shared.dataTask(with: apiBase) { _, _, _ in } }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "call"), ["Llm", "Net"],
+                       "a bare const reference to a model host is Llm + Net")
+        XCTAssertEqual(by["call"]?["hosts"] as? [String], ["api.openai.com"])
+    }
+
+    // a CONCATENATION with a const-string left operand (`apiBase + "/chat"`) resolves too.
+    func testConstStringConcatResolvesModelHost() throws {
+        let by = try scan("""
+        import Foundation
+        let apiBase = "https://api.openai.com"
+        func call() { _ = URLSession.shared.dataTask(with: apiBase + "/chat") { _, _, _ in } }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "call"), ["Llm", "Net"],
+                       "a const-left concatenation of a model host is Llm + Net")
+        XCTAssertEqual(by["call"]?["hosts"] as? [String], ["api.openai.com"])
+    }
+
+    // a LOCAL `let` const (bound inside the same fn body) resolves as well.
+    func testLocalConstStringResolvesModelHost() throws {
+        let by = try scan("""
+        import Foundation
+        func call() {
+            let base = "https://api.openai.com/v1"
+            _ = URLSession.shared.dataTask(with: "\\(base)/chat") { _, _, _ in }
+        }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "call"), ["Llm", "Net"],
+                       "a local let string constant anchors the resolved model host")
+        XCTAssertEqual(by["call"]?["hosts"] as? [String], ["api.openai.com"])
+    }
+
+    // ── CONST-STRING FABRICATION GUARDS: none of these may fabricate Llm — they stay bare Net ────────────
+    func testConstStringGuardsNeverFabricateLlm() throws {
+        // (1) a non-model const host (`cdn`) — bare/interpolation/concat all stay Net, host cdn.example.com.
+        let cdn = try scan("""
+        import Foundation
+        let cdn = "https://cdn.example.com"
+        func interp() { _ = URLSession.shared.dataTask(with: "\\(cdn)/asset") { _, _, _ in } }
+        func bare()   { _ = URLSession.shared.dataTask(with: cdn) { _, _, _ in } }
+        func concat() { _ = URLSession.shared.dataTask(with: cdn + "/x") { _, _, _ in } }
+        """)
+        for fn in ["interp", "bare", "concat"] {
+            XCTAssertEqual(ProcessHarness.inferred(cdn, fn), ["Net"],
+                           "\(fn): a non-model const host must stay bare Net, never Llm")
+            XCTAssertEqual(cdn[fn]?["hosts"] as? [String], ["cdn.example.com"])
+        }
+
+        // (2) a RUNTIME host (function result) — indeterminate, must not resolve.
+        let runtime = try scan("""
+        import Foundation
+        func config() -> String { return "https://api.openai.com" }
+        func call() { let h = config(); _ = URLSession.shared.dataTask(with: "\\(h)/x") { _, _, _ in } }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(runtime, "call"), ["Net"],
+                       "a runtime host (fn result) must not resolve → bare Net, no Llm")
+        XCTAssertNil(runtime["call"]?["hosts"], "an unresolved runtime host captures no literal")
+
+        // (3) a `var` (reassignable) — never treated as a constant.
+        let mut = try scan("""
+        import Foundation
+        var mutBase = "https://api.openai.com"
+        func call() { _ = URLSession.shared.dataTask(with: "\\(mutBase)/x") { _, _, _ in } }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(mut, "call"), ["Net"],
+                       "a var could be reassigned — must not resolve → bare Net, no Llm")
+        XCTAssertNil(mut["call"]?["hosts"])
+
+        // (4) an interpolation whose FIRST segment is a LITERAL prefix (the host is the interpolated part,
+        // not the const) — must not treat the interpolated tail as a const-anchored host.
+        let prefix = try scan("""
+        import Foundation
+        let suffix = "openai.com"
+        func call() { _ = URLSession.shared.dataTask(with: "https://api.\\(suffix)/x") { _, _, _ in } }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(prefix, "call"), ["Net"],
+                       "a literal prefix before the interpolation is not const-anchored → bare Net")
+        XCTAssertNil(prefix["call"]?["hosts"])
+    }
+
     // the positive: allow Llm certifies a scope whose only model host is the allowed one.
     func testAllowLlmCertifiesAllowedModelHost() throws {
         let r = try gate("""

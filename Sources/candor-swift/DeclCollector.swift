@@ -122,6 +122,14 @@ final class DeclCollector: SyntaxVisitor {
     // its OWN property-scoped accessor unit `<Type>.f` (so a pure closure property contributes nothing — no
     // flood), and record the property name so CallCollector can edge an invocation to it.
     var closureFields: [String: Set<String>] = [:]   // Type -> stored closure-property names (with a `<Type>.<prop>` unit)
+    // CONST-STRING PROPAGATION — module/global and `static let` string CONSTANTS whose initializer is a
+    // PLAIN string literal (`let apiBase = "https://api.openai.com/v1"`). Keyed by the SIMPLE bound name —
+    // a bare reference / interpolation-prefix / concat-left uses the name only. VALUE is the literal, or
+    // nil when the SAME name is bound to ≥2 DIFFERENT literals (ambiguous → never resolve). ONLY plain
+    // string literals of a `let` enter: a `var`, an interpolation, a function/computed result do NOT (they
+    // could be reassigned or are runtime — resolving them would FABRICATE a host). Fed to CallCollector so
+    // a const-anchored Net/Db/Llm host is resolved through the EXISTING host-refinement path.
+    var constStrings: [String: String?] = [:]
     private var typeStack: [String] = []
     // parallel to typeStack: self's ELEMENT bound when the current scope is a COLLECTION extension with a
     // `where Element: P` clause (`extension Array where Element: Saveable` → "Saveable"); nil otherwise.
@@ -199,6 +207,31 @@ final class DeclCollector: SyntaxVisitor {
     // IdentifierPattern-only guard and its initializer effect was SILENTLY DROPPED (a `let (a,b) =
     // readConfig()` global read pure — the cardinal sin, the top-level sibling the <main> collector
     // excludes because it binds names).
+    // The PLAIN string-literal value of an initializer, or nil if it is not a pure string literal (an
+    // interpolated/computed value). Mirrors CallCollector.firstStringLiteral's pure-segment discipline:
+    // ANY non-plain (interpolation) segment ⇒ nil (no const claim). Escape decoding is deferred to the
+    // use-site (CallCollector), which runs the value through the same host path as an inline literal.
+    private func plainStringLiteralValue(_ expr: ExprSyntax) -> String? {
+        guard let lit = expr.as(StringLiteralExprSyntax.self) else { return nil }
+        var out = ""
+        for seg in lit.segments {
+            if let plain = seg.as(StringSegmentSyntax.self) { out += plain.content.text } else { return nil }
+        }
+        return out
+    }
+
+    // Record a `let NAME = "literal"` STRING CONSTANT into the const-string index. ONLY a `let` (not `var`
+    // — a var could be reassigned) whose initializer is a PLAIN string literal enters. A second, DIFFERENT
+    // literal for the same name marks it ambiguous (nil) so it is never resolved (never guess).
+    private func recordConstString(name: String, isLet: Bool, initializer: ExprSyntax?) {
+        guard isLet, let initializer, let value = plainStringLiteralValue(initializer) else { return }
+        if let existing = constStrings[name] {
+            if existing != value { constStrings[name] = String?.none }   // same name, ≠ literal → ambiguous
+        } else {
+            constStrings[name] = value
+        }
+    }
+
     private func boundNames(_ pattern: PatternSyntax) -> [String] {
         if let id = pattern.as(IdentifierPatternSyntax.self) { return [id.identifier.text] }
         if let tuple = pattern.as(TuplePatternSyntax.self) {
@@ -370,6 +403,13 @@ final class DeclCollector: SyntaxVisitor {
                 }
                 let qual = "\(tyPath).\(name)"          // fully-qualified nested path
                 let simpleQual = "\(ty).\(name)"
+                // CONST-STRING PROPAGATION — a `static let NAME = "literal"` type member. Keyed by SIMPLE
+                // name (a bare/interpolation/concat reference names it without the type path). Only static
+                // (a global-equivalent, fixed once); an instance stored `let` is per-object and reached via
+                // `self.x`, not a bare name, so it stays out of the bare-name index.
+                if isStatic, node.bindingSpecifier.text == "let", binding.accessorBlock == nil {
+                    recordConstString(name: name, isLet: true, initializer: binding.initializer?.value)
+                }
                 // the property's declared type — used to TYPE a setter's implicit param so an effect
                 // reached THROUGH it (`set { newValue.write(toFile:) }`) resolves (else newValue is an
                 // untyped bare identifier and the member call reads silent-pure). nil ⇒ inferred type, skip.
@@ -508,6 +548,12 @@ final class DeclCollector: SyntaxVisitor {
                 // one name). An empty list = a wildcard-only binding — the <main> collector owns that.
                 let names = boundNames(binding.pattern)
                 if names.isEmpty { continue }
+                // CONST-STRING PROPAGATION — a module/global `let NAME = "literal"`. Only a plain-string
+                // `let` with no accessor block (a computed global is runtime, not a constant).
+                if node.bindingSpecifier.text == "let", binding.accessorBlock == nil,
+                   let only = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
+                    recordConstString(name: only, isLet: true, initializer: binding.initializer?.value)
+                }
                 var bodies: [Syntax] = []
                 if let ab = binding.accessorBlock {
                     switch ab.accessors {
