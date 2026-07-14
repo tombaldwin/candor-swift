@@ -7,6 +7,17 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.14.1] — 2026-07-14
+
+Patch — a soundness fix, still spec `0.14` (a false-pure hole closed; report bytes change for the fixed shapes).
+
+- **Tuple-destructured global no longer dropped.** `let (a, b) = effectfulInit()` at file scope binds
+  names (so it is not a `<main>` statement), but the identifier-pattern-only unit guard SILENTLY DROPPED
+  its initializer effect — a `let (a, b) = readConfig()` global read pure (the cardinal sin, the top-level
+  sibling). Each bound name now carries the shared initializer's effect (a sound first-touch
+  over-approximation); the same fix covers a `static let (p, q) = …` type member. Found probing adjacent
+  cases after the 0.14 top-level rung.
+
 ## [0.14.0] — 2026-07-14
 
 ### ⚠ FIXED — the top-level `<main>` initializer unit (a false-"pure" empty report — the cardinal sin)

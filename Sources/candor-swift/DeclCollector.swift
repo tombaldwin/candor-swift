@@ -192,6 +192,21 @@ final class DeclCollector: SyntaxVisitor {
         return false
     }
 
+    // Every identifier bound by a pattern, recursing into tuples: `x` → [x]; `(a, b)` → [a, b];
+    // `(_, x)` → [x]. A TUPLE-destructured binding (`let (a, b) = effectfulInit()`) shares ONE
+    // initializer, so charging that init to each name's first-touch read is a sound over-approximation
+    // (either read could force the lazy global). Without this, a tuple-pattern binding fell through the
+    // IdentifierPattern-only guard and its initializer effect was SILENTLY DROPPED (a `let (a,b) =
+    // readConfig()` global read pure — the cardinal sin, the top-level sibling the <main> collector
+    // excludes because it binds names).
+    private func boundNames(_ pattern: PatternSyntax) -> [String] {
+        if let id = pattern.as(IdentifierPatternSyntax.self) { return [id.identifier.text] }
+        if let tuple = pattern.as(TuplePatternSyntax.self) {
+            return tuple.elements.flatMap { boundNames($0.pattern) }
+        }
+        return []   // wildcard / other — binds no name (the <main> collector handles wildcard-only)
+    }
+
     private func pushType(_ name: String, inheritance: InheritanceClauseSyntax?, attributes: AttributeListSyntax? = nil,
                           isExtension: Bool = false) {
         typeStack.append(name)
@@ -332,7 +347,27 @@ final class DeclCollector: SyntaxVisitor {
             let tyPath = typeStack.joined(separator: ".")
             let isStatic = node.modifiers.contains { $0.name.text == "static" || $0.name.text == "class" }
             for binding in node.bindings {
-                guard let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
+                guard let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else {
+                    // a TUPLE-destructured type member (`static let (a, b) = effectfulInit()`): the
+                    // IdentifierPattern-only guard would drop its initializer effect (the member-branch
+                    // sibling of the global tuple hole). A STATIC/lazy tuple property is a first-touch
+                    // init, exactly like the global — mint a per-name unit for the shared initializer.
+                    // (The field/wrapper/type machinery below needs a single name; a tuple member has no
+                    // field type to record. An INSTANCE tuple stored property runs in the ctor and is a
+                    // rarer residual, noted in the log.)
+                    let tnames = boundNames(binding.pattern)
+                    if !tnames.isEmpty, let init0 = binding.initializer,
+                       (isStatic || node.modifiers.contains(where: { $0.name.text == "lazy" })) {
+                        for nm in tnames {
+                            var info = FnInfo(qual: "\(tyPath).\(nm)", loc: loc(binding))
+                            info.simpleQual = "\(ty).\(nm)"
+                            info.body = Syntax(init0.value)
+                            info.isAccessor = true
+                            fns.append(info)
+                        }
+                    }
+                    continue
+                }
                 let qual = "\(tyPath).\(name)"          // fully-qualified nested path
                 let simpleQual = "\(ty).\(name)"
                 // the property's declared type — used to TYPE a setter's implicit param so an effect
@@ -467,7 +502,12 @@ final class DeclCollector: SyntaxVisitor {
             // Only a stored global with an initializer; a computed global var is collected via the
             // accessor branch above (which requires a type stack, so handle it here too).
             for binding in node.bindings {
-                guard let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
+                // A tuple-destructured global (`let (a, b) = effectfulInit()`) binds several names sharing
+                // one initializer; mint a unit for EACH so any name's first-touch read carries the effect
+                // (a computed global is always a single identifier, so accessor bodies only ever pair with
+                // one name). An empty list = a wildcard-only binding — the <main> collector owns that.
+                let names = boundNames(binding.pattern)
+                if names.isEmpty { continue }
                 var bodies: [Syntax] = []
                 if let ab = binding.accessorBlock {
                     switch ab.accessors {
@@ -478,12 +518,14 @@ final class DeclCollector: SyntaxVisitor {
                 } else if let init0 = binding.initializer {
                     bodies.append(Syntax(init0.value))
                 }
-                for b in bodies {
-                    var info = FnInfo(qual: name, loc: loc(binding))
-                    info.simpleQual = name
-                    info.body = b
-                    info.isAccessor = true
-                    fns.append(info)
+                for name in names {
+                    for b in bodies {
+                        var info = FnInfo(qual: name, loc: loc(binding))
+                        info.simpleQual = name
+                        info.body = b
+                        info.isAccessor = true
+                        fns.append(info)
+                    }
                 }
             }
         }

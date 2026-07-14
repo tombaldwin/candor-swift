@@ -76,4 +76,30 @@ final class TopLevelMainProcessTests: XCTestCase {
         XCTAssertEqual(ProcessHarness.inferred(by, "token"), ["Fs"], "the named global keeps its own lazy unit")
         XCTAssertNil(by["<main>"], "a named global-var decl is not a bare top-level statement — no <main>")
     }
+
+    // a TUPLE-destructured global (`let (a, b) = effectfulInit()`) binds names so it is NOT a <main>
+    // statement, but the IdentifierPattern-only unit guard used to DROP its initializer effect (a false-
+    // pure global — the cardinal sin). Each bound name now carries the shared initializer's effect.
+    func testTupleDestructuredGlobalIsNotDropped() throws {
+        let by = try scan("""
+        import Foundation
+        let (a, b) = ((try? String(contentsOfFile: "/etc/x")), 1)
+        func use() { _ = a; _ = b }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "a"), ["Fs"], "tuple element `a` carries the initializer effect")
+        XCTAssertEqual(ProcessHarness.inferred(by, "b"), ["Fs"], "tuple element `b` carries the initializer effect (first-touch over-approximation is sound)")
+        XCTAssertEqual(ProcessHarness.inferred(by, "use"), ["Fs"], "a reader of a tuple element inherits the effect")
+    }
+
+    // the type-member sibling: `static let (p, q) = effectfulInit()` inside a type — a static tuple
+    // property is a first-touch init like the global, and used to fall through the same guard.
+    func testStaticMemberTupleIsNotDropped() throws {
+        let by = try scan("""
+        import Foundation
+        struct S { static let (p, q) = ((try? String(contentsOfFile: "/etc/x")), 1) }
+        func u() { _ = S.p }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "S.p"), ["Fs"], "static tuple member `p` carries the initializer effect")
+        XCTAssertEqual(ProcessHarness.inferred(by, "S.q"), ["Fs"], "static tuple member `q` carries the initializer effect")
+    }
 }
