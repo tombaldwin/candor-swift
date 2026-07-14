@@ -75,7 +75,7 @@ private func mergeCallgraph(_ full: String, into cg: inout [String: [String]]) -
 // dot-segments") — so one engine can query another engine's report by its exact path, even when the filename
 // does not fit the `<prefix>.<pkg>.Swift.json` family shape. A matching `.callgraph.json` sibling (same stem)
 // is still picked up for the graph if present.
-private func loadFixModel(prefix: String) -> (byName: [String: FixFn], cg: [String: [String]])? {
+func loadFixModel(prefix: String) -> (byName: [String: FixFn], cg: [String: [String]])? {
     let fm = FileManager.default
     var byName: [String: FixFn] = [:]
     var cg: [String: [String]] = [:]
@@ -146,7 +146,7 @@ private func noteDeprecated(_ what: String) {
 // to its prefix — see below); otherwise a bare prefix. The Swift loaders index sibling reports by a
 // prefix (`<prefix>.<pkg>.Swift[.<sidecar>].json`), so a full `.json` path is normalized back to the
 // `<prefix>` by stripping the trailing `.<pkg>.Swift.json` (or `.callgraph.json`/`.hierarchy.json`).
-private func resolveReportLocator(_ locator: String) -> String {
+func resolveReportLocator(_ locator: String) -> String {
     var isDir: ObjCBool = false
     if FileManager.default.fileExists(atPath: locator, isDirectory: &isDir), isDir.boolValue {
         return (locator as NSString).appendingPathComponent(".candor/report")
@@ -206,7 +206,7 @@ private func quietPrefixMatches(_ prefix: String) -> Bool {
 // Discover the report prefix when no --report is given: CANDOR_REPORT overrides; otherwise walk UP from
 // the CWD for a `.candor/` directory and use `<that>/.candor/report` as the prefix (§3.4 discovery,
 // mirroring Config.swift's ancestor walk). Returns nil if neither is found (the caller fails loud).
-private func discoverReportPrefix() -> String? {
+func discoverReportPrefix() -> String? {
     if let env = ProcessInfo.processInfo.environment["CANDOR_REPORT"], !env.isEmpty {
         return resolveReportLocator(env)
     }

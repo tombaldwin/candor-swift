@@ -87,6 +87,7 @@ reports; candor-swift itself carries a few query subcommands, over a report a sc
     candor-swift unverified <report-prefix> <policy-file> [--strict]    # pure/deny layers that PASS but are Unknown (not PROVABLY clean)
     candor-swift tour [<N>]                                             # the N most surprising transitive reaches (default 10; no policy)
     candor-swift gains      <current> <baseline> [--json]              # effects the surface GAINED since the baseline (supply-chain alarm)
+    candor-swift privacy-manifest [--verify <Info.plist>]              # generate/verify the Apple privacy manifest from the sensor reach (privacy/1)
 
 `fix` is the remedial inverse of the policy gate (integrations/FIX-SPEC.md): when a function performs
 an effect its layer forbids, it computes where the effect belongs (hoist it to the nearest allowed-
@@ -105,6 +106,15 @@ function down to the nearest DIRECT source, each step indented one deeper, the s
 policy, read-only; `--json` emits `{ effect, fn, path:[{ fn, loc, source }] }`. If the fn does not
 perform the effect (or the source is not a local function) the chain is honestly empty. A missing
 report or an unmatched fn fails loud (exit 2).
+`privacy-manifest` (the `privacy/1` extension, SPEC-EXTENSION-privacy.md) turns the report's privacy-sensor
+reach — the transitive union of Location/Camera/Mic/Contacts/Photos/Notify, which grep can't see — into an
+Apple privacy declaration. With no `--verify` it GENERATES the required Info.plist usage-description keys
+(each with the reaching functions); `--verify <Info.plist>` diffs the plist's declared keys against the
+reach — a reached effect with no satisfying key is an UNDER-declaration (the App-Store-rejection finding,
+exit 1), a declared sensor key with no reach is an OVER-declaration (an unused permission, a warning, still
+exit 0). Notify needs no key (it gates at runtime). Read-only; `--json` emits `{ reached, required, declared,
+underDeclared:[{effect,keys,fns}], overDeclared, ok }`. A missing report or an unreadable/unparseable plist
+fails loud (exit 2).
 
 ## The trust rule — do not skip this
 

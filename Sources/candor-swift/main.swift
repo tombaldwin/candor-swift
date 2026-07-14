@@ -108,6 +108,13 @@ if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "path" {
 if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "gains" {
     runGainsCLI(CommandLine.arguments)
 }
+// `privacy-manifest` (SPEC-EXTENSION-privacy.md, "Product surface") — the code-level truth behind an app's
+// Apple privacy declaration: GENERATE the required Info.plist usage-description keys from the report's
+// privacy-effect reach, or VERIFY an Info.plist against it (an under-declaration → exit 1). A read-only
+// query over a report a scan wrote (privacy/1 extension); a subcommand, before the scan flag loop.
+if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "privacy-manifest" {
+    runPrivacyManifestCLI(CommandLine.arguments)
+}
 
 var target = "."
 var outPrefix: String? = nil
@@ -155,6 +162,7 @@ while let a = argIter.next() {
                candor-swift unverified        [--report <locator>] [--policy <file>] [--json] [--strict]  # PASS-but-Unknown holes
                candor-swift tour [<N>]         [--report <locator>] [--json]                    # the N most surprising reaches (default 10)
                candor-swift gains <current> <baseline> [--json]                                 # effects gained between two reports — the supply-chain alarm (§5.1)
+               candor-swift privacy-manifest [--report <locator>] [--verify <Info.plist>] [--json]  # generate/verify the Apple privacy manifest from the sensor reach (privacy/1)
 
           Query verbs (fix/fix-gate/unverified/tour) follow the §3.3.1 canonical grammar: the report is
           DISCOVERED by default (walk up from CWD for a .candor/ dir; CANDOR_REPORT overrides). --report

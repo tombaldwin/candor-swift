@@ -94,12 +94,47 @@ report) is a **future enhancement**: an engine would preserve unknown effect nam
 pass-through strings in the entry's effect sets. Not first-wave — swift produces and queries privacy
 reports; the privacy-manifest verb is swift's.
 
-## Product surface (staged — after the effects land)
+## Product surface — the `privacy-manifest` verb
 
-`candor-swift privacy-manifest [--verify <PrivacyInfo.xcprivacy>]` — GENERATE the accessed-API set from
-the code-level effect reach, or VERIFY an existing manifest against it (a declared capability the code
-never reaches → over-declaration; a reached capability the manifest omits → the App-Store-rejection-shaped
-under-declaration). The marketing exhibit: run it on a real open-source iOS app and show a divergence.
+`candor-swift privacy-manifest [--report <locator>] [--verify <Info.plist>] [--json]` — the code-level
+truth behind an app's privacy declaration.
+
+- **GENERATE** (no `--verify`): from the report's privacy-effect reach (the transitive `inferred` set),
+  emit the set of Apple **Info.plist usage-description keys** the code's sensor access REQUIRES, each with
+  the reaching functions. (A `PrivacyInfo.xcprivacy` NSPrivacyAccessedAPITypes generator is a later
+  extension — the usage-description keys are the App-Store-gating declaration for the sensor cluster.)
+- **VERIFY `<Info.plist>`**: read the plist's usage-description keys and diff against the reached effects:
+  - a reached effect with NO satisfying key → **UNDER-declaration** — the App-Store-rejection-shaped
+    finding (the app touches the capability, transitively through a dependency, but never declares it);
+    exit 1.
+  - a declared key with NO reached effect → **OVER-declaration** — an unused permission (a privacy-review
+    smell, a warning, not a failure); exit 0 unless combined with an under-declaration.
+  - clean (every reached effect declared) → exit 0.
+
+**The effect → usage-description key mapping** (a reached effect is SATISFIED if ANY acceptable key is
+present):
+
+| effect | acceptable Info.plist keys |
+|---|---|
+| `Location` | `NSLocationWhenInUseUsageDescription` \| `NSLocationAlwaysAndWhenInUseUsageDescription` \| `NSLocationAlwaysUsageDescription` \| `NSLocationUsageDescription` |
+| `Camera` | `NSCameraUsageDescription` |
+| `Mic` | `NSMicrophoneUsageDescription` |
+| `Contacts` | `NSContactsUsageDescription` |
+| `Photos` | `NSPhotoLibraryUsageDescription` \| `NSPhotoLibraryAddUsageDescription` |
+| `Notify` | (none — notifications gate via a runtime `requestAuthorization`, not an Info.plist key; reported as a declared capability with no manifest key required) |
+
+The JSON shape: `{ "reached": ["Location", …], "required": { "Location": ["NSLocation…"], … },
+"declared": ["NSLocation…"], "underDeclared": [ { "effect", "keys", "fns":[…] } ],
+"overDeclared": ["NSCamera…"], "ok": bool }`. The marketing exhibit: run VERIFY on a real open-source iOS
+app and show a divergence (or a clean pass that proves the manifest is complete against the *transitive*
+code truth — which grep can't).
+
+**Caveat (whole-tree scan):** candor-swift analyzes a source tree as ONE report, so `reached` is the
+union across every target in the tree. A multi-target app (an iOS app + a macOS app + a widget) whose
+targets have SEPARATE Info.plists should scan and verify each target's sources against its own plist —
+verifying the whole-tree report against one target's plist can flag a capability another target reaches.
+The verb reports the divergence for REVIEW (report-reach vs plist-declaration); confirming a target-
+membership violation is the reviewer's step. (Per-target scoping is a future refinement.)
 
 ## Versioning
 
