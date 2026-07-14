@@ -7,6 +7,45 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.12.0] — 2026-07-14
+
+### ✨ NEW `gains` verb — the supply-chain alarm (this engine's first)
+
+`candor-swift gains <current> <baseline> [--json]` lists every `fn\teffect` the surface **gained**
+between two reports (current `inferred` minus baseline, per function, sorted) — the alarm a CI job
+raises when a dependency update quietly grows a capability. Both positionals are report locators (the
+family's two-positional comparative form, like `diff` — no discovery, no policy); the default output is
+the byte-stable `fn\teffect` TSV, `--json` the `{baseline_version, byFunction, engine_version, gained}`
+machine form. Each `byFunction` entry carries **`origin`**: `existing` (the function was there at the
+baseline and now performs the effect — the supply-chain *attack* signal), `new` (a new function grew
+the effect — a feature), or `unknown`. Existence is keyed on the **baseline callgraph sidecar**
+(reports omit pure functions, so a baseline-pure function is a graph node with no report entry); a
+**partial** graph — a matched sidecar that fails to read or parse — degrades the negative claim to
+`unknown`, never a mislabel, while a node still in the partial graph stays `existing`. Mirrors the
+Rust reference `candor-query gains`; pinned four-way by conformance PART 5b.
+
+### Report acceptance + loudness on the comparative verb
+
+- **Legacy bare-array reports accepted** — the v0.1 form, including the clean-empty `[]` the other
+  three engines already answer on (was a four-way divergence: candor-swift alone exited 2).
+- **All-junk reports fail loud** — a non-empty `functions` array in which every entry is unusable is
+  corruption (exit 2 + a naming stderr line), never an empty `{byFunction:[],gained:[]}` all-clear at
+  exit 0; a well-formed empty array stays a valid pure report.
+- **Producing-build provenance** — `gains --json` carries the unconditional
+  `baseline_version`/`engine_version` fields (`""` = unknown), and when both are known and differ a
+  §2.1 stderr ⚠ discloses that a "gained capability" may be the engine reclassifying, not the
+  dependency changing (the TSV stdout is unchanged — the disclosure is stderr-only).
+
+### spec 0.12 — the gains-origin rung (§3.1)
+
+candor-swift now declares **spec `0.12`** (`specVersion` in `main.swift`; the envelope + `--gate-json`
+verdict carry it). 0.12 is another tier-2 (pinned-tool-surface) rung, additive over 0.11 and
+invocation-compatible with it: it promotes the §3.1 `gains` **`origin`** field and the provenance
+fields into the pinned contract, four-way (conformance **PART 5b**, including the partial-sidecar and
+no-baseline cases). No report-schema, classifier, or verdict change — a 0.11 report/verdict is
+byte-identical under 0.12. **⚠ the `spec` string changed** — a consumer pinning `spec == "0.11"` must
+accept `0.12`.
+
 ## [0.11.0] — 2026-07-13
 
 ### spec 0.11 — the surprising-reach surface rung (§3.1)
