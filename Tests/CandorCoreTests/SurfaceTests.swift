@@ -99,6 +99,23 @@ final class SurfaceTests: XCTestCase {
         }
     }
 
+    /// `privacy/1` salience: a benign fn reaching a sensor effect (Location/Camera/Mic/…) IS a surprising
+    /// reach — the cluster scores sharp (salience 5) like any boundary reach, so it surfaces as a tour row
+    /// (SPEC-EXTENSION-privacy.md "Effect-model membership"; the containment/boundary posture at this layer).
+    func testPrivacySensorReachSurfacesAsBoundary() {
+        for eff in ["Location", "Camera", "Mic", "Contacts", "Photos", "Notify"] {
+            var direct: [String: Set<String>] = [:]
+            var inferred: [String: Set<String>] = [:]
+            var calls: [String: Set<String>] = [:]
+            direct["Sensor.read"] = set([eff]); inferred["Sensor.read"] = set([eff])
+            inferred["Settings.load"] = set([eff]); calls["Settings.load"] = set(["Sensor.read"])
+            let got = bestFinds(inferred: inferred, direct: direct, calls: calls, loc: [:], n: 10)
+            XCTAssertEqual(got.first?.func_, "Settings.load",
+                           "\(eff) is a boundary reach (salience 5) — a benign fn reaching it surfaces")
+            XCTAssertEqual(got.first?.effect, eff)
+        }
+    }
+
     func testFallbackWhenNothingQualifies() {
         // One effectful function, but it is a DIRECT source (not inherited) AND effecty-named — no
         // candidate qualifies → the honest fallback.

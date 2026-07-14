@@ -96,7 +96,10 @@ private func hasToken(_ name: String, _ lexicon: Set<String>) -> String? {
 /// candor-classify/src/surface.rs).
 private func salience(_ effect: String) -> Int {
     switch effect {
-    case "Net", "Exec", "Db", "Ipc", "Llm": return 5  // `Llm` ⟨0.13⟩ is a boundary reach — scores sharp
+    case "Net", "Exec", "Db", "Ipc", "Llm",
+         // `privacy/1` (SPEC-EXTENSION-privacy.md): a benign-named fn reaching Location/Camera/Mic/… is
+         // exactly the §3.1 surprising-reach shape — the sensor cluster scores sharp like any boundary reach.
+         "Location", "Camera", "Mic", "Contacts", "Photos", "Notify": return 5  // `Llm` ⟨0.13⟩ is a boundary reach — scores sharp
     case "Fs", "Env": return 3
     default: return 0
     }

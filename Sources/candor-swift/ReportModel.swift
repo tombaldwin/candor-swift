@@ -11,9 +11,18 @@ import Foundation
 enum Effect: String, CaseIterable {
     case clipboard = "Clipboard", clock = "Clock", db = "Db", env = "Env", exec = "Exec"
     case fs = "Fs", ipc = "Ipc", llm = "Llm", log = "Log", net = "Net", rand = "Rand", unknown = "Unknown"
+    // `privacy/1` SPEC EXTENSION (SPEC-EXTENSION-privacy.md) — Apple privacy-sensor effects. Each is an
+    // outside-world surface (a sensor / personal-data store / the user's attention) on the same footing as
+    // Clipboard (main-spec §6.1): a boundary effect, high-salience, NOT allowlistable via a literal (there is
+    // no host/path to certify — `deny Location`/containment yes, `allow Location <x>` no). The extension is
+    // DISCLOSED in the envelope's `extensions` array when any of these appears (Report.privacyActive).
+    case location = "Location", camera = "Camera", mic = "Mic", contacts = "Contacts", photos = "Photos", notify = "Notify"
     var specName: String { rawValue }
     static func from(_ name: String) -> Effect? { Effect(rawValue: name) }
 }
+// The `privacy/1` extension's effect NAMES (the six SPEC-EXTENSION-privacy.md effects). Used to detect
+// whether the extension is active (any effector reaches one) so the envelope discloses `extensions`.
+let PRIVACY_EFFECTS: Set<String> = ["Location", "Camera", "Mic", "Contacts", "Photos", "Notify"]
 // A set of effects (SEMANTICS §1). Wire form = spec-name-sorted names — which, for this vocabulary, is the
 // same lexicographic order a `Set<String>.sorted()` produced, so adoption is byte-identical.
 struct EffectSet {
@@ -60,10 +69,27 @@ struct Effector {
 // The §2 envelope: provenance + the package + the effectors.
 struct Report {
     let provenance: Provenance, package: String, effectors: [Effector]
+    // Is the `privacy/1` extension ACTIVE — does any effector reach one of its six sensor effects (in its
+    // inferred OR direct set)? Computed from the effectors so the envelope discloses the extension exactly
+    // when one of its effects appears (SPEC-EXTENSION-privacy.md "Wire disclosure").
+    var privacyActive: Bool {
+        effectors.contains { ef in
+            !ef.inferred.effects.isDisjoint(with: PRIVACY_EFFECTS_ENUM)
+                || !ef.direct.effects.isDisjoint(with: PRIVACY_EFFECTS_ENUM)
+        }
+    }
     func toJSON() -> [String: Any] {
-        ["candor": provenance.toJSON(), "package": package, "functions": effectors.map { $0.toJSON() }]
+        var env: [String: Any] = ["candor": provenance.toJSON(), "package": package,
+                                  "functions": effectors.map { $0.toJSON() }]
+        // `privacy/1` wire disclosure (REQUIRED when active): a top-level `extensions` array. OMITTED when
+        // no extension effect is active, so a plain report is byte-unchanged (SPEC-EXTENSION-privacy.md).
+        if privacyActive { env["extensions"] = ["privacy/1"] }
+        return env
     }
 }
+// The `privacy/1` effects as `Effect` values — for the disjoint-set membership test in `privacyActive`
+// (EffectSet stores `Set<Effect>`, so the test is against the enum, not the string names).
+private let PRIVACY_EFFECTS_ENUM: Set<Effect> = Set(PRIVACY_EFFECTS.compactMap(Effect.from))
 
 func writeJson(_ obj: Any, _ path: String) {
     // A write failure (read-only FS, no space, a non-existent --out dir, EACCES) used to `try!`-TRAP

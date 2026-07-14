@@ -207,12 +207,52 @@ public let MODEL_SDK_TYPES: Set<String> = [
     "LanguageModelSession", "SystemLanguageModel",
 ]
 
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// `privacy/1` SPEC EXTENSION (SPEC-EXTENSION-privacy.md) — Apple privacy-sensor effects
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+/// The `privacy/1` per-effect type→effect table: a call whose receiver/argument TYPE is a curated
+/// privacy-source type carries that effect (SPEC-EXTENSION-privacy.md "Classification"). Keyed by the
+/// distinctive framework TYPE NAME (candor-swift's syntactic engine keys κ on type names — the same
+/// mechanism as `MODEL_SDK_TYPES`/`NWConnection`). NO method-name gating: any call into one of these
+/// single-purpose sensor types IS the sensor access. A project's OWN type of one of these names shadows
+/// this via `declaredTypes`/`localTypes` (the anti-fabrication rule, exactly like the model-SDK types) —
+/// a local `CLLocationManager` is not CoreLocation's. A curated STARTER set; the §7 coverage ledger
+/// discloses an uncovered privacy framework like any other. UNKNOWN/ambiguous receivers stay pure —
+/// never guessed (a fabricated `Camera` on a QR-decode helper is the precision failure the probe fences).
+///
+/// AVCaptureDevice / AVCaptureSession are AMBIGUOUS: the video path is Camera, the audio path is Mic
+/// (discriminated at runtime by the `.audio`/`.video` media-type argument). For the STARTER we classify a
+/// bare AVCaptureDevice / AVCaptureSession as `Camera` (the dominant use); finer audio/video
+/// discrimination by the media-type argument is a future refinement. AVAudioRecorder / AVAudioEngine are
+/// unambiguously `Mic`.
+public let PRIVACY_SDK_TYPES: [String: String] = [
+    // Location — CoreLocation (the sensor-accessing MANAGER/updater/geocoder; CLLocation itself is a value
+    // type carrying already-read coordinates, so it is NOT here) + MapKit user-tracking.
+    "CLLocationManager": "Location", "CLLocationUpdate": "Location", "CLGeocoder": "Location",
+    "MKUserTrackingMode": "Location",
+    // Camera — AVFoundation capture (bare AVCaptureDevice/Session default to Camera; see the ambiguity note)
+    // + UIImagePickerController (its camera source).
+    "AVCaptureDevice": "Camera", "AVCaptureSession": "Camera", "UIImagePickerController": "Camera",
+    // Mic — the unambiguous audio-capture types.
+    "AVAudioRecorder": "Mic", "AVAudioEngine": "Mic",
+    // Contacts — the address book.
+    "CNContactStore": "Contacts", "CNContactPickerViewController": "Contacts",
+    // Photos — the photo library.
+    "PHPhotoLibrary": "Photos", "PHAsset": "Photos", "PHPickerViewController": "Photos", "PHImageManager": "Photos",
+    // Notify — user-attention / notifications.
+    "UNUserNotificationCenter": "Notify",
+]
+
 /// Classify a member call `root.member(...)` (root = the receiver chain's base identifier or the
 /// receiver's inferred TYPE). Returns nil for the pure/unknown surface — never a guess.
 public func kappaMember(root: String, member: String) -> String? {
     // §1 ⟨0.13⟩ model-SDK surface: ANY call into a curated model-provider client type is `Llm` (the
     // caller adds the companion `Net`). No method-name gating — the clients are single-purpose.
     if MODEL_SDK_TYPES.contains(root) { return "Llm" }
+    // `privacy/1`: ANY call into a curated privacy-sensor type is that sensor effect (no method-name
+    // gating — single-purpose types). A local same-named type shadows this via declaredTypes at the driver.
+    if let priv = PRIVACY_SDK_TYPES[root] { return priv }
     switch root {
     case "FileManager", "FileHandle": return FS_MEMBERS.contains(member) || member == "readToEnd"
         || member == "write" || member == "read" ? "Fs" : nil
@@ -329,6 +369,10 @@ public func kappaFree(name: String, argCount: Int) -> String? {
     // `LanguageModelSession()`) is the model dispatch entry → `Llm` (caller adds `Net`). A local type of
     // the same name shadows this at the call site (localTypes/localFreeFns), like `Pipe`/`Process`.
     if MODEL_SDK_TYPES.contains(name) { return "Llm" }
+    // `privacy/1`: constructing a curated privacy-sensor type (`CLLocationManager()`, `AVAudioRecorder(...)`,
+    // `CNContactStore()`) is the sensor-access entry → that sensor effect. A local type of the same name
+    // shadows this at the call site (localTypes/localFreeFns), like the model-SDK types (anti-fabrication).
+    if let priv = PRIVACY_SDK_TYPES[name] { return priv }
     switch name {
     case "Date": return argCount == 0 ? "Clock" : nil // Date() reads the clock; Date(timeInterval…) is arithmetic
     case "NSDate": return argCount == 0 ? "Clock" : nil // the legacy twin of Date() (no-arg = current time)
