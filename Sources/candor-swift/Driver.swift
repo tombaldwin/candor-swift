@@ -157,13 +157,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         "(" + ps.map { ($0.type ?? "_") + ($0.variadic ? "..." : "") }.joined(separator: ",") + ")"
     }
     var qualGroup: [String: Int] = [:]
-    for f in allFns where !f.isAccessor { qualGroup[f.qual, default: 0] += 1 }
+    // `<main>` top-level units are excluded from overload suffixing (like accessors): the wire name MUST
+    // stay exactly `<main>` (never `<main>()`), and a multi-file package's per-file top levels union under
+    // the one `<main>` module-entry unit rather than becoming spurious overloads.
+    for f in allFns where !f.isAccessor && !f.isTopLevel { qualGroup[f.qual, default: 0] += 1 }
     let overloadedQuals = Set(qualGroup.filter { $0.value > 1 }.keys)
     var overloads: [String: [(qual: String, sig: [(type: String?, hasDefault: Bool, variadic: Bool)])]] = [:]
     var overloadedBases = Set<String>()
     if !overloadedQuals.isEmpty {
         var seen: [String: Int] = [:]   // identical type-sigs get a positional suffix so they stay distinct nodes
-        for i in allFns.indices where !allFns[i].isAccessor && overloadedQuals.contains(allFns[i].qual) {
+        for i in allFns.indices where !allFns[i].isAccessor && !allFns[i].isTopLevel && overloadedQuals.contains(allFns[i].qual) {
             let base = allFns[i].simpleQual
             overloadedBases.insert(base)
             var suffix = sigStr(allFns[i].paramSig)
@@ -249,7 +252,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // reached by property/global-read edges, so they must not pollute the free-fn name index (a
         // same-qual default-expr accessor unit otherwise made its function's name AMBIGUOUS, dropping every
         // call edge to it — the hole-9 default-arg fix's own footgun).
-        if f.enclosingType == nil && !f.isAccessor { freeFnByName[f.qual, default: []].append(f.qual) }
+        // `<main>` is not a callable free function (no Swift call site names it) — keep it out of the
+        // free-fn index so it neither resolves phantom `<main>()` calls nor makes any name ambiguous.
+        if f.enclosingType == nil && !f.isAccessor && !f.isTopLevel { freeFnByName[f.qual, default: []].append(f.qual) }
         if f.isAccessor && f.enclosingType == nil && !f.qual.contains(".") { globalUnitNames.insert(f.qual) }
     }
     // Resolve a simple "Type.member" call target to a full nested qual: an exact full-qual hit (top-level,

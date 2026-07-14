@@ -71,12 +71,15 @@ final class BaselineProcessTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: base) }
         try recordBaseline(bin, src: Self.beforeSrc, to: base)
 
-        // `charge` unchanged; `wipe` is NEW (absent from the baseline) and effectful.
+        // `charge` unchanged; `wipe` is NEW (absent from the baseline) and effectful. `wipe` is NOT
+        // invoked at the top level — the top-level `<main>` unit must stay identical to the baseline's
+        // (calling `wipe()` there would make `<main>` itself gain Fs, a genuine top-level regression the
+        // ratchet SHOULD catch — a different property than "a new function is exempt").
         let root = try ProcessHarness.makePackage("""
         import Foundation
         struct Billing { func charge() { _ = Date() } }
         func wipe() { try? FileManager.default.removeItem(atPath: "/x") }
-        Billing().charge(); wipe()
+        Billing().charge()
         """)
         defer { try? FileManager.default.removeItem(at: root) }
         let r = try ProcessHarness.run(bin, [root.path, "--json"], env: ["CANDOR_BASELINE": base.path])
@@ -185,9 +188,13 @@ final class BaselineProcessTests: XCTestCase {
         let obj = try JSONSerialization.jsonObject(with: Data(contentsOf: verdict)) as? [String: Any]
         XCTAssertEqual(obj?["ok"] as? Bool, false, "the verdict agrees with the exit code")
         let viols = obj?["violations"] as? [[String: Any]] ?? []
-        XCTAssertEqual(viols.count, 1, "one AS-EFF-005 record: \(viols)")
-        XCTAssertEqual(viols.first?["rule"] as? String, "AS-EFF-005")
-        XCTAssertEqual(viols.first?["fn"] as? String, "Billing.charge")
-        XCTAssertEqual(viols.first?["effects"] as? [String], ["Fs"], "effects = the GAINED set")
+        // gainedSrc calls `Billing().charge()` at the top level, so the Fs gain regresses BOTH the method
+        // AND the `<main>` top-level unit that transitively reaches it — two AS-EFF-005 records.
+        XCTAssertEqual(viols.count, 2, "the method gain and its top-level transitive gain: \(viols)")
+        XCTAssertTrue(viols.allSatisfy { $0["rule"] as? String == "AS-EFF-005" })
+        let byFn = Dictionary(uniqueKeysWithValues: viols.compactMap { v -> (String, [String: Any])? in
+            (v["fn"] as? String).map { ($0, v) } })
+        XCTAssertEqual(byFn["Billing.charge"]?["effects"] as? [String], ["Fs"], "effects = the GAINED set")
+        XCTAssertEqual(byFn["<main>"]?["effects"] as? [String], ["Fs"], "the top-level caller gained Fs transitively")
     }
 }

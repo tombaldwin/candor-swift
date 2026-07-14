@@ -39,6 +39,11 @@ struct FnInfo {
     var enclosingType: String?
     var isMain: Bool = false
     var isAccessor: Bool = false   // a computed-property/observer/lazy-init body (spec 0.5 unitKind)
+    // the synthetic `<main>` unit for a file's TOP-LEVEL executable statements (Swift allows executable
+    // statements directly at file scope in main.swift / script files). Emits `unitKind: "initializer"`
+    // (spec §2 recommended value; the JVM engine's `<clinit>` uses the same kind) — the top level runs
+    // once, like a static initializer. Distinct from `isAccessor` so it is NOT relabelled "accessor".
+    var isTopLevel: Bool = false
     var uppercaseAttrs: [String] = []   // capitalized @-attributes (a `@SomeBuilder` result-builder candidate)
     // self's ELEMENT type when this method lives in a COLLECTION extension with an element bound
     // (`extension Array where Element: Saveable` → "Saveable") — so a bare `forEach { $0.method() }`
@@ -131,6 +136,60 @@ final class DeclCollector: SyntaxVisitor {
     private func loc(_ node: some SyntaxProtocol) -> String {
         let l = node.startLocation(converter: converter)
         return "\(file):\(l.line):\(l.column)"
+    }
+
+    // TOP-LEVEL EXECUTABLE STATEMENTS — Swift allows bare executable statements directly at file scope in
+    // `main.swift` / script files (`URLSession.shared.dataTask(…)`, `work()`, `if …`). They run once when
+    // the file's module entry point executes — like a static initializer. Without this they were collected
+    // by NOTHING (they belong to no declaration), so a file whose only effect lives at the top level scanned
+    // as an EMPTY report — a false "pure" verdict (the cardinal sin, top-level edition).
+    //
+    // Synthesize ONE `<main>` unit per file whose body is JUST the executable items — expression statements,
+    // control-flow statements, and WILDCARD/`_` variable decls (`let _ = …`, which bind no name so no lazy
+    // global-var unit was ever minted for them). Named global `let x = …` / `var x` decls are EXCLUDED — they
+    // are already collected as first-touch lazy units (the else-branch of visit(VariableDeclSyntax)); folding
+    // their initializers in here would double-attribute. Func / type / import / typealias declarations are
+    // also EXCLUDED — each is (or contributes) its own unit; inlining a `func work(){…}` body would charge
+    // work's effects to `<main>` as DIRECT instead of transitively through the `work()` call edge.
+    //
+    // Minted only when the filtered list is non-empty (a plain library file — imports + declarations, no
+    // executable statements — gets no `<main>` at all). A `<main>` that turns out pure carries no effect and
+    // is omitted from the report's `functions` (pure units are dropped downstream), exactly like a pure
+    // global-var / func unit — so this never floods the effect report.
+    override func visit(_ node: SourceFileSyntax) -> SyntaxVisitorContinueKind {
+        var executable: [CodeBlockItemSyntax] = []
+        for item in node.statements {
+            switch item.item {
+            case .stmt, .expr:
+                executable.append(item)
+            case .decl(let decl):
+                // Only a variable decl whose bindings bind NO name (`let _ = …`, or a `_`-only tuple) —
+                // a wildcard binding runs its initializer for effect but was never a named lazy unit.
+                if let v = decl.as(VariableDeclSyntax.self),
+                   v.bindings.allSatisfy({ !bindsAnyName($0.pattern) }) {
+                    executable.append(item)
+                }
+            }
+        }
+        if let first = executable.first {
+            let block = CodeBlockItemListSyntax(executable)
+            var info = FnInfo(qual: "<main>", loc: loc(first))
+            info.simpleQual = "<main>"
+            info.body = Syntax(block)
+            info.isTopLevel = true
+            fns.append(info)
+        }
+        return .visitChildren
+    }
+
+    // Does this pattern bind at least one name (vs a pure-wildcard `_` / `(_, _)`)?
+    private func bindsAnyName(_ pattern: PatternSyntax) -> Bool {
+        if pattern.is(IdentifierPatternSyntax.self) { return true }
+        if let tuple = pattern.as(TuplePatternSyntax.self) {
+            return tuple.elements.contains { bindsAnyName($0.pattern) }
+        }
+        // WildcardPattern (`_`), and any other non-identifier pattern, binds no name.
+        return false
     }
 
     private func pushType(_ name: String, inheritance: InheritanceClauseSyntax?, attributes: AttributeListSyntax? = nil,

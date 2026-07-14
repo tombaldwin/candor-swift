@@ -7,6 +7,34 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.14.0] — 2026-07-14
+
+### ⚠ FIXED — the top-level `<main>` initializer unit (a false-"pure" empty report — the cardinal sin)
+
+A `main.swift` / script file whose **bare top-level executable statements** performed an effect was
+SILENTLY DROPPED: those statements belong to no function, so the collector minted no unit for them and
+the report came back a false-"pure" empty — the cardinal sin. A `deny Llm` / `deny Net` gate PASSED
+such a file even though its top level opened a socket or called a model provider. The top level is now
+synthesized as **one `<main>` unit per file**, carrying `unitKind: "initializer"`, with the file's
+top-level effects and its transitive call edges — so the effect is disclosed and the gate now catches
+it. The unit is minted **only when the top level carries or reaches an effect** — a pure top level mints
+no unit (report bytes unchanged for pure files). Global-var initializers, computed properties, and
+stored-property inits were already sound and are **unchanged**.
+
+Conformance **PART 4p** pins the top-level-initializer unit four-way (java `<clinit>` / ts `<module>` /
+swift `<main>`; rust N/A — no free top-level executable statements). **⚠ report bytes change** on any
+file with an effectful top level (a previously empty/"pure" report gains the `<main>` unit), so an
+upgrade across 0.14 is baseline-invalidating.
+
+### spec 0.14 — the top-level-initializer rung (§3.1)
+
+candor-swift now declares **spec `0.14`** (`specVersion` in `main.swift`; the envelope + `--gate-json`
+verdict carry it). 0.14 is another tier-2 (pinned-tool-surface) rung, additive over 0.13: it admits the
+`<main>` top-level initializer unit (`unitKind: "initializer"`) into the pinned contract. **⚠ report
+bytes change** where a file's effectful top level is now surfaced as a `<main>` unit (a report
+previously seen as empty/"pure" gains the unit), so an upgrade across 0.14 is baseline-invalidating; and
+**⚠ the `spec` string changed** — a consumer pinning `spec == "0.13"` must accept `0.14`.
+
 ## [0.13.0] — 2026-07-14
 
 ### ✨ NEW `Llm` effect — a model-provider call (boundary effect refining Net)

@@ -27,13 +27,13 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.13.0"
+let engineVersion = "candor-swift-0.14.0"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
 // The spec contract version this engine speaks — the SAME literal that stamps the §2 envelope's `spec`
 // field (see the envelope below), reused so `--version` and the report can never disagree.
-let specVersion = "0.13"
+let specVersion = "0.14"
 
 // `parsepolicy <file>` — dump the parsed §6.2 policy as canonical JSON, the SAME shape candor-java's
 // Query.policyJson / candor-query / candor-ts emit: {"deny":[{effects,scope}], "allow":[{effect,scope,
@@ -292,6 +292,9 @@ let invisibleAcc = analysis.invisibleAcc
 let prefix = outPrefix ?? (rootDir as NSString).appendingPathComponent(".candor/report")
 
 let accessorQuals = Set(allFns.filter { $0.isAccessor }.map { $0.qual })
+// the synthetic `<main>` top-level-statement unit(s): unitKind "initializer" (the top level runs once,
+// like a static/class initializer — the JVM engine's `<clinit>` uses the same kind).
+let topLevelQuals = Set(allFns.filter { $0.isTopLevel }.map { $0.qual })
 // (the domain model — Effect/EffectSet/Provenance/Effector/Report — and the atomic writeJson
 //  live in ReportModel.swift)
 
@@ -309,7 +312,8 @@ for qual in reportQuals.sorted() {
         unresolved: inf.contains("Unknown"), hash: "\(pkgName)#\(qual)",
         calls: (edges[qual] ?? []).sorted())
     if entryPoints.contains(qual) { ef.entryPoint = true }
-    if accessorQuals.contains(qual) { ef.unitKind = "accessor" }
+    if topLevelQuals.contains(qual) { ef.unitKind = "initializer" }
+    else if accessorQuals.contains(qual) { ef.unitKind = "accessor" }
     if let w = whyMap[qual], !w.isEmpty { ef.unknownWhy = w.sorted() }
     if let h = hostsAcc[qual], !h.isEmpty { ef.hosts = h.sorted() }
     if let c = cmdsAcc[qual], !c.isEmpty { ef.cmds = c.sorted() }

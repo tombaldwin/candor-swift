@@ -455,13 +455,17 @@ final class GateProcessTests: XCTestCase {
 
         let data = try Data(contentsOf: gate)
         let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        XCTAssertEqual(obj?["spec"] as? String, "0.13", "verdict declares the spec version")
+        XCTAssertEqual(obj?["spec"] as? String, "0.14", "verdict declares the spec version")
         XCTAssertEqual(obj?["ok"] as? Bool, false, "ok:false on a failing gate")
         let viols = obj?["violations"] as? [[String: Any]] ?? []
-        XCTAssertEqual(viols.count, 1, "one violation")
-        XCTAssertEqual(viols.first?["rule"] as? String, "AS-EFF-006")
-        XCTAssertEqual(viols.first?["effects"] as? [String], ["Net"], "effects = the denied set")
-        XCTAssertTrue((viols.first?["fn"] as? String ?? "").contains("charge"), "names the violating fn")
+        // The fixture calls `Billing().charge("x")` at the top level, so `deny Net` catches BOTH the
+        // method AND the `<main>` top-level unit that transitively reaches it.
+        XCTAssertEqual(viols.count, 2, "the method and its top-level transitive caller: \(viols)")
+        XCTAssertTrue(viols.allSatisfy { $0["rule"] as? String == "AS-EFF-006" })
+        XCTAssertTrue(viols.allSatisfy { ($0["effects"] as? [String]) == ["Net"] }, "effects = the denied set")
+        let fns = viols.compactMap { $0["fn"] as? String }
+        XCTAssertTrue(fns.contains { $0.contains("charge") }, "names the violating method")
+        XCTAssertTrue(fns.contains("<main>"), "names the top-level caller")
     }
 
     func testGateJsonValuelessFailsClosed() throws {
