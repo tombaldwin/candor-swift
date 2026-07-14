@@ -11,7 +11,11 @@ import Foundation
 ///   C — §2.1 producing-build provenance: baseline_version/engine_version in the JSON + the one-line
 ///       stderr ⚠ mismatch disclosure;
 ///   D — a PARTIAL baseline callgraph (a matched sidecar failed to parse) degrades origin to
-///       "unknown", never mislabels the dropped file's fns "new".
+///       "unknown", never mislabels the dropped file's fns "new";
+///   E — junk entries among good ones are disclosed with a COUNT (rust load_entries_inner parity),
+///       never silently dropped;
+///   F — one corrupt sibling among valid reports is tolerated but SUMMARIZED (partial-surface line);
+///       every-sibling-corrupt is a net-empty hard failure (exit 2, rust load_fninfo_loud parity).
 final class GainsProcessTests: XCTestCase {
 
     /// A scratch dir the fixture reports live in; callers `defer` removal.
@@ -174,6 +178,71 @@ final class GainsProcessTests: XCTestCase {
         let d = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any])
         let entries = try XCTUnwrap(d["byFunction"] as? [[String: Any]])
         XCTAssertEqual(entries.first?["origin"] as? String, "new", r.out)
+    }
+
+    /// FINDING E (max-review): junk entries AMONG good ones are disclosed with a COUNT (the Rust
+    /// load_entries_inner rule — "N function entries could not be parsed and are OMITTED"), never
+    /// silently dropped; the good entries still answer (exit 0, TSV intact).
+    func testJunkEntriesAmongGoodOnesDisclosedWithCount() throws {
+        let binary = try ProcessHarness.binaryURL(for: Self.self)
+        let dir = try makeDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let cur = try write(
+            #"{"candor":{"version":"candor-swift-0.11.0"},"functions":[{"bogus":1},{"fn":"Pkg.doNet","inferred":["Net"]},{"fn":""}]}"#,
+            dir, "cur.json")
+        let base = try write(#"{"candor":{"version":"candor-swift-0.11.0"},"functions":[]}"#, dir, "base.json")
+
+        let r = try ProcessHarness.run(binary, ["gains", cur, base])
+        XCTAssertEqual(r.code, 0, r.err)
+        XCTAssertEqual(r.out, "Pkg.doNet\tNet\n", "the usable entry still answers: \(r.out)")
+        XCTAssertTrue(r.err.contains("2 function entries could not be parsed and are OMITTED"), r.err)
+        XCTAssertTrue(r.err.contains("cur.json"), r.err)
+        XCTAssertTrue(r.err.contains("re-run the scan"), r.err)
+    }
+
+    /// FINDING F (max-review): ONE corrupt sibling among valid baseline reports stays
+    /// disclosed-and-tolerated (the Rust net rule — NOT a hard fail), but the answer must carry the
+    /// NET consequence: the per-file OMITTED note PLUS the partial-surface summary line
+    /// ("1 of 2 baseline reports failed to load — the delta is computed over a PARTIAL baseline").
+    /// Exit 0, valid JSON.
+    func testCorruptSiblingDisclosesPartialBaselineSummary() throws {
+        let binary = try ProcessHarness.binaryURL(for: Self.self)
+        let dir = try makeDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let cur = try write(curEnvelope, dir, "cur.json")
+        _ = try write(#"{"candor":{"version":"candor-swift-0.11.0"},"functions":[{"fn":"Pkg.other","inferred":["Fs"]}]}"#,
+                      dir, "rep.A.Swift.json")
+        _ = try write(#"{"candor":{"version":"candor-swift-0.11.0"},"functions":[{"fn":"Pkg."#,
+                      dir, "rep.B.Swift.json")   // truncated mid-write
+        let basePrefix = dir.appendingPathComponent("rep").path
+
+        let r = try ProcessHarness.run(binary, ["gains", cur, basePrefix, "--json"])
+        XCTAssertEqual(r.code, 0, r.err)
+        XCTAssertTrue(r.err.contains("rep.B.Swift.json"), r.err)                      // the casualty is named
+        XCTAssertTrue(r.err.contains("OMITTED from this gains answer"), r.err)        // with its consequence
+        XCTAssertTrue(
+            r.err.contains("1 of 2 baseline reports failed to load — the delta is computed over a PARTIAL baseline"),
+            r.err)
+        let d = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any])
+        XCTAssertEqual(d["gained"] as? [String], ["Net"], r.out)
+    }
+
+    /// The tolerant-merge control: with EVERY baseline sibling corrupt the merge is net-empty over a
+    /// hard failure — exit 2 (never an empty all-clear), the Rust load_fninfo_loud net rule.
+    func testAllSiblingsCorruptFailsLoud() throws {
+        let binary = try ProcessHarness.binaryURL(for: Self.self)
+        let dir = try makeDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let cur = try write(curEnvelope, dir, "cur.json")
+        _ = try write("NOT JSON{{{", dir, "rep.A.Swift.json")
+        _ = try write(#"{"functions":[{"fn":"#, dir, "rep.B.Swift.json")
+        let basePrefix = dir.appendingPathComponent("rep").path
+
+        let r = try ProcessHarness.run(binary, ["gains", cur, basePrefix, "--json"])
+        XCTAssertEqual(r.code, 2, r.out)
+        XCTAssertTrue(r.err.contains("every report found at baseline prefix"), r.err)
+        XCTAssertTrue(r.err.contains("refusing to report an empty (all-clear) answer"), r.err)
+        XCTAssertFalse(r.out.contains("byFunction"), "must not emit JSON over a corrupt baseline: \(r.out)")
     }
 
     /// A node still IN the partial graph keeps "existing" — only the negative claim degrades.

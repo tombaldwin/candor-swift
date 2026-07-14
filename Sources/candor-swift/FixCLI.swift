@@ -819,29 +819,40 @@ func runPathCLI(_ args: [String]) -> Never {
 // load_fninfo's union-not-overwrite rule). Accepts BOTH the §2 `{candor, functions}` envelope and the
 // legacy v0.1 bare-array form (the migration contract the Rust reference's report_entries honors — a
 // bare `[]` is a VALID clean-empty report the whole family answers on, not a parse failure). Returns
-// false (with a stderr note) on an unparseable / non-report file — the caller fails loud, never a
+// false (with a stderr note naming the CONSEQUENCE — the file's functions are omitted, so the delta may
+// under- or over-report) on an unparseable / non-report file — the caller applies the net rule, never a
 // silently-empty "no gains". A NON-EMPTY entries array in which EVERY entry is unusable (no `fn`) is
 // the same failure, not an empty report: treating it as parsed would print {byFunction:[],gained:[]}
 // at exit 0 over a corrupt current — the false all-clear a gate silently PASSES on (the §4 cardinal sin).
+// A PARTIAL drop (some entries junk, some usable) is DISCLOSED with a count and tolerated — the Rust
+// reference load_entries_inner's rule (load.rs): a dropped entry is the same under-report as a dropped
+// file, so it must never silently vanish (and read as pure) from the merged answer.
 private func mergeInferredReport(_ full: String, into inferredByFn: inout [String: Set<String>]) -> Bool {
     let entries: [Any]
-    if let data = FileManager.default.contents(atPath: full),
-       let root = try? JSONSerialization.jsonObject(with: data) {
+    guard let data = FileManager.default.contents(atPath: full) else {
+        FileHandle.standardError.write("candor-swift gains: report `\(full)` could not be read — its functions are OMITTED from this gains answer, so the delta may under- or over-report.\n".data(using: .utf8)!)
+        return false
+    }
+    if let root = try? JSONSerialization.jsonObject(with: data) {
         if let obj = root as? [String: Any], let fns = obj["functions"] as? [Any] {
             entries = fns                     // the §2 envelope
         } else if let arr = root as? [Any] {
             entries = arr                     // the legacy bare-array report
         } else {
-            FileHandle.standardError.write("candor-swift gains: report `\(full)` could not be parsed — OMITTED.\n".data(using: .utf8)!)
+            FileHandle.standardError.write("candor-swift gains: report `\(full)` failed to parse — its functions are OMITTED from this gains answer, so the delta may under- or over-report (corrupt or mid-write); re-run the scan.\n".data(using: .utf8)!)
             return false
         }
     } else {
-        FileHandle.standardError.write("candor-swift gains: report `\(full)` could not be parsed — OMITTED.\n".data(using: .utf8)!)
+        FileHandle.standardError.write("candor-swift gains: report `\(full)` failed to parse — its functions are OMITTED from this gains answer, so the delta may under- or over-report (corrupt or mid-write); re-run the scan.\n".data(using: .utf8)!)
         return false
     }
     var usable = 0
+    var dropped = 0
     for e in entries {
-        guard let d = e as? [String: Any], let fn = d["fn"] as? String, !fn.isEmpty else { continue }
+        guard let d = e as? [String: Any], let fn = d["fn"] as? String, !fn.isEmpty else {
+            dropped += 1
+            continue
+        }
         let inferred = Set((d["inferred"] as? [Any])?.compactMap { $0 as? String } ?? [])
         inferredByFn[fn, default: []].formUnion(inferred)
         usable += 1
@@ -849,36 +860,80 @@ private func mergeInferredReport(_ full: String, into inferredByFn: inout [Strin
     if !entries.isEmpty && usable == 0 {
         // A well-formed EMPTY functions array is a valid pure report; a non-empty one that yields
         // ZERO usable entries is semantic corruption — fail loud, never an all-clear.
-        FileHandle.standardError.write("candor-swift gains: report `\(full)` has no usable functions — every entry was dropped (corrupt report); OMITTED.\n".data(using: .utf8)!)
+        FileHandle.standardError.write("candor-swift gains: report `\(full)` has no usable functions — every entry was dropped (corrupt report); its functions are OMITTED from this gains answer, so the delta may under- or over-report; re-run the scan.\n".data(using: .utf8)!)
         return false
+    }
+    if dropped > 0 {
+        // A per-entry drop is the same under-report as a whole-file failure — disclose the count,
+        // never let a corrupt function silently vanish (and read as pure) from the merged answer.
+        FileHandle.standardError.write(
+            "candor-swift gains: report `\(full)` — \(dropped) function entr\(dropped == 1 ? "y" : "ies") could not be parsed and \(dropped == 1 ? "is" : "are") OMITTED from this gains answer (corrupt or mid-write); re-run the scan.\n"
+                .data(using: .utf8)!)
     }
     return true
 }
 
 // Load fn → inferred effects for every `<prefix>*.Swift.json` report (merging siblings). As in
 // loadFixModel, a `prefix` that is itself an existing regular `.json` file is loaded DIRECTLY (§3.3.1).
-// Returns nil when no report file is found — or when every found file failed to parse (the loadFixModel
-// house rule, stricter than the Rust reference's tolerant merge: a corrupt-only CURRENT locator must
-// never read as "zero gains", the false all-clear a gate built on this output would silently PASS on).
-private func loadInferredByFn(prefix: String) -> [String: Set<String>]? {
+// Returns the merged map PLUS the file accounting the caller's net rule needs — the Rust reference
+// load_entries_inner's `hard_fail` bit (load.rs), generalized to a count so a PARTIAL merge is
+// distinguishable: filesFound (matched report files) and hardFails (files that wholly failed to read /
+// parse, or parsed to zero usable entries while non-empty). One corrupt file among valid siblings is
+// disclosed-and-tolerated (mergeInferredReport's stderr note; the valid siblings still merge — the Rust
+// rule, NOT a hard fail); the NET verdict is the caller's (loadInferredLoud below).
+private struct InferredLoad {
+    var byFn: [String: Set<String>] = [:]
+    var filesFound = 0
+    var hardFails = 0
+}
+
+private func loadInferredByFn(prefix: String) -> InferredLoad {
     let fm = FileManager.default
-    var out: [String: Set<String>] = [:]
-    var found = false
+    var load = InferredLoad()
 
     var isDir: ObjCBool = false
     if prefix.hasSuffix(".json"), fm.fileExists(atPath: prefix, isDirectory: &isDir), !isDir.boolValue {
-        return mergeInferredReport(prefix, into: &out) ? out : nil
+        load.filesFound = 1
+        if !mergeInferredReport(prefix, into: &load.byFn) { load.hardFails = 1 }
+        return load
     }
 
     let ns = prefix as NSString
     let dirRaw = ns.deletingLastPathComponent
     let dir = dirRaw.isEmpty ? "." : dirRaw
     let base = ns.lastPathComponent
-    guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return nil }
+    guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return load }
     for name in entries.sorted() where name.hasPrefix(base + ".") && name.hasSuffix(".Swift.json") {
-        if mergeInferredReport(dir + "/" + name, into: &out) { found = true }
+        load.filesFound += 1
+        if !mergeInferredReport(dir + "/" + name, into: &load.byFn) { load.hardFails += 1 }
     }
-    return found ? out : nil
+    return load
+}
+
+// The LOUD wrapper — the Rust reference load_fninfo_loud's net rule (diff.rs), applied per side:
+//   no files found            → exit 2 ("check the path" — a typo'd locator must never read as an
+//                               empty surface; a typo'd current shows zero gains, a typo'd baseline
+//                               shows every effect as newly gained);
+//   NET-EMPTY after any hard  → exit 2 — every found report failed to load, and printing
+//   failure                     {byFunction:[],gained:[]} over corrupt input is the §4 cardinal-sin
+//                               false all-clear (a CLEAN-empty valid report stays a non-fatal empty);
+//   PARTIAL merge (some       → tolerated, but SUMMARIZED on stderr: the per-file OMITTED notes name
+//   siblings failed, some       each casualty, this line names the NET consequence — the delta is
+//   answered)                   computed over a partial surface, so gains may under- or over-report.
+private func loadInferredLoud(prefix: String, which: String) -> [String: Set<String>] {
+    let load = loadInferredByFn(prefix: prefix)
+    if load.filesFound == 0 {
+        fixDie("candor-swift gains: no report files at \(which) prefix `\(prefix)` — check the path.")
+    }
+    if load.byFn.isEmpty && load.hardFails > 0 {
+        fixDie("candor-swift gains: every report found at \(which) prefix `\(prefix)` failed to load — refusing to report an empty (all-clear) answer over a corrupt report; re-run the scan.")
+    }
+    if load.filesFound > 1 && load.hardFails > 0 {
+        FileHandle.standardError.write(
+            "candor-swift gains: \(load.hardFails) of \(load.filesFound) \(which) reports failed to load — the delta is computed over a PARTIAL \(which).\n"
+                .data(using: .utf8)!)
+    }
+    return load.byFn
 }
 
 // The BASELINE callgraph for `origin` — SIDECAR-ONLY, deliberately NOT loadFixModel's inline-`calls`
@@ -962,15 +1017,11 @@ func runGainsCLI(_ args: [String]) -> Never {
     }
     let curPre = resolveReportLocator(positionals[0])
     let basePre = resolveReportLocator(positionals[1])
-    // A locator with no loadable report fails LOUD for BOTH sides (the family's diff/gains rule, and for
-    // the same reason): a typo'd CURRENT prefix shows zero gains (a gate built on this silently PASSES);
-    // a typo'd BASELINE shows every effect as newly gained.
-    guard let cur = loadInferredByFn(prefix: curPre) else {
-        fixDie("candor-swift gains: no report files at current prefix `\(curPre)` — check the path.")
-    }
-    guard let base = loadInferredByFn(prefix: basePre) else {
-        fixDie("candor-swift gains: no report files at baseline prefix `\(basePre)` — check the path.")
-    }
+    // Both sides load LOUD (loadInferredLoud — the Rust reference load_fninfo_loud rule): a no-files
+    // locator AND a net-empty merge over corrupt reports both exit 2; a partial sibling merge answers
+    // but discloses the partial-surface summary on stderr.
+    let cur = loadInferredLoud(prefix: curPre, which: "current")
+    let base = loadInferredLoud(prefix: basePre, which: "baseline")
 
     // §2.1 producing-build provenance — a DISCLOSURE, not a guard (unlike the baseline gate, gains still
     // ANSWERS): a baseline is comparable only to reports from its own producing build, so when BOTH
