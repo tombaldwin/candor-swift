@@ -391,10 +391,37 @@ final class CallCollector: SyntaxVisitor {
     //   • an interpolation whose FIRST segment is a const — `"\(apiBase)/chat"` → value + "/chat" tail
     //   • a concatenation with a const-string LEFT operand — `apiBase + "/chat"` → value + tail
     // A literal PREFIX before the interpolation (`"https://\(h)/x"`) is NOT const-anchored on the host (the
-    // host is the interpolated part, not the leading literal) → nil. A non-const reference → nil. The tail
-    // (plain segments / a literal right operand) is appended so the host part parses correctly; an
-    // interpolated/non-literal tail is dropped (only the host prefix matters for host extraction). Returns
-    // the resolved string (already escape-decoded) or nil to leave the arg unresolved (bare Net today).
+    // host is the interpolated part, not the leading literal) → nil — UNLESS that leading literal itself
+    // already completes the authority (`"https://api.openai.com/v1/\(p)"`), in which case the host comes from
+    // the LITERAL head (see literalHeadAuthority below). A non-const reference → nil. The tail (plain
+    // segments / a literal right operand) is appended so the host part parses correctly; an interpolated/
+    // non-literal tail is dropped (only the host prefix matters). Returns the resolved string (already
+    // escape-decoded) or nil to leave the arg unresolved (bare Net today).
+
+    // LITERAL-HEAD HOST EXTRACTION: given the plain literal TEXT before the first `\(…)` of an interpolation
+    // (or the LEFT literal of a `"lit" + x` concat), return `scheme://authority/` when that text ALREADY
+    // completes the authority — a `/` appears AFTER the `://` within this literal, so the host is fully
+    // present in the literal and any interpolation is confined to the PATH. Returns the head (through the
+    // first `/` after `://`, port-and-all) so the existing host refinement (`hostPort`/`isModelHost`) parses
+    // it identically to a whole-URL literal. Returns nil when the authority is NOT terminated by a `/` inside
+    // this literal segment (the `\(…)` could be inside the host or port — `"https://\(h)/…"`,
+    // `"https://api.\(x).com/…"`, `"https://api.openai.com:\(port)/…"`) → the caller leaves it bare Net.
+    // Only the curated URL schemes are accepted (matching hostPort's scheme list) so a non-URL literal
+    // prefix with an embedded `//…/` can't be misread as an authority.
+    static func literalHeadAuthority(_ text: String) -> String? {
+        for scheme in ["https://", "http://", "wss://", "ws://", "tcp://"] where text.hasPrefix(scheme) {
+            let afterScheme = text.index(text.startIndex, offsetBy: scheme.count)
+            // The authority ends at the FIRST `/` after the scheme. Require it to be WITHIN this literal —
+            // if there is none, the `\(…)` (which follows this literal) is the authority terminator or lies
+            // inside the authority → the host is not statically complete → nil.
+            guard let slash = text[afterScheme...].firstIndex(of: "/") else { return nil }
+            // Guard the empty-authority form `scheme:///…` (no host between `://` and `/`): nothing to refine.
+            if slash == afterScheme { return nil }
+            return String(text[..<text.index(after: slash)])   // `scheme://authority/`
+        }
+        return nil
+    }
+
     private func resolveConstString(_ raw: ExprSyntax) -> String? {
         let expr = Self.peel(raw)
         // a bare const reference
@@ -406,9 +433,17 @@ final class CallCollector: SyntaxVisitor {
             var segs = Array(lit.segments)
             // The parser may emit a leading EMPTY plain segment before the first `\(…)`; skip it. A leading
             // NON-EMPTY plain segment is a literal PREFIX — the host is NOT the const (e.g. `"https://\(h)/x"`)
-            // → not const-anchored, leave unresolved (soundness: never treat the interpolated tail as a host).
+            // → not const-anchored. BUT a leading literal prefix that itself already contains a COMPLETE
+            // `scheme://authority/` (a `/` after the `://` WITHIN the literal, so the `\(…)` is only in the
+            // path — `"https://api.openai.com/v1/\(p)"`) STATICALLY determines the host from the LITERAL head.
+            // Extract that head and refine it (SPEC §1: a statically-known model host classifies Llm). A
+            // prefix that does NOT complete the authority (`"https://api.\(x).com/…"`, `"https://\(h)/…"`,
+            // `"https://api.openai.com:\(port)/…"` — interp inside the authority/port) stays unresolved →
+            // bare Net (soundness: never treat an interpolated authority segment as a host).
             if let first = segs.first, let plain = first.as(StringSegmentSyntax.self) {
-                if plain.content.text.isEmpty { segs.removeFirst() } else { return nil }
+                if plain.content.text.isEmpty { segs.removeFirst() }
+                else if let head = Self.literalHeadAuthority(decodeEscapes(plain.content.text)) { return head }
+                else { return nil }
             }
             guard let firstExpr = segs.first?.as(ExpressionSegmentSyntax.self),
                   firstExpr.expressions.count == 1,
@@ -426,6 +461,14 @@ final class CallCollector: SyntaxVisitor {
         // a concatenation `const + "..."` — const LEFT operand anchors the host
         if let seq = expr.as(SequenceExprSyntax.self) {
             let elems = Array(seq.elements)
+            // `"https://api.openai.com/v1/" + x` — a plain-string-literal LEFT operand that already completes
+            // the authority statically determines the host (same rule as the interpolation literal head). A
+            // left literal that does NOT complete the authority (or an interpolated left) → fall through → nil.
+            if elems.count >= 3, let op = elems[1].as(BinaryOperatorExprSyntax.self), op.operator.text == "+",
+               let leftPlain = plainStringLiteralValue(elems[0]),
+               let head = Self.literalHeadAuthority(decodeEscapes(leftPlain)) {
+                return head
+            }
             if elems.count >= 3, let op = elems[1].as(BinaryOperatorExprSyntax.self), op.operator.text == "+",
                let leftDR = Self.peel(elems[0]).as(DeclReferenceExprSyntax.self), let v = constValue(leftDR.baseName.text) {
                 // append a literal right operand's plain value (the path tail); a non-literal right → host only

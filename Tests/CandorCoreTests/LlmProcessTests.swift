@@ -262,6 +262,91 @@ final class LlmProcessTests: XCTestCase {
         XCTAssertNil(prefix["call"]?["hosts"])
     }
 
+    // ── LITERAL-HEAD HOST EXTRACTION: an interpolation whose FIRST literal segment already contains a
+    // COMPLETE `scheme://authority/` (the `\(…)` is only in the PATH) determines the host FROM THE LITERAL.
+    // The most common real-world URL shape — `"https://api.openai.com/v1/\(path)"` — read bare Net before.
+    func testLiteralHeadInterpolationResolvesModelHost() throws {
+        let by = try scan("""
+        import Foundation
+        func withPath(_ p: String) { _ = URLSession.shared.dataTask(with: "https://api.openai.com/v1/\\(p)") { _, _, _ in } }
+        func rootPath(_ p: String) { _ = URLSession.shared.dataTask(with: "https://api.openai.com/\\(p)") { _, _, _ in } }
+        """)
+        for fn in ["withPath", "rootPath"] {
+            XCTAssertEqual(ProcessHarness.inferred(by, fn), ["Llm", "Net"],
+                           "\(fn): the host is complete in the first literal segment → Llm + Net")
+            XCTAssertEqual(by[fn]?["hosts"] as? [String], ["api.openai.com"],
+                           "\(fn): the host comes from the literal head, not the interpolation")
+        }
+    }
+
+    // a `"lit" + x` concat whose LEFT literal completes the authority resolves the same way.
+    func testLiteralHeadConcatResolvesModelHost() throws {
+        let by = try scan("""
+        import Foundation
+        func call(_ p: String) { _ = URLSession.shared.dataTask(with: "https://api.openai.com/v1/" + p) { _, _, _ in } }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "call"), ["Llm", "Net"],
+                       "a literal-left concat that completes the authority → Llm + Net")
+        XCTAssertEqual(by["call"]?["hosts"] as? [String], ["api.openai.com"])
+    }
+
+    // NEGATIVES — the authority is NOT statically complete in the first literal segment → bare Net, no host.
+    func testLiteralHeadNegativesStayBareNet() throws {
+        // (a) split authority: the `\(…)` lands INSIDE the host.
+        let split = try scan("""
+        import Foundation
+        func call(_ x: String) { _ = URLSession.shared.dataTask(with: "https://api.\\(x).com/v1/y") { _, _, _ in } }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(split, "call"), ["Net"], "split authority stays bare Net")
+        XCTAssertNil(split["call"]?["hosts"])
+
+        // (b) whole host interpolated: no literal authority at all.
+        let whole = try scan("""
+        import Foundation
+        func call(_ h: String) { _ = URLSession.shared.dataTask(with: "https://\\(h)/v1/y") { _, _, _ in } }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(whole, "call"), ["Net"], "a whole-host interpolation stays bare Net")
+        XCTAssertNil(whole["call"]?["hosts"])
+
+        // (c) host not terminated by a `/` before the interpolation (the interp could extend the host).
+        let unterminated = try scan("""
+        import Foundation
+        func call(_ x: String) { _ = URLSession.shared.dataTask(with: "https://api.openai\\(x)/v1") { _, _, _ in } }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(unterminated, "call"), ["Net"], "an unterminated host stays bare Net")
+        XCTAssertNil(unterminated["call"]?["hosts"])
+
+        // (d) port interpolated before the first `/` (safe under-report: the `:port` is part of the authority).
+        let port = try scan("""
+        import Foundation
+        func call(_ port: Int) { _ = URLSession.shared.dataTask(with: "https://api.openai.com:\\(port)/v1") { _, _, _ in } }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(port, "call"), ["Net"], "an interpolated port stays bare Net")
+        XCTAssertNil(port["call"]?["hosts"])
+
+        // (e) concat left literal that does NOT terminate the authority with a `/` → bare Net.
+        let concatUnterminated = try scan("""
+        import Foundation
+        func call(_ p: String) { _ = URLSession.shared.dataTask(with: "https://api.openai.com" + p) { _, _, _ in } }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(concatUnterminated, "call"), ["Net"],
+                       "a concat left literal that doesn't complete the authority stays bare Net")
+        XCTAssertNil(concatUnterminated["call"]?["hosts"])
+    }
+
+    // FABRICATION GUARD: a NON-model host in the literal head is captured as a Net host but NEVER fabricated
+    // to Llm — the precision fence holds identically for the literal-head path.
+    func testLiteralHeadNonModelHostNeverFabricatesLlm() throws {
+        let by = try scan("""
+        import Foundation
+        func call(_ p: String) { _ = URLSession.shared.dataTask(with: "https://cdn.example.com/v1/\\(p)") { _, _, _ in } }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "call"), ["Net"],
+                       "a non-model literal-head host stays bare Net, never Llm")
+        XCTAssertEqual(by["call"]?["hosts"] as? [String], ["cdn.example.com"],
+                       "the non-model host is still captured as a Net literal")
+    }
+
     // the positive: allow Llm certifies a scope whose only model host is the allowed one.
     func testAllowLlmCertifiesAllowedModelHost() throws {
         let r = try gate("""
