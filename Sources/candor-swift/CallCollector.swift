@@ -338,6 +338,26 @@ final class CallCollector: SyntaxVisitor {
         return r.isVar ? r.root : nil
     }
 
+    /// `privacy/1` finding 5 — the statically-visible AVFoundation media-type of a capture call. Reads the
+    /// leading-dot member name of the `for:` argument on `AVCaptureDevice.default(for:)` / `.devices(for:)`
+    /// (`.audio`→"audio", `.video`→"video"; also `AVMediaType.audio`/`.video` spelled in full). Returns nil
+    /// when the media type is NOT statically visible — no such arg (a bare `AVCaptureSession()`), or a
+    /// computed/variable value (`for: mt`) — so the caller over-discloses BOTH sensors (never under-declare).
+    private func mediaTypeArg(_ args: LabeledExprListSyntax) -> String? {
+        for a in args where a.label?.text == "for" || a.label == nil {
+            let e = Self.peel(a.expression)
+            // `.audio` / `.video` — a leading-dot member access (contextual enum-like static member).
+            if let ma = e.as(MemberAccessExprSyntax.self) {
+                let name = ma.declName.baseName.text
+                // Fully-qualified `AVMediaType.audio` too — the terminal member carries the discriminant.
+                if name == "audio" || name == "video" { return name }
+            }
+            // an arg is present but not a recognized static media type (a var, a computed value) → ambiguous.
+            return nil
+        }
+        return nil  // no `for:`/positional media-type arg at all (a bare capture) → ambiguous
+    }
+
     private func firstStringLiteral(_ args: LabeledExprListSyntax) -> String? {
         for a in args {
             guard let lit = a.expression.as(StringLiteralExprSyntax.self) else { continue }
@@ -821,6 +841,14 @@ final class CallCollector: SyntaxVisitor {
                 recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
                 if lit == nil, est { incompleteSurfaces.insert(eff) }
             } else if !localTypes.contains(name), !localFreeFns.contains(name),
+                      PRIVACY_CAPTURE_TYPES.contains(dealias(name)) {
+                // `privacy/1` finding 5 — an AVFoundation capture-type CONSTRUCTOR (`AVCaptureSession()`).
+                // A ctor carries no media-type arg → the capture is ambiguous → over-disclose BOTH Camera
+                // AND Mic (privacy: never under-declare a real sensor). A local type of the same name
+                // already short-circuited above (declaredTypes/localTypes), so this never fabricates on
+                // project code. Supersedes the flat Camera in kappaFree for these types.
+                for e in privacyCaptureEffects(mediaType: mediaTypeArg(node.arguments)) { directEffects.insert(e) }
+            } else if !localTypes.contains(name), !localFreeFns.contains(name),
                       let eff = kappaFree(name: dealias(name), argCount: node.arguments.count) {
                 // A LOCALLY-declared type ctor (`Pipe()` where `class Pipe`) or free fn (`NSLog(...)` where
                 // `func NSLog`) ALWAYS shadows the platform free-call table — else a project's own
@@ -901,6 +929,15 @@ final class CallCollector: SyntaxVisitor {
                 directEffects.insert("Fs")
                 recordSurfaces(effect: "Fs", lit: lit)
                 if lit == nil { incompleteSurfaces.insert("Fs") }  // write destination is the arg → invisible if not literal
+            } else if let rt = base.root, PRIVACY_CAPTURE_TYPES.contains(rt), !declaredTypes.contains(rt) {
+                // `privacy/1` finding 5 — an AVFoundation CAPTURE call (`AVCaptureDevice.default(for: .audio)`,
+                // `.devices(for: .video)`, a bare `AVCaptureSession.startRunning()`): refine the Camera/Mic
+                // split by the media-type argument the syntactic engine CAN see. A statically-visible
+                // `.audio`→Mic / `.video`→Camera; an ambiguous capture (no visible media-type arg — a bare
+                // AVCaptureSession, or a computed `for:` value) over-discloses BOTH (privacy: never
+                // under-declare a real sensor). Confirmed-capture-type only, so an unknown receiver still
+                // never fabricates. Supersedes the flat Camera in PRIVACY_SDK_TYPES for these types.
+                for e in privacyCaptureEffects(mediaType: mediaTypeArg(node.arguments)) { directEffects.insert(e) }
             } else if let rt = base.root, let eff = kappaMember(root: rt, member: member) {
                 directEffects.insert(eff)
                 if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK call IS network I/O

@@ -170,14 +170,22 @@ public let MODEL_HOSTS: Set<String> = [
 /// AWS Bedrock runtime host `bedrock*-runtime.<region>.amazonaws.com` (host contains "bedrock" AND ends
 /// `.amazonaws.com`). Mirrors candor-java's `Literals.isModelHost` exactly.
 public func isModelHost(_ hostLiteral: String) -> Bool {
-    // Ollama: a `:11434` port anywhere is the local model endpoint (keep it simple, per SPEC §1).
-    if let colon = hostLiteral.range(of: ":", options: .backwards),
-       hostLiteral[colon.upperBound...] == "11434" { return true }
     let host = hostPart(hostLiteral).lowercased()
+    // Ollama is a LOCAL endpoint: :11434 → Llm ONLY on a loopback host (max-review r3 parity — "any host
+    // on :11434" fabricated Llm on unrelated internal services on that port).
+    if let colon = hostLiteral.range(of: ":", options: .backwards),
+       hostLiteral[colon.upperBound...] == "11434" {
+        return host == "localhost" || host == "127.0.0.1" || host == "::1"
+    }
     if MODEL_HOSTS.contains(host) { return true }
     for m in MODEL_HOSTS where host.hasSuffix("." + m) { return true } // a subdomain of a known model host
-    // *.bedrock*.amazonaws.com — the AWS Bedrock runtime endpoint (bedrock-runtime.<region>.amazonaws.com).
-    if host.hasSuffix(".amazonaws.com") && host.contains("bedrock") { return true }
+    // AWS Bedrock runtime: the FIRST label is the model-inference service (bedrock-runtime.<region>.
+    // amazonaws.com), NOT the substring "bedrock" (which caught the S3 bucket `bedrock-backups.s3.…`) and
+    // NOT the control-plane `bedrock.<region>.amazonaws.com`.
+    if host.hasSuffix(".amazonaws.com") {
+        let first = host.split(separator: ".").first.map(String.init) ?? ""
+        if first == "bedrock-runtime" || first == "bedrock-agent-runtime" { return true }
+    }
     return false
 }
 
@@ -222,20 +230,35 @@ public let MODEL_SDK_TYPES: Set<String> = [
 /// never guessed (a fabricated `Camera` on a QR-decode helper is the precision failure the probe fences).
 ///
 /// AVCaptureDevice / AVCaptureSession are AMBIGUOUS: the video path is Camera, the audio path is Mic
-/// (discriminated at runtime by the `.audio`/`.video` media-type argument). For the STARTER we classify a
-/// bare AVCaptureDevice / AVCaptureSession as `Camera` (the dominant use); finer audio/video
-/// discrimination by the media-type argument is a future refinement. AVAudioRecorder / AVAudioEngine are
-/// unambiguously `Mic`.
+/// (discriminated by the `.audio`/`.video` media-type argument on `AVCaptureDevice.default(for:)` /
+/// `.devices(for:)`). This table classifies the DEFAULT (Camera). The finer discrimination is layered ON
+/// TOP at the call site (`privacyCaptureEffects`, driven by the media-type arg the syntactic engine CAN
+/// see): a statically-visible `.audio` classifies Mic, `.video` classifies Camera, and an AMBIGUOUS
+/// capture (a bare `AVCaptureSession`, or a media-type argument that is not statically visible) classifies
+/// BOTH Camera AND Mic. That over-disclosure is DELIBERATE and is the opposite trade-off from the Llm/Net
+/// host case: for a privacy manifest a MISSED sensor (App-Store-rejection-shaped under-declaration) is the
+/// costly error, so an ambiguous capture declares both rather than silently miss one — whereas an unknown
+/// Net host stays bare `Net`, never fabricated to `Llm`. (The precision fence still holds for a genuinely
+/// UNKNOWN receiver — that stays pure; the over-disclosure is only within a CONFIRMED capture type.)
+///
+/// AVAudioRecorder is unambiguously `Mic`. AVAudioEngine is NOT here — it is a general audio-graph type
+/// (playback, synthesis, mixing, effects); only its `.inputNode` touches the microphone, so a bare
+/// AVAudioEngine used for PLAYBACK must not fabricate `Mic`. The mic-specific `AVAudioEngine.inputNode`
+/// access is member-gated in `kappaPropertyRead` instead (finding 4). This is the opposite direction from
+/// the capture-ambiguity over-disclosure above BECAUSE AVAudioEngine is PREDOMINANTLY not-mic: gating on
+/// the mic-specific member is right, over-disclosing every playback engine as Mic would be a fabrication.
 public let PRIVACY_SDK_TYPES: [String: String] = [
     // Location — CoreLocation (the sensor-accessing MANAGER/updater/geocoder; CLLocation itself is a value
     // type carrying already-read coordinates, so it is NOT here) + MapKit user-tracking.
     "CLLocationManager": "Location", "CLLocationUpdate": "Location", "CLGeocoder": "Location",
     "MKUserTrackingMode": "Location",
-    // Camera — AVFoundation capture (bare AVCaptureDevice/Session default to Camera; see the ambiguity note)
-    // + UIImagePickerController (its camera source).
+    // Camera — AVFoundation capture (bare AVCaptureDevice/Session DEFAULT to Camera; the media-type arg
+    // refines to Mic/Camera, and an ambiguous capture over-discloses BOTH — see the ambiguity note and
+    // `privacyCaptureEffects`) + UIImagePickerController (its camera source).
     "AVCaptureDevice": "Camera", "AVCaptureSession": "Camera", "UIImagePickerController": "Camera",
-    // Mic — the unambiguous audio-capture types.
-    "AVAudioRecorder": "Mic", "AVAudioEngine": "Mic",
+    // Mic — the unambiguous audio-capture type. (AVAudioEngine is NOT here — mic-gated on `.inputNode`
+    // in kappaPropertyRead; a bare playback engine must not fabricate Mic. See the note above.)
+    "AVAudioRecorder": "Mic",
     // Contacts — the address book.
     "CNContactStore": "Contacts", "CNContactPickerViewController": "Contacts",
     // Photos — the photo library.
@@ -437,8 +460,41 @@ public func kappaPropertyRead(root: String, path: [String]) -> String? {
     // method-call FS classifier — they live in FS_MEMBERS but were dead in the property-read path
     // (a real-world dogfood vein: `FileManager.default.currentDirectoryPath` read silent-pure).
     if root == "FileManager", let m = path.last, FS_MEMBERS.contains(m) { return "Fs" }
+    // `privacy/1` finding 4 — AVAudioEngine's mic-specific member. A bare AVAudioEngine is a general
+    // audio-graph type (playback/synthesis/mixing); only its `.inputNode` (and taps installed on it —
+    // `engine.inputNode.installTap(...)`, where `engine.inputNode` is the receiver chain here) touches the
+    // microphone. Member-gate on `inputNode` so a playback-only engine is NOT fabricated as Mic; the bare
+    // type is deliberately absent from PRIVACY_SDK_TYPES (under-disclose via the coverage ledger rather
+    // than fabricate). `engine.inputNode.installTap(...)` reaches here as the `.inputNode` property read
+    // (its parent is the `.installTap` member-access, not a call), so both forms classify Mic.
+    if root == "AVAudioEngine" && path.contains("inputNode") { return "Mic" }
     return nil
 }
+
+/// `privacy/1` finding 5 — the effect(s) of an AVFoundation CAPTURE call, discriminated by the media-type
+/// argument. `mediaType` is the statically-visible leading-dot member name of the `for:` argument on
+/// `AVCaptureDevice.default(for:)` / `.devices(for:)` (`"audio"`/`"video"`), or nil when the argument is
+/// NOT statically visible (a computed value, or a bare `AVCaptureSession` with no media-type arg at all).
+///
+/// - `.video` → `["Camera"]`; `.audio` → `["Mic"]` (the arg IS visible, so classify precisely).
+/// - nil (ambiguous) → `["Camera", "Mic"]` — OVER-DISCLOSE both. This is the safe direction for a privacy
+///   manifest: a capture that could be either must declare both, never silently miss a real microphone
+///   capture (an under-declared sensor is the App-Store-rejection-shaped error). This is the OPPOSITE
+///   trade-off from the Llm/Net host case (an unknown host stays bare Net, never fabricated to Llm),
+///   because for privacy CAPTURE a missed sensor is the costly failure, not a spurious extra one.
+///
+/// Applied only when the receiver is a CONFIRMED capture type (AVCaptureDevice/AVCaptureSession), so the
+/// no-fabrication-on-unknown-receiver rule still holds — the over-disclosure is bounded to a real capture.
+public func privacyCaptureEffects(mediaType: String?) -> [String] {
+    switch mediaType {
+    case "video": return ["Camera"]
+    case "audio": return ["Mic"]
+    default:      return ["Camera", "Mic"]  // ambiguous capture → over-disclose both (privacy: never under-declare)
+    }
+}
+
+/// The AVFoundation capture types whose Camera/Mic split is refined by the media-type argument (finding 5).
+public let PRIVACY_CAPTURE_TYPES: Set<String> = ["AVCaptureDevice", "AVCaptureSession"]
 
 /// Fluent (Vapor's ORM) persistence verbs → Db. A project entity `final class X: Model` INHERITS these
 /// from FluentKit's `Model` protocol extension; called on the project type (`x.save(on:)`,

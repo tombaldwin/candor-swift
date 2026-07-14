@@ -63,9 +63,10 @@ final class PrivacyEffectsTests: XCTestCase {
                        "AVAudioRecorder is unambiguously Mic")
     }
 
-    func testCaptureSessionClassifiesCamera() throws {
-        // The AVCaptureDevice/Session ambiguity STARTER call: a bare AVCaptureSession is Camera (the dominant
-        // use); finer audio/video discrimination by the media-type argument is a future refinement.
+    // finding 5 — a bare AVCaptureSession (no visible media-type arg) is AMBIGUOUS: it could capture audio
+    // OR video, so it over-discloses BOTH Camera AND Mic. A missed sensor in a privacy manifest is the
+    // App-Store-rejection-shaped error, so an ambiguous capture declares both (never silently under-declare).
+    func testBareCaptureSessionClassifiesBothCameraAndMic() throws {
         let (by, _) = try scan("""
         import Foundation
         import AVFoundation
@@ -77,8 +78,100 @@ final class PrivacyEffectsTests: XCTestCase {
         }
         Cam().start()
         """)
-        XCTAssertEqual(ProcessHarness.inferred(by, "Cam.start"), ["Camera"],
-                       "a bare AVCaptureSession is Camera (the starter call for the audio/video ambiguity)")
+        XCTAssertEqual(ProcessHarness.inferred(by, "Cam.start"), ["Camera", "Mic"],
+                       "a bare AVCaptureSession is an ambiguous capture → over-disclose BOTH Camera and Mic")
+    }
+
+    // finding 5 — the media-type argument is STATICALLY VISIBLE on AVCaptureDevice.default(for:), so the
+    // Camera/Mic split is precise: `.audio` → Mic, `.video` → Camera.
+    func testCaptureDeviceAudioClassifiesMic() throws {
+        let (by, _) = try scan("""
+        import Foundation
+        import AVFoundation
+        struct Rec {
+            func mic() {
+                _ = AVCaptureDevice.default(for: .audio)
+            }
+        }
+        Rec().mic()
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "Rec.mic"), ["Mic"],
+                       "AVCaptureDevice.default(for: .audio) is a microphone capture → Mic, not Camera")
+    }
+
+    func testCaptureDeviceVideoClassifiesCamera() throws {
+        let (by, _) = try scan("""
+        import Foundation
+        import AVFoundation
+        struct Cam {
+            func lens() {
+                _ = AVCaptureDevice.default(for: .video)
+            }
+        }
+        Cam().lens()
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "Cam.lens"), ["Camera"],
+                       "AVCaptureDevice.default(for: .video) is a camera capture → Camera, not Mic")
+    }
+
+    // finding 5 — a capture with a media-type arg that is NOT statically visible (a variable) is ambiguous
+    // → over-disclose BOTH (the safe privacy direction — never miss a real sensor behind a runtime value).
+    func testCaptureDeviceRuntimeMediaTypeClassifiesBoth() throws {
+        let (by, _) = try scan("""
+        import Foundation
+        import AVFoundation
+        struct Any_ {
+            func capture(mt: AVMediaType) {
+                _ = AVCaptureDevice.default(for: mt)
+            }
+        }
+        Any_().capture(mt: .audio)
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "Any_.capture"), ["Camera", "Mic"],
+                       "a runtime media-type arg is ambiguous → over-disclose BOTH Camera and Mic")
+    }
+
+    // ── finding 4 — AVAudioEngine is mic-gated on `.inputNode`, not the bare type ────────────────────
+    // A playback-only AVAudioEngine (no `.inputNode`) must NOT be fabricated as Mic (it is a general
+    // audio-graph type — playback/synthesis/mixing). Bare AVAudioEngine was removed from the Mic table.
+    func testAudioEnginePlaybackIsNotMic() throws {
+        let (by, env) = try scan("""
+        import Foundation
+        import AVFoundation
+        struct Player {
+            func play() {
+                let engine = AVAudioEngine()
+                let node = AVAudioPlayerNode()
+                engine.attach(node)
+                engine.prepare()
+                try? engine.start()
+                node.play()
+            }
+        }
+        Player().play()
+        """)
+        XCTAssertFalse((ProcessHarness.inferred(by, "Player.play") ?? []).contains("Mic"),
+                       "a playback-only AVAudioEngine touches no microphone — classifying Mic fabricates")
+        XCTAssertNil(env["extensions"], "no privacy effect present → extensions must be omitted")
+    }
+
+    // The mic-specific member `AVAudioEngine.inputNode` (and a tap installed on it) IS Mic — member-gated.
+    func testAudioEngineInputNodeClassifiesMic() throws {
+        let (by, _) = try scan("""
+        import Foundation
+        import AVFoundation
+        struct Capture {
+            func listen() {
+                let engine = AVAudioEngine()
+                let input = engine.inputNode
+                input.installTap(onBus: 0, bufferSize: 1024, format: nil) { _, _ in }
+                try? engine.start()
+            }
+        }
+        Capture().listen()
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "Capture.listen"), ["Mic"],
+                       "AVAudioEngine.inputNode (the microphone input) is Mic — member-gated, not the bare type")
     }
 
     func testContactStoreClassifiesContacts() throws {
