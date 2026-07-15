@@ -7,16 +7,21 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
-## [Unreleased] — ⟨0.15 staged⟩ the COVERAGE surface (candor-spec/COVERAGE-DESIGN.md)
+## [0.15.0] — 2026-07-15
 
-Staged with the held train (the engine still declares spec `0.14`; no version bump until the ship
-call). The wikipedia-ios false-confidence find (SOUNDNESS-LOG 2026-07-15): "what the scan couldn't
-see" now travels WITH the report and conditions the verdicts, instead of evaporating on stderr.
+### ⚠ The coverage envelope + privacy-manifest conditionality ⟨0.15⟩ (candor-spec/COVERAGE-DESIGN.md)
+
+The wikipedia-ios false-confidence find (a real-world corpus-testing find, SOUNDNESS-LOG 2026-07-15):
+"what the scan couldn't see" — the κ ledger — now travels WITH the report and conditions the
+verdicts, instead of evaporating on stderr. Before: `privacy-manifest --verify` answered `ok: true`
+with no caveat over 19 invisible modules; after: `conditional: true` + `coverage: { uncovered: 19 }`,
+exit code unchanged. Pinned by conformance PART 4s.
 
 - **`coverage` envelope field.** The κ-coverage ledger (the stderr `classifier doesn't cover` line)
   as data: `"coverage": { "uncovered": [ { "name", "calls" }, … ] }` — same modules, same import
-  counts, same order; OMITTED entirely when nothing is uncovered, so a fully-covered report is
-  byte-identical to a 0.14.1 one (verified against the prior release binary).
+  counts, same order; OMITTED entirely when nothing is uncovered, so a fully-covered report keeps
+  the exact pre-0.15 document shape (verified byte-identical against the prior release binary
+  before the version bump; the shipped envelope differs only in its `version`/`spec` strings).
 - **`privacy-manifest --verify` is coverage-conditional.** When the report's ledger is non-empty (or
   any fn carries `invisible`), the JSON verdict gains `conditional: true` +
   `coverage: { uncovered: N, modules: [...] }`, and the human output appends the
@@ -33,6 +38,31 @@ see" now travels WITH the report and conditions the verdicts, instead of evapora
   exactly that module — precise, not file-granular, so the sweep-[33]/[36] no-flooding guard for
   member calls on stdlib/κ-pure receivers is untouched. (Report bytes change only for that shape —
   an added disclosure, the sound direction.)
+
+### Host-resolution recall — constant strings + literal heads
+
+Two recall improvements to the §1 host-refinement path (`Llm`/`Db`/`Net` uniformly), matching
+candor-java; both conservative — any ambiguity stays bare `Net`, no fabrication:
+
+- **Constant-string resolution** (conformance **PART 4q**). A host built from a string constant —
+  `let apiBase = "https://api.openai.com"; URL(string: "\(apiBase)/chat")` (interpolation, bare
+  ref, or const-left concat) — now resolves through the host-refinement path exactly like an inline
+  literal. A module/global/static or local `let NAME = "literal"` is indexed; a var, runtime value,
+  or non-const first segment stays bare `Net`, and ambiguous same-name consts resolve to nil.
+- **Literal-head extraction** (conformance **PART 4r**). An interpolation/concat whose FIRST literal
+  segment itself completes `scheme://authority/` — `"https://api.openai.com/v1/\(path)"` — now
+  extracts the host and fires the refinement (was bare `Net`). A split authority, interpolated
+  port, or unterminated authority stays bare `Net`; a CDN-style head stays `Net` (no fabrication).
+
+### spec 0.15 — the coverage-envelope rung (§2)
+
+candor-swift now declares **spec `0.15`** (`specVersion` in `main.swift`; the envelope + `--gate-json`
+verdict carry it). 0.15 is another tier-2 (pinned-tool-surface) rung, additive over 0.14: it admits
+the envelope `coverage` ledger and the coverage-conditional verdict surfaces into the pinned contract.
+**⚠ report bytes change** — every envelope's `version`/`spec` strings, plus wherever a scan has
+uncovered modules (the report gains the `coverage` field) or a newly-refined host shape (gains
+`hosts`/`Llm`/`Db`) — so an upgrade across 0.15 is baseline-invalidating; and **⚠ the `spec` string
+changed** — a consumer pinning `spec == "0.14"` must accept `0.15`.
 
 ## [0.14.1] — 2026-07-14
 

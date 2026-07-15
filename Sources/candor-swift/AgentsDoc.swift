@@ -15,7 +15,7 @@ this file is the Swift-specific surface.
 > describe a different candor-swift than the one you are running.
 
 A computed property's getter/setter/observer (and a `lazy` initializer) is its own unit, named
-`Type.property` and carrying `unitKind: "accessor"` (spec 0.14, informative); ordinary
+`Type.property` and carrying `unitKind: "accessor"` (spec 0.15, informative); ordinary
 functions omit the field. A file's TOP-LEVEL executable statements (the bare statements Swift allows
 at file scope in `main.swift` / script files) are collected as one synthetic unit named `<main>`
 carrying `unitKind: "initializer"` — but only when they carry an effect or reach one; a pure top level
@@ -29,7 +29,7 @@ git clone --depth 1 https://github.com/tombaldwin/candor-swift /tmp/candor-swift
 /tmp/candor-swift/.build/release/candor-swift <package-dir>     # Tests/ and .build/ excluded
 ```
 
-Writes `<dir>/.candor/report.<pkg>.Swift.json` (the spec-0.14 envelope) plus two sidecars:
+Writes `<dir>/.candor/report.<pkg>.Swift.json` (the spec-0.15 envelope) plus two sidecars:
 `report.<pkg>.Swift.callgraph.json` (EVERY analyzed function a key — pure ones included, SPEC §2.2)
 and `report.<pkg>.Swift.hierarchy.json` (each local type → its declared supertypes/protocols, for
 dispatch-frontier queries). Add `--policy <file>` (or `CANDOR_POLICY`, or a checked-in
@@ -38,7 +38,7 @@ CWD) to enforce a §6.2 policy: exit 1 on violation, 2 LOUDLY on an unreadable p
 forbids every *effect* but not the `Unknown` trust marker — `deny Unknown <scope>` is the explicit
 strictness knob. `--gate-json <file|->` additionally writes the structured §3.3 verdict
 `{ spec, ok, violations }` — plus, when the scan's coverage ledger is non-empty, an ADVISORY
-`coverage: { uncovered: <n>, modules: [...] }` note (⟨0.15 staged⟩): the verdict and exit code are
+`coverage: { uncovered: <n>, modules: [...] }` note (⟨0.15⟩): the verdict and exit code are
 computed exactly as before (a gate does not fail on uncovered deps), the note only makes the blind
 spot travel with the verdict.
 
@@ -62,7 +62,7 @@ inactive. Record one: `candor-swift <dir> --json > baseline.json`.
 **Already installed? Report the version, then ask before upgrading.** If this project already has
 candor — a `.candor/` report dir, or `candor-swift` built/on PATH — do this BEFORE you scan. Run
 `candor-swift --version` (offline) and TELL THE USER plainly which build they're on, e.g. "This
-project is on candor-swift 0.14.1 (spec 0.14)". (On an older build that predates `--version`, read
+project is on candor-swift 0.15.0 (spec 0.15)". (On an older build that predates `--version`, read
 `candor.version`/`candor.spec` from an existing `.candor/report*.json` instead.)
 
 **Staying current — candor can't check for you, *you* can.** candor never makes a network call to
@@ -78,10 +78,10 @@ If it's behind, **ASK the user before upgrading** — e.g. "candor-swift 0.8.2 i
 bare `git pull` of main — an untagged HEAD is not a released build). Never upgrade silently. If it's current or the user declines, just proceed with the build they have;
 if candor isn't installed at all, install it normally (clone + build, below).
 
-**Report shape:** `{ "candor": {…, "spec": "0.14"}, "package": "<name>", "functions": [...] }` — an
+**Report shape:** `{ "candor": {…, "spec": "0.15"}, "package": "<name>", "functions": [...] }` — an
 ARRAY of entries keyed `fn` (`Type.method` for members, bare `name` for free functions), each with
 `inferred` (full transitive set) / `direct` / `unresolved` / `hash` (`pkg#qual`, the §2 chain key)
-/ optional `hosts`/`cmds`/`paths`/`tables`. ⟨0.15 staged⟩ the envelope also carries
+/ optional `hosts`/`cmds`/`paths`/`tables`. ⟨0.15⟩ the envelope also carries
 `"coverage": { "uncovered": [ { "name": "<module>", "calls": <n> }, … ] }` — the κ-coverage ledger
 (the stderr `classifier doesn't cover` line) as data, same modules and import counts (swift counts
 imports; the field name stays `calls` per the spec), OMITTED entirely when nothing is uncovered
@@ -127,13 +127,13 @@ exit 1), a declared sensor key with no reach is an OVER-declaration (an unused p
 exit 0). Notify needs no key (it gates at runtime). Read-only; `--json` emits `{ reached, required, declared,
 underDeclared:[{effect,keys,fns}], overDeclared, ok }`. A missing report or an unreadable/unparseable plist
 fails loud (exit 2).
-`gains <current> <baseline> [--json]` diffs two reports (the supply-chain alarm). ⟨0.15 staged⟩ the
+`gains <current> <baseline> [--json]` diffs two reports (the supply-chain alarm). ⟨0.15⟩ the
 `--json` answer re-discloses coverage: the CURRENT report's envelope `coverage` block rides it
 verbatim when present (absent otherwise — a "no gains" over an uncovered dep must not read as total),
 and when the baseline's uncovered NAME SET differs from the current's it also carries
 `coverageDelta: { nowUncovered: [...], noLongerUncovered: [...] }` (names only). The human
 `fn\teffect` TSV is a pinned consumer surface and is unchanged.
-⟨0.15 staged⟩ **the privacy-manifest verify verdict is coverage-CONDITIONAL**: when the report's
+⟨0.15⟩ **the privacy-manifest verify verdict is coverage-CONDITIONAL**: when the report's
 coverage ledger is non-empty (or any function carries `invisible`), the JSON gains `conditional: true`
 and `coverage: { uncovered: <n>, modules: [...] }`, and the human output appends a `⚠ verdict is
 conditional on N uncovered modules…` line — sensor usage inside an uncovered module is invisible to
@@ -159,7 +159,7 @@ could not see through these" (a LOWER bound), not "pure". Because the Swift engi
 mostly attributes at FILE granularity — an unresolved unqualified call names every uncovered module
 in the function's import scope, not the single resolved package — so `invisible` is an
 over-approximation of the blind set (disclosed, never a silent-pure); a MODULE-QUALIFIED call
-(`SomeSDK.doThing()`) attributes precisely, naming only that module ⟨0.15 staged⟩.
+(`SomeSDK.doThing()`) attributes precisely, naming only that module ⟨0.15⟩.
 
 ## Swift-specific things to know
 
