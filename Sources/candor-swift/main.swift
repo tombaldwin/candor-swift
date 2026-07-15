@@ -500,6 +500,10 @@ if policyPath != nil || baselinePath != nil {
         }
     } else {
         FileHandle.standardError.write("candor-swift: \(gateViolations.count) policy violation(s)\n".data(using: .utf8)!)
+        // Remedy pointer (FAILURE path only — a clean gate stays byte-identical): the engine carries its
+        // own remedy verb; name it so the reader doesn't have to know. Append-only, after the pinned
+        // summary line, same stream (stderr); exit code and --gate-json untouched.
+        FileHandle.standardError.write("→ candor-swift fix-gate names the remedy for each\n".data(using: .utf8)!)
         exit(1)
     }
 }
