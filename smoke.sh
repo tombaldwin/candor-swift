@@ -1218,11 +1218,25 @@ CANDOR_BASELINE="$CGREP" "$BIN" "$W/cg/after" --json >/dev/null 2>"$W/cg/g2.err"
   && ok "baseline ⟨0.16⟩: sidecar absent -> degrade to report-only existence + stderr note (exit 0)" \
   || bad "baseline ⟨0.16⟩ degrade: rc=$RC $(cat "$W/cg/g2.err")"
 # (3) sidecar PRESENT-but-corrupt: fail closed (exit 2), no AS-EFF-005 wave.
+cp "$W/cg/saved.callgraph.json" "$CGSIDE"   # restore the sidecar removed by (2)
 printf '{ "fmt": [' > "$CGSIDE"
 CANDOR_BASELINE="$CGREP" "$BIN" "$W/cg/after" --json >/dev/null 2>"$W/cg/g3.err"; RC=$?
 { [ $RC -eq 2 ] && grep -q 'callgraph sidecar.*could not be parsed' "$W/cg/g3.err" && ! grep -q '\[AS-EFF-005\]' "$W/cg/g3.err"; } \
   && ok "baseline ⟨0.16⟩: a corrupt callgraph sidecar fails closed (exit 2)" \
   || bad "baseline ⟨0.16⟩ corrupt sidecar: rc=$RC $(cat "$W/cg/g3.err")"
+# (4) ⟨0.16 staged⟩ Unknown-ONLY gain: a formerly-pure fn that gains only an unresolved call (Unknown,
+# NOT a real effect) is ADVISORY, never a CI-breaking regression — Unknown is the §4 trust marker
+# (`pure` excludes it), dominated by resolution noise on version bumps. exit 0 + a note, NO [AS-EFF-005].
+cp "$W/cg/saved.callgraph.json" "$CGSIDE"   # restore the sidecar corrupted by (3)
+mkdir -p "$W/cg/afterU"
+printf 'import Foundation\nfunc fmt(_ s: String, _ opaque: () -> Void) -> String { opaque(); return s.uppercased() }\nfunc fetchIt() { _ = URLSession.shared.dataTask(with: URL(string: "https://x.example.com/")!) { _,_,_ in } }\nfetchIt()\n' > "$W/cg/afterU/m.swift"
+CANDOR_BASELINE="$CGREP" "$BIN" "$W/cg/afterU" --json --gate-json "$W/cg/u.verdict" >/dev/null 2>"$W/cg/g4.err"; RC=$?
+UOK=$(python3 -c "import json; print(json.load(open('$W/cg/u.verdict'))['ok'])" 2>/dev/null)
+{ [ $RC -eq 0 ] && grep -q 'gained an unresolved call (Unknown)' "$W/cg/g4.err" \
+  && grep -q 'advisory, NOT a regression' "$W/cg/g4.err" && ! grep -q '\[AS-EFF-005\]' "$W/cg/g4.err" \
+  && [ "$UOK" = "True" ]; } \
+  && ok "baseline ⟨0.16⟩: an Unknown-ONLY gain is advisory (exit 0, note, gate-json ok:true), not AS-EFF-005" \
+  || bad "baseline ⟨0.16⟩ Unknown-only advisory: rc=$RC ok=$UOK $(cat "$W/cg/g4.err")"
 
 # ── `tour` verb (FixCLI.runTourCLI) + isTest fix (CandorCore/Surface.swift) ──────────────────────────
 # The surface heuristic must key "test code" off the MODULE, never the leaf: a PRODUCTION fn whose leaf

@@ -288,6 +288,55 @@ final class BaselineProcessTests: XCTestCase {
                       "the degradation is DISCLOSED on stderr, never silent: \(r.err)")
     }
 
+    /// The same pure-leaf shape, but `fmt` now invokes an OPAQUE function-typed value (annotated
+    /// `() -> Void`), which the §4 contract reads as Unknown — an unresolved call, NOT a real effect.
+    /// `pure`/`deny` policies exclude Unknown, and on real dependency bumps it is dominated by resolution
+    /// noise, so a pure→Unknown-only gain is ADVISORY, never a CI-breaking AS-EFF-005 regression.
+    private static let pureLeafGainsUnknownSrc = """
+    import Foundation
+    func fmt(_ s: String, _ opaque: () -> Void) -> String { opaque(); return s.uppercased() }
+    func fetchIt() { _ = URLSession.shared.dataTask(with: URL(string: "https://x.example.com/")!) { _, _, _ in } }
+    fetchIt()
+    """
+
+    /// (1b) Sidecar PRESENT, a formerly-pure fn gains ONLY Unknown (an unresolved call, no real effect):
+    ///      ADVISORY note on stderr, exit UNCHANGED (0) — NOT the [AS-EFF-005] violation line. Unknown is
+    ///      the §4 trust marker, dominated by resolution noise on version bumps.
+    func testSidecarPresentPureToUnknownIsAdvisoryNotViolation() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let (dir, report) = try recordBaselineWithSidecar(bin, src: Self.pureLeafSrc)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let root = try ProcessHarness.makePackage(Self.pureLeafGainsUnknownSrc)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try ProcessHarness.run(bin, [root.path, "--json"], env: ["CANDOR_BASELINE": report.path])
+        XCTAssertEqual(r.code, 0, "an Unknown-only gain is advisory, not a regression — stderr: \(r.err)")
+        XCTAssertFalse(r.err.contains("[AS-EFF-005]"), "no violation line for an Unknown-only gain: \(r.err)")
+        XCTAssertTrue(r.err.contains("gained an unresolved call (Unknown)") && r.err.contains("advisory, NOT a regression"),
+                      "the Unknown-only gain is disclosed as an advisory note: \(r.err)")
+        XCTAssertTrue(r.err.contains("fmt"), "the advisory names the gaining function: \(r.err)")
+    }
+
+    /// (1c) The advisory verdict is consistent with --gate-json: an Unknown-only gain must NOT set
+    ///      ok:false (exit 0, no violation records), or the machine verdict would disagree with the exit.
+    func testUnknownOnlyGainKeepsGateJsonOk() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let (dir, report) = try recordBaselineWithSidecar(bin, src: Self.pureLeafSrc)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let root = try ProcessHarness.makePackage(Self.pureLeafGainsUnknownSrc)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let verdict = root.appendingPathComponent("verdict.json")
+        let r = try ProcessHarness.run(bin, [root.path, "--json", "--gate-json", verdict.path],
+                                       env: ["CANDOR_BASELINE": report.path])
+        XCTAssertEqual(r.code, 0, "an Unknown-only gain leaves the gate clean — stderr: \(r.err)")
+        let obj = try JSONSerialization.jsonObject(with: Data(contentsOf: verdict)) as? [String: Any]
+        XCTAssertEqual(obj?["ok"] as? Bool, true, "the advisory must NOT set ok:false")
+        let viols = obj?["violations"] as? [[String: Any]] ?? []
+        XCTAssertTrue(viols.allSatisfy { $0["rule"] as? String != "AS-EFF-005" },
+                      "no AS-EFF-005 record for an Unknown-only gain: \(viols)")
+    }
+
     /// (3) Sidecar PRESENT-but-corrupt: fail CLOSED (exit 2), like a corrupt baseline — a broken sidecar
     ///     must not silently narrow the guard back to report-only.
     func testCorruptSidecarFailsClosed() throws {

@@ -99,6 +99,9 @@ func loadBaselineCallgraph(reportPath: String) -> BaselineSidecar {
 /// a corrupt callgraph sidecar); returns [] with a stderr note when the file is absent (guard not yet
 /// adopted). ⟨0.16 staged⟩ Existence is keyed on the baseline callgraph sidecar when present, so a
 /// formerly-PURE fn (omitted from the report) turning effectful is caught, not exempted as "new code".
+/// ⟨0.16 staged⟩ A fn that gains ONLY Unknown (an unresolved call, no real effect) is ADVISORY, not a
+/// violation: Unknown is the §4 trust marker (`pure` policies exclude it) and on version bumps it is
+/// dominated by resolution noise — a single stderr note discloses it and the exit code is unchanged.
 func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion: String) -> [GateViolation] {
     // A configured-but-EMPTY value (bare `baseline` config line, CANDOR_BASELINE="") is invalid gate
     // input, not an un-adopted guard: the user declared a ratchet and named no file. java/scan/ts all
@@ -156,6 +159,7 @@ func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion:
     }
 
     var violations: [GateViolation] = []
+    var unknownOnly: [String] = []   // ⟨0.16 staged⟩ advisory: fns that gained ONLY Unknown, no real effect
     for qual in inferred.keys.sorted() {
         // ⟨0.16 staged⟩ The baseline effect set: the report entry when present, else ∅ for a fn that is a
         // baseline callgraph node (it existed and was PURE — reports omit pure fns). A fn in NEITHER is
@@ -165,10 +169,27 @@ func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion:
         else if sidecarNodes.contains(qual) { prior = [] }   // existed at baseline, and was pure
         else { continue }                                    // new function — new code, not a regression
         let gained = (inferred[qual] ?? []).subtracting(prior).sorted()
-        if !gained.isEmpty {
-            violations.append((rule: "AS-EFF-005", fn: qual, effects: gained,
-                detail: "`\(qual)` gained effect { \(gained.joined(separator: ", ")) } not present in the baseline"))
+        if gained.isEmpty { continue }
+        // ⟨0.16 staged⟩ The ratchet fires only on gaining a REAL boundary effect. An Unknown-ONLY gain is
+        // the §4 trust marker, not an effect (`pure` policies exclude it), and on real dependency bumps it
+        // is dominated by resolution noise (SOUNDNESS-LOG 2026-07-16) — DISCLOSE it as advisory, never a
+        // CI-breaking regression. A REAL gain (with or without Unknown alongside) is still a violation, and
+        // the reported `effects` are the real set only (Unknown filtered from the shown effects).
+        let real = gained.filter { $0 != "Unknown" }
+        if real.isEmpty {
+            unknownOnly.append(qual)
+            continue
         }
+        violations.append((rule: "AS-EFF-005", fn: qual, effects: real,
+            detail: "`\(qual)` gained effect { \(real.joined(separator: ", ")) } not present in the baseline"))
+    }
+    if !unknownOnly.isEmpty {
+        let shown = unknownOnly.prefix(3).joined(separator: ", ")
+        let more = unknownOnly.count > 3 ? " (+\(unknownOnly.count - 3) more)" : ""
+        FileHandle.standardError.write(("candor-swift: note — \(unknownOnly.count) function(s) gained an "
+            + "unresolved call (Unknown) vs the baseline but no real effect — advisory, NOT a regression "
+            + "(Unknown is the §4 trust marker, dominated by resolution noise on version bumps): "
+            + "\(shown)\(more)\n").data(using: .utf8)!)
     }
     return violations
 }
