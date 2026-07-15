@@ -322,9 +322,21 @@ for qual in reportQuals.sorted() {
     if !invisible.isEmpty { ef.invisible = invisible }
     effectors.append(ef)
 }
-let report = Report(
+// the coverage ledger: imported modules outside the platform frontier that the classifier doesn't
+// cover — INVISIBLE, not Unknown; named per scan (SPEC §7 item 14, canonical marker `classifier
+// doesn't cover`). A package a chained
+// sibling report covers is EXEMPT (SPEC §2 rule 3) — including an all-pure dep's EMPTY report,
+// whose silence is its purity claim, so the ledger must not name it a blind spot.
+// Computed HERE (before the envelope is built) because ⟨0.15 staged⟩ the same list rides the report
+// as the `coverage` envelope field — one computation feeds the stderr line (printed below, after the
+// receipt, keeping the disclosure order) AND the wire field, so they can never disagree.
+let unlisted = importCounts.filter { !PLATFORM_MODULES.contains($0.key) && !KAPPA_MODULES.contains($0.key) && !internalModules.contains($0.key) && !depsIndex.coveredPkgs.contains($0.key) }
+    .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+
+var report = Report(
     provenance: Provenance(version: engineVersion, toolchain: "swiftsyntax", spec: specVersion),
     package: pkgName, effectors: effectors)
+report.coverage = unlisted.map { (name: $0.key, calls: $0.value) }   // ⟨0.15 staged⟩ SPEC §2 `coverage`
 let envelope: [String: Any] = report.toJSON()
 var cg: [String: [String]] = [:]
 for f in allFns { cg[f.qual] = (edges[f.qual] ?? []).sorted() }  // §2.2: EVERY analyzed fn a key
@@ -384,13 +396,8 @@ if wantJson {
     }
 }
 
-// the coverage ledger: imported modules outside the platform frontier that the classifier doesn't
-// cover — INVISIBLE, not Unknown; named per scan (SPEC §7 item 14, canonical marker `classifier
-// doesn't cover`). A package a chained
-// sibling report covers is EXEMPT (SPEC §2 rule 3) — including an all-pure dep's EMPTY report,
-// whose silence is its purity claim, so the ledger must not name it a blind spot.
-let unlisted = importCounts.filter { !PLATFORM_MODULES.contains($0.key) && !KAPPA_MODULES.contains($0.key) && !internalModules.contains($0.key) && !depsIndex.coveredPkgs.contains($0.key) }
-    .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+// the coverage ledger's stderr line (the ledger itself is computed above, before the envelope,
+// and ALSO rides the report as the ⟨0.15 staged⟩ `coverage` field — same list, same counts).
 if !unlisted.isEmpty {
     let shown = unlisted.prefix(8).map { "\($0.key) (\($0.value) import\($0.value == 1 ? "" : "s"))" }.joined(separator: ", ")
     let more = unlisted.count > 8 ? " + \(unlisted.count - 8) more" : ""
@@ -456,7 +463,7 @@ for v in gateViolations { FileHandle.standardError.write(("[\(v.rule)] \(v.detai
 // --gate-json ⟨0.8⟩: the machine verdict, from the SAME gateViolations that set the exit code — written
 // BEFORE the exit below (ok:true,[] when no gate is configured). Unreadable policy already exited 2 above;
 // AS-EFF-005 records join the same list, so the verdict and the exit code can never disagree.
-if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVersion) }
+if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVersion, coverage: unlisted.map(\.key)) }   // ⟨0.15 staged⟩ advisory, verdict-preserving
 if policyPath != nil || baselinePath != nil {
     if gateViolations.isEmpty {
         if policyPath != nil {

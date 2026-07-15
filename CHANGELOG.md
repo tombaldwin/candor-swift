@@ -7,6 +7,33 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [Unreleased] — ⟨0.15 staged⟩ the COVERAGE surface (candor-spec/COVERAGE-DESIGN.md)
+
+Staged with the held train (the engine still declares spec `0.14`; no version bump until the ship
+call). The wikipedia-ios false-confidence find (SOUNDNESS-LOG 2026-07-15): "what the scan couldn't
+see" now travels WITH the report and conditions the verdicts, instead of evaporating on stderr.
+
+- **`coverage` envelope field.** The κ-coverage ledger (the stderr `classifier doesn't cover` line)
+  as data: `"coverage": { "uncovered": [ { "name", "calls" }, … ] }` — same modules, same import
+  counts, same order; OMITTED entirely when nothing is uncovered, so a fully-covered report is
+  byte-identical to a 0.14.1 one (verified against the prior release binary).
+- **`privacy-manifest --verify` is coverage-conditional.** When the report's ledger is non-empty (or
+  any fn carries `invisible`), the JSON verdict gains `conditional: true` +
+  `coverage: { uncovered: N, modules: [...] }`, and the human output appends the
+  `⚠ verdict is conditional on N uncovered modules…` line. Exit code UNCHANGED (disclosure, not a
+  gate); both keys absent on a fully-covered report.
+- **`--gate-json` advisory coverage note.** The structured verdict carries the same small
+  `coverage` block when the ledger is non-empty — VERDICT-PRESERVING (ok/violations/exit computed
+  exactly as before; the ⟨0.9⟩ provable-purity auto-disclosure precedent).
+- **`gains --json` re-discloses coverage.** The CURRENT report's envelope `coverage` block rides the
+  answer verbatim when present, plus `coverageDelta: { nowUncovered, noLongerUncovered }` when the
+  baseline's uncovered NAME SET differs (names only). Human TSV unchanged (pinned surface).
+- **Per-fn `invisible`, module-qualified precision.** A member call whose confidently-resolved
+  receiver root IS a blind imported module (`SomeSDK.doThing()`) now attributes `invisible` with
+  exactly that module — precise, not file-granular, so the sweep-[33]/[36] no-flooding guard for
+  member calls on stdlib/κ-pure receivers is untouched. (Report bytes change only for that shape —
+  an added disclosure, the sound direction.)
+
 ## [0.14.1] — 2026-07-14
 
 Patch — a soundness fix, still spec `0.14` (a false-pure hole closed; report bytes change for the fixed shapes).

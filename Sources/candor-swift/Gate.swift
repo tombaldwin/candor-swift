@@ -18,12 +18,20 @@ import CandorCore
 // BODY (no `[AS-EFF-00x]` prefix — the rule carries the code). The console prints `[rule] detail`; --gate-json
 // serializes the records verbatim. Written from the SAME list that sets the exit code, so it can't disagree.
 typealias GateViolation = (rule: String, fn: String, effects: [String], detail: String)
-func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: String) {
-    let dict: [String: Any] = [
+func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: String,
+                      coverage uncoveredModules: [String] = []) {
+    var dict: [String: Any] = [
         "spec": spec,
         "ok": violations.isEmpty,
         "violations": violations.map { ["rule": $0.rule, "fn": $0.fn, "effects": $0.effects, "detail": $0.detail] as [String: Any] },
     ]
+    // ⟨0.15 staged⟩ advisory coverage note (SPEC §2 `coverage` re-disclosure): when the scan's κ ledger
+    // is non-empty, the verdict names the uncovered modules — VERDICT-PRESERVING (the ⟨0.9⟩ provable-purity
+    // auto-disclosure precedent): ok/violations/exit are computed exactly as before, this field only ADDS.
+    // A gate does NOT fail on uncovered deps (nearly every real scan has some); the policy author decides.
+    if !uncoveredModules.isEmpty {
+        dict["coverage"] = ["uncovered": uncoveredModules.count, "modules": uncoveredModules.sorted()] as [String: Any]
+    }
     if path == "-" {
         if let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys]),
            let s = String(data: data, encoding: .utf8) { print(s) }

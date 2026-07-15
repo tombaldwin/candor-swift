@@ -37,7 +37,10 @@ dispatch-frontier queries). Add `--policy <file>` (or `CANDOR_POLICY`, or a chec
 CWD) to enforce a §6.2 policy: exit 1 on violation, 2 LOUDLY on an unreadable policy. A `pure` rule
 forbids every *effect* but not the `Unknown` trust marker — `deny Unknown <scope>` is the explicit
 strictness knob. `--gate-json <file|->` additionally writes the structured §3.3 verdict
-`{ spec, ok, violations }`.
+`{ spec, ok, violations }` — plus, when the scan's coverage ledger is non-empty, an ADVISORY
+`coverage: { uncovered: <n>, modules: [...] }` note (⟨0.15 staged⟩): the verdict and exit code are
+computed exactly as before (a gate does not fail on uncovered deps), the note only makes the blind
+spot travel with the verdict.
 
 **Chain sibling reports** with `CANDOR_DEPS=<report paths>` (or a checked-in config `deps` line —
 whitespace/colon/comma-separated; a relative config value anchors to the config's home dir): an
@@ -78,7 +81,13 @@ if candor isn't installed at all, install it normally (clone + build, below).
 **Report shape:** `{ "candor": {…, "spec": "0.14"}, "package": "<name>", "functions": [...] }` — an
 ARRAY of entries keyed `fn` (`Type.method` for members, bare `name` for free functions), each with
 `inferred` (full transitive set) / `direct` / `unresolved` / `hash` (`pkg#qual`, the §2 chain key)
-/ optional `hosts`/`cmds`/`paths`/`tables`. Only effectful-or-unresolved functions appear; a
+/ optional `hosts`/`cmds`/`paths`/`tables`. ⟨0.15 staged⟩ the envelope also carries
+`"coverage": { "uncovered": [ { "name": "<module>", "calls": <n> }, … ] }` — the κ-coverage ledger
+(the stderr `classifier doesn't cover` line) as data, same modules and import counts (swift counts
+imports; the field name stays `calls` per the spec), OMITTED entirely when nothing is uncovered
+(a fully-covered report is byte-identical to a pre-⟨0.15⟩ one). Consume it before trusting an
+"all clear": those modules' effects are absent from the report, NOT claimed pure.
+Only effectful-or-unresolved functions appear; a
 function in the SIDECAR but absent from the report is pure **as far as this engine resolved** —
 candor-swift claims §4 (below), but read `unresolved` before trusting any specific entry. For the
 general read-only queries (show/where/callers/whatif) point candor-query or candor-ts-query at these
@@ -118,6 +127,19 @@ exit 1), a declared sensor key with no reach is an OVER-declaration (an unused p
 exit 0). Notify needs no key (it gates at runtime). Read-only; `--json` emits `{ reached, required, declared,
 underDeclared:[{effect,keys,fns}], overDeclared, ok }`. A missing report or an unreadable/unparseable plist
 fails loud (exit 2).
+`gains <current> <baseline> [--json]` diffs two reports (the supply-chain alarm). ⟨0.15 staged⟩ the
+`--json` answer re-discloses coverage: the CURRENT report's envelope `coverage` block rides it
+verbatim when present (absent otherwise — a "no gains" over an uncovered dep must not read as total),
+and when the baseline's uncovered NAME SET differs from the current's it also carries
+`coverageDelta: { nowUncovered: [...], noLongerUncovered: [...] }` (names only). The human
+`fn\teffect` TSV is a pinned consumer surface and is unchanged.
+⟨0.15 staged⟩ **the privacy-manifest verify verdict is coverage-CONDITIONAL**: when the report's
+coverage ledger is non-empty (or any function carries `invisible`), the JSON gains `conditional: true`
+and `coverage: { uncovered: <n>, modules: [...] }`, and the human output appends a `⚠ verdict is
+conditional on N uncovered modules…` line — sensor usage inside an uncovered module is invisible to
+this verify, so a clean answer holds only for the covered code (chain dep reports or scan the
+workspace root to close the gap). Disclosure, not a gate: the exit code is unchanged (under-declaration
+1, otherwise 0), and both keys are ABSENT on a fully-covered report.
 
 ## The trust rule — do not skip this
 
@@ -134,9 +156,10 @@ function ALSO carries an **`invisible`** list — the uncovered modules it
 (transitively) makes an unresolved call into — so `inferred` is never an unqualified claim PER
 FUNCTION: `inferred: []` with a non-empty `invisible` means "pure as far as candor could see, but it
 could not see through these" (a LOWER bound), not "pure". Because the Swift engine is parse-only it
-attributes at FILE granularity — it names every uncovered module in the function's import scope where
-the function has an unresolved external reach, not the single resolved package — so `invisible` is an
-over-approximation of the blind set (disclosed, never a silent-pure).
+mostly attributes at FILE granularity — an unresolved unqualified call names every uncovered module
+in the function's import scope, not the single resolved package — so `invisible` is an
+over-approximation of the blind set (disclosed, never a silent-pure); a MODULE-QUALIFIED call
+(`SomeSDK.doThing()`) attributes precisely, naming only that module ⟨0.15 staged⟩.
 
 ## Swift-specific things to know
 

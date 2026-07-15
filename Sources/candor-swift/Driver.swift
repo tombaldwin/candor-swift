@@ -544,6 +544,17 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 for m in fileImports[file] ?? [] where blindModules.contains(m) {
                     blindDirect[f.qual, default: []].insert(m)
                 }
+            } else if !resolved, let owner = call.extOwner, blindModules.contains(owner) {
+                // ⟨0.15 staged⟩ a MODULE-QUALIFIED member call whose confidently-resolved receiver root IS
+                // a blind imported module (`SomeSDK.doThing()` — extOwner == the module name, in this file's
+                // import scope) demonstrably reaches that exact module. PRECISE, not file-granular — it names
+                // only the module the call text targets, so the sweep-[33]/[36] guard (member calls on
+                // stdlib/κ-pure receivers must NOT flood blind imports) is untouched: an unresolvable member
+                // call on any OTHER receiver still attributes nothing and stays covered by the scan ledger.
+                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                if (fileImports[file] ?? []).contains(owner) {
+                    blindDirect[f.qual, default: []].insert(owner)
+                }
             }
         }
 

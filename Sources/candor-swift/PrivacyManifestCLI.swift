@@ -163,6 +163,15 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
 
         let ok = underDeclared.isEmpty
 
+        // ⟨0.15 staged⟩ coverage conditionality (SPEC §2 `coverage` re-disclosure; the wikipedia-ios
+        // false-confidence finding): when the report's κ ledger is non-empty OR any examined function
+        // carries a per-fn `invisible` (the verb's reach computation examines EVERY function, so any
+        // uncovered module could hide sensor usage the verify cannot see), the verdict is CONDITIONAL —
+        // a "clean" answer holds only for the covered part of the code. DISCLOSURE, not a gate: the
+        // exit code is computed exactly as before (under-declaration 1, otherwise 0).
+        let uncoveredModules = model.coverage.modules
+        let conditional = !model.coverage.isEmpty
+
         if pm.json {
             // The pinned JSON shape (SPEC-EXTENSION-privacy.md): reached / required / declared /
             // underDeclared[{effect,keys,fns}] / overDeclared / ok. `required` names the acceptable keys
@@ -173,15 +182,22 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
             let under: [[String: Any]] = underDeclared.map {
                 ["effect": $0.effect, "keys": $0.keys, "fns": $0.fns]
             }
-            emitPrivacyJSON([
+            var verdict: [String: Any] = [
                 "reached": reached,
                 "required": required,
                 "declared": declaredSorted,
                 "underDeclared": under,
                 "overDeclared": overDeclared,
                 "ok": ok,
-            ])
-            exit(ok ? 0 : 1)
+            ]
+            // ⟨0.15 staged⟩ conditionality block — ABSENT when fully covered, so a fully-covered
+            // verify's JSON is byte-identical to the pre-⟨0.15⟩ shape.
+            if conditional {
+                verdict["conditional"] = true
+                verdict["coverage"] = ["uncovered": uncoveredModules.count, "modules": uncoveredModules] as [String: Any]
+            }
+            emitPrivacyJSON(verdict)
+            exit(ok ? 0 : 1)   // EXIT UNCHANGED by coverage — disclosure, not a gate
         }
 
         // HUMAN: the divergences first (the actionable findings), then the verdict line.
@@ -201,6 +217,12 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
             // Clean of under-declaration, but an over-declaration warning was printed above.
             let n = reached.count
             print("✓ every accessed capability is declared (\(n) effect\(n == 1 ? "" : "s")) — see the ⚠ over-declaration note(s) above")
+        }
+        // ⟨0.15 staged⟩ the conditionality caveat travels with the human verdict too — LAST, so the
+        // verdict line above stays where consumers expect it. Exit unchanged (disclosure, not a gate).
+        if conditional {
+            let n = uncoveredModules.count
+            print("⚠ verdict is conditional on \(n) uncovered module\(n == 1 ? "" : "s") — sensor usage there is invisible to this verify (chain dep reports or scan the workspace root to close the gap)")
         }
         exit(ok ? 0 : 1)
     }

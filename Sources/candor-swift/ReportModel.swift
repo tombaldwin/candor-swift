@@ -66,9 +66,16 @@ struct Effector {
         return e
     }
 }
-// The §2 envelope: provenance + the package + the effectors.
+// The §2 envelope: provenance + the package + the effectors (+ the ⟨0.15 staged⟩ coverage ledger).
 struct Report {
     let provenance: Provenance, package: String, effectors: [Effector]
+    // ⟨0.15 staged⟩ the κ-coverage ledger as DATA (SPEC §2 `coverage`): the same uncovered-module
+    // list + import counts the stderr disclosure prints (§7 item 14), in the same order (count desc,
+    // name asc), so "what the scan couldn't see" travels WITH the report instead of evaporating on
+    // stderr. OMITTED entirely when empty — a fully-covered scan's report is byte-identical to a
+    // pre-⟨0.15⟩ one (the `extensions`-field precedent). Swift counts IMPORTS; the wire field name
+    // stays `calls` per the spec ("call/import count as the engine counts it").
+    var coverage: [(name: String, calls: Int)] = []
     // Is the `privacy/1` extension ACTIVE — does any effector reach one of its six sensor effects (in its
     // inferred OR direct set)? Computed from the effectors so the envelope discloses the extension exactly
     // when one of its effects appears (SPEC-EXTENSION-privacy.md "Wire disclosure").
@@ -84,6 +91,10 @@ struct Report {
         // `privacy/1` wire disclosure (REQUIRED when active): a top-level `extensions` array. OMITTED when
         // no extension effect is active, so a plain report is byte-unchanged (SPEC-EXTENSION-privacy.md).
         if privacyActive { env["extensions"] = ["privacy/1"] }
+        // ⟨0.15 staged⟩ `coverage` envelope field — omitted when nothing is uncovered (see above).
+        if !coverage.isEmpty {
+            env["coverage"] = ["uncovered": coverage.map { ["name": $0.name, "calls": $0.calls] as [String: Any] }]
+        }
         return env
     }
 }

@@ -21,9 +21,24 @@ private func emitJSON(_ obj: Any) {
     print(s)
 }
 
-// Parse one `functions`-envelope report file into `byName`. Returns false (with a stderr note) on an
+// ⟨0.15 staged⟩ The report's coverage disclosure, as loaded (SPEC §2): the envelope `coverage`
+// ledger's module names (merged across sibling reports) + the union of per-function `invisible`
+// lists. A report-consuming verb whose verdict could change under uncovered reach (privacy-manifest
+// --verify) re-discloses this — verdict-preserving. `invisible` is folded in so a pre-⟨0.15⟩ or
+// foreign report (loaded directly by path, no envelope ledger) still conditions the verdict when
+// its functions carry the per-fn attribution.
+struct ReportCoverage {
+    var envelopeModules: Set<String> = []    // envelope `coverage.uncovered[].name`
+    var invisibleModules: Set<String> = []   // union of per-fn `invisible`
+    var modules: [String] { envelopeModules.union(invisibleModules).sorted() }
+    var isEmpty: Bool { envelopeModules.isEmpty && invisibleModules.isEmpty }
+}
+
+// Parse one `functions`-envelope report file into `byName` (+ its coverage disclosure into `coverage`).
+// Returns false (with a stderr note) on an
 // unparseable / non-report file — the caller FAILS LOUD, never reads it as an empty "no crossings".
-private func mergeFixReport(_ full: String, into byName: inout [String: FixFn], who: String) -> Bool {
+private func mergeFixReport(_ full: String, into byName: inout [String: FixFn],
+                            coverage: inout ReportCoverage, who: String) -> Bool {
     let fm = FileManager.default
     guard let data = fm.contents(atPath: full),
           let root = try? JSONSerialization.jsonObject(with: data),
@@ -39,6 +54,11 @@ private func mergeFixReport(_ full: String, into byName: inout [String: FixFn], 
         let calls = (e["calls"] as? [Any])?.compactMap { $0 as? String } ?? []
         let loc = e["loc"] as? String ?? ""
         byName[fn] = FixFn(inferred: inferred, direct: direct, calls: calls, loc: loc)
+        for case let m as String in (e["invisible"] as? [Any]) ?? [] { coverage.invisibleModules.insert(m) }
+    }
+    // ⟨0.15 staged⟩ envelope `coverage` ledger (absent on a fully-covered or pre-⟨0.15⟩ report).
+    if let cov = obj["coverage"] as? [String: Any], let unc = cov["uncovered"] as? [[String: Any]] {
+        for entry in unc { if let name = entry["name"] as? String { coverage.envelopeModules.insert(name) } }
     }
     return true
 }
@@ -75,22 +95,23 @@ private func mergeCallgraph(_ full: String, into cg: inout [String: [String]]) -
 // dot-segments") — so one engine can query another engine's report by its exact path, even when the filename
 // does not fit the `<prefix>.<pkg>.Swift.json` family shape. A matching `.callgraph.json` sibling (same stem)
 // is still picked up for the graph if present.
-func loadFixModel(prefix: String) -> (byName: [String: FixFn], cg: [String: [String]])? {
+func loadFixModel(prefix: String) -> (byName: [String: FixFn], cg: [String: [String]], coverage: ReportCoverage)? {
     let fm = FileManager.default
     var byName: [String: FixFn] = [:]
     var cg: [String: [String]] = [:]
+    var coverage = ReportCoverage()
     var foundReport = false
 
     var isDir: ObjCBool = false
     if prefix.hasSuffix(".json"), fm.fileExists(atPath: prefix, isDirectory: &isDir), !isDir.boolValue {
         // Direct single-file load (any `.json` filename).
-        foundReport = mergeFixReport(prefix, into: &byName, who: "fix")
+        foundReport = mergeFixReport(prefix, into: &byName, coverage: &coverage, who: "fix")
         let stem = (prefix as NSString).deletingPathExtension
         let sidecar = stem + ".callgraph.json"
         if fm.fileExists(atPath: sidecar) { mergeCallgraph(sidecar, into: &cg) }
         guard foundReport else { return nil }
         if cg.isEmpty { for (fn, f) in byName { cg[fn] = f.calls } }
-        return (byName, cg)
+        return (byName, cg, coverage)
     }
 
     let ns = prefix as NSString
@@ -107,14 +128,14 @@ func loadFixModel(prefix: String) -> (byName: [String: FixFn], cg: [String: [Str
             // A report file present but unparseable (truncated / mid-write / not a report) FAILS LOUD;
             // `foundReport` flips true only after a successful parse, so a lone corrupt report leaves it
             // false → loadFixModel returns nil → exit 2.
-            if mergeFixReport(full, into: &byName, who: "fix") { foundReport = true }
+            if mergeFixReport(full, into: &byName, coverage: &coverage, who: "fix") { foundReport = true }
         }
     }
     guard foundReport else { return nil }
     // The callgraph sidecar is the graph of record; if it is absent (an older/`--json`-only report), fall
     // back to the report's own inline `calls` so a prefix that has only the envelope still answers.
     if cg.isEmpty { for (fn, f) in byName { cg[fn] = f.calls } }
-    return (byName, cg)
+    return (byName, cg, coverage)
 }
 
 private func loadDenyOrDie(_ policyPath: String, who: String) -> [DenyRule] {
@@ -998,6 +1019,42 @@ private func gainsReportVersion(prefix: String) -> String {
     return ""
 }
 
+// ⟨0.15 staged⟩ The `coverage` envelope ledger at `prefix` — the uncovered-module entries, merged
+// across sibling reports (union by name; counts sum, matching what one whole-workspace scan would
+// count), in the ledger order (count desc, name asc). Empty when no report carries the field (a
+// fully-covered or pre-⟨0.15⟩ report). Read tolerantly (a malformed entry is skipped): this is a
+// re-DISCLOSURE rider on gains, never a reason to refuse the delta the loud loaders already vetted.
+private func gainsCoverage(prefix: String) -> [(name: String, calls: Int)] {
+    let fm = FileManager.default
+    var files: [String] = []
+    var isDir: ObjCBool = false
+    if prefix.hasSuffix(".json"), fm.fileExists(atPath: prefix, isDirectory: &isDir), !isDir.boolValue {
+        files = [prefix]
+    } else {
+        let ns = prefix as NSString
+        let dirRaw = ns.deletingLastPathComponent
+        let dir = dirRaw.isEmpty ? "." : dirRaw
+        let base = ns.lastPathComponent
+        guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return [] }
+        files = entries.sorted()
+            .filter { $0.hasPrefix(base + ".") && $0.hasSuffix(".Swift.json") }
+            .map { dir + "/" + $0 }
+    }
+    var counts: [String: Int] = [:]
+    for f in files {
+        guard let data = fm.contents(atPath: f),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let cov = obj["coverage"] as? [String: Any],
+              let unc = cov["uncovered"] as? [[String: Any]] else { continue }
+        for entry in unc {
+            guard let name = entry["name"] as? String, !name.isEmpty else { continue }
+            counts[name, default: 0] += entry["calls"] as? Int ?? 0
+        }
+    }
+    return counts.map { (name: $0.key, calls: $0.value) }
+        .sorted { $0.calls != $1.calls ? $0.calls > $1.calls : $0.name < $1.name }
+}
+
 // Dispatched from main.swift when argv[1] is `gains`.
 func runGainsCLI(_ args: [String]) -> Never {
     var wantJson = false
@@ -1076,9 +1133,27 @@ func runGainsCLI(_ args: [String]) -> Never {
             // Keys ALPHABETICAL within each entry (emitJSON's .sortedKeys): effect, fn, origin.
             ["effect": $0.effect, "fn": $0.fn, "origin": originOf($0.fn)]
         }
-        // Top-level keys ALPHABETICAL too: baseline_version, byFunction, engine_version, gained.
-        emitJSON(["baseline_version": baseVersion, "byFunction": byFunction,
-                  "engine_version": curVersion, "gained": gained])
+        // Top-level keys ALPHABETICAL too (emitJSON's .sortedKeys): baseline_version, byFunction,
+        // [coverage], [coverageDelta], engine_version, gained.
+        var doc: [String: Any] = ["baseline_version": baseVersion, "byFunction": byFunction,
+                                  "engine_version": curVersion, "gained": gained]
+        // ⟨0.15 staged⟩ coverage re-disclosure (SPEC §2/§3.1; the java reference's shape): the CURRENT
+        // report's envelope `coverage` block rides the answer verbatim when present (absent otherwise) —
+        // a "no gains" over an uncovered dep must not read as total. And when the BASELINE's uncovered
+        // NAME SET differs from the current's (a dep became uncovered between scans — itself a signal),
+        // `coverageDelta` names the difference, names only (call-count changes are not a delta).
+        // Human TSV unchanged (pinned consumer surface); verdict-free, purely additive.
+        let curCov = gainsCoverage(prefix: curPre)
+        if !curCov.isEmpty {
+            doc["coverage"] = ["uncovered": curCov.map { ["name": $0.name, "calls": $0.calls] as [String: Any] }]
+        }
+        let curNames = Set(curCov.map(\.name))
+        let baseNames = Set(gainsCoverage(prefix: basePre).map(\.name))
+        if curNames != baseNames {
+            doc["coverageDelta"] = ["nowUncovered": curNames.subtracting(baseNames).sorted(),
+                                    "noLongerUncovered": baseNames.subtracting(curNames).sorted()] as [String: Any]
+        }
+        emitJSON(doc)
         exit(0)
     }
     for p in out { print("\(p.fn)\t\(p.effect)") }
