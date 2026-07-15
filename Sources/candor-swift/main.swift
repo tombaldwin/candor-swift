@@ -152,38 +152,67 @@ while let a = argIter.next() {
         gateJsonPath = v
     case "-h", "--help":
         print("""
-        candor-swift \(releaseVersion) — Swift effect scanner (candor-spec \(specVersion))
+        candor-swift — the Swift effect analyzer. SwiftSyntax-based, it scans source without building.
 
-        USAGE: candor-swift [<dir|file.swift>] [--out <prefix>] [--json] [--policy <file>] [--gate-json <file>] [--agents] [--version]
-               candor-swift parsepolicy <policy-file>     # dump the parsed §6.2 policy as canonical JSON (the conformance grammar-diff witness)
-               candor-swift path <fn> <Effect> [--report <locator>] [--json]                    # the call chain by which a fn comes to perform an effect (§3.1)
-               candor-swift fix <fn> <Effect> [--report <locator>] [--policy <file>] [--json]   # the boundary remedy (§3.3.1)
-               candor-swift fix-gate          [--report <locator>] [--policy <file>] [--json]   # all crossings + remedies
-               candor-swift unverified        [--report <locator>] [--policy <file>] [--json] [--strict]  # PASS-but-Unknown holes
-               candor-swift tour [<N>]         [--report <locator>] [--json]                    # the N most surprising reaches (default 10)
-               candor-swift gains <current> <baseline> [--json]                                 # effects gained between two reports — the supply-chain alarm (§5.1)
-               candor-swift privacy-manifest [--report <locator>] [--verify <Info.plist>] [--json]  # generate/verify the Apple privacy manifest from the sensor reach (privacy/1)
+        A scan reads every .swift file, propagates effects through the call graph, and writes the
+        report to .candor/. A call the analysis cannot resolve is Unknown, and an imported module
+        the classifier doesn't cover is named INVISIBLE, per scan — the report never silently
+        claims purity it can't see.
 
-          Query verbs (fix/fix-gate/unverified/tour) follow the §3.3.1 canonical grammar: the report is
-          DISCOVERED by default (walk up from CWD for a .candor/ dir; CANDOR_REPORT overrides). --report
-          <locator> overrides — a dir → <dir>/.candor/report, a *.json path → that report, else a prefix.
-          --policy is a flag (honours CANDOR_POLICY then .candor/config). The old positional forms (a
-          leading report prefix, a positional policy) stay accepted as deprecated aliases (stderr note).
+        USAGE
+          candor-swift [<dir|file.swift>] [options]            scan Swift sources (default target: .)
+          candor-swift <action> [args] [options]               query the discovered report (.candor/, walk-up)
+          candor-swift privacy-manifest [--verify <plist>]     generate/verify the Apple privacy manifest
+          candor-swift gains <current> <baseline>              effects gained between two reports
+          candor-swift --agents                                print the agent contract for this build
 
-          <target>          a dir or a single .swift file to scan (default: .)
-          --out <prefix>    write the report to <prefix>.<package>.Swift.json + a .callgraph.json sidecar
-          --json            print the report as JSON to stdout (instead of writing files)
-          --policy <file>   enforce a policy file (deny/pure/allow/forbid, candor-spec §6.2) — exit 1 on a violation, 2 if unreadable; honours $CANDOR_POLICY when the flag is absent
-          --gate-json <f>   write the structured gate verdict { spec, ok, violations } as JSON (candor-spec §3.3)
-          --agents          print the agent contract for this build (AGENTS.md)
+        COMMON ACTIONS
+          path <fn> <Effect>        the call chain by which a function reaches an effect
+          tour [N]                  the N most surprising transitive reaches (default 10)
+          gains <current> <base>    what a new version newly reaches — the supply-chain alarm
+          fix <fn> <Effect>         the boundary hoist that would clear a violation
+          fix-gate                  every policy crossing + its remedy
+          unverified                pure/deny scopes that PASS but contain Unknown (--strict: exit 1)
+          privacy-manifest          the Info.plist usage keys the sensor reach requires; --verify diffs one
 
-        CANDOR_BASELINE=<report> (or a .candor/config `baseline` line) enables the AS-EFF-005 regression
-        guard: an existing function GAINING an effect vs the saved report fails (exit 1); new functions are
-        exempt; a corrupt or cross-build baseline refuses to evaluate (exit 2); an absent file is a note.
-          -V, --version     print the build and spec version (offline)
-          -h, --help        show this help
+        ALL ACTIONS
+          path  tour  gains  fix  fix-gate  unverified  privacy-manifest  parsepolicy
 
-        See https://github.com/tombaldwin/candor
+          Query actions follow the same grammar as every candor engine: the report is DISCOVERED
+          by default (walk up from CWD for a .candor/ dir; CANDOR_REPORT overrides). --report <locator>
+          overrides both — a dir → <dir>/.candor/report, a *.json path → that report, else a prefix.
+          --policy is a flag (honours CANDOR_POLICY then .candor/config). The old positional forms
+          (a leading report prefix, a positional policy) stay accepted as deprecated aliases (stderr
+          note). `gains` takes no discovery: both positionals ARE report locators. `parsepolicy
+          <file>` dumps a parsed policy as canonical JSON (the conformance grammar-diff witness).
+
+        OPTIONS
+          --out <prefix>       write the report to <prefix>.<package>.Swift.json + a .callgraph.json sidecar
+          --json               print the report as JSON to stdout (a scan then writes no files)
+          --policy <file>      enforce a policy (deny/pure/allow/forbid) — exit 1 on a violation, 2 if unreadable
+          --gate-json <file>   write the machine-readable gate verdict as JSON (`-` = stdout)
+          --report <locator>   (query actions) use this report instead of discovering .candor/
+          --verify <plist>     (privacy-manifest) verify an Info.plist against the sensor reach — an under-declaration exits 1
+          --strict             (unverified) exit 1 when PASS-but-Unknown holes exist
+          --agents             print the agent contract for this build (AGENTS.md)
+          -V, --version        print the installed build and the contract it speaks (offline)
+          -h, --help           show this help
+
+        ENVIRONMENT
+          CANDOR_POLICY=<file>      the policy gate when --policy is absent; .candor/config `policy` is the floor
+          CANDOR_BASELINE=<report>  the baseline regression guard (or a .candor/config `baseline` line):
+                                    an existing function GAINING an effect vs the saved report fails (exit 1);
+                                    new functions are exempt; a corrupt or cross-build baseline refuses to
+                                    evaluate (exit 2); an absent file is a note
+
+        EXAMPLES
+          candor-swift .
+          candor-swift path PhotoUploader.sync Net
+          candor-swift privacy-manifest --verify App/Info.plist
+          candor-swift . --policy candor.policy --gate-json verdict.json
+          candor-swift gains new/.candor/report old/.candor/report
+
+        Docs: candor.poly.io   ·   Verify an install: candor doctor
         """)
         exit(0)
     case "--version", "-V":

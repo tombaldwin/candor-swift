@@ -53,10 +53,52 @@ private func baselineFail(_ msg: String) -> Never {
     exit(2)
 }
 
+/// ⟨0.16 staged⟩ The existence oracle for the AS-EFF-005 guard, keyed on the baseline CALLGRAPH sidecar
+/// (`<baseline-stem>.callgraph.json` — SPEC §2.2 lists EVERY analyzed fn, pure leaves included, which the
+/// report OMITS). Three outcomes, matching the guard's fail modes:
+///   · `.absent`        — no sidecar next to the baseline report: the guard degrades to report-only
+///                        existence (pre-⟨0.16⟩; a formerly-pure fn still reads as "new" and escapes) —
+///                        the caller emits a stderr note and does NOT fail.
+///   · `.loaded(nodes)` — the sidecar parsed: `nodes` is every fn in the graph (caller keys ∪ callees).
+///                        A fn present here whose report entry is absent had a baseline effect set of ∅,
+///                        so ANY current effect is a GAIN (the pure→effectful supply-chain shape).
+///   · `.corrupt`       — the sidecar exists but could not be read/parsed: fail CLOSED (exit 2), exactly
+///                        like a corrupt baseline report — a broken sidecar must not silently narrow the
+///                        guard back to report-only. Absent ≠ corrupt.
+/// This is the `gains` verb's `origin` existence rule (FixCLI.swift, ⟨0.12⟩ — base report OR callgraph
+/// node ⇒ "existing") applied to the scan-time ratchet: same sidecar, same node-set union, same
+/// disclose-don't-guess discipline (there absent/partial → "unknown"; here absent → degrade, corrupt →
+/// fail). The one deliberate difference: `gains` scans a PREFIX (sibling `.callgraph.json` files); the
+/// guard names an EXACT report file (CANDOR_BASELINE), so the sidecar is the single stem-derived sibling.
+enum BaselineSidecar {
+    case absent
+    case loaded(Set<String>)
+    case corrupt
+}
+
+/// Derive the sidecar path from a baseline REPORT path and load it. `<stem>.callgraph.json` — the same
+/// stem→sidecar rule the writer uses (`<prefix>.<pkg>.Swift.json` → `<prefix>.<pkg>.Swift.callgraph.json`,
+/// main.swift) and `loadCallgraphSidecars`'s single-`.json`-file arm.
+func loadBaselineCallgraph(reportPath: String) -> BaselineSidecar {
+    let sidecar = ((reportPath as NSString).deletingPathExtension) + ".callgraph.json"
+    guard FileManager.default.fileExists(atPath: sidecar) else { return .absent }
+    guard let data = FileManager.default.contents(atPath: sidecar),
+          let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+        return .corrupt
+    }
+    var nodes = Set(obj.keys)
+    for callees in obj.values {
+        for case let callee as String in (callees as? [Any]) ?? [] { nodes.insert(callee) }
+    }
+    return .loaded(nodes)
+}
+
 /// AS-EFF-005: the functions that GAINED an effect versus the saved baseline report, as gate
 /// violations (rule/fn/effects/detail — `effects` is the GAINED set, not the fn's full set).
-/// Exits 2 on invalid gate input (unparseable / versionless / cross-build baseline); returns []
-/// with a stderr note when the file is absent (guard not yet adopted).
+/// Exits 2 on invalid gate input (unparseable / versionless / cross-build baseline, and ⟨0.16 staged⟩
+/// a corrupt callgraph sidecar); returns [] with a stderr note when the file is absent (guard not yet
+/// adopted). ⟨0.16 staged⟩ Existence is keyed on the baseline callgraph sidecar when present, so a
+/// formerly-PURE fn (omitted from the report) turning effectful is caught, not exempted as "new code".
 func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion: String) -> [GateViolation] {
     // A configured-but-EMPTY value (bare `baseline` config line, CANDOR_BASELINE="") is invalid gate
     // input, not an un-adopted guard: the user declared a ratchet and named no file. java/scan/ts all
@@ -88,9 +130,40 @@ func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion:
             + "never a silent skip, never a bogus AS-EFF-005 wave). Regenerate deliberately with this "
             + "build: candor-swift <target> --json > \(path)")
     }
+    // ⟨0.16 staged⟩ Existence is keyed on the baseline CALLGRAPH sidecar (SPEC §7 item 5, the ⟨0.16⟩
+    // paragraph). The report OMITS pure functions, so keying existence on the report alone lets a
+    // formerly-PURE fn that turns effectful read as "new code" and escape the guard — the sharpest
+    // supply-chain shape. The sidecar lists pure leaves, so a fn present there (baseline effect set ∅)
+    // that now performs ANY effect is a GAIN. See loadBaselineCallgraph for the fail modes.
+    let sidecarNodes: Set<String>
+    switch loadBaselineCallgraph(reportPath: path) {
+    case .loaded(let nodes):
+        sidecarNodes = nodes
+    case .corrupt:
+        baselineFail("the baseline callgraph sidecar next to \(path) exists but could not be parsed "
+            + "(corrupt/truncated?) — failing (exit 2), like a corrupt baseline; a broken sidecar must "
+            + "not silently narrow the guard to report-only existence (§6.2). Regenerate the baseline "
+            + "with this build: candor-swift <target> --out <prefix>")
+    case .absent:
+        // Pre-⟨0.16⟩ degradation: no sidecar → report-only existence (a formerly-pure fn reads as new
+        // and escapes). Still catches an EXISTING fn widening its effect set. DISCLOSED, never silent.
+        FileHandle.standardError.write(("candor-swift: note — no baseline callgraph sidecar next to "
+            + "\(path); the AS-EFF-005 guard falls back to report-only existence, so a formerly-PURE "
+            + "function turning effectful reads as new code and is NOT caught. Record the baseline with "
+            + "`candor-swift <target> --out <prefix>` (writes the .callgraph.json sidecar) to close it.\n")
+            .data(using: .utf8)!)
+        sidecarNodes = []
+    }
+
     var violations: [GateViolation] = []
     for qual in inferred.keys.sorted() {
-        guard let prior = base[qual] else { continue }   // new function — new code, not a regression
+        // ⟨0.16 staged⟩ The baseline effect set: the report entry when present, else ∅ for a fn that is a
+        // baseline callgraph node (it existed and was PURE — reports omit pure fns). A fn in NEITHER is
+        // genuinely new code (an added function), still exempt.
+        let prior: Set<String>
+        if let reported = base[qual] { prior = reported }
+        else if sidecarNodes.contains(qual) { prior = [] }   // existed at baseline, and was pure
+        else { continue }                                    // new function — new code, not a regression
         let gained = (inferred[qual] ?? []).subtracting(prior).sorted()
         if !gained.isEmpty {
             violations.append((rule: "AS-EFF-005", fn: qual, effects: gained,

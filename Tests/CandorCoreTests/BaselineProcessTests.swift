@@ -60,7 +60,10 @@ final class BaselineProcessTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let r = try ProcessHarness.run(bin, [root.path, "--json"], env: ["CANDOR_BASELINE": base.path])
         XCTAssertEqual(r.code, 0, "no gain vs the baseline is a clean gate — stderr: \(r.err)")
-        XCTAssertFalse(r.err.contains("AS-EFF-005"), "no violation may be reported: \(r.err)")
+        // The bracketed `[AS-EFF-005]` is the violation-line marker; the ⟨0.16⟩ absent-sidecar note
+        // (this baseline was recorded via --json, no sidecar) mentions the rule name in prose, so match
+        // the violation FORM, not the bare string.
+        XCTAssertFalse(r.err.contains("[AS-EFF-005]"), "no violation may be reported: \(r.err)")
     }
 
     // ── a NEW function is exempt (reviewed as new code, not a regression) ──────────────────────────
@@ -84,7 +87,10 @@ final class BaselineProcessTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let r = try ProcessHarness.run(bin, [root.path, "--json"], env: ["CANDOR_BASELINE": base.path])
         XCTAssertEqual(r.code, 0, "a new fn is exempt from the ratchet — stderr: \(r.err)")
-        XCTAssertFalse(r.err.contains("AS-EFF-005"), "no violation for a new fn: \(r.err)")
+        // Match the bracketed violation FORM: the ⟨0.16⟩ absent-sidecar note (--json baseline, no
+        // sidecar) names the rule in prose. `wipe` is genuinely absent from BOTH report and (absent)
+        // sidecar, so it stays exempt regardless.
+        XCTAssertFalse(r.err.contains("[AS-EFF-005]"), "no violation for a new fn: \(r.err)")
     }
 
     // ── absent baseline file → stderr note, guard inactive, exit 0 ─────────────────────────────────
@@ -196,5 +202,106 @@ final class BaselineProcessTests: XCTestCase {
             (v["fn"] as? String).map { ($0, v) } })
         XCTAssertEqual(byFn["Billing.charge"]?["effects"] as? [String], ["Fs"], "effects = the GAINED set")
         XCTAssertEqual(byFn["<main>"]?["effects"] as? [String], ["Fs"], "the top-level caller gained Fs transitively")
+    }
+
+    // ── ⟨0.16 staged⟩ callgraph-aware existence: a formerly-PURE fn turning effectful ────────────────
+    //
+    // The pre-⟨0.16⟩ guard keyed existence on the REPORT, which OMITS pure functions — so a fn that
+    // shipped pure and now performs an effect read as absent ("new code") and escaped the guard, the
+    // sharpest supply-chain shape. ⟨0.16⟩ keys existence on the baseline CALLGRAPH sidecar (which lists
+    // pure leaves), reusing the `gains` verb's origin rule. These pins need the sidecar, so the baseline
+    // is recorded with `--out <prefix>` (writes `<prefix>.<pkg>.Swift.callgraph.json`) rather than a
+    // `--json` stdout redirect (which writes no sidecar). SPEC §7 item 5, the ⟨0.16 staged⟩ paragraph.
+
+    /// A leaf that is PURE at baseline (uppercased only) — reports omit it; only the callgraph sidecar
+    /// records it. Not reachable from any effectful (reported) fn, so its gain is the ONLY regression.
+    private static let pureLeafSrc = """
+    import Foundation
+    func fmt(_ s: String) -> String { s.uppercased() }
+    func fetchIt() { _ = URLSession.shared.dataTask(with: URL(string: "https://x.example.com/")!) { _, _, _ in } }
+    fetchIt()
+    """
+
+    /// The same shape, but `fmt` now reads a file — the formerly-pure→effectful transition ⟨0.16⟩ catches.
+    private static let pureLeafGainsFsSrc = """
+    import Foundation
+    func fmt(_ s: String) -> String { _ = try? String(contentsOfFile: "/etc/hosts"); return s.uppercased() }
+    func fetchIt() { _ = URLSession.shared.dataTask(with: URL(string: "https://x.example.com/")!) { _, _, _ in } }
+    fetchIt()
+    """
+
+    /// Record a same-build baseline WITH its callgraph sidecar (`--out <prefix>`). Returns the temp dir
+    /// holding `<prefix>.<pkg>.Swift.json` + `.callgraph.json` and the exact report-file path (what
+    /// CANDOR_BASELINE names). Callers `defer` removal of the returned dir.
+    private func recordBaselineWithSidecar(_ bin: URL, src: String) throws -> (dir: URL, report: URL) {
+        let root = try ProcessHarness.makePackage(src)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-bl-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let prefix = dir.appendingPathComponent("baseline").path
+        let r = try ProcessHarness.run(bin, [root.path, "--out", prefix])
+        XCTAssertEqual(r.code, 0, "baseline recording scan must be clean — stderr: \(r.err)")
+        let report = try XCTUnwrap(
+            (try FileManager.default.contentsOfDirectory(atPath: dir.path))
+                .first { $0.hasSuffix(".Swift.json") && !$0.hasSuffix(".callgraph.json") && !$0.hasSuffix(".hierarchy.json") }
+                .map { dir.appendingPathComponent($0) },
+            "the --out scan wrote a report file")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: report.path.replacingOccurrences(of: ".Swift.json", with: ".Swift.callgraph.json")),
+                      "the --out scan wrote the callgraph sidecar")
+        return (dir, report)
+    }
+
+    private func sidecarPath(for report: URL) -> String {
+        (report.path as NSString).deletingPathExtension + ".callgraph.json"
+    }
+
+    /// (1) Sidecar PRESENT: a fn present in the baseline callgraph (even pure — ∅ effects) that now
+    ///     performs ANY effect is a GAIN. exit 1, `fmt` flagged.
+    func testSidecarPresentPureToEffectfulIsCaught() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let (dir, report) = try recordBaselineWithSidecar(bin, src: Self.pureLeafSrc)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let root = try ProcessHarness.makePackage(Self.pureLeafGainsFsSrc)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try ProcessHarness.run(bin, [root.path, "--json"], env: ["CANDOR_BASELINE": report.path])
+        XCTAssertEqual(r.code, 1, "a formerly-pure fn turning effectful must be caught — stderr: \(r.err)")
+        XCTAssertTrue(r.err.contains("`fmt` gained effect { Fs } not present in the baseline"),
+                      "the pure→effectful leaf `fmt` is the flagged gain: \(r.err)")
+    }
+
+    /// (2) Sidecar ABSENT: degrade to report-only existence (the formerly-pure fn reads as new and is
+    ///     NOT caught) — exit 0 — WITH a stderr note. Deleting the sidecar must not fail.
+    func testSidecarAbsentDegradesWithNote() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let (dir, report) = try recordBaselineWithSidecar(bin, src: Self.pureLeafSrc)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.removeItem(atPath: sidecarPath(for: report))
+
+        let root = try ProcessHarness.makePackage(Self.pureLeafGainsFsSrc)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try ProcessHarness.run(bin, [root.path, "--json"], env: ["CANDOR_BASELINE": report.path])
+        XCTAssertEqual(r.code, 0, "no sidecar → report-only existence, the pure leaf reads as new: \(r.err)")
+        XCTAssertFalse(r.err.contains("[AS-EFF-005]"), "the pure leaf is NOT flagged without the sidecar: \(r.err)")
+        XCTAssertTrue(r.err.contains("no baseline callgraph sidecar"),
+                      "the degradation is DISCLOSED on stderr, never silent: \(r.err)")
+    }
+
+    /// (3) Sidecar PRESENT-but-corrupt: fail CLOSED (exit 2), like a corrupt baseline — a broken sidecar
+    ///     must not silently narrow the guard back to report-only.
+    func testCorruptSidecarFailsClosed() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let (dir, report) = try recordBaselineWithSidecar(bin, src: Self.pureLeafSrc)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try "{ \"fmt\": [".write(toFile: sidecarPath(for: report), atomically: true, encoding: .utf8)
+
+        let root = try ProcessHarness.makePackage(Self.pureLeafGainsFsSrc)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try ProcessHarness.run(bin, [root.path, "--json"], env: ["CANDOR_BASELINE": report.path])
+        XCTAssertEqual(r.code, 2, "a corrupt sidecar fails closed, like a corrupt baseline: \(r.err)")
+        XCTAssertTrue(r.err.contains("callgraph sidecar") && r.err.contains("could not be parsed"),
+                      "the exit-2 note names the corrupt sidecar: \(r.err)")
+        XCTAssertFalse(r.err.contains("[AS-EFF-005]"), "no gate wave is emitted when we fail closed: \(r.err)")
     }
 }

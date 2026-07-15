@@ -1192,6 +1192,38 @@ CANDOR_BASELINE= "$BIN" "$W/bl/afterd" --json > /dev/null 2>"$W/bl/empty.err"; R
 { [ $RC -eq 2 ] && grep -q 'configured but EMPTY' "$W/bl/empty.err"; } \
   && ok "baseline guard: a configured-but-empty value fails closed (exit 2)" || bad "baseline empty: rc=$RC"
 
+# ── ⟨0.16 staged⟩ callgraph-aware existence: a formerly-PURE fn (omitted from the report, but a
+# callgraph-sidecar node) turning effectful is a GAIN, not exempt "new code" (SPEC §7 item 5, the
+# ⟨0.16⟩ paragraph — the `gains` origin rule applied to the scan-time ratchet). Record the baseline
+# with --out (writes the .callgraph.json sidecar). fmt is pure at baseline, not reached by fetchIt.
+mkdir -p "$W/cg/before" "$W/cg/after"
+printf 'import Foundation\nfunc fmt(_ s: String) -> String { s.uppercased() }\nfunc fetchIt() { _ = URLSession.shared.dataTask(with: URL(string: "https://x.example.com/")!) { _,_,_ in } }\nfetchIt()\n' > "$W/cg/before/m.swift"
+printf 'import Foundation\nfunc fmt(_ s: String) -> String { _ = try? String(contentsOfFile: "/etc/hosts"); return s.uppercased() }\nfunc fetchIt() { _ = URLSession.shared.dataTask(with: URL(string: "https://x.example.com/")!) { _,_,_ in } }\nfetchIt()\n' > "$W/cg/after/m.swift"
+"$BIN" "$W/cg/before" --out "$W/cg/base" >/dev/null 2>&1
+CGREP=$(ls "$W/cg/base".*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
+CGSIDE="${CGREP%.json}.callgraph.json"
+# fmt must be ABSENT from the report (pure) but PRESENT in the sidecar — the premise of the fix.
+{ ! grep -q '"fn"[^}]*"fmt"' "$CGREP" && grep -q '"fmt"' "$CGSIDE"; } \
+  && ok "baseline ⟨0.16⟩: a pure fn is omitted from the report but recorded in the callgraph sidecar" \
+  || bad "baseline ⟨0.16⟩ premise: fmt report/sidecar presence wrong"
+# (1) sidecar PRESENT: fmt pure→effectful -> exit 1, fmt flagged.
+CANDOR_BASELINE="$CGREP" "$BIN" "$W/cg/after" --json >/dev/null 2>"$W/cg/g1.err"; RC=$?
+{ [ $RC -eq 1 ] && grep -q 'AS-EFF-005.*`fmt` gained effect { Fs }' "$W/cg/g1.err"; } \
+  && ok "baseline ⟨0.16⟩: sidecar present, a formerly-pure fn turning effectful -> AS-EFF-005 + exit 1" \
+  || bad "baseline ⟨0.16⟩ pure→effectful: rc=$RC $(cat "$W/cg/g1.err")"
+# (2) sidecar ABSENT: degrade to report-only (fmt reads as new) -> exit 0 + note.
+cp "$CGSIDE" "$W/cg/saved.callgraph.json"; rm "$CGSIDE"
+CANDOR_BASELINE="$CGREP" "$BIN" "$W/cg/after" --json >/dev/null 2>"$W/cg/g2.err"; RC=$?
+{ [ $RC -eq 0 ] && grep -q 'no baseline callgraph sidecar' "$W/cg/g2.err" && ! grep -q '\[AS-EFF-005\]' "$W/cg/g2.err"; } \
+  && ok "baseline ⟨0.16⟩: sidecar absent -> degrade to report-only existence + stderr note (exit 0)" \
+  || bad "baseline ⟨0.16⟩ degrade: rc=$RC $(cat "$W/cg/g2.err")"
+# (3) sidecar PRESENT-but-corrupt: fail closed (exit 2), no AS-EFF-005 wave.
+printf '{ "fmt": [' > "$CGSIDE"
+CANDOR_BASELINE="$CGREP" "$BIN" "$W/cg/after" --json >/dev/null 2>"$W/cg/g3.err"; RC=$?
+{ [ $RC -eq 2 ] && grep -q 'callgraph sidecar.*could not be parsed' "$W/cg/g3.err" && ! grep -q '\[AS-EFF-005\]' "$W/cg/g3.err"; } \
+  && ok "baseline ⟨0.16⟩: a corrupt callgraph sidecar fails closed (exit 2)" \
+  || bad "baseline ⟨0.16⟩ corrupt sidecar: rc=$RC $(cat "$W/cg/g3.err")"
+
 # ── `tour` verb (FixCLI.runTourCLI) + isTest fix (CandorCore/Surface.swift) ──────────────────────────
 # The surface heuristic must key "test code" off the MODULE, never the leaf: a PRODUCTION fn whose leaf
 # begins "test" (`Manifest.testConnection`) reaching an effect IS surfaced; `tour 0` and a positional
