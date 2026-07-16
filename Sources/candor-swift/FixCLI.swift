@@ -566,7 +566,12 @@ func runTourCLI(_ args: [String]) -> Never {
             ["fn": f.func_, "effect": f.effect, "hops": f.hops,
              "source": f.source, "loc": f.sourceLoc, "score": f.score]
         }
-        emitTourJSON(["reaches": reaches])
+        // The MACHINE half of the mostly-Unknown disclosure (Fable-review finding E): a JSON consumer got a
+        // bare {"reaches":[]} and read it as clean — the same false all-clear the text branch qualifies.
+        // ADDITIVE + present only when the ≥⅓-Unknown threshold trips (byte-identical otherwise).
+        let total = inferred.values.filter { !$0.isEmpty }.count
+        let unknown = inferred.values.filter { $0.contains("Unknown") }.count
+        emitTourJSON(reaches, unknown: (total > 0 && unknown * 3 >= total) ? (unknown, total) : nil)
         exit(0)
     }
 
@@ -600,8 +605,7 @@ func runTourCLI(_ args: [String]) -> Never {
 // `serde_json::Value`, whose object is a sorted map, so each reach's keys come out ALPHABETICALLY sorted:
 // effect, fn, hops, loc, score, source. Built by hand (JSONSerialization neither guarantees key order nor a
 // compact form), so this is emitted explicitly rather than via JSONSerialization.
-private func emitTourJSON(_ obj: [String: Any]) {
-    guard let reaches = obj["reaches"] as? [[String: Any]] else { fixDie("candor-swift tour: internal serialize error") }
+private func emitTourJSON(_ reaches: [[String: Any]], unknown: (count: Int, total: Int)? = nil) {
     func jstr(_ s: String) -> String {
         // Minimal JSON string escaping (the fields are qualified names / effects / file:line — no control
         // chars in practice, but escape the JSON-significant characters for correctness).
@@ -630,7 +634,10 @@ private func emitTourJSON(_ obj: [String: Any]) {
         // Keys ALPHABETICAL to match serde_json::Value's sorted-map output: effect, fn, hops, loc, score, source.
         parts.append("{\"effect\":\(jstr(effect)),\"fn\":\(jstr(fn)),\"hops\":\(hops),\"loc\":\(jstr(loc)),\"score\":\(score),\"source\":\(jstr(source))}")
     }
-    print("{\"reaches\":[\(parts.joined(separator: ","))]}")
+    // `unknown` (when present) sorts AFTER `reaches` (reaches < unknown) with count < total — matching the
+    // Rust reference's serde sorted-map output byte-for-byte (Fable-review finding E, additive disclosure).
+    let unknownPart = unknown.map { ",\"unknown\":{\"count\":\($0.count),\"total\":\($0.total)}" } ?? ""
+    print("{\"reaches\":[\(parts.joined(separator: ","))]\(unknownPart)}")
 }
 
 // Dispatched from main.swift when argv[1] is `fix` or `fix-gate` (before the scan flag loop). §3.3.1:

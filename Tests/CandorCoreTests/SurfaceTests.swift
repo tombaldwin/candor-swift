@@ -140,6 +140,51 @@ final class SurfaceTests: XCTestCase {
         else { return XCTFail("expected noEffects") }
     }
 
+    /// Run `body` with fd 2 (stderr) redirected to a pipe; return what it wrote. `emitSurface` writes via
+    /// `FileHandle.standardError`, which targets fd 2, so this captures its opener line.
+    private func captureStderr(_ body: () -> Void) -> String {
+        let pipe = Pipe()
+        let saved = dup(2)
+        dup2(pipe.fileHandleForWriting.fileDescriptor, 2)
+        body()
+        fflush(stderr)
+        dup2(saved, 2); close(saved)
+        pipe.fileHandleForWriting.closeFile()
+        return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    }
+
+    func testFallbackQualifiesOverMostlyUnknownGraph() {
+        // Fable-review finding A: the SCAN opener (emitSurface) must NOT reassure the bare "nothing hidden"
+        // over a ≥⅓-Unknown graph — the Unknowns (unresolved calls) ARE the hidden part. Before the fix only
+        // `tour` was gated; the scan opener printed the false all-clear on ordinary `candor scan`. Mirrors the
+        // tour gate + the rust/java/ts scan openers (surface.rs / Surface.java / surface.mjs).
+        var inferred: [String: Set<String>] = [:]
+        var direct: [String: Set<String>] = [:]
+        inferred["net.client.send"] = set(["Net"]); direct["net.client.send"] = set(["Net"])  // effecty direct source → no winner → .fallback
+        inferred["util.loadA"] = set(["Unknown"])
+        inferred["util.loadB"] = set(["Unknown"])  // 3 effectful fns, 2 Unknown → 2*3 >= 3 → gate trips
+        guard case .fallback = surfaceBestFind(inferred: inferred, direct: direct, calls: [:])
+        else { return XCTFail("fixture must land in .fallback (nothing surprising qualifies)") }
+        let out = captureStderr { emitSurface(inferred: inferred, direct: direct, calls: [:], loc: [:]) }
+        XCTAssertFalse(out.contains("nothing hidden"), "must not reassure over a mostly-Unknown graph; got: \(out)")
+        XCTAssertTrue(out.contains("are Unknown") && out.contains("blindspots"),
+                      "must qualify (N of M … are Unknown … blindspots); got: \(out)")
+    }
+
+    func testFallbackStaysCleanWhenFewUnknowns() {
+        // The control (Fable-review finding F / no over-fire): below the ⅓ threshold the opener keeps the
+        // honest "nothing hidden" — one Unknown among three effectful fns (⅓ is the boundary; 1*3 >= 3 → the
+        // gate DOES trip at exactly ⅓, so use 1 Unknown of 4 to stay below).
+        var inferred: [String: Set<String>] = [:]
+        var direct: [String: Set<String>] = [:]
+        for f in ["net.client.send", "fs.io.write", "fs.io.read"] { inferred[f] = set(["Net"]); direct[f] = set(["Net"]) }
+        inferred["util.loadA"] = set(["Unknown"])  // 1 Unknown of 4 effectful → 1*3 < 4 → below threshold
+        guard case .fallback = surfaceBestFind(inferred: inferred, direct: direct, calls: [:])
+        else { return XCTFail("fixture must land in .fallback") }
+        let out = captureStderr { emitSurface(inferred: inferred, direct: direct, calls: [:], loc: [:]) }
+        XCTAssertTrue(out.contains("nothing hidden"), "below ⅓ Unknown, the honest fallback stands; got: \(out)")
+    }
+
     /// The `tour` verb's top-N heuristic (CandorCore.bestFinds), the Swift port of the Rust
     /// `best_finds`: two distinct benign candidates reach Net at different depths → the list names each
     /// ONCE, ranked (deeper reach first — higher score), and `n` caps the list. Mirrors the reference

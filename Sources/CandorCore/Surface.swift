@@ -307,9 +307,17 @@ public func emitSurface(
     case .noEffects:
         break  // zero effectful functions — emit nothing
     case .fallback:
-        FileHandle.standardError.write(
-            "candor: nothing hidden — every effect sits where its name says it should.\n"
-                .data(using: .utf8)!)
+        // Effectful-but-nothing-surprising lands here — BUT never reassure "nothing hidden" over a
+        // meaningfully-Unknown graph: the Unknowns (unresolved calls) ARE the hidden part, their transitive
+        // effects unanalyzed. ≥⅓ effectful Unknown → qualify + point at `blindspots` (Fable-review finding A:
+        // the trio-#1 gate reached tour but NOT this scan opener — a false all-clear on ordinary `candor scan`;
+        // rust/java/ts gate the opener too — surface.rs/Surface.java/surface.mjs).
+        let total = inferred.values.filter { !$0.isEmpty }.count
+        let unknown = inferred.values.filter { $0.contains("Unknown") }.count
+        let msg = (total > 0 && unknown * 3 >= total)
+            ? "candor: no surprising reaches — but \(unknown) of \(total) function(s) are Unknown (unresolved calls; their transitive effects are NOT analyzed). Run `candor blindspots`; unresolvable imports or missing project config are the usual cause.\n"
+            : "candor: nothing hidden — every effect sits where its name says it should.\n"
+        FileHandle.standardError.write(msg.data(using: .utf8)!)
     case .winner(let f):
         // `surfaceBestFind` computes with an empty `loc` (the note doesn't need per-candidate loc), so
         // resolve the source's file:line HERE against the caller's `loc`, matching the prior behaviour
