@@ -147,7 +147,7 @@ final class SurfaceTests: XCTestCase {
         let saved = dup(2)
         dup2(pipe.fileHandleForWriting.fileDescriptor, 2)
         body()
-        fflush(stderr)
+        fflush(nil)  // flush ALL streams — never reference the C `stderr` global (not concurrency-safe on Linux Swift)
         dup2(saved, 2); close(saved)
         pipe.fileHandleForWriting.closeFile()
         return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
