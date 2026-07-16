@@ -570,7 +570,15 @@ func runTourCLI(_ args: [String]) -> Never {
 
     if finds.isEmpty {
         // Effectful-but-nothing-surprising vs genuinely-pure both land here; either way the honest line is
-        // the useful answer (never a manufactured surprise) — mirrors the scan-note fallback.
+        // the useful answer (never a manufactured surprise) — mirrors the scan-note fallback. BUT never
+        // reassure "nothing hidden" over a meaningfully-Unknown graph: the Unknowns ARE the hidden part
+        // (re-audit cardinal sin; four-way with candor-ts/rust/java). ≥⅓ effectful Unknown → qualify.
+        let total = inferred.values.filter { !$0.isEmpty }.count
+        let unknown = inferred.values.filter { $0.contains("Unknown") }.count
+        if total > 0 && unknown * 3 >= total {
+            print("candor: no surprising reaches — but \(unknown) of \(total) function(s) are Unknown (unresolved calls; their transitive effects are NOT analyzed). Run `candor blindspots`; unresolvable imports or missing project config are the usual cause.")
+            exit(0)
+        }
         print("candor: nothing hidden — every effect sits where its name says it should.")
         exit(0)
     }
