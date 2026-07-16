@@ -7,6 +7,21 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.18.0] — 2026-07-16
+
+### spec 0.18 — the trust-trio
+
+candor-swift now declares **spec `0.18`** (`specVersion`; engine `candor-swift-0.18.0`). A pinned-tool-surface
+rung (no report/verdict change), pinned four-way in the conformance suite:
+
+- **`--strict` advisory-verb CI gate**: `fix-gate`, `gains`, `unverified` are advisory (exit 0); `--strict`
+  makes each a CI gate (exit 1 while a finding remains). `gains` rejects a `--policy` (exit 2), naming the
+  scan-time `deny <E> gained` gate (`AS-EFF-005`).
+- **mostly-Unknown disclosure**: the scan opener (`emitSurface`) + `tour` never say "nothing hidden" over a
+  ≥⅓-Unknown graph; `tour --json` carries an additive `unknown: {count, total}`.
+- Hardening from a Fable-model code review: the scan opener gained the ⅓-Unknown gate it was missing (only
+  `tour` had it); `gains --strict` added.
+
 ## [0.16.0] — 2026-07-16
 
 ### ⚠ The callgraph-aware baseline guard + Unknown-only advisory ⟨0.16⟩
