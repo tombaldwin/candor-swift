@@ -290,6 +290,7 @@ private func parseQueryArgs(_ args: [String], expectedVerbArgs: Int) -> QueryArg
             guard let v = it.next() else { fixDie("candor-swift: --policy requires a value") }
             policyFlag = v
         default:
+            if a == "--text" || a == "--human" { continue }  // candor-ts output-mode flags (#8); swift prose is the default — tolerate for cross-engine `candor <verb> --text`
             if a.hasPrefix("-") { fixDie("candor-swift: unknown flag \(a)") }
             positionals.append(a)
         }
@@ -449,6 +450,7 @@ private func parseTourArgs(_ args: [String]) -> TourArgs {
             guard let v = it.next() else { fixDie("candor-swift: --report requires a value") }
             reportFlag = v
         default:
+            if a == "--text" || a == "--human" { continue }  // candor-ts output-mode flags (#8); swift prose is the default — tolerate for cross-engine `candor <verb> --text`
             if a.hasPrefix("-") { fixDie("candor-swift: unknown flag \(a)") }
             positionals.append(a)
         }
@@ -715,6 +717,7 @@ private func parsePathArgs(_ args: [String]) -> PathArgs {
             guard let v = it.next() else { fixDie("candor-swift: --report requires a value") }
             reportFlag = v
         default:
+            if a == "--text" || a == "--human" { continue }  // candor-ts output-mode flags (#8); swift prose is the default — tolerate for cross-engine `candor <verb> --text`
             if a.hasPrefix("-") { fixDie("candor-swift: unknown flag \(a)") }
             positionals.append(a)
         }
@@ -1072,6 +1075,7 @@ func runGainsCLI(_ args: [String]) -> Never {
         switch a {
         case "--json": wantJson = true
         default:
+            if a == "--text" || a == "--human" { continue }  // candor-ts output-mode flags (#8); swift prose is the default — tolerate for cross-engine `candor <verb> --text`
             if a.hasPrefix("-") { fixDie("candor-swift: unknown flag \(a)") }
             positionals.append(a)
         }
