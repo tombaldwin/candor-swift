@@ -681,7 +681,9 @@ func runFixCLI(_ args: [String]) -> Never {
         }
         let (ok, remedies) = fixGate(byName: model.byName, cg: model.cg, deny: deny)
         emitJSON(["ok": ok, "remedies": remedies.map { $0.toJSON() }])
-        exit(0)
+        // Advisory by default (exit 0 — the agent fix-loop reads the remedy and edits); `--strict` makes the
+        // exit follow `ok`, so CI can REQUIRE zero outstanding crossings (mirrors `unverified --strict`).
+        exit(q.strict && !ok ? 1 : 0)
     }
 }
 
@@ -1069,20 +1071,29 @@ private func gainsCoverage(prefix: String) -> [(name: String, calls: Int)] {
 // Dispatched from main.swift when argv[1] is `gains`.
 func runGainsCLI(_ args: [String]) -> Never {
     var wantJson = false
+    var strict = false
     var positionals: [String] = []
     var it = args.dropFirst(2).makeIterator()   // drop the binary name + the verb
     while let a = it.next() {
         switch a {
         case "--json": wantJson = true
+        // Advisory by default (exit 0 — gains is a diff view); `--strict` fails on ANY gained effect so a
+        // supply-chain CI job can require a bump introduce no new capability (mirrors `unverified --strict`).
+        case "--strict": strict = true
         default:
             if a == "--text" || a == "--human" { continue }  // candor-ts output-mode flags (#8); swift prose is the default — tolerate for cross-engine `candor <verb> --text`
+            if a == "--policy" {
+                // gains has no `--policy` of its own — reject it loud (never swallow → exit-0 false-clean) and
+                // point at the real gate. Effect-specific gating is a `deny <E> gained` scan policy (AS-EFF-005).
+                fixDie("candor-swift gains: unknown flag --policy — gains is a diff view; to FAIL CI on a newly-gained effect gate at scan time with a `deny <E> gained` policy (AS-EFF-005), or use --strict to fail on ANY gain")
+            }
             if a.hasPrefix("-") { fixDie("candor-swift: unknown flag \(a)") }
             positionals.append(a)
         }
     }
     // Exactly TWO positionals (<current> <baseline>); a surplus is a usage error — never silently ignored.
     guard positionals.count == 2 else {
-        fixDie("usage: candor-swift gains <current> <baseline> [--json]")
+        fixDie("usage: candor-swift gains <current> <baseline> [--json] [--strict]")
     }
     let curPre = resolveReportLocator(positionals[0])
     let basePre = resolveReportLocator(positionals[1])
@@ -1166,8 +1177,12 @@ func runGainsCLI(_ args: [String]) -> Never {
                                     "noLongerUncovered": baseNames.subtracting(curNames).sorted()] as [String: Any]
         }
         emitJSON(doc)
-        exit(0)
+        exit(strict && !out.isEmpty ? 1 : 0)
     }
     for p in out { print("\(p.fn)\t\(p.effect)") }
+    if strict && !out.isEmpty {
+        FileHandle.standardError.write("candor-swift gains --strict: the surface gained new effect(s) vs the baseline → exit 1\n".data(using: .utf8)!)
+        exit(1)
+    }
     exit(0)
 }
