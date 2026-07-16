@@ -204,14 +204,14 @@ final class BaselineProcessTests: XCTestCase {
         XCTAssertEqual(byFn["<main>"]?["effects"] as? [String], ["Fs"], "the top-level caller gained Fs transitively")
     }
 
-    // ── ⟨0.16 staged⟩ callgraph-aware existence: a formerly-PURE fn turning effectful ────────────────
+    // ── ⟨0.16⟩ callgraph-aware existence: a formerly-PURE fn turning effectful ────────────────
     //
     // The pre-⟨0.16⟩ guard keyed existence on the REPORT, which OMITS pure functions — so a fn that
     // shipped pure and now performs an effect read as absent ("new code") and escaped the guard, the
     // sharpest supply-chain shape. ⟨0.16⟩ keys existence on the baseline CALLGRAPH sidecar (which lists
     // pure leaves), reusing the `gains` verb's origin rule. These pins need the sidecar, so the baseline
     // is recorded with `--out <prefix>` (writes `<prefix>.<pkg>.Swift.callgraph.json`) rather than a
-    // `--json` stdout redirect (which writes no sidecar). SPEC §7 item 5, the ⟨0.16 staged⟩ paragraph.
+    // `--json` stdout redirect (which writes no sidecar). SPEC §7 item 5, the ⟨0.16⟩ paragraph.
 
     /// A leaf that is PURE at baseline (uppercased only) — reports omit it; only the callgraph sidecar
     /// records it. Not reachable from any effectful (reported) fn, so its gain is the ONLY regression.

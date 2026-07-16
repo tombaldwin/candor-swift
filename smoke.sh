@@ -1192,7 +1192,7 @@ CANDOR_BASELINE= "$BIN" "$W/bl/afterd" --json > /dev/null 2>"$W/bl/empty.err"; R
 { [ $RC -eq 2 ] && grep -q 'configured but EMPTY' "$W/bl/empty.err"; } \
   && ok "baseline guard: a configured-but-empty value fails closed (exit 2)" || bad "baseline empty: rc=$RC"
 
-# ── ⟨0.16 staged⟩ callgraph-aware existence: a formerly-PURE fn (omitted from the report, but a
+# ── ⟨0.16⟩ callgraph-aware existence: a formerly-PURE fn (omitted from the report, but a
 # callgraph-sidecar node) turning effectful is a GAIN, not exempt "new code" (SPEC §7 item 5, the
 # ⟨0.16⟩ paragraph — the `gains` origin rule applied to the scan-time ratchet). Record the baseline
 # with --out (writes the .callgraph.json sidecar). fmt is pure at baseline, not reached by fetchIt.
@@ -1224,7 +1224,7 @@ CANDOR_BASELINE="$CGREP" "$BIN" "$W/cg/after" --json >/dev/null 2>"$W/cg/g3.err"
 { [ $RC -eq 2 ] && grep -q 'callgraph sidecar.*could not be parsed' "$W/cg/g3.err" && ! grep -q '\[AS-EFF-005\]' "$W/cg/g3.err"; } \
   && ok "baseline ⟨0.16⟩: a corrupt callgraph sidecar fails closed (exit 2)" \
   || bad "baseline ⟨0.16⟩ corrupt sidecar: rc=$RC $(cat "$W/cg/g3.err")"
-# (4) ⟨0.16 staged⟩ Unknown-ONLY gain: a formerly-pure fn that gains only an unresolved call (Unknown,
+# (4) ⟨0.16⟩ Unknown-ONLY gain: a formerly-pure fn that gains only an unresolved call (Unknown,
 # NOT a real effect) is ADVISORY, never a CI-breaking regression — Unknown is the §4 trust marker
 # (`pure` excludes it), dominated by resolution noise on version bumps. exit 0 + a note, NO [AS-EFF-005].
 cp "$W/cg/saved.callgraph.json" "$CGSIDE"   # restore the sidecar corrupted by (3)

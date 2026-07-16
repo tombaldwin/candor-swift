@@ -7,6 +7,31 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.16.0] — 2026-07-16
+
+### ⚠ The callgraph-aware baseline guard + Unknown-only advisory ⟨0.16⟩
+
+The AS-EFF-005 regression ratchet (`CANDOR_BASELINE`) now keys existence on the baseline CALLGRAPH
+sidecar, not the report. The report OMITS pure functions, so the pre-⟨0.16⟩ guard read a formerly-
+PURE function turning effectful as "new" (exempt) and let it escape — the sharpest supply-chain
+shape. ⟨0.16⟩ the sidecar lists every analyzed function (pure ones included, SPEC §2.2), so a
+pure→effectful transition is now caught: `[AS-EFF-005]`, exit 1.
+
+- **Callgraph-keyed existence.** A function present in the baseline callgraph sidecar but absent from
+  its report is a KNOWN-PURE function; gaining a real boundary effect against it is a violation. When
+  no sidecar accompanies the baseline the guard degrades to report-only existence (a stderr note,
+  exit unchanged) rather than failing; a corrupt sidecar fails closed (exit 2).
+- **Unknown-only gain is advisory, not exit 1.** A corpus test found the guard, on real dependency
+  bumps, firing only on gained-`Unknown` — resolution noise, not a capability gain. `Unknown` is the
+  §4 trust marker (pure policies exclude it), so failing pure→Unknown broke CI on innocuous bumps.
+  Now the ratchet (exit 1) fires only on gaining a REAL boundary effect; an Unknown-ONLY gain is
+  disclosed as one advisory note, exit unchanged (`--gate-json` stays `ok: true`). A real+Unknown
+  gain still fails and reports only the real effect. Pinned by conformance PART 15c.
+
+**⚠ report/verdict-affecting** — an upgrade across 0.16 is baseline-invalidating (regenerate the
+saved baseline, callgraph sidecar included, with the new build); and **⚠ the `spec` string changed**
+to `0.16` — a consumer pinning `spec == "0.15"` must accept `0.16`.
+
 ## [0.15.0] — 2026-07-15
 
 ### ⚠ The coverage envelope + privacy-manifest conditionality ⟨0.15⟩ (candor-spec/COVERAGE-DESIGN.md)

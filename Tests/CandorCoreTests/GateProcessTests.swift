@@ -455,7 +455,7 @@ final class GateProcessTests: XCTestCase {
 
         let data = try Data(contentsOf: gate)
         let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        XCTAssertEqual(obj?["spec"] as? String, "0.15", "verdict declares the spec version")
+        XCTAssertEqual(obj?["spec"] as? String, "0.16", "verdict declares the spec version")
         XCTAssertEqual(obj?["ok"] as? Bool, false, "ok:false on a failing gate")
         let viols = obj?["violations"] as? [[String: Any]] ?? []
         // The fixture calls `Billing().charge("x")` at the top level, so `deny Net` catches BOTH the

@@ -53,7 +53,7 @@ private func baselineFail(_ msg: String) -> Never {
     exit(2)
 }
 
-/// ⟨0.16 staged⟩ The existence oracle for the AS-EFF-005 guard, keyed on the baseline CALLGRAPH sidecar
+/// ⟨0.16⟩ The existence oracle for the AS-EFF-005 guard, keyed on the baseline CALLGRAPH sidecar
 /// (`<baseline-stem>.callgraph.json` — SPEC §2.2 lists EVERY analyzed fn, pure leaves included, which the
 /// report OMITS). Three outcomes, matching the guard's fail modes:
 ///   · `.absent`        — no sidecar next to the baseline report: the guard degrades to report-only
@@ -95,11 +95,11 @@ func loadBaselineCallgraph(reportPath: String) -> BaselineSidecar {
 
 /// AS-EFF-005: the functions that GAINED an effect versus the saved baseline report, as gate
 /// violations (rule/fn/effects/detail — `effects` is the GAINED set, not the fn's full set).
-/// Exits 2 on invalid gate input (unparseable / versionless / cross-build baseline, and ⟨0.16 staged⟩
+/// Exits 2 on invalid gate input (unparseable / versionless / cross-build baseline, and ⟨0.16⟩
 /// a corrupt callgraph sidecar); returns [] with a stderr note when the file is absent (guard not yet
-/// adopted). ⟨0.16 staged⟩ Existence is keyed on the baseline callgraph sidecar when present, so a
+/// adopted). ⟨0.16⟩ Existence is keyed on the baseline callgraph sidecar when present, so a
 /// formerly-PURE fn (omitted from the report) turning effectful is caught, not exempted as "new code".
-/// ⟨0.16 staged⟩ A fn that gains ONLY Unknown (an unresolved call, no real effect) is ADVISORY, not a
+/// ⟨0.16⟩ A fn that gains ONLY Unknown (an unresolved call, no real effect) is ADVISORY, not a
 /// violation: Unknown is the §4 trust marker (`pure` policies exclude it) and on version bumps it is
 /// dominated by resolution noise — a single stderr note discloses it and the exit code is unchanged.
 func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion: String) -> [GateViolation] {
@@ -133,7 +133,7 @@ func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion:
             + "never a silent skip, never a bogus AS-EFF-005 wave). Regenerate deliberately with this "
             + "build: candor-swift <target> --json > \(path)")
     }
-    // ⟨0.16 staged⟩ Existence is keyed on the baseline CALLGRAPH sidecar (SPEC §7 item 5, the ⟨0.16⟩
+    // ⟨0.16⟩ Existence is keyed on the baseline CALLGRAPH sidecar (SPEC §7 item 5, the ⟨0.16⟩
     // paragraph). The report OMITS pure functions, so keying existence on the report alone lets a
     // formerly-PURE fn that turns effectful read as "new code" and escape the guard — the sharpest
     // supply-chain shape. The sidecar lists pure leaves, so a fn present there (baseline effect set ∅)
@@ -159,9 +159,9 @@ func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion:
     }
 
     var violations: [GateViolation] = []
-    var unknownOnly: [String] = []   // ⟨0.16 staged⟩ advisory: fns that gained ONLY Unknown, no real effect
+    var unknownOnly: [String] = []   // ⟨0.16⟩ advisory: fns that gained ONLY Unknown, no real effect
     for qual in inferred.keys.sorted() {
-        // ⟨0.16 staged⟩ The baseline effect set: the report entry when present, else ∅ for a fn that is a
+        // ⟨0.16⟩ The baseline effect set: the report entry when present, else ∅ for a fn that is a
         // baseline callgraph node (it existed and was PURE — reports omit pure fns). A fn in NEITHER is
         // genuinely new code (an added function), still exempt.
         let prior: Set<String>
@@ -170,7 +170,7 @@ func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion:
         else { continue }                                    // new function — new code, not a regression
         let gained = (inferred[qual] ?? []).subtracting(prior).sorted()
         if gained.isEmpty { continue }
-        // ⟨0.16 staged⟩ The ratchet fires only on gaining a REAL boundary effect. An Unknown-ONLY gain is
+        // ⟨0.16⟩ The ratchet fires only on gaining a REAL boundary effect. An Unknown-ONLY gain is
         // the §4 trust marker, not an effect (`pure` policies exclude it), and on real dependency bumps it
         // is dominated by resolution noise (SOUNDNESS-LOG 2026-07-16) — DISCLOSE it as advisory, never a
         // CI-breaking regression. A REAL gain (with or without Unknown alongside) is still a violation, and
