@@ -46,7 +46,7 @@ struct Effector {
     var unknownWhy: [String]? = nil
     var hosts: [String]? = nil, cmds: [String]? = nil, paths: [String]? = nil, tables: [String]? = nil
     var invisible: [String]? = nil   // per-fn blind-spot disclosure: κ-unknown modules reached (qualifies `inferred`)
-    var netClass: [String]? = nil    // ⟨0.21⟩ Net destination classes present in the fn's transitive Net surface
+    var netClass: [String]? = nil    // ⟨0.20⟩ Net destination classes present in the fn's transitive Net surface
     func toJSON() -> [String: Any] {
         var e: [String: Any] = [
             "fn": fn, "loc": loc,
@@ -64,7 +64,7 @@ struct Effector {
         if let p = paths, !p.isEmpty { e["paths"] = p }
         if let t = tables, !t.isEmpty { e["tables"] = t }
         if let v = invisible, !v.isEmpty { e["invisible"] = v }
-        if let n = netClass, !n.isEmpty { e["netClass"] = n }   // ⟨0.21⟩ Net destination-class (SPEC §1)
+        if let n = netClass, !n.isEmpty { e["netClass"] = n }   // ⟨0.20⟩ Net destination-class (SPEC §1)
         return e
     }
 }

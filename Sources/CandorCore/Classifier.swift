@@ -189,7 +189,7 @@ public func isModelHost(_ hostLiteral: String) -> Bool {
     return false
 }
 
-/// ⟨0.21⟩ Curated telemetry / analytics / APM hosts — the `Net` destination-class `known-telemetry` set
+/// ⟨0.20⟩ Curated telemetry / analytics / APM hosts — the `Net` destination-class `known-telemetry` set
 /// (NET-DESTINATION-CLASS-DESIGN.md), shared VERBATIM with the sibling engines (java `Literals.TELEMETRY_HOSTS`
 /// / rust `TELEMETRY_HOSTS` / ts), like `MODEL_HOSTS`. A benign observability endpoint. Matched by host,
 /// case-insensitive; a SUBDOMAIN of a listed host counts. Tight, high-precision STARTER set — mis-including
@@ -219,7 +219,7 @@ public func hostInSet(_ hostLiteral: String, _ set: Set<String>) -> Bool {
 /// Whether an endpoint HOST literal is a known telemetry/analytics/APM host (`TELEMETRY_HOSTS`).
 public func isTelemetryHost(_ hostLiteral: String) -> Bool { hostInSet(hostLiteral, TELEMETRY_HOSTS) }
 
-/// ⟨0.21⟩ The `Net` DESTINATION CLASS of a host literal (NET-DESTINATION-CLASS-DESIGN.md): `known-telemetry`
+/// ⟨0.20⟩ The `Net` DESTINATION CLASS of a host literal (NET-DESTINATION-CLASS-DESIGN.md): `known-telemetry`
 /// (curated), `known-partner` (config `net-partner` OR a model host — a declared-ish external API), else
 /// `unknown-host` — the HONEST default (candor makes no claim; the security gate bites this). `partners` is a
 /// per-project set (config-declared). Never fabricated onto a safe class: an unresolved host is unknown-host.
@@ -230,10 +230,10 @@ public func netDestClass(_ hostLiteral: String, _ partners: Set<String>) -> Stri
     return "unknown-host"
 }
 
-/// ⟨0.21⟩ The closed `Net` destination-class vocabulary, for the `deny Net[<dest…>]` policy filter.
+/// ⟨0.20⟩ The closed `Net` destination-class vocabulary, for the `deny Net[<dest…>]` policy filter.
 public let NET_DEST_CLASSES: Set<String> = ["known-telemetry", "known-partner", "unknown-host"]
 
-/// ⟨0.21⟩ The `Net` destination classes an fn reaches — the SINGLE derivation shared by the report's
+/// ⟨0.20⟩ The `Net` destination classes an fn reaches — the SINGLE derivation shared by the report's
 /// `netClass` field and the gate: an exact host-literal match (`netDestClass`) for the visible (transitive)
 /// hosts, plus the fail-closed `unknown-host` when the Net surface is masked (`netIncomplete`) OR carries no
 /// visible host (a runtime endpoint). Call only for an fn with Net; returns sorted. Mirrors java/rust/ts.

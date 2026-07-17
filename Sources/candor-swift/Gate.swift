@@ -19,7 +19,7 @@ import CandorCore
 // serializes the records verbatim. Written from the SAME list that sets the exit code, so it can't disagree.
 // ⟨0.19⟩ `reasonClass`: on an AS-EFF-006 violation whose `effects` include `Unknown`, all reason classes
 // present (transitively) on the fn — every reason the strict gate bit (SPEC §6.2). Empty otherwise.
-// ⟨0.21⟩ `netClass`: on an AS-EFF-006 violation whose `effects` include `Net`, all destination classes
+// ⟨0.20⟩ `netClass`: on an AS-EFF-006 violation whose `effects` include `Net`, all destination classes
 // present (transitively) on the fn — which class the security gate bit (NET-DESTINATION-CLASS-DESIGN.md).
 typealias GateViolation = (rule: String, fn: String, effects: [String], detail: String, reasonClass: [String], netClass: [String])
 func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: String,
@@ -30,7 +30,7 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
         "violations": violations.map { v -> [String: Any] in
             var m: [String: Any] = ["rule": v.rule, "fn": v.fn, "effects": v.effects, "detail": v.detail]
             if !v.reasonClass.isEmpty { m["reasonClass"] = v.reasonClass }  // omitted when empty (byte-compat)
-            if !v.netClass.isEmpty { m["netClass"] = v.netClass }           // ⟨0.21⟩ omitted when empty
+            if !v.netClass.isEmpty { m["netClass"] = v.netClass }           // ⟨0.20⟩ omitted when empty
             return m
         },
     ]
@@ -100,7 +100,7 @@ func evaluateGate(_ pol: (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidR
                 if !hits.isEmpty {
                     // When Unknown is denied, report ALL reason classes on the fn (transitive) — every reason bit.
                     let rc = hits.contains("Unknown") ? (reasonClassAcc[qual].map { $0.sorted() } ?? []) : []
-                    // ⟨0.21⟩ when Net is denied, report ALL of the fn's destination classes (transitive).
+                    // ⟨0.20⟩ when Net is denied, report ALL of the fn's destination classes (transitive).
                     let nc = hits.contains("Net") ? netClassesOf(Array(hostsAcc[qual] ?? []),
                                                                  netIncomplete: incompleteAcc[qual]?.contains("Net") ?? false,
                                                                  partners: netPartners) : []

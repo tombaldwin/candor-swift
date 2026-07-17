@@ -122,7 +122,7 @@ public func parseUnknownAliases(_ configText: String?) -> [String: Set<String>] 
     return out
 }
 
-/// ⟨0.21⟩ Parse `net-partner <host>` lines (NET-DESTINATION-CLASS-DESIGN.md) into a set of host-normalized
+/// ⟨0.20⟩ Parse `net-partner <host>` lines (NET-DESTINATION-CLASS-DESIGN.md) into a set of host-normalized
 /// partner hosts — the per-project `known-partner` set for the Net destination-class classifier. Multi-value
 /// (repeatable key); the value's `:port` is stripped + lowercased like `MODEL_HOSTS`. Case-insensitive key,
 /// mirroring `parseUnknownAliases` + the java/rust/ts config loaders. A partner is per-project — never universal.

@@ -27,13 +27,13 @@ import CandorCore
 // CLI
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-let engineVersion = "candor-swift-0.19.0"
+let engineVersion = "candor-swift-0.20.0"
 // The bare release semver (`0.5.0`) — the ONE source of truth for both the envelope's build id above
 // and `--version`, derived by stripping the engine prefix so the two can't drift.
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
 // The spec contract version this engine speaks — the SAME literal that stamps the §2 envelope's `spec`
 // field (see the envelope below), reused so `--version` and the report can never disagree.
-let specVersion = "0.19"
+let specVersion = "0.20"
 
 // `parsepolicy <file>` — dump the parsed §6.2 policy as canonical JSON, the SAME shape candor-java's
 // Query.policyJson / candor-query / candor-ts emit: {"deny":[{effects,scope}], "allow":[{effect,scope,
@@ -344,7 +344,7 @@ let hostsAcc = analysis.hostsAcc, cmdsAcc = analysis.cmdsAcc
 let pathsAcc = analysis.pathsAcc, tablesAcc = analysis.tablesAcc
 let incompleteAcc = analysis.incompleteAcc
 let invisibleAcc = analysis.invisibleAcc
-// ⟨0.21⟩ Net destination-class partners from `.candor/config` — read ONCE here, used by the report's per-fn
+// ⟨0.20⟩ Net destination-class partners from `.candor/config` — read ONCE here, used by the report's per-fn
 // `netClass` field (below) and the gate (deny Net[unknown-host]); the SAME set both surfaces resolve.
 let netPartners = parseNetPartners(discoverConfigText(targetPath: target))
 
@@ -383,7 +383,7 @@ for qual in reportQuals.sorted() {
     if let p = pathsAcc[qual], !p.isEmpty { ef.paths = p.sorted() }
     if let t = tablesAcc[qual], !t.isEmpty, inf.contains("Db") { ef.tables = t.sorted() }
     if !invisible.isEmpty { ef.invisible = invisible }
-    // ⟨0.21⟩ Net destination-class: the classes in this fn's transitive Net surface — exact host-literal
+    // ⟨0.20⟩ Net destination-class: the classes in this fn's transitive Net surface — exact host-literal
     // match, fail-closed unknown-host on a masked surface (incompleteAcc has Net) OR a Net with no visible host.
     if inf.contains("Net") {
         ef.netClass = netClassesOf(Array(hostsAcc[qual] ?? []),
@@ -516,7 +516,7 @@ if let pp = policyPath {
     let reasonClassAcc = propagate(reasonClassDirect, over: edges)
     // ⟨0.19⟩ reason-class aliases (SPEC §6.2) from `.candor/config`, so `Unknown[<alias>]` resolves at the gate.
     let unknownAliases = parseUnknownAliases(discoverConfigText(targetPath: target))
-    // ⟨0.21⟩ `net-partner` hosts (NET-DESTINATION-CLASS-DESIGN.md): the SAME set the report netClass used
+    // ⟨0.20⟩ `net-partner` hosts (NET-DESTINATION-CLASS-DESIGN.md): the SAME set the report netClass used
     // (hoisted above), so `deny Net[unknown-host]` tolerates a declared partner and the verdict classifies it.
     gateViolations += evaluateGate(parsePolicy(text, aliases: unknownAliases), inferred: inferred, hostsAcc: hostsAcc,
                                    cmdsAcc: cmdsAcc, pathsAcc: pathsAcc, tablesAcc: tablesAcc,
