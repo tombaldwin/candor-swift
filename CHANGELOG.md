@@ -7,6 +7,16 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.19.0] — 2026-07-17
+
+Reason-scoped `Unknown` policies (SPEC §6.2): `deny E Unknown[reflect,dispatch,indirect,native,unresolved,setup]`
+narrows the `Unknown` part of a deny to a fixed reason-class vocabulary, with the `dynamic`/`*` aliases and
+config `.candor/config` `unknown-alias <name> = <class…>` names. Bare `deny E Unknown` is unchanged
+(`Unknown[*]`); an unrecognized reason maps to `unresolved`; the class propagates transitively. An AS-EFF-006
+`--gate-json` verdict whose `effects` include `Unknown` carries a **`reasonClass`** array. Report bytes
+unchanged. Also: a scan-level **SETUP warning** — a `Package.swift` that declares dependencies but has no
+fetched `.build/checkouts` prints a "run `swift build`" remediation (the analog of a missing node_modules).
+
 ## [0.18.0] — 2026-07-16
 
 ### spec 0.18 — the trust-trio

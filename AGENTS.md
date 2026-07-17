@@ -12,7 +12,7 @@ this file is the Swift-specific surface.
 > describe a different candor-swift than the one you are running.
 
 A computed property's getter/setter/observer (and a `lazy` initializer) is its own unit, named
-`Type.property` and carrying `unitKind: "accessor"` (spec 0.18, informative); ordinary
+`Type.property` and carrying `unitKind: "accessor"` (spec 0.19, informative); ordinary
 functions omit the field. A file's TOP-LEVEL executable statements (the bare statements Swift allows
 at file scope in `main.swift` / script files) are collected as one synthetic unit named `<main>`
 carrying `unitKind: "initializer"` — but only when they carry an effect or reach one; a pure top level
@@ -59,7 +59,7 @@ inactive. Record one: `candor-swift <dir> --json > baseline.json`.
 **Already installed? Report the version, then ask before upgrading.** If this project already has
 candor — a `.candor/` report dir, or `candor-swift` built/on PATH — do this BEFORE you scan. Run
 `candor-swift --version` (offline) and TELL THE USER plainly which build they're on, e.g. "This
-project is on candor-swift 0.18.0 (spec 0.18)". (On an older build that predates `--version`, read
+project is on candor-swift 0.18.0 (spec 0.19)". (On an older build that predates `--version`, read
 `candor.version`/`candor.spec` from an existing `.candor/report*.json` instead.)
 
 **Staying current — candor can't check for you, *you* can.** candor never makes a network call to
@@ -75,7 +75,7 @@ If it's behind, **ASK the user before upgrading** — e.g. "candor-swift 0.8.2 i
 bare `git pull` of main — an untagged HEAD is not a released build). Never upgrade silently. If it's current or the user declines, just proceed with the build they have;
 if candor isn't installed at all, install it normally (clone + build, below).
 
-**Report shape:** `{ "candor": {…, "spec": "0.18"}, "package": "<name>", "functions": [...] }` — an
+**Report shape:** `{ "candor": {…, "spec": "0.19"}, "package": "<name>", "functions": [...] }` — an
 ARRAY of entries keyed `fn` (`Type.method` for members, bare `name` for free functions), each with
 `inferred` (full transitive set) / `direct` / `unresolved` / `hash` (`pkg#qual`, the §2 chain key)
 / optional `hosts`/`cmds`/`paths`/`tables`. ⟨0.15⟩ the envelope also carries
