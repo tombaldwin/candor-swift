@@ -84,6 +84,17 @@ final class PolicyTests: XCTestCase {
                        ["dispatch", "indirect", "native", "reflect", "unresolved"])
     }
 
+    func testConfigUnknownAliasResolves() {
+        let aliases = parseUnknownAliases(
+            "unknown-alias risky = reflect,native\nunknown-alias telemetry = indirect\nunknown-alias reflect = native\n")
+        XCTAssertEqual(aliases["risky"], ["reflect", "native"])
+        XCTAssertEqual(aliases["telemetry"], ["indirect"])
+        XCTAssertNil(aliases["reflect"], "a config alias may not shadow a class token")
+        XCTAssertEqual(parsePolicy("deny Net Unknown[risky] api", aliases: aliases).deny[0].unknownClasses, ["native", "reflect"])
+        // an UNDEFINED alias name is dropped-with-warning → empty filter (behaves like bare Unknown[*])
+        XCTAssertEqual(parsePolicy("deny Net Unknown[nope] api", aliases: aliases).deny[0].unknownClasses, [])
+    }
+
     func testReasonClassMapsRawReasons() {
         XCTAssertEqual(reasonClass("reflect:eval"), "reflect")
         XCTAssertEqual(reasonClass("dynamicMemberLookup"), "reflect")

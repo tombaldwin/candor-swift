@@ -12,7 +12,29 @@ import Foundation
 // consumes `policy`, `baseline` (the AS-EFF-005 regression guard, Baseline.swift) and `deps` (SPEC §2
 // report chaining, Deps.swift); the remaining java-only gate keys stay disclosed-inert. A key OUTSIDE
 // the vocabulary warns (typo protection: a misspelt `policy` must not silently drop the gate).
-let candorConfigKeys: Set<String> = ["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps"]
+let candorConfigKeys: Set<String> = ["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps", "unknown-alias"]
+
+// ⟨0.19⟩ Discover `.candor/config` TEXT anchored at `targetPath`: $CANDOR_CONFIG if set + readable, else the
+// nearest `.candor/config` walking UP, else nil. Read-only + LENIENT (no exit — the caller decides
+// fail-closed); used to resolve reason-class `unknown-alias` for the §6.2 gate + `parsepolicy`.
+func discoverConfigText(targetPath: String) -> String? {
+    if let override = ProcessInfo.processInfo.environment["CANDOR_CONFIG"] {
+        return try? String(contentsOfFile: override, encoding: .utf8)
+    }
+    var dir = (URL(fileURLWithPath: targetPath).standardizedFileURL.path as NSString).standardizingPath
+    var isDir: ObjCBool = false
+    if !(FileManager.default.fileExists(atPath: dir, isDirectory: &isDir) && isDir.boolValue) {
+        dir = (dir as NSString).deletingLastPathComponent
+    }
+    for _ in 0..<64 {
+        let cand = (dir as NSString).appendingPathComponent(".candor/config")
+        if FileManager.default.fileExists(atPath: cand) { return try? String(contentsOfFile: cand, encoding: .utf8) }
+        let parent = (dir as NSString).deletingLastPathComponent
+        if parent == dir || parent.isEmpty { break }
+        dir = parent
+    }
+    return nil
+}
 func loadCandorConfig(targetPath: String) -> [String: String] {
     var file: String? = nil
     if let override = ProcessInfo.processInfo.environment["CANDOR_CONFIG"] {
@@ -67,6 +89,7 @@ func loadCandorConfig(targetPath: String) -> [String: String] {
             FileHandle.standardError.write("candor-swift: ignoring unknown config key '\(key)' in \(file!)\n".data(using: .utf8)!)
             continue
         }
+        if key == "unknown-alias" { continue }  // ⟨0.19⟩ MULTI-VALUE — extracted via parseUnknownAliases
         cfg[key] = val
     }
     // FAMILY DECISION (2026-07-09): a RELATIVE path value in .candor/config resolves against the CONFIG

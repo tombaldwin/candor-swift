@@ -51,7 +51,9 @@ if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "parsepolicy" {
         FileHandle.standardError.write("candor-swift: cannot read policy \(polPath)\n".data(using: .utf8)!)
         exit(2)
     }
-    let pol = parsePolicy(polText)
+    // ⟨0.19⟩ config-aware: resolve `Unknown[<alias>]` via a checked-in `unknown-alias`, anchored to the
+    // policy file (or CANDOR_CONFIG) — the dump reflects real gate resolution + pins the four-way expansion.
+    let pol = parsePolicy(polText, aliases: parseUnknownAliases(discoverConfigText(targetPath: polPath)))
     // Deterministic entry order: each list sorted by its serialized JSON (the reference engine's
     // byJson comparator) — the conformance differential normalizes anyway; this keeps raw dumps diffable.
     func sortedByJson(_ xs: [[String: Any]]) -> [[String: Any]] {
@@ -479,14 +481,16 @@ if let pp = policyPath {
         reasonClassDirect[fn] = Set(whys.map { reasonClass($0) })
     }
     let reasonClassAcc = propagate(reasonClassDirect, over: edges)
-    gateViolations += evaluateGate(parsePolicy(text), inferred: inferred, hostsAcc: hostsAcc,
+    // ⟨0.19⟩ reason-class aliases (SPEC §6.2) from `.candor/config`, so `Unknown[<alias>]` resolves at the gate.
+    let unknownAliases = parseUnknownAliases(discoverConfigText(targetPath: target))
+    gateViolations += evaluateGate(parsePolicy(text, aliases: unknownAliases), inferred: inferred, hostsAcc: hostsAcc,
                                    cmdsAcc: cmdsAcc, pathsAcc: pathsAcc, tablesAcc: tablesAcc,
                                    incompleteAcc: incompleteAcc, cg: cg, reasonClassAcc: reasonClassAcc)
     // Provable-purity DISCLOSURE (advisory — NEVER a violation, so the exit/verdict are untouched): functions
     // in a pure/deny scope that PASS but are Unknown (the Unknown could hide the forbidden effect — a
     // fn/closure-injected port). Surfaces the gap automatically (eval/fixloop/DISPATCH-NOTE.md).
     // Same predicate + upgrade as `candor-swift unverified` (CandorCore.unverifiedHoleRule) — one source of truth.
-    let disclosePolicy = parsePolicy(text)
+    let disclosePolicy = parsePolicy(text, aliases: unknownAliases)
     var purityHoles: [(String, String)] = []
     for qual in inferred.keys.sorted() {
         if let r = unverifiedHoleRule(qual, inferred[qual] ?? [], disclosePolicy.deny) {

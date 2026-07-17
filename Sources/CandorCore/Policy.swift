@@ -86,6 +86,42 @@ public let ALLOW_EFFECTS: Set<String> = ["Net", "Exec", "Fs", "Db", "Llm"]
 public let REASON_CLASSES = ["reflect", "dispatch", "indirect", "native", "unresolved", "setup"]
 // `dynamic` = every GENUINE blind-spot class (excludes `setup`), incl. `unresolved` so it never under-gates.
 let DYNAMIC_CLASSES = ["reflect", "dispatch", "indirect", "native", "unresolved"]
+/// ⟨0.19⟩ Parse `unknown-alias <name> = <class,…>` lines from `.candor/config` TEXT (SPEC §6.2) into a
+/// name→classes map. A name that shadows a built-in (`*`/`dynamic`/a class token) is warned-and-skipped (a
+/// config alias may not redefine a built-in), as is a definition naming no valid class. Byte-shape with the
+/// java `Config.addAlias` / rust `parse_unknown_aliases`.
+public func parseUnknownAliases(_ configText: String?) -> [String: Set<String>] {
+    var out: [String: Set<String>] = [:]
+    guard let configText else { return out }
+    for raw in configText.split(separator: "\n", omittingEmptySubsequences: false) {
+        let line = raw.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0].trimmingCharacters(in: .whitespaces)
+        if line.isEmpty { continue }
+        let parts = line.split(maxSplits: 1, whereSeparator: { $0 == " " || $0 == "\t" })
+        guard parts.first?.lowercased() == "unknown-alias", parts.count > 1 else { continue }
+        let val = parts[1].trimmingCharacters(in: .whitespaces)
+        guard let eq = val.firstIndex(of: "=") else {
+            FileHandle.standardError.write("candor: ignoring `unknown-alias` (want `unknown-alias <name> = <class,…>`): \(val)\n".data(using: .utf8)!)
+            continue
+        }
+        let name = val[val.startIndex..<eq].trimmingCharacters(in: .whitespaces)
+        if name.isEmpty || name == "*" || name == "dynamic" || REASON_CLASSES.contains(name) {
+            FileHandle.standardError.write("candor: ignoring `unknown-alias` with reserved/empty name `\(name)` (may not shadow `*`/`dynamic`/a class token)\n".data(using: .utf8)!)
+            continue
+        }
+        var classes = Set<String>()
+        for rawCn in val[val.index(after: eq)...].split(separator: ",", omittingEmptySubsequences: false) {
+            let cn = rawCn.trimmingCharacters(in: .whitespaces)
+            if cn.isEmpty { continue }
+            if cn == "dynamic" { DYNAMIC_CLASSES.forEach { classes.insert($0) } }
+            else if REASON_CLASSES.contains(cn) { classes.insert(cn) }
+            else { FileHandle.standardError.write("candor: `unknown-alias \(name)` names unknown reason-class `\(cn)` — skipped\n".data(using: .utf8)!) }
+        }
+        if classes.isEmpty { FileHandle.standardError.write("candor: ignoring `unknown-alias \(name)` — no valid reason-class\n".data(using: .utf8)!) }
+        else { out[name] = classes }
+    }
+    return out
+}
+
 /// Map a raw `unknownWhy` token (e.g. `reflect:eval`, `callback:fetch`) to its normative reason class.
 public func reasonClass(_ why: String) -> String {
     let w = why.trimmingCharacters(in: .whitespaces).lowercased()
@@ -105,7 +141,7 @@ func warnRule(_ why: String, _ line: String) {
     FileHandle.standardError.write("candor: ignoring policy rule (\(why)): \(line)\n".data(using: .utf8)!)
 }
 
-public func parsePolicy(_ text: String) -> (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidRule]) {
+public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) -> (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidRule]) {
     var deny: [DenyRule] = [], allow: [AllowRule] = [], forbid: [ForbidRule] = []
     // Split LINES on \n / \r\n / bare \r — the three forms Java's Files.readAllLines (the reference parser)
     // breaks on. Splitting on \n ONLY let a classic-Mac (bare-\r) file collapse to ONE line: \r is also an
@@ -139,7 +175,8 @@ public func parsePolicy(_ text: String) -> (deny: [DenyRule], allow: [AllowRule]
                         if cn == "*" { unknownStar = true }
                         else if cn == "dynamic" { DYNAMIC_CLASSES.forEach { unknownClasses.insert($0) } }
                         else if REASON_CLASSES.contains(cn) { unknownClasses.insert(cn) }
-                        else { warnRule("unknown reason-class `\(cn)` (known: \(REASON_CLASSES.joined(separator: ",")); aliases: dynamic,*)", line) }
+                        else if let a = aliases[cn] { unknownClasses.formUnion(a) }  // ⟨0.19⟩ config unknown-alias
+                        else { warnRule("unknown reason-class/alias `\(cn)` (known: \(REASON_CLASSES.joined(separator: ",")); aliases: dynamic,*, or a config `unknown-alias`)", line) }
                     }
                     continue
                 }
