@@ -78,6 +78,17 @@ struct Report {
     // pre-⟨0.15⟩ one (the `extensions`-field precedent). Swift counts IMPORTS; the wire field name
     // stays `calls` per the spec ("call/import count as the engine counts it").
     var coverage: [(name: String, calls: Int)] = []
+    // ⟨0.21⟩ COMPLETENESS MANIFEST (COMPLETENESS-MANIFEST-DESIGN.md Gap 1): the analyzed-universe summary.
+    // `count` = the total analyzed-fn set (every analyzed fn incl. pure leaves = allFns.count, NOT the
+    // effectful-only `effectors` array), so a bare-envelope consumer computes `count − |functions|` = the
+    // pure count and distinguishes analyzed-pure from never-seen. `digest` = an FNV-1a-64 fingerprint of the
+    // sorted analyzed quals (same-engine re-scan agreement). ALWAYS emitted (the engine always enumerates
+    // its analyzed set). Set in main.swift from `analysis.allFns`.
+    var analyzed: (count: Int, digest: String)? = nil
+    // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): the target's own source candor could NOT read/parse — its effects
+    // are absent because never seen, not because pure. OMITTED when empty (a complete scan is byte-identical
+    // to a pre-rung report). Set in main.swift from `analysis.unanalyzed`.
+    var unanalyzed: [(path: String, reason: String)] = []
     // Is the `privacy/1` extension ACTIVE — does any effector reach one of its six sensor effects (in its
     // inferred OR direct set)? Computed from the effectors so the envelope discloses the extension exactly
     // when one of its effects appears (SPEC-EXTENSION-privacy.md "Wire disclosure").
@@ -96,6 +107,17 @@ struct Report {
         // ⟨0.15 staged⟩ `coverage` envelope field — omitted when nothing is uncovered (see above).
         if !coverage.isEmpty {
             env["coverage"] = ["uncovered": coverage.map { ["name": $0.name, "calls": $0.calls] as [String: Any] }]
+        }
+        // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 1): the analyzed-universe summary — ALWAYS present, so a consumer
+        // of the bare envelope tells analyzed-pure from never-seen (pure count = analyzed.count − |functions|).
+        if let a = analyzed {
+            env["analyzed"] = ["count": a.count, "digest": a.digest] as [String: Any]
+        }
+        // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): the source candor could NOT analyze — OMITTED when empty (a
+        // complete scan stays byte-identical), so a MACHINE reading --json sees the incompleteness a green
+        // report used to hide on stderr alone.
+        if !unanalyzed.isEmpty {
+            env["unanalyzed"] = unanalyzed.map { ["path": $0.path, "reason": $0.reason] as [String: Any] }
         }
         return env
     }

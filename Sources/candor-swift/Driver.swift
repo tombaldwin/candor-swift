@@ -26,6 +26,13 @@ struct Analysis {
     var tablesAcc: [String: Set<String>]
     var incompleteAcc: [String: Set<String>]
     var invisibleAcc: [String: Set<String>]
+    // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): the TARGET's own .swift source candor could NOT read/parse —
+    // a file whose `String(contentsOfFile:)` returned nil (unreadable: EACCES, invalid UTF-8, gone).
+    // (SwiftSyntax's Parser.parse is error-TOLERANT — always returns a tree, never throws — so the
+    // practical swift "unanalyzed" case is an unreadable file, not a parse failure.) Its effects are
+    // absent NOT because pure but because never seen; carried into the report + gate verdict so a gate
+    // over skipped source fails closed, never green. (path, reason), in discovery order.
+    var unanalyzed: [(path: String, reason: String)]
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -80,8 +87,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
 
     var collectors: [DeclCollector] = []
+    // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a file that fails to read used to be SILENTLY skipped by the
+    // `guard…else { continue }` — a green report would then hide the code candor never saw. Track it.
+    var unanalyzed: [(path: String, reason: String)] = []
     for p in sourcePaths {
-        guard let src = try? String(contentsOfFile: p, encoding: .utf8) else { continue }
+        guard let src = try? String(contentsOfFile: p, encoding: .utf8) else {
+            unanalyzed.append((path: p, reason: "source failed to read"))
+            continue
+        }
         let tree = Parser.parse(source: src)
         let rel = p.hasPrefix(rootDir) ? String(p.dropFirst(rootDir.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/")) : p
         let c = DeclCollector(file: rel, tree: tree)
@@ -634,10 +647,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     let incompleteAcc = propagate(incompleteD, over: edges)
     let invisibleAcc = propagate(blindDirect, over: edges)
 
+    // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a LOUD stderr line naming the count (like rust/java), so a
+    // human sees the incompleteness even when they don't read the JSON. The machine-legible disclosure
+    // rides the report's `unanalyzed` + the gate verdict (built in main.swift from this array).
+    if !unanalyzed.isEmpty {
+        FileHandle.standardError.write(
+            "candor-swift: \(unanalyzed.count) source file(s) could not be read — NOT analyzed (their effects are unseen, not pure); see `unanalyzed` in the report\n"
+                .data(using: .utf8)!)
+    }
     return Analysis(
         allFns: allFns, conformers: conformers, importCounts: importCounts,
         internalModules: internalModules, direct: direct, edges: edges, whyMap: whyMap,
         locOf: locOf, entryPoints: entryPoints, inferred: inferred, hostsAcc: hostsAcc,
         cmdsAcc: cmdsAcc, pathsAcc: pathsAcc, tablesAcc: tablesAcc, incompleteAcc: incompleteAcc,
-        invisibleAcc: invisibleAcc)
+        invisibleAcc: invisibleAcc, unanalyzed: unanalyzed)
 }

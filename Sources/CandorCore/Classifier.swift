@@ -32,6 +32,28 @@ public func isHarnessPath(_ p: String) -> Bool {
     return false
 }
 
+// ⟨0.21⟩ COMPLETENESS MANIFEST — an opaque, within-engine-stable fingerprint of a SORTED qual set:
+// FNV-1a 64-bit over the newline-joined UTF-8 quals, lowercase zero-padded 16-hex. Dependency-free +
+// deterministic: it changes iff the set changes, so a same-engine re-scan of unchanged input agrees.
+// NOT cryptographic and NOT cross-engine comparable (qualifiers differ) — a re-scan-agreement check.
+// Ported byte-for-byte from candor-java's ReportWriter.fnv1aHex (UInt64 overflow-wrapping `&*`/`&+`/`^`).
+public func fnv1aHex(_ sortedQuals: [String]) -> String {
+    var h: UInt64 = 0xcbf29ce484222325           // FNV offset basis
+    let prime: UInt64 = 0x100000001b3            // FNV prime
+    for q in sortedQuals {
+        for b in q.utf8 {
+            h ^= UInt64(b)
+            h = h &* prime
+        }
+        h ^= UInt64(0x0a)                        // the '\n' separator (matches java's `h ^= '\n'`)
+        h = h &* prime
+    }
+    // `%llx` (NOT `%x`): Swift's String(format:) reads `%x` as a 32-bit C `unsigned int`, which would
+    // TRUNCATE the 64-bit hash to its low 32 bits. `%llx` reads the full UInt64 — matching java's `%016x`
+    // over a `long`, so the SPEC describes ONE algorithm across engines.
+    return String(format: "%016llx", h)
+}
+
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // κ — the curated classifier (the platform frontier; third-party modules are the LEDGER's job)
 // ════════════════════════════════════════════════════════════════════════════════════════════════

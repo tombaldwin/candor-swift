@@ -344,6 +344,9 @@ let hostsAcc = analysis.hostsAcc, cmdsAcc = analysis.cmdsAcc
 let pathsAcc = analysis.pathsAcc, tablesAcc = analysis.tablesAcc
 let incompleteAcc = analysis.incompleteAcc
 let invisibleAcc = analysis.invisibleAcc
+// ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): the target source candor could NOT read/parse — rides the report
+// (`unanalyzed`) + drives the fail-closed gate verdict + exit 2 below.
+let unanalyzedUnits = analysis.unanalyzed
 // ⟨0.20⟩ Net destination-class partners from `.candor/config` — read ONCE here, used by the report's per-fn
 // `netClass` field (below) and the gate (deny Net[unknown-host]); the SAME set both surfaces resolve.
 let netPartners = parseNetPartners(discoverConfigText(targetPath: target))
@@ -407,6 +410,12 @@ var report = Report(
     provenance: Provenance(version: engineVersion, toolchain: "swiftsyntax", spec: specVersion),
     package: pkgName, effectors: effectors)
 report.coverage = unlisted.map { (name: $0.key, calls: $0.value) }   // ⟨0.15 staged⟩ SPEC §2 `coverage`
+// ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 1): the analyzed universe = every analyzed fn incl. pure leaves =
+// `allFns` (NOT the effectful-only `effectors`). count lets a bare-envelope consumer compute the pure
+// count; digest = FNV-1a-64 over the SORTED analyzed quals (same-input re-scan agreement).
+let analyzedQuals = allFns.map { $0.qual }.sorted()
+report.analyzed = (count: allFns.count, digest: fnv1aHex(analyzedQuals))
+report.unanalyzed = unanalyzedUnits   // ⟨0.21⟩ (Gap 2) omitted when empty by toJSON()
 let envelope: [String: Any] = report.toJSON()
 var cg: [String: [String]] = [:]
 for f in allFns { cg[f.qual] = (edges[f.qual] ?? []).sorted() }  // §2.2: EVERY analyzed fn a key
@@ -547,8 +556,9 @@ for v in gateViolations { FileHandle.standardError.write(("[\(v.rule)] \(v.detai
 // --gate-json ⟨0.8⟩: the machine verdict, from the SAME gateViolations that set the exit code — written
 // BEFORE the exit below (ok:true,[] when no gate is configured). Unreadable policy already exited 2 above;
 // AS-EFF-005 records join the same list, so the verdict and the exit code can never disagree.
-if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVersion, coverage: unlisted.map(\.key)) }   // ⟨0.15 staged⟩ advisory, verdict-preserving
-if policyPath != nil || baselinePath != nil {
+if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVersion, analyzedCount: allFns.count, unanalyzed: unanalyzedUnits, coverage: unlisted.map(\.key)) }   // ⟨0.15 staged⟩ advisory, verdict-preserving; ⟨0.21⟩ analyzed + fail-closed unanalyzed
+let gateConfigured = policyPath != nil || baselinePath != nil
+if gateConfigured {
     if gateViolations.isEmpty {
         if policyPath != nil {
             FileHandle.standardError.write("candor-swift: policy ✓\n".data(using: .utf8)!)
@@ -559,6 +569,16 @@ if policyPath != nil || baselinePath != nil {
         // own remedy verb; name it so the reader doesn't have to know. Append-only, after the pinned
         // summary line, same stream (stderr); exit code and --gate-json untouched.
         FileHandle.standardError.write("→ candor-swift fix-gate names the remedy for each\n".data(using: .utf8)!)
-        exit(1)
+        exit(1)   // a real violation dominates
     }
+}
+// ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a CONFIGURED gate over source candor could NOT analyze (unreadable
+// files) cannot certify — exit 2 (could-not-evaluate), the fail-closed posture. A real violation (exit 1,
+// above) dominates. A BARE scan with NO gate does not exit 2 — it discloses `unanalyzed` in the report and
+// stays exit 0. (Mirrors candor-java's gate fail-closed.)
+if gateConfigured && !unanalyzedUnits.isEmpty {
+    FileHandle.standardError.write(
+        "candor-swift: gate NOT certified — \(unanalyzedUnits.count) source file(s) could not be analyzed (see above); a gate cannot be green over unanalyzed code\n"
+            .data(using: .utf8)!)
+    exit(2)
 }

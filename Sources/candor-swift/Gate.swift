@@ -23,10 +23,19 @@ import CandorCore
 // present (transitively) on the fn — which class the security gate bit (NET-DESTINATION-CLASS-DESIGN.md).
 typealias GateViolation = (rule: String, fn: String, effects: [String], detail: String, reasonClass: [String], netClass: [String])
 func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: String,
+                      analyzedCount: Int,
+                      unanalyzed: [(path: String, reason: String)] = [],
                       coverage uncoveredModules: [String] = []) {
+    // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a gate over source candor could NOT analyze must NOT read green —
+    // its effects are invisible, so a `deny`/`allow` that "passes" over it is a false-pure. `ok` requires
+    // BOTH no violation AND a complete analysis (the caller exits 2 on this incomplete-but-clean path).
+    let incomplete = !unanalyzed.isEmpty
     var dict: [String: Any] = [
         "spec": spec,
-        "ok": violations.isEmpty,
+        "ok": violations.isEmpty && !incomplete,
+        // ⟨0.21⟩ (Gap 1) the analyzed-universe count, so a --gate-json consumer sees the scan's scope from the
+        // verdict alone (mirrors the report envelope's `analyzed`). ALWAYS present.
+        "analyzed": ["count": analyzedCount] as [String: Any],
         "violations": violations.map { v -> [String: Any] in
             var m: [String: Any] = ["rule": v.rule, "fn": v.fn, "effects": v.effects, "detail": v.detail]
             if !v.reasonClass.isEmpty { m["reasonClass"] = v.reasonClass }  // omitted when empty (byte-compat)
@@ -34,6 +43,13 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
             return m
         },
     ]
+    // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): the machine-legible incompleteness — the units candor couldn't
+    // analyze, so a CI/agent reading the JSON learns WHY the gate can't certify (the stderr line alone hid
+    // this from a machine). `incomplete:true` + the list; the caller exits 2 (could-not-fully-evaluate).
+    if incomplete {
+        dict["incomplete"] = true
+        dict["unanalyzed"] = unanalyzed.map { ["path": $0.path, "reason": $0.reason] as [String: Any] }
+    }
     // ⟨0.15 staged⟩ advisory coverage note (SPEC §2 `coverage` re-disclosure): when the scan's κ ledger
     // is non-empty, the verdict names the uncovered modules — VERDICT-PRESERVING (the ⟨0.9⟩ provable-purity
     // auto-disclosure precedent): ok/violations/exit are computed exactly as before, this field only ADDS.
