@@ -29,7 +29,7 @@ git clone --depth 1 https://github.com/tombaldwin/candor-swift /tmp/candor-swift
 /tmp/candor-swift/.build/release/candor-swift <package-dir>     # Tests/ and .build/ excluded
 ```
 
-Writes `<dir>/.candor/report.<pkg>.Swift.json` (the spec-0.18 envelope) plus two sidecars:
+Writes `<dir>/.candor/report.<pkg>.Swift.json` (the spec-0.19 envelope) plus two sidecars:
 `report.<pkg>.Swift.callgraph.json` (EVERY analyzed function a key — pure ones included, SPEC §2.2)
 and `report.<pkg>.Swift.hierarchy.json` (each local type → its declared supertypes/protocols, for
 dispatch-frontier queries). Add `--policy <file>` (or `CANDOR_POLICY`, or a checked-in

@@ -26,7 +26,7 @@ git clone --depth 1 https://github.com/tombaldwin/candor-swift /tmp/candor-swift
 /tmp/candor-swift/.build/release/candor-swift <package-dir>     # Tests/ and .build/ excluded
 ```
 
-Writes `<dir>/.candor/report.<pkg>.Swift.json` (the spec-0.18 envelope) plus two sidecars:
+Writes `<dir>/.candor/report.<pkg>.Swift.json` (the spec-0.19 envelope) plus two sidecars:
 `report.<pkg>.Swift.callgraph.json` (EVERY analyzed function a key — pure ones included, SPEC §2.2)
 and `report.<pkg>.Swift.hierarchy.json` (each local type → its declared supertypes/protocols, for
 dispatch-frontier queries). Add `--policy <file>` (or `CANDOR_POLICY`, or a checked-in
@@ -59,7 +59,7 @@ inactive. Record one: `candor-swift <dir> --json > baseline.json`.
 **Already installed? Report the version, then ask before upgrading.** If this project already has
 candor — a `.candor/` report dir, or `candor-swift` built/on PATH — do this BEFORE you scan. Run
 `candor-swift --version` (offline) and TELL THE USER plainly which build they're on, e.g. "This
-project is on candor-swift 0.18.0 (spec 0.19)". (On an older build that predates `--version`, read
+project is on candor-swift 0.19.0 (spec 0.19)". (On an older build that predates `--version`, read
 `candor.version`/`candor.spec` from an existing `.candor/report*.json` instead.)
 
 **Staying current — candor can't check for you, *you* can.** candor never makes a network call to
