@@ -95,6 +95,34 @@ final class PolicyTests: XCTestCase {
         XCTAssertEqual(parsePolicy("deny Net Unknown[nope] api", aliases: aliases).deny[0].unknownClasses, [])
     }
 
+    func testNetDestinationClassParsesAndClassifies() {
+        // `Net[unknown-host,known-telemetry]` narrows the Net membership to those destination classes.
+        let r = parsePolicy("deny Net[unknown-host,known-telemetry] dom").deny[0]
+        XCTAssertEqual(r.effects, ["Net"])
+        XCTAssertEqual(r.scope, "dom")
+        XCTAssertEqual(r.netClasses, ["known-telemetry", "unknown-host"])   // stored sorted
+        // bare Net and Net[*] ⇒ empty filter (all destinations)
+        XCTAssertEqual(parsePolicy("deny Net dom").deny[0].netClasses, [])
+        XCTAssertEqual(parsePolicy("deny Net[*] dom").deny[0].netClasses, [])
+        // an unknown destination-class is dropped-with-warning → empty filter (behaves like bare Net[*])
+        XCTAssertEqual(parsePolicy("deny Net[nope] dom").deny[0].netClasses, [])
+        // the classifier: telemetry (subdomain-aware), a model host, unresolved, and the config-partner path.
+        let none: Set<String> = []
+        XCTAssertEqual(netDestClass("sentry.io", none), "known-telemetry")
+        XCTAssertEqual(netDestClass("o1.ingest.sentry.io", none), "known-telemetry")   // subdomain-aware
+        XCTAssertEqual(netDestClass("api.openai.com", none), "known-partner")          // a model host is known-partner
+        XCTAssertEqual(netDestClass("evil.example.com", none), "unknown-host")
+        XCTAssertEqual(netDestClass("api.stripe.com", ["api.stripe.com"]), "known-partner")   // config partner
+        XCTAssertEqual(netDestClass("api.stripe.com", none), "unknown-host")           // partner is config-only
+        // netClassesOf: fail-closed unknown-host on a masked surface or a Net with no visible host.
+        XCTAssertEqual(netClassesOf(["sentry.io"], netIncomplete: false, partners: none), ["known-telemetry"])
+        XCTAssertEqual(netClassesOf(["sentry.io"], netIncomplete: true, partners: none), ["known-telemetry", "unknown-host"])
+        XCTAssertEqual(netClassesOf([], netIncomplete: false, partners: none), ["unknown-host"])
+        // net-partner config parsing: host-normalized, case-insensitive key, multi-value.
+        let p = parseNetPartners("net-partner Api.Stripe.com:443\nNET-PARTNER hooks.stripe.com\n")
+        XCTAssertEqual(p, ["api.stripe.com", "hooks.stripe.com"])
+    }
+
     func testReasonClassMapsRawReasons() {
         XCTAssertEqual(reasonClass("reflect:eval"), "reflect")
         XCTAssertEqual(reasonClass("dynamicMemberLookup"), "reflect")

@@ -65,11 +65,13 @@ if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "parsepolicy" {
     }
     let polDict: [String: Any] = [
         "deny": sortedByJson(pol.deny.map { r -> [String: Any] in
-            // Emit sorted `unknownClasses` ONLY when the rule narrows Unknown — a bare deny dump stays
-            // byte-identical to pre-feature, and the four-way parsepolicy differential pins reason-class
-            // parsing across engines (matches candor-java/rust/ts).
-            r.unknownClasses.isEmpty ? ["effects": r.effects, "scope": r.scope]
-                                     : ["effects": r.effects, "scope": r.scope, "unknownClasses": r.unknownClasses]
+            // Emit sorted `unknownClasses`/`netClasses` ONLY when the rule narrows Unknown/Net — a bare deny
+            // dump stays byte-identical to pre-feature, and the four-way parsepolicy differential pins the
+            // reason-class + destination-class parsing across engines (matches candor-java/rust/ts).
+            var m: [String: Any] = ["effects": r.effects, "scope": r.scope]
+            if !r.unknownClasses.isEmpty { m["unknownClasses"] = r.unknownClasses }
+            if !r.netClasses.isEmpty { m["netClasses"] = r.netClasses }
+            return m
         }),
         "allow": sortedByJson(pol.allow.map { ["effect": $0.effect, "scope": $0.scope, "values": $0.values] }),
         "forbid": sortedByJson(pol.forbid.map { ["from": $0.from, "to": $0.to] }),
@@ -342,6 +344,9 @@ let hostsAcc = analysis.hostsAcc, cmdsAcc = analysis.cmdsAcc
 let pathsAcc = analysis.pathsAcc, tablesAcc = analysis.tablesAcc
 let incompleteAcc = analysis.incompleteAcc
 let invisibleAcc = analysis.invisibleAcc
+// ⟨0.21⟩ Net destination-class partners from `.candor/config` — read ONCE here, used by the report's per-fn
+// `netClass` field (below) and the gate (deny Net[unknown-host]); the SAME set both surfaces resolve.
+let netPartners = parseNetPartners(discoverConfigText(targetPath: target))
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // Report (§2 envelope, spec 0.5) + sidecar (§2.2) + receipt + κ ledger (§7.14)
@@ -378,6 +383,13 @@ for qual in reportQuals.sorted() {
     if let p = pathsAcc[qual], !p.isEmpty { ef.paths = p.sorted() }
     if let t = tablesAcc[qual], !t.isEmpty, inf.contains("Db") { ef.tables = t.sorted() }
     if !invisible.isEmpty { ef.invisible = invisible }
+    // ⟨0.21⟩ Net destination-class: the classes in this fn's transitive Net surface — exact host-literal
+    // match, fail-closed unknown-host on a masked surface (incompleteAcc has Net) OR a Net with no visible host.
+    if inf.contains("Net") {
+        ef.netClass = netClassesOf(Array(hostsAcc[qual] ?? []),
+                                   netIncomplete: incompleteAcc[qual]?.contains("Net") ?? false,
+                                   partners: netPartners)
+    }
     effectors.append(ef)
 }
 // the coverage ledger: imported modules outside the platform frontier that the classifier doesn't
@@ -504,9 +516,12 @@ if let pp = policyPath {
     let reasonClassAcc = propagate(reasonClassDirect, over: edges)
     // ⟨0.19⟩ reason-class aliases (SPEC §6.2) from `.candor/config`, so `Unknown[<alias>]` resolves at the gate.
     let unknownAliases = parseUnknownAliases(discoverConfigText(targetPath: target))
+    // ⟨0.21⟩ `net-partner` hosts (NET-DESTINATION-CLASS-DESIGN.md): the SAME set the report netClass used
+    // (hoisted above), so `deny Net[unknown-host]` tolerates a declared partner and the verdict classifies it.
     gateViolations += evaluateGate(parsePolicy(text, aliases: unknownAliases), inferred: inferred, hostsAcc: hostsAcc,
                                    cmdsAcc: cmdsAcc, pathsAcc: pathsAcc, tablesAcc: tablesAcc,
-                                   incompleteAcc: incompleteAcc, cg: cg, reasonClassAcc: reasonClassAcc)
+                                   incompleteAcc: incompleteAcc, cg: cg, reasonClassAcc: reasonClassAcc,
+                                   netPartners: netPartners)
     // Provable-purity DISCLOSURE (advisory — NEVER a violation, so the exit/verdict are untouched): functions
     // in a pure/deny scope that PASS but are Unknown (the Unknown could hide the forbidden effect — a
     // fn/closure-injected port). Surfaces the gap automatically (eval/fixloop/DISPATCH-NOTE.md).

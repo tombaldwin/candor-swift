@@ -122,6 +122,24 @@ public func parseUnknownAliases(_ configText: String?) -> [String: Set<String>] 
     return out
 }
 
+/// ⟨0.21⟩ Parse `net-partner <host>` lines (NET-DESTINATION-CLASS-DESIGN.md) into a set of host-normalized
+/// partner hosts — the per-project `known-partner` set for the Net destination-class classifier. Multi-value
+/// (repeatable key); the value's `:port` is stripped + lowercased like `MODEL_HOSTS`. Case-insensitive key,
+/// mirroring `parseUnknownAliases` + the java/rust/ts config loaders. A partner is per-project — never universal.
+public func parseNetPartners(_ configText: String?) -> Set<String> {
+    var out = Set<String>()
+    guard let configText else { return out }
+    for raw in configText.split(separator: "\n", omittingEmptySubsequences: false) {
+        let line = raw.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0].trimmingCharacters(in: .whitespaces)
+        if line.isEmpty { continue }
+        let parts = line.split(maxSplits: 1, whereSeparator: { $0 == " " || $0 == "\t" })
+        guard parts.first?.lowercased() == "net-partner", parts.count > 1 else { continue }
+        let val = parts[1].trimmingCharacters(in: .whitespaces)
+        if !val.isEmpty { out.insert(hostPart(val).lowercased()) }
+    }
+    return out
+}
+
 /// Map a raw `unknownWhy` token (e.g. `reflect:eval`, `callback:fetch`) to its normative reason class.
 public func reasonClass(_ why: String) -> String {
     let w = why.trimmingCharacters(in: .whitespaces).lowercased()
@@ -150,7 +168,7 @@ public func parseClassFilter(_ spec: String?) -> Set<String>? {
     return out
 }
 
-public struct DenyRule { public var effects: [String]; public var scope: String; public var unknownClasses: [String]; public var raw: String }
+public struct DenyRule { public var effects: [String]; public var scope: String; public var unknownClasses: [String]; public var netClasses: [String]; public var raw: String }
 public struct AllowRule { public var effect: String; public var scope: String; public var values: [String]; public var raw: String }
 public struct ForbidRule { public var from: String; public var to: String; public var raw: String }
 
@@ -182,7 +200,22 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
             // Reason-class filter on an `Unknown` membership: empty ⇒ `Unknown[*]` (any reason — the bare
             // form); non-empty ⇒ only those classes. `*` = all; `dynamic` = every genuine class.
             var unknownClasses = Set<String>(); var unknownStar = false
+            // Destination-class filter on a `Net` membership (NET-DESTINATION-CLASS-DESIGN.md): empty ⇒
+            // `Net[*]` (any destination — the bare form); non-empty ⇒ only those classes. `*` = all.
+            var netClasses = Set<String>(); var netStar = false
             for tok in t.dropFirst() {
+                if tok.hasPrefix("Net["), tok.hasSuffix("]") {
+                    effects.append("Net")
+                    let inner = String(tok.dropFirst("Net[".count).dropLast())
+                    for rawCn in inner.split(separator: ",", omittingEmptySubsequences: false) {
+                        let cn = rawCn.trimmingCharacters(in: .whitespaces)
+                        if cn.isEmpty { continue }
+                        if cn == "*" { netStar = true }
+                        else if NET_DEST_CLASSES.contains(cn) { netClasses.insert(cn) }
+                        else { warnRule("unknown Net destination-class `\(cn)` (known: \(NET_DEST_CLASSES.sorted().joined(separator: ",")), or *)", line) }
+                    }
+                    continue
+                }
                 if tok.hasPrefix("Unknown["), tok.hasSuffix("]") {
                     effects.append("Unknown")
                     let inner = String(tok.dropFirst("Unknown[".count).dropLast())
@@ -200,11 +233,14 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
                 if EFFECTS.contains(tok) || tok == "Unknown" {
                     effects.append(tok)
                     if tok == "Unknown" { unknownStar = true } // bare Unknown ⇒ all classes
+                    if tok == "Net" { netStar = true }         // bare Net ⇒ all destinations
                 } else { scope = tok; break }
             }
             if effects.isEmpty { warnRule("deny names no known effect", line); continue }
             // `*` (or bare Unknown) means all classes ⇒ empty filter (matches any Unknown).
             let uc = unknownStar ? [] : unknownClasses.sorted()
+            // `*` (or bare Net) means all destinations ⇒ empty filter (matches any Net).
+            let nc = netStar ? [] : netClasses.sorted()
             // A2 under-gating lint: a narrowed scope omitting `unresolved` (the catch-all for holes the
             // engine couldn't classify) may silently tolerate exactly those — flag it (advisory). NOT via
             // warnRule: the rule is KEPT (it still gates), so "ignoring policy rule" would be wrong wording.
@@ -214,9 +250,9 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
             // Duplicate effect tokens dedup to a SET (`deny Net Net` ≡ `deny Net`) — the reference
             // parser's EffectSet semantics; without it the parsepolicy dump (conformance PART 4)
             // diverges on the battery's duplicate-token case. Gate verdicts were already unaffected.
-            deny.append(DenyRule(effects: Array(Set(effects)).sorted(), scope: scope, unknownClasses: uc, raw: line))
+            deny.append(DenyRule(effects: Array(Set(effects)).sorted(), scope: scope, unknownClasses: uc, netClasses: nc, raw: line))
         case "pure":
-            deny.append(DenyRule(effects: [], scope: t.count > 1 ? t[1] : "", unknownClasses: [], raw: line))
+            deny.append(DenyRule(effects: [], scope: t.count > 1 ? t[1] : "", unknownClasses: [], netClasses: [], raw: line))
         case "allow":
             guard t.count >= 3 else { warnRule("allow names no values", line); continue }
             guard ALLOW_EFFECTS.contains(t[1]) else {

@@ -181,7 +181,7 @@ func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion:
             continue
         }
         violations.append((rule: "AS-EFF-005", fn: qual, effects: real,
-            detail: "`\(qual)` gained effect { \(real.joined(separator: ", ")) } not present in the baseline", reasonClass: []))
+            detail: "`\(qual)` gained effect { \(real.joined(separator: ", ")) } not present in the baseline", reasonClass: [], netClass: []))
     }
     if !unknownOnly.isEmpty {
         let shown = unknownOnly.prefix(3).joined(separator: ", ")

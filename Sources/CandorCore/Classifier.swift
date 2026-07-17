@@ -189,6 +189,60 @@ public func isModelHost(_ hostLiteral: String) -> Bool {
     return false
 }
 
+/// ⟨0.21⟩ Curated telemetry / analytics / APM hosts — the `Net` destination-class `known-telemetry` set
+/// (NET-DESTINATION-CLASS-DESIGN.md), shared VERBATIM with the sibling engines (java `Literals.TELEMETRY_HOSTS`
+/// / rust `TELEMETRY_HOSTS` / ts), like `MODEL_HOSTS`. A benign observability endpoint. Matched by host,
+/// case-insensitive; a SUBDOMAIN of a listed host counts. Tight, high-precision STARTER set — mis-including
+/// an exfil-capable host would under-gate `deny Net[unknown-host]`.
+public let TELEMETRY_HOSTS: Set<String> = [
+    "sentry.io",
+    "bugsnag.com",
+    "rollbar.com",
+    "segment.io", "segment.com",
+    "mixpanel.com",
+    "amplitude.com",
+    "google-analytics.com", "analytics.google.com",
+    "datadoghq.com", "datadoghq.eu",
+    "newrelic.com", "nr-data.net",
+    "honeycomb.io",
+    "logtail.com",
+]
+
+/// Subdomain-aware membership of a `host[:port]` literal in a host `set` (mirrors java `Literals.hostInSet`).
+public func hostInSet(_ hostLiteral: String, _ set: Set<String>) -> Bool {
+    let host = hostPart(hostLiteral).lowercased()
+    if set.contains(host) { return true }
+    for e in set where host.hasSuffix("." + e) { return true }
+    return false
+}
+
+/// Whether an endpoint HOST literal is a known telemetry/analytics/APM host (`TELEMETRY_HOSTS`).
+public func isTelemetryHost(_ hostLiteral: String) -> Bool { hostInSet(hostLiteral, TELEMETRY_HOSTS) }
+
+/// ⟨0.21⟩ The `Net` DESTINATION CLASS of a host literal (NET-DESTINATION-CLASS-DESIGN.md): `known-telemetry`
+/// (curated), `known-partner` (config `net-partner` OR a model host — a declared-ish external API), else
+/// `unknown-host` — the HONEST default (candor makes no claim; the security gate bites this). `partners` is a
+/// per-project set (config-declared). Never fabricated onto a safe class: an unresolved host is unknown-host.
+/// Mirrors candor-java's `Literals.netDestClass`.
+public func netDestClass(_ hostLiteral: String, _ partners: Set<String>) -> String {
+    if isTelemetryHost(hostLiteral) { return "known-telemetry" }
+    if hostInSet(hostLiteral, partners) || isModelHost(hostLiteral) { return "known-partner" }
+    return "unknown-host"
+}
+
+/// ⟨0.21⟩ The closed `Net` destination-class vocabulary, for the `deny Net[<dest…>]` policy filter.
+public let NET_DEST_CLASSES: Set<String> = ["known-telemetry", "known-partner", "unknown-host"]
+
+/// ⟨0.21⟩ The `Net` destination classes an fn reaches — the SINGLE derivation shared by the report's
+/// `netClass` field and the gate: an exact host-literal match (`netDestClass`) for the visible (transitive)
+/// hosts, plus the fail-closed `unknown-host` when the Net surface is masked (`netIncomplete`) OR carries no
+/// visible host (a runtime endpoint). Call only for an fn with Net; returns sorted. Mirrors java/rust/ts.
+public func netClassesOf(_ hosts: [String], netIncomplete: Bool, partners: Set<String>) -> [String] {
+    var classes = Set(hosts.map { netDestClass($0, partners) })
+    if netIncomplete || hosts.isEmpty { classes.insert("unknown-host") }
+    return classes.sorted()
+}
+
 /// Curated model-provider SDK modules — the SPEC §1 ⟨0.13⟩ `Llm` model-SDK surface. A call into one of
 /// these clients' types dispatches a request → `Llm` + `Net` (the caller adds Net; the client IS network
 /// I/O). Keyed by the distinctive CLIENT TYPE NAME the module exports (candor-swift's syntactic engine

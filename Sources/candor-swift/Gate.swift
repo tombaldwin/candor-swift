@@ -19,7 +19,9 @@ import CandorCore
 // serializes the records verbatim. Written from the SAME list that sets the exit code, so it can't disagree.
 // ⟨0.19⟩ `reasonClass`: on an AS-EFF-006 violation whose `effects` include `Unknown`, all reason classes
 // present (transitively) on the fn — every reason the strict gate bit (SPEC §6.2). Empty otherwise.
-typealias GateViolation = (rule: String, fn: String, effects: [String], detail: String, reasonClass: [String])
+// ⟨0.21⟩ `netClass`: on an AS-EFF-006 violation whose `effects` include `Net`, all destination classes
+// present (transitively) on the fn — which class the security gate bit (NET-DESTINATION-CLASS-DESIGN.md).
+typealias GateViolation = (rule: String, fn: String, effects: [String], detail: String, reasonClass: [String], netClass: [String])
 func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: String,
                       coverage uncoveredModules: [String] = []) {
     var dict: [String: Any] = [
@@ -28,6 +30,7 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
         "violations": violations.map { v -> [String: Any] in
             var m: [String: Any] = ["rule": v.rule, "fn": v.fn, "effects": v.effects, "detail": v.detail]
             if !v.reasonClass.isEmpty { m["reasonClass"] = v.reasonClass }  // omitted when empty (byte-compat)
+            if !v.netClass.isEmpty { m["netClass"] = v.netClass }           // ⟨0.21⟩ omitted when empty
             return m
         },
     ]
@@ -61,7 +64,8 @@ func evaluateGate(_ pol: (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidR
                   hostsAcc: [String: Set<String>], cmdsAcc: [String: Set<String>],
                   pathsAcc: [String: Set<String>], tablesAcc: [String: Set<String>],
                   incompleteAcc: [String: Set<String>], cg: [String: [String]],
-                  reasonClassAcc: [String: Set<String>] = [:]) -> [GateViolation] {
+                  reasonClassAcc: [String: Set<String>] = [:],
+                  netPartners: Set<String> = []) -> [GateViolation] {
     var gateViolations: [GateViolation] = []
         for qual in inferred.keys.sorted() {
             let inf = inferred[qual] ?? []
@@ -81,12 +85,28 @@ func evaluateGate(_ pol: (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidR
                         hits.removeAll { $0 == "Unknown" }
                     }
                 }
+                // Net destination-class: a `deny Net[dest…]` keeps its Net hit only for a fn reaching one of
+                // those destination classes; else tolerate (only asserted-safe destinations). Fail-closed: a
+                // masked surface / a Net with no visible host is unknown-host (netClassesOf). The class travels
+                // the call graph via the (transitive) hostsAcc + incompleteAcc.
+                if hits.contains("Net"), !r.netClasses.isEmpty {
+                    let fnNet = netClassesOf(Array(hostsAcc[qual] ?? []),
+                                             netIncomplete: incompleteAcc[qual]?.contains("Net") ?? false,
+                                             partners: netPartners)
+                    if !fnNet.contains(where: { r.netClasses.contains($0) }) {
+                        hits.removeAll { $0 == "Net" }
+                    }
+                }
                 if !hits.isEmpty {
                     // When Unknown is denied, report ALL reason classes on the fn (transitive) — every reason bit.
                     let rc = hits.contains("Unknown") ? (reasonClassAcc[qual].map { $0.sorted() } ?? []) : []
+                    // ⟨0.21⟩ when Net is denied, report ALL of the fn's destination classes (transitive).
+                    let nc = hits.contains("Net") ? netClassesOf(Array(hostsAcc[qual] ?? []),
+                                                                 netIncomplete: incompleteAcc[qual]?.contains("Net") ?? false,
+                                                                 partners: netPartners) : []
                     gateViolations.append((rule: "AS-EFF-006", fn: qual, effects: hits,
                         detail: "`\(qual)` performs { \(hits.joined(separator: ", ")) }, forbidden by policy: `\(r.raw)`",
-                        reasonClass: rc))
+                        reasonClass: rc, netClass: nc))
                 }
             }
             for r in pol.allow where scopeMatches(qual, r.scope) && inf.contains(r.effect) {
@@ -114,12 +134,12 @@ func evaluateGate(_ pol: (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidR
                     let why = surface.isEmpty
                         ? "performs \(r.effect) with no visible literal — the surface cannot be certified"
                         : "reaches a structurally-invisible \(r.effect) endpoint a visible literal cannot mask"
-                    gateViolations.append((rule: "AS-EFF-008", fn: qual, effects: [r.effect], detail: "`\(qual)` \(why): `\(r.raw)`", reasonClass: []))
+                    gateViolations.append((rule: "AS-EFF-008", fn: qual, effects: [r.effect], detail: "`\(qual)` \(why): `\(r.raw)`", reasonClass: [], netClass: []))
                 } else {
                     let bad = surface.filter { !literalAllowed(r.effect, $0, r.values) }.sorted()
                     if !bad.isEmpty {
                         gateViolations.append((rule: "AS-EFF-008", fn: qual, effects: [r.effect],
-                            detail: "`\(qual)` reaches { \(bad.joined(separator: ", ")) } outside the allowlist: `\(r.raw)`", reasonClass: []))
+                            detail: "`\(qual)` reaches { \(bad.joined(separator: ", ")) } outside the allowlist: `\(r.raw)`", reasonClass: [], netClass: []))
                     }
                 }
             }
@@ -132,7 +152,7 @@ func evaluateGate(_ pol: (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidR
                     if scopeMatches(cur, r.to) {
                         gateViolations.append((rule: "AS-EFF-009", fn: fn, effects: [],
                             detail: "`\(fn)` (scope `\(r.from)`) transitively reaches `\(cur)` in forbidden scope `\(r.to)`: `\(r.raw)`",
-                            reasonClass: []))
+                            reasonClass: [], netClass: []))
                         break
                     }
                     stack.append(contentsOf: cg[cur] ?? [])
