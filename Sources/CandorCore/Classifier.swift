@@ -206,6 +206,11 @@ public let TELEMETRY_HOSTS: Set<String> = [
     "newrelic.com", "nr-data.net",
     "honeycomb.io",
     "logtail.com",
+    // ⟨0.20.1⟩ corpus-grown (a real-repo dogfood): more single-purpose analytics / session-replay / RUM
+    // providers — vendor-specific product domains only (no general-purpose host), so no under-gate risk.
+    "posthog.com", "plausible.io", "usefathom.com", "heapanalytics.com",
+    "fullstory.com", "hotjar.com", "logrocket.com",
+    "cloudflareinsights.com",
 ]
 
 /// Subdomain-aware membership of a `host[:port]` literal in a host `set` (mirrors java `Literals.hostInSet`).

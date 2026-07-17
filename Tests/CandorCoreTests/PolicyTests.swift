@@ -109,6 +109,7 @@ final class PolicyTests: XCTestCase {
         // the classifier: telemetry (subdomain-aware), a model host, unresolved, and the config-partner path.
         let none: Set<String> = []
         XCTAssertEqual(netDestClass("sentry.io", none), "known-telemetry")
+        XCTAssertEqual(netDestClass("us.i.posthog.com", none), "known-telemetry") // 0.20.1 corpus-grown
         XCTAssertEqual(netDestClass("o1.ingest.sentry.io", none), "known-telemetry")   // subdomain-aware
         XCTAssertEqual(netDestClass("api.openai.com", none), "known-partner")          // a model host is known-partner
         XCTAssertEqual(netDestClass("evil.example.com", none), "unknown-host")
