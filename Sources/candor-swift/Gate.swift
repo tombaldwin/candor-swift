@@ -17,13 +17,19 @@ import CandorCore
 // concerns — the denied set (006), the allowed effect (008), or [] (009 layer-flow); `detail` is the message
 // BODY (no `[AS-EFF-00x]` prefix — the rule carries the code). The console prints `[rule] detail`; --gate-json
 // serializes the records verbatim. Written from the SAME list that sets the exit code, so it can't disagree.
-typealias GateViolation = (rule: String, fn: String, effects: [String], detail: String)
+// ⟨0.19⟩ `reasonClass`: on an AS-EFF-006 violation whose `effects` include `Unknown`, all reason classes
+// present (transitively) on the fn — every reason the strict gate bit (SPEC §6.2). Empty otherwise.
+typealias GateViolation = (rule: String, fn: String, effects: [String], detail: String, reasonClass: [String])
 func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: String,
                       coverage uncoveredModules: [String] = []) {
     var dict: [String: Any] = [
         "spec": spec,
         "ok": violations.isEmpty,
-        "violations": violations.map { ["rule": $0.rule, "fn": $0.fn, "effects": $0.effects, "detail": $0.detail] as [String: Any] },
+        "violations": violations.map { v -> [String: Any] in
+            var m: [String: Any] = ["rule": v.rule, "fn": v.fn, "effects": v.effects, "detail": v.detail]
+            if !v.reasonClass.isEmpty { m["reasonClass"] = v.reasonClass }  // omitted when empty (byte-compat)
+            return m
+        },
     ]
     // ⟨0.15 staged⟩ advisory coverage note (SPEC §2 `coverage` re-disclosure): when the scan's κ ledger
     // is non-empty, the verdict names the uncovered modules — VERDICT-PRESERVING (the ⟨0.9⟩ provable-purity
@@ -76,8 +82,11 @@ func evaluateGate(_ pol: (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidR
                     }
                 }
                 if !hits.isEmpty {
+                    // When Unknown is denied, report ALL reason classes on the fn (transitive) — every reason bit.
+                    let rc = hits.contains("Unknown") ? (reasonClassAcc[qual].map { $0.sorted() } ?? []) : []
                     gateViolations.append((rule: "AS-EFF-006", fn: qual, effects: hits,
-                        detail: "`\(qual)` performs { \(hits.joined(separator: ", ")) }, forbidden by policy: `\(r.raw)`"))
+                        detail: "`\(qual)` performs { \(hits.joined(separator: ", ")) }, forbidden by policy: `\(r.raw)`",
+                        reasonClass: rc))
                 }
             }
             for r in pol.allow where scopeMatches(qual, r.scope) && inf.contains(r.effect) {
@@ -105,12 +114,12 @@ func evaluateGate(_ pol: (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidR
                     let why = surface.isEmpty
                         ? "performs \(r.effect) with no visible literal — the surface cannot be certified"
                         : "reaches a structurally-invisible \(r.effect) endpoint a visible literal cannot mask"
-                    gateViolations.append((rule: "AS-EFF-008", fn: qual, effects: [r.effect], detail: "`\(qual)` \(why): `\(r.raw)`"))
+                    gateViolations.append((rule: "AS-EFF-008", fn: qual, effects: [r.effect], detail: "`\(qual)` \(why): `\(r.raw)`", reasonClass: []))
                 } else {
                     let bad = surface.filter { !literalAllowed(r.effect, $0, r.values) }.sorted()
                     if !bad.isEmpty {
                         gateViolations.append((rule: "AS-EFF-008", fn: qual, effects: [r.effect],
-                            detail: "`\(qual)` reaches { \(bad.joined(separator: ", ")) } outside the allowlist: `\(r.raw)`"))
+                            detail: "`\(qual)` reaches { \(bad.joined(separator: ", ")) } outside the allowlist: `\(r.raw)`", reasonClass: []))
                     }
                 }
             }
@@ -122,7 +131,8 @@ func evaluateGate(_ pol: (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidR
                     if !seen.insert(cur).inserted { continue }
                     if scopeMatches(cur, r.to) {
                         gateViolations.append((rule: "AS-EFF-009", fn: fn, effects: [],
-                            detail: "`\(fn)` (scope `\(r.from)`) transitively reaches `\(cur)` in forbidden scope `\(r.to)`: `\(r.raw)`"))
+                            detail: "`\(fn)` (scope `\(r.from)`) transitively reaches `\(cur)` in forbidden scope `\(r.to)`: `\(r.raw)`",
+                            reasonClass: []))
                         break
                     }
                     stack.append(contentsOf: cg[cur] ?? [])

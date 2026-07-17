@@ -612,10 +612,15 @@ final class GateProcessTests: XCTestCase {
         let policy = root.appendingPathComponent("policy.txt")
 
         try "deny Net Unknown[dispatch] App\n".write(to: policy, atomically: true, encoding: .utf8)
-        let fired = try run(bin, [root.path, "--policy", policy.path])
+        let fired = try run(bin, [root.path, "--policy", policy.path, "--gate-json", "-"])
         XCTAssertEqual(fired.code, 1, "Unknown[dispatch] must fire on the caller inheriting a dispatch Unknown — stderr: \(fired.err)")
         XCTAssertTrue(fired.err.contains("AS-EFF-006") && fired.err.contains("App.entry"),
                       "expected a deny hit on App.entry; stderr: \(fired.err)")
+        // §6.2 ⟨0.19⟩: the --gate-json verdict carries reasonClass on the Unknown denial (on App.entry, transitive).
+        let obj = try JSONSerialization.jsonObject(with: Data(fired.out.utf8)) as? [String: Any]
+        let vs = (obj?["violations"] as? [[String: Any]]) ?? []
+        let entry = vs.first { ($0["fn"] as? String) == "App.entry" }
+        XCTAssertEqual(entry?["reasonClass"] as? [String], ["dispatch"], "reasonClass rides App.entry's Unknown verdict; verdict: \(fired.out)")
 
         try "deny Net Unknown[reflect] App\n".write(to: policy, atomically: true, encoding: .utf8)
         let tolerated = try run(bin, [root.path, "--policy", policy.path])
