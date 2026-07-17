@@ -133,6 +133,23 @@ public func reasonClass(_ why: String) -> String {
     return "unresolved" // conservative catch-all
 }
 
+/// ⟨0.20⟩ Parse a `--class <c,…>` filter into reason classes: the six tokens, `dynamic` (every genuine
+/// class), or `*` (all). nil spec ⇒ nil (no filter); an unknown token warns; an all-unknown spec ⇒ an
+/// empty set that matches nothing. Shared shape with the java/rust/ts `parseClassFilter`.
+public func parseClassFilter(_ spec: String?) -> Set<String>? {
+    guard let spec else { return nil }
+    var out = Set<String>()
+    for rawT in spec.split(separator: ",", omittingEmptySubsequences: false) {
+        let t = rawT.trimmingCharacters(in: .whitespaces)
+        if t.isEmpty { continue }
+        if t == "*" { return Set(REASON_CLASSES) }
+        if t == "dynamic" { DYNAMIC_CLASSES.forEach { out.insert($0) } }
+        else if REASON_CLASSES.contains(t) { out.insert(t) }
+        else { FileHandle.standardError.write("candor-swift: --class ignores unknown reason-class `\(t)` (known: \(REASON_CLASSES.joined(separator: ",")); aliases: dynamic,*)\n".data(using: .utf8)!) }
+    }
+    return out
+}
+
 public struct DenyRule { public var effects: [String]; public var scope: String; public var unknownClasses: [String]; public var raw: String }
 public struct AllowRule { public var effect: String; public var scope: String; public var values: [String]; public var raw: String }
 public struct ForbidRule { public var from: String; public var to: String; public var raw: String }

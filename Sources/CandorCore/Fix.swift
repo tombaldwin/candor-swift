@@ -233,11 +233,13 @@ public func unverifiedHoleRule(_ fn: String, _ inferred: Set<String>, _ deny: [D
 // `pure`/`deny E` layer PASSES a function that carries none of its forbidden effects — but if that function is
 // `Unknown` (an unresolvable call), the pass is UNVERIFIED: the Unknown could hide the very effect the rule
 // forbids (the fn/closure-port hole). Returns each such function + the `deny E Unknown <scope>` upgrade.
-public func unverified(_ fns: [UnverifiedFn], _ deny: [DenyRule]) -> (ok: Bool, holes: [UnverifiedHole]) {
+public func unverified(_ fns: [UnverifiedFn], _ deny: [DenyRule], classFilter: Set<String>? = nil) -> (ok: Bool, holes: [UnverifiedHole]) {
     var holes: [UnverifiedHole] = []
     for e in fns {
         // Same predicate + upgrade as the gate note (main.swift) — one source of truth for a hole.
         guard let r = unverifiedHoleRule(e.fn, e.inferred, deny) else { continue }
+        // ⟨0.20⟩ --class: keep only holes whose Unknown is of a matching reason class.
+        if let cf = classFilter, !e.unknownWhy.contains(where: { cf.contains(reasonClass($0)) }) { continue }
         let (rule, upgrade) = ruleUpgrade(r)
         holes.append(UnverifiedHole(fn: e.fn, rule: rule, unknownWhy: e.unknownWhy, upgrade: upgrade))
     }

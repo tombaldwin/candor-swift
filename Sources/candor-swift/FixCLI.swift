@@ -263,6 +263,7 @@ private struct QueryArgs {
     var policy: String?   // resolved policy path (nil ⇒ none configured)
     var strict = false
     var json = false
+    var classFilter: String?  // ⟨0.20⟩ --class <c,…> reason-class drill-down (unverified)
 }
 
 // Parse the canonical grammar for a query verb, accepting the deprecated positional aliases.
@@ -289,6 +290,9 @@ private func parseQueryArgs(_ args: [String], expectedVerbArgs: Int) -> QueryArg
         case "--policy":
             guard let v = it.next() else { fixDie("candor-swift: --policy requires a value") }
             policyFlag = v
+        case "--class":
+            guard let v = it.next() else { fixDie("candor-swift: --class requires a <class,…> value") }
+            q.classFilter = v
         default:
             if a == "--text" || a == "--human" { continue }  // candor-ts output-mode flags (#8); swift prose is the default — tolerate for cross-engine `candor <verb> --text`
             if a.hasPrefix("-") { fixDie("candor-swift: unknown flag \(a)") }
@@ -412,7 +416,7 @@ func runUnverifiedCLI(_ args: [String]) -> Never {
     guard let fns = loadUnverifiedFns(prefix: prefix) else {
         fixDie("candor-swift unverified: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
     }
-    let (ok, holes) = unverified(fns, deny)
+    let (ok, holes) = unverified(fns, deny, classFilter: parseClassFilter(q.classFilter))
     emitJSON(["ok": ok, "unverified": holes.map { $0.toJSON() }])
     exit(q.strict && !ok ? 1 : 0)
 }
