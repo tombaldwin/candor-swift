@@ -62,7 +62,13 @@ if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "parsepolicy" {
         return xs.sorted { key($0) < key($1) }
     }
     let polDict: [String: Any] = [
-        "deny": sortedByJson(pol.deny.map { ["effects": $0.effects, "scope": $0.scope] }),
+        "deny": sortedByJson(pol.deny.map { r -> [String: Any] in
+            // Emit sorted `unknownClasses` ONLY when the rule narrows Unknown — a bare deny dump stays
+            // byte-identical to pre-feature, and the four-way parsepolicy differential pins reason-class
+            // parsing across engines (matches candor-java/rust/ts).
+            r.unknownClasses.isEmpty ? ["effects": r.effects, "scope": r.scope]
+                                     : ["effects": r.effects, "scope": r.scope, "unknownClasses": r.unknownClasses]
+        }),
         "allow": sortedByJson(pol.allow.map { ["effect": $0.effect, "scope": $0.scope, "values": $0.values] }),
         "forbid": sortedByJson(pol.forbid.map { ["from": $0.from, "to": $0.to] }),
     ]
@@ -464,9 +470,18 @@ if let pp = policyPath {
         FileHandle.standardError.write("candor-swift: policy \(pp) could not be read; gate NOT enforced\n".data(using: .utf8)!)
         exit(2)
     }
+    // Reason-scoped Unknown (REASON-SCOPED-UNKNOWN-DESIGN.md): the Unknown reason CLASS must travel the
+    // call graph the same way the Unknown EFFECT does (whyMap is direct-only). Classify each fn's direct
+    // reasons to class tokens, then propagate transitively — so `deny E Unknown[reflect]` at a caller
+    // inheriting Unknown from a reflect-caused callee still fires (matches java/rust/ts reasonClassAcc).
+    var reasonClassDirect: [String: Set<String>] = [:]
+    for (fn, whys) in whyMap where !whys.isEmpty {
+        reasonClassDirect[fn] = Set(whys.map { reasonClass($0) })
+    }
+    let reasonClassAcc = propagate(reasonClassDirect, over: edges)
     gateViolations += evaluateGate(parsePolicy(text), inferred: inferred, hostsAcc: hostsAcc,
                                    cmdsAcc: cmdsAcc, pathsAcc: pathsAcc, tablesAcc: tablesAcc,
-                                   incompleteAcc: incompleteAcc, cg: cg)
+                                   incompleteAcc: incompleteAcc, cg: cg, reasonClassAcc: reasonClassAcc)
     // Provable-purity DISCLOSURE (advisory — NEVER a violation, so the exit/verdict are untouched): functions
     // in a pure/deny scope that PASS but are Unknown (the Unknown could hide the forbidden effect — a
     // fn/closure-injected port). Surfaces the gap automatically (eval/fixloop/DISPATCH-NOTE.md).

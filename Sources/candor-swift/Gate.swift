@@ -54,7 +54,8 @@ func evaluateGate(_ pol: (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidR
                   inferred: [String: Set<String>],
                   hostsAcc: [String: Set<String>], cmdsAcc: [String: Set<String>],
                   pathsAcc: [String: Set<String>], tablesAcc: [String: Set<String>],
-                  incompleteAcc: [String: Set<String>], cg: [String: [String]]) -> [GateViolation] {
+                  incompleteAcc: [String: Set<String>], cg: [String: [String]],
+                  reasonClassAcc: [String: Set<String>] = [:]) -> [GateViolation] {
     var gateViolations: [GateViolation] = []
         for qual in inferred.keys.sorted() {
             let inf = inferred[qual] ?? []
@@ -64,8 +65,16 @@ func evaluateGate(_ pol: (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidR
                 // marker (AS-EFF-003's concern; `deny Unknown <scope>` is the explicit knob). The
                 // reference engine, the rust engines and candor-ts exclude it identically; this
                 // engine wrongly counted an Unknown-only fn as a `pure` violation until 2026-07-09.
-                let hits = r.effects.isEmpty ? inf.sorted().filter { $0 != "Unknown" }
+                var hits = r.effects.isEmpty ? inf.sorted().filter { $0 != "Unknown" }
                                              : inf.sorted().filter { r.effects.contains($0) }
+                // Reason-scoped Unknown: a `deny E Unknown[classes]` keeps its Unknown hit only for a fn
+                // whose TRANSITIVE reason classes include one of those; no recorded reason ⇒ `unresolved`.
+                if hits.contains("Unknown"), !r.unknownClasses.isEmpty {
+                    let fnClasses = reasonClassAcc[qual].map { $0.isEmpty ? ["unresolved"] : Array($0) } ?? ["unresolved"]
+                    if !fnClasses.contains(where: { r.unknownClasses.contains($0) }) {
+                        hits.removeAll { $0 == "Unknown" }
+                    }
+                }
                 if !hits.isEmpty {
                     gateViolations.append((rule: "AS-EFF-006", fn: qual, effects: hits,
                         detail: "`\(qual)` performs { \(hits.joined(separator: ", ")) }, forbidden by policy: `\(r.raw)`"))

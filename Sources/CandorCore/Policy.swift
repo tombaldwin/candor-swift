@@ -80,7 +80,24 @@ public let EFFECTS: Set<String> = ["Net", "Fs", "Db", "Exec", "Env", "Clock", "I
 // its incompleteness off Net's — a runtime/masked host fails `allow Llm` closed too).
 public let ALLOW_EFFECTS: Set<String> = ["Net", "Exec", "Fs", "Db", "Llm"]
 
-public struct DenyRule { public var effects: [String]; public var scope: String; public var raw: String }
+// Reason-scoped Unknown (REASON-SCOPED-UNKNOWN-DESIGN.md): the CLOSED, cross-engine reason-class set a
+// `deny E Unknown[class…]` rule quantifies over. Must be IDENTICAL to candor-java's ReasonClass and the
+// rust/ts ports — `reasonClass(_:)` mirrors java's prefix-based ReasonClass.classify(String).
+public let REASON_CLASSES = ["reflect", "dispatch", "indirect", "native", "unresolved", "setup"]
+// `dynamic` = every GENUINE blind-spot class (excludes `setup`), incl. `unresolved` so it never under-gates.
+let DYNAMIC_CLASSES = ["reflect", "dispatch", "indirect", "native", "unresolved"]
+/// Map a raw `unknownWhy` token (e.g. `reflect:eval`, `callback:fetch`) to its normative reason class.
+public func reasonClass(_ why: String) -> String {
+    let w = why.trimmingCharacters(in: .whitespaces).lowercased()
+    if w.hasPrefix("reflect") || w == "dynamicmemberlookup" { return "reflect" }
+    if w.hasPrefix("native") { return "native" }
+    if w.hasPrefix("callback") || w.hasPrefix("closure") || w.hasPrefix("task-handoff") { return "indirect" }
+    if w.hasPrefix("dispatch") || w.hasPrefix("indy") || w.hasPrefix("ambiguous") { return "dispatch" }
+    if w.hasPrefix("missing-config") || w.hasPrefix("no-tsconfig") || w.hasPrefix("no-node_modules") { return "setup" }
+    return "unresolved" // conservative catch-all
+}
+
+public struct DenyRule { public var effects: [String]; public var scope: String; public var unknownClasses: [String]; public var raw: String }
 public struct AllowRule { public var effect: String; public var scope: String; public var values: [String]; public var raw: String }
 public struct ForbidRule { public var from: String; public var to: String; public var raw: String }
 
@@ -109,16 +126,43 @@ public func parsePolicy(_ text: String) -> (deny: [DenyRule], allow: [AllowRule]
         switch t[0] {
         case "deny":
             var effects: [String] = []; var scope = ""
+            // Reason-class filter on an `Unknown` membership: empty ⇒ `Unknown[*]` (any reason — the bare
+            // form); non-empty ⇒ only those classes. `*` = all; `dynamic` = every genuine class.
+            var unknownClasses = Set<String>(); var unknownStar = false
             for tok in t.dropFirst() {
-                if EFFECTS.contains(tok) || tok == "Unknown" { effects.append(tok) } else { scope = tok; break }
+                if tok.hasPrefix("Unknown["), tok.hasSuffix("]") {
+                    effects.append("Unknown")
+                    let inner = String(tok.dropFirst("Unknown[".count).dropLast())
+                    for rawCn in inner.split(separator: ",", omittingEmptySubsequences: false) {
+                        let cn = rawCn.trimmingCharacters(in: .whitespaces)
+                        if cn.isEmpty { continue }
+                        if cn == "*" { unknownStar = true }
+                        else if cn == "dynamic" { DYNAMIC_CLASSES.forEach { unknownClasses.insert($0) } }
+                        else if REASON_CLASSES.contains(cn) { unknownClasses.insert(cn) }
+                        else { warnRule("unknown reason-class `\(cn)` (known: \(REASON_CLASSES.joined(separator: ",")); aliases: dynamic,*)", line) }
+                    }
+                    continue
+                }
+                if EFFECTS.contains(tok) || tok == "Unknown" {
+                    effects.append(tok)
+                    if tok == "Unknown" { unknownStar = true } // bare Unknown ⇒ all classes
+                } else { scope = tok; break }
             }
             if effects.isEmpty { warnRule("deny names no known effect", line); continue }
+            // `*` (or bare Unknown) means all classes ⇒ empty filter (matches any Unknown).
+            let uc = unknownStar ? [] : unknownClasses.sorted()
+            // A2 under-gating lint: a narrowed scope omitting `unresolved` (the catch-all for holes the
+            // engine couldn't classify) may silently tolerate exactly those — flag it (advisory). NOT via
+            // warnRule: the rule is KEPT (it still gates), so "ignoring policy rule" would be wrong wording.
+            if !uc.isEmpty, !uc.contains("unresolved") {
+                FileHandle.standardError.write("candor: policy rule narrows `Unknown[…]` but omits `unresolved` — may UNDER-gate on holes the engine couldn't classify; add `unresolved` (or use `dynamic`): \(line)\n".data(using: .utf8)!)
+            }
             // Duplicate effect tokens dedup to a SET (`deny Net Net` ≡ `deny Net`) — the reference
             // parser's EffectSet semantics; without it the parsepolicy dump (conformance PART 4)
             // diverges on the battery's duplicate-token case. Gate verdicts were already unaffected.
-            deny.append(DenyRule(effects: Array(Set(effects)).sorted(), scope: scope, raw: line))
+            deny.append(DenyRule(effects: Array(Set(effects)).sorted(), scope: scope, unknownClasses: uc, raw: line))
         case "pure":
-            deny.append(DenyRule(effects: [], scope: t.count > 1 ? t[1] : "", raw: line))
+            deny.append(DenyRule(effects: [], scope: t.count > 1 ? t[1] : "", unknownClasses: [], raw: line))
         case "allow":
             guard t.count >= 3 else { warnRule("allow names no values", line); continue }
             guard ALLOW_EFFECTS.contains(t[1]) else {

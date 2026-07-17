@@ -596,4 +596,29 @@ final class GateProcessTests: XCTestCase {
         XCTAssertEqual(obj?["ok"] as? Bool, false, "stdout parses as the pure verdict — stdout: \(r.out.prefix(200))")
         XCTAssertTrue(r.err.contains("AS-EFF-006"), "the AS-EFF line goes to stderr: \(r.err)")
     }
+
+    // ── F: reason-scoped Unknown fires on the TRANSITIVE reason class (REASON-SCOPED-UNKNOWN-DESIGN.md)
+    // `App.entry` inherits a `dispatch:`-class Unknown from `Mid.go` (a protocol-existential dispatch).
+    // A `deny Net Unknown[dispatch]` must fire on the caller (the reason class travels the call graph),
+    // while `Unknown[reflect]` must tolerate it — the four-way behaviour proven in java/rust/ts.
+    func testReasonScopedUnknownFiresOnTransitiveClass() throws {
+        let bin = try binaryURL()
+        let root = try makeFixture("""
+        protocol Sink { func write() }
+        struct Mid { let s: Sink; func go() { s.write() } }
+        struct App { let m: Mid; func entry() { m.go() } }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let policy = root.appendingPathComponent("policy.txt")
+
+        try "deny Net Unknown[dispatch] App\n".write(to: policy, atomically: true, encoding: .utf8)
+        let fired = try run(bin, [root.path, "--policy", policy.path])
+        XCTAssertEqual(fired.code, 1, "Unknown[dispatch] must fire on the caller inheriting a dispatch Unknown — stderr: \(fired.err)")
+        XCTAssertTrue(fired.err.contains("AS-EFF-006") && fired.err.contains("App.entry"),
+                      "expected a deny hit on App.entry; stderr: \(fired.err)")
+
+        try "deny Net Unknown[reflect] App\n".write(to: policy, atomically: true, encoding: .utf8)
+        let tolerated = try run(bin, [root.path, "--policy", policy.path])
+        XCTAssertEqual(tolerated.code, 0, "Unknown[reflect] must tolerate a dispatch-class Unknown — stderr: \(tolerated.err)")
+    }
 }

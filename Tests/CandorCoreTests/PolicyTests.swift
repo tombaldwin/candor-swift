@@ -69,6 +69,32 @@ final class PolicyTests: XCTestCase {
         XCTAssertEqual(p.deny[0].effects, ["Unknown"])
     }
 
+    // ── reason-scoped Unknown (REASON-SCOPED-UNKNOWN-DESIGN.md — four-way with java/rust/ts) ──────────
+
+    func testReasonScopedUnknownParses() {
+        let r = parsePolicy("deny Net Unknown[dispatch,indirect] dom").deny[0]
+        XCTAssertEqual(r.effects, ["Net", "Unknown"])
+        XCTAssertEqual(r.scope, "dom")
+        XCTAssertEqual(r.unknownClasses, ["dispatch", "indirect"])   // stored sorted
+        // bare Unknown and Unknown[*] ⇒ empty filter (all classes)
+        XCTAssertEqual(parsePolicy("deny Net Unknown dom").deny[0].unknownClasses, [])
+        XCTAssertEqual(parsePolicy("deny Net Unknown[*] dom").deny[0].unknownClasses, [])
+        // dynamic alias = every genuine class incl. unresolved, excl. setup
+        XCTAssertEqual(parsePolicy("deny Net Unknown[dynamic] dom").deny[0].unknownClasses,
+                       ["dispatch", "indirect", "native", "reflect", "unresolved"])
+    }
+
+    func testReasonClassMapsRawReasons() {
+        XCTAssertEqual(reasonClass("reflect:eval"), "reflect")
+        XCTAssertEqual(reasonClass("dynamicMemberLookup"), "reflect")
+        XCTAssertEqual(reasonClass("native:extern"), "native")
+        XCTAssertEqual(reasonClass("callback:f"), "indirect")
+        XCTAssertEqual(reasonClass("dispatch:Dyn.f"), "dispatch")
+        XCTAssertEqual(reasonClass("ambiguous:same-name"), "dispatch")
+        XCTAssertEqual(reasonClass("unresolved"), "unresolved")
+        XCTAssertEqual(reasonClass("some-new-token"), "unresolved")   // conservative catch-all
+    }
+
     func testDenyDuplicateEffectTokensDedupToASet() {
         // `deny Net Net` ≡ `deny Net` — the reference parser's EffectSet semantics; the battery's
         // duplicate-token case would otherwise split the PART 4 grammar differential.
