@@ -12,7 +12,7 @@ import Foundation
 // consumes `policy`, `baseline` (the AS-EFF-005 regression guard, Baseline.swift) and `deps` (SPEC §2
 // report chaining, Deps.swift); the remaining java-only gate keys stay disclosed-inert. A key OUTSIDE
 // the vocabulary warns (typo protection: a misspelt `policy` must not silently drop the gate).
-let candorConfigKeys: Set<String> = ["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps", "unknown-alias"]
+let candorConfigKeys: Set<String> = ["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps", "unknown-alias", "unknown-ratchet"]
 
 // ⟨0.19⟩ Discover `.candor/config` TEXT anchored at `targetPath`: $CANDOR_CONFIG if set + readable, else the
 // nearest `.candor/config` walking UP, else nil. Read-only + LENIENT (no exit — the caller decides

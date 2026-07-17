@@ -102,7 +102,13 @@ func loadBaselineCallgraph(reportPath: String) -> BaselineSidecar {
 /// ⟨0.16⟩ A fn that gains ONLY Unknown (an unresolved call, no real effect) is ADVISORY, not a
 /// violation: Unknown is the §4 trust marker (`pure` policies exclude it) and on version bumps it is
 /// dominated by resolution noise — a single stderr note discloses it and the exit code is unchanged.
-func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion: String) -> [GateViolation] {
+/// ⟨unknown-ratchet⟩ OPT-IN (config `unknown-ratchet` / CANDOR_UNKNOWN_RATCHET, default OFF ⇒ the
+/// AS-EFF-005 contract is byte-identical when unset): flips an Unknown-ONLY gain from advisory to a
+/// violation (AS-EFF-005, exit 1). This makes `deny E Unknown` adoptable on legacy DI/reflection-heavy
+/// code — a fn already Unknown in the baseline shows no gain ⇒ GRANDFATHERED, only a NEWLY-introduced
+/// Unknown (a blind spot the baseline lacked) fails, so the strict gate ratchets the Unknown surface
+/// DOWN rather than failing everywhere on day one. Grandfather one by regenerating the baseline.
+func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion: String, unknownRatchet: Bool = false) -> [GateViolation] {
     // A configured-but-EMPTY value (bare `baseline` config line, CANDOR_BASELINE="") is invalid gate
     // input, not an un-adopted guard: the user declared a ratchet and named no file. java/scan/ts all
     // exit 2 here (verified 2026-07-10); swift briefly took the absent-file note path — family-aligned.
@@ -177,6 +183,17 @@ func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion:
         // the reported `effects` are the real set only (Unknown filtered from the shown effects).
         let real = gained.filter { $0 != "Unknown" }
         if real.isEmpty {
+            // ⟨unknown-ratchet⟩ OPT-IN (default OFF, so the ⟨0.16⟩ advisory posture — Unknown-gains as
+            // resolution noise — is preserved unless a team explicitly adopts the ratchet). ON: a NEWLY
+            // introduced Unknown FAILS (AS-EFF-005); the CURRENT Unknown surface is grandfathered (a fn
+            // already Unknown in the baseline shows no gain, so it is never reached here) and only a blind
+            // spot the baseline lacked is flagged. Regenerate the baseline to grandfather one.
+            if unknownRatchet {
+                violations.append((rule: "AS-EFF-005", fn: qual, effects: ["Unknown"],
+                    detail: "`\(qual)` gained an unresolved call (Unknown) not in the baseline — a NEW blind spot "
+                        + "(unknown-ratchet); resolve it, or regenerate the baseline to grandfather it", reasonClass: [], netClass: []))
+                continue
+            }
             unknownOnly.append(qual)
             continue
         }

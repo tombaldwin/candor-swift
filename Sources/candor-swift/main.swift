@@ -506,8 +506,18 @@ var gateViolations: [GateViolation] = []
 // unparseable / versionless / cross-build baseline); an ABSENT file is a note, guard inactive.
 var baselinePath: String? = ProcessInfo.processInfo.environment["CANDOR_BASELINE"]
 if baselinePath == nil, let b = candorConfig["baseline"] { baselinePath = b }
+// ⟨unknown-ratchet⟩ OPT-IN (default OFF): env CANDOR_UNKNOWN_RATCHET over config `unknown-ratchet`, the
+// same env-over-config precedence + truthiness as candor-java's Config.flag — env PRESENT (any value,
+// even empty) is true; else the config key present with an empty / true / 1 / yes value. When ON an
+// Unknown-only gain vs the baseline FAILS (AS-EFF-005) instead of being advisory.
+let unknownRatchet: Bool = {
+    if ProcessInfo.processInfo.environment["CANDOR_UNKNOWN_RATCHET"] != nil { return true }
+    guard let v = candorConfig["unknown-ratchet"] else { return false }
+    let lc = v.lowercased()
+    return v.isEmpty || lc == "true" || v == "1" || lc == "yes"
+}()
 if let bp = baselinePath {
-    gateViolations += checkBaseline(inferred: inferred, path: bp, engineVersion: engineVersion)
+    gateViolations += checkBaseline(inferred: inferred, path: bp, engineVersion: engineVersion, unknownRatchet: unknownRatchet)
 }
 if let pp = policyPath {
     guard let text = try? String(contentsOfFile: pp, encoding: .utf8) else {

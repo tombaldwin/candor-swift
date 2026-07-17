@@ -353,4 +353,70 @@ final class BaselineProcessTests: XCTestCase {
                       "the exit-2 note names the corrupt sidecar: \(r.err)")
         XCTAssertFalse(r.err.contains("[AS-EFF-005]"), "no gate wave is emitted when we fail closed: \(r.err)")
     }
+
+    // ── ⟨unknown-ratchet⟩ OPT-IN: a NEWLY-introduced Unknown FAILS; the existing surface is grandfathered ─
+    //
+    // The default AS-EFF-005 posture (above) treats an Unknown-only gain as ADVISORY (resolution noise on
+    // version bumps). The `unknown-ratchet` opt-in (config `unknown-ratchet` / CANDOR_UNKNOWN_RATCHET,
+    // default OFF) flips that to a FAILURE — making `deny E Unknown` adoptable on legacy DI/reflection code:
+    // freeze today's report as the baseline, and only a NEWLY-introduced Unknown fails, ratcheting the
+    // Unknown surface DOWN rather than failing everywhere on day one. A fn already Unknown in the baseline
+    // shows no gain ⇒ GRANDFATHERED. These pins need the callgraph sidecar (a pure→Unknown transition is a
+    // gain from ∅), so the baseline is recorded with `--out`.
+
+    /// Baseline shape: `alpha` already reaches an OPAQUE call (Unknown), `beta` is PURE. The scan that
+    /// records this freezes `alpha`'s Unknown as the grandfathered surface.
+    private static let ratchetBaselineSrc = """
+    import Foundation
+    func alpha(_ opaque: () -> Void) -> String { opaque(); return "a" }
+    func beta(_ s: String) -> String { s.uppercased() }
+    func fetchIt() { _ = URLSession.shared.dataTask(with: URL(string: "https://x.example.com/")!) { _, _, _ in } }
+    fetchIt()
+    """
+
+    /// Current shape: `alpha` STILL Unknown (grandfathered — no gain), `beta` NOW reaches an opaque call
+    /// too (a NEWLY-introduced Unknown — the blind spot the baseline lacked).
+    private static let ratchetCurrentSrc = """
+    import Foundation
+    func alpha(_ opaque: () -> Void) -> String { opaque(); return "a" }
+    func beta(_ s: String, _ opaque: () -> Void) -> String { opaque(); return s.uppercased() }
+    func fetchIt() { _ = URLSession.shared.dataTask(with: URL(string: "https://x.example.com/")!) { _, _, _ in } }
+    fetchIt()
+    """
+
+    /// OFF (default): both Unknown-only gains are advisory — exit 0, no [AS-EFF-005] line (byte-identical
+    /// to the ⟨0.16⟩ posture). ON: only the NEWLY-introduced Unknown (`beta`) fails — exit 1, exactly one
+    /// AS-EFF-005 record; `alpha` (already Unknown at baseline) is grandfathered.
+    func testUnknownRatchetGrandfathersExistingAndFailsNew() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let (dir, report) = try recordBaselineWithSidecar(bin, src: Self.ratchetBaselineSrc)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // OFF (default): the ratchet is not adopted — an Unknown-only gain stays advisory, exit 0.
+        let rootOff = try ProcessHarness.makePackage(Self.ratchetCurrentSrc)
+        defer { try? FileManager.default.removeItem(at: rootOff) }
+        let off = try ProcessHarness.run(bin, [rootOff.path, "--json"], env: ["CANDOR_BASELINE": report.path])
+        XCTAssertEqual(off.code, 0, "ratchet OFF: an Unknown-only gain is advisory (0 violations) — stderr: \(off.err)")
+        XCTAssertFalse(off.err.contains("[AS-EFF-005]"), "ratchet OFF: no violation line — \(off.err)")
+
+        // ON: only the NEWLY-introduced Unknown (`beta`) fails; `alpha` is grandfathered.
+        let rootOn = try ProcessHarness.makePackage(Self.ratchetCurrentSrc)
+        defer { try? FileManager.default.removeItem(at: rootOn) }
+        let verdict = rootOn.appendingPathComponent("verdict.json")
+        let on = try ProcessHarness.run(bin, [rootOn.path, "--json", "--gate-json", verdict.path],
+                                        env: ["CANDOR_BASELINE": report.path, "CANDOR_UNKNOWN_RATCHET": "1"])
+        XCTAssertEqual(on.code, 1, "ratchet ON: a newly-introduced Unknown fails (exit 1) — stderr: \(on.err)")
+        XCTAssertTrue(on.err.contains("[AS-EFF-005]"), "ratchet ON: the violation line is present — \(on.err)")
+        XCTAssertTrue(on.err.contains("beta") && on.err.contains("a NEW blind spot (unknown-ratchet)"),
+                      "ratchet ON: `beta` is the flagged new-Unknown blind spot — \(on.err)")
+        XCTAssertFalse(on.err.contains("`alpha`") && on.err.contains("[AS-EFF-005]") && on.err.contains("alpha` gained"),
+                       "ratchet ON: `alpha` is grandfathered, never flagged — \(on.err)")
+        // The verdict records EXACTLY the one new-Unknown regression.
+        let obj = try JSONSerialization.jsonObject(with: Data(contentsOf: verdict)) as? [String: Any]
+        XCTAssertEqual(obj?["ok"] as? Bool, false, "the machine verdict agrees with the exit code")
+        let viols = (obj?["violations"] as? [[String: Any]] ?? []).filter { $0["rule"] as? String == "AS-EFF-005" }
+        XCTAssertEqual(viols.count, 1, "exactly one AS-EFF-005 record — the new-Unknown `beta`: \(viols)")
+        XCTAssertEqual(viols.first?["fn"] as? String, "beta", "the sole regression is `beta`")
+        XCTAssertEqual(viols.first?["effects"] as? [String], ["Unknown"], "the reported effect is the new Unknown")
+    }
 }
