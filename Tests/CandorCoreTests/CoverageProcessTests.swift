@@ -269,4 +269,26 @@ final class CoverageProcessTests: XCTestCase {
         XCTAssertEqual(v["ok"] as? Bool, true)
         XCTAssertNil(v["coverage"], "fully covered → the verdict document keeps the exact pre-⟨0.15⟩ shape: \(v)")
     }
+
+    // ── SETUP warning (⟨0.19⟩, SPEC §6.2 §3): a manifest declaring deps but with no fetched .build/checkouts ──
+    func testSetupWarningOnUnfetchedDeps() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage("print(\"hi\")")
+        defer { try? FileManager.default.removeItem(at: root) }
+        // Declare a dependency; .build/checkouts is absent (deps not fetched) → the setup remediation fires.
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "App",
+          dependencies: [ .package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0") ],
+          targets: [ .executableTarget(name: "App") ])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        let r = try ProcessHarness.run(bin, [root.path])
+        XCTAssertTrue(r.err.contains("SETUP") && r.err.contains("swift build"),
+                      "unfetched declared deps must emit the SETUP remediation — stderr: \(r.err)")
+        // A fetched .build/checkouts silences it (no false setup nag on a resolved project).
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(".build/checkouts"), withIntermediateDirectories: true)
+        let r2 = try ProcessHarness.run(bin, [root.path])
+        XCTAssertFalse(r2.err.contains("SETUP"), "a fetched .build/checkouts must silence the setup warning — stderr: \(r2.err)")
+    }
 }

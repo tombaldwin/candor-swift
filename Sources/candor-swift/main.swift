@@ -289,11 +289,32 @@ if sourcePaths.isEmpty {
 
 // The package name — the first half of the §2 `hash` join key. Package.swift's name, else the dir.
 var pkgName = (rootDir as NSString).lastPathComponent
-if let manifest = try? String(contentsOfFile: (rootDir as NSString).appendingPathComponent("Package.swift"), encoding: .utf8),
-   let r = manifest.range(of: #"name:\s*"([^"]+)""#, options: .regularExpression) {
-    let m = String(manifest[r])
-    if let q1 = m.firstIndex(of: "\""), let q2 = m.lastIndex(of: "\""), q1 < q2 {
-        pkgName = String(m[m.index(after: q1)..<q2])
+if let manifest = try? String(contentsOfFile: (rootDir as NSString).appendingPathComponent("Package.swift"), encoding: .utf8) {
+    if let r = manifest.range(of: #"name:\s*"([^"]+)""#, options: .regularExpression) {
+        let m = String(manifest[r])
+        if let q1 = m.firstIndex(of: "\""), let q2 = m.lastIndex(of: "\""), q1 < q2 {
+            pkgName = String(m[m.index(after: q1)..<q2])
+        }
+    }
+    // ⟨0.19⟩ SETUP warning (SPEC §6.2 §3, the setup/genuine split): a manifest that declares dependencies but
+    // whose `.build/checkouts` is absent hasn't fetched them — the analog of a missing node_modules. Calls into
+    // those packages resolve to the κ coverage ledger as `invisible` (never silently pure), but a fuller
+    // analysis needs the deps present. A SCAN-LEVEL remediation only (no per-fn `setup` tag: SwiftSyntax does
+    // no cross-module resolution, so attributing a specific call to an unfetched dep can't be done SAFELY — a
+    // wrong `setup` tag would make a genuine dynamic hole tolerable by `Unknown[dynamic]`, an under-gate).
+    var declaredDeps = 0
+    var scan = manifest[...]
+    while let r = scan.range(of: #"\.package\(\s*(url|name|path):"#, options: .regularExpression) {
+        declaredDeps += 1
+        scan = scan[r.upperBound...]
+    }
+    let checkouts = (rootDir as NSString).appendingPathComponent(".build/checkouts")
+    var isDir: ObjCBool = false
+    let fetched = FileManager.default.fileExists(atPath: checkouts, isDirectory: &isDir) && isDir.boolValue
+    if declaredDeps > 0 && !fetched {
+        FileHandle.standardError.write(("candor-swift: SETUP — Package.swift declares \(declaredDeps) dependenc\(declaredDeps == 1 ? "y" : "ies") "
+            + "but .build/checkouts is absent (deps not fetched); calls into those packages resolve to the κ coverage "
+            + "ledger as `invisible`, not fully analyzed. Run `swift build` (or `swift package resolve`) first, then re-scan.\n").data(using: .utf8)!)
     }
 }
 
