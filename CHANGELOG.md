@@ -7,6 +7,12 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.22.0] — 2026-07-18
+
+Spec floor → **0.22** (the `verify` oracle rung, shipped on the java/ts arms). candor-swift declares `0.22`; the
+report and verdict schema are unchanged from 0.21, so this engine's output is byte-identical across the bump. No
+functional change to the Swift engine.
+
 ## [0.19.0] — 2026-07-17
 
 Reason-scoped `Unknown` policies (SPEC §6.2): `deny E Unknown[reflect,dispatch,indirect,native,unresolved,setup]`
