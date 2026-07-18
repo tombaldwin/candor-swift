@@ -687,7 +687,10 @@ final class DeclCollector: SyntaxVisitor {
             // this it landed in `params` as the useless container name and `for x in p` left the loop var
             // untyped — the structured-concurrency `for await x in stream` silent-pure hole. `[T]`/`[K:V]`
             // (no simple name) were already reaching here; this just also catches the angle-bracket forms.
-            else if let elem = arrayElementName(p.type) { info.arrayParams[pname] = elem }  // `[T]`/`AsyncStream<T>`/…
+            // `[T]`/`AsyncStream<T>`/…; resolve a GENERIC element to its protocol BOUND (`[T]` where
+            // `<T: Doer>` → element `Doer`), mirroring the plain-param resolution below, so `for x in items
+            // { x.go() }` dispatches over the bound exactly like an existential `[any Doer]` element does.
+            else if let elem = arrayElementName(p.type) { info.arrayParams[pname] = genericBounds[elem] ?? elem }
             else if let val = dictValueName(p.type) { info.dictParams[pname] = val }        // `[K: V]`/`Dictionary<K,V>`
             else if let tn = t.name {
                 // resolve a generic param to its protocol BOUND (`x: T` where `<T: Sender>` → dispatch P)

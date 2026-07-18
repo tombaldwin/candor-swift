@@ -413,4 +413,25 @@ final class DriverResolutionProcessTests: XCTestCase {
         XCTAssertNil(by["viaPure"], "a pure dynamicallyCall witness stays pure")
         XCTAssertEqual(ProcessHarness.inferred(by, "viaCallAsFn"), ["Fs"], "callAsFunction dispatch is unaffected")
     }
+
+    // A GENERIC-element array `[T]` where `<T: Doer>` iterates + dispatches over the bound, exactly like an
+    // existential `[any Doer]` element (which already worked). The generic element resolved to the bare "T"
+    // (not the protocol), so `for it in items { it.go() }` read silent-pure.
+    func testGenericArrayElementDispatchesOverBound() throws {
+        let by = try scan("""
+        import Foundation
+        func sink() { try? Data().write(to: URL(fileURLWithPath: "/tmp/x")) }
+        protocol Doer { func go() }
+        struct Impl: Doer { func go() { sink() } }
+        func viaGeneric<T: Doer>(_ items: [T]) { for it in items { it.go() } }      // Fs
+        func viaExistential(_ items: [any Doer]) { for it in items { it.go() } }    // Fs (control)
+        protocol Quiet { func run() }
+        struct Q: Quiet { func run() {} }
+        func viaPure<T: Quiet>(_ items: [T]) { for it in items { it.run() } }       // PURE
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaGeneric"), ["Fs"],
+                       "a generic `[T: Doer]` array element must dispatch over the bound")
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaExistential"), ["Fs"], "the existential control still carries")
+        XCTAssertNil(by["viaPure"], "a pure-protocol bound must stay pure (no over-fire)")
+    }
 }
