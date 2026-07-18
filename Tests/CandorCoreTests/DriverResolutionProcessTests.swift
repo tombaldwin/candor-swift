@@ -342,4 +342,29 @@ final class DriverResolutionProcessTests: XCTestCase {
         XCTAssertEqual(ProcessHarness.inferred(by, "viaFree"), ["Fs"],
                        "a bare free fn inside a protocol extension must still resolve by name (not filtered away)")
     }
+
+    // R33 — deinit-glue: a `let`/`var` LOCAL bound to a fresh CONSTRUCTION of a type with an effectful
+    // `deinit` runs that deinit at scope exit (deterministic under ARC for a non-escaping local), which
+    // read silent-pure (the deinit unit has no syntactic caller). Charge the constructing scope — but NOT
+    // an escaping value (factory-return / field-store / alias), mirroring rust Drop-glue's let-bound rule.
+    func testDeinitGlueChargesNonEscapingLocalConstruction() throws {
+        let by = try scan("""
+        import Foundation
+        class Resource { deinit { try? Data("x".utf8).write(to: URL(fileURLWithPath: "/tmp/x")) } }  // Fs
+        func makesLocal() { let r = Resource(); _ = r }                 // Fs — deinit at scope exit
+        func makesVar() { var r = Resource(); _ = r }                   // Fs
+        func factory() -> Resource { return Resource() }               // PURE — escapes (no binding)
+        class Holder { var r: Resource?; func stash() { self.r = Resource() } }  // PURE — stored, deferred
+        func aliases(_ existing: Resource) { let r = existing; _ = r }  // PURE — alias, not a construction
+        class Plain { deinit {} }
+        func makesPlain() { let p = Plain(); _ = p }                    // PURE — pure deinit
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "makesLocal"), ["Fs"],
+                       "a non-escaping local of an effectful-deinit type must charge the deinit at scope exit")
+        XCTAssertEqual(ProcessHarness.inferred(by, "makesVar"), ["Fs"], "a var binding charges too")
+        XCTAssertNil(by["factory"], "a factory that RETURNS its product does not run the deinit here (no over-charge)")
+        XCTAssertNil(by["Holder.stash"], "storing the value in a field defers the deinit — the constructor scope is pure")
+        XCTAssertNil(by["aliases"], "aliasing an existing value is not a fresh construction — never charged")
+        XCTAssertNil(by["makesPlain"], "a pure deinit contributes nothing")
+    }
 }

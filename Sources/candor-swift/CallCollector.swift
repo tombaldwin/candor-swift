@@ -133,8 +133,15 @@ final class CallCollector: SyntaxVisitor {
         self.localProtocols = localProtocols
         self.returns = returns
         self.enclosingType = info.enclosingType
+        self.returnedNames = info.body.map { ReturnedNameCollector.collect(Syntax($0)) } ?? []
         super.init(viewMode: .sourceAccurate)
     }
+
+    // Names this function RETURNS (any identifier mentioned in a `return <expr>`). A returned binding
+    // ESCAPES — its deinit runs at the CALLER, not here — so R33 deinit-glue must skip it. Skipping on
+    // any return-mention is the SAFE direction: a missed charge only under-reports, whereas charging the
+    // pervasive `let v = View(); …; return v` factory pattern (SwiftUI `makeNSView`) would fabricate.
+    private let returnedNames: Set<String>
 
     /// Peel the effect-transparent wrappers Swift puts around calls — `try`/`try?`/`await`/`!`/`?`.
     /// (The GRDB interop probe: every `try statement.execute()` receiver failed to type because
@@ -1548,7 +1555,27 @@ final class CallCollector: SyntaxVisitor {
                     else {
                         // ctor or unambiguous factory — one resolver for both (rootOf handles peeling)
                         let info = rootOf(v)
-                        if let t = info.root, info.isVar { vars[name] = t }
+                        if let t = info.root, info.isVar {
+                            vars[name] = t
+                            // R33 — deinit-glue: a `let`/`var` LOCAL bound to a fresh CONSTRUCTION (this
+                            // ctor/factory-CALL branch, never a bare-identifier ALIAS) of a type with an
+                            // effectful `deinit` runs that deinit at scope exit — deterministic under ARC for
+                            // a non-escaping local, but silent-pure because the deinit unit has no syntactic
+                            // caller (mirrors rust Drop-glue). Edge to `<t>.deinit`; resolveQual DROPS it when
+                            // the type has no deinit unit (pure/none → nothing), so this self-filters with no
+                            // deinitType threading. An escaping value — `return Type()` (no binding),
+                            // `self.f = Type()` (assignment), `let r = other` (alias, not this branch) — is
+                            // never charged, so a factory that RETURNS its product stays pure (no over-charge).
+                            if localTypes.contains(t), !returnedNames.contains(name) {
+                                // A `propertyEdges` SOFT edge, NOT a typed Call: it resolves via resolveQual
+                                // and DROPS SILENTLY when the type has no deinit unit (a struct/pure class →
+                                // nothing), never reaching the external-protocol member-dispatch fallback that
+                                // would fabricate Unknown for any type conforming to a non-pure external
+                                // protocol (the ActivityAttributes over-charge). A real class deinit resolves;
+                                // an inherited deinit chains via the supertype resolution there.
+                                propertyEdges.insert("\(t).deinit")
+                            }
+                        }
                         // a collection TRANSFORM result keeps the element type: `let active = cs.filter {…}`
                         // (then `for c in active` resolves). Element-preserving transforms only.
                         else if let elem = elementTypeOf(v0) { arrayElem[name] = elem }
@@ -1600,4 +1627,28 @@ final class CallCollector: SyntaxVisitor {
         }
         return .visitChildren
     }
+}
+
+/// Collects every identifier mentioned in a `return <expr>` within a function body — the escape signal
+/// R33 deinit-glue uses to avoid charging a returned (escaping) local. Descends into the return
+/// expression only; a `return v as View` / `return v!` / `return f(v)` all mark `v` as escaping.
+private final class ReturnedNameCollector: SyntaxVisitor {
+    private var names: Set<String> = []
+    static func collect(_ node: Syntax) -> Set<String> {
+        let c = ReturnedNameCollector(viewMode: .sourceAccurate)
+        c.walk(node)
+        return c.names
+    }
+    override func visit(_ node: ReturnStmtSyntax) -> SyntaxVisitorContinueKind {
+        if let expr = node.expression {
+            for ref in expr.tokens(viewMode: .sourceAccurate) where ref.tokenKind.isIdentifier {
+                names.insert(ref.text)
+            }
+        }
+        return .visitChildren
+    }
+}
+
+private extension TokenKind {
+    var isIdentifier: Bool { if case .identifier = self { return true }; return false }
 }
