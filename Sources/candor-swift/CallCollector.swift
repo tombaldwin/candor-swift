@@ -971,6 +971,12 @@ final class CallCollector: SyntaxVisitor {
                 // desugars `f(args)` on a non-function value to `f.callAsFunction(args)`). Edge to the
                 // type's callAsFunction unit (if it has one; resolveQual drops the edge otherwise).
                 calls.append(Call(path: "\(t).callAsFunction", leaf: "callAsFunction", strArg: lit, typed: true, args: argKinds(node), argTypes: argTypesOf(node)))
+                // R35 — a `@dynamicCallable` type: `c(1, 2)` desugars to `c.dynamicallyCall(withArguments:)`
+                // (or `withKeywordArguments:`), whose effectful body read silent-pure since the desugar was
+                // invisible. Edge to the `dynamicallyCall` witness (soft edge — resolveQual drops it when the
+                // type isn't @dynamicCallable / declares no such method, so an ordinary local-type value that
+                // is not actually callable adds nothing).
+                propertyEdges.insert("\(t).dynamicallyCall")
             } else if let et = enclosingType, !boundLocals.contains(name), !localFreeFns.contains(name),
                       !declaredTypes.contains(et), let eff = kappaMember(root: et, member: name) {
                 // an IMPLICIT-self member call inside an `extension <κ-platform-type>`: `launch()` inside

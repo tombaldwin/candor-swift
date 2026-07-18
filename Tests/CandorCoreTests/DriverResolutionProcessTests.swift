@@ -393,4 +393,24 @@ final class DriverResolutionProcessTests: XCTestCase {
         XCTAssertNil(by["genNumeric"], "a std Numeric bound has no local witness — must not fabricate")
         XCTAssertNil(by["stdInt"], "plain Int + Int is the stdlib operator — pure")
     }
+
+    // R35 — a `@dynamicCallable` value: `c(1, 2)` desugars to `c.dynamicallyCall(withArguments:)`, whose
+    // effectful body read silent-pure (the desugar was invisible). Edge to the witness; a pure witness
+    // stays pure, and `callAsFunction` (the other value-call desugar) is unaffected.
+    func testDynamicCallableDispatchesToWitness() throws {
+        let by = try scan("""
+        import Foundation
+        func sink() { try? Data().write(to: URL(fileURLWithPath: "/tmp/x")) }  // Fs
+        @dynamicCallable struct Caller { func dynamicallyCall(withArguments a: [Int]) -> Int { sink(); return 0 } }
+        func viaDynCall(c: Caller) { _ = c(1, 2) }                 // Fs
+        @dynamicCallable struct PureCaller { func dynamicallyCall(withArguments a: [Int]) -> Int { 0 } }
+        func viaPure(c: PureCaller) { _ = c(1) }                   // PURE
+        struct CallF { func callAsFunction() { sink() } }
+        func viaCallAsFn(c: CallF) { c() }                         // Fs — callAsFunction still works
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaDynCall"), ["Fs"],
+                       "c(args) on a @dynamicCallable type must dispatch to dynamicallyCall")
+        XCTAssertNil(by["viaPure"], "a pure dynamicallyCall witness stays pure")
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaCallAsFn"), ["Fs"], "callAsFunction dispatch is unaffected")
+    }
 }
