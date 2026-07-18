@@ -1268,6 +1268,21 @@ final class CallCollector: SyntaxVisitor {
             if localOperand {
                 calls.append(Call(path: opName, leaf: opName, strArg: nil, typed: false, args: opArgs, argTypes: opTypes, unqualified: true))
             }
+            // GENERIC / protocol-typed operand: `a + b` where `a: T: P` and `P` declares the operator —
+            // dispatch to `P`'s conformers' operator WITNESSES via bounded CHA, the operator analog of the
+            // generic-METHOD path (`x.act()` on `x: T: P` already resolves; the operator did not, so an
+            // effectful `static func + ` witness read silent-pure). The concrete-operand edge above needs a
+            // localTypes type; a generic/protocol operand has none. The Driver's CHA gates on `P` actually
+            // declaring `opName`, so a std operator over a `Numeric`/`Comparable` bound (no local conformer /
+            // not a declared requirement) resolves to nothing — no fabrication.
+            if !localOperand {
+                for operandExpr in [elems[i], (i + 2 < elems.count ? elems[i + 2] : nil)].compactMap({ $0 }) {
+                    if let dr = Self.peel(operandExpr).as(DeclReferenceExprSyntax.self),
+                       let proto = protoTyped[dr.baseName.text] {
+                        protoDispatches.append((proto, opName))
+                    }
+                }
+            }
             i += 2
         }
         return .visitChildren

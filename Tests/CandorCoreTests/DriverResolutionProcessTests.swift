@@ -367,4 +367,30 @@ final class DriverResolutionProcessTests: XCTestCase {
         XCTAssertNil(by["aliases"], "aliasing an existing value is not a fresh construction — never charged")
         XCTAssertNil(by["makesPlain"], "a pure deinit contributes nothing")
     }
+
+    // R34 — a GENERIC/protocol-typed operator: `a + b` where `a: T: P` and `P` declares the operator
+    // dispatches to `P`'s conformers' operator witnesses (bounded CHA), the operator analog of the
+    // generic-method path. An effectful `static func +` witness reached only through a generic bound read
+    // silent-pure. A pure conformer / a std `Numeric` bound / plain `Int + Int` must stay pure.
+    func testGenericOperatorDispatchesToConformerWitness() throws {
+        let by = try scan("""
+        import Foundation
+        func sink() { try? Data().write(to: URL(fileURLWithPath: "/tmp/x")) }  // Fs
+        protocol EAdd { static func + (a: Self, b: Self) -> Self }
+        struct Eff: EAdd { static func + (a: Eff, b: Eff) -> Eff { sink(); return a } }  // Fs witness
+        func genEff<T: EAdd>(_ a: T, _ b: T) -> T { a + b }        // Fs via bounded CHA
+        func concrete(_ a: Eff, _ b: Eff) -> Eff { a + b }         // Fs (concrete operand)
+        protocol PAdd { static func + (a: Self, b: Self) -> Self }
+        struct Pure: PAdd { static func + (a: Pure, b: Pure) -> Pure { a } }  // pure
+        func genPure<T: PAdd>(_ a: T, _ b: T) -> T { a + b }       // PURE — no over-fire
+        func genNumeric<T: Numeric>(_ a: T, _ b: T) -> T { a + b } // PURE — std bound, no local witness
+        func stdInt() -> Int { 1 + 2 }                             // PURE
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "genEff"), ["Fs"],
+                       "a generic operator `a+b` on a `T: EAdd` bound must dispatch to the effectful witness")
+        XCTAssertEqual(ProcessHarness.inferred(by, "concrete"), ["Fs"], "the concrete-operand path still carries")
+        XCTAssertNil(by["genPure"], "a pure operator witness must stay pure (no over-fire)")
+        XCTAssertNil(by["genNumeric"], "a std Numeric bound has no local witness — must not fabricate")
+        XCTAssertNil(by["stdInt"], "plain Int + Int is the stdlib operator — pure")
+    }
 }
