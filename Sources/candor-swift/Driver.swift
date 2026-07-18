@@ -49,6 +49,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var caseAssocAll: [String: Set<String>] = [:]
     var staticFactoryFields: [(type: String, field: String, leaf: String)] = []
     var protocolMethods: [String: Set<String>] = [:]
+    var protocolSupers: [String: Set<String>] = [:]
     var conformers: [String: [String]] = [:]
     var localTypes: Set<String> = []
     var declaredTypes: Set<String> = []
@@ -135,6 +136,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (t, fs) in c.fieldDictValue { fieldDictValue[t, default: [:]].merge(fs) { a, _ in a } }
         for (cn, ts) in c.caseAssoc { caseAssocAll[cn, default: []].formUnion(ts) }
         for (pn, ms) in c.protocolMethods { protocolMethods[pn, default: []].formUnion(ms) }
+        for (pn, ss) in c.protocolSupers { protocolSupers[pn, default: []].formUnion(ss) }
         for (pn, ts) in c.conformers { conformers[pn, default: []].append(contentsOf: ts) }
         localTypes.formUnion(c.localTypes)
         declaredTypes.formUnion(c.declaredTypes)
@@ -322,6 +324,22 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var deferredCallbacks: [String: (indexes: Set<Int>, names: Set<String>)] = [:]
 
     let localProtocolNames = Set(protocolMethods.keys)  // loop-invariant: build once, not per fn
+    // Does protocol `p` declare `member` DIRECTLY, or INHERIT it from a (transitive) super-protocol
+    // (`protocol Sub: Sup` → `protocolSupers[Sub] = {Sup}`)? A super-protocol method IS callable on a
+    // `Sub`-bound / `any Sub` receiver, and the sub's own concrete conformers (which provide the inherited
+    // witness — `Impl.base`) resolve it via the `conformers[Sub]` CHA below. Walked transitively with a
+    // visited-set (a cyclic/deep hierarchy terminates); only genuine super-PROTOCOLs are in the map, so no
+    // unrelated type hijacks a Sub receiver. Without this `s.base()` (base ∈ Sup, `s: any Sub`) read
+    // silent-pure — the dispatch gate checked `protocolMethods[Sub]` alone.
+    func protoOrSuperDeclares(_ p: String, _ member: String) -> Bool {
+        var seen = Set<String>(), frontier = [p]
+        while let cur = frontier.popLast() {
+            if !seen.insert(cur).inserted { continue }
+            if protocolMethods[cur]?.contains(member) == true { return true }
+            frontier.append(contentsOf: protocolSupers[cur] ?? [])
+        }
+        return false
+    }
     // Collapse the const-string index: drop ambiguous (nil) names, keep only the unambiguous NAME→literal.
     var globalConstStrings: [String: String] = [:]
     for (k, v) in constStrings { if let v { globalConstStrings[k] = v } }
@@ -574,7 +592,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // Bounded CHA over local protocols (SPEC §4, 0.5): the protocol is local and declares the
         // method; resolve ≤12 conformers, otherwise honest Unknown.
         for d in cc.protoDispatches {
-            guard protocolMethods[d.proto]?.contains(d.member) == true else { continue }
+            guard protoOrSuperDeclares(d.proto, d.member) else { continue }
             let conf = conformers[d.proto] ?? []
             let impls = conf.compactMap { resolveQual("\($0).\(d.member)") }
             if !impls.isEmpty && impls.count <= 12 && impls.count == conf.count {
@@ -592,7 +610,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // stored. Instead require every conformer to be a KNOWN local type and edge to whichever accessor
         // units exist; an unresolvable/unbounded conformer set is honest Unknown.
         for d in cc.protoPropReads {
-            guard protocolMethods[d.proto]?.contains(d.member) == true else { continue }
+            guard protoOrSuperDeclares(d.proto, d.member) else { continue }
             let conf = conformers[d.proto] ?? []
             if conf.isEmpty || conf.count > 12 {
                 direct[f.qual, default: []].insert("Unknown")

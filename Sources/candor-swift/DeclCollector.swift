@@ -73,6 +73,7 @@ final class DeclCollector: SyntaxVisitor {
     var fieldArrayElem: [String: [String: String]] = [:]  // Type -> field -> ELEMENT type (`[T]` field)
     var fieldDictValue: [String: [String: String]] = [:]  // Type -> field -> VALUE type (`[K: V]` field)
     var protocolMethods: [String: Set<String>] = [:]   // protocol -> declared method names
+    var protocolSupers: [String: Set<String>] = [:]    // protocol -> its DIRECT super-protocols (`Sub: Sup`)
     var returnsTmp: [String: String?] = [:]            // fn leaf -> return type (nil = ambiguous)
     var conformers: [String: [String]] = [:]           // protocol -> conforming local types
     var caseAssoc: [String: Set<String>] = [:]         // enum case -> single-associated-value type(s) seen
@@ -368,6 +369,18 @@ final class DeclCollector: SyntaxVisitor {
             }
         }
         protocolMethods[node.name.text, default: []].formUnion(methods)
+        // SUPER-PROTOCOLS (`protocol Sub: Sup`): a Sup method is callable on a `Sub`-bound / `any Sub`
+        // receiver, and Sub's conformers provide the inherited witness. Record the inheritance in a
+        // DEDICATED map (NOT `conformers` — a protocol name there would pollute a concrete-dispatch CHA
+        // and its `impls.count == conf.count` guard, forcing spurious Unknown). Driver walks this map
+        // transitively so the dispatch gate accepts an INHERITED member while still CHA-ing over the
+        // sub's own concrete conformers. Without it the super-protocol clause was dropped (this visit
+        // does NOT go through `pushType`) and `s.base()` (base ∈ Sup) read silent-pure.
+        for inh in node.inheritanceClause?.inheritedTypes ?? [] {
+            if let pname = typeName(inh.type).name {
+                protocolSupers[node.name.text, default: []].insert(pname)
+            }
+        }
         return .skipChildren
     }
 

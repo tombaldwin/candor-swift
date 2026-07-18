@@ -472,4 +472,47 @@ final class DriverResolutionProcessTests: XCTestCase {
         XCTAssertNil(by["ctrlOptMapPureProto"], "a pure-protocol optional map stays pure (no over-fire)")
         XCTAssertNil(by["ctrlPlainDict"], "a plain `[String: Int]` stays pure (no fabrication)")
     }
+
+    // A SUPER-PROTOCOL method dispatched via a Sub bound / `any Sub`. `protocol Sub: Sup`, `base ∈ Sup`,
+    // `s.base()` where `s: any Sub` (or `t: T: Sub`) read SILENT-PURE: two gates each rejected an
+    // INHERITED member — (a) `visit(ProtocolDeclSyntax)` never recorded the `: Sup` inheritance, so
+    // `supertypesOf[Sub]` didn't contain `Sup`; (b) the dispatch gate checked only `protocolMethods[Sub]`.
+    // A Sup method IS callable on a Sub receiver and Sub's conformers provide the witness (`Impl.base`).
+    // Over-fire controls: the sub's OWN pure method stays pure; a super method with a PURE conformer impl
+    // stays pure; an UNRELATED same-named protocol must not hijack a Sub receiver; a conformer-less super
+    // chain reads honest Unknown (never fabricated pure).
+    func testSuperProtocolMethodDispatchesViaSubBound() throws {
+        let by = try scan("""
+        import Foundation
+        func sink() { try? Data().write(to: URL(fileURLWithPath: "/tmp/x")) }
+        protocol Sup { func base() }
+        protocol Sub: Sup { func extra() }
+        struct Impl: Sub { func base() { sink() }; func extra() {} }   // base does Fs
+        func viaProto(_ s: any Sub) { s.base() }                       // Fs (inherited method, any Sub)
+        func viaGeneric<T: Sub>(_ t: T) { t.base() }                   // Fs (inherited method, T: Sub)
+        func ownPure(_ s: any Sub) { s.extra() }                       // PURE (sub's own pure method)
+        // a super method whose conformer impl is PURE stays pure
+        protocol PSup { func p() }
+        protocol PSub: PSup { func q() }
+        struct PImpl: PSub { func p() {}; func q() {} }
+        func superPure(_ s: any PSub) { s.p() }                        // PURE
+        // an UNRELATED same-named `base` must not hijack a Sub receiver
+        protocol Other { func base() }
+        struct OtherImpl: Other { func base() { sink() } }
+        func noHijack<T: Sub>(_ t: T) { t.extra() }                    // PURE (Other.base must not leak)
+        // a conformer-less super chain reads honest Unknown, never fabricated pure
+        protocol LSup { func lm() }
+        protocol LSub: LSup {}
+        func viaNoConf(_ s: any LSub) { s.lm() }                       // Unknown
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaProto"), ["Fs"],
+                       "an inherited (super-protocol) method via `any Sub` must dispatch to the conformer's Fs")
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaGeneric"), ["Fs"],
+                       "an inherited (super-protocol) method via a `T: Sub` bound must dispatch to the conformer's Fs")
+        XCTAssertNil(by["ownPure"], "the sub's OWN pure method stays pure (no over-fire)")
+        XCTAssertNil(by["superPure"], "a super method with a pure conformer impl stays pure (no over-fire)")
+        XCTAssertNil(by["noHijack"], "an unrelated same-named protocol must not hijack a Sub receiver")
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaNoConf"), ["Unknown"],
+                       "a conformer-less super chain reads honest Unknown, never fabricated pure")
+    }
 }
