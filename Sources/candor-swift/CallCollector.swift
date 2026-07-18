@@ -1000,6 +1000,15 @@ final class CallCollector: SyntaxVisitor {
                 recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
                 if lit == nil, est { incompleteSurfaces.insert(eff) }
             } else {
+                // R32 (swift) — an UNQUALIFIED requirement call inside a PROTOCOL EXTENSION (or protocol
+                // default body): `self` is `Self: P`, so a bare `req()` may dispatch to each conformer's
+                // WITNESS, whose override candor never reached (silent-pure — the protocol-witness sibling
+                // of the concrete-receiver default dispatch). Record a protoDispatch; the Driver's bounded
+                // CHA resolves it ONLY when `name` is a real requirement of P (`protocolMethods` guard), so
+                // a bare free-fn/sibling call is filtered there and resolved by the plain Call below instead.
+                if let et = enclosingType, localProtocols.contains(et) {
+                    protoDispatches.append((et, name))
+                }
                 calls.append(Call(path: name, leaf: name, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), unqualified: true))
             }
         } else if let ma = node.calledExpression.as(MemberAccessExprSyntax.self) {

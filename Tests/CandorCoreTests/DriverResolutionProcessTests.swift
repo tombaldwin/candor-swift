@@ -309,4 +309,37 @@ final class DriverResolutionProcessTests: XCTestCase {
         XCTAssertEqual(ProcessHarness.inferred(by, "viaStdArrayMethod"), ["Fs"],
                        "a std array method with a local Array extension present must charge Fs and NOT disclose a spurious Unknown")
     }
+
+    // R32 — an UNQUALIFIED requirement call inside a PROTOCOL EXTENSION (`extension Sink { func provided()
+    // { req() } }`) dispatches to each conformer's WITNESS. A custom effectful witness reached only via the
+    // extension-provided method read silent-pure (the protocol-witness sibling of the concrete-receiver
+    // default dispatch). Every conformer form carries; a pure witness / a bare FREE fn inside an extension
+    // (resolved by name, not a requirement) must stay correct.
+    func testUnqualifiedRequirementCallInProtocolExtensionDispatchesToWitness() throws {
+        let by = try scan("""
+        import Foundation
+        protocol Sink { func req() }
+        extension Sink { func provided() { req() } }
+        struct S: Sink { func req() { try? Data("x".utf8).write(to: URL(fileURLWithPath: "/tmp/x")) } }  // Fs
+        func viaProvided(_ s: S) { s.provided() }                       // → Sink.provided → S.req (Fs)
+        // PURE control: an extension provided method calling a pure requirement must stay pure
+        protocol PureSink { func handle() }
+        extension PureSink { func run() { handle() } }
+        struct PS: PureSink { func handle() {} }
+        func viaPure(_ p: PS) { p.run() }
+        // FREE-FN control: a bare free fn inside a protocol extension is NOT a requirement — it must still
+        // resolve by name (never lost, never fabricated as a phantom dispatch)
+        func freeHelper() { try? Data("y".utf8).write(to: URL(fileURLWithPath: "/tmp/y")) }  // Fs
+        protocol HasHelper { func x() }
+        extension HasHelper { func callsFree() { freeHelper() } }
+        struct HH: HasHelper { func x() {} }
+        func viaFree(_ h: HH) { h.callsFree() }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaProvided"), ["Fs"],
+                       "s.provided() → the extension's req() must dispatch to the S.req witness (Fs)")
+        XCTAssertNil(by["viaPure"],
+                     "a pure witness reached via an extension provided method must stay pure (no over-fire)")
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaFree"), ["Fs"],
+                       "a bare free fn inside a protocol extension must still resolve by name (not filtered away)")
+    }
 }
