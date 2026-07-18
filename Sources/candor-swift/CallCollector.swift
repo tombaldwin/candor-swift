@@ -617,6 +617,14 @@ final class CallCollector: SyntaxVisitor {
             if let et = enclosingType, let t = fieldArrayElem[et]?[n] { return t }  // implicit-self field
             return nil
         }
+        // `dict.values` iteration (`for v in m.values { v.go() }`) yields the dict's VALUE type — the
+        // container sibling of the `for (k, v)` pair form. Without this the loop var was untyped and a
+        // `v.go()` over `[K: any Doer]`/`[K: T where T: Doer]` read silent-pure. `.keys` is the KEY type
+        // (dispatch-irrelevant for the value payload) so only `.values` carries.
+        if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base,
+           ma.declName.baseName.text == "values", let v = dictValueOf(base, depth + 1) {
+            return v
+        }
         if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base,
            let bt = rootOf(base, depth + 1).root, let t = fieldArrayElem[bt]?[ma.declName.baseName.text] {
             return t  // a `[E]` field of ANY typed receiver: `self.items` / `pool.clients` / `ps[0].items`
@@ -795,7 +803,15 @@ final class CallCollector: SyntaxVisitor {
             if let ma = node.calledExpression.as(MemberAccessExprSyntax.self),
                Self.ELEMENT_ITERATORS.contains(ma.declName.baseName.text) || pairIterator,
                let base = ma.base {
-                return elementTypeOf(base)
+                if let e = elementTypeOf(base) { return e }
+                // `o.map { $0.go() }` where `o: (any Doer)?` — Optional.map's closure param is the
+                // WRAPPED payload, here the protocol. `elementTypeOf` doesn't type an optional, so fall
+                // back to a protocol-typed base (the optional sibling of the array-element map path). The
+                // over-fire guard is `closure == elemClosure` + `localProtocols` at dispatch: a concrete
+                // or non-protocol optional payload isn't in `protoTyped`, so it stays untyped (pure).
+                if let dr = Self.peel(base).as(DeclReferenceExprSyntax.self), let proto = protoTyped[dr.baseName.text] {
+                    return proto
+                }
             }
             // BARE element-iterator over implicit `self` — `forEach { $0.persist() }` inside
             // `extension Array where Element: Saveable`: self's element is that bound (R28).
@@ -1139,6 +1155,14 @@ final class CallCollector: SyntaxVisitor {
             // `guard let d = s.data(using:.utf8)` / `= enc.encode(x)` — the unwrapped value is Data, so a
             // later `d.write(to:)` is Fs (the via-optional-binding dogfood vein; matches the plain-`let` path).
             if producesFoundationData(initVal) { vars[name] = "Data" }
+            // `if let d = o` where `o: (any Doer)?` — unwrapping a PROTOCOL-typed optional param yields
+            // the protocol; type `d` as the protocol so `d.go()` dispatches over the conformers (the
+            // optional sibling of the array-element/dict-value existential paths). `protoTyped` holds the
+            // protocol (rootOf leaves a proto param's root the bare name), so route `d` through `vars` —
+            // rootOf(`d`) then resolves to the protocol name and the localProtocols dispatch fires.
+            else if let dr = Self.peel(initVal).as(DeclReferenceExprSyntax.self), let proto = protoTyped[dr.baseName.text] {
+                vars[name] = proto
+            }
             else {
                 let info = rootOf(initVal)
                 if info.isVar, let t = info.root { vars[name] = t }

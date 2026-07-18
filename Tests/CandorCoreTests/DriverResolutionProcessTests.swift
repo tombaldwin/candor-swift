@@ -434,4 +434,42 @@ final class DriverResolutionProcessTests: XCTestCase {
         XCTAssertEqual(ProcessHarness.inferred(by, "viaExistential"), ["Fs"], "the existential control still carries")
         XCTAssertNil(by["viaPure"], "a pure-protocol bound must stay pure (no over-fire)")
     }
+
+    // Dispatching a method on a PROTOCOL-typed value reached through a CONTAINER/OPTIONAL — the sibling
+    // of the array-element existential path (which already worked). Three veins read silent-pure because
+    // the value landed untyped instead of on the protoDispatch path:
+    //   1. dict VALUE iteration  `for v in m.values { v.go() }`  over `[K: any Doer]`
+    //   2. optional if-let unwrap `if let d = o { d.go() }`      over `(any Doer)?`
+    //   3. optional `.map`       `o.map { $0.go() }`             over `(any Doer)?`
+    // Each must dispatch over `Doer`'s conformers (here `Impl.go` → Fs). Over-fire controls: a CONCRETE
+    // pure value type, a PURE-protocol conformer, and a plain `[String: Int]` must all stay pure.
+    func testProtocolValueViaContainerOrOptionalDispatches() throws {
+        let by = try scan("""
+        import Foundation
+        func sink() { try? Data().write(to: URL(fileURLWithPath: "/tmp/x")) }
+        protocol Doer { func go() }
+        struct Impl: Doer { func go() { sink() } }
+        func viaDictValues(_ m: [String: any Doer]) { for v in m.values { v.go() } }   // Fs
+        func viaOptional(_ o: (any Doer)?) { if let d = o { d.go() } }                 // Fs
+        func viaOptMap(_ o: (any Doer)?) { o.map { $0.go() } }                         // Fs
+        // over-fire controls
+        struct PureVal { func go() {} }
+        func ctrlDictConcretePure(_ m: [String: PureVal]) { for v in m.values { v.go() } }  // PURE
+        protocol Quiet { func run() }
+        struct Q: Quiet { func run() {} }
+        func ctrlOptPureProto(_ o: (any Quiet)?) { if let d = o { d.run() } }               // PURE
+        func ctrlOptMapPureProto(_ o: (any Quiet)?) { o.map { $0.run() } }                  // PURE
+        func ctrlPlainDict(_ m: [String: Int]) { for v in m.values { _ = v + 1 } }          // PURE
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaDictValues"), ["Fs"],
+                       "a dict VALUE dispatch over `[K: any Doer]` must carry the conformer's Fs")
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaOptional"), ["Fs"],
+                       "an if-let-unwrapped `(any Doer)?` must dispatch over the protocol")
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaOptMap"), ["Fs"],
+                       "an Optional.map closure over `(any Doer)?` must dispatch over the protocol")
+        XCTAssertNil(by["ctrlDictConcretePure"], "a concrete pure-method dict value stays pure (no over-fire)")
+        XCTAssertNil(by["ctrlOptPureProto"], "a pure-protocol optional stays pure (no over-fire)")
+        XCTAssertNil(by["ctrlOptMapPureProto"], "a pure-protocol optional map stays pure (no over-fire)")
+        XCTAssertNil(by["ctrlPlainDict"], "a plain `[String: Int]` stays pure (no fabrication)")
+    }
 }
