@@ -131,6 +131,7 @@ var outPrefix: String? = nil
 var wantJson = false
 var policyPath: String? = ProcessInfo.processInfo.environment["CANDOR_POLICY"]
 var gateJsonPath: String? = nil
+var wantWorkspace = false
 var argIter = CommandLine.arguments.dropFirst().makeIterator()
 while let a = argIter.next() {
     switch a {
@@ -160,6 +161,12 @@ while let a = argIter.next() {
             FileHandle.standardError.write("candor-swift: --gate-json requires a value\n".data(using: .utf8)!); exit(2)
         }
         gateJsonPath = v
+    case "--workspace", "--deps":
+        // Auto-discover the target's LOCAL PATH dependencies (`.package(path:)` in Package.swift), scan
+        // each into .candor/deps/ with protocol-CHA union entries, and chain them — so a cross-package
+        // protocol call discloses the sibling's effect instead of reading pure (the candor-ts `--workspace`
+        // analog; swift's local deps are path-declared, not node_modules symlinks).
+        wantWorkspace = true
     case "-h", "--help":
         print("""
         candor-swift — the Swift effect analyzer. SwiftSyntax-based, it scans source without building.
@@ -201,6 +208,8 @@ while let a = argIter.next() {
           --json               print the report as JSON to stdout (a scan then writes no files)
           --policy <file>      enforce a policy (deny/pure/allow/forbid) — exit 1 on a violation, 2 if unreadable
           --gate-json <file>   write the machine-readable gate verdict as JSON (`-` = stdout)
+          --workspace (--deps) auto-discover the target's local `.package(path:)` deps, scan each into
+                               .candor/deps/, and chain them so a cross-package call discloses the sibling's effect
           --report <locator>   (query actions) use this report instead of discovering .candor/
           --verify <plist>     (privacy-manifest) verify an Info.plist against the sensor reach — an under-declaration exits 1
           --strict             (unverified) exit 1 when PASS-but-Unknown holes exist
@@ -323,10 +332,65 @@ if let manifest = try? String(contentsOfFile: (rootDir as NSString).appendingPat
 // (Pass A / Pass B collectors live in DeclCollector.swift / CallCollector.swift;
 //  the two-pass drive lives in Driver.swift — called here.)
 
+// ⟨workspace chain⟩ --workspace: discover the target's LOCAL PATH deps from Package.swift
+// (`.package(path: "../X")`), scan each into .candor/deps/ with CANDOR_WORKSPACE_CHAIN (protocol-CHA union
+// entries), transitively to a fixpoint, and prepend that dir to the CANDOR_DEPS spec below. The child scan
+// is spawned WITHOUT --workspace (no re-discovery recursion). The candor-ts `--workspace` analog.
+var workspaceDepsDir: String? = nil
+if wantWorkspace {
+    let selfPath = CommandLine.arguments[0]
+    let depsDir = (rootDir as NSString).appendingPathComponent(".candor/deps")
+    try? fm.createDirectory(atPath: depsDir, withIntermediateDirectories: true)
+    // discover local path-deps: lines that declare `.package(... path: "...")` (target `path:` is excluded
+    // by requiring `.package(` on the same line — a single-line dep decl, the common monorepo form).
+    var depPaths: [String] = []
+    if let manifest = try? String(contentsOfFile: (rootDir as NSString).appendingPathComponent("Package.swift"), encoding: .utf8) {
+        for rawLine in manifest.split(separator: "\n") {
+            let line = String(rawLine)
+            guard line.contains(".package(") && line.contains("path:") else { continue }
+            guard let r = line.range(of: #"path:\s*"([^"]+)""#, options: .regularExpression) else { continue }
+            let seg = String(line[r])
+            guard let q1 = seg.firstIndex(of: "\""), let q2 = seg.lastIndex(of: "\""), q1 < q2 else { continue }
+            let rel = String(seg[seg.index(after: q1)..<q2])
+            let abs = ((rootDir as NSString).appendingPathComponent(rel) as NSString).standardizingPath
+            if fm.fileExists(atPath: (abs as NSString).appendingPathComponent("Package.swift")) { depPaths.append(abs) }
+        }
+    }
+    var names: Set<String> = []
+    let maxRounds = 6
+    for _ in 0..<maxRounds {
+        var changed = false
+        for dp in depPaths {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: selfPath)
+            proc.arguments = [dp, "--json"]
+            var env = ProcessInfo.processInfo.environment
+            env["CANDOR_WORKSPACE_CHAIN"] = "1"; env["CANDOR_DEPS"] = depsDir
+            proc.environment = env
+            let pipe = Pipe()
+            proc.standardOutput = pipe; proc.standardError = FileHandle.nullDevice
+            guard (try? proc.run()) != nil else { continue }
+            let out = pipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            guard proc.terminationStatus == 0, !out.isEmpty else { continue }
+            let name = ((try? JSONSerialization.jsonObject(with: out)) as? [String: Any])?["package"] as? String ?? (dp as NSString).lastPathComponent
+            names.insert(name)
+            let safe = name.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "@", with: "_")
+            let file = (depsDir as NSString).appendingPathComponent(safe + ".json")
+            let prev = try? Data(contentsOf: URL(fileURLWithPath: file))
+            if prev != out { try? out.write(to: URL(fileURLWithPath: file)); changed = true }
+        }
+        if !changed { break }
+    }
+    workspaceDepsDir = depsDir
+    FileHandle.standardError.write("candor-swift: --workspace chained \(names.count) workspace dep report(s), transitive\(names.isEmpty ? " (no local path deps found)" : ": " + names.sorted().joined(separator: ", "))\n".data(using: .utf8)!)
+}
 // Report chaining (SPEC §2, Deps.swift): CANDOR_DEPS overrides the config's `deps` key (the same
 // env-over-config precedence as `policy`). Fail-closed loading — a bad token/report exits 2 HERE,
-// before any analysis could silently read the dep as pure.
-let depsSpec = ProcessInfo.processInfo.environment["CANDOR_DEPS"] ?? candorConfig["deps"]
+// before any analysis could silently read the dep as pure. --workspace's auto-scanned dir prepends.
+let envOrConfigDeps = ProcessInfo.processInfo.environment["CANDOR_DEPS"] ?? candorConfig["deps"]
+let depsSpec = [workspaceDepsDir, envOrConfigDeps].compactMap { $0 }.joined(separator: ":").isEmpty
+    ? nil : [workspaceDepsDir, envOrConfigDeps].compactMap { $0 }.joined(separator: ":")
 let depsIndex = loadDepReports(spec: depsSpec, engineVersion: engineVersion)
 
 let analysis = analyze(sourcePaths: sourcePaths, rootDir: rootDir, pkgName: pkgName, deps: depsIndex)
