@@ -469,20 +469,28 @@ for qual in reportQuals.sorted() {
 // For swift this is a PRECISION upgrade — an unresolved cross-package protocol call already discloses
 // `Unknown` (never silent-pure, Driver.swift), so the union only sharpens `Unknown` → the precise effect.
 if ProcessInfo.processInfo.environment["CANDOR_WORKSPACE_CHAIN"] != nil {
-    // index: bare owner-type -> the (method, qual) pairs it owns (built once from the report quals).
+    // index: bare owner-type -> the (method, qual) pairs it owns (built once from the report quals);
+    // ownersByTail tracks the DISTINCT full owner paths per bare tail, for the ambiguity guard below.
     var ownerMethods: [String: [(method: String, qual: String)]] = [:]
+    var ownersByTail: [String: Set<String>] = [:]
     for qual in reportQuals {
         guard let dot = qual.lastIndex(of: ".") else { continue }
         let owner = String(qual[qual.startIndex..<dot])
         let method = String(qual[qual.index(after: dot)...])
         let tail = owner.lastIndex(of: ".").map { String(owner[owner.index(after: $0)...]) } ?? owner
         ownerMethods[tail, default: []].append((method, qual))
+        ownersByTail[tail, default: []].insert(owner)
     }
     let emitted = Set(effectors.map { $0.hash })
     var unionCount = 0
     for (proto, conformerTypes) in conformers {
         var byMethod: [String: (inf: Set<String>, inv: Set<String>)] = [:]
         for t in Set(conformerTypes) {
+            // AMBIGUOUS bare type name: two DISTINCT types share tail `t` (e.g. `A.Foo` and `B.Foo`), so
+            // `ownerMethods[t]` merges both — the union would pull an unrelated same-named type's method (a
+            // fabrication). `conformers` holds only the bare name, so we cannot tell which `Foo` conforms;
+            // the family's never-guess rule (Driver.swift) says SKIP it rather than guess.
+            if (ownersByTail[t]?.count ?? 0) > 1 { continue }
             for (method, qual) in ownerMethods[t] ?? [] {
                 var cur = byMethod[method] ?? (inf: [], inv: [])
                 cur.inf.formUnion(inferred[qual] ?? [])
