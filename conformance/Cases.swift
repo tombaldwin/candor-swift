@@ -25,6 +25,10 @@ func pure_fn() -> Int { 1 + 2 }
 struct Dyn { let f: () -> Void }
 func unknown_dyn(_ d: Dyn) { d.f() }
 
+// An OPAQUE closure handed to a SYNCHRONOUS invoker (forEach) is an unresolvable call -> Unknown,
+// never silently pure (four-way sync-callback-invoker rung).
+func sync_callback_opaque(_ xs: [Int], _ cb: (Int) -> Void) { xs.forEach(cb) }
+
 // --- composition: union + transitive propagation ----------------------------------------------------
 func combined() { _ = FileManager.default.contents(atPath: "/tmp/x"); _ = URLSession.shared.dataTask(with: URL(string: "http://h")!) }
 func transitive_leaf() { _ = FileManager.default.contents(atPath: "/tmp/x") }
