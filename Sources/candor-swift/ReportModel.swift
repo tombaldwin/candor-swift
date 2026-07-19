@@ -47,6 +47,7 @@ struct Effector {
     var hosts: [String]? = nil, cmds: [String]? = nil, paths: [String]? = nil, tables: [String]? = nil
     var invisible: [String]? = nil   // per-fn blind-spot disclosure: κ-unknown modules reached (qualifies `inferred`)
     var netClass: [String]? = nil    // ⟨0.20⟩ Net destination classes present in the fn's transitive Net surface
+    var interfaceUnion = false       // ⟨workspace-chain⟩ synthetic protocol-CHA union entry (not an analyzed unit)
     func toJSON() -> [String: Any] {
         var e: [String: Any] = [
             "fn": fn, "loc": loc,
@@ -65,6 +66,7 @@ struct Effector {
         if let t = tables, !t.isEmpty { e["tables"] = t }
         if let v = invisible, !v.isEmpty { e["invisible"] = v }
         if let n = netClass, !n.isEmpty { e["netClass"] = n }   // ⟨0.20⟩ Net destination-class (SPEC §1)
+        if interfaceUnion { e["interfaceUnion"] = true }        // ⟨workspace-chain⟩ synthetic union entry
         return e
     }
 }

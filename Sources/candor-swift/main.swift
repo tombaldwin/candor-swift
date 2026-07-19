@@ -395,6 +395,54 @@ for qual in reportQuals.sorted() {
     }
     effectors.append(ef)
 }
+// ⟨workspace-chain, opt-in via CANDOR_WORKSPACE_CHAIN⟩ PROTOCOL-CHA union entries — the candor-ts
+// `interfaceUnion` analog. A CONSUMER of this package that calls a protocol method on a `P`-typed value
+// imported from here resolves the call to the protocol REQUIREMENT (no body → no entry → the chain reads
+// it pure). Emit a synthetic `pkg#P.method` entry = the UNION over every local conformer of that method's
+// effects (inferred + invisible), reusing the `conformers` CHA universe in-package dispatch already uses.
+// Sound over-approximation; a `P.m` a consumer never resolves (not a real requirement) is harmless data.
+// GATED so a default scan stays byte-identical (four-way conformance unaffected until the rung is pinned).
+// For swift this is a PRECISION upgrade — an unresolved cross-package protocol call already discloses
+// `Unknown` (never silent-pure, Driver.swift), so the union only sharpens `Unknown` → the precise effect.
+if ProcessInfo.processInfo.environment["CANDOR_WORKSPACE_CHAIN"] != nil {
+    // index: bare owner-type -> the (method, qual) pairs it owns (built once from the report quals).
+    var ownerMethods: [String: [(method: String, qual: String)]] = [:]
+    for qual in reportQuals {
+        guard let dot = qual.lastIndex(of: ".") else { continue }
+        let owner = String(qual[qual.startIndex..<dot])
+        let method = String(qual[qual.index(after: dot)...])
+        let tail = owner.lastIndex(of: ".").map { String(owner[owner.index(after: $0)...]) } ?? owner
+        ownerMethods[tail, default: []].append((method, qual))
+    }
+    let emitted = Set(effectors.map { $0.hash })
+    var unionCount = 0
+    for (proto, conformerTypes) in conformers {
+        var byMethod: [String: (inf: Set<String>, inv: Set<String>)] = [:]
+        for t in Set(conformerTypes) {
+            for (method, qual) in ownerMethods[t] ?? [] {
+                var cur = byMethod[method] ?? (inf: [], inv: [])
+                cur.inf.formUnion(inferred[qual] ?? [])
+                cur.inv.formUnion(invisibleAcc[qual] ?? [])
+                byMethod[method] = cur
+            }
+        }
+        for (method, eff) in byMethod {
+            if eff.inf.isEmpty && eff.inv.isEmpty { continue }   // pure across all conformers — silence = purity
+            let hash = "\(pkgName)#\(proto).\(method)"
+            if emitted.contains(hash) { continue }               // a real entry already claims this hash
+            var ef = Effector(fn: "\(proto).\(method)", loc: "",
+                inferred: EffectSet(names: eff.inf), direct: EffectSet(names: [String]()),
+                unresolved: eff.inf.contains("Unknown"), hash: hash, calls: [String]())
+            if !eff.inv.isEmpty { ef.invisible = eff.inv.sorted() }
+            ef.interfaceUnion = true
+            effectors.append(ef)
+            unionCount += 1
+        }
+    }
+    if unionCount > 0 {
+        FileHandle.standardError.write("candor-swift: emitted \(unionCount) protocol-CHA union entries (workspace chain)\n".data(using: .utf8)!)
+    }
+}
 // the coverage ledger: imported modules outside the platform frontier that the classifier doesn't
 // cover — INVISIBLE, not Unknown; named per scan (SPEC §7 item 14, canonical marker `classifier
 // doesn't cover`). A package a chained
