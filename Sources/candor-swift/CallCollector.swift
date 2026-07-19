@@ -759,6 +759,22 @@ final class CallCollector: SyntaxVisitor {
     // param is the accumulator, so element-typing it would mistype the fold state.)
     private static let ELEMENT_PAIR_ITERATORS: Set<String> = ["sorted", "min", "max"]
 
+    // SYNC callback-invokers: standard higher-order methods on Sequence/Collection/Optional that
+    // invoke their closure argument SYNCHRONOUSLY, in-thread, before returning. An OPAQUE closure arg
+    // (a fn-typed PARAM, or an unresolvable callable value) passed to one of these is therefore CALLED
+    // right here — its effects are reachable but unaddressable → `Unknown` (SPEC §4 callback). This is
+    // the exact sibling of the direct opaque call `cb()`: `xs.forEach(cb)` runs `cb` too. INLINE closure
+    // literals (`xs.forEach { … }`) are charged to the passer lexically and keep their analyzed effect
+    // (they are ClosureExprSyntax, not opaque refs — never reach this guard); a RESOLVABLE named callable
+    // (`xs.forEach(loadFree)`) keeps its resolved effect via the fn-ref edge above. Only the OPAQUE arg
+    // discloses — low over-disclosure. Swift arm of the four-way sync-callback parity fix (candor-java).
+    // reduce's closure is `(Acc, Element)`, still synchronously invoked; forEach/map/filter/… likewise.
+    private static let SYNC_CALLBACK_INVOKERS: Set<String> =
+        ["forEach", "map", "filter", "compactMap", "flatMap", "reduce",
+         "first", "contains", "allSatisfy", "sorted", "min", "max",
+         "firstIndex", "lastIndex", "last", "partition", "removeAll", "split",
+         "drop", "prefix"]
+
     // Names a closure binds: explicit `{ (a, b) in … }`/`{ a, b in … }` → those names; shorthand
     // `{ $0.… }` with no signature → `$0`/`$1`/`$2` (we can't tell arity, so clear the common few).
     private func closureParamNames(_ closure: ClosureExprSyntax) -> [(name: String, annotated: String?)] {
@@ -883,10 +899,32 @@ final class CallCollector: SyntaxVisitor {
         // forEach/sorted) dropped the reference → silent-pure. Edge to the referenced unit (the Rust/TS
         // engines' fn-as-value posture). A plain value identifier resolves to no unique fn unit (or is a
         // local var/param, skipped) → dropped, never fabricated.
+        // Is the callee a SYNC callback-invoker (`xs.forEach(…)` / bare `forEach(…)` in a Collection
+        // extension)? Then an OPAQUE closure ARG is invoked synchronously here (see SYNC_CALLBACK_INVOKERS).
+        let invokerMethod: String? = (node.calledExpression.as(MemberAccessExprSyntax.self))?.declName.baseName.text
+            ?? node.calledExpression.as(DeclReferenceExprSyntax.self)?.baseName.text
+        let isSyncInvoker = invokerMethod.map(Self.SYNC_CALLBACK_INVOKERS.contains) ?? false
         for arg in node.arguments {
             let e = Self.peel(arg.expression)
             if let dr = e.as(DeclReferenceExprSyntax.self) {
                 let n = dr.baseName.text
+                // OPAQUE closure PARAM passed to a sync callback-invoker (`xs.forEach(cb)` where `cb` is a
+                // fn-typed param): it is CALLED here, its effects reachable but unaddressable → deferred to
+                // callback-flow (drops to pure iff every caller passes a closure/named fn; else §4 Unknown),
+                // the exact machinery of the direct `cb()`. INLINE closures never reach here (ClosureExpr);
+                // a RESOLVABLE named fn keeps its resolved effect via the fn-ref edge below.
+                if isSyncInvoker && fnTyped.contains(n) {
+                    if opaqueFnLocals.contains(n) {
+                        // an OPAQUE fn-typed LOCAL (origin indeterminate, not a param) invoked via forEach:
+                        // call-site flow can never resolve it → §4 Unknown directly (sibling of the direct
+                        // `cb()` opaqueFnLocals path).
+                        unresolved = true
+                        why.insert("callback:\(n)")
+                    } else {
+                        // a fn-typed PARAM invoked via forEach — defer to callback-flow (index-resolved).
+                        callbackInvoked.insert(n)
+                    }
+                }
                 // skip a bound LOCAL (a value, not a free-fn reference) — `vars` drops literal-typed
                 // locals, so `boundLocals` guards them too, else passing such a local fabricates a
                 // same-named free fn's effect.

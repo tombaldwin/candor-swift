@@ -515,4 +515,68 @@ final class DriverResolutionProcessTests: XCTestCase {
         XCTAssertEqual(ProcessHarness.inferred(by, "viaNoConf"), ["Unknown"],
                        "a conformer-less super chain reads honest Unknown, never fabricated pure")
     }
+
+    // ── SYNC callback-invoker: an OPAQUE closure param passed to forEach&friends is CALLED here ─────
+    // (the Swift arm of the four-way sync-callback parity fix — candor-java). `xs.forEach(cb)` runs
+    // `cb` synchronously, the exact sibling of the direct `cb()`, yet the param used to be DROPPED →
+    // silent-pure (the cardinal sin). It must read Unknown; INLINE closures and RESOLVABLE named fns
+    // must NOT regress (no over-disclosure, no fabrication).
+    func testOpaqueClosureParamToForEachReadsUnknown() throws {
+        let by = try scan("""
+        func opaqueForEach(_ cb: (Int) -> Void) { [1, 2, 3].forEach(cb) }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "opaqueForEach"), ["Unknown"],
+                       "an opaque closure param synchronously invoked by forEach must read Unknown, not silent-pure")
+        XCTAssertEqual(by["opaqueForEach"]?["unknownWhy"] as? [String], ["callback:cb"],
+                       "the Unknown names the invoked opaque callback param")
+    }
+
+    // the opaque param passed to the OTHER sync invokers (map/filter/reduce) — all invoke synchronously.
+    func testOpaqueClosureParamToMapFilterReduceReadsUnknown() throws {
+        let by = try scan("""
+        func viaMap(_ t: (Int) -> Int) -> [Int] { return [1, 2, 3].map(t) }
+        func viaFilter(_ p: (Int) -> Bool) -> [Int] { return [1, 2, 3].filter(p) }
+        func viaReduce(_ c: (Int, Int) -> Int) -> Int { return [1, 2, 3].reduce(0, c) }
+        """)
+        for fn in ["viaMap", "viaFilter", "viaReduce"] {
+            XCTAssertEqual(ProcessHarness.inferred(by, fn), ["Unknown"],
+                           "\(fn): an opaque closure param synchronously invoked must read Unknown")
+        }
+    }
+
+    // NO-REGRESSION: an INLINE closure literal keeps its analyzed effect (charged lexically to the
+    // passer) — the sync-invoker guard fires only on OPAQUE refs, never on inline closures.
+    func testInlineEffectfulClosureToForEachStillReportsItsEffect() throws {
+        let by = try scan("""
+        import Foundation
+        func inlineEffect() { [1, 2, 3].forEach { _ in FileManager.default.createFile(atPath: "/tmp/y", contents: nil) } }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "inlineEffect"), ["Fs"],
+                       "an inline effectful forEach closure keeps its Fs — must NOT be masked or turned Unknown")
+    }
+
+    // NO-OVER-DISCLOSURE: a PURE inline forEach stays pure — the guard must not flood common inline code.
+    func testPureInlineForEachStaysPure() throws {
+        let by = try scan("""
+        func pureInline() { [1, 2, 3].forEach { _ = $0 + 1 } }
+        func pureInlineMap() -> [Int] { return [1, 2, 3].map { $0 + 1 } }
+        """)
+        XCTAssertNil(by["pureInline"], "a pure inline forEach must stay pure — no over-disclosure")
+        XCTAssertNil(by["pureInlineMap"], "a pure inline map must stay pure — no over-disclosure")
+    }
+
+    // NO-REGRESSION: a RESOLVABLE named callable passed to forEach keeps its RESOLVED effect (precise
+    // edge), never a blanket Unknown — the fn-ref path resolves it; only OPAQUE args disclose.
+    func testNamedCallableToForEachKeepsResolvedEffect() throws {
+        let by = try scan("""
+        import Foundation
+        func namedEffect(_ x: Int) { FileManager.default.createFile(atPath: "/tmp/z", contents: nil) }
+        func passNamedEffect() { [1, 2, 3].forEach(namedEffect) }
+        func namedPure(_ x: Int) { _ = x + 1 }
+        func passNamedPure() { [1, 2, 3].forEach(namedPure) }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "passNamedEffect"), ["Fs"],
+                       "a resolvable named effectful callable resolves to its effect (edge), never Unknown")
+        XCTAssertNil(by["passNamedPure"], "a resolvable named pure callable stays pure — no fabrication")
+    }
 }

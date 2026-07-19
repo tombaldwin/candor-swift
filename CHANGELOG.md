@@ -7,6 +7,22 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [Unreleased]
+
+### ⚠ soundness — sync callback-invoker opaque-arg (Swift arm of the four-way parity fix)
+
+Fixes a silent under-report (cardinal sin): an OPAQUE closure passed to a SYNCHRONOUS higher-order
+invoker — `Sequence/Collection.forEach/map/filter/compactMap/flatMap/reduce/first/contains/allSatisfy/
+sorted/min/max/…` (and their bare-`self` forms in a `Collection` extension) — read PURE, when the
+invoker CALLS its closure argument in-thread. `xs.forEach(cb)` where `cb` is a fn-typed param is the
+exact sibling of the already-correct direct call `cb()` and must contribute `Unknown` (`callback:<arg>`).
+INLINE closure literals (`xs.forEach { … }`) keep their analyzed effect (charged lexically to the
+passer — never reach the guard) and RESOLVABLE named callables (`xs.forEach(namedFn)`) keep their
+resolved effect via the fn-ref edge — only OPAQUE args disclose, so over-disclosure is low. Matches
+candor-java's `SYNC_CALLBACK_INVOKERS` opaque-arg guard (c755acd). A/B on swift-argument-parser:
++2 direct sites (`InputOrigin.forEach`, `ErrorMessageGenerator.unknownOptionMessage`) + 3 honest
+transitive reaches; zero fabrication, zero inline-closure flood; report bytes otherwise unchanged.
+
 ## [0.22.0] — 2026-07-18
 
 Spec floor → **0.22** (the `verify` oracle rung, shipped on the java/ts arms). candor-swift declares `0.22`; the
