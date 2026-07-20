@@ -23,6 +23,16 @@ candor-java's `SYNC_CALLBACK_INVOKERS` opaque-arg guard (c755acd). A/B on swift-
 +2 direct sites (`InputOrigin.forEach`, `ErrorMessageGenerator.unknownOptionMessage`) + 3 honest
 transitive reaches; zero fabrication, zero inline-closure flood; report bytes otherwise unchanged.
 
+## [0.23.0] — 2026-07-20
+
+Spec floor → **0.23**. Soundness-increasing, report-shape-neutral:
+- **cross-package protocol dispatch** (interfaceUnion, the 0.23 rung): a chained consumer's protocol method
+  resolves to the conformer's effect (gated behind `CANDOR_WORKSPACE_CHAIN`). PART 18 conformance.
+- **⚠ opaque closure → synchronous invoker** (`arr.forEach(cb)`/`map`/`filter`/… with an opaque closure
+  param) discloses `Unknown` — the four-way sync-callback rung (PART 1 `sync_callback_opaque`). Inline
+  closure literals keep their analyzed effect (no over-disclosure).
+- protocol-union emission guarded against same-tail-type name collision.
+
 ## [0.22.0] — 2026-07-18
 
 Spec floor → **0.22** (the `verify` oracle rung, shipped on the java/ts arms). candor-swift declares `0.22`; the
