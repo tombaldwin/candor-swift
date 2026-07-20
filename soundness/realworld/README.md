@@ -39,7 +39,14 @@ A pure control guards the fabrication mirror. Linux + `strace` only (the swift C
 | `exec_pipe` | Exec | `Process` captures child stdout via a `Pipe` (candor: Exec+Ipc) → child `openat` |
 | `net_url`  | Net | `URLSession` request → `connect` carries the TEST-NET marker IP |
 | `net_raw`  | Net | raw `import Glibc; socket()`/non-blocking `connect(fd,&addr,len)` → `connect` carries the marker IP |
+| `realtool` | Fs+Exec | a realistic multi-effect CLI (load config → read env → run a step → write a log); **MULTI** driver — one strace pass checks Fs (log `openat`) AND Exec (child `openat`) together, each against candor's per-function claim (`loadConfig`→Fs, `runStep`→Exec, `writeLog`→Fs, `home`→Env) |
 | `pure_ctrl` | — | pure arithmetic; nothing runs, nothing predicted (fabrication control) |
+
+A **MULTI** driver's marker field is a `;`-separated list of `EFF=marker` pairs; the harness verifies each
+effect ran and is in candor's precise claim (or disclosed as `Unknown`) in a single run. `realtool` exercises
+the mixed-effect call structure real Swift CLIs have — not a single-effect probe — on GitHub's Linux runners
+(the same strace mechanism the per-effect drivers use; local Docker Desktop hangs strace+`Process` under
+virtualization, so this runs in CI, not locally).
 
 ## Recall corpus (non-syscall effects) — `recall/`
 

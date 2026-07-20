@@ -50,6 +50,7 @@ CASES=(
   "exec_pipe|Exec|/tmp/candor-oracle-swift-exec-pipe"
   "net_url|Net|192.0.2.1"
   "net_raw|Net|192.0.2.5"
+  "realtool|MULTI|Fs=/tmp/realtool-log;Exec=/tmp/realtool-step"
   "pure_ctrl||__no_marker__"
 )
 
@@ -89,6 +90,24 @@ for f in funcs:
 print((",".join(sorted(precise)) or "-"), ("uncertain" if unc else "certain"), (";".join(sorted(whys)) or "-"))
 PY
 )"
+
+  # MULTI-effect driver (realistic code doing several effects): the marker field is a ';'-separated list of
+  # EFF=marker pairs. One strace pass; verify EACH effect ran (its marker fired) AND candor's precise claim
+  # contains it (or discloses Unknown). Any silent-pure among them reds the gate.
+  if [ "$eff" = "MULTI" ]; then
+    echo "  $d: (multi-effect)  candor=[$pred] $uncertain"
+    allok=1
+    IFS=';' read -ra pairs <<<"$marker"
+    for pair in "${pairs[@]}"; do
+      peff="${pair%%=*}"; pmk="${pair#*=}"
+      if ! grep -qF "$pmk" "$HERE/$d/trace.log" 2>/dev/null; then echo "    [$peff] SKIP (marker did not fire)"; continue; fi
+      if echo ",$pred," | grep -q ",$peff,"; then echo "    [$peff] ✓ ran + candor precise"
+      elif [ "$uncertain" = "uncertain" ]; then echo "    [$peff] ⓘ held by disclosure — blame: [$whys]"; blame=$((blame+1))
+      else echo "    ✗ NEW UNDER-REPORT: ran $peff (marker '$pmk') but candor precise=[$pred]"; under=$((under+1)); failed="$failed $d:$peff"; allok=0; fi
+    done
+    [ "$allok" = 1 ] && pass=$((pass+1))
+    continue
+  fi
 
   echo "  $d: ran=$ran  effect=${eff:-none}  candor=[$pred] $uncertain"
   if [ -z "$eff" ]; then  # pure control: nothing should run, nothing should be predicted
