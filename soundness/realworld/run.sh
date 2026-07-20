@@ -33,19 +33,18 @@ SW="$ROOT/.build/debug/candor-swift"
 KNOWN_UNDER=()
 
 # driver | effect ("" = pure control) | marker (must appear in the strace iff the effect ran)
-# ACTIVE set: the drivers validated end-to-end on Linux (marker fires under strace, candor predicts the
-# effect). Fs is the highest-frequency boundary effect, so this already gives the gate real teeth.
+# The marker is chosen to be a DIRECTLY-traced syscall argument: an openat path for Fs; for Exec, the CHILD
+# process opens a marker path (the openat proves the subprocess ran — robust vs matching argv inside the
+# parent's posix_spawn); for Net, the connect() carries the literal TEST-NET address. A driver whose effect
+# does not execute under strace this run is SKIPped (logged), never a failure — the gate only reds on a
+# genuine under-report (effect ran, candor silent-pure).
 CASES=(
   "fs_read|Fs|/tmp/candor-oracle-swift-fs-read"
   "fs_write|Fs|/tmp/candor-oracle-swift-fs-write"
+  "exec_proc|Exec|/tmp/candor-oracle-swift-exec-ran"
+  "net_url|Net|192.0.2.1"
   "pure_ctrl||__no_marker__"
 )
-# STAGED (drivers written + candor predicts them correctly — exec_proc→Exec, net_url→Net — but their
-# marker does not yet fire under strace on Linux: Foundation `Process` routes through posix_spawn and
-# `URLSession` through libcurl, so the exec argv / connect address land differently than the naive marker
-# expects). Left OUT of CASES deliberately (a driver that always SKIPs would be a silent coverage gap, the
-# very thing candor exists to prevent) until the Linux syscall attribution is nailed down — tracked in
-# soundness/realworld/README.md. Do NOT re-add them to CASES until their markers fire in this harness.
 
 pass=0; under=0; known=0; skip=0; fab=0; failed=""
 for row in "${CASES[@]}"; do

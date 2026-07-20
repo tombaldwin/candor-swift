@@ -20,19 +20,23 @@ Linux + `strace` only (the swift CI Linux job; locally via a `swift:6.1` Docker 
 
 ## Coverage
 
-**Active** (validated end-to-end on Linux — marker fires, candor predicts the effect):
-
-| driver | effect | how |
-|--------|--------|-----|
+| driver | effect | how the marker is traced |
+|--------|--------|--------------------------|
 | `fs_read`  | Fs | `String(contentsOfFile:)` → `openat` on the marker path |
-| `fs_write` | Fs | `Data`/`String.write(toFile:atomically:false)` → `openat` on the marker path |
+| `fs_write` | Fs | `String.write(toFile:atomically:false)` → `openat` on the marker path |
+| `exec_proc` | Exec | `Process` spawns `/bin/sh -c 'echo ran > <marker>'`; the CHILD's `openat` on the marker path proves the subprocess ran (robust vs matching argv inside the parent's `posix_spawn`) |
+| `net_url`  | Net | `URLSession` request to a TEST-NET-1 address (RFC 5737) → `connect` carries the literal marker IP |
 | `pure_ctrl` | — | pure arithmetic; nothing runs, nothing predicted (fabrication control) |
 
-**Staged** (drivers written; candor predicts them correctly — `exec_proc`→Exec, `net_url`→Net — but the
-marker does not yet fire under strace on Linux): Foundation `Process` routes through `posix_spawn` and
-`URLSession` through libcurl, so the exec argv / connect address land differently than the naive string
-marker expects. They are deliberately **left out of `CASES`** rather than left in to always-SKIP (a silent
-coverage gap is exactly what candor exists to prevent). **TODO:** pin the Linux syscall attribution — e.g.
-have the Exec child perform a directly-traced syscall on a marker path (proving it executed), and confirm
-whether `URLSession`'s libcurl `connect` on Linux carries the literal address or a resolved form; re-add to
-`CASES` only once the marker fires in this harness. Best iterated from real CI logs.
+`fs_read`/`fs_write`/`pure_ctrl` are validated end-to-end on Linux CI. `exec_proc`/`net_url` use markers
+chosen to trace reliably under Foundation's Linux syscall routing (`Process`→`posix_spawn`,
+`URLSession`→libcurl); a driver whose effect doesn't execute under strace a given run is SKIPped (logged),
+never a failure — the gate only reds on a genuine under-report.
+
+## Observed scope boundary (not a driver — a note)
+
+candor-swift classifies a **raw POSIX socket** (`import Glibc; socket()/connect()`) as **pure** — no `Net`,
+no disclosed uncertainty. Idiomatic Swift reaches the network through `URLSession`/`Network.framework` (both
+modelled → `Net`), so this is arguably out of scope, but a program doing a bare `connect()` reads silent-pure.
+Recorded here as a candid gap for a future decision (model it → `Net`, or disclose `Unknown`); the oracle's
+Net driver deliberately uses `URLSession` so it exercises candor's real, honest prediction.
