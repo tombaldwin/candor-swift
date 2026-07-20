@@ -117,6 +117,21 @@ final class ClassifierTests: XCTestCase {
         XCTAssertEqual(kappaFree(name: "getaddrinfo", argCount: 4), "Net")
         XCTAssertEqual(kappaFree(name: "getnameinfo", argCount: 7), "Net")
         XCTAssertEqual(kappaFree(name: "gethostbyname", argCount: 1), "Net")
+        // POSIX socket WIRE verbs → Net (raw `import Glibc; connect(fd,&addr,len)` did Net at runtime but
+        // read silent-pure — the swift dynamic oracle surfaced the gap). GATED ON EXACT ARITY + shadow-guarded.
+        XCTAssertEqual(kappaFree(name: "connect", argCount: 3), "Net")      // connect(fd, sockaddr*, socklen)
+        XCTAssertEqual(kappaFree(name: "sendto", argCount: 6), "Net")
+        XCTAssertEqual(kappaFree(name: "recvfrom", argCount: 6), "Net")
+        XCTAssertEqual(kappaFree(name: "sendmsg", argCount: 3), "Net")
+        XCTAssertEqual(kappaFree(name: "recvmsg", argCount: 3), "Net")
+        // Anti-fabrication: the arity gate rejects a same-named non-POSIX call, and the collision-prone
+        // SETUP/common verbs stay ABSENT (bind is the GRDB Statement.bind case — must never fabricate Net).
+        XCTAssertNil(kappaFree(name: "connect", argCount: 2))              // not the POSIX 3-arg signature
+        XCTAssertNil(kappaFree(name: "connect", argCount: 1))
+        XCTAssertNil(kappaFree(name: "bind", argCount: 3))                 // GRDB Statement.bind → NEVER Net
+        XCTAssertNil(kappaFree(name: "socket", argCount: 3))              // fd creation, not the wire act
+        XCTAssertNil(kappaFree(name: "send", argCount: 4))                // too-common a word to model bare
+        XCTAssertNil(kappaFree(name: "listen", argCount: 2))
         // property-read clock surface: ContinuousClock/SuspendingClock `.now`
         XCTAssertEqual(kappaPropertyRead(root: "ContinuousClock", path: ["now"]), "Clock")
         XCTAssertEqual(kappaPropertyRead(root: "SuspendingClock", path: ["now"]), "Clock")

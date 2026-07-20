@@ -513,11 +513,21 @@ public func kappaFree(name: String, argCount: Int) -> String? {
     case "os_log": return "Log"
     case "posix_spawn", "execv", "execvp": return "Exec"
     case "fopen": return "Fs"
-    // NOTE deliberately ABSENT: the bare POSIX names (open/bind/connect/listen/socket/fork/
-    // system/mkdir/rename/unlink). As bare Swift identifiers they collide with ordinary local
-    // functions — the first real-repo sweep caught GRDB's local `bind(...)` fabricating Net onto
-    // its hottest Statement paths (214 fns transitively). Raw syscalls in Swift come through
-    // Darwin/Glibc imports the ledger names; under-report beats a wrong label.
+    // POSIX SOCKET WIRE verbs → Net, GATED ON THE EXACT ARITY of the C signature (and still shadow-guarded
+    // by the call site's localFreeFns, so a project's own same-named fn never fabricates). This closes a
+    // real under-report — a raw `import Glibc; connect(fd, &addr, len)` client did Net at runtime yet read
+    // silent-pure — for the DISTINCTIVE, establishing verbs only. `connect` is THE network-establishing act
+    // and a 3-arg free `connect` is unmistakably POSIX; sendto/recvfrom (6-arg) and sendmsg/recvmsg (3-arg)
+    // are collision-unlikely as free calls at that arity. See the NOTE below for what stays absent and why.
+    case "connect":  return argCount == 3 ? "Net" : nil   // connect(fd, sockaddr*, socklen_t)
+    case "sendmsg", "recvmsg": return argCount == 3 ? "Net" : nil // (fd, msghdr*, flags)
+    case "sendto", "recvfrom": return argCount == 6 ? "Net" : nil // (fd, buf, len, flags, sockaddr*, socklen)
+    // NOTE deliberately ABSENT: the collision-prone bare POSIX names — SETUP verbs (bind/socket/listen: not
+    // the wire act, and `bind` collides with SQL binding — the first real-repo sweep caught GRDB's local
+    // `bind(...)` fabricating Net onto 214 fns), the ULTRA-common words (send/recv/read/write/open — free
+    // functions of these arities exist all over), and process/fs names (fork/system/mkdir/rename/unlink).
+    // For these, under-report the rare direct-syscall program beats a wrong label on a common one; idiomatic
+    // Swift reaches the network via URLSession/Network.framework (both modelled → Net) anyway.
     default:
         if SQLITE_PURE_INTROSPECTION.contains(name) { return nil }   // resident-state read — never Db
         if name.hasPrefix(DB_FREE_PREFIX) { return "Db" }

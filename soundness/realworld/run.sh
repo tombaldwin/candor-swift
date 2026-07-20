@@ -41,12 +41,15 @@ KNOWN_UNDER=()
 CASES=(
   "fs_read|Fs|/tmp/candor-oracle-swift-fs-read"
   "fs_write|Fs|/tmp/candor-oracle-swift-fs-write"
+  "fs_filehandle|Fs|/tmp/candor-oracle-swift-fh"
+  "fs_manager|Fs|/tmp/candor-oracle-swift-fm"
   "exec_proc|Exec|/tmp/candor-oracle-swift-exec-ran"
   "net_url|Net|192.0.2.1"
+  "net_raw|Net|192.0.2.5"
   "pure_ctrl||__no_marker__"
 )
 
-pass=0; under=0; known=0; skip=0; fab=0; failed=""
+pass=0; under=0; known=0; skip=0; fab=0; blame=0; failed=""
 for row in "${CASES[@]}"; do
   IFS='|' read -r d eff marker <<<"$row"
   src="$HERE/$d/main.swift"
@@ -64,18 +67,22 @@ for row in "${CASES[@]}"; do
   rep=$(ls "$HERE/$d"/.candor/report.*.Swift.json 2>/dev/null | grep -vE 'callgraph|hierarchy' | head -1)
   # Pass the report FILE as argv (NOT a stdin pipe): `candor --json | python - <<'PY'` is broken because
   # the heredoc overrides stdin, so json.load(sys.stdin) would read the SCRIPT text, not the report.
-  read -r pred uncertain <<<"$(python3 - "${rep:-/dev/null}" <<'PY'
+  # Extract candor's PRECISE claim (the inferred effects EXCEPT Unknown — Unknown is disclosure, not a
+  # precise effect), whether it disclosed any uncertainty, and the unknownWhy REASONS (the blame data).
+  read -r pred uncertain whys <<<"$(python3 - "${rep:-/dev/null}" <<'PY'
 import json, sys
 try:
     d = json.load(open(sys.argv[1])); funcs = d.get("functions", [])
 except Exception:
     funcs = []
-union = set(); unc = False
+precise = set(); unc = False; whys = set()
 for f in funcs:
-    s = set(f.get("inferred", [])); union |= s
+    s = set(f.get("inferred", []))
+    precise |= (s - {"Unknown"})
     if "Unknown" in s or f.get("unresolved") or f.get("invisible") or f.get("blind") or f.get("incomplete"):
         unc = True
-print((",".join(sorted(union)) or "-"), ("uncertain" if unc else "certain"))
+    for w in (f.get("unknownWhy") or []): whys.add(w)
+print((",".join(sorted(precise)) or "-"), ("uncertain" if unc else "certain"), (";".join(sorted(whys)) or "-"))
 PY
 )"
 
@@ -85,8 +92,16 @@ PY
     continue
   fi
   if [ "$ran" = "0" ]; then echo "    SKIP ($eff did not execute under strace this run)"; skip=$((skip+1)); continue; fi
-  if echo ",$pred," | grep -q ",$eff," || echo ",$pred," | grep -q ",Unknown," || [ "$uncertain" = "uncertain" ]; then
+  # Three-way honesty verdict (mirrors candor-ts verify-core):
+  #  (1) PRECISE   — the effect is in candor's precise (non-Unknown) claim: held tightly.
+  #  (2) HELD BY DISCLOSURE — not precise, but Unknown was disclosed → honest, and BLAME-TRACKED: the
+  #      unknownWhy reason names the exact unresolved edge to fix for a precise answer (backlog P3).
+  #  (3) VIOLATION — neither: a silent-pure that demonstrably ran = the cardinal sin.
+  if echo ",$pred," | grep -q ",$eff,"; then
     pass=$((pass+1))
+  elif [ "$uncertain" = "uncertain" ]; then
+    echo "    ⓘ $eff held by DISCLOSURE (Unknown), not a precise claim — blame: [$whys]  (resolve this edge → precise $eff)"
+    blame=$((blame+1)); pass=$((pass+1))
   elif printf '%s\n' "${KNOWN_UNDER[@]}" | grep -qx "$d"; then
     echo "    ⚠ KNOWN under-report (tracked, awaiting fix): ran $eff but candor predicts [$pred] — see KNOWN_UNDER"
     known=$((known+1))
@@ -97,7 +112,7 @@ PY
 done
 
 echo
-echo "swift realworld oracle: $pass honest, $known KNOWN under-report(s), $under NEW under-report(s), $fab fabrication(s), $skip skipped"
+echo "swift realworld oracle: $pass honest ($blame held by disclosure+blamed), $known KNOWN under-report(s), $under NEW under-report(s), $fab fabrication(s), $skip skipped"
 [ -n "$failed" ] && { echo "swift realworld oracle: NEW under-reporting drivers:$failed"; exit 1; }
 [ "$fab" -gt 0 ] && { echo "swift realworld oracle: fabrication on the pure control"; exit 1; }
 exit 0
