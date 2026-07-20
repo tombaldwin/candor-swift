@@ -9,6 +9,14 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### performance — quadratic per-function loop-invariant removed (no output change)
+
+The per-function analysis loop rebuilt `Set(freeFnByName.keys)` at every `CallCollector` construction —
+`freeFnByName` is fixed after decl-aggregation and never mutated in the loop, so this was O(freeFns) × N =
+**O(N²)** on any function-heavy corpus (ms/function rose 0.07 → 0.40 across 500→10000 funcs). Hoisted to a
+single build before the loop → flat ~0.05 ms/function, **8.4× faster at 10k functions**. Report output
+verified byte-for-byte identical (this is a loop-invariant hoist, not a semantic change); `swift test` green.
+
 ### ⚠ soundness — sync callback-invoker opaque-arg (Swift arm of the four-way parity fix)
 
 Fixes a silent under-report (cardinal sin): an OPAQUE closure passed to a SYNCHRONOUS higher-order
