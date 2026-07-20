@@ -31,7 +31,11 @@ A pure control guards the fabrication mirror. Linux + `strace` only (the swift C
 | `fs_read`  | Fs | `String(contentsOfFile:)` → `openat` on the marker path |
 | `fs_write` | Fs | `String.write(toFile:atomically:false)` → `openat` |
 | `fs_filehandle` | Fs | `FileHandle(forWritingAtPath:)` opens an fd → `openat` |
+| `fs_fh_read` | Fs | `FileHandle(forReadingAtPath:)` + `readToEnd()` → `openat` |
+| `fs_data`  | Fs | `Data(contentsOf: fileURL)` → `openat` |
+| `fs_remove` | Fs | `FileManager.removeItem` → `unlink` on the marker path |
 | `exec_proc` | Exec | `Process` spawns `/bin/sh -c 'echo > <marker>'`; the CHILD's `openat` proves the subprocess ran (robust vs argv inside the parent's `posix_spawn`) |
+| `exec_env` | Exec | `Process` with a set `environment` spawns `/bin/sh` → child `openat` |
 | `net_url`  | Net | `URLSession` request → `connect` carries the TEST-NET marker IP |
 | `net_raw`  | Net | raw `import Glibc; socket()`/non-blocking `connect(fd,&addr,len)` → `connect` carries the marker IP |
 | `pure_ctrl` | — | pure arithmetic; nothing runs, nothing predicted (fabrication control) |
@@ -46,3 +50,9 @@ verbs stay deliberately **absent** (`bind` is the GRDB `Statement.bind` case tha
 214 fns; `socket`/`send`/`recv`/`listen` are too common as bare identifiers) — for those, under-reporting the
 rare direct-syscall program still beats a wrong label on a common one. Regression: `ClassifierTests`
 (connect(3)→Net, connect(2)/bind/socket/send→nil).
+
+**Four-way check (2026-07-20):** the raw-socket gap was swift-SPECIFIC. The other engines classify their
+low-level socket surface as `Net` already, because they are path/type-qualified and never had the bare-
+identifier collision: rust `libc::connect`/`nix::sys::socket::connect`/socket2, java `Socket.connect` /
+`SocketChannel.connect`, ts `net.Socket.connect` / `net.connect`. Verified by scanning a raw-socket program
+through each engine (all → `Net`); no fix needed there.

@@ -42,7 +42,11 @@ CASES=(
   "fs_read|Fs|/tmp/candor-oracle-swift-fs-read"
   "fs_write|Fs|/tmp/candor-oracle-swift-fs-write"
   "fs_filehandle|Fs|/tmp/candor-oracle-swift-fh"
+  "fs_fh_read|Fs|/tmp/candor-oracle-swift-fhr"
+  "fs_data|Fs|/tmp/candor-oracle-swift-data"
+  "fs_remove|Fs|/tmp/candor-oracle-swift-rm"
   "exec_proc|Exec|/tmp/candor-oracle-swift-exec-ran"
+  "exec_env|Exec|/tmp/candor-oracle-swift-execenv"
   "net_url|Net|192.0.2.1"
   "net_raw|Net|192.0.2.5"
   "pure_ctrl||__no_marker__"
@@ -58,7 +62,7 @@ for row in "${CASES[@]}"; do
   # not a finding — an oracle can only judge a program that runs.
   swiftc "$src" -o "$bin" >/dev/null 2>&1 || { echo "  $d: swiftc failed — SKIP"; skip=$((skip+1)); continue; }
 
-  strace -f -e trace=connect,socket,openat,open,execve -o "$HERE/$d/trace.log" "$bin" >/dev/null 2>&1 || true
+  strace -f -e trace=connect,socket,openat,open,execve,unlink,unlinkat -o "$HERE/$d/trace.log" "$bin" >/dev/null 2>&1 || true
   ran=0; grep -qF "$marker" "$HERE/$d/trace.log" 2>/dev/null && ran=1
 
   rm -rf "$HERE/$d/.candor" 2>/dev/null
