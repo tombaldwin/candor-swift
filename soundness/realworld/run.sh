@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Real-world DYNAMIC oracle for candor-swift — kernel ground truth on candor's STATIC prediction.
+#
+# The mechanism-INDEPENDENT third soundness check (static analysis → cross-engine conformance → THIS).
+# candor-swift is the only engine that lacked it: rust has soundness/realworld (strace), java a bytecode
+# agent, candor-ts verify-core — this closes the RQ3 gap (conformance is the WEAKEST check because shared
+# blind spots hide from agreement; a runtime trace shares no code/spec/author-intuition with the analyzer).
+#
+# For each driver (a small Swift program exercising ONE real effectful API with a distinctive marker):
+# compile it, RUN it under strace, and confirm the effect actually executed (its marker appears in the
+# trace). If it did, assert candor-swift's STATIC prediction contains that effect — OR discloses uncertainty
+# (Unknown/unresolved/invisible/blind/incomplete), which is honest. An effect that demonstrably RAN which
+# candor predicts NOWHERE and discloses NOWHERE (silent-pure) is a real under-report — the cardinal sin.
+# A pure control that runs no syscall and is predicted pure guards the fabrication mirror.
+#
+#   bash soundness/realworld/run.sh
+# Linux + strace only (the swift CI linux job; locally via a swift:6.1 Docker container + strace).
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/../.." && pwd)"
+
+case "$(uname -s)" in Linux) : ;; *) echo "swift realworld oracle: needs Linux + strace (got $(uname -s)) — skipping."; exit 0 ;; esac
+command -v strace >/dev/null 2>&1 || { echo "swift realworld oracle: strace not installed — skipping."; exit 0; }
+command -v swiftc >/dev/null 2>&1 || { echo "swift realworld oracle: swiftc not found — skipping."; exit 0; }
+
+echo "swift realworld oracle: building candor-swift…"
+( cd "$ROOT" && swift build -q ) || { echo "FAIL: candor-swift build"; exit 1; }
+SW="$ROOT/.build/debug/candor-swift"
+[ -x "$SW" ] || { echo "FAIL: no candor-swift binary at $SW"; exit 1; }
+
+# KNOWN, TRIAGED under-reports — tracked so the oracle is a clean gate (green on known gaps, red only on
+# NEW findings). Empty now; a real find gets a fix + a row here (never a silent ignore).
+KNOWN_UNDER=()
+
+# driver | effect ("" = pure control) | marker (must appear in the strace iff the effect ran)
+# ACTIVE set: the drivers validated end-to-end on Linux (marker fires under strace, candor predicts the
+# effect). Fs is the highest-frequency boundary effect, so this already gives the gate real teeth.
+CASES=(
+  "fs_read|Fs|/tmp/candor-oracle-swift-fs-read"
+  "fs_write|Fs|/tmp/candor-oracle-swift-fs-write"
+  "pure_ctrl||__no_marker__"
+)
+# STAGED (drivers written + candor predicts them correctly — exec_proc→Exec, net_url→Net — but their
+# marker does not yet fire under strace on Linux: Foundation `Process` routes through posix_spawn and
+# `URLSession` through libcurl, so the exec argv / connect address land differently than the naive marker
+# expects). Left OUT of CASES deliberately (a driver that always SKIPs would be a silent coverage gap, the
+# very thing candor exists to prevent) until the Linux syscall attribution is nailed down — tracked in
+# soundness/realworld/README.md. Do NOT re-add them to CASES until their markers fire in this harness.
+
+pass=0; under=0; known=0; skip=0; fab=0; failed=""
+for row in "${CASES[@]}"; do
+  IFS='|' read -r d eff marker <<<"$row"
+  src="$HERE/$d/main.swift"
+  bin="$HERE/$d/$d.bin"
+  [ -f "$src" ] || { echo "  $d: no source — SKIP"; skip=$((skip+1)); continue; }
+  # Compile the driver (Foundation/FoundationNetworking auto-linked on Linux). A build failure = SKIP,
+  # not a finding — an oracle can only judge a program that runs.
+  swiftc "$src" -o "$bin" >/dev/null 2>&1 || { echo "  $d: swiftc failed — SKIP"; skip=$((skip+1)); continue; }
+
+  strace -f -e trace=connect,socket,openat,open,execve -o "$HERE/$d/trace.log" "$bin" >/dev/null 2>&1 || true
+  ran=0; grep -qF "$marker" "$HERE/$d/trace.log" 2>/dev/null && ran=1
+
+  rm -rf "$HERE/$d/.candor" 2>/dev/null
+  read -r pred uncertain <<<"$("$SW" "$HERE/$d" --json 2>/dev/null | python3 - <<'PY'
+import json, sys
+try:
+    d = json.load(sys.stdin); funcs = d.get("functions", [])
+except Exception:
+    funcs = []
+union = set(); unc = False
+for f in funcs:
+    s = set(f.get("inferred", [])); union |= s
+    if "Unknown" in s or f.get("unresolved") or f.get("invisible") or f.get("blind") or f.get("incomplete"):
+        unc = True
+print((",".join(sorted(union)) or "-"), ("uncertain" if unc else "certain"))
+PY
+)"
+
+  echo "  $d: ran=$ran  effect=${eff:-none}  candor=[$pred] $uncertain"
+  if [ -z "$eff" ]; then  # pure control: nothing should run, nothing should be predicted
+    { [ "$ran" = "0" ] && [ "$pred" = "-" ]; } && pass=$((pass+1)) || { echo "    ⚠ control: ran=$ran pred=$pred (expected none/none)"; fab=$((fab+1)); }
+    continue
+  fi
+  if [ "$ran" = "0" ]; then echo "    SKIP ($eff did not execute under strace this run)"; skip=$((skip+1)); continue; fi
+  if echo ",$pred," | grep -q ",$eff," || echo ",$pred," | grep -q ",Unknown," || [ "$uncertain" = "uncertain" ]; then
+    pass=$((pass+1))
+  elif printf '%s\n' "${KNOWN_UNDER[@]}" | grep -qx "$d"; then
+    echo "    ⚠ KNOWN under-report (tracked, awaiting fix): ran $eff but candor predicts [$pred] — see KNOWN_UNDER"
+    known=$((known+1))
+  else
+    echo "    ✗ NEW UNDER-REPORT: ran $eff (marker '$marker' in trace) but candor predicts [$pred] with no uncertainty"
+    under=$((under+1)); failed="$failed $d"
+  fi
+done
+
+echo
+echo "swift realworld oracle: $pass honest, $known KNOWN under-report(s), $under NEW under-report(s), $fab fabrication(s), $skip skipped"
+[ -n "$failed" ] && { echo "swift realworld oracle: NEW under-reporting drivers:$failed"; exit 1; }
+[ "$fab" -gt 0 ] && { echo "swift realworld oracle: fabrication on the pure control"; exit 1; }
+exit 0

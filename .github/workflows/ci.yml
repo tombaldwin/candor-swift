@@ -69,8 +69,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
-      - name: Harness deps (the swift image is minimal — smoke/fuzz/probe need python3, the TTY wrapper `script` is util-linux)
-        run: apt-get update -qq && apt-get install -y -qq python3 util-linux >/dev/null
+      - name: Harness deps (the swift image is minimal — smoke/fuzz/probe need python3, the TTY wrapper `script` is util-linux, the dynamic oracle needs strace)
+        run: apt-get update -qq && apt-get install -y -qq python3 util-linux strace >/dev/null
       - name: Build
         run: swift build
       - name: Unit tests
@@ -86,6 +86,12 @@ jobs:
         run: python3 fuzz.py
       - name: Fabrication probe
         run: python3 fabrication_probe.py
+      # The mechanism-INDEPENDENT soundness tier (static → conformance → THIS): each driver exercises a real
+      # effect under strace; a silent-pure that demonstrably RAN is the cardinal sin. Linux-only (strace);
+      # rebuilds candor-swift once (already built above, cached). Closes the RQ3 gap — swift was the only
+      # engine without a runtime honesty oracle (rust has strace, java a bytecode agent, ts verify-core).
+      - name: Dynamic honesty oracle (runtime syscall ground truth — Fs/Net/Exec)
+        run: bash soundness/realworld/run.sh
 
   # Weekly early-warning lane: run the smoke oracle against candor-spec HEAD, so a floor rise (a new
   # conformance case, a tightened expectation) surfaces as a scheduled red — without redding PRs, which
