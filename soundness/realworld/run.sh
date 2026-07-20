@@ -61,10 +61,14 @@ for row in "${CASES[@]}"; do
   ran=0; grep -qF "$marker" "$HERE/$d/trace.log" 2>/dev/null && ran=1
 
   rm -rf "$HERE/$d/.candor" 2>/dev/null
-  read -r pred uncertain <<<"$("$SW" "$HERE/$d" --json 2>/dev/null | python3 - <<'PY'
+  "$SW" "$HERE/$d" >/dev/null 2>&1   # writes .candor/report.<d>.Swift.json (+ callgraph/hierarchy)
+  rep=$(ls "$HERE/$d"/.candor/report.*.Swift.json 2>/dev/null | grep -vE 'callgraph|hierarchy' | head -1)
+  # Pass the report FILE as argv (NOT a stdin pipe): `candor --json | python - <<'PY'` is broken because
+  # the heredoc overrides stdin, so json.load(sys.stdin) would read the SCRIPT text, not the report.
+  read -r pred uncertain <<<"$(python3 - "${rep:-/dev/null}" <<'PY'
 import json, sys
 try:
-    d = json.load(sys.stdin); funcs = d.get("functions", [])
+    d = json.load(open(sys.argv[1])); funcs = d.get("functions", [])
 except Exception:
     funcs = []
 union = set(); unc = False
