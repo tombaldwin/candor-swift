@@ -7,7 +7,7 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
-## [Unreleased]
+## [0.23.1] — 2026-07-20
 
 ### performance — quadratic per-function loop-invariant removed (no output change)
 
