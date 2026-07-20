@@ -43,6 +43,11 @@ jobs:
         run: python3 fuzz.py
       - name: Fabrication probe (the never-fabricate / never-lose-control guard)
         run: python3 fabrication_probe.py
+      # The non-syscall half of the dynamic oracle (Ipc/Log/Rand/Env/Clock — strace can't distinguish these,
+      # so the ground truth is documented API semantics). Needs no strace, so it runs on macOS here and
+      # complements the Linux strace oracle (Fs/Net/Exec) — together they cover the full effect vocabulary.
+      - name: Recall oracle (non-syscall effects — known-semantics)
+        run: bash soundness/realworld/recall/recall.sh
       - name: Self-gate (§7.12 — the engine holds its own boundary)
         # The analyzer reads source + writes reports (Fs/Env). It must reach the network / a database NOWHERE,
         # and spawn a subprocess ONLY for the `--workspace` chain (main.swift spawns candor-swift itself on each
@@ -92,6 +97,10 @@ jobs:
       # engine without a runtime honesty oracle (rust has strace, java a bytecode agent, ts verify-core).
       - name: Dynamic honesty oracle (runtime syscall ground truth — Fs/Net/Exec)
         run: bash soundness/realworld/run.sh
+      # Also run the non-syscall recall here: swift-corelibs-foundation DIVERGES from Darwin Foundation, so
+      # verify the Ipc/Log/Rand/Env/Clock classifications hold on Linux too.
+      - name: Recall oracle (non-syscall effects — known-semantics)
+        run: bash soundness/realworld/recall/recall.sh
 
   # Weekly early-warning lane: run the smoke oracle against candor-spec HEAD, so a floor rise (a new
   # conformance case, a tightened expectation) surfaces as a scheduled red — without redding PRs, which

@@ -47,6 +47,7 @@ CASES=(
   "fs_remove|Fs|/tmp/candor-oracle-swift-rm"
   "exec_proc|Exec|/tmp/candor-oracle-swift-exec-ran"
   "exec_env|Exec|/tmp/candor-oracle-swift-execenv"
+  "exec_pipe|Exec|/tmp/candor-oracle-swift-exec-pipe"
   "net_url|Net|192.0.2.1"
   "net_raw|Net|192.0.2.5"
   "pure_ctrl||__no_marker__"

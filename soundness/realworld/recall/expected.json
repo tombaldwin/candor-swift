@@ -1,0 +1,7 @@
+{
+  "ipc_pipe": "Ipc",
+  "log_nslog": "Log",
+  "rand_uuid": "Rand",
+  "env_read": "Env",
+  "clock_now": "Clock"
+}

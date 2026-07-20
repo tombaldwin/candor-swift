@@ -36,9 +36,21 @@ A pure control guards the fabrication mirror. Linux + `strace` only (the swift C
 | `fs_remove` | Fs | `FileManager.removeItem` → `unlink` on the marker path |
 | `exec_proc` | Exec | `Process` spawns `/bin/sh -c 'echo > <marker>'`; the CHILD's `openat` proves the subprocess ran (robust vs argv inside the parent's `posix_spawn`) |
 | `exec_env` | Exec | `Process` with a set `environment` spawns `/bin/sh` → child `openat` |
+| `exec_pipe` | Exec | `Process` captures child stdout via a `Pipe` (candor: Exec+Ipc) → child `openat` |
 | `net_url`  | Net | `URLSession` request → `connect` carries the TEST-NET marker IP |
 | `net_raw`  | Net | raw `import Glibc; socket()`/non-blocking `connect(fd,&addr,len)` → `connect` carries the marker IP |
 | `pure_ctrl` | — | pure arithmetic; nothing runs, nothing predicted (fabrication control) |
+
+## Recall corpus (non-syscall effects) — `recall/`
+
+`strace` can't distinguish **Ipc / Log / Rand / Env / Clock** from ordinary fd/register ops, so — exactly
+like rust's `soundness/realworld/recall` — these are checked against **documented API semantics**
+(`recall/expected.json`), not the kernel. `recall.sh` scans `recall/recall.swift` and asserts each function's
+static prediction contains the expected effect (or discloses `Unknown`). candor-swift is syntactic, so it
+needs no strace and runs **anywhere** — the swift CI runs it on both macOS and Linux (swift-corelibs-foundation
+diverges from Darwin). Coverage: `ipc_pipe`→Ipc (matches rust's `ipc_unix`), `log_nslog`→Log, `rand_uuid`→Rand,
+`env_read`→Env, `clock_now`→Clock. Together with the strace oracle above (Fs/Net/Exec), the two cover the full
+effect vocabulary against ground truth.
 
 ## Resolved: raw POSIX sockets now classify Net
 
