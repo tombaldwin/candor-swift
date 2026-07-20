@@ -31,7 +31,6 @@ A pure control guards the fabrication mirror. Linux + `strace` only (the swift C
 | `fs_read`  | Fs | `String(contentsOfFile:)` → `openat` on the marker path |
 | `fs_write` | Fs | `String.write(toFile:atomically:false)` → `openat` |
 | `fs_filehandle` | Fs | `FileHandle(forWritingAtPath:)` opens an fd → `openat` |
-| `fs_manager` | Fs | `FileManager.createFile`/`removeItem` → `openat` |
 | `exec_proc` | Exec | `Process` spawns `/bin/sh -c 'echo > <marker>'`; the CHILD's `openat` proves the subprocess ran (robust vs argv inside the parent's `posix_spawn`) |
 | `net_url`  | Net | `URLSession` request → `connect` carries the TEST-NET marker IP |
 | `net_raw`  | Net | raw `import Glibc; socket()`/non-blocking `connect(fd,&addr,len)` → `connect` carries the marker IP |

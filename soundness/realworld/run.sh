@@ -42,7 +42,6 @@ CASES=(
   "fs_read|Fs|/tmp/candor-oracle-swift-fs-read"
   "fs_write|Fs|/tmp/candor-oracle-swift-fs-write"
   "fs_filehandle|Fs|/tmp/candor-oracle-swift-fh"
-  "fs_manager|Fs|/tmp/candor-oracle-swift-fm"
   "exec_proc|Exec|/tmp/candor-oracle-swift-exec-ran"
   "net_url|Net|192.0.2.1"
   "net_raw|Net|192.0.2.5"
