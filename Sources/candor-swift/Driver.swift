@@ -343,6 +343,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // Collapse the const-string index: drop ambiguous (nil) names, keep only the unambiguous NAME→literal.
     var globalConstStrings: [String: String] = [:]
     for (k, v) in constStrings { if let v { globalConstStrings[k] = v } }
+    // Loop-invariant: `freeFnByName` is fully built above (the decl-aggregation pass) and never mutated in
+    // the per-fn loop, so its key set is fixed. Build it ONCE here — not once PER function inside the loop
+    // (`Set(freeFnByName.keys)` at the CallCollector site was O(freeFns) rebuilt N times = O(N²) on a
+    // free-function-heavy corpus). Byte-identical: the set passed to each CallCollector is the same value.
+    let localFreeFnNames = Set(freeFnByName.keys)
     for f in allFns {
         locOf[f.qual] = f.loc
         if f.isMain { entryPoints.insert(f.qual) }
@@ -354,7 +359,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                fieldArrayElem: fieldArrayElem, fieldDictValue: fieldDictValue,
                                enumCaseValueType: enumCaseValueType, dynamicMemberTypes: dynamicMemberTypes,
                                propertyWrapperTypes: propertyWrapperTypes, wrappedProps: wrappedProps,
-                               localFreeFns: Set(freeFnByName.keys), typeAliases: typeAliases,
+                               localFreeFns: localFreeFnNames, typeAliases: typeAliases,
                                opaqueSeqBuilders: opaqueSeqBuilders, seqBuilderConcrete: seqBuilderConcrete,
                                closureFields: closureFields, moduleConstStrings: globalConstStrings)
         cc.walk(body)
