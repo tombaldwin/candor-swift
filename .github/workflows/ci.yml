@@ -44,9 +44,18 @@ jobs:
       - name: Fabrication probe (the never-fabricate / never-lose-control guard)
         run: python3 fabrication_probe.py
       - name: Self-gate (§7.12 — the engine holds its own boundary)
+        # The analyzer reads source + writes reports (Fs/Env). It must reach the network / a database NOWHERE,
+        # and spawn a subprocess ONLY for the `--workspace` chain (main.swift spawns candor-swift itself on each
+        # workspace dep, reading its report through a Pipe → Exec + Ipc). A prefix deny can't carve out one
+        # file, so — exactly as candor-java proves its verify-runner — we prove the two halves separately:
         run: |
-          printf 'deny Net Db Exec Ipc\n' > /tmp/gate.pol
-          .build/debug/candor-swift Sources --out /tmp/self --policy /tmp/gate.pol
+          # (1) the analysis CORE (main.swift — the sole Exec/Ipc surface — removed) must not Exec/Ipc/Net/Db.
+          rm -rf /tmp/core && cp -r Sources /tmp/core && rm -f /tmp/core/candor-swift/main.swift
+          printf 'deny Net Db Exec Ipc\n' > /tmp/gate-core.pol
+          .build/debug/candor-swift /tmp/core --out /tmp/self-core --policy /tmp/gate-core.pol
+          # (2) the WHOLE engine (chain spawner included) must still never reach the network or a database.
+          printf 'deny Net Db\n' > /tmp/gate-all.pol
+          .build/debug/candor-swift Sources --out /tmp/self-all --policy /tmp/gate-all.pol
 
   # Linux is in scope (Glibc/Musl sit in PLATFORM_MODULES) and swift-corelibs-foundation DIVERGES from
   # Darwin Foundation — the URL.deletingLastPathComponent root-behaviour class (38fbc71) would have been
