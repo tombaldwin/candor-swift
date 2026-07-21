@@ -1,0 +1,4 @@
+package	tag	observed_raw	observed_crate	named	unknown_only	violations	level	verdict
+ZIPFoundation	0.9.20	Exec,Fs,Net	Net	Fs	Exec,Net	-	perfn	H-holds
+Path.swift	1.6.0	Exec,Fs,Net	Net	Fs	Exec,Net	-	perfn	PF-VIOLATION[next@Net{Fs}]
+FlyingFox	0.19.0	Exec,Fs	-	Fs	Exec	-	perfn	H-holds
