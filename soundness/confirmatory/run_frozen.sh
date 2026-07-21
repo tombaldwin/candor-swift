@@ -27,7 +27,7 @@ grep -vE '^\s*#|^\s*$' "$HERE/manifest.tsv" | while IFS=$'\t' read -r name url t
   bin=$(find "$d/.build/debug" -name '*PackageTests.xctest' 2>/dev/null | head -1)
   [ -x "$bin" ] || bin=$(find "$d/.build" -name '*.xctest' -type f 2>/dev/null | head -1)
   [ -n "$bin" ] || { echo "  no test bundle"; printf '%s\t%s\t-\t-\t-\tno-test-bin\n' "$name" "$tag" >>"$SUM"; continue; }
-  strace -f -e trace=openat,open,connect,execve,unlink -o "$d/trace.log" "$bin" >/dev/null 2>&1 || true
+  strace -f -e trace=openat,openat2,open,connect,socket,execve,unlink -o "$d/trace.log" "$bin" >/dev/null 2>&1 || true
   observed=$(python3 - "$d/trace.log" "$rep" <<'PY'
 import json,sys,re
 trace,rep=sys.argv[1],sys.argv[2]
