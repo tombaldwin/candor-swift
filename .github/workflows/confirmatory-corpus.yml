@@ -1,0 +1,34 @@
+# FROZEN confirmatory corpus — Swift syscall arm, on GitHub's Linux runners (swift:6.1 container has strace;
+# the author's local Docker was too CPU-starved, and SwiftSyntax builds from source). Manual + weekly: it
+# clones + test-builds a held-out, version-pinned Swift-package corpus (soundness/confirmatory/manifest.tsv)
+# and checks candor-swift's prediction against the kernel. A violation is a REPORTED confirmatory datapoint
+# (per FROZEN.md), uploaded as an artifact, not a red gate. The frozen binary is candor-swift built from
+# this commit's source.
+name: confirmatory-corpus
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '41 5 * * 1'   # weekly (Mon 05:41 UTC); heavy (SwiftSyntax + package builds), not per-push
+
+concurrency:
+  group: confirmatory-corpus-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  confirmatory:
+    runs-on: ubuntu-24.04
+    container: swift:6.1
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - name: Harness deps (minimal image needs python3 + strace)
+        run: apt-get update -qq && apt-get install -y -qq python3 strace >/dev/null
+      - name: Frozen confirmatory run (held-out packages; candor-swift vs kernel)
+        run: bash soundness/confirmatory/run_frozen.sh
+      - name: Upload frozen per-package disposition
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-confirmatory-summary
+          path: soundness/confirmatory/results/FROZEN-SUMMARY.tsv
+          if-no-files-found: warn
