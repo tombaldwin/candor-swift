@@ -1,6 +1,6 @@
 # Pre-registered confirmatory corpus — Swift syscall arm. Held-out, version-pinned. (See FROZEN.md.)
 # Columns: name<TAB>git_url<TAB>tag<TAB>effect_classes<TAB>why
 # EXCLUDED (dogfooded): Files ShellOut SQLite.swift swifter GRDB.
-ZIPFoundation	https://github.com/weichsel/ZIPFoundation	0.9.19	Fs	reads/writes real zip files on disk in its tests — Fs it opens itself
-Path.swift	https://github.com/mxcl/Path.swift	6.0.1	Fs	filesystem path ops (stat/exists/mkdir) over real files in tests
+ZIPFoundation	https://github.com/weichsel/ZIPFoundation	0.9.20	Fs	reads/writes real zip files on disk in its tests — Fs it opens itself
+Path.swift	https://github.com/mxcl/Path.swift	1.6.0	Fs	filesystem path ops (stat/exists/mkdir) over real files in tests
 FlyingFox	https://github.com/swhitty/FlyingFox	0.19.0	Net	binds a real TCP socket (HTTP server) in its tests — Net in its own code
