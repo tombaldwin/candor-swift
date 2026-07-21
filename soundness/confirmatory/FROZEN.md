@@ -21,3 +21,17 @@ corpus, executed on the swift CI Linux job.
   `openat`/`connect`/`execve` map to `Fs`/`Net`/`Exec`; **program-level H** — every observed class must be
   named by some function or disclosed `Unknown`; a violation is an observed class no function covers.
 - **Acceptance:** zero *undisclosed* observed-effect classes; disclosed `Unknown` is a pass; reported not fixed.
+
+## Result (GitHub CI, swift:6.1 Linux, 2026-07-21)
+
+3/3 held-out packages: every kernel-observed effect class (Fs/Net/Exec) is **covered** by candor-swift.
+**0 program-level false all-clears; H holds on all.**
+
+| package | tag | observed | covered | violations |
+|---|---|---|---|---|
+| ZIPFoundation | 0.9.20 | Fs,Net,Exec | Fs,Net,Exec | 0 |
+| Path.swift | 1.6.0 | Fs,Net,Exec | Fs,Net,Exec | 0 |
+| FlyingFox | 0.19.0 | Fs,Exec | Fs,Exec | 0 |
+
+Same honest caveat as the Rust arm: program-level, and the XCTest harness inflates `observed` (safe
+direction). Mechanism-independent kernel oracle on held-out Swift packages.
