@@ -31,10 +31,12 @@ grep -vE '^\s*#|^\s*$' "$HERE/manifest.tsv" | while IFS=$'\t' read -r name url t
   observed=$(python3 - "$d/trace.log" "$rep" <<'PY'
 import json,sys,re
 trace,rep=sys.argv[1],sys.argv[2]
-CLS={'openat':'Fs','open':'Fs','unlink':'Fs','connect':'Net','execve':'Exec'}
+CLS={'openat':'Fs','openat2':'Fs','open':'Fs','unlink':'Fs','connect':'Net','socket':'Net','execve':'Exec'}
 obs=set()
+# strace -f prefixes "PID  syscall(...)"; match the syscall name wherever it sits (not anchored at start).
+RX=re.compile(r'(?:^|\s)(openat2|openat|open|connect|socket|execve|unlink)\(')
 for line in open(trace,errors='replace'):
-    m=re.match(r'(?:\[pid \d+\] )?(\w+)\(',line)
+    m=RX.search(line)
     if m and m.group(1) in CLS: obs.add(CLS[m.group(1)])
 d=json.load(open(rep)); named=set(); unknown=False
 for f in d.get('functions',[]):
