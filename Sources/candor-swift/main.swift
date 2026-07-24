@@ -603,6 +603,67 @@ if !unlisted.isEmpty {
     FileHandle.standardError.write(
         ("candor-swift: candor's classifier doesn't cover \(unlisted.count) module\(unlisted.count == 1 ? "" : "s") this code imports — "
          + "their effects are INVISIBLE to the scan (absent from the report, NOT a claim they're pure): \(shown)\(more)\n").data(using: .utf8)!)
+
+    // SCAN-COMPLETENESS NUDGE (the candor-java port, commit 8b5d0b0). A scan that sees your sources but
+    // not the packages they depend on cannot see those packages' effects — a MISSING INPUT, not a
+    // precision defect, and the ledger line above states the gap without saying what to DO about it.
+    // Measured on the JVM side: a real 18.7k-fn webapp scanned app-only could PROVE Net on 465 functions;
+    // re-scanned as the deployed artifact (app + its 222 dependency jars) the same gate proved Net on
+    // 5,865 — the library reaches became DETERMINED effects instead of nothing. The nudge deliberately
+    // promises VISIBILITY only: chaining a dep's report does not resolve a dispatch over your OWN broad
+    // protocol hierarchy, so it must never be sold as a precision fix.
+    //
+    // Triggered on VOLUME, not on the module COUNT: count is the wrong metric — a small app touching five
+    // tiny util modules once each would be nudged for nothing, while one SDK pulled into sixty files (the
+    // textbook "you pointed candor at sources whose deps were never scanned" case) would be missed by any
+    // count threshold. UNIT DEVIATION from the reference engine: candor-java sums CALLS into uncovered
+    // packages (bytecode gives it call sites into named packages); this engine's ledger counts IMPORT
+    // DECLARATIONS per module (one per `import M` per file — see Driver's `importCounts`, and the wire
+    // field that stays `calls` per SPEC §2), because a syntactic Swift scan cannot attribute an
+    // unresolved call to a specific module. So the swift trigger is import volume, the closest quantity
+    // this engine actually measures: it still separates "one dependency, imported everywhere" from
+    // "a handful of modules touched once".
+    //
+    // Advisory ONLY — stderr, after the ledger line; it never touches the report, the verdict, the exit
+    // code, or stdout (stdout stays pure JSON under --json, pinned by ScanCompletenessNudgeProcessTests).
+    //
+    // SCOPED TO SCANNABLE MODULES, which is what makes this port honest. Unlike a jar, most of a Swift
+    // ledger is Apple frameworks with NO SOURCE TO SCAN: a 2.9k-fn SwiftUI app measured 22 uncovered
+    // modules / 49 imports, almost all MapKit/Metal/WidgetKit-class. Volume alone would therefore nudge
+    // that user toward a remedy they cannot act on — a dead end, which this project's UX rule forbids
+    // ("failures carry remedies"). So the trigger counts ONLY imports of modules that are demonstrably
+    // scannable: a module directory under a fetched SwiftPM checkout (`.build/checkouts/*/Sources/<M>`,
+    // the SwiftPM layout convention). A framework never appears there, so it never contributes; a real
+    // dependency does, and for it the remedy is exactly right — which is why the message can now state
+    // it unconditionally instead of hedging.
+    //
+    // Deliberately silent when `.build/checkouts` is absent: nothing is provably scannable, so the honest
+    // volume is zero. That case is ALREADY covered upstream by the ⟨0.19⟩ SETUP warning ("deps not
+    // fetched … run swift build first"), so staying quiet here avoids a duplicate — and fail-quiet is the
+    // right default for an advisory whose only cost of firing is noise.
+    let uncoveredImportsNudgeMin = 50   // ledger-volume bar; parity with candor-java's UNCOVERED_CALLS_NUDGE_MIN
+    var scannableModules: Set<String> = []
+    let checkoutsDir = (rootDir as NSString).appendingPathComponent(".build/checkouts")
+    for checkout in ((try? fm.contentsOfDirectory(atPath: checkoutsDir)) ?? []) {
+        let srcDir = ((checkoutsDir as NSString).appendingPathComponent(checkout) as NSString)
+            .appendingPathComponent("Sources")
+        for module in ((try? fm.contentsOfDirectory(atPath: srcDir)) ?? []) {
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: (srcDir as NSString).appendingPathComponent(module), isDirectory: &isDir),
+               isDir.boolValue { scannableModules.insert(module) }
+        }
+    }
+    let scannable = unlisted.filter { scannableModules.contains($0.key) }
+    let uncoveredImports = scannable.reduce(0) { $0 + $1.value }
+    if uncoveredImports >= uncoveredImportsNudgeMin {
+        // The count is >= the bar, so `imports` is always plural here; only the module count needs agreement.
+        let m = scannable.count
+        FileHandle.standardError.write(
+            ("candor-swift: hint — \(uncoveredImports) imports pull in \(m) dependency module\(m == 1 ? "" : "s") that "
+             + "\(m == 1 ? "is" : "are") not scanned, so their effects are invisible here. Scan them too and chain "
+             + "their reports (`--workspace` for local path deps, or CANDOR_DEPS=<dir>): those reaches then resolve "
+             + "to DETERMINED effects instead of being absent.\n").data(using: .utf8)!)
+    }
 }
 
 // The cold-repo hook (SURFACE-BEST-FIND-DESIGN.md, phase P3): ONE more stderr line naming the single
