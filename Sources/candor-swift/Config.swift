@@ -12,7 +12,18 @@ import Foundation
 // consumes `policy`, `baseline` (the AS-EFF-005 regression guard, Baseline.swift) and `deps` (SPEC §2
 // report chaining, Deps.swift); the remaining java-only gate keys stay disclosed-inert. A key OUTSIDE
 // the vocabulary warns (typo protection: a misspelt `policy` must not silently drop the gate).
-let candorConfigKeys: Set<String> = ["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps", "unknown-alias", "unknown-ratchet"]
+let candorConfigKeys: Set<String> = ["policy", "baseline", "strict", "no-ambient", "closed-world", "taint", "deps", "unknown-alias", "net-partner", "unknown-ratchet"]
+
+// The subset of `candorConfigKeys` this engine actually wires to a mode. The rest are spec-inert HERE —
+// but a checked-in enforcement key that silently does nothing is a DECLARED-GATE-SILENTLY-OFF (the
+// reader believes the gate is on, and another engine really does honour it), so an inert recognized key
+// DISCLOSES loudly rather than staying mute (the 2026-07-09 config amendment; byte-shape with rust's
+// CONFIG_KEYS_IMPLEMENTED). One wiring site each: `policy` → the policyPath floor (main.swift), `baseline`
+// → the AS-EFF-005 guard path (main.swift), `deps` → the §2 chaining spec (main.swift), `unknown-ratchet`
+// → the baseline guard's Unknown opt-in (main.swift). `unknown-alias` is ALSO implemented — Policy.swift's
+// parseUnknownAliases reads it straight off the config TEXT — but it is multi-value, so it exits this
+// loop at the `continue` below and never reaches the check, exactly as in rust.
+let candorConfigKeysImplemented: Set<String> = ["policy", "baseline", "deps", "unknown-ratchet"]
 
 // ⟨0.19⟩ Discover `.candor/config` TEXT anchored at `targetPath`: $CANDOR_CONFIG if set + readable, else the
 // nearest `.candor/config` walking UP, else nil. Read-only + LENIENT (no exit — the caller decides
@@ -89,7 +100,20 @@ func loadCandorConfig(targetPath: String) -> [String: String] {
             FileHandle.standardError.write("candor-swift: ignoring unknown config key '\(key)' in \(file!)\n".data(using: .utf8)!)
             continue
         }
-        if key == "unknown-alias" { continue }  // ⟨0.19⟩ MULTI-VALUE — extracted via parseUnknownAliases
+        // MULTI-VALUE keys, both read from the config TEXT rather than this single-value map: ⟨0.19⟩
+        // `unknown-alias` via parseUnknownAliases, ⟨0.20⟩ `net-partner` via parseNetPartners. `net-partner`
+        // was missing from candorConfigKeys entirely, so a config setting it drew "ignoring unknown config
+        // key 'net-partner'" while the value WAS honoured — a FALSE disclosure, worse than a missing one in
+        // a tool whose contract is that its statements about itself are true. Recognized now, and skipped
+        // before the implemented-check so it is not then mislabelled inert either.
+        if key == "unknown-alias" || key == "net-partner" { continue }
+        if !candorConfigKeysImplemented.contains(key) {
+            // Recognized family-wide but INERT here. Silence would read as "the gate is on" to whoever
+            // checked the key in — the divergence this tool exists to prevent — so say so on stderr.
+            // Disclosure only: exit code, report, verdict and stdout are untouched.
+            FileHandle.standardError.write("candor-swift: config key '\(key)' is recognized by the candor family but not implemented by candor-swift — that gate/mode is NOT active on this scan (the nightly lint / another engine enforces it)\n".data(using: .utf8)!)
+            continue
+        }
         cfg[key] = val
     }
     // FAMILY DECISION (2026-07-09): a RELATIVE path value in .candor/config resolves against the CONFIG
