@@ -1293,6 +1293,22 @@ final class CallCollector: SyntaxVisitor {
         // or member access (those expression forms charge through their own visitors).
         if vars[n] != nil || fnTyped.contains(n) || arrayElem[n] != nil || dictElem[n] != nil { return .skipChildren }
         if let p = node.parent {
+            // ...but a global read is still a read when it is the BASE of a member access or subscript:
+            // `dbg.count` / `table[k]` force `dbg`/`table`'s initializer exactly as a bare `dbg` does, and
+            // the base's own visitor is the only place that sees it. Skipping the whole form left an
+            // effectful global silent at every reader that touched a member OF it — by far the commoner
+            // shape (candor-spec SOUNDNESS-VEIN-initializer-edge.md).
+            // Two exclusions keep it exact: the member NAME (this visitor fires on that too, and recording
+            // it would edge to a global that was never read), and an INSTANCE PROPERTY of the enclosing type
+            // — a bare `typeStack.append(x)` in a method is `self.typeStack`, which the bare-read path
+            // already routes to `propertyEdges`.
+            let isReadBase = (p.as(MemberAccessExprSyntax.self)?.base?.id == node.id)
+                || (p.as(SubscriptCallExprSyntax.self)?.calledExpression.id == node.id)
+            if isReadBase {
+                if let et = enclosingType, fields[et]?[n] != nil { return .skipChildren }
+                globalReads.insert(n)
+                return .skipChildren
+            }
             if p.is(FunctionCallExprSyntax.self) || p.is(MemberAccessExprSyntax.self)
                 || p.is(SubscriptCallExprSyntax.self) { return .skipChildren }
         }

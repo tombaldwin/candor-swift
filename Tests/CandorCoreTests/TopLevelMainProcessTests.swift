@@ -96,6 +96,33 @@ final class TopLevelMainProcessTests: XCTestCase {
         XCTAssertEqual(ProcessHarness.inferred(by, "<main>"), ["Fs"], "its effect is the top level's, and is still charged there")
     }
 
+    // READING A MEMBER OF A GLOBAL forces its initializer just as a bare read does — `cfg.count` is a read
+    // of `cfg`. The `DeclReferenceExpr` visitor skipped the whole member-access form, so an effectful
+    // global stayed silent at every reader that touched a member OF it, which is the commoner shape:
+    // candor-swift's own `analysis.allFns` and swift-syntax's `SYNTAX_NODES.map { … }` both read this way.
+    // (candor-spec SOUNDNESS-VEIN-initializer-edge.md — the swift sibling of candor-ts's import edge.)
+    // The exclusions that keep it exact are pinned below: the member NAME is not a read of a global, and a
+    // bare `self` property is not a global at all.
+    func testReadingAMemberOfAGlobalForcesItsInitializer() throws {
+        let by = try scan("""
+        import Foundation
+        let cfg = (try? String(contentsOfFile: "/etc/c")) ?? ""
+        func member() -> Int { cfg.count }
+        func bare() -> String { cfg }
+        struct Holder {
+            var cfg: [String] = []
+            // `self.cfg` — an instance property that happens to share the global's name. Appending to it
+            // must NOT charge the global's Fs (it did: a whole engine's methods lit up this way).
+            mutating func add(_ s: String) { cfg.append(s) }
+        }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "member"), ["Fs"],
+                       "reading `cfg.count` forces cfg's initializer — it read silent-pure before: \(by)")
+        XCTAssertEqual(ProcessHarness.inferred(by, "bare"), ["Fs"], "the bare read still works: \(by)")
+        XCTAssertNil(by["Holder.add"],
+                     "a same-named INSTANCE property is not the global — appending to self.cfg is pure: \(by)")
+    }
+
     // a TUPLE-destructured global (`let (a, b) = effectfulInit()`) binds names so it is NOT a <main>
     // statement, but the IdentifierPattern-only unit guard used to DROP its initializer effect (a false-
     // pure global — the cardinal sin). Each bound name now carries the shared initializer's effect.
