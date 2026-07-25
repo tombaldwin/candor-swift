@@ -39,6 +39,16 @@ struct Analysis {
 // Drive the two passes
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
+/// The Swift MODULE (SwiftPM target) a source path belongs to — `Sources/<Target>/…` / `Tests/<Target>/…`,
+/// one module per target. Empty for anything outside that layout.
+func swiftModuleOf(_ loc: String) -> String {
+    let parts = loc.split(separator: ":").first.map(String.init)?.split(separator: "/").map(String.init) ?? []
+    for (i, seg) in parts.enumerated() where seg == "Sources" || seg == "Tests" {
+        if i + 1 < parts.count { return parts[i + 1] }
+    }
+    return ""
+}
+
 func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepIndex = DepIndex()) -> Analysis {
     let fm = FileManager.default
 
@@ -253,6 +263,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         return hits
     }
 
+    // MODULE-QUALIFIED FREE CALL (`Core.shared()`). Swift lets a call name the declaring module to
+    // disambiguate, and it is the idiomatic way a wrapper delegates to a same-named implementation
+    // elsewhere (`SwiftSyntaxMacrosTestSupport` → `SwiftSyntaxMacrosGenericTestSupport.assertMacroExpansion`).
+    // Such a call was read as a member call on a TYPE named `Core`, which does not exist, so the edge was
+    // DROPPED and the caller came back silent-pure — the cardinal sin (candor-spec
+    // SOUNDNESS-VEIN-global-unit-identity.md). Indexed `module -> leaf -> quals`, and used only when the
+    // module name is a real target and the leaf is unambiguous within it, so it can never guess.
+    var freeFnByModule: [String: [String: [String]]] = [:]
     // name indexes for resolution — UNAMBIGUOUS only (the family's never-guess rule)
     var freeFnByName: [String: [String]] = [:]
     var byQual: Set<String> = []
@@ -277,7 +295,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // call edge to it — the hole-9 default-arg fix's own footgun).
         // `<main>` is not a callable free function (no Swift call site names it) — keep it out of the
         // free-fn index so it neither resolves phantom `<main>()` calls nor makes any name ambiguous.
-        if f.enclosingType == nil && !f.isAccessor && !f.isTopLevel { freeFnByName[f.qual, default: []].append(f.qual) }
+        if f.enclosingType == nil && !f.isAccessor && !f.isTopLevel {
+            freeFnByName[f.qual, default: []].append(f.qual)
+            // key on the SIMPLE name: the qual may already carry an overload suffix (`shared()#1`).
+            let leaf = f.simpleQual.split(separator: "(").first.map(String.init) ?? f.simpleQual
+            freeFnByModule[swiftModuleOf(f.loc), default: [:]][leaf, default: []].append(f.qual)
+        }
         if f.isAccessor && f.enclosingType == nil && !f.qual.contains(".") { globalUnitNames.insert(f.qual) }
     }
     // Resolve a simple "Type.member" call target to a full nested qual: an exact full-qual hit (top-level,
@@ -429,7 +452,20 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // helper: edge to a resolved overload target (no callsiteArgs for sibling/init forms which don't
             // participate in callback-flow). For an overloaded base, matchOverloads returns 0 (drop), 1
             // (precise) or several (sound union) full quals.
-            if call.typed {
+            // MODULE-QUALIFIED FREE CALL (`Core.shared()`) — checked FIRST, because such a call is neither
+            // `typed` (its base names a module, not a type) nor `unqualified`, so it reached no branch at
+            // all and the caller came back silent-pure. Swift lets a call name the declaring module to
+            // disambiguate, and it is how a wrapper delegates to a same-named implementation elsewhere
+            // (`SwiftSyntaxMacrosTestSupport` → `SwiftSyntaxMacrosGenericTestSupport.assertMacroExpansion`).
+            // Exact, not a guess: the base must be a real target that is NOT also a local type, and that
+            // target must declare exactly one free function of the name — otherwise nothing resolves.
+            if !call.typed, !call.unqualified, let modName = call.extOwner,
+               !localTypes.contains(modName),                       // a real type shadows a module name
+               let inMod = freeFnByModule[modName]?[call.leaf], inMod.count == 1 {
+                edges[f.qual, default: []].insert(inMod[0])
+                callsiteArgs[inMod[0], default: []].append(call.args)
+                resolved = true
+            } else if call.typed {
                 if overloadedBases.contains(call.path) {
                     for t in matchOverloads(call.path, argc, call.argTypes) {
                         edges[f.qual, default: []].insert(t)

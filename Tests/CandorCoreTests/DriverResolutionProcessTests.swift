@@ -23,6 +23,46 @@ final class DriverResolutionProcessTests: XCTestCase {
         return try ProcessHarness.fns(ofJson: r.out)
     }
 
+    // ── 0. MODULE-QUALIFIED free call (`Core.shared()`) ───────────────────────────────────────────
+    // Swift lets a call name its declaring module to disambiguate, and that is how a wrapper delegates to a
+    // same-named implementation elsewhere (swift-syntax's `SwiftSyntaxMacrosTestSupport` →
+    // `SwiftSyntaxMacrosGenericTestSupport.assertMacroExpansion`). Such a call is neither `typed` (its base
+    // names a module, not a type) nor `unqualified`, so it reached NO resolution branch and the caller came
+    // back SILENT-PURE — the cardinal sin (candor-spec SOUNDNESS-VEIN-global-unit-identity.md). The base is
+    // kept on the call as `extOwner`; resolving through it is exact, and must charge ONLY that module's
+    // function — never the same-named one next door.
+    func testModuleQualifiedFreeCallResolvesToThatModulesFunction() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("candor-modqual-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        try fm.createDirectory(at: root.appendingPathComponent("Sources/Core"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: root.appendingPathComponent("Sources/Util"), withIntermediateDirectories: true)
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "P", targets: [.target(name: "Core"), .target(name: "Util", dependencies: ["Core"])])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try """
+        import Foundation
+        public func shared() -> String { (try? String(contentsOfFile: "/etc/core")) ?? "" }
+        """.write(to: root.appendingPathComponent("Sources/Core/Core.swift"), atomically: true, encoding: .utf8)
+        try """
+        import Foundation
+        import Core
+        func shared() -> String { ProcessInfo.processInfo.environment["U"] ?? "" }
+        func delegates() -> String { Core.shared() }
+        """.write(to: root.appendingPathComponent("Sources/Util/Util.swift"), atomically: true, encoding: .utf8)
+
+        let bin = try ProcessHarness.binaryURL(for: DriverResolutionProcessTests.self)
+        let r = try ProcessHarness.run(bin, [root.path, "--json"])
+        XCTAssertEqual(r.code, 0, "scan must succeed — stderr: \(r.err)")
+        let by = try ProcessHarness.fns(ofJson: r.out)
+        let eff = ProcessHarness.inferred(by, "delegates")
+        XCTAssertEqual(eff, ["Fs"],
+                       "a module-qualified call must charge ONLY Core's Fs — it read silent-pure before, and "
+                       + "must not pick up Util's same-named Env either: \(by)")
+    }
+
     // ── 1. overload-matched edge insertion (same name, same arity, different param TYPE) ───────────
     func testOverloadResolvedCallCarriesOnlyTheMatchedOverloadsEffect() throws {
         let by = try scan("""
