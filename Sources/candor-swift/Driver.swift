@@ -460,6 +460,29 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 edges[f.qual, default: []].insert(inMod[0])
             } else if globalUnitNames.contains(name) {
                 edges[f.qual, default: []].insert(name)
+            } else if !deps.isEmpty {
+                // The global may belong to a chained DEPENDENCY module. Reading it still forces its
+                // initializer — swift globals are lazy — and the dep's report records that unit under
+                // `<Module>#<name>`, but nothing looked for it, so a consumer of an effectful dependency
+                // global read sound-complete pure (candor-spec SOUNDNESS-VEIN-initializer-edge.md; java and
+                // rust needed the same edge on their side of the boundary). Effects attach directly, since
+                // the dep's unit lives in another report. Only the file's own imports are consulted and only
+                // an unambiguous single hit joins, so an unimported or ambiguous name resolves to nothing.
+                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                var hits: [DepEntry] = []
+                for m in fileImports[file] ?? [] where deps.coveredPkgs.contains(m) {
+                    if let e = deps.lookup("\(m)#\(name)") { hits.append(e) }
+                }
+                if hits.count == 1, let de = hits.first {
+                    direct[f.qual, default: []].formUnion(de.effects)
+                    if de.effects.contains("Unknown") {
+                        unresolvedSet.insert(f.qual)
+                        if let why = de.whyReason { whyMap[f.qual, default: []].insert(why) }
+                    }
+                    hostsD[f.qual, default: []].formUnion(de.hosts)
+                    cmdsD[f.qual, default: []].formUnion(de.cmds)
+                    pathsD[f.qual, default: []].formUnion(de.paths)
+                }
             }
         }
         direct[f.qual, default: []].formUnion(cc.directEffects)
