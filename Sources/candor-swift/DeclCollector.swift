@@ -54,6 +54,27 @@ struct FnInfo {
 // Collects the expression of every explicit `return <expr>` inside a body (Finding 1: pinning a function's
 // concrete returned iterable type). Does NOT descend into nested closures/functions — a `return` there
 // belongs to that inner scope, not the function whose concrete result type we're resolving.
+/// True when a `let`/`var` sits at FILE SCOPE, i.e. is a real module global rather than a local.
+///
+/// Swift allows executable statements at file scope, so a binding inside a top-level `if`/`for`/`while`
+/// block is lexically outside any type while being an ordinary LOCAL of that block. Registering those as
+/// globals minted a unit named after a local — candor-swift's own `main.swift` has `let pipe = Pipe()`
+/// three blocks deep inside `if wantWorkspace { for … { … } }`, and the report carried a global `pipe`
+/// with `Ipc` that no module-level `pipe` exists to justify. Global units are keyed by bare name, so such
+/// a phantom is also a magnet: any bare read of that name anywhere in the module resolves to it.
+///
+/// At true file scope the parent chain is VariableDecl -> CodeBlockItem -> CodeBlockItemList -> SourceFile.
+/// Any `CodeBlockSyntax` or closure on the way up means a nested block, so: a local.
+func isFileScopeBinding(_ node: VariableDeclSyntax) -> Bool {
+    var p: Syntax? = node.parent
+    while let cur = p {
+        if cur.is(SourceFileSyntax.self) { return true }
+        if cur.is(CodeBlockSyntax.self) || cur.is(ClosureExprSyntax.self) { return false }
+        p = cur.parent
+    }
+    return false
+}
+
 final class ReturnExprWalker: SyntaxVisitor {
     var exprs: [ExprSyntax] = []
     override func visit(_ node: ReturnStmtSyntax) -> SyntaxVisitorContinueKind {
@@ -549,7 +570,7 @@ final class DeclCollector: SyntaxVisitor {
                     }
                 }
             }
-        } else {
+        } else if isFileScopeBinding(node) {
             // TOP-LEVEL GLOBAL `let/var x = <expr>` — a global's initializer runs at first ACCESS
             // (lazy, like a static), so it's a unit charged to the first bare-name read (`_ = x`).
             // Only a stored global with an initializer; a computed global var is collected via the

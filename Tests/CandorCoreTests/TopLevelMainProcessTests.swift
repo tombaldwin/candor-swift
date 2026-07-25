@@ -77,6 +77,25 @@ final class TopLevelMainProcessTests: XCTestCase {
         XCTAssertNil(by["<main>"], "a named global-var decl is not a bare top-level statement — no <main>")
     }
 
+    // A `let` inside a TOP-LEVEL BLOCK is a LOCAL of that block, not a module global. Swift allows
+    // executable statements at file scope, so such a binding is lexically outside any type — and was
+    // registered as a global, minting a unit named after a local. candor-swift's own main.swift has
+    // `let pipe = Pipe()` three blocks deep inside `if wantWorkspace { for … { … } }`, and its report
+    // carried a global `pipe` with Ipc that no module-level `pipe` exists to justify. Global units are
+    // keyed by bare name, so a phantom is also a magnet: any bare read of that name in the module
+    // resolves to it. The block's effects belong to `<main>`, which still carries them.
+    func testBindingInsideTopLevelBlockIsNotAGlobal() throws {
+        let by = try scan("""
+        import Foundation
+        if CommandLine.arguments.count > 1 {
+            let handle = try? String(contentsOfFile: "/etc/t")
+            print(handle ?? "")
+        }
+        """)
+        XCTAssertNil(by["handle"], "a binding inside a top-level block is a LOCAL — it must not mint a global unit")
+        XCTAssertEqual(ProcessHarness.inferred(by, "<main>"), ["Fs"], "its effect is the top level's, and is still charged there")
+    }
+
     // a TUPLE-destructured global (`let (a, b) = effectfulInit()`) binds names so it is NOT a <main>
     // statement, but the IdentifierPattern-only unit guard used to DROP its initializer effect (a false-
     // pure global — the cardinal sin). Each bound name now carries the shared initializer's effect.
