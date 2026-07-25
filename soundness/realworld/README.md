@@ -44,9 +44,11 @@ A pure control guards the fabrication mirror. Linux + `strace` only (the swift C
 
 A **MULTI** driver's marker field is a `;`-separated list of `EFF=marker` pairs; the harness verifies each
 effect ran and is in candor's precise claim (or disclosed as `Unknown`) in a single run. `realtool` exercises
-the mixed-effect call structure real Swift CLIs have — not a single-effect probe — on GitHub's Linux runners
-(the same strace mechanism the per-effect drivers use; local Docker Desktop hangs strace+`Process` under
-virtualization, so this runs in CI, not locally).
+the mixed-effect call structure real Swift CLIs have — not a single-effect probe — using the same strace
+mechanism the per-effect drivers do. Under Docker Desktop's virtualization `strace` + Foundation's `Process`
+hangs indefinitely, which used to confine `realtool` and the `exec_*` drivers to CI; the traced run is now
+bounded (`timeout 90`), so a hang degrades to a partial trace — the verdict still stands if the marker fired,
+and the driver is reported SKIP/uncalibrated if it did not — and the whole set runs locally in a container.
 
 ## Recall corpus (non-syscall effects) — `recall/`
 
@@ -75,3 +77,9 @@ low-level socket surface as `Net` already, because they are path/type-qualified 
 identifier collision: rust `libc::connect`/`nix::sys::socket::connect`/socket2, java `Socket.connect` /
 `SocketChannel.connect`, ts `net.Socket.connect` / `net.connect`. Verified by scanning a raw-socket program
 through each engine (all → `Net`); no fix needed there.
+
+## Is this oracle able to fail?
+
+A green run above means "no silent under-report was found", which is evidence about candor only if a
+violation *could* have been reported. `recall/disclosure_recall.sh` settles that by seeding the exact defect
+this oracle exists to catch and requiring it to turn red — see [recall/README.md](recall/README.md).

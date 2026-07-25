@@ -21,6 +21,10 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 
 case "$(uname -s)" in Linux) : ;; *) echo "swift realworld oracle: needs Linux + strace (got $(uname -s)) — skipping."; exit 0 ;; esac
 command -v strace >/dev/null 2>&1 || { echo "swift realworld oracle: strace not installed — skipping."; exit 0; }
+# The verdict is computed by an inline python3 reader. Without it every prediction reads EMPTY and the
+# harness reports a violation on every effectful driver — a missing interpreter would masquerade as a wall
+# of findings. Fail fast and say so, rather than report a violation on every driver at once.
+command -v python3 >/dev/null 2>&1 || { echo "swift realworld oracle: python3 not found — cannot read candor's report; skipping."; exit 0; }
 command -v swiftc >/dev/null 2>&1 || { echo "swift realworld oracle: swiftc not found — skipping."; exit 0; }
 
 echo "swift realworld oracle: building candor-swift…"
@@ -31,6 +35,12 @@ SW="$ROOT/.build/debug/candor-swift"
 # KNOWN, TRIAGED under-reports — tracked so the oracle is a clean gate (green on known gaps, red only on
 # NEW findings). Empty now; a real find gets a fix + a row here (never a silent ignore).
 KNOWN_UNDER=()
+
+# `timeout` is coreutils, present on the CI runners; degrade to no bound if it is missing rather than fail.
+# CANDOR_ORACLE_TIMEOUT lowers the bound for local container runs, where the hang costs real wall time and
+# the marker has already fired by the time it starts. Lowering it can only move a driver to SKIP (reported
+# as uncalibrated, by name) — never turn a violation green.
+TIMEOUT=""; command -v timeout >/dev/null 2>&1 && TIMEOUT="timeout ${CANDOR_ORACLE_TIMEOUT:-90}"
 
 # driver | effect ("" = pure control) | marker (must appear in the strace iff the effect ran)
 # The marker is chosen to be a DIRECTLY-traced syscall argument: an openat path for Fs; for Exec, the CHILD
@@ -64,12 +74,23 @@ for row in "${CASES[@]}"; do
   # not a finding — an oracle can only judge a program that runs.
   swiftc "$src" -o "$bin" >/dev/null 2>&1 || { echo "  $d: swiftc failed — SKIP"; skip=$((skip+1)); continue; }
 
-  strace -f -e trace=connect,socket,openat,open,execve,unlink,unlinkat -o "$HERE/$d/trace.log" "$bin" >/dev/null 2>&1 || true
+  # Bound the traced run. Under Docker Desktop's virtualization strace + Foundation's `Process` can hang
+  # indefinitely, which stalls the whole gate on a driver whose effect has usually already been traced. A
+  # timeout degrades that to a partial trace: if the marker fired the verdict still stands, and if it did
+  # not the driver is SKIPped and reported as uncalibrated rather than silently counted either way.
+  $TIMEOUT strace -f -e trace=connect,socket,openat,open,execve,unlink,unlinkat -o "$HERE/$d/trace.log" "$bin" >/dev/null 2>&1 || true
   ran=0; grep -qF "$marker" "$HERE/$d/trace.log" 2>/dev/null && ran=1
 
   rm -rf "$HERE/$d/.candor" 2>/dev/null
   "$SW" "$HERE/$d" >/dev/null 2>&1   # writes .candor/report.<d>.Swift.json (+ callgraph/hierarchy)
   rep=$(ls "$HERE/$d"/.candor/report.*.Swift.json 2>/dev/null | grep -vE 'callgraph|hierarchy' | head -1)
+  # DISCLOSURE-RECALL calibration hook — UNSET in every normal run. When set, candor's signature is
+  # falsified here (downstream of the analyzer, upstream of the verdict) so a known cardinal sin is
+  # injected and this oracle MUST turn red. That is what makes a green run evidence rather than silence.
+  # See recall/README.md; driven by recall/disclosure_recall.sh.
+  if [ -n "${CANDOR_ORACLE_MUTATE:-}" ] && [ -n "$rep" ]; then
+    python3 "$HERE/recall/mutate_report.py" "$CANDOR_ORACLE_MUTATE" "$rep" || true
+  fi
   # Pass the report FILE as argv (NOT a stdin pipe): `candor --json | python - <<'PY'` is broken because
   # the heredoc overrides stdin, so json.load(sys.stdin) would read the SCRIPT text, not the report.
   # Extract candor's PRECISE claim (the inferred effects EXCEPT Unknown — Unknown is disclosure, not a

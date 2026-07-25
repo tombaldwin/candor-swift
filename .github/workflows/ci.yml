@@ -101,6 +101,14 @@ jobs:
       # verify the Ipc/Log/Rand/Env/Clock classifications hold on Linux too.
       - name: Recall oracle (non-syscall effects — known-semantics)
         run: bash soundness/realworld/recall/recall.sh
+      # Is the oracle above able to FAIL? A green run of it means "no silent under-report was found", which
+      # is only evidence about candor if a violation COULD have been reported — a marker that stops firing or
+      # a verdict loosened in a refactor would give a permanent green indistinguishable from soundness. This
+      # seeds the defect the oracle exists to catch and requires it to turn red. Three passes of the oracle,
+      # so it is gated to the schedule + manual runs rather than every PR.
+      - name: Disclosure-recall calibration (seed a false all-clear; the oracle must catch it)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: bash soundness/realworld/recall/disclosure_recall.sh
 
   # Weekly early-warning lane: run the smoke oracle against candor-spec HEAD, so a floor rise (a new
   # conformance case, a tightened expectation) surfaces as a scheduled red — without redding PRs, which
