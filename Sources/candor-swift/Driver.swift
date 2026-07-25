@@ -627,6 +627,37 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if let t = resolveQual("\(c).\(d.member)") { edges[f.qual, default: []].insert(t) }
             }
         }
+        // IMPLICIT STRINGIFICATION over a PROTOCOL-typed operand — `"\(e)"` / `String(describing: e)` /
+        // `print(e)` where `e: any P` (or a generic `<T: P>`): the `description`/`debugDescription` that
+        // RUNS is the conformer's witness, and no call site spells it. The concrete-receiver form already
+        // edged (CallCollector Vector 1/2); the existential form reached NOTHING — the four-way
+        // implicit-stringification vein (candor-spec/SOUNDNESS-VEIN-implicit-stringify.md), found on
+        // HikariCP through SLF4J parameterized logging and reproduced in all four engines.
+        //
+        // CHA over the protocol's (transitive) conformers/subclasses, like the property-read rung above —
+        // but PRECISE-OR-NOTHING: a conformer set that resolves to no `description` unit edges nothing
+        // instead of disclosing `Unknown`, and there is no ≤12 bound (the bound exists to decide when to
+        // fall back to Unknown; with no Unknown to fall back to, capping would only DROP real dispatch
+        // targets — a silent under-report, the thing being fixed). Rationale for precise-or-nothing (and
+        // the honest residual): a conformer that does NOT declare `description` stringifies through the
+        // stdlib's PURE reflective default, so "no local witness" is overwhelmingly "nothing runs" rather
+        // than "something hidden runs" — and interpolation is pervasive enough in Swift that an Unknown
+        // here would flood every program's report (the usability catastrophe the vein write-up warns
+        // against). RESIDUAL, recorded not repaired: a conformer declared OUTSIDE the analysed code whose
+        // `description` is effectful is still missed.
+        for d in cc.stringifyDispatches {
+            for c in subtypesOf[d.proto] ?? [] {
+                if let t = resolveQual("\(c).\(d.member)") {
+                    edges[f.qual, default: []].insert(t)
+                } else {
+                    // an INHERITED witness (the `description` accessor lives on a superclass / a conformed
+                    // protocol's extension) — climb exactly as the accessor-unit edge above does.
+                    for sup in supertypesOf[c] ?? [] {
+                        if let t = resolveQual("\(sup).\(d.member)") { edges[f.qual, default: []].insert(t) }
+                    }
+                }
+            }
+        }
     }
 
     // Callback-flow resolution (the TS engine's callback_named, the Rust closure-flow slice): a

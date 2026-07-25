@@ -7,6 +7,43 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [Unreleased]
+
+### ⚠ soundness — implicit stringification through a PROTOCOL-typed operand (Swift arm of the four-way vein)
+
+Closes a silent under-report (cardinal sin): `"\(e)"` / `String(describing: e)` / `print(e)` runs the
+operand's `description` (or `debugDescription`), and when the operand's static type is an EXISTENTIAL
+(`any P`), a GENERIC bound (`<T: P>`), or a caught `error`, the witness belongs to a CONFORMER — so
+nothing was edged and the function read PURE while its `description` performed I/O. The concrete-operand
+form was already modeled (the implicit-conversion vectors in smoke.sh); only the dispatching form was
+missing. This is the Swift arm of the common-mode vein recorded in
+`candor-spec/SOUNDNESS-VEIN-implicit-stringify.md` (found on HikariCP through SLF4J parameterized
+logging by the dynamic oracle, reproduced in all four engines).
+
+A stringification site whose operand is a local protocol — or one of the stringify/error protocols whose
+CONFORMANCE is declared in the analysed code (`CustomStringConvertible`, `CustomDebugStringConvertible`,
+`Error`, `LocalizedError`) — now resolves by CHA over the conformers (and their subclasses), edging to
+the `description`/`debugDescription` accessor units that exist and climbing to an INHERITED witness (a
+protocol-extension default) when the conformer declares none. `catch` bindings are typed for this path
+only: the implicit `error`, `catch let e`, and the concrete `catch let e as MyError`.
+
+PRECISE-OR-NOTHING, deliberately: an unresolvable conformer set edges nothing rather than disclosing
+`Unknown` (a conformer with no `description` stringifies through the stdlib's PURE reflective default,
+and interpolation is pervasive enough in Swift that an Unknown here would flood every report). RESIDUAL,
+recorded not repaired: a conformer declared outside the analysed code whose `description` is effectful is
+still missed. No fabrication: a String/Int/library operand edges nothing, and the external-protocol list
+is closed by NAME precisely because Swift's inheritance clause is overloaded — `enum Suit: String`
+records String as a "conformed supertype", so an open rule would edge every `"\(someString)"` to that
+enum's `description`.
+
+A/B over 10 real packages (Alamofire, console-kit, Files, SQLite.swift, swift-argument-parser,
+swift-composable-architecture, swift-log, vapor, pollen, candor-swift itself — 4360 reported functions):
+3 gains, all explained, all transitive `Unknown` inherited from units that already carried it —
+SQLite.swift `Context.set` (`String(describing: result)` on a `Binding?` → `Blob.description` →
+`Blob.toHex`), and vapor `BodyStreamResult.description`/`.debugDescription` (`"error(\(error))"` on an
+`any Error` payload → `DebuggableError`/`ValidationsError`/`MacroError` `description`). Zero fabricated
+effects; every conformance fixture byte-identical (the four-way differential is untouched).
+
 ## [0.23.1] — 2026-07-20
 
 ### performance — quadratic per-function loop-invariant removed (no output change)

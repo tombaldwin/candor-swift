@@ -76,6 +76,14 @@ final class CallCollector: SyntaxVisitor {
     var incompleteSurfaces: Set<String> = []
     var protoDispatches: [(proto: String, member: String)] = []
     var protoPropReads: [(proto: String, member: String)] = []  // protocol PROPERTY/subscript reads — CHA
+    // IMPLICIT-STRINGIFICATION dispatch: a PROTOCOL-typed (existential / generic-bound) operand of an
+    // interpolation / `String(describing:)` / `print` — the `description`/`debugDescription` witness that
+    // runs belongs to the CONFORMER, so it is resolved by CHA over the conformers in the Driver. SEPARATE from
+    // `protoPropReads` because the member is NOT a declared requirement of the local protocol (the
+    // `protoOrSuperDeclares` gate would drop it) and because an unresolvable conformer set must NOT
+    // become `Unknown` here: interpolation is pervasive in Swift, and a conformer that doesn't declare a
+    // `description` uses the stdlib's PURE default — so this rung is precise-or-nothing, never a flood.
+    var stringifyDispatches: [(proto: String, member: String)] = []
     var globalReads: Set<String> = []     // bare-name reads — candidate edges to GLOBAL initializer units
     var boundLocals: Set<String> = []     // EVERY local binding name (even literal/unresolved-type ones,
                                           // which `vars` drops) — so a bare read / fn-ref of a SHADOWING
@@ -1438,14 +1446,99 @@ final class CallCollector: SyntaxVisitor {
         return t
     }
 
+    /// NON-LOCAL protocols whose conformance is declared IN the analysed code and whose witness is what a
+    /// stringification site runs: the two `Custom*StringConvertible` protocols themselves, and the error
+    /// protocols (`catch { log("\(error)") }` is the Swift spelling of the HikariCP finding — log an
+    /// object, its `description` runs). NAMED explicitly rather than "any type that has local conformers"
+    /// because Swift's inheritance clause is overloaded: `enum Suit: String` / `enum Code: Int` record
+    /// String/Int as conformed supertypes, so an open rule would edge every `"\(someString)"` to a raw-
+    /// value enum's `description` — a fabrication. This is the one place the family's denylist-over-
+    /// allowlist rule inverts: a denylist here is the FABRICATING direction, so the list is closed and
+    /// what it omits under-reports (recorded below as the residual) instead of inventing an effect.
+    private static let EXTERNAL_STRINGIFY_PROTOCOLS: Set<String> =
+        ["CustomStringConvertible", "CustomDebugStringConvertible", "Error", "LocalizedError"]
+
+    /// The TYPE a stringification operand DISPATCHES over when it is not a plain local type: a LOCAL
+    /// PROTOCOL (an existential `any P` / bare `P` param, a `P`-typed field or binding, or a generic
+    /// `<T: P>` param — DeclCollector already resolves a generic bound to its protocol), one of the
+    /// external stringify protocols above, or the type of a CATCH binding. nil when the operand has no
+    /// such type. A protocol-typed operand's witness is only knowable by DISPATCH over the conformers, so
+    /// it can't go through `localTypeOfOperand` (protocols are deliberately absent from `localTypes`).
+    private func dispatchTypeOfOperand(_ raw: ExprSyntax) -> String? {
+        let e = Self.peel(raw)
+        if let dr = e.as(DeclReferenceExprSyntax.self) {
+            let n = dr.baseName.text
+            // a protocol-typed PARAM is held in `protoTyped`, NOT `vars` — rootOf leaves its root the bare
+            // param name (isVar false), exactly as the method-dispatch/property-read paths handle it.
+            if let p = protoTyped[n] { return p }
+            // a CATCH binding (`catch { … "\(error)" }`'s implicit `error`, `catch let e`, `catch let e as
+            // MyError`): no other index types these, so the interpolation resolved to NOTHING. A param or
+            // any other LOCAL binding of the same name SHADOWS — `boundLocals` carries the literal-typed
+            // locals `vars` drops (a `let error = "oops"` must not dispatch over the Error conformers).
+            if vars[n] == nil, !boundLocals.contains(n), let t = catchBindings[n] { return t }
+        }
+        let r = rootOf(e)
+        // a protocol-typed FIELD / `let` / loop var / unwrapped optional: rootOf resolves the chain to the
+        // protocol NAME with isVar set. `isVar` is required so a bare identifier that merely SPELLS a
+        // protocol name (never a value) can't dispatch.
+        guard r.isVar, let t = r.root else { return nil }
+        if localProtocols.contains(t) || Self.EXTERNAL_STRINGIFY_PROTOCOLS.contains(t) { return t }
+        return nil
+    }
+
+    /// Names bound by an enclosing `catch` clause → the type caught (the concrete type of a
+    /// `catch let e as MyError`, else `Error`). Consulted ONLY by the stringification path, so it cannot
+    /// perturb any other resolution. Function-wide like every other binding index here — a name leaking
+    /// past its catch block can at most add a stringify edge for a same-named value.
+    private var catchBindings: [String: String] = [:]
+
+    override func visit(_ node: CatchClauseSyntax) -> SyntaxVisitorContinueKind {
+        // `catch { … }` with no items binds the IMPLICIT `error`.
+        if node.catchItems.isEmpty { catchBindings["error"] = "Error" }
+        for item in node.catchItems {
+            guard let pat = item.pattern else { catchBindings["error"] = "Error"; continue }
+            guard let vb = pat.as(ValueBindingPatternSyntax.self) else { continue }   // `catch is X` binds nothing
+            if let id = vb.pattern.as(IdentifierPatternSyntax.self) {
+                catchBindings[id.identifier.text] = "Error"          // `catch let e`
+            } else if let ex = vb.pattern.as(ExpressionPatternSyntax.self),
+                      let seq = ex.expression.as(SequenceExprSyntax.self) {
+                // `catch let e as MyError` — SwiftParser leaves `as` unfolded: [name, UnresolvedAs, Type].
+                // Bind the CONCRETE type so the witness resolves precisely (a non-local type resolves to
+                // no unit and contributes nothing).
+                let elems = Array(seq.elements)
+                if elems.count == 3, elems[1].is(UnresolvedAsExprSyntax.self),
+                   let name = elems[0].as(DeclReferenceExprSyntax.self)?.baseName.text,
+                   let te = elems[2].as(TypeExprSyntax.self), let tn = typeName(te.type).name {
+                    catchBindings[name] = dealias(tn)
+                }
+            }
+        }
+        return .visitChildren
+    }
+
     /// Edge an interpolation/`String(describing:)`/`print` operand to its local type's stringification
     /// witness. `reflecting` picks `debugDescription` (the `CustomDebugStringConvertible` witness), else
     /// `description`. A property READ (the getter runs) — `propertyEdges`/resolveQual drop it when the
     /// type declares no such accessor unit (a stored property, or a synthesised/external witness) → no
     /// fabrication; a PURE `description` accessor contributes nothing.
+    ///
+    /// PROTOCOL-EXISTENTIAL / GENERIC operand (`"\(e)"` where `e: any Entry` / `<T: Entry>`): the witness
+    /// that runs is the CONFORMER's, which only DISPATCH can name — the concrete-type path above resolves
+    /// nothing (a protocol is not in `localTypes`), so such a site read SILENT-PURE even though every
+    /// conformer's `description` was analysed correctly (the four-way implicit-stringification vein:
+    /// candor-spec/SOUNDNESS-VEIN-implicit-stringify.md). Record a stringify dispatch; the Driver resolves
+    /// it by CHA over the protocol's conformers, edging ONLY to `description` accessor units that
+    /// genuinely exist — a conformer with no (or a pure) `description` contributes nothing.
     private func edgeStringWitness(_ operand: ExprSyntax, reflecting: Bool) {
-        guard let t = localTypeOfOperand(operand) else { return }
-        propertyEdges.insert("\(t).\(reflecting ? "debugDescription" : "description")")
+        let member = reflecting ? "debugDescription" : "description"
+        if let t = localTypeOfOperand(operand) {
+            propertyEdges.insert("\(t).\(member)")
+        } else if let d = dispatchTypeOfOperand(operand) {
+            // a CONCRETE local type from a typed catch (`catch let e as MyError`) is a precise witness —
+            // the same soft property edge as the plain concrete path; anything else DISPATCHES.
+            if localTypes.contains(d) { propertyEdges.insert("\(d).\(member)") }
+            else { stringifyDispatches.append((d, member)) }
+        }
     }
 
     /// The WRITER side of formatting: a destination stream passed as `to: &stream` to `print`/`debugPrint`/
