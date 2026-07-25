@@ -68,6 +68,13 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
         public init() {}
         deinit { }
     }
+
+    public protocol Speaker { func speak() }
+
+    public final class LoudSpeaker: Speaker {
+        public init() {}
+        public func speak() { _ = FileManager.default.contents(atPath: "/loud") }
+    }
     """
 
     /// The consumer's source, with `IMPORT` replaced by `import DepLib` (split) or nothing (control).
@@ -82,6 +89,26 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
     public func scoped() { let g = Guardian(); _ = g }
     public func scopedQuiet() { let q = Quiet(); _ = q }
     public func handOut() -> Guardian { let g = Guardian(); return g }
+
+    // dispatch over an IMPORTED protocol whose conformer is declared HERE
+    public final class AppSpeaker: Speaker {
+        public init() {}
+        public func speak() { _ = ProcessInfo.processInfo.environment["APP_SPEAK"] }
+    }
+    public func viaImportedProtocol(_ s: Speaker) { s.speak() }
+    public func viaImportedProtocolLocal() { let s: Speaker = AppSpeaker(); s.speak() }
+
+    // FABRICATION GUARD for the same rung: `enum Rank: String` puts `String` in the inheritance
+    // clause, so String LOOKS like a supertype with `Rank` as its conformer. A call on a plain
+    // String-typed value must NOT dispatch into `Rank.lowercased`.
+    public enum Rank: String {
+        case high, low
+        public func lowercased() -> String {
+            _ = ProcessInfo.processInfo.environment["RANK"]
+            return "x"
+        }
+    }
+    public func plainString(_ s: String) -> String { return s.lowercased() }
     """
 
     /// (root, depDir, appDir, ctlDir) — the split pair plus the one-package control.
@@ -275,6 +302,76 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
                             env: ["CANDOR_DEPS": depReport.path])
         XCTAssertEqual(split.code, 1,
                        "split + chained must fail the SAME gate — exit 0 here is the false all-clear; stderr: \(split.err)")
+    }
+
+    // ── DISPATCH OVER AN IMPORTED PROTOCOL WHOSE CONFORMER IS LOCAL ───────────────────────────────
+    // `s.speak()` where `s: DepLib.Speaker` and `final class AppSpeaker: Speaker` is declared HERE.
+    // `protocolMethods`/`protoParams` are local-only, so `s` was never seen as protocol-typed and NO
+    // dispatch was recorded — the call read silent-pure even though the witness that runs is a project
+    // unit candor analysed correctly. This half needs no dep report: the conformance declaration is
+    // ours, and `conformers` already records it.
+    func testImportedProtocolDispatchesOverLocalConformers() throws {
+        let bin = try binaryURL()
+        let (root, dep, app, ctl) = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+
+        // CONTROL: in ONE package both conformers are visible, so the dispatch unions Env (the app's)
+        // and Fs (the dep's).
+        XCTAssertEqual(try run(bin, [ctl.path, "--out", root.appendingPathComponent("ctl-r").path]).code, 0)
+        let ctlFns = try fns(ofReport: root.appendingPathComponent("ctl-r.Ctl.Swift.json"))
+        XCTAssertEqual(Set(ctlFns["viaImportedProtocol"]?["inferred"] as? [String] ?? []), ["Env", "Fs"],
+                       "CONTROL: one package unions both conformers; got \(ctlFns["viaImportedProtocol"] ?? [:])")
+
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path],
+                        env: ["CANDOR_DEPS": depReport.path])
+        XCTAssertEqual(r.code, 0)
+        let by = try fns(ofReport: root.appendingPathComponent("app-r.App.Swift.json"))
+        for fn in ["viaImportedProtocol", "viaImportedProtocolLocal"] {
+            XCTAssertTrue(Set(by[fn]?["inferred"] as? [String] ?? []).contains("Env"),
+                          "\(fn) must reach the LOCAL conformer's witness; got \(by[fn] ?? [:])")
+        }
+        // RESIDUAL, pinned not repaired: the DEPENDENCY's own conformer (`LoudSpeaker`, Fs) is not
+        // reachable from a plain dep report — it needs the protocol-CHA union entries a `--workspace`
+        // child scan emits. The local half is recovered; the dep half stays out.
+        XCTAssertFalse(Set(by["viaImportedProtocol"]?["inferred"] as? [String] ?? []).contains("Fs"),
+                       "a plain dep report carries no conformer hierarchy — nothing may be invented for it")
+    }
+
+    // The recovery is chaining-INDEPENDENT: the conformance is declared in the app, so it holds with
+    // no dep report at all.
+    func testImportedProtocolDispatchNeedsNoDepReport() throws {
+        let bin = try binaryURL()
+        let (root, _, app, _) = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path])
+        XCTAssertEqual(r.code, 0)
+        let by = try fns(ofReport: root.appendingPathComponent("app-r.App.Swift.json"))
+        XCTAssertTrue(Set(by["viaImportedProtocol"]?["inferred"] as? [String] ?? []).contains("Env"),
+                      "unchained too; got \(by["viaImportedProtocol"] ?? [:])")
+    }
+
+    // THE FABRICATION MIRROR for that rung. Swift's inheritance clause is overloaded: `enum Rank: String`
+    // records `String` as a supertype with `Rank` as its conformer, so an unguarded CHA would send every
+    // call on a String-typed value into `Rank`'s methods. `plainString` must stay pure in EVERY mode.
+    func testRawValueBaseDoesNotDispatchIntoItsEnums() throws {
+        let bin = try binaryURL()
+        let (root, dep, app, ctl) = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        for (label, args, env) in [
+            ("control", [ctl.path, "--out", root.appendingPathComponent("ctl-r").path], [String: String]()),
+            ("unchained", [app.path, "--out", root.appendingPathComponent("app-u").path], [:]),
+            ("chained", [app.path, "--out", root.appendingPathComponent("app-c").path],
+             ["CANDOR_DEPS": depReport.path]),
+        ] {
+            XCTAssertEqual(try run(bin, args, env: env).code, 0, "\(label) scan must succeed")
+            let out = args[2]
+            let suffix = label == "control" ? ".Ctl.Swift.json" : ".App.Swift.json"
+            let by = try fns(ofReport: URL(fileURLWithPath: out + suffix))
+            XCTAssertNil(by["plainString"],
+                         "\(label): `s.lowercased()` on a String must not dispatch into `enum Rank: String`; got \(by["plainString"] ?? [:])")
+        }
     }
 
     // A STALE dep report is not trusted at this join either (§2.1): the witness reads Unknown with

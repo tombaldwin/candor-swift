@@ -39,6 +39,15 @@ struct Analysis {
 // Drive the two passes
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
+/// Std types that appear in an inheritance clause as a RAW VALUE, not a conformance: `enum Suit: String`
+/// makes `String` look like a supertype of `Suit`. Dispatching over the "conformers" of one of these
+/// would send every call on a String/Int-typed receiver into raw-value enums' methods — a fabrication,
+/// so they are carved out of the imported-supertype CHA below.
+let RAW_VALUE_BASE_TYPES: Set<String> = [
+    "String", "Character", "Bool", "Double", "Float", "Int", "Int8", "Int16", "Int32", "Int64",
+    "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
+]
+
 /// The Swift MODULE (SwiftPM target) a source path belongs to — `Sources/<Target>/…` / `Tests/<Target>/…`,
 /// one module per target. Empty for anything outside that layout.
 func swiftModuleOf(_ loc: String) -> String {
@@ -645,6 +654,36 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             }
             // otherwise: unresolvable bare member (unresolved receiver) — stays out (under-report, never a
             // guess); the κ ledger and Unknown rules above carry the honesty.
+            // DISPATCH OVER AN IMPORTED PROTOCOL/BASE WHOSE CONFORMERS ARE LOCAL. `s.speak()` where
+            // `s: Speaker`, `Speaker` is a DEPENDENCY's protocol and `final class AppSpeaker: Speaker` is
+            // declared HERE: `protocolMethods`/`protoParams` are local-only, so `s` was never recognised as
+            // protocol-typed and no dispatch was recorded at all — the call read silent-pure even though the
+            // witness that runs is a project unit candor analysed correctly two files away
+            // (candor-spec/SOUNDNESS-VEIN-crossing-the-scan-boundary.md; `trait_decls is local-only` is the
+            // rust sibling). This half is recoverable with NO dep report — the conformance declaration is
+            // ours — and `conformers` already records it: Swift's inheritance clause is where a conformance
+            // to an imported protocol is spelled, so `subtypesOf[Speaker]` holds our conformers.
+            //
+            // PRECISE-OR-NOTHING and ADDITIVE. Only real `<conformer>.<member>` units are edged, so a member
+            // no conformer declares contributes nothing (no Unknown flood over every external-typed
+            // receiver). `resolved` is deliberately NOT set: the local conformer set is a LOWER bound on the
+            // true one — a dependency's own conformers are still invisible — so the call keeps its κ/blind
+            // disclosure AND still reaches the §2 join below (which is what carries a chained sibling's
+            // conformers, via its protocol-CHA union entries).
+            //
+            // Two carve-outs, both fabrication guards on Swift's OVERLOADED inheritance clause (the same
+            // hazard the stringification witness table documents). STD_PURE_PROTOCOLS: their requirements
+            // are synthesized and pure, and nearly every type conforms, so CHA there would union unrelated
+            // project methods onto `Codable`/`Hashable`/`Sequence`-typed receivers. RAW_VALUE_BASE_TYPES:
+            // `enum Suit: String` records `String` as a supertype, so without the carve-out a call on any
+            // String/Int-typed value would dispatch into raw-value enums' methods — a pure fabrication.
+            if !resolved, !call.typed, !call.unqualified, let owner = call.extOwner,
+               !localTypes.contains(owner), !STD_PURE_PROTOCOLS.contains(owner),
+               !RAW_VALUE_BASE_TYPES.contains(owner) {
+                for sub in subtypesOf[owner] ?? [] {
+                    if let t = resolveQual("\(sub).\(call.leaf)") { edges[f.qual, default: []].insert(t) }
+                }
+            }
             // CANDOR_DEPS cross-package JOIN (SPEC §2), GATED: an unclassified call that resolved to NO
             // local unit, in a file that IMPORTS a package a sibling report covers, inherits the dep fn's
             // recorded effects + literal surfaces. Key shapes (§2 rule 1 — the way THIS engine names the
