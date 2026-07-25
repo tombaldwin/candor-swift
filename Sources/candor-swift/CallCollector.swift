@@ -86,6 +86,14 @@ final class CallCollector: SyntaxVisitor {
     // become `Unknown` here: interpolation is pervasive in Swift, and a conformer that doesn't declare a
     // `description` uses the stdlib's PURE default — so this rung is precise-or-nothing, never a flood.
     var stringifyDispatches: [(proto: String, member: String)] = []
+    // IMPLICIT STRINGIFICATION over an operand whose type is NOT declared in the analysed code —
+    // `"\(e)"` where `e: DepLib.Entry`. Neither index above can name the witness (a dep type is in
+    // neither `localTypes` nor `localProtocols`), so the site recorded NOTHING and an effectful
+    // dependency `description` was absorbed silently. `Type.member` candidates, resolved ONLY against a
+    // chained sibling report in the Driver (`<Module>#<Type>.<member>`, the key the dep's own report
+    // already carries) — with no dep report loaded nothing consults this set, so the unchained analysis
+    // is byte-identical. See candor-spec/SOUNDNESS-VEIN-crossing-the-scan-boundary.md.
+    var stringifyExternal: Set<String> = []
     var globalReads: Set<String> = []     // bare-name reads — candidate edges to GLOBAL initializer units
     var boundLocals: Set<String> = []     // EVERY local binding name (even literal/unresolved-type ones,
                                           // which `vars` drops) — so a bare read / fn-ref of a SHADOWING
@@ -1563,7 +1571,26 @@ final class CallCollector: SyntaxVisitor {
             // the same soft property edge as the plain concrete path; anything else DISPATCHES.
             if localTypes.contains(d) { propertyEdges.insert("\(d).\(member)") }
             else { stringifyDispatches.append((d, member)) }
+        } else if let x = externalTypeOfOperand(operand) {
+            // The operand has a confidently-resolved type that is NOT declared here — most often a
+            // chained DEPENDENCY's type. Record the `Type.member` candidate; the Driver joins it against
+            // a sibling report only (`<Module>#<Type>.<member>`) and drops it otherwise, so a stdlib or
+            // unchained operand contributes exactly nothing, as today.
+            stringifyExternal.insert("\(x).\(member)")
         }
+    }
+
+    /// The NON-LOCAL type of a stringification operand: the same confidently-resolved value type the
+    /// local path demands (`rootOf(...).isVar` — a bare identifier that merely SPELLS a type name has
+    /// isVar false and is rejected), minus the `localTypes` membership. `Entry` for `e: Entry`,
+    /// `Entry()` inline, and a `[Entry]` element bound to a closure's `$0` — all three resolve through
+    /// this one resolver, which is why the three silent forms close together.
+    private func externalTypeOfOperand(_ raw: ExprSyntax) -> String? {
+        let r = rootOf(raw)
+        // `<super>` is rootOf's marker, not a type — rejected by its bracketed spelling (no Swift type
+        // name starts with `<`), which also keeps any future marker out.
+        guard r.isVar, let t = r.root, !t.hasPrefix("<"), !localTypes.contains(t) else { return nil }
+        return t
     }
 
     /// The WRITER side of formatting: a destination stream passed as `to: &stream` to `print`/`debugPrint`/

@@ -778,6 +778,42 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 }
             }
         }
+        // The SAME vein one scan boundary out: `"\(e)"` where `e`'s type belongs to a chained
+        // DEPENDENCY. The two rungs above are both LOCAL-only — a dep type is in neither `localTypes`
+        // (so the concrete-witness edge misses) nor `localProtocols`/`conformers` (so the CHA rung is
+        // never even reached) — and the site therefore recorded NOTHING, not even Unknown. The dep's own
+        // report already holds the answer under `<Module>#<Type>.description`; nothing looked for it, so
+        // an effectful dependency `description` was absorbed silently at every interpolation and a
+        // `deny`-gated app went GREEN on code the single-package control fails
+        // (candor-spec/SOUNDNESS-VEIN-crossing-the-scan-boundary.md; rust closed its half in
+        // candor-rust 1623a07).
+        //
+        // Effects attach DIRECTLY, since the dep's accessor unit lives in another report — the shape the
+        // chained-global edge (7a1b077) and the §2 call join both use. Same discipline as both: only the
+        // file's OWN imports are consulted, only packages a loaded report COVERS, and only an
+        // unambiguous single hit joins, so an unimported, uncovered or ambiguous type resolves to
+        // nothing rather than being guessed. With no dep report loaded the set is never consulted.
+        if !deps.isEmpty, !cc.stringifyExternal.isEmpty {
+            let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+            for cand in cc.stringifyExternal {
+                var hits: [DepEntry] = []
+                for m in fileImports[file] ?? [] where deps.coveredPkgs.contains(m) {
+                    if let e = deps.lookup("\(m)#\(cand)") { hits.append(e) }
+                }
+                guard hits.count == 1, let de = hits.first else { continue }
+                direct[f.qual, default: []].formUnion(de.effects)
+                if de.effects.contains("Unknown") {
+                    unresolvedSet.insert(f.qual)
+                    if let why = de.whyReason { whyMap[f.qual, default: []].insert(why) }
+                }
+                hostsD[f.qual, default: []].formUnion(de.hosts)
+                cmdsD[f.qual, default: []].formUnion(de.cmds)
+                pathsD[f.qual, default: []].formUnion(de.paths)
+                tablesD[f.qual, default: []].formUnion(de.tables)
+                if !de.invisible.isEmpty { blindDirect[f.qual, default: []].formUnion(de.invisible) }
+                if !de.incomplete.isEmpty { incompleteD[f.qual, default: []].formUnion(de.incomplete) }
+            }
+        }
     }
 
     // Callback-flow resolution (the TS engine's callback_named, the Rust closure-flow slice): a
