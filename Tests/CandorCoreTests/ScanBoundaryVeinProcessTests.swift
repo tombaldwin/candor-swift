@@ -58,6 +58,16 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
         public init() {}
         public var description: String { return "plain" }
     }
+
+    public final class Guardian {
+        public init() {}
+        deinit { _ = ProcessInfo.processInfo.environment["GUARD_EXIT"] }
+    }
+
+    public final class Quiet {
+        public init() {}
+        deinit { }
+    }
     """
 
     /// The consumer's source, with `IMPORT` replaced by `import DepLib` (split) or nothing (control).
@@ -69,6 +79,9 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
     public func describeInline() -> String { return "got \\(Entry())" }
     public func describeMapped(_ es: [Entry]) -> [String] { return es.map { "\\($0)" } }
     public func describePure(_ p: Plain) -> String { return "got \\(p)" }
+    public func scoped() { let g = Guardian(); _ = g }
+    public func scopedQuiet() { let q = Quiet(); _ = q }
+    public func handOut() -> Guardian { let g = Guardian(); return g }
     """
 
     /// (root, depDir, appDir, ctlDir) — the split pair plus the one-package control.
@@ -214,6 +227,49 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
                                     "--out", root.appendingPathComponent("ctl-g").path])
         XCTAssertEqual(control.code, 1, "CONTROL: one package must fail the deny gate; stderr: \(control.err)")
 
+        let split = try run(bin, [app.path, "--policy", pol.path,
+                                  "--out", root.appendingPathComponent("app-g").path],
+                            env: ["CANDOR_DEPS": depReport.path])
+        XCTAssertEqual(split.code, 1,
+                       "split + chained must fail the SAME gate — exit 0 here is the false all-clear; stderr: \(split.err)")
+    }
+
+    // ── DEINIT GLUE over a DEPENDENCY class (the R33 mechanism across the boundary) ───────────────
+    // `let g = Guardian()` runs `Guardian.deinit` at scope exit — deterministic under ARC for a
+    // non-escaping local, and modeled inside the scan since R33. The edge was gated on
+    // `localTypes.contains(t)`, so a dep class whose `deinit` is effectful read silent-pure with the
+    // dep's report chained, even though that report records `DepLib#Guardian.deinit`.
+    func testDependencyDeinitGlueChargesTheScope() throws {
+        let bin = try binaryURL()
+        let (root, dep, app, ctl) = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+
+        XCTAssertEqual(try run(bin, [ctl.path, "--out", root.appendingPathComponent("ctl-r").path]).code, 0)
+        let ctlFns = try fns(ofReport: root.appendingPathComponent("ctl-r.Ctl.Swift.json"))
+        XCTAssertEqual(ctlFns["scoped"]?["inferred"] as? [String], ["Env"],
+                       "CONTROL: the deinit glue must charge the scope in one package; got \(ctlFns["scoped"] ?? [:])")
+
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path],
+                        env: ["CANDOR_DEPS": depReport.path])
+        XCTAssertEqual(r.code, 0, "chained app scan must succeed; stderr: \(r.err)")
+        let by = try fns(ofReport: root.appendingPathComponent("app-r.App.Swift.json"))
+        XCTAssertEqual(by["scoped"]?["inferred"] as? [String], ["Env"],
+                       "a dep class's effectful deinit must charge its holder; got \(by["scoped"] ?? [:])")
+        // the two no-fabrication controls, both carried over from the in-scan rung:
+        XCTAssertNil(by["scopedQuiet"], "a dep class with a PURE deinit has no report entry — nothing joins")
+        XCTAssertNil(by["handOut"], "a RETURNED (escaping) value is not charged to the constructing scope")
+    }
+
+    func testDeinitGateDoesNotFlipAcrossTheBoundary() throws {
+        let bin = try binaryURL()
+        let (root, dep, app, ctl) = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        let pol = try policy(root, ["deny Env Unknown scoped"])
+        let control = try run(bin, [ctl.path, "--policy", pol.path,
+                                    "--out", root.appendingPathComponent("ctl-g").path])
+        XCTAssertEqual(control.code, 1, "CONTROL: one package must fail the deny gate; stderr: \(control.err)")
         let split = try run(bin, [app.path, "--policy", pol.path,
                                   "--out", root.appendingPathComponent("app-g").path],
                             env: ["CANDOR_DEPS": depReport.path])

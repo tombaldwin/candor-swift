@@ -778,24 +778,27 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 }
             }
         }
-        // The SAME vein one scan boundary out: `"\(e)"` where `e`'s type belongs to a chained
-        // DEPENDENCY. The two rungs above are both LOCAL-only — a dep type is in neither `localTypes`
-        // (so the concrete-witness edge misses) nor `localProtocols`/`conformers` (so the CHA rung is
-        // never even reached) — and the site therefore recorded NOTHING, not even Unknown. The dep's own
-        // report already holds the answer under `<Module>#<Type>.description`; nothing looked for it, so
-        // an effectful dependency `description` was absorbed silently at every interpolation and a
-        // `deny`-gated app went GREEN on code the single-package control fails
-        // (candor-spec/SOUNDNESS-VEIN-crossing-the-scan-boundary.md; rust closed its half in
-        // candor-rust 1623a07).
+        // DESUGARED EDGES ACROSS THE SCAN BOUNDARY. Two mechanisms that run without any call being
+        // spelled at the site — the implicit `description`/`debugDescription` witness of a
+        // stringification, and the `deinit` glue of a constructed non-escaping local — are modeled
+        // INSIDE the scan by LOCAL-only indexes (`localTypes`, `localProtocols`/`conformers`). When the
+        // type belongs to a chained DEPENDENCY it is in none of them, so the site recorded NOTHING, not
+        // even Unknown, and a `deny`-gated app went GREEN on code its single-package control fails
+        // (candor-spec/SOUNDNESS-VEIN-crossing-the-scan-boundary.md; rust closed its stringification
+        // half in candor-rust 1623a07). In both cases the dep's own report already holds the answer
+        // under `<Module>#<Type>.<member>` — nothing looked for it.
         //
-        // Effects attach DIRECTLY, since the dep's accessor unit lives in another report — the shape the
+        // Effects attach DIRECTLY, since the dep's unit lives in another report — the shape the
         // chained-global edge (7a1b077) and the §2 call join both use. Same discipline as both: only the
         // file's OWN imports are consulted, only packages a loaded report COVERS, and only an
         // unambiguous single hit joins, so an unimported, uncovered or ambiguous type resolves to
-        // nothing rather than being guessed. With no dep report loaded the set is never consulted.
-        if !deps.isEmpty, !cc.stringifyExternal.isEmpty {
+        // nothing rather than being guessed. Both candidate sets self-filter: a pure witness / a type
+        // with no effectful `deinit` is ABSENT from the dep report (reports omit pure functions), so the
+        // join adds nothing. With no dep report loaded neither set is consulted at all, which is why the
+        // unchained analysis is unchanged by construction.
+        if !deps.isEmpty, !(cc.stringifyExternal.isEmpty && cc.deinitExternal.isEmpty) {
             let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
-            for cand in cc.stringifyExternal {
+            for cand in cc.stringifyExternal.union(cc.deinitExternal) {
                 var hits: [DepEntry] = []
                 for m in fileImports[file] ?? [] where deps.coveredPkgs.contains(m) {
                     if let e = deps.lookup("\(m)#\(cand)") { hits.append(e) }

@@ -94,6 +94,10 @@ final class CallCollector: SyntaxVisitor {
     // already carries) — with no dep report loaded nothing consults this set, so the unchained analysis
     // is byte-identical. See candor-spec/SOUNDNESS-VEIN-crossing-the-scan-boundary.md.
     var stringifyExternal: Set<String> = []
+    // DEINIT GLUE (R33) over a type declared OUTSIDE the analysed code — a chained DEPENDENCY's class,
+    // constructed and held as a non-escaping local, whose `deinit` runs at scope exit. `Type.deinit`
+    // candidates, resolved ONLY against a sibling report in the Driver (`<Module>#<Type>.deinit`).
+    var deinitExternal: Set<String> = []
     var globalReads: Set<String> = []     // bare-name reads — candidate edges to GLOBAL initializer units
     var boundLocals: Set<String> = []     // EVERY local binding name (even literal/unresolved-type ones,
                                           // which `vars` drops) — so a bare read / fn-ref of a SHADOWING
@@ -1802,6 +1806,19 @@ final class CallCollector: SyntaxVisitor {
                                 // protocol (the ActivityAttributes over-charge). A real class deinit resolves;
                                 // an inherited deinit chains via the supertype resolution there.
                                 propertyEdges.insert("\(t).deinit")
+                            } else if !localTypes.contains(t), !t.hasPrefix("<"),
+                                      !returnedNames.contains(name) {
+                                // THE SAME GLUE ONE SCAN BOUNDARY OUT: the constructed type belongs to a
+                                // chained DEPENDENCY, so it is not in `localTypes` and the soft edge above
+                                // never fired — a dep class whose `deinit` is effectful, held as a local,
+                                // read silent-pure with the dep's report chained even though that report
+                                // records the unit under `<Module>#<Type>.deinit`
+                                // (candor-spec/SOUNDNESS-VEIN-crossing-the-scan-boundary.md). Recorded as a
+                                // candidate and joined against the sibling report ONLY, in the Driver; with
+                                // no dep report loaded nothing consults it. Self-filtering in exactly the
+                                // same way: a struct or a class with no (or a pure) `deinit` has no entry in
+                                // the dep report, so the join adds nothing.
+                                deinitExternal.insert("\(t).deinit")
                             }
                         }
                         // a collection TRANSFORM result keeps the element type: `let active = cs.filter {…}`
