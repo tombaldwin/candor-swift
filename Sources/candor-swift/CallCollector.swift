@@ -25,6 +25,8 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
                                                // loaded dep report is unchanged.
 
 final class CallCollector: SyntaxVisitor {
+    /// Receiver marker for `super.m()`; resolved against the supertype chain in the driver.
+    static let superMarker = "<super>"
     var vars: [String: String]              // local/param -> concrete type
     var fnTyped: Set<String>                // function-typed locals/params
     var opaqueFnLocals: Set<String> = []    // fn-typed LOCALS whose value is opaque (not a visible
@@ -200,6 +202,13 @@ final class CallCollector: SyntaxVisitor {
         // under-report, never a crash), exactly what an unresolvable receiver already yields.
         if depth > 200 { return (nil, false, []) }
         let expr = Self.peel(raw)
+        // `super.m()` — an explicit call to the SUPERCLASS's implementation. It is not a DeclReference, so it
+        // fell through this resolver entirely and the call was dropped: `override func load() { super.load() }`
+        // and `func run() { super.other() }` both read silent-pure while the base's `load`/`other` carried the
+        // effect two lines up. Resolving it to the ENCLOSING type would be wrong for the override case (the
+        // edge would point at the overriding method itself and add nothing), so mark it and let the driver
+        // walk the supertype chain, skipping the enclosing type.
+        if expr.is(SuperExprSyntax.self) { return (Self.superMarker, true, []) }
         if let dr = expr.as(DeclReferenceExprSyntax.self) {
             let n = dr.baseName.text
             // `self` (instance) and `Self` (the enclosing TYPE, used for `Self.staticMethod()`) both resolve

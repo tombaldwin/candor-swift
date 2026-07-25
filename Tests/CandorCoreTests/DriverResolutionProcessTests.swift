@@ -83,6 +83,31 @@ final class DriverResolutionProcessTests: XCTestCase {
                        "and a reader of Util's same-named `cfg` only Env — not the union of both: \(by)")
     }
 
+    // ── 0b. `super.m()` — the SUPERCLASS's implementation ─────────────────────────────────────────
+    // `super` is a SuperExprSyntax, not a DeclReference, so the receiver resolver fell through and the call
+    // was DROPPED: an override calling `super.load()` and a method calling `super.other()` both read
+    // silent-pure while the base's effect sat two lines up. Resolving `super` to the ENCLOSING type would be
+    // wrong for the override form — the edge would point at the overriding method itself and add nothing —
+    // so it is marked and resolved on the SUPERTYPE chain, skipping the enclosing type.
+    func testSuperCallReachesTheSuperclassImplementation() throws {
+        let by = try scan("""
+        import Foundation
+        class Base {
+            func load()  { _ = ProcessInfo.processInfo.environment["A"] }
+            func other() { _ = ProcessInfo.processInfo.environment["B"] }
+        }
+        class Sub1: Base { override func load() { super.load() } }
+        class Sub2: Base { func run() { super.other() } }
+        class Sub3: Base { func run2() { self.load() } }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "Sub1.load"), ["Env"],
+                       "an override calling super.load() carries the base's effect: \(by)")
+        XCTAssertEqual(ProcessHarness.inferred(by, "Sub2.run"), ["Env"],
+                       "a different-name super call resolves too: \(by)")
+        XCTAssertEqual(ProcessHarness.inferred(by, "Sub3.run2"), ["Env"],
+                       "and the self-dispatch control is unaffected: \(by)")
+    }
+
     // ── 1. overload-matched edge insertion (same name, same arity, different param TYPE) ───────────
     func testOverloadResolvedCallCarriesOnlyTheMatchedOverloadsEffect() throws {
         let by = try scan("""

@@ -532,6 +532,23 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 edges[f.qual, default: []].insert(inMod[0])
                 callsiteArgs[inMod[0], default: []].append(call.args)
                 resolved = true
+            } else if call.extOwner == CallCollector.superMarker {
+                // `super.m()` — resolve on the SUPERTYPE chain, never on the enclosing type: for an
+                // override (`override func load() { super.load() }`) the enclosing type's own unit IS the
+                // caller, so edging there would add nothing and the base's effect stayed silent. Walking the
+                // chain also covers the different-name form (`func run() { super.other() }`). Every matching
+                // supertype is edged — a union across a chain is sound, and an unresolvable `super` (an
+                // external base) resolves to nothing, exactly as before.
+                let member = call.leaf
+                if let et = f.enclosingType {
+                    for sup in supertypesOf[et] ?? [] where sup != et {
+                        if let t = resolveQual("\(sup).\(member)") {
+                            edges[f.qual, default: []].insert(t)
+                            callsiteArgs[t, default: []].append(call.args)
+                            resolved = true
+                        }
+                    }
+                }
             } else if call.typed {
                 if overloadedBases.contains(call.path) {
                     for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
