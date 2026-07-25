@@ -194,6 +194,27 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // stay exactly `<main>` (never `<main>()`), and a multi-file package's per-file top levels union under
     // the one `<main>` module-entry unit rather than becoming spurious overloads.
     for f in allFns where !f.isAccessor && !f.isTopLevel { qualGroup[f.qual, default: 0] += 1 }
+    // FILE-SCOPE GLOBALS are accessor units and so sit outside the overload pass above — which meant two
+    // modules each declaring `let cfg` collapsed into ONE unit carrying the union of both initializers'
+    // effects, reported at one file's location, and a reader of either was charged both. Give them the same
+    // positional disambiguation ordinary functions get, so the units stay distinct; module-scoped resolution
+    // below then picks the right one. (candor-spec SOUNDNESS-VEIN-global-unit-identity.md — rust had the
+    // same merge on `<lazy>::NAME` and was fixed the same way.)
+    var globalDup: [String: Int] = [:]
+    for f in allFns where f.isAccessor && f.enclosingType == nil && !f.qual.contains(".") {
+        globalDup[f.qual, default: 0] += 1
+    }
+    let mergedGlobals = Set(globalDup.filter { $0.value > 1 }.keys)
+    if !mergedGlobals.isEmpty {
+        var seenGlobal: [String: Int] = [:]
+        for i in allFns.indices
+        where allFns[i].isAccessor && allFns[i].enclosingType == nil
+              && !allFns[i].qual.contains(".") && mergedGlobals.contains(allFns[i].qual) {
+            let n = seenGlobal[allFns[i].qual, default: 0]
+            seenGlobal[allFns[i].qual] = n + 1
+            if n > 0 { allFns[i].qual = "\(allFns[i].qual)#\(n)"; allFns[i].simpleQual = allFns[i].qual }
+        }
+    }
     let overloadedQuals = Set(qualGroup.filter { $0.value > 1 }.keys)
     var overloads: [String: [(qual: String, sig: [(type: String?, hasDefault: Bool, variadic: Bool)], module: String)]] = [:]
     var overloadedBases = Set<String>()
@@ -277,6 +298,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // SOUNDNESS-VEIN-global-unit-identity.md). Indexed `module -> leaf -> quals`, and used only when the
     // module name is a real target and the leaf is unambiguous within it, so it can never guess.
     var freeFnByModule: [String: [String: [String]]] = [:]
+    // module -> bare global name -> unit quals (the quals may carry a `#n` disambiguator).
+    var globalsByModule: [String: [String: [String]]] = [:]
     // name indexes for resolution — UNAMBIGUOUS only (the family's never-guess rule)
     var freeFnByName: [String: [String]] = [:]
     var byQual: Set<String> = []
@@ -307,7 +330,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             let leaf = f.simpleQual.split(separator: "(").first.map(String.init) ?? f.simpleQual
             freeFnByModule[swiftModuleOf(f.loc), default: [:]][leaf, default: []].append(f.qual)
         }
-        if f.isAccessor && f.enclosingType == nil && !f.qual.contains(".") { globalUnitNames.insert(f.qual) }
+        if f.isAccessor && f.enclosingType == nil && !f.qual.contains(".") {
+            globalUnitNames.insert(f.qual)
+            let bare = f.qual.split(separator: "#").first.map(String.init) ?? f.qual
+            globalsByModule[swiftModuleOf(f.loc), default: [:]][bare, default: []].append(f.qual)
+        }
     }
     // Resolve a simple "Type.member" call target to a full nested qual: an exact full-qual hit (top-level,
     // already full), else the unique simple→full mapping, else nil (ambiguous/unknown → drop the edge).
@@ -423,7 +450,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             }
         }
         // a bare-name read that names a GLOBAL initializer unit charges its first-touch effects here
-        edges[f.qual, default: []].formUnion(cc.globalReads.filter { globalUnitNames.contains($0) && $0 != f.qual })
+        // A bare global read resolves in the reader's OWN module when that module declares the name —
+        // the same lexical rule the free-function path uses, and the reason the two `cfg`s above needed to
+        // stay distinct units first. Falls back to the plain name match, so a module that declares no such
+        // global still reaches a uniquely-named one elsewhere exactly as before.
+        let readerModule = swiftModuleOf(f.loc)
+        for name in cc.globalReads where name != f.qual {
+            if let inMod = globalsByModule[readerModule]?[name], inMod.count == 1 {
+                edges[f.qual, default: []].insert(inMod[0])
+            } else if globalUnitNames.contains(name) {
+                edges[f.qual, default: []].insert(name)
+            }
+        }
         direct[f.qual, default: []].formUnion(cc.directEffects)
         if cc.unresolved { direct[f.qual, default: []].insert("Unknown"); unresolvedSet.insert(f.qual) }
         whyMap[f.qual, default: []].formUnion(cc.why)

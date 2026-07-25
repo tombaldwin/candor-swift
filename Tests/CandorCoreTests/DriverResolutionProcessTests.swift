@@ -45,6 +45,8 @@ final class DriverResolutionProcessTests: XCTestCase {
         try """
         import Foundation
         public func shared() -> String { (try? String(contentsOfFile: "/etc/core")) ?? "" }
+        let cfg = (try? String(contentsOfFile: "/etc/core")) ?? ""
+        func coreReads() -> String { cfg }
         """.write(to: root.appendingPathComponent("Sources/Core/Core.swift"), atomically: true, encoding: .utf8)
         try """
         import Foundation
@@ -52,6 +54,8 @@ final class DriverResolutionProcessTests: XCTestCase {
         func shared() -> String { ProcessInfo.processInfo.environment["U"] ?? "" }
         func delegates() -> String { Core.shared() }
         func localCall() -> String { shared() }
+        let cfg = ProcessInfo.processInfo.environment["U"] ?? ""
+        func utilReads() -> String { cfg }
         """.write(to: root.appendingPathComponent("Sources/Util/Util.swift"), atomically: true, encoding: .utf8)
 
         let bin = try ProcessHarness.binaryURL(for: DriverResolutionProcessTests.self)
@@ -69,6 +73,14 @@ final class DriverResolutionProcessTests: XCTestCase {
         // delegation it was stealing is written module-qualified.
         XCTAssertEqual(ProcessHarness.inferred(by, "localCall"), ["Env"],
                        "an unqualified call resolves in its OWN module — not the same-named Fs next door: \(by)")
+        // The GLOBAL sibling. File-scope globals are accessor units and sat outside the overload pass, so two
+        // modules' `let cfg` collapsed into ONE unit carrying the union of both initializers' effects — and a
+        // reader of either was charged both. They now get the same positional disambiguation functions get,
+        // and a bare read resolves in the reader's own module.
+        XCTAssertEqual(ProcessHarness.inferred(by, "coreReads"), ["Fs"],
+                       "a reader of Core's `cfg` carries only Core's Fs: \(by)")
+        XCTAssertEqual(ProcessHarness.inferred(by, "utilReads"), ["Env"],
+                       "and a reader of Util's same-named `cfg` only Env — not the union of both: \(by)")
     }
 
     // ── 1. overload-matched edge insertion (same name, same arity, different param TYPE) ───────────
