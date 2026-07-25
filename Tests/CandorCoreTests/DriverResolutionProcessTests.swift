@@ -51,16 +51,24 @@ final class DriverResolutionProcessTests: XCTestCase {
         import Core
         func shared() -> String { ProcessInfo.processInfo.environment["U"] ?? "" }
         func delegates() -> String { Core.shared() }
+        func localCall() -> String { shared() }
         """.write(to: root.appendingPathComponent("Sources/Util/Util.swift"), atomically: true, encoding: .utf8)
 
         let bin = try ProcessHarness.binaryURL(for: DriverResolutionProcessTests.self)
         let r = try ProcessHarness.run(bin, [root.path, "--json"])
         XCTAssertEqual(r.code, 0, "scan must succeed — stderr: \(r.err)")
         let by = try ProcessHarness.fns(ofJson: r.out)
-        let eff = ProcessHarness.inferred(by, "delegates")
-        XCTAssertEqual(eff, ["Fs"],
+        XCTAssertEqual(ProcessHarness.inferred(by, "delegates"), ["Fs"],
                        "a module-qualified call must charge ONLY Core's Fs — it read silent-pure before, and "
                        + "must not pick up Util's same-named Env either: \(by)")
+        // The UNQUALIFIED sibling. Two modules' same-named free functions are grouped as overloads of one
+        // another, so every signature matched and each caller edged to BOTH — charging a caller of its own
+        // module's function with the other module's effect. A free call resolves lexically, so candidates in
+        // the caller's own module win. This is sound only BECAUSE the qualified form above now resolves:
+        // measured before that fix, the same preference dropped a real `Unknown` on swift-syntax, where the
+        // delegation it was stealing is written module-qualified.
+        XCTAssertEqual(ProcessHarness.inferred(by, "localCall"), ["Env"],
+                       "an unqualified call resolves in its OWN module — not the same-named Fs next door: \(by)")
     }
 
     // ── 1. overload-matched edge insertion (same name, same arity, different param TYPE) ───────────

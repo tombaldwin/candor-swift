@@ -195,7 +195,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // the one `<main>` module-entry unit rather than becoming spurious overloads.
     for f in allFns where !f.isAccessor && !f.isTopLevel { qualGroup[f.qual, default: 0] += 1 }
     let overloadedQuals = Set(qualGroup.filter { $0.value > 1 }.keys)
-    var overloads: [String: [(qual: String, sig: [(type: String?, hasDefault: Bool, variadic: Bool)])]] = [:]
+    var overloads: [String: [(qual: String, sig: [(type: String?, hasDefault: Bool, variadic: Bool)], module: String)]] = [:]
     var overloadedBases = Set<String>()
     if !overloadedQuals.isEmpty {
         var seen: [String: Int] = [:]   // identical type-sigs get a positional suffix so they stay distinct nodes
@@ -206,7 +206,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             let dupKey = "\(allFns[i].qual)\(suffix)"
             let n = seen[dupKey, default: 0]; seen[dupKey] = n + 1
             if n > 0 { suffix += "#\(n)" }
-            overloads[base, default: []].append(("\(allFns[i].qual)\(suffix)", allFns[i].paramSig))
+            overloads[base, default: []].append(("\(allFns[i].qual)\(suffix)", allFns[i].paramSig,
+                                                 swiftModuleOf(allFns[i].loc)))
             allFns[i].qual = "\(allFns[i].qual)\(suffix)"
             allFns[i].simpleQual = "\(base)\(suffix)"
         }
@@ -235,9 +236,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // Match a call (arg count + inferred arg types) to overload target qual(s). Empty ⇒ confident no local
     // overload matches ⇒ DROP. Non-empty ⇒ edge to all (one hit precise; several = sound union). A closure so
     // it captures `overloads`/`subtypesOf`.
-    let matchOverloads: (String, Int, [String?]) -> [String] = { base, argc, argTypes in
+    let matchOverloads: (String, Int, [String?], String) -> [String] = { base, argc, argTypes, callerModule in
         guard let cands = overloads[base] else { return [] }
         var hits: [String] = []
+        var hitsInCallerModule: [String] = []
         for c in cands {
             // arity by COUNT RANGE: a call must provide every REQUIRED param (not defaulted, not variadic) and
             // no more than the total — independent of WHICH params a labeled call omitted. A trailing VARIADIC
@@ -258,9 +260,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if subtypesOf[pt]?.contains(at) == true { continue }   // arg is a known subtype/conformer of param
                 ok = false; break
             }
-            if ok { hits.append(c.qual) }
+            if ok {
+                hits.append(c.qual)
+                if c.module == callerModule { hitsInCallerModule.append(c.qual) }
+            }
         }
-        return hits
+        let isFreeFunction = !base.contains(".")
+        return (isFreeFunction && !hitsInCallerModule.isEmpty) ? hitsInCallerModule : hits
     }
 
     // MODULE-QUALIFIED FREE CALL (`Core.shared()`). Swift lets a call name the declaring module to
@@ -467,7 +473,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 resolved = true
             } else if call.typed {
                 if overloadedBases.contains(call.path) {
-                    for t in matchOverloads(call.path, argc, call.argTypes) {
+                    for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
                         edges[f.qual, default: []].insert(t)
                         callsiteArgs[t, default: []].append(call.args)
                         resolved = true
@@ -522,7 +528,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // to an EXTERNAL delegate; resolving it to self's `urlSession` overload cluster unioned a
                 // sibling's real Fs onto the pure forwarder — a fabrication).
                 if overloadedBases.contains(call.path) {            // an overloaded FREE function
-                    for t in matchOverloads(call.path, argc, call.argTypes) {
+                    for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
                         edges[f.qual, default: []].insert(t)
                         callsiteArgs[t, default: []].append(call.args)
                         resolved = true
@@ -532,7 +538,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     callsiteArgs[targets[0], default: []].append(call.args)
                     resolved = true
                 } else if localTypes.contains(call.path), overloadedBases.contains("\(call.path).init") {
-                    for t in matchOverloads("\(call.path).init", argc, call.argTypes) {
+                    for t in matchOverloads("\(call.path).init", argc, call.argTypes, swiftModuleOf(f.loc)) {
                         edges[f.qual, default: []].insert(t)
                         resolved = true
                     }
@@ -547,7 +553,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     if let t = resolveQual("\(call.path).init") { edges[f.qual, default: []].insert(t) }
                     resolved = true
                 } else if let et = f.enclosingType, overloadedBases.contains("\(et).\(call.leaf)") {  // overloaded sibling
-                    for t in matchOverloads("\(et).\(call.leaf)", argc, call.argTypes) {
+                    for t in matchOverloads("\(et).\(call.leaf)", argc, call.argTypes, swiftModuleOf(f.loc)) {
                         edges[f.qual, default: []].insert(t)
                         resolved = true
                     }
