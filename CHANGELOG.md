@@ -9,6 +9,41 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### ⚠ soundness — three defects in the erasure/typeSurface gates, found by adversarial review
+
+Three fixes, each with its own two-direction fixtures and each guard verified by mutating it out and
+naming the test that fails. A/B over 14 real Swift targets / 12 004 entries (pollen, candor-swift,
+swift-syntax, Alamofire, vapor, TCA, SQLite.swift, swift-argument-parser, console-kit, Files, swift-log,
+Commander, ShellOut, swifter): 0 effect gains, 0 losses, Unknown unchanged.
+
+**A ternary's opacity is a claim about BOTH arms.** `rootOf` composed `cond ? a : b`'s monomorphization
+flags with `||`, so a receiver monomorphized on one arm and ERASED on the other was treated as fully
+monomorphized: the local-conformer CHA was skipped for the erased arm too and the function went ABSENT
+from `functions` — a positive purity claim, under the ⟨0.21⟩ manifest, about a body that performs the
+conformer's effect. Opacity licenses suppression, so it composes by conjunction.
+
+**A binder is an `IdentifierPattern`, not an entry on a list.** `patternNames` enumerated three of the
+seven `PatternSyntax` kinds, so `for case let x?`, `for case .some(let x)`, `for case let x as T` and
+`for var x` never reached the shadowing path at all and the enclosing signature's opacity /
+dependency-provenance flags stayed attached to the loop's own unrelated binding — silent-pure in one
+direction, a false `Unknown[dispatch:…]` for a purely local value in the other. Now a walk for every
+`IdentifierPatternSyntax` in the pattern subtree (verified in both directions against SwiftParser: every
+bound name reaches one, and no non-binding pattern produces one), plus a catch-all that CLEARS any binder
+no specific visitor claimed — so an unenumerated form defaults to dropping a stale binding rather than
+keeping one. Two forms are now typed as well, since scoping alone left them untyped and silent for a
+second reason: `for case let x as T` (T is written in the source) and `for case let x?` (Optional sugar).
+A loop binder's type no longer outlives its loop. Also fixed: `catch let e as MyError` matched a
+`DeclReferenceExpr` where the parser puts a `patternExpr > identifierPattern`, so that branch never fired.
+
+**The `typeSurface` ANSWER must be unambiguous, not just the entry.** The ⟨0.23⟩ consumer keys a BARE
+callee name against every covered package the file imports and gated only on the entry lookup being
+unambiguous. Two chained packages both exporting `build` — one returning a type with an effectful
+`fetch`, the other a type whose `fetch` is pure and therefore absent — charged the first package's effect
+AND its path literal to a caller that reaches only the second, with `unresolved` left false so nothing
+disclosed it. SPEC §2 rule 1's never-guess rule now applies across the file's imports too, and refusing
+falls back to half 1's disclosure. `CANDOR_TYPESURFACE_DEBUG` reports `AMBIGUOUS` as its own verdict.
+
+
 ### ⚠ ⟨0.23⟩ `typeSurface.returns` — the factory-bound receiver resolves, not just discloses
 
 `let c = build(); c.fetch()` types `c` from `build`'s RETURN type, and a PURE `build` is ABSENT from the
