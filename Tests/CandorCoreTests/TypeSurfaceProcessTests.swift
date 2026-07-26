@@ -388,4 +388,118 @@ final class TypeSurfaceProcessTests: XCTestCase {
                        + "half 1's reason — reading it and then inheriting the entry's `dep-stale:` "
                        + "reason means the type claim WAS believed; got \(by["viaFactory"] ?? [:])")
     }
+
+    // ── TWO COVERED IMPORTS ANSWERING THE SAME BARE FN KEY ──────────────────────────────────────
+
+    /// `depCallee` is a BARE name, because an idiomatic Swift call into a dependency carries no module.
+    /// So EVERY covered import of the file is asked the same fn key, and two libraries may both export
+    /// a `build`. Gating only on `hits.count == 1` — the ENTRY lookup — let one of two different
+    /// answers be picked whenever the other package's type happened to have no entry for the member.
+    ///
+    /// Alpha publishes `build -> Alpha#Client` whose `fetch` is `Fs` with `/etc/secrets` in `paths`;
+    /// Beta publishes `build -> Beta#Stub` whose `fetch` is PURE and therefore absent. The consumer
+    /// calls BETA's overload, `surfaced` holds two types, `hits` holds one — and the caller was charged
+    /// Alpha's effect AND its path literal, with `unresolved` left false so nothing disclosed it. rust's
+    /// reverted defect 1 (a leaf-keyed collapse of two distinct types), reappearing ACROSS packages.
+    ///
+    /// THE SECOND FIXTURE IS `viaUnique`, and it is what the fix must not break: BOTH packages are
+    /// imported and covered, and only ONE answers `openAlpha`. That must still resolve — a guard keyed
+    /// on "the file imports more than one covered package" would pass the row above and silently kill
+    /// every real recovery in a multi-dependency file, which is the whole shape of standing-bar item 0.
+    private func makeTwoDepFixture() throws -> (root: URL, alpha: URL, beta: URL, app: URL) {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-twodep-\(UUID().uuidString)")
+        let fm = FileManager.default
+        let alpha = root.appendingPathComponent("alpha"), beta = root.appendingPathComponent("beta")
+        let app = root.appendingPathComponent("app")
+        for (d, t) in [(alpha, "Alpha"), (beta, "Beta"), (app, "App")] {
+            try fm.createDirectory(at: d.appendingPathComponent("Sources/\(t)"), withIntermediateDirectories: true)
+        }
+        for (d, t) in [(alpha, "Alpha"), (beta, "Beta")] {
+            try """
+            // swift-tools-version: 6.0
+            import PackageDescription
+            let package = Package(name: "\(t)", targets: [.target(name: "\(t)")])
+            """.write(to: d.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        }
+        try """
+        import Foundation
+        public struct Client {
+            public init() {}
+            public func fetch() { _ = FileManager.default.contents(atPath: "/etc/secrets") }
+        }
+        public func build() -> Client { return Client() }
+        public func openAlpha() -> Client { return Client() }
+        """.write(to: alpha.appendingPathComponent("Sources/Alpha/Lib.swift"), atomically: true, encoding: .utf8)
+        // Beta's `build` takes an argument, so the consumer's call is UNAMBIGUOUS SWIFT while candor —
+        // which records only the callee's bare name — sees the same key both packages publish.
+        try """
+        public struct Stub {
+            public init() {}
+            public func fetch() { }
+        }
+        public func build(_ name: String) -> Stub { return Stub() }
+        """.write(to: beta.appendingPathComponent("Sources/Beta/Lib.swift"), atomically: true, encoding: .utf8)
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(
+            name: "App",
+            dependencies: [.package(path: "../alpha"), .package(path: "../beta")],
+            targets: [.target(name: "App", dependencies: [.product(name: "Alpha", package: "alpha"),
+                                                          .product(name: "Beta", package: "beta")])]
+        )
+        """.write(to: app.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try """
+        import Alpha
+        import Beta
+        // BETA's factory. Alpha cannot be reached from here at all.
+        public func viaColliding() { let c = build("x"); c.fetch() }
+        // …and the row the fix must keep: only ALPHA publishes `openAlpha`, with both packages covered.
+        public func viaUnique() { let c = openAlpha(); c.fetch() }
+        """.write(to: app.appendingPathComponent("Sources/App/App.swift"), atomically: true, encoding: .utf8)
+        return (root, alpha, beta, app)
+    }
+
+    func testTwoCoveredImportsAnsweringOneFnKeyRefuseToGuess() throws {
+        let bin = try binaryURL()
+        let (root, alpha, beta, app) = try makeTwoDepFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fm = FileManager.default
+        for (d, n) in [(alpha, "Alpha"), (beta, "Beta")] {
+            try? fm.removeItem(at: root.appendingPathComponent("\(n.lowercased())-r.\(n).Swift.json"))
+            XCTAssertEqual(try ProcessHarness.run(
+                bin, [d.path, "--out", root.appendingPathComponent("\(n.lowercased())-r").path]).code, 0)
+        }
+        let depSpec = root.appendingPathComponent("alpha-r.Alpha.Swift.json").path
+            + "," + root.appendingPathComponent("beta-r.Beta.Swift.json").path
+        try? fm.removeItem(at: root.appendingPathComponent("app-r.App.Swift.json"))
+        let r = try ProcessHarness.run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path],
+                                       env: ["CANDOR_DEPS": depSpec])
+        XCTAssertEqual(r.code, 0, r.err)
+        let by = try fns(root.appendingPathComponent("app-r.App.Swift.json"))
+
+        // THE SECOND FIXTURE FIRST: the unique key must still resolve, with both packages covered.
+        XCTAssertTrue(Set(by["viaUnique"]?["inferred"] as? [String] ?? []).contains("Fs"),
+                      "viaUnique: only Alpha answers `openAlpha`, so the answer IS unambiguous and must "
+                      + "still resolve — refusing whenever a file imports two covered packages would "
+                      + "kill every real recovery in a multi-dependency file; got \(by["viaUnique"] ?? [:])")
+
+        let colliding = by["viaColliding"]
+        XCTAssertFalse(Set(colliding?["inferred"] as? [String] ?? []).contains("Fs"),
+                       "viaColliding calls BETA's `build`, whose `Stub.fetch` is pure. Charging Alpha's "
+                       + "Fs is a leaf-keyed collapse of two distinct types across packages — §2 rule 1 "
+                       + "says a key two entries share is DROPPED, never picked from; got \(colliding ?? [:])")
+        XCTAssertFalse((colliding?["paths"] as? [String] ?? []).contains("/etc/secrets"),
+                       "…and the literal SURFACE travels with the effect, so the fabrication put another "
+                       + "package's path literal on this function too; got \(colliding ?? [:])")
+        XCTAssertNotNil(colliding, "viaColliding must not be ABSENT — under the ⟨0.21⟩ manifest that is a "
+                        + "positive purity claim, and refusing to answer licenses no such claim")
+        XCTAssertTrue(Set(colliding?["inferred"] as? [String] ?? []).contains("Unknown"),
+                      "refusing an ambiguous answer falls back to half 1's DISCLOSURE, never to silence; "
+                      + "got \(colliding ?? [:])")
+        XCTAssertTrue((colliding?["unknownWhy"] as? [String] ?? [])
+                        .contains("dispatch:untyped cross-package receiver"),
+                      "…and it keeps half 1's reason class; got \(colliding ?? [:])")
+    }
 }

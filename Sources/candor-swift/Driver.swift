@@ -816,16 +816,34 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         surfaced.append(ty)
                         if let e = deps.lookup("\(ty).\(call.leaf)") { hits.append(e) }
                     }
+                    // THE ANSWER MUST BE UNAMBIGUOUS TOO, not only the entry lookup that follows it.
+                    // `depCallee` is a BARE name (`build`) — an idiomatic Swift call into a dependency
+                    // carries no module — so every covered import of this file is asked the same fn key,
+                    // and two libraries may both export a `build`. Gating on `hits.count == 1` alone let
+                    // ONE of two different answers be picked whenever the other package's type happened
+                    // to have no entry for the member: Alpha publishing `build -> Alpha#Client` (whose
+                    // `fetch` is Fs, with `/etc/secrets` in its `paths`) and Beta publishing
+                    // `build -> Beta#Stub` (whose `fetch` is pure, so absent) charged Alpha's effect AND
+                    // its path literal to a caller that reaches Beta, with `unresolved` left false so
+                    // nothing disclosed it. That is a leaf-keyed collapse of two distinct types — rust's
+                    // reverted defect 1 — reappearing ACROSS packages rather than within one.
+                    //
+                    // §2 rule 1 says a key two entries share is DROPPED, never picked from, and the
+                    // index enforces that WITHIN a report (`returnsAmbiguous`); this is the same rule
+                    // ACROSS the file's imports, where no single report can see the collision. Refusing
+                    // falls through to half 1's disclosure below — never to silence.
+                    let answers = Set(surfaced)
                     // An A/B diff cannot show that a mechanism never fired, or fired on the wrong thing —
                     // so the trigger, the `returns` answer and the entry lookup are each observable.
                     if ProcessInfo.processInfo.environment["CANDOR_TYPESURFACE_DEBUG"] != nil {
-                        let verdict = hits.count == 1 ? "HIT " : (surfaced.isEmpty ? "MISS-returns" : "MISS-entry")
+                        let verdict = answers.count > 1 ? "AMBIGUOUS"
+                            : (hits.count == 1 ? "HIT " : (surfaced.isEmpty ? "MISS-returns" : "MISS-entry"))
                         let line = "TYPESURFACE-\(verdict) \(f.qual) :: \(callee) -> "
-                            + "\(surfaced.isEmpty ? "<no returns entry>" : surfaced.joined(separator: "|"))"
+                            + "\(surfaced.isEmpty ? "<no returns entry>" : surfaced.sorted().joined(separator: "|"))"
                             + " :: .\(call.leaf)()\n"
                         FileHandle.standardError.write(line.data(using: .utf8)!)
                     }
-                    if hits.count == 1, let de = hits.first {
+                    if answers.count == 1, hits.count == 1, let de = hits.first {
                         applyDepEntry(de, to: f.qual)
                         continue
                     }
