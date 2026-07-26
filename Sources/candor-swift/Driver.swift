@@ -390,6 +390,30 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var callsiteArgs: [String: [[ArgKind]]] = [:]   // resolved target -> each call site's arg kinds
     var deferredCallbacks: [String: (indexes: Set<Int>, names: Set<String>)] = [:]
 
+    // THE ONE APPLY SITE for a chained dependency entry (SPEC §2). It was three, and they had drifted:
+    // the chained-GLOBAL read carried the effects, `hosts`, `cmds` and `paths` and silently dropped
+    // `tables`, `invisible` and `incomplete`. So a consumer that reached a dependency's effectful lazy
+    // global inherited the EFFECT and not the dependency's own honesty markers — its blind-module
+    // disclosure vanished, and its masking-incompleteness with it, which is precisely the case SPEC §2
+    // names: a benign literal in the consumer must not certify what the dependency declared
+    // uncertifiable. candor-rust found three drifted copies of this (7cb5748) and candor-java two
+    // (6ab26e4) by asking the same question, so it is a duplication defect and not a swift accident.
+    // Every field of `DepEntry` a consumer can inherit is applied HERE and nowhere else; adding one to
+    // `DepEntry` and not to this function is the next instance of the same bug.
+    func applyDepEntry(_ de: DepEntry, to qual: String) {
+        direct[qual, default: []].formUnion(de.effects)
+        if de.effects.contains("Unknown") {
+            unresolvedSet.insert(qual)
+            if let why = de.whyReason { whyMap[qual, default: []].insert(why) }
+        }
+        hostsD[qual, default: []].formUnion(de.hosts)
+        cmdsD[qual, default: []].formUnion(de.cmds)
+        pathsD[qual, default: []].formUnion(de.paths)
+        tablesD[qual, default: []].formUnion(de.tables)
+        if !de.invisible.isEmpty { blindDirect[qual, default: []].formUnion(de.invisible) }
+        if !de.incomplete.isEmpty { incompleteD[qual, default: []].formUnion(de.incomplete) }
+    }
+
     let localProtocolNames = Set(protocolMethods.keys)  // loop-invariant: build once, not per fn
     // Does protocol `p` declare `member` DIRECTLY, or INHERIT it from a (transitive) super-protocol
     // (`protocol Sub: Sup` → `protocolSupers[Sub] = {Sup}`)? A super-protocol method IS callable on a
@@ -485,16 +509,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 for m in fileImports[file] ?? [] where deps.coveredPkgs.contains(m) {
                     if let e = deps.lookup("\(m)#\(name)") { hits.append(e) }
                 }
-                if hits.count == 1, let de = hits.first {
-                    direct[f.qual, default: []].formUnion(de.effects)
-                    if de.effects.contains("Unknown") {
-                        unresolvedSet.insert(f.qual)
-                        if let why = de.whyReason { whyMap[f.qual, default: []].insert(why) }
-                    }
-                    hostsD[f.qual, default: []].formUnion(de.hosts)
-                    cmdsD[f.qual, default: []].formUnion(de.cmds)
-                    pathsD[f.qual, default: []].formUnion(de.paths)
-                }
+                if hits.count == 1, let de = hits.first { applyDepEntry(de, to: f.qual) }
             }
         }
         direct[f.qual, default: []].formUnion(cc.directEffects)
@@ -750,20 +765,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     }
                 }
                 if hits.count == 1, let de = hits.first {
-                    direct[f.qual, default: []].formUnion(de.effects)
-                    if de.effects.contains("Unknown") {
-                        unresolvedSet.insert(f.qual)
-                        if let why = de.whyReason { whyMap[f.qual, default: []].insert(why) }
-                    }
-                    hostsD[f.qual, default: []].formUnion(de.hosts)
-                    cmdsD[f.qual, default: []].formUnion(de.cmds)
-                    pathsD[f.qual, default: []].formUnion(de.paths)
-                    tablesD[f.qual, default: []].formUnion(de.tables)
-                    // inherit the dep fn's own honesty markers so the consumer's verdict stays qualified
-                    // across the chain boundary: its blind-module disclosure and its masking-incompleteness
-                    // (a benign literal HERE must not certify the dep's invisible runtime endpoint).
-                    if !de.invisible.isEmpty { blindDirect[f.qual, default: []].formUnion(de.invisible) }
-                    if !de.incomplete.isEmpty { incompleteD[f.qual, default: []].formUnion(de.incomplete) }
+                    // inherit the dep fn's own honesty markers too, so the consumer's verdict stays
+                    // qualified across the chain boundary (a benign literal HERE must not certify the
+                    // dep's invisible runtime endpoint) — see applyDepEntry.
+                    applyDepEntry(de, to: f.qual)
                     resolved = true
                 }
             }
@@ -884,17 +889,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     if let e = deps.lookup("\(m)#\(cand)") { hits.append(e) }
                 }
                 guard hits.count == 1, let de = hits.first else { continue }
-                direct[f.qual, default: []].formUnion(de.effects)
-                if de.effects.contains("Unknown") {
-                    unresolvedSet.insert(f.qual)
-                    if let why = de.whyReason { whyMap[f.qual, default: []].insert(why) }
-                }
-                hostsD[f.qual, default: []].formUnion(de.hosts)
-                cmdsD[f.qual, default: []].formUnion(de.cmds)
-                pathsD[f.qual, default: []].formUnion(de.paths)
-                tablesD[f.qual, default: []].formUnion(de.tables)
-                if !de.invisible.isEmpty { blindDirect[f.qual, default: []].formUnion(de.invisible) }
-                if !de.incomplete.isEmpty { incompleteD[f.qual, default: []].formUnion(de.incomplete) }
+                applyDepEntry(de, to: f.qual)
             }
         }
     }
