@@ -18,6 +18,13 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               var unqualified: Bool = false    // a bare DeclReference `name(…)` (free fn / ctor / self-sibling) —
                                                // NOT a `recv.member(…)` whose receiver type couldn't be resolved
                                                // (those must never be guessed onto a same-named sibling/free fn).
+              // The receiver is an OPAQUE `some P` parameter. The type is still carried (the §2 dep join
+              // and the classifier both need it, and both are SOUND here: every monomorphization must
+              // conform to P, so P's own reported effects apply). Only the LOCAL-CONFORMER CHA must be
+              // suppressed — the caller picks ONE conforming type, so unioning every local conformer's
+              // effects fabricates. Suppressing the type itself, as the first version of this fix did,
+              // took the dep join with it and made an Fs-performing function read PURE.
+              var opaqueRecv: Bool = false
               var extOwner: String? = nil }    // the RESOLVED receiver root of an otherwise-unmatched member
                                                // call (`c.fetch()` where c: RatesClient, an external type) —
                                                // carried ONLY for the §2 CANDOR_DEPS join key (`pkg#Owner.leaf`);
@@ -66,6 +73,8 @@ final class CallCollector: SyntaxVisitor {
         "max", "min", "abs", "swap", "zip", "stride", "repeatElement", "sequence",
         "numericCast", "unsafeDowncast", "withUnsafePointer", "withoutActuallyEscaping",
     ]
+    /// Parameter names declared `some P` in THIS signature (opaque, caller-monomorphized).
+    var opaqueParamNames: Set<String> = []
     let localProtocols: Set<String> // local protocol names — a receiver typed as one is DISPATCH
     let returns: [String: String]   // unambiguous factory return types (the candor-scan move)
     /// Locals bound from a CALL whose return type we could not determine, where the callee is not a local
@@ -158,6 +167,7 @@ final class CallCollector: SyntaxVisitor {
         self.selfElementType = info.selfElementType
         self.fnTyped = info.fnTypedParams
         self.protoTyped = info.protoParams
+        self.opaqueParamNames = info.opaqueParams
         self.arrayElem = info.arrayParams
         self.dictElem = info.dictParams
         self.tupleElem = info.tupleParams
@@ -707,6 +717,12 @@ final class CallCollector: SyntaxVisitor {
         arrayElem.removeValue(forKey: name)
         dictElem.removeValue(forKey: name)
         tupleElem.removeValue(forKey: name)
+        // A REBIND drops dependency provenance too. Without this a later shadowing binding of the same
+        // name — a loop variable, an `if let` unwrap, a closure parameter — inherited the earlier
+        // binding's provenance and was disclosed as an untyped cross-package receiver though it is a
+        // purely local value. The 47bb69a comment claimed this line already existed; it did not, and the
+        // review found the gap. A `deny E Unknown` gate would have gone exit 0 -> 1 on clean code.
+        depBoundLocals.remove(name)
     }
 
     // `for x in coll` / `for (k, v) in dict` / `for (i, x) in coll.enumerated()` — type the iteration
@@ -1215,7 +1231,9 @@ final class CallCollector: SyntaxVisitor {
                 // dep quals lead with a type name — but keep the owner honest: only a tracked value
                 // (isVar) or a type-looking root qualifies.
                 let owner = base.root.flatMap { r in (base.isVar || r.first?.isUppercase == true) ? r : nil }
-                calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), extOwner: owner))
+                let opaque = ma.base?.as(DeclReferenceExprSyntax.self)
+                    .map { opaqueParamNames.contains($0.baseName.text) } ?? false
+                calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), opaqueRecv: opaque, extOwner: owner))
                 // COULD-NOT-FORM-A-KEY: the receiver is a local bound from a dependency call we could not
                 // type, and nothing above resolved it. Emit a marker the Driver consumes into an honest
                 // `Unknown`; it resolves to NOTHING by design — it exists to say no key was formed, not to

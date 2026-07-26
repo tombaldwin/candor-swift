@@ -677,7 +677,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // project methods onto `Codable`/`Hashable`/`Sequence`-typed receivers. RAW_VALUE_BASE_TYPES:
             // `enum Suit: String` records `String` as a supertype, so without the carve-out a call on any
             // String/Int-typed value would dispatch into raw-value enums' methods — a pure fabrication.
-            if !resolved, !call.typed, !call.unqualified, let owner = call.extOwner,
+            // ERASURE, and it belongs HERE rather than at the binding. `some P` is opaque: the CALLER
+            // picks one conforming type, so the local conformers are not this receiver's witnesses and
+            // unioning them fabricates. `any P` is an existential and genuinely may be any of them.
+            // Only THIS arm is suppressed — the §2 dep join below still runs on an opaque receiver, and
+            // soundly, since every monomorphization must conform to P. An earlier version enforced the
+            // distinction by withholding the receiver's TYPE, which took the dep join with it and made an
+            // Fs-performing function read PURE.
+            if !resolved, !call.typed, !call.unqualified, !call.opaqueRecv, let owner = call.extOwner,
                !localTypes.contains(owner), !STD_PURE_PROTOCOLS.contains(owner),
                !RAW_VALUE_BASE_TYPES.contains(owner) {
                 for sub in subtypesOf[owner] ?? [] {

@@ -31,6 +31,10 @@ struct FnInfo {
     var params: [String: String] = [:]       // param name -> type name (concrete)
     var fnTypedParams: Set<String> = []      // params of function type
     var fnTypedParamIndex: [String: Int] = [:] // fn-typed param name -> position
+    /// Params declared `some P` — opaque, so the CALLER monomorphizes and the local conformers are NOT
+    /// this receiver's candidate witnesses. Recorded so the Driver's CHA arm can skip them while every
+    /// other use of the type (classifier, §2 dep join) proceeds normally.
+    var opaqueParams: Set<String> = []
     var protoParams: [String: String] = [:]  // param name -> local protocol name
     var arrayParams: [String: String] = [:]  // param name -> ELEMENT type (a `[T]` param, for `for x in p`)
     var dictParams: [String: String] = [:]   // param name -> VALUE type (a `[K: V]` param, for `for (k,v)`)
@@ -740,7 +744,17 @@ final class DeclCollector: SyntaxVisitor {
                 // like its equivalent spelling `<T: P>`, which was already inert. The LOCAL-protocol arm
                 // above is untouched: that dispatch is the long-standing behaviour and is a separate
                 // question (see the note in SOUNDNESS-VEIN-crossing-the-scan-boundary.md).
-                else if !isOpaqueParam(p.type) { info.params[pname] = tn }
+                else {
+                    // RESTORED. Suppressing the type here (the first version of this fix) killed far
+                    // more than the local-conformer CHA it was aiming at: `vars` is seeded from
+                    // `info.params`, so the receiver lost typed resolution for the classifier AND for
+                    // the SPEC §2 cross-package join — and `func upload(_ c: some Uploader) { c.send() }`
+                    // went from Fs to ABSENT-and-pure against a chained report that named Uploader.send.
+                    // The erasure distinction belongs on the CHA arm alone; it is recorded, not enforced,
+                    // here.
+                    info.params[pname] = tn
+                    if isOpaqueParam(p.type) { info.opaqueParams.insert(pname) }
+                }
             }
             else { let te = tupleElements(p.type); if !te.isEmpty { info.tupleParams[pname] = te } }  // `p: (A, B)`
         }
