@@ -91,6 +91,12 @@ struct Report {
     // are absent because never seen, not because pure. OMITTED when empty (a complete scan is byte-identical
     // to a pre-rung report). Set in main.swift from `analysis.unanalyzed`.
     var unanalyzed: [(path: String, reason: String)] = []
+    // ⟨0.23⟩ `typeSurface.returns` (SPEC §2, `DEP-RECEIVER-TYPING-DESIGN.md`): `<pkg>#<fn qual>` ->
+    // `<pkg>#<type qual>`, both FULLY QUALIFIED in this package's own namespace — the same namespace the
+    // entry hashes use, so a consumer forms `<pkg>#<type qual>.<method>` and asks the ordinary chained
+    // lookup. OMITTED when empty, so a report with nothing to say is byte-identical to a pre-rung one and
+    // a 0.22 consumer is unaffected. Set in main.swift from `analysis.typeSurfaceReturns`.
+    var typeSurfaceReturns: [String: String] = [:]
     // Is the `privacy/1` extension ACTIVE — does any effector reach one of its six sensor effects (in its
     // inferred OR direct set)? Computed from the effectors so the envelope discloses the extension exactly
     // when one of its effects appears (SPEC-EXTENSION-privacy.md "Wire disclosure").
@@ -121,6 +127,8 @@ struct Report {
         if !unanalyzed.isEmpty {
             env["unanalyzed"] = unanalyzed.map { ["path": $0.path, "reason": $0.reason] as [String: Any] }
         }
+        // ⟨0.23⟩ the factory-bound receiver's type surface — omitted when empty (see above).
+        if !typeSurfaceReturns.isEmpty { env["typeSurface"] = ["returns": typeSurfaceReturns] }
         return env
     }
 }

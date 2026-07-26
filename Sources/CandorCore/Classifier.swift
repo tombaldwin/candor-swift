@@ -720,6 +720,29 @@ public func typeName(_ t: TypeSyntax) -> (name: String?, isFunction: Bool) {
     return (nil, false)
 }
 
+/// The PLAIN NOMINAL spelling of a return type, or nil — the ⟨0.23⟩ `typeSurface.returns` producer
+/// predicate (SPEC §2, `DEP-RECEIVER-TYPING-DESIGN.md`).
+///
+/// DELIBERATELY STRICTER THAN `typeName`, and the difference is the whole rule. `typeName` peels
+/// `Optional`/`some`/`any`/attributes and DROPS a generic argument clause, because for naming the type a
+/// receiver was declared with, `Conn?` and `Conn` are the same thing. For publishing what a BINDING
+/// HOLDS they are not: `let c = connect()` where `connect() -> Conn?` holds an Optional, and keying
+/// `c.map { … }` against `Conn` charges effects nobody runs. candor-rust shipped exactly that and
+/// reverted it. So: an identifier with NO generic argument clause, or a dotted `Outer.Inner` of those,
+/// and nothing else — no optional, array, dictionary, tuple, function type, `some`/`any`, `Result<_,_>`
+/// or `Array<_>`. Refusing is the safe direction: what it refuses costs precision only, because a miss
+/// falls back to half 1's disclosure rather than to silence.
+public func plainNominalTypeName(_ t: TypeSyntax) -> String? {
+    if let id = t.as(IdentifierTypeSyntax.self) {
+        return id.genericArgumentClause == nil ? id.name.text : nil
+    }
+    if let mem = t.as(MemberTypeSyntax.self) {
+        guard mem.genericArgumentClause == nil, let head = plainNominalTypeName(mem.baseType) else { return nil }
+        return "\(head).\(mem.name.text)"
+    }
+    return nil
+}
+
 /// Is this parameter type spelled `some P` (an OPAQUE type) rather than `any P` (an existential)?
 ///
 /// `typeName` deliberately collapses the two — for naming a type they are the same. For class-hierarchy

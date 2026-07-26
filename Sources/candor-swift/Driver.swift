@@ -33,6 +33,71 @@ struct Analysis {
     // absent NOT because pure but because never seen; carried into the report + gate verdict so a gate
     // over skipped source fails closed, never green. (path, reason), in discovery order.
     var unanalyzed: [(path: String, reason: String)]
+    /// ⟨0.23⟩ `typeSurface.returns` (SPEC §2, `DEP-RECEIVER-TYPING-DESIGN.md`): fn qual -> the FULLY
+    /// QUALIFIED type a binding bound from that fn HOLDS. Both ends are qualified in this package's own
+    /// namespace, so main.swift prefixes each with `<pkg>#` — the same namespace the entry hashes use.
+    /// The point of the rung: a PURE factory is absent from `functions` entirely (§2 rule 3), so its
+    /// return type can never be recovered from the entries, and every later method call on the binding
+    /// drops. Empty when there is nothing to say, and the field is then omitted so the report stays
+    /// byte-identical to a pre-rung one.
+    var typeSurfaceReturns: [String: String]
+}
+
+/// ⟨0.23⟩ THE `typeSurface.returns` PRODUCER (SPEC §2, `DEP-RECEIVER-TYPING-DESIGN.md`).
+///
+/// `let c = build(); c.fetch()` types `c` from `build`'s RETURN type, and a PURE `build` is absent from
+/// the dependency's report entirely (§2 rule 3) — so no consumer can recover it from the entries, and
+/// every later method call on `c` drops. This publishes it.
+///
+/// QUALIFICATION IS THE WHOLE RULE, and it is the defect rust shipped and reverted. A leaf-keyed surface
+/// makes `Sync.Client` and `Mock.Client` one string, and a PURE `mockClient()` then charges the real
+/// client's effects to a caller that cannot reach them. So the written spelling is resolved against the
+/// DECLARING type path, outward exactly as Swift's own lookup runs, and the result must match a declared
+/// type path EXACTLY — never a leaf, never a suffix. A name that resolves to nothing (an imported type,
+/// a stdlib type, a generic parameter) publishes NOTHING: it names no unit in this report, so a consumer
+/// keying through it could only miss, and a miss it cannot explain is worse than an absent entry.
+///
+/// A fn qual that several functions share (a same-name overload set, whose members may return different
+/// types) publishes nothing either — the never-guess rule the whole dep index runs on.
+func buildTypeSurfaceReturns(_ allFns: [FnInfo], _ localTypePaths: Set<String>) -> [String: String] {
+    var byQualCount: [String: Int] = [:]
+    for f in allFns { byQualCount[f.qual, default: 0] += 1 }
+
+    /// Resolve a written type spelling against the scope it was written in. `Client` inside
+    /// `enum Sync { … }` is `Sync.Client`; inside `Sync.Inner` it is `Sync.Inner.Client`, else
+    /// `Sync.Client`, else the top-level `Client` — the outward walk, stopping at the first EXACT hit.
+    func resolveTypePath(_ written: String, scope: String?) -> String? {
+        var segs = scope.map { $0.split(separator: ".").map(String.init) } ?? []
+        while !segs.isEmpty {
+            let cand = segs.joined(separator: ".") + "." + written
+            if localTypePaths.contains(cand) { return cand }
+            segs.removeLast()
+        }
+        return localTypePaths.contains(written) ? written : nil
+    }
+    // THE EXACTNESS OF THAT LAST LINE IS NOT CURRENTLY PROVEN, and saying so beats a comment claiming
+    // it is. Relaxing it to a suffix match (`first { $0.hasSuffix(".\(written)") }`) fails NO test and
+    // changes NO corpus output — a suffix match can only return a path of TWO OR MORE segments, the
+    // consumer then forms a THREE-segment key, and this engine's dep index carries only `pkg#leaf` and
+    // `pkg#tail2`, so the lookup misses and falls to the disclosure. The guard is right and the spec
+    // requires it; it is INERT until a full-qual index key lands (candor-rust's prerequisite `5feba18`),
+    // at which point it becomes the load-bearing one — and the fixture that catches it must be written
+    // WITH that key, not before it.
+
+    var out: [String: String] = [:]
+    for f in allFns {
+        guard let written = f.retBoundTypeSpelling, byQualCount[f.qual] == 1,
+              let resolved = resolveTypePath(written, scope: f.enclosingTypePath) else { continue }
+        out[f.qual] = resolved
+    }
+    if ProcessInfo.processInfo.environment["CANDOR_TYPESURFACE_DEBUG"] != nil {
+        let spelled = allFns.filter { $0.retBoundTypeSpelling != nil }.count
+        let ambiguous = allFns.filter { $0.retBoundTypeSpelling != nil && byQualCount[$0.qual]! > 1 }.count
+        let line = "TYPESURFACE producer: fns=\(allFns.count) plain-nominal-returns=\(spelled) "
+            + "ambiguous-qual=\(ambiguous) type-paths=\(localTypePaths.count) published=\(out.count)\n"
+        FileHandle.standardError.write(line.data(using: .utf8)!)
+    }
+    return out
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -72,6 +137,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var protocolSupers: [String: Set<String>] = [:]
     var conformers: [String: [String]] = [:]
     var localTypes: Set<String> = []
+    var localTypePaths: Set<String> = []
     var declaredTypes: Set<String> = []
     var typeAliases: [String: String] = [:]
     var dynamicMemberTypes: Set<String> = []
@@ -160,6 +226,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (pn, ss) in c.protocolSupers { protocolSupers[pn, default: []].formUnion(ss) }
         for (pn, ts) in c.conformers { conformers[pn, default: []].append(contentsOf: ts) }
         localTypes.formUnion(c.localTypes)
+        localTypePaths.formUnion(c.localTypePaths)
         declaredTypes.formUnion(c.declaredTypes)
         for (a, u) in c.typeAliases { typeAliases[a] = u }   // last-writer-wins (a redeclared alias is rare)
         dynamicMemberTypes.formUnion(c.dynamicMemberTypes)
@@ -733,6 +800,42 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // silence becomes the claim worth spending a disclosure on.
             if call.path.hasPrefix("<untyped>.") {
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                // ⟨0.23⟩ HALF 2 — DETERMINATION (SPEC §2 `typeSurface.returns`). Ask the dependency what
+                // its factory RETURNS, then key the ordinary chained lookup with it. Both ends of the
+                // surface are fully qualified in the producing package's namespace — the same namespace
+                // the entry hashes use — so the key we form here is `<pkg>#<type qual>.<method>` and no
+                // new resolution path is added: it is the shape the join already understands.
+                //
+                // Same never-guess discipline as every other join on this path: only the file's OWN
+                // imports, only packages a loaded report COVERS, and only an unambiguous SINGLE hit.
+                if let callee = call.depCallee {
+                    var hits: [DepEntry] = []
+                    var surfaced: [String] = []
+                    for m in fileImports[file] ?? [] where deps.coveredPkgs.contains(m) {
+                        guard let ty = deps.boundType("\(m)#\(callee)") else { continue }
+                        surfaced.append(ty)
+                        if let e = deps.lookup("\(ty).\(call.leaf)") { hits.append(e) }
+                    }
+                    // An A/B diff cannot show that a mechanism never fired, or fired on the wrong thing —
+                    // so the trigger, the `returns` answer and the entry lookup are each observable.
+                    if ProcessInfo.processInfo.environment["CANDOR_TYPESURFACE_DEBUG"] != nil {
+                        let verdict = hits.count == 1 ? "HIT " : (surfaced.isEmpty ? "MISS-returns" : "MISS-entry")
+                        let line = "TYPESURFACE-\(verdict) \(f.qual) :: \(callee) -> "
+                            + "\(surfaced.isEmpty ? "<no returns entry>" : surfaced.joined(separator: "|"))"
+                            + " :: .\(call.leaf)()\n"
+                        FileHandle.standardError.write(line.data(using: .utf8)!)
+                    }
+                    if hits.count == 1, let de = hits.first {
+                        applyDepEntry(de, to: f.qual)
+                        continue
+                    }
+                }
+                // A MISS — on `returns` OR on the entry lookup that follows a `returns` HIT — falls back
+                // to half 1's disclosure, NEVER to silence. The second half is the one that is easy to get
+                // wrong and is a requirement rather than belt-and-braces: this index DROPS a key two
+                // entries share (§2 rule 1), so a miss cannot distinguish "no such method" from "I
+                // withdrew the answer", and a refusal to answer is not a purity claim. rust shipped that
+                // `continue` and reverted it.
                 if (fileImports[file] ?? []).contains(where: { deps.coveredPkgs.contains($0) }) {
                     direct[f.qual, default: []].insert("Unknown")
                     unresolvedSet.insert(f.qual)
@@ -948,5 +1051,6 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         internalModules: internalModules, direct: direct, edges: edges, whyMap: whyMap,
         locOf: locOf, entryPoints: entryPoints, inferred: inferred, hostsAcc: hostsAcc,
         cmdsAcc: cmdsAcc, pathsAcc: pathsAcc, tablesAcc: tablesAcc, incompleteAcc: incompleteAcc,
-        invisibleAcc: invisibleAcc, unanalyzed: unanalyzed)
+        invisibleAcc: invisibleAcc, unanalyzed: unanalyzed,
+        typeSurfaceReturns: buildTypeSurfaceReturns(allFns, localTypePaths))
 }

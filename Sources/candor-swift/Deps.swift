@@ -49,7 +49,23 @@ struct DepIndex {
     var byKey: [String: DepEntry] = [:]
     var ambiguous: Set<String> = []
     var coveredPkgs: Set<String> = []
+    /// ⟨0.23⟩ `typeSurface.returns` (SPEC §2): `<pkg>#<fn qual>` -> `<pkg>#<type qual>`, exactly as the
+    /// producer published it. Same never-guess discipline as `byKey`: two reports publishing the same fn
+    /// key with DIFFERENT types drop the key rather than pick one.
+    var returnsIdx: [String: String] = [:]
+    var returnsAmbiguous: Set<String> = []
     var isEmpty: Bool { byKey.isEmpty && coveredPkgs.isEmpty }
+    /// nil for an unknown OR ambiguous fn key. A miss here does NOT license silence — see the consumer.
+    func boundType(_ key: String) -> String? { returnsAmbiguous.contains(key) ? nil : returnsIdx[key] }
+
+    mutating func insertReturn(key: String, _ type: String) {
+        if returnsAmbiguous.contains(key) { return }
+        if let existing = returnsIdx[key] {
+            if existing != type { returnsIdx.removeValue(forKey: key); returnsAmbiguous.insert(key) }
+        } else {
+            returnsIdx[key] = type
+        }
+    }
     /// nil for an unknown OR ambiguous key — an ambiguous key is dropped, never picked from (§2 rule 1).
     func lookup(_ key: String) -> DepEntry? { ambiguous.contains(key) ? nil : byKey[key] }
 
@@ -131,6 +147,16 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
         // Envelope-level coverage — registers even an EMPTY report's package (§2 rule 3): singular
         // `package` (this engine, candor-report, candor-ts) and the JVM-shape plural `packages`.
         if let pkg = obj?["package"] as? String, !pkg.isEmpty { idx.coveredPkgs.insert(pkg) }
+        // ⟨0.23⟩ the published type surface. GATED ON `!stale` for the same reason the effects are: a
+        // report from a different producer version is not trusted, and keying a consumer through a type
+        // claim we just refused to believe would smuggle a stale answer back in under another field.
+        // Both ends arrive fully qualified; nothing here re-qualifies or shortens them.
+        if !stale, let ts = (obj?["typeSurface"] as? [String: Any])?["returns"] as? [String: Any] {
+            for (fnKey, ty) in ts {
+                guard let ty = ty as? String, fnKey.contains("#"), ty.contains("#") else { continue }
+                idx.insertReturn(key: fnKey, ty)
+            }
+        }
         for pkg in (obj?["packages"] as? [String]) ?? [] where !pkg.isEmpty { idx.coveredPkgs.insert(pkg) }
 
         for case let e as [String: Any] in fns {

@@ -22,6 +22,12 @@ struct FnInfo {
     var simpleQual: String = ""   // the immediate "Type.name" form — receivers resolve to SIMPLE type
                                   // names, so call edges are matched simple→full through `qualBySimple`.
     var enclosingTypePath: String?    // FULL nested path of the enclosing type (for precise sibling edges)
+    /// ⟨0.23⟩ `typeSurface.returns` — the PLAIN NOMINAL return type AS SPELLED (`Client`, `Sync.Client`),
+    /// or nil for a wrapper/tuple/function/opaque return, which must not publish its payload. Left
+    /// UNRESOLVED here: turning the spelling into a fully-qualified type is a module-wide question
+    /// (`Client` inside `enum Sync` means `Sync.Client`), so the Driver resolves it against the declared
+    /// type paths with `enclosingTypePath` as the lookup scope.
+    var retBoundTypeSpelling: String? = nil
     var paramSig: [(type: String?, hasDefault: Bool, variadic: Bool)] = []  // ordered param signature for
                                       // PARAM-TYPE overload resolution: distinguishes same-name overloads
                                       // (`compare(_:Date)` vs `compare(_:DateComparisonType)`), including the
@@ -116,6 +122,10 @@ final class DeclCollector: SyntaxVisitor {
     // the returns index is built (a free factory's return type isn't known during this first pass).
     var staticFactoryFields: [(type: String, field: String, leaf: String)] = []
     var localTypes: Set<String> = []
+    /// Every declared/extended type's FULL nested path (`Client`, `Sync.Client`) — `localTypes` keeps only
+    /// the simple name, which is exactly the collision `typeSurface` must not publish through: two
+    /// `Client`s under `enum Sync` and `enum Mock` are ONE string there and two strings here.
+    var localTypePaths: Set<String> = []
     // Types with a REAL local definition (class/struct/enum/actor/protocol) — a SUBSET of localTypes,
     // which also carries types that only ever appear in an `extension`. An `extension Process { … }` adds
     // "Process" to localTypes (so its members resolve to any sibling helpers) but NOT to declaredTypes —
@@ -281,6 +291,7 @@ final class DeclCollector: SyntaxVisitor {
         typeStack.append(name)
         selfElementStack.append(nil)   // extensions with a `where Element: P` overwrite this below
         localTypes.insert(name)
+        localTypePaths.insert(typeStack.joined(separator: "."))
         // An `extension` does not DECLARE the type — it adds to whatever (possibly platform) type already
         // exists. Only a real definition shadows the κ table (see declaredTypes' note).
         if !isExtension { declaredTypes.insert(name) }
@@ -387,6 +398,15 @@ final class DeclCollector: SyntaxVisitor {
     override func visitPost(_ node: ExtensionDeclSyntax) { typeStack.removeLast(); selfElementStack.removeLast() }
 
     override func visit(_ node: ProtocolDeclSyntax) -> SyntaxVisitorContinueKind {
+        // ⟨0.23⟩ A protocol is a TYPE PATH for `typeSurface.returns`, and `func make() -> SomeProtocol`
+        // is the most idiomatic Swift factory there is. It deliberately does NOT go through `pushType`
+        // (a protocol name in `conformers` would pollute the concrete-dispatch CHA), so it is recorded
+        // here alone. What the consumer then keys — `<pkg>#Proto.method` — names a REQUIREMENT with no
+        // body, and is answered only by an `interfaceUnion` entry the producer emits under
+        // CANDOR_WORKSPACE_CHAIN. Without one the lookup misses and falls to half 1's disclosure, so the
+        // two mechanisms are LAYERED, never redundant, and the unanswerable key is never silence.
+        localTypePaths.insert(typeStack.isEmpty ? node.name.text
+                                                : typeStack.joined(separator: ".") + "." + node.name.text)
         var methods = Set<String>()
         for member in node.memberBlock.members {
             if let f = member.decl.as(FunctionDeclSyntax.self) { methods.insert(f.name.text) }
@@ -704,6 +724,9 @@ final class DeclCollector: SyntaxVisitor {
         info.simpleQual = typeStack.last.map { "\($0).\(name)" } ?? name
         info.enclosingType = typeStack.last
         info.enclosingTypePath = tyPath
+        // ⟨0.23⟩ `typeSurface.returns`: what a binding bound from THIS function actually holds. See
+        // `plainNominalTypeName` for why this is not `typeName` — a wrapper return must publish nothing.
+        info.retBoundTypeSpelling = sig.returnClause.flatMap { plainNominalTypeName($0.type) }
         info.selfElementType = selfElementStack.last ?? nil   // collection-extension element bound, if any
         info.body = body.map { Syntax($0) }
         info.isMain = name == "main"

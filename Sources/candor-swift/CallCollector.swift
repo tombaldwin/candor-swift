@@ -25,6 +25,11 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               // effects fabricates. Suppressing the type itself, as the first version of this fix did,
               // took the dep join with it and made an Fs-performing function read PURE.
               var opaqueRecv: Bool = false
+              /// ⟨0.23⟩ The NAME of the dependency factory this receiver was bound from — the other half
+              /// of the `<untyped>.` marker. Half 1 needed only "no key could be formed"; half 2 needs to
+              /// say WHICH function's return type would have formed it, and the callee name is the only
+              /// evidence a bare Swift call site carries (see `depBoundLocals`).
+              var depCallee: String? = nil
               var extOwner: String? = nil }    // the RESOLVED receiver root of an otherwise-unmatched member
                                                // call (`c.fetch()` where c: RatesClient, an external type) —
                                                // carried ONLY for the §2 CANDOR_DEPS join key (`pkg#Owner.leaf`);
@@ -126,7 +131,7 @@ final class CallCollector: SyntaxVisitor {
     /// a later `s.save()` asks no question of the chained report, so the report's silence licenses nothing.
     /// See candor-spec/DEP-RECEIVER-TYPING-DESIGN.md half 1. The CHAINED conjunct is applied in Driver,
     /// which is where fileImports and the covered-package set live.
-    var depBoundLocals: Set<String> = []
+    var depBoundLocals: [String: String] = [:]
     let enumCaseValueType: [String: String]  // unambiguous enum case -> associated value type
     var enclosingType: String?
     var selfElementType: String?   // self's element bound in a collection extension (R28)
@@ -824,7 +829,7 @@ final class CallCollector: SyntaxVisitor {
     // So: a binder CLEARS, the enclosing scope RESTORES (see enterShadowScope/leaveShadowScope).
     private func shadowName(_ name: String) {
         monoNames.remove(name)
-        depBoundLocals.remove(name)
+        depBoundLocals.removeValue(forKey: name)
     }
 
     // Saved `monoNames`/`opaqueElem`/`depBoundLocals` per scope-delimiting node, restored when the node
@@ -832,7 +837,7 @@ final class CallCollector: SyntaxVisitor {
     // save; SwiftSyntax calls `visitPost` for every visited node (including one whose `visit` returned
     // `.skipChildren`), so entries cannot leak.
     private var shadowScopes: [SyntaxIdentifier:
-        (opaque: Set<String>, opaqueElem: Set<String>, depBound: Set<String>)] = [:]
+        (opaque: Set<String>, opaqueElem: Set<String>, depBound: [String: String])] = [:]
 
     /// Closure node -> element parameters the enclosing call typed from a MONOMORPHIZED element. Handed
     /// over rather than set directly because `typeClosureParams` runs before the closure is entered (see
@@ -1422,9 +1427,10 @@ final class CallCollector: SyntaxVisitor {
                 // `Unknown`; it resolves to NOTHING by design — it exists to say no key was formed, not to
                 // carry an effect. Distinguishable from a real path (angle brackets), exactly as the rust
                 // `<untyped>` and `<drop>` markers are, so it can never reach local resolution or κ.
-                if owner == nil, let r = base.root, depBoundLocals.contains(r) {
+                if owner == nil, let r = base.root, let callee = depBoundLocals[r] {
                     calls.append(Call(path: "<untyped>.\(member)", leaf: member, strArg: nil,
-                                      typed: false, args: [], argTypes: [], extOwner: nil))
+                                      typed: false, args: [], argTypes: [],
+                                      depCallee: callee, extOwner: nil))
                 }
             }
         } else if node.calledExpression.is(ClosureExprSyntax.self) {
@@ -2078,8 +2084,8 @@ final class CallCollector: SyntaxVisitor {
                            callee.first?.isUppercase == false, returns[callee] == nil,
                            !localTypes.contains(callee), !localFreeFns.contains(callee),
                            !Self.PURE_STDLIB_FREE_FNS.contains(callee) {
-                            depBoundLocals.insert(name)
-                        } else { depBoundLocals.remove(name) }
+                            depBoundLocals[name] = callee
+                        } else { depBoundLocals.removeValue(forKey: name) }
                         if let t = info.root, info.isVar {
                             vars[name] = t
                             // R33 — deinit-glue: a `let`/`var` LOCAL bound to a fresh CONSTRUCTION (this

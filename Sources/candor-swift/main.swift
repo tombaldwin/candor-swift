@@ -536,6 +536,13 @@ report.coverage = unlisted.map { (name: $0.key, calls: $0.value) }   // ⟨0.15 
 let analyzedQuals = allFns.map { $0.qual }.sorted()
 report.analyzed = (count: allFns.count, digest: fnv1aHex(analyzedQuals))
 report.unanalyzed = unanalyzedUnits   // ⟨0.21⟩ (Gap 2) omitted when empty by toJSON()
+// ⟨0.23⟩ `typeSurface.returns` — PREFIXED here with this report's package, so both ends land in the same
+// namespace the entry hashes use and a consumer forms `<pkg>#<type>.<method>` with no extra convention.
+if !analysis.typeSurfaceReturns.isEmpty {
+    var ts: [String: String] = [:]
+    for (fn, ty) in analysis.typeSurfaceReturns { ts["\(pkgName)#\(fn)"] = "\(pkgName)#\(ty)" }
+    report.typeSurfaceReturns = ts
+}
 let envelope: [String: Any] = report.toJSON()
 var cg: [String: [String]] = [:]
 for f in allFns { cg[f.qual] = (edges[f.qual] ?? []).sorted() }  // §2.2: EVERY analyzed fn a key
