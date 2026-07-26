@@ -791,9 +791,41 @@ final class DeclCollector: SyntaxVisitor {
                 // charges effects the callee cannot perform. Measured: with an IMPORTED protocol,
                 // `func f(_ s: some Speaker) { s.speak() }` called only with a pure conformer was charged
                 // the effectful conformer's Env. Recording nothing here leaves `some P` behaving exactly
-                // like its equivalent spelling `<T: P>`, which was already inert. The LOCAL-protocol arm
-                // above is untouched: that dispatch is the long-standing behaviour and is a separate
-                // question (see the note in SOUNDNESS-VEIN-crossing-the-scan-boundary.md).
+                // like its equivalent spelling `<T: P>`, which was already inert.
+                //
+                // THE LOCAL-PROTOCOL ARM IS DELIBERATELY UNTOUCHED, AND HERE IS THE ARGUMENT. This
+                // comment used to end "see the note in SOUNDNESS-VEIN-crossing-the-scan-boundary.md",
+                // and that note WAS NEVER WRITTEN — a citation of an argument that does not exist, which
+                // is worse than no comment because a reader cannot tell the two apart. Replaced with the
+                // reasoning and the measurement that settled it (2026-07-26).
+                //
+                // The two cases are NOT the same question. For an IMPORTED protocol the conformers
+                // visible here are an ARBITRARY SUBSET of the candidate set: the caller lives in another
+                // module and may supply a type this scan has never seen, so unioning our few conformers
+                // is neither the true set nor a bound on it — it is one member picked out of an
+                // unbounded one. For a LOCALLY declared protocol the conformers in scope BOUND the
+                // instantiations (and where they do not — an open hierarchy, an unresolvable witness —
+                // `protoDispatches`' completeness test already falls to a disclosed `Unknown` rather
+                // than to a partial union). So the union over local conformers is the sound
+                // over-approximation of a generic function, not a fabrication.
+                //
+                // MEASURED, both candidate treatments, 14 real Swift targets / 12 004 entries. The
+                // trigger is small and real: 17 monomorphized local-protocol dispatch sites
+                // (swift-syntax 4, Alamofire 4, TCA 7, SQLite.swift 1, console-kit 1).
+                //   - SUPPRESS THE ARM: 5 effect losses and 7 entries REMOVED, and among them
+                //     `_$willModify` goes from a disclosed `Unknown[dispatch:…]` to ABSENT. That is a
+                //     purity claim manufactured by a fabrication fix — disqualified outright.
+                //   - DISCLOSE `Unknown` INSTEAD: nothing goes silent (Unknown 10 539 → 10 540), but 9
+                //     concrete effects degrade to a hedge. Traced, and the headline row is what decides
+                //     it: TCA's `final class ScopedCore<Base: Core>: Core { func send() { base.send() } }`
+                //     — `Base` is bounded by `Core`, EVERY one of the 8 in-scan conformers is a legal
+                //     instantiation, and they compose, so the union IS the candidate set. Replacing it
+                //     with `Unknown` trades a correct answer for a hedge.
+                // The residual this leaves is real and general rather than protocol-specific: candor
+                // does not specialize at call sites, so a generic function whose only instantiation in
+                // THIS program is pure still carries the union. That is a statement about what a public
+                // generic function can be asked to do, and it is the same answer any caller-agnostic
+                // per-function analysis gives.
                 else {
                     // RESTORED. Suppressing the type here (the first version of this fix) killed far
                     // more than the local-conformer CHA it was aiming at: `vars` is seeded from
