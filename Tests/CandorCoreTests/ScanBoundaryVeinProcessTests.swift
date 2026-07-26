@@ -115,6 +115,67 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
     public func viaOpaqueImported(_ s: some Speaker) { s.speak() }
     public func viaExistentialImported(_ s: any Speaker) { s.speak() }
 
+    // SHADOWING, both directions. The opaque set is keyed by NAME, so a binder that REBINDS the name
+    // leaves a receiver that is not the opaque parameter at all — suppressing the CHA there makes an
+    // effectful call read silent-pure. `shadowed*` must RESOLVE.
+    public func shadowedByLoop(_ s: some Speaker, _ all: [Speaker]) { for s in all { s.speak() } }
+    public func shadowedByClosure(_ s: some Speaker, _ all: [Speaker]) {
+        all.forEach { (s: Speaker) in s.speak() }
+    }
+    public func shadowedByIfLet(_ s: some Speaker, _ o: Speaker?) { if let s = o { s.speak() } }
+    public func shadowedByLet(_ s: some Speaker, _ all: [Speaker]) { let s = all[0]; s.speak() }
+    public func shadowedByGuardLet(_ s: some Speaker, _ o: Speaker?) {
+        guard let s = o else { return }
+        s.speak()
+    }
+    // …and the OTHER direction: once the shadowing SCOPE closes, `s` is the opaque parameter again and
+    // the suppression must be BACK, or clearing it re-opens the fabrication d62dd69 closed.
+    public func opaqueAfterLoopShadow(_ s: some Speaker, _ all: [Speaker]) {
+        for s in all { _ = s }
+        s.speak()
+    }
+    public func opaqueAfterClosureShadow(_ s: some Speaker, _ all: [Speaker]) {
+        all.forEach { (s: Speaker) in _ = s }
+        s.speak()
+    }
+    public func opaqueAfterIfLetShadow(_ s: some Speaker, _ o: Speaker?) {
+        if let s = o { _ = s }
+        s.speak()
+    }
+    // MECHANISM CONTROLS: the same bodies with a binder name that does NOT collide with the opaque
+    // parameter. These must resolve in BOTH arms — they are what proves a `shadowed*` miss is the
+    // name-keyed suppression and not a typing failure.
+    public func loopNoShadow(_ x: some Speaker, _ all: [Speaker]) { for s in all { s.speak() } }
+    public func closureNoShadow(_ x: some Speaker, _ all: [Speaker]) {
+        all.forEach { (s: Speaker) in s.speak() }
+    }
+    public func ifLetNoShadow(_ x: some Speaker, _ o: Speaker?) { if let s = o { s.speak() } }
+    public func letNoShadow(_ x: some Speaker, _ all: [Speaker]) { let s = all[0]; s.speak() }
+    public func guardLetNoShadow(_ x: some Speaker, _ o: Speaker?) {
+        guard let s = o else { return }
+        s.speak()
+    }
+
+    // The SAME scope question for half 1's dependency-provenance set. An UNTYPED sequence, so the
+    // shadowing binder leaves no stale type behind in `vars` (which is function-wide by design) —
+    // otherwise the stale type makes the receiver look resolved and never reaches the marker at all.
+    public func mystery() -> Any { return 0 }
+    public func factoryThenLoopShadow() {
+        let c = makeSpeaker()
+        for c in mystery() { _ = c }
+        c.speak()
+    }
+    public func factoryThenClosureShadow() {
+        let c = makeSpeaker()
+        mystery().forEach { c in _ = c }
+        c.speak()
+    }
+    public func shadowMustNotInheritProvenance() {
+        let c = makeSpeaker()
+        _ = c
+        for c in mystery() { _ = c.notAThing() }
+    }
+
     // FABRICATION GUARD for the same rung: `enum Rank: String` puts `String` in the inheritance
     // clause, so String LOOKS like a supertype with `Rank` as its conformer. A call on a plain
     // String-typed value must NOT dispatch into `Rank.lowercased`.
@@ -369,6 +430,77 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
         XCTAssertFalse(Set(by["viaOpaqueImported"]?["inferred"] as? [String] ?? []).contains("Env"),
                        "an OPAQUE `some P` receiver is monomorphized BY THE CALLER — dispatching it over "
                        + "local conformers FABRICATES; got \(by["viaOpaqueImported"] ?? [:])")
+    }
+
+    /// The opaque-receiver suppression (d62dd69) is keyed by the parameter's NAME, and a name can be
+    /// REBOUND. Both directions are asserted here, because each one alone is satisfiable by a wrong fix:
+    ///
+    ///   - inside a shadowing binder the receiver is NOT the opaque parameter, so suppressing the CHA
+    ///     there drops a real witness and the caller reads silent-pure — the cardinal sin;
+    ///   - once the shadowing SCOPE closes the name is the opaque parameter again, so clearing the flag
+    ///     instead of scoping it re-opens the fabrication d62dd69 closed.
+    ///
+    /// The `…NoShadow` row of each pair is the mechanism control: the same body with a non-colliding
+    /// binder name. It resolves in both arms, which is what makes a `shadowed*` miss attributable to the
+    /// name-keyed suppression rather than to a typing failure.
+    func testOpaqueParamSuppressionIsScopedToTheName() throws {
+        let bin = try binaryURL()
+        let (root, _, app, _) = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        // chaining-independent: the conformance (AppSpeaker: Speaker) is declared in the app
+        XCTAssertEqual(try run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path]).code, 0)
+        let by = try fns(ofReport: root.appendingPathComponent("app-r.App.Swift.json"))
+        func eff(_ n: String) -> Set<String> { Set(by[n]?["inferred"] as? [String] ?? []) }
+
+        for (shadowed, control) in [("shadowedByLoop", "loopNoShadow"),
+                                    ("shadowedByClosure", "closureNoShadow"),
+                                    ("shadowedByIfLet", "ifLetNoShadow"),
+                                    ("shadowedByLet", "letNoShadow"),
+                                    ("shadowedByGuardLet", "guardLetNoShadow")] {
+            XCTAssertTrue(eff(control).contains("Env"),
+                          "CONTROL \(control): the non-colliding binder must resolve, else \(shadowed) "
+                          + "proves nothing; got \(by[control] ?? [:])")
+            XCTAssertTrue(eff(shadowed).contains("Env"),
+                          "\(shadowed): the REBOUND name is not the opaque parameter — suppressing the "
+                          + "local-conformer CHA there makes an Env-performing call read silent-pure; "
+                          + "got \(by[shadowed] ?? [:])")
+        }
+        for after in ["opaqueAfterLoopShadow", "opaqueAfterClosureShadow", "opaqueAfterIfLetShadow"] {
+            XCTAssertFalse(eff(after).contains("Env"),
+                           "\(after): the shadow's scope has CLOSED, so `s` is the `some Speaker` "
+                           + "parameter again and the CHA must be suppressed as d62dd69 requires; "
+                           + "got \(by[after] ?? [:])")
+        }
+        XCTAssertFalse(eff("viaOpaqueImported").contains("Env"), "the unshadowed opaque case is untouched")
+    }
+
+    /// The same scope question for half 1's dependency-PROVENANCE set. 81a9dc3 made a rebind clear the
+    /// provenance (right — a shadowing binder's value is local, and disclosing it is false uncertainty)
+    /// and left it cleared for the rest of the function (wrong — below the shadow the name is the
+    /// factory-bound receiver again, and it went back to reading silent-pure).
+    func testDepProvenanceSurvivesAShadowingBinder() throws {
+        let bin = try binaryURL()
+        let (root, dep, app, _) = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        let out = root.appendingPathComponent("app-r")
+        XCTAssertEqual(try run(bin, [app.path, "--out", out.path],
+                               env: ["CANDOR_DEPS": depReport.path]).code, 0)
+        let by = try fns(ofReport: root.appendingPathComponent("app-r.App.Swift.json"))
+        func why(_ n: String) -> Set<String> { Set(by[n]?["unknownWhy"] as? [String] ?? []) }
+        let marker = "dispatch:untyped cross-package receiver"
+
+        XCTAssertTrue(why("viaFactoryBoundReceiver").contains(marker),
+                      "BASELINE for the rung — without this the two assertions below are vacuous")
+        for fn in ["factoryThenLoopShadow", "factoryThenClosureShadow"] {
+            XCTAssertTrue(why(fn).contains(marker),
+                          "\(fn): the shadow is confined to the binder; the call BELOW it is the "
+                          + "factory-bound receiver and must still disclose; got \(by[fn] ?? [:])")
+        }
+        XCTAssertFalse(why("shadowMustNotInheritProvenance").contains(marker),
+                       "the receiver INSIDE the shadow is a purely local value that merely reuses the "
+                       + "name — the over-disclosure 81a9dc3 closed must stay closed; "
+                       + "got \(by["shadowMustNotInheritProvenance"] ?? [:])")
     }
 
     // The recovery is chaining-INDEPENDENT: the conformance is declared in the app, so it holds with

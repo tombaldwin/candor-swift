@@ -713,22 +713,104 @@ final class CallCollector: SyntaxVisitor {
     // safe direction). NOTE: still not true block scoping — a cleared binding also leaks OUTWARD, which
     // can under-report (the safe direction), accepted over fabrication.
     private func clearBinding(_ name: String) {
+        clearBindingTypeOnly(name)
+        shadowName(name)
+    }
+
+    // `clearBinding` minus the name-keyed FLAGS, for a binder whose shadow SCOPE is entered somewhere
+    // else. The only such binder is a CLOSURE PARAMETER: `typeClosureParams` runs on the enclosing
+    // CALL node, which is visited BEFORE the closure, so clearing a flag there would happen outside
+    // the closure's save and could never be restored — `let c = depBuild(); xs.forEach { c in … };
+    // c.fetch()` would lose its disclosure for good. `visit(ClosureExprSyntax)` does the flag clearing
+    // instead, after the save.
+    private func clearBindingTypeOnly(_ name: String) {
         vars.removeValue(forKey: name)
         arrayElem.removeValue(forKey: name)
         dictElem.removeValue(forKey: name)
         tupleElem.removeValue(forKey: name)
-        // A REBIND drops dependency provenance too. Without this a later shadowing binding of the same
-        // name — a loop variable, an `if let` unwrap, a closure parameter — inherited the earlier
-        // binding's provenance and was disclosed as an untyped cross-package receiver though it is a
-        // purely local value. The 47bb69a comment claimed this line already existed; it did not, and the
-        // review found the gap. A `deny E Unknown` gate would have gone exit 0 -> 1 on clean code.
+    }
+
+    // Every identifier a binding pattern introduces (`x`, `(k, v)`, `(a, (b, c))`).
+    private static func patternNames(_ pattern: PatternSyntax) -> [String] {
+        if let ip = pattern.as(IdentifierPatternSyntax.self) { return [ip.identifier.text] }
+        if let tp = pattern.as(TuplePatternSyntax.self) { return tp.elements.flatMap { patternNames($0.pattern) } }
+        if let vb = pattern.as(ValueBindingPatternSyntax.self) { return patternNames(vb.pattern) }
+        return []
+    }
+
+    // A binder REBINDS `name`, so the name-keyed FLAGS carried by the signature or by an earlier
+    // binding no longer describe it. Called by EVERY binder — `clearBinding`, and also the paths that
+    // succeed in typing the new binding, which do not go through `clearBinding` at all.
+    //
+    // `vars` is deliberately function-wide (see `clearBinding`): a stale TYPE is dangerous inward and
+    // harmless outward, so clearing is enough there. These two sets INVERT that, and each is wrong in
+    // BOTH directions, which is why they need a scope rather than a clear:
+    //
+    //   - `opaqueParamNames` suppresses the local-conformer CHA (d62dd69). Leaking it INTO a shadowing
+    //     binder suppresses the CHA for a receiver that is not the opaque parameter at all — the call
+    //     reads silent-pure, the cardinal sin. Dropping it when the shadowing scope CLOSES re-fabricates
+    //     the effect on the genuine `some P` receiver, which is the defect d62dd69 closed.
+    //   - `depBoundLocals` drives the half-1 disclosure (47bb69a). Leaking it in discloses a purely
+    //     local value (81a9dc3 added the clear for exactly that); dropping it at scope close sends a
+    //     genuinely factory-bound receiver back to silent-pure — `let c = depBuild(); for c in xs {};
+    //     c.fetch()` lost its disclosure when 81a9dc3 landed the clear without the restore.
+    //
+    // So: a binder CLEARS, the enclosing scope RESTORES (see enterShadowScope/leaveShadowScope).
+    private func shadowName(_ name: String) {
+        opaqueParamNames.remove(name)
         depBoundLocals.remove(name)
     }
+
+    // Saved `opaqueParamNames`/`depBoundLocals` per scope-delimiting node, restored when the node
+    // closes. Keyed by node id rather than a stack so an un-entered scope can never pop someone else's
+    // save; SwiftSyntax calls `visitPost` for every visited node (including one whose `visit` returned
+    // `.skipChildren`), so entries cannot leak.
+    private var shadowScopes: [SyntaxIdentifier: (opaque: Set<String>, depBound: Set<String>)] = [:]
+
+    private func enterShadowScope(_ node: some SyntaxProtocol) {
+        guard !opaqueParamNames.isEmpty || !depBoundLocals.isEmpty else { return }
+        shadowScopes[node.id] = (opaqueParamNames, depBoundLocals)
+    }
+
+    private func leaveShadowScope(_ node: some SyntaxProtocol) {
+        guard let saved = shadowScopes.removeValue(forKey: node.id) else { return }
+        opaqueParamNames = saved.opaque
+        depBoundLocals = saved.depBound
+    }
+
+    // THE SCOPES. A brace-delimited block covers `let`/`guard let` shadows; the statement/expression
+    // nodes cover binders written OUTSIDE their block (a `for` pattern, an `if let`/`while let`
+    // condition, a `case let`, a `catch let`), which are visited before the block is entered.
+    override func visit(_ node: CodeBlockSyntax) -> SyntaxVisitorContinueKind { enterShadowScope(node); return .visitChildren }
+    override func visitPost(_ node: CodeBlockSyntax) { leaveShadowScope(node) }
+    override func visit(_ node: IfExprSyntax) -> SyntaxVisitorContinueKind { enterShadowScope(node); return .visitChildren }
+    override func visitPost(_ node: IfExprSyntax) { leaveShadowScope(node) }
+    override func visit(_ node: WhileStmtSyntax) -> SyntaxVisitorContinueKind { enterShadowScope(node); return .visitChildren }
+    override func visitPost(_ node: WhileStmtSyntax) { leaveShadowScope(node) }
+    override func visit(_ node: SwitchCaseSyntax) -> SyntaxVisitorContinueKind { enterShadowScope(node); return .visitChildren }
+    override func visitPost(_ node: SwitchCaseSyntax) { leaveShadowScope(node) }
+    override func visitPost(_ node: CatchClauseSyntax) { leaveShadowScope(node) }
+    override func visitPost(_ node: ForStmtSyntax) { leaveShadowScope(node) }
+    // A closure's PARAMETERS are cleared here rather than in `typeClosureParams` (which runs on the
+    // enclosing CALL, i.e. before this node is entered, so the save would capture the already-cleared
+    // set and restore nothing).
+    override func visit(_ node: ClosureExprSyntax) -> SyntaxVisitorContinueKind {
+        enterShadowScope(node)
+        for p in closureParamNames(node) { shadowName(p.name) }
+        return .visitChildren
+    }
+    override func visitPost(_ node: ClosureExprSyntax) { leaveShadowScope(node) }
 
     // `for x in coll` / `for (k, v) in dict` / `for (i, x) in coll.enumerated()` — type the iteration
     // variable from the collection so its member calls resolve (else dropped to pure — §4 under-report).
     override func visit(_ node: ForStmtSyntax) -> SyntaxVisitorContinueKind {
+        enterShadowScope(node)
         modelImplicitIteration(node.sequence)
+        // EVERY name the pattern binds is shadowed, including the ones no branch below types (a
+        // `for (key, _) in dict` key, a tuple arity this doesn't model) — an untyped loop variable is
+        // still a rebind, and leaving the opaque/provenance flag on it is what made
+        // `func f(_ c: some P) { for c in xs { c.m() } }` read silent-pure.
+        for n in Self.patternNames(node.pattern) { shadowName(n) }
         if let name = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
             // An EXPLICIT loop-var annotation (`for await x: Item in s`) names the element type directly —
             // honor it over the sequence's inferred element, so an unpinned/async sequence whose element
@@ -909,7 +991,8 @@ final class CallCollector: SyntaxVisitor {
                     vars[p.name] = elem                      // iterator element param — typed (both params
                     // for a pair-iterator like sorted/min/max; only the first for the rest)
                 } else {
-                    clearBinding(p.name)                     // every other param — CLEARED, never leak
+                    clearBindingTypeOnly(p.name)             // every other param — CLEARED, never leak
+                    // (the FLAGS are cleared in visit(ClosureExprSyntax), inside the closure's save)
                 }
             }
         }
@@ -933,6 +1016,7 @@ final class CallCollector: SyntaxVisitor {
             if let pat = arg.expression.as(PatternExprSyntax.self),
                let vb = pat.pattern.as(ValueBindingPatternSyntax.self),
                let name = vb.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
+                shadowName(name)  // a rebind, typed or not (the enclosing switch case / if restores it)
                 if let singleAssoc { vars[name] = singleAssoc } else { clearBinding(name) }
             }
         }
@@ -1260,6 +1344,8 @@ final class CallCollector: SyntaxVisitor {
     override func visit(_ node: OptionalBindingConditionSyntax) -> SyntaxVisitorContinueKind {
         if let name = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text,
            let initVal = node.initializer?.value {
+            shadowName(name)  // a rebind, typed or not — the `if`/`while` (or the enclosing block, for
+                              // `guard let`, whose binding runs to the end of that block) restores it
             // `guard let d = s.data(using:.utf8)` / `= enc.encode(x)` — the unwrapped value is Data, so a
             // later `d.write(to:)` is Fs (the via-optional-binding dogfood vein; matches the plain-`let` path).
             if producesFoundationData(initVal) { vars[name] = "Data" }
@@ -1571,13 +1657,15 @@ final class CallCollector: SyntaxVisitor {
     private var catchBindings: [String: String] = [:]
 
     override func visit(_ node: CatchClauseSyntax) -> SyntaxVisitorContinueKind {
+        enterShadowScope(node)   // `catch let e` is a rebind scoped to the clause (see shadowName)
         // `catch { … }` with no items binds the IMPLICIT `error`.
-        if node.catchItems.isEmpty { catchBindings["error"] = "Error" }
+        if node.catchItems.isEmpty { catchBindings["error"] = "Error"; shadowName("error") }
         for item in node.catchItems {
-            guard let pat = item.pattern else { catchBindings["error"] = "Error"; continue }
+            guard let pat = item.pattern else { catchBindings["error"] = "Error"; shadowName("error"); continue }
             guard let vb = pat.as(ValueBindingPatternSyntax.self) else { continue }   // `catch is X` binds nothing
             if let id = vb.pattern.as(IdentifierPatternSyntax.self) {
                 catchBindings[id.identifier.text] = "Error"          // `catch let e`
+                shadowName(id.identifier.text)                       // …and it REBINDS the name
             } else if let ex = vb.pattern.as(ExpressionPatternSyntax.self),
                       let seq = ex.expression.as(SequenceExprSyntax.self) {
                 // `catch let e as MyError` — SwiftParser leaves `as` unfolded: [name, UnresolvedAs, Type].
@@ -1585,9 +1673,11 @@ final class CallCollector: SyntaxVisitor {
                 // no unit and contributes nothing).
                 let elems = Array(seq.elements)
                 if elems.count == 3, elems[1].is(UnresolvedAsExprSyntax.self),
-                   let name = elems[0].as(DeclReferenceExprSyntax.self)?.baseName.text,
-                   let te = elems[2].as(TypeExprSyntax.self), let tn = typeName(te.type).name {
-                    catchBindings[name] = dealias(tn)
+                   let name = elems[0].as(DeclReferenceExprSyntax.self)?.baseName.text {
+                    shadowName(name)                                 // a rebind whether or not it types
+                    if let te = elems[2].as(TypeExprSyntax.self), let tn = typeName(te.type).name {
+                        catchBindings[name] = dealias(tn)
+                    }
                 }
             }
         }
@@ -1770,6 +1860,7 @@ final class CallCollector: SyntaxVisitor {
             // `let (a, b) = (X(), Y())` — destructure: bind each name from the initializer tuple element
             if let tp = binding.pattern.as(TuplePatternSyntax.self),
                let tupleInit = binding.initializer?.value.as(TupleExprSyntax.self) {
+                for n in Self.patternNames(PatternSyntax(tp)) { shadowName(n) }
                 for (pe, ve) in zip(tp.elements, tupleInit.elements) {
                     guard let n = pe.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
                     boundLocals.insert(n)
@@ -1787,6 +1878,10 @@ final class CallCollector: SyntaxVisitor {
             }
             guard let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
             boundLocals.insert(name)  // record the SHADOW (any local, even a literal-typed one `vars` drops)
+            shadowName(name)          // a rebind: the signature's `some P` opacity and any earlier
+                                      // dependency provenance stop applying to the NAME here. Runs
+                                      // BEFORE the branches below, one of which re-inserts the
+                                      // provenance for this binding's own initializer.
             // CONST-STRING PROPAGATION — a LOCAL `let NAME = "literal"` string constant. Resolves a later
             // const-anchored host in the SAME fn body (`let apiBase = "…"; dataTask(with: "\(apiBase)/x")`).
             // ONLY a `let` with a PLAIN string-literal initializer and no accessor block. A `var` of the
