@@ -59,6 +59,13 @@ final class CallCollector: SyntaxVisitor {
     let localFreeFns: Set<String>   // local free-function names — a bare `name(...)` call to one is the
                                     // project's OWN fn, so the platform free-call classifier (kappaFree)
                                     // must NOT fire (else a local `func NSLog`/`Pipe`-ctor fabricates)
+    /// Swift stdlib free functions whose result is an ordinary value of an argument's own type, so a
+    /// member call on that result cannot be a dependency reach. Excluded from the half-1 provenance
+    /// trigger, which cannot otherwise tell a bare `max(a, b)` from a bare imported `build()`.
+    static let PURE_STDLIB_FREE_FNS: Set<String> = [
+        "max", "min", "abs", "swap", "zip", "stride", "repeatElement", "sequence",
+        "numericCast", "unsafeDowncast", "withUnsafePointer", "withoutActuallyEscaping",
+    ]
     let localProtocols: Set<String> // local protocol names — a receiver typed as one is DISPATCH
     let returns: [String: String]   // unambiguous factory return types (the candor-scan move)
     /// Locals bound from a CALL whose return type we could not determine, where the callee is not a local
@@ -1808,11 +1815,28 @@ final class CallCollector: SyntaxVisitor {
                         // every later member call on it then falls through silently. Record it so the
                         // call site can DISCLOSE instead (half 1). Cleared on any rebind by the
                         // clearBinding path below, and never set when the call DID type.
+                        //
+                        // PROVENANCE IS THE HARD PART IN SWIFT, and measurement is what showed it. Unlike
+                        // Rust, where the callee path carries a crate root, an idiomatic Swift call to an
+                        // imported function is spelled BARE — `build()`, not `DepLib.build()` — so nothing
+                        // at the call site distinguishes a dependency's factory from the stdlib's `max()`
+                        // or from one of our own functions. Instrumented on real code, the unguarded form
+                        // bound 239 locals on pollen and 50 on candor-swift, and the top hits were
+                        // `max()`, `min()`, `abs()`, and LOCAL functions (`rootOf()`, `typeName()`) —
+                        // not a dependency factory among them.
+                        //
+                        // `localFreeFns` removes the local leak outright. The stdlib names below are a
+                        // carve-out of PROVEN-PURE value functions: each returns an ordinary value of an
+                        // argument's own type, so a member call on the result is never a dependency reach.
+                        // Carving proven-safe cases out of a sound over-approximation is the right
+                        // direction; the list is deliberately short and admittedly incomplete, and what it
+                        // misses costs precision (a spurious `Unknown`), never soundness.
                         if info.root == nil,
                            let callee = v.as(FunctionCallExprSyntax.self)?.calledExpression
                                          .as(DeclReferenceExprSyntax.self)?.baseName.text,
                            callee.first?.isUppercase == false, returns[callee] == nil,
-                           !localTypes.contains(callee) {
+                           !localTypes.contains(callee), !localFreeFns.contains(callee),
+                           !Self.PURE_STDLIB_FREE_FNS.contains(callee) {
                             depBoundLocals.insert(name)
                         } else { depBoundLocals.remove(name) }
                         if let t = info.root, info.isVar {
