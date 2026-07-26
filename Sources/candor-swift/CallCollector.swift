@@ -66,12 +66,43 @@ final class CallCollector: SyntaxVisitor {
     let localFreeFns: Set<String>   // local free-function names — a bare `name(...)` call to one is the
                                     // project's OWN fn, so the platform free-call classifier (kappaFree)
                                     // must NOT fire (else a local `func NSLog`/`Pipe`-ctor fabricates)
-    /// Swift stdlib free functions whose result is an ordinary value of an argument's own type, so a
-    /// member call on that result cannot be a dependency reach. Excluded from the half-1 provenance
-    /// trigger, which cannot otherwise tell a bare `max(a, b)` from a bare imported `build()`.
+    /// Swift stdlib free functions carved OUT of the half-1 provenance trigger, which cannot otherwise
+    /// tell a bare `max(a, b)` from a bare imported `build()` — Swift spells both without a module root.
+    ///
+    /// THE PROPERTY EVERY ENTRY MUST SATISFY: the binding's type is fixed by the ARGUMENTS' types, or is
+    /// `Void`. Then no dependency-chosen type can enter the function through the call, and a member call
+    /// on the result cannot be a dependency reach. Entry by entry, rather than as a group:
+    ///
+    ///   max/min/abs    -> `T`, an argument's own type
+    ///   swap           -> `Void` — there is no member to call on the result
+    ///   zip            -> `Zip2Sequence<S1, S2>`
+    ///   stride         -> `StrideTo<T>` / `StrideThrough<T>`
+    ///   repeatElement  -> `Repeated<T>`     (stdlib structs generic over the ARGUMENTS' types)
+    ///
+    /// FOUR ENTRIES DID NOT SATISFY IT and were removed. The doc comment asserting the property is what
+    /// kept them here — standing-bar item 9, a justification stated in a comment is not a proof:
+    ///
+    ///   withUnsafePointer, withoutActuallyEscaping — return the TRAILING CLOSURE's own result, and the
+    ///       closure body can call anything:
+    ///       `let c = withoutActuallyEscaping(mk) { _ in DepLib.buildClient() }; c.fetch()` read pure.
+    ///   unsafeDowncast — returns the `to:` argument's NAMED type, which the caller picks and which is
+    ///       very often a dependency class: `unsafeDowncast(o, to: DepLib.LibClient.self)`.
+    ///   sequence — NOT for the reason it looks like. It returns `UnfoldFirstSequence<T>` /
+    ///       `UnfoldSequence<T, State>`, a stdlib type, not the closure's result. But in the
+    ///       `state:next:` overload the ELEMENT type `T` is the CLOSURE's, not an argument's, and both
+    ///       overloads share the bare name this set is keyed on — so `sequence` is not PROVEN, and an
+    ///       entry that is not proven does not belong in a denylist of proven-safe cases.
+    ///   numericCast — returns a target type inferred from CONTEXT, not from an argument.
+    ///
+    /// What the list omits costs precision (a spurious `Unknown`), never soundness — measured: removing
+    /// the four adds ZERO markers across pollen and candor-swift, chained and unchained.
+    ///
+    /// Residual, stated rather than hidden: a dependency's protocol EXTENSION on a stdlib type
+    /// (`extension Sequence { func depFetch() }`) makes a member call on a stdlib-typed value a
+    /// dependency reach. That is universal — it applies to every literal and every stdlib value in the
+    /// program — so it is not what this list governs, and no entry here is carved out on its strength.
     static let PURE_STDLIB_FREE_FNS: Set<String> = [
-        "max", "min", "abs", "swap", "zip", "stride", "repeatElement", "sequence",
-        "numericCast", "unsafeDowncast", "withUnsafePointer", "withoutActuallyEscaping",
+        "max", "min", "abs", "swap", "zip", "stride", "repeatElement",
     ]
     /// Parameter names declared `some P` in THIS signature (opaque, caller-monomorphized).
     var opaqueParamNames: Set<String> = []

@@ -176,6 +176,41 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
         for c in mystery() { _ = c.notAThing() }
     }
 
+    // HALF-1 CARVE-OUT (`PURE_STDLIB_FREE_FNS`). An entry may only be carved out of the provenance
+    // trigger if the binding's type is fixed by the ARGUMENTS' types (or is Void). These four are not:
+    // the first two return the TRAILING CLOSURE's result, `unsafeDowncast` returns the caller-named
+    // `to:` type, and `sequence(state:next:)`'s element type is the closure's. A dependency value
+    // enters through each, so the receiver must DISCLOSE.
+    public func viaWithoutActuallyEscaping(_ mk: @escaping () -> Int) {
+        let s = withoutActuallyEscaping(mk) { _ in makeSpeaker() }
+        s.speak()
+    }
+    public func viaWithUnsafePointer(_ n: Int) {
+        let s = withUnsafePointer(to: n) { _ in makeSpeaker() }
+        s.speak()
+    }
+    public func viaUnsafeDowncast(_ o: AnyObject) {
+        let s = unsafeDowncast(o, to: LoudSpeaker.self)
+        s.speak()
+    }
+    public func viaSequence() {
+        let s = sequence(state: 0) { (i: inout Int) -> Speaker? in
+            i += 1
+            return i < 2 ? makeSpeaker() : nil
+        }
+        _ = s.makeIterator()
+    }
+    // FALSE-UNCERTAINTY controls — the RETAINED entries must not start disclosing. Each is a live
+    // probe: emptying the carve-out flips all of these (except `viaSwap`, whose Void result has no
+    // member to call — which is also why `swap` can never trigger it).
+    public func viaMax(_ a: Int, _ b: Int) { let m = max(a, b); _ = m.advanced(by: 1) }
+    public func viaMin(_ a: Int, _ b: Int) { let m = min(a, b); _ = m.advanced(by: 1) }
+    public func viaAbs(_ a: Int) { let m = abs(a); _ = m.advanced(by: 1) }
+    public func viaSwap(_ a: inout Int, _ b: inout Int) { let v = swap(&a, &b); _ = v }
+    public func viaZip(_ a: [Int], _ b: [Int]) { let z = zip(a, b); _ = z.makeIterator() }
+    public func viaStride() { let t = stride(from: 0, to: 10, by: 1); _ = t.makeIterator() }
+    public func viaRepeatElement() { let r = repeatElement(1, count: 3); _ = r.makeIterator() }
+
     // FABRICATION GUARD for the same rung: `enum Rank: String` puts `String` in the inheritance
     // clause, so String LOOKS like a supertype with `Rank` as its conformer. A call on a plain
     // String-typed value must NOT dispatch into `Rank.lowercased`.
@@ -501,6 +536,42 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
                        "the receiver INSIDE the shadow is a purely local value that merely reuses the "
                        + "name — the over-disclosure 81a9dc3 closed must stay closed; "
                        + "got \(by["shadowMustNotInheritProvenance"] ?? [:])")
+    }
+
+    /// `PURE_STDLIB_FREE_FNS` is a DENYLIST of PROVEN-safe cases, and the proof is the same for every
+    /// entry: the binding's type is fixed by the ARGUMENTS' types, or is Void, so no dependency-chosen
+    /// type can enter the function through the call. Four entries did not satisfy it — they return the
+    /// trailing closure's result, the caller-named `to:` type, or a closure-chosen element type — and
+    /// each was a silent under-report of a dependency reach.
+    ///
+    /// The controls matter as much: this test WIDENS disclosure, so the risk it carries is false
+    /// uncertainty, and the retained entries must not start firing. They are live probes — emptying the
+    /// carve-out makes six of the seven disclose (`swap` alone cannot, its result being Void).
+    func testStdlibCarveOutOnlyHoldsProvenSafeCalls() throws {
+        let bin = try binaryURL()
+        let (root, dep, app, _) = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        XCTAssertEqual(try run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path],
+                               env: ["CANDOR_DEPS": depReport.path]).code, 0)
+        let by = try fns(ofReport: root.appendingPathComponent("app-r.App.Swift.json"))
+        func why(_ n: String) -> Set<String> { Set(by[n]?["unknownWhy"] as? [String] ?? []) }
+        let marker = "dispatch:untyped cross-package receiver"
+
+        XCTAssertTrue(why("viaFactoryBoundReceiver").contains(marker),
+                      "BASELINE for the rung — without this every row below is vacuous")
+        for fn in ["viaWithoutActuallyEscaping", "viaWithUnsafePointer", "viaUnsafeDowncast",
+                   "viaSequence"] {
+            XCTAssertTrue(why(fn).contains(marker),
+                          "\(fn): the result's type is chosen by the CLOSURE or by the CALLER, not by "
+                          + "the arguments, so a dependency value enters here and the receiver must "
+                          + "disclose rather than read pure; got \(by[fn] ?? [:])")
+        }
+        for fn in ["viaMax", "viaMin", "viaAbs", "viaSwap", "viaZip", "viaStride", "viaRepeatElement"] {
+            XCTAssertFalse(why(fn).contains(marker),
+                           "\(fn): the binding's type is fixed by the arguments (or is Void) — "
+                           + "disclosing it is false uncertainty; got \(by[fn] ?? [:])")
+        }
     }
 
     // The recovery is chaining-INDEPENDENT: the conformance is declared in the app, so it holds with
