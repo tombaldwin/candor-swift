@@ -155,6 +155,7 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
         opaqueAfterNestedFuncShadow(QuietSpeaker())
         ternaryBothOpaque(QuietSpeaker(), QuietSpeaker(), true)
     }
+    public func mystery() -> Any { return 0 }
 
     // SHADOWING, both directions. The opaque set is keyed by NAME, so a binder that REBINDS the name
     // leaves a receiver that is not the opaque parameter at all — suppressing the CHA there makes an
@@ -256,6 +257,63 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
         for x in xs { x.speak() }
     }
 
+    // BINDER FORMS `patternNames` COULD NOT SEE. It enumerated three of the seven `PatternSyntax`
+    // kinds, so `for case let x?` / `for case let x as T` / `for var x` never reached `shadowName` at
+    // all and the enclosing signature's flags stayed attached to the loop's own, unrelated binding.
+    // Each `…NoShadow` row is the mechanism control (identical body, binder renamed).
+    public func forCaseOptionalShadow(_ s: some Speaker, _ all: [Speaker?]) {
+        for case let s? in all { s.speak() }
+    }
+    public func forCaseOptionalNoShadow(_ q: some Speaker, _ all: [Speaker?]) {
+        for case let s? in all { s.speak() }
+    }
+    public func forCaseCastShadow(_ s: some Speaker, _ all: [Any]) {
+        for case let s as Speaker in all { s.speak() }
+    }
+    public func forCaseCastNoShadow(_ q: some Speaker, _ all: [Any]) {
+        for case let s as Speaker in all { s.speak() }
+    }
+    public func forVarShadow(_ s: some Speaker, _ all: [Speaker]) { for var s in all { s.speak() } }
+    public func forVarNoShadow(_ q: some Speaker, _ all: [Speaker]) { for var s in all { s.speak() } }
+
+    // THE CATCH-ALL's own row, and it is a FABRICATION rather than a miss. `case let .quiet(s)` writes
+    // the `let` OUTSIDE the case pattern, so the argument is a bare `patternExpr > identifierPattern`
+    // with no `ValueBindingPattern` for `typeEnumCaseBinding` to match — it claims nothing and types
+    // nothing. The binder then kept the enclosing parameter's `AppSpeaker` type and `s.speak()`
+    // resolved to a body this case cannot reach. `visit(IdentifierPatternSyntax)` clears any binder no
+    // specific visitor claimed, which is why an unenumerated form is now safe by default.
+    public enum Payload { case quiet(QuietSpeaker) }
+    public func caseLetOutsideBindsItsOwnValue(_ s: AppSpeaker, _ p: Payload) {
+        switch p { case let .quiet(s): s.speak() }
+    }
+
+    // A LOOP BINDER'S TYPE DOES NOT OUTLIVE THE LOOP. `vars` is function-wide by design, so the loop's
+    // concrete `QuietSpeaker` used to survive past the loop and answer for the ERASED parameter it
+    // shadowed — `s.speak()` resolved to the pure conformer's own body and the existential's dispatch
+    // was lost. The `…NoShadow` control keeps the parameter's own name free of the loop.
+    public func loopTypeDoesNotOutliveTheLoop(_ s: any Speaker, _ all: [QuietSpeaker]) {
+        for s in all { _ = s }
+        s.speak()
+    }
+    public func loopTypeNoShadow(_ s: any Speaker, _ all: [QuietSpeaker]) {
+        for q in all { _ = q }
+        s.speak()
+    }
+
+    // The MIRROR of the same missed binder, on half 1's provenance set: a `for case let c?` binder is a
+    // purely local value, so it must NOT inherit the factory's provenance and disclose `Unknown`…
+    public func provenanceNotOntoOptionalBinder(_ xs: [Any?]) {
+        let c = makeSpeaker()
+        for case let c? in xs { _ = c.notAThing() }
+        _ = c
+    }
+    // …and once that loop CLOSES, `c` is the factory-bound receiver again and must disclose.
+    public func provenanceRestoredAfterOptionalBinder(_ xs: [Any?]) {
+        let c = makeSpeaker()
+        for case let c? in xs { _ = c }
+        c.speak()
+    }
+
     // OPACITY ACROSS A TERNARY. `(c ? m : e).speak()` has TWO receivers, and `rootOf` composed their
     // opacity with `||` — so one monomorphized arm certified an ERASED sibling and the CHA was skipped
     // for both. All three compositions are asserted, because each single row is satisfiable by a wrong
@@ -269,7 +327,6 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
     // The SAME scope question for half 1's dependency-provenance set. An UNTYPED sequence, so the
     // shadowing binder leaves no stale type behind in `vars` (which is function-wide by design) —
     // otherwise the stale type makes the receiver look resolved and never reaches the marker at all.
-    public func mystery() -> Any { return 0 }
     public func factoryThenLoopShadow() {
         let c = makeSpeaker()
         for c in mystery() { _ = c }
@@ -703,6 +760,74 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
                        + "`[some Speaker]` parameter again and its opacity must be RESTORED, not dropped "
                        + "— else the fix trades one sin for the other; got "
                        + "\(by["elemOpacityRestoredAfterShadow"] ?? [:])")
+    }
+
+    /// THE BINDER FORMS NOBODY ENUMERATED — the fourth instance of one failure, and the reason this one
+    /// was fixed structurally instead of by a fourth `if`.
+    ///
+    /// `patternNames` listed three of the seven `PatternSyntax` kinds and returned `[]` for the rest, so
+    /// `for case let x?`, `for case .some(let x)` and `for case let x as T` never reached `shadowName`:
+    /// the enclosing signature's `monoNames`/`depBoundLocals` entry stayed attached to the loop's own,
+    /// genuinely unrelated binding. It is now a walk for every `IdentifierPatternSyntax` in the subtree
+    /// — which is where the grammar puts every binder and nowhere else — plus a catch-all
+    /// `visit(IdentifierPatternSyntax)` that CLEARS any binder no specific visitor claimed, so an
+    /// unenumerated form defaults to dropping a stale binding rather than to keeping one.
+    ///
+    /// Four things are asserted, because the first alone is satisfiable by three wrong fixes:
+    ///   - the shadowed rows dispatch (the leak is gone) AND their `…NoShadow` controls do too, which is
+    ///     what makes the shadowed miss attributable to the leak rather than to a typing failure. Note
+    ///     both controls FAILED before this change: these binders were never typed at all, so scoping
+    ///     the flag alone would have left the same silent-pure answer by another route;
+    ///   - `loopTypeDoesNotOutliveTheLoop` — typing a `for case` binder made `vars`' documented outward
+    ///     leak bite, so the pattern's names now have their type restored at the loop's end. Measured
+    ///     live on the corpus: 258 restores across 13 targets actually change a binding;
+    ///   - `provenanceNotOntoOptionalBinder` — the MIRROR. Half 1's provenance riding onto the loop's
+    ///     own binder disclosed `Unknown[dispatch:…]` for a purely local value, which flips
+    ///     `deny E Unknown[dispatch]` to exit 1 on clean code;
+    ///   - `provenanceRestoredAfterOptionalBinder` — …and it must come BACK, or the fix trades a false
+    ///     disclosure for a silent purity claim on a genuinely factory-bound receiver.
+    func testEveryPatternBinderIsAScope() throws {
+        let bin = try binaryURL()
+        let (root, dep, app, _) = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path],
+                        env: ["CANDOR_DEPS": depReport.path])
+        XCTAssertEqual(r.code, 0, "chained app scan must succeed; stderr: \(r.err)")
+        let by = try fns(ofReport: root.appendingPathComponent("app-r.App.Swift.json"))
+        func eff(_ n: String) -> Set<String> { Set(by[n]?["inferred"] as? [String] ?? []) }
+
+        for (shadowed, control) in [("forCaseOptionalShadow", "forCaseOptionalNoShadow"),
+                                    ("forCaseCastShadow", "forCaseCastNoShadow"),
+                                    ("forVarShadow", "forVarNoShadow")] {
+            XCTAssertTrue(eff(control).contains("Env"),
+                          "CONTROL \(control): this binder must be TYPED, else \(shadowed) reads pure "
+                          + "for a second reason and the row proves nothing; got \(by[control] ?? [:])")
+            XCTAssertTrue(eff(shadowed).contains("Env"),
+                          "\(shadowed): the loop's binder is not the `some Speaker` parameter — leaving "
+                          + "the parameter's opacity on it makes an Env-performing call read silent-pure; "
+                          + "got \(by[shadowed] ?? [:])")
+        }
+        XCTAssertTrue(eff("loopTypeNoShadow").contains("Env"),
+                      "CONTROL loopTypeNoShadow: the erased parameter dispatches when no loop shadows it; "
+                      + "got \(by["loopTypeNoShadow"] ?? [:])")
+        XCTAssertTrue(eff("loopTypeDoesNotOutliveTheLoop").contains("Env"),
+                      "loopTypeDoesNotOutliveTheLoop: the loop's concrete `QuietSpeaker` must not survive "
+                      + "the loop and answer for the `any Speaker` parameter it shadowed; got "
+                      + "\(by["loopTypeDoesNotOutliveTheLoop"] ?? [:])")
+
+        XCTAssertFalse(eff("caseLetOutsideBindsItsOwnValue").contains("Env"),
+                       "caseLetOutsideBindsItsOwnValue: `case let .quiet(s)` binds a QuietSpeaker — "
+                       + "keeping the enclosing AppSpeaker parameter's type for the name charges an "
+                       + "effect this case cannot reach; got \(by["caseLetOutsideBindsItsOwnValue"] ?? [:])")
+        XCTAssertNil(by["provenanceNotOntoOptionalBinder"],
+                     "the loop's own binder is a purely LOCAL value — disclosing the factory's provenance "
+                     + "for it is false uncertainty that flips `deny E Unknown[dispatch]` on clean code; "
+                     + "got \(by["provenanceNotOntoOptionalBinder"] ?? [:])")
+        XCTAssertTrue(eff("provenanceRestoredAfterOptionalBinder").contains("Unknown"),
+                      "…and once the loop CLOSES `c` is the factory-bound receiver again and must "
+                      + "disclose, or the mirror fix manufactures a silent purity claim; got "
+                      + "\(by["provenanceRestoredAfterOptionalBinder"] ?? [:])")
     }
 
     /// OPACITY IS NOT A PROPERTY OF ONE ARM OF A JOIN. `rootOf` types `(c ? a : b)` from the arms'

@@ -819,12 +819,65 @@ final class CallCollector: SyntaxVisitor {
         if elem.mono { opaqueElem.insert(name) } else { opaqueElem.remove(name) }
     }
 
-    // Every identifier a binding pattern introduces (`x`, `(k, v)`, `(a, (b, c))`).
+    /// Every binder a pattern introduces, as the `IdentifierPatternSyntax` NODES — `x`, `(k, v)`,
+    /// `(a, (b, c))`, `let x?`, `.some(let x)`, `let x as T`, `case let .pair(a, b)`, and anything else
+    /// the grammar grows.
+    ///
+    /// STRUCTURAL RATHER THAN AN ENUMERATION OF PATTERN KINDS, and that is the whole point. The previous
+    /// version listed three of the seven `PatternSyntax` kinds and returned `[]` for the rest, so
+    /// `for case let item? in xs` never reached `shadowName` and the enclosing signature's
+    /// `monoNames`/`depBoundLocals` entry stayed attached to the loop's own, unrelated binding — the
+    /// third scope leak from the same gate, and a purity claim on a body that performs the conformer's
+    /// effect. Adding `OptionalPattern`/`ExpressionPattern`/enum-case to the list would have been the
+    /// fourth one-off; the grammar decides how many spellings there are, so the rule has to be a
+    /// property of the parse tree rather than a list somebody keeps current.
+    ///
+    /// The property, VERIFIED IN BOTH DIRECTIONS against SwiftParser rather than assumed: every bound
+    /// name is an `identifierPattern` node somewhere in the subtree (`let x?` →
+    /// `valueBinding > expressionPattern > optionalChainingExpr > patternExpr > identifierPattern`;
+    /// `.some(let y)` and `case let .two(m, n)` reach one through `labeledExpr > patternExpr`), and a
+    /// NON-binding expression pattern never produces one — a matched constant, an enum case with
+    /// literal payloads and a range (`for case konst in`, `case E.one(3)`, `case 1...2`) parse to
+    /// `declReferenceExpr`/literal nodes, and `_` is a `wildcardPattern`. So the walk is exact, not
+    /// conservative, in both directions.
+    private static func patternBinders(_ pattern: PatternSyntax) -> [IdentifierPatternSyntax] {
+        var out: [IdentifierPatternSyntax] = []
+        func walk(_ n: Syntax) {
+            if let ip = n.as(IdentifierPatternSyntax.self) { out.append(ip); return }  // a leaf node
+            for c in n.children(viewMode: .sourceAccurate) { walk(c) }
+        }
+        walk(Syntax(pattern))
+        return out
+    }
+
     private static func patternNames(_ pattern: PatternSyntax) -> [String] {
-        if let ip = pattern.as(IdentifierPatternSyntax.self) { return [ip.identifier.text] }
-        if let tp = pattern.as(TuplePatternSyntax.self) { return tp.elements.flatMap { patternNames($0.pattern) } }
-        if let vb = pattern.as(ValueBindingPatternSyntax.self) { return patternNames(vb.pattern) }
-        return []
+        patternBinders(pattern).map { $0.identifier.text }
+    }
+
+    /// Binder nodes a specific visitor has already accounted for, so `visit(IdentifierPatternSyntax)`
+    /// leaves them alone. See that visitor for why the marking is the load-bearing half.
+    private var handledBinders: Set<SyntaxIdentifier> = []
+
+    private func markBinders(_ pattern: PatternSyntax) {
+        for b in Self.patternBinders(pattern) { handledBinders.insert(b.id) }
+    }
+
+    /// The TYPE indexes for one name, saved so a binder whose scope is narrower than the function can
+    /// give the name back (see `visit(ForStmtSyntax)`). These four are exactly the maps
+    /// `clearBindingTypeOnly` drops; `opaqueElem` is restored by the shadow scope with the other flags,
+    /// and it is written only in lockstep with `arrayElem`, so the pair cannot come back inconsistent.
+    private typealias TypeBinding = (type: String?, arrayElem: String?, dictElem: String?, tupleElem: [String: String]?)
+    private var typeScopes: [SyntaxIdentifier: [(String, TypeBinding)]] = [:]
+
+    private func snapshotType(_ name: String) -> TypeBinding {
+        (vars[name], arrayElem[name], dictElem[name], tupleElem[name])
+    }
+
+    private func restoreType(_ name: String, _ b: TypeBinding) {
+        vars[name] = b.type
+        arrayElem[name] = b.arrayElem
+        dictElem[name] = b.dictElem
+        tupleElem[name] = b.tupleElem
     }
 
     // A binder REBINDS `name`, so the name-keyed FLAGS carried by the signature or by an earlier
@@ -886,6 +939,32 @@ final class CallCollector: SyntaxVisitor {
         depBoundLocals = saved.depBound
     }
 
+    /// THE CATCH-ALL BINDER, and it exists to invert a failure mode rather than to add a case.
+    ///
+    /// Four of the five defects this gate has produced were the same shape: a name-keyed flag outliving
+    /// the binding that set it, because some binder form was not on somebody's list. The lists are the
+    /// problem — a binder nobody enumerated LEAKS the enclosing signature's opacity onto an unrelated
+    /// value, which suppresses the local-conformer CHA and reads silent-pure, and leaks half 1's
+    /// dependency provenance, which discloses `Unknown` for a purely local value.
+    ///
+    /// `IdentifierPatternSyntax` is where the language puts every binding, and nowhere else: parameters
+    /// and closure parameters are TOKENS (`FunctionParameterSyntax.secondName`,
+    /// `ClosureParameterSyntax.name`), never patterns, so this fires on `let`/`var` declarations,
+    /// `for`-in patterns, `case` patterns, `if`/`while`/`guard case` patterns and `catch` patterns — the
+    /// complete set of pattern binders — and on nothing else.
+    ///
+    /// Unmarked ⇒ no specific visitor claimed this binder ⇒ CLEAR it. So an unenumerated form now
+    /// defaults to dropping a stale binding (the direction the collector already documents as safe:
+    /// harmless outward, and the only direction that cannot fabricate) instead of to keeping one. The
+    /// MARKING is what carries the risk, not the clearing: a visitor that types a binding must claim it,
+    /// or this would wipe the type/provenance it just established — which is why
+    /// `visit(OptionalBindingConditionSyntax)` marks UNCONDITIONALLY, including the shorthand
+    /// `guard let c` that deliberately keeps the enclosing binding's type.
+    override func visit(_ node: IdentifierPatternSyntax) -> SyntaxVisitorContinueKind {
+        if !handledBinders.contains(node.id) { clearBinding(node.identifier.text) }
+        return .visitChildren
+    }
+
     // THE SCOPES. A brace-delimited block covers `let`/`guard let` shadows; the statement/expression
     // nodes cover binders written OUTSIDE their block (a `for` pattern, an `if let`/`while let`
     // condition, a `case let`, a `catch let`), which are visited before the block is entered.
@@ -898,7 +977,10 @@ final class CallCollector: SyntaxVisitor {
     override func visit(_ node: SwitchCaseSyntax) -> SyntaxVisitorContinueKind { enterShadowScope(node); return .visitChildren }
     override func visitPost(_ node: SwitchCaseSyntax) { leaveShadowScope(node) }
     override func visitPost(_ node: CatchClauseSyntax) { leaveShadowScope(node) }
-    override func visitPost(_ node: ForStmtSyntax) { leaveShadowScope(node) }
+    override func visitPost(_ node: ForStmtSyntax) {
+        leaveShadowScope(node)
+        for (n, b) in typeScopes.removeValue(forKey: node.id) ?? [] { restoreType(n, b) }
+    }
     // A closure's PARAMETERS are cleared here rather than in `typeClosureParams` (which runs on the
     // enclosing CALL, i.e. before this node is entered, so the save would capture the already-cleared
     // set and restore nothing).
@@ -918,12 +1000,38 @@ final class CallCollector: SyntaxVisitor {
     override func visit(_ node: ForStmtSyntax) -> SyntaxVisitorContinueKind {
         enterShadowScope(node)
         modelImplicitIteration(node.sequence)
-        // EVERY name the pattern binds is shadowed, including the ones no branch below types (a
-        // `for (key, _) in dict` key, a tuple arity this doesn't model) — an untyped loop variable is
-        // still a rebind, and leaving the opaque/provenance flag on it is what made
-        // `func f(_ c: some P) { for c in xs { c.m() } }` read silent-pure.
-        for n in Self.patternNames(node.pattern) { shadowName(n) }
-        if let name = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
+        // EVERY name the pattern binds is CLEARED, including the ones no branch below types (a
+        // `for (key, _) in dict` key, a tuple arity this doesn't model, a `for case let x? in`) — an
+        // untyped loop variable is still a rebind, and leaving the opaque/provenance flag on it is what
+        // made `func f(_ c: some P) { for c in xs { c.m() } }` read silent-pure. The TYPE goes with the
+        // flags rather than being left behind: this loop used to `shadowName` only, so a pattern no
+        // branch below reaches (`for case let item? in xs`) kept the enclosing parameter's type for the
+        // name — resolving the loop's receiver against a type it does not have, which is the fabrication
+        // direction of the same leak. `clearBinding` is `shadowName` plus the type indexes; the branches
+        // below then re-establish what they can determine.
+        //
+        // The pattern's binders are then MARKED as claimed, so `visit(IdentifierPatternSyntax)` — which
+        // walks into this pattern a moment later — does not undo the typing done here.
+        //
+        // A LOOP BINDER'S TYPE DOES NOT OUTLIVE THE LOOP, and this is the first place the collector had
+        // to say so. `vars` is deliberately function-wide (see `clearBinding`) because a stale type is
+        // dangerous inward and merely lossy outward — but the `for case` branch below TYPES a name whose
+        // scope is strictly the loop body, and the outward leak then bites in the honesty direction:
+        // `let c = depBuild(); for case let c? in xs { … }; c.speak()` typed the loop's `c` from the
+        // sequence, that type survived the loop, and the factory-bound receiver below it stopped
+        // reaching half 1's `<untyped>` marker — a disclosed gap turned back into a silent purity claim
+        // by a fix aimed at the opposite defect (standing bar item 0). So the pattern's names have their
+        // TYPE indexes saved here and restored in `visitPost`, which also closes the same outward leak
+        // for the plain `for x in xs` binder that has always had it.
+        typeScopes[node.id] = Self.patternNames(node.pattern).map { ($0, snapshotType($0)) }
+        for n in Self.patternNames(node.pattern) { clearBinding(n) }
+        markBinders(node.pattern)
+        // `for var x in xs` is `for x in xs` with a mutable binding, and it parses as a
+        // `valueBindingPattern` WRAPPING the identifier — so this test failed and the loop variable was
+        // never typed at all. Found by instrumenting the `for case` branch below, not by reading the
+        // grammar: five sites on the corpus land there with an element type already in hand
+        // (`for var p in fgParticles` → `Particle`). Peeled so both spellings share the one rule.
+        if let name = Self.plainBinderName(node.pattern) {
             // An EXPLICIT loop-var annotation (`for await x: Item in s`) names the element type directly —
             // honor it over the sequence's inferred element, so an unpinned/async sequence whose element
             // type candor can't infer still types the loop var (was ignored → `x.member()` silent-pure).
@@ -944,8 +1052,61 @@ final class CallCollector: SyntaxVisitor {
                 vars[second] = elem.name  // for (offset, element) in coll.enumerated()
                 if elem.mono { monoNames.insert(second) }
             } else { clearBinding(second) }
+        } else if Self.patternBinders(node.pattern).count == 1,
+                  let only = Self.patternBinders(node.pattern).first {
+            // A `for case` pattern binding exactly ONE name. Scoping it (above) is what stops the
+            // enclosing signature's flags riding on it, but scoping ALONE leaves the binder untyped and
+            // the receiver still resolves to nothing — the leak stops fabricating and the call stays
+            // silent, which is the same purity claim by a different route. So the two forms whose type
+            // is available WITHOUT inference are typed here:
+            //
+            //   `for case let x as T in …`  — T is written in the source. Nothing is inferred.
+            //   `for case let x?     in …`  — Optional-unwrap sugar, and `elementTypeOf` already peels
+            //                                 the Optional (`[Speaker?]` → `Speaker`), so the sequence's
+            //                                 element type IS the binder's type.
+            //
+            // `.some(let x)` is deliberately NOT accepted through the second door even though it means
+            // the same thing: a local enum with a case named `some` parses identically, and there the
+            // element type is the ENUM and not the payload — a fabrication. That spelling is a
+            // leading-dot case pattern and belongs to `typeEnumCaseBinding`, which types it from
+            // `enumCaseValueType` or clears it. `x?` has no second reading in the grammar.
+            let name = only.identifier.text
+            if let t = Self.castBinderType(node.pattern).flatMap({ typeName($0).name }) {
+                vars[name] = dealias(t)
+            } else if Self.isOptionalUnwrapBinder(node.pattern), let elem = elementTypeOf(node.sequence) {
+                vars[name] = elem.name
+                if elem.mono { monoNames.insert(name) }
+            }
         }
         return .visitChildren
+    }
+
+    /// `case let x as T` — the type the cast NAMES. SwiftParser leaves `as` unfolded, so the pattern is
+    /// `[valueBinding >] expressionPattern > sequenceExpr [patternExpr, unresolvedAsExpr, typeExpr]`.
+    private static func castBinderType(_ pattern: PatternSyntax) -> TypeSyntax? {
+        var p = pattern
+        if let vb = p.as(ValueBindingPatternSyntax.self) { p = vb.pattern }
+        guard let ex = p.as(ExpressionPatternSyntax.self),
+              let seq = ex.expression.as(SequenceExprSyntax.self) else { return nil }
+        let elems = Array(seq.elements)
+        guard elems.count == 3, elems[1].is(UnresolvedAsExprSyntax.self), elems[0].is(PatternExprSyntax.self),
+              let te = elems[2].as(TypeExprSyntax.self) else { return nil }
+        return te.type
+    }
+
+    /// The name of a pattern that is JUST a binder — `x` or `var x`/`let x`.
+    private static func plainBinderName(_ pattern: PatternSyntax) -> String? {
+        var p = pattern
+        if let vb = p.as(ValueBindingPatternSyntax.self) { p = vb.pattern }
+        return p.as(IdentifierPatternSyntax.self)?.identifier.text
+    }
+
+    /// `case let x?` — Optional-unwrap sugar, and only that spelling (see the caller for why `.some`).
+    private static func isOptionalUnwrapBinder(_ pattern: PatternSyntax) -> Bool {
+        var p = pattern
+        if let vb = p.as(ValueBindingPatternSyntax.self) { p = vb.pattern }
+        guard let ex = p.as(ExpressionPatternSyntax.self) else { return false }
+        return ex.expression.is(OptionalChainingExprSyntax.self)
     }
 
     // A `for x in seq` desugars to `var it = seq.makeIterator(); while let x = it.next() { … }` — two
@@ -1135,6 +1296,14 @@ final class CallCollector: SyntaxVisitor {
         // pattern (`case .live(let c, _)`) belongs to a DIFFERENT enum sharing the case name — binding
         // its first `let` to the single-assoc type FABRICATES (the review's enum-identity find).
         // Mismatch (or ambiguous/unknown case) → CLEAR every binding, never leave a stale leak.
+        // ONLY the `.active(let c)` spelling is TYPED here, and only that spelling is CLAIMED. The
+        // `case let .active(c)` spelling puts the `let` outside, so the argument is a bare
+        // `patternExpr > identifierPattern` with no `ValueBindingPattern` to match and this loop skipped
+        // it entirely — the same missed-binder leak as `for case let x?`, through a different door.
+        // Rather than grow a second shape here, it is simply left UNCLAIMED, and
+        // `visit(IdentifierPatternSyntax)` clears it: an unmodelled binder must not keep the enclosing
+        // signature's flags, and dropping the type is the safe direction the arity/ambiguity guards
+        // above already take.
         let singleAssoc = node.arguments.count == 1 ? enumCaseValueType[ma.declName.baseName.text] : nil
         for arg in node.arguments {
             if let pat = arg.expression.as(PatternExprSyntax.self),
@@ -1142,6 +1311,7 @@ final class CallCollector: SyntaxVisitor {
                let name = vb.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
                 shadowName(name)  // a rebind, typed or not (the enclosing switch case / if restores it)
                 if let singleAssoc { vars[name] = singleAssoc } else { clearBinding(name) }
+                markBinders(vb.pattern)
             }
         }
     }
@@ -1465,6 +1635,12 @@ final class CallCollector: SyntaxVisitor {
     // (a factory call, subscript, cast, …) so `c.method()` resolves. A shorthand `guard let c` (no
     // initializer) keeps the existing param/var type. The optional is stripped by typing the value.
     override func visit(_ node: OptionalBindingConditionSyntax) -> SyntaxVisitorContinueKind {
+        // Claimed UNCONDITIONALLY, before the branch below decides whether it can type it: the
+        // shorthand `guard let c` deliberately keeps the enclosing binding — `c` is the SAME value,
+        // unwrapped — so letting `visit(IdentifierPatternSyntax)` clear it would drop a genuine type and
+        // half 1's provenance with it. This is the one place where "unmarked means clear" would be
+        // wrong, and it is marked for exactly that reason.
+        markBinders(node.pattern)
         if let name = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text,
            let initVal = node.initializer?.value {
             shadowName(name)  // a rebind, typed or not — the `if`/`while` (or the enclosing block, for
@@ -1789,18 +1965,26 @@ final class CallCollector: SyntaxVisitor {
             if let id = vb.pattern.as(IdentifierPatternSyntax.self) {
                 catchBindings[id.identifier.text] = "Error"          // `catch let e`
                 shadowName(id.identifier.text)                       // …and it REBINDS the name
+                markBinders(vb.pattern)
             } else if let ex = vb.pattern.as(ExpressionPatternSyntax.self),
                       let seq = ex.expression.as(SequenceExprSyntax.self) {
-                // `catch let e as MyError` — SwiftParser leaves `as` unfolded: [name, UnresolvedAs, Type].
-                // Bind the CONCRETE type so the witness resolves precisely (a non-local type resolves to
-                // no unit and contributes nothing).
+                // `catch let e as MyError` — SwiftParser leaves `as` unfolded: [binder, UnresolvedAs,
+                // Type]. Bind the CONCRETE type so the witness resolves precisely (a non-local type
+                // resolves to no unit and contributes nothing).
+                //
+                // The binder is a `patternExpr > identifierPattern`, NOT a bare `declReferenceExpr` —
+                // this read `elems[0].as(DeclReferenceExprSyntax)` and so never fired, leaving `e`
+                // untyped AND unshadowed. Dumped from SwiftParser rather than reasoned about, after the
+                // same wrong assumption produced `patternBinders`' three-kind list.
                 let elems = Array(seq.elements)
                 if elems.count == 3, elems[1].is(UnresolvedAsExprSyntax.self),
-                   let name = elems[0].as(DeclReferenceExprSyntax.self)?.baseName.text {
+                   let pe = elems[0].as(PatternExprSyntax.self),
+                   let name = pe.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
                     shadowName(name)                                 // a rebind whether or not it types
                     if let te = elems[2].as(TypeExprSyntax.self), let tn = typeName(te.type).name {
                         catchBindings[name] = dealias(tn)
                     }
+                    markBinders(pe.pattern)
                 }
             }
         }
@@ -2011,6 +2195,7 @@ final class CallCollector: SyntaxVisitor {
             if let tp = binding.pattern.as(TuplePatternSyntax.self),
                let tupleInit = binding.initializer?.value.as(TupleExprSyntax.self) {
                 for n in Self.patternNames(PatternSyntax(tp)) { shadowName(n) }
+                markBinders(PatternSyntax(tp))
                 for (pe, ve) in zip(tp.elements, tupleInit.elements) {
                     guard let n = pe.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
                     boundLocals.insert(n)
@@ -2026,7 +2211,13 @@ final class CallCollector: SyntaxVisitor {
             if let ann = binding.typeAnnotation, let v0 = binding.initializer?.value {
                 edgeLiteralInit(annotation: ann.type, value: v0)
             }
+            // Claimed for the whole binding — the identifier form is typed below, and a form this
+            // visitor does NOT model (`let (a, b) = pair()`, a tuple pattern with a non-tuple
+            // initializer) falls out of the guard on the next line, so leaving it unclaimed lets
+            // `visit(IdentifierPatternSyntax)` clear it rather than let the enclosing signature's flags
+            // ride on it.
             guard let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
+            markBinders(binding.pattern)
             boundLocals.insert(name)  // record the SHADOW (any local, even a literal-typed one `vars` drops)
             shadowName(name)          // a rebind: the signature's `some P` opacity and any earlier
                                       // dependency provenance stop applying to the NAME here. Runs
