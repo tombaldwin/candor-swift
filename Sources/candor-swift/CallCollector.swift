@@ -113,7 +113,10 @@ final class CallCollector: SyntaxVisitor {
     var monoNames: Set<String> = []
     /// Names whose ARRAY ELEMENT type is monomorphized — the container form of `monoNames`, kept in
     /// lockstep with `arrayElem`: every write to one writes the other, so a rebind can never leave a
-    /// stale opacity sitting behind a fresh type.
+    /// stale opacity sitting behind a fresh type. SCOPED exactly like `monoNames`
+    /// (see `enterShadowScope`): the lockstep gets the CLEAR half of the discipline right and says
+    /// nothing about the RESTORE half, and an inner block's monomorphized `let` of an existing name
+    /// suppressed the CHA on the ERASED binding it shadowed for the rest of the function.
     var opaqueElem: Set<String> = []
     let localProtocols: Set<String> // local protocol names — a receiver typed as one is DISPATCH
     let returns: [String: String]   // unambiguous factory return types (the candor-scan move)
@@ -824,11 +827,12 @@ final class CallCollector: SyntaxVisitor {
         depBoundLocals.remove(name)
     }
 
-    // Saved `monoNames`/`depBoundLocals` per scope-delimiting node, restored when the node
+    // Saved `monoNames`/`opaqueElem`/`depBoundLocals` per scope-delimiting node, restored when the node
     // closes. Keyed by node id rather than a stack so an un-entered scope can never pop someone else's
     // save; SwiftSyntax calls `visitPost` for every visited node (including one whose `visit` returned
     // `.skipChildren`), so entries cannot leak.
-    private var shadowScopes: [SyntaxIdentifier: (opaque: Set<String>, depBound: Set<String>)] = [:]
+    private var shadowScopes: [SyntaxIdentifier:
+        (opaque: Set<String>, opaqueElem: Set<String>, depBound: Set<String>)] = [:]
 
     /// Closure node -> element parameters the enclosing call typed from a MONOMORPHIZED element. Handed
     /// over rather than set directly because `typeClosureParams` runs before the closure is entered (see
@@ -841,12 +845,21 @@ final class CallCollector: SyntaxVisitor {
         // can ADD to `monoNames` (a `for x in xs` element that is monomorphized). With no save there is
         // nothing to restore, so that flag leaked out past the loop and suppressed the CHA on a later,
         // unrelated `x` — the silent under-report this whole mechanism exists to avoid.
-        shadowScopes[node.id] = (monoNames, depBoundLocals)
+        //
+        // `opaqueElem` IS THE SAME ARGUMENT ONE CONTAINER OUT, and it shipped without the save. It is
+        // written in lockstep with `arrayElem`, which is the CLEAR half of the discipline — a rebind
+        // cannot leave a stale opacity behind a fresh element type — and says nothing about the RESTORE
+        // half. `if c { let ys = xs.filter { … } }` inside a function taking `ys: [any Speaker]` marks
+        // `ys` monomorphized from the `[some P]` source, the block ends, and the ERASED parameter it
+        // shadowed spends the rest of the body with the CHA suppressed. Measured: identical bodies,
+        // Env when the inner binding is named `zs` and silent-pure when it is named `ys`.
+        shadowScopes[node.id] = (monoNames, opaqueElem, depBoundLocals)
     }
 
     private func leaveShadowScope(_ node: some SyntaxProtocol) {
         guard let saved = shadowScopes.removeValue(forKey: node.id) else { return }
         monoNames = saved.opaque
+        opaqueElem = saved.opaqueElem
         depBoundLocals = saved.depBound
     }
 

@@ -149,6 +149,7 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
         viaOpaqueElement([QuietSpeaker()])
         viaGenericForEach([QuietSpeaker()])
         Relay(inner: QuietSpeaker()).run()
+        elemOpacityRestoredAfterShadow([QuietSpeaker()], true)
     }
 
     // SHADOWING, both directions. The opaque set is keyed by NAME, so a binder that REBINDS the name
@@ -190,6 +191,37 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
     public func guardLetNoShadow(_ x: some Speaker, _ o: Speaker?) {
         guard let s = o else { return }
         s.speak()
+    }
+
+    // THE CONTAINER FORM OF THE SAME SCOPE QUESTION — the half 02fb0ad shipped without. The element
+    // opacity moves in lockstep with the element TYPE, which is the CLEAR half of the discipline (a
+    // rebind cannot leave stale opacity behind a fresh type) and says nothing about the RESTORE half.
+    // An inner block binding an EXISTING name from a monomorphized source outlived the block, so the
+    // ERASED parameter it shadowed spent the rest of the body with the CHA suppressed — silent-pure.
+    // `elemOpacityNoShadow` is the mechanism control: byte-identical body, binder renamed.
+    public func elemOpacityAfterBlockShadow(_ xs: [some Speaker], _ ys: [any Speaker], _ c: Bool) {
+        if c {
+            let ys = xs.filter { _ in true }
+            _ = ys
+        }
+        for y in ys { y.speak() }
+    }
+    public func elemOpacityNoShadow(_ xs: [some Speaker], _ ys: [any Speaker], _ c: Bool) {
+        if c {
+            let zs = xs.filter { _ in true }
+            _ = zs
+        }
+        for y in ys { y.speak() }
+    }
+    // …and the OTHER direction, which is why this is a SCOPE and not a clear: once the shadowing block
+    // closes, `xs` is the monomorphized parameter again and the suppression must be BACK. Dropping the
+    // opacity instead re-opens the fabrication 02fb0ad closed.
+    public func elemOpacityRestoredAfterShadow(_ xs: [some Speaker], _ c: Bool) {
+        if c {
+            let xs: [any Speaker] = []
+            _ = xs
+        }
+        for x in xs { x.speak() }
     }
 
     // The SAME scope question for half 1's dependency-provenance set. An UNTYPED sequence, so the
@@ -590,6 +622,45 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
                            + "got \(by[after] ?? [:])")
         }
         XCTAssertFalse(eff("viaOpaqueImported").contains("Env"), "the unshadowed opaque case is untouched")
+    }
+
+    /// THE CONTAINER FORM OF THE SAME SCOPE QUESTION, which 02fb0ad shipped without. That commit made
+    /// `enterShadowScope` save unconditionally because a `for x in xs` binder can now ADD to `monoNames`
+    /// — and introduced a SECOND set, `opaqueElem`, that was never added to the save at all. Its
+    /// lockstep-with-`arrayElem` invariant is the CLEAR half of the discipline (a rebind cannot leave a
+    /// stale opacity behind a fresh element type) and is silent about the RESTORE half.
+    ///
+    /// So an inner block that binds an EXISTING name from a monomorphized source (`let ys = xs.filter`,
+    /// `xs: [some Speaker]`) marked `ys` opaque for the rest of the FUNCTION, and the erased
+    /// `ys: [any Speaker]` parameter it shadowed lost its dispatch — a silent under-report manufactured
+    /// by a fabrication fix, which is standing-bar item 0 in its exact shape. Invisible in a corpus A/B,
+    /// because it needs a name collision that no measured target happens to contain.
+    ///
+    /// Both directions, as with `monoNames`: `elemOpacityNoShadow` is the mechanism control (identical
+    /// body, binder renamed — it must resolve in both arms, which is what makes the miss attributable to
+    /// the leaked flag rather than to a typing failure), and `elemOpacityRestoredAfterShadow` proves the
+    /// fix is a SCOPE and not a clear.
+    func testElementOpacityIsScopedToItsBlock() throws {
+        let bin = try binaryURL()
+        let (root, _, app, _) = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        XCTAssertEqual(try run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path]).code, 0)
+        let by = try fns(ofReport: root.appendingPathComponent("app-r.App.Swift.json"))
+        func eff(_ n: String) -> Set<String> { Set(by[n]?["inferred"] as? [String] ?? []) }
+
+        XCTAssertTrue(eff("elemOpacityNoShadow").contains("Env"),
+                      "CONTROL elemOpacityNoShadow: the non-colliding binder must resolve, else the row "
+                      + "below proves nothing; got \(by["elemOpacityNoShadow"] ?? [:])")
+        XCTAssertTrue(eff("elemOpacityAfterBlockShadow").contains("Env"),
+                      "elemOpacityAfterBlockShadow: the inner block's monomorphized `ys` does not outlive "
+                      + "the block — the parameter it shadowed is `[any Speaker]`, so the CHA must fire "
+                      + "and this Env-performing function must not read pure; got "
+                      + "\(by["elemOpacityAfterBlockShadow"] ?? [:])")
+        XCTAssertFalse(eff("elemOpacityRestoredAfterShadow").contains("Env"),
+                       "elemOpacityRestoredAfterShadow: the shadow's scope has CLOSED, so `xs` is the "
+                       + "`[some Speaker]` parameter again and its opacity must be RESTORED, not dropped "
+                       + "— else the fix trades one sin for the other; got "
+                       + "\(by["elemOpacityRestoredAfterShadow"] ?? [:])")
     }
 
     /// The same scope question for half 1's dependency-PROVENANCE set. 81a9dc3 made a rebind clear the
