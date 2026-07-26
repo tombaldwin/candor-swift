@@ -729,7 +729,18 @@ final class DeclCollector: SyntaxVisitor {
             else if let tn = t.name {
                 // resolve a generic param to its protocol BOUND (`x: T` where `<T: Sender>` → dispatch P)
                 let resolved = genericBounds[tn] ?? tn
-                if protocolMethods[resolved] != nil { info.protoParams[pname] = resolved } else { info.params[pname] = tn }
+                if protocolMethods[resolved] != nil { info.protoParams[pname] = resolved }
+                // ERASED vs MONOMORPHIZED. `typeName` collapses `some P` and `any P` to `P`, but they are
+                // not interchangeable for class-hierarchy analysis: `any P` is an existential, so the
+                // types conforming here really are its candidate witnesses, whereas `some P` is opaque and
+                // the CALLER picks the single concrete type — dispatching it over every local conformer
+                // charges effects the callee cannot perform. Measured: with an IMPORTED protocol,
+                // `func f(_ s: some Speaker) { s.speak() }` called only with a pure conformer was charged
+                // the effectful conformer's Env. Recording nothing here leaves `some P` behaving exactly
+                // like its equivalent spelling `<T: P>`, which was already inert. The LOCAL-protocol arm
+                // above is untouched: that dispatch is the long-standing behaviour and is a separate
+                // question (see the note in SOUNDNESS-VEIN-crossing-the-scan-boundary.md).
+                else if !isOpaqueParam(p.type) { info.params[pname] = tn }
             }
             else { let te = tupleElements(p.type); if !te.isEmpty { info.tupleParams[pname] = te } }  // `p: (A, B)`
         }

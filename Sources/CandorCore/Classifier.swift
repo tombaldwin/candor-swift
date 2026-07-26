@@ -720,6 +720,28 @@ public func typeName(_ t: TypeSyntax) -> (name: String?, isFunction: Bool) {
     return (nil, false)
 }
 
+/// Is this parameter type spelled `some P` (an OPAQUE type) rather than `any P` (an existential)?
+///
+/// `typeName` deliberately collapses the two — for naming a type they are the same. For class-hierarchy
+/// analysis they are opposites. `any P` is erased: the value could be any conformer, so the conformers
+/// visible here really are its candidate witnesses. `some P` is monomorphized BY THE CALLER: exactly one
+/// concrete type is chosen at each call site, so unioning every conformer's effects onto the callee
+/// charges it with effects it cannot perform. (`<T: P>` is the same thing under another spelling, and was
+/// already inert here because the param's type name is `T`, which resolves to nothing.)
+///
+/// Found via candor-rust, which hit the identical trap from the other side: gating its imported-trait CHA
+/// on PROVENANCE alone put 32 spurious Unknowns on serde_json, and erasure was the discriminator that
+/// fixed it. Peels the wrappers `typeName` peels, so `some P?` and `@escaping some P` are caught too.
+public func isOpaqueParam(_ t: TypeSyntax) -> Bool {
+    if let opt = t.as(OptionalTypeSyntax.self) { return isOpaqueParam(opt.wrappedType) }
+    if let att = t.as(AttributedTypeSyntax.self) { return isOpaqueParam(att.baseType) }
+    if let tup = t.as(TupleTypeSyntax.self), tup.elements.count == 1, let only = tup.elements.first {
+        return isOpaqueParam(only.type)
+    }
+    if let some = t.as(SomeOrAnyTypeSyntax.self) { return some.someOrAnySpecifier.text == "some" }
+    return false
+}
+
 /// The ELEMENT type name of a collection type: `[T]`/`Set<T>`/`Array<T>`/`ContiguousArray<T>` → `T`
 /// (peeling Optional/`some`/`any` wrappers). Used to type a `for x in coll`/`coll.forEach { x in … }`
 /// iteration variable so its member calls classify — without it, a loop/closure over a typed

@@ -98,6 +98,14 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
     public func viaImportedProtocol(_ s: Speaker) { s.speak() }
     public func viaImportedProtocolLocal() { let s: Speaker = AppSpeaker(); s.speak() }
 
+    // ERASURE GUARD for the same rung. `some Speaker` is OPAQUE: the CALLER picks one concrete type, so
+    // the conformers visible here are NOT its candidate witnesses and unioning them charges effects this
+    // function cannot perform. `any Speaker` is an existential and genuinely may be any of them.
+    // `typeName` collapses both spellings to `Speaker`, so without an explicit check `some` inherits the
+    // existential's CHA — measured, this function was charged AppSpeaker's Env.
+    public func viaOpaqueImported(_ s: some Speaker) { s.speak() }
+    public func viaExistentialImported(_ s: any Speaker) { s.speak() }
+
     // FABRICATION GUARD for the same rung: `enum Rank: String` puts `String` in the inheritance
     // clause, so String LOOKS like a supertype with `Rank` as its conformer. A call on a plain
     // String-typed value must NOT dispatch into `Rank.lowercased`.
@@ -336,6 +344,16 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
         // child scan emits. The local half is recovered; the dep half stays out.
         XCTAssertFalse(Set(by["viaImportedProtocol"]?["inferred"] as? [String] ?? []).contains("Fs"),
                        "a plain dep report carries no conformer hierarchy — nothing may be invented for it")
+
+        // ERASURE. `any Speaker` keeps the recovery; `some Speaker` must NOT get it — the caller
+        // monomorphizes it, so charging every conformer's effect is a fabrication, not a conservative
+        // over-approximation. Both are spelled `Speaker` after type-name resolution, which is exactly why
+        // this needs asserting rather than assuming.
+        XCTAssertTrue(Set(by["viaExistentialImported"]?["inferred"] as? [String] ?? []).contains("Env"),
+                      "an EXISTENTIAL `any P` receiver keeps the dispatch; got \(by["viaExistentialImported"] ?? [:])")
+        XCTAssertFalse(Set(by["viaOpaqueImported"]?["inferred"] as? [String] ?? []).contains("Env"),
+                       "an OPAQUE `some P` receiver is monomorphized BY THE CALLER — dispatching it over "
+                       + "local conformers FABRICATES; got \(by["viaOpaqueImported"] ?? [:])")
     }
 
     // The recovery is chaining-INDEPENDENT: the conformance is declared in the app, so it holds with
