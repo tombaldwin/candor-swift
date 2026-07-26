@@ -65,6 +65,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var fields: [String: [String: (name: String?, isFunction: Bool)]] = [:]
     var fieldArrayElem: [String: [String: String]] = [:]
     var fieldDictValue: [String: [String: String]] = [:]
+    var opaqueFields: [String: Set<String>] = [:]
     var caseAssocAll: [String: Set<String>] = [:]
     var staticFactoryFields: [(type: String, field: String, leaf: String)] = []
     var protocolMethods: [String: Set<String>] = [:]
@@ -153,6 +154,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (t, fs) in c.fields { fields[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.fieldArrayElem { fieldArrayElem[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.fieldDictValue { fieldDictValue[t, default: [:]].merge(fs) { a, _ in a } }
+        for (t, fs) in c.opaqueFields { opaqueFields[t, default: []].formUnion(fs) }
         for (cn, ts) in c.caseAssoc { caseAssocAll[cn, default: []].formUnion(ts) }
         for (pn, ms) in c.protocolMethods { protocolMethods[pn, default: []].formUnion(ms) }
         for (pn, ss) in c.protocolSupers { protocolSupers[pn, default: []].formUnion(ss) }
@@ -422,6 +424,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                declaredTypes: declaredTypes,
                                localProtocols: localProtocolNames, returns: returnsIdx,
                                fieldArrayElem: fieldArrayElem, fieldDictValue: fieldDictValue,
+                               opaqueFields: opaqueFields,
                                enumCaseValueType: enumCaseValueType, dynamicMemberTypes: dynamicMemberTypes,
                                propertyWrapperTypes: propertyWrapperTypes, wrappedProps: wrappedProps,
                                localFreeFns: localFreeFnNames, typeAliases: typeAliases,

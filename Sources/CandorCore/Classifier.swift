@@ -726,8 +726,11 @@ public func typeName(_ t: TypeSyntax) -> (name: String?, isFunction: Bool) {
 /// analysis they are opposites. `any P` is erased: the value could be any conformer, so the conformers
 /// visible here really are its candidate witnesses. `some P` is monomorphized BY THE CALLER: exactly one
 /// concrete type is chosen at each call site, so unioning every conformer's effects onto the callee
-/// charges it with effects it cannot perform. (`<T: P>` is the same thing under another spelling, and was
-/// already inert here because the param's type name is `T`, which resolves to nothing.)
+/// charges it with effects it cannot perform. (`<T: P>` is the same thing under another spelling. In
+/// PARAMETER position it is inert here because the param's type name is `T`, which resolves to nothing —
+/// but `[T]`, a `T`-typed FIELD and `where Element: P` all DO resolve to the bound, so those forms carry
+/// their opacity through `opaqueArrayParams`/`opaqueFields`/`selfElementType` instead of through this
+/// predicate. The gate is the same one; only the spelling that reaches it differs.)
 ///
 /// Found via candor-rust, which hit the identical trap from the other side: gating its imported-trait CHA
 /// on PROVENANCE alone put 32 spurious Unknowns on serde_json, and erasure was the discriminator that
@@ -747,10 +750,17 @@ public func isOpaqueParam(_ t: TypeSyntax) -> Bool {
 /// iteration variable so its member calls classify — without it, a loop/closure over a typed
 /// collection dropped its receiver to pure (a §4 under-report on a very common Swift shape).
 public func arrayElementName(_ t: TypeSyntax) -> String? {
-    if let arr = t.as(ArrayTypeSyntax.self) { return typeName(arr.element).name }
-    if let opt = t.as(OptionalTypeSyntax.self) { return arrayElementName(opt.wrappedType) }
-    if let att = t.as(AttributedTypeSyntax.self) { return arrayElementName(att.baseType) }
-    if let some = t.as(SomeOrAnyTypeSyntax.self) { return arrayElementName(some.constraint) }
+    arrayElementType(t).flatMap { typeName($0).name }
+}
+
+/// The ELEMENT type SYNTAX of a collection type — `arrayElementName` without the name projection, so a
+/// caller that needs to inspect the element's SPELLING (is it `some P`? — `isOpaqueParam`) can, rather
+/// than re-deriving the same peeling and drifting from it.
+public func arrayElementType(_ t: TypeSyntax) -> TypeSyntax? {
+    if let arr = t.as(ArrayTypeSyntax.self) { return arr.element }
+    if let opt = t.as(OptionalTypeSyntax.self) { return arrayElementType(opt.wrappedType) }
+    if let att = t.as(AttributedTypeSyntax.self) { return arrayElementType(att.baseType) }
+    if let some = t.as(SomeOrAnyTypeSyntax.self) { return arrayElementType(some.constraint) }
     if let gen = t.as(IdentifierTypeSyntax.self), let args = gen.genericArgumentClause,
        // The async-sequence/task-group element is also the FIRST generic argument: `for await x in s`
        // over an `AsyncStream<E>`/`AsyncThrowingStream<E, _>`/`TaskGroup<E>`/`ThrowingTaskGroup<E, _>`
@@ -759,7 +769,7 @@ public func arrayElementName(_ t: TypeSyntax) -> String? {
        ["Array", "Set", "ContiguousArray", "ArraySlice",
         "AsyncStream", "AsyncThrowingStream", "TaskGroup", "ThrowingTaskGroup"].contains(gen.name.text),
        let first = args.arguments.first, let at = first.argument.as(TypeSyntax.self) {
-        return typeName(at).name
+        return at
     }
     return nil
 }

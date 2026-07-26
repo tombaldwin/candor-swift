@@ -35,6 +35,11 @@ struct FnInfo {
     /// this receiver's candidate witnesses. Recorded so the Driver's CHA arm can skip them while every
     /// other use of the type (classifier, §2 dep join) proceeds normally.
     var opaqueParams: Set<String> = []
+    /// Params whose ELEMENT type is monomorphized: `[some P]`, and `[T]` under a `<T: P>` bound. Unlike a
+    /// bare `T` param (whose type name resolves to nothing) the element IS resolved to the bound below, so
+    /// a `for x in p` / `p.forEach { $0 … }` binder inherits a protocol name for which the CALLER picked a
+    /// single conformer — the same monomorphized receiver `opaqueParams` covers, one container out.
+    var opaqueArrayParams: Set<String> = []
     var protoParams: [String: String] = [:]  // param name -> local protocol name
     var arrayParams: [String: String] = [:]  // param name -> ELEMENT type (a `[T]` param, for `for x in p`)
     var dictParams: [String: String] = [:]   // param name -> VALUE type (a `[K: V]` param, for `for (k,v)`)
@@ -95,6 +100,11 @@ final class DeclCollector: SyntaxVisitor {
     var fns: [FnInfo] = []
     var fields: [String: [String: (name: String?, isFunction: Bool)]] = [:] // Type -> field -> info
     var typeGenericBounds: [String: [String: String]] = [:]  // Type -> its generic param -> protocol bound
+    /// Fields whose recorded type is MONOMORPHIZED rather than erased: a field typed as the enclosing
+    /// type's generic param (`struct Pipe<T: Saver> { var item: T }` — resolved to `Saver` below), or one
+    /// spelled `some P`. Whoever instantiates `Pipe` picks the single conforming type, so the conformers
+    /// visible here are not this field's candidate witnesses. Consumed only by the Driver's CHA arm.
+    var opaqueFields: [String: Set<String>] = [:]         // Type -> field names
     var fieldArrayElem: [String: [String: String]] = [:]  // Type -> field -> ELEMENT type (`[T]` field)
     var fieldDictValue: [String: [String: String]] = [:]  // Type -> field -> VALUE type (`[K: V]` field)
     var protocolMethods: [String: Set<String>] = [:]   // protocol -> declared method names
@@ -556,7 +566,15 @@ final class DeclCollector: SyntaxVisitor {
                     var info = typeName(ann.type)
                     // a field typed as the enclosing type's GENERIC PARAM resolves to its bound, so a
                     // protocol-typed field dispatches (`Pipe<T: Saver>.item` → Saver → `item.save()` fires).
-                    if let tn = info.name, let bound = typeGenericBounds[ty]?[tn] { info = (bound, info.isFunction) }
+                    // …and that resolution is MONOMORPHIZED — the instantiator of `Pipe` picks one
+                    // conformer — so it is recorded as opaque, exactly like a `some P` parameter. `any P`
+                    // was written as a type here and stays erased (a real existential field).
+                    if let tn = info.name, let bound = typeGenericBounds[ty]?[tn] {
+                        info = (bound, info.isFunction)
+                        opaqueFields[ty, default: []].insert(name)
+                    } else if isOpaqueParam(ann.type) {
+                        opaqueFields[ty, default: []].insert(name)
+                    }
                     fields[ty, default: [:]][name] = info
                     if let elem = arrayElementName(ann.type) { fieldArrayElem[ty, default: [:]][name] = elem }
                     if let val = dictValueName(ann.type) { fieldDictValue[ty, default: [:]][name] = val }
@@ -728,7 +746,16 @@ final class DeclCollector: SyntaxVisitor {
             // `[T]`/`AsyncStream<T>`/…; resolve a GENERIC element to its protocol BOUND (`[T]` where
             // `<T: Doer>` → element `Doer`), mirroring the plain-param resolution below, so `for x in items
             // { x.go() }` dispatches over the bound exactly like an existential `[any Doer]` element does.
-            else if let elem = arrayElementName(p.type) { info.arrayParams[pname] = genericBounds[elem] ?? elem }
+            // …and it dispatches over the bound *sound only for the erased spelling*. `[any Doer]` really
+            // may hold any conformer; `[T]` under `<T: Doer>` and `[some Doer]` are monomorphized by the
+            // CALLER, so the element binder is flagged opaque and the Driver's local-conformer CHA skips
+            // it (every other use of the element type — classifier, §2 dep join — proceeds).
+            else if let elem = arrayElementName(p.type) {
+                info.arrayParams[pname] = genericBounds[elem] ?? elem
+                if genericBounds[elem] != nil || (arrayElementType(p.type).map(isOpaqueParam) ?? false) {
+                    info.opaqueArrayParams.insert(pname)
+                }
+            }
             else if let val = dictValueName(p.type) { info.dictParams[pname] = val }        // `[K: V]`/`Dictionary<K,V>`
             else if let tn = t.name {
                 // resolve a generic param to its protocol BOUND (`x: T` where `<T: Sender>` → dispatch P)

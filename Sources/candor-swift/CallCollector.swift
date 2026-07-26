@@ -59,6 +59,7 @@ final class CallCollector: SyntaxVisitor {
     let fields: [String: [String: (name: String?, isFunction: Bool)]]
     let fieldArrayElem: [String: [String: String]]  // Type -> field -> [T] element (self.field loops)
     let fieldDictValue: [String: [String: String]]  // Type -> field -> [K: V] value
+    let opaqueFields: [String: Set<String>]         // Type -> fields whose type is monomorphized
     let localTypes: Set<String>
     let declaredTypes: Set<String>  // types with a REAL local definition (NOT extension-only) — the shadow
                                     // discipline keys on this so a member call on an extension-only κ-platform
@@ -104,8 +105,16 @@ final class CallCollector: SyntaxVisitor {
     static let PURE_STDLIB_FREE_FNS: Set<String> = [
         "max", "min", "abs", "swap", "zip", "stride", "repeatElement",
     ]
-    /// Parameter names declared `some P` in THIS signature (opaque, caller-monomorphized).
-    var opaqueParamNames: Set<String> = []
+    /// Names bound to a value whose type is caller-MONOMORPHIZED rather than erased, so the conformers
+    /// visible here are not its candidate witnesses (see `isOpaqueParam`). Three sources, all the same
+    /// question under different spellings: a `some P` parameter; a binder that takes its type from a
+    /// `[some P]` / `[T]`-where-`T: P` element (`for x in xs`, `xs.forEach { $0 … }`); and `self`'s
+    /// element in an `extension Array where Element: P`. Consumed ONLY by the local-conformer CHA arm.
+    var monoNames: Set<String> = []
+    /// Names whose ARRAY ELEMENT type is monomorphized — the container form of `monoNames`, kept in
+    /// lockstep with `arrayElem`: every write to one writes the other, so a rebind can never leave a
+    /// stale opacity sitting behind a fresh type.
+    var opaqueElem: Set<String> = []
     let localProtocols: Set<String> // local protocol names — a receiver typed as one is DISPATCH
     let returns: [String: String]   // unambiguous factory return types (the candor-scan move)
     /// Locals bound from a CALL whose return type we could not determine, where the callee is not a local
@@ -179,6 +188,7 @@ final class CallCollector: SyntaxVisitor {
          declaredTypes: Set<String>,
          localProtocols: Set<String>, returns: [String: String],
          fieldArrayElem: [String: [String: String]], fieldDictValue: [String: [String: String]],
+         opaqueFields: [String: Set<String>] = [:],
          enumCaseValueType: [String: String], dynamicMemberTypes: Set<String>,
          propertyWrapperTypes: Set<String>, wrappedProps: [String: [String: String]],
          localFreeFns: Set<String>, typeAliases: [String: String],
@@ -198,13 +208,15 @@ final class CallCollector: SyntaxVisitor {
         self.selfElementType = info.selfElementType
         self.fnTyped = info.fnTypedParams
         self.protoTyped = info.protoParams
-        self.opaqueParamNames = info.opaqueParams
+        self.monoNames = info.opaqueParams
+        self.opaqueElem = info.opaqueArrayParams
         self.arrayElem = info.arrayParams
         self.dictElem = info.dictParams
         self.tupleElem = info.tupleParams
         self.fields = fields
         self.fieldArrayElem = fieldArrayElem
         self.fieldDictValue = fieldDictValue
+        self.opaqueFields = opaqueFields
         self.localTypes = localTypes
         self.declaredTypes = declaredTypes
         self.localProtocols = localProtocols
@@ -261,13 +273,18 @@ final class CallCollector: SyntaxVisitor {
 
     /// The receiver chain's root: `FileManager.default.contents` -> ("FileManager", path). A root
     /// identifier resolves through vars (param/let types); `self` resolves to the enclosing type.
-    private func rootOf(_ raw: ExprSyntax, _ depth: Int = 0) -> (root: String?, isVar: Bool, path: [String]) {
+    /// `mono` says the resolved type is a caller-MONOMORPHIZED generic (a `some P` param, a `[T: P]`
+    /// element binder, a `T`-typed field of a generic type) rather than an erased existential — see
+    /// `monoNames`. It travels WITH the resolution rather than being re-derived at the call site,
+    /// because the same receiver spelling can resolve through vars, a field, or a subscript element,
+    /// and only the resolving branch knows which one answered.
+    private func rootOf(_ raw: ExprSyntax, _ depth: Int = 0) -> (root: String?, isVar: Bool, path: [String], mono: Bool) {
         // Receiver chains recurse with the syntactic nesting (`a.b.c…`, ternary arms, subscript bases —
         // the last via elementTypeOf/dictValueOf, which call back here). Real receivers nest <10 deep;
         // a pathological/generated expression could otherwise overflow the stack. Past a generous bound,
         // give up resolving the type (root = nil = untyped receiver) — the SAFE direction (the call may
         // under-report, never a crash), exactly what an unresolvable receiver already yields.
-        if depth > 200 { return (nil, false, []) }
+        if depth > 200 { return (nil, false, [], false) }
         let expr = Self.peel(raw)
         // `super.m()` — an explicit call to the SUPERCLASS's implementation. It is not a DeclReference, so it
         // fell through this resolver entirely and the call was dropped: `override func load() { super.load() }`
@@ -275,31 +292,31 @@ final class CallCollector: SyntaxVisitor {
         // effect two lines up. Resolving it to the ENCLOSING type would be wrong for the override case (the
         // edge would point at the overriding method itself and add nothing), so mark it and let the driver
         // walk the supertype chain, skipping the enclosing type.
-        if expr.is(SuperExprSyntax.self) { return (Self.superMarker, true, []) }
+        if expr.is(SuperExprSyntax.self) { return (Self.superMarker, true, [], false) }
         if let dr = expr.as(DeclReferenceExprSyntax.self) {
             let n = dr.baseName.text
             // `self` (instance) and `Self` (the enclosing TYPE, used for `Self.staticMethod()`) both resolve
             // to the enclosing type for member resolution — so `Self.decode(…)` is a precise typed call on the
             // type, not a guessed bare member that would either drop or mis-link to a same-named sibling.
-            if n == "self" || n == "Self" { return (enclosingType, true, []) }
-            if let t = vars[n] { return (t, true, [n]) }
+            if n == "self" || n == "Self" { return (enclosingType, true, [], false) }
+            if let t = vars[n] { return (t, true, [n], monoNames.contains(n)) }
             // IMPLICIT SELF: a bare identifier inside a method body can be a FIELD of the
             // enclosing type (`handler.log(s)` ≡ `self.handler.log(s)`) — the protocol-field probe
             // found dispatchers resolving as raw names and missing the field index entirely.
             if let et = enclosingType, let f = fields[et]?[n], let ft = f.name {
-                return (ft, true, [n])
+                return (ft, true, [n], opaqueFields[et]?.contains(n) == true)
             }
             // a bare TYPE/alias reference (`FM.default`, the base of a static-member chain): resolve a
             // typealias to its underlying type so κ keys on the real spelling (`FM`→`FileManager`).
-            return (dealias(n), false, [n])
+            return (dealias(n), false, [n], false)
         }
         if let ma = expr.as(MemberAccessExprSyntax.self) {
             // tuple element/member: `p.0` / `p.c` where p is a tuple-typed local/param
             if let baseDR = ma.base?.as(DeclReferenceExprSyntax.self),
                let elemType = tupleElem[baseDR.baseName.text]?[ma.declName.baseName.text] {
-                return (elemType, true, [])
+                return (elemType, true, [], false)
             }
-            let inner = ma.base.map { rootOf($0, depth + 1) } ?? (root: nil, isVar: false, path: [])
+            let inner = ma.base.map { rootOf($0, depth + 1) } ?? (root: nil, isVar: false, path: [], mono: false)
             let member = ma.declName.baseName.text
             // WALK THROUGH A FIELD: if the chain so far is a local type with `member` as a stored
             // field, the chain's type becomes the FIELD's type — so `self.client.send()` /
@@ -307,9 +324,9 @@ final class CallCollector: SyntaxVisitor {
             // (explicit `self.field.method()` and field-of-field chains otherwise resolved against the
             // wrong type and dropped to pure — the bare-identifier implicit-self path already did this).
             if let rt = inner.root, let f = fields[rt]?[member], let ft = f.name, !f.isFunction {
-                return (ft, true, inner.path + [member])
+                return (ft, true, inner.path + [member], opaqueFields[rt]?.contains(member) == true)
             }
-            return (inner.root, inner.isVar, inner.path + [member])
+            return (inner.root, inner.isVar, inner.path + [member], inner.mono)
         }
         if let call = expr.as(FunctionCallExprSyntax.self) {
             // `Svc().act()` — a constructor call types the chain; a FACTORY's unambiguous return
@@ -318,8 +335,8 @@ final class CallCollector: SyntaxVisitor {
                 let n = ctor.baseName.text
                 // `Proc()` where `typealias Proc = Process` — the ctor types the value as the aliased
                 // type so its members classify (`p.run()`→Exec). A LOCAL type shadows (dealias no-ops).
-                if n.first?.isUppercase == true { return (dealias(n), true, [n]) }
-                if let rt = returns[n] { return (rt, true, [n]) }
+                if n.first?.isUppercase == true { return (dealias(n), true, [n], false) }
+                if let rt = returns[n] { return (rt, true, [n], false) }
             }
             // `Outer.Inner()` — a NESTED-TYPE constructor: the callee is a member-access spelling a dotted
             // TYPE path (`Outer.Inner`), not a factory member. When that dotted path is a known local type,
@@ -327,19 +344,22 @@ final class CallCollector: SyntaxVisitor {
             // BEFORE the factory-return path so a nested ctor isn't mistaken for a `.member`-named factory.
             if let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
                let dotted = dottedTypePath(Syntax(ma)), localTypes.contains(dealias(dotted)) {
-                return (dealias(dotted), true, [ma.declName.baseName.text])
+                return (dealias(dotted), true, [ma.declName.baseName.text], false)
             }
             if let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
                let rt = returns[ma.declName.baseName.text] {
-                return (rt, true, [ma.declName.baseName.text])
+                return (rt, true, [ma.declName.baseName.text], false)
             }
-            return (nil, false, [])
+            return (nil, false, [], false)
         }
         // `coll[i]` — an array subscript yields the element type, a dictionary subscript the value
         // type (`cs[0].send()` / `d["k"]?.send()` resolved against the bare base and dropped to pure).
         if let sub = expr.as(SubscriptCallExprSyntax.self) {
-            if let t = elementTypeOf(sub.calledExpression, depth + 1) ?? dictValueOf(sub.calledExpression, depth + 1) {
-                return (t, true, [])
+            if let e = elementTypeOf(sub.calledExpression, depth + 1) {
+                return (e.name, true, [], e.mono)
+            }
+            if let v = dictValueOf(sub.calledExpression, depth + 1) {
+                return (v, true, [], false)   // a `[K: V]` VALUE is never bound-resolved (see dictValueOf)
             }
         }
         // SwiftParser leaves operators UNFOLDED, so `x as! T` and `cond ? a : b` are SequenceExprs:
@@ -348,15 +368,15 @@ final class CallCollector: SyntaxVisitor {
             // `x as! T` / `x as? T` → `[operand, unresolvedAsExpr, typeExpr]`: the type is the result.
             if elems.count == 3, elems[1].is(UnresolvedAsExprSyntax.self),
                let te = elems[2].as(TypeExprSyntax.self), let t = typeName(te.type).name {
-                return (t, true, [])
+                return (t, true, [], isOpaqueParam(te.type))
             }
             // `cond ? a : b` → `[cond, unresolvedTernaryExpr(then), elseExpr]`: both arms one type.
             if elems.count == 3, let tern = elems[1].as(UnresolvedTernaryExprSyntax.self) {
                 let a = rootOf(tern.thenExpression, depth + 1), b = rootOf(elems[2], depth + 1)
-                if let ra = a.root, ra == b.root, a.isVar, b.isVar { return (ra, true, []) }
+                if let ra = a.root, ra == b.root, a.isVar, b.isVar { return (ra, true, [], a.mono || b.mono) }
             }
         }
-        return (nil, false, [])
+        return (nil, false, [], false)
     }
 
     /// The Foundation file-write idiom `value.write(to: url)` — `Data.write(to:)` and
@@ -692,13 +712,16 @@ final class CallCollector: SyntaxVisitor {
     // The ELEMENT type a sequence yields per iteration. A `[T]` local/param/field; `self.field`; an
     // element-PRESERVING transform (`coll.filter/sorted/reversed/prefix/…`) → coll's element. A
     // literal/computed/transforming (map) sequence is left untyped — never guess.
-    private func elementTypeOf(_ expr: ExprSyntax, _ depth: Int = 0) -> String? {
+    private func elementTypeOf(_ expr: ExprSyntax, _ depth: Int = 0) -> (name: String, mono: Bool)? {
         if depth > 200 { return nil }   // bounds the rootOf ⇄ elementTypeOf recursion (see rootOf)
         let e = Self.peel(expr)
         if let dr = e.as(DeclReferenceExprSyntax.self) {
             let n = dr.baseName.text
-            if let t = arrayElem[n] { return t }
-            if let et = enclosingType, let t = fieldArrayElem[et]?[n] { return t }  // implicit-self field
+            if let t = arrayElem[n] { return (t, opaqueElem.contains(n)) }
+            // implicit-self field. `fieldArrayElem` records the element SPELLING and never resolves it
+            // through `typeGenericBounds`, so a `[T]` field's element is `T` (resolves to nothing) and
+            // there is no monomorphized protocol name to guard — hence `false`, not an omission.
+            if let et = enclosingType, let t = fieldArrayElem[et]?[n] { return (t, false) }
             return nil
         }
         // `dict.values` iteration (`for v in m.values { v.go() }`) yields the dict's VALUE type — the
@@ -707,11 +730,11 @@ final class CallCollector: SyntaxVisitor {
         // (dispatch-irrelevant for the value payload) so only `.values` carries.
         if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base,
            ma.declName.baseName.text == "values", let v = dictValueOf(base, depth + 1) {
-            return v
+            return (v, false)
         }
         if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base,
            let bt = rootOf(base, depth + 1).root, let t = fieldArrayElem[bt]?[ma.declName.baseName.text] {
-            return t  // a `[E]` field of ANY typed receiver: `self.items` / `pool.clients` / `ps[0].items`
+            return (t, false)  // a `[E]` field of ANY typed receiver: `self.items` / `pool.clients` / `ps[0].items`
         }
         if let call = e.as(FunctionCallExprSyntax.self),
            let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
@@ -757,8 +780,17 @@ final class CallCollector: SyntaxVisitor {
     private func clearBindingTypeOnly(_ name: String) {
         vars.removeValue(forKey: name)
         arrayElem.removeValue(forKey: name)
+        opaqueElem.remove(name)
         dictElem.removeValue(forKey: name)
         tupleElem.removeValue(forKey: name)
+    }
+
+    // `arrayElem` and `opaqueElem` describe the same binding and must move together: a name rebound to a
+    // NON-monomorphized collection has to LOSE its opacity, or the CHA stays suppressed on a receiver that
+    // is now erased — a silent under-report. One writer, so the pair can never drift.
+    private func setArrayElem(_ name: String, _ elem: (name: String, mono: Bool)) {
+        arrayElem[name] = elem.name
+        if elem.mono { opaqueElem.insert(name) } else { opaqueElem.remove(name) }
     }
 
     // Every identifier a binding pattern introduces (`x`, `(k, v)`, `(a, (b, c))`).
@@ -777,7 +809,7 @@ final class CallCollector: SyntaxVisitor {
     // harmless outward, so clearing is enough there. These two sets INVERT that, and each is wrong in
     // BOTH directions, which is why they need a scope rather than a clear:
     //
-    //   - `opaqueParamNames` suppresses the local-conformer CHA (d62dd69). Leaking it INTO a shadowing
+    //   - `monoNames` suppresses the local-conformer CHA (d62dd69). Leaking it INTO a shadowing
     //     binder suppresses the CHA for a receiver that is not the opaque parameter at all — the call
     //     reads silent-pure, the cardinal sin. Dropping it when the shadowing scope CLOSES re-fabricates
     //     the effect on the genuine `some P` receiver, which is the defect d62dd69 closed.
@@ -788,24 +820,33 @@ final class CallCollector: SyntaxVisitor {
     //
     // So: a binder CLEARS, the enclosing scope RESTORES (see enterShadowScope/leaveShadowScope).
     private func shadowName(_ name: String) {
-        opaqueParamNames.remove(name)
+        monoNames.remove(name)
         depBoundLocals.remove(name)
     }
 
-    // Saved `opaqueParamNames`/`depBoundLocals` per scope-delimiting node, restored when the node
+    // Saved `monoNames`/`depBoundLocals` per scope-delimiting node, restored when the node
     // closes. Keyed by node id rather than a stack so an un-entered scope can never pop someone else's
     // save; SwiftSyntax calls `visitPost` for every visited node (including one whose `visit` returned
     // `.skipChildren`), so entries cannot leak.
     private var shadowScopes: [SyntaxIdentifier: (opaque: Set<String>, depBound: Set<String>)] = [:]
 
+    /// Closure node -> element parameters the enclosing call typed from a MONOMORPHIZED element. Handed
+    /// over rather than set directly because `typeClosureParams` runs before the closure is entered (see
+    /// `visit(ClosureExprSyntax)`). Consumed once, so an un-entered closure cannot leak an entry.
+    private var monoClosureParams: [SyntaxIdentifier: Set<String>] = [:]
+
     private func enterShadowScope(_ node: some SyntaxProtocol) {
-        guard !opaqueParamNames.isEmpty || !depBoundLocals.isEmpty else { return }
-        shadowScopes[node.id] = (opaqueParamNames, depBoundLocals)
+        // Saved UNCONDITIONALLY. The old `guard !isEmpty` skipped the save when both sets were empty on
+        // entry — fine while the sets could only ever SHRINK inside a scope, and wrong now that a binder
+        // can ADD to `monoNames` (a `for x in xs` element that is monomorphized). With no save there is
+        // nothing to restore, so that flag leaked out past the loop and suppressed the CHA on a later,
+        // unrelated `x` — the silent under-report this whole mechanism exists to avoid.
+        shadowScopes[node.id] = (monoNames, depBoundLocals)
     }
 
     private func leaveShadowScope(_ node: some SyntaxProtocol) {
         guard let saved = shadowScopes.removeValue(forKey: node.id) else { return }
-        opaqueParamNames = saved.opaque
+        monoNames = saved.opaque
         depBoundLocals = saved.depBound
     }
 
@@ -828,6 +869,10 @@ final class CallCollector: SyntaxVisitor {
     override func visit(_ node: ClosureExprSyntax) -> SyntaxVisitorContinueKind {
         enterShadowScope(node)
         for p in closureParamNames(node) { shadowName(p.name) }
+        // …then re-apply the opacity the enclosing call's `typeClosureParams` determined for the element
+        // parameter (`xs.forEach { $0.greet() }` over a `[T]`/`[some P]`): the shadow above is what makes
+        // the flag scoped to THIS closure, so it has to be set after it, not before.
+        if let mono = monoClosureParams.removeValue(forKey: node.id) { monoNames.formUnion(mono) }
         return .visitChildren
     }
     override func visitPost(_ node: ClosureExprSyntax) { leaveShadowScope(node) }
@@ -848,7 +893,10 @@ final class CallCollector: SyntaxVisitor {
             // type candor can't infer still types the loop var (was ignored → `x.member()` silent-pure).
             if let ann = node.typeAnnotation, let tn = typeName(ann.type).name {
                 vars[name] = tn
-            } else if let elem = elementTypeOf(node.sequence) { vars[name] = elem } else { clearBinding(name) }
+            } else if let elem = elementTypeOf(node.sequence) {
+                vars[name] = elem.name
+                if elem.mono { monoNames.insert(name) }   // `for x in xs` over `[T]`/`[some P]` (shadowName ran above)
+            } else { clearBinding(name) }
         } else if let tup = node.pattern.as(TuplePatternSyntax.self), tup.elements.count == 2,
                   let second = tup.elements.last?.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
             if let v = dictValueOf(node.sequence) {
@@ -857,7 +905,8 @@ final class CallCollector: SyntaxVisitor {
                       let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
                       ma.declName.baseName.text == "enumerated", let base = ma.base,
                       let elem = elementTypeOf(base) {
-                vars[second] = elem  // for (offset, element) in coll.enumerated()
+                vars[second] = elem.name  // for (offset, element) in coll.enumerated()
+                if elem.mono { monoNames.insert(second) }
             } else { clearBinding(second) }
         }
         return .visitChildren
@@ -987,7 +1036,7 @@ final class CallCollector: SyntaxVisitor {
         let iteratorMethod: String? = (node.calledExpression.as(MemberAccessExprSyntax.self))?.declName.baseName.text
             ?? node.calledExpression.as(DeclReferenceExprSyntax.self)?.baseName.text
         let pairIterator = iteratorMethod.map(Self.ELEMENT_PAIR_ITERATORS.contains) ?? false
-        let iteratorElem: String? = {
+        let iteratorElem: (name: String, mono: Bool)? = {
             if let ma = node.calledExpression.as(MemberAccessExprSyntax.self),
                Self.ELEMENT_ITERATORS.contains(ma.declName.baseName.text) || pairIterator,
                let base = ma.base {
@@ -998,14 +1047,16 @@ final class CallCollector: SyntaxVisitor {
                 // over-fire guard is `closure == elemClosure` + `localProtocols` at dispatch: a concrete
                 // or non-protocol optional payload isn't in `protoTyped`, so it stays untyped (pure).
                 if let dr = Self.peel(base).as(DeclReferenceExprSyntax.self), let proto = protoTyped[dr.baseName.text] {
-                    return proto
+                    return (proto, false)
                 }
             }
             // BARE element-iterator over implicit `self` — `forEach { $0.persist() }` inside
             // `extension Array where Element: Saveable`: self's element is that bound (R28).
             if let dr = node.calledExpression.as(DeclReferenceExprSyntax.self),
                Self.ELEMENT_ITERATORS.contains(dr.baseName.text) || pairIterator {
-                return selfElementType
+                // `extension Array where Element: P` — Element is a generic parameter of the ARRAY the
+                // caller holds, so it is monomorphized there, never erased. Always `mono`.
+                return selfElementType.map { ($0, true) }
             }
             return nil
         }()
@@ -1019,8 +1070,14 @@ final class CallCollector: SyntaxVisitor {
                 if let annotated = p.annotated {
                     vars[p.name] = annotated                 // explicit `{ (x: Foo) in }` — precise
                 } else if (i == 0 || pairIterator), let elem = iteratorElem, closure == elemClosure {
-                    vars[p.name] = elem                      // iterator element param — typed (both params
-                    // for a pair-iterator like sorted/min/max; only the first for the rest)
+                    // iterator element param — typed (both params for a pair-iterator like
+                    // sorted/min/max; only the first for the rest)
+                    vars[p.name] = elem.name
+                    // …and its opacity is DEFERRED to `visit(ClosureExprSyntax)`. This runs on the
+                    // enclosing CALL, before the closure node is entered, and that visit shadows every
+                    // closure parameter — so a flag set here would be wiped a moment later. Record it
+                    // against the closure and let the closure's own visit re-apply it inside its save.
+                    if elem.mono { monoClosureParams[closure.id, default: []].insert(p.name) }
                 } else {
                     clearBindingTypeOnly(p.name)             // every other param — CLEARED, never leak
                     // (the FLAGS are cleared in visit(ClosureExprSyntax), inside the closure's save)
@@ -1254,7 +1311,7 @@ final class CallCollector: SyntaxVisitor {
             }
         } else if let ma = node.calledExpression.as(MemberAccessExprSyntax.self) {
             let member = ma.declName.baseName.text
-            let base = ma.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [])
+            let base = ma.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [], mono: false)
             // a function-typed FIELD invoked (`d.f()` where f: () -> Void) — the unknown_dyn case
             if let rt = base.root, let f = fields[rt]?[member], f.isFunction {
                 // FINDING 2 — `obj.f()` where `f` is a stored CLOSURE PROPERTY (a resolvable local closure
@@ -1346,9 +1403,7 @@ final class CallCollector: SyntaxVisitor {
                 // dep quals lead with a type name — but keep the owner honest: only a tracked value
                 // (isVar) or a type-looking root qualifies.
                 let owner = base.root.flatMap { r in (base.isVar || r.first?.isUppercase == true) ? r : nil }
-                let opaque = ma.base?.as(DeclReferenceExprSyntax.self)
-                    .map { opaqueParamNames.contains($0.baseName.text) } ?? false
-                calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), opaqueRecv: opaque, extOwner: owner))
+                calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), opaqueRecv: base.mono, extOwner: owner))
                 // COULD-NOT-FORM-A-KEY: the receiver is a local bound from a dependency call we could not
                 // type, and nothing above resolved it. Emit a marker the Driver consumes into an honest
                 // `Unknown`; it resolves to NOTHING by design — it exists to say no key was formed, not to
@@ -1391,7 +1446,7 @@ final class CallCollector: SyntaxVisitor {
             else {
                 let info = rootOf(initVal)
                 if info.isVar, let t = info.root { vars[name] = t }
-                else if let elem = elementTypeOf(initVal) { arrayElem[name] = elem }
+                else if let elem = elementTypeOf(initVal) { setArrayElem(name, elem) }
                 else { clearBinding(name) }  // can't type the unwrapped value → clear (don't leak a stale type)
             }
         }
@@ -1407,7 +1462,7 @@ final class CallCollector: SyntaxVisitor {
             // `let general: NSPasteboard`) would fabricate the effect (`self.now` → root "Date", path
             // ["now"] → a bogus Clock). The receiver-rooted path matches the genuine reads
             // (`ProcessInfo.processInfo.environment`, `Date.now`, `self.w.pinfo.environment`) without it.
-            let recv = node.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [])
+            let recv = node.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [], mono: false)
             if let root = recv.root, !declaredTypes.contains(root),
                // a REAL local type named like a platform clock/env owner (`struct ContinuousClock { let now }`)
                // shadows the κ table; an EXTENSION of a platform type (`extension ProcessInfo {…}`) does NOT
@@ -1518,7 +1573,7 @@ final class CallCollector: SyntaxVisitor {
             guard let op = elems[i + 1].as(BinaryOperatorExprSyntax.self) else { i += 1; continue }
             let opName = op.operator.text
             // resolve a local operand type from either side (the lhs first, then rhs)
-            let lt = rootOf(elems[i]), rt = i + 2 < elems.count ? rootOf(elems[i + 2]) : (root: nil, isVar: false, path: [])
+            let lt = rootOf(elems[i]), rt = i + 2 < elems.count ? rootOf(elems[i + 2]) : (root: nil, isVar: false, path: [], mono: false)
             // a binary operator takes two args — supply two opaque arg slots so overloaded operator
             // resolution (arity ≥ 2) keeps the edge.
             let opArgs: [ArgKind] = [.opaque, .opaque], opTypes: [String?] = [lt.isVar ? lt.root : nil, rt.isVar ? rt.root : nil]
@@ -1617,7 +1672,7 @@ final class CallCollector: SyntaxVisitor {
                 rootType = rootOf(sub.calledExpression).root      // `h[keyPath: \.prop]` → type of `h`
             } else if let call = p?.as(FunctionCallExprSyntax.self),
                       let ma = call.calledExpression.as(MemberAccessExprSyntax.self), let base = ma.base {
-                rootType = elementTypeOf(base)
+                rootType = elementTypeOf(base)?.name
             }
         }
         if let rt = rootType, localTypes.contains(rt) { propertyEdges.insert("\(rt).\(lastProp)") }
@@ -1838,7 +1893,7 @@ final class CallCollector: SyntaxVisitor {
         // a `(by:)`/`(into:)` etc. closure form supplies its own comparator — no implicit `<` runs.
         if node.arguments.contains(where: { Self.peel($0.expression).is(ClosureExprSyntax.self) })
             || node.trailingClosure != nil { return }
-        guard let elem = elementTypeOf(base), localTypes.contains(elem) else { return }
+        guard let elem = elementTypeOf(base)?.name, localTypes.contains(elem) else { return }
         // the `<` witness is EITHER a `static func <` member (`Element.<`) OR a top-level free
         // `func <(a: Element, b: Element)` — emit both forms, exactly as the binary-operator visitor does.
         // The free form is gated on a CONFIDENT local element type (argTypes), so matchOverloads routes by
@@ -1938,7 +1993,9 @@ final class CallCollector: SyntaxVisitor {
                     }
                 }
                 else if let tn = t.name { vars[name] = tn }
-                else if let elem = arrayElementName(ann.type) { arrayElem[name] = elem }  // `let xs: [T]`
+                else if let elem = arrayElementName(ann.type) {                            // `let xs: [T]`
+                    setArrayElem(name, (elem, arrayElementType(ann.type).map(isOpaqueParam) ?? false))
+                }
                 else if let val = dictValueName(ann.type) { dictElem[name] = val }        // `let m: [K: V]`
             } else if let v0 = binding.initializer?.value {
                 let v = Self.peel(v0)
@@ -2019,7 +2076,7 @@ final class CallCollector: SyntaxVisitor {
                         }
                         // a collection TRANSFORM result keeps the element type: `let active = cs.filter {…}`
                         // (then `for c in active` resolves). Element-preserving transforms only.
-                        else if let elem = elementTypeOf(v0) { arrayElem[name] = elem }
+                        else if let elem = elementTypeOf(v0) { setArrayElem(name, elem) }
                     }
                 } else if let ma = v.as(MemberAccessExprSyntax.self),
                           let baseDR = ma.base?.as(DeclReferenceExprSyntax.self),

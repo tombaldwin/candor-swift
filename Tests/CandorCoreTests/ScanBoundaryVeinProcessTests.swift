@@ -115,6 +115,42 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
     public func viaOpaqueImported(_ s: some Speaker) { s.speak() }
     public func viaExistentialImported(_ s: any Speaker) { s.speak() }
 
+    // THE SAME QUESTION, FOUR MORE DOORS. `some P` in a parameter is the only spelling whose opacity is
+    // visible on the parameter's own type. These reach the CHA with a receiver typed `Speaker` too, and
+    // each one is monomorphized just as hard — a `[T]` element under a `<T: Speaker>` bound, its `some`
+    // sugar, the `forEach` closure form of both, and a field typed as the enclosing type's generic param.
+    // Each was measured charging AppSpeaker's Env; each is called here ONLY with the pure conformer.
+    public func viaGenericElement<T: Speaker>(_ xs: [T]) { for x in xs { x.speak() } }
+    public func viaOpaqueElement(_ xs: [some Speaker]) { for x in xs { x.speak() } }
+    public func viaGenericForEach<T: Speaker>(_ xs: [T]) { xs.forEach { $0.speak() } }
+    public struct Relay<T: Speaker> {
+        public var inner: T
+        public init(inner: T) { self.inner = inner }
+        public func run() { inner.speak() }
+    }
+    // …and the ERASED CONTROLS for the same three shapes. These are the rung itself and must KEEP
+    // dispatching — without them a fix that simply stopped resolving container elements would pass.
+    public func viaExistentialElement(_ xs: [any Speaker]) { for x in xs { x.speak() } }
+    public func viaExistentialForEach(_ xs: [any Speaker]) { xs.forEach { $0.speak() } }
+    public struct ErasedRelay {
+        public var inner: any Speaker
+        public init(inner: any Speaker) { self.inner = inner }
+        public func run() { inner.speak() }
+    }
+    // The single PURE call site for the monomorphized forms, so "cannot perform Env" is a fact about
+    // this program and not only an argument about Swift's semantics.
+    public final class QuietSpeaker: Speaker {
+        public init() {}
+        public func speak() { }
+    }
+    public func callsTheMonomorphizedOnesWithAPureConformer() {
+        [QuietSpeaker()].speakAll()
+        viaGenericElement([QuietSpeaker()])
+        viaOpaqueElement([QuietSpeaker()])
+        viaGenericForEach([QuietSpeaker()])
+        Relay(inner: QuietSpeaker()).run()
+    }
+
     // SHADOWING, both directions. The opaque set is keyed by NAME, so a binder that REBINDS the name
     // leaves a receiver that is not the opaque parameter at all — suppressing the CHA there makes an
     // effectful call read silent-pure. `shadowed*` must RESOLVE.
@@ -222,6 +258,13 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
         }
     }
     public func plainString(_ s: String) -> String { return s.lowercased() }
+
+    // The FIFTH door, and the only one whose bound is on `self` rather than on a binding: inside
+    // `extension Array where Element: P` the element is a generic parameter of the ARRAY THE CALLER
+    // HOLDS, so it is monomorphized there and never erased.
+    extension Array where Element: Speaker {
+        public func speakAll() { forEach { $0.speak() } }
+    }
     """
 
     /// (root, depDir, appDir, ctlDir) — the split pair plus the one-package control.
@@ -467,6 +510,46 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
                        + "local conformers FABRICATES; got \(by["viaOpaqueImported"] ?? [:])")
     }
 
+    /// ERASURE, THE SPELLINGS `some P` DOES NOT COVER. d62dd69 keyed the gate on the PARAMETER's own
+    /// type, which answers the question for `func f(_ s: some P)` and for nothing else: a `[T]` element
+    /// under a `<T: P>` bound, its `[some P]` sugar, the `forEach` closure form of either, a field typed
+    /// as the enclosing type's generic parameter, and `extension Array where Element: P` all resolve to
+    /// the bound `P` too, and all of them are monomorphized by whoever supplies the concrete type. Each
+    /// was measured charging `AppSpeaker.speak`'s Env to a function whose only call site passes the pure
+    /// conformer — a fabrication, and the mirror of the miss the rung exists to close.
+    ///
+    /// The `viaExistential*` rows are not decoration: they are the same three shapes written `any P`,
+    /// where the local conformers really are the candidate witnesses. A fix that stopped resolving
+    /// container elements or generic fields at all would satisfy the first list and break these.
+    /// (candor-rust reached the identical conclusion from the other side — see `isOpaqueParam`.)
+    func testMonomorphizedElementsAndFieldsDoNotDispatchOverLocalConformers() throws {
+        let bin = try binaryURL()
+        let (root, _, app, _) = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        // chaining-independent, exactly like the rung it guards: the conformance is declared in the app.
+        XCTAssertEqual(try run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path]).code, 0)
+        let by = try fns(ofReport: root.appendingPathComponent("app-r.App.Swift.json"))
+        func eff(_ n: String) -> Set<String> { Set(by[n]?["inferred"] as? [String] ?? []) }
+
+        for erased in ["viaExistentialElement", "viaExistentialForEach", "ErasedRelay.run"] {
+            XCTAssertTrue(eff(erased).contains("Env"),
+                          "CONTROL \(erased): an `any Speaker` element/field IS erased, so the local "
+                          + "conformers are its witnesses and the dispatch must hold — without this the "
+                          + "rows below are satisfied by simply not resolving; got \(by[erased] ?? [:])")
+        }
+        for mono in ["viaGenericElement", "viaOpaqueElement", "viaGenericForEach", "Relay.run",
+                     "Array.speakAll"] {
+            XCTAssertFalse(eff(mono).contains("Env"),
+                           "\(mono): the element/field type is monomorphized by the CALLER — the only "
+                           + "call site passes QuietSpeaker, so charging AppSpeaker's Env is an effect "
+                           + "this function cannot perform; got \(by[mono] ?? [:])")
+        }
+        // and the caller inherits nothing it cannot reach either — the fabrication propagates.
+        XCTAssertFalse(eff("callsTheMonomorphizedOnesWithAPureConformer").contains("Env"),
+                       "the pure-conformer call site must stay pure; got "
+                       + "\(by["callsTheMonomorphizedOnesWithAPureConformer"] ?? [:])")
+    }
+
     /// The opaque-receiver suppression (d62dd69) is keyed by the parameter's NAME, and a name can be
     /// REBOUND. Both directions are asserted here, because each one alone is satisfiable by a wrong fix:
     ///
@@ -590,6 +673,12 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
     // THE FABRICATION MIRROR for that rung. Swift's inheritance clause is overloaded: `enum Rank: String`
     // records `String` as a supertype with `Rank` as its conformer, so an unguarded CHA would send every
     // call on a String-typed value into `Rank`'s methods. `plainString` must stay pure in EVERY mode.
+    //
+    // NOT SUBSUMED by the erasure gate, measured rather than assumed: they answer different questions.
+    // Erasure is about the receiver's SPELLING — `some P`/`<T: P>` is monomorphized, `any P` is not.
+    // A plain `s: String` parameter is a CONCRETE type that nobody monomorphizes, so the erasure gate
+    // has nothing to say about it. With `RAW_VALUE_BASE_TYPES` removed and the erasure gate in place,
+    // `plainString` reads `['Env']` via `Rank.lowercased`. Both guards stay.
     func testRawValueBaseDoesNotDispatchIntoItsEnums() throws {
         let bin = try binaryURL()
         let (root, dep, app, ctl) = try makeFixture()
