@@ -1949,10 +1949,37 @@ final class CallCollector: SyntaxVisitor {
     // (`.visitChildren`) to fold them in. Record the name so a bare `helper()` call below resolves to
     // THIS local func (shadowing) and is NOT also edged to a same-named module-level/sibling free fn —
     // which would fabricate the free fn's effects onto a caller whose local `helper` shadows it.
+    //
+    // ITS PARAMETERS ARE ITS OWN, and they are a SCOPE like every other binder. The enclosing unit's
+    // signature flags are keyed by NAME, and a nested `func` re-declaring one of those names does not
+    // inherit what the outer spelling meant: `func outer(_ s: some Speaker) { func inner(_ s: any
+    // Speaker) { s.speak() } }` had `inner`'s genuinely ERASED receiver suppressed by the outer
+    // parameter's opacity and read silent-pure — measured, and Env the moment the outer parameter is
+    // spelled `any`. This is the swift form of the nested-item leak candor-rust's R4 needed a third
+    // carve-out for: a nested item has its own signature but its calls attribute to the enclosing unit,
+    // so its parameters SHADOW the outer ones.
+    //
+    // A shadow alone would be the mirror sin — `func inner(_ s: some Speaker)` inside an erased outer
+    // would start dispatching over the local conformers — so the nested signature's OWN opacity is
+    // re-applied, through the same `isOpaqueParam`/`arrayElementType` predicates DeclCollector uses for
+    // a top-level parameter rather than a second copy of the rule. RESIDUAL, deliberately untouched:
+    // the TYPE indexes (`vars`/`arrayElem`) are function-wide by design and still hold the enclosing
+    // binding's type for the name — a pre-existing leak in both directions, unchanged here, and a
+    // separate measurement from this one.
     override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
         localFuncs.insert(node.name.text)
+        enterShadowScope(node)
+        for p in node.signature.parameterClause.parameters {
+            let name = (p.secondName ?? p.firstName).text
+            guard name != "_" else { continue }
+            shadowName(name)
+            opaqueElem.remove(name)
+            if isOpaqueParam(p.type) { monoNames.insert(name) }
+            if arrayElementType(p.type).map(isOpaqueParam) == true { opaqueElem.insert(name) }
+        }
         return .visitChildren
     }
+    override func visitPost(_ node: FunctionDeclSyntax) { leaveShadowScope(node) }
 
     override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
         for binding in node.bindings {

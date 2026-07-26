@@ -150,6 +150,9 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
         viaGenericForEach([QuietSpeaker()])
         Relay(inner: QuietSpeaker()).run()
         elemOpacityRestoredAfterShadow([QuietSpeaker()], true)
+        nestedFuncOwnOpacity(QuietSpeaker())
+        nestedFuncOwnElementOpacity([QuietSpeaker()])
+        opaqueAfterNestedFuncShadow(QuietSpeaker())
     }
 
     // SHADOWING, both directions. The opaque set is keyed by NAME, so a binder that REBINDS the name
@@ -212,6 +215,34 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
             _ = zs
         }
         for y in ys { y.speak() }
+    }
+    // A NESTED `func` HAS ITS OWN SIGNATURE, and its calls attribute to this enclosing unit. The
+    // opacity set is keyed by NAME, so `inner`'s genuinely ERASED receiver inherited the enclosing
+    // parameter's `some` and read silent-pure. `nestedFuncNoShadow` is the mechanism control: the same
+    // body with the OUTER parameter spelled `any`, which must resolve in both arms.
+    public func nestedFuncOwnParam(_ s: some Speaker) {
+        func inner(_ s: any Speaker) { s.speak() }
+        inner(QuietSpeaker())
+    }
+    public func nestedFuncNoShadow(_ s: any Speaker) {
+        func inner(_ s: any Speaker) { s.speak() }
+        inner(QuietSpeaker())
+    }
+    // …and the mirror: a shadow ALONE would let a nested `some P` parameter start dispatching over the
+    // local conformers inside an ERASED outer, which is the fabrication the erasure gate exists to stop.
+    public func nestedFuncOwnOpacity(_ s: any Speaker) {
+        func inner(_ s: some Speaker) { s.speak() }
+        inner(QuietSpeaker())
+    }
+    public func nestedFuncOwnElementOpacity(_ xs: [any Speaker]) {
+        func inner(_ xs: [some Speaker]) { for x in xs { x.speak() } }
+        inner([QuietSpeaker()])
+    }
+    // …and once the nested `func` CLOSES, the enclosing parameter is opaque again.
+    public func opaqueAfterNestedFuncShadow(_ s: some Speaker) {
+        func inner(_ s: any Speaker) { _ = s }
+        inner(QuietSpeaker())
+        s.speak()
     }
     // …and the OTHER direction, which is why this is a SCOPE and not a clear: once the shadowing block
     // closes, `xs` is the monomorphized parameter again and the suppression must be BACK. Dropping the
@@ -661,6 +692,42 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
                        + "`[some Speaker]` parameter again and its opacity must be RESTORED, not dropped "
                        + "— else the fix trades one sin for the other; got "
                        + "\(by["elemOpacityRestoredAfterShadow"] ?? [:])")
+    }
+
+    /// A NESTED `func` has its OWN signature, and its calls attribute to the enclosing unit — so the
+    /// name-keyed opacity set has to treat its parameters as a shadowing scope. It did not: an outer
+    /// `some Speaker` parameter suppressed the CHA on a nested function's genuinely ERASED receiver of
+    /// the same name, and an Env-performing body read silent-pure. This is the swift form of the
+    /// nested-item leak candor-rust's R4 needed a third carve-out for.
+    ///
+    /// All three directions, because each is satisfiable by a wrong fix:
+    ///   - `nestedFuncNoShadow` is the mechanism CONTROL (outer spelled `any`) and resolves in both arms;
+    ///   - `nestedFuncOwnOpacity` / `nestedFuncOwnElementOpacity` are the MIRROR — shadowing alone would
+    ///     let a nested `some P` parameter dispatch over the local conformers inside an erased outer;
+    ///   - `opaqueAfterNestedFuncShadow` proves it is a SCOPE: after the nested `func` closes, the
+    ///     enclosing parameter is opaque again.
+    func testNestedFuncParametersAreTheirOwnScope() throws {
+        let bin = try binaryURL()
+        let (root, _, app, _) = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        XCTAssertEqual(try run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path]).code, 0)
+        let by = try fns(ofReport: root.appendingPathComponent("app-r.App.Swift.json"))
+        func eff(_ n: String) -> Set<String> { Set(by[n]?["inferred"] as? [String] ?? []) }
+
+        XCTAssertTrue(eff("nestedFuncNoShadow").contains("Env"),
+                      "CONTROL nestedFuncNoShadow: the nested erased receiver must resolve when the "
+                      + "OUTER parameter is erased too, else the row below proves nothing; got "
+                      + "\(by["nestedFuncNoShadow"] ?? [:])")
+        XCTAssertTrue(eff("nestedFuncOwnParam").contains("Env"),
+                      "nestedFuncOwnParam: `inner`'s `s` is `any Speaker` — its own signature, not the "
+                      + "enclosing `some Speaker` — so the local-conformer CHA must fire and this "
+                      + "Env-performing body must not read pure; got \(by["nestedFuncOwnParam"] ?? [:])")
+        for mono in ["nestedFuncOwnOpacity", "nestedFuncOwnElementOpacity", "opaqueAfterNestedFuncShadow"] {
+            XCTAssertFalse(eff(mono).contains("Env"),
+                           "\(mono): shadowing the enclosing flag must not DROP the nested signature's "
+                           + "own opacity (nor the enclosing one once the nested func closes) — that is "
+                           + "the fabrication mirror; got \(by[mono] ?? [:])")
+        }
     }
 
     /// The same scope question for half 1's dependency-PROVENANCE set. 81a9dc3 made a rebind clear the
