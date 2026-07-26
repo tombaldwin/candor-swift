@@ -684,6 +684,26 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     if let t = resolveQual("\(sub).\(call.leaf)") { edges[f.qual, default: []].insert(t) }
                 }
             }
+            // COULD-NOT-FORM-A-KEY (DEP-RECEIVER-TYPING-DESIGN.md half 1). The receiver was bound from a
+            // call out of this target whose return type never travelled, so no key was ever formed and
+            // NOTHING was looked up — the dep report's silence is only an answer to a question that was
+            // asked. Dropping here makes the caller a confident purity claim; under the ⟨0.21⟩ manifest it
+            // is still counted in `analyzed`, so the omission reads as a positive claim rather than a gap.
+            //
+            // THREE conjuncts, the third learned by measuring in rust: untyped receiver AND dep provenance
+            // AND the package is CHAINED. For an UNCHAINED package the κ ledger already discloses
+            // `invisible: [M]`, so a second disclosure would be pure false uncertainty; it is precisely
+            // when the package IS chained that the ledger correctly falls silent (§2 rule 3) and the
+            // silence becomes the claim worth spending a disclosure on.
+            if call.path.hasPrefix("<untyped>.") {
+                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                if (fileImports[file] ?? []).contains(where: { deps.coveredPkgs.contains($0) }) {
+                    direct[f.qual, default: []].insert("Unknown")
+                    unresolvedSet.insert(f.qual)
+                    whyMap[f.qual, default: []].insert("dispatch:untyped cross-package receiver")
+                }
+                continue
+            }
             // CANDOR_DEPS cross-package JOIN (SPEC §2), GATED: an unclassified call that resolved to NO
             // local unit, in a file that IMPORTS a package a sibling report covers, inherits the dep fn's
             // recorded effects + literal surfaces. Key shapes (§2 rule 1 — the way THIS engine names the

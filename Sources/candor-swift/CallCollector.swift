@@ -61,6 +61,13 @@ final class CallCollector: SyntaxVisitor {
                                     // must NOT fire (else a local `func NSLog`/`Pipe`-ctor fabricates)
     let localProtocols: Set<String> // local protocol names — a receiver typed as one is DISPATCH
     let returns: [String: String]   // unambiguous factory return types (the candor-scan move)
+    /// Locals bound from a CALL whose return type we could not determine, where the callee is not a local
+    /// function — `let s = build()` with `build` living in a dependency. The value's PROVENANCE is known
+    /// (a call out of this target) even though its TYPE is not, which is the "could-not-form-a-key" case:
+    /// a later `s.save()` asks no question of the chained report, so the report's silence licenses nothing.
+    /// See candor-spec/DEP-RECEIVER-TYPING-DESIGN.md half 1. The CHAINED conjunct is applied in Driver,
+    /// which is where fileImports and the covered-package set live.
+    var depBoundLocals: Set<String> = []
     let enumCaseValueType: [String: String]  // unambiguous enum case -> associated value type
     var enclosingType: String?
     var selfElementType: String?   // self's element bound in a collection extension (R28)
@@ -1202,6 +1209,15 @@ final class CallCollector: SyntaxVisitor {
                 // (isVar) or a type-looking root qualifies.
                 let owner = base.root.flatMap { r in (base.isVar || r.first?.isUppercase == true) ? r : nil }
                 calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), extOwner: owner))
+                // COULD-NOT-FORM-A-KEY: the receiver is a local bound from a dependency call we could not
+                // type, and nothing above resolved it. Emit a marker the Driver consumes into an honest
+                // `Unknown`; it resolves to NOTHING by design — it exists to say no key was formed, not to
+                // carry an effect. Distinguishable from a real path (angle brackets), exactly as the rust
+                // `<untyped>` and `<drop>` markers are, so it can never reach local resolution or κ.
+                if owner == nil, let r = base.root, depBoundLocals.contains(r) {
+                    calls.append(Call(path: "<untyped>.\(member)", leaf: member, strArg: nil,
+                                      typed: false, args: [], argTypes: [], extOwner: nil))
+                }
             }
         } else if node.calledExpression.is(ClosureExprSyntax.self) {
             // immediately-invoked closure: body walks lexically below — nothing to record
@@ -1787,6 +1803,18 @@ final class CallCollector: SyntaxVisitor {
                     else {
                         // ctor or unambiguous factory — one resolver for both (rootOf handles peeling)
                         let info = rootOf(v)
+                        // PROVENANCE WITHOUT A TYPE. `returns` holds LOCAL factory returns only, so a
+                        // dependency's factory yields no root at all and the binding stays untyped —
+                        // every later member call on it then falls through silently. Record it so the
+                        // call site can DISCLOSE instead (half 1). Cleared on any rebind by the
+                        // clearBinding path below, and never set when the call DID type.
+                        if info.root == nil,
+                           let callee = v.as(FunctionCallExprSyntax.self)?.calledExpression
+                                         .as(DeclReferenceExprSyntax.self)?.baseName.text,
+                           callee.first?.isUppercase == false, returns[callee] == nil,
+                           !localTypes.contains(callee) {
+                            depBoundLocals.insert(name)
+                        } else { depBoundLocals.remove(name) }
                         if let t = info.root, info.isVar {
                             vars[name] = t
                             // R33 — deinit-glue: a `let`/`var` LOCAL bound to a fresh CONSTRUCTION (this

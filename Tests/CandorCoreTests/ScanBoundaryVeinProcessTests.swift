@@ -71,6 +71,14 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
 
     public protocol Speaker { func speak() }
 
+    // A PURE FACTORY returning the protocol. Pure fns are omitted from a report, so no return type ever
+    // travels — the consumer cannot type the binding and never forms a key (half 1, row 2).
+    public final class LibSpeaker: Speaker {
+        public init() {}
+        public func speak() { _ = FileManager.default.contents(atPath: "/lib-speak") }
+    }
+    public func makeSpeaker() -> Speaker { return LibSpeaker() }
+
     public final class LoudSpeaker: Speaker {
         public init() {}
         public func speak() { _ = FileManager.default.contents(atPath: "/loud") }
@@ -95,6 +103,7 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
         public init() {}
         public func speak() { _ = ProcessInfo.processInfo.environment["APP_SPEAK"] }
     }
+    public func viaFactoryBoundReceiver() { let s = makeSpeaker(); s.speak() }
     public func viaImportedProtocol(_ s: Speaker) { s.speak() }
     public func viaImportedProtocolLocal() { let s: Speaker = AppSpeaker(); s.speak() }
 
@@ -349,6 +358,12 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
         // monomorphizes it, so charging every conformer's effect is a fabrication, not a conservative
         // over-approximation. Both are spelled `Speaker` after type-name resolution, which is exactly why
         // this needs asserting rather than assuming.
+        // COULD-NOT-FORM-A-KEY (half 1, row 2). `makeSpeaker` is pure, so it is omitted from the dep's
+        // report and no return type travels; the binding is untyped and NO key is formed. The report's
+        // silence answers a question that was never asked, so this must DISCLOSE, not read pure.
+        XCTAssertTrue(Set(by["viaFactoryBoundReceiver"]?["inferred"] as? [String] ?? []).contains("Unknown"),
+                      "an untyped receiver from a CHAINED package must disclose; got \(by["viaFactoryBoundReceiver"] ?? [:])")
+
         XCTAssertTrue(Set(by["viaExistentialImported"]?["inferred"] as? [String] ?? []).contains("Env"),
                       "an EXISTENTIAL `any P` receiver keeps the dispatch; got \(by["viaExistentialImported"] ?? [:])")
         XCTAssertFalse(Set(by["viaOpaqueImported"]?["inferred"] as? [String] ?? []).contains("Env"),
