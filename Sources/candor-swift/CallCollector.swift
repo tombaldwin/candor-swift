@@ -379,9 +379,27 @@ final class CallCollector: SyntaxVisitor {
                 return (t, true, [], isOpaqueParam(te.type))
             }
             // `cond ? a : b` → `[cond, unresolvedTernaryExpr(then), elseExpr]`: both arms one type.
+            //
+            // OPACITY COMPOSES BY CONJUNCTION, and it is the only join in this resolver that has to
+            // decide. `mono` is a claim that the value is caller-MONOMORPHIZED, which is what licenses
+            // SUPPRESSING the local-conformer CHA; the receiver of `(c ? m : e).speak()` is `m` on one
+            // branch and `e` on the other, so the claim holds of the expression only if it holds of
+            // EVERY arm. Disjunction let one monomorphized arm speak for an ERASED sibling: with
+            // `m: some Speaker` and `e: any Speaker` both arms resolve to the root `Speaker`, the guard
+            // below passes, and the CHA was skipped for the erased arm too — a positive purity claim on
+            // a function that performs the conformer's effect whenever `c` is false. The mirror is
+            // asserted beside it: an ALL-monomorphized ternary must stay suppressed, or this re-opens
+            // the fabrication d62dd69/02fb0ad closed.
             if elems.count == 3, let tern = elems[1].as(UnresolvedTernaryExprSyntax.self) {
                 let a = rootOf(tern.thenExpression, depth + 1), b = rootOf(elems[2], depth + 1)
-                if let ra = a.root, ra == b.root, a.isVar, b.isVar { return (ra, true, [], a.mono || b.mono) }
+                // MEASURED rather than assumed (standing bar item 8): instrumented over 14 real Swift
+                // targets the join fires 12 times and every one is ERASED/ERASED, so the corpus cannot
+                // tell `&&` from `||` and is the fabrication CONTROL here, not the evidence — the
+                // fixtures are. The probe is not shipped: `rootOf` is the hot path, and an env read
+                // here charged Env+Fs to 26 of candor's OWN functions in its self-scan.
+                if let ra = a.root, ra == b.root, a.isVar, b.isVar {
+                    return (ra, true, [], a.mono && b.mono)
+                }
             }
         }
         return (nil, false, [], false)

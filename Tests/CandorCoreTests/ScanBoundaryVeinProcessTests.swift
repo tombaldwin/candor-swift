@@ -153,6 +153,7 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
         nestedFuncOwnOpacity(QuietSpeaker())
         nestedFuncOwnElementOpacity([QuietSpeaker()])
         opaqueAfterNestedFuncShadow(QuietSpeaker())
+        ternaryBothOpaque(QuietSpeaker(), QuietSpeaker(), true)
     }
 
     // SHADOWING, both directions. The opaque set is keyed by NAME, so a binder that REBINDS the name
@@ -254,6 +255,16 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
         }
         for x in xs { x.speak() }
     }
+
+    // OPACITY ACROSS A TERNARY. `(c ? m : e).speak()` has TWO receivers, and `rootOf` composed their
+    // opacity with `||` — so one monomorphized arm certified an ERASED sibling and the CHA was skipped
+    // for both. All three compositions are asserted, because each single row is satisfiable by a wrong
+    // fix: MIXED must dispatch (the erased arm's witnesses ARE the local conformers), ERASED/ERASED
+    // must dispatch (a fix that simply stopped resolving ternaries would satisfy the first row), and
+    // MONO/MONO must stay suppressed (dropping the claim entirely re-opens d62dd69's fabrication).
+    public func ternaryMixedOpacity(_ m: some Speaker, _ e: any Speaker, _ c: Bool) { (c ? m : e).speak() }
+    public func ternaryBothErased(_ a: any Speaker, _ b: any Speaker, _ c: Bool) { (c ? a : b).speak() }
+    public func ternaryBothOpaque(_ a: some Speaker, _ b: some Speaker, _ c: Bool) { (c ? a : b).speak() }
 
     // The SAME scope question for half 1's dependency-provenance set. An UNTYPED sequence, so the
     // shadowing binder leaves no stale type behind in `vars` (which is function-wide by design) —
@@ -692,6 +703,44 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
                        + "`[some Speaker]` parameter again and its opacity must be RESTORED, not dropped "
                        + "— else the fix trades one sin for the other; got "
                        + "\(by["elemOpacityRestoredAfterShadow"] ?? [:])")
+    }
+
+    /// OPACITY IS NOT A PROPERTY OF ONE ARM OF A JOIN. `rootOf` types `(c ? a : b)` from the arms'
+    /// shared root and composed their `mono` flags with `||`, so a receiver monomorphized on one branch
+    /// and ERASED on the other was treated as fully monomorphized: the guard `ra == b.root` passes
+    /// (`some Speaker` and `any Speaker` both resolve to `Speaker`), `opaqueRecv` goes true, the
+    /// local-conformer CHA is skipped for the erased arm too, and the function is ABSENT from the report
+    /// — a positive purity claim, under ⟨0.21⟩, about a body that performs Env whenever `c` is false.
+    ///
+    /// Opacity licenses SUPPRESSION, so it composes by CONJUNCTION: the claim may be made of the
+    /// expression only if it holds of every arm. All three rows are asserted because each alone is
+    /// satisfiable by a wrong fix — dropping the flag on any ternary passes the first two and re-opens
+    /// d62dd69's fabrication on the third; refusing to resolve ternaries at all passes the first and
+    /// third and loses the second.
+    ///
+    /// Measured (standing bar item 8): instrumented over 14 real Swift targets this join fires 12 times
+    /// and every firing is ERASED/ERASED, so a corpus A/B cannot distinguish `&&` from `||` here — the
+    /// corpus is the fabrication control and these fixtures are the evidence.
+    func testTernaryOpacityComposesByConjunction() throws {
+        let bin = try binaryURL()
+        let (root, _, app, _) = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        XCTAssertEqual(try run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path]).code, 0)
+        let by = try fns(ofReport: root.appendingPathComponent("app-r.App.Swift.json"))
+        func eff(_ n: String) -> Set<String> { Set(by[n]?["inferred"] as? [String] ?? []) }
+
+        XCTAssertTrue(eff("ternaryBothErased").contains("Env"),
+                      "CONTROL ternaryBothErased: two `any Speaker` arms are erased, so the local "
+                      + "conformers ARE the witnesses and the dispatch must hold — without this row a "
+                      + "fix that stopped resolving ternaries would pass; got \(by["ternaryBothErased"] ?? [:])")
+        XCTAssertTrue(eff("ternaryMixedOpacity").contains("Env"),
+                      "ternaryMixedOpacity: the `any Speaker` arm is genuinely erased, so suppressing the "
+                      + "CHA for the whole expression makes an Env-performing function read silent-pure; "
+                      + "got \(by["ternaryMixedOpacity"] ?? [:])")
+        XCTAssertFalse(eff("ternaryBothOpaque").contains("Env"),
+                       "ternaryBothOpaque: BOTH arms are caller-monomorphized and the only call site "
+                       + "passes QuietSpeaker, so charging AppSpeaker's Env is the fabrication mirror; "
+                       + "got \(by["ternaryBothOpaque"] ?? [:])")
     }
 
     /// A NESTED `func` has its OWN signature, and its calls attribute to the enclosing unit — so the
