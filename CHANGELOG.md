@@ -9,6 +9,58 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### ⚠ ⟨0.23⟩ `typeSurface.returns` — the factory-bound receiver resolves, not just discloses
+
+`let c = build(); c.fetch()` types `c` from `build`'s RETURN type, and a PURE `build` is ABSENT from the
+dependency's report entirely (SPEC §2 rule 3), so no consumer could recover it from the entries. Half 1
+made that disclose `Unknown` instead of reading silent-pure; this recovers the effect. `deny Fs` on
+identical source goes one-package exit 1 -> split+chained exit 0 -> exit 1 again.
+
+PRODUCER: a new optional envelope field `typeSurface.returns`, mapping `<pkg>#<fn qual>` to
+`<pkg>#<type qual>`, both FULLY QUALIFIED in this package's own namespace. Omitted when empty, so a report
+with nothing to say is byte-identical to a pre-rung one and a ⟨0.22⟩ consumer is unaffected. A wrapper
+return (`-> Conn?`, `-> Result<Conn,E>`, `-> [Conn]`, `-> Box<Conn>`) publishes NOTHING: the binding holds
+the wrapper, and keying its `map` against the payload would charge effects nobody runs. A PROTOCOL return
+IS published — `func make() -> SomeProtocol` is the commonest Swift factory — and the key it forms is
+answered by the producer's `interfaceUnion` entry, so the two mechanisms are layered.
+
+CONSUMER: a miss on `returns`, or on the entry lookup that follows a `returns` hit, falls back to half 1's
+disclosure and never to silence — the index deliberately drops keys two entries share, so a miss cannot
+tell "no such method" from "I withdrew the answer". A STALE producer's surface is not read at all.
+
+Measured: 11 real targets unchained, 0 effect gains/losses/entry deltas and the only envelope change is
+the new field (3 564 entries published). 5 chained consumers, 0 gains, 0 losses; the consumer arm is
+entered 20 times and misses every time — instrumented via `CANDOR_TYPESURFACE_DEBUG`, which prints the
+producer counts and every consumer hit/miss.
+
+Residuals, deliberate: a NESTED type's method is unreachable for the consumer (the key is three segments
+and the dep index carries `pkg#leaf`/`pkg#tail2` only — it misses and discloses); `-> any P` / `-> some P`
+returns are refused.
+
+### soundness — one apply site for a chained dep entry; the chained-GLOBAL one had drifted
+
+The engine carried three copies of "inherit a chained `DepEntry`", and the chained-global read applied
+the effects, `hosts`, `cmds` and `paths` while silently dropping `tables`, `invisible` and `incomplete`.
+A consumer reading a dependency's effectful lazy global therefore inherited the EFFECT and none of the
+dependency's own honesty markers — turning a qualified claim (`Fs`, plus a blind spot inside the
+dependency) into an unqualified one. Now one `applyDepEntry`. No corpus output changes; the fixture is
+the evidence.
+
+### soundness — two scope leaks in the erasure gate, both silent under-reports
+
+Both are the standing-bar item 0 shape — a fabrication fix narrowing past a real reach — and both are
+invisible in a corpus A/B because each needs a name collision no measured target contains.
+
+- The ELEMENT-opacity set was written in lockstep with the element TYPE (the CLEAR half of the scope
+  discipline) but was never added to the scope SAVE. An inner block binding an existing name from a
+  monomorphized source (`if c { let ys = xs.filter { … } }`, `xs: [some P]`) marked `ys` monomorphized for
+  the rest of the FUNCTION, so the ERASED `ys: [any P]` parameter it shadowed lost its dispatch and an
+  Env-performing function read pure.
+- A nested `func`'s PARAMETERS were not a scope. `func outer(_ s: some P) { func inner(_ s: any P) { … } }`
+  suppressed the CHA on `inner`'s genuinely erased receiver because the enclosing parameter, a different
+  variable, is spelled `some`. The nested signature's own opacity is re-applied, so the mirror
+  fabrication does not open.
+
 ### ⚠ soundness — implicit stringification through a PROTOCOL-typed operand (Swift arm of the four-way vein)
 
 Closes a silent under-report (cardinal sin): `"\(e)"` / `String(describing: e)` / `print(e)` runs the
