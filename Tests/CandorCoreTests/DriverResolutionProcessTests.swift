@@ -664,4 +664,30 @@ final class DriverResolutionProcessTests: XCTestCase {
                        "a resolvable named effectful callable resolves to its effect (edge), never Unknown")
         XCTAssertNil(by["passNamedPure"], "a resolvable named pure callable stays pure — no fabrication")
     }
+
+    /// THE REPORT MUST BE REPRODUCIBLE. `supertypesOf` is a `[String: Set<String>]`, and Swift seeds Set
+    /// hashing PER PROCESS — so picking the disclosure's supertype with `.first` gave a different
+    /// `unknownWhy` on different runs of the same binary over the same input. Measured on a real project:
+    /// 14 functions churned between `dispatch:CodingKey.self` and `dispatch:String.self`, and the per-function
+    /// reason SET changed size when two call sites picked differently. Effect sets were stable throughout,
+    /// which is exactly why it went unnoticed.
+    ///
+    /// This is asserted as a PROPERTY (the alphabetically-first external supertype wins) rather than by
+    /// scanning twice: two scans inside one test process share a hash seed, so a double-scan could pass
+    /// while the defect was live. A property is checkable in one run and cannot pass by luck.
+    ///
+    /// It matters beyond tidiness: A/B diffing reports on real code is this project's primary evidence, and
+    /// a report that differs from ITSELF injects noise into every diff — it cost a false datapoint before
+    /// anyone thought to diff a report against itself. It also makes `gains` noisy on identical inputs.
+    func testDisclosureReasonIsDeterministicAcrossRuns() throws {
+        let by = try scan("""
+        protocol ZZeta { }
+        protocol AAlpha { }
+        final class Thing: ZZeta, AAlpha { func go() { self.unresolvedMember() } }
+        """)
+        let why = (by["Thing.go"]?["unknownWhy"] as? [String]) ?? []
+        XCTAssertTrue(why.contains("dispatch:AAlpha.unresolvedMember"),
+                      "the disclosure must name a STABLE supertype — the alphabetically-first — so the "
+                      + "report is byte-reproducible run to run; got \(why)")
+    }
 }

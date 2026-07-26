@@ -596,7 +596,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // project code. Std value protocols (Codable/Equatable/…) are excluded — their synthesized
                     // requirements are pure, so disclosing Unknown there would be false over-disclosure.
                     if !resolved {
-                        let extSupers = (supertypesOf[type] ?? []).filter { !localTypes.contains($0) }
+                        // SORTED. `supertypesOf` is a [String: Set<String>], and a Set's iteration order
+                        // varies between processes — so `.first` below picked a different supertype on
+                        // different runs of the SAME binary on the SAME input. Effect sets were unaffected
+                        // (Unknown either way), but the DISCLOSURE REASON churned: `dispatch:CodingKey.self`
+                        // vs `dispatch:String.self`, and the per-function reason SET even changed size when
+                        // two call sites happened to pick differently.
+                        //
+                        // That is not cosmetic. A/B diffing reports on real code is this project's primary
+                        // evidence, and a report that differs from ITSELF injects noise into every diff —
+                        // it cost a false datapoint before anyone thought to run a report against itself.
+                        // It also makes `gains` noisy between identical inputs, which is product-facing.
+                        let extSupers = (supertypesOf[type] ?? []).filter { !localTypes.contains($0) }.sorted()
                         if let eff = extSupers.compactMap({ FLUENT_MODEL_PROTOCOLS.contains($0) ? fluentModelEffect(member) : nil }).first {
                             direct[f.qual, default: []].insert(eff)
                             resolved = true
