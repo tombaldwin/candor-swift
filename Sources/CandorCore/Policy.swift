@@ -143,7 +143,16 @@ public func parseNetPartners(_ configText: String?) -> Set<String> {
 /// Map a raw `unknownWhy` token (e.g. `reflect:eval`, `callback:fetch`) to its normative reason class.
 public func reasonClass(_ why: String) -> String {
     let w = why.trimmingCharacters(in: .whitespaces).lowercased()
-    if w.hasPrefix("reflect") || w == "dynamicmemberlookup" { return "reflect" }
+    // PREFIX, not equality, on the second arm. SPEC §6.2's table is titled "raw `unknownWhy` PREFIXES it
+    // projects" and lists `dynamicMemberLookup` under `reflect`; the equality test could never match what
+    // this engine EMITS, because every reason is `kind:detail` and the only reflect-class producer in
+    // candor-swift writes `dynamicMemberLookup:<root>.<prop>`. So `Unknown[reflect]` was SILENTLY
+    // UNSATISFIABLE here — a policy author narrowing the ⟨0.19⟩ gate to reflection holes got exit 0 on a
+    // report that discloses one, while bare `Unknown` fired and `Unknown[unresolved]` fired, so the hole
+    // was invisible unless you compared the arms. The same equality test is in candor-ts `policy.mjs` and
+    // candor-java `model/ReasonClass.java`; neither engine EMITS the token (swift is the only one with
+    // `@dynamicMemberLookup`), so it is latent there and live here.
+    if w.hasPrefix("reflect") || w.hasPrefix("dynamicmemberlookup") { return "reflect" }
     if w.hasPrefix("native") { return "native" }
     if w.hasPrefix("callback") || w.hasPrefix("closure") || w.hasPrefix("task-handoff") { return "indirect" }
     if w.hasPrefix("dispatch") || w.hasPrefix("indy") || w.hasPrefix("ambiguous") { return "dispatch" }

@@ -475,6 +475,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         direct[qual, default: []].formUnion(de.effects)
         if de.effects.contains("Unknown") {
             if let why = de.whyReason { whyMap[qual, default: []].insert(why) }
+            // ⟨0.19⟩ the dependency's OWN reason tokens travel too, so the reason CLASS survives the
+            // boundary and `deny E Unknown[<class>]` is not silently inert on a chained consumer.
+            // `dep:<hash>` above names WHERE; these name WHY. See DepEntry.whyClasses.
+            whyMap[qual, default: []].formUnion(de.whyClasses)
         }
         hostsD[qual, default: []].formUnion(de.hosts)
         cmdsD[qual, default: []].formUnion(de.cmds)

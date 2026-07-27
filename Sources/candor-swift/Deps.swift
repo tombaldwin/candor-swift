@@ -59,6 +59,18 @@ struct DepEntry {
     /// Unknown source names its origin): `dep-stale:<pkg>` for a distrusted producer, `dep:<hash>`
     /// when a FRESH dep entry itself reads Unknown.
     var whyReason: String? = nil
+    /// ⟨0.19⟩ THE DEPENDENCY'S OWN `unknownWhy` TOKENS, carried across the join so the REASON CLASS
+    /// survives the scan boundary. Without them a chained Unknown arrives carrying only `dep:<hash>`,
+    /// which SPEC §6.2 projects to `unresolved` — so the reason-scoped gate, a shipped ⟨0.19⟩ rung, was
+    /// silently inert at exactly the boundary where a consumer most needs it: `deny Unknown[reflect]`
+    /// went exit 1 single-tree and exit 0 the moment the same code was split and chained, while bare
+    /// `deny Unknown` fired in both — which is why it survives review, since only the class-targeted
+    /// middle reads green, and that middle is how the ratchet is adopted in practice.
+    ///
+    /// candor-java found the same gap one hop further out (`6ab26e4`) and needed no format rung, because
+    /// the dependency's report ALREADY carries `unknownWhy` — nothing looked for it. Same here.
+    /// `dep:<hash>` is KEPT alongside: it names the origin, which the raw tokens do not.
+    var whyClasses: Set<String> = []
 }
 
 /// The CANDOR_DEPS index: `pkg#leaf` / `pkg#tail2` keys (unambiguous only) + the covered-package set.
@@ -223,7 +235,23 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
                     entry.incomplete.insert(v)
                 }
                 if entry.effects.contains("Unknown") {
-                    entry.whyReason = "dep:\(hash ?? "\(pkg)#\(qual)")"
+                    // The dep's OWN reasons, so the ⟨0.19⟩ class survives the boundary. Only tokens the
+                    // dep RECORDED: an entry that inherited its Unknown without a reason of its own
+                    // (SPEC §4 makes `unknownWhy` direct-only) contributes nothing.
+                    for case let w as String in (e["unknownWhy"] as? [Any]) ?? [] where !w.isEmpty {
+                        entry.whyClasses.insert(w)
+                    }
+                    // `dep:<hash>` ONLY when the dependency classified nothing. It is a PROVENANCE
+                    // pointer, not a reason, and §6.2 projects it to `unresolved` — so carrying it beside
+                    // a classified reason puts an `unresolved` in the consumer's class set that the
+                    // single-tree control does not have, and `deny E Unknown[unresolved]` then fires on a
+                    // chained consumer and not on the same code unsplit. Chained-vs-single-tree agreement
+                    // is this vein's done-ness criterion, and the origin is recoverable from `calls`;
+                    // where the dep gives us nothing, `dep:` stands and the class is the conservative
+                    // `unresolved` the spec prescribes for a hole nobody classified.
+                    if entry.whyClasses.isEmpty {
+                        entry.whyReason = "dep:\(hash ?? "\(pkg)#\(qual)")"
+                    }
                 }
             }
             if entry.effects.isEmpty && entry.invisible.isEmpty && entry.incomplete.isEmpty { continue }
