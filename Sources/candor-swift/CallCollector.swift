@@ -805,6 +805,7 @@ final class CallCollector: SyntaxVisitor {
     // instead, after the save.
     private func clearBindingTypeOnly(_ name: String) {
         vars.removeValue(forKey: name)
+        protoTyped.removeValue(forKey: name)
         arrayElem.removeValue(forKey: name)
         opaqueElem.remove(name)
         dictElem.removeValue(forKey: name)
@@ -840,6 +841,23 @@ final class CallCollector: SyntaxVisitor {
     /// literal payloads and a range (`for case konst in`, `case E.one(3)`, `case 1...2`) parse to
     /// `declReferenceExpr`/literal nodes, and `_` is a `wildcardPattern`. So the walk is exact, not
     /// conservative, in both directions.
+    /// Does `expr` mention `name` as a declaration reference anywhere in its subtree? Used by the
+    /// VariableDecl rebind to tell `let u = s` (the old binding is dead the moment the pattern is seen)
+    /// from `let u = u.asURL()` (the old binding is what the initializer resolves through). Conservative
+    /// in the safe direction: a false YES keeps a stale type — which is the shape `clearBindingTypeOnly`
+    /// still catches on any binder that cannot type — while a false NO would drop a live one.
+    private static func referencesName(_ expr: ExprSyntax?, _ name: String) -> Bool {
+        guard let expr else { return false }
+        var found = false
+        func walk(_ n: Syntax) {
+            if found { return }
+            if let dr = n.as(DeclReferenceExprSyntax.self), dr.baseName.text == name { found = true; return }
+            for c in n.children(viewMode: .sourceAccurate) { walk(c) }
+        }
+        walk(Syntax(expr))
+        return found
+    }
+
     private static func patternBinders(_ pattern: PatternSyntax) -> [IdentifierPatternSyntax] {
         var out: [IdentifierPatternSyntax] = []
         func walk(_ n: Syntax) {
@@ -896,19 +914,40 @@ final class CallCollector: SyntaxVisitor {
     //     local value (81a9dc3 added the clear for exactly that); dropping it at scope close sends a
     //     genuinely factory-bound receiver back to silent-pure — `let c = depBuild(); for c in xs {};
     //     c.fetch()` lost its disclosure when 81a9dc3 landed the clear without the restore.
+    //   - `protoTyped` drives the LOCAL-protocol CHA (`protoDispatches` → `subtypesOf`). Leaking it in
+    //     charges every conformer's effects to a call on a value that is not the protocol-typed
+    //     parameter at all — a FABRICATION, and the direction the other two do not cover. MEASURED, and
+    //     the rename control is what isolates it: `func f(_ j: Job, _ xs: [String]) { for j in xs {
+    //     j.run() } }` reads `['Env']` from `RealJob`, and the identical body with the binder named `t`
+    //     is ABSENT. Dropping it at scope close would send the genuine parameter's own `j.run()` below
+    //     the loop back to silent-pure, so it needs the scope and not just the clear.
+    //   - `localConstStrings` drives the const-anchored literal surfaces (PART 4q). Leaking it in
+    //     attributes a LITERAL endpoint to a call whose address is a runtime value: `let u =
+    //     "https://telemetry.example.com/beacon"` followed by `for u in xs { …dataTask(with: u)… }`
+    //     reported `hosts: ['telemetry.example.com']`, and the same body with the binder named `v`
+    //     reports none. `hosts` is what an `allow`/`forbid` host rule matches on, so the fabricated
+    //     literal is policy-visible. Dropping it at scope close would lose a genuine literal, which
+    //     empties the surface and is the direction `forbid` reads as incomplete — safe, but still a
+    //     loss, so it takes the same scope.
     //
     // So: a binder CLEARS, the enclosing scope RESTORES (see enterShadowScope/leaveShadowScope).
+    // FOUR maps now, and the list is still an enumeration — see the note on `enterShadowScope` for what
+    // it would take to stop it being one, and why that is a rewrite rather than a refactor.
     private func shadowName(_ name: String) {
         monoNames.remove(name)
         depBoundLocals.removeValue(forKey: name)
+        localConstStrings.removeValue(forKey: name)
     }
 
-    // Saved `monoNames`/`opaqueElem`/`depBoundLocals` per scope-delimiting node, restored when the node
+    // The name-keyed per-binding state saved per scope-delimiting node and restored when the node
     // closes. Keyed by node id rather than a stack so an un-entered scope can never pop someone else's
     // save; SwiftSyntax calls `visitPost` for every visited node (including one whose `visit` returned
     // `.skipChildren`), so entries cannot leak.
-    private var shadowScopes: [SyntaxIdentifier:
-        (opaque: Set<String>, opaqueElem: Set<String>, depBound: [String: String])] = [:]
+    private struct ShadowSave {
+        var opaque: Set<String>, opaqueElem: Set<String>, depBound: [String: String]
+        var protoTyped: [String: String], constStrings: [String: String]
+    }
+    private var shadowScopes: [SyntaxIdentifier: ShadowSave] = [:]
 
     /// Closure node -> element parameters the enclosing call typed from a MONOMORPHIZED element. Handed
     /// over rather than set directly because `typeClosureParams` runs before the closure is entered (see
@@ -929,7 +968,28 @@ final class CallCollector: SyntaxVisitor {
         // `ys` monomorphized from the `[some P]` source, the block ends, and the ERASED parameter it
         // shadowed spends the rest of the body with the CHA suppressed. Measured: identical bodies,
         // Env when the inner binding is named `zs` and silent-pure when it is named `ys`.
-        shadowScopes[node.id] = (monoNames, opaqueElem, depBoundLocals)
+        //
+        // `protoTyped` and `localConstStrings` joined the save the same way — by being found leaking on
+        // a fixture, not by being reasoned onto the list. THAT IS THE POINT WORTH CARRYING: this save
+        // and `shadowName` are two enumerations of the same set, and the previous round filed "fuse the
+        // flags into `vars`" as a rewrite of the binding model over ~9 name-keyed maps rather than
+        // attempt it. RE-PRICED after the parse-tree walk landed, and the answer has not changed —
+        // `visit(IdentifierPatternSyntax)` removed the enumeration of BINDER FORMS, which is what it
+        // claimed to remove, and this is a different enumeration: WHICH FACTS a rebind invalidates.
+        // Fusing them into `vars` still requires `vars` to become lexically scoped, which it
+        // deliberately is not (function-wide with clear-on-rebind, because a stale TYPE is dangerous
+        // inward and merely lossy outward), and doing it without that scoping would make every flag
+        // leak outward the way types do — i.e. `71de627` permanently.
+        //
+        // What DID change is the price of leaving it: the audit that found these two enumerated the
+        // collector's name-keyed state and probed every member with a rename control, so the remaining
+        // three (`fnTyped`, `opaqueFnLocals`, `fnValueAlias`) are measured rather than assumed — a
+        // shadowed fn-typed param still discloses `callback:`, and an aliased fn value called after a
+        // shadowing loop still resolves. The residual is a NEW map added later without being added
+        // here, which is a review question, not a design one.
+        shadowScopes[node.id] = ShadowSave(opaque: monoNames, opaqueElem: opaqueElem,
+                                           depBound: depBoundLocals, protoTyped: protoTyped,
+                                           constStrings: localConstStrings)
     }
 
     private func leaveShadowScope(_ node: some SyntaxProtocol) {
@@ -937,6 +997,8 @@ final class CallCollector: SyntaxVisitor {
         monoNames = saved.opaque
         opaqueElem = saved.opaqueElem
         depBoundLocals = saved.depBound
+        protoTyped = saved.protoTyped
+        localConstStrings = saved.constStrings
     }
 
     /// THE CATCH-ALL BINDER, and it exists to invert a failure mode rather than to add a case.
@@ -2223,6 +2285,24 @@ final class CallCollector: SyntaxVisitor {
                                       // dependency provenance stop applying to the NAME here. Runs
                                       // BEFORE the branches below, one of which re-inserts the
                                       // provenance for this binding's own initializer.
+            // `protoTyped` is NOT in `shadowName`, and the reason is an ORDERING fact that cost a real
+            // reach before it was understood. SwiftSyntax walks a binding's PATTERN before its
+            // INITIALIZER, so anything cleared here is already gone by the time the initializer's own
+            // calls are collected — and `let u = u.asURL()` (Alamofire's `URLRequest.init(url: any
+            // URLConvertible …)`) resolves `u.asURL()` through exactly the entry being cleared. Putting
+            // it in `shadowName` closed the loop-binder fabrication and turned that function from a
+            // disclosed `Unknown` into ABSENT: the fabrication traded for its mirror, which item 1 of
+            // the vein's standing bar forbids. Measured on the corpus as one loss, reduced to
+            // `selfRebind` in the ordering fixture.
+            //
+            // So the clear lives in `clearBindingTypeOnly` — the path a binder takes when it CANNOT type
+            // the new binding, which is where the fabrication actually arises (a loop/case binder) and
+            // which the self-referential `let` never reaches. This line covers the remaining hole: a
+            // binding that DOES type still rebinds the name, so the protocol type stops applying —
+            // unless the initializer mentions the name, which is the one case where the old binding is
+            // still live while the initializer is walked. A DENYLIST (clear unless proven unsafe), not
+            // an allowlist of binder shapes.
+            if !Self.referencesName(binding.initializer?.value, name) { protoTyped.removeValue(forKey: name) }
             // CONST-STRING PROPAGATION — a LOCAL `let NAME = "literal"` string constant. Resolves a later
             // const-anchored host in the SAME fn body (`let apiBase = "…"; dataTask(with: "\(apiBase)/x")`).
             // ONLY a `let` with a PLAIN string-literal initializer and no accessor block. A `var` of the
