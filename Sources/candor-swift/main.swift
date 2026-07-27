@@ -357,33 +357,110 @@ if wantWorkspace {
         }
     }
     var names: Set<String> = []
-    let maxRounds = 6
-    for _ in 0..<maxRounds {
-        var changed = false
-        for dp in depPaths {
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: selfPath)
-            proc.arguments = [dp, "--json"]
-            var env = ProcessInfo.processInfo.environment
-            env["CANDOR_WORKSPACE_CHAIN"] = "1"; env["CANDOR_DEPS"] = depsDir
-            proc.environment = env
-            let pipe = Pipe()
-            proc.standardOutput = pipe; proc.standardError = FileHandle.nullDevice
-            guard (try? proc.run()) != nil else { continue }
-            let out = pipe.fileHandleForReading.readDataToEndOfFile()
-            proc.waitUntilExit()
-            guard proc.terminationStatus == 0, !out.isEmpty else { continue }
-            let name = ((try? JSONSerialization.jsonObject(with: out)) as? [String: Any])?["package"] as? String ?? (dp as NSString).lastPathComponent
-            names.insert(name)
-            let safe = name.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "@", with: "_")
-            let file = (depsDir as NSString).appendingPathComponent(safe + ".json")
-            let prev = try? Data(contentsOf: URL(fileURLWithPath: file))
-            if prev != out { try? out.write(to: URL(fileURLWithPath: file)); changed = true }
+    // The report files a scan SUCCEEDED at this run, and the dep paths that failed. `.candor/deps` is a
+    // DISK CACHE that outlives the run, so a dep whose child scan fails leaves the PREVIOUS run's report
+    // behind — and `loadDepReports` walks the whole directory, so that report is chained as though it
+    // were this run's answer, with §2 rule 3 turning its silence into a purity claim. Reproduced:
+    //
+    //   run 1  dep pure, scans clean            -> .candor/deps/DepLib.json written
+    //   dep then performs Fs AND gains a `.candor/config` naming a policy path the consumer cannot
+    //   resolve, so its child scan exits 2
+    //   run 2  WARM (run 1's file on disk)      -> `useDep` ABSENT from `functions` — a ⟨0.21⟩ purity
+    //                                              claim about a call that writes /tmp/leak.txt
+    //   run 2  COLD (same code, cache deleted)  -> `useDep` -> invisible: ['DepLib'], ledger names it
+    //
+    // Two arms of identical source differing only in whether a previous run's artefact was on disk: the
+    // candor-rust `39bbc8b` shape (a fail-closed abort cached as a false all-clear), reached through a
+    // different door. FAIL CLOSED: a report no successful scan produced THIS run is swept, so the
+    // package falls back to the κ ledger's `invisible` hedge instead of standing in for an answer
+    // nobody computed.
+    var confirmed: Set<String> = []
+    var succeededPaths: Set<String> = []
+    var failures: [String: String] = [:]        // dep path -> the last reason its scan did not produce one
+    func runRounds() {
+        let maxRounds = 6
+        for _ in 0..<maxRounds {
+            var changed = false
+            for dp in depPaths {
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: selfPath)
+                proc.arguments = [dp, "--json"]
+                var env = ProcessInfo.processInfo.environment
+                env["CANDOR_WORKSPACE_CHAIN"] = "1"; env["CANDOR_DEPS"] = depsDir
+                proc.environment = env
+                let pipe = Pipe(), errPipe = Pipe()
+                proc.standardOutput = pipe; proc.standardError = errPipe
+                guard (try? proc.run()) != nil else { failures[dp] = "could not be spawned"; continue }
+                let out = pipe.fileHandleForReading.readDataToEndOfFile()
+                let errOut = errPipe.fileHandleForReading.readDataToEndOfFile()
+                proc.waitUntilExit()
+                guard proc.terminationStatus == 0 else {
+                    // the child's own last stderr line is the diagnosis (a bad `.candor/config`, an
+                    // unreadable tree); relaying it is what turns "silently skipped" into actionable.
+                    let tail = String(decoding: errOut, as: UTF8.self)
+                        .split(separator: "\n").last.map(String.init) ?? ""
+                    failures[dp] = "exited \(proc.terminationStatus)\(tail.isEmpty ? "" : " — " + tail)"
+                    continue
+                }
+                guard !out.isEmpty else { failures[dp] = "produced no report"; continue }
+                let name = ((try? JSONSerialization.jsonObject(with: out)) as? [String: Any])?["package"] as? String ?? (dp as NSString).lastPathComponent
+                names.insert(name)
+                succeededPaths.insert(dp)
+                failures.removeValue(forKey: dp)   // it failed on an earlier ROUND and has since converged
+                let safe = name.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "@", with: "_")
+                let file = (depsDir as NSString).appendingPathComponent(safe + ".json")
+                confirmed.insert(file)             // …including when the bytes are unchanged: confirmed ≠ rewritten
+                let prev = try? Data(contentsOf: URL(fileURLWithPath: file))
+                if prev != out { try? out.write(to: URL(fileURLWithPath: file)); changed = true }
+            }
+            if !changed { break }
         }
-        if !changed { break }
+    }
+    /// Remove every report in the cache that no successful scan produced this run. Returns their names.
+    func sweepStale() -> [String] {
+        var removed: [String] = []
+        for f in ((try? fm.contentsOfDirectory(atPath: depsDir)) ?? []).sorted() where f.hasSuffix(".json") {
+            let full = (depsDir as NSString).appendingPathComponent(f)
+            if confirmed.contains(full) { continue }
+            try? fm.removeItem(atPath: full)
+            removed.append(f)
+        }
+        return removed
+    }
+    runRounds()
+    var swept = sweepStale()
+    if !swept.isEmpty {
+        // The children were spawned with CANDOR_DEPS pointing at this same directory, so a sibling that
+        // DID scan cleanly may have chained the stale report we have just removed — and its report feeds
+        // the parent, so sweeping afterwards alone would leave the contamination one hop away. Re-run the
+        // fixpoint once with the cache clean. One extra cycle is enough: a file only ever appears from a
+        // success, so a second sweep can find nothing the first did not.
+        confirmed.removeAll()
+        runRounds()
+        swept += sweepStale()
     }
     workspaceDepsDir = depsDir
-    FileHandle.standardError.write("candor-swift: --workspace chained \(names.count) workspace dep report(s), transitive\(names.isEmpty ? " (no local path deps found)" : ": " + names.sorted().joined(separator: ", "))\n".data(using: .utf8)!)
+    let failed = depPaths.filter { !succeededPaths.contains($0) }
+    if !failed.isEmpty {
+        // LOUD, and it names what it cost. Previously the child's stderr went to /dev/null and the skip
+        // was silent, so the one thing a reader could see — the count line below — said "no local path
+        // deps found" while a path dep sat there unscanned.
+        for dp in failed.sorted() {
+            FileHandle.standardError.write(
+                ("candor-swift: --workspace could NOT scan the local path dependency \(dp) "
+                 + "(\(failures[dp] ?? "no report")) — its effects are UNSEEN, not pure; any report this "
+                 + "cache held for it has been removed so the package falls back to the κ ledger\n").data(using: .utf8)!)
+        }
+    }
+    if !swept.isEmpty {
+        FileHandle.standardError.write(
+            ("candor-swift: --workspace removed \(swept.count) stale report(s) from \(depsDir) that no scan "
+             + "produced this run: \(Set(swept).sorted().joined(separator: ", "))\n").data(using: .utf8)!)
+    }
+    let tail = names.isEmpty
+        ? (depPaths.isEmpty ? " (no local path deps found)" : " (every local path dep failed to scan — see above)")
+        : ": " + names.sorted().joined(separator: ", ")
+    FileHandle.standardError.write("candor-swift: --workspace chained \(names.count) workspace dep report(s), transitive\(tail)\n".data(using: .utf8)!)
 }
 // Report chaining (SPEC §2, Deps.swift): CANDOR_DEPS overrides the config's `deps` key (the same
 // env-over-config precedence as `policy`). Fail-closed loading — a bad token/report exits 2 HERE,
