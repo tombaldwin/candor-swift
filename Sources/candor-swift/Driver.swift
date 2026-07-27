@@ -449,6 +449,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // INVISIBLE. A module a chained sibling report COVERS is exempt (SPEC §2 rule 3): the report — even an
     // EMPTY one — is the producer's claim over that package, so a joined-nothing call into it reads pure,
     // not blind.
+    //
+    // `coveredPkgs`, NOT `isChained`, and that asymmetry is the whole of the 2026-07-27 fix. A report
+    // §2.1 refused to trust is still CHAINED (its keys are looked up, so rule 2's `Unknown` downgrade
+    // fires) but makes NO coverage claim, so the package it names stays blind HERE and a key it does not
+    // answer keeps its `invisible` hedge instead of reading pure. See the rule-3 note in Deps.swift.
     let blindModules = Set(importCounts.keys.filter {
         !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !internalModules.contains($0)
             && !deps.coveredPkgs.contains($0) })
@@ -573,7 +578,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // an unambiguous single hit joins, so an unimported or ambiguous name resolves to nothing.
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                 var hits: [DepEntry] = []
-                for m in fileImports[file] ?? [] where deps.coveredPkgs.contains(m) {
+                for m in fileImports[file] ?? [] where deps.isChained(m) {
                     if let e = deps.lookup("\(m)#\(name)") { hits.append(e) }
                 }
                 if hits.count == 1, let de = hits.first { applyDepEntry(de, to: f.qual) }
@@ -811,7 +816,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if let callee = call.depCallee {
                     var hits: [DepEntry] = []
                     var surfaced: [String] = []
-                    for m in fileImports[file] ?? [] where deps.coveredPkgs.contains(m) {
+                    for m in fileImports[file] ?? [] where deps.isChained(m) {
                         guard let ty = deps.boundType("\(m)#\(callee)") else { continue }
                         surfaced.append(ty)
                         if let e = deps.lookup("\(ty).\(call.leaf)") { hits.append(e) }
@@ -854,7 +859,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // entries share (§2 rule 1), so a miss cannot distinguish "no such method" from "I
                 // withdrew the answer", and a refusal to answer is not a purity claim. rust shipped that
                 // `continue` and reverted it.
-                if (fileImports[file] ?? []).contains(where: { deps.coveredPkgs.contains($0) }) {
+                if (fileImports[file] ?? []).contains(where: { deps.isChained($0) }) {
                     direct[f.qual, default: []].insert("Unknown")
                     unresolvedSet.insert(f.qual)
                     whyMap[f.qual, default: []].insert("dispatch:untyped cross-package receiver")
@@ -873,7 +878,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             if !resolved, !deps.isEmpty, !call.typed {
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                 var hits: [DepEntry] = []
-                for m in fileImports[file] ?? [] where deps.coveredPkgs.contains(m) {
+                for m in fileImports[file] ?? [] where deps.isChained(m) {
                     if call.unqualified {
                         if let e = deps.lookup("\(m)#\(call.path)") ?? deps.lookup("\(m)#\(call.path).init") {
                             hits.append(e)
@@ -1006,7 +1011,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
             for cand in cc.stringifyExternal.union(cc.deinitExternal) {
                 var hits: [DepEntry] = []
-                for m in fileImports[file] ?? [] where deps.coveredPkgs.contains(m) {
+                for m in fileImports[file] ?? [] where deps.isChained(m) {
                     if let e = deps.lookup("\(m)#\(cand)") { hits.append(e) }
                 }
                 guard hits.count == 1, let de = hits.first else { continue }

@@ -519,7 +519,9 @@ if ProcessInfo.processInfo.environment["CANDOR_WORKSPACE_CHAIN"] != nil {
 // cover — INVISIBLE, not Unknown; named per scan (SPEC §7 item 14, canonical marker `classifier
 // doesn't cover`). A package a chained
 // sibling report covers is EXEMPT (SPEC §2 rule 3) — including an all-pure dep's EMPTY report,
-// whose silence is its purity claim, so the ledger must not name it a blind spot.
+// whose silence is its purity claim, so the ledger must not name it a blind spot. `coveredPkgs` and not
+// `isChained`: a report §2.1 refused to trust makes no claim over its package, so the ledger keeps naming
+// it — the same asymmetry the per-fn `invisible` set uses (Driver.swift, Deps.swift rule 3).
 // Computed HERE (before the envelope is built) because ⟨0.15 staged⟩ the same list rides the report
 // as the `coverage` envelope field — one computation feeds the stderr line (printed below, after the
 // receipt, keeping the disclosure order) AND the wire field, so they can never disagree.

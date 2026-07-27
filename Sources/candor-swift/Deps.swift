@@ -13,13 +13,30 @@
 //   2. STALE REPORTS ARE NOT TRUSTED — a report whose `candor.version` differs from THIS engine's
 //      build (or is missing: as unverifiable as a mismatch — the family condition, mirrored from
 //      candor-ts scan.mjs / candor-java Loader) contributes `Unknown` at every join, never a stale
-//      effect claim; its literal surfaces are not carried. Its PACKAGE is still covered (rule 3 —
-//      coverage is the producer's claim of scope, not of currency).
-//   3. A CHAINED PACKAGE IS COVERED, NOT BLIND — every package a loaded report covers (envelope
-//      `package`/`packages`, plus each entry's hash prefix) is exempt from the §7.14 κ ledger and
-//      the per-fn `invisible` disclosure, INCLUDING an all-pure dep's EMPTY report: reports omit
-//      pure functions, so a call that joins nothing in a covered package reads pure — the silence
-//      is the claim.
+//      effect claim; its literal surfaces are not carried. It is still CHAINED — its keys are looked
+//      up, so the downgrade can happen — but it grants NO COVERAGE (see rule 3).
+//   3. A CHAINED PACKAGE IS COVERED, NOT BLIND — every package a TRUSTED loaded report covers
+//      (envelope `package`/`packages`, plus each entry's hash prefix) is exempt from the §7.14 κ
+//      ledger and the per-fn `invisible` disclosure, INCLUDING an all-pure dep's EMPTY report:
+//      reports omit pure functions, so a call that joins nothing in a covered package reads pure —
+//      the silence is the claim.
+//
+//      THE TRUST QUALIFIER IS LOAD-BEARING, and it is what rule 3 got wrong until 2026-07-27.
+//      Coverage is the mechanism that turns a report's SILENCE into a purity claim, so granting it
+//      on a report §2.1 has just refused to trust makes that claim on the refused report's own
+//      authority: the keys such a report CARRIED read `Unknown` (right, rule 2) while every key it
+//      simply did not contain read PURE (wrong, and silent). Measured on the two-tree fixture: a
+//      call into a dep API the stale report has no entry for went from `invisible: ['RatesDep']`
+//      unchained to ABSENT FROM `functions` — a ⟨0.21⟩ positive purity claim — the moment the
+//      untrusted report was chained, and the κ ledger stopped naming the package. Staleness
+//      rewrites the CONTENT of the keys a report holds; it can never conjure a key the report
+//      lacks, so trusting its silence is the whole of the hole (candor-ts 651c9f9, same shape).
+//
+//      So a stale report's packages go to `stalePkgs`, NOT `coveredPkgs`, and `isChained` (either set)
+//      is what the JOIN gates consult — dropping the package from the join too would be the mirror sin,
+//      since it is the join that produces rule 2's `Unknown` downgrade in the first place. Measured: with
+//      the join gated on `coveredPkgs` instead, FOUR named tests go red, three of them the stale-downgrade
+//      rows. The second direction is not belt-and-braces here; it is the larger half.
 //
 // FAIL-CLOSED (the CANDOR_CONFIG posture, matching candor-java): a CANDOR_DEPS/config-`deps` token
 // that names no readable file or directory, and a dep report that does not parse as JSON, FAIL the
@@ -48,13 +65,26 @@ struct DepEntry {
 struct DepIndex {
     var byKey: [String: DepEntry] = [:]
     var ambiguous: Set<String> = []
+    /// Packages whose silence is a PURITY CLAIM (§2 rule 3) — a package covered by a report this engine
+    /// TRUSTS. Consulted by the κ ledger and the per-fn `invisible` disclosure, which are exactly the
+    /// hedges coverage is allowed to delete. Never consulted to decide whether to LOOK UP a key.
     var coveredPkgs: Set<String> = []
+    /// Packages whose only chained report failed the §2.1 version check. Chained (so rule 2's `Unknown`
+    /// downgrade fires on the keys the report does carry) but NOT covered (so a key it does not carry
+    /// falls back to the `invisible` hedge instead of reading pure). A package chained twice — once fresh,
+    /// once stale — is covered by the fresh report and is removed from here at the end of the load.
+    var stalePkgs: Set<String> = []
+    /// Does ANY chained report — trusted or not — claim this package? The predicate the JOIN gates use.
+    /// Coverage decides whether SILENCE is a claim; chaining decides whether a key is worth ASKING.
+    /// Conflating the two is the defect this split exists to close, and it bites in BOTH directions:
+    /// gating the join on `coveredPkgs` would take rule 2's `Unknown` downgrade with it.
+    func isChained(_ pkg: String) -> Bool { coveredPkgs.contains(pkg) || stalePkgs.contains(pkg) }
     /// ⟨0.23⟩ `typeSurface.returns` (SPEC §2): `<pkg>#<fn qual>` -> `<pkg>#<type qual>`, exactly as the
     /// producer published it. Same never-guess discipline as `byKey`: two reports publishing the same fn
     /// key with DIFFERENT types drop the key rather than pick one.
     var returnsIdx: [String: String] = [:]
     var returnsAmbiguous: Set<String> = []
-    var isEmpty: Bool { byKey.isEmpty && coveredPkgs.isEmpty }
+    var isEmpty: Bool { byKey.isEmpty && coveredPkgs.isEmpty && stalePkgs.isEmpty }
     /// nil for an unknown OR ambiguous fn key. A miss here does NOT license silence — see the consumer.
     func boundType(_ key: String) -> String? { returnsAmbiguous.contains(key) ? nil : returnsIdx[key] }
 
@@ -146,7 +176,11 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
 
         // Envelope-level coverage — registers even an EMPTY report's package (§2 rule 3): singular
         // `package` (this engine, candor-report, candor-ts) and the JVM-shape plural `packages`.
-        if let pkg = obj?["package"] as? String, !pkg.isEmpty { idx.coveredPkgs.insert(pkg) }
+        // An UNTRUSTED report registers into `stalePkgs` instead: chained, not covered (rule 3's
+        // trust qualifier — the header explains why the distinction is the whole fix).
+        if let pkg = obj?["package"] as? String, !pkg.isEmpty {
+            if stale { idx.stalePkgs.insert(pkg) } else { idx.coveredPkgs.insert(pkg) }
+        }
         // ⟨0.23⟩ the published type surface. GATED ON `!stale` for the same reason the effects are: a
         // report from a different producer version is not trusted, and keying a consumer through a type
         // claim we just refused to believe would smuggle a stale answer back in under another field.
@@ -157,7 +191,9 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
                 idx.insertReturn(key: fnKey, ty)
             }
         }
-        for pkg in (obj?["packages"] as? [String]) ?? [] where !pkg.isEmpty { idx.coveredPkgs.insert(pkg) }
+        for pkg in (obj?["packages"] as? [String]) ?? [] where !pkg.isEmpty {
+            if stale { idx.stalePkgs.insert(pkg) } else { idx.coveredPkgs.insert(pkg) }
+        }
 
         for case let e as [String: Any] in fns {
             guard let qual = e["fn"] as? String, !qual.isEmpty else { continue }
@@ -167,7 +203,7 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
             let pkg = hash.flatMap { $0.contains("#") ? String($0.split(separator: "#", maxSplits: 1)[0]) : nil }
                 ?? (obj?["package"] as? String)
             guard let pkg, !pkg.isEmpty else { continue }
-            idx.coveredPkgs.insert(pkg)
+            if stale { idx.stalePkgs.insert(pkg) } else { idx.coveredPkgs.insert(pkg) }
 
             var entry = DepEntry()
             if stale {
@@ -200,6 +236,17 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
                 idx.insert(key: "\(pkg)#\(segs[segs.count - 2]).\(leaf)", entry)
             }
         }
+    }
+    // A package chained TWICE — once fresh, once stale — IS covered: the fresh report makes the claim and
+    // the stale one adds nothing to it. Without this, a second report for an already-covered package would
+    // strip the coverage the first one earned, which is the mirror sin (a real purity claim degraded to a
+    // hedge by a report that says nothing new).
+    idx.stalePkgs.subtract(idx.coveredPkgs)
+    if !idx.stalePkgs.isEmpty {
+        FileHandle.standardError.write(
+            ("candor-swift: \(idx.stalePkgs.count) chained dependency report(s) were produced by a DIFFERENT engine "
+             + "build — downgraded to Unknown and granted NO coverage, so their unanswered keys stay in the κ ledger "
+             + "(§2.1): \(idx.stalePkgs.sorted().joined(separator: ", "))\n").data(using: .utf8)!)
     }
     return idx
 }

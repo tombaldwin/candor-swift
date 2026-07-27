@@ -50,7 +50,10 @@ final class ChainingProcessTests: XCTestCase {
     /// A throwaway root holding the PART 14 dep+app pair. `deproot/` is the RatesDep package (one
     /// class method + one free fn, both reaching Net at the pinned literal); `approot/` imports it
     /// and calls through both join shapes. Returns (root, depDir, appDir).
-    private func makeChainFixture() throws -> (root: URL, dep: URL, app: URL) {
+    /// `extraApp` appends source to the app target — used by the COVERAGE tests, which need a call the
+    /// dep report has NO entry for. Defaulted to empty so every pre-existing test's input is byte-for-byte
+    /// what it was: a fixture change and a regression must stay distinguishable.
+    private func makeChainFixture(extraApp: String = "") throws -> (root: URL, dep: URL, app: URL) {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("candor-swift-chain-\(UUID().uuidString)")
         let dep = root.appendingPathComponent("dep"), app = root.appendingPathComponent("app")
@@ -89,6 +92,7 @@ final class ChainingProcessTests: XCTestCase {
             let c = RatesClient()
             c.fetch()
         }
+        \(extraApp)
         """.write(to: app.appendingPathComponent("Sources/App/App.swift"), atomically: true, encoding: .utf8)
         return (root, dep, app)
     }
@@ -161,6 +165,137 @@ final class ChainingProcessTests: XCTestCase {
             XCTAssertEqual(by[fn]?["unknownWhy"] as? [String], ["dep-stale:RatesDep"],
                            "the Unknown must name its origin (spec 0.6 unknownWhy)")
         }
+    }
+
+    // ── (b2) AN UNTRUSTED REPORT GRANTS NO COVERAGE (§2 rule 3's trust qualifier) ──────────────────
+    //
+    // Rule 3 turns a report's SILENCE into a purity claim. §2.1 says this producer's assertions are not
+    // ours to repeat. Granting coverage on a stale report therefore makes the purity claim on the
+    // authority of a report the engine has just refused to trust: the keys it CARRIES read `Unknown`
+    // (right) while every key it simply does not contain reads PURE (wrong, and silent). The sharp row is
+    // `goUnlisted`, whose callee has no entry in the report at all.
+    //
+    // THE SECOND FIXTURE IS WRITTEN FIRST, below and beside this one, because the obvious fix — drop the
+    // package from the dep index outright — is the mirror sin: the JOIN is what produces rule 2's
+    // downgrade, so an uncoverd-AND-unchained package would send `go` from a disclosed `Unknown` back to
+    // an undisclosed pure. `testStaleDepDowngradesToUnknown` above is that control and must stay green.
+
+    func testStaleDepGrantsNoCoverage() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture(extraApp: """
+        public func goUnlisted() {
+            brandNewApi()
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        let stale = root.appendingPathComponent("dep-stale.json")
+        try doctor(depReport, to: stale) { d in
+            var candor = d["candor"] as! [String: Any]
+            candor["version"] = "candor-doctored-0.0.0"
+            d["candor"] = candor
+        }
+
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path],
+                        env: ["CANDOR_DEPS": stale.path])
+        XCTAssertEqual(r.code, 0)
+        let by = try fns(ofReport: root.appendingPathComponent("app-r.App.Swift.json"))
+
+        // the key the untrusted report does NOT carry must keep its hedge, not read pure
+        XCTAssertNotNil(by["goUnlisted"],
+                        "a call an UNTRUSTED report does not answer must not be absent from `functions` — "
+                        + "absence is a ⟨0.21⟩ purity claim made on the authority of a refused report")
+        XCTAssertEqual(by["goUnlisted"]?["invisible"] as? [String], ["RatesDep"],
+                       "an unanswered key under a stale report falls back to the κ ledger's hedge")
+        // and the scan-level ledger keeps naming the package
+        XCTAssertTrue(r.err.contains("classifier doesn't cover") && r.err.contains("RatesDep"),
+                      "an untrusted report must not exempt its package from the κ ledger: \(r.err)")
+        // the load itself discloses which packages were downgraded
+        XCTAssertTrue(r.err.contains("granted NO coverage") && r.err.contains("RatesDep"),
+                      "the loader must name the untrusted package: \(r.err)")
+    }
+
+    // THE SECOND DIRECTION, and the reason the fix is a SPLIT rather than a drop: the keys the untrusted
+    // report DOES carry must still be looked up, or rule 2's downgrade disappears with the coverage.
+    // (`testStaleDepDowngradesToUnknown` asserts the same property on the un-extended fixture; this one
+    // asserts it survives beside the new hedge, in the same report.)
+    func testStaleDepStillDowngradesTheKeysItDoesCarry() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture(extraApp: """
+        public func goUnlisted() {
+            brandNewApi()
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        let stale = root.appendingPathComponent("dep-stale.json")
+        try doctor(depReport, to: stale) { d in
+            var candor = d["candor"] as! [String: Any]
+            candor["version"] = "candor-doctored-0.0.0"
+            d["candor"] = candor
+        }
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path],
+                        env: ["CANDOR_DEPS": stale.path])
+        XCTAssertEqual(r.code, 0)
+        let by = try fns(ofReport: root.appendingPathComponent("app-r.App.Swift.json"))
+        XCTAssertEqual(Set(by["go"]?["inferred"] as? [String] ?? []), ["Unknown"],
+                       "removing coverage must NOT remove the join — `go` still downgrades (§2 rule 2)")
+        XCTAssertEqual(by["go"]?["unknownWhy"] as? [String], ["dep-stale:RatesDep"])
+        XCTAssertTrue(by["go"]?["unresolved"] as? Bool ?? false,
+                      "an entry carrying Unknown carries the marker that says so")
+    }
+
+    // A package chained TWICE — once fresh, once stale — IS covered: the fresh report makes the claim.
+    // Without this the stale arm would strip the coverage the fresh one earned (the mirror sin: a real
+    // purity claim degraded to a hedge by a report that adds nothing).
+    func testPackageChainedFreshAndStaleKeepsItsCoverage() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture(extraApp: """
+        public func goUnlisted() {
+            brandNewApi()
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        let stale = root.appendingPathComponent("dep-stale.json")
+        try doctor(depReport, to: stale) { d in
+            var candor = d["candor"] as! [String: Any]
+            candor["version"] = "candor-doctored-0.0.0"
+            d["candor"] = candor
+        }
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path],
+                        env: ["CANDOR_DEPS": "\(depReport.path):\(stale.path)"])
+        XCTAssertEqual(r.code, 0)
+        let by = try fns(ofReport: root.appendingPathComponent("app-r.App.Swift.json"))
+        XCTAssertNil(by["goUnlisted"], "the FRESH report covers the package — its silence is still a claim")
+        XCTAssertFalse(r.err.contains("classifier doesn't cover"),
+                       "a package with a fresh report must stay out of the κ ledger: \(r.err)")
+        // …and the DISCLOSURE must agree with the behaviour. Without the `stalePkgs.subtract(coveredPkgs)`
+        // reconciliation the loader announces a package as uncovered while it is covered — a FALSE
+        // disclosure, which is worse than a missing one, and the only thing that reconciliation changes.
+        XCTAssertFalse(r.err.contains("granted NO coverage"),
+                       "RatesDep IS covered by the fresh report — the loader must not announce otherwise: \(r.err)")
+    }
+
+    // …and the FRESH-only control, so the hedge above is provably the stale arm's doing and not a general
+    // change to how an unanswered key reads.
+    func testFreshDepStillMakesSilenceAPurityClaim() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture(extraApp: """
+        public func goUnlisted() {
+            brandNewApi()
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path],
+                        env: ["CANDOR_DEPS": depReport.path])
+        XCTAssertEqual(r.code, 0)
+        let by = try fns(ofReport: root.appendingPathComponent("app-r.App.Swift.json"))
+        XCTAssertNil(by["goUnlisted"],
+                     "a TRUSTED report's silence is its purity claim (§2 rule 3) — unchanged")
+        XCTAssertFalse(r.err.contains("classifier doesn't cover"), "\(r.err)")
+        XCTAssertFalse(r.err.contains("granted NO coverage"), "no stale report here: \(r.err)")
     }
 
     // a MISSING producing version is as unverifiable as a mismatched one (the family condition).
