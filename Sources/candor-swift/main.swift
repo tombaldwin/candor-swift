@@ -388,8 +388,24 @@ if wantWorkspace {
     // of one of those deps. `ownedReportFile` answers that for a dep whose scan FAILED too (which is the
     // only case that matters, since a success rewrites the file anyway): the package name recorded by an
     // earlier round, else the dep's own `Package.swift` `name:`, else the directory basename — the same
-    // three sources the writer uses, in the same order. A file matching none of them is disclosed and
-    // left alone.
+    // three sources the writer uses, in the same order (ONE parse, shared with the writer — see
+    // `manifestPackageName`). A file matching none of them is disclosed and left alone.
+    //
+    // …AND OWNERSHIP IS NOT ENOUGH, BECAUSE TWO PATH DEPS CAN DERIVE THE SAME REPORT NAME. The report
+    // file is named after the PACKAGE, and a workspace can hold the same package twice — a vendored
+    // fork beside the upstream checkout is the ordinary shape. If one of those scans and the other
+    // fails, the failed dep "owns" the exact file the healthy one has just written, and the sweep
+    // deleted a report this run had produced seconds earlier. Then, because a non-empty sweep triggers
+    // the second fixpoint round, the retry rewrote it and THE SECOND SWEEP DELETED IT AGAIN. Measured on
+    // the two-package fixture: the consumer went from `['Fs']` to `invisible: ['Shared']`, and the file
+    // was gone from the cache afterwards.
+    //
+    // `b4f6cbc` fixed the sibling of this one door over (a file the USER put there), and the guard it
+    // needed is the same guard one step stronger: NEVER DELETE A FILE THIS RUN WROTE. `confirmed` is
+    // already the set of report files a successful scan produced this run — including the ones whose
+    // bytes were unchanged, which is why it is `confirmed` and not `rewritten` — so the sweep subtracts
+    // it. A candidate skipped for that reason is DISCLOSED, because the alternative is the run saying
+    // it removed a report it did not remove, and a false disclosure is worse than a missing one.
     var confirmed: Set<String> = []
     var succeededPaths: Set<String> = []
     var reportNameOf: [String: String] = [:]    // dep path -> the package name its report is filed under
@@ -456,22 +472,32 @@ if wantWorkspace {
         return (depsDir as NSString).appendingPathComponent(safe + ".json")
     }
     /// Remove the cached report of every local path dep whose scan did NOT succeed this run. Returns
-    /// the file names actually removed.
+    /// the file names actually removed, and the ones a HEALTHY sibling had already written this run.
     ///
     /// SCOPED TO WHAT THIS RUN OWNS. The candidates are the discovered path deps, never the directory
     /// listing: a report the USER put here for a binary dependency, produced by hand, or written by
     /// another engine is not this run's to delete, and deleting it is unrecoverable. The cost of the
     /// narrower rule is that a report for a package that USED to be a path dep and no longer is will
     /// linger — information kept rather than destroyed, and disclosed by `unownedReports` below.
-    func sweepStale(_ recorded: [String: String]) -> [String] {
-        var removed: [String] = []
+    ///
+    /// …AND NEVER A FILE THIS RUN WROTE. Ownership is by NAME, and two path deps can derive the same
+    /// name (the same package vendored twice), so a failed dep's "owned" file can be the report a
+    /// healthy sibling produced moments ago. `wroteThisRun` is `confirmed` — the files a successful
+    /// scan produced this round, unchanged bytes included — and it is PASSED rather than captured for
+    /// the reason `recorded` is (see `ownedReportFile`).
+    func sweepStale(_ recorded: [String: String], _ wroteThisRun: Set<String>) -> (removed: [String], keptForSibling: [String]) {
+        var removed: [String] = [], kept: [String] = []
         for dp in depPaths.sorted() where !succeededPaths.contains(dp) {
             let full = ownedReportFile(dp, recorded)
             guard fm.fileExists(atPath: full) else { continue }
+            guard !wroteThisRun.contains(full) else {
+                kept.append((full as NSString).lastPathComponent)   // a sibling's fresh answer, not a stale one
+                continue
+            }
             try? fm.removeItem(atPath: full)
             removed.append((full as NSString).lastPathComponent)
         }
-        return removed
+        return (removed, kept)
     }
     /// Reports in the cache that this run neither produced nor owns — chained by `loadDepReports` all
     /// the same. Named on stderr rather than removed: §2.1's staleness check is what decides whether to
@@ -483,7 +509,8 @@ if wantWorkspace {
             .filter { !owned.contains((depsDir as NSString).appendingPathComponent($0)) }
     }
     runRounds()
-    var swept = sweepStale(reportNameOf)
+    var sweep = sweepStale(reportNameOf, confirmed)
+    var swept = sweep.removed, keptForSibling = sweep.keptForSibling
     if !swept.isEmpty {
         // The children were spawned with CANDOR_DEPS pointing at this same directory, so a sibling that
         // DID scan cleanly may have chained the stale report we have just removed — and its report feeds
@@ -492,7 +519,8 @@ if wantWorkspace {
         // success, so a second sweep can find nothing the first did not.
         confirmed.removeAll()
         runRounds()
-        swept += sweepStale(reportNameOf)
+        sweep = sweepStale(reportNameOf, confirmed)
+        swept += sweep.removed; keptForSibling += sweep.keptForSibling
     }
     workspaceDepsDir = depsDir
     let failed = depPaths.filter { !succeededPaths.contains($0) }
@@ -500,11 +528,23 @@ if wantWorkspace {
         // LOUD, and it names what it cost. Previously the child's stderr went to /dev/null and the skip
         // was silent, so the one thing a reader could see — the count line below — said "no local path
         // deps found" while a path dep sat there unscanned.
+        //
+        // AND IT MUST NOT CLAIM A REMOVAL THAT DID NOT HAPPEN. When the failed dep's report name is the
+        // one a healthy sibling just wrote, nothing was removed and the cache holds the SIBLING's answer
+        // under that name — a materially different situation, and telling the reader the package fell
+        // back to the κ ledger when it did not is the false-disclosure failure this project treats as
+        // worse than silence.
+        let keptNames = Set(keptForSibling)
         for dp in failed.sorted() {
+            let file = (ownedReportFile(dp, reportNameOf) as NSString).lastPathComponent
+            let fate = keptNames.contains(file)
+                ? "its report name (\(file)) is one ANOTHER local path dep produced this run, so nothing "
+                  + "was removed and that file is the OTHER package's answer — two path deps deriving one "
+                  + "report name is a workspace this cache cannot represent"
+                : "any report this cache held for it has been removed so the package falls back to the κ ledger"
             FileHandle.standardError.write(
                 ("candor-swift: --workspace could NOT scan the local path dependency \(dp) "
-                 + "(\(failures[dp] ?? "no report")) — its effects are UNSEEN, not pure; any report this "
-                 + "cache held for it has been removed so the package falls back to the κ ledger\n").data(using: .utf8)!)
+                 + "(\(failures[dp] ?? "no report")) — its effects are UNSEEN, not pure; \(fate)\n").data(using: .utf8)!)
         }
     }
     if !swept.isEmpty {

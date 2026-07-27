@@ -282,6 +282,122 @@ final class WorkspaceCacheProcessTests: XCTestCase {
     /// `Package.swift` branch could be deleted and this row would still pass: a test that cannot reach
     /// the code it names is not a test. Here the basename is `libdep-src` and only the manifest says
     /// `Dep0`, so exactly one branch can find the file.
+    // ── …AND NEVER A FILE THIS RUN WROTE ─────────────────────────────────────────────────────────
+    //
+    // Ownership is by NAME. Two local path deps can derive the SAME report name — the ordinary shape is
+    // one package vendored twice, an upstream checkout beside a fork — and when one of them scans and
+    // the other fails, the FAILED dep "owns" the file the healthy one wrote seconds ago. The sweep
+    // deleted it. Then, because a non-empty sweep triggers the second fixpoint round, the retry rewrote
+    // it and the second sweep deleted it AGAIN.
+    //
+    // `b4f6cbc` closed the sibling of this (a file the USER put there) with a rule about who wrote a
+    // file; this is the same rule one step stronger, and it is the simplest form of it: never delete a
+    // file this run wrote. `confirmed` already holds exactly that set.
+
+    /// A workspace holding the same package twice: `Shared/` scans and is EFFECTFUL, `vendor/Shared/`
+    /// derives the same report name and fails, `Ghost/` fails with a genuinely stale report on disk.
+    /// Plus a user-placed report for a binary dep. All four fates in one run.
+    private func makeCollidingWorkspace() throws -> URL {
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-ws-\(UUID().uuidString)")
+        func pkg(_ rel: String, name: String, target: String, body: String, broken: Bool) throws {
+            try fm.createDirectory(at: root.appendingPathComponent("\(rel)/Sources/\(target)"),
+                                   withIntermediateDirectories: true)
+            try """
+            // swift-tools-version: 6.0
+            import PackageDescription
+            let package = Package(name: "\(name)", targets: [.target(name: "\(target)")])
+            """.write(to: root.appendingPathComponent("\(rel)/Package.swift"), atomically: true, encoding: .utf8)
+            try body.write(to: root.appendingPathComponent("\(rel)/Sources/\(target)/S.swift"),
+                           atomically: true, encoding: .utf8)
+            if broken {
+                try fm.createDirectory(at: root.appendingPathComponent("\(rel)/.candor"), withIntermediateDirectories: true)
+                try "policy ./ci/strict.candor\n"
+                    .write(to: root.appendingPathComponent("\(rel)/.candor/config"), atomically: true, encoding: .utf8)
+            }
+        }
+        // the healthy one, and it PERFORMS Fs — so the consumer's answer is a positive effect rather
+        // than an absence, and a lost report shows up as a lost `Fs` and not just a missing file
+        try pkg("Shared", name: "Shared", target: "Shared", body: """
+        import Foundation
+        public func work() { try? "s".write(toFile: "/tmp/candor-shared.txt", atomically: true, encoding: .utf8) }
+        """, broken: false)
+        // the same PACKAGE name from a different path, and it fails to scan
+        try pkg("vendor/Shared", name: "Shared", target: "Shared",
+                body: "public func vendored() { }\n", broken: true)
+        // a failed dep whose stale report really is nobody else's — the control that keeps the sweep alive
+        try pkg("Ghost", name: "Ghost", target: "Ghost", body: "public func ghost() { }\n", broken: true)
+
+        try fm.createDirectory(at: root.appendingPathComponent("app/Sources/App"), withIntermediateDirectories: true)
+        try "import Shared\npublic func use() { work() }\n"
+            .write(to: root.appendingPathComponent("app/Sources/App/U.swift"), atomically: true, encoding: .utf8)
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(
+            name: "App",
+            dependencies: [
+                .package(path: "../Shared"),
+                .package(path: "../vendor/Shared"),
+                .package(path: "../Ghost"),
+            ],
+            targets: [.target(name: "App")])
+        """.write(to: root.appendingPathComponent("app/Package.swift"), atomically: true, encoding: .utf8)
+
+        let deps = root.appendingPathComponent("app/.candor/deps")
+        try fm.createDirectory(at: deps, withIntermediateDirectories: true)
+        // a file this run neither wrote nor owns…
+        try "{\"candor\":{\"version\":\"hand-written\"},\"package\":\"BinaryDep\",\"functions\":[]}"
+            .write(to: deps.appendingPathComponent("BinaryDep.json"), atomically: true, encoding: .utf8)
+        // …and one it did not write but DOES own: genuinely stale, and it must still go
+        try "{\"candor\":{\"version\":\"hand-written\"},\"package\":\"Ghost\",\"functions\":[]}"
+            .write(to: deps.appendingPathComponent("Ghost.json"), atomically: true, encoding: .utf8)
+        return root
+    }
+
+    func testAFailedDepDoesNotSweepTheReportAHealthySiblingJustWrote() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        let root = try makeCollidingWorkspace()
+        defer { try? fm.removeItem(at: root) }
+        let deps = root.appendingPathComponent("app/.candor/deps")
+
+        let r = try scan(bin, root, out: "coll")
+        XCTAssertEqual(r.code, 0, r.err)
+
+        // THE DEFECT: the file the healthy dep wrote THIS RUN, deleted on the failed dep's behalf —
+        // and deleted a second time after the retry rewrote it.
+        XCTAssertTrue(fm.fileExists(atPath: deps.appendingPathComponent("Shared.json").path),
+                      "`Shared/` scanned cleanly and its report was written this run; the sweep deleted "
+                      + "it because `vendor/Shared/` derives the same report name and failed. Deleting a "
+                      + "file this run produced is unrecoverable and has nothing to do with staleness.")
+        // …and the analysis consequence, which is what makes it more than a housekeeping bug
+        let by = try appFns(root, "coll")
+        XCTAssertEqual(by["use"]?["inferred"] as? [String], ["Fs"],
+                       "the consumer's answer comes from that report — with it deleted, `use` fell back "
+                       + "to `invisible: ['Shared']` and the dependency's real file write went unseen")
+        XCTAssertEqual(by["use"]?["paths"] as? [String], ["/tmp/candor-shared.txt"],
+                       "…and its literal surface with it")
+
+        // THE SWEEP IS STILL A SWEEP — the failed dep whose report is nobody else's still loses it
+        XCTAssertFalse(fm.fileExists(atPath: deps.appendingPathComponent("Ghost.json").path),
+                       "`Ghost/` failed and its stale report is not a sibling's answer — it must still "
+                       + "go, or the fix is 'stop sweeping' rather than 'never delete what you wrote'")
+        // …and a report this run neither wrote nor owns is still left alone (b4f6cbc's row)
+        XCTAssertTrue(fm.fileExists(atPath: deps.appendingPathComponent("BinaryDep.json").path))
+        XCTAssertTrue(r.err.contains("removed 1 stale report") && r.err.contains("Ghost.json"),
+                      "exactly one removal, and it is named: \(r.err)")
+
+        // A FALSE DISCLOSURE IS WORSE THAN A MISSING ONE. The per-dep failure line used to say the
+        // cache's report "has been removed so the package falls back to the κ ledger" — untrue here,
+        // and the file under that name is a DIFFERENT package's answer.
+        XCTAssertTrue(r.err.contains("is one ANOTHER local path dep produced this run"),
+                      "the collision must be named, not papered over: \(r.err)")
+        XCTAssertEqual(r.err.components(separatedBy: "falls back to the κ ledger").count - 1, 1,
+                       "only Ghost's line may claim the ledger fallback: \(r.err)")
+    }
+
     func testAStaleReportIsSweptWhenOnlyTheDepManifestNamesIt() throws {
         let bin = try ProcessHarness.binaryURL(for: Self.self)
         let fm = FileManager.default
