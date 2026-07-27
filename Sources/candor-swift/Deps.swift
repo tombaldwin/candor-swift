@@ -412,16 +412,49 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
             for k in keys { idx.insert(key: k, entry, stale: stale) }
         }
     }
+    // A PACKAGE CHAINED TWICE, ONCE COMPLETE AND ONCE NOT, IS **NOT** COVERED — INCOMPLETENESS WINS.
+    //
+    // This line used to run the other way (`incompletePkgs.subtract(coveredPkgs)`), on the reading that a
+    // complete report makes its coverage claim on its own authority and must not inherit another
+    // report's hedge. That reading is wrong, and the reason is one sentence: **two reports covering one
+    // package do not cover the same SOURCE.** Coverage is the rule that turns SILENCE into a purity
+    // claim (§2 rule 3), and a set of reports' silence is only as strong as the weakest completeness
+    // claim in the set — report A's silence about a region it never read is not evidence, and A never
+    // said otherwise; it answered for its own source. B DID say it could not read some of the package,
+    // and complete-wins cancelled exactly that hedge.
+    //
+    // MEASURED on two fresh reports for one package, A complete and B declaring `unanalyzed`:
+    //
+    //   B alone      goUnlisted -> invisible: ['RatesDep']    the hedge B asked for
+    //   A alone      goUnlisted -> ABSENT                     A's coverage, over source A read
+    //   A and B      goUnlisted -> ABSENT                     B's hedge CANCELLED by A's claim
+    //
+    // …and the sharper form, which is candor-rust `63bbe87`'s argument arriving on the completeness axis
+    // instead of the staleness one. This index DROPS a key two TRUSTED reports disagree under (§2 rule
+    // 1 forbids picking) — so with A and C disagreeing about `RatesDep#hit`, one of them incomplete:
+    //
+    //   C alone      go -> ['Exec']       A alone  go -> ['Net']       A and C  go -> ABSENT
+    //
+    // a ⟨0.21⟩ positive purity claim over a function BOTH reports call effectful. Rust refused
+    // complete-wins for exactly this shape and pinned the refusal; swift had it landed.
+    //
+    // The cost is a HEDGE, never an effect: entries are untouched either way (incompleteness withholds
+    // coverage and nothing else), so the change can only add `invisible` and κ-ledger rows. Withholding
+    // coverage from a package one chained report says it could not fully read is not a false disclosure
+    // — the package really does have source nobody analyzed, and the ledger says so.
+    //
+    // ORDER MATTERS: completeness first, so the staleness reconciliation below sees the FINAL covered
+    // set. A package that is covered, stale and incomplete at once then keeps BOTH disclosures rather
+    // than losing the stale one to a coverage claim that has just been withdrawn.
+    idx.coveredPkgs.subtract(idx.incompletePkgs)
     // A package chained TWICE — once fresh, once stale — IS covered: the fresh report makes the claim and
     // the stale one adds nothing to it. Without this, a second report for an already-covered package would
     // strip the coverage the first one earned, which is the mirror sin (a real purity claim degraded to a
-    // hedge by a report that says nothing new).
+    // hedge by a report that says nothing new). NOT the same shape as the completeness line above: a
+    // stale report makes NO claim about its own source at all, whereas an incomplete one makes a specific
+    // negative one — and swift's `insert` keeps the TRUSTED answer on a fresh/stale collision (`ca5feb0`)
+    // rather than withdrawing the key, which is what made rust's refusal rust-specific on that axis.
     idx.stalePkgs.subtract(idx.coveredPkgs)
-    // …and the same for completeness: a package chained twice, once COMPLETE and once not, IS covered by
-    // the complete report. A complete report is a coverage claim on its own and must not inherit the
-    // other's hedge — the same rule one line up, and a stale report's `unanalyzed` never reaches here
-    // (staleness is checked first), so this cannot re-cover a distrusted package.
-    idx.incompletePkgs.subtract(idx.coveredPkgs)
     if !idx.incompletePkgs.isEmpty {
         FileHandle.standardError.write(
             ("candor-swift: \(idx.incompletePkgs.count) chained dependency report(s) declare source they "

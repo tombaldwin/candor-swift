@@ -791,11 +791,21 @@ final class ChainingProcessTests: XCTestCase {
         XCTAssertEqual(under?["invisible"] as? [String], ["RatesDep"], "…and the ledger speaks too")
     }
 
-    /// A package chained TWICE — once complete, once not — IS covered: the complete report makes the
-    /// claim on its own and must not inherit the other's hedge. The same reconciliation `stalePkgs` gets,
-    /// and without it the loader would announce a covered package as uncovered — a FALSE disclosure,
-    /// which is worse than a missing one.
-    func testPackageChainedCompleteAndIncompleteKeepsItsCoverage() throws {
+    /// A PACKAGE CHAINED TWICE, ONCE COMPLETE AND ONCE NOT, IS **NOT** COVERED — INCOMPLETENESS WINS.
+    ///
+    /// This row used to assert the opposite, on the reading that a complete report makes its coverage
+    /// claim on its own authority and that announcing a covered package as uncovered would be a FALSE
+    /// disclosure. It is not false, and the reading is wrong for one reason: **two reports covering one
+    /// package do not cover the same SOURCE.** Coverage turns SILENCE into a purity claim (§2 rule 3),
+    /// so a set of reports' silence is only as strong as the weakest completeness claim in it. Report A
+    /// answered for the source A read and never claimed more; report B said in as many words that it
+    /// could not read some of the package — and complete-wins cancelled exactly that hedge.
+    ///
+    /// This test PINNED THE DEFECT (standing bar item 7g). It is inverted here rather than deleted,
+    /// with the measurement attached, and the flip instructions are: `Deps.swift`'s
+    /// `coveredPkgs.subtract(incompletePkgs)` is the one line; running it the other way restores
+    /// complete-wins and this row goes red.
+    func testPackageChainedCompleteAndIncompleteLosesItsCoverage() throws {
         let bin = try binaryURL()
         let (root, dep, app) = try makeChainFixture(extraApp: """
         public func goUnlisted() {
@@ -810,11 +820,84 @@ final class ChainingProcessTests: XCTestCase {
                         env: ["CANDOR_DEPS": "\(depReport.path):\(incomplete.path)"])
         XCTAssertEqual(r.code, 0)
         let by = try fns(ofReport: root.appendingPathComponent("app-ci.App.Swift.json"))
-        XCTAssertNil(by["goUnlisted"], "the COMPLETE report covers the package — its silence still claims")
-        XCTAssertFalse(r.err.contains("could not analyze"),
-                       "RatesDep IS covered by the complete report; announcing otherwise is a FALSE "
-                       + "disclosure: \(r.err)")
+        XCTAssertEqual(by["goUnlisted"]?["invisible"] as? [String], ["RatesDep"],
+                       "one of the two chained reports declares source it could not analyze, so the "
+                       + "package's silence about a key NEITHER answers is not a purity claim. Measured "
+                       + "with the incomplete report chained ALONE it hedges; complete-wins cancelled it.")
+        XCTAssertTrue(r.err.contains("could not analyze") && r.err.contains("RatesDep"),
+                      "…and the ledger says which package and why: \(r.err)")
+        // THE ENTRIES ARE UNTOUCHED — the cost of this is a hedge, never an effect. Incompleteness
+        // withholds coverage and nothing else, so an answered key still answers, with its surface.
         XCTAssertEqual(Set(by["go"]?["inferred"] as? [String] ?? []), ["Net"])
+        XCTAssertEqual(by["go"]?["hosts"] as? [String], ["rates.internal:7070"])
+    }
+
+    /// THE SECOND FIXTURE, WRITTEN FIRST: two COMPLETE reports for one package still cover it. Without
+    /// this the change above is indistinguishable from "a package chained twice loses its coverage",
+    /// which would flood every workspace that reaches a package through two paths.
+    func testAPackageChainedTwiceByTwoCompleteReportsKeepsItsCoverage() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture(extraApp: """
+        public func goUnlisted() {
+            brandNewApi()
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        let copy = root.appendingPathComponent("dep-copy.json")
+        try doctor(depReport, to: copy) { _ in }
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-cc").path],
+                        env: ["CANDOR_DEPS": "\(depReport.path):\(copy.path)"])
+        XCTAssertEqual(r.code, 0)
+        let by = try fns(ofReport: root.appendingPathComponent("app-cc.App.Swift.json"))
+        XCTAssertNil(by["goUnlisted"], "neither report hedges, so the package is covered and silence claims")
+        XCTAssertFalse(r.err.contains("could not analyze"), r.err)
+        XCTAssertEqual(Set(by["go"]?["inferred"] as? [String] ?? []), ["Net"],
+                       "…and the identical-entry exemption keeps the answer (see `insert`)")
+    }
+
+    /// THE SHARPER FORM, and it is candor-rust `63bbe87`'s argument arriving on the COMPLETENESS axis
+    /// rather than the staleness one. §2 rule 1 forbids picking between two candidates, so this index
+    /// DROPS a key two TRUSTED reports disagree under — and under complete-wins the package stayed
+    /// covered, which turned the withdrawn key into a positive purity claim over a function BOTH
+    /// reports call effectful.
+    ///
+    ///   C alone  go -> ['Exec']    A alone  go -> ['Net']    A and C  go -> ABSENT FROM `functions`
+    func testAWithdrawnKeyUnderAnIncompleteSiblingDoesNotReadPure() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        // a second FRESH report for RatesDep that disagrees about `hit` AND declares itself incomplete
+        let other = root.appendingPathComponent("dep-other.json")
+        try doctor(depReport, to: other) { d in
+            var fns: [Any] = []
+            for case var f as [String: Any] in (d["functions"] as? [Any]) ?? [] {
+                if f["fn"] as? String == "hit" {
+                    f["inferred"] = ["Exec"]; f["cmds"] = ["/bin/ls"]; f.removeValue(forKey: "hosts")
+                }
+                fns.append(f)
+            }
+            d["functions"] = fns
+            d["unanalyzed"] = [["path": "Sources/RatesDep/Other.swift", "reason": "source failed to read"]]
+        }
+        // the control: chained ALONE it answers, so the row below is about the collision and not about
+        // the report being unusable
+        let solo = try run(bin, [app.path, "--out", root.appendingPathComponent("app-solo").path],
+                           env: ["CANDOR_DEPS": other.path])
+        XCTAssertEqual(solo.code, 0)
+        XCTAssertEqual(Set(try fns(ofReport: root.appendingPathComponent("app-solo.App.Swift.json"))["go"]?["inferred"] as? [String] ?? []),
+                       ["Exec"], "the disagreeing report must answer on its own, or this proves nothing")
+
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-ac").path],
+                        env: ["CANDOR_DEPS": "\(depReport.path):\(other.path)"])
+        XCTAssertEqual(r.code, 0)
+        let by = try fns(ofReport: root.appendingPathComponent("app-ac.App.Swift.json"))
+        XCTAssertNotNil(by["go"],
+                        "the key is withdrawn as ambiguous, which is right — but with the package still "
+                        + "COVERED that withdrawal read as a ⟨0.21⟩ purity claim over a function both "
+                        + "reports call effectful. A withdrawn key must fall back to disclosure.")
+        XCTAssertEqual(by["go"]?["invisible"] as? [String], ["RatesDep"])
     }
 
     /// STALENESS IS CHECKED FIRST. A report this engine does not trust cannot be trusted about its own
