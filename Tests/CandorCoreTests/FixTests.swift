@@ -119,8 +119,9 @@ final class FixTests: XCTestCase {
     func testUnverifiedFlagsAnUnknownInScope() {
         // domain.price is Unknown (a fn-value call) → `pure domain` PASSES it, but its purity is unverified.
         let fns = [
-            UnverifiedFn(fn: "domain.price", inferred: ["Unknown"], unknownWhy: ["callback:fetch"]),
-            UnverifiedFn(fn: "domain.calc", inferred: [], unknownWhy: []),
+            UnverifiedFn(fn: "domain.price", inferred: ["Unknown"], direct: ["Unknown"],
+                         unknownWhy: ["callback:fetch"], calls: []),
+            UnverifiedFn(fn: "domain.calc", inferred: [], direct: [], unknownWhy: [], calls: []),
         ]
         let deny = parsePolicy("pure domain").deny
         let (ok, holes) = unverified(fns, deny)

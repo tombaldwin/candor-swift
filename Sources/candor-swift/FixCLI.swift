@@ -371,8 +371,15 @@ private func mergeUnverifiedReport(_ full: String, into out: inout [UnverifiedFn
     for e in fns {
         guard let fn = e["fn"] as? String, !fn.isEmpty else { continue }
         let inferred = Set((e["inferred"] as? [Any])?.compactMap { $0 as? String } ?? [])
+        // `direct` + `calls` ride along for the ⟨0.24⟩ reason-class resolution (CandorCore.unverified):
+        // the class of an INHERITED `Unknown` is at the callee, and only `direct` separates a function
+        // that introduced an unrecorded `Unknown` from one that inherited a classified one. A report
+        // predating either field loads it empty, which the resolution tolerates (it falls back to the
+        // conservative `unresolved` for anything left unexplained) — never to a dropped hole.
+        let direct = Set((e["direct"] as? [Any])?.compactMap { $0 as? String } ?? [])
         let why = (e["unknownWhy"] as? [Any])?.compactMap { $0 as? String } ?? []
-        out.append(UnverifiedFn(fn: fn, inferred: inferred, unknownWhy: why))
+        let calls = (e["calls"] as? [Any])?.compactMap { $0 as? String } ?? []
+        out.append(UnverifiedFn(fn: fn, inferred: inferred, direct: direct, unknownWhy: why, calls: calls))
     }
     return true
 }

@@ -9,6 +9,40 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### soundness — `unverified --class` read the direct `unknownWhy` as if it were the transitive one (2026-07-27)
+
+`unverified` names the functions a `pure`/`deny E` layer PASSES without proving anything. Its ⟨0.20⟩
+`--class` filter matched against the report's `unknownWhy` FIELD, which is the wrong quantity twice:
+
+- SPEC §4 makes `unknownWhy` **direct-only**, so a function that INHERITS its `Unknown` records no
+  reason of its own — and matched no class, so every inherited hole was dropped by every filter.
+  44% of pollen's `Unknown`-bearing entries (192/435) and 67% of candor-swift's own (35/52) are that shape.
+- SPEC §6.2 ⟨0.24⟩: a reasonless `Unknown` **CONTRIBUTES** `unresolved`. The site contributed nothing,
+  so `--class unresolved` — the filter whose job is the holes nobody could classify — missed them.
+
+The tell is that `--class dynamic` names every genuine class and so cannot exclude a hole, yet returned
+strictly fewer. Measured, `deny Exec`, holes unfiltered → `--class dynamic`:
+
+| target | unfiltered | dynamic BEFORE | dynamic AFTER |
+|---|---|---|---|
+| pollen | 387 | 230 (−41%) | **387** |
+| candor-swift | 51 | 16 (−69%) | **51** |
+
+Both halves are required and each is the other's guard: contributing on absence alone would give an
+inherited `Unknown` `unresolved` when its callee classified it `dispatch` — the fail-open traded for its
+fabrication mirror. So the contribution is gated on `direct` ∋ `Unknown` (the function introduced the
+hole and named nothing), and inheritance is resolved by the same least-fixpoint over `calls` the gate
+uses. The filter still discriminates after the change — pollen `--class unresolved` = 6 of 387,
+`--class native` = 0 — which is the control that separates this from "everything matches everything".
+`UnverifiedClassFilterTests` pins both directions; the mutation dropping the `direct` gate fails only the
+control rows. No report-format change: `direct` and `calls` were already on every entry, unread.
+
+The ⟨0.24⟩ projection change does **not** move any gate verdict here: candor-swift attaches a reason at
+the SOURCE (`dep:<hash>` synthesized per dep entry exactly when the dependency classified nothing), so a
+function's class set is never empty and the gate's empty-set default is unreachable — instrumented, 0
+fires across 487 `Unknown`-bearing functions on two real targets, and the three-row counterexample
+(reasonless dep, reasoned dep, both) is already rejected on the both row.
+
 ### soundness — ⚠ a binder that CAN type its new binding still has to invalidate the old one (2026-07-27)
 
 A review found one site; the rename control that reproduced it found four more. `shadowName` drops the

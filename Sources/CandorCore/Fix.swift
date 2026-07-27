@@ -178,14 +178,24 @@ public func fixGate(byName: [String: FixFn], cg: [String: [String]], deny: [Deny
 }
 
 // A per-function record the `unverified` check needs (fn name + inferred effects + the Unknown reasons).
+// `direct` and `calls` are what the ⟨0.24⟩ reason-class resolution needs and `unknownWhy` alone cannot
+// give: `unknownWhy` is DIRECT-ONLY per SPEC §4, so the class of an INHERITED `Unknown` lives at the
+// callee (`calls` reaches it), and a function that introduced its own `Unknown` without recording a
+// reason is only distinguishable from one that merely inherited it by `direct` (§6.2's contribution
+// case). Both are non-defaulted: a construction site that omitted them would silently rebuild the
+// direct-field-only reading this field pair exists to end.
 public struct UnverifiedFn {
     public let fn: String
     public let inferred: Set<String>
+    public let direct: Set<String>
     public let unknownWhy: [String]
-    public init(fn: String, inferred: Set<String>, unknownWhy: [String]) {
+    public let calls: [String]
+    public init(fn: String, inferred: Set<String>, direct: Set<String>, unknownWhy: [String], calls: [String]) {
         self.fn = fn
         self.inferred = inferred
+        self.direct = direct
         self.unknownWhy = unknownWhy
+        self.calls = calls
     }
 }
 
@@ -229,17 +239,60 @@ public func unverifiedHoleRule(_ fn: String, _ inferred: Set<String>, _ deny: [D
     return nil
 }
 
+/// Each function's TRANSITIVE `Unknown` reason-class set (SPEC §6.2), over a loaded report's entries —
+/// the `unverified` counterpart of the gate's `reasonClassAcc`, and it must answer the same question the
+/// same way or `--class` and `deny E Unknown[<class>]` disagree about one report.
+///
+/// Two rules, and BOTH are needed. Either alone is a defect in its own direction:
+///
+///  - ⟨0.24⟩ CONTRIBUTION. A function whose `Unknown` carries no recorded reason CONTRIBUTES `unresolved`
+///    — never "defaults to it when the set is empty", which is keyed on absence and so is removed by
+///    learning a second, classifiable reason. The reasonless case is `direct` ∋ `Unknown` with no
+///    `unknownWhy`: the function introduced the hole itself and named nothing.
+///  - TRANSITIVITY. `unknownWhy` is DIRECT-ONLY by SPEC §4, so an inherited `Unknown` records no reason
+///    of its own and its class lives at the callee. Reading the direct field as if it were the
+///    transitive one drops every inherited hole from every filter.
+///
+/// Applying the contribution rule to an INHERITED `Unknown` would be the mirror fabrication — an
+/// `unresolved` on a function whose callee classified the hole perfectly well — which is why the
+/// contribution is gated on `direct` and not on the absence of a reason. The final sweep is neither
+/// rule: a function still carrying `Unknown` that nothing in its reach explains (a truncated report, a
+/// callee entry in a report that was not loaded) is a hole nobody classified, and §6.2's conservative
+/// projection for that is `unresolved`.
+func reasonClassesTransitive(_ fns: [UnverifiedFn]) -> [String: Set<String>] {
+    var seed: [String: Set<String>] = [:]
+    var edges: [String: Set<String>] = [:]
+    var unknownBearing: Set<String> = []
+    for e in fns {
+        if !e.calls.isEmpty { edges[e.fn, default: []].formUnion(e.calls) }
+        if e.inferred.contains("Unknown") { unknownBearing.insert(e.fn) }
+        if !e.unknownWhy.isEmpty {
+            seed[e.fn, default: []].formUnion(e.unknownWhy.map(reasonClass))
+        } else if e.direct.contains("Unknown") {
+            seed[e.fn, default: []].insert("unresolved")
+        }
+    }
+    var acc = propagate(seed, over: edges)
+    for fn in unknownBearing where acc[fn]?.isEmpty ?? true { acc[fn] = ["unresolved"] }
+    return acc
+}
+
 // unverified: the PROVABLE-PURITY disclosure (eval/fixloop/DISPATCH-NOTE.md, mirrors candor-query). A
 // `pure`/`deny E` layer PASSES a function that carries none of its forbidden effects — but if that function is
 // `Unknown` (an unresolvable call), the pass is UNVERIFIED: the Unknown could hide the very effect the rule
 // forbids (the fn/closure-port hole). Returns each such function + the `deny E Unknown <scope>` upgrade.
 public func unverified(_ fns: [UnverifiedFn], _ deny: [DenyRule], classFilter: Set<String>? = nil) -> (ok: Bool, holes: [UnverifiedHole]) {
     var holes: [UnverifiedHole] = []
+    // Computed once, and ONLY when a filter will consult it — the unfiltered list is unchanged by it.
+    let classes = classFilter == nil ? [:] : reasonClassesTransitive(fns)
     for e in fns {
         // Same predicate + upgrade as the gate note (main.swift) — one source of truth for a hole.
         guard let r = unverifiedHoleRule(e.fn, e.inferred, deny) else { continue }
-        // ⟨0.20⟩ --class: keep only holes whose Unknown is of a matching reason class.
-        if let cf = classFilter, !e.unknownWhy.contains(where: { cf.contains(reasonClass($0)) }) { continue }
+        // ⟨0.20⟩ --class: keep only holes whose Unknown is of a matching reason class. ⟨0.24⟩ that class
+        // set is the TRANSITIVE one above, not the report's direct `unknownWhy` field: measured on
+        // pollen under `deny Exec`, the direct reading returned 230 of 387 holes for `--class dynamic`,
+        // a filter which names every genuine class and therefore cannot exclude one.
+        if let cf = classFilter, !(classes[e.fn] ?? []).contains(where: { cf.contains($0) }) { continue }
         let (rule, upgrade) = ruleUpgrade(r)
         holes.append(UnverifiedHole(fn: e.fn, rule: rule, unknownWhy: e.unknownWhy, upgrade: upgrade))
     }
