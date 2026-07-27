@@ -9,6 +9,30 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### soundness — the FULL-QUAL dep-index key, and the guard it makes provable (2026-07-27)
+
+**A third dep-index key shape: `pkg#<full qual>`.** The `CANDOR_DEPS` index held exactly `pkg#leaf`
+and `pkg#tail2`, so a consumer that knew its target PRECISELY had no key to ask on — `Conn.send` and
+`Mock.Conn.send` are one tail2 string, and the ⟨0.23⟩ `typeSurface.returns` join, which forms
+`<pkg>#<type qual>.<member>` from a fully qualified path, could only ever miss on a nested type.
+Normalized rather than raw, so a report another engine wrote as `mod::Type::fn` is keyed the way a
+Swift call site spells it. Additive by construction against every other entry (a leaf key carries no
+`.`, a tail2 key exactly one), and the **DEDUP is the whole safety argument**: for a 1- or 2-segment
+qual the "full qual" IS the string already pushed, so an undeduped third push self-collides and §2
+rule 1 withdraws a key that already worked. Both directions are asserted by one test and both were
+verified to catch — with the dedup deleted, a bare free call into the dependency goes ABSENT from the
+report, which under the ⟨0.21⟩ manifest is a positive purity claim. Index grew 14 535 → 15 398 keys
+over seven real repos split one package per target; keys present before and absent after: 0. Report
+bytes unchanged: 11 targets unchained and 43 chained consumers, all byte-identical, 0 gains, 0 losses.
+
+**The `typeSurface` exact type-path match is no longer an open question.** It shipped honestly marked
+UNPROVEN, because relaxing it to a suffix match failed no test — a suffix match returns a path of two
+or more segments, the consumer forms a three-segment key, and the old index missed it. With the third
+key the wrong answer LANDS: a factory returning a type the package does not declare then publishes the
+nested type that merely shares its leaf, and the caller is charged an effect it cannot reach while
+losing its disclosure with it. Pinned by a fixture written with the key, mutation-verified, and paired
+with the row that must still resolve.
+
 ### ⚠ soundness — the five-shape cross-engine sweep (2026-07-27)
 
 Five defect shapes confirmed in one engine each the day before, swept here. Three were PRESENT, one
