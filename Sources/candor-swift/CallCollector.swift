@@ -1462,8 +1462,21 @@ final class CallCollector: SyntaxVisitor {
             // `.active(let c)` — the `let` inside the parens; the only spelling this types.
             if let vb = pat.pattern.as(ValueBindingPatternSyntax.self),
                let name = vb.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
-                shadowName(name)  // a rebind, typed or not (the enclosing switch case / if restores it)
-                if let singleAssoc { vars[name] = singleAssoc } else { clearBinding(name) }
+                // A REBIND DROPS EVERY INDEX FOR THE NAME, NOT JUST THE FLAGS. `shadowName` clears the
+                // four flag maps; the TYPE indexes (`vars`, `protoTyped`, `arrayElem`/`opaqueElem`,
+                // `dictElem`, `tupleElem`) live in `clearBindingTypeOnly`, and the typed branch below
+                // used to reach neither — it wrote `vars` over the top and left the rest standing. So a
+                // payload binding shadowing a same-named PROTOCOL-TYPED parameter still dispatched over
+                // that protocol's conformers: `func f(_ p: Job, _ e: E) { switch e { case .active(let p):
+                // p.run() } }` read `['Fs']` from `RealJob.run`, and the identical body with the binding
+                // renamed `q` is ABSENT. `protoTyped` is consulted BEFORE the `vars` type at the member-
+                // dispatch site, so writing the payload's own type over `vars` does not mask it.
+                //
+                // The clear is SCOPED, not permanent: `protoTyped` and `opaqueElem` are in `ShadowSave`
+                // and the enclosing `SwitchCaseSyntax`/`IfExprSyntax` gives them back, so the genuine
+                // parameter's dispatch below the case is untouched (asserted, not argued).
+                clearBinding(name)
+                if let singleAssoc { vars[name] = singleAssoc }
                 casePayloadLocals.insert(name)
                 markBinders(vb.pattern)
             } else if let ip = pat.pattern.as(IdentifierPatternSyntax.self) {

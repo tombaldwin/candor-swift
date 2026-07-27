@@ -32,6 +32,30 @@ import SwiftSyntax
 /// which is the mirror sin). Forcing that judgement to be written down, once per property, is the
 /// whole of what this file buys.
 ///
+/// WHAT THIS FILE CANNOT SEE, STATED SO THE NEXT READER DOES NOT ASSUME IT IS COVERED. The derivation
+/// is over DECLARATIONS: which maps exist, and whether the clear/save/restore paths mention each one.
+/// It says nothing about whether every BINDER SITE takes those paths, and a review found exactly that
+/// defect after this file shipped — `typeEnumCaseBinding`'s TYPED branch called `shadowName` (the four
+/// FLAGS) and wrote `vars` over the top, so `protoTyped` survived and an enum payload binding shadowing
+/// a protocol-typed parameter dispatched over that protocol's conformers. Every row here was green
+/// through it, correctly: `protoTyped` IS classified, IS cleared in `clearBindingTypeOnly`, and IS
+/// saved and restored. The map's disposition was right; one branch did not honour it.
+///
+/// THE STRENGTHENING WAS CONSIDERED AND REFUSED, and the reason is a property of the property. What was
+/// violated is per-NAME and per-CONTROL-PATH — "before a binder writes a fact about `x`, every other
+/// per-binding map keyed by `x` is invalidated" — and a parse tree shows declarations and mentions, not
+/// which of two branches ran. The two derivable approximations were both priced:
+///   - "every METHOD that writes a per-binding map must also mention a clear helper" — the defective
+///     method mentioned BOTH `shadowName` and `clearBinding`; it would have passed.
+///   - "every WRITE SITE must be listed in an authored allowlist" — derivable and exact, but the site
+///     in question predates the wave, so its entry would have been written years before the branch went
+///     wrong; it would have passed too. It also re-introduces the authored list this file exists to
+///     delete, one level down, over ~25 `vars` writes.
+/// So the remedy is at the SITE, not in a test: the branches were fused so that no path through
+/// `typeEnumCaseBinding` can write a type without the clear having run. `TypedRebindShadowProcessTests`
+/// is the behavioural gate, with a rename control per row. If a third form of this defect appears, the
+/// thing to re-price is the binding-model rewrite (see `enterShadowScope`), not another derivation here.
+///
 /// A SOURCE-LEVEL TEST BECAUSE REFLECTION IS NOT AVAILABLE: `CallCollector` lives in the EXECUTABLE
 /// target, which a test target cannot import, so `Mirror` over a live instance is out. The parse tree
 /// is the next-best derivation and is exact rather than approximate — a regex over the source would be
