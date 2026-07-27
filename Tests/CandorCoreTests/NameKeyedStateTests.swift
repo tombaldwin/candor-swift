@@ -47,6 +47,11 @@ final class NameKeyedStateTests: XCTestCase {
         /// A HEDGE. Clearing it lets a shadowed name fall through to silence — the cardinal sin — so it
         /// is deliberately left alone and over-hedges instead. The reason is the payload.
         case deliberatelyKept(String)
+        /// A LEXICAL EXISTENCE SET: not a per-binding FACT that a rebind invalidates, but a claim that
+        /// a name IS a local right here. Nothing clears it — a binder only ever adds — so the discipline
+        /// it needs is the SCOPE half alone: saved on entry, restored on close, because the claim stops
+        /// being true when the block ends. The reason is the payload.
+        case lexicallyScoped(String)
         /// KNOWN DEFECTIVE, measured, filed. Recorded here so the next audit inherits the numbers
         /// instead of the surprise.
         case knownDefect(String)
@@ -80,13 +85,24 @@ final class NameKeyedStateTests: XCTestCase {
         "opaqueFnLocals": .deliberatelyKept(
             "an opaque fn-typed local invoked is §4 Unknown; clearing it drops the Unknown, and an "
             + "over-hedge on a shadowing binder costs precision where the clear would cost soundness"),
+        // ── a lexical existence set: nothing clears it, the scope gives it back
+        "casePayloadLocals": .lexicallyScoped(
+            "enum-case payload bindings (`case let .x(a)` / `case .x(let a)`), which the collector's own "
+            + "guards consult alongside `boundLocals`. SEPARATE from it because a payload binding's scope "
+            + "is the one case body — folding them into the function-wide set drops the genuine property "
+            + "read after the block (swift-syntax `IfConfigDiagnostic.asDiagnostic`), and scoping "
+            + "`boundLocals` instead un-shadows the Driver's post-walk guard. Both measured; see "
+            + "`EnumPayloadBindingProcessTests`."),
         // ── known defective, measured and filed rather than patched
         "boundLocals": .knownDefect(
-            "written by only 2 of the ~7 binder forms and never scoped; a `case let`/`catch` binder "
-            + "registers no shadow, so a bare read of the name edges to the enclosing type's property "
-            + "or to a same-named global. Three forms reproduced with rename controls. The obvious fix "
-            + "(write it in `shadowName`, save it in `ShadowSave`) costs 305 report changes over 34 "
-            + "real packages, including disclosed Unknowns disappearing — see the work queue."),
+            "written by only 2 of the ~7 binder forms. The ENUM-CASE payload forms are now covered by "
+            + "`casePayloadLocals` above (0 gains / 15 report changes over 13 packages, every one traced "
+            + "to a fabrication); a CATCH binder, a CLOSURE parameter and a FUNCTION parameter still "
+            + "register no shadow, so a bare read of one edges to the enclosing type's same-named "
+            + "property or to a same-named global. Writing it in `shadowName` for ALL of them was "
+            + "measured at 305 report changes and reverted; what the payload round then established is "
+            + "that the vanishing entries in that arm were fabricated `invisible` disclosures being "
+            + "withdrawn, and that the residual risk is scope, not the claim. See the work queue."),
         "catchBindings": .knownDefect(
             "same mechanism in the stringification arm: function-wide, and its shadow guard is a "
             + "`!boundLocals.contains` PROXY that stops working the moment `boundLocals` is written by "
@@ -220,7 +236,11 @@ final class NameKeyedStateTests: XCTestCase {
         XCTAssertTrue(enter.contains("monoNames") && leave.contains("monoNames"),
                       "the two scope paths were not found as expected — the extraction is broken")
         for (name, d) in Self.disposition {
-            guard case .clearedOnRebind(let scoped) = d, scoped else { continue }
+            switch d {
+            case .clearedOnRebind(let scoped): if !scoped { continue }
+            case .lexicallyScoped: break
+            default: continue
+            }
             XCTAssertTrue(enter.contains(name), "`\(name)` is classified as scoped but `enterShadowScope` does not save it")
             XCTAssertTrue(leave.contains(name), "`\(name)` is classified as scoped but `leaveShadowScope` does not restore it")
         }
@@ -235,6 +255,8 @@ final class NameKeyedStateTests: XCTestCase {
                 XCTAssertGreaterThan(why.count, 40, "`\(name)` is kept with no argument for keeping it")
             case .knownDefect(let why):
                 XCTAssertGreaterThan(why.count, 40, "`\(name)` is filed as defective with no description")
+            case .lexicallyScoped(let why):
+                XCTAssertGreaterThan(why.count, 40, "`\(name)` is scoped with no argument for the scope")
             default: continue
             }
         }

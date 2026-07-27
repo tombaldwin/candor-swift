@@ -190,7 +190,31 @@ final class CallCollector: SyntaxVisitor {
     var globalReads: Set<String> = []     // bare-name reads — candidate edges to GLOBAL initializer units
     var boundLocals: Set<String> = []     // EVERY local binding name (even literal/unresolved-type ones,
                                           // which `vars` drops) — so a bare read / fn-ref of a SHADOWING
-                                          // local isn't mistaken for an implicit-self property or a free fn
+                                          // local isn't mistaken for an implicit-self property or a free fn.
+                                          // FUNCTION-WIDE and monotone: `Driver` reads it after the walk,
+                                          // where "is this a local" has no lexical position to be asked at.
+    /// ENUM-CASE PAYLOAD BINDINGS — `case let .x(a)` / `case .x(let a)` — as a SEPARATE, LEXICALLY SCOPED
+    /// set, and the separation is the whole safety argument rather than tidiness.
+    ///
+    /// They belong with `boundLocals`: a payload binding is a local, and until it said so a bare read of
+    /// one charged the enclosing type's same-named property and passing one as an argument charged a
+    /// same-named FREE FUNCTION (see `typeEnumCaseBinding`). But `boundLocals` is FUNCTION-WIDE, and a
+    /// payload binding's scope is the one `case` or `if case` body — so putting them in it suppresses the
+    /// genuine property read that follows the block. Measured, on swift-syntax's `IfConfigDiagnostic`:
+    /// `if case .integerLiteralCondition(let syntax, _) = self { … }` … `return Diagnostic(node: syntax)`
+    /// — the trailing `syntax` IS the property, and the function-wide spelling of this fix dropped that
+    /// edge. A silent under-report manufactured by a fabrication fix, which is the thing the standing bar
+    /// says to expect.
+    ///
+    /// SO WHY NOT SCOPE `boundLocals` ITSELF? Because `Driver` reads it once, at the END of the walk, and
+    /// a restored set is empty there: scoping it makes `if c { let helper = { }; helper() }` edge to a
+    /// same-named FREE FUNCTION and charge its effects to the caller. MEASURED, and pinned by
+    /// `scopingBoundLocalsWouldUnshadowTheDriverGuard`. Scoping also un-masks a SEPARATE latent
+    /// fabrication one door over — a bare read of a PARAMETER charging the enclosing type's same-named
+    /// property, which today only stays hidden because some inner binder happens to have poisoned the
+    /// function-wide set (swift-syntax `TokenKind.fromRaw`). Both are filed in the work queue; neither is
+    /// this change's to fix, and a second set is what lets this change not depend on either.
+    private var casePayloadLocals: Set<String> = []
     var localFuncs: Set<String> = []      // NESTED `func` names declared in this unit's body. Their bodies
                                           // attribute lexically (DeclCollector skips them; we walk them here),
                                           // so a bare `helper()` call to a local func must NOT also edge to a
@@ -970,6 +994,12 @@ final class CallCollector: SyntaxVisitor {
         fnValueAlias.removeValue(forKey: name)
     }
 
+    /// Is `name` a LOCAL BINDING at this point in the walk? The union of the function-wide set and the
+    /// lexically-scoped payload set — every guard in this file asks it at a position, so both apply.
+    private func isBoundLocal(_ name: String) -> Bool {
+        boundLocals.contains(name) || casePayloadLocals.contains(name)
+    }
+
     // The name-keyed per-binding state saved per scope-delimiting node and restored when the node
     // closes. Keyed by node id rather than a stack so an un-entered scope can never pop someone else's
     // save; SwiftSyntax calls `visitPost` for every visited node (including one whose `visit` returned
@@ -977,7 +1007,7 @@ final class CallCollector: SyntaxVisitor {
     private struct ShadowSave {
         var opaque: Set<String>, opaqueElem: Set<String>, depBound: [String: String]
         var protoTyped: [String: String], constStrings: [String: String]
-        var fnValueAlias: [String: String]
+        var fnValueAlias: [String: String], casePayload: Set<String>
     }
     private var shadowScopes: [SyntaxIdentifier: ShadowSave] = [:]
 
@@ -1028,7 +1058,8 @@ final class CallCollector: SyntaxVisitor {
         // used to end on — "a NEW map added later without being added here" — now fails a test.
         shadowScopes[node.id] = ShadowSave(opaque: monoNames, opaqueElem: opaqueElem,
                                            depBound: depBoundLocals, protoTyped: protoTyped,
-                                           constStrings: localConstStrings, fnValueAlias: fnValueAlias)
+                                           constStrings: localConstStrings, fnValueAlias: fnValueAlias,
+                                           casePayload: casePayloadLocals)
     }
 
     private func leaveShadowScope(_ node: some SyntaxProtocol) {
@@ -1039,6 +1070,7 @@ final class CallCollector: SyntaxVisitor {
         protoTyped = saved.protoTyped
         localConstStrings = saved.constStrings
         fnValueAlias = saved.fnValueAlias
+        casePayloadLocals = saved.casePayload
     }
 
     /// THE CATCH-ALL BINDER, and it exists to invert a failure mode rather than to add a case.
@@ -1398,22 +1430,49 @@ final class CallCollector: SyntaxVisitor {
         // pattern (`case .live(let c, _)`) belongs to a DIFFERENT enum sharing the case name — binding
         // its first `let` to the single-assoc type FABRICATES (the review's enum-identity find).
         // Mismatch (or ambiguous/unknown case) → CLEAR every binding, never leave a stale leak.
-        // ONLY the `.active(let c)` spelling is TYPED here, and only that spelling is CLAIMED. The
-        // `case let .active(c)` spelling puts the `let` outside, so the argument is a bare
-        // `patternExpr > identifierPattern` with no `ValueBindingPattern` to match and this loop skipped
-        // it entirely — the same missed-binder leak as `for case let x?`, through a different door.
-        // Rather than grow a second shape here, it is simply left UNCLAIMED, and
-        // `visit(IdentifierPatternSyntax)` clears it: an unmodelled binder must not keep the enclosing
-        // signature's flags, and dropping the type is the safe direction the arity/ambiguity guards
-        // above already take.
+        //
+        // ONLY the `.active(let c)` spelling is TYPED here. The `case let .active(c)` spelling puts the
+        // `let` outside the parens, so its argument is a bare `patternExpr > identifierPattern` with no
+        // `ValueBindingPattern`, and typing it from `singleAssoc` is a SEPARATE change with its own
+        // measurement (it types operands that then reach the external-supertype disclosure rung — four
+        // new `Unknown`s and one withdrawn over thirteen packages, filed in the work queue, not landed
+        // with this). What BOTH spellings now do is register the name as a LOCAL, below.
+        //
+        // A PAYLOAD BINDING IS A LOCAL EVEN WHEN NOTHING CAN TYPE IT, and until `boundLocals` said so
+        // the untyped case — the `case let .active(c)` spelling, an ambiguous case name, or any
+        // multi-payload pattern, which the arity guard above refuses to type — left the name in NEITHER
+        // `vars` NOR `boundLocals`, i.e. invisible to every shadow guard in this file. Two fabrications
+        // followed, and the second is the one that cost a report entry:
+        //   - a BARE READ of the name charged the enclosing type's same-named property, and
+        //   - passing it as an argument (`help(ctx)`) charged a same-named FREE FUNCTION, because the
+        //     fn-ref-as-argument rule can only skip arguments it can see are locals.
+        // The free-fn form resolves to nothing, which marks the unit as reaching code the scan cannot
+        // see — so an `invisible` disclosure was manufactured out of a local binding's name. See
+        // `EnumPayloadBindingProcessTests`.
+        //
+        // KEYING ON `patternExpr` IS WHAT MAKES THE SECOND SPELLING EXACT, verified against SwiftParser
+        // in the other direction too: a MATCHED CONSTANT (`case .three(konst)`) parses to
+        // `declReferenceExpr` and a matched literal to `integerLiteralExpr`, neither of which is a
+        // `PatternExprSyntax`. The enclosing `case let` is exactly what makes the parser wrap a bound
+        // identifier in a pattern node, so this cannot mistake a value being compared for a name being
+        // bound.
         let singleAssoc = node.arguments.count == 1 ? enumCaseValueType[ma.declName.baseName.text] : nil
         for arg in node.arguments {
-            if let pat = arg.expression.as(PatternExprSyntax.self),
-               let vb = pat.pattern.as(ValueBindingPatternSyntax.self),
+            guard let pat = arg.expression.as(PatternExprSyntax.self) else { continue }
+            // `.active(let c)` — the `let` inside the parens; the only spelling this types.
+            if let vb = pat.pattern.as(ValueBindingPatternSyntax.self),
                let name = vb.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
                 shadowName(name)  // a rebind, typed or not (the enclosing switch case / if restores it)
                 if let singleAssoc { vars[name] = singleAssoc } else { clearBinding(name) }
+                casePayloadLocals.insert(name)
                 markBinders(vb.pattern)
+            } else if let ip = pat.pattern.as(IdentifierPatternSyntax.self) {
+                // `case let .active(c)` — claimed for the EXISTENCE claim only. `clearBinding` is
+                // exactly what `visit(IdentifierPatternSyntax)` did with it before, so the sole
+                // difference this branch makes is the `casePayloadLocals` entry.
+                clearBinding(ip.identifier.text)
+                casePayloadLocals.insert(ip.identifier.text)
+                markBinders(PatternSyntax(ip))
             }
         }
     }
@@ -1467,7 +1526,7 @@ final class CallCollector: SyntaxVisitor {
                 // skip a bound LOCAL (a value, not a free-fn reference) — `vars` drops literal-typed
                 // locals, so `boundLocals` guards them too, else passing such a local fabricates a
                 // same-named free fn's effect.
-                if vars[n] == nil && !fnTyped.contains(n) && !boundLocals.contains(n) {
+                if vars[n] == nil && !fnTyped.contains(n) && !isBoundLocal(n) {
                     // FINDING 2 — `xs.map(transform)` where `transform` is a stored CLOSURE PROPERTY of the
                     // enclosing type: passing it as a fn-ref to a HOF that invokes it reaches the closure's
                     // effects. Edge to the property-scoped unit `<Type>.transform` (its own collected unit).
@@ -1547,13 +1606,13 @@ final class CallCollector: SyntaxVisitor {
                 // lexically) or a named function (an edge), the Unknown is redundant; otherwise
                 // it stands (§4). The TS engine's callback_named move.
                 callbackInvoked.insert(name)
-            } else if let et = enclosingType, !boundLocals.contains(name), closureFields[et]?.contains(name) == true {
+            } else if let et = enclosingType, !isBoundLocal(name), closureFields[et]?.contains(name) == true {
                 // FINDING 2 — a bare `f(0)` invoking a stored CLOSURE PROPERTY of the enclosing type
                 // (`self.f` implicit): the closure body runs. Edge to its property-scoped unit `<Type>.f` so
                 // the closure's effects are reached (was silent-pure — the deferred/direct closure-property
                 // hole). Guarded against a shadowing local `f` (boundLocals), which is a different value.
                 propertyEdges.insert("\(et).\(name)")
-            } else if let et = enclosingType, !boundLocals.contains(name),
+            } else if let et = enclosingType, !isBoundLocal(name),
                       let f = fields[et]?[name], f.isFunction {
                 // a bare invocation of a function-typed FIELD that is NOT a resolvable local closure
                 // (assigned in init / no initializer) — the value is unaddressable → honest Unknown.
@@ -1570,7 +1629,7 @@ final class CallCollector: SyntaxVisitor {
                 // type isn't @dynamicCallable / declares no such method, so an ordinary local-type value that
                 // is not actually callable adds nothing).
                 propertyEdges.insert("\(t).dynamicallyCall")
-            } else if let et = enclosingType, !boundLocals.contains(name), !localFreeFns.contains(name),
+            } else if let et = enclosingType, !isBoundLocal(name), !localFreeFns.contains(name),
                       !declaredTypes.contains(et), let eff = kappaMember(root: et, member: name) {
                 // an IMPLICIT-self member call inside an `extension <κ-platform-type>`: `launch()` inside
                 // `extension Process` is `self.launch()` → Exec (the ShellOut `launchBash` cardinal-sin: it
@@ -1871,7 +1930,7 @@ final class CallCollector: SyntaxVisitor {
         // ...unless `n` is a LOCAL binding (a literal/arithmetic-bound `let n = …` that `vars` drops
         // because its type didn't resolve) — then the bare read is the local, NOT `self.n`; edging to the
         // enclosing type's `n` accessor would FABRICATE its effect (regression). boundLocals tracks these.
-        if let et = enclosingType, !boundLocals.contains(n) { propertyEdges.insert("\(et).\(n)") }
+        if let et = enclosingType, !isBoundLocal(n) { propertyEdges.insert("\(et).\(n)") }
         globalReads.insert(n)
         return .skipChildren
     }
@@ -2040,7 +2099,7 @@ final class CallCollector: SyntaxVisitor {
             // MyError`): no other index types these, so the interpolation resolved to NOTHING. A param or
             // any other LOCAL binding of the same name SHADOWS — `boundLocals` carries the literal-typed
             // locals `vars` drops (a `let error = "oops"` must not dispatch over the Error conformers).
-            if vars[n] == nil, !boundLocals.contains(n), let t = catchBindings[n] { return t }
+            if vars[n] == nil, !isBoundLocal(n), let t = catchBindings[n] { return t }
         }
         let r = rootOf(e)
         // a protocol-typed FIELD / `let` / loop var / unwrapped optional: rootOf resolves the chain to the
@@ -2509,7 +2568,7 @@ final class CallCollector: SyntaxVisitor {
                     if info.isVar, let t = info.root { vars[name] = t }
                 } else if let dr = v.as(DeclReferenceExprSyntax.self),
                           localFreeFns.contains(dr.baseName.text),
-                          vars[dr.baseName.text] == nil, !boundLocals.contains(dr.baseName.text) {
+                          vars[dr.baseName.text] == nil, !isBoundLocal(dr.baseName.text) {
                     // INFERRED-type FUNCTION VALUE: `let g = eff` where `eff` is a known local free fn (and
                     // NOT shadowed by a local var/binding of the same name). Without an explicit `: () -> Void`
                     // annotation this fell through untracked and `g()` read silent-pure — violating the README
