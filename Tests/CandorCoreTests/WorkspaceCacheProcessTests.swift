@@ -282,6 +282,92 @@ final class WorkspaceCacheProcessTests: XCTestCase {
     /// `Package.swift` branch could be deleted and this row would still pass: a test that cannot reach
     /// the code it names is not a test. Here the basename is `libdep-src` and only the manifest says
     /// `Dep0`, so exactly one branch can find the file.
+    // ── THE SWEEP AND THE WRITER MUST DERIVE THE SAME NAME ───────────────────────────────────────
+    //
+    // `ownedReportFile` had its OWN `Package.swift` parse, anchored after `Package(`, under a comment
+    // saying it used "the same three sources the writer uses, in the same order". The writer's parse is
+    // UNANCHORED — the first `name: "…"` in the whole manifest — so a manifest that mentions one before
+    // the `Package(` call makes the two disagree, and BOTH failure directions land at once.
+    //
+    // A hoisted target array is ordinary Swift manifest style, and it is all it takes.
+
+    func testTheSweepAndTheWriterDeriveTheSameReportNameFromOneManifest() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-ws-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        try fm.createDirectory(at: root.appendingPathComponent("dep0dir/Sources/Dep0"), withIntermediateDirectories: true)
+        // THE MANIFEST THAT SPLITS THE TWO PARSES. The writer takes `Dep0` (the first `name:` in the
+        // file, which is the TARGET's) and files the report under it; the anchored parse takes
+        // `Dep0Kit`. Deliberately the shape where the writer's answer is the MODULE name, so the app's
+        // chaining works and the row can assert an analysis consequence rather than just a filename.
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let libTargets: [Target] = [.target(name: "Dep0")]
+        let package = Package(name: "Dep0Kit", targets: libTargets)
+        """.write(to: root.appendingPathComponent("dep0dir/Package.swift"), atomically: true, encoding: .utf8)
+        try "public func work0() { }\n"
+            .write(to: root.appendingPathComponent("dep0dir/Sources/Dep0/D.swift"), atomically: true, encoding: .utf8)
+        try fm.createDirectory(at: root.appendingPathComponent("app/Sources/App"), withIntermediateDirectories: true)
+        try "import Dep0\npublic func use0() { work0() }\n"
+            .write(to: root.appendingPathComponent("app/Sources/App/U0.swift"), atomically: true, encoding: .utf8)
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(
+            name: "App",
+            dependencies: [ .package(path: "../dep0dir") ],
+            targets: [.target(name: "App")])
+        """.write(to: root.appendingPathComponent("app/Package.swift"), atomically: true, encoding: .utf8)
+
+        let deps = root.appendingPathComponent("app/.candor/deps")
+        XCTAssertEqual(try scan(bin, root, out: "warm").code, 0)
+        XCTAssertTrue(fm.fileExists(atPath: deps.appendingPathComponent("Dep0.json").path),
+                      "the WRITER files it under the manifest's first `name:` — if this moves, the row "
+                      + "below is measuring something else")
+
+        // a user-placed report that happens to sit under the name the ANCHORED parse computes
+        try "{\"candor\":{\"version\":\"hand-written\"},\"package\":\"Dep0Kit\",\"functions\":[]}"
+            .write(to: deps.appendingPathComponent("Dep0Kit.json"), atomically: true, encoding: .utf8)
+        // now break the dep, in a fresh process that has recorded no package name for it
+        try """
+        import Foundation
+        public func work0() { try? "s".write(toFile: "/tmp/candor-leak0.txt", atomically: true, encoding: .utf8) }
+        """.write(to: root.appendingPathComponent("dep0dir/Sources/Dep0/D.swift"), atomically: true, encoding: .utf8)
+        try fm.createDirectory(at: root.appendingPathComponent("dep0dir/.candor"), withIntermediateDirectories: true)
+        try "policy ./ci/strict.candor\n"
+            .write(to: root.appendingPathComponent("dep0dir/.candor/config"), atomically: true, encoding: .utf8)
+
+        let r = try scan(bin, root, out: "cold")
+        XCTAssertEqual(r.code, 0)
+
+        // DIRECTION 1 — it SPARED the file it exists to remove, and `43a0eaa`'s false all-clear came back
+        XCTAssertFalse(fm.fileExists(atPath: deps.appendingPathComponent("Dep0.json").path),
+                       "the stale report is the one the WRITER wrote; a sweep computing a different name "
+                       + "leaves it standing in for a scan that failed")
+        XCTAssertEqual(try appFns(root, "cold")["use0"]?["invisible"] as? [String], ["Dep0"],
+                       "…and with it standing, `use0` is ABSENT from `functions` — a ⟨0.21⟩ purity claim "
+                       + "over a dependency that writes /tmp/candor-leak0.txt")
+
+        // DIRECTION 2 — and it DELETED a file it neither wrote nor owns, which is unrecoverable
+        XCTAssertTrue(fm.fileExists(atPath: deps.appendingPathComponent("Dep0Kit.json").path),
+                      "the anchored parse invented a name, and whatever sat under it was removed")
+        // THE STDERR ROWS ARE ASSERTED PER LINE, because both file names appear in the mutant's output
+        // too — with the two lines' contents SWAPPED. A `contains` over the whole stream cannot tell the
+        // arms apart, which is a decorative assertion, not a test (standing bar item 8c).
+        func line(containing needle: String) -> String {
+            r.err.split(separator: "\n").first { $0.contains(needle) }.map(String.init) ?? ""
+        }
+        XCTAssertTrue(line(containing: "removed 1 stale report").contains("Dep0.json"),
+                      "the removal line must name the WRITER's file: \(r.err)")
+        XCTAssertFalse(line(containing: "removed 1 stale report").contains("Dep0Kit.json"),
+                       "…and not the user's: \(r.err)")
+        XCTAssertTrue(line(containing: "does not produce").contains("Dep0Kit.json"),
+                      "the left-in-place line must name the user's file: \(r.err)")
+    }
+
     // ── …AND NEVER A FILE THIS RUN WROTE ─────────────────────────────────────────────────────────
     //
     // Ownership is by NAME. Two local path deps can derive the SAME report name — the ordinary shape is

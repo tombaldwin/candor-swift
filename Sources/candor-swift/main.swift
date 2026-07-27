@@ -298,15 +298,36 @@ if sourcePaths.isEmpty {
     exit(2)
 }
 
+/// THE package-name parse — the WRITER's, and the only one. `<dir>/Package.swift`'s first `name: "…"`.
+///
+/// THERE WERE TWO OF THESE AND THEY WERE NOT THE SAME. `--workspace`'s sweep carried its own copy,
+/// anchored AFTER `Package(`, under a comment claiming it used "the same three sources the writer uses,
+/// in the same order". The writer is UNANCHORED and takes the first `name:` in the whole manifest, so
+/// any manifest that mentions one before the `Package(` call — a hoisted `let targets: [Target] =
+/// [.target(name: "…")]`, a hoisted dependency array, both ordinary Swift manifest idioms — makes the
+/// two disagree. The sweep then works on a name the writer never used: it SPARES the stale report it
+/// exists to remove (`43a0eaa`'s false all-clear, back — measured, the consumer's `use0` goes ABSENT
+/// from `functions` over a dependency that writes a file), and DELETES whatever happens to sit under
+/// the name it invented instead.
+///
+/// SO THE POINT IS NOT THAT THIS PARSE IS GOOD. It is not — the first `name:` in a manifest is very
+/// often a target's, and this is the same field in the same two roles as the open package-vs-module
+/// keying row. The point is that there is ONE of it, so improving it moves the writer and the sweep
+/// together. Two parses that agree by inspection stop agreeing the moment somebody edits one, and a
+/// comment asserting they agree is exactly the shape that survives review while being false.
+func manifestPackageName(atDir dir: String) -> String? {
+    guard let manifest = try? String(contentsOfFile: (dir as NSString).appendingPathComponent("Package.swift"),
+                                     encoding: .utf8),
+          let r = manifest.range(of: #"name:\s*"([^"]+)""#, options: .regularExpression) else { return nil }
+    let m = String(manifest[r])
+    guard let q1 = m.firstIndex(of: "\""), let q2 = m.lastIndex(of: "\""), q1 < q2 else { return nil }
+    return String(m[m.index(after: q1)..<q2])
+}
+
 // The package name — the first half of the §2 `hash` join key. Package.swift's name, else the dir.
 var pkgName = (rootDir as NSString).lastPathComponent
+if let n = manifestPackageName(atDir: rootDir) { pkgName = n }
 if let manifest = try? String(contentsOfFile: (rootDir as NSString).appendingPathComponent("Package.swift"), encoding: .utf8) {
-    if let r = manifest.range(of: #"name:\s*"([^"]+)""#, options: .regularExpression) {
-        let m = String(manifest[r])
-        if let q1 = m.firstIndex(of: "\""), let q2 = m.lastIndex(of: "\""), q1 < q2 {
-            pkgName = String(m[m.index(after: q1)..<q2])
-        }
-    }
     // ⟨0.19⟩ SETUP warning (SPEC §6.2 §3, the setup/genuine split): a manifest that declares dependencies but
     // whose `.build/checkouts` is absent hasn't fetched them — the analog of a missing node_modules. Calls into
     // those packages resolve to the κ coverage ledger as `invisible` (never silently pure), but a fuller
@@ -441,8 +462,7 @@ if wantWorkspace {
                 succeededPaths.insert(dp)
                 failures.removeValue(forKey: dp)   // it failed on an earlier ROUND and has since converged
                 reportNameOf[dp] = name
-                let safe = name.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "@", with: "_")
-                let file = (depsDir as NSString).appendingPathComponent(safe + ".json")
+                let file = reportFile(forPackage: name)
                 confirmed.insert(file)             // …including when the bytes are unchanged: confirmed ≠ rewritten
                 let prev = try? Data(contentsOf: URL(fileURLWithPath: file))
                 if prev != out { try? out.write(to: URL(fileURLWithPath: file)); changed = true }
@@ -450,26 +470,29 @@ if wantWorkspace {
             if !changed { break }
         }
     }
+    /// The cache path a package's report is written to. THE writer's transform, called by the writer —
+    /// so `ownedReportFile` below cannot drift from it on the second half of the derivation either.
+    func reportFile(forPackage name: String) -> String {
+        let safe = name.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "@", with: "_")
+        return (depsDir as NSString).appendingPathComponent(safe + ".json")
+    }
     /// The report file `--workspace` OWNS for a local path dependency — the one IT writes when that
     /// dep scans. Three sources in the writer's own order, so the name a failed dep would have been
     /// filed under is the name it WAS filed under.
+    ///
+    /// AND "THE SAME" IS NOW SHARED CODE RATHER THAN A CLAIM. Both halves of the derivation are the
+    /// writer's own: `manifestPackageName` is the function the writer names its report with (this
+    /// copy was anchored after `Package(` while the writer's is not — see that function for the two
+    /// directions that cost), and `reportFile` is the transform the writer files it under. A comment
+    /// asserting two parses agree is an assertion; one parse is a fact.
+    ///
     /// `recorded` is PASSED, not captured. A nested func closing over a top-level `var` that a sibling
     /// closure also writes is a Swift-6 `sending` diagnostic under whole-module optimization, and it
     /// surfaces ONLY in the release build — `swift build` and the whole suite are green over the
     /// capturing form (standing bar item 7c: check the artifact, not the command's exit).
     func ownedReportFile(_ dp: String, _ recorded: [String: String]) -> String {
-        var name = recorded[dp]
-        if name == nil, let manifest = try? String(contentsOfFile: (dp as NSString).appendingPathComponent("Package.swift"), encoding: .utf8),
-           let pkgRange = manifest.range(of: "Package("),
-           let r = manifest[pkgRange.upperBound...].range(of: #"name:\s*"([^"]+)""#, options: .regularExpression) {
-            let seg = String(manifest[r])
-            if let q1 = seg.firstIndex(of: "\""), let q2 = seg.lastIndex(of: "\""), q1 < q2 {
-                name = String(seg[seg.index(after: q1)..<q2])
-            }
-        }
-        let safe = (name ?? (dp as NSString).lastPathComponent)
-            .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "@", with: "_")
-        return (depsDir as NSString).appendingPathComponent(safe + ".json")
+        let name = recorded[dp] ?? manifestPackageName(atDir: dp) ?? (dp as NSString).lastPathComponent
+        return reportFile(forPackage: name)
     }
     /// Remove the cached report of every local path dep whose scan did NOT succeed this run. Returns
     /// the file names actually removed, and the ones a HEALTHY sibling had already written this run.
