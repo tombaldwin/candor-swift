@@ -609,8 +609,16 @@ cmp -s "$HERE_DIR/AGENTS.md" "$W/agents.body" \
 # SPEC-STRING drift: every `spec <X>` claim in AGENTS.md must match the spec the BINARY declares. The
 # embedded==file gate above can't catch a COHERENT stale pair (an 0.8 binary shipped an AGENTS.md still
 # claiming spec 0.7 — v0.8.3). Case-sensitive: the uppercase `SPEC §…` section refs are not versions.
+#
+# EXEMPT: a claim carrying the trailing `, informative)` marker — `unitKind: "accessor" (spec 0.23,
+# informative)` names the RUNG a feature arrived at, a historical fact that must NOT move when the floor
+# does. Keyed on the marker rather than on an allowlist of old versions: it encodes the actual
+# current-contract-vs-history distinction, where an allowlist just re-flags the next annotation someone
+# adds. Separator narrowed to quote/colon/space/hyphen so a lowercase `spec §6.1` section ref can never
+# be read as the version "6.1" — the old `[^0-9A-Za-z]` class matched the `§`.
 BSPEC=$("$BIN" --version 2>/dev/null | sed -nE 's/.*\(spec ([0-9.]+)\).*/\1/p' | head -1)
-STALE=$(grep -oE 'spec[^0-9A-Za-z]{1,4}[0-9]+\.[0-9]+' "$HERE_DIR/AGENTS.md" | grep -v "$BSPEC" || true)
+STALE=$(grep -oE 'spec[-: "]{1,4}[0-9]+\.[0-9]+(, informative\))?' "$HERE_DIR/AGENTS.md" \
+        | grep -v ', informative)$' | grep -v "$BSPEC" || true)
 { [ -n "$BSPEC" ] && [ -z "$STALE" ]; } \
   && ok "AGENTS.md spec strings all match the binary's declared spec ($BSPEC)" \
   || bad "AGENTS.md spec drift (binary declares spec ${BSPEC:-???}): ${STALE:-no spec string found}"
