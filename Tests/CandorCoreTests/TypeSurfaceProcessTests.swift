@@ -36,6 +36,11 @@ final class TypeSurfaceProcessTests: XCTestCase {
         public struct Conn {
             public init() {}
             public func send() { }
+            // THE THREE-SEGMENT QUAL. `Mock.Conn.probe`'s leaf key is `DepLib#probe` and its tail2 key
+            // `DepLib#Conn.probe` — neither is the key a consumer holding the FULLY QUALIFIED
+            // `DepLib#Mock.Conn` forms. Until the index carried the full qual too, a nested type's
+            // method was unreachable across the boundary however precisely the consumer knew it.
+            public func probe() { _ = ProcessInfo.processInfo.environment["MOCK_PROBE"] }
         }
         // …and the BARE spelling, which is what makes the DECLARING-SCOPE resolution testable: written
         // `Conn` here means `Mock.Conn`, and resolving it outward-only yields the real client's type.
@@ -65,6 +70,13 @@ final class TypeSurfaceProcessTests: XCTestCase {
         public func save() { _ = FileManager.default.contents(atPath: "/dep-sink") }
     }
     public func openSink() -> Sink { return FileSink() }
+
+    // THE DEDUP ROW, and it is the direction an "additive" change forgets. `freeReach`'s qual is ONE
+    // segment, so its "full qual" IS the leaf string already pushed; `Conn.send`'s is TWO, so its full
+    // qual IS its tail2 string. Pushing either a second time self-collides, and §2 rule 1 then REMOVES
+    // the key that already worked — a silent under-report manufactured by a change whose whole argument
+    // is that it removes nothing (standing-bar item 9b, candor-rust `5feba18`).
+    public func freeReach() { _ = FileManager.default.contents(atPath: "/dep-free") }
     """
 
     private static let appSource = """
@@ -81,6 +93,12 @@ final class TypeSurfaceProcessTests: XCTestCase {
     public func viaBoxedFactory() { let c = openBoxed(); _ = c.map { $0 } }
     // The protocol-returning factory — see `Sink`.
     public func viaProtocolFactory() { let s = openSink(); s.save() }
+    // THE FULL-QUAL KEY ROW: the surface answers `DepLib#Mock.Conn`, so the key formed is THREE
+    // segments and only a full-qual index key can answer it.
+    public func viaNestedFactory() { let c = openMock(); c.probe() }
+    // …and the two rows the third key must not withdraw — a 1-segment leaf key and (via `viaFactory`
+    // above) a 2-segment tail2 key.
+    public func viaFreeCall() { freeReach() }
     """
 
     /// (root, dep, app, ctl) — the split pair plus the ONE-PACKAGE control that proves this is a
@@ -255,6 +273,65 @@ final class TypeSurfaceProcessTests: XCTestCase {
                            + "payload keys the dep's effectful `map` here and charges an Fs this "
                            + "function cannot perform; got \(chained[wrapper] ?? [:])")
         }
+    }
+
+    /// THE FULL-QUAL INDEX KEY (candor-rust's prerequisite `5feba18`), asserted in BOTH DIRECTIONS
+    /// because both directions are the same three lines of `loadDepReports`.
+    ///
+    /// FORWARD — a THREE-segment qual becomes reachable. `openMock()` publishes `DepLib#Mock.Conn`, so
+    /// the consumer forms `DepLib#Mock.Conn.probe`; the index's `pkg#leaf` and `pkg#tail2` shapes name
+    /// that entry `DepLib#probe` and `DepLib#Conn.probe`, so the precise key the consumer holds had
+    /// nothing to match and the row could only ever fall to half 1's disclosure.
+    ///
+    /// BACKWARD — the DEDUP. For a 1- or 2-segment qual the "full qual" IS the leaf/tail2 string
+    /// already pushed, so an undeduped third push self-collides and §2 rule 1 REMOVES the key that
+    /// worked before. Verified by mutating the dedup out: `viaFactory` (2-segment tail2 key) loses its
+    /// `Fs` for a disclosure, and `viaFreeCall` (1-segment leaf key) goes ABSENT FROM THE REPORT
+    /// altogether — a ⟨0.21⟩ positive purity claim, which is the cardinal sin, manufactured by an
+    /// "additive" change. An additive change still needs item 0's second-direction check, and the
+    /// thing the new key collides with is the old copy of itself.
+    ///
+    /// NOTE ON THE ABSENT CONTROL: this row has no single-tree control, deliberately. The SAME code in
+    /// ONE package also reads pure — `let c = openMock(); c.probe()` does not resolve in-scan either,
+    /// because the local returns/binder path does not carry a NESTED type path. That is a separate
+    /// pre-existing in-scan gap (the java `9ae68f7` smell: the chained arm now strictly better than the
+    /// unsplit one), and it is reported rather than pinned here — asserting the control would encode
+    /// that gap as a requirement.
+    func testTheFullQualKeyIsAdditiveInBothDirections() throws {
+        let bin = try binaryURL()
+        let (root, dep, app, _) = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        try? FileManager.default.removeItem(at: root.appendingPathComponent("fq-r.App.Swift.json"))
+        XCTAssertEqual(try ProcessHarness.run(bin, [app.path, "--out", root.appendingPathComponent("fq-r").path],
+                                              env: ["CANDOR_DEPS": depReport.path]).code, 0)
+        let by = try fns(root.appendingPathComponent("fq-r.App.Swift.json"))
+        func eff(_ n: String) -> Set<String> { Set(by[n]?["inferred"] as? [String] ?? []) }
+
+        // BACKWARD FIRST — the case that must STILL resolve, written before the case that must newly
+        // resolve, because the fixture proving the gain is structurally incapable of noticing the loss.
+        XCTAssertNotNil(by["viaFreeCall"],
+                        "viaFreeCall is ABSENT from the report — the 1-segment LEAF key `DepLib#freeReach` "
+                        + "was withdrawn as ambiguous by the entry colliding with its own new full-qual "
+                        + "key, and under the ⟨0.21⟩ manifest an absent entry is a positive PURITY claim")
+        XCTAssertTrue(eff("viaFreeCall").contains("Fs"),
+                      "the 1-segment leaf key must survive the third push; got \(by["viaFreeCall"] ?? [:])")
+        XCTAssertTrue(eff("viaFactory").contains("Fs"),
+                      "the 2-segment tail2 key `DepLib#Conn.send` must survive it too — for a 2-segment "
+                      + "qual the full qual IS the tail2 string; got \(by["viaFactory"] ?? [:])")
+
+        // FORWARD — the three-segment key.
+        XCTAssertTrue(eff("viaNestedFactory").contains("Env"),
+                      "viaNestedFactory holds a `Mock.Conn`, whose `probe` is Env. The surface names the "
+                      + "type EXACTLY, so the key `DepLib#Mock.Conn.probe` is precise and the index must "
+                      + "carry it; got \(by["viaNestedFactory"] ?? [:])")
+        XCTAssertFalse(eff("viaNestedFactory").contains("Fs"),
+                       "…and it must not pick up the TOP-LEVEL `Conn`'s Fs — the whole point of a "
+                       + "qualified key is that `Conn` and `Mock.Conn` stop being one string; got "
+                       + "\(by["viaNestedFactory"] ?? [:])")
+        XCTAssertFalse(eff("viaNestedFactory").contains("Unknown"),
+                       "…and a key that IS answered must resolve rather than disclose; got "
+                       + "\(by["viaNestedFactory"] ?? [:])")
     }
 
     /// A MISS FALLS BACK TO HALF 1'S DISCLOSURE, NEVER TO SILENCE — on `returns` AND on the entry

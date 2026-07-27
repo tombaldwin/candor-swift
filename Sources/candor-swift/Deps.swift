@@ -4,9 +4,9 @@
 // and an unresolved/unclassified call into a package one of them covers inherits that function's
 // recorded transitive effects AND its literal surfaces. The three §2 rules, as this engine holds them:
 //
-//   1. JOINS NEVER GUESS — the index keys each dep entry under `pkg#leaf` and `pkg#tail2` (tail2 =
-//      the qual's last two segments, `.`/`::` separators normalized to `.` — the way THIS engine
-//      names a call: `Owner.member`, or a bare free-fn/ctor name). A key two dep functions share is
+//   1. JOINS NEVER GUESS — the index keys each dep entry under `pkg#leaf`, `pkg#tail2` and
+//      `pkg#<full qual>` (all separators normalized to `.` — the way THIS engine names a call:
+//      `Owner.member`, or a bare free-fn/ctor name). A key two dep functions share is
 //      REMOVED and remembered as ambiguous (the candor-scan move) — dropped, never picked from. The
 //      consumer side additionally gates every join on the call site's FILE importing a covered
 //      package, so a same-named symbol in an unimported dep can never join.
@@ -73,7 +73,8 @@ struct DepEntry {
     var whyClasses: Set<String> = []
 }
 
-/// The CANDOR_DEPS index: `pkg#leaf` / `pkg#tail2` keys (unambiguous only) + the covered-package set.
+/// The CANDOR_DEPS index: `pkg#leaf` / `pkg#tail2` / `pkg#<full qual>` keys (unambiguous only) + the
+/// covered-package set.
 struct DepIndex {
     var byKey: [String: DepEntry] = [:]
     var ambiguous: Set<String> = []
@@ -256,13 +257,34 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
             }
             if entry.effects.isEmpty && entry.invisible.isEmpty && entry.incomplete.isEmpty { continue }
 
-            // `pkg#leaf` + `pkg#tail2` — the two shapes this engine's call sites can derive (§2 rule 1).
+            // THREE key shapes per entry: `pkg#leaf`, `pkg#tail2`, and `pkg#<full qual>` — the shapes
+            // this engine's call sites can derive (§2 rule 1). The full qual is the PRECISE one, and it
+            // exists because a consumer that knows its target exactly had no key to ask on: `Conn.send`
+            // and `Mock.Conn.send` are ONE tail2 string, so the index withdrew both as ambiguous and the
+            // ⟨0.23⟩ `typeSurface.returns` consumer — which forms `<pkg>#<type qual>.<member>` from a
+            // FULLY QUALIFIED type path — could only ever miss on a nested type (candor-rust `5feba18`,
+            // the same prerequisite one repo over).
+            //
+            // NORMALIZED, not the raw `qual`: a report produced by another engine writes `mod::Type::fn`,
+            // and the key a swift call site forms is dotted. `tail2` already normalizes; so must this, or
+            // the new key is one no consumer can spell.
+            //
+            // ADDITIVE, and THE DEDUP IS WHAT MAKES IT SO. For a 1- or 2-segment qual the "full qual" IS
+            // the leaf/tail2 string already pushed, so pushing it again would collide with ITSELF and the
+            // never-guess rule in `insert` would REMOVE a key that already worked — a silent under-report
+            // manufactured by a change whose whole argument is that it removes nothing (standing-bar item
+            // 9b). Against every OTHER entry it is additive by construction: a leaf key carries no `.` and
+            // a tail2 key exactly one, so a ≥3-segment full qual lives in a disjoint string space and can
+            // never withdraw either. A full qual is NOT unique within a package — it can still collide
+            // with another entry's full qual — so a consumer's miss on an exact key must fall back to
+            // disclosure, never to silence.
             let segs = qualSegments(qual)
             guard let leaf = segs.last else { continue }
-            idx.insert(key: "\(pkg)#\(leaf)", entry)
-            if segs.count >= 2 {
-                idx.insert(key: "\(pkg)#\(segs[segs.count - 2]).\(leaf)", entry)
-            }
+            var keys: [String] = ["\(pkg)#\(leaf)"]
+            if segs.count >= 2 { keys.append("\(pkg)#\(segs[segs.count - 2]).\(leaf)") }
+            let full = "\(pkg)#\(segs.joined(separator: "."))"
+            if !keys.contains(full) { keys.append(full) }
+            for k in keys { idx.insert(key: k, entry) }
         }
     }
     // A package chained TWICE — once fresh, once stale — IS covered: the fresh report makes the claim and
