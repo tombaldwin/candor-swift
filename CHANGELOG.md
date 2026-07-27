@@ -9,6 +9,34 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### soundness — a stale report BESIDE a fresh one withdrew the fresh answer (2026-07-27)
+
+⚠ **A package chained both FRESH and STALE read as a positive purity claim** (`Deps.swift`). Two
+mechanisms met. §2 rule 1 withdraws a key two entries share, so the fresh `{Net}` entry and the stale
+`{Unknown}` entry for the same dependency function cancelled each other and the key resolved to
+NOTHING; `stalePkgs.subtract(coveredPkgs)` then — correctly — left the package COVERED on the fresh
+report's authority, and §2 rule 3 turned that nothing into a claim. Measured on the two-report fixture:
+
+    unchained          go -> invisible: ['RatesDep']          the honest hedge
+    FRESH report only  go -> ['Net'] + the host literal
+    STALE report only  go -> ['Unknown'], dep-stale:RatesDep
+    FRESH *and* STALE  go -> ABSENT FROM `functions`           a ⟨0.21⟩ purity claim
+
+Strictly worse than not chaining at all, and NON-MONOTONE: adding a report removed an answer that was
+already there. A dep directory holding one package twice is the ordinary situation rather than a corner
+— candor-rust, which found this and handed it over, measured it at 7/167 of its own dep reports, 9/259
+on pgman and 30/378 on ebman — and in this engine `--workspace` reaches it by construction, since it
+PREPENDS its own scanned directory to the configured `CANDOR_DEPS` spec.
+
+Rule 1 exists because two DIFFERENT dependency functions can share a leaf/tail2 key with nothing to
+tell them apart. That is not this case: §2.1 has already ranked the two producers, so preferring the
+trusted one is the rule the engine spent rule 2 stating, not a guess. Trust now decides first and the
+collision rule applies WITHIN a trust level — trusted vs trusted withdraws permanently (unchanged),
+trusted vs stale keeps the trusted entry whichever order they load in, stale vs stale withdraws
+recoverably so a trusted report can still claim the key. The invariant the test asserts: **adding an
+untrusted report to a dep dir that already holds a trusted one changes the consumer's report by
+nothing at all.** ⚠ a chained consumer may newly carry effects it was silently dropping.
+
 ### data loss — `--workspace`'s cache sweep deleted reports the user put there (2026-07-27)
 
 **`--workspace` removed every `*.json` in `<root>/.candor/deps` that its own path-dependency scans had

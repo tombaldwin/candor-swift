@@ -520,4 +520,102 @@ final class ChainingProcessTests: XCTestCase {
         XCTAssertEqual(Set(by["go"]?["inferred"] as? [String] ?? []), ["Unknown"],
                        "CANDOR_DEPS must override the config `deps` key (env over config, like `policy`)")
     }
+    // ── THE FRESH+STALE COLLISION: chaining must be MONOTONE ─────────────────────────────────────
+    //
+    // A dep directory holding a package TWICE — one fresh report and one left over from a previous
+    // engine build — is the ordinary situation, not a corner: candor-rust measured it at 7/167 of its
+    // own dep reports, 9/259 on pgman, 30/378 on ebman, and found this there.
+    //
+    // Two mechanisms met. §2 rule 1 withdraws a key two entries share, so the fresh `{Net}` entry and
+    // the stale `{Unknown}` entry for `RatesDep#hit` cancelled each other and the key resolved to
+    // NOTHING. `stalePkgs.subtract(coveredPkgs)` then (correctly) left the package COVERED on the fresh
+    // report's authority, so §2 rule 3 turned that nothing into a purity claim. Measured before the fix,
+    // on a dep whose only function performs the effect:
+    //
+    //     unchained          go -> invisible: ['RatesDep']
+    //     FRESH only         go -> ['Net']
+    //     STALE only         go -> ['Unknown'], dep-stale:RatesDep
+    //     FRESH *and* STALE  go -> ABSENT FROM `functions`      the cardinal sin
+    //
+    // Strictly worse than not chaining at all, and non-monotone: ADDING a report removed an answer.
+    // Rule 1 exists because two DIFFERENT dependency functions can share a leaf key; §2.1 has already
+    // ranked these two producers, so preferring the trusted one is not a guess. Found by candor-rust
+    // and handed over; verified here on this engine's own fixture before a line was written.
+    func testAStaleReportBesideAFreshOneChangesNothing() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture(extraApp: """
+        public func goUnlisted() {
+            brandNewApi()
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        let stale = root.appendingPathComponent("dep-stale.json")
+        try doctor(depReport, to: stale) { d in
+            var candor = d["candor"] as! [String: Any]
+            candor["version"] = "candor-doctored-0.0.0"
+            d["candor"] = candor
+        }
+        func scanApp(_ spec: String, _ out: String) throws -> [String: [String: Any]] {
+            let r = try run(bin, [app.path, "--out", root.appendingPathComponent(out).path],
+                            env: ["CANDOR_DEPS": spec])
+            XCTAssertEqual(r.code, 0, r.err)
+            return try fns(ofReport: root.appendingPathComponent("\(out).App.Swift.json"))
+        }
+        // the CONTROL — one trusted report — is what "changes nothing" is measured against
+        let fresh = try scanApp(depReport.path, "app-fresh")
+        XCTAssertEqual(Set(fresh["go"]?["inferred"] as? [String] ?? []), ["Net"],
+                       "the control must be live, or the row below asserts nothing")
+
+        let both = try scanApp("\(depReport.path):\(stale.path)", "app-both")
+        XCTAssertEqual(Set(both["go"]?["inferred"] as? [String] ?? []), ["Net"],
+                       "a stale report BESIDE a fresh one must not withdraw the fresh answer — the key "
+                       + "resolved to nothing and coverage turned that into a ⟨0.21⟩ purity claim")
+        XCTAssertEqual(both["go"]?["hosts"] as? [String], fresh["go"]?["hosts"] as? [String],
+                       "…and the literal surface travels exactly as it does without the stale report")
+        XCTAssertEqual(Set(both["goMember"]?["inferred"] as? [String] ?? []), ["Net"],
+                       "the same through the member-call key shape")
+        XCTAssertNil(both["goUnlisted"], "coverage is unchanged too: the fresh report's silence still claims")
+        // the ORDER of the two reports must not matter either
+        let reversed = try scanApp("\(stale.path):\(depReport.path)", "app-rev")
+        XCTAssertEqual(Set(reversed["go"]?["inferred"] as? [String] ?? []), ["Net"],
+                       "trust decides, not load order")
+    }
+
+    /// THE SECOND DIRECTION, and it is §2 rule 1 itself: two TRUSTED reports that disagree about a key
+    /// must still withdraw it. Preferring the trusted producer is a TRUST ordering, not a licence to
+    /// pick between two dependency functions — `testAmbiguousKeyIsDroppedNotGuessed` above is the
+    /// pre-existing pin and must stay green; this row adds the stale-vs-stale case, which withdraws the
+    /// key too but RECOVERABLY, so a trusted report arriving afterwards can still answer it.
+    func testTwoStaleReportsWithdrawTheKeyButATrustedOneReclaimsIt() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        var stales: [String] = []
+        for (i, v) in ["candor-doctored-0.0.0", "some-other-build-9.9.9"].enumerated() {
+            let u = root.appendingPathComponent("stale\(i).json")
+            try doctor(depReport, to: u) { d in
+                var candor = d["candor"] as! [String: Any]
+                candor["version"] = v
+                d["candor"] = candor
+            }
+            stales.append(u.path)
+        }
+        func scanApp(_ spec: String, _ out: String) throws -> (fns: [String: [String: Any]], err: String) {
+            let r = try run(bin, [app.path, "--out", root.appendingPathComponent(out).path],
+                            env: ["CANDOR_DEPS": spec])
+            XCTAssertEqual(r.code, 0, r.err)
+            return (try fns(ofReport: root.appendingPathComponent("\(out).App.Swift.json")), r.err)
+        }
+        // two UNTRUSTED reports disagree about the key: withdrawn, and neither grants coverage — so the
+        // call keeps the κ ledger's hedge instead of reading pure. Never absent.
+        let two = try scanApp(stales.joined(separator: ":"), "app-2stale")
+        XCTAssertNotNil(two.fns["go"], "a withdrawn key under NO coverage must not read as a purity claim")
+        XCTAssertEqual(two.fns["go"]?["invisible"] as? [String], ["RatesDep"])
+        // …and a trusted report arriving after them reclaims it: the stale-level withdrawal is not final.
+        let recovered = try scanApp("\(stales.joined(separator: ":")):\(depReport.path)", "app-recover")
+        XCTAssertEqual(Set(recovered.fns["go"]?["inferred"] as? [String] ?? []), ["Net"],
+                       "a stale/stale withdrawal must not outrank a trusted report that answers the key")
+    }
 }

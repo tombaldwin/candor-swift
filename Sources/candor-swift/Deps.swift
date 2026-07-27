@@ -112,14 +112,68 @@ struct DepIndex {
     /// nil for an unknown OR ambiguous key — an ambiguous key is dropped, never picked from (§2 rule 1).
     func lookup(_ key: String) -> DepEntry? { ambiguous.contains(key) ? nil : byKey[key] }
 
-    mutating func insert(key: String, _ entry: DepEntry) {
-        if ambiguous.contains(key) { return }
-        if byKey[key] != nil {
-            byKey.removeValue(forKey: key)   // two dep fns share the key — drop it, never guess
-            ambiguous.insert(key)
-        } else {
-            byKey[key] = entry
+    /// Keys currently answered by an entry from an UNTRUSTED (§2.1-stale) report, and keys withdrawn by
+    /// a collision BETWEEN two untrusted reports. Both are recoverable by a trusted report; a collision
+    /// between two TRUSTED reports goes to `ambiguous` and is permanent.
+    private var staleKeys: Set<String> = []
+    private var staleAmbiguous: Set<String> = []
+
+    /// §2 RULE 1 IS ABOUT TWO DEPENDENCY FUNCTIONS, NOT TWO BUILDS OF ONE — and conflating them made
+    /// chaining NON-MONOTONE: adding a report REMOVED an answer that was already there.
+    ///
+    /// Measured, on the ordinary situation of one package present in the dep dir twice (a fresh report
+    /// and one left over from a previous engine build — 7/167 dep reports in candor-rust, 9/259 in
+    /// pgman, 30/378 in ebman, where the rust engine found this):
+    ///
+    ///     unchained          go -> invisible: ['RatesDep']         the honest hedge
+    ///     FRESH report only  go -> ['Exec']                        the answer
+    ///     STALE report only  go -> ['Unknown']  dep-stale:RatesDep  rule 2's downgrade
+    ///     FRESH *and* STALE  go -> ABSENT FROM `functions`          a ⟨0.21⟩ PURITY CLAIM
+    ///
+    /// on a function that runs `/bin/ls`. Two mechanisms met: the never-guess rule withdrew `RatesDep#hit`
+    /// because two reports pushed it, and `stalePkgs.subtract(coveredPkgs)` (correctly) left the package
+    /// COVERED on the fresh report's authority — so the withdrawn key resolved to nothing and coverage
+    /// turned that nothing into a claim. Strictly worse than not chaining at all.
+    ///
+    /// The never-guess rule exists because two DIFFERENT dependency functions can share a leaf/tail2 key
+    /// and nothing distinguishes them. That is not this: here §2.1 has ALREADY ranked the two producers,
+    /// and preferring the trusted one is not a guess, it is the rule the engine spent rule 2 stating.
+    /// So trust decides first and the collision rule applies only WITHIN a trust level:
+    ///
+    ///   trusted vs trusted  -> withdraw permanently (`ambiguous`) — the original rule, untouched
+    ///   trusted vs stale    -> the trusted entry stands, whichever order they load in
+    ///   stale vs stale      -> withdraw, but recoverably: a trusted report may still claim the key
+    ///
+    /// The invariant that follows is the one the test asserts: **adding an untrusted report to a dep dir
+    /// that already holds a trusted one changes the consumer's report by nothing at all.**
+    mutating func insert(key: String, _ entry: DepEntry, stale: Bool) {
+        if ambiguous.contains(key) { return }         // two TRUSTED reports disagreed — stays withdrawn
+        if !stale {
+            if staleKeys.contains(key) || staleAmbiguous.contains(key) {
+                // whatever the untrusted reports left here, a trusted answer supersedes it (§2.1)
+                staleKeys.remove(key); staleAmbiguous.remove(key)
+                byKey[key] = entry
+                return
+            }
+            if byKey[key] != nil {
+                byKey.removeValue(forKey: key)   // two dep fns share the key — drop it, never guess
+                ambiguous.insert(key)
+            } else {
+                byKey[key] = entry
+            }
+            return
         }
+        // STALE. It may not displace a trusted answer, and may not withdraw one either.
+        if byKey[key] != nil {
+            guard staleKeys.contains(key) else { return }   // a trusted entry stands — leave it alone
+            byKey.removeValue(forKey: key)                  // stale vs stale: withdraw, recoverably
+            staleKeys.remove(key)
+            staleAmbiguous.insert(key)
+            return
+        }
+        if staleAmbiguous.contains(key) { return }
+        byKey[key] = entry
+        staleKeys.insert(key)
     }
 }
 
@@ -284,7 +338,7 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
             if segs.count >= 2 { keys.append("\(pkg)#\(segs[segs.count - 2]).\(leaf)") }
             let full = "\(pkg)#\(segs.joined(separator: "."))"
             if !keys.contains(full) { keys.append(full) }
-            for k in keys { idx.insert(key: k, entry) }
+            for k in keys { idx.insert(key: k, entry, stale: stale) }
         }
     }
     // A package chained TWICE — once fresh, once stale — IS covered: the fresh report makes the claim and
