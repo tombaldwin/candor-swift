@@ -482,7 +482,27 @@ if ProcessInfo.processInfo.environment["CANDOR_WORKSPACE_CHAIN"] != nil {
         ownersByTail[tail, default: []].insert(owner)
     }
     let emitted = Set(effectors.map { $0.hash })
-    var unionCount = 0
+    // COLLECTED, THEN SORTED BY HASH — never appended straight into `effectors`. `conformers` is a
+    // `[String: [String]]` and `byMethod` a `[String: …]`, and Swift seeds Dictionary hashing PER
+    // PROCESS, so appending inside those two loops made the emission ORDER of the union entries differ
+    // between runs of the same binary on the same input. Measured before the fix: five runs of the
+    // release binary over Alamofire under `CANDOR_WORKSPACE_CHAIN=1` gave FIVE different report hashes,
+    // with the same 879 union entries in five different orders.
+    //
+    // This is `23eafc2` surviving in the code path added after it. That commit's argument applies
+    // unchanged and is the reason this outranks its blast radius: A/B on real code is this project's
+    // primary evidence, and a report that differs from ITSELF injects noise into every diff — it cost an
+    // agent a false datapoint before anyone thought to run a report against itself. It also makes
+    // `gains`, the supply-chain effect-diff, noisy between identical inputs, which is product-facing.
+    // The path it survived in is the CROSS-PACKAGE PUBLISHING path: these are exactly the bytes a
+    // chained consumer reads.
+    //
+    // Sorting the RESULT rather than the two loops is deliberate: it makes the loops' order irrelevant
+    // (including `reportQuals`, a Set, feeding `ownerMethods`' arrays) instead of relying on three
+    // iteration orders staying sorted, and it is directly assertable in one process — two scans inside
+    // one test process share a hash seed, so a double-scan test could pass while the defect was live.
+    // The hash is a total order here: it is `pkg#proto.method` and (proto, method) is a key pair.
+    var unionEntries: [Effector] = []
     for (proto, conformerTypes) in conformers {
         var byMethod: [String: (inf: Set<String>, inv: Set<String>)] = [:]
         for t in Set(conformerTypes) {
@@ -507,12 +527,13 @@ if ProcessInfo.processInfo.environment["CANDOR_WORKSPACE_CHAIN"] != nil {
                 unresolved: eff.inf.contains("Unknown"), hash: hash, calls: [String]())
             if !eff.inv.isEmpty { ef.invisible = eff.inv.sorted() }
             ef.interfaceUnion = true
-            effectors.append(ef)
-            unionCount += 1
+            unionEntries.append(ef)
         }
     }
-    if unionCount > 0 {
-        FileHandle.standardError.write("candor-swift: emitted \(unionCount) protocol-CHA union entries (workspace chain)\n".data(using: .utf8)!)
+    unionEntries.sort { $0.hash < $1.hash }
+    effectors.append(contentsOf: unionEntries)
+    if !unionEntries.isEmpty {
+        FileHandle.standardError.write("candor-swift: emitted \(unionEntries.count) protocol-CHA union entries (workspace chain)\n".data(using: .utf8)!)
     }
 }
 // the coverage ledger: imported modules outside the platform frontier that the classifier doesn't
