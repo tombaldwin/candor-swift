@@ -150,7 +150,13 @@ conformer reads `Unknown` — `unknownWhy` names each origin (`callback:f`, `dis
 conclude a function is pure while `unresolved` is true. **And the coverage caveat:** the
 classifier covers the platform frontier (Foundation, Network, Dispatch, os, sqlite3) — a
 third-party package contributes NOTHING, invisible, not `Unknown`, UNLESS a chained sibling report
-covers it (`CANDOR_DEPS`, above — then its entries join and its silence is a purity claim). The
+covers it (`CANDOR_DEPS`, above — then its entries join and its silence is a purity claim). **Two
+kinds of chained report grant NO coverage**, so a key they do not answer falls back to the ledger's
+hedge instead of reading pure: one produced by a DIFFERENT engine build (§2.1 — its entries are also
+downgraded to `Unknown`), and one that **declares itself INCOMPLETE** — a non-empty ⟨0.21⟩
+`unanalyzed`, i.e. it names source it could not analyze. The incomplete case keeps its entries
+UNCHANGED (they were derived from source it *did* read); only its silence hedges, so chaining an
+incomplete report is never worse than not chaining it. The
 receipt **names the rest per scan** (the coverage ledger: `candor's classifier doesn't cover N
 modules this code imports…`): never conclude "no effect" through a module that line names. Each
 function ALSO carries an **`invisible`** list — the uncovered modules it

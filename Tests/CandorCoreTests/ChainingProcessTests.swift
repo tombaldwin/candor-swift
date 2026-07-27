@@ -618,4 +618,179 @@ final class ChainingProcessTests: XCTestCase {
         XCTAssertEqual(Set(recovered.fns["go"]?["inferred"] as? [String] ?? []), ["Net"],
                        "a stale/stale withdrawal must not outrank a trusted report that answers the key")
     }
+
+    // ── ⟨0.21⟩ A REPORT THAT DECLARES ITSELF INCOMPLETE GRANTS NO COVERAGE ────────────────────────
+    //
+    // §2 rule 3 turns a report's SILENCE into a purity claim. A report carrying a non-empty ⟨0.21⟩
+    // `unanalyzed` has just said it never read some of its own source, so its silence about that source
+    // answers nothing — and it was still registering full coverage for its package. The same door
+    // `stalePkgs` closed, read one step earlier: staleness asks whether to believe what the report SAYS,
+    // completeness asks whether its silence means anything.
+    //
+    // Found by candor-ts's own sweep (`21277eb`) and carried across here — the thing the sweep exists to
+    // do, and it had not been done: swift, rust and java all gated coverage on STALENESS alone.
+    // candor-ts measured the single-tree control over the same sources at exit 2 ("a gate cannot be green
+    // over unanalyzed code"), so chaining an incomplete report was strictly WORSE than not chaining it:
+    // the dependency's own scan refused to certify a gate over itself and the consumer certified one on
+    // its behalf.
+    //
+    // THE TREATMENT DIFFERS FROM STALENESS, and that difference is the point. A stale report's entries
+    // are assertions from a build this engine does not trust, so they are downgraded to `Unknown`. An
+    // incomplete report's entries were derived from source it DID read and are true, so they are kept
+    // exactly as they are and only COVERAGE is withheld. Strictly additive: no effect is ever removed.
+
+    private func incompleteVariant(_ report: URL, to out: URL) throws {
+        try doctor(report, to: out) { d in
+            d["unanalyzed"] = [["path": "Sources/RatesDep/Broken.swift", "reason": "source failed to read"]]
+        }
+    }
+
+    /// THE SECOND FIXTURE, WRITTEN FIRST. A COMPLETE report must still grant coverage, or the change is
+    /// indistinguishable from "chained coverage no longer exists" and re-opens the κ-hedge flood §2 rule
+    /// 3 exists to close. `testFreshDepStillMakesSilenceAPurityClaim` above is the same control on the
+    /// staleness axis and is untouched.
+    func testACompleteDepReportStillGrantsCoverage() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture(extraApp: """
+        public func goUnlisted() {
+            brandNewApi()
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-c").path],
+                        env: ["CANDOR_DEPS": depReport.path])
+        XCTAssertEqual(r.code, 0)
+        let by = try fns(ofReport: root.appendingPathComponent("app-c.App.Swift.json"))
+        XCTAssertNil(by["goUnlisted"], "a COMPLETE report's silence is still its purity claim")
+        XCTAssertFalse(r.err.contains("could not analyze"), "no incompleteness here: \(r.err)")
+        XCTAssertFalse(r.err.contains("classifier doesn't cover"), r.err)
+    }
+
+    func testAnIncompleteDepReportGrantsNoCoverageButKeepsItsEntries() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture(extraApp: """
+        public func goUnlisted() {
+            brandNewApi()
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        let incomplete = root.appendingPathComponent("dep-incomplete.json")
+        try incompleteVariant(depReport, to: incomplete)
+
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-i").path],
+                        env: ["CANDOR_DEPS": incomplete.path])
+        XCTAssertEqual(r.code, 0)
+        let by = try fns(ofReport: root.appendingPathComponent("app-i.App.Swift.json"))
+
+        // the key it does NOT answer must stop reading pure
+        XCTAssertNotNil(by["goUnlisted"],
+                        "a key an INCOMPLETE report does not answer must not be absent from `functions` — "
+                        + "absence is a ⟨0.21⟩ purity claim, made by a report that just said it never read "
+                        + "some of its own source")
+        XCTAssertEqual(by["goUnlisted"]?["invisible"] as? [String], ["RatesDep"],
+                       "it falls back to the κ ledger's hedge")
+        XCTAssertTrue(r.err.contains("could not analyze") && r.err.contains("RatesDep"),
+                      "the load must name the package whose coverage was withheld: \(r.err)")
+
+        // THE ENTRIES IT DOES CARRY ARE UNTOUCHED — this is what separates incompleteness from staleness.
+        // Treating them alike would downgrade a true answer to `Unknown`, which no evidence supports.
+        XCTAssertEqual(Set(by["go"]?["inferred"] as? [String] ?? []), ["Net"],
+                       "an entry the incomplete report DOES carry is applied unchanged — not downgraded")
+        XCTAssertEqual(by["go"]?["hosts"] as? [String], ["rates.internal:7070"],
+                       "…and so is its literal surface, unlike a stale report's")
+        XCTAssertNil(by["go"]?["unknownWhy"], "nothing is hedged about an answer it actually gave")
+    }
+
+    /// THE TRADE candor-ts MEASURED GOING THE WRONG WAY, and the reason this row exists at all.
+    /// Withholding coverage sends the site to the κ-ledger arm, so an engine whose half-1 disclosure is
+    /// gated on COVERAGE silently REPLACES the unanswerable-key `Unknown` with the `invisible` hedge —
+    /// `deny E Unknown[dispatch]` going exit 1 -> exit 0, a gate lost to a fix whose whole argument is
+    /// that it only adds disclosure. This engine gates half 1 on `isChained`, so both voices must speak.
+    func testHalf1StillDisclosesUnderAnIncompleteDepReport() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture(extraApp: """
+        public func goHalf1() {
+            let c = makeClient()
+            c.send()
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        let incomplete = root.appendingPathComponent("dep-incomplete.json")
+        try incompleteVariant(depReport, to: incomplete)
+
+        func half1(_ spec: String, _ out: String) throws -> [String: Any]? {
+            let r = try run(bin, [app.path, "--out", root.appendingPathComponent(out).path],
+                            env: ["CANDOR_DEPS": spec])
+            XCTAssertEqual(r.code, 0, r.err)
+            return try fns(ofReport: root.appendingPathComponent("\(out).App.Swift.json"))["goHalf1"]
+        }
+        // the control: under a COMPLETE report half 1 discloses
+        let complete = try half1(depReport.path, "app-h1c")
+        XCTAssertEqual(complete?["unknownWhy"] as? [String], ["dispatch:untyped cross-package receiver"],
+                       "the trigger must be live, or the row below asserts nothing")
+
+        let under = try half1(incomplete.path, "app-h1i")
+        XCTAssertEqual(under?["unknownWhy"] as? [String], ["dispatch:untyped cross-package receiver"],
+                       "half 1's disclosure must SURVIVE the withheld coverage — the ledger hedge adds to "
+                       + "it, it does not replace it, or `deny E Unknown[dispatch]` is narrowed by a fix "
+                       + "whose whole argument is that it only adds disclosure")
+        XCTAssertTrue(Set(under?["inferred"] as? [String] ?? []).contains("Unknown"))
+        XCTAssertEqual(under?["invisible"] as? [String], ["RatesDep"], "…and the ledger speaks too")
+    }
+
+    /// A package chained TWICE — once complete, once not — IS covered: the complete report makes the
+    /// claim on its own and must not inherit the other's hedge. The same reconciliation `stalePkgs` gets,
+    /// and without it the loader would announce a covered package as uncovered — a FALSE disclosure,
+    /// which is worse than a missing one.
+    func testPackageChainedCompleteAndIncompleteKeepsItsCoverage() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture(extraApp: """
+        public func goUnlisted() {
+            brandNewApi()
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        let incomplete = root.appendingPathComponent("dep-incomplete.json")
+        try incompleteVariant(depReport, to: incomplete)
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-ci").path],
+                        env: ["CANDOR_DEPS": "\(depReport.path):\(incomplete.path)"])
+        XCTAssertEqual(r.code, 0)
+        let by = try fns(ofReport: root.appendingPathComponent("app-ci.App.Swift.json"))
+        XCTAssertNil(by["goUnlisted"], "the COMPLETE report covers the package — its silence still claims")
+        XCTAssertFalse(r.err.contains("could not analyze"),
+                       "RatesDep IS covered by the complete report; announcing otherwise is a FALSE "
+                       + "disclosure: \(r.err)")
+        XCTAssertEqual(Set(by["go"]?["inferred"] as? [String] ?? []), ["Net"])
+    }
+
+    /// STALENESS IS CHECKED FIRST. A report this engine does not trust cannot be trusted about its own
+    /// completeness either, so its `unanalyzed` buys it nothing beyond the downgrade it already has — and
+    /// it must land in `stalePkgs`, not `incompletePkgs`, or rule 2's `Unknown` downgrade is lost.
+    func testAStaleReportThatAlsoDeclaresItselfIncompleteIsStillTreatedAsStale() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        let both = root.appendingPathComponent("dep-both.json")
+        try doctor(depReport, to: both) { d in
+            var candor = d["candor"] as! [String: Any]
+            candor["version"] = "candor-doctored-0.0.0"
+            d["candor"] = candor
+            d["unanalyzed"] = [["path": "x.swift", "reason": "source failed to read"]]
+        }
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-b").path],
+                        env: ["CANDOR_DEPS": both.path])
+        XCTAssertEqual(r.code, 0)
+        let by = try fns(ofReport: root.appendingPathComponent("app-b.App.Swift.json"))
+        XCTAssertEqual(Set(by["go"]?["inferred"] as? [String] ?? []), ["Unknown"],
+                       "rule 2's downgrade still applies — the incompleteness must not divert it")
+        XCTAssertEqual(by["go"]?["unknownWhy"] as? [String], ["dep-stale:RatesDep"])
+        XCTAssertTrue(r.err.contains("granted NO coverage"), "the STALE disclosure is the one that fires: \(r.err)")
+        XCTAssertFalse(r.err.contains("could not analyze"),
+                       "…and not the incompleteness one, which would claim its `unanalyzed` was believed: \(r.err)")
+    }
 }

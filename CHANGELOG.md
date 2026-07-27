@@ -9,6 +9,42 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### soundness — ⟨0.21⟩ a chained report that DECLARES ITSELF INCOMPLETE no longer grants coverage (2026-07-27)
+
+⚠ **A dependency report carrying a non-empty `unanalyzed` was still registering full coverage for its
+package** (`Deps.swift`). §2 rule 3 turns a report's SILENCE into a purity claim; a report with a
+non-empty `unanalyzed` has just said it never read some of its own source, so its silence about that
+source answers nothing. The same door `stalePkgs` closed, read one step earlier — staleness asks
+whether to believe what a report SAYS, completeness asks whether its silence means anything.
+
+Measured on the two-tree fixture: a call into a dep API the incomplete report has no entry for went
+from `invisible: ['RatesDep']` unchained — the honest hedge — to **absent from `functions`**, a ⟨0.21⟩
+positive purity claim, the moment the report was chained. candor-ts, which found this door in its own
+sweep (`21277eb`) and whose treatment this ports, measured the single-tree control over the same
+sources at exit 2 ("a gate cannot be green over unanalyzed code"), so chaining an incomplete report was
+strictly WORSE than not chaining it.
+
+The TREATMENT differs from staleness because the evidence does. A stale report's entries are assertions
+from a build this engine will not repeat and are downgraded to `Unknown`; an incomplete report's
+entries were derived from source it DID read and are kept **unchanged** — effects, literal surfaces and
+all. Only the SILENCE hedges: strictly additive, no effect is ever removed. Staleness is checked FIRST
+(a report we do not trust cannot be trusted about its own completeness), a package chained both
+complete and incomplete keeps the complete report's coverage, and half 1's unanswerable-key `Unknown`
+speaks BESIDE the ledger hedge rather than being replaced by it — the trade candor-ts measured going
+the wrong way, where withholding coverage silently took `deny E Unknown[dispatch]` from exit 1 to
+exit 0. Six guards, six mutants, each failing its named test and only it. ⚠ a chained consumer may
+newly carry `invisible` where a dependency's report is incomplete; regenerate baselines.
+
+Corpus: 0 of 34 real Swift packages produce a report declaring an `unanalyzed` unit, so the rung is
+inert there — the corpus is the fabrication control and the fixtures are the evidence. It fires exactly
+when a dependency ships source candor cannot read, which is precisely when its silence is worth least.
+
+**A second, smaller repair fell out of the fixture**: two reports carrying an IDENTICAL entry for the
+same key were withdrawing it as ambiguous. The header's canonical-path dedup catches the same FILE
+loaded twice but not the same report present under two names — the ordinary shape once `--workspace`
+prepends its scanned directory to a configured `CANDOR_DEPS`. §2 rule 1 forbids PICKING between
+candidates; there is nothing to pick when they are equal.
+
 ### soundness — a stale report BESIDE a fresh one withdrew the fresh answer (2026-07-27)
 
 ⚠ **A package chained both FRESH and STALE read as a positive purity claim** (`Deps.swift`). Two
