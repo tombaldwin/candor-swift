@@ -513,6 +513,38 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // (`Set(freeFnByName.keys)` at the CallCollector site was O(freeFns) rebuilt N times = O(N²) on a
     // free-function-heavy corpus). Byte-identical: the set passed to each CallCollector is the same value.
     let localFreeFnNames = Set(freeFnByName.keys)
+    // MEMBER NAMES PER LOCAL TYPE, for half 1's provenance conjunct. A bare `foo()` inside `struct Bar`
+    // is `self.foo()` when `Bar` declares `foo` — a purely LOCAL call, never a dependency factory — but
+    // the conjunct only excluded FREE functions, so every such call recorded a dependency-provenance
+    // binding and every later member call on its result disclosed a false
+    // `Unknown[dispatch:untyped cross-package receiver]`. Instrumented over 14 real targets: 289 bindings,
+    // led by `rootOf` (16), `classifyItems`, `createFunction`, `parseMisplacedSpecifiers`, `expandMacros`
+    // — enclosing-type methods, every one.
+    //
+    // Keyed by TYPE, not a flat leaf set, and the enclosing type's local SUPERS are climbed: the exclusion
+    // must be as narrow as Swift's own bare-name resolution, because widening it drops a genuine half-1
+    // disclosure, which is the direction that costs soundness. A same-named method on an UNRELATED local
+    // type must exempt nothing.
+    var localTypeMembers: [String: Set<String>] = [:]
+    for f in allFns {
+        guard let dot = f.simpleQual.lastIndex(of: ".") else { continue }
+        let owner = String(f.simpleQual[..<dot])
+        let member = String(f.simpleQual[f.simpleQual.index(after: dot)...])
+        localTypeMembers[owner, default: []].insert(member.split(separator: "(").first.map(String.init) ?? member)
+    }
+    /// `t`'s own members plus every LOCAL supertype's, transitively — an inherited method is callable
+    /// bare too. Walked with the same sorted, seen-guarded traversal the dispatch paths use.
+    func membersVisibleOn(_ t: String) -> Set<String> {
+        var out = localTypeMembers[t] ?? []
+        var seen: Set<String> = [t], queue = Array(supertypesOf[t] ?? []).sorted()
+        while let s = queue.popLast() {
+            guard seen.insert(s).inserted else { continue }
+            out.formUnion(localTypeMembers[s] ?? [])
+            queue.append(contentsOf: (supertypesOf[s] ?? []).sorted())
+        }
+        return out
+    }
+    var membersVisibleCache: [String: Set<String>] = [:]
     for f in allFns {
         locOf[f.qual] = f.loc
         if f.isMain { entryPoints.insert(f.qual) }
@@ -526,6 +558,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                enumCaseValueType: enumCaseValueType, dynamicMemberTypes: dynamicMemberTypes,
                                propertyWrapperTypes: propertyWrapperTypes, wrappedProps: wrappedProps,
                                localFreeFns: localFreeFnNames, typeAliases: typeAliases,
+                               enclosingMembers: f.enclosingType.map { t in
+                                   membersVisibleCache[t] ?? {
+                                       let m = membersVisibleOn(t); membersVisibleCache[t] = m; return m
+                                   }()
+                               } ?? [],
                                opaqueSeqBuilders: opaqueSeqBuilders, seqBuilderConcrete: seqBuilderConcrete,
                                closureFields: closureFields, moduleConstStrings: globalConstStrings)
         cc.walk(body)

@@ -69,6 +69,12 @@ final class CallCollector: SyntaxVisitor {
     let declaredTypes: Set<String>  // types with a REAL local definition (NOT extension-only) — the shadow
                                     // discipline keys on this so a member call on an extension-only κ-platform
                                     // type (`self.launch()` in `extension Process`) reaches the κ table.
+    /// Member names callable BARE on the enclosing type — its own plus every local supertype's. A bare
+    /// `foo()` inside `struct Bar` that `Bar` declares is `self.foo()`, a purely local call; half 1's
+    /// provenance conjunct treated it as a dependency factory and disclosed for it. Scoped to the
+    /// ENCLOSING type rather than a flat leaf set, because widening the exclusion drops a genuine
+    /// disclosure, which is the direction that costs soundness.
+    let enclosingMembers: Set<String>
     let localFreeFns: Set<String>   // local free-function names — a bare `name(...)` call to one is the
                                     // project's OWN fn, so the platform free-call classifier (kappaFree)
                                     // must NOT fire (else a local `func NSLog`/`Pipe`-ctor fabricates)
@@ -107,8 +113,18 @@ final class CallCollector: SyntaxVisitor {
     /// (`extension Sequence { func depFetch() }`) makes a member call on a stdlib-typed value a
     /// dependency reach. That is universal — it applies to every literal and every stdlib value in the
     /// program — so it is not what this list governs, and no entry here is carved out on its strength.
+    ///
+    /// THE LIBM BLOCK was added after instrumenting the conjunct on 14 real targets: with the local-name
+    /// widening in place it still fired 153 times, and the largest remaining false population was `sin`
+    /// (7), `cos` (5), `atan2` (5), `sqrt` (4), `pow` (3), `asin` (3). Each satisfies the criterion by
+    /// its SIGNATURE — `(Double) -> Double`, `(Float) -> Float` — so a member call on the result is a
+    /// member call on a floating-point value. That is the same argument the block above makes, applied
+    /// to a family rather than to seven names; it is not a judgement about what the callees do.
     static let PURE_STDLIB_FREE_FNS: Set<String> = [
         "max", "min", "abs", "swap", "zip", "stride", "repeatElement",
+        "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh",
+        "sqrt", "cbrt", "pow", "exp", "exp2", "log", "log2", "log10", "hypot",
+        "floor", "ceil", "round", "trunc", "fmod", "fabs",
     ]
     /// Names bound to a value whose type is caller-MONOMORPHIZED rather than erased, so the conformers
     /// visible here are not its candidate witnesses (see `isOpaqueParam`). Three sources, all the same
@@ -200,6 +216,7 @@ final class CallCollector: SyntaxVisitor {
          enumCaseValueType: [String: String], dynamicMemberTypes: Set<String>,
          propertyWrapperTypes: Set<String>, wrappedProps: [String: [String: String]],
          localFreeFns: Set<String>, typeAliases: [String: String],
+         enclosingMembers: Set<String> = [],
          opaqueSeqBuilders: Set<String>, seqBuilderConcrete: [String: String],
          closureFields: [String: Set<String>], moduleConstStrings: [String: String] = [:]) {
         self.moduleConstStrings = moduleConstStrings
@@ -208,6 +225,7 @@ final class CallCollector: SyntaxVisitor {
         self.closureFields = closureFields
         self.typeAliases = typeAliases
         self.localFreeFns = localFreeFns
+        self.enclosingMembers = enclosingMembers
         self.propertyWrapperTypes = propertyWrapperTypes
         self.wrappedProps = wrappedProps
         self.dynamicMemberTypes = dynamicMemberTypes
@@ -2372,6 +2390,20 @@ final class CallCollector: SyntaxVisitor {
                                          .as(DeclReferenceExprSyntax.self)?.baseName.text,
                            callee.first?.isUppercase == false, returns[callee] == nil,
                            !localTypes.contains(callee), !localFreeFns.contains(callee),
+                           // …and the two LOCAL-name kinds `localFreeFns` does not cover. MEASURED, not
+                           // guessed: instrumented over 14 real targets the conjunct fires 289 times and
+                           // the population is led by `rootOf` (16), `classifyItems`, `createFunction`,
+                           // `parseMisplacedSpecifiers`, `expandMacros` — enclosing-type methods, with
+                           // nested funcs behind them. Not one is a dependency factory, and a hedge wrong
+                           // every time teaches a consumer to ignore the channel. candor-rust narrowed the
+                           // same conjunct after measuring it fire on `max()`/`min()`.
+                           //
+                           // `enclosingMembers` is scoped to THIS type and its local supertypes, matching
+                           // Swift's own bare-name resolution. A flat leaf set over every local type would
+                           // let an unrelated same-named method exempt a real dependency factory, and
+                           // losing a half-1 disclosure re-opens the silent purity claim this rung exists
+                           // to close — the widening is the dangerous direction here, not the narrowing.
+                           !enclosingMembers.contains(callee), !localFuncs.contains(callee),
                            !Self.PURE_STDLIB_FREE_FNS.contains(callee) {
                             depBoundLocals[name] = callee
                         } else { depBoundLocals.removeValue(forKey: name) }
