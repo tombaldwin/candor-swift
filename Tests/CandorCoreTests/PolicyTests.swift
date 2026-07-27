@@ -130,6 +130,14 @@ final class PolicyTests: XCTestCase {
         XCTAssertEqual(reasonClass("native:extern"), "native")
         XCTAssertEqual(reasonClass("callback:f"), "indirect")
         XCTAssertEqual(reasonClass("dispatch:Dyn.f"), "dispatch")
+        // SPEC §4 ⟨0.24⟩: a DOT-FREE `dispatch:` detail is the reserved form for "no owner could be
+        // formed at all" — and it is still a `dispatch:`. This engine EMITS one
+        // (`dispatch:untyped cross-package receiver`, Driver.swift), so the rejected alternative ruling
+        // (reclassify to `callback:`/`indirect` because no owner type exists) would move it out of the
+        // `dispatch` class and silently narrow every `deny E Unknown[dispatch]` gate in the field.
+        // Measured on the fixture that emits it: `deny Unknown[dispatch]` exits 1, `deny Unknown[indirect]`
+        // exits 0 — so the classification below is the one the gate acts on.
+        XCTAssertEqual(reasonClass("dispatch:untyped cross-package receiver"), "dispatch")
         XCTAssertEqual(reasonClass("ambiguous:same-name"), "dispatch")
         XCTAssertEqual(reasonClass("unresolved"), "unresolved")
         XCTAssertEqual(reasonClass("some-new-token"), "unresolved")   // conservative catch-all
