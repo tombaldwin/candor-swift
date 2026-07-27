@@ -9,6 +9,33 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### changed — ⟨0.24⟩ a `--class` value that cannot be honoured is REFUSED, not quietly narrowed (2026-07-27)
+
+SPEC §6.2's **value grammar**, which conformance PART 27 found unimplemented in **all four** engines
+rather than divergent between them — the suite's only `engine: "*"` waiver, and the last thing holding
+the floor below 0.24. `--class <c>[,<c>…]` takes ONE comma-separated list of the six reason classes plus
+the aliases `dynamic` and `*`. Two things that used to exit 0 on `unverified --class` (this engine's only
+`--class` consumer — there is no `blindspots` or `callers` verb here) now exit **2**:
+
+- **an unrecognised token.** `--class dyanmic` printed `--class ignores unknown reason-class …` and
+  carried on with whatever was left of the list — for a one-token list, an EMPTY filter. It now names the
+  token and lists the accepted set. `*` is also honoured only after the whole list is walked, so
+  `--class *,dyanmic` reports the typo instead of short-circuiting past it.
+- **a repeated `--class`.** It was last-wins, silently discarding the first list. A second occurrence is
+  a usage error, not a union — and not last-wins either.
+
+**Why the query side refuses what the policy side drops**, since the asymmetry reads as an inconsistency
+until it is written down: a token dropped out of `deny E Unknown[reflect,dyanmic]` leaves the **wider**
+rule standing, so the mistake is loud — the gate over-fires and somebody comes to look. The same token
+dropped out of `--class` leaves a **narrower** filter, and a narrower filter on `unverified` comes back
+as a **smaller number**, indistinguishable from a real all-clear in the one verb whose whole job is to
+say "green, but not provably so". A refusal also emits **no answer document at all**; a narrower result
+one exit code away from a refusal is the same fail-open in a different hat.
+
+`parseClassFilter` now throws `ClassFilterUsageError` rather than warning, so the rule lives in one
+place. Nothing changes for well-formed input — the new suite pins the unfiltered baseline and each
+filter's exact selection alongside the refusals.
+
 ### added — ⟨0.24⟩ `ambiguous:` is a fifth §4 kind: candor-swift already conformed; the controls did not exist (2026-07-27)
 
 SPEC §4's `unknownWhy` kind set gains **`ambiguous:`** — name resolution was ambiguous, so no owner could

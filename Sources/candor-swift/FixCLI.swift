@@ -293,7 +293,19 @@ private func parseQueryArgs(_ args: [String], expectedVerbArgs: Int) -> QueryArg
             guard let v = it.next() else { fixDie("candor-swift: --policy requires a value") }
             policyFlag = v
         case "--class":
-            guard let v = it.next() else { fixDie("candor-swift: --class requires a <class,…> value") }
+            guard let v = it.next() else {
+                fixDie("candor-swift: --class requires a <class,…> value\n  accepted: \(CLASS_FILTER_TOKENS)")
+            }
+            // SPEC §6.2 ⟨0.24⟩: `--class` takes ONE comma-separated list and is NOT REPEATABLE — a second
+            // occurrence is a usage error, not a union. Neither silent reading is safe: last-wins (what
+            // this did) DROPS the first list, and a union would WIDEN past what the second flag asked
+            // for. Both answer a different question than the line on screen, and on `unverified` a
+            // quietly different question comes back as a quietly different NUMBER.
+            if q.classFilter != nil {
+                fixDie("candor-swift: --class given more than once — it takes ONE comma-separated list "
+                       + "(`--class a,b`), not a repeated flag\n"
+                       + "  a second occurrence is a usage error, not a union (SPEC §6.2 ⟨0.24⟩)")
+            }
             q.classFilter = v
         default:
             if a == "--text" || a == "--human" { continue }  // candor-ts output-mode flags (#8); swift prose is the default — tolerate for cross-engine `candor <verb> --text`
@@ -425,7 +437,14 @@ func runUnverifiedCLI(_ args: [String]) -> Never {
     guard let fns = loadUnverifiedFns(prefix: prefix) else {
         fixDie("candor-swift unverified: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
     }
-    let (ok, holes) = unverified(fns, deny, classFilter: parseClassFilter(q.classFilter))
+    // §6.2 ⟨0.24⟩: an unrecognised token is a USAGE ERROR (exit 2) and NO answer is emitted — a narrower
+    // result one exit code away from a refusal is the same fail-open in a different hat. See
+    // `parseClassFilter` for why this half of the rule is not the policy side's drop-with-a-warning.
+    let classFilter: Set<String>?
+    do { classFilter = try parseClassFilter(q.classFilter) }
+    catch let e as ClassFilterUsageError { fixDie(e.message) }
+    catch { fixDie("candor-swift: --class could not be parsed: \(error)") }
+    let (ok, holes) = unverified(fns, deny, classFilter: classFilter)
     emitJSON(["ok": ok, "unverified": holes.map { $0.toJSON() }])
     exit(q.strict && !ok ? 1 : 0)
 }

@@ -47,31 +47,31 @@ final class UnverifiedClassFilterTests: XCTestCase {
         ]
     }
 
-    private func holes(_ classSpec: String?) -> [String] {
+    private func holes(_ classSpec: String?) throws -> [String] {
         let deny = parsePolicy("deny Exec").deny
-        let (_, hs) = unverified(rows(), deny, classFilter: parseClassFilter(classSpec))
+        let (_, hs) = unverified(rows(), deny, classFilter: try parseClassFilter(classSpec))
         return hs.map { $0.fn }.sorted()
     }
 
     /// THE CONVERGENCE THE NUMBER IS ABOUT: `dynamic` is every genuine class, so it cannot drop a hole.
-    func testDynamicNamesEveryGenuineClassSoItDropsNothing() {
-        let all = holes(nil)
+    func testDynamicNamesEveryGenuineClassSoItDropsNothing() throws {
+        let all = try holes(nil)
         XCTAssertEqual(all, ["a.reasonless", "b.reasoned", "c.inheritsReasoned",
                              "d.inheritsReasonless", "e.inheritsBoth"])
-        XCTAssertEqual(holes("dynamic"), all,
+        XCTAssertEqual(try holes("dynamic"), all,
                        "`--class dynamic` excludes only `setup`; on a report with no setup-class hole it "
                        + "must return the unfiltered list, or the filter is dropping what it cannot classify")
     }
 
     /// HALF 1 — a reasonless DIRECT `Unknown` contributes `unresolved`, and carries it to its callers.
-    func testAReasonlessUnknownContributesUnresolved() {
-        XCTAssertEqual(holes("unresolved"),
+    func testAReasonlessUnknownContributesUnresolved() throws {
+        XCTAssertEqual(try holes("unresolved"),
                        ["a.reasonless", "d.inheritsReasonless", "e.inheritsBoth"])
     }
 
     /// HALF 2 — the class travels the call graph, exactly as the `Unknown` effect does.
-    func testTheClassTravelsTheCallGraph() {
-        XCTAssertEqual(holes("dispatch"),
+    func testTheClassTravelsTheCallGraph() throws {
+        XCTAssertEqual(try holes("dispatch"),
                        ["b.reasoned", "c.inheritsReasoned", "e.inheritsBoth"])
     }
 
@@ -79,28 +79,28 @@ final class UnverifiedClassFilterTests: XCTestCase {
     /// match `--class unresolved` — directly (`b.reasoned`) or through inheritance (`c.inheritsReasoned`).
     /// Without this, the fix is indistinguishable from "contribute `unresolved` unconditionally", which
     /// makes every hole match every filter and deletes the verb.
-    func testAClassifiedHoleNeverReadsUnresolved() {
-        let unres = holes("unresolved")
+    func testAClassifiedHoleNeverReadsUnresolved() throws {
+        let unres = try holes("unresolved")
         XCTAssertFalse(unres.contains("b.reasoned"),
                        "a `dispatch:` reason is not an unclassified hole")
         XCTAssertFalse(unres.contains("c.inheritsReasoned"),
                        "…and inheriting one is not either — resolving the class transitively must not "
                        + "also invent an `unresolved` the callee's report refutes")
         // the mirror: a class nothing in the fixture has matches nothing at all
-        XCTAssertEqual(holes("native"), [], "`--class native` has no candidate here")
-        XCTAssertEqual(holes("reflect"), [], "`--class reflect` has no candidate here")
+        XCTAssertEqual(try holes("native"), [], "`--class native` has no candidate here")
+        XCTAssertEqual(try holes("reflect"), [], "`--class reflect` has no candidate here")
     }
 
     /// A pre-⟨0.24⟩ report (no `direct` field, so `direct` loads empty) must still not silently drop a
     /// hole nobody classified: with nothing anywhere in its reach explaining the `Unknown`, `unresolved`
     /// stands. This is the format-tolerance arm — the fix must not depend on a field a report may lack.
-    func testAHoleNothingExplainsStillReadsUnresolved() {
+    func testAHoleNothingExplainsStillReadsUnresolved() throws {
         let deny = parsePolicy("deny Exec").deny
         let fns = [UnverifiedFn(fn: "x.opaque", inferred: ["Unknown"], direct: [],
                                 unknownWhy: [], calls: [])]
-        let (_, hs) = unverified(fns, deny, classFilter: parseClassFilter("unresolved"))
+        let (_, hs) = unverified(fns, deny, classFilter: try parseClassFilter("unresolved"))
         XCTAssertEqual(hs.map { $0.fn }, ["x.opaque"])
-        let (_, none) = unverified(fns, deny, classFilter: parseClassFilter("dispatch"))
+        let (_, none) = unverified(fns, deny, classFilter: try parseClassFilter("dispatch"))
         XCTAssertEqual(none.map { $0.fn }, [], "…and never a guessed class")
     }
 

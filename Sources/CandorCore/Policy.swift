@@ -160,20 +160,52 @@ public func reasonClass(_ why: String) -> String {
     return "unresolved" // conservative catch-all
 }
 
-/// ⟨0.20⟩ Parse a `--class <c,…>` filter into reason classes: the six tokens, `dynamic` (every genuine
-/// class), or `*` (all). nil spec ⇒ nil (no filter); an unknown token warns; an all-unknown spec ⇒ an
-/// empty set that matches nothing. Shared shape with the java/rust/ts `parseClassFilter`.
-public func parseClassFilter(_ spec: String?) -> Set<String>? {
+/// The accepted `--class` token set, spelled ONCE (SPEC §6.2 ⟨0.24⟩ THE FLAG'S VALUE GRAMMAR): the six
+/// reason classes plus the two aliases. `dynamic` is in the set because §6.2's own normative diagnostic
+/// (`--class dynamic` == unfiltered minus the setup-only entries) is stated in terms of it — an engine
+/// that rejected it as unrecognised would fail the standing test every engine carries.
+public let CLASS_FILTER_TOKENS = "reflect, dispatch, indirect, native, unresolved, setup (aliases: dynamic, *)"
+
+/// An unrecognised `--class` token. It carries the FINISHED diagnostic rather than just the token, so the
+/// CLI cannot re-word the message into a second, drifting statement of the same rule.
+public struct ClassFilterUsageError: Error {
+    public let token: String
+    public init(token: String) { self.token = token }
+    public var message: String {
+        "candor-swift: --class: unrecognised reason-class `\(token)`\n"
+        + "  accepted: \(CLASS_FILTER_TOKENS)\n"
+        + "  a --class value that cannot be honoured is refused, not dropped: dropping it would narrow "
+        + "the filter and answer a question you did not ask, with a smaller number (SPEC §6.2 ⟨0.24⟩)"
+    }
+}
+
+/// ⟨0.20⟩ Parse a `--class <c,…>` filter into reason classes; value grammar pinned normative at §6.2
+/// ⟨0.24⟩: ONE comma-separated list of the six tokens, `dynamic` (every GENUINE class — all six MINUS
+/// `setup`), or `*` (all six). nil spec ⇒ nil (no filter).
+///
+/// AN UNRECOGNISED TOKEN THROWS, and the caller turns that into exit 2. This is deliberately NOT the
+/// policy side's drop-with-a-warning, and the asymmetry reads as an inconsistency until it is written
+/// down: a token dropped out of `deny E Unknown[reflect,dyanmic]` leaves the WIDER rule standing, so the
+/// mistake is loud — the gate over-fires and somebody comes to look. The same token dropped out of
+/// `--class` leaves a NARROWER filter, and a narrower filter on `unverified` comes back as a SMALLER
+/// NUMBER, which is indistinguishable from a real all-clear in the one verb whose whole job is to say
+/// "green, but not provably so". That is precisely the fail-open §6.2 exists to close. A query flag that
+/// cannot be honoured is refused, not approximated.
+public func parseClassFilter(_ spec: String?) throws -> Set<String>? {
     guard let spec else { return nil }
     var out = Set<String>()
+    var star = false
     for rawT in spec.split(separator: ",", omittingEmptySubsequences: false) {
         let t = rawT.trimmingCharacters(in: .whitespaces)
         if t.isEmpty { continue }
-        if t == "*" { return Set(REASON_CLASSES) }
-        if t == "dynamic" { DYNAMIC_CLASSES.forEach { out.insert($0) } }
+        if t == "*" { star = true }
+        else if t == "dynamic" { DYNAMIC_CLASSES.forEach { out.insert($0) } }
         else if REASON_CLASSES.contains(t) { out.insert(t) }
-        else { FileHandle.standardError.write("candor-swift: --class ignores unknown reason-class `\(t)` (known: \(REASON_CLASSES.joined(separator: ",")); aliases: dynamic,*)\n".data(using: .utf8)!) }
+        else { throw ClassFilterUsageError(token: t) }
     }
+    // `*` is honoured only after the WHOLE list is walked, so `--class *,dyanmic` still reports the typo
+    // instead of short-circuiting past it: the refusal must not depend on token order.
+    if star { return Set(REASON_CLASSES) }
     return out
 }
 
