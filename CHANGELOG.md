@@ -9,6 +9,27 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### process — the set of name-keyed maps a rebind must invalidate is now DERIVED (2026-07-27)
+
+One mechanism has produced **seven** defects in `CallCollector` across three days, every one the same
+shape: a name-keyed fact outliving the binding that set it. `42093b6` removed the enumeration of binder
+FORMS by binding to `IdentifierPatternSyntax`, which is where the language puts every pattern binding —
+and it clears a LIST of maps, which is the same enumeration one level up. Two of the seven were maps
+missing from that list.
+
+`NameKeyedStateTests` makes the obligation derived rather than listed: it parses `CallCollector.swift`
+with SwiftParser, enumerates the class's stored properties from the parse tree, and requires each one to
+be classified — cleared (and whether scoped), deliberately kept as a hedge, a program-wide index, or not
+per-binding at all. **Adding a map without that decision fails a test**; classifying one as cleared
+without writing the clear fails another; classifying one as scoped without both saving AND restoring it
+fails a third. All three verified by mutation, and the stale-entry direction caught a real one on its
+first run. What is derived is the SET (nobody keeps it current, in either direction); what is authored
+is the JUDGEMENT, which has to be — whether a `[String: X]` is keyed by a binding name or a type name is
+a fact about meaning, not syntax, and the two hedging sets must NOT be cleared.
+
+The classification is also where the two maps this pass did NOT fix are filed, with their measurement,
+so the next audit inherits the numbers instead of the surprise.
+
 ### soundness — ⟨0.21⟩ a chained report that DECLARES ITSELF INCOMPLETE no longer grants coverage (2026-07-27)
 
 ⚠ **A dependency report carrying a non-empty `unanalyzed` was still registering full coverage for its

@@ -959,9 +959,10 @@ final class CallCollector: SyntaxVisitor {
     //     back to silent-pure, so — like the four above — it needs the scope and not just the clear.
     //
     // So: a binder CLEARS, the enclosing scope RESTORES (see enterShadowScope/leaveShadowScope).
-    // FIVE maps now. The list is no longer maintained by hand: `NameKeyedState` is the single
-    // classification every name-keyed stored property of this class must appear in, and
-    // `NameKeyedStateTests` reflects over the live instance and fails when one does not.
+    // FIVE maps now, and this list is no longer the OBLIGATION. `NameKeyedStateTests` parses this
+    // file and requires every stored property of this class to be classified — cleared, scoped,
+    // deliberately kept, or not per-binding — so a map added without that decision fails a test, and a
+    // map classified as cleared without the clear being written fails a different one.
     private func shadowName(_ name: String) {
         monoNames.remove(name)
         depBoundLocals.removeValue(forKey: name)
@@ -1021,9 +1022,10 @@ final class CallCollector: SyntaxVisitor {
         // was never probed: an aliased name rebound by that same loop resolved to the aliased function
         // for the rest of the body. `boundLocals` was not on its list at all, because it is not a
         // per-binding FACT but a per-binding EXISTENCE claim, and the audit was looking for facts. A
-        // rename control run in one direction is half a control. Both now carry the discipline, and the
-        // classification is `NameKeyedState` — reflected over rather than kept by hand, so the residual
-        // the note used to end on ("a NEW map added later without being added here") fails a test.
+        // rename control run in one direction is half a control. `fnValueAlias` now carries the
+        // discipline; `boundLocals` does NOT, and is filed with its measurement in
+        // `NameKeyedStateTests.disposition` rather than left to be rediscovered. The residual the note
+        // used to end on — "a NEW map added later without being added here" — now fails a test.
         shadowScopes[node.id] = ShadowSave(opaque: monoNames, opaqueElem: opaqueElem,
                                            depBound: depBoundLocals, protoTyped: protoTyped,
                                            constStrings: localConstStrings, fnValueAlias: fnValueAlias)
