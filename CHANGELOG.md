@@ -9,6 +9,66 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### soundness — ⚠ a binder that CAN type its new binding still has to invalidate the old one (2026-07-27)
+
+A review found one site; the rename control that reproduced it found four more. `shadowName` drops the
+four name-keyed FLAGS and `clearBindingTypeOnly` drops the TYPE indexes — and every branch that
+succeeded in TYPING a rebound name called the first and wrote `vars` over the top, leaving `protoTyped`
+describing a binding that is no longer there. The member-dispatch site consults `protoTyped` BEFORE the
+`vars` root, so the fresh type does not mask the stale protocol, and the call dispatched over the
+SHADOWED parameter's conformers:
+
+| binder | reads | rename control |
+|---|---|---|
+| `switch e { case .active(let j): j.run() }` beside `j: Job` | `['Fs']` | ABSENT |
+| `if let j = o { j.run() }` | `['Fs']` | ABSENT |
+| `xs.forEach { (j: Ctx) in j.run() }` | `['Fs']` | ABSENT |
+| `let (j, _) = (Ctx(), 1); j.run()` | `['Fs']` | ABSENT |
+| `func inner(_ j: Ctx) { j.run() }` inside `f(_ j: Job)` | `['Fs']` | ABSENT |
+
+**The clear is also a RECOVERY**: the stale entry was not only fabricating, it was masking the shadowing
+binding's own type, so `if let j = o { j.go() }` and the closure form now resolve `Ctx.go` for the first
+time. The ordering carve-out (`let u = u.asURL()` resolves THROUGH the entry being cleared) is a
+denylist and is pinned by its own row — the mutant that clears unconditionally fails only that one.
+A/B over 13 real Swift packages: 0 gains, 0 losses; the shape needs a stale `protoTyped` under a
+shadowing binder, which no corpus site has (instrumented: 0 of 89 live-index hits at the payload site),
+so the corpus is the fabrication control and the fixtures are the evidence.
+
+`NameKeyedStateTests` was green through all five and correctly so — it derives the SET of name-keyed
+maps and checks each map's classification, and what was violated is per-NAME and per-CONTROL-PATH,
+which a parse tree cannot see. Both derivable strengthenings were priced and both would have PASSED on
+the defective code; the limit is now stated in that file rather than left to be assumed away.
+
+### deps — ⚠ completeness, and the identical-entry rule at every trust level (2026-07-27)
+
+- **A complete report no longer cancels an incomplete sibling's hedge over the same package.** Coverage
+  turns SILENCE into a purity claim (§2 rule 3), so a set of reports' silence is only as strong as the
+  weakest completeness claim in it — **two reports covering one package do not cover the same SOURCE**.
+  Measured: with A complete and B declaring `unanalyzed`, B alone hedges `invisible: ['RatesDep']` and
+  A+B went ABSENT. The sharper form is candor-rust `63bbe87`'s argument on the completeness axis: two
+  fresh reports disagreeing on a key withdraw it (§2 rule 1, correctly) and complete-wins turned that
+  withdrawal into a positive purity claim over a function both reports call effectful. The cost is a
+  hedge, never an effect — entries are untouched either way.
+- **The identical-entry exemption now applies at every trust level.** Two byte-identical entries from
+  two STALE reports were withdrawn as ambiguous, costing the §2.1 `Unknown` downgrade the stale arm
+  exists to produce (`go` went from `['Unknown'] dep-stale:RatesDep` to a bare ledger hedge). 476 of
+  8367 join keys already collide within a single real report, across 12 of the 13 corpus packages, so
+  the population is not marginal. candor-rust `6f2210c` aligned.
+
+### fix — `--workspace`'s cache sweep, twice more (2026-07-27)
+
+- **It deleted a report a healthy sibling had just written.** The sweep skipped deps that SUCCEEDED,
+  which is not the set of files THIS RUN PRODUCED: a workspace holding one package twice (a vendored
+  fork beside the upstream checkout) has the FAILED copy owning exactly the file the healthy copy wrote,
+  and the retry-plus-second-sweep deleted it twice. The consumer went from `['Fs']` with its literal
+  surface to `invisible: ['Shared']`. The guard is the simplest one — never delete a file this run
+  wrote — and the per-dep failure line no longer claims a removal that did not happen.
+- **The sweep's manifest parse was not the writer's, and a comment said it was.** The sweep anchored
+  after `Package(`; the writer takes the first `name:` in the whole file. A hoisted target or dependency
+  array splits them, and both failure directions land at once: the stale report SURVIVES (a ⟨0.21⟩
+  purity claim over a dependency that writes to disk) and a user-placed file under the invented name is
+  DELETED. There is now one parse and one name transform, both the writer's, both called by the writer.
+
 ### soundness — ⚠ an enum-case payload binding is a LOCAL, and no shadow guard knew it (2026-07-27)
 
 `typeEnumCaseBinding` typed `case .active(let c)` when the case name was unambiguous and carried exactly
