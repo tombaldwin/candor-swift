@@ -149,7 +149,8 @@ final class NameKeyedStateTests: XCTestCase {
         "paths": .notPerBinding, "tables": .notPerBinding, "incompleteSurfaces": .notPerBinding,
         "protoDispatches": .notPerBinding, "protoPropReads": .notPerBinding,
         "stringifyDispatches": .notPerBinding, "stringifyExternal": .notPerBinding,
-        "deinitExternal": .notPerBinding, "globalReads": .notPerBinding,
+        "deinitExternal": .notPerBinding, "propertyExternal": .notPerBinding,
+        "globalReads": .notPerBinding,
         "propertyEdges": .notPerBinding, "callbackInvoked": .notPerBinding,
         // `localFuncs` is a DECLARATION set, not a binding fact: a nested `func` name suppresses the
         // same-named module-level free fn for the whole unit. Its leak direction is SUPPRESSION (a

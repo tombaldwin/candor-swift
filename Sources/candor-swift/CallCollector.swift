@@ -128,6 +128,11 @@ final class CallCollector: SyntaxVisitor {
         "sqrt", "cbrt", "pow", "exp", "exp2", "log", "log2", "log10", "hypot",
         "floor", "ceil", "round", "trunc", "fmod", "fabs",
     ]
+    /// Member spellings that are NEVER a property accessor, however the receiver types. `T.init` is an
+    /// initializer reference, `T.self` a metatype value, `T.Type`/`T.Protocol` metatype spellings — none
+    /// of them can run an accessor body, so no accessor unit in a dependency's report can legitimately
+    /// answer them. Consumed only by the `propertyExternal` candidate gate.
+    static let METATYPE_MEMBERS: Set<String> = ["init", "self", "Type", "Protocol"]
     /// Names bound to a value whose type is caller-MONOMORPHIZED rather than erased, so the conformers
     /// visible here are not its candidate witnesses (see `isOpaqueParam`). Three sources, all the same
     /// question under different spellings: a `some P` parameter; a binder that takes its type from a
@@ -187,6 +192,13 @@ final class CallCollector: SyntaxVisitor {
     // constructed and held as a non-escaping local, whose `deinit` runs at scope exit. `Type.deinit`
     // candidates, resolved ONLY against a sibling report in the Driver (`<Module>#<Type>.deinit`).
     var deinitExternal: Set<String> = []
+    // A PROPERTY ACCESSOR READ on a type declared OUTSIDE the analysed code — `l.v` where `L` is a chained
+    // dependency's type and `v` is a computed/lazy/static property whose body performs I/O. `Type.member`
+    // candidates, resolved ONLY against a sibling report in the Driver (`<Module>#<Type>.<member>`, which
+    // is exactly the key the dep's own report already carries, `unitKind: "accessor"`). With no dep report
+    // loaded nothing consults this set, so the unchained analysis is byte-identical. Sibling of
+    // `stringifyExternal`/`deinitExternal`; see candor-spec/SCAN-BOUNDARY-WORK-QUEUE.md §3c.
+    var propertyExternal: Set<String> = []
     var globalReads: Set<String> = []     // bare-name reads — candidate edges to GLOBAL initializer units
     var boundLocals: Set<String> = []     // EVERY local binding name (even literal/unresolved-type ones,
                                           // which `vars` drops) — so a bare read / fn-ref of a SHADOWING
@@ -1517,6 +1529,52 @@ final class CallCollector: SyntaxVisitor {
         }
     }
 
+    /// THE DEPENDENCY-FACTORY PROVENANCE GUARD, shared by BOTH spellings of the same call.
+    ///
+    /// `expr` is a call whose result `rootOf` could not type. This decides whether that untyped result
+    /// plausibly came out of a CHAINED DEPENDENCY, which is what licenses the `<untyped>.` marker the
+    /// Driver turns into either a `typeSurface.returns` determination or a half-1 disclosure.
+    ///
+    /// PROVENANCE IS THE HARD PART IN SWIFT, and measurement is what showed it. Unlike Rust, where the
+    /// callee path carries a crate root, an idiomatic Swift call to an imported function is spelled BARE
+    /// — `build()`, not `DepLib.build()` — so nothing at the call site distinguishes a dependency's
+    /// factory from the stdlib's `max()` or from one of our own functions. Instrumented on real code, the
+    /// unguarded form bound 239 locals on pollen and 50 on candor-swift, and the top hits were `max()`,
+    /// `min()`, `abs()`, and LOCAL functions (`rootOf()`, `typeName()`) — not a dependency factory
+    /// among them.
+    ///
+    /// `localFreeFns` removes the local leak outright. `PURE_STDLIB_FREE_FNS` is a carve-out of
+    /// PROVEN-PURE value functions: each returns an ordinary value of an argument's own type, so a member
+    /// call on the result is never a dependency reach. Carving proven-safe cases out of a sound
+    /// over-approximation is the right direction; the list is deliberately short and admittedly
+    /// incomplete, and what it misses costs precision (a spurious `Unknown`), never soundness.
+    ///
+    /// `enclosingMembers`/`localFuncs` are the two LOCAL-name kinds `localFreeFns` does not cover.
+    /// MEASURED, not guessed: instrumented over 14 real targets the conjunct fires 289 times and the
+    /// population is led by `rootOf` (16), `classifyItems`, `createFunction`, `parseMisplacedSpecifiers`,
+    /// `expandMacros` — enclosing-type methods, with nested funcs behind them. Not one is a dependency
+    /// factory, and a hedge wrong every time teaches a consumer to ignore the channel. candor-rust
+    /// narrowed the same conjunct after measuring it fire on `max()`/`min()`. `enclosingMembers` is
+    /// scoped to THIS type and its local supertypes, matching Swift's own bare-name resolution: a flat
+    /// leaf set over every local type would let an unrelated same-named method exempt a real dependency
+    /// factory, and losing a half-1 disclosure re-opens the silent purity claim this rung exists to
+    /// close — the widening is the dangerous direction here, not the narrowing.
+    ///
+    /// IT IS A HELPER RATHER THAN AN INLINE CONDITION because there are TWO spellings of the same
+    /// program and the guard has to be identical in both: `let c = build(); c.fetch()` (the binding, and
+    /// the only one PART 21's fixture wrote) and `build().fetch()` (no binding at all). The unbound
+    /// spelling read silent-pure while the bound one resolved or disclosed — a shipped guard whose
+    /// fixture had picked one spelling (candor-spec `SCAN-BOUNDARY-WORK-QUEUE.md` §3c).
+    func depFactoryCallee(_ expr: ExprSyntax) -> String? {
+        guard let callee = Self.peel(expr).as(FunctionCallExprSyntax.self)?.calledExpression
+                            .as(DeclReferenceExprSyntax.self)?.baseName.text,
+              callee.first?.isUppercase == false, returns[callee] == nil,
+              !localTypes.contains(callee), !localFreeFns.contains(callee),
+              !enclosingMembers.contains(callee), !localFuncs.contains(callee),
+              !Self.PURE_STDLIB_FREE_FNS.contains(callee) else { return nil }
+        return callee
+    }
+
     override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
         typeClosureParams(node)
         typeEnumCaseBinding(node)
@@ -1821,6 +1879,20 @@ final class CallCollector: SyntaxVisitor {
                                       typed: false, args: [], argTypes: [],
                                       depCallee: callee, extOwner: nil))
                 }
+                // THE SAME PROGRAM WITH NO INTERMEDIATE BINDING: `build().fetch()` rather than
+                // `let c = build(); c.fetch()`. There is no local to carry `depBoundLocals`, so the
+                // branch above cannot fire and `rootOf` yields no root for an untypeable dep factory —
+                // the call was dropped outright and the caller read silent-pure, while the bound
+                // spelling of the identical program resolved (via `typeSurface.returns`) or disclosed
+                // `Unknown`. Recover the provenance from the receiver EXPRESSION instead of from a
+                // binding, through `depFactoryCallee` — the same guard, so the two spellings cannot
+                // drift again — and emit the marker the Driver already understands.
+                else if base.root == nil, let recvExpr = ma.base,
+                        let callee = depFactoryCallee(recvExpr) {
+                    calls.append(Call(path: "<untyped>.\(member)", leaf: member, strArg: nil,
+                                      typed: false, args: [], argTypes: [],
+                                      depCallee: callee, extOwner: nil))
+                }
             }
         } else if node.calledExpression.is(ClosureExprSyntax.self) {
             // immediately-invoked closure: body walks lexically below — nothing to record
@@ -1884,6 +1956,7 @@ final class CallCollector: SyntaxVisitor {
             // ["now"] → a bogus Clock). The receiver-rooted path matches the genuine reads
             // (`ProcessInfo.processInfo.environment`, `Date.now`, `self.w.pinfo.environment`) without it.
             let recv = node.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [], mono: false)
+            var kappaClassified = false
             if let root = recv.root, !declaredTypes.contains(root),
                // a REAL local type named like a platform clock/env owner (`struct ContinuousClock { let now }`)
                // shadows the κ table; an EXTENSION of a platform type (`extension ProcessInfo {…}`) does NOT
@@ -1892,6 +1965,7 @@ final class CallCollector: SyntaxVisitor {
                // (the real-world dogfood vein: `extension ProcessInfo` nulled all Env detection).
                let eff = kappaPropertyRead(root: root, path: recv.path + [node.declName.baseName.text]) {
                 directEffects.insert(eff)
+                kappaClassified = true
             }
             // The accessor-unit edge uses the RECEIVER's type (rootOf of the BASE) — NOT the field-walked
             // whole node, whose root would be this property's own value type (`G().v` must edge to `G.v`,
@@ -1932,6 +2006,44 @@ final class CallCollector: SyntaxVisitor {
                 // Unknown, exactly like a method dispatch. The CHA-as-method-requirement path (~line 1299)
                 // only knew FUNCTION requirements; a property requirement read was silently pure.
                 protoPropReads.append((root, prop))
+            } else if !kappaClassified, let root = recvRoot, !root.hasPrefix("<"),
+                      !Self.METATYPE_MEMBERS.contains(prop),
+                      recv.isVar || root.first?.isUppercase == true {
+                // A PROPERTY ACCESSOR ON A CHAINED DEPENDENCY'S TYPE. `l.v` where `L` belongs to a
+                // dependency: every branch above is LOCAL-ONLY (`localTypes`/`localProtocols`), so the
+                // read fell off the end of this chain and was never recorded at all — the reader read
+                // silent-pure while the dep's report carried `L.v ['Fs'] accessor` under exactly the key
+                // needed. Reading a computed/lazy property RUNS its body, which is the same reach a
+                // method call has, and the method path has joined the dep report since §2 shipped.
+                //
+                // NOT lazy-specific: a plain computed `var`, and a STATIC accessor read off the type
+                // name, are the same shape and were equally silent. PART 19's swift fixture reads a
+                // module-level GLOBAL, which IS modelled — so the accessor form had never been asked
+                // (candor-spec `SCAN-BOUNDARY-WORK-QUEUE.md` §3c).
+                //
+                // A CANDIDATE, joined against a sibling report ONLY (in the Driver), exactly like
+                // `deinitExternal`/`stringifyExternal`. Self-filtering in the way that matters here:
+                // a STORED property and a PURE computed one have no entry in the dep report, so this
+                // adds nothing for them — the effectful accessor is the only thing it can pick up.
+                // Not `propertyEdges`, which is the LOCAL resolution set: a local type reaches its own
+                // unit through the branch above and never gets here, so a dependency type sharing a
+                // local type's name cannot lend it an effect.
+                //
+                // Three gates keep the key honest. Two are copied from the method path's `extOwner`: κ
+                // classified reads are already answered (`ProcessInfo.processInfo.environment` must not
+                // also be asked of the dependency), and only a tracked value (`isVar`) or a type-looking
+                // root qualifies — an unresolved lowercase identifier is just the receiver's own name and
+                // could join only by accident, since dep quals lead with a type name.
+                //
+                // The third, `METATYPE_MEMBERS`, was FOUND BY THE A/B on real code and is not a
+                // hypothetical: `scope.split(separator: ".").map(String.init)` is a MemberAccessExpr with
+                // the member `init`, and swift-syntax's report carries `SwiftSyntax#String.init` for its
+                // OWN `extension String` — so the join charged that extension's `Unknown` to every caller
+                // passing the STDLIB's `String.init` as a function reference. `.init`/`.self`/`.Type`/
+                // `.Protocol` are metatype and initializer spellings, never property accessors, so no
+                // accessor unit can legitimately answer them; excluding them removes the whole class
+                // rather than the one collision that surfaced.
+                propertyExternal.insert("\(root).\(prop)")
             }
         }
         return .visitChildren
@@ -2522,41 +2634,11 @@ final class CallCollector: SyntaxVisitor {
                         // call site can DISCLOSE instead (half 1). Cleared on any rebind by the
                         // clearBinding path below, and never set when the call DID type.
                         //
-                        // PROVENANCE IS THE HARD PART IN SWIFT, and measurement is what showed it. Unlike
-                        // Rust, where the callee path carries a crate root, an idiomatic Swift call to an
-                        // imported function is spelled BARE — `build()`, not `DepLib.build()` — so nothing
-                        // at the call site distinguishes a dependency's factory from the stdlib's `max()`
-                        // or from one of our own functions. Instrumented on real code, the unguarded form
-                        // bound 239 locals on pollen and 50 on candor-swift, and the top hits were
-                        // `max()`, `min()`, `abs()`, and LOCAL functions (`rootOf()`, `typeName()`) —
-                        // not a dependency factory among them.
-                        //
-                        // `localFreeFns` removes the local leak outright. The stdlib names below are a
-                        // carve-out of PROVEN-PURE value functions: each returns an ordinary value of an
-                        // argument's own type, so a member call on the result is never a dependency reach.
-                        // Carving proven-safe cases out of a sound over-approximation is the right
-                        // direction; the list is deliberately short and admittedly incomplete, and what it
-                        // misses costs precision (a spurious `Unknown`), never soundness.
-                        if info.root == nil,
-                           let callee = v.as(FunctionCallExprSyntax.self)?.calledExpression
-                                         .as(DeclReferenceExprSyntax.self)?.baseName.text,
-                           callee.first?.isUppercase == false, returns[callee] == nil,
-                           !localTypes.contains(callee), !localFreeFns.contains(callee),
-                           // …and the two LOCAL-name kinds `localFreeFns` does not cover. MEASURED, not
-                           // guessed: instrumented over 14 real targets the conjunct fires 289 times and
-                           // the population is led by `rootOf` (16), `classifyItems`, `createFunction`,
-                           // `parseMisplacedSpecifiers`, `expandMacros` — enclosing-type methods, with
-                           // nested funcs behind them. Not one is a dependency factory, and a hedge wrong
-                           // every time teaches a consumer to ignore the channel. candor-rust narrowed the
-                           // same conjunct after measuring it fire on `max()`/`min()`.
-                           //
-                           // `enclosingMembers` is scoped to THIS type and its local supertypes, matching
-                           // Swift's own bare-name resolution. A flat leaf set over every local type would
-                           // let an unrelated same-named method exempt a real dependency factory, and
-                           // losing a half-1 disclosure re-opens the silent purity claim this rung exists
-                           // to close — the widening is the dangerous direction here, not the narrowing.
-                           !enclosingMembers.contains(callee), !localFuncs.contains(callee),
-                           !Self.PURE_STDLIB_FREE_FNS.contains(callee) {
+                        // The guard that decides "plausibly a dependency factory" lives in
+                        // `depFactoryCallee`, with the measurements that shaped it — it is shared with the
+                        // UNBOUND spelling of the same call (`build().fetch()`), which is why it is a
+                        // function and not the inline condition it used to be.
+                        if info.root == nil, let callee = depFactoryCallee(v) {
                             depBoundLocals[name] = callee
                         } else { depBoundLocals.removeValue(forKey: name) }
                         if let t = info.root, info.isVar {

@@ -9,6 +9,44 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### ⚠ soundness — a chained dependency's ACCESSOR read, and the UNBOUND factory call, were silent-pure (2026-07-27)
+
+Two chained-boundary defects found by conformance PART 24 (split-invariance) on its first run, each
+re-derived from a hand-written two-package fixture. Under ⟨0.21⟩ an absent-but-analysed function is a
+positive purity claim, so both were false all-clears rather than gaps.
+
+- **A property ACCESSOR on a dependency's type.** `l.v` where `L` is a chained dependency's type and `v`
+  is a computed/lazy/static property that performs I/O. The dep's report already carried `L.v ['Fs']
+  unitKind:accessor` — every reader-side branch in the property-read path was gated on
+  `localTypes`/`localProtocols`, so the read fell off the end of the chain and was never recorded.
+  Not lazy-specific: computed, lazy and static spellings were all silent. PART 19's fixture reads a
+  module-level GLOBAL, which IS modelled, so the accessor spelling had never been asked.
+- **A factory call with NO intermediate binding.** `build().fetch()` and `getDyn().run()` read
+  silent-pure while `let c = build(); c.fetch()` resolved and `let t = getDyn(); t.run()` disclosed
+  `Unknown[dispatch:untyped cross-package receiver]`. That is a hole in a SHIPPED guard: PART 21's
+  ruling is that an unformable key must not read pure, and PART 21's fixture binds the result.
+
+Both fixes emit the call shape the join already understands, so **neither needed a report-format
+change**: the accessor read becomes a `propertyExternal` candidate joined against the sibling report
+under `<Module>#<Type>.<member>` (the third member of the `stringifyExternal`/`deinitExternal` set), and
+the unbound receiver recovers its provenance through `depFactoryCallee` — now a shared function, so the
+bound and unbound spellings cannot drift apart again.
+
+The mirror controls, each verified by mutating its guard out: a LOCAL type whose accessor is pure,
+sharing a name with a dependency type whose same-named accessor is `Fs`, stays pure (it resolves to its
+own unit — the reason this is a candidate set and not a `propertyEdges` entry); a dependency accessor
+the report shows as pure, and a dependency STORED property, add nothing; `max(a,b).advanced(by:)` and a
+call on a nested local `func`'s result acquire no hedge.
+
+A/B over 8 real Swift targets: **unchained is byte-identical** (3082 entries, 0 changed) — with no dep
+report loaded neither candidate set is consulted. Chained against per-module swift-syntax reports,
+candor-swift's own scan gains 35 `Unknown`-only entries and 0 real effects, every one traceable to a
+genuine SwiftSyntax accessor unit the dep's report itself marks `Unknown`. The A/B also caught the one
+over-fire this join has had: `.map(String.init)` keyed swift-syntax's own `extension String`, so
+`.init`/`.self`/`.Type`/`.Protocol` are now excluded as metatype spellings no accessor can answer.
+`CANDOR_DEPMEMBER_DEBUG=1` prints each candidate and whether it hit, because a diff shows which
+functions moved and never which key moved them.
+
 ### soundness — `unverified --class` read the direct `unknownWhy` as if it were the transitive one (2026-07-27)
 
 `unverified` names the functions a `pure`/`deny E` layer PASSES without proving anything. Its ⟨0.20⟩

@@ -1054,12 +1054,31 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // with no effectful `deinit` is ABSENT from the dep report (reports omit pure functions), so the
         // join adds nothing. With no dep report loaded neither set is consulted at all, which is why the
         // unchained analysis is unchanged by construction.
-        if !deps.isEmpty, !(cc.stringifyExternal.isEmpty && cc.deinitExternal.isEmpty) {
+        //
+        // `propertyExternal` is the THIRD member of this set and arrived the same way: an accessor unit
+        // is a body that RUNS on a property read, the dep's report carries it under the same
+        // `<Module>#<Type>.<member>` key (`unitKind: "accessor"`), and the reader-side branch was
+        // local-only so the read was never recorded. It self-filters identically — a STORED property and
+        // a PURE computed one are absent from the dep report — and it is a candidate set rather than a
+        // `propertyEdges` entry precisely so a local type sharing a dependency type's name resolves to
+        // its OWN unit and can never inherit the dependency's (candor-spec SCAN-BOUNDARY-WORK-QUEUE §3c).
+        if !deps.isEmpty, !(cc.stringifyExternal.isEmpty && cc.deinitExternal.isEmpty
+                            && cc.propertyExternal.isEmpty) {
             let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
-            for cand in cc.stringifyExternal.union(cc.deinitExternal) {
+            for cand in cc.stringifyExternal.union(cc.deinitExternal).union(cc.propertyExternal) {
                 var hits: [DepEntry] = []
                 for m in fileImports[file] ?? [] where deps.isChained(m) {
                     if let e = deps.lookup("\(m)#\(cand)") { hits.append(e) }
+                }
+                // An A/B diff shows which FUNCTIONS moved, never which KEY moved them — and the one
+                // over-fire this join has had (`String.init`, see `METATYPE_MEMBERS`) was invisible in
+                // the diff and obvious in this line. Same reason `CANDOR_TYPESURFACE_DEBUG` exists.
+                if ProcessInfo.processInfo.environment["CANDOR_DEPMEMBER_DEBUG"] != nil {
+                    let kind = cc.propertyExternal.contains(cand) ? "prop"
+                        : (cc.deinitExternal.contains(cand) ? "deinit" : "stringify")
+                    FileHandle.standardError.write(
+                        "DEPMEMBER-\(hits.count == 1 ? "HIT " : "MISS") \(kind) \(f.qual) :: \(cand)\n"
+                            .data(using: .utf8)!)
                 }
                 guard hits.count == 1, let de = hits.first else { continue }
                 applyDepEntry(de, to: f.qual)
