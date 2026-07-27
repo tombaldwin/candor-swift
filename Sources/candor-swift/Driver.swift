@@ -75,14 +75,26 @@ func buildTypeSurfaceReturns(_ allFns: [FnInfo], _ localTypePaths: Set<String>) 
         }
         return localTypePaths.contains(written) ? written : nil
     }
-    // THE EXACTNESS OF THAT LAST LINE IS NOT CURRENTLY PROVEN, and saying so beats a comment claiming
-    // it is. Relaxing it to a suffix match (`first { $0.hasSuffix(".\(written)") }`) fails NO test and
-    // changes NO corpus output — a suffix match can only return a path of TWO OR MORE segments, the
-    // consumer then forms a THREE-segment key, and this engine's dep index carries only `pkg#leaf` and
-    // `pkg#tail2`, so the lookup misses and falls to the disclosure. The guard is right and the spec
-    // requires it; it is INERT until a full-qual index key lands (candor-rust's prerequisite `5feba18`),
-    // at which point it becomes the load-bearing one — and the fixture that catches it must be written
-    // WITH that key, not before it.
+    // THE EXACTNESS OF THAT LAST LINE IS LOAD-BEARING, and it became PROVABLE only once the dep index
+    // grew its third key shape (`pkg#<full qual>`, this repo's `9a51e7f`, candor-rust's `5feba18`).
+    // Before that, relaxing it to a suffix match (`first { $0.hasSuffix(".\(written)") }`) failed NO
+    // test and changed NO corpus output: a suffix match can only return a path of TWO OR MORE segments,
+    // the consumer then forms a THREE-segment key, and an index carrying only `pkg#leaf`/`pkg#tail2`
+    // misses it — a wrong answer with nowhere to land. An untestable guard is a hope, not a guard, so
+    // it was written here as an open question rather than a claim.
+    //
+    // It is a claim now, and the fixture was written WITH the key: `openForeign() -> Progress` names
+    // Foundation's type, which this package does not declare, and a suffix match answers `Mock.Progress`
+    // instead — whose `pause` is effectful, so the guess LANDS on the third key and charges Env to a
+    // caller holding a Foundation object. `testAForeignReturnSpellingPublishesNothingRatherThanSuffix-
+    // Matching` fails under exactly that mutation and its sibling row asserts the other direction: a
+    // spelling that resolves EXACTLY must still publish its full path.
+    //
+    // MEASURED, because "the key is what makes it matter" is itself checkable: with the third key
+    // mutated back OUT and the suffix mutant left IN, the CONSUMER rows go green again —
+    // `viaForeignFactory` misses and discloses, harmlessly. Only the producer-side "publishes nothing"
+    // row still fails. So what the key changed is not that a wrong answer can be OBSERVED; it is that a
+    // wrong answer now LANDS.
 
     var out: [String: String] = [:]
     for f in allFns {

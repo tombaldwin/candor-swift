@@ -45,6 +45,13 @@ final class TypeSurfaceProcessTests: XCTestCase {
         // …and the BARE spelling, which is what makes the DECLARING-SCOPE resolution testable: written
         // `Conn` here means `Mock.Conn`, and resolving it outward-only yields the real client's type.
         public static func open() -> Conn { return Conn() }
+        // THE EXACTNESS ROW. Foundation's `Progress` and this nested `Mock.Progress` share a LEAF and
+        // nothing else. `pause` is effectful precisely so that a suffix match does not merely mis-key:
+        // it charges an Env to a caller whose binding is a Foundation object.
+        public struct Progress {
+            public init() {}
+            public func pause() { _ = ProcessInfo.processInfo.environment["MOCK_PROGRESS"] }
+        }
     }
     public func openMock() -> Mock.Conn { return Mock.Conn() }
 
@@ -77,6 +84,12 @@ final class TypeSurfaceProcessTests: XCTestCase {
     // the key that already worked — a silent under-report manufactured by a change whose whole argument
     // is that it removes nothing (standing-bar item 9b, candor-rust `5feba18`).
     public func freeReach() { _ = FileManager.default.contents(atPath: "/dep-free") }
+
+    // A FACTORY RETURNING A TYPE THIS PACKAGE DOES NOT DECLARE. `Progress` here is Foundation's — a
+    // top-level spelling never means the nested `Mock.Progress`, which needs qualifying. The written
+    // name resolves to NOTHING locally, so the surface must publish nothing: it names no unit in this
+    // report, and a key the consumer forms through it could only miss.
+    public func openForeign() -> Progress { return Progress() }
     """
 
     private static let appSource = """
@@ -99,6 +112,9 @@ final class TypeSurfaceProcessTests: XCTestCase {
     // …and the two rows the third key must not withdraw — a 1-segment leaf key and (via `viaFactory`
     // above) a 2-segment tail2 key.
     public func viaFreeCall() { freeReach() }
+    // THE EXACTNESS ROW: `openForeign` returns a type DepLib does not declare, so nothing is published
+    // and this must fall to half 1's disclosure — never to `Mock.Progress`, which it cannot hold.
+    public func viaForeignFactory() { let p = openForeign(); p.pause() }
     """
 
     /// (root, dep, app, ctl) — the split pair plus the ONE-PACKAGE control that proves this is a
@@ -332,6 +348,66 @@ final class TypeSurfaceProcessTests: XCTestCase {
         XCTAssertFalse(eff("viaNestedFactory").contains("Unknown"),
                        "…and a key that IS answered must resolve rather than disclose; got "
                        + "\(by["viaNestedFactory"] ?? [:])")
+    }
+
+    /// THE EXACT-MATCH GUARD IN `resolveTypePath`, AND IT IS NOW PROVABLE.
+    ///
+    /// Until the full-qual index key landed this guard could not be made to fail. Relaxing the exact
+    /// match to a suffix match fails no test and changes no corpus output while the index carries only
+    /// `pkg#leaf` and `pkg#tail2`, because a suffix match can only ever return a path of TWO OR MORE
+    /// segments, the consumer then forms a THREE-segment key, and the lookup misses — a wrong answer
+    /// with nowhere to land. That is why it was written into the code as an open question rather than a
+    /// claim. With the third key the same wrong answer LANDS, and the guard is what stops it.
+    ///
+    /// THE MUTATION, run and confirmed to fail this test and no other. In `buildTypeSurfaceReturns`:
+    ///
+    ///     -   return localTypePaths.contains(written) ? written : nil
+    ///     +   return localTypePaths.contains(written) ? written
+    ///     +       : localTypePaths.sorted().first { $0.hasSuffix(".\(written)") }
+    ///
+    /// `openForeign() -> Progress` then publishes `DepLib#Mock.Progress`, the consumer keys
+    /// `DepLib#Mock.Progress.pause`, the third key answers it, and `viaForeignFactory` — whose binding
+    /// holds a Foundation object — is charged the mock's Env. A fabrication on a function that cannot
+    /// reach it, which is the mirror of the sin this vein exists to close.
+    ///
+    /// THE SECOND FIXTURE IS `viaNestedFactory`, asserted here beside it: the rule is EXACTNESS, not
+    /// "refuse anything nested". A guard that published nothing for a qualified path would pass the row
+    /// above and silently kill the recovery the third key exists for.
+    func testAForeignReturnSpellingPublishesNothingRatherThanSuffixMatching() throws {
+        let bin = try binaryURL()
+        let (root, dep, app, _) = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+
+        let ts = try surface(depReport)
+        XCTAssertNil(ts["DepLib#openForeign"],
+                     "`Progress` is not declared in DepLib — a top-level spelling never means the "
+                     + "nested `Mock.Progress`. Publishing anything here is a GUESS about which type "
+                     + "the binding holds; got \(ts["DepLib#openForeign"] ?? "nil")")
+        XCTAssertEqual(ts["DepLib#openMock"], "DepLib#Mock.Conn",
+                       "…and the rule is EXACTNESS, not a refusal to qualify: a spelling that DOES "
+                       + "resolve must still publish its full path; got \(ts["DepLib#openMock"] ?? "nil")")
+
+        try? FileManager.default.removeItem(at: root.appendingPathComponent("ex-r.App.Swift.json"))
+        XCTAssertEqual(try ProcessHarness.run(bin, [app.path, "--out", root.appendingPathComponent("ex-r").path],
+                                              env: ["CANDOR_DEPS": depReport.path]).code, 0)
+        let by = try fns(root.appendingPathComponent("ex-r.App.Swift.json"))
+        func eff(_ n: String) -> Set<String> { Set(by[n]?["inferred"] as? [String] ?? []) }
+
+        XCTAssertFalse(eff("viaForeignFactory").contains("Env"),
+                       "viaForeignFactory holds a Foundation `Progress`. Charging `Mock.Progress.pause`'s "
+                       + "Env is a leaf-keyed guess that the FULL-QUAL index key made reachable — it is "
+                       + "exactly the fabrication the exact match stops; got \(by["viaForeignFactory"] ?? [:])")
+        XCTAssertTrue(eff("viaForeignFactory").contains("Unknown"),
+                      "…and refusing to publish falls back to half 1's DISCLOSURE, never to silence; "
+                      + "got \(by["viaForeignFactory"] ?? [:])")
+        XCTAssertTrue((by["viaForeignFactory"]?["unknownWhy"] as? [String] ?? [])
+                        .contains("dispatch:untyped cross-package receiver"),
+                      "…keeping half 1's reason class; got \(by["viaForeignFactory"] ?? [:])")
+        XCTAssertTrue(eff("viaNestedFactory").contains("Env"),
+                      "THE SECOND FIXTURE: a spelling that resolves EXACTLY must still resolve across "
+                      + "the boundary — the guard is about wrong answers, not about qualified ones; got "
+                      + "\(by["viaNestedFactory"] ?? [:])")
     }
 
     /// A MISS FALLS BACK TO HALF 1'S DISCLOSURE, NEVER TO SILENCE — on `returns` AND on the entry
