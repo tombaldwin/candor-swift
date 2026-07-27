@@ -111,4 +111,110 @@ final class TypedRebindShadowProcessTests: XCTestCase {
                      + "dispatch and must not be charged `RealJob.run`'s Fs")
         XCTAssertNil(by["payloadShadowRenamed"], "…and neither is the control, which never was")
     }
+
+    // ── THE OTHER FOUR SITES ───────────────────────────────────────────────────────────────────────
+    //
+    // The enum-payload defect was found by review; the rename control that reproduced it was then run
+    // over every other binder that TYPES its new binding, and four more answered. One mechanism, five
+    // doors — a nested `func` parameter, an `if let`, an annotated closure parameter and a tuple
+    // destructure, each shadowing a protocol-typed parameter and each dispatching over its conformers.
+    //
+    // TWO OF THE SECOND-DIRECTION ROWS ARE RECOVERIES, which is the part worth keeping: the stale
+    // `protoTyped` was not only fabricating, it was MASKING the shadowing binding's real type. Removing
+    // it makes `if let j = o { j.go() }` and the closure form resolve `Ctx.go` for the first time.
+
+    /// `RealConv.asURL` is Net, `Ctx.go` is Env and `RealJob.run` is Fs — three distinct effects, so
+    /// every row below names which reach it is about.
+    private static let sites = """
+    import Foundation
+    protocol Job { func run() }
+    struct RealJob: Job {
+        func run() { try? "x".write(toFile: "/tmp/candor-rebind.txt", atomically: true, encoding: .utf8) }
+    }
+    struct Ctx { func go() { _ = ProcessInfo.processInfo.environment["X"] } }
+    protocol Conv { func asURL() -> Ctx? }
+    struct RealConv: Conv {
+        func asURL() -> Ctx? {
+            URLSession.shared.dataTask(with: "http://conv.internal/x") { _, _, _ in }.resume()
+            return nil
+        }
+    }
+
+    // ── the second direction, written first ────────────────────────────────────────────────────────
+    // (a) THE CARVE-OUT. SwiftSyntax walks the PATTERN before the INITIALIZER, so a self-referential
+    //     rebind resolves THROUGH the binding being replaced — Alamofire's `URLRequest.init(url: any
+    //     URLConvertible)` is `if let u = u.asURL()`, and clearing unconditionally loses its Net.
+    func selfRebindKeepsItsReach(_ u: Conv) { if let u = u.asURL() { u.go() } }
+    // (b,c,d) the scoped maps must be GIVEN BACK when the block/closure/nested func closes
+    func optBindRestored(_ j: Job, _ o: Ctx?) { if let j = o { j.go() }; j.run() }
+    func closureRestored(_ j: Job, _ xs: [Ctx]) { xs.forEach { (j: Ctx) in j.go() }; j.run() }
+    func nestedRestored(_ j: Job) { func inner(_ j: Ctx) { j.go() }; inner(Ctx()); j.run() }
+    // (e) a tuple binding nothing shadows is untouched
+    func tupleUnshadowed(_ j: Job) { let (q, _) = (Ctx(), 1); q.go(); j.run() }
+
+    // ── the fabrications, each with its rename control ─────────────────────────────────────────────
+    func optBindShadow(_ j: Job, _ o: Ctx?) { if let j = o { j.run() } }
+    func optBindShadowRenamed(_ j: Job, _ o: Ctx?) { if let q = o { q.run() } }
+    func closureShadow(_ j: Job, _ xs: [Ctx]) { xs.forEach { (j: Ctx) in j.run() } }
+    func closureShadowRenamed(_ j: Job, _ xs: [Ctx]) { xs.forEach { (q: Ctx) in q.run() } }
+    func tupleShadow(_ j: Job) { let (j, _) = (Ctx(), 1); j.run() }
+    func tupleShadowRenamed(_ j: Job) { let (q, _) = (Ctx(), 1); q.run() }
+    func nestedFuncShadow(_ j: Job) { func inner(_ j: Ctx) { j.run() }; inner(Ctx()) }
+    func nestedFuncShadowRenamed(_ j: Job) { func inner(_ q: Ctx) { q.run() }; inner(Ctx()) }
+    """
+
+    func testTheThreeConformersAreEffectfulOrEveryRowBelowIsVacuous() throws {
+        let by = try scan(Self.sites, "Sites")
+        XCTAssertEqual(by["RealJob.run"]?["inferred"] as? [String], ["Fs"])
+        XCTAssertEqual(by["Ctx.go"]?["inferred"] as? [String], ["Env"])
+        XCTAssertEqual(by["RealConv.asURL"]?["inferred"] as? [String], ["Net"])
+    }
+
+    // ── the second direction ───────────────────────────────────────────────────────────────────────
+
+    func testASelfReferentialRebindStillResolvesThroughTheBindingItReplaces() throws {
+        let by = try scan(Self.sites, "Sites")
+        XCTAssertTrue(Set(by["selfRebindKeepsItsReach"]?["inferred"] as? [String] ?? []).contains("Net"),
+                      "`if let u = u.asURL()` resolves through the entry the rebind is about to clear. "
+                      + "Clearing unconditionally is the mirror of the fabrication — a real cross-package "
+                      + "reach dropped by a fix aimed at the opposite defect (standing bar item 0).")
+    }
+
+    func testTheScopedMapsAreGivenBackWhenTheBlockClosureOrNestedFuncCloses() throws {
+        let by = try scan(Self.sites, "Sites")
+        for fn in ["optBindRestored", "closureRestored", "nestedRestored"] {
+            XCTAssertTrue(Set(by[fn]?["inferred"] as? [String] ?? []).contains("Fs"),
+                          "\(fn): `protoTyped` is in `ShadowSave`, so the parameter's dispatch AFTER the "
+                          + "shadowing scope is untouched. Clearing without the scope sends it to "
+                          + "silent-pure.")
+        }
+        XCTAssertEqual(Set(by["tupleUnshadowed"]?["inferred"] as? [String] ?? []), ["Env", "Fs"],
+                       "a tuple binding nothing shadows keeps both reaches")
+    }
+
+    /// THE CLEAR IS ALSO A RECOVERY, and this is the row that says so. The stale `protoTyped` did not
+    /// only fabricate — it MASKED the shadowing binding's own type, because the member-dispatch site
+    /// consults it before the `vars` root. With it gone, `j` is the `Ctx` it always was.
+    func testRemovingTheStaleProtocolRecoversTheShadowingBindingsOwnType() throws {
+        let by = try scan(Self.sites, "Sites")
+        for fn in ["optBindRestored", "closureRestored"] {
+            XCTAssertEqual(Set(by[fn]?["inferred"] as? [String] ?? []), ["Env", "Fs"],
+                           "\(fn): the Env is `Ctx.go` on the shadowing binding, which the stale entry "
+                           + "was hiding; the Fs is the parameter's own dispatch after the scope")
+        }
+    }
+
+    // ── the fabrications ───────────────────────────────────────────────────────────────────────────
+
+    func testNoTypedBinderInheritsTheShadowedParamsProtocol() throws {
+        let by = try scan(Self.sites, "Sites")
+        for site in ["optBind", "closure", "tuple", "nestedFunc"] {
+            XCTAssertNil(by["\(site)Shadow"],
+                         "\(site): the binding is a `Ctx`; `j.run()` is not the protocol parameter's "
+                         + "dispatch and must not be charged `RealJob.run`'s Fs")
+            XCTAssertEqual(by["\(site)Shadow"]?["inferred"] as? [String] ?? [],
+                           by["\(site)ShadowRenamed"]?["inferred"] as? [String] ?? [],
+                           "\(site): the rename control — the only difference is the name collision")
+        }
+    }
 }

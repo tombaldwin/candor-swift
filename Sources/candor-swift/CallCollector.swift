@@ -994,6 +994,26 @@ final class CallCollector: SyntaxVisitor {
         fnValueAlias.removeValue(forKey: name)
     }
 
+    /// A BINDER THAT **CAN** TYPE THE NEW BINDING STILL HAS TO INVALIDATE THE OLD ONE, and the branches
+    /// that could type it were the ones not doing it. `shadowName` drops the four FLAGS;
+    /// `clearBindingTypeOnly` drops the TYPE indexes; a branch that called the first and then wrote
+    /// `vars` left `protoTyped` (and `arrayElem`/`dictElem`/`tupleElem`) describing a binding that is no
+    /// longer there. `protoTyped` is the sharp one — the member-dispatch site consults it BEFORE the
+    /// `vars` root, so a fresh type on the shadowing binding does not mask the stale protocol, and the
+    /// call dispatches over the shadowed parameter's conformers. Five binder sites had it; four are
+    /// routed through here and the fifth (`typeEnumCaseBinding`) goes through `clearBinding` directly.
+    ///
+    /// `through` IS A DENYLIST AND IT IS LOAD-BEARING. SwiftSyntax walks a binding's PATTERN before its
+    /// INITIALIZER, so when the initializer MENTIONS the name the old binding is still live while the
+    /// initializer's own calls are collected: `let u = u.asURL()` and `if let u = u.asURL()` resolve
+    /// THROUGH the entry being cleared (Alamofire's `URLRequest.init(url: any URLConvertible)` — the
+    /// reach `visit(VariableDeclSyntax)` already states this carve-out for). Conservative in the safe
+    /// direction: a false YES keeps a stale type, which every binder that CANNOT type still clears.
+    private func rebindTyped(_ name: String, through initializer: ExprSyntax?) {
+        guard !Self.referencesName(initializer, name) else { return }
+        clearBindingTypeOnly(name)
+    }
+
     /// Is `name` a LOCAL BINDING at this point in the walk? The union of the function-wide set and the
     /// lexically-scoped payload set — every guard in this file asks it at a position, so both apply.
     private func isBoundLocal(_ name: String) -> Bool {
@@ -1120,7 +1140,14 @@ final class CallCollector: SyntaxVisitor {
     // set and restore nothing).
     override func visit(_ node: ClosureExprSyntax) -> SyntaxVisitorContinueKind {
         enterShadowScope(node)
-        for p in closureParamNames(node) { shadowName(p.name) }
+        // …and `protoTyped` with them, HERE rather than in `typeClosureParams`, for the reason the
+        // comment above gives: this map is in `ShadowSave`, so a clear inside the scope is given back
+        // when the closure closes. `typeClosureParams` clears the type indexes for the params it cannot
+        // type (outside the save, lossy-but-safe) and TYPES the annotated/element ones — and typing them
+        // left the enclosing protocol parameter's entry standing, so `func f(_ p: Job, _ xs: [Int]) {
+        // xs.forEach { (p: Ctx) in p.run() } }` dispatched over `Job`'s conformers. Rename control: the
+        // identical body with the closure parameter named `q` is ABSENT.
+        for p in closureParamNames(node) { shadowName(p.name); protoTyped.removeValue(forKey: p.name) }
         // …then re-apply the opacity the enclosing call's `typeClosureParams` determined for the element
         // parameter (`xs.forEach { $0.greet() }` over a `[T]`/`[some P]`): the shadow above is what makes
         // the flag scoped to THIS closure, so it has to be set after it, not before.
@@ -1819,6 +1846,13 @@ final class CallCollector: SyntaxVisitor {
            let initVal = node.initializer?.value {
             shadowName(name)  // a rebind, typed or not — the `if`/`while` (or the enclosing block, for
                               // `guard let`, whose binding runs to the end of that block) restores it
+            // …and the TYPE indexes with them. Every branch below either types the name or clears it,
+            // and the typing ones wrote `vars` over a live `protoTyped`: `func f(_ p: Job, _ o: Ctx?) {
+            // if let p = o { p.run() } }` dispatched over `Job`'s conformers, where the same body with
+            // the binding named `q` is ABSENT. `through: initVal` is what keeps `if let u = u.asURL()`
+            // — see `rebindTyped`, and note the protocol-unwrap branch below READS `protoTyped` for the
+            // initializer's own name, which the carve-out is exactly what preserves.
+            rebindTyped(name, through: initVal)
             // `guard let d = s.data(using:.utf8)` / `= enc.encode(x)` — the unwrapped value is Data, so a
             // later `d.write(to:)` is Fs (the via-optional-binding dogfood vein; matches the plain-`let` path).
             if producesFoundationData(initVal) { vars[name] = "Data" }
@@ -2356,6 +2390,14 @@ final class CallCollector: SyntaxVisitor {
             guard name != "_" else { continue }
             shadowName(name)
             opaqueElem.remove(name)
+            // A NESTED FUNC'S PARAMETER REBINDS THE NAME TOO. `protoTyped` and `opaqueElem` are the two
+            // scoped maps, so clearing them here is given back at `visitPost` and costs nothing outside;
+            // without it `func f(_ p: Job) { func inner(_ p: Ctx) { p.run() } }` dispatched over `Job`'s
+            // conformers, against a rename control that is ABSENT. The type indexes are deliberately NOT
+            // touched — `vars` is not in `ShadowSave`, so clearing it here would leak the clear outward
+            // past the nested func, which is the pre-existing leak the note above this visitor files as
+            // a separate measurement.
+            protoTyped.removeValue(forKey: name)
             if isOpaqueParam(p.type) { monoNames.insert(name) }
             if arrayElementType(p.type).map(isOpaqueParam) == true { opaqueElem.insert(name) }
         }
@@ -2368,7 +2410,15 @@ final class CallCollector: SyntaxVisitor {
             // `let (a, b) = (X(), Y())` — destructure: bind each name from the initializer tuple element
             if let tp = binding.pattern.as(TuplePatternSyntax.self),
                let tupleInit = binding.initializer?.value.as(TupleExprSyntax.self) {
-                for n in Self.patternNames(PatternSyntax(tp)) { shadowName(n) }
+                // …and the type indexes, with the same carve-out the identifier form gets below: the
+                // element branch TYPES each name from `rootOf(ve.expression)` and left a live
+                // `protoTyped` under it, so `func f(_ p: Job) { let (p, _) = (Ctx(), 1); p.run() }`
+                // dispatched over `Job`'s conformers against an ABSENT rename control. `through` is the
+                // WHOLE tuple initializer rather than the matching element — conservative in the safe
+                // direction, and it covers the arities the zip below does not reach.
+                for n in Self.patternNames(PatternSyntax(tp)) {
+                    shadowName(n); rebindTyped(n, through: binding.initializer?.value)
+                }
                 markBinders(PatternSyntax(tp))
                 for (pe, ve) in zip(tp.elements, tupleInit.elements) {
                     guard let n = pe.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
