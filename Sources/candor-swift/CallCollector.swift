@@ -50,6 +50,8 @@ final class CallCollector: SyntaxVisitor {
                                             // ("a function-typed value invoked reads Unknown — never silent
                                             // purity") held only WITH an explicit annotation; an inferred
                                             // `let g = eff` fell through untracked and read silent-pure.
+                                            // A RESOLUTION table, so it is cleared on rebind and scoped
+                                            // by the enclosing block — see `shadowName`.
     // CONST-STRING PROPAGATION — the module/global + static string-constant index (SIMPLE name → literal),
     // shared read-only across all fn units. `localConstStrings` overlays it with a `let NAME = "literal"`
     // bound INSIDE this fn body (a local const shadows a global of the same name). Both hold ONLY plain
@@ -947,14 +949,24 @@ final class CallCollector: SyntaxVisitor {
     //     literal is policy-visible. Dropping it at scope close would lose a genuine literal, which
     //     empties the surface and is the direction `forbid` reads as incomplete — safe, but still a
     //     loss, so it takes the same scope.
+    //   - `fnValueAlias` RESOLVES a bare `g()` to a named local function. Leaking it in edges an
+    //     unrelated value's invocation to that function's body and charges its whole transitive effect
+    //     set — the widest fabrication of the five, because the target is a real unit rather than a type
+    //     index. MEASURED with the rename control: `func f(_ jobs: [() -> Void]) { let g = eff; for g in
+    //     jobs { g() } }` reads `['Fs']` from `eff`, and the identical body with the binder named `h` is
+    //     ABSENT — as is the same body with no alias above it, which is the point: the alias is the only
+    //     thing charging it. Dropping it at scope close sends `let g = eff; if c { let g = {} }; g()`
+    //     back to silent-pure, so — like the four above — it needs the scope and not just the clear.
     //
     // So: a binder CLEARS, the enclosing scope RESTORES (see enterShadowScope/leaveShadowScope).
-    // FOUR maps now, and the list is still an enumeration — see the note on `enterShadowScope` for what
-    // it would take to stop it being one, and why that is a rewrite rather than a refactor.
+    // FIVE maps now. The list is no longer maintained by hand: `NameKeyedState` is the single
+    // classification every name-keyed stored property of this class must appear in, and
+    // `NameKeyedStateTests` reflects over the live instance and fails when one does not.
     private func shadowName(_ name: String) {
         monoNames.remove(name)
         depBoundLocals.removeValue(forKey: name)
         localConstStrings.removeValue(forKey: name)
+        fnValueAlias.removeValue(forKey: name)
     }
 
     // The name-keyed per-binding state saved per scope-delimiting node and restored when the node
@@ -964,6 +976,7 @@ final class CallCollector: SyntaxVisitor {
     private struct ShadowSave {
         var opaque: Set<String>, opaqueElem: Set<String>, depBound: [String: String]
         var protoTyped: [String: String], constStrings: [String: String]
+        var fnValueAlias: [String: String]
     }
     private var shadowScopes: [SyntaxIdentifier: ShadowSave] = [:]
 
@@ -1000,14 +1013,20 @@ final class CallCollector: SyntaxVisitor {
         // leak outward the way types do — i.e. `71de627` permanently.
         //
         // What DID change is the price of leaving it: the audit that found these two enumerated the
-        // collector's name-keyed state and probed every member with a rename control, so the remaining
-        // three (`fnTyped`, `opaqueFnLocals`, `fnValueAlias`) are measured rather than assumed — a
-        // shadowed fn-typed param still discloses `callback:`, and an aliased fn value called after a
-        // shadowing loop still resolves. The residual is a NEW map added later without being added
-        // here, which is a review question, not a design one.
+        // collector's name-keyed state and probed every member with a rename control.
+        //
+        // TWO OF ITS THREE CLEAN VERDICTS WERE WRONG, and how they were wrong is the durable part. It
+        // reported `fnValueAlias` safe on the evidence that "an aliased fn value called after a
+        // shadowing loop still resolves" — which is the LOSS direction, and the fabrication direction
+        // was never probed: an aliased name rebound by that same loop resolved to the aliased function
+        // for the rest of the body. `boundLocals` was not on its list at all, because it is not a
+        // per-binding FACT but a per-binding EXISTENCE claim, and the audit was looking for facts. A
+        // rename control run in one direction is half a control. Both now carry the discipline, and the
+        // classification is `NameKeyedState` — reflected over rather than kept by hand, so the residual
+        // the note used to end on ("a NEW map added later without being added here") fails a test.
         shadowScopes[node.id] = ShadowSave(opaque: monoNames, opaqueElem: opaqueElem,
                                            depBound: depBoundLocals, protoTyped: protoTyped,
-                                           constStrings: localConstStrings)
+                                           constStrings: localConstStrings, fnValueAlias: fnValueAlias)
     }
 
     private func leaveShadowScope(_ node: some SyntaxProtocol) {
@@ -1017,6 +1036,7 @@ final class CallCollector: SyntaxVisitor {
         depBoundLocals = saved.depBound
         protoTyped = saved.protoTyped
         localConstStrings = saved.constStrings
+        fnValueAlias = saved.fnValueAlias
     }
 
     /// THE CATCH-ALL BINDER, and it exists to invert a failure mode rather than to add a case.
@@ -2299,6 +2319,13 @@ final class CallCollector: SyntaxVisitor {
             guard let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
             markBinders(binding.pattern)
             boundLocals.insert(name)  // record the SHADOW (any local, even a literal-typed one `vars` drops)
+            // THE SAME ORDERING CARVE-OUT `protoTyped` needs below, for the same reason and with a
+            // fixture of its own: `shadowName` runs before the initializer is walked, so a
+            // SELF-REFERENTIAL rebind (`let g = g`, `let g = g()`) would drop the alias the initializer
+            // is about to resolve through — and the re-aliasing branch at the bottom cannot restore it,
+            // because its RHS is a shadowed local rather than a `localFreeFns` name. Captured before,
+            // reinstated after, only when the initializer MENTIONS the name.
+            let aliasBeforeRebind = fnValueAlias[name]
             shadowName(name)          // a rebind: the signature's `some P` opacity and any earlier
                                       // dependency provenance stop applying to the NAME here. Runs
                                       // BEFORE the branches below, one of which re-inserts the
@@ -2321,6 +2348,7 @@ final class CallCollector: SyntaxVisitor {
             // still live while the initializer is walked. A DENYLIST (clear unless proven unsafe), not
             // an allowlist of binder shapes.
             if !Self.referencesName(binding.initializer?.value, name) { protoTyped.removeValue(forKey: name) }
+            else if let a = aliasBeforeRebind { fnValueAlias[name] = a }
             // CONST-STRING PROPAGATION — a LOCAL `let NAME = "literal"` string constant. Resolves a later
             // const-anchored host in the SAME fn body (`let apiBase = "…"; dataTask(with: "\(apiBase)/x")`).
             // ONLY a `let` with a PLAIN string-literal initializer and no accessor block. A `var` of the

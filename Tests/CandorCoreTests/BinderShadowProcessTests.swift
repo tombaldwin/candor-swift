@@ -147,4 +147,105 @@ final class BinderShadowProcessTests: XCTestCase {
         XCTAssertEqual(by["hostConstRestoredAfterLoop"]?["hosts"] as? [String], host,
                        "the enclosing scope restores the const past the loop")
     }
+
+    // ── `fnValueAlias` — the FIFTH map, and the widest of them ──────────────────────────────────────
+    //
+    // The four above are TYPE indexes: leaking one resolves a receiver against a type it does not have,
+    // and what gets charged is whatever that type's member happens to do. `fnValueAlias` resolves a bare
+    // `g()` to a NAMED LOCAL FUNCTION, so leaking it charges that function's entire transitive effect
+    // set to an invocation of an unrelated value.
+    //
+    // It escaped the catch-all binder (`42093b6`) because the catch-all clears a LIST of maps, and it
+    // escaped the audit that found `protoTyped`/`localConstStrings` because that audit probed it in one
+    // direction only — "an aliased fn value called after a shadowing loop still resolves" is the LOSS
+    // direction, and the FABRICATION direction was never run.
+    private static let aliasSrc = """
+    import Foundation
+    func eff() { try? FileManager.default.removeItem(atPath: "/tmp/candor-alias-probe") }
+
+    // (1) THE SECOND FIXTURE, written first: the alias itself must keep resolving, or the fix is
+    //     indistinguishable from deleting the rung — `let g = eff; g()` read SILENT-PURE before the
+    //     alias existed, which is the README §4 contract this map was added to honour.
+    func aliasResolves() {
+        let g = eff
+        g()
+    }
+    // (2) …and it must survive a shadowing block, or the clear has traded the fabrication for a loss.
+    func aliasRestoredAfterBlock(_ c: Bool) {
+        let g = eff
+        if c {
+            let g = { }
+            g()
+        }
+        g()
+    }
+    // (3) …and a SELF-REFERENTIAL rebind resolves THROUGH the binding it replaces: `shadowName` runs
+    //     before the initializer is walked (the Alamofire `let url = try url.asURL()` ordering, one map
+    //     over), and the re-aliasing branch cannot restore it because the RHS is a shadowed local.
+    func aliasSelfRebind(_ c: Bool) {
+        let g = eff
+        if c {
+            let g = g
+            g()
+        }
+    }
+
+    // (4) THE FABRICATION: a loop binder rebinds the aliased name. The elements are not `eff`.
+    func aliasLoopShadow(_ jobs: [() -> Void]) {
+        let g = eff
+        _ = g
+        for g in jobs { g() }
+    }
+    func aliasLoopNoShadow(_ jobs: [() -> Void]) {
+        let g = eff
+        _ = g
+        for h in jobs { h() }
+    }
+    // (5) …and an INNER binding of the same name to a visibly-pure closure. This one does not go
+    //     through `clearBinding` at all — a `let` that DOES type never reaches it — so it is the row
+    //     that decides the clear lives in `shadowName` rather than in `clearBindingTypeOnly`.
+    func aliasInnerShadow(_ c: Bool) {
+        let g = eff
+        _ = g
+        if c {
+            let g = { }
+            g()
+        }
+    }
+    func aliasInnerNoShadow(_ c: Bool) {
+        let g = eff
+        _ = g
+        if c {
+            let h = { }
+            h()
+        }
+    }
+    """
+
+    func testAnAliasedFunctionValueDoesNotAnswerForALaterBindingOfTheName() throws {
+        let by = try scan(Self.aliasSrc, "Alias")
+        // the trigger must be live, or every row below is vacuous
+        XCTAssertEqual(by["eff"]?["inferred"] as? [String], ["Fs"])
+        XCTAssertEqual(by["aliasResolves"]?["inferred"] as? [String], ["Fs"],
+                       "the alias rung itself: `let g = eff; g()` edges to the real unit")
+        // the fabrication and its rename control
+        XCTAssertNil(by["aliasLoopShadow"],
+                     "the loop binder is one of `jobs`, not `eff` — charging eff's Fs here is a fabrication")
+        XCTAssertNil(by["aliasLoopNoShadow"], "the rename control: same body, different binder name")
+        XCTAssertNil(by["aliasInnerShadow"],
+                     "the inner `let g = { }` is a pure closure — it must not inherit eff's body")
+        XCTAssertNil(by["aliasInnerNoShadow"], "the rename control")
+    }
+
+    /// THE SECOND DIRECTION. Clearing without the scope, or clearing before a self-referential
+    /// initializer is walked, sends each of these from `['Fs']` to ABSENT — the cardinal sin traded in
+    /// for its mirror, which is how four of the five fixes in this family went wrong.
+    func testTheAliasSurvivesAShadowingScopeAndASelfReferentialRebind() throws {
+        let by = try scan(Self.aliasSrc, "Alias")
+        XCTAssertEqual(by["aliasRestoredAfterBlock"]?["inferred"] as? [String], ["Fs"],
+                       "the enclosing block restores the alias past the shadow")
+        XCTAssertEqual(by["aliasSelfRebind"]?["inferred"] as? [String], ["Fs"],
+                       "`let g = g` resolves through the binding it replaces — clearing before the "
+                       + "initializer is walked loses a real reach")
+    }
 }

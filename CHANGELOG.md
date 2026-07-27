@@ -9,6 +9,29 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### soundness — a fifth name-keyed map a rebind never invalidated, and this one edges to a BODY (2026-07-27)
+
+⚠ **`fnValueAlias` outlived the binding that set it** (`CallCollector.swift`). It maps an inferred
+fn-value local to a NAMED LOCAL FUNCTION (`let g = eff` → invoking `g()` edges to `eff`), and no clear
+path touched it: not `clearBinding`, not `clearBindingTypeOnly`, not `shadowName`, and
+`leaveShadowScope` neither saved nor restored it. So an alias established for a name answered for every
+LATER and every INNER binding of that name. Measured with the rename control:
+`func f(_ jobs: [() -> Void]) { let g = eff; for g in jobs { g() } }` reads `['Fs']` — `eff`'s effect
+charged to an invocation of a loop element — while the identical body binding `h` is ABSENT; the same
+for an inner `let g = { }`, a visibly pure closure that inherited `eff`'s body.
+
+This is the **fifth** map in one mechanism and the widest of them: the other four are TYPE indexes, so
+leaking one charges whatever some type's member happens to do, while this one charges a named
+function's entire transitive effect set. It is now cleared by `shadowName` and saved/restored by the
+enclosing scope, with the same self-referential-initializer carve-out `protoTyped` needs (`let g = g`
+resolves through the binding it replaces). Three guards, three mutants, each failing its named
+assertion and only it.
+
+Measured on 34 real Swift packages: **0 gains, 0 losses, 0 entry delta** — and per the standing bar
+that clean diff is the fabrication CONTROL, not the evidence. Instrumented, the rung is established
+exactly ONCE across the corpus (console-kit's `let rpp = linux_readpassphrase`) and the fix's trigger
+— a rebind dropping a live alias — fires **zero** times there. The fixtures are the evidence.
+
 ### soundness — the FULL-QUAL dep-index key, and the guard it makes provable (2026-07-27)
 
 **A third dep-index key shape: `pkg#<full qual>`.** The `CANDOR_DEPS` index held exactly `pkg#leaf`
