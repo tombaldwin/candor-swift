@@ -9,6 +9,88 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### added — ⟨0.24⟩ `gate --report`: the gate as a function of a GIVEN signature (2026-07-27)
+
+    candor-swift gate --report <locator> --policy <file> [--json] [--gate-json <f>]
+
+SPEC §3.1's ⟨0.24⟩ verb: apply a policy to an EXISTING report, with **no scan**. Exit codes and verdict
+shape are exactly `--policy`'s on a scan (0 / 1 / 2); the only difference is where `S` and `D` come from.
+`--json` **is** `--gate-json -` — the verb's machine output is the verdict, and a second meaning for
+`--json` would be the one place a consumer could tell the two routes apart. A query verb, so it inherits
+§3.3.1 unchanged: the same three locator forms, the same discovery and `CANDOR_POLICY`/config fallbacks,
+and no positionals (a stray one is a usage error — `gate` has no argument of its own, and a swallowed
+token is how a gate runs green).
+
+Two things this buys. It is the **supply-chain verb** — gating a dependency's published report is what an
+adopter actually wants and could not express without re-analysing code they do not have. And it makes the
+code-implements-spec direction **testable**: every other route recomputes the effect set from source, so a
+defect in the gate and a defect in the classifier were indistinguishable from any test this repo could
+write.
+
+**THE SEAM.** `evaluateGate` now takes a `GateInput` — a record of already-accumulated maps — built either
+by `gateInputFromScan` (the reason-class fixpoint and the per-fn `netClassesOf` derivation, moved out of
+the gate body and off `main.swift`) or by `gateInputFromReport`. There is deliberately **no second copy of
+the §6.2 matching**: the clause mandating this verb exists about exactly that mistake, an open-coded copy
+of a classification rule drifting from the gate's, silently, because nothing compared them.
+
+**REPORT-LOADING.** This engine ships no `callers`/`show`/`where` (it is the producer; the read-only
+queries are candor-query's), so `gate` is its first verb that CONSUMES a report to reach a verdict. The
+§3.3.1 locator machinery already existed and is reused (`resolveReportLocator`, `discoverReportPrefix`,
+`discoverPolicy`); the reader itself is new, because it must read **strictly less** than the existing one.
+
+**THE MUST NOT.** §3.1: an engine must not re-derive, widen or re-classify, and an ABSENT entry is absent
+— the ⟨0.21⟩ purity claim — never back-filled from a callgraph sidecar or a chained dep. `loadGateReport`
+opens the report file(s) and nothing else: no `.callgraph.json` (which `loadFixModel` does merge, for
+fix/fix-gate/tour/path), no `.hierarchy.json`, no `loadDepReports` chaining, and `hosts`/`cmds`/`paths`/
+`tables`/`netClass` taken verbatim rather than re-matched or re-mapped through this machine's
+`net-partner` config. Proved with `app.Facade.load` ABSENT from a report while three baits sit beside it:
+a sidecar naming it and edging it to a `Net` unit, a chained dep report giving it `Net` outright, and a
+`.candor/config` `deps` key inside the one directory the verb does open a config from. Verdict clean; the
+positive control beside it (same directory, same baits, a report that DOES carry the effect) exits 1.
+Both halves mutation-verified — back-filling from either the sidecar or the dep flips the clean half to
+exit 1. Separately measured: gating a report written WITH a `net-partner` config, from a process whose
+config has none, still produces the verdict byte-for-byte — `netClass` came off the wire.
+
+**ANSWERABILITY — three refusals, each fail-OPEN if approximated instead.** `forbid A -> B` is refused
+whole-policy: a report carries an entry only for a function with an EFFECT, so a wholly pure unit has no
+entry and no edges, while `forbid` matches on NAME. `allow <E> …` is refused whole-policy: the AS-EFF-008
+surface-completeness marker does not ride the wire, and `netClass: unknown-host` is not it (that token
+also names a merely unrecognised host). Whole-policy in both cases because enforcing the answerable half
+and exiting 0 is gateless-green. The third is per-(rule, function): a class-scoped `deny` whose scoping
+datum is ABSENT on a matched entry. **Measured on this engine with the check disabled:**
+
+    report                                    deny Net[unknown-host]   deny Net
+    Net-bearing entry, netClass ABSENT        exit 0  ← green          exit 1
+
+    report                                    deny Unknown[dispatch]   deny Unknown
+    Unknown, no unknownWhy and no calls edge  exit 0  ← green          exit 1
+
+The narrowing succeeds *because the evidence is missing* — an absence-keyed relaxation of a fail-closed
+gate. Per-(rule, function) so a scoped rule whose own matches carry their evidence still evaluates; the
+message names the exact `deny` line, the function, and the remedy. None of the three fires on a report
+this engine wrote.
+
+**EQUIVALENCE, and it is byte-level.** 80 rows over four corpora — candor-swift's own `Sources` (526
+analyzed fns, 20 policies, up to 95 violations), a reason-class fixture, a host-literal fixture with a
+`net-partner`/`unknown-alias` config, and a tree with an unreadable file — every `--gate-json` document
+BYTE-EQUAL between `scan --policy` and `gate --report`, and every exit code equal. `analyzed.count`,
+`reasonClass`, `netClass`, the ⟨0.15⟩ coverage advisory and the ⟨0.21⟩ `incomplete`+`unanalyzed` manifest
+(the exit-2 rows) all included. No divergence found.
+
+**MODEL CROSS-CHECK** against `candor-spec/reference/policy_model.py`: 256 signatures × 5 verbs = 1280
+rows. `deny Fs Unknown[reflect,unresolved]` and `pure` agree 256/256. All 100 disagreements are ONE
+family — `Llm ∈ S` with `Net ∉ S` under a `deny Net`, where the model applies Definition 4's refinement
+preorder (`Llm ⊑ₑ Net`) and the engine intersects the denied set with `inferred`; direction is uniform,
+model REJECT / engine pass. That is the same model-versus-contract shape SPEC §6 pins for `Db` (since
+amended out of the model, so the residual has MOVED rather than closed): §6.2's normative `deny` grammar
+has no refinement clause. It is also unreachable from a scan — SPEC §1 ⟨0.13⟩ has the engines CO-EMIT
+`Llm` and `Net`, and this one does at three sites in `CallCollector.swift`. Restricted to that
+well-formed sub-lattice (`Llm ⇒ Net`), **0 disagreements**. Not patched here: making `deny Net` fire on
+`Llm` alone is a family-wide contract change, not a candor-swift one.
+
+Pinned by `GateReportVerbProcessTests` (15 process-level cases, each verified to FAIL under a targeted
+mutation of the shipped binary) plus four `smoke.sh` cases. `swift test` 387 passed; `smoke.sh` 108/0.
+
 ### ⚠ soundness — a chained dependency's ACCESSOR read, and the UNBOUND factory call, were silent-pure (2026-07-27)
 
 Two chained-boundary defects found by conformance PART 24 (split-invariance) on its first run, each

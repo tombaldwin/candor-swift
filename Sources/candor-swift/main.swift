@@ -125,6 +125,12 @@ if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "gains" {
 if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "privacy-manifest" {
     runPrivacyManifestCLI(CommandLine.arguments)
 }
+// ⟨0.24⟩ `gate --report <locator> --policy <file>` (SPEC §3.1) — apply a policy to an EXISTING report,
+// with no scan: the supply-chain gate, and the one route that reaches §6.2 as a function of a GIVEN
+// signature rather than through the classifier. A subcommand, before the scan flag loop (GateReportCLI.swift).
+if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "gate" {
+    runGateReportCLI(CommandLine.arguments)
+}
 
 var target = "."
 var outPrefix: String? = nil
@@ -181,6 +187,7 @@ while let a = argIter.next() {
           candor-swift <action> [args] [options]               query the discovered report (.candor/, walk-up)
           candor-swift privacy-manifest [--verify <plist>]     generate/verify the Apple privacy manifest
           candor-swift gains <current> <baseline>              effects gained between two reports
+          candor-swift gate --report <loc> --policy <file>     apply a policy to an EXISTING report, no scan
           candor-swift --agents                                print the agent contract for this build
 
         COMMON ACTIONS
@@ -191,9 +198,15 @@ while let a = argIter.next() {
           fix-gate                  every policy crossing + its remedy
           unverified                pure/deny scopes that PASS but contain Unknown (--strict: exit 1)
           privacy-manifest          the Info.plist usage keys the sensor reach requires; --verify diffs one
+          gate --policy <file>      apply a policy to an EXISTING report, with NO scan — the supply-chain
+                                    gate. Same exit codes and same verdict shape as a scan's --policy
+                                    (0 clean / 1 violation / 2 could-not-evaluate); the only difference is
+                                    that the effect set is READ from the report rather than recomputed.
+                                    `--json` is `--gate-json -`. `forbid` and `allow` rules are REFUSED
+                                    (exit 2): the report wire does not carry the evidence they need.
 
         ALL ACTIONS
-          path  tour  gains  fix  fix-gate  unverified  privacy-manifest  parsepolicy
+          path  tour  gains  fix  fix-gate  unverified  privacy-manifest  gate  parsepolicy
 
           Query actions follow the same grammar as every candor engine: the report is DISCOVERED
           by default (walk up from CWD for a .candor/ dir; CANDOR_REPORT overrides). --report <locator>
@@ -952,23 +965,18 @@ if let pp = policyPath {
         FileHandle.standardError.write("candor-swift: policy \(pp) could not be read; gate NOT enforced\n".data(using: .utf8)!)
         exit(2)
     }
-    // Reason-scoped Unknown (REASON-SCOPED-UNKNOWN-DESIGN.md): the Unknown reason CLASS must travel the
-    // call graph the same way the Unknown EFFECT does (whyMap is direct-only). Classify each fn's direct
-    // reasons to class tokens, then propagate transitively — so `deny E Unknown[reflect]` at a caller
-    // inheriting Unknown from a reflect-caused callee still fires (matches java/rust/ts reasonClassAcc).
-    var reasonClassDirect: [String: Set<String>] = [:]
-    for (fn, whys) in whyMap where !whys.isEmpty {
-        reasonClassDirect[fn] = Set(whys.map { reasonClass($0) })
-    }
-    let reasonClassAcc = propagate(reasonClassDirect, over: edges)
     // ⟨0.19⟩ reason-class aliases (SPEC §6.2) from `.candor/config`, so `Unknown[<alias>]` resolves at the gate.
     let unknownAliases = parseUnknownAliases(discoverConfigText(targetPath: target))
-    // ⟨0.20⟩ `net-partner` hosts (NET-DESTINATION-CLASS-DESIGN.md): the SAME set the report netClass used
+    // ⟨0.24⟩ the SCAN route into the shared gate seam (Gate.swift): the reason-class fixpoint and the
+    // per-fn `netClassesOf` derivation moved into `gateInputFromScan`, so `gate --report` can hand
+    // `evaluateGate` the same record built from a WRITTEN report instead of from the classifier.
+    // ⟨0.20⟩ `net-partner` (NET-DESTINATION-CLASS-DESIGN.md) is the SAME set the report's `netClass` used
     // (hoisted above), so `deny Net[unknown-host]` tolerates a declared partner and the verdict classifies it.
-    gateViolations += evaluateGate(parsePolicy(text, aliases: unknownAliases), inferred: inferred, hostsAcc: hostsAcc,
-                                   cmdsAcc: cmdsAcc, pathsAcc: pathsAcc, tablesAcc: tablesAcc,
-                                   incompleteAcc: incompleteAcc, cg: cg, reasonClassAcc: reasonClassAcc,
-                                   netPartners: netPartners)
+    gateViolations += evaluateGate(parsePolicy(text, aliases: unknownAliases),
+                                   gateInputFromScan(inferred: inferred, whyMap: whyMap, edges: edges, cg: cg,
+                                                     hostsAcc: hostsAcc, cmdsAcc: cmdsAcc,
+                                                     pathsAcc: pathsAcc, tablesAcc: tablesAcc,
+                                                     incompleteAcc: incompleteAcc, netPartners: netPartners))
     // Provable-purity DISCLOSURE (advisory — NEVER a violation, so the exit/verdict are untouched): functions
     // in a pure/deny scope that PASS but are Unknown (the Unknown could hide the forbidden effect — a
     // fn/closure-injected port). Surfaces the gap automatically (eval/fixloop/DISPATCH-NOTE.md).

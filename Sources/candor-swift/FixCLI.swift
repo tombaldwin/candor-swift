@@ -248,7 +248,9 @@ func discoverReportPrefix() -> String? {
 // Policy fallback when --policy is absent (mirrors the scan surface): CANDOR_POLICY env, then the
 // discovered .candor/config `policy` key (CWD-anchored — the query has no scan target). Returns nil if
 // neither is set (the caller fails loud, as fix requires a policy to define the boundary it crosses).
-private func discoverPolicy() -> String? {
+// Internal (not private) so ⟨0.24⟩ `gate --report` inherits the SAME §3.3.1 fallback as fix/fix-gate/
+// unverified rather than open-coding a second one.
+func discoverPolicy() -> String? {
     if let env = ProcessInfo.processInfo.environment["CANDOR_POLICY"], !env.isEmpty { return env }
     let cfg = loadCandorConfig(targetPath: ".")
     if let p = cfg["policy"], !p.isEmpty { return p }

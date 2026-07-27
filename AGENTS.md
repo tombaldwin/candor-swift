@@ -97,6 +97,23 @@ reports; candor-swift itself carries a few query subcommands, over a report a sc
     candor-swift tour [<N>]                                             # the N most surprising transitive reaches (default 10; no policy)
     candor-swift gains      <current> <baseline> [--json]              # effects the surface GAINED since the baseline (supply-chain alarm)
     candor-swift privacy-manifest [--verify <Info.plist>]              # generate/verify the Apple privacy manifest from the sensor reach (privacy/1)
+    candor-swift gate --report <locator> --policy <file> [--json] [--gate-json <f>]       # apply a policy to an EXISTING report, with NO scan
+
+⟨0.24⟩ `gate --report <locator> --policy <file>` (SPEC §3.1) applies a policy to an EXISTING report
+with no scan — the supply-chain gate (gate a dependency's published report without re-analysing code
+you do not have), and the one route that reaches §6.2 as a function of a GIVEN signature rather than
+through the classifier. Exit codes and verdict shape are exactly `--policy`'s on a scan: 0 clean,
+1 violation, 2 could-not-evaluate. **`--json` IS `--gate-json -`** — the verb's machine output is the
+verdict, not a report. It reads the report file(s) and NOTHING else: no callgraph sidecar, no chained
+dep, no re-classification, so an entry ABSENT from the report is absent (the ⟨0.21⟩ purity claim) and
+is never back-filled. Two rule kinds are REFUSED (exit 2, whole-policy) because the wire does not carry
+their evidence and approximating them fails OPEN: **`forbid A -> B`** (a report has an entry only for a
+function with an EFFECT, so a wholly pure unit is invisible while `forbid` matches on NAME) and
+**`allow <E> …`** (the AS-EFF-008 surface-completeness marker does not ride the wire; `netClass:
+unknown-host` is NOT that marker — it also names a merely unrecognised host). A third refusal is
+per-(rule, function): a class-scoped **`deny Net[…]`/`deny Unknown[…]` whose scoping datum is ABSENT**
+on a matched entry — measured, that narrowing silently succeeds *for lack of evidence* and returns
+exit 0 where the bare `deny` returns 1. None of the three fires on a report this engine wrote.
 
 `fix` is the remedial inverse of the policy gate (integrations/FIX-SPEC.md): when a function performs
 an effect its layer forbids, it computes where the effect belongs (hoist it to the nearest allowed-

@@ -1274,5 +1274,40 @@ RPT_TOUR=$(ls "$W"/tour/r.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v
 { [ $RC -eq 2 ] && grep -q 'positive integer' "$W/tour/p.err"; } \
   && ok "tour <report.json> (positional) -> exit 2 (N, not a report)" || bad "tour positional report: rc=$RC $(cat "$W/tour/p.err")"
 
+# ⟨0.24⟩ `gate --report` (SPEC §3.1) — a policy over an EXISTING report, no scan. The acceptance test
+# is BYTE-LEVEL equivalence with `scan --policy`'s own --gate-json, so that is what runs here; the
+# answerability refusals and the MUST NOT (an absent entry is never back-filled from a sidecar or a
+# chained dep) are pinned by GateReportVerbProcessTests, which can pose a signature by hand.
+mkdir -p "$W/gr"
+: > "$W/gr/config"                                    # pin BOTH routes to the same .candor/config
+cat > "$W/gr/m.swift" <<'SW'
+import Foundation
+func reachesNet() { URLSession.shared.dataTask(with: URL(string: "https://api.example.com/x")!).resume() }
+protocol Port { func go() }
+func viaPort(_ p: Port) { p.go() }
+func readsFile() { _ = try? String(contentsOfFile: "/etc/hosts", encoding: .utf8) }
+func all(_ p: Port) { reachesNet(); viaPort(p); readsFile() }
+SW
+grbad=0
+for POL in 'pure' 'deny Net' 'deny Unknown' 'deny Net Unknown[dispatch]' 'deny Clipboard'; do
+  printf '%s\n' "$POL" > "$W/gr/pol"
+  rm -f "$W/gr/scan.json" "$W/gr/gate.json"           # delete the outputs before measuring
+  CANDOR_CONFIG="$W/gr/config" "$BIN" "$W/gr" --out "$W/gr/r" --policy "$W/gr/pol" --gate-json "$W/gr/scan.json" >/dev/null 2>&1; S=$?
+  CANDOR_CONFIG="$W/gr/config" "$BIN" gate --report "$W/gr/r" --policy "$W/gr/pol" --gate-json "$W/gr/gate.json" >/dev/null 2>&1; G=$?
+  { [ "$S" = "$G" ] && cmp -s "$W/gr/scan.json" "$W/gr/gate.json"; } || { grbad=1; echo "    ($POL: scan=$S gate=$G)"; }
+done
+[ "$grbad" -eq 0 ] && ok "gate --report: --gate-json byte-equal to scan --policy over 5 policies" \
+                   || bad "gate --report: scan-vs-gate divergence"
+# `forbid` / `allow` need evidence the wire does not carry — REFUSED (exit 2), never evaluated green.
+printf 'forbid a -> b\n' > "$W/gr/pol"
+"$BIN" gate --report "$W/gr/r" --policy "$W/gr/pol" >/dev/null 2>"$W/gr/f.err"; RC=$?
+{ [ $RC -eq 2 ] && grep -q 'forbid' "$W/gr/f.err"; } && ok "gate --report refuses \`forbid\` (exit 2)" || bad "gate --report forbid: rc=$RC"
+printf 'allow Exec git\n' > "$W/gr/pol"
+"$BIN" gate --report "$W/gr/r" --policy "$W/gr/pol" >/dev/null 2>"$W/gr/a.err"; RC=$?
+{ [ $RC -eq 2 ] && grep -q 'allow' "$W/gr/a.err"; } && ok "gate --report refuses \`allow\` (exit 2)" || bad "gate --report allow: rc=$RC"
+# `gate` takes no positionals — a swallowed token is how a gate runs green.
+"$BIN" gate "$W/gr/r" --policy "$W/gr/pol" >/dev/null 2>"$W/gr/p.err"; RC=$?
+{ [ $RC -eq 2 ] && grep -q 'unexpected argument' "$W/gr/p.err"; } && ok "gate --report: a stray positional is a usage error" || bad "gate positional: rc=$RC"
+
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

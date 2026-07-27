@@ -73,15 +73,77 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
     }
 }
 
-/// Evaluate a parsed §6.2 policy against the analysis maps — the SAME violation list drives the
-/// console lines, --gate-json and the exit code, so they can never disagree.
+/// ⟨0.24⟩ THE GATE'S INPUT — the seam between "what produced the signature" and "what §6.2 does with it".
+/// Every field is ALREADY ACCUMULATED (transitive): the gate runs no fixpoint and reads no scan state, so
+/// the same matching code serves both routes in.
+///
+/// `gateInputFromScan` builds it from the classifier's live maps (the reason-class fixpoint and the
+/// per-fn `netClassesOf` derivation that used to sit inline in the gate); `gateInputFromReport`
+/// (GateReportCLI.swift) builds it from a WRITTEN report and nothing else. That split is the point of
+/// SPEC §3.1 ⟨0.24⟩: until it existed the gate was reachable only THROUGH the classifier, so a defect in
+/// the gate and a defect in the classifier were indistinguishable from any test this repo could write.
+/// Do NOT re-implement the §6.2 matching on the report side — the clause exists about exactly that
+/// mistake (an open-coded second copy of a classification rule drifting from the gate's, silently,
+/// because nothing compared them).
+struct GateInput {
+    /// per fn, the TRANSITIVE effect set — the model's `S`, with candor's `Unknown` marker carried as a
+    /// member (this family's encoding of `D ≠ ∅`).
+    let inferred: [String: Set<String>]
+    /// per fn, the TRANSITIVE reason-class tokens — the model's `D` (SPEC §6.2 ⟨0.19⟩).
+    let reasonClasses: [String: Set<String>]
+    /// per Net-bearing fn, its ⟨0.20⟩ destination classes, ALREADY derived (scan: `netClassesOf`;
+    /// report: the wire's `netClass`, verbatim).
+    let netClasses: [String: [String]]
+    /// per fn, the TRANSITIVE literal surface AS-EFF-008 certifies.
+    let hosts: [String: Set<String>], cmds: [String: Set<String>]
+    let paths: [String: Set<String>], tables: [String: Set<String>]
+    /// per fn, the effects whose literal surface is structurally incomplete — the AS-EFF-008 fail-closed
+    /// marker. It does NOT ride the ⟨0.24⟩ wire, which is why `gate --report` refuses every `allow` rule.
+    let surfaceIncomplete: [String: Set<String>]
+    /// the call graph AS-EFF-009 walks.
+    let edges: [String: [String]]
+}
+
+/// The SCAN route into the gate: the classifier's live maps, plus the two derivations the gate used to
+/// run inline. Behaviour-preserving — `netClassesOf` was only ever asked for a fn that HAS `Net` (it is
+/// the `deny` membership that triggers it), so materializing exactly those is the same set of answers.
+func gateInputFromScan(inferred: [String: Set<String>],
+                       whyMap: [String: Set<String>],
+                       edges: [String: Set<String>], cg: [String: [String]],
+                       hostsAcc: [String: Set<String>], cmdsAcc: [String: Set<String>],
+                       pathsAcc: [String: Set<String>], tablesAcc: [String: Set<String>],
+                       incompleteAcc: [String: Set<String>],
+                       netPartners: Set<String>) -> GateInput {
+    // Reason-scoped Unknown (REASON-SCOPED-UNKNOWN-DESIGN.md): the Unknown reason CLASS must travel the
+    // call graph the same way the Unknown EFFECT does (whyMap is direct-only). Classify each fn's direct
+    // reasons to class tokens, then propagate transitively — so `deny E Unknown[reflect]` at a caller
+    // inheriting Unknown from a reflect-caused callee still fires (matches java/rust/ts reasonClassAcc).
+    var reasonClassDirect: [String: Set<String>] = [:]
+    for (fn, whys) in whyMap where !whys.isEmpty {
+        reasonClassDirect[fn] = Set(whys.map { reasonClass($0) })
+    }
+    var netClasses: [String: [String]] = [:]
+    for (qual, inf) in inferred where inf.contains("Net") {
+        netClasses[qual] = netClassesOf(Array(hostsAcc[qual] ?? []),
+                                        netIncomplete: incompleteAcc[qual]?.contains("Net") ?? false,
+                                        partners: netPartners)
+    }
+    return GateInput(inferred: inferred,
+                     reasonClasses: propagate(reasonClassDirect, over: edges),
+                     netClasses: netClasses,
+                     hosts: hostsAcc, cmds: cmdsAcc, paths: pathsAcc, tables: tablesAcc,
+                     surfaceIncomplete: incompleteAcc, edges: cg)
+}
+
+/// Evaluate a parsed §6.2 policy against an ALREADY-ACCUMULATED signature — the SAME violation list
+/// drives the console lines, --gate-json and the exit code, so they can never disagree. THE ONLY §6.2
+/// matching code in this engine: `scan --policy` and `gate --report` both land here, which makes "the
+/// same verdict from the same signature" a property of the code rather than of two consistent authors.
 func evaluateGate(_ pol: (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidRule]),
-                  inferred: [String: Set<String>],
-                  hostsAcc: [String: Set<String>], cmdsAcc: [String: Set<String>],
-                  pathsAcc: [String: Set<String>], tablesAcc: [String: Set<String>],
-                  incompleteAcc: [String: Set<String>], cg: [String: [String]],
-                  reasonClassAcc: [String: Set<String>] = [:],
-                  netPartners: Set<String> = []) -> [GateViolation] {
+                  _ gi: GateInput) -> [GateViolation] {
+    let inferred = gi.inferred
+    let hostsAcc = gi.hosts, cmdsAcc = gi.cmds, pathsAcc = gi.paths, tablesAcc = gi.tables
+    let incompleteAcc = gi.surfaceIncomplete, cg = gi.edges, reasonClassAcc = gi.reasonClasses
     var gateViolations: [GateViolation] = []
         for qual in inferred.keys.sorted() {
             let inf = inferred[qual] ?? []
@@ -103,12 +165,13 @@ func evaluateGate(_ pol: (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidR
                 }
                 // Net destination-class: a `deny Net[dest…]` keeps its Net hit only for a fn reaching one of
                 // those destination classes; else tolerate (only asserted-safe destinations). Fail-closed: a
-                // masked surface / a Net with no visible host is unknown-host (netClassesOf). The class travels
-                // the call graph via the (transitive) hostsAcc + incompleteAcc.
+                // masked surface / a Net with no visible host is unknown-host. ⟨0.24⟩ the class set is
+                // ALREADY DERIVED in `gi.netClasses` — from the transitive hostsAcc + incompleteAcc on the
+                // scan route, and read verbatim off the wire's `netClass` on the `gate --report` route.
+                // An EMPTY set here cannot mean "no destinations": `netClassesOf` floors at unknown-host, and
+                // the report route refuses a scoped rule over an entry whose field is absent (GateReportCLI).
                 if hits.contains("Net"), !r.netClasses.isEmpty {
-                    let fnNet = netClassesOf(Array(hostsAcc[qual] ?? []),
-                                             netIncomplete: incompleteAcc[qual]?.contains("Net") ?? false,
-                                             partners: netPartners)
+                    let fnNet = gi.netClasses[qual] ?? []
                     if !fnNet.contains(where: { r.netClasses.contains($0) }) {
                         hits.removeAll { $0 == "Net" }
                     }
@@ -117,9 +180,7 @@ func evaluateGate(_ pol: (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidR
                     // When Unknown is denied, report ALL reason classes on the fn (transitive) — every reason bit.
                     let rc = hits.contains("Unknown") ? (reasonClassAcc[qual].map { $0.sorted() } ?? []) : []
                     // ⟨0.20⟩ when Net is denied, report ALL of the fn's destination classes (transitive).
-                    let nc = hits.contains("Net") ? netClassesOf(Array(hostsAcc[qual] ?? []),
-                                                                 netIncomplete: incompleteAcc[qual]?.contains("Net") ?? false,
-                                                                 partners: netPartners) : []
+                    let nc = hits.contains("Net") ? (gi.netClasses[qual] ?? []) : []
                     gateViolations.append((rule: "AS-EFF-006", fn: qual, effects: hits,
                         detail: "`\(qual)` performs { \(hits.joined(separator: ", ")) }, forbidden by policy: `\(r.raw)`",
                         reasonClass: rc, netClass: nc))
