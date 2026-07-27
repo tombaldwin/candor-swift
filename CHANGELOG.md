@@ -9,6 +9,43 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### soundness — ⚠ an enum-case payload binding is a LOCAL, and no shadow guard knew it (2026-07-27)
+
+`typeEnumCaseBinding` typed `case .active(let c)` when the case name was unambiguous and carried exactly
+one associated value. Everything else — the `case let .active(c)` spelling (the `let` outside the
+parens, which parses to a bare `patternExpr > identifierPattern` with no `ValueBindingPattern` to
+match), an ambiguous case name, and every multi-payload pattern the arity guard refuses to type — left
+the bound name in NEITHER `vars` NOR `boundLocals`, i.e. invisible to every shadow guard in
+`CallCollector`. Two fabrications followed, both measured on real code:
+
+- **a BARE READ of the name charged the enclosing type's same-named property.** Alamofire's
+  `AuthenticationInterceptor.adapt` was charged its own `credential` accessor; `WebSocketRequest.didClose`
+  was charged the inherited `Request.error`; TCA's `TypeSyntax.identifier` was reported as its own
+  caller.
+- **PASSING it as an argument charged a same-named FREE FUNCTION**, because the fn-ref-as-argument rule
+  (`xs.map(transform)`) can only skip arguments it can see are locals. `UploadRequest.task`'s
+  `case let .data(data)` resolved to the unrelated `DataRequest.data`, and inherited an `Unknown` from it.
+
+**AND THE SECOND FABRICATION MANUFACTURED A DISCLOSURE, which is why the previous round reverted.** A
+phantom free-fn reference resolves to no local unit, and that is exactly the Driver's test for "this unit
+reaches code the scan cannot see" — so vapor's `DecodingError.reason`, whose only unresolvable "call" was
+the name of its own `case let .dataCorrupted(ctx)` binding, carried an `invisible: [HTTPTypes]` it had no
+business carrying, and `DecodingError.description` inherited it through `self.reason`. Both units are in
+the report ONLY because of that disclosure, so closing the fabrication removes the entries. A vanishing
+report entry looked like the cardinal sin and was a fabricated disclosure being withdrawn.
+
+A/B over 13 real Swift packages (11,924 report entries): **0 gains, 8 fabricated call edges removed, 13
+manufactured `invisible` disclosures withdrawn and one fabricated `Unknown`** — every change traced to
+source.
+
+The payload names live in their own LEXICALLY SCOPED set rather than in `boundLocals`, and both halves of
+that were forced by measurement. Folding them into the function-wide set drops the genuine property read
+that FOLLOWS the block (swift-syntax's `IfConfigDiagnostic.asDiagnostic` binds `syntax` in three `if case`
+blocks and then reads the real `self.syntax`) — a silent under-report manufactured by a fabrication fix.
+Scoping `boundLocals` itself instead is worse: `Driver` reads it once, AFTER the walk, where a restored
+set is empty, so `if c { let loadIt = { }; loadIt() }` starts edging to a same-named free function.
+Both directions are pinned by fixtures, and five mutants each fail a named one.
+
 ### process — the set of name-keyed maps a rebind must invalidate is now DERIVED (2026-07-27)
 
 One mechanism has produced **seven** defects in `CallCollector` across three days, every one the same
