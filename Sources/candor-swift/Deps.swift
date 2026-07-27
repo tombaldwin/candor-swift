@@ -208,8 +208,28 @@ struct DepIndex {
             return
         }
         // STALE. It may not displace a trusted answer, and may not withdraw one either.
-        if byKey[key] != nil {
+        if let existing = byKey[key] {
             guard staleKeys.contains(key) else { return }   // a trusted entry stands — leave it alone
+            // …AND THE IDENTICAL-ENTRY EXEMPTION APPLIES AT EVERY TRUST LEVEL. It landed above on the
+            // trusted arm only; candor-rust (`6f2210c`) exempts identical entries regardless of trust,
+            // and the argument does not mention trust anywhere: rule 1 forbids PICKING between
+            // candidates, and there is nothing to pick when they are equal. Withdrawing here costs the
+            // §2.1 `Unknown` downgrade — the ONE thing the stale arm exists to produce — and hands the
+            // site back to the coverage hedge, so `deny E Unknown[…]` stops firing on a package a stale
+            // report is telling you it cannot vouch for. Measured, two copies of one stale report (the
+            // ordinary `--workspace`-prepends-its-own-dir shape):
+            //
+            //   pre   go -> invisible: ['RatesDep']                  the ledger hedge, no class
+            //   post  go -> ['Unknown'], unknownWhy dep-stale:RatesDep
+            //
+            // THE BRANCH BELOW IS UNREACHABLE TODAY AND THAT IS WORTH STATING RATHER THAN DISCOVERING.
+            // A stale entry is built from nothing but its package (`effects = ["Unknown"]`,
+            // `whyReason = "dep-stale:<pkg>"`) and the key it is filed under BEGINS with that package,
+            // so two stale entries sharing a key are equal by construction — including the genuine
+            // two-functions-one-leaf collision, where both candidates say the identical thing. It is
+            // kept, not deleted, because it becomes live the moment a stale entry carries anything
+            // per-FUNCTION; if that changes, this is the guard that already handles it.
+            if existing == entry { return }
             byKey.removeValue(forKey: key)                  // stale vs stale: withdraw, recoverably
             staleKeys.remove(key)
             staleAmbiguous.insert(key)

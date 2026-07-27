@@ -585,8 +585,21 @@ final class ChainingProcessTests: XCTestCase {
     /// THE SECOND DIRECTION, and it is §2 rule 1 itself: two TRUSTED reports that disagree about a key
     /// must still withdraw it. Preferring the trusted producer is a TRUST ordering, not a licence to
     /// pick between two dependency functions — `testAmbiguousKeyIsDroppedNotGuessed` above is the
-    /// pre-existing pin and must stay green; this row adds the stale-vs-stale case, which withdraws the
-    /// key too but RECOVERABLY, so a trusted report arriving afterwards can still answer it.
+    /// pre-existing pin and must stay green; this row covers the stale side, where the key is
+    /// recoverable so a trusted report arriving afterwards can still answer it.
+    ///
+    /// THE IDENTICAL-ENTRY EXEMPTION APPLIES AT EVERY TRUST LEVEL, and the first arm of this row used
+    /// to assert the opposite. `ca5feb0` landed the exemption on the TRUSTED arm only; candor-rust
+    /// (`6f2210c`) exempts identical entries regardless of trust, and the argument never mentions
+    /// trust — rule 1 forbids PICKING between candidates and there is nothing to pick when they are
+    /// equal. Withdrawing cost the §2.1 `Unknown` downgrade, which is the one thing the stale arm
+    /// exists to produce:
+    ///
+    ///   pre   go -> invisible: ['RatesDep']                          the ledger hedge, no class
+    ///   post  go -> ['Unknown'], unknownWhy ['dep-stale:RatesDep']   §2.1's downgrade, back
+    ///
+    /// so `deny E Unknown[…]` fires again on a package a distrusted report cannot vouch for. The
+    /// direction is a hedge gaining a class, never an effect appearing.
     func testTwoStaleReportsWithdrawTheKeyButATrustedOneReclaimsIt() throws {
         let bin = try binaryURL()
         let (root, dep, app) = try makeChainFixture()
@@ -608,11 +621,18 @@ final class ChainingProcessTests: XCTestCase {
             XCTAssertEqual(r.code, 0, r.err)
             return (try fns(ofReport: root.appendingPathComponent("\(out).App.Swift.json")), r.err)
         }
-        // two UNTRUSTED reports disagree about the key: withdrawn, and neither grants coverage — so the
-        // call keeps the κ ledger's hedge instead of reading pure. Never absent.
+        // Two UNTRUSTED reports for one package say the IDENTICAL thing about the key — a stale entry
+        // is built from nothing but its package and the key begins with that package, so they cannot
+        // differ. Nothing to pick, so the key stands and §2.1's downgrade survives.
         let two = try scanApp(stales.joined(separator: ":"), "app-2stale")
-        XCTAssertNotNil(two.fns["go"], "a withdrawn key under NO coverage must not read as a purity claim")
-        XCTAssertEqual(two.fns["go"]?["invisible"] as? [String], ["RatesDep"])
+        XCTAssertNotNil(two.fns["go"], "a key under NO coverage must never read as a purity claim")
+        XCTAssertEqual(Set(two.fns["go"]?["inferred"] as? [String] ?? []), ["Unknown"],
+                       "withdrawing two entries that AGREE costs the §2.1 downgrade — the one thing the "
+                       + "stale arm exists to produce — and hands the site back to the coverage hedge")
+        XCTAssertEqual(two.fns["go"]?["unknownWhy"] as? [String], ["dep-stale:RatesDep"],
+                       "…with the class, which is what `deny E Unknown[…]` reads")
+        XCTAssertNil(two.fns["go"]?["invisible"],
+                     "the key ANSWERED, so it is not a blind spot; the answer is that we do not trust it")
         // …and a trusted report arriving after them reclaims it: the stale-level withdrawal is not final.
         let recovered = try scanApp("\(stales.joined(separator: ":")):\(depReport.path)", "app-recover")
         XCTAssertEqual(Set(recovered.fns["go"]?["inferred"] as? [String] ?? []), ["Net"],
