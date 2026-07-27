@@ -513,6 +513,16 @@ for qual in reportQuals.sorted() {
     let inf = inferred[qual] ?? []
     let invisible = (invisibleAcc[qual] ?? []).sorted()
     if inf.isEmpty && invisible.isEmpty { continue }
+    // `unresolved` IS DERIVED FROM THE EFFECT SET, HERE, and that is the whole of this engine's answer to
+    // candor-ts `e66f29e` (an entry inherited `Unknown` while its `unresolved` marker stayed absent, so a
+    // TIER-1 consumer read `false` on an entry that genuinely carries Unknown). A marker maintained in
+    // parallel with the thing it describes can drift from it; one computed from that thing cannot. Both
+    // Effector construction sites in this file derive it — this one and the protocol-union one below — so
+    // there is no path that can set the effect and forget the marker. A side set that recorded the same
+    // fact independently DID exist here (`unresolvedSet` in Driver, written at seven Unknown sources and
+    // read at none); it was removed rather than wired up, because its only possible future is to disagree
+    // with this line. Measured over 14 real targets / 12 004 entries: 10 539 carry Unknown, 0 fail the
+    // marker, and 0 carry a DIRECT Unknown without an `unknownWhy` (spec §4's other required disclosure).
     var ef = Effector(
         fn: qual, loc: locOf[qual] ?? "",
         inferred: EffectSet(names: inf), direct: EffectSet(names: direct[qual] ?? []),

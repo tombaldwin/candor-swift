@@ -438,7 +438,6 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
 
     var direct: [String: Set<String>] = [:]
     var edges: [String: Set<String>] = [:]
-    var unresolvedSet: Set<String> = []
     var whyMap: [String: Set<String>] = [:]
     var hostsD: [String: Set<String>] = [:], cmdsD: [String: Set<String>] = [:]
     var pathsD: [String: Set<String>] = [:], tablesD: [String: Set<String>] = [:]
@@ -475,7 +474,6 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     func applyDepEntry(_ de: DepEntry, to qual: String) {
         direct[qual, default: []].formUnion(de.effects)
         if de.effects.contains("Unknown") {
-            unresolvedSet.insert(qual)
             if let why = de.whyReason { whyMap[qual, default: []].insert(why) }
         }
         hostsD[qual, default: []].formUnion(de.hosts)
@@ -585,7 +583,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             }
         }
         direct[f.qual, default: []].formUnion(cc.directEffects)
-        if cc.unresolved { direct[f.qual, default: []].insert("Unknown"); unresolvedSet.insert(f.qual) }
+        if cc.unresolved { direct[f.qual, default: []].insert("Unknown") }
         whyMap[f.qual, default: []].formUnion(cc.why)
         hostsD[f.qual, default: []].formUnion(cc.hosts)
         cmdsD[f.qual, default: []].formUnion(cc.cmds)
@@ -703,7 +701,6 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             resolved = true
                         } else if let sup = extSupers.first(where: { !STD_PURE_PROTOCOLS.contains($0) }) {
                             direct[f.qual, default: []].insert("Unknown")
-                            unresolvedSet.insert(f.qual)
                             whyMap[f.qual, default: []].insert("dispatch:\(sup).\(member)")
                             resolved = true
                         }
@@ -861,7 +858,6 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // `continue` and reverted it.
                 if (fileImports[file] ?? []).contains(where: { deps.isChained($0) }) {
                     direct[f.qual, default: []].insert("Unknown")
-                    unresolvedSet.insert(f.qual)
                     whyMap[f.qual, default: []].insert("dispatch:untyped cross-package receiver")
                 }
                 continue
@@ -935,7 +931,6 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 for t in impls { edges[f.qual, default: []].insert(t) }
             } else {
                 direct[f.qual, default: []].insert("Unknown")
-                unresolvedSet.insert(f.qual)
                 whyMap[f.qual, default: []].insert("dispatch:\(d.proto).\(d.member)")
             }
         }
@@ -950,7 +945,6 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             let conf = conformers[d.proto] ?? []
             if conf.isEmpty || conf.count > 12 {
                 direct[f.qual, default: []].insert("Unknown")
-                unresolvedSet.insert(f.qual)
                 whyMap[f.qual, default: []].insert("dispatch:\(d.proto).\(d.member)")
                 continue
             }
@@ -1047,7 +1041,6 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             edges[fq, default: []].formUnion(namedTargets)
         } else {
             direct[fq, default: []].insert("Unknown")
-            unresolvedSet.insert(fq)
             for n in info.names { whyMap[fq, default: []].insert("callback:\(n)") }
         }
     }
