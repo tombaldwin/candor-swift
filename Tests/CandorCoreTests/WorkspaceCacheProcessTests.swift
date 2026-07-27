@@ -218,4 +218,116 @@ final class WorkspaceCacheProcessTests: XCTestCase {
         XCTAssertNil(by["use1"], "the healthy dep's silence is still a purity claim")
         XCTAssertTrue(r.err.contains("chained 1 workspace dep report(s)"), r.err)
     }
+
+    // ── THE SWEEP MUST NOT DELETE A FILE IT DID NOT WRITE ────────────────────────────────────────
+    //
+    // `.candor/deps` is the directory SPEC §2 tells a user to drop reports into: for a BINARY
+    // dependency `--workspace` cannot scan, for a package whose report was produced by hand, or for
+    // another engine's report in a polyglot repo. The first version of the sweep removed every `*.json`
+    // this run's own path-dep scans had not produced, which is exactly those files. Unrecoverably.
+    //
+    // This is not an analysis defect and that is why it is worth stating separately: candor's contract
+    // is that it does not destroy information, and a file the user chose to put there is information.
+    //
+    // The SECOND fixture is the pre-existing suite above and it must stay green — the sweep exists for a
+    // real reason (`43a0eaa`: a stale child report standing in for a failed rescan) and the fix is to
+    // distinguish reports this run OWNS from reports it merely FOUND, never to stop sweeping.
+
+    /// A report for a package that is not a local path dep at all — the binary-dependency case.
+    @discardableResult
+    private func placeUserReport(_ root: URL, named: String) throws -> URL {
+        let deps = root.appendingPathComponent("app/.candor/deps")
+        try FileManager.default.createDirectory(at: deps, withIntermediateDirectories: true)
+        let f = deps.appendingPathComponent("\(named).json")
+        try "{\"candor\":{\"version\":\"hand-written\"},\"package\":\"\(named)\",\"functions\":[]}"
+            .write(to: f, atomically: true, encoding: .utf8)
+        return f
+    }
+
+    func testAReportTheRunDidNotWriteIsNeverASweepCandidate() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let mine = try placeUserReport(root, named: "BinaryDep")
+
+        // (a) a clean run sweeps nothing anyway — but it must not touch the file even so
+        XCTAssertEqual(try scan(bin, root, out: "clean").code, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: mine.path),
+                      "a user-placed report must survive a run that sweeps nothing")
+
+        // (b) …and it must survive the run where the sweep DOES fire, which is the real defect
+        try breakDep(root, 0)
+        let r = try scan(bin, root, out: "swept")
+        XCTAssertEqual(r.code, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: mine.path),
+                      "the sweep removed a report `--workspace` never wrote — unrecoverable, and nothing "
+                      + "to do with the stale path-dep report it was aimed at")
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("app/.candor/deps/Dep0.json").path),
+            "…while the report it DOES own is still swept: the fix is ownership, not restraint")
+        // the file it left alone is DISCLOSED rather than silently ignored
+        XCTAssertTrue(r.err.contains("does not produce") && r.err.contains("BinaryDep.json"),
+                      "a report the run leaves in place must be named: \(r.err)")
+        XCTAssertTrue(r.err.contains("removed 1 stale report"),
+                      "only the owned report is counted: \(r.err)")
+    }
+
+    /// …and the ownership derivation must find the file of a dep whose scan has NEVER succeeded in this
+    /// process, which is the case where no package name was recorded: the name comes from the
+    /// dependency's own `Package.swift`. Without that fallback a run over a warm cache leaves the stale
+    /// report exactly where `43a0eaa` found it.
+    ///
+    /// THE DIRECTORY IS DELIBERATELY NAMED DIFFERENTLY FROM THE PACKAGE. With `Dep0/` holding package
+    /// `Dep0` the last resort — the directory basename — produces the right answer too, so the
+    /// `Package.swift` branch could be deleted and this row would still pass: a test that cannot reach
+    /// the code it names is not a test. Here the basename is `libdep-src` and only the manifest says
+    /// `Dep0`, so exactly one branch can find the file.
+    func testAStaleReportIsSweptWhenOnlyTheDepManifestNamesIt() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-ws-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        try fm.createDirectory(at: root.appendingPathComponent("libdep-src/Sources/Dep0"),
+                               withIntermediateDirectories: true)
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "Dep0", targets: [.target(name: "Dep0")])
+        """.write(to: root.appendingPathComponent("libdep-src/Package.swift"), atomically: true, encoding: .utf8)
+        try "public func work0() { }\n"
+            .write(to: root.appendingPathComponent("libdep-src/Sources/Dep0/D.swift"), atomically: true, encoding: .utf8)
+        try fm.createDirectory(at: root.appendingPathComponent("app/Sources/App"), withIntermediateDirectories: true)
+        try "import Dep0\npublic func use0() { work0() }\n"
+            .write(to: root.appendingPathComponent("app/Sources/App/Use0.swift"), atomically: true, encoding: .utf8)
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(
+            name: "App",
+            dependencies: [
+                .package(path: "../libdep-src"),
+            ],
+            targets: [.target(name: "App")])
+        """.write(to: root.appendingPathComponent("app/Package.swift"), atomically: true, encoding: .utf8)
+
+        XCTAssertEqual(try scan(bin, root, out: "warm").code, 0)
+        XCTAssertTrue(fm.fileExists(atPath: root.appendingPathComponent("app/.candor/deps/Dep0.json").path),
+                      "the report is filed under the PACKAGE name, not the directory name")
+        // now break it, in a fresh process that never records a package name for this dep
+        try """
+        import Foundation
+        public func work0() { try? "s".write(toFile: "/tmp/leak0.txt", atomically: true, encoding: .utf8) }
+        """.write(to: root.appendingPathComponent("libdep-src/Sources/Dep0/D.swift"), atomically: true, encoding: .utf8)
+        try fm.createDirectory(at: root.appendingPathComponent("libdep-src/.candor"), withIntermediateDirectories: true)
+        try "policy ./ci/strict.candor\n"
+            .write(to: root.appendingPathComponent("libdep-src/.candor/config"), atomically: true, encoding: .utf8)
+
+        let r = try scan(bin, root, out: "cold")
+        XCTAssertEqual(r.code, 0)
+        XCTAssertFalse(fm.fileExists(atPath: root.appendingPathComponent("app/.candor/deps/Dep0.json").path),
+                       "the manifest's `name:` is the only source that finds this file — without it the "
+                       + "stale report survives and `43a0eaa`'s false all-clear is back")
+        XCTAssertEqual(try appFns(root, "cold")["use0"]?["invisible"] as? [String], ["Dep0"])
+    }
 }

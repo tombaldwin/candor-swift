@@ -374,8 +374,25 @@ if wantWorkspace {
     // different door. FAIL CLOSED: a report no successful scan produced THIS run is swept, so the
     // package falls back to the κ ledger's `invisible` hedge instead of standing in for an answer
     // nobody computed.
+    //
+    // …AND THE SWEEP MAY ONLY EVER TOUCH A FILE THIS RUN OWNS. `.candor/deps` is a directory the USER
+    // also writes to: SPEC §2 makes it the ordinary place to drop a report for a BINARY dependency, a
+    // hand-produced report, or another engine's report in a polyglot repo. The first version of this
+    // sweep removed every `*.json` no path-dep scan had produced this run, which deletes exactly those
+    // files — unrecoverably, and for a reason that has nothing to do with them. candor's whole contract
+    // is that it does not destroy information; a file it did not write must never be a deletion
+    // candidate, however stale the thing it is standing beside.
+    //
+    // OWNERSHIP IS DERIVED FROM `Package.swift`, not from a marker file. The run already knows the set
+    // of local path deps it is responsible for; a report belongs to it when its name is the report name
+    // of one of those deps. `ownedReportFile` answers that for a dep whose scan FAILED too (which is the
+    // only case that matters, since a success rewrites the file anyway): the package name recorded by an
+    // earlier round, else the dep's own `Package.swift` `name:`, else the directory basename — the same
+    // three sources the writer uses, in the same order. A file matching none of them is disclosed and
+    // left alone.
     var confirmed: Set<String> = []
     var succeededPaths: Set<String> = []
+    var reportNameOf: [String: String] = [:]    // dep path -> the package name its report is filed under
     var failures: [String: String] = [:]        // dep path -> the last reason its scan did not produce one
     func runRounds() {
         let maxRounds = 6
@@ -407,6 +424,7 @@ if wantWorkspace {
                 names.insert(name)
                 succeededPaths.insert(dp)
                 failures.removeValue(forKey: dp)   // it failed on an earlier ROUND and has since converged
+                reportNameOf[dp] = name
                 let safe = name.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "@", with: "_")
                 let file = (depsDir as NSString).appendingPathComponent(safe + ".json")
                 confirmed.insert(file)             // …including when the bytes are unchanged: confirmed ≠ rewritten
@@ -416,19 +434,56 @@ if wantWorkspace {
             if !changed { break }
         }
     }
-    /// Remove every report in the cache that no successful scan produced this run. Returns their names.
-    func sweepStale() -> [String] {
+    /// The report file `--workspace` OWNS for a local path dependency — the one IT writes when that
+    /// dep scans. Three sources in the writer's own order, so the name a failed dep would have been
+    /// filed under is the name it WAS filed under.
+    /// `recorded` is PASSED, not captured. A nested func closing over a top-level `var` that a sibling
+    /// closure also writes is a Swift-6 `sending` diagnostic under whole-module optimization, and it
+    /// surfaces ONLY in the release build — `swift build` and the whole suite are green over the
+    /// capturing form (standing bar item 7c: check the artifact, not the command's exit).
+    func ownedReportFile(_ dp: String, _ recorded: [String: String]) -> String {
+        var name = recorded[dp]
+        if name == nil, let manifest = try? String(contentsOfFile: (dp as NSString).appendingPathComponent("Package.swift"), encoding: .utf8),
+           let pkgRange = manifest.range(of: "Package("),
+           let r = manifest[pkgRange.upperBound...].range(of: #"name:\s*"([^"]+)""#, options: .regularExpression) {
+            let seg = String(manifest[r])
+            if let q1 = seg.firstIndex(of: "\""), let q2 = seg.lastIndex(of: "\""), q1 < q2 {
+                name = String(seg[seg.index(after: q1)..<q2])
+            }
+        }
+        let safe = (name ?? (dp as NSString).lastPathComponent)
+            .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "@", with: "_")
+        return (depsDir as NSString).appendingPathComponent(safe + ".json")
+    }
+    /// Remove the cached report of every local path dep whose scan did NOT succeed this run. Returns
+    /// the file names actually removed.
+    ///
+    /// SCOPED TO WHAT THIS RUN OWNS. The candidates are the discovered path deps, never the directory
+    /// listing: a report the USER put here for a binary dependency, produced by hand, or written by
+    /// another engine is not this run's to delete, and deleting it is unrecoverable. The cost of the
+    /// narrower rule is that a report for a package that USED to be a path dep and no longer is will
+    /// linger — information kept rather than destroyed, and disclosed by `unownedReports` below.
+    func sweepStale(_ recorded: [String: String]) -> [String] {
         var removed: [String] = []
-        for f in ((try? fm.contentsOfDirectory(atPath: depsDir)) ?? []).sorted() where f.hasSuffix(".json") {
-            let full = (depsDir as NSString).appendingPathComponent(f)
-            if confirmed.contains(full) { continue }
+        for dp in depPaths.sorted() where !succeededPaths.contains(dp) {
+            let full = ownedReportFile(dp, recorded)
+            guard fm.fileExists(atPath: full) else { continue }
             try? fm.removeItem(atPath: full)
-            removed.append(f)
+            removed.append((full as NSString).lastPathComponent)
         }
         return removed
     }
+    /// Reports in the cache that this run neither produced nor owns — chained by `loadDepReports` all
+    /// the same. Named on stderr rather than removed: §2.1's staleness check is what decides whether to
+    /// TRUST one, and that is a decision about the report, not about who wrote it.
+    func unownedReports(_ recorded: [String: String]) -> [String] {
+        let owned = Set(depPaths.map { ownedReportFile($0, recorded) })
+        return ((try? fm.contentsOfDirectory(atPath: depsDir)) ?? []).sorted()
+            .filter { $0.hasSuffix(".json") }
+            .filter { !owned.contains((depsDir as NSString).appendingPathComponent($0)) }
+    }
     runRounds()
-    var swept = sweepStale()
+    var swept = sweepStale(reportNameOf)
     if !swept.isEmpty {
         // The children were spawned with CANDOR_DEPS pointing at this same directory, so a sibling that
         // DID scan cleanly may have chained the stale report we have just removed — and its report feeds
@@ -437,7 +492,7 @@ if wantWorkspace {
         // success, so a second sweep can find nothing the first did not.
         confirmed.removeAll()
         runRounds()
-        swept += sweepStale()
+        swept += sweepStale(reportNameOf)
     }
     workspaceDepsDir = depsDir
     let failed = depPaths.filter { !succeededPaths.contains($0) }
@@ -453,9 +508,21 @@ if wantWorkspace {
         }
     }
     if !swept.isEmpty {
+        let uniq = Set(swept).sorted()
         FileHandle.standardError.write(
-            ("candor-swift: --workspace removed \(swept.count) stale report(s) from \(depsDir) that no scan "
-             + "produced this run: \(Set(swept).sorted().joined(separator: ", "))\n").data(using: .utf8)!)
+            ("candor-swift: --workspace removed \(uniq.count) stale report(s) from \(depsDir) — this run "
+             + "owns them (they are the reports it writes for local path deps) and no scan produced them "
+             + "this run: \(uniq.joined(separator: ", "))\n").data(using: .utf8)!)
+    }
+    let unowned = unownedReports(reportNameOf)
+    if !unowned.isEmpty {
+        // A report `--workspace` did not write. It is still CHAINED (§2.1 decides whether to trust it),
+        // and it is NOT swept — a binary dep's report, a hand-produced one, or another engine's report in
+        // a polyglot repo is the user's file and this run has nothing to say about its freshness.
+        FileHandle.standardError.write(
+            ("candor-swift: --workspace found \(unowned.count) report(s) in \(depsDir) it does not produce "
+             + "(no local path dep is filed under that name) — chained, and LEFT IN PLACE; their freshness "
+             + "is §2.1's call, not the sweep's: \(unowned.joined(separator: ", "))\n").data(using: .utf8)!)
     }
     let tail = names.isEmpty
         ? (depPaths.isEmpty ? " (no local path deps found)" : " (every local path dep failed to scan — see above)")

@@ -9,6 +9,30 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### data loss — `--workspace`'s cache sweep deleted reports the user put there (2026-07-27)
+
+**`--workspace` removed every `*.json` in `<root>/.candor/deps` that its own path-dependency scans had
+not produced this run** (`main.swift`) — including a report the USER placed there, which SPEC §2 makes
+the ordinary way to chain a BINARY dependency, a hand-produced report, or another engine's report in a
+polyglot repo. Unrecoverable, and unrelated to the stale path-dep report the sweep was aimed at. Not an
+analysis defect at all, which is why it is stated on its own: candor's contract is that it does not
+destroy information, and a file the user chose to put there is information.
+
+The sweep exists for a real reason (`43a0eaa` — a stale child report standing in for a failed rescan is
+a ⟨0.21⟩ false all-clear), so the fix distinguishes reports the run OWNS from reports it merely FOUND,
+rather than sweeping less. Ownership is DERIVED from `Package.swift` and needs no marker file: the
+candidates are the discovered local path deps, and a failed dep's report file is found by the package
+name an earlier round recorded, else its own manifest's `name:`, else the directory basename — the same
+three sources, in the same order, that the writer uses. Anything else in the directory is **named on
+stderr and left in place**; whether to trust it is §2.1's staleness call, not the sweep's. Residual,
+stated rather than hidden: a report for a package that USED to be a path dep and no longer is now
+lingers — information kept rather than destroyed, and disclosed.
+
+Two guards, two mutants, each failing its named test and only it. The manifest-name row uses a dep
+whose DIRECTORY name differs from its package name, because with `Dep0/` holding package `Dep0` the
+basename fallback answers correctly too and the branch under test could be deleted with the row still
+green.
+
 ### soundness — a fifth name-keyed map a rebind never invalidated, and this one edges to a BODY (2026-07-27)
 
 ⚠ **`fnValueAlias` outlived the binding that set it** (`CallCollector.swift`). It maps an inferred
