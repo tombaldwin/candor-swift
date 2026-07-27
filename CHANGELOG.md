@@ -9,6 +9,39 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### added — ⟨0.24⟩ `ambiguous:` is a fifth §4 kind: candor-swift already conformed; the controls did not exist (2026-07-27)
+
+SPEC §4's `unknownWhy` kind set gains **`ambiguous:`** — name resolution was ambiguous, so no owner could
+be formed at all. §4 ⟨0.24⟩ warns that an engine holds this vocabulary **twice** (a prefix/string
+classifier feeding §6.2's class table, and a typed/structural one) and that when §4 goes stale the string
+half stays right while the typed half does not — measured on the reference JVM engine, where one token
+classified `dispatch` on the string path and `unresolved` on the typed path, silently.
+
+**candor-swift holds it ONCE.** `reasonClass(_:)` (Policy.swift) is the only representation: an
+`unknownWhy` token is a raw `String` from its emission site to the JSON writer, with no `Kind` enum, no
+union, no accepted-prefix set and no validator anywhere in `Sources/`. Its `dispatch` arm has covered
+`ambiguous` since the ⟨0.19⟩ reason-scoped rung. So the JVM failure mode is structurally unreachable here
+and **nothing in production changed** — no report byte, no gate verdict. `dep:<hash>`/`dep-stale:<pkg>`,
+which §4 ⟨0.24⟩ registers as permanent kinds rather than migration ones, sit in no migration bucket
+either: this repo has none, and they project to `unresolved` exactly as the spec prescribes. The two
+places the kind set could have drifted in prose — `AGENTS.md` and `README.md` — never restate it; they
+give two examples of a reason, which is not a set.
+
+**What was missing is the control §4 ⟨0.24⟩ asks for**, and its absence is the whole point of the clause:
+without it, "added a fifth kind" and "stopped checking the kind set" are the same diff. Added at both
+levels, over the path this engine can actually meet the kind on — it EMITS no `ambiguous:` (its producers
+are `dispatch:`, `callback:`, `dynamicMemberLookup:`, `contentsOf:` and the `dep:` pointers) but it
+**RELAYS** one, since `loadDepIndex` carries a dependency's own tokens across the join. A fabricated
+`banana:whatever` and a relayed `ambiguous:go` are driven through `scan --policy` and `unverified
+--class`, the two verbs whose class sets are accumulated by two independent code paths
+(`Gate.buildGateInput`, `Fix.reasonClassesTransitive`) — the divergence shape §4 describes.
+
+Mutation-verified with four mutations, each caught by a **different** arm: the blanket catch-all →
+`dispatch` fails both controls; dropping the `ambiguous` prefix fails the gate and both class paths;
+recognising the token SHAPE (`contains(":")`) instead of the SET leaves every gate arm of the
+`ambiguous:` test green and is caught only by the fabricated kind; and normalising the relayed token to
+its class is caught only by the round-trip arms.
+
 ### added — ⟨0.24⟩ `gate --report`: the gate as a function of a GIVEN signature (2026-07-27)
 
     candor-swift gate --report <locator> --policy <file> [--json] [--gate-json <f>]

@@ -138,9 +138,18 @@ final class PolicyTests: XCTestCase {
         // Measured on the fixture that emits it: `deny Unknown[dispatch]` exits 1, `deny Unknown[indirect]`
         // exits 0 — so the classification below is the one the gate acts on.
         XCTAssertEqual(reasonClass("dispatch:untyped cross-package receiver"), "dispatch")
+        // SPEC §4 ⟨0.24⟩: `ambiguous:` is the FIFTH kind — the analyser's own name resolution was
+        // ambiguous, so no owner could be formed at all. §6.2's table projects it to `dispatch`, and
+        // that projection is the one a `deny E Unknown[dispatch]` gate acts on.
         XCTAssertEqual(reasonClass("ambiguous:same-name"), "dispatch")
         XCTAssertEqual(reasonClass("unresolved"), "unresolved")
         XCTAssertEqual(reasonClass("some-new-token"), "unresolved")   // conservative catch-all
+        // THE OFF-VOCABULARY CONTROL (SPEC §4 ⟨0.24⟩ names this test). A fabricated kind in the
+        // `kind:detail` SHAPE — the shape the five kinds share, so a classifier that stopped checking
+        // the kind SET and merely recognised the shape would pass every assertion above and fail here.
+        // §2 forward-compatibility: it goes through the conservative catch-all, never a guessed class.
+        // Without it, "added a fifth kind" and "stopped checking the kind set" are the same diff.
+        XCTAssertEqual(reasonClass("banana:whatever"), "unresolved")
     }
 
     func testDenyDuplicateEffectTokensDedupToASet() {
