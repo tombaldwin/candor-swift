@@ -288,7 +288,28 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
         // `incompletePkgs`). STALENESS IS CHECKED FIRST: a report this engine does not trust cannot be
         // trusted about its own completeness, so its `unanalyzed` claim buys it nothing beyond the
         // downgrade it already has.
-        let incomplete = !stale && !(((obj?["unanalyzed"] as? [Any]) ?? []).isEmpty)
+        // A MALFORMED MANIFEST HAS NOT MADE A COMPLETENESS CLAIM, so it must not be read as one. The
+        // previous spelling — `(obj?["unanalyzed"] as? [Any]) ?? []` — made a FAILED CAST indistinguishable
+        // from an ABSENT key: `"unanalyzed": "oops"`, `{}` or `null` all collapsed to the empty array and
+        // the report was read COMPLETE, buying it full coverage. That is the door the well-formed case
+        // closes, reopened by a garbled one. candor-java fails closed here and candor-rust adopted that
+        // reading (`dbab8be`); candor-ts fixed the same fail-open in `26a89fc`; this is the last engine.
+        //
+        // The three cases are genuinely different and only two of them are complete:
+        //   key ABSENT                  -> complete (the overwhelming case: nothing to declare)
+        //   key present, EMPTY array    -> complete (an explicit "I analysed everything")
+        //   anything else               -> INCOMPLETE, including a non-array, because a report that
+        //                                  garbles its own completeness claim has not made one.
+        // Conflating the first two with the third is the fail-open; conflating ABSENT with INCOMPLETE is
+        // the opposite error and withholds coverage from every report that simply has nothing to declare —
+        // candor-java measured that mistake at 7 failing tests, candor-ts at 15.
+        let incomplete: Bool = {
+            guard !stale else { return false }          // staleness is decided first, as above
+            guard let raw = obj?["unanalyzed"] else { return false }   // absent: nothing declared
+            if raw is NSNull { return true }                            // present-but-null: garbled
+            guard let arr = raw as? [Any] else { return true }          // present, not an array: garbled
+            return !arr.isEmpty
+        }()
         func register(_ pkg: String) {
             if stale { idx.stalePkgs.insert(pkg) }
             else if incomplete { idx.incompletePkgs.insert(pkg) }

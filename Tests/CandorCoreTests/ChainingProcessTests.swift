@@ -645,6 +645,56 @@ final class ChainingProcessTests: XCTestCase {
         }
     }
 
+    /// A MALFORMED manifest has not made a completeness claim, so it must not be read as one.
+    ///
+    /// `(obj?["unanalyzed"] as? [Any]) ?? []` made a FAILED CAST indistinguishable from an ABSENT key, so
+    /// `"oops"`, `{}` and `null` all collapsed to the empty array and the report was read COMPLETE —
+    /// buying it full coverage, which is the door the well-formed case closes, reopened by a garbled one.
+    /// Found by the candor-rust pass while porting this shape (it reported ts and swift both failing open);
+    /// candor-java fails closed, candor-rust adopted that reading, candor-ts fixed its half in `26a89fc`.
+    ///
+    /// BOTH DIRECTIONS ARE IN THIS ONE TEST DELIBERATELY. Reading ABSENT as incomplete is the opposite
+    /// error and withholds coverage from every report with nothing to declare — java measured that mistake
+    /// at 7 failing tests, ts at 15 — so the absent/empty rows are as load-bearing as the malformed ones.
+    func testAMalformedUnanalyzedManifestGrantsNoCoverage() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture(extraApp: """
+        public func goUnlisted() {
+            brandNewApi()
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+
+        // (shape, expectComplete) — the two that ARE claims, and the three that only look like one.
+        let cases: [(String, Any?, Bool)] = [
+            ("absent",  nil,             true),
+            ("empty",   [] as [Any],     true),
+            ("string",  "oops",          false),
+            ("object",  [:] as [String: Any], false),
+            ("null",    NSNull(),        false),
+        ]
+        for (name, value, expectComplete) in cases {
+            let variant = root.appendingPathComponent("dep-\(name).json")
+            try doctor(depReport, to: variant) { d in
+                if let v = value { d["unanalyzed"] = v } else { d.removeValue(forKey: "unanalyzed") }
+            }
+            let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-\(name)").path],
+                            env: ["CANDOR_DEPS": variant.path])
+            XCTAssertEqual(r.code, 0, "\(name): scan failed")
+            let by = try fns(ofReport: root.appendingPathComponent("app-\(name).App.Swift.json"))
+            if expectComplete {
+                XCTAssertNil(by["goUnlisted"]?["invisible"],
+                             "\(name): a report that made no incompleteness claim must still grant coverage — "
+                             + "withholding it here floods every report that has nothing to declare")
+            } else {
+                XCTAssertEqual(by["goUnlisted"]?["invisible"] as? [String], ["RatesDep"],
+                               "\(name): a report that GARBLED its completeness claim has not made one, and "
+                               + "its silence must not buy coverage")
+            }
+        }
+    }
+
     /// THE SECOND FIXTURE, WRITTEN FIRST. A COMPLETE report must still grant coverage, or the change is
     /// indistinguishable from "chained coverage no longer exists" and re-opens the κ-hedge flood §2 rule
     /// 3 exists to close. `testFreshDepStillMakesSilenceAPurityClaim` above is the same control on the
