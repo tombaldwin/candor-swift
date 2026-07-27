@@ -9,6 +9,63 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### ⚠ soundness — the five-shape cross-engine sweep (2026-07-27)
+
+Five defect shapes confirmed in one engine each the day before, swept here. Three were PRESENT, one
+ABSENT with the line that prevents it named, and one — swift's own — was VERIFIED holding and then
+found leaking through two maps its verification did not cover. Every fix carries both fixtures (the
+case that must now work AND the case that must still work), every guard was mutated out with its
+named failing test recorded, and every arm's binary was kept by content hash.
+
+**⚠ An untrusted chained report no longer grants COVERAGE.** §2 rule 3 turns a report's silence into a
+purity claim and §2.1 says a report from another engine build is not ours to repeat; the loader did
+both at once, so the keys a stale report CARRIED read `Unknown` (right) while every key it did not
+contain read PURE. A stale report is now CHAINED but not COVERED — the split matters in both
+directions, since gating the join on coverage too would take rule 2's downgrade with it (four named
+tests). Measured live: with console-kit's six dependency reports marked as another build, 29 functions
+gain an `invisible` hedge and 18 that were absent from the report entirely come back, 0 effect losses.
+
+**⚠ The report differed from itself under `CANDOR_WORKSPACE_CHAIN`.** Protocol-CHA union entries were
+appended from two DICTIONARY iterations, so five runs of one binary over Alamofire gave five report
+hashes carrying the same 879 entries in five orders. Sorted at the point of emission; content
+bit-identical.
+
+**⚠ `--workspace` kept a previous run's report when this run's scan of that dependency FAILED.** The
+child's stderr went to `/dev/null` and the skip was silent, so `.candor/deps/` handed the analysis a
+stale answer and §2 rule 3 made its silence a purity claim — a warm run and a cold run of identical
+source disagreeing, one reading `invisible: ['DepLib']` and the other absent from `functions`. Reports
+no successful scan produced are now swept, the failure is disclosed with the child's own reason, and
+the fixpoint re-runs once so a sibling that chained the removed report is re-derived without it.
+
+**⚠ The reason-scoped gate was inert twice over.** `reasonClass` tested `dynamicMemberLookup` for
+EQUALITY while the engine emits `kind:detail`, so `Unknown[reflect]` was silently unsatisfiable even
+single-tree; and a chained dependency's Unknown arrived carrying only `dep:<hash>`, so the class was
+lost at the first hop. Both fixed with no format rung — the dependency's report already carries
+`unknownWhy`. Over a three-package chain `deny Unknown[reflect]` now bites single-tree, one hop and two
+hops alike, while `[native]` bites in none of them and `[unresolved]` no longer fires on a classified
+hole.
+
+**⚠ Two name-keyed maps a binder never invalidated, both fabricating.** `protoTyped` charged a local
+protocol's conformers to a call on a loop binder that shadowed the protocol-typed parameter;
+`localConstStrings` attributed a literal host to a `dataTask` whose address is a runtime value. Each
+measured with the rename control that separates a leaked flag from an untyped binder. The obvious
+placement cost Alamofire's `URLRequest.init` its disclosed `Unknown` — SwiftSyntax walks a binding's
+pattern before its initializer, and that function is `let url = try url.asURL()` — so the clear lives
+where a binder cannot type the new binding, plus one line guarded on the initializer not mentioning
+the name.
+
+**The `unresolved` marker does NOT fail open here** (candor-ts `e66f29e` swept): it is DERIVED from the
+effect set at the single writer, and over 12 004 real entries — 10 539 carrying `Unknown` — 0 fail the
+marker and 0 carry a direct `Unknown` without an `unknownWhy`. The dead parallel `unresolvedSet`, whose
+only possible future was to disagree with that line, was removed and the invariant pinned by tests.
+
+**Half 1's provenance conjunct no longer fires on the enclosing type's own methods.** Instrumented over
+14 targets it bound 289 locals — led by `rootOf`, `classifyItems`, `createFunction`, all enclosing-type
+methods, then `sin`/`cos`/`atan2`/`sqrt` — and not one was a dependency factory. Now 123. The exclusion
+is scoped to the enclosing type and its local supertypes, never a flat leaf set, because widening it
+drops a genuine disclosure.
+
+
 ### ⚠ soundness — three defects in the erasure/typeSurface gates, found by adversarial review
 
 Three fixes, each with its own two-direction fixtures and each guard verified by mutating it out and
