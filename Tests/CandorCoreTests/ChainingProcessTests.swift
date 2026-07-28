@@ -1105,10 +1105,23 @@ final class ChainingProcessTests: XCTestCase {
         XCTAssertNil(out[false]?["go"], "count n>0 -> covered, believed all-pure")
     }
 
-    /// The manifest is only a claim when it IS one. Five spellings, and the two anti-flood rows matter as
-    /// much as the three fail-closed ones: reading a pre-⟨0.21⟩ producer's ABSENT manifest as "judged
-    /// nothing" would withdraw coverage from every report that predates the rung — the `unanalyzed`
-    /// absent/garbled mistake in a new costume (java measured that one at 7 failing tests, ts at 15).
+    /// The manifest is only a claim when it IS one. The anti-flood rows matter as much as the fail-closed
+    /// ones: reading a pre-⟨0.21⟩ producer's ABSENT manifest as "judged nothing" would withdraw coverage
+    /// from every report that predates the rung — the `unanalyzed` absent/garbled mistake in a new costume
+    /// (java measured that one at 7 failing tests, ts at 15).
+    ///
+    /// ⟨0.24⟩ **THE `bool_true` ROW IS THE ONE THAT WAS LIVE, AND SPEC §2 NAMES THIS ENGINE FOR IT.**
+    /// Foundation bridges a JSON `true` to `__NSCFBoolean`, and `__NSCFBoolean as? Int` SUCCEEDS with `1` —
+    /// so `analyzed: {count: true}` read as JUDGED and granted full coverage **byte-identically to
+    /// `count: 2`**, and `goUnlisted` then dropped out of `functions` entirely: a ⟨0.21⟩ positive purity
+    /// claim licensed by a manifest that made no readable claim at all. MEASURED before the fix, one
+    /// integer's worth of difference between this row and `count_two` producing zero difference in output.
+    /// The other three engines fail closed here only because their JSON readers are stricter, not because
+    /// anyone tested it — which is why the row is in the table rather than in a note.
+    ///
+    /// `float_integral` is the anti-flood control for the numeric half: `2.0` is a legitimate JSON
+    /// spelling of 2 and must still be believed, so the rejection is of NON-INTEGRAL values, not of the
+    /// double representation.
     func testAnAbsentOrGarbledAnalyzedManifestIsReadAsAClaimOnlyWhenItIsOne() throws {
         let bin = try binaryURL()
         let (root, dep, app) = try makeChainFixture(extraApp: """
@@ -1128,6 +1141,15 @@ final class ChainingProcessTests: XCTestCase {
             ("string",        .some("oops"),                                       true,  false),
             ("no_count",      .some([:] as [String: Any]),                         true,  false),
             ("null",          .some(NSNull()),                                     true,  false),
+            // ⟨0.24⟩ A BOOLEAN IS NOT AN INTEGER — the live one. `as? Int` on `__NSCFBoolean` yields 1.
+            ("bool_true",     .some(["count": true, "digest": "x"] as [String: Any]),  false, false),
+            ("bool_false",    .some(["count": false, "digest": "x"] as [String: Any]), false, false),
+            // …nor is a fraction, nor a negative count. All three "no readable claim" (SPEC §2 ⟨0.24⟩).
+            ("fractional",    .some(["count": 2.5, "digest": "x"] as [String: Any]),   true,  false),
+            ("negative",      .some(["count": -1, "digest": "x"] as [String: Any]),    true,  false),
+            ("count_string",  .some(["count": "2", "digest": "x"] as [String: Any]),   true,  false),
+            // …but `2.0` IS 2. The anti-flood control for the numeric half.
+            ("float_integral", .some(["count": 2.0, "digest": "x"] as [String: Any]),  false, true),
         ]
         for (name, value, keepEntries, expectCovered) in cases {
             let variant = root.appendingPathComponent("dep-a-\(name).json")

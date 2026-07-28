@@ -9,6 +9,33 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed ⚠ — ⟨0.24⟩ `analyzed: {count: true}` read as JUDGED — a BOOLEAN is not an integer (2026-07-28)
+
+SPEC §2 ⟨0.24⟩ names this engine for it. Foundation bridges a JSON `true` to `__NSCFBoolean`, and
+`__NSCFBoolean as? Int` **succeeds with `1`** — so the manifest reader took `{count: true}` for "one unit
+judged" and granted the package **full coverage, byte-identically to `count: 2`**. The caller into that
+package then dropped out of `functions` entirely: a ⟨0.21⟩ **positive purity claim licensed by a manifest
+that made no readable claim at all** — the fabrication mirror of the rung directly below, arriving through
+a language's type bridge rather than through a logic error.
+
+Measured on the two-tree fixture (dep report doctored to `functions: []`, app calls an API the dep never
+listed), one row against its own control:
+
+    count: 2                     goUnlisted -> ABSENT from `functions`   (correct: an all-pure claim)
+    count: true   pre            goUnlisted -> ABSENT from `functions`   <- indistinguishable
+    count: true   post           goUnlisted -> invisible: ['RatesDep']   + κ ledger + advisory
+
+The rejection is made **before** the integer cast and on the number's own type tag (`objCType == "c"`,
+which is the boolean spelling on Darwin Foundation *and* swift-corelibs-foundation), because no test on
+the *value* could separate them — `count: 1` and `count: true` are the same number. `count` must be a
+**non-negative integer**: a boolean, a fraction (`2.5`), a negative, a string or a missing `count` are all
+**present-but-unreadable**, which is not a claim, so coverage is withheld. `2.0` is a legitimate JSON
+spelling of `2` and is still believed — the anti-flood control for the numeric half.
+
+The predicate is now **one function** (`claimsToHaveJudgedNothing`) shared by the chained-dep route and
+`gate --report`, so the two cannot drift into two readings of one integer. Seven new rows in the shape
+table, the boolean one verified to fail before the fix.
+
 ### fixed ⚠ — ⟨0.24⟩ a chained report that JUDGED NOTHING no longer reads as an all-clear (2026-07-28)
 
 SPEC §2's three-row table. A chained dependency report carrying `functions: []` **and**

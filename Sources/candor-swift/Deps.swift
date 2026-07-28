@@ -282,6 +282,55 @@ struct DepIndex {
     }
 }
 
+/// ⟨0.24⟩ **DOES THIS REPORT SAY IT JUDGED NOTHING?** SPEC §2's three-row table plus the two fail-closed
+/// rows it implies. ONE rule, TWO routes: `loadDepReports` asks it of every CHAINED dep report (where the
+/// answer decides COVERAGE — see `DepIndex.unjudgedPkgs`) and `gate --report` asks it of the report it was
+/// handed DIRECTLY, because SPEC §3.1 ⟨0.24⟩ puts the obligation on the READING, not on the route the
+/// report arrived by. It lives here so the two can never drift into two readings of one integer.
+///
+/// `analyzed` is the raw `analyzed` value off the wire (`nil` for an ABSENT key — NOT for a `null`, which
+/// is `NSNull` and a garbled manifest); `entryCount` is the report's `functions` length, consulted ONLY on
+/// the manifest-absent row.
+///
+///   · `analyzed` ABSENT → a pre-⟨0.21⟩ producer with no manifest: judged-nothing IFF it listed no
+///     entries. One that LISTS functions demonstrably judged units and said so the only way it could, so
+///     it keeps the standing it always had. Reading THIS row as judged-nothing would withdraw coverage
+///     from every report predating the rung (java measured that mistake at 7 failing tests, ts at 15).
+///   · `count` a non-negative INTEGER > 0 → judged n units. UNCHANGED, including `n > 0` with
+///     `functions: []`, which is the legitimate all-pure claim §2 rule 3 requires a consumer to BELIEVE.
+///     That row is the CONTROL: a change that hedged it would have disabled chained coverage, not fixed it.
+///   · `count == 0` → judged nothing.
+///   · anything else — `analyzed: "oops"` / `{}` / `null`, a missing, non-numeric, NEGATIVE, NON-INTEGRAL
+///     or BOOLEAN `count` → **present but UNREADABLE**, which is not a claim: FAIL CLOSED, withhold
+///     coverage. A denylist of proven-safe shapes, never an allowlist of rejected ones.
+///
+/// **A BOOLEAN IS NOT AN INTEGER, AND THIS ONE WAS LIVE** (SPEC §2 ⟨0.24⟩ names this engine). Foundation
+/// bridges a JSON `true` to `__NSCFBoolean`, and `__NSCFBoolean as? Int` SUCCEEDS with `1` — so
+/// `analyzed: {count: true}` read as JUDGED and granted full coverage byte-identically to `count: 2`, and
+/// the caller then dropped out of `functions`: a ⟨0.21⟩ positive purity claim licensed by a manifest that
+/// made no readable claim at all. That is the fabrication mirror this rung exists to close, arriving
+/// through a language's type bridge rather than through a logic error. The other three engines fail
+/// closed here only because their JSON readers are stricter, not because anyone tested it — so the
+/// boolean row is now in the shape table (`testAnAbsentOrGarbledAnalyzedManifestIsReadAsAClaimOnlyWhenItIsOne`).
+///
+/// The rejection is made BEFORE the integer cast, on the number's OWN type tag rather than on its value:
+/// `objCType` is `"c"` for a boolean on BOTH Darwin Foundation and swift-corelibs-foundation (`Bool` is
+/// stored as `kCFNumberCharType`), while a JSON integer is `"q"`/`"l"`/`"i"` and a JSON float `"d"`. A
+/// value test could not do it — `count: 1` and `count: true` are the same number.
+func claimsToHaveJudgedNothing(analyzed: Any?, entryCount: Int) -> Bool {
+    guard let analyzed else { return entryCount == 0 }        // ABSENT: entries are the pre-⟨0.21⟩ claim
+    guard let m = analyzed as? [String: Any] else { return true }          // "oops" / null / a list
+    guard let n = m["count"] as? NSNumber else { return true }             // absent or non-numeric `count`
+    // BOOLEAN, rejected before the integer cast. Also rejects a genuine 8-bit integer, which no JSON
+    // reader in this family produces for a `count` — and rejecting one would only WITHHOLD coverage,
+    // which is the direction to be wrong in.
+    let tag = String(cString: n.objCType)
+    if tag == "c" || tag == "C" || tag == "B" { return true }
+    let d = n.doubleValue
+    guard d.isFinite, d >= 0, d == d.rounded() else { return true }        // negative / NaN / non-integral
+    return d == 0
+}
+
 private func depsFail(_ msg: String) -> Never {
     FileHandle.standardError.write("candor-swift: \(msg) — failing (exit 2), a configured dep must not silently read pure\n".data(using: .utf8)!)
     exit(2)
@@ -388,14 +437,12 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
         // from every report predating the rung, which is the `unanalyzed` absent/garbled mistake in a new
         // costume (java measured that one at 7 failing tests, ts at 15).
         //
-        // A manifest that is present but GARBLED (`analyzed: "oops"`, a `count` that is not a number)
-        // has not made a completeness claim, so it must not be read as one — the same fail-closed reading
-        // the `unanalyzed` cast above takes, and for the same reason.
-        let judged: Bool = {
-            guard let raw = obj?["analyzed"] else { return !fns.isEmpty }   // pre-⟨0.21⟩: entries are the claim
-            guard let m = raw as? [String: Any], let c = m["count"] as? Int else { return false }
-            return c > 0
-        }()
+        // A manifest that is present but GARBLED (`analyzed: "oops"`, a `count` that is not a number, a
+        // BOOLEAN `count`) has not made a completeness claim, so it must not be read as one — the same
+        // fail-closed reading the `unanalyzed` cast above takes, and for the same reason. The predicate is
+        // SHARED with `gate --report` (`claimsToHaveJudgedNothing` above), so the chained route and the
+        // direct route cannot drift into two readings of one integer.
+        let judged = !claimsToHaveJudgedNothing(analyzed: obj?["analyzed"], entryCount: fns.count)
         func register(_ pkg: String) {
             if stale { idx.stalePkgs.insert(pkg) }
             else if incomplete { idx.incompletePkgs.insert(pkg) }
