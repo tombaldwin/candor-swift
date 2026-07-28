@@ -73,6 +73,41 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
     }
 }
 
+/// ⟨0.24⟩ THE REFUSAL DOCUMENT (SPEC §3.1) — what `--gate-json` gets when the gate REFUSES.
+///
+/// **THE STALE-VERDICT HAZARD.** A refusal used to write nothing at all, so the canonical CI wrapper
+/// (`candor-swift gate … --gate-json v.json || true` then `jq .ok v.json`) re-read **the PREVIOUS run's
+/// document as current** — a green file from yesterday's clean run, still on disk, is how a refusal
+/// becomes an all-clear. Deleting the path is not the fix either: a consumer that treats a missing file
+/// as "nothing to report" fails open by a different route. The only safe answer is a document whose
+/// NAIVE read is the fail-closed one, because the naive read is the one that ships.
+///
+/// `ok: false` so a consumer keying only on `ok` lands on FAIL; `refused: true` + `reason` so one keying
+/// on `refused` learns why. **NO `violations` KEY, and that absence is load-bearing**: the gate is making
+/// no claim about violations here, and `[]` is precisely the claim it cannot make — every consumer in
+/// existence reads an empty array as "we looked and found none". ABSENT, not empty.
+///
+/// A failure to WRITE is not escalated: the exit is already 2 and already fail-closed, and a second exit
+/// code would be a lie about which refusal happened. It is disclosed on stderr naming the stale-read
+/// consequence, because that is the one thing the operator can act on.
+func writeGateRefusal(_ reason: String, to path: String, spec: String) {
+    let dict: [String: Any] = ["spec": spec, "ok": false, "refused": true, "reason": reason]
+    guard let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys]),
+          let text = String(data: data, encoding: .utf8) else {
+        FileHandle.standardError.write("candor-swift: could not serialize the refusal document\n".data(using: .utf8)!)
+        return
+    }
+    if path == "-" { print(text); return }
+    do {
+        try Data(text.utf8).write(to: URL(fileURLWithPath: path), options: .atomic)
+    } catch {
+        FileHandle.standardError.write(
+            ("candor-swift: could not write the refusal document to --gate-json \(path): "
+             + "\(error.localizedDescription) — a consumer reading that path will see the PREVIOUS run's "
+             + "verdict, which is stale. Delete it, or treat exit 2 as a failure.\n").data(using: .utf8)!)
+    }
+}
+
 /// ⟨0.24⟩ THE GATE'S INPUT — the seam between "what produced the signature" and "what §6.2 does with it".
 /// Every field is ALREADY ACCUMULATED (transitive): the gate runs no fixpoint and reads no scan state, so
 /// the same matching code serves both routes in.

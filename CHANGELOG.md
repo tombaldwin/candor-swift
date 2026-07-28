@@ -9,6 +9,24 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed ⚠ — ⟨0.24⟩ a refusal wrote NO `--gate-json` document, so CI re-read yesterday's green (2026-07-28)
+
+SPEC §3.1 ⟨0.24⟩ (candor-spec `107755b`). The canonical CI wrapper is
+`candor-swift gate … --gate-json v.json || true` then `jq .ok v.json`. Seed `v.json` with a green document
+from a previous clean run, then refuse:
+
+    before   exit 2, v.json UNTOUCHED — `jq .ok` returns the stale `true`
+    after    v.json = {spec, ok:false, refused:true, reason:"…"} — `jq .ok` returns false
+
+Deleting the path is not the fix: a consumer that treats a missing file as "nothing to report" fails open
+by a different route. The naive read of a document this format emits has to be the safe one, because the
+naive read is the one that ships. The document carries **no `violations` key**, and that absence is the
+load-bearing part — the gate is making no claim about violations, and `[]` is precisely the claim it
+cannot make. All three answerability refusals (`forbid`, `allow`, a scoped `deny` whose scoping datum is
+absent) take it, on `--gate-json <path>` and on `--json`. A broken gate CONFIG or a report that never
+loaded AS one still writes nothing (§3.3 cause (a)) — there the input to the verdict is unreadable, so
+even `refused: true` would attribute a refusal to a policy nobody could parse.
+
 ### fixed ⚠ — ⟨0.24⟩ a refusal standing beside a FIRING rule DELETED the certain violation (2026-07-28)
 
 SPEC §3.1 ⟨0.24⟩ (candor-spec `7271c69`), which corrects its own ruling of an hour earlier. The

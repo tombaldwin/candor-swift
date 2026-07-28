@@ -22,6 +22,28 @@ private func gateDie(_ msg: String) -> Never {
     exit(2)
 }
 
+/// ⟨0.24⟩ REFUSE: print the reason, WRITE the refusal document `--gate-json` was promised, exit 2
+/// (SPEC §3.1). See `writeGateRefusal` (Gate.swift) for the stale-verdict hazard this closes and for why
+/// the document carries no `violations` key.
+///
+/// **SCOPED TO THE ANSWERABILITY REFUSALS**, which is what the ⟨0.24⟩ measurement was about: the policy
+/// LOADED and the report LOADED, and the gate cannot answer the question over THIS report
+/// (`forbid`/`allow` whole-policy; a scoped `deny` whose scoping datum is absent). The OTHER exit-2
+/// cause — a gate CONFIG that is broken, or a report that never loaded AS one — keeps writing nothing,
+/// per §3.3's cause (a) and the rows already pinned here (`testCorruptReportIsRefusedNotReadAsEmpty`,
+/// `testUnreadablePolicyAndMissingPolicyBothExit2`): there the INPUT to the verdict is unreadable, so
+/// even `refused: true` would be attributing a refusal to a policy or a report nobody could parse. The
+/// stale-path hazard is identical for that bucket and the two rulings are in tension — recorded for Tom
+/// rather than resolved unilaterally, because the change would move a rule pinned four-way.
+private func gateRefuse(_ reason: String, wantJson: Bool, gateJsonPath: String?) -> Never {
+    FileHandle.standardError.write("candor-swift gate: \(reason)\n".data(using: .utf8)!)
+    var targets: [String] = []
+    if wantJson { targets.append("-") }
+    if let p = gateJsonPath, !(wantJson && p == "-") { targets.append(p) }
+    for t in targets { writeGateRefusal(reason, to: t, spec: specVersion) }
+    exit(2)
+}
+
 // ── the report, read as data ─────────────────────────────────────────────────────────────────────────
 
 /// One §2 report entry, as far as the ⟨0.24⟩ gate is concerned. Every field is read VERBATIM off the
@@ -434,20 +456,22 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // THE POLICY-LEVEL REFUSALS. Whole-policy, not per-rule: enforcing the answerable half and exiting 0
     // is gateless-green — the user believes a rule is enforced that never ran.
     if !pol.forbid.isEmpty {
-        gateDie("candor-swift gate: this policy has \(pol.forbid.count) `forbid` rule(s), which "
-                + "`gate --report` cannot evaluate — a report carries an entry only for a function with an "
-                + "EFFECT, so a wholly pure unit has no entry and no edges at all, while `forbid` matches "
-                + "on NAME. The rule would read green over a crossing a scan fails on. Gate layering at "
-                + "scan time: candor-swift <dir> --policy \(policyPath)")
+        gateRefuse("this policy has \(pol.forbid.count) `forbid` rule(s), which "
+                   + "`gate --report` cannot evaluate — a report carries an entry only for a function with an "
+                   + "EFFECT, so a wholly pure unit has no entry and no edges at all, while `forbid` matches "
+                   + "on NAME. The rule would read green over a crossing a scan fails on. Gate layering at "
+                   + "scan time: candor-swift <dir> --policy \(policyPath)",
+                   wantJson: wantJson, gateJsonPath: gateJsonPath)
     }
     if !pol.allow.isEmpty {
         let effects = Set(pol.allow.map { $0.effect }).sorted()
-        gateDie("candor-swift gate: this policy has `allow \(effects.joined(separator: "`/`"))` rule(s), "
-                + "which `gate --report` cannot evaluate — the AS-EFF-008 surface-completeness marker does "
-                + "not ride the report wire, so a benign visible literal beside a runtime-computed endpoint "
-                + "would be CERTIFIED here and flagged by a scan. (`netClass: unknown-host` is NOT that "
-                + "marker — it also names a merely unrecognised host.) Gate allowlists at scan time: "
-                + "candor-swift <dir> --policy \(policyPath)")
+        gateRefuse("this policy has `allow \(effects.joined(separator: "`/`"))` rule(s), "
+                   + "which `gate --report` cannot evaluate — the AS-EFF-008 surface-completeness marker does "
+                   + "not ride the report wire, so a benign visible literal beside a runtime-computed endpoint "
+                   + "would be CERTIFIED here and flagged by a scan. (`netClass: unknown-host` is NOT that "
+                   + "marker — it also names a merely unrecognised host.) Gate allowlists at scan time: "
+                   + "candor-swift <dir> --policy \(policyPath)",
+                   wantJson: wantJson, gateJsonPath: gateJsonPath)
     }
 
     let locator = reportFlag.map(resolveReportLocator) ?? discoverReportPrefix()
@@ -517,8 +541,8 @@ func runGateReportCLI(_ args: [String]) -> Never {
     let violations = evaluateGate(pol, gi)
     if violations.isEmpty, !refused.isEmpty {
         // SOLE refusal: nothing certain to report, so the gate genuinely could not be evaluated as
-        // written. Unchanged behaviour — exit 2, and (⟨0.24⟩, below) the refusal document.
-        for why in refused { FileHandle.standardError.write("candor-swift gate: \(why)\n".data(using: .utf8)!) }
+        // written. Exit 2 — and ⟨0.24⟩ the refusal DOCUMENT, so a CI wrapper reading `--gate-json`
+        // unconditionally cannot re-read the previous run's green verdict as today's.
         if !env.unanalyzed.isEmpty {
             // Refusal (2) outranks incomplete (2) — the same exit, and the refusal is the reason no
             // verdict exists. The manifest still gets said, on the human channel.
@@ -526,7 +550,9 @@ func runGateReportCLI(_ args: [String]) -> Never {
                 ("candor-swift gate: (the report ALSO declares \(env.unanalyzed.count) unanalyzed unit(s) — "
                  + "that alone would have been exit 2)\n").data(using: .utf8)!)
         }
-        exit(2)
+        // Every unanswerable rule, joined — the message is the document's `reason`, so the human and the
+        // machine channel carry the SAME disclosure rather than two drifting statements of it.
+        gateRefuse(refused.joined(separator: "  ·  "), wantJson: wantJson, gateJsonPath: gateJsonPath)
     }
     if !refused.isEmpty {
         FileHandle.standardError.write(
