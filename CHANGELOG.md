@@ -9,6 +9,22 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed ⚠ — ⟨0.24⟩ neither §3.1 rule has a carve-out, and both of ours did (2026-07-28)
+
+SPEC §3.1 ⟨0.24⟩ (candor-spec `1503368`). **Precedence binds `forbid`/`allow` too**: measured,
+`deny Fs` + `forbid app.Domain -> app.Infra` in one policy exited 2 with the certain violation absent from
+the document — the identical harm the precedence rung closed, surviving under a different rule KIND,
+because those two refusals returned before the report was even opened. Now exit 1, the document names the
+violation, and the unevaluated rule is disclosed beside it. The refused rules are still never evaluated
+(the gate is handed a deny-only policy), so no `allow` can be certified off a wire that does not carry the
+AS-EFF-008 surface-completeness marker.
+
+**And the refusal document has no exempt cause**: an unreadable policy, a report that never loaded AS one,
+a broken `.candor/config` and an invalid baseline now all write the same fail-closed document
+(`ok:false`, `refused:true`, the reason, no `violations` key). A stale green on disk does not care why this
+run declined to overwrite it. The one case that still writes nothing is a usage error inside the flag loop,
+where `--gate-json`'s value is not yet resolved — asserted, not assumed.
+
 ### fixed ⚠ — ⟨0.24⟩ the precedence fix FABRICATED a violation, and this is the half that makes it safe (2026-07-28)
 
 SPEC §3.1 ⟨0.24⟩ (candor-spec `5a8cf48`), found by implementing `7271c69` rather than by reading it.
