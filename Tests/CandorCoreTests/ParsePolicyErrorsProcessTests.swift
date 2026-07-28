@@ -18,8 +18,15 @@ import Foundation
 ///
 /// THE SHAPE IS PINNED AND NOT THIS ENGINE'S CHOICE: `{kind, token, accepted, rule, message}` with
 /// `accepted` an ARRAY OF TOKENS (candor-ts emits prose there, which the consumer the field exists for
-/// cannot parse) and `kind` from a CLOSED FOUR-TOKEN SET — `reason-class/alias`, `Net destination-class`,
-/// `effect-name`, `rule-kind`.
+/// cannot parse) and `kind` from a CLOSED set — `reason-class/alias`, `Net destination-class`,
+/// `effect-name`, `rule-kind`, `rule-form`.
+///
+/// ⟨0.24⟩ `rule-form` arrived hours after the set was pinned at four (candor-spec `f735b16`): a rule whose
+/// KIND is recognised but whose FORM is malformed is described by none of the other values, and folding it
+/// into `rule-kind` — which this engine did on its first wiring — is a true statement about a set that was
+/// itself incomplete. **A closed set is only a constraint if it is closed over the DOMAIN rather than over
+/// the author's sample**, which is why `testEachKindOfTheClosedSetIsReachable` asserts EQUALITY with the
+/// set rather than membership in it: an engine speaking four of five values fails that row.
 final class ParsePolicyErrorsProcessTests: XCTestCase {
 
     private func parse(_ policy: String, config: String? = nil) throws -> (obj: [String: Any], code: Int32, err: String) {
@@ -44,10 +51,10 @@ final class ParsePolicyErrorsProcessTests: XCTestCase {
         (obj["errors"] as? [[String: Any]]) ?? []
     }
 
-    /// The CLOSED `kind` set. An engine inventing a seventh vocabulary name is exactly the drift the pin
-    /// exists to stop, and the trailing ellipsis the first draft left on it was four future guesses.
+    /// The CLOSED `kind` set. An engine inventing its own vocabulary name is exactly the drift the pin
+    /// exists to stop — candor-java ships seven, this engine normalises onto these five.
     private static let KINDS: Set<String> = ["reason-class/alias", "Net destination-class",
-                                             "effect-name", "rule-kind"]
+                                             "effect-name", "rule-kind", "rule-form"]
 
     // ── THE ROW: every unhonoured line, not just the two that prompted the clause ───────────────────
 
@@ -100,10 +107,13 @@ final class ParsePolicyErrorsProcessTests: XCTestCase {
         deny Net[bogus,unknown-host] mixed
         deny notaneffect
         nonsense line
+        forbid bad
         """)
         let kinds = Set(errors(p.obj).compactMap { $0["kind"] as? String })
-        XCTAssertEqual(kinds, Self.KINDS, "all four kinds must be reachable, or the closed set is a "
-                       + "vocabulary this engine only partly speaks: \(errors(p.obj))")
+        XCTAssertEqual(kinds, Self.KINDS, "EVERY kind must be reachable, or the closed set is a "
+                       + "vocabulary this engine only partly speaks. `forbid bad` is the `rule-form` row: "
+                       + "a rule whose KIND is recognised but whose FORM is malformed — folding it into "
+                       + "`rule-kind` is a true statement about an incomplete set: \(errors(p.obj))")
     }
 
     /// A typo inside an `unknown-alias` DEFINITION is a line the engine did not honour either, and it is

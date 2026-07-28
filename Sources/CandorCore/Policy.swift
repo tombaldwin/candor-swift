@@ -294,8 +294,16 @@ public func parseClassFilter(_ spec: String?) throws -> Set<String>? {
 /// `kind` is drawn from a CLOSED FOUR-TOKEN SET. `message` is the human sentence; `rule` is the source
 /// line verbatim.
 public struct PolicyError {
-    /// CLOSED SET: `reason-class/alias`, `Net destination-class`, `effect-name`, `rule-kind`. The
-    /// trailing ellipsis the first draft left on this vocabulary was four future guesses in one ellipsis.
+    /// CLOSED SET: `reason-class/alias`, `Net destination-class`, `effect-name`, `rule-kind`,
+    /// `rule-form`. The trailing ellipsis the first draft left on this vocabulary was four future guesses
+    /// in one ellipsis.
+    ///
+    /// ⟨0.24⟩ `rule-form` was added by candor-spec `f735b16` hours after the set was pinned at four: a
+    /// rule whose KIND is recognised (`forbid`, `allow`) but whose FORM is malformed is described by none
+    /// of the other values, and folding it into `rule-kind` — which this engine did on its first wiring —
+    /// is a true statement about a set that was itself incomplete. **A closed set is only a constraint if
+    /// it is closed over the DOMAIN rather than over the author's sample.** `rule-kind` now means only
+    /// what it says: the leading keyword is not one of the four.
     public let kind: String
     /// the thing not recognised.
     public let token: String
@@ -569,7 +577,7 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
             deny.append(DenyRule(effects: [], scope: t.count > 1 ? t[1] : "", unknownClasses: [], netClasses: [], raw: line))
         case "allow":
             guard t.count >= 3 else {
-                errors.append(warnRule("allow names no values", line, kind: "rule-kind", token: t[0],
+                errors.append(warnRule("allow names no values", line, kind: "rule-form", token: t[0],
                                        accepted: ["allow <Effect> [in <scope>] <value…>"]))
                 continue
             }
@@ -594,7 +602,7 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
             if t[2] == "in" { scope = t.count > 3 ? t[3] : ""; vi = 4 }
             let values = Array(t.dropFirst(vi))
             if values.isEmpty {
-                errors.append(warnRule("allow names no values", line, kind: "rule-kind", token: t[0],
+                errors.append(warnRule("allow names no values", line, kind: "rule-form", token: t[0],
                                        accepted: ["allow <Effect> [in <scope>] <value…>"]))
                 continue
             }
@@ -603,7 +611,7 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
         case "forbid":
             let a = t.count > 1 ? t[1] : "", arrow = t.count > 2 ? t[2] : "", b = t.count > 3 ? t[3] : ""
             if a.isEmpty || arrow != "->" || b.isEmpty {
-                errors.append(warnRule("want `forbid <scope> -> <scope>`", line, kind: "rule-kind",
+                errors.append(warnRule("want `forbid <scope> -> <scope>`", line, kind: "rule-form",
                                        token: t.dropFirst().joined(separator: " "),
                                        accepted: ["forbid <scope> -> <scope>"]))
                 continue
