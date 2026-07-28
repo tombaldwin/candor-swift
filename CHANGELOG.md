@@ -9,6 +9,28 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed — ⟨0.24⟩ `gate --report` over a count-0 report printed `policy ✓` and nothing else (2026-07-28)
+
+SPEC §3.1 ⟨0.24⟩, as corrected in candor-spec `0744d29`. A report presented DIRECTLY to the gate with
+`analyzed.count: 0` makes the same claim as a chained one — it judged nothing, so it licenses no purity
+claim — and the verb MUST say so. Measured before, on a count-0 report with `deny Net`:
+
+    exit 0, stdout empty, stderr exactly `candor-swift: policy ✓`
+
+**The exit code and the verdict document are UNMOVED, deliberately.** §3.1 makes byte-equality with
+`scan --policy`'s `--gate-json` the acceptance test and a scan of an empty facade package exits 0 with a
+clean verdict, so diverging would split the verb this rung exists to keep single; §3.3 enumerates exactly
+two exit-2 causes (a broken gate CONFIG, an INCOMPLETE analysis of the target's own code) and a
+judged-nothing dependency is neither. And a verdict is an ASSERTION — the consumer has no evidence of any
+effect here, so manufacturing one would be the fabrication mirror of the silent under-report. What was
+missing was the human channel: `analyzed.count: 0` already rode the machine one. So a caveat now goes to
+stderr naming the locator, and byte-equality is re-verified (12 policies).
+
+The unreadable-manifest rows reach the same caveat, because a claim that cannot be READ is not a claim. And
+they no longer reach the verdict: an unreadable `count` contributed to the document's own `analyzed.count`,
+measured at **`count: true` -> `analyzed: {count: 1}`** and **`count: -1` -> `analyzed: {count: -1}`** — a
+fabricated number in the machine channel, the mirror of the missing disclosure. Both are now `0`.
+
 ### fixed ⚠ — ⟨0.24⟩ `analyzed: {count: true}` read as JUDGED — a BOOLEAN is not an integer (2026-07-28)
 
 SPEC §2 ⟨0.24⟩ names this engine for it. Foundation bridges a JSON `true` to `__NSCFBoolean`, and

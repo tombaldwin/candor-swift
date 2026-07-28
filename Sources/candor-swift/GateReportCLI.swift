@@ -43,6 +43,11 @@ private struct GateReportEnvelope {
     var unanalyzed: [(path: String, reason: String)] = []
     var coverageModules: Set<String> = []
     var entries: [GateReportEntry] = []
+    /// ⟨0.24⟩ Does every report at this locator say it JUDGED NOTHING? (SPEC §2's three-row table, bound
+    /// to this verb by §3.1.) ANDed across the multi-report siblings: the union has judged something as
+    /// soon as one member has. Starts `true` and is falsified per file, so a locator that resolved to no
+    /// file at all never reaches the advisory — `loadGateReport` returns nil there and the caller exits 2.
+    var judgedNothing = true
 }
 
 /// Parse ONE report file into `env`. Returns false (loudly) on a file that is not a well-formed §2
@@ -74,7 +79,13 @@ private func mergeGateReport(_ full: String, into env: inout GateReportEnvelope)
     }
     // ⟨0.21⟩ the completeness manifest, and ⟨0.15⟩ the κ ledger — the wire fields the scan's own verdict
     // was written from, so the two documents carry the same three facts (Gate.swift's writeGateVerdict).
-    if let a = obj["analyzed"] as? [String: Any], let c = a["count"] as? Int { env.analyzedCount += c }
+    // ⟨0.24⟩ THE COUNT IS READ ONCE, THROUGH THE SHARED READER (Deps.swift). A `count` that is boolean,
+    // fractional, negative or non-numeric is present-but-UNREADABLE and contributes NOTHING to the sum —
+    // it must never put a number in the machine-readable verdict that the wire did not carry.
+    if let c = readableAnalyzedCount(obj["analyzed"]) { env.analyzedCount += c }
+    // …and the same predicate decides the ⟨0.24⟩ judged-nothing advisory, so the chained-dep route and
+    // this one cannot drift into two readings of one integer.
+    if !claimsToHaveJudgedNothing(analyzed: obj["analyzed"], entryCount: fns.count) { env.judgedNothing = false }
     for u in (obj["unanalyzed"] as? [[String: Any]]) ?? [] {
         env.unanalyzed.append((path: u["path"] as? String ?? "", reason: u["reason"] as? String ?? ""))
     }
@@ -316,6 +327,35 @@ func runGateReportCLI(_ args: [String]) -> Never {
     }
     guard let env = loadGateReport(prefix: prefix) else {
         gateDie("candor-swift gate: no readable report at `\(prefix)` — nothing to gate (scan: candor-swift <dir>)")
+    }
+    // ⟨0.24⟩ A REPORT THAT JUDGED NOTHING IS NOT AN ALL-CLEAR (SPEC §2's three-row table, bound to this
+    // verb by §3.1: "a report presented DIRECTLY to the gate with `analyzed.count: 0` makes the same claim
+    // as a chained one, and must be read the same way … the obligation is on the reading, not on the route
+    // by which the report arrived"). The chained half of this rule lives in Deps.swift, on the COVERAGE
+    // decision; here there is no coverage decision to hang it on — the report IS the whole input — so what
+    // the rule buys is the DISCLOSURE beside the verdict.
+    //
+    // NOT THE EXIT CODE AND NOT THE VERDICT DOCUMENT, and the spec is explicit about both after the first
+    // spelling of this clause contradicted itself (SPEC §3.1 ⟨0.24⟩, corrected 2026-07-28). §3.1 makes
+    // byte-equality with `scan --policy`'s `--gate-json` the acceptance test, and a scan of an empty facade
+    // package exits 0 with a clean verdict — so diverging here would SPLIT THE VERB this rung exists to
+    // keep single. And §3.3 enumerates exactly two exit-2 causes (a broken gate CONFIG; an INCOMPLETE
+    // analysis of the target's OWN code); a judged-nothing DEPENDENCY is neither, so refusing would mint a
+    // third. Beyond conformance, a verdict is an ASSERTION: the consumer has no evidence of any effect
+    // here, so manufacturing one would be the fabrication mirror of the silent under-report.
+    //
+    // MEASURED before this landed, on a count-0 report with `deny Net`: exit 0 printing
+    // `candor-swift: policy ✓` and NOTHING ELSE — a human reading "no violations" had nothing telling them
+    // the gate had judged nothing at all. The machine channel was already right: `analyzed.count: 0` rides
+    // the verdict document, which is what ⟨0.21⟩ put it there for. What was missing was the human one.
+    if env.judgedNothing {
+        FileHandle.standardError.write(
+            ("candor-swift gate: the report at `\(prefix)` judged NOTHING (⟨0.24⟩ `analyzed.count` is 0, "
+             + "absent with no entries, or unreadable) — a report with no judgment in it is not an "
+             + "all-clear, so a green verdict below certifies NOTHING: absence from `functions` licenses "
+             + "no purity claim about any unit. Re-scan the sources you meant to gate "
+             + "(candor-swift <src> --out \(prefix)), or gate the report of the package that has them.\n")
+                .data(using: .utf8)!)
     }
     let gi = gateInputFromReport(env)
 

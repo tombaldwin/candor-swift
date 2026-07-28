@@ -318,17 +318,32 @@ struct DepIndex {
 /// stored as `kCFNumberCharType`), while a JSON integer is `"q"`/`"l"`/`"i"` and a JSON float `"d"`. A
 /// value test could not do it — `count: 1` and `count: true` are the same number.
 func claimsToHaveJudgedNothing(analyzed: Any?, entryCount: Int) -> Bool {
-    guard let analyzed else { return entryCount == 0 }        // ABSENT: entries are the pre-⟨0.21⟩ claim
-    guard let m = analyzed as? [String: Any] else { return true }          // "oops" / null / a list
-    guard let n = m["count"] as? NSNumber else { return true }             // absent or non-numeric `count`
-    // BOOLEAN, rejected before the integer cast. Also rejects a genuine 8-bit integer, which no JSON
-    // reader in this family produces for a `count` — and rejecting one would only WITHHOLD coverage,
-    // which is the direction to be wrong in.
+    guard analyzed != nil else { return entryCount == 0 }     // ABSENT: entries are the pre-⟨0.21⟩ claim
+    guard let c = readableAnalyzedCount(analyzed) else { return true }     // present but UNREADABLE
+    return c == 0
+}
+
+/// `analyzed.count` as a READABLE non-negative integer, or `nil` when the manifest is absent, garbled
+/// (`"oops"` / `null` / a list / no `count`) or carries a `count` that is not a non-negative integer —
+/// **boolean, fractional, negative, non-finite or non-numeric**. See `claimsToHaveJudgedNothing` for the
+/// boolean, which is the one that was live. Every reader of the wire's `count` in this engine goes through
+/// here, including the one that sums it into a `gate --report` verdict: a `count: true` that reached that
+/// sum would have put a fabricated `1` in the machine-readable document.
+func readableAnalyzedCount(_ analyzed: Any?) -> Int? {
+    guard let m = analyzed as? [String: Any], let n = m["count"] as? NSNumber else { return nil }
+    // BOOLEAN, rejected before the integer cast, on the number's OWN type tag: `objCType` is `"c"` for a
+    // boolean on Darwin Foundation AND on swift-corelibs-foundation (`Bool` is stored as
+    // `kCFNumberCharType`), while a JSON integer is `"q"`/`"l"`/`"i"` and a JSON float `"d"`. A test on
+    // the VALUE could not do it — `count: 1` and `count: true` are the same number. This also rejects a
+    // genuine 8-bit integer, which no JSON reader in this family produces for a `count`, and rejecting
+    // one would only WITHHOLD coverage — the direction to be wrong in.
     let tag = String(cString: n.objCType)
-    if tag == "c" || tag == "C" || tag == "B" { return true }
+    if tag == "c" || tag == "C" || tag == "B" { return nil }
     let d = n.doubleValue
-    guard d.isFinite, d >= 0, d == d.rounded() else { return true }        // negative / NaN / non-integral
-    return d == 0
+    // non-integral (`2.5`), negative, NaN/∞, or past what an Int can hold. `2.0` IS `2` and is believed:
+    // a double is a legitimate JSON spelling of an integer, and rejecting it would hedge real reports.
+    guard d.isFinite, d >= 0, d == d.rounded(), d <= Double(Int.max) else { return nil }
+    return Int(d)
 }
 
 private func depsFail(_ msg: String) -> Never {

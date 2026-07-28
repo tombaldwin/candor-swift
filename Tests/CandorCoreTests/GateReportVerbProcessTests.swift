@@ -318,6 +318,79 @@ final class GateReportVerbProcessTests: XCTestCase {
         XCTAssertEqual((d?["unanalyzed"] as? [Any])?.count, 1)
     }
 
+    // ── ⟨0.24⟩ A REPORT THAT JUDGED NOTHING (SPEC §2's three-row table, bound to this verb by §3.1) ──
+    //
+    // MEASURED before the fix, on a count-0 report with `deny Net`: exit 0, stdout empty, stderr exactly
+    // `candor-swift: policy ✓` — the literal §3.1 forbids, with no trace anywhere that the gate had judged
+    // nothing at all. The reading is a DISCLOSURE, not an exit code: §3.1's byte-equality MUST binds the
+    // gate route to `scan --policy`, and a scan of an empty facade package exits 0 with a clean verdict,
+    // so moving the exit code or the document here would split the verb. §3.3 also enumerates exactly two
+    // exit-2 causes and a judged-nothing dependency is neither.
+
+    /// The FLOOR arm. `analyzed.count: 0` with `functions: []` — nothing was judged, so the caveat MUST
+    /// fire on stderr while the exit code and the `--gate-json` document stay exactly where they were.
+    func testACountZeroReportGetsALoudCaveatButKeepsItsExitCodeAndVerdict() throws {
+        let root = try makeReportDir(report: envelope("", analyzed: 0), policy: "deny Net\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let v = root.appendingPathComponent("v.json")
+        try? FileManager.default.removeItem(at: v)
+        let r = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                               "--policy", root.appendingPathComponent("pol.txt").path,
+                                               "--gate-json", v.path])
+        XCTAssertEqual(r.code, 0, "the exit code is UNMOVED — §3.1's byte-equality MUST binds this route to "
+                       + "`scan --policy`, and a scan of an empty facade package exits 0: \(r.err)")
+        XCTAssertTrue(r.err.contains("judged NOTHING"),
+                      "…and the disclosure is what changes: a human reading `policy ✓` must be told the "
+                      + "gate judged nothing. stderr was: \(r.err)")
+        XCTAssertTrue(r.err.contains("certifies NOTHING"), "the caveat must say what it MEANS: \(r.err)")
+        let d = try JSONSerialization.jsonObject(with: Data(contentsOf: v)) as? [String: Any]
+        XCTAssertEqual(d?["ok"] as? Bool, true, "the verdict document is UNMOVED too — a refusal here would "
+                       + "assert an effect the consumer has no evidence for: \(d ?? [:])")
+        XCTAssertEqual((d?["analyzed"] as? [String: Any])?["count"] as? Int, 0,
+                       "the machine channel was already correct and stays correct: \(d ?? [:])")
+    }
+
+    /// THE CONTROL, WITHOUT WHICH THE ROW ABOVE IS A TEST OF AN UNCONDITIONAL PRINT. The same empty
+    /// `functions` list with `analyzed.count: 3` is a legitimate all-pure claim §2 rule 3 says a consumer
+    /// SHOULD believe — one integer apart, and the caveat must NOT fire. A fix that caveated both would
+    /// have disabled the reading, not implemented it.
+    func testAnAllPureReportWithAJudgedCountGetsNoCaveat() throws {
+        let root = try makeReportDir(report: envelope("", analyzed: 3), policy: "deny Net\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                               "--policy", root.appendingPathComponent("pol.txt").path])
+        XCTAssertEqual(r.code, 0, r.err)
+        XCTAssertFalse(r.err.contains("judged NOTHING"),
+                       "`count: 3` with `functions: []` is a POSITIVE all-pure claim and must not be hedged: \(r.err)")
+    }
+
+    /// The unreadable-manifest rows reach the same advisory, because a claim that cannot be READ is not a
+    /// claim (SPEC §2 ⟨0.24⟩ + the present-but-unparseable rule). `count: true` is the one that was live in
+    /// this engine — Foundation bridges it through `as? Int` as `1` — and it must neither be believed here
+    /// nor put a fabricated `1` in the verdict document's `analyzed.count`.
+    func testAnUnreadableCountIsNotAJudgmentClaimAndNeverReachesTheVerdict() throws {
+        for (name, count) in [("boolean", "true"), ("fractional", "2.5"), ("negative", "-1"), ("string", "\"2\"")] {
+            let report = """
+            {"candor":{"spec":"0.23","toolchain":"swiftsyntax","version":"candor-swift-0.23.1"},
+             "package":"App","analyzed":{"count":\(count),"digest":"1111111111111111"},"functions":[]}
+            """
+            let root = try makeReportDir(report: report, policy: "deny Net\n")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let v = root.appendingPathComponent("v.json")
+            try? FileManager.default.removeItem(at: v)
+            let r = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                                   "--policy", root.appendingPathComponent("pol.txt").path,
+                                                   "--gate-json", v.path])
+            XCTAssertTrue(r.err.contains("judged NOTHING"),
+                          "\(name): a `count` that cannot be read is not a judgment claim: \(r.err)")
+            let d = try JSONSerialization.jsonObject(with: Data(contentsOf: v)) as? [String: Any]
+            XCTAssertEqual((d?["analyzed"] as? [String: Any])?["count"] as? Int, 0,
+                           "\(name): an unreadable count must contribute NOTHING to the verdict's own "
+                           + "`analyzed.count` — a fabricated number in the machine channel is the mirror "
+                           + "of the missing disclosure: \(d ?? [:])")
+        }
+    }
+
     /// The §3.3.1 locator, all three forms, over the same report — a dir, the full `.json` path, and the
     /// bare prefix must reach the same verdict (`gate` inherits the grammar, it does not redefine it).
     func testAllThreeLocatorFormsReachTheSameVerdict() throws {
