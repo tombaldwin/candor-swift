@@ -969,9 +969,55 @@ let unknownRatchet: Bool = {
 if let bp = baselinePath {
     gateViolations += checkBaseline(inferred: inferred, path: bp, engineVersion: engineVersion, unknownRatchet: unknownRatchet)
 }
-if let pp = policyPath {
+// ⟨0.24⟩ **PRECEDENCE BINDS THE VERDICT, NOT THE POLICY GATE** (SPEC §3.1, candor-spec `4c79958`).
+//
+// MEASURED 2026-07-28 — a pure function gains an `Fs` call, scanned against a frozen baseline:
+//
+//     control (no policy)         exit 1, violations: ["AS-EFF-005"]
+//     + a policy with a bad token exit 2, NO `violations` key — THE REGRESSION IS DELETED
+//
+// So a typo in a policy token downgraded "your change added an effect" to "could not evaluate", and the
+// regression vanished from the machine channel. On THIS engine it did not even survive on stderr: the
+// violation lines are printed below the policy block, so `refuseGateAndExit` ran before them and the
+// finding was lost on BOTH channels.
+//
+// Three individually-correct decisions composed into it: the baseline guard runs first BY DESIGN, the
+// earlier precedence repair was scoped to the policy gate's own violation list, and "a refusal document
+// carries no `violations` key" was justified by every exit-2 site running before anything could be
+// recorded — **a claim about ORDERING that reads as a claim about SHAPE**, and it stopped being true
+// once a producer's evidence sat upstream of the refusal.
+//
+// THE RULE IS OVER THE VERDICT. Any violation this run has already established on carried evidence —
+// whatever subsystem produced it — dominates a refusal and MUST appear in the document. So the refusal
+// arm is keyed on `gateViolations.isEmpty` (did this run evaluate NOTHING?) and never on "did this run
+// end refused", which is exactly the conflation the clause forbids. The policy itself is still NOT
+// evaluated: `break policyBlock` skips `evaluateGate` entirely, so the rule that could not be honoured
+// as written never runs — only what was already certain is reported.
+//
+// WHY EXIT 1 IS SAFE HERE and not merely fail-closed: the baseline record is CERTAIN on evidence this
+// run carries, `Reject` is upward-closed (PAPER3 Lemma 2), and no resolution of the unreadable policy
+// could un-reject it. Exit 1 is also strictly more informative than exit 2, because it NAMES the finding.
+policyBlock: if let pp = policyPath {
+    /// Refuse — UNLESS a violation is already established, in which case it dominates and the run falls
+    /// through to the common verdict tail (document + exit 1) with the refusal disclosed beside it.
+    /// Returns true when the caller must `break policyBlock`; it never returns on the sole-refusal path.
+    func refuseUnlessAViolationStands(_ reason: String) -> Bool {
+        if gateViolations.isEmpty { refuseGateAndExit(reason) }
+        FileHandle.standardError.write(
+            (reason + "\n"
+             + "candor-swift: the policy above was NOT evaluated — but \(gateViolations.count) violation(s) "
+             + "were already established on evidence this run carries, and a certain violation DOMINATES a "
+             + "refusal (SPEC §3.1, PAPER3 Lemma 2: no resolution of an unevaluated rule can un-reject a "
+             + "rejected verdict). Reporting them below; the verdict does NOT answer the policy.\n")
+                .data(using: .utf8)!)
+        return true
+    }
     guard let text = try? String(contentsOfFile: pp, encoding: .utf8) else {
-        refuseGateAndExit("candor-swift: policy \(pp) could not be read; gate NOT enforced")
+        if refuseUnlessAViolationStands("candor-swift: policy \(pp) could not be read; gate NOT enforced") {
+            break policyBlock
+        }
+        // unreachable — `refuseUnlessAViolationStands` exits when nothing stands. `guard` needs an exit.
+        exit(2)
     }
     // ⟨0.19⟩ reason-class aliases (SPEC §6.2) from `.candor/config`, so `Unknown[<alias>]` resolves at the
     // gate — ⟨0.24⟩ ANCHORED AT THE POLICY FILE, not at the scan target (SPEC §3.1, candor-spec `99eb4e9`).
@@ -1027,7 +1073,9 @@ if let pp = policyPath {
     let aliasErrors = partitionAliasErrors(parsedAliases.errors, consumedBy: scanPolicy)
     discloseUnconsumedAliasErrors(aliasErrors.disclosed)
     let policyErrors = aliasErrors.refusing.map(\.message) + scanPolicy.errors
-    if !policyErrors.isEmpty { refuseGateAndExit(policyErrors.joined(separator: "\n")) }
+    if !policyErrors.isEmpty, refuseUnlessAViolationStands(policyErrors.joined(separator: "\n")) {
+        break policyBlock
+    }
     // ⟨0.24⟩ the SCAN route into the shared gate seam (Gate.swift): the reason-class fixpoint and the
     // per-fn `netClassesOf` derivation moved into `gateInputFromScan`, so `gate --report` can hand
     // `evaluateGate` the same record built from a WRITTEN report instead of from the classifier.
