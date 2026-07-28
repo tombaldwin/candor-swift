@@ -114,6 +114,14 @@ public struct AliasTokenError {
     public let rule: String
     /// the full §6.2 refusal text (used verbatim when the definition IS consumed).
     public let message: String
+    /// ⟨0.24⟩ The same record in `parsepolicy`'s `errors` shape. `gateReason` is deliberately nil: whether
+    /// this definition refuses is a property of the POLICY that did or did not consume it, decided by
+    /// `partitionAliasErrors`, not of the definition line on its own.
+    public var policyError: PolicyError {
+        PolicyError(kind: "reason-class/alias", token: token, accepted: POLICY_CLASS_TOKEN_LIST, rule: rule,
+                    message: "config line NOT HONOURED AS WRITTEN — `\(token)` is not a reason class, so "
+                           + "the alias `\(alias)` is defined without it")
+    }
 }
 public func parseUnknownAliases(_ configText: String?) -> (aliases: [String: Set<String>], errors: [AliasTokenError]) {
     var out: [String: Set<String>] = [:]
@@ -266,6 +274,54 @@ public func parseClassFilter(_ spec: String?) throws -> Set<String>? {
     return out
 }
 
+/// ⟨0.24⟩ **ONE POLICY LINE THE ENGINE DID NOT HONOUR AS WRITTEN** (SPEC §3.1, candor-spec `195d45a` +
+/// `901f14d`). The `parsepolicy` witness emits these as its `errors` array.
+///
+/// MEASURED 2026-07-28 on `candor-spec/conformance/policydsl/policy.txt`:
+/// **java 10, ts 2, rust 0, swift 0** — this engine emitted no `errors` key AT ALL, while its stderr
+/// listed nine policy lines dropped entirely (an unknown effect name, an `allow` on an effect with no
+/// literal surface, two malformed `forbid`s, two `allow`s with no values, two unknown rule kinds) plus
+/// two unrecognised tokens. **None of it reached the machine output.** A dropped rule is the limit case
+/// of "silently rewritten into a different policy": the rewritten policy is the one WITHOUT that line,
+/// which is a bigger rewrite than a narrowed filter, not a smaller one.
+///
+/// It matters more here than in the engine that prompted the clause, because THIS engine's gate already
+/// REFUSES some of these lines: the parse was narrowing silently while the gate refused — two answers to
+/// one question, and the witness gave the quieter one.
+///
+/// SHAPE IS PINNED AND NOT THIS ENGINE'S CHOICE (`901f14d`): `accepted` is an ARRAY OF TOKENS, never a
+/// prose string — candor-ts emits prose, which is unparseable by the consumer the field exists for — and
+/// `kind` is drawn from a CLOSED FOUR-TOKEN SET. `message` is the human sentence; `rule` is the source
+/// line verbatim.
+public struct PolicyError {
+    /// CLOSED SET: `reason-class/alias`, `Net destination-class`, `effect-name`, `rule-kind`. The
+    /// trailing ellipsis the first draft left on this vocabulary was four future guesses in one ellipsis.
+    public let kind: String
+    /// the thing not recognised.
+    public let token: String
+    /// the admissible set, as TOKENS.
+    public let accepted: [String]
+    /// the source line, verbatim.
+    public let rule: String
+    /// the human sentence.
+    public let message: String
+    /// ⟨0.24⟩ The §6.2 refusal text when this error makes the GATE refuse (exit 2), nil when it is
+    /// REPORTED ONLY. The distinction is the one the spec draws deliberately: an unrecognised value
+    /// token, and (⟨0.24⟩ `1e1748a`) the two unambiguous effect-name cases, cannot be told from a typo,
+    /// so refusing loses nothing; the genuinely ambiguous middle stays permissive and is reported either
+    /// way. Keeping both in ONE list is what stops the witness and the gate answering differently.
+    public let gateReason: String?
+    public init(kind: String, token: String, accepted: [String], rule: String, message: String,
+                gateReason: String? = nil) {
+        self.kind = kind; self.token = token; self.accepted = accepted
+        self.rule = rule; self.message = message; self.gateReason = gateReason
+    }
+    /// The wire shape, for `parsepolicy`'s `errors`.
+    public var json: [String: Any] {
+        ["kind": kind, "token": token, "accepted": accepted, "rule": rule, "message": message]
+    }
+}
+
 public struct DenyRule { public var effects: [String]; public var scope: String; public var unknownClasses: [String]; public var netClasses: [String]; public var raw: String }
 public struct AllowRule { public var effect: String; public var scope: String; public var values: [String]; public var raw: String }
 public struct ForbidRule { public var from: String; public var to: String; public var raw: String }
@@ -282,24 +338,37 @@ public struct ParsedPolicy {
     public var deny: [DenyRule]
     public var allow: [AllowRule]
     public var forbid: [ForbidRule]
-    /// ⟨0.24⟩ Finished diagnostics for tokens that could not be honoured AS WRITTEN (SPEC §6.2,
-    /// candor-spec `382a7e0`). See `parsePolicy` for the measurement.
-    public var errors: [String]
+    /// ⟨0.24⟩ EVERY LINE THE ENGINE DID NOT HONOUR AS WRITTEN — unrecognised tokens AND dropped rules
+    /// (SPEC §3.1, candor-spec `195d45a`). A subset of these also make the GATE refuse (`gateReason`);
+    /// the rest are reported by the witness and stay permissive. See `PolicyError`.
+    public var errors: [PolicyError]
     /// ⟨0.24⟩ The `unknown-alias` names this policy actually CONSUMED — sorted, deduped, and empty unless
     /// a config alias was used to expand a token. It is the trigger for SPEC §3.1's ambience disclosure:
     /// the verdict names the config file only when that file's vocabulary PARTICIPATED, never merely
     /// because a config exists. A config that defines ten aliases and is asked for none is not an input
     /// to this verdict and naming it would be noise.
     public var usedAliases: [String]
-    public init(deny: [DenyRule], allow: [AllowRule], forbid: [ForbidRule], errors: [String] = [],
+    public init(deny: [DenyRule], allow: [AllowRule], forbid: [ForbidRule], errors: [PolicyError] = [],
                 usedAliases: [String] = []) {
         self.deny = deny; self.allow = allow; self.forbid = forbid
         self.errors = errors; self.usedAliases = usedAliases
     }
+    /// ⟨0.24⟩ The refusal texts, in order — the GATE's view of `errors`. Empty means every line the
+    /// engine could not honour is a report-only one, which is the ambiguous middle §6.2 leaves permissive.
+    public var gateRefusals: [String] { errors.compactMap(\.gateReason) }
 }
 
-func warnRule(_ why: String, _ line: String) {
+/// ⟨0.24⟩ A DROPPED RULE, recorded. It stays a stderr warning AND becomes a `PolicyError`, because until
+/// it is reported nobody can measure how often it happens — the witness was disclosing the two cases that
+/// prompted the token clause and staying silent on the six that did not. `gateReason` is supplied only by
+/// the callers §6.2 makes unambiguous; the rest are report-only.
+func warnRule(_ why: String, _ line: String, kind: String, token: String, accepted: [String],
+              gateReason: String? = nil) -> PolicyError {
     FileHandle.standardError.write("candor: ignoring policy rule (\(why)): \(line)\n".data(using: .utf8)!)
+    return PolicyError(kind: kind, token: token, accepted: accepted, rule: line,
+                       message: "policy line NOT HONOURED — DROPPED (\(why)); it is absent from the parse, "
+                              + "so the policy that ran is the one without it",
+                       gateReason: gateReason)
 }
 
 /// ⟨0.24⟩ **AN UNRECOGNISED REASON-CLASS TOKEN IN A POLICY IS A POLICY ERROR** (SPEC §6.2, candor-spec
@@ -341,9 +410,30 @@ func policyClassTokenError(_ token: String, _ line: String) -> String {
     + "the gate still looks armed), and dropping the only token WIDENS it. Refusing (exit 2) — SPEC §6.2 ⟨0.24⟩"
 }
 
+/// The ⟨0.24⟩ `accepted` TOKEN LIST for a reason-class/alias position — the array form of
+/// `POLICY_CLASS_TOKENS`, which is prose and stays prose because it is a human sentence in a stderr line.
+/// `901f14d`: `accepted` is an array of tokens, never a prose string, because the consumer the field
+/// exists for cannot parse prose.
+let POLICY_CLASS_TOKEN_LIST = REASON_CLASSES + ["dynamic", "*"]
+
+func policyClassTokenPolicyError(_ token: String, _ line: String) -> PolicyError {
+    PolicyError(kind: "reason-class/alias", token: token, accepted: POLICY_CLASS_TOKEN_LIST, rule: line,
+                message: "unknown reason-class/alias `\(token)` (known: "
+                       + "\(REASON_CLASSES.joined(separator: ", ")); aliases: dynamic, *, or a config "
+                       + "`unknown-alias`)",
+                gateReason: policyClassTokenError(token, line))
+}
+func policyDestClassPolicyError(_ token: String, _ line: String) -> PolicyError {
+    PolicyError(kind: "Net destination-class", token: token,
+                accepted: NET_DEST_CLASSES.sorted() + ["*"], rule: line,
+                message: "unknown Net destination-class `\(token)` (known: "
+                       + "\(NET_DEST_CLASSES.sorted().joined(separator: ", ")), or *)",
+                gateReason: policyDestClassTokenError(token, line))
+}
+
 public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) -> ParsedPolicy {
     var deny: [DenyRule] = [], allow: [AllowRule] = [], forbid: [ForbidRule] = []
-    var errors: [String] = []
+    var errors: [PolicyError] = []
     var usedAliases = Set<String>()
     // Split LINES on \n / \r\n / bare \r — the three forms Java's Files.readAllLines (the reference parser)
     // breaks on. Splitting on \n ONLY let a classic-Mac (bare-\r) file collapse to ONE line: \r is also an
@@ -383,7 +473,7 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
                         // `deny Net[known-telemetry,unknown-hosst]` exits 0 where the correctly-spelled
                         // rule exits 1. The clause was never about reason-classes — it is about a policy
                         // value list the implementation cannot honour as written.
-                        else { errors.append(policyDestClassTokenError(cn, line)) }
+                        else { errors.append(policyDestClassPolicyError(cn, line)) }
                     }
                     continue
                 }
@@ -403,7 +493,7 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
                         // rule" and then KEPT the rule — a false disclosure — or dropped the token and
                         // silently NARROWED the rule. See `policyClassTokenError`. The rule is still
                         // BUILT (the advisory readers are unchanged); the gate routes refuse on `errors`.
-                        else { errors.append(policyClassTokenError(cn, line)) }
+                        else { errors.append(policyClassTokenPolicyError(cn, line)) }
                     }
                     continue
                 }
@@ -413,7 +503,14 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
                     if tok == "Net" { netStar = true }         // bare Net ⇒ all destinations
                 } else { scope = tok; break }
             }
-            if effects.isEmpty { warnRule("deny names no known effect", line); continue }
+            if effects.isEmpty {
+                // ⟨0.24⟩ RECORDED, not merely warned. `scope` holds the FIRST token that was not a known
+                // effect — the loop assigns it and breaks — so it is exactly the token that made the
+                // effect list empty. `deny` with no tokens at all leaves it "".
+                errors.append(warnRule("deny names no known effect", line, kind: "effect-name",
+                                       token: scope, accepted: EFFECTS.sorted()))
+                continue
+            }
             // `*` (or bare Unknown) means all classes ⇒ empty filter (matches any Unknown).
             let uc = unknownStar ? [] : unknownClasses.sorted()
             // `*` (or bare Net) means all destinations ⇒ empty filter (matches any Net).
@@ -431,22 +528,39 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
         case "pure":
             deny.append(DenyRule(effects: [], scope: t.count > 1 ? t[1] : "", unknownClasses: [], netClasses: [], raw: line))
         case "allow":
-            guard t.count >= 3 else { warnRule("allow names no values", line); continue }
+            guard t.count >= 3 else {
+                errors.append(warnRule("allow names no values", line, kind: "rule-kind", token: t[0],
+                                       accepted: ["allow <Effect> [in <scope>] <value…>"]))
+                continue
+            }
             guard ALLOW_EFFECTS.contains(t[1]) else {
-                warnRule("allow supports only Net hosts / Llm hosts / Exec commands / Fs paths / Db tables", line); continue
+                errors.append(warnRule("allow supports only Net hosts / Llm hosts / Exec commands / Fs paths / Db tables",
+                                       line, kind: "effect-name", token: t[1],
+                                       accepted: ALLOW_EFFECTS.sorted()))
+                continue
             }
             var scope = ""; var vi = 2
             if t[2] == "in" { scope = t.count > 3 ? t[3] : ""; vi = 4 }
             let values = Array(t.dropFirst(vi))
-            if values.isEmpty { warnRule("allow names no values", line); continue }
+            if values.isEmpty {
+                errors.append(warnRule("allow names no values", line, kind: "rule-kind", token: t[0],
+                                       accepted: ["allow <Effect> [in <scope>] <value…>"]))
+                continue
+            }
             // Duplicate values dedup (the reference parser's TreeSet) — same PART 4 parity as deny.
             allow.append(AllowRule(effect: t[1], scope: scope, values: Array(Set(values)).sorted(), raw: line))
         case "forbid":
             let a = t.count > 1 ? t[1] : "", arrow = t.count > 2 ? t[2] : "", b = t.count > 3 ? t[3] : ""
-            if a.isEmpty || arrow != "->" || b.isEmpty { warnRule("want `forbid <scope> -> <scope>`", line); continue }
+            if a.isEmpty || arrow != "->" || b.isEmpty {
+                errors.append(warnRule("want `forbid <scope> -> <scope>`", line, kind: "rule-kind",
+                                       token: t.dropFirst().joined(separator: " "),
+                                       accepted: ["forbid <scope> -> <scope>"]))
+                continue
+            }
             forbid.append(ForbidRule(from: a, to: b, raw: line))
         default:
-            warnRule("unknown rule kind", line)
+            errors.append(warnRule("unknown rule kind `\(t[0])`", line, kind: "rule-kind", token: t[0],
+                                   accepted: ["deny", "pure", "allow", "forbid"]))
         }
     }
     return ParsedPolicy(deny: deny, allow: allow, forbid: forbid, errors: errors,

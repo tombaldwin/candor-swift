@@ -462,7 +462,7 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // subtree). See `partitionAliasErrors`.
     let aliasErrors = partitionAliasErrors(parsedAliases.errors, consumedBy: pol)
     discloseUnconsumedAliasErrors(aliasErrors.disclosed)
-    let policyErrors = aliasErrors.refusing.map(\.message) + pol.errors
+    let policyErrors = aliasErrors.refusing.map(\.message) + pol.gateRefusals
     if !policyErrors.isEmpty { gateDie(policyErrors.joined(separator: "\n")) }
 
     // THE POLICY-LEVEL REFUSALS. Whole-policy, not per-rule: enforcing the answerable half and exiting 0

@@ -53,7 +53,8 @@ if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "parsepolicy" {
     }
     // ⟨0.19⟩ config-aware: resolve `Unknown[<alias>]` via a checked-in `unknown-alias`, anchored to the
     // policy file (or CANDOR_CONFIG) — the dump reflects real gate resolution + pins the four-way expansion.
-    let pol = parsePolicy(polText, aliases: parseUnknownAliases(discoverConfigText(targetPath: polPath)).aliases)
+    let polAliases = parseUnknownAliases(discoverConfigText(targetPath: polPath))
+    let pol = parsePolicy(polText, aliases: polAliases.aliases)
     // Deterministic entry order: each list sorted by its serialized JSON (the reference engine's
     // byJson comparator) — the conformance differential normalizes anyway; this keeps raw dumps diffable.
     func sortedByJson(_ xs: [[String: Any]]) -> [[String: Any]] {
@@ -63,7 +64,7 @@ if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "parsepolicy" {
         }
         return xs.sorted { key($0) < key($1) }
     }
-    let polDict: [String: Any] = [
+    var polDict: [String: Any] = [
         "deny": sortedByJson(pol.deny.map { r -> [String: Any] in
             // Emit sorted `unknownClasses`/`netClasses` ONLY when the rule narrows Unknown/Net — a bare deny
             // dump stays byte-identical to pre-feature, and the four-way parsepolicy differential pins the
@@ -76,6 +77,24 @@ if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "parsepolicy" {
         "allow": sortedByJson(pol.allow.map { ["effect": $0.effect, "scope": $0.scope, "values": $0.values] }),
         "forbid": sortedByJson(pol.forbid.map { ["from": $0.from, "to": $0.to] }),
     ]
+    // ⟨0.24⟩ `errors` — EVERY LINE THE ENGINE DID NOT HONOUR AS WRITTEN (SPEC §3.1, candor-spec
+    // `195d45a` + `901f14d`). MEASURED 2026-07-28 on the conformance battery: java 10, ts 2, rust 0,
+    // **swift 0** — this engine emitted no `errors` key at all while its stderr listed nine dropped
+    // lines and two unrecognised tokens. A dropped rule is the LIMIT CASE of "silently rewritten into a
+    // different policy": the rewritten policy is the one without that line, a bigger rewrite than a
+    // narrowed filter rather than a smaller one. And it mattered more here than in the engine that
+    // prompted the clause, because this engine's GATE already refuses some of these lines — so the parse
+    // was narrowing silently while the gate refused, two answers to one question, and the witness was
+    // giving the quieter one.
+    //
+    // ORDER IS THE POLICY'S OWN (never sortedByJson): these are per-LINE diagnostics and a reader
+    // matching them against the file needs them in file order. The alias-definition errors come first —
+    // the vocabulary is read before the policy that uses it.
+    //
+    // OMITTED WHEN EMPTY, so a clean parse stays byte-identical and the four-way deny/allow/forbid
+    // comparison (conformance PART 4) is untouched.
+    let allErrors = polAliases.errors.map(\.policyError) + pol.errors
+    if !allErrors.isEmpty { polDict["errors"] = allErrors.map(\.json) }
     // DEFENSIVE, deliberately uncovered (TESTING.md §6): the dict holds only strings/arrays — the
     // same cannot-fire arm as writeJson's.
     guard let polData = try? JSONSerialization.data(withJSONObject: polDict, options: [.prettyPrinted, .sortedKeys]),
@@ -1072,7 +1091,7 @@ policyBlock: if let pp = policyPath {
     // policy token errors on its own line).
     let aliasErrors = partitionAliasErrors(parsedAliases.errors, consumedBy: scanPolicy)
     discloseUnconsumedAliasErrors(aliasErrors.disclosed)
-    let policyErrors = aliasErrors.refusing.map(\.message) + scanPolicy.errors
+    let policyErrors = aliasErrors.refusing.map(\.message) + scanPolicy.gateRefusals
     if !policyErrors.isEmpty, refuseUnlessAViolationStands(policyErrors.joined(separator: "\n")) {
         break policyBlock
     }
