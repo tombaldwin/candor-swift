@@ -283,9 +283,19 @@ final class PrivacyEffectsTests: XCTestCase {
 
     // ── (e) NOT allowlistable via a literal: `allow Location …` is rejected (no host/path to certify) ─
     func testAllowLocationIsRejected() throws {
-        // Location is not in ALLOW_EFFECTS (like Ipc/Clipboard) — `allow Location <x>` is warned + ignored,
-        // so a location-reaching fn is UNGATED by an allow rule (only deny/containment name it). The scan
-        // still succeeds (exit 0) — the malformed rule is dropped, not a hard error.
+        // Location is not in ALLOW_EFFECTS (like Ipc/Clipboard) — there is no literal surface to certify.
+        //
+        // ⟨0.24⟩ **THIS ROW CHANGED, AND THE OLD ANSWER WAS THE DEFECT** (SPEC §6.2, candor-spec
+        // `1e1748a`). It used to be warned-and-IGNORED with the scan exiting 0, so a location-reaching fn
+        // was UNGATED while the operator read an `allow` rule that gated nothing at all. A dropped rule is
+        // the LIMIT CASE of "silently rewritten into a different policy": the policy that ran was the one
+        // WITHOUT this line. `allow`'s effect position is a fixed, CLOSED set with no scope reading
+        // available, so a token outside it cannot be honoured as written and refusing loses nothing.
+        // Now exit 2, naming the token and the accepted set; the stderr warning is unchanged, it is just
+        // no longer the whole answer.
+        //
+        // The DENY half is untouched — `deny Location` is the correct way to gate a sensor, and rows
+        // (a)–(d) above pin that it still fires.
         let r = try gate("""
         import Foundation
         import CoreLocation
@@ -297,8 +307,12 @@ final class PrivacyEffectsTests: XCTestCase {
         }
         Tracker().whereAmI()
         """, policy: "allow Location somewhere\n")
-        XCTAssertEqual(r.code, 0, "allow Location is not a thing — the rule is ignored, the scan passes; stderr: \(r.err)")
+        XCTAssertEqual(r.code, 2, "`allow Location` cannot be honoured, and a rule the engine cannot honour "
+                       + "is REFUSED rather than dropped — dropping it left the sensor ungated behind a "
+                       + "rule that looked like a gate; stderr: \(r.err)")
         XCTAssertTrue(r.err.contains("ignoring policy rule"),
-                      "the unsupported allow rule must be warned + ignored; stderr: \(r.err)")
+                      "the unsupported allow rule is still warned about; stderr: \(r.err)")
+        XCTAssertTrue(r.err.contains("`Location`") && r.err.contains("Db, Exec, Fs, Llm, Net"),
+                      "and the refusal names the token AND the closed set it is outside of; stderr: \(r.err)")
     }
 }

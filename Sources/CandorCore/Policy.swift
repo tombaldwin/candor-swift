@@ -410,6 +410,36 @@ func policyClassTokenError(_ token: String, _ line: String) -> String {
     + "the gate still looks armed), and dropping the only token WIDENS it. Refusing (exit 2) — SPEC §6.2 ⟨0.24⟩"
 }
 
+/// ⟨0.24⟩ **A TYPO'D EFFECT NAME DELETES THE RULE, SILENTLY, FOUR-WAY GREEN** (SPEC §6.2, candor-spec
+/// `1e1748a`). MEASURED 2026-07-28 on all four engines:
+///
+///     deny Nett app             ->  rust 0  ts 0  java 0  swift 0   the rule is DELETED, the gate is green
+///     allow Nett host.example   ->  rust 0  ts 0  java 0  swift 0   the certification silently vanishes
+///
+/// The operator reads an armed `deny Net`; there is no gate at all. This format already calls a dropped
+/// rule *"the limit case of silently rewritten into a different policy… a bigger rewrite than a narrowed
+/// filter, not a smaller one"* — and yet the BIGGER rewrite was warning-only while the SMALLER one is
+/// exit 2.
+///
+/// THE GRAMMAR DEFENCE IS REAL BUT NARROWER than it was taken to be. `deny Net Exex app` genuinely cannot
+/// be told from a legitimate scope by the parser, and stays permissive. But:
+///
+///   - **`allow`'s effect position is a fixed, closed set.** `allow Nett …` is unambiguously a typo, with
+///     no scope reading available at all.
+///   - **A `deny` whose effect list ends up EMPTY after scope-splitting is malformed under either
+///     reading** — there is no legitimate policy it could be — so refusing it loses nothing.
+///
+/// `parsepolicy` reports the ambiguous middle either way (§3.1), so the operator can always see it.
+func policyEffectNameError(_ token: String, _ line: String, accepted: [String], why: String) -> String {
+    (token.isEmpty
+        ? "candor: policy error — this rule names NO effect at all, in: \(line)\n"
+        : "candor: policy error — unrecognised effect name `\(token)` in: \(line)\n")
+    + "  accepted: \(accepted.joined(separator: ", "))\n"
+    + "  \(why) Dropping the rule is the LIMIT CASE of rewriting the policy — the policy that ran is the "
+    + "one WITHOUT this line, so the operator reads an armed gate that does not exist. Refusing (exit 2) "
+    + "— SPEC §6.2 ⟨0.24⟩"
+}
+
 /// The ⟨0.24⟩ `accepted` TOKEN LIST for a reason-class/alias position — the array form of
 /// `POLICY_CLASS_TOKENS`, which is prose and stays prose because it is a human sentence in a stderr line.
 /// `901f14d`: `accepted` is an array of tokens, never a prose string, because the consumer the field
@@ -507,8 +537,18 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
                 // ⟨0.24⟩ RECORDED, not merely warned. `scope` holds the FIRST token that was not a known
                 // effect — the loop assigns it and breaks — so it is exactly the token that made the
                 // effect list empty. `deny` with no tokens at all leaves it "".
+                // ⟨0.24⟩ AND THE GATE REFUSES IT (candor-spec `1e1748a`). A `deny` whose effect list is
+                // EMPTY after scope-splitting is malformed under EITHER reading of the trailing token —
+                // there is no legitimate policy it could be — so refusing loses nothing, while dropping
+                // it left `deny Nett app` exiting 0 over a signature the correctly-spelled rule fails.
+                // The AMBIGUOUS MIDDLE (at least one valid effect plus an unrecognised trailing token
+                // that might be a scope) is untouched: it keeps its effects and stays permissive.
                 errors.append(warnRule("deny names no known effect", line, kind: "effect-name",
-                                       token: scope, accepted: EFFECTS.sorted()))
+                                       token: scope, accepted: EFFECTS.sorted(),
+                                       gateReason: policyEffectNameError(
+                                        scope, line, accepted: EFFECTS.sorted(),
+                                        why: "a `deny` whose effect list is EMPTY after scope-splitting is "
+                                           + "malformed under either reading of the trailing token.")))
                 continue
             }
             // `*` (or bare Unknown) means all classes ⇒ empty filter (matches any Unknown).
@@ -534,9 +574,20 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
                 continue
             }
             guard ALLOW_EFFECTS.contains(t[1]) else {
+                // ⟨0.24⟩ AND THE GATE REFUSES IT (candor-spec `1e1748a`). `allow`'s effect position is a
+                // FIXED, CLOSED set with no scope reading available, so an unrecognised token there is
+                // unambiguously a typo — the grammar defence that keeps the `deny` middle permissive does
+                // not reach it. Before this, `allow Nett host.example` exited 0 and the certification
+                // silently vanished.
                 errors.append(warnRule("allow supports only Net hosts / Llm hosts / Exec commands / Fs paths / Db tables",
                                        line, kind: "effect-name", token: t[1],
-                                       accepted: ALLOW_EFFECTS.sorted()))
+                                       accepted: ALLOW_EFFECTS.sorted(),
+                                       gateReason: policyEffectNameError(
+                                        t[1], line, accepted: ALLOW_EFFECTS.sorted(),
+                                        why: "`allow`'s effect position is a fixed, CLOSED set with no "
+                                           + "scope reading available, so a token outside it — a typo, or "
+                                           + "a real effect with no literal surface to certify — cannot "
+                                           + "be honoured as written.")))
                 continue
             }
             var scope = ""; var vi = 2
