@@ -9,6 +9,47 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed ⚠ — ⟨0.24⟩ a chained report that JUDGED NOTHING no longer reads as an all-clear (2026-07-28)
+
+SPEC §2's three-row table. A chained dependency report carrying `functions: []` **and**
+`analyzed.count: 0` bought a consumer **more confidence than not chaining the package at all**: every
+call into it dropped out of `functions`, which under ⟨0.21⟩ is a positive purity claim, with no advisory
+in either channel — while the same scan with **no dep report** correctly discloses `invisible` +
+`coverage.uncovered` + the κ nudge. A silent under-report, and conformance PART 26 measured it in all
+four engines (64 live cells ABSENT here).
+
+Measured, two-tree fixture (dep `hit()` reads `/etc/hosts`, app `go()` calls it, `deny Fs`):
+
+    unchained        go -> invisible: ['RatesDep'], coverage.uncovered, κ nudge   exit 0
+    trusted          go -> ['Fs']                                                 exit 1
+    count: 0   pre   go -> ABSENT from `functions`, no coverage, no advisory      exit 0
+    count: 0   post  go -> invisible: ['RatesDep'], coverage.uncovered, κ nudge   exit 0
+
+**The wire already distinguished the two cases and nothing read it.** A facade target scans to
+`count: 0`; an all-pure target scans to `count: n` with the same empty `functions`. So `count: 0` now
+registers into a new `unjudgedPkgs` — chained (its keys are still asked) but NOT covered, the same
+treatment ⟨0.21⟩ `incompletePkgs` gets and for the same reason: coverage is the rule that turns a
+report's SILENCE into a purity claim, and a report that judged nothing is all silence. Entries are
+untouched; only coverage is withheld, so nothing is ever downgraded or dropped.
+
+**The second row is the control, and a fix that hedged it too would have deleted chained coverage rather
+than implemented the rule.** `count: n > 0` with an empty `functions` is a legitimate all-pure claim §2
+rule 3 says a consumer SHOULD believe: unchanged, believed, no new hedge, no advisory. Both directions
+are mutation-verified — forcing the count-0 arm covered turns the three FLOOR tests red and leaves the
+control green; hedging both arms turns the control (and eight pre-existing coverage tests) red and
+leaves the FLOOR test green.
+
+Two reconciliations, running in **opposite** directions, because they follow what the second report
+*says*. An INCOMPLETE report makes a specific negative claim about the package's source, so it beats a
+complete sibling. A count-0 report makes no claim at all, so a package chained once judged and once not
+**keeps** its coverage — letting an empty report withdraw an earned purity claim is the mirror sin.
+
+Blast radius, real code: **1 report in 37** emits `count: 0` (swift-syntax's 21 modules + candor-swift's
+2 + 14 soundness fixtures) — and it is swift-syntax's `SwiftSyntax-all`, a target whose only source file
+is a comment saying "this is a fake target that depends on all targets". A rare facade, not half a dep
+tree. PART 26 now prints `swift  SEPARATED on 24/80 cells — the engine distinguishes them`, where all
+four engines printed INDISTINGUISHABLE.
+
 ### changed — ⟨0.24⟩ a `--class` value that cannot be honoured is REFUSED, not quietly narrowed (2026-07-27)
 
 SPEC §6.2's **value grammar**, which conformance PART 27 found unimplemented in **all four** engines

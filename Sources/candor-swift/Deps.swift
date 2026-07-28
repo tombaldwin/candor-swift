@@ -113,6 +113,41 @@ struct DepIndex {
     /// code") — so chaining an incomplete report was strictly WORSE than not chaining it: the dependency
     /// refused to certify a gate over itself and the consumer certified one on its behalf.
     var incompletePkgs: Set<String> = []
+    /// ⟨0.24⟩ Packages whose only chained report JUDGED NOTHING — `analyzed.count == 0` (or a manifest so
+    /// garbled it made no claim, or, on a pre-⟨0.21⟩ producer with no manifest at all, an empty
+    /// `functions` list). The third reading of the same door, and the one where the report is entirely
+    /// well-formed and entirely trusted: rule 3 turns a report's SILENCE into a purity claim, and a
+    /// report that judged nothing is ALL silence.
+    ///
+    /// THE WIRE ALREADY DISTINGUISHED THE TWO CASES AND NOTHING READ IT. A `functions: []` report is two
+    /// completely different statements depending on one integer:
+    ///
+    ///   `analyzed.count: 0`  "I judged nothing here"           — a facade package of pure re-exports
+    ///                                                            scans to exactly this. No unit in it
+    ///                                                            was ever looked at, so absence carries
+    ///                                                            no purity claim: NOT COVERED.
+    ///   `analyzed.count: n`  "I judged n units, none effectful" — a legitimate positive all-pure claim
+    ///                                                            which §2 rule 3 says a consumer SHOULD
+    ///                                                            believe: COVERED, and it MUST NOT be
+    ///                                                            hedged. That row is the control, and a
+    ///                                                            fix that hedged both would have
+    ///                                                            disabled chained coverage, not fixed it.
+    ///
+    /// MEASURED on the two-tree fixture (dep `hit()` reads /etc/hosts, app `go()` calls it, `deny Fs`):
+    ///
+    ///   unchained                     go -> invisible: ['RatesDep'], coverage.uncovered, κ nudge, exit 0
+    ///   trusted                       go -> ['Fs']                                                exit 1
+    ///   count: 0 (pre)                go -> ABSENT FROM `functions`, no coverage field, no nudge   exit 0
+    ///
+    /// — the chained arm bought MORE confidence than not chaining the package at all, which is the one
+    /// thing a degraded report may never do: `deny Fs` went exit 1 -> exit 0 with the disclosure the
+    /// UNCHAINED arm carries deleted on the way. Conformance PART 26 measured 64 live cells ABSENT here
+    /// and printed the two arms INDISTINGUISHABLE on all four engines.
+    ///
+    /// TREATMENT: as for `incompletePkgs` — entries untouched, only COVERAGE withheld. A count-0 report
+    /// has no entries to touch in the ordinary case; the branch matters for the contradictory report that
+    /// carries entries anyway, where dropping them would be the mirror sin.
+    var unjudgedPkgs: Set<String> = []
     /// Does ANY chained report — trusted or not — claim this package? The predicate the JOIN gates use.
     /// Coverage decides whether SILENCE is a claim; chaining decides whether a key is worth ASKING.
     /// Conflating the two is the defect this split exists to close, and it bites in BOTH directions:
@@ -124,8 +159,13 @@ struct DepIndex {
     /// would be silently REPLACED by the `invisible` hedge and `deny E Unknown[dispatch]` would go exit
     /// 1 -> exit 0 — a gate lost to a fix whose whole argument is that it only adds disclosure. This
     /// engine's half-1 gate reads `isChained`, so both voices speak; the test asserts both.
+    ///
+    /// ⟨0.24⟩ `unjudgedPkgs` likewise. A count-0 report contributes no keys, so in the ordinary case this
+    /// changes nothing; it is here so the CONTRADICTORY report — `analyzed.count: 0` with entries anyway —
+    /// still has its entries asked, since withholding coverage may never take a real answer with it.
     func isChained(_ pkg: String) -> Bool {
         coveredPkgs.contains(pkg) || stalePkgs.contains(pkg) || incompletePkgs.contains(pkg)
+            || unjudgedPkgs.contains(pkg)
     }
     /// ⟨0.23⟩ `typeSurface.returns` (SPEC §2): `<pkg>#<fn qual>` -> `<pkg>#<type qual>`, exactly as the
     /// producer published it. Same never-guess discipline as `byKey`: two reports publishing the same fn
@@ -134,6 +174,7 @@ struct DepIndex {
     var returnsAmbiguous: Set<String> = []
     var isEmpty: Bool {
         byKey.isEmpty && coveredPkgs.isEmpty && stalePkgs.isEmpty && incompletePkgs.isEmpty
+            && unjudgedPkgs.isEmpty
     }
     /// nil for an unknown OR ambiguous fn key. A miss here does NOT license silence — see the consumer.
     func boundType(_ key: String) -> String? { returnsAmbiguous.contains(key) ? nil : returnsIdx[key] }
@@ -330,9 +371,35 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
             guard let arr = raw as? [Any] else { return true }          // present, not an array: garbled
             return !arr.isEmpty
         }()
+        // ⟨0.24⟩ …and a report that JUDGED NOTHING grants no coverage either — the same door, third
+        // reading, and the only one where the report is well-formed AND trusted. §2's three-row table:
+        //
+        //   `analyzed.count: 0`   `functions: []`  -> I judged nothing. NOT COVERED, exactly as if the
+        //                                             package were never chained.
+        //   `analyzed.count: n>0` `functions: []`  -> I judged n units and none is effectful. A positive
+        //                                             all-pure claim §2 rule 3 says a consumer SHOULD
+        //                                             believe — COVERED, and MUST NOT be hedged. This is
+        //                                             the control the row above is meaningless without.
+        //   manifest ABSENT       `functions: []`  -> a pre-⟨0.21⟩ producer made no manifest and listed
+        //                                             nothing: no claim at all, so the unchained reading.
+        //
+        // A manifest ABSENT with entries PRESENT is the pre-⟨0.21⟩ producer that did judge something and
+        // said so the only way it could — its entries. Reading that as unjudged would withdraw coverage
+        // from every report predating the rung, which is the `unanalyzed` absent/garbled mistake in a new
+        // costume (java measured that one at 7 failing tests, ts at 15).
+        //
+        // A manifest that is present but GARBLED (`analyzed: "oops"`, a `count` that is not a number)
+        // has not made a completeness claim, so it must not be read as one — the same fail-closed reading
+        // the `unanalyzed` cast above takes, and for the same reason.
+        let judged: Bool = {
+            guard let raw = obj?["analyzed"] else { return !fns.isEmpty }   // pre-⟨0.21⟩: entries are the claim
+            guard let m = raw as? [String: Any], let c = m["count"] as? Int else { return false }
+            return c > 0
+        }()
         func register(_ pkg: String) {
             if stale { idx.stalePkgs.insert(pkg) }
             else if incomplete { idx.incompletePkgs.insert(pkg) }
+            else if !judged { idx.unjudgedPkgs.insert(pkg) }
             else { idx.coveredPkgs.insert(pkg) }
         }
 
@@ -467,6 +534,15 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
     // set. A package that is covered, stale and incomplete at once then keeps BOTH disclosures rather
     // than losing the stale one to a coverage claim that has just been withdrawn.
     idx.coveredPkgs.subtract(idx.incompletePkgs)
+    // ⟨0.24⟩ …AND A PACKAGE CHAINED TWICE, ONCE JUDGED AND ONCE NOT, **IS** COVERED — the opposite
+    // reconciliation to the line above, and the direction follows from what the second report SAYS.
+    // An INCOMPLETE report makes a specific NEGATIVE claim about the package's source ("there is source
+    // here I could not read"), and that claim is true whoever else read it, so it wins. A count-0 report
+    // makes NO claim in either direction: "I judged nothing" adds nothing to a report that judged
+    // something, and subtracts nothing from it either. Letting it withdraw another report's earned
+    // coverage would be the mirror sin — a real purity claim degraded to a hedge by a report with no
+    // content — which is exactly the argument the `stalePkgs` line below is made of.
+    idx.unjudgedPkgs.subtract(idx.coveredPkgs)
     // A package chained TWICE — once fresh, once stale — IS covered: the fresh report makes the claim and
     // the stale one adds nothing to it. Without this, a second report for an already-covered package would
     // strip the coverage the first one earned, which is the mirror sin (a real purity claim degraded to a
@@ -481,6 +557,13 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
              + "could not analyze (⟨0.21⟩ `unanalyzed`) — their entries are KEPT unchanged, but they grant "
              + "NO coverage, so a key they do not answer discloses instead of reading pure: "
              + "\(idx.incompletePkgs.sorted().joined(separator: ", "))\n").data(using: .utf8)!)
+    }
+    if !idx.unjudgedPkgs.isEmpty {
+        FileHandle.standardError.write(
+            ("candor-swift: \(idx.unjudgedPkgs.count) chained dependency report(s) judged NOTHING (⟨0.24⟩ "
+             + "`analyzed.count: 0`) — a report with no judgment in it is not an all-clear, so it grants NO "
+             + "coverage and its package stays in the κ ledger exactly as if it were never chained: "
+             + "\(idx.unjudgedPkgs.sorted().joined(separator: ", "))\n").data(using: .utf8)!)
     }
     if !idx.stalePkgs.isEmpty {
         FileHandle.standardError.write(

@@ -946,4 +946,214 @@ final class ChainingProcessTests: XCTestCase {
         XCTAssertFalse(r.err.contains("could not analyze"),
                        "…and not the incompleteness one, which would claim its `unanalyzed` was believed: \(r.err)")
     }
+
+    // ── ⟨0.24⟩ `analyzed.count == 0` IS "I JUDGED NOTHING" ────────────────────────────────────────
+    //
+    // A chained report carrying `functions: []` and `analyzed.count: 0` bought a consumer MORE
+    // confidence than not chaining the package at all: every call into it dropped out of `functions`,
+    // which under ⟨0.21⟩ is a positive purity claim, with no advisory in either channel — while the
+    // UNCHAINED arm over the same sources correctly discloses `invisible` + `coverage.uncovered` + the
+    // κ nudge. Strictly more confident than having no report, which is the one thing a report may never
+    // buy. Conformance PART 26 measured 64 live cells ABSENT in this engine.
+    //
+    // THE WIRE ALREADY SAID WHICH IT WAS. A `pub use`-style facade package scans to `count: 0`; an
+    // all-pure two-function package scans to `count: 2` with the same empty `functions`. Nothing read the
+    // integer, so both read as an all-clear.
+    //
+    // THE SECOND ROW IS THE CONTROL AND IT IS WHY THIS IS NOT A ONE-LINER: `count: n>0` with an empty
+    // `functions` is a legitimate all-pure claim that §2 rule 3 says a consumer SHOULD believe, and a fix
+    // that hedged BOTH rows would have disabled chained coverage rather than implemented the rule.
+    // `testEmptyDepReportIsAPurityClaim` above is the pre-existing pin on that row and is untouched;
+    // `testTheAllPureArmAndTheJudgedNothingArmDiverge` below is the in-repo CONTROL SEPARATION.
+
+    /// Doctor the report to `functions: []` with `analyzed.count` forced to `zero` (the ⟨0.24⟩ FLOOR arm)
+    /// or left exactly as produced (the CONTROL arm). One integer apart, deliberately.
+    private func emptiedVariant(_ report: URL, to out: URL, zeroCount: Bool) throws {
+        try doctor(report, to: out) { d in
+            d["functions"] = [Any]()
+            if zeroCount {
+                var a = (d["analyzed"] as? [String: Any]) ?? [:]
+                a["count"] = 0
+                d["analyzed"] = a
+            }
+        }
+    }
+
+    /// THE SECOND FIXTURE, WRITTEN FIRST — the control. An all-pure dep report (`functions: []`,
+    /// `analyzed.count` as produced) must still grant full coverage and gain NO hedge: that is §2 rule 3,
+    /// and a change that also hedged here would have deleted chained coverage instead of fixing it.
+    func testAnAllPureDepReportWithAJudgedCountStillGrantsCoverage() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture(extraApp: """
+        public func goUnlisted() {
+            brandNewApi()
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        let allPure = root.appendingPathComponent("dep-allpure.json")
+        try emptiedVariant(depReport, to: allPure, zeroCount: false)
+        // the arm is only a control if its `analyzed.count` really is non-zero — assert the input
+        let count = ((try JSONSerialization.jsonObject(with: Data(contentsOf: allPure)) as? [String: Any])?["analyzed"]
+                     as? [String: Any])?["count"] as? Int
+        XCTAssertGreaterThan(count ?? 0, 0,
+                             "the CONTROL arm must carry a POSITIVE judged count, or it is the FLOOR arm and "
+                             + "this test asserts the opposite of what it says")
+
+        let policy = root.appendingPathComponent("deny-net.policy")
+        try "deny Net\n".write(to: policy, atomically: true, encoding: .utf8)
+        let verdict = root.appendingPathComponent("verdict-allpure.json")
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-ap").path,
+                              "--policy", policy.path, "--gate-json", verdict.path],
+                        env: ["CANDOR_DEPS": allPure.path])
+        XCTAssertEqual(r.code, 0, "an all-pure dep's claim is believed, so the gate is green: \(r.err)")
+        let by = try fns(ofReport: root.appendingPathComponent("app-ap.App.Swift.json"))
+        for fn in ["go", "goMember", "goUnlisted"] {
+            XCTAssertNil(by[fn], "\(fn): an all-pure report's silence is its purity CLAIM (§2 rule 3) and "
+                         + "⟨0.24⟩ must not hedge it; got \(by[fn] ?? [:])")
+        }
+        let env = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("app-ap.App.Swift.json"))) as? [String: Any]
+        XCTAssertNil(env?["coverage"], "…and the κ ledger must not name a covered package")
+        XCTAssertFalse(r.err.contains("judged NOTHING"),
+                       "the ⟨0.24⟩ advisory must NOT fire on a positive all-pure claim: \(r.err)")
+        XCTAssertFalse(r.err.contains("classifier doesn't cover"), r.err)
+        let v = try JSONSerialization.jsonObject(with: Data(contentsOf: verdict)) as? [String: Any]
+        XCTAssertNil(v?["coverage"], "the machine-readable verdict carries no caveat either: \(v ?? [:])")
+    }
+
+    /// THE FLOOR ARM. `analyzed.count: 0` means the producer judged nothing, so its silence licenses
+    /// nothing: the package is NOT COVERED and the consumer must carry exactly the disclosure it would
+    /// carry with no dep report at all — per-fn `invisible`, the `coverage.uncovered` envelope, the κ
+    /// stderr nudge and the gate verdict's caveat. Asserted AGAINST the unchained arm rather than against
+    /// a hand-written expectation, because "exactly as if unchained" is the rule §2 states.
+    func testADepReportThatJudgedNothingGrantsNoCoverage() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture(extraApp: """
+        public func goUnlisted() {
+            brandNewApi()
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        let zero = root.appendingPathComponent("dep-zero.json")
+        try emptiedVariant(depReport, to: zero, zeroCount: true)
+        let policy = root.appendingPathComponent("deny-net.policy")
+        try "deny Net\n".write(to: policy, atomically: true, encoding: .utf8)
+
+        let verdict = root.appendingPathComponent("verdict-zero.json")
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-z").path,
+                              "--policy", policy.path, "--gate-json", verdict.path],
+                        env: ["CANDOR_DEPS": zero.path])
+        XCTAssertEqual(r.code, 0, r.err)
+        let by = try fns(ofReport: root.appendingPathComponent("app-z.App.Swift.json"))
+        for fn in ["go", "goMember", "goUnlisted"] {
+            XCTAssertEqual(by[fn]?["invisible"] as? [String], ["RatesDep"],
+                           "\(fn): a report that judged NOTHING makes no purity claim about it — absence "
+                           + "from `functions` here is the ⟨0.21⟩ claim the cardinal sin is made of")
+        }
+        let env = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("app-z.App.Swift.json"))) as? [String: Any]
+        let uncovered = (env?["coverage"] as? [String: Any])?["uncovered"] as? [[String: Any]]
+        XCTAssertEqual(uncovered?.map { $0["name"] as? String }, ["RatesDep"],
+                       "the κ ledger travels with the report (⟨0.15⟩), naming the package nobody judged")
+        XCTAssertTrue(r.err.contains("judged NOTHING") && r.err.contains("RatesDep"),
+                      "the advisory must NAME the package and say what it means: \(r.err)")
+        XCTAssertTrue(r.err.contains("classifier doesn't cover"),
+                      "…and the ordinary κ nudge fires too, exactly as unchained: \(r.err)")
+        let v = try JSONSerialization.jsonObject(with: Data(contentsOf: verdict)) as? [String: Any]
+        XCTAssertEqual((v?["coverage"] as? [String: Any])?["modules"] as? [String], ["RatesDep"],
+                       "the gate verdict re-discloses it (⟨0.15⟩ verdict-preserving), so a MACHINE consumer "
+                       + "of a green gate learns the package was never judged: \(v ?? [:])")
+
+        // …and the whole point: this is the UNCHAINED answer, not a smaller one. Compared arm-to-arm
+        // rather than to a literal, because the rule is "exactly as if the package were not chained".
+        let u = try run(bin, [app.path, "--out", root.appendingPathComponent("app-u").path,
+                              "--policy", policy.path])
+        XCTAssertEqual(u.code, 0, u.err)
+        let unchained = try fns(ofReport: root.appendingPathComponent("app-u.App.Swift.json"))
+        XCTAssertEqual(Set(by.keys), Set(unchained.keys),
+                       "the same functions are reported chained-but-unjudged as unchained")
+        for fn in unchained.keys {
+            XCTAssertEqual(by[fn]?["invisible"] as? [String], unchained[fn]?["invisible"] as? [String],
+                           "\(fn): the same disclosure, arm for arm")
+            XCTAssertEqual(by[fn]?["inferred"] as? [String], unchained[fn]?["inferred"] as? [String],
+                           "\(fn): …and no effect invented or lost on the way")
+        }
+    }
+
+    /// CONTROL SEPARATION, in-repo. Conformance PART 26 prints this comparison for all four engines and
+    /// printed INDISTINGUISHABLE for every one of them; the two arms differ by ONE integer and a correct
+    /// implementation must answer them DIFFERENTLY. Pinned here so the separation cannot be lost quietly
+    /// between conformance runs.
+    func testTheAllPureArmAndTheJudgedNothingArmDiverge() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        var out: [Bool: [String: [String: Any]]] = [:]
+        for zero in [true, false] {
+            let variant = root.appendingPathComponent("dep-sep-\(zero).json")
+            try emptiedVariant(depReport, to: variant, zeroCount: zero)
+            let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-sep-\(zero)").path],
+                            env: ["CANDOR_DEPS": variant.path])
+            XCTAssertEqual(r.code, 0, r.err)
+            out[zero] = try fns(ofReport: root.appendingPathComponent("app-sep-\(zero).App.Swift.json"))
+        }
+        XCTAssertNotEqual(Set(out[true]!.keys), Set(out[false]!.keys),
+                          "the FLOOR arm and the CONTROL arm differ only in `analyzed.count`, and an engine "
+                          + "that answers them the same is not reading the manifest at all")
+        XCTAssertEqual(out[true]?["go"]?["invisible"] as? [String], ["RatesDep"], "count 0 -> not covered")
+        XCTAssertNil(out[false]?["go"], "count n>0 -> covered, believed all-pure")
+    }
+
+    /// The manifest is only a claim when it IS one. Five spellings, and the two anti-flood rows matter as
+    /// much as the three fail-closed ones: reading a pre-⟨0.21⟩ producer's ABSENT manifest as "judged
+    /// nothing" would withdraw coverage from every report that predates the rung — the `unanalyzed`
+    /// absent/garbled mistake in a new costume (java measured that one at 7 failing tests, ts at 15).
+    func testAnAbsentOrGarbledAnalyzedManifestIsReadAsAClaimOnlyWhenItIsOne() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture(extraApp: """
+        public func goUnlisted() {
+            brandNewApi()
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+
+        // (name, `analyzed` value — .some(nil) removes the key, keepEntries, expect covered)
+        let cases: [(String, Any??, Bool, Bool)] = [
+            ("count_zero",    .some(["count": 0, "digest": "x"] as [String: Any]), false, false),
+            ("count_two",     .some(["count": 2, "digest": "x"] as [String: Any]), false, true),
+            ("absent_empty",  .some(nil),                                          false, false),
+            ("absent_entries", .some(nil),                                         true,  true),
+            ("string",        .some("oops"),                                       true,  false),
+            ("no_count",      .some([:] as [String: Any]),                         true,  false),
+            ("null",          .some(NSNull()),                                     true,  false),
+        ]
+        for (name, value, keepEntries, expectCovered) in cases {
+            let variant = root.appendingPathComponent("dep-a-\(name).json")
+            try doctor(depReport, to: variant) { d in
+                if !keepEntries { d["functions"] = [Any]() }
+                if let v = value, let vv = v { d["analyzed"] = vv } else { d.removeValue(forKey: "analyzed") }
+            }
+            let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-a-\(name)").path],
+                            env: ["CANDOR_DEPS": variant.path])
+            XCTAssertEqual(r.code, 0, "\(name): scan failed: \(r.err)")
+            let by = try fns(ofReport: root.appendingPathComponent("app-a-\(name).App.Swift.json"))
+            if expectCovered {
+                XCTAssertNil(by["goUnlisted"],
+                             "\(name): this report DID judge something, and its silence is the claim §2 rule 3 "
+                             + "says to believe — withholding coverage here floods every pre-rung report")
+            } else {
+                XCTAssertEqual(by["goUnlisted"]?["invisible"] as? [String], ["RatesDep"],
+                               "\(name): a report that judged nothing — or garbled the manifest that would "
+                               + "have said otherwise — has made no claim, so its silence buys nothing")
+            }
+            if keepEntries {
+                // ENTRIES ARE KEPT EITHER WAY. Withholding coverage may never take a real answer with it:
+                // that is the mirror sin, and it is what makes this strictly additive.
+                XCTAssertEqual(Set(by["go"]?["inferred"] as? [String] ?? []), ["Net"],
+                               "\(name): the entries the report DOES carry still answer")
+            }
+        }
+    }
 }
