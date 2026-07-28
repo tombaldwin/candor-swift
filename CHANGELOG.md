@@ -9,6 +9,26 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed ⚠ — ⟨0.24⟩ a refusal standing beside a FIRING rule DELETED the certain violation (2026-07-28)
+
+SPEC §3.1 ⟨0.24⟩ (candor-spec `7271c69`), which corrects its own ruling of an hour earlier. The
+precedence is **violation (1) > refusal (2) > incomplete (2)**, and the first rung is forced by Lemma 2
+rather than chosen: if a rule FIRES on evidence the report carries the policy is Rejected, and `Reject` is
+upward-closed, so however an unanswerable rule would have resolved cannot un-reject it. Measured on a
+two-entry report, one policy:
+
+    deny Fs                                        exit 1   document names `app.writes`
+    deny Net[unknown-host] app                     exit 2   no document (the entry has no netClass)
+    BOTH IN ONE POLICY                             exit 2   NO DOCUMENT AT ALL          <- pre
+    BOTH IN ONE POLICY                             exit 1   document names `app.writes` <- post
+
+The harm was **in the document, not the exit code**: the refusal ran before the gate did, so the verdict
+that would have named the certain violation was never computed, and the finding vanished from every
+machine channel. Byte-identical in harm to the ⟨0.21⟩ incomplete-analysis path one rung down, and the
+same fix — compute the verdict first, decide the exit from it. The refusal is **not swallowed**: every
+unanswered rule is still named on stderr beside the verdict it is not part of. A refusal with no firing
+rule beside it still exits 2, unchanged.
+
 ### fixed ⚠ — ⟨0.24⟩ a CORRUPT chained dep entry was skipped, so the calls it answered read PURE (2026-07-28)
 
 The sibling of the `gate --report` rung below, one layer over, found while verifying it. This file's own

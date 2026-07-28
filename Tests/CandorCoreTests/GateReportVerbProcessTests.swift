@@ -379,6 +379,15 @@ final class GateReportVerbProcessTests: XCTestCase {
     /// names. Only the third is unanswerable. MEASURED before the fix: swift refused naming `app.inheritU`
     /// where rust, ts and java all name `app.orphanU` — the same exit code, with the remedy pointing at
     /// the wrong function.
+    ///
+    /// ⟨0.24⟩ **THE EXIT MOVED FROM 2 TO 1 UNDER THE PRECEDENCE CORRECTION, and that is the ruling
+    /// working, not a regression.** This same policy FIRES on `app.mystery` and `app.inheritU` — both
+    /// contribute `unresolved` from evidence the report carries — so the policy is Rejected, `Reject` is
+    /// upward-closed (PAPER3 Lemma 2), and whatever `app.orphanU` would have resolved to cannot un-reject
+    /// it (SPEC §3.1, candor-spec `7271c69`). The property this row exists for is UNCHANGED and still
+    /// asserted: the refusal disclosure must name the entry whose reason channel is actually missing. It
+    /// is now read off the refusal LINES specifically, because the violation lines legitimately name the
+    /// other two and a whole-stderr `contains` can no longer tell the two channels apart.
     func testTheRefusalNamesTheEntryWhoseReasonChannelIsActuallyMissing() throws {
         let entries = [
             #"{"fn":"app.mystery","loc":"a.swift:1:1","inferred":["Unknown"],"direct":["Unknown"],"declared":[],"undeclared":[],"overdeclared":[],"unresolved":true,"hash":"App#mystery"}"#,
@@ -390,16 +399,24 @@ final class GateReportVerbProcessTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let r = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
                                                "--policy", root.appendingPathComponent("pol.txt").path])
-        XCTAssertEqual(r.code, 2, "an Unknown inherited from nowhere the report names is still the "
-                       + "uncomputable state, and must still be refused: \(r.err)")
-        XCTAssertTrue(r.err.contains("app.orphanU"),
+        XCTAssertEqual(r.code, 1, "the same policy FIRES on the two entries that DO contribute a class, so "
+                       + "a certain violation dominates the unanswerable third (SPEC §3.1). stderr: \(r.err)")
+        // The refusal LINES only — the violation lines legitimately name the other two entries.
+        let refusalLines = r.err.split(separator: "\n").filter { $0.contains("narrows on the Unknown REASON CLASS") }
+        XCTAssertEqual(refusalLines.count, 1, "exactly one rule went unanswered: \(r.err)")
+        let refusal = refusalLines.joined()
+        XCTAssertTrue(refusal.contains("app.orphanU"),
                       "the refusal must name the entry whose reason channel is ACTUALLY missing — a remedy "
-                      + "pointing at the wrong function is worth as little as no remedy: \(r.err)")
-        XCTAssertFalse(r.err.contains("app.inheritU"),
+                      + "pointing at the wrong function is worth as little as no remedy: \(refusal)")
+        XCTAssertFalse(refusal.contains("app.inheritU"),
                        "`app.inheritU` reaches `app.mystery`'s contributed `unresolved` through its own "
-                       + "`calls` edge, so it is not the unanswerable one: \(r.err)")
-        XCTAssertFalse(r.err.contains("app.mystery"),
-                       "…and `app.mystery` contributes `unresolved` from its own DIRECT Unknown: \(r.err)")
+                       + "`calls` edge, so it is not the unanswerable one: \(refusal)")
+        XCTAssertFalse(refusal.contains("app.mystery"),
+                       "…and `app.mystery` contributes `unresolved` from its own DIRECT Unknown: \(refusal)")
+        // …and the unanswered rule is still DISCLOSED beside the verdict it is not part of.
+        XCTAssertTrue(r.err.contains("could not be evaluated"),
+                      "exit 1 reports the violation it is sure of; it does not conceal the part it could "
+                      + "not read (SPEC §3.1): \(r.err)")
     }
 
     /// The anti-flood control on the other side: a narrowed filter that does NOT include `unresolved` must
@@ -578,5 +595,69 @@ final class GateReportVerbProcessTests: XCTestCase {
             let r = try ProcessHarness.run(bin(), ["gate", "--report", locator, "--policy", pol])
             XCTAssertEqual(r.code, 1, "locator form `\(locator)` must reach the same verdict: \(r.err)")
         }
+    }
+
+    // ── ⟨0.24⟩ PRECEDENCE: a CERTAIN violation dominates a refusal (SPEC §3.1) ──────────────────────
+
+    /// **THE HARM IS IN THE DOCUMENT, NOT THE EXIT CODE**, so this test asserts the document.
+    ///
+    /// One policy, two rules: `deny Fs` FIRES on evidence the report carries, and
+    /// `deny Net[unknown-host] app` is unanswerable (the `Net` entry has no `netClass`). MEASURED on this
+    /// engine before the fix (2026-07-28):
+    ///
+    ///     deny Fs                                  ->  exit 1, document names `app.writes`
+    ///     deny Net[unknown-host] app               ->  exit 2, no document
+    ///     BOTH IN ONE POLICY                       ->  exit 2, NO DOCUMENT AT ALL
+    ///
+    /// The third row deleted a CERTAIN violation from the machine-consumer channel — byte-identical in
+    /// harm to the ⟨0.21⟩ incomplete-analysis path. `Reject` is upward-closed (PAPER3 Lemma 2), so however
+    /// the unanswerable rule would have resolved cannot un-reject a policy a firing rule already rejected:
+    /// exit 1 is CERTAIN there, not merely fail-closed, and it names the violation where exit 2 names
+    /// nothing (candor-spec `7271c69`, which corrects its own ruling of an hour earlier).
+    ///
+    /// THE TWO CONTROLS ARE NOT OPTIONAL. Without the refuse-only row this cannot tell "the violation
+    /// dominated the refusal" from "the scoped rule was answerable all along and there was never a refusal
+    /// to dominate"; without the fire-only row a gate that has stopped evaluating anything scores OK.
+    /// A broken invocation returns ONE code; these three demand 1, 2 and 1.
+    func testACertainViolationDominatesARefusalAndTheDocumentCarriesIt() throws {
+        let fns = fnEntry("app.writes", ["Fs"]) + "," + fnEntry("app.calls", ["Net"])
+        let root = try makeReportDir(report: envelope(fns, analyzed: 2),
+                                     policy: "deny Fs\ndeny Net[unknown-host] app\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func policyFile(_ name: String, _ text: String) throws -> String {
+            let u = root.appendingPathComponent(name)
+            try text.write(to: u, atomically: true, encoding: .utf8)
+            return u.path
+        }
+        // CONTROL 1 — the firing rule ALONE fires.
+        let fireOnly = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                                      "--policy", try policyFile("fire.txt", "deny Fs\n")])
+        XCTAssertEqual(fireOnly.code, 1, "control: `deny Fs` alone must fire, else the fixture is inert. stderr: \(fireOnly.err)")
+        // CONTROL 2 — the unanswerable rule ALONE still refuses, so there IS a refusal to dominate.
+        let refuseOnly = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                                        "--policy", try policyFile("refuse.txt", "deny Net[unknown-host] app\n")])
+        XCTAssertEqual(refuseOnly.code, 2, "control: the scoped rule alone must still refuse. stderr: \(refuseOnly.err)")
+
+        // THE ROW. Delete the document before measuring — a stale artifact here reads as a pass.
+        let v = root.appendingPathComponent("v.json")
+        try? FileManager.default.removeItem(at: v)
+        let r = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                               "--policy", root.appendingPathComponent("pol.txt").path,
+                                               "--gate-json", v.path])
+        XCTAssertEqual(r.code, 1, "a rule FIRED on evidence the report carries; an unanswered rule cannot "
+                       + "un-reject a rejected policy (Lemma 2). stderr: \(r.err)")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: v.path),
+                      "the verdict document must exist — its absence IS the harm this row is about")
+        let d = try JSONSerialization.jsonObject(with: Data(contentsOf: v)) as? [String: Any]
+        XCTAssertEqual(d?["ok"] as? Bool, false)
+        let vs = d?["violations"] as? [[String: Any]] ?? []
+        XCTAssertEqual(vs.count, 1, "the CERTAIN finding must survive into the machine channel: \(String(describing: d))")
+        XCTAssertEqual(vs.first?["fn"] as? String, "app.writes",
+                       "and it must NAME the function — an exit-code-only assertion passes on a route that "
+                       + "exits 1 with `violations: []`")
+        // …and the part it could not read is still disclosed. Exit 1 reports the violation it is sure of;
+        // it does not conceal the unanswered rule (SPEC §3.1).
+        XCTAssertTrue(r.err.contains("deny Net[unknown-host] app"),
+                      "the unanswered rule must still be named on stderr: \(r.err)")
     }
 }

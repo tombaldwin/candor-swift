@@ -340,27 +340,37 @@ private func gateInputFromReport(_ env: GateReportEnvelope) -> GateInput {
 ///
 /// Per (rule, function), NOT per policy: a scoped rule whose matched functions all carry their evidence
 /// evaluates normally, and only the rule that would have been silently narrowed is refused.
-private func unanswerableScopedFilter(_ deny: [DenyRule], _ gi: GateInput) -> String? {
+///
+/// ⟨0.24⟩ RETURNS EVERY UNANSWERABLE RULE, not the first. SPEC §3.1: *"The refusal message MUST still
+/// disclose which rules could not be evaluated — exit 1 reports the violation it is sure of, it does not
+/// conceal the part it could not read."* Now that a refusal can be OVERRULED by a certain violation (the
+/// precedence correction below), this list is a DISCLOSURE that has to travel ALONGSIDE a verdict rather
+/// than being the whole output, and one rule out of three is a partial disclosure. At most one message
+/// per RULE — the first function that defeats it is the example; naming every match would bury the rule.
+private func unanswerableScopedFilters(_ deny: [DenyRule], _ gi: GateInput) -> [String] {
+    var out: [String] = []
     for r in deny {
         for fn in gi.inferred.keys.sorted() where scopeMatches(fn, r.scope) {
             let inf = gi.inferred[fn] ?? []
             if !r.netClasses.isEmpty, inf.contains("Net"), (gi.netClasses[fn] ?? []).isEmpty {
-                return "`\(r.raw)` narrows on the Net DESTINATION CLASS, but `\(fn)` carries Net with no "
+                out.append("`\(r.raw)` narrows on the Net DESTINATION CLASS, but `\(fn)` carries Net with no "
                     + "`netClass` in this report — the field the filter reads is absent, so the narrowing "
                     + "would succeed for lack of evidence and drop a Net the bare `deny Net` catches. "
                     + "Refusing (exit 2) rather than passing: an absent optional field must not relax a "
-                    + "fail-closed gate. Use the bare `deny Net`, or gate at scan time."
+                    + "fail-closed gate. Use the bare `deny Net`, or gate at scan time.")
+                break
             }
             if !r.unknownClasses.isEmpty, inf.contains("Unknown"), (gi.reasonClasses[fn] ?? []).isEmpty {
-                return "`\(r.raw)` narrows on the Unknown REASON CLASS, but `\(fn)` carries Unknown with no "
+                out.append("`\(r.raw)` narrows on the Unknown REASON CLASS, but `\(fn)` carries Unknown with no "
                     + "reason reachable in this report — neither its own `unknownWhy` nor a `calls` edge to "
                     + "one. §6.2 resolves the class set TRANSITIVELY over the gate's reach; with the channel "
                     + "missing, every narrowed filter silently tolerates while only the bare `deny Unknown` "
-                    + "fires. Refusing (exit 2). Use the bare `deny Unknown`, or gate at scan time."
+                    + "fires. Refusing (exit 2). Use the bare `deny Unknown`, or gate at scan time.")
+                break
             }
         }
     }
-    return nil
+    return out
 }
 
 // ── the CLI ─────────────────────────────────────────────────────────────────────────────────────────
@@ -479,12 +489,53 @@ func runGateReportCLI(_ args: [String]) -> Never {
     }
     let gi = gateInputFromReport(env)
 
-    // The third refusal, and the only one that depends on the REPORT rather than on the policy alone.
-    if let why = unanswerableScopedFilter(pol.deny, gi) {
-        gateDie("candor-swift gate: \(why)")
-    }
-
+    // ⟨0.24⟩ THE PRECEDENCE: **violation (1) > refusal (2) > incomplete (2)** (SPEC §3.1), and the first
+    // rung is FORCED by Lemma 2 rather than chosen.
+    //
+    // The third refusal — the only one that depends on the REPORT rather than on the policy alone — is
+    // COMPUTED here and ACTED ON below, AFTER the gate has run. It used to exit 2 on this line, before
+    // `evaluateGate` was ever called, so a policy carrying a firing `deny Fs` PLUS one unanswerable
+    // scoped rule exited 2 and wrote NO document: **the certain violation was deleted from the
+    // machine-consumer channel by a rule it had nothing to do with.** MEASURED 2026-07-28 on
+    // `deny Fs` + `deny Net[unknown-host] app` over a two-entry report — exit 2, no `--gate-json` file,
+    // the `Fs` finding gone from every machine channel. Byte-identical in harm to the ⟨0.21⟩
+    // incomplete-analysis path one rung down, and it takes the same fix: compute the verdict FIRST,
+    // decide the exit FROM it.
+    //
+    // WHY THE VIOLATION IS SAFE TO REPORT even though a rule went unanswered: if one rule FIRES on
+    // evidence the report carries, the policy is REJECTED, and `Reject` is upward-closed (PAPER3 Lemma
+    // 2) — however the unanswerable rule would have resolved CANNOT UN-REJECT IT. Exit 1 is therefore not
+    // merely fail-closed here, it is CERTAIN, and it is strictly more informative than exit 2 because it
+    // NAMES the violation. All four engines had this backwards, and the spec clause pinning
+    // "refusal > violation" was corrected within the hour of being written (candor-spec `7271c69`) —
+    // uniform engine agreement was the evidence for the wrong ruling.
+    //
+    // The refusal is NOT swallowed: when a violation dominates, every unanswerable rule is still
+    // disclosed on stderr below. Exit 1 reports the violation it is sure of; it does not conceal the part
+    // it could not read.
+    let refused = unanswerableScopedFilters(pol.deny, gi)
     let violations = evaluateGate(pol, gi)
+    if violations.isEmpty, !refused.isEmpty {
+        // SOLE refusal: nothing certain to report, so the gate genuinely could not be evaluated as
+        // written. Unchanged behaviour — exit 2, and (⟨0.24⟩, below) the refusal document.
+        for why in refused { FileHandle.standardError.write("candor-swift gate: \(why)\n".data(using: .utf8)!) }
+        if !env.unanalyzed.isEmpty {
+            // Refusal (2) outranks incomplete (2) — the same exit, and the refusal is the reason no
+            // verdict exists. The manifest still gets said, on the human channel.
+            FileHandle.standardError.write(
+                ("candor-swift gate: (the report ALSO declares \(env.unanalyzed.count) unanalyzed unit(s) — "
+                 + "that alone would have been exit 2)\n").data(using: .utf8)!)
+        }
+        exit(2)
+    }
+    if !refused.isEmpty {
+        FileHandle.standardError.write(
+            ("candor-swift gate: NOTE — \(refused.count) policy rule(s) could not be evaluated over this "
+             + "report and are NOT answered by the verdict below. The verdict stands anyway: a rule FIRED "
+             + "on evidence this report carries, and no resolution of an unanswered rule can un-reject a "
+             + "rejected policy (SPEC §3.1, PAPER3 Lemma 2). Unanswered:\n").data(using: .utf8)!)
+        for why in refused { FileHandle.standardError.write("    \(why)\n".data(using: .utf8)!) }
+    }
     // Diagnostics go to STDERR exactly as the scan routes them, so `gate … --json | jq` sees pure JSON.
     for v in violations { FileHandle.standardError.write(("[\(v.rule)] \(v.detail)\n").data(using: .utf8)!) }
     // `--json` IS `--gate-json -`: the same document, from the same writer the scan uses, so a consumer
