@@ -441,7 +441,8 @@ func runGateReportCLI(_ args: [String]) -> Never {
     let parsedAliases = parseUnknownAliases(vocabConfig?.text)
     let pol = parsePolicy(policyText, aliases: parsedAliases.aliases)
     // ⟨0.24⟩ SPEC §3.1: the config file is named in the verdict only when its vocabulary PARTICIPATED.
-    let configSources = pol.usedAliases.isEmpty ? [] : [vocabConfig?.path].compactMap { $0 }
+    let policyVocabulary: (config: String, aliases: [String])? =
+        pol.usedAliases.isEmpty ? nil : vocabConfig.map { (config: $0.path, aliases: pol.usedAliases) }
     // ⟨0.24⟩ AN UNRECOGNISED REASON-CLASS TOKEN IS A POLICY ERROR (SPEC §6.2) — the UNREADABLE-POLICY
     // posture, so exit 2 with NO verdict document, before the report is even opened. Not a refusal in the
     // §3.1 answerability sense: nothing about THIS report is at issue, the policy could not be read as
@@ -578,10 +579,10 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // cannot tell a scanned verdict from a report-gated one.
     if wantJson { writeGateVerdict(violations, to: "-", spec: specVersion, analyzedCount: env.analyzedCount,
                                    unanalyzed: env.unanalyzed, coverage: Array(env.coverageModules),
-                                   configSources: configSources) }
+                                   policyVocabulary: policyVocabulary) }
     if let gp = gateJsonPath { writeGateVerdict(violations, to: gp, spec: specVersion, analyzedCount: env.analyzedCount,
                                                 unanalyzed: env.unanalyzed, coverage: Array(env.coverageModules),
-                                                configSources: configSources) }
+                                                policyVocabulary: policyVocabulary) }
     if violations.isEmpty {
         FileHandle.standardError.write("candor-swift: policy ✓\n".data(using: .utf8)!)
     } else {

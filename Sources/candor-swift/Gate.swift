@@ -26,7 +26,7 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
                       analyzedCount: Int,
                       unanalyzed: [(path: String, reason: String)] = [],
                       coverage uncoveredModules: [String] = [],
-                      configSources: [String] = []) {
+                      policyVocabulary: (config: String, aliases: [String])? = nil) {
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a gate over source candor could NOT analyze must NOT read green —
     // its effects are invisible, so a `deny`/`allow` that "passes" over it is a false-pure. `ok` requires
     // BOTH no violation AND a complete analysis (the caller exits 2 on this incomplete-but-clean path).
@@ -69,11 +69,20 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
     }
     // ⟨0.24⟩ THE AMBIENCE IS DISCLOSED (SPEC §3.1): if a config file supplied VOCABULARY that participated
     // in this verdict — today `unknown-alias`, the only key that expands a policy token — the document
-    // NAMES that file. Config discovery walks parent directories, so an alias file anywhere above the
-    // policy participates; a verdict changed by a file the operator cannot see named in the output is the
-    // ambient-input failure this format exists to refuse. Named only when the vocabulary was actually
-    // CONSUMED: a config that defines aliases nobody asked for is not an input to this verdict.
-    if !configSources.isEmpty { dict["configSources"] = configSources.sorted() }
+    // NAMES that file AND the aliases it supplied. Config discovery walks parent directories, so an alias
+    // file anywhere above the policy participates; a verdict changed by a file the operator cannot see
+    // named in the output is the ambient-input failure this format exists to refuse. Present only when the
+    // vocabulary was actually CONSUMED: a config that defines aliases nobody asked for is not an input to
+    // this verdict, and naming it unconditionally is noise a reader learns to ignore.
+    //
+    // KEY AND SHAPE ARE FOUR-WAY, not this engine's choice. It shipped here for one commit as a
+    // `configSources` string list; conformance PART 27 R9's key-parity arm — added the same day, because
+    // WITHIN-engine byte-equality is structurally blind to a key every route of one engine spells the same
+    // wrong way — measured java and ts on `policyVocabulary: {config, aliases}`, rust on `vocabulary`, and
+    // swift on `configSources`. Three names for one field, and none of them wrong on its own.
+    if let pv = policyVocabulary, !pv.aliases.isEmpty {
+        dict["policyVocabulary"] = ["config": pv.config, "aliases": pv.aliases.sorted()] as [String: Any]
+    }
     if path == "-" {
         if let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys]),
            let s = String(data: data, encoding: .utf8) { print(s) }

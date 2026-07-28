@@ -848,9 +848,17 @@ final class GateReportVerbProcessTests: XCTestCase {
 
         // …AND THE AMBIENCE IS DISCLOSED. A verdict changed by a file the operator cannot see named is the
         // ambient-input failure this format exists to refuse.
+        // KEY AND SHAPE ARE FOUR-WAY: `policyVocabulary: {config, aliases}`, matching java and ts exactly.
+        // This engine shipped it for one commit as a `configSources` string list; conformance PART 27 R9's
+        // key-parity arm measured three names for one field across four engines, which is the hole
+        // WITHIN-engine byte-equality is structurally blind to.
         let d = try JSONSerialization.jsonObject(with: Data(contentsOf: gateV)) as? [String: Any]
-        XCTAssertEqual(d?["configSources"] as? [String], [pdir.appendingPathComponent(".candor/config").path],
-                       "the config whose vocabulary PARTICIPATED must be named: \(String(describing: d))")
+        let pv = try XCTUnwrap(d?["policyVocabulary"] as? [String: Any],
+                               "the config whose vocabulary PARTICIPATED must be named: \(String(describing: d))")
+        XCTAssertEqual(pv["config"] as? String, pdir.appendingPathComponent(".candor/config").path)
+        XCTAssertEqual(pv["aliases"] as? [String], ["corp"],
+                       "…and WHICH aliases it supplied — naming the file alone leaves the reader to diff "
+                       + "a config against a policy to find out what acted")
 
         // CONTROL — the same policy with a BUILT-IN token uses no config vocabulary, so the key is ABSENT.
         // Without this the assertion above passes on an engine that names the config unconditionally.
@@ -861,7 +869,7 @@ final class GateReportVerbProcessTests: XCTestCase {
         _ = try ProcessHarness.run(bin(), ["gate", "--report", rep.path, "--policy", plain.path,
                                            "--gate-json", v2.path])
         let d2 = try JSONSerialization.jsonObject(with: Data(contentsOf: v2)) as? [String: Any]
-        XCTAssertNil(d2?["configSources"],
+        XCTAssertNil(d2?["policyVocabulary"],
                      "a config that defines aliases nobody asked for is not an input to this verdict")
     }
 

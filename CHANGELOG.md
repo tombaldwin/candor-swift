@@ -80,7 +80,8 @@ Vocabulary now travels with the policy that uses it: `unknown-alias` resolves re
 anchoring at the target, because they describe the thing being scanned.
 
 **And the ambience is disclosed.** When a config file supplied vocabulary that PARTICIPATED in the verdict,
-the `--gate-json` document names it under `configSources`. Discovery walks parent directories, so an alias
+the `--gate-json` document names it under `policyVocabulary: {config, aliases}` — the file AND which aliases
+it supplied. Discovery walks parent directories, so an alias
 file anywhere above the policy participates; a verdict changed by a file the operator cannot see named is
 the ambient-input failure this format exists to refuse. Named only when an alias was actually consumed — a
 config defining aliases nobody asked for is not an input to this verdict.
