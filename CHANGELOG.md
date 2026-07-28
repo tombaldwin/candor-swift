@@ -9,6 +9,28 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed ⚠ — ⟨0.24⟩ policy VOCABULARY anchored at the target on a scan and at the policy on a gate (2026-07-28)
+
+SPEC §3.1 ⟨0.24⟩ (candor-spec `99eb4e9`). §3.1's MUST NOT names three channels an effect must never enter
+a gate through; review found a FOURTH that no engine tested — `.candor/config`'s `unknown-alias`. The two
+routes anchored config discovery DIFFERENTLY (gate verbs at the policy file's directory, scan routes at the
+target), so with the policy filed OUTSIDE the scan target the same rule expanded differently and §3.1's
+byte-equality MUST was breakable by a file that is neither the report nor the policy. Measured, one report
++ one policy `deny Unknown[corp]`, `unknown-alias corp = reflect` filed beside the POLICY:
+
+    gate --report R --policy P    exit 0    alias found — narrows to [reflect], no match
+    scan TARGET   --policy P      exit 1    alias NOT found — widened to a bare `deny Unknown`
+
+Vocabulary now travels with the policy that uses it: `unknown-alias` resolves relative to the resolved
+`--policy` file's directory on BOTH routes. Target-scoped keys (`deps`, `net-partner`, scan settings) keep
+anchoring at the target, because they describe the thing being scanned.
+
+**And the ambience is disclosed.** When a config file supplied vocabulary that PARTICIPATED in the verdict,
+the `--gate-json` document names it under `configSources`. Discovery walks parent directories, so an alias
+file anywhere above the policy participates; a verdict changed by a file the operator cannot see named is
+the ambient-input failure this format exists to refuse. Named only when an alias was actually consumed — a
+config defining aliases nobody asked for is not an input to this verdict.
+
 ### fixed ⚠ — ⟨0.24⟩ an unrecognised reason-class token silently REWROTE the rule (2026-07-28)
 
 SPEC §6.2 ⟨0.24⟩ (candor-spec `382a7e0`), which withdraws its own asymmetry argument — "a dropped policy

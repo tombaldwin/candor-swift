@@ -735,6 +735,73 @@ final class GateReportVerbProcessTests: XCTestCase {
         }
     }
 
+    // ── ⟨0.24⟩ THE FOURTH AMBIENT CHANNEL: policy VOCABULARY anchors at the POLICY (SPEC §3.1) ──────
+
+    /// §3.1's MUST NOT names three channels an effect must never enter a gate through. A review found a
+    /// FOURTH that no engine tested: `.candor/config`'s `unknown-alias`. **The two routes anchored
+    /// DIFFERENTLY** — every gate verb at the policy file's directory, every scan route at the target — so
+    /// with the policy filed OUTSIDE the scan target the same rule expanded differently, and §3.1's
+    /// byte-equality MUST was breakable by a file that is neither the report nor the policy.
+    ///
+    /// MEASURED on this engine before the fix, one report + one policy `deny Unknown[corp]`, with
+    /// `unknown-alias corp = reflect` filed beside the POLICY and the target's only hole in the `indirect`
+    /// class:
+    ///
+    ///     gate --report R --policy P   exit 0   alias found — the rule narrows to [reflect], no match
+    ///     scan TARGET   --policy P     exit 1   alias NOT found — the rule widened to a bare deny Unknown
+    ///
+    /// The fixture files the policy OUTSIDE the scan target on purpose: with the two in the same tree the
+    /// two anchors coincide and the row is vacuous.
+    func testPolicyVocabularyAnchorsAtThePolicyOnBothRoutes() throws {
+        let root = try ProcessHarness.makePackage("""
+        import Foundation
+        func hole(_ f: () -> Void) { f() }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        // The policy + its vocabulary live in a SEPARATE tree — the whole point of the row.
+        let pdir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-polvocab-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: pdir.appendingPathComponent(".candor"),
+                                                withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: pdir) }
+        try "unknown-alias corp = reflect\n".write(to: pdir.appendingPathComponent(".candor/config"),
+                                                   atomically: true, encoding: .utf8)
+        let pol = pdir.appendingPathComponent("pol.txt")
+        try "deny Unknown[corp]\n".write(to: pol, atomically: true, encoding: .utf8)
+
+        let rep = root.appendingPathComponent("r")
+        let scanV = root.appendingPathComponent("scan.json"), gateV = root.appendingPathComponent("gate.json")
+        for u in [scanV, gateV] { try? FileManager.default.removeItem(at: u) }
+        let s = try ProcessHarness.run(bin(), [root.path, "--out", rep.path, "--policy", pol.path,
+                                               "--gate-json", scanV.path])
+        let g = try ProcessHarness.run(bin(), ["gate", "--report", rep.path, "--policy", pol.path,
+                                               "--gate-json", gateV.path])
+        XCTAssertEqual(s.code, 0, "the alias resolves on the SCAN route too, so the rule narrows to "
+                       + "[reflect] and does not fire. stderr: \(s.err)")
+        XCTAssertEqual(g.code, 0, "…as it always did on the gate route: \(g.err)")
+        XCTAssertEqual(try Data(contentsOf: scanV), try Data(contentsOf: gateV),
+                       "and §3.1's byte-equality holds by CONSTRUCTION, not by the two routes happening to "
+                       + "be pointed at the same directory")
+
+        // …AND THE AMBIENCE IS DISCLOSED. A verdict changed by a file the operator cannot see named is the
+        // ambient-input failure this format exists to refuse.
+        let d = try JSONSerialization.jsonObject(with: Data(contentsOf: gateV)) as? [String: Any]
+        XCTAssertEqual(d?["configSources"] as? [String], [pdir.appendingPathComponent(".candor/config").path],
+                       "the config whose vocabulary PARTICIPATED must be named: \(String(describing: d))")
+
+        // CONTROL — the same policy with a BUILT-IN token uses no config vocabulary, so the key is ABSENT.
+        // Without this the assertion above passes on an engine that names the config unconditionally.
+        let plain = pdir.appendingPathComponent("plain.txt")
+        try "deny Unknown[reflect]\n".write(to: plain, atomically: true, encoding: .utf8)
+        let v2 = root.appendingPathComponent("v2.json")
+        try? FileManager.default.removeItem(at: v2)
+        _ = try ProcessHarness.run(bin(), ["gate", "--report", rep.path, "--policy", plain.path,
+                                           "--gate-json", v2.path])
+        let d2 = try JSONSerialization.jsonObject(with: Data(contentsOf: v2)) as? [String: Any]
+        XCTAssertNil(d2?["configSources"],
+                     "a config that defines aliases nobody asked for is not an input to this verdict")
+    }
+
     /// `--json` IS `--gate-json -` on the refusal path too — otherwise the one consumer that pipes the
     /// verdict instead of filing it gets NOTHING on stdout and reads it as an empty result.
     func testTheRefusalDocumentAlsoRidesJsonToStdout() throws {

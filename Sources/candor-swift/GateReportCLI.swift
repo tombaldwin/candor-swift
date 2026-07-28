@@ -451,7 +451,10 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // report. The ⟨0.20⟩ `net-partner` list is deliberately NOT loaded: `netClass` is read verbatim from
     // the report, so re-classifying its hosts through THIS machine's config would be the re-derivation
     // §3.1 ⟨0.24⟩ forbids (and would make the verdict depend on the consumer's CWD).
-    let pol = parsePolicy(policyText, aliases: parseUnknownAliases(discoverConfigText(targetPath: policyPath)))
+    let vocabConfig = discoverConfig(targetPath: policyPath)
+    let pol = parsePolicy(policyText, aliases: parseUnknownAliases(vocabConfig?.text))
+    // ⟨0.24⟩ SPEC §3.1: the config file is named in the verdict only when its vocabulary PARTICIPATED.
+    let configSources = pol.usedAliases.isEmpty ? [] : [vocabConfig?.path].compactMap { $0 }
     // ⟨0.24⟩ AN UNRECOGNISED REASON-CLASS TOKEN IS A POLICY ERROR (SPEC §6.2) — the UNREADABLE-POLICY
     // posture, so exit 2 with NO verdict document, before the report is even opened. Not a refusal in the
     // §3.1 answerability sense: nothing about THIS report is at issue, the policy could not be read as
@@ -573,9 +576,11 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // `--json` IS `--gate-json -`: the same document, from the same writer the scan uses, so a consumer
     // cannot tell a scanned verdict from a report-gated one.
     if wantJson { writeGateVerdict(violations, to: "-", spec: specVersion, analyzedCount: env.analyzedCount,
-                                   unanalyzed: env.unanalyzed, coverage: Array(env.coverageModules)) }
+                                   unanalyzed: env.unanalyzed, coverage: Array(env.coverageModules),
+                                   configSources: configSources) }
     if let gp = gateJsonPath { writeGateVerdict(violations, to: gp, spec: specVersion, analyzedCount: env.analyzedCount,
-                                                unanalyzed: env.unanalyzed, coverage: Array(env.coverageModules)) }
+                                                unanalyzed: env.unanalyzed, coverage: Array(env.coverageModules),
+                                                configSources: configSources) }
     if violations.isEmpty {
         FileHandle.standardError.write("candor-swift: policy ✓\n".data(using: .utf8)!)
     } else {

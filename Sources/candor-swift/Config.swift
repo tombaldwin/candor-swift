@@ -28,9 +28,18 @@ let candorConfigKeysImplemented: Set<String> = ["policy", "baseline", "deps", "u
 // ⟨0.19⟩ Discover `.candor/config` TEXT anchored at `targetPath`: $CANDOR_CONFIG if set + readable, else the
 // nearest `.candor/config` walking UP, else nil. Read-only + LENIENT (no exit — the caller decides
 // fail-closed); used to resolve reason-class `unknown-alias` for the §6.2 gate + `parsepolicy`.
-func discoverConfigText(targetPath: String) -> String? {
+func discoverConfigText(targetPath: String) -> String? { discoverConfig(targetPath: targetPath)?.text }
+
+/// ⟨0.24⟩ The same discovery, returning the PATH beside the text (SPEC §3.1: *"If a config file supplied
+/// vocabulary that participated in the verdict, the `--gate-json` document MUST name that file"*). A
+/// verdict changed by a file the operator cannot see named in the output is the ambient-input failure this
+/// format exists to refuse, and the remedy is the usual one — not to forbid the input, but to make it
+/// unable to act unnamed. Discovery walks parent directories, so an alias file anywhere ABOVE the anchor
+/// participates; naming it is the only thing that makes that visible.
+func discoverConfig(targetPath: String) -> (path: String, text: String)? {
     if let override = ProcessInfo.processInfo.environment["CANDOR_CONFIG"] {
-        return try? String(contentsOfFile: override, encoding: .utf8)
+        guard let t = try? String(contentsOfFile: override, encoding: .utf8) else { return nil }
+        return (override, t)
     }
     var dir = (URL(fileURLWithPath: targetPath).standardizedFileURL.path as NSString).standardizingPath
     var isDir: ObjCBool = false
@@ -39,7 +48,10 @@ func discoverConfigText(targetPath: String) -> String? {
     }
     for _ in 0..<64 {
         let cand = (dir as NSString).appendingPathComponent(".candor/config")
-        if FileManager.default.fileExists(atPath: cand) { return try? String(contentsOfFile: cand, encoding: .utf8) }
+        if FileManager.default.fileExists(atPath: cand) {
+            guard let t = try? String(contentsOfFile: cand, encoding: .utf8) else { return nil }
+            return (cand, t)
+        }
         let parent = (dir as NSString).deletingLastPathComponent
         if parent == dir || parent.isEmpty { break }
         dir = parent

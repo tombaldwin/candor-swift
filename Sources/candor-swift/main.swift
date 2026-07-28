@@ -940,6 +940,9 @@ emitSurface(inferred: inferred, direct: direct, calls: edges, loc: locOf)
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 var gateViolations: [GateViolation] = []
+/// ⟨0.24⟩ the `.candor/config` file(s) whose VOCABULARY participated in this verdict (SPEC §3.1) — empty
+/// unless a config `unknown-alias` was actually consumed by a policy token.
+var gateConfigSources: [String] = []
 // AS-EFF-005 baseline regression guard (SPEC §7 item 5, Baseline.swift) — checked FIRST, matching the
 // reference engine's checker order (candor-java runs checkBaseline before checkPolicy). CANDOR_BASELINE
 // env over the config `baseline` key (the same env-over-config precedence as `policy`; a relative
@@ -965,11 +968,36 @@ if let pp = policyPath {
         FileHandle.standardError.write("candor-swift: policy \(pp) could not be read; gate NOT enforced\n".data(using: .utf8)!)
         exit(2)
     }
-    // ⟨0.19⟩ reason-class aliases (SPEC §6.2) from `.candor/config`, so `Unknown[<alias>]` resolves at the gate.
-    let unknownAliases = parseUnknownAliases(discoverConfigText(targetPath: target))
+    // ⟨0.19⟩ reason-class aliases (SPEC §6.2) from `.candor/config`, so `Unknown[<alias>]` resolves at the
+    // gate — ⟨0.24⟩ ANCHORED AT THE POLICY FILE, not at the scan target (SPEC §3.1, candor-spec `99eb4e9`).
+    //
+    // §3.1 names three channels an effect must never enter a gate through; review found a FOURTH that no
+    // engine tested: `.candor/config`'s `unknown-alias`. The two routes anchored DIFFERENTLY — every gate
+    // verb at the policy file's directory, every scan route at the target — so with the policy filed
+    // OUTSIDE the scan target the same rule expanded differently and §3.1's byte-equality MUST was
+    // breakable by a file that is neither the report nor the policy. MEASURED on this engine before the
+    // fix, one report + one policy `deny Unknown[corp]`, with `unknown-alias corp = reflect` beside the
+    // POLICY and the target's only hole in the `indirect` class:
+    //
+    //     gate --report R --policy P   exit 0   (alias found: the rule narrows to [reflect], no match)
+    //     scan TARGET   --policy P     exit 1   (alias NOT found: the rule widened to a bare deny Unknown)
+    //
+    // RULING: vocabulary travels with the POLICY that uses it. Target-scoped keys (`deps`, `net-partner`,
+    // scan settings) keep anchoring at the target because they describe the thing being SCANNED — see
+    // `netPartners` above, deliberately unchanged. Byte-equality then holds by construction rather than by
+    // the two routes happening to be pointed at the same directory.
+    //
+    // ANCHORED AT THE RESOLVED POLICY PATH, which is broader than the ruling's literal "when `--policy` is
+    // given explicitly": `gate --report` anchors at whatever `--policy`/`CANDOR_POLICY`/the config `policy`
+    // key resolved to, in every case. Restricting this side to the explicit flag would leave the
+    // CANDOR_POLICY case anchoring at two different directories — the exact defect the ruling is closing.
+    let vocabConfig = discoverConfig(targetPath: pp)
+    let unknownAliases = parseUnknownAliases(vocabConfig?.text)
     // Parsed ONCE and shared with the purity-hole disclosure below — two `parsePolicy` calls over the same
     // text were two chances for the ⟨0.24⟩ policy-error check to be applied to only one of them.
     let scanPolicy = parsePolicy(text, aliases: unknownAliases)
+    // ⟨0.24⟩ SPEC §3.1: the config file is named in the verdict only when its vocabulary PARTICIPATED.
+    gateConfigSources = scanPolicy.usedAliases.isEmpty ? [] : [vocabConfig?.path].compactMap { $0 }
     // ⟨0.24⟩ AN UNRECOGNISED REASON-CLASS TOKEN IS A POLICY ERROR (SPEC §6.2, candor-spec `382a7e0`) —
     // exit 2, the unreadable-policy posture, BEFORE any verdict is derived and before `--gate-json` is
     // written. Measured on this engine: `deny Unknown[dispatch,nativ]` silently NARROWED to `[dispatch]`
@@ -1016,7 +1044,7 @@ for v in gateViolations { FileHandle.standardError.write(("[\(v.rule)] \(v.detai
 // --gate-json ⟨0.8⟩: the machine verdict, from the SAME gateViolations that set the exit code — written
 // BEFORE the exit below (ok:true,[] when no gate is configured). Unreadable policy already exited 2 above;
 // AS-EFF-005 records join the same list, so the verdict and the exit code can never disagree.
-if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVersion, analyzedCount: allFns.count, unanalyzed: unanalyzedUnits, coverage: unlisted.map(\.key)) }   // ⟨0.15 staged⟩ advisory, verdict-preserving; ⟨0.21⟩ analyzed + fail-closed unanalyzed
+if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVersion, analyzedCount: allFns.count, unanalyzed: unanalyzedUnits, coverage: unlisted.map(\.key), configSources: gateConfigSources) }   // ⟨0.15 staged⟩ advisory, verdict-preserving; ⟨0.21⟩ analyzed + fail-closed unanalyzed; ⟨0.24⟩ the config vocabulary that participated
 let gateConfigured = policyPath != nil || baselinePath != nil
 if gateConfigured {
     if gateViolations.isEmpty {

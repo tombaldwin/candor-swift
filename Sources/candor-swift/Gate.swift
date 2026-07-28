@@ -25,7 +25,8 @@ typealias GateViolation = (rule: String, fn: String, effects: [String], detail: 
 func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: String,
                       analyzedCount: Int,
                       unanalyzed: [(path: String, reason: String)] = [],
-                      coverage uncoveredModules: [String] = []) {
+                      coverage uncoveredModules: [String] = [],
+                      configSources: [String] = []) {
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a gate over source candor could NOT analyze must NOT read green —
     // its effects are invisible, so a `deny`/`allow` that "passes" over it is a false-pure. `ok` requires
     // BOTH no violation AND a complete analysis (the caller exits 2 on this incomplete-but-clean path).
@@ -57,6 +58,13 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
     if !uncoveredModules.isEmpty {
         dict["coverage"] = ["uncovered": uncoveredModules.count, "modules": uncoveredModules.sorted()] as [String: Any]
     }
+    // ⟨0.24⟩ THE AMBIENCE IS DISCLOSED (SPEC §3.1): if a config file supplied VOCABULARY that participated
+    // in this verdict — today `unknown-alias`, the only key that expands a policy token — the document
+    // NAMES that file. Config discovery walks parent directories, so an alias file anywhere above the
+    // policy participates; a verdict changed by a file the operator cannot see named in the output is the
+    // ambient-input failure this format exists to refuse. Named only when the vocabulary was actually
+    // CONSUMED: a config that defines aliases nobody asked for is not an input to this verdict.
+    if !configSources.isEmpty { dict["configSources"] = configSources.sorted() }
     if path == "-" {
         if let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys]),
            let s = String(data: data, encoding: .utf8) { print(s) }

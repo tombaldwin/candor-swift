@@ -228,8 +228,16 @@ public struct ParsedPolicy {
     /// ⟨0.24⟩ Finished diagnostics for tokens that could not be honoured AS WRITTEN (SPEC §6.2,
     /// candor-spec `382a7e0`). See `parsePolicy` for the measurement.
     public var errors: [String]
-    public init(deny: [DenyRule], allow: [AllowRule], forbid: [ForbidRule], errors: [String] = []) {
-        self.deny = deny; self.allow = allow; self.forbid = forbid; self.errors = errors
+    /// ⟨0.24⟩ The `unknown-alias` names this policy actually CONSUMED — sorted, deduped, and empty unless
+    /// a config alias was used to expand a token. It is the trigger for SPEC §3.1's ambience disclosure:
+    /// the verdict names the config file only when that file's vocabulary PARTICIPATED, never merely
+    /// because a config exists. A config that defines ten aliases and is asked for none is not an input
+    /// to this verdict and naming it would be noise.
+    public var usedAliases: [String]
+    public init(deny: [DenyRule], allow: [AllowRule], forbid: [ForbidRule], errors: [String] = [],
+                usedAliases: [String] = []) {
+        self.deny = deny; self.allow = allow; self.forbid = forbid
+        self.errors = errors; self.usedAliases = usedAliases
     }
 }
 
@@ -267,6 +275,7 @@ func policyClassTokenError(_ token: String, _ line: String) -> String {
 public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) -> ParsedPolicy {
     var deny: [DenyRule] = [], allow: [AllowRule] = [], forbid: [ForbidRule] = []
     var errors: [String] = []
+    var usedAliases = Set<String>()
     // Split LINES on \n / \r\n / bare \r — the three forms Java's Files.readAllLines (the reference parser)
     // breaks on. Splitting on \n ONLY let a classic-Mac (bare-\r) file collapse to ONE line: \r is also an
     // in-line ASCII-ws token separator (§6.2), so every rule after the first was glued into the first rule's
@@ -314,7 +323,9 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
                         if cn == "*" { unknownStar = true }
                         else if cn == "dynamic" { DYNAMIC_CLASSES.forEach { unknownClasses.insert($0) } }
                         else if REASON_CLASSES.contains(cn) { unknownClasses.insert(cn) }
-                        else if let a = aliases[cn] { unknownClasses.formUnion(a) }  // ⟨0.19⟩ config unknown-alias
+                        // ⟨0.19⟩ config unknown-alias — RECORDED as used, because ⟨0.24⟩ SPEC §3.1 makes
+                        // the verdict name the config file whose vocabulary participated in it.
+                        else if let a = aliases[cn] { unknownClasses.formUnion(a); usedAliases.insert(cn) }
                         // ⟨0.24⟩ RECORDED, not warned-and-dropped. The old line said "ignoring policy
                         // rule" and then KEPT the rule — a false disclosure — or dropped the token and
                         // silently NARROWED the rule. See `policyClassTokenError`. The rule is still
@@ -365,7 +376,8 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
             warnRule("unknown rule kind", line)
         }
     }
-    return ParsedPolicy(deny: deny, allow: allow, forbid: forbid, errors: errors)
+    return ParsedPolicy(deny: deny, allow: allow, forbid: forbid, errors: errors,
+                        usedAliases: usedAliases.sorted())
 }
 
 /// §6.2 scope match: segment run, last segment a prefix. Segments split on BOTH `.` and `::` (empty
