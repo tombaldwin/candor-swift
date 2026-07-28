@@ -213,12 +213,60 @@ public struct DenyRule { public var effects: [String]; public var scope: String;
 public struct AllowRule { public var effect: String; public var scope: String; public var values: [String]; public var raw: String }
 public struct ForbidRule { public var from: String; public var to: String; public var raw: String }
 
+/// A parsed §6.2 policy. The three rule lists are what they always were; `errors` is ⟨0.24⟩.
+///
+/// **`errors` IS NOT A PARSE FAILURE — the rules are still built, and the ADVISORY readers
+/// (`parsepolicy`, `unverified`, `fix`, `fix-gate`) are unchanged.** It is the GATE routes that must
+/// refuse on it: `scan --policy` and `gate --report`, before any verdict is derived. Keeping the parse
+/// intact is deliberate — `parsepolicy` is the conformance suite's grammar witness (PART 4), and its
+/// battery deliberately contains a rule with an unrecognised token; a parser that refused would delete
+/// the witness rather than fix the gate.
+public struct ParsedPolicy {
+    public var deny: [DenyRule]
+    public var allow: [AllowRule]
+    public var forbid: [ForbidRule]
+    /// ⟨0.24⟩ Finished diagnostics for tokens that could not be honoured AS WRITTEN (SPEC §6.2,
+    /// candor-spec `382a7e0`). See `parsePolicy` for the measurement.
+    public var errors: [String]
+    public init(deny: [DenyRule], allow: [AllowRule], forbid: [ForbidRule], errors: [String] = []) {
+        self.deny = deny; self.allow = allow; self.forbid = forbid; self.errors = errors
+    }
+}
+
 func warnRule(_ why: String, _ line: String) {
     FileHandle.standardError.write("candor: ignoring policy rule (\(why)): \(line)\n".data(using: .utf8)!)
 }
 
-public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) -> (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidRule]) {
+/// ⟨0.24⟩ **AN UNRECOGNISED REASON-CLASS TOKEN IN A POLICY IS A POLICY ERROR** (SPEC §6.2, candor-spec
+/// `382a7e0`, which WITHDRAWS its own asymmetry argument). The clause used to justify the query/policy
+/// asymmetry by asserting that dropping an unrecognised class token on the policy side can only WIDEN a
+/// rule, so the failure is loud. Measured four-way, it does both, and the common case is the fail-open one:
+///
+///     deny Unknown[corp]              sole unrecognised token — the filter empties and the rule WIDENS to
+///                                     a bare `deny Unknown`, while the engine prints "ignoring policy
+///                                     rule" and then KEEPS and re-scopes it. A FALSE DISCLOSURE, the
+///                                     `net-partner` class PART 13b exists for.
+///     deny Unknown[dispatch,nativ]    a typo BESIDE valid tokens — silently dropped, the rule NARROWS to
+///                                     `[dispatch]`, and it no longer gates native-caused holes at all
+///                                     while the operator reads a gate that looks armed. FAIL-OPEN, and a
+///                                     typo lands beside correct tokens far more often than alone.
+///
+/// MEASURED on this engine, `gate --report` over a one-entry report whose only hole is `native:` —
+/// `[dispatch,nativ]` exited **0** and `[corp]` exited 1 with the false "ignoring" line. A policy that
+/// cannot be honoured as written is not silently rewritten into a different policy.
+public let POLICY_CLASS_TOKENS = "reflect, dispatch, indirect, native, unresolved, setup "
+    + "(aliases: dynamic, *, or a `.candor/config` `unknown-alias`)"
+func policyClassTokenError(_ token: String, _ line: String) -> String {
+    "candor: policy error — unrecognised reason-class/alias `\(token)` in: \(line)\n"
+    + "  accepted: \(POLICY_CLASS_TOKENS)\n"
+    + "  a policy that cannot be honoured AS WRITTEN is not silently rewritten into a different policy: "
+    + "dropping the token beside valid ones NARROWS the rule (it stops gating the class you meant, while "
+    + "the gate still looks armed), and dropping the only token WIDENS it. Refusing (exit 2) — SPEC §6.2 ⟨0.24⟩"
+}
+
+public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) -> ParsedPolicy {
     var deny: [DenyRule] = [], allow: [AllowRule] = [], forbid: [ForbidRule] = []
+    var errors: [String] = []
     // Split LINES on \n / \r\n / bare \r — the three forms Java's Files.readAllLines (the reference parser)
     // breaks on. Splitting on \n ONLY let a classic-Mac (bare-\r) file collapse to ONE line: \r is also an
     // in-line ASCII-ws token separator (§6.2), so every rule after the first was glued into the first rule's
@@ -267,7 +315,11 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
                         else if cn == "dynamic" { DYNAMIC_CLASSES.forEach { unknownClasses.insert($0) } }
                         else if REASON_CLASSES.contains(cn) { unknownClasses.insert(cn) }
                         else if let a = aliases[cn] { unknownClasses.formUnion(a) }  // ⟨0.19⟩ config unknown-alias
-                        else { warnRule("unknown reason-class/alias `\(cn)` (known: \(REASON_CLASSES.joined(separator: ",")); aliases: dynamic,*, or a config `unknown-alias`)", line) }
+                        // ⟨0.24⟩ RECORDED, not warned-and-dropped. The old line said "ignoring policy
+                        // rule" and then KEPT the rule — a false disclosure — or dropped the token and
+                        // silently NARROWED the rule. See `policyClassTokenError`. The rule is still
+                        // BUILT (the advisory readers are unchanged); the gate routes refuse on `errors`.
+                        else { errors.append(policyClassTokenError(cn, line)) }
                     }
                     continue
                 }
@@ -313,7 +365,7 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
             warnRule("unknown rule kind", line)
         }
     }
-    return (deny, allow, forbid)
+    return ParsedPolicy(deny: deny, allow: allow, forbid: forbid, errors: errors)
 }
 
 /// §6.2 scope match: segment run, last segment a prefix. Segments split on BOTH `.` and `::` (empty

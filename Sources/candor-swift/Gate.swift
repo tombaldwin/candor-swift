@@ -174,8 +174,7 @@ func gateInputFromScan(inferred: [String: Set<String>],
 /// drives the console lines, --gate-json and the exit code, so they can never disagree. THE ONLY §6.2
 /// matching code in this engine: `scan --policy` and `gate --report` both land here, which makes "the
 /// same verdict from the same signature" a property of the code rather than of two consistent authors.
-func evaluateGate(_ pol: (deny: [DenyRule], allow: [AllowRule], forbid: [ForbidRule]),
-                  _ gi: GateInput) -> [GateViolation] {
+func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> [GateViolation] {
     let inferred = gi.inferred
     let hostsAcc = gi.hosts, cmdsAcc = gi.cmds, pathsAcc = gi.paths, tablesAcc = gi.tables
     let incompleteAcc = gi.surfaceIncomplete, cg = gi.edges, reasonClassAcc = gi.reasonClasses

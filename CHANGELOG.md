@@ -9,6 +9,35 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed ⚠ — ⟨0.24⟩ an unrecognised reason-class token silently REWROTE the rule (2026-07-28)
+
+SPEC §6.2 ⟨0.24⟩ (candor-spec `382a7e0`), which withdraws its own asymmetry argument — "a dropped policy
+token leaves a WIDER rule standing, so the failure is loud". Measured on this engine, over a signature
+whose ONLY hole class is `indirect`:
+
+    deny Unknown[dispatch,indirct]  typo BESIDE a valid token — dropped, the rule NARROWED to
+                                    `[dispatch]` and stopped gating the `indirect` hole it was written
+                                    for. EXIT 0 on BOTH routes. FAIL-OPEN, and the common case.
+    deny Unknown[corp]              sole unrecognised token — "candor: ignoring policy rule (unknown
+                                    reason-class/alias `corp`)" printed, and then the rule KEPT and
+                                    WIDENED to a bare `deny Unknown`, exit 1. A FALSE DISCLOSURE, the
+                                    `net-partner` class PART 13b exists for.
+    after                           both exit 2 on BOTH routes, naming the token and the accepted set.
+
+A policy that cannot be honoured as written is not silently rewritten into a different policy. The
+narrowing direction is the common case, because a typo lands beside correct tokens far more often than
+alone. `parsePolicy` now returns a `ParsedPolicy` carrying `errors`; the rules still parse, so the
+ADVISORY readers (`parsepolicy`, `unverified`, `fix`, `fix-gate`) are unchanged — `parsepolicy` is the
+conformance suite's four-way grammar witness and its battery deliberately contains a rule with an
+unrecognised token. It is the GATE routes (`scan --policy` and `gate --report`) that refuse, before any
+verdict is derived and with no `--gate-json` document, so §3.1's byte-equality holds on a broken policy by
+there being nothing to disagree about. A `.candor/config` `unknown-alias` still resolves.
+
+NOT extended, deliberately, and flagged for a four-way call: the same silent rewrite exists for `Net[…]`
+destination-class tokens and inside an `unknown-alias` DEFINITION. The ruling's wording covers them, but
+fixing them in one engine alone would put swift out of step with three engines on a token grammar
+(candor-rust made the same call).
+
 ### fixed ⚠ — ⟨0.24⟩ a refusal wrote NO `--gate-json` document, so CI re-read yesterday's green (2026-07-28)
 
 SPEC §3.1 ⟨0.24⟩ (candor-spec `107755b`). The canonical CI wrapper is

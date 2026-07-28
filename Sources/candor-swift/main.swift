@@ -967,12 +967,26 @@ if let pp = policyPath {
     }
     // ⟨0.19⟩ reason-class aliases (SPEC §6.2) from `.candor/config`, so `Unknown[<alias>]` resolves at the gate.
     let unknownAliases = parseUnknownAliases(discoverConfigText(targetPath: target))
+    // Parsed ONCE and shared with the purity-hole disclosure below — two `parsePolicy` calls over the same
+    // text were two chances for the ⟨0.24⟩ policy-error check to be applied to only one of them.
+    let scanPolicy = parsePolicy(text, aliases: unknownAliases)
+    // ⟨0.24⟩ AN UNRECOGNISED REASON-CLASS TOKEN IS A POLICY ERROR (SPEC §6.2, candor-spec `382a7e0`) —
+    // exit 2, the unreadable-policy posture, BEFORE any verdict is derived and before `--gate-json` is
+    // written. Measured on this engine: `deny Unknown[dispatch,nativ]` silently NARROWED to `[dispatch]`
+    // and exited 0 over a report whose only hole is `native:` (fail-open, and the common case — a typo
+    // lands beside correct tokens far more often than alone), while `deny Unknown[corp]` printed
+    // "ignoring policy rule" and then KEPT and WIDENED it. Same check on `gate --report`, so the two
+    // routes refuse the same policies.
+    if !scanPolicy.errors.isEmpty {
+        FileHandle.standardError.write((scanPolicy.errors.joined(separator: "\n") + "\n").data(using: .utf8)!)
+        exit(2)
+    }
     // ⟨0.24⟩ the SCAN route into the shared gate seam (Gate.swift): the reason-class fixpoint and the
     // per-fn `netClassesOf` derivation moved into `gateInputFromScan`, so `gate --report` can hand
     // `evaluateGate` the same record built from a WRITTEN report instead of from the classifier.
     // ⟨0.20⟩ `net-partner` (NET-DESTINATION-CLASS-DESIGN.md) is the SAME set the report's `netClass` used
     // (hoisted above), so `deny Net[unknown-host]` tolerates a declared partner and the verdict classifies it.
-    gateViolations += evaluateGate(parsePolicy(text, aliases: unknownAliases),
+    gateViolations += evaluateGate(scanPolicy,
                                    gateInputFromScan(inferred: inferred, whyMap: whyMap, edges: edges, cg: cg,
                                                      hostsAcc: hostsAcc, cmdsAcc: cmdsAcc,
                                                      pathsAcc: pathsAcc, tablesAcc: tablesAcc,
@@ -981,7 +995,7 @@ if let pp = policyPath {
     // in a pure/deny scope that PASS but are Unknown (the Unknown could hide the forbidden effect — a
     // fn/closure-injected port). Surfaces the gap automatically (eval/fixloop/DISPATCH-NOTE.md).
     // Same predicate + upgrade as `candor-swift unverified` (CandorCore.unverifiedHoleRule) — one source of truth.
-    let disclosePolicy = parsePolicy(text, aliases: unknownAliases)
+    let disclosePolicy = scanPolicy
     var purityHoles: [(String, String)] = []
     for qual in inferred.keys.sorted() {
         if let r = unverifiedHoleRule(qual, inferred[qual] ?? [], disclosePolicy.deny) {

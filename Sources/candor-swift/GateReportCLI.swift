@@ -452,6 +452,12 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // the report, so re-classifying its hosts through THIS machine's config would be the re-derivation
     // §3.1 ⟨0.24⟩ forbids (and would make the verdict depend on the consumer's CWD).
     let pol = parsePolicy(policyText, aliases: parseUnknownAliases(discoverConfigText(targetPath: policyPath)))
+    // ⟨0.24⟩ AN UNRECOGNISED REASON-CLASS TOKEN IS A POLICY ERROR (SPEC §6.2) — the UNREADABLE-POLICY
+    // posture, so exit 2 with NO verdict document, before the report is even opened. Not a refusal in the
+    // §3.1 answerability sense: nothing about THIS report is at issue, the policy could not be read as
+    // written at all, and §3.1's byte-equality then holds on a broken policy by there being nothing to
+    // disagree about. See `policyClassTokenError` (Policy.swift) for the two measured harms.
+    if !pol.errors.isEmpty { gateDie(pol.errors.joined(separator: "\n")) }
 
     // THE POLICY-LEVEL REFUSALS. Whole-policy, not per-rule: enforcing the answerable half and exiting 0
     // is gateless-green — the user believes a rule is enforced that never ran.
