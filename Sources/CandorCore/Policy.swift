@@ -96,9 +96,28 @@ let DYNAMIC_CLASSES = ["reflect", "dispatch", "indirect", "native", "unresolved"
 /// silently defines `corp` as `{dispatch}` and the gate goes green on a native hole that
 /// `= dispatch,native` catches. Same treatment as a policy-side token — the GATE routes refuse, the
 /// advisory readers are unchanged.
-public func parseUnknownAliases(_ configText: String?) -> (aliases: [String: Set<String>], errors: [String]) {
+///
+/// ⟨0.24⟩ **EACH ERROR CARRIES THE ALIAS IT WAS DEFINING, because the gate may only refuse on a
+/// definition the POLICY ACTUALLY CONSUMED** (SPEC §6.2 ⟨0.24⟩ + §3.1's precedence rule). Measured
+/// 2026-07-28 on `deny Fs` (no bracket to expand) beside an unused `unknown-alias corp = dispatch,nativ`:
+/// this engine exited 2 and DELETED the `Fs` violation, where candor-rust exited 1 and charged it. An
+/// alias no rule references expands no token, so it cannot change any verdict — and a thing that cannot
+/// change a verdict cannot make one unanswerable. It is at most a DISCLOSURE. Config discovery is an
+/// ANCESTOR WALK, so the un-gated form let one bad token in a parent `.candor/config` red-refuse every
+/// gate in the whole subtree, including gates whose policies never mention reason classes at all.
+public struct AliasTokenError {
+    /// the alias being DEFINED — the key the gate matches against `ParsedPolicy.usedAliases`.
+    public let alias: String
+    /// the token that is not a reason class.
+    public let token: String
+    /// the definition line, as `parsePolicy`'s `raw` would spell it.
+    public let rule: String
+    /// the full §6.2 refusal text (used verbatim when the definition IS consumed).
+    public let message: String
+}
+public func parseUnknownAliases(_ configText: String?) -> (aliases: [String: Set<String>], errors: [AliasTokenError]) {
     var out: [String: Set<String>] = [:]
-    var errors: [String] = []
+    var errors: [AliasTokenError] = []
     guard let configText else { return (out, errors) }
     for raw in configText.split(separator: "\n", omittingEmptySubsequences: false) {
         let line = raw.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0].trimmingCharacters(in: .whitespaces)
@@ -121,12 +140,43 @@ public func parseUnknownAliases(_ configText: String?) -> (aliases: [String: Set
             if cn.isEmpty { continue }
             if cn == "dynamic" { DYNAMIC_CLASSES.forEach { classes.insert($0) } }
             else if REASON_CLASSES.contains(cn) { classes.insert(cn) }
-            else { errors.append(policyClassTokenError(cn, "unknown-alias \(name) = …")) }
+            else {
+                errors.append(AliasTokenError(alias: name, token: cn, rule: "unknown-alias \(name) = …",
+                                              message: policyClassTokenError(cn, "unknown-alias \(name) = …")))
+            }
         }
         if classes.isEmpty { FileHandle.standardError.write("candor: ignoring `unknown-alias \(name)` — no valid reason-class\n".data(using: .utf8)!) }
         else { out[name] = classes }
     }
     return (out, errors)
+}
+
+/// ⟨0.24⟩ Split alias-definition token errors by whether THIS policy could have been changed by them.
+/// A definition the policy CONSUMED (its name is in `ParsedPolicy.usedAliases`) expanded a token that a
+/// rule reads, so a typo in it silently narrows a live rule — that is a policy error and the gate routes
+/// refuse. A definition nothing consumed expanded nothing: no rule's meaning depends on it, so it cannot
+/// make the verdict unanswerable, and per SPEC §3.1 a certain violation dominates a refusal anyway.
+///
+/// AN UNRESOLVED ALIAS IS STILL COVERED: if a definition loses ALL its tokens to typos the alias is never
+/// entered in the map, so the referring `Unknown[<alias>]` token itself becomes a policy error inside
+/// `parsePolicy` — the refusal happens there, on the line that actually reads it.
+public func partitionAliasErrors(_ errs: [AliasTokenError], consumedBy pol: ParsedPolicy)
+    -> (refusing: [AliasTokenError], disclosed: [AliasTokenError]) {
+    let used = Set(pol.usedAliases)
+    return (errs.filter { used.contains($0.alias) }, errs.filter { !used.contains($0.alias) })
+}
+
+/// The DISCLOSURE half of `partitionAliasErrors` — one stderr line per unconsumed definition error, so a
+/// broken alias in an ancestor `.candor/config` is still visible without refusing a gate it cannot reach.
+public func discloseUnconsumedAliasErrors(_ errs: [AliasTokenError]) {
+    for e in errs {
+        FileHandle.standardError.write(
+            ("candor: NOTE — `\(e.rule)` names `\(e.token)`, which is not a reason class "
+             + "(accepted: \(POLICY_CLASS_TOKENS)). No rule in this policy CONSUMED the alias `\(e.alias)`, "
+             + "so the definition expanded no token and did not participate in this verdict — DISCLOSED, "
+             + "not refused (SPEC §6.2 ⟨0.24⟩). Fix it before a rule starts referring to it.\n")
+                .data(using: .utf8)!)
+    }
 }
 
 /// ⟨0.20⟩ Parse `net-partner <host>` lines (NET-DESTINATION-CLASS-DESIGN.md) into a set of host-normalized

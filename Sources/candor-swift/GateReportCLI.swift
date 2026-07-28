@@ -450,7 +450,13 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // disagree about. See `policyClassTokenError` (Policy.swift) for the two measured harms.
     // ⟨0.24⟩ the ALIAS DEFINITION's own tokens take the same rule (candor-spec `be0b9a9`): a typo in the
     // vocabulary the policy is written AGAINST fails open identically, and more quietly.
-    let policyErrors = parsedAliases.errors + pol.errors
+    // ⟨0.24⟩ …and ONLY when a rule of THIS policy consumed the definition — the same gate the scan route
+    // applies, from the same function, because a definition no token expands cannot change a verdict and
+    // config discovery walks PARENTS (one bad token above the repo would otherwise red-refuse the whole
+    // subtree). See `partitionAliasErrors`.
+    let aliasErrors = partitionAliasErrors(parsedAliases.errors, consumedBy: pol)
+    discloseUnconsumedAliasErrors(aliasErrors.disclosed)
+    let policyErrors = aliasErrors.refusing.map(\.message) + pol.errors
     if !policyErrors.isEmpty { gateDie(policyErrors.joined(separator: "\n")) }
 
     // THE POLICY-LEVEL REFUSALS. Whole-policy, not per-rule: enforcing the answerable half and exiting 0

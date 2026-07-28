@@ -88,7 +88,7 @@ final class PolicyTests: XCTestCase {
         let parsed = parseUnknownAliases(
             "unknown-alias risky = reflect,native\nunknown-alias telemetry = indirect\nunknown-alias reflect = native\n")
         let aliases = parsed.aliases
-        XCTAssertEqual(parsed.errors, [], "a RESERVED NAME is warn-and-skip, not a ⟨0.24⟩ token error — "
+        XCTAssertEqual(parsed.errors.count, 0, "a RESERVED NAME is warn-and-skip, not a ⟨0.24⟩ token error — "
                        + "the token rule is about a class token the engine cannot honour, and `reflect` "
                        + "as a NAME is a different rule, pinned four-way by conformance PART 4")
         XCTAssertEqual(aliases["risky"], ["reflect", "native"])

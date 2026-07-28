@@ -1015,7 +1015,18 @@ if let pp = policyPath {
     // ⟨0.24⟩ the ALIAS DEFINITION's own tokens are checked FIRST and on the same rule (candor-spec
     // `be0b9a9`) — a typo in the vocabulary the policy is written AGAINST fails open identically, and
     // more quietly, because the policy line reads perfectly well.
-    let policyErrors = parsedAliases.errors + scanPolicy.errors
+    //
+    // ⟨0.24⟩ **BUT ONLY WHEN THE POLICY CONSUMED THE DEFINITION.** Measured 2026-07-28 on `deny Fs` (no
+    // bracket to expand) beside an unused `unknown-alias corp = dispatch,nativ`: swift exit 2 with the
+    // `Fs` violation DELETED, rust exit 1 with it charged, on the identical triple. An alias no rule
+    // references expands no token, so it cannot change any verdict — and a thing that cannot change a
+    // verdict cannot make one unanswerable. Because config discovery walks parent directories, the
+    // un-gated form let ONE bad token in a parent config red-refuse every gate in the subtree. See
+    // `partitionAliasErrors` for why an alias that lost ALL its tokens is still refused (the referring
+    // policy token errors on its own line).
+    let aliasErrors = partitionAliasErrors(parsedAliases.errors, consumedBy: scanPolicy)
+    discloseUnconsumedAliasErrors(aliasErrors.disclosed)
+    let policyErrors = aliasErrors.refusing.map(\.message) + scanPolicy.errors
     if !policyErrors.isEmpty { refuseGateAndExit(policyErrors.joined(separator: "\n")) }
     // ⟨0.24⟩ the SCAN route into the shared gate seam (Gate.swift): the reason-class fixpoint and the
     // per-fn `netClassesOf` derivation moved into `gateInputFromScan`, so `gate --report` can hand
