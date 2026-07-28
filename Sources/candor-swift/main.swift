@@ -1015,7 +1015,7 @@ if let pp = policyPath {
     // ⟨0.20⟩ `net-partner` (NET-DESTINATION-CLASS-DESIGN.md) is the SAME set the report's `netClass` used
     // (hoisted above), so `deny Net[unknown-host]` tolerates a declared partner and the verdict classifies it.
     gateViolations += evaluateGate(scanPolicy,
-                                   gateInputFromScan(inferred: inferred, whyMap: whyMap, edges: edges, cg: cg,
+                                   gateInputFromScan(inferred: inferred, whyMap: whyMap, direct: direct, edges: edges, cg: cg,
                                                      hostsAcc: hostsAcc, cmdsAcc: cmdsAcc,
                                                      pathsAcc: pathsAcc, tablesAcc: tablesAcc,
                                                      incompleteAcc: incompleteAcc, netPartners: netPartners))

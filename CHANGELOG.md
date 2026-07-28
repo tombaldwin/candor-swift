@@ -9,6 +9,27 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed ⚠ — ⟨0.24⟩ the precedence fix FABRICATED a violation, and this is the half that makes it safe (2026-07-28)
+
+SPEC §3.1 ⟨0.24⟩ (candor-spec `5a8cf48`), found by implementing `7271c69` rather than by reading it.
+Removing the refusal's short-circuit made the evaluator reach code it had never reached: the reason-class
+matcher floored an unknown class set at `unresolved`, so a scoped `deny Unknown[unresolved]` over an entry
+whose `Unknown` is INHERITED and reasonless began emitting an actual violation RECORD — in the same run
+whose stderr said that rule could not be evaluated over that function. A self-contradicting document,
+reachable only THROUGH the soundness fix.
+
+    entry `app.orphanU` (inferred [Unknown], direct [], no calls), deny Unknown[unresolved]
+      after the precedence commit   exit 1, violations: [{fn: "app.orphanU"}]   <- FABRICATED
+      now                           exit 2, the refusal document, no violations key
+
+That floor is the right fail-closed default for a MATCHER — "could this rule apply?" — and the wrong basis
+for a FIRING — "did it?". **A fail-closed default is not portable between a predicate that GUARDS and one
+that CHARGES.** The `unresolved` default is still applied, at the ENTRY (both `gateInputFromScan` and
+`gateInputFromReport`), gated on a DIRECT `Unknown` the function did not name — where it composes and where
+it is evidenced. The matcher now WITHHOLDS instead, per (rule, function): the same rule fires on a function
+whose match its own entry evidences and is withheld on one whose it does not, in the same run, with exit 1
+for what fired and a disclosure for what could not be evaluated.
+
 ### changed ⚠ — ⟨0.24⟩ the gate verdict's `coverage` block spells its name list `packages` (2026-07-28)
 
 SPEC §3.1 ⟨0.24⟩ (candor-spec `aafa021`), which pins the verdict's coverage block as

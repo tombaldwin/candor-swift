@@ -661,6 +661,69 @@ final class GateReportVerbProcessTests: XCTestCase {
                       "the unanswered rule must still be named on stderr: \(r.err)")
     }
 
+    /// ⟨0.24⟩ **THE PRECEDENCE FIX INTRODUCED A FABRICATION, AND THIS ROW IS THE ONE THAT CATCHES IT**
+    /// (SPEC §3.1, candor-spec `5a8cf48` — found by implementing `7271c69`, not by reading it).
+    ///
+    /// Removing the refusal's short-circuit made the evaluator reach code it had never reached. The
+    /// reason-class matcher floored an unknown class set at `unresolved`, so a scoped
+    /// `deny Unknown[unresolved]` over an entry whose `Unknown` is INHERITED and reasonless began
+    /// emitting an actual VIOLATION RECORD. MEASURED on this engine after the precedence commit and
+    /// before this one, one entry (`app.orphanU`, `inferred: [Unknown]`, `direct: []`, no `calls`):
+    ///
+    ///     exit 1, violations: [{fn: "app.orphanU", …}]
+    ///     …in the SAME run whose stderr said `deny Unknown[unresolved] app.orphanU` could not be
+    ///     evaluated over that function. A self-contradicting document.
+    ///
+    /// That floor is the right fail-closed default for a MATCHER ("could this rule apply?") and the wrong
+    /// basis for a FIRING ("did it?"); the two questions shared one helper safely only while the refusal
+    /// short-circuited before the difference could show. **A fail-closed default is not portable between a
+    /// predicate that GUARDS and one that CHARGES.**
+    ///
+    /// THE SHARP ROW IS THE SECOND ONE: the SAME rule fires on one function and is withheld on another,
+    /// in one run. Whole-policy withholding cannot express that, and a fixture with only the withheld
+    /// function cannot tell "withheld correctly" from "the gate stopped working".
+    func testAWithheldRuleIsNotChargedOnADefaultNobodyRecorded() throws {
+        // ROW 1 — the withheld function ALONE. No violation may be manufactured for it.
+        let sole = try makeReportDir(report: envelope(fnEntry("app.orphanU", ["Unknown"], direct: []), analyzed: 1),
+                                     policy: "deny Unknown[unresolved] app.orphanU\n")
+        defer { try? FileManager.default.removeItem(at: sole) }
+        let v = sole.appendingPathComponent("v.json")
+        try? FileManager.default.removeItem(at: v)
+        let r1 = try ProcessHarness.run(bin(), ["gate", "--report", sole.path,
+                                                "--policy", sole.appendingPathComponent("pol.txt").path,
+                                                "--gate-json", v.path])
+        XCTAssertEqual(r1.code, 2, "nothing fired, so this is a sole refusal: \(r1.err)")
+        let d1 = try JSONSerialization.jsonObject(with: Data(contentsOf: v)) as? [String: Any]
+        XCTAssertEqual(d1?["refused"] as? Bool, true, "…and it is the REFUSAL document, not a verdict")
+        XCTAssertFalse(d1?.keys.contains("violations") ?? true,
+                       "the matcher's `unresolved` floor must not become grounds to EMIT a violation "
+                       + "naming a function whose reason nobody recorded: \(String(describing: d1))")
+
+        // ROW 2 — ONE rule, TWO functions, and it must fire on exactly the evidenced one. `app.named`
+        // raises `Unknown` DIRECTLY and names no reason, so §6.2 CONTRIBUTES `unresolved` from its own
+        // entry and the rule is ANSWERED there; `app.orphanU` INHERITS it from nowhere the report names,
+        // so the rule is withheld. Withholding is per (rule, function), never whole-policy.
+        let both = try makeReportDir(
+            report: envelope(fnEntry("app.named", ["Unknown"], direct: ["Unknown"]) + ","
+                             + fnEntry("app.orphanU", ["Unknown"], direct: []), analyzed: 2),
+            policy: "deny Unknown[unresolved]\n")
+        defer { try? FileManager.default.removeItem(at: both) }
+        let v2 = both.appendingPathComponent("v.json")
+        try? FileManager.default.removeItem(at: v2)
+        let r2 = try ProcessHarness.run(bin(), ["gate", "--report", both.path,
+                                                "--policy", both.appendingPathComponent("pol.txt").path,
+                                                "--gate-json", v2.path])
+        XCTAssertEqual(r2.code, 1, "exit 1 for what fired: \(r2.err)")
+        let d2 = try JSONSerialization.jsonObject(with: Data(contentsOf: v2)) as? [String: Any]
+        let fns = (d2?["violations"] as? [[String: Any]] ?? []).compactMap { $0["fn"] as? String }
+        XCTAssertEqual(fns, ["app.named"],
+                       "exactly the evidenced function — `app.orphanU`'s presence here would be the "
+                       + "fabrication, and its ABSENCE while `app.named` is present is what proves the "
+                       + "withholding is per (rule, function) rather than whole-policy: \(fns)")
+        XCTAssertTrue(r2.err.contains("app.orphanU"),
+                      "…and a disclosure for what could not be evaluated: \(r2.err)")
+    }
+
     // ── ⟨0.24⟩ A REFUSAL MUST STILL WRITE A DOCUMENT (SPEC §3.1) ────────────────────────────────────
 
     /// **THE STALE-VERDICT HAZARD.** The canonical CI wrapper is

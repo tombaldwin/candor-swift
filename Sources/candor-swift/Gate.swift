@@ -161,6 +161,7 @@ struct GateInput {
 /// the `deny` membership that triggers it), so materializing exactly those is the same set of answers.
 func gateInputFromScan(inferred: [String: Set<String>],
                        whyMap: [String: Set<String>],
+                       direct: [String: Set<String>],
                        edges: [String: Set<String>], cg: [String: [String]],
                        hostsAcc: [String: Set<String>], cmdsAcc: [String: Set<String>],
                        pathsAcc: [String: Set<String>], tablesAcc: [String: Set<String>],
@@ -173,6 +174,24 @@ func gateInputFromScan(inferred: [String: Set<String>],
     var reasonClassDirect: [String: Set<String>] = [:]
     for (fn, whys) in whyMap where !whys.isEmpty {
         reasonClassDirect[fn] = Set(whys.map { reasonClass($0) })
+    }
+    // ⟨0.24⟩ §6.2's CONTRIBUTION, applied HERE rather than in the matcher (SPEC §3.1, candor-spec
+    // `5a8cf48`). A function that raises `Unknown` DIRECTLY and names no reason for it contributes
+    // `unresolved` — at the ENTRY, BEFORE the fixpoint, which is what makes it COMPOSE and is exactly what
+    // `gateInputFromReport` does on the other route. The floor used to live in `evaluateGate` instead
+    // (`fnClasses = classes.isEmpty ? ["unresolved"] : …`), and that is the wrong place for it: a
+    // fail-closed default is not portable between a predicate that GUARDS and one that CHARGES. As a
+    // guard it made the matcher conservative; as grounds to EMIT a violation it asserted a reason nobody
+    // recorded. Same shape as `netClassesOf` below, which has always floored at `unknown-host` in the
+    // INPUT rather than in the match.
+    //
+    // Gated on a DIRECT `Unknown` the function did not name, never on the reason set being empty:
+    // emptiness is also what an INHERITED `Unknown` looks like, and marking those is the mirror
+    // fabrication. On this route the guard is belt-and-braces — over 14 real targets / 12 004 entries,
+    // 0 carry a direct `Unknown` without an `unknownWhy` (§4's invariant, pinned by
+    // UnknownMarkerInvariantProcessTests) — but it is what lets the matcher stop flooring at all.
+    for (fn, d) in direct where d.contains("Unknown") && (whyMap[fn]?.isEmpty ?? true) {
+        reasonClassDirect[fn, default: []].insert("unresolved")
     }
     var netClasses: [String: [String]] = [:]
     for (qual, inf) in inferred where inf.contains("Net") {
@@ -207,9 +226,28 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> [GateViolation] {
                 var hits = r.effects.isEmpty ? inf.sorted().filter { $0 != "Unknown" }
                                              : inf.sorted().filter { r.effects.contains($0) }
                 // Reason-scoped Unknown: a `deny E Unknown[classes]` keeps its Unknown hit only for a fn
-                // whose TRANSITIVE reason classes include one of those; no recorded reason ⇒ `unresolved`.
+                // whose TRANSITIVE reason classes include one of those.
+                //
+                // ⟨0.24⟩ **NO FLOOR HERE — THE MATCHER MUST NOT CHARGE ON A DEFAULT** (SPEC §3.1,
+                // candor-spec `5a8cf48`). This line used to read
+                // `reasonClassAcc[qual].map { $0.isEmpty ? ["unresolved"] : … } ?? ["unresolved"]`, and
+                // while the answerability refusal SHORT-CIRCUITED before the gate ran, the floor was
+                // unreachable on the one route where an empty set is possible. Removing that
+                // short-circuit (the precedence fix) made it reachable, and MEASURED it FABRICATED: a
+                // scoped `deny Unknown[unresolved]` over an entry whose `Unknown` is INHERITED and
+                // reasonless emitted an actual violation RECORD naming that function — in the same run
+                // whose stderr said the rule could not be evaluated over it. A self-contradicting
+                // document, and a soundness fix was what made it reachable.
+                //
+                // A fail-closed default is not portable between a predicate that GUARDS and one that
+                // CHARGES. The `unresolved` default is still applied — at the ENTRY, in
+                // `gateInputFromScan` / `gateInputFromReport`, gated on a DIRECT `Unknown` the function
+                // did not name — where it composes and where it is evidenced. An EMPTY set here means the
+                // match is not evidenced by this function's own entry, so the rule is WITHHELD on this
+                // (rule, function) pair and disclosed by the caller. Withholding is per (rule, function),
+                // never whole-policy: the same rule may fire on one function and be withheld on another.
                 if hits.contains("Unknown"), !r.unknownClasses.isEmpty {
-                    let fnClasses = reasonClassAcc[qual].map { $0.isEmpty ? ["unresolved"] : Array($0) } ?? ["unresolved"]
+                    let fnClasses = reasonClassAcc[qual] ?? []
                     if !fnClasses.contains(where: { r.unknownClasses.contains($0) }) {
                         hits.removeAll { $0 == "Unknown" }
                     }
