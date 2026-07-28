@@ -1105,6 +1105,91 @@ final class ChainingProcessTests: XCTestCase {
         XCTAssertNil(out[false]?["go"], "count n>0 -> covered, believed all-pure")
     }
 
+    /// ⟨0.24⟩ A DEP ENTRY THAT IS PRESENT BUT UNPARSEABLE IS CORRUPT INPUT, NEVER AN ABSENT ONE (SPEC §2,
+    /// candor-spec `38ba3e2`). The file header already states the principle — a dep report that does not
+    /// parse FAILS the run, because "silently skipping either would make every call into that dep read
+    /// pure" — and `(e[k] as? [Any]) ?? []` undid it one entry down.
+    ///
+    /// MEASURED before the fix on this exact fixture, `deny Fs`, with the dep's `hit` entry doctored:
+    ///
+    ///     intact dep report   go -> ['Fs']                     exit 1   the gate catches it
+    ///     unchained control   go -> invisible: ['RatesDep']    exit 0   the honest hedge
+    ///     `fn` key deleted    go -> ABSENT from `functions`    exit 0   a ⟨0.21⟩ PURITY CLAIM
+    ///     `inferred: [1]`     go -> ABSENT from `functions`    exit 0   a ⟨0.21⟩ PURITY CLAIM
+    ///
+    /// Both corrupt arms are strictly MORE confident than not chaining the package at all, over a function
+    /// the dep report was trying to say was effectful. The two arms of the intact/unchained pair are the
+    /// controls that make that reading non-vacuous, and both are asserted here.
+    func testACorruptDepEntryFailsClosedRatherThanReadingPure() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+
+        // CONTROL 1 — the intact report answers, so the corrupt arms below are not just a broken fixture.
+        let policy = root.appendingPathComponent("deny-net.policy")
+        try "deny Net\n".write(to: policy, atomically: true, encoding: .utf8)
+        let ok = try run(bin, [app.path, "--out", root.appendingPathComponent("app-ok").path,
+                               "--policy", policy.path], env: ["CANDOR_DEPS": depReport.path])
+        XCTAssertEqual(ok.code, 1, "the INTACT dep report must make the gate fire, or the arms below prove "
+                       + "nothing: \(ok.err)")
+
+        // CONTROL 2 — unchained, the honest hedge the corrupt arms must never be more confident than.
+        let un = try run(bin, [app.path, "--out", root.appendingPathComponent("app-un").path])
+        XCTAssertEqual(un.code, 0, un.err)
+        let unchained = try fns(ofReport: root.appendingPathComponent("app-un.App.Swift.json"))
+        XCTAssertEqual(unchained["go"]?["invisible"] as? [String], ["RatesDep"],
+                       "the unchained arm discloses; a chained-but-corrupt one must not do better")
+
+        let corruptions: [(String, (inout [String: Any]) -> Void)] = [
+            ("no fn key", { d in
+                var fns = d["functions"] as! [[String: Any]]
+                fns[0].removeValue(forKey: "fn"); d["functions"] = fns }),
+            ("fn not a string", { d in
+                var fns = d["functions"] as! [[String: Any]]; fns[0]["fn"] = 7; d["functions"] = fns }),
+            ("inferred holds a number", { d in
+                var fns = d["functions"] as! [[String: Any]]; fns[0]["inferred"] = [1]; d["functions"] = fns }),
+            ("hosts is a bare string", { d in
+                var fns = d["functions"] as! [[String: Any]]; fns[0]["hosts"] = "h"; d["functions"] = fns }),
+            ("unknownWhy holds null", { d in
+                var fns = d["functions"] as! [[String: Any]]
+                fns[0]["inferred"] = ["Unknown"]; fns[0]["unknownWhy"] = [NSNull()]; d["functions"] = fns }),
+        ]
+        for (name, mutate) in corruptions {
+            let variant = root.appendingPathComponent("dep-corrupt-\(name.replacingOccurrences(of: " ", with: "-")).json")
+            try doctor(depReport, to: variant, mutate: mutate)
+            let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-c").path,
+                                  "--policy", policy.path], env: ["CANDOR_DEPS": variant.path])
+            XCTAssertEqual(r.code, 2, "\(name): a corrupt dep entry must FAIL the run, not be skipped — "
+                           + "skipping it makes every call it answers read pure, which is the exact care "
+                           + "this file's header takes one level up. stderr: \(r.err)")
+            XCTAssertTrue(r.err.contains(variant.lastPathComponent),
+                          "\(name): and the refusal names the report: \(r.err)")
+        }
+    }
+
+    /// THE CONTROL FOR THE ROW ABOVE. An ABSENT optional key still takes its documented default — a dep
+    /// entry carrying only `fn`, `hash` and `inferred` is ordinary, not corrupt, and must still join.
+    /// Conflating absent with present-but-unparseable would refuse every report in the wild.
+    func testADepEntryWithOnlyItsRequiredKeysStillJoins() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        let minimal = root.appendingPathComponent("dep-minimal.json")
+        try doctor(depReport, to: minimal) { d in
+            d["functions"] = (d["functions"] as! [[String: Any]]).map { e in
+                ["fn": e["fn"]!, "hash": e["hash"]!, "inferred": e["inferred"]!] as [String: Any]
+            }
+        }
+        let policy = root.appendingPathComponent("deny-net.policy")
+        try "deny Net\n".write(to: policy, atomically: true, encoding: .utf8)
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-min").path,
+                              "--policy", policy.path], env: ["CANDOR_DEPS": minimal.path])
+        XCTAssertEqual(r.code, 1, "an entry with no `hosts`/`calls`/`unknownWhy`/… is ordinary, and its "
+                       + "effect must still cross the join: \(r.err)")
+    }
+
     /// The manifest is only a claim when it IS one. The anti-flood rows matter as much as the fail-closed
     /// ones: reading a pre-⟨0.21⟩ producer's ABSENT manifest as "judged nothing" would withdraw coverage
     /// from every report that predates the rung — the `unanalyzed` absent/garbled mistake in a new costume

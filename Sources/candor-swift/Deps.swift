@@ -482,8 +482,34 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
         }
         for pkg in (obj?["packages"] as? [String]) ?? [] where !pkg.isEmpty { register(pkg) }
 
+        // ⟨0.24⟩ A LIST KEY THAT IS PRESENT BUT UNPARSEABLE IS CORRUPT INPUT (SPEC §2, candor-spec
+        // `38ba3e2`), and on this path the coercion is the header's own care undone one entry down: the
+        // file header says a dep report that does not parse FAILS the run, "silently skipping either would
+        // make every call into that dep read pure". `(e[k] as? [Any]) ?? []` skipped a CORRUPT ENTRY on
+        // exactly those terms. Returns nil when the key is present and is not a list of strings; an ABSENT
+        // key is `[]`, the documented default — conflating the two would refuse every legitimate report.
+        func depStrs(_ k: String, _ e: [String: Any]) -> [String]? {
+            guard let raw = e[k] else { return [] }
+            guard let arr = raw as? [Any] else { return nil }
+            let out = arr.compactMap { $0 as? String }
+            return out.count == arr.count ? out : nil
+        }
         for case let e as [String: Any] in fns {
-            guard let qual = e["fn"] as? String, !qual.isEmpty else { continue }
+            // NOT `continue`. MEASURED on the two-tree fixture (dep `hit()` reads /etc/hosts, app `go()`
+            // calls it, `deny Fs`), with the dep entry's `fn` key deleted and with its `inferred` set to
+            // `[1]`:
+            //
+            //   intact dep report   go -> ['Fs']                     exit 1   the gate catches it
+            //   unchained           go -> invisible: ['RatesDep']    exit 0   the honest hedge
+            //   corrupt entry       go -> ABSENT from `functions`    exit 0   a ⟨0.21⟩ PURITY CLAIM
+            //
+            // — strictly more confident than not chaining the package at all, on a function the dep report
+            // was TRYING to tell you was effectful. Same shape as the `gate --report` half, one layer over.
+            guard let qual = e["fn"] as? String, !qual.isEmpty else {
+                depsFail("CANDOR_DEPS report \(f) has a `functions` entry with no readable `fn` "
+                         + "(a non-empty string is §2-required) — a corrupt entry is not an absent one, and "
+                         + "dropping it would make every call it answers read PURE")
+            }
             // The entry's package: its hash prefix (`pkg#qual`), else the envelope package. No
             // package → unchainable entry (a hashless report under-reports, the documented direction).
             let hash = e["hash"] as? String
@@ -497,25 +523,35 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
                 entry.effects = ["Unknown"]      // §2.1: a different/missing producer version is not trusted
                 entry.whyReason = "dep-stale:\(pkg)"
             } else {
-                for case let name as String in (e["inferred"] as? [Any]) ?? [] {
+                // Every list key this entry contributes from, checked BEFORE any of them is used —
+                // `inferred` is the effect set the join carries, and dropping a member of it is the
+                // silent under-report in its purest form.
+                guard let inferredNames = depStrs("inferred", e), let invisibleNames = depStrs("invisible", e),
+                      let incompleteNames = depStrs("incomplete", e), let whyTokens = depStrs("unknownWhy", e),
+                      let surfaces = ["hosts", "cmds", "paths", "tables"].reduce([String: [String]]?([:]), {
+                          guard var acc = $0, let v = depStrs($1, e) else { return nil }
+                          acc[$1] = v; return acc
+                      }) else {
+                    depsFail("CANDOR_DEPS report \(f) entry `\(qual)` carries a §2 list key that is not a "
+                             + "list of strings (`inferred`, `hosts`, `cmds`, `paths`, `tables`, "
+                             + "`invisible`, `incomplete`, `unknownWhy`) — reading it as EMPTY would drop "
+                             + "the effect the entry was published to carry")
+                }
+                for name in inferredNames {
                     // foreign vocabulary (a future spec's effect) is honestly Unknown, never dropped
                     entry.effects.insert(Effect.from(name) != nil ? name : "Unknown")
                 }
                 for (key, path) in [("hosts", \DepEntry.hosts), ("cmds", \.cmds), ("paths", \.paths), ("tables", \.tables)] {
-                    for case let v as String in (e[key] as? [Any]) ?? [] { entry[keyPath: path].insert(v) }
+                    for v in surfaces[key] ?? [] { entry[keyPath: path].insert(v) }
                 }
                 // carry the dep fn's own honesty markers across the join (the candor-scan sweeps [8]/[30])
-                for case let v as String in (e["invisible"] as? [Any]) ?? [] { entry.invisible.insert(v) }
-                for case let v as String in (e["incomplete"] as? [Any]) ?? [] where Effect.from(v) != nil {
-                    entry.incomplete.insert(v)
-                }
+                for v in invisibleNames { entry.invisible.insert(v) }
+                for v in incompleteNames where Effect.from(v) != nil { entry.incomplete.insert(v) }
                 if entry.effects.contains("Unknown") {
                     // The dep's OWN reasons, so the ⟨0.19⟩ class survives the boundary. Only tokens the
                     // dep RECORDED: an entry that inherited its Unknown without a reason of its own
                     // (SPEC §4 makes `unknownWhy` direct-only) contributes nothing.
-                    for case let w as String in (e["unknownWhy"] as? [Any]) ?? [] where !w.isEmpty {
-                        entry.whyClasses.insert(w)
-                    }
+                    for w in whyTokens where !w.isEmpty { entry.whyClasses.insert(w) }
                     // `dep:<hash>` ONLY when the dependency classified nothing. It is a PROVENANCE
                     // pointer, not a reason, and §6.2 projects it to `unresolved` — so carrying it beside
                     // a classified reason puts an `unresolved` in the consumer's class set that the

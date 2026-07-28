@@ -9,6 +9,26 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed ⚠ — ⟨0.24⟩ a CORRUPT chained dep entry was skipped, so the calls it answered read PURE (2026-07-28)
+
+The sibling of the `gate --report` rung below, one layer over, found while verifying it. This file's own
+header already states the principle — a dep report that does not parse FAILS the run, because "silently
+skipping either would make every call into that dep read pure" — and `(e[k] as? [Any]) ?? []` plus a
+`continue` on a missing `fn` undid it one entry down. Measured on the two-tree fixture (dep `hit()` reads
+`/etc/hosts`, app `go()` calls it, `deny Fs`), the dep's one entry doctored:
+
+    intact dep report   go -> ['Fs']                     exit 1   the gate catches it
+    unchained control   go -> invisible: ['RatesDep']    exit 0   the honest hedge
+    `fn` key deleted    go -> ABSENT from `functions`    exit 0   a ⟨0.21⟩ PURITY CLAIM
+    `inferred: [1]`     go -> ABSENT from `functions`    exit 0   a ⟨0.21⟩ PURITY CLAIM
+
+Both corrupt arms are **strictly more confident than not chaining the package at all**, over a function
+the dep report was trying to say was effectful. A dep entry with no readable `fn`, or with a §2 list key
+that is present and is not a list of strings (`inferred`, `hosts`, `cmds`, `paths`, `tables`, `invisible`,
+`incomplete`, `unknownWhy`), now FAILS the run (exit 2) naming the report — the posture the loader already
+takes for a report that does not parse at all. An **absent** optional key still takes its default, pinned
+by its own control: an entry carrying only `fn`, `hash` and `inferred` still joins.
+
 ### fixed ⚠ — ⟨0.24⟩ a `gate --report` key that is PRESENT but unparseable was coerced to its empty value (2026-07-28)
 
 SPEC §2 ⟨0.24⟩ (candor-spec `38ba3e2`). The shape that generalises the count-0 and missing-`functions`
