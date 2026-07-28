@@ -55,8 +55,17 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
     // is non-empty, the verdict names the uncovered modules — VERDICT-PRESERVING (the ⟨0.9⟩ provable-purity
     // auto-disclosure precedent): ok/violations/exit are computed exactly as before, this field only ADDS.
     // A gate does NOT fail on uncovered deps (nearly every real scan has some); the policy author decides.
+    // ⟨0.24⟩ SPEC §3.1 pins the VERDICT's coverage block as `{ "uncovered": <n>, "packages": [ … ] }`, and
+    // until 2026-07-28 this document never said so. §2 defines the REPORT's ledger — `coverage.uncovered`
+    // as an ARRAY of `{name, calls}` — which is a DIFFERENT shape from the verdict's (a count plus a name
+    // list), so the verdict shape was never pinned and the engines diverged unobserved: rust and ts emit
+    // `packages`, this engine emitted `modules`, and the single prose mention in §3.1 said `modules` too,
+    // because it was written describing THIS engine's output. `packages` is correct, and NOT because it is
+    // three-to-one: the §2 envelope names the very same objects `package`/`packages`, so a verdict that
+    // renames them mid-document is drift, and `module` already means a different thing in two of the four
+    // implementation languages (a compilation unit, which is not what is being counted).
     if !uncoveredModules.isEmpty {
-        dict["coverage"] = ["uncovered": uncoveredModules.count, "modules": uncoveredModules.sorted()] as [String: Any]
+        dict["coverage"] = ["uncovered": uncoveredModules.count, "packages": uncoveredModules.sorted()] as [String: Any]
     }
     // ⟨0.24⟩ THE AMBIENCE IS DISCLOSED (SPEC §3.1): if a config file supplied VOCABULARY that participated
     // in this verdict — today `unknown-alias`, the only key that expands a policy token — the document

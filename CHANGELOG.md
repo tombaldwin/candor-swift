@@ -9,6 +9,23 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### changed ⚠ — ⟨0.24⟩ the gate verdict's `coverage` block spells its name list `packages` (2026-07-28)
+
+SPEC §3.1 ⟨0.24⟩ (candor-spec `aafa021`), which pins the verdict's coverage block as
+`{ "uncovered": <n>, "packages": [ … ] }` for the first time. §2 defines the *report's* ledger —
+`coverage.uncovered` as an array of `{name, calls}` — and that is a different shape from the *verdict's*,
+so the verdict shape was never stated and the engines diverged unobserved: rust and ts emitted `packages`,
+candor-swift emitted `modules`, and §3.1's single prose mention said `modules` too, because it was written
+describing this engine's output. `packages` is correct, and not because it is three-to-one: the §2 envelope
+names the very same objects `package`/`packages`, so a verdict that renames them mid-document is drift, and
+`module` already means a different thing in two of the four implementation languages.
+
+**A machine consumer reading `coverage.modules` from a candor-swift verdict must move to
+`coverage.packages`.** Both swift routes go through one writer, so `scan --policy` and `gate --report`
+change together and §3.1's byte-equality is unaffected. NOT renamed: the `privacy-manifest --verify --json`
+document's own `coverage.modules` — that is the privacy/1 extension's surface, no clause and no conformance
+PART pins it, and it is recorded as the second instance of the same hole rather than renamed unilaterally.
+
 ### fixed ⚠ — ⟨0.24⟩ policy VOCABULARY anchored at the target on a scan and at the policy on a gate (2026-07-28)
 
 SPEC §3.1 ⟨0.24⟩ (candor-spec `99eb4e9`). §3.1's MUST NOT names three channels an effect must never enter

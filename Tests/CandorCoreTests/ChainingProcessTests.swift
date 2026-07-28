@@ -1060,7 +1060,7 @@ final class ChainingProcessTests: XCTestCase {
         XCTAssertTrue(r.err.contains("classifier doesn't cover"),
                       "…and the ordinary κ nudge fires too, exactly as unchained: \(r.err)")
         let v = try JSONSerialization.jsonObject(with: Data(contentsOf: verdict)) as? [String: Any]
-        XCTAssertEqual((v?["coverage"] as? [String: Any])?["modules"] as? [String], ["RatesDep"],
+        XCTAssertEqual((v?["coverage"] as? [String: Any])?["packages"] as? [String], ["RatesDep"],
                        "the gate verdict re-discloses it (⟨0.15⟩ verdict-preserving), so a MACHINE consumer "
                        + "of a green gate learns the package was never judged: \(v ?? [:])")
 

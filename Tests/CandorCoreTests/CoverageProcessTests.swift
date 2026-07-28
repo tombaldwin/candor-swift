@@ -127,6 +127,10 @@ final class CoverageProcessTests: XCTestCase {
         XCTAssertEqual(d["conditional"] as? Bool, true, r.out)
         let cov = try XCTUnwrap(d["coverage"] as? [String: Any], r.out)
         XCTAssertEqual(cov["uncovered"] as? Int, 1, r.out)
+        // NOT renamed to `packages` with the GATE verdict (⟨0.24⟩ SPEC §3.1): this is the privacy/1
+        // EXTENSION's own `--verify --json` document, which no clause and no conformance PART pins. It is
+        // the SECOND instance of the hole the gate key fell through — a field nothing compares — and it is
+        // recorded rather than renamed on one engine's judgment, which is how the first divergence got made.
         XCTAssertEqual(cov["modules"] as? [String], ["SomeSDK"], r.out)
         // human surface: the ⚠ conditional line, same verdict/exit
         let h = try ProcessHarness.run(bin, ["privacy-manifest", "--report", prefix, "--verify", plist.path])
@@ -193,7 +197,10 @@ final class CoverageProcessTests: XCTestCase {
         XCTAssertTrue(badViolations.contains { $0["fn"] as? String == "w" }, "\(badV)")
         let badCov = try XCTUnwrap(badV["coverage"] as? [String: Any], "\(badV)")
         XCTAssertEqual(badCov["uncovered"] as? Int, 1)
-        XCTAssertEqual(badCov["modules"] as? [String], ["SomeSDK"])
+        XCTAssertEqual(badCov["packages"] as? [String], ["SomeSDK"],
+                       "⟨0.24⟩ SPEC §3.1 pins the VERDICT's coverage block as `{uncovered, packages}` — "
+                       + "this engine emitted `modules`, and the §2 envelope names the same objects `packages`")
+        XCTAssertNil(badCov["modules"], "the old spelling must be GONE, not carried beside the new one")
 
         // PASSING gate: `deny Exec` matches nothing — exit 0, ok:true, [], coverage still disclosed.
         let pass = dir.appendingPathComponent("pass.policy")
