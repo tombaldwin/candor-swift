@@ -22,11 +22,51 @@ import CandorCore
 // ⟨0.20⟩ `netClass`: on an AS-EFF-006 violation whose `effects` include `Net`, all destination classes
 // present (transitively) on the fn — which class the security gate bit (NET-DESTINATION-CLASS-DESIGN.md).
 typealias GateViolation = (rule: String, fn: String, effects: [String], detail: String, reasonClass: [String], netClass: [String])
+
+/// ⟨0.24⟩ ONE POLICY RULE THIS RUN COULD NOT DECIDE (SPEC §3.1, candor-spec `fc4b5f6`).
+///
+/// The exit-1 clause said the refusal "MUST still disclose which rules could not be evaluated" and named
+/// no field, no shape and no channel — sitting beside the clause requiring every machine field to be
+/// pinned in the rung that introduces it. MEASURED on `deny Fs` + `allow Fs /var/data`, exit 1:
+///
+///     rust    NOTHING in the document — stderr only
+///     swift   NOTHING in the document — stderr only            ← this engine
+///     java    "unevaluated": [{"rule": "forbid (× 1)"}]        ← a KIND AGGREGATE; WHICH rules is lost
+///     ts      "unevaluated": [{"rule": "<raw line>", "why"}]   ← correct, and the pinned shape
+///
+/// **A machine consumer of this engine's exit-1 verdict could not see that any rule went unevaluated at
+/// all** — a finding that never reaches the consumer, arriving through the disclosure this rung added to
+/// stop exactly that. stderr is not the machine channel; that is the same distinction that made the
+/// incomplete-analysis defect a defect.
+///
+/// ONE ENTRY PER RULE, `rule` being the RAW policy line VERBATIM. Java's aggregate answers "how many"
+/// when the operator's question is "which", so it satisfies a naive reading of "disclose which rules"
+/// while answering the other one. OMITTED when empty, so a fully-answered verdict stays byte-identical
+/// and the four-way clean-gate comparison is untouched.
+///
+/// It rides BOTH documents, matching the reference engine: the exit-1 VERDICT (where a violation
+/// dominates and the unanswered rules travel beside it) and the exit-2 REFUSAL document (where they ARE
+/// the reason). Withholding it from the refusal document would put the whole disclosure back on stderr in
+/// exactly the case where nothing else is said.
+struct Unevaluated {
+    /// the RAW policy line, verbatim — never a kind, never a count.
+    let rule: String
+    /// why this run could not decide it.
+    let why: String
+}
+
+/// The `unevaluated` array as it goes on the wire — shared by the verdict and the refusal document so the
+/// two can never spell it differently.
+private func unevaluatedJson(_ xs: [Unevaluated]) -> [[String: Any]] {
+    xs.map { ["rule": $0.rule, "why": $0.why] as [String: Any] }
+}
+
 func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: String,
                       analyzedCount: Int,
                       unanalyzed: [(path: String, reason: String)] = [],
                       coverage uncoveredModules: [String] = [],
-                      policyVocabulary: (config: String, aliases: [String])? = nil) {
+                      policyVocabulary: (config: String, aliases: [String])? = nil,
+                      unevaluated: [Unevaluated] = []) {
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a gate over source candor could NOT analyze must NOT read green —
     // its effects are invisible, so a `deny`/`allow` that "passes" over it is a false-pure. `ok` requires
     // BOTH no violation AND a complete analysis (the caller exits 2 on this incomplete-but-clean path).
@@ -83,6 +123,10 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
     if let pv = policyVocabulary, !pv.aliases.isEmpty {
         dict["policyVocabulary"] = ["config": pv.config, "aliases": pv.aliases.sorted()] as [String: Any]
     }
+    // ⟨0.24⟩ WHICH RULES THIS VERDICT DOES NOT ANSWER (SPEC §3.1) — see `Unevaluated`. Exit 1 reports the
+    // violation it is sure of; it does not conceal the part it could not read, and it does not confine
+    // that admission to stderr.
+    if !unevaluated.isEmpty { dict["unevaluated"] = unevaluatedJson(unevaluated) }
     if path == "-" {
         if let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys]),
            let s = String(data: data, encoding: .utf8) { print(s) }
@@ -129,14 +173,17 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
 nonisolated(unsafe) var gateVerdictSinks: [String] = []
 
 /// Print the reason, write the refusal document to every requested sink, exit 2.
-func refuseGateAndExit(_ reason: String) -> Never {
+/// ⟨0.24⟩ `unevaluated` travels with it when the refusal IS a set of undecidable rules (SPEC §3.1) — the
+/// machine channel for the same disclosure the `reason` string carries for the human.
+func refuseGateAndExit(_ reason: String, unevaluated: [Unevaluated] = []) -> Never {
     FileHandle.standardError.write((reason + "\n").data(using: .utf8)!)
-    for t in gateVerdictSinks { writeGateRefusal(reason, to: t, spec: specVersion) }
+    for t in gateVerdictSinks { writeGateRefusal(reason, to: t, spec: specVersion, unevaluated: unevaluated) }
     exit(2)
 }
 
-func writeGateRefusal(_ reason: String, to path: String, spec: String) {
-    let dict: [String: Any] = ["spec": spec, "ok": false, "refused": true, "reason": reason]
+func writeGateRefusal(_ reason: String, to path: String, spec: String, unevaluated: [Unevaluated] = []) {
+    var dict: [String: Any] = ["spec": spec, "ok": false, "refused": true, "reason": reason]
+    if !unevaluated.isEmpty { dict["unevaluated"] = unevaluatedJson(unevaluated) }
     guard let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys]),
           let text = String(data: data, encoding: .utf8) else {
         FileHandle.standardError.write("candor-swift: could not serialize the refusal document\n".data(using: .utf8)!)

@@ -349,25 +349,31 @@ private func gateInputFromReport(_ env: GateReportEnvelope) -> GateInput {
 /// precedence correction below), this list is a DISCLOSURE that has to travel ALONGSIDE a verdict rather
 /// than being the whole output, and one rule out of three is a partial disclosure. At most one message
 /// per RULE — the first function that defeats it is the example; naming every match would bury the rule.
-private func unanswerableScopedFilters(_ deny: [DenyRule], _ gi: GateInput) -> [String] {
-    var out: [String] = []
+///
+/// ⟨0.24⟩ Each entry carries the RAW policy line separately from the prose, because `fc4b5f6` pins
+/// `unevaluated[].rule` to the verbatim line: a `why` that MENTIONS the rule is not a field a consumer
+/// can read it out of.
+private func unanswerableScopedFilters(_ deny: [DenyRule], _ gi: GateInput) -> [Unevaluated] {
+    var out: [Unevaluated] = []
     for r in deny {
         for fn in gi.inferred.keys.sorted() where scopeMatches(fn, r.scope) {
             let inf = gi.inferred[fn] ?? []
             if !r.netClasses.isEmpty, inf.contains("Net"), (gi.netClasses[fn] ?? []).isEmpty {
-                out.append("`\(r.raw)` narrows on the Net DESTINATION CLASS, but `\(fn)` carries Net with no "
+                out.append(Unevaluated(rule: r.raw, why:
+                    "`\(r.raw)` narrows on the Net DESTINATION CLASS, but `\(fn)` carries Net with no "
                     + "`netClass` in this report — the field the filter reads is absent, so the narrowing "
                     + "would succeed for lack of evidence and drop a Net the bare `deny Net` catches. "
                     + "Refusing (exit 2) rather than passing: an absent optional field must not relax a "
-                    + "fail-closed gate. Use the bare `deny Net`, or gate at scan time.")
+                    + "fail-closed gate. Use the bare `deny Net`, or gate at scan time."))
                 break
             }
             if !r.unknownClasses.isEmpty, inf.contains("Unknown"), (gi.reasonClasses[fn] ?? []).isEmpty {
-                out.append("`\(r.raw)` narrows on the Unknown REASON CLASS, but `\(fn)` carries Unknown with no "
+                out.append(Unevaluated(rule: r.raw, why:
+                    "`\(r.raw)` narrows on the Unknown REASON CLASS, but `\(fn)` carries Unknown with no "
                     + "reason reachable in this report — neither its own `unknownWhy` nor a `calls` edge to "
                     + "one. §6.2 resolves the class set TRANSITIVELY over the gate's reach; with the channel "
                     + "missing, every narrowed filter silently tolerates while only the bare `deny Unknown` "
-                    + "fires. Refusing (exit 2). Use the bare `deny Unknown`, or gate at scan time.")
+                    + "fires. Refusing (exit 2). Use the bare `deny Unknown`, or gate at scan time."))
                 break
             }
         }
@@ -472,22 +478,32 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // The `allow`/`forbid` rules themselves are still never evaluated: `denyOnly` below hands
     // `evaluateGate` the deny rules alone, so no AS-EFF-008 can be certified off a wire that does not carry
     // the surface-completeness marker.
-    var policyRefusals: [String] = []
-    if !pol.forbid.isEmpty {
-        policyRefusals.append("this policy has \(pol.forbid.count) `forbid` rule(s), which "
+    //
+    // ⟨0.24⟩ **ONE ENTRY PER RULE, KEYED ON THE RAW LINE** (SPEC §3.1, candor-spec `fc4b5f6`). The refusal
+    // is still decided whole-policy — every `forbid` is unanswerable for the same reason — but the
+    // DISCLOSURE is per rule, because the operator's question is *which* and an aggregate answers *how
+    // many*. candor-java emits `"forbid (× 2)"` and loses which two; that satisfies a naive reading of
+    // "disclose which rules" while answering the other one.
+    var policyRefusals: [Unevaluated] = []
+    for r in pol.forbid {
+        policyRefusals.append(Unevaluated(rule: r.raw, why:
+            "this policy has \(pol.forbid.count) `forbid` rule(s), which "
                    + "`gate --report` cannot evaluate — a report carries an entry only for a function with an "
                    + "EFFECT, so a wholly pure unit has no entry and no edges at all, while `forbid` matches "
                    + "on NAME. The rule would read green over a crossing a scan fails on. Gate layering at "
-                   + "scan time: candor-swift <dir> --policy \(policyPath)")
+                   + "scan time: candor-swift <dir> --policy \(policyPath)"))
     }
     if !pol.allow.isEmpty {
         let effects = Set(pol.allow.map { $0.effect }).sorted()
-        policyRefusals.append("this policy has `allow \(effects.joined(separator: "`/`"))` rule(s), "
+        for r in pol.allow {
+            policyRefusals.append(Unevaluated(rule: r.raw, why:
+                "this policy has `allow \(effects.joined(separator: "`/`"))` rule(s), "
                    + "which `gate --report` cannot evaluate — the AS-EFF-008 surface-completeness marker does "
                    + "not ride the report wire, so a benign visible literal beside a runtime-computed endpoint "
                    + "would be CERTIFIED here and flagged by a scan. (`netClass: unknown-host` is NOT that "
                    + "marker — it also names a merely unrecognised host.) Gate allowlists at scan time: "
-                   + "candor-swift <dir> --policy \(policyPath)")
+                   + "candor-swift <dir> --policy \(policyPath)"))
+        }
     }
     let denyOnly = ParsedPolicy(deny: pol.deny, allow: [], forbid: [])
 
@@ -568,8 +584,11 @@ func runGateReportCLI(_ args: [String]) -> Never {
                  + "that alone would have been exit 2)\n").data(using: .utf8)!)
         }
         // Every unanswerable rule, joined — the message is the document's `reason`, so the human and the
-        // machine channel carry the SAME disclosure rather than two drifting statements of it.
-        refuseGateAndExit("candor-swift gate: " + refused.joined(separator: "\n    "))
+        // machine channel carry the SAME disclosure rather than two drifting statements of it. ⟨0.24⟩ and
+        // the SAME rules ride the refusal document as `unevaluated`, per rule and keyed on the raw line:
+        // a prose `reason` is not a field a consumer can read a rule list out of.
+        refuseGateAndExit("candor-swift gate: " + refused.map(\.why).joined(separator: "\n    "),
+                          unevaluated: refused)
     }
     if !refused.isEmpty {
         FileHandle.standardError.write(
@@ -577,7 +596,7 @@ func runGateReportCLI(_ args: [String]) -> Never {
              + "report and are NOT answered by the verdict below. The verdict stands anyway: a rule FIRED "
              + "on evidence this report carries, and no resolution of an unanswered rule can un-reject a "
              + "rejected policy (SPEC §3.1, PAPER3 Lemma 2). Unanswered:\n").data(using: .utf8)!)
-        for why in refused { FileHandle.standardError.write("    \(why)\n".data(using: .utf8)!) }
+        for u in refused { FileHandle.standardError.write("    \(u.why)\n".data(using: .utf8)!) }
     }
     // Diagnostics go to STDERR exactly as the scan routes them, so `gate … --json | jq` sees pure JSON.
     for v in violations { FileHandle.standardError.write(("[\(v.rule)] \(v.detail)\n").data(using: .utf8)!) }
@@ -585,10 +604,10 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // cannot tell a scanned verdict from a report-gated one.
     if wantJson { writeGateVerdict(violations, to: "-", spec: specVersion, analyzedCount: env.analyzedCount,
                                    unanalyzed: env.unanalyzed, coverage: Array(env.coverageModules),
-                                   policyVocabulary: policyVocabulary) }
+                                   policyVocabulary: policyVocabulary, unevaluated: refused) }
     if let gp = gateJsonPath { writeGateVerdict(violations, to: gp, spec: specVersion, analyzedCount: env.analyzedCount,
                                                 unanalyzed: env.unanalyzed, coverage: Array(env.coverageModules),
-                                                policyVocabulary: policyVocabulary) }
+                                                policyVocabulary: policyVocabulary, unevaluated: refused) }
     if violations.isEmpty {
         FileHandle.standardError.write("candor-swift: policy ✓\n".data(using: .utf8)!)
     } else {
