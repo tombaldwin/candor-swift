@@ -17,32 +17,12 @@ import Foundation
 // choreography — see `gateInputFromReport` below and the `GateInput` doc comment for why there is
 // deliberately no second copy of the §6.2 rules on this side.
 
-private func gateDie(_ msg: String) -> Never {
-    FileHandle.standardError.write((msg + "\n").data(using: .utf8)!)
-    exit(2)
-}
+/// ⟨0.24⟩ Every exit-2 cause on this verb, and they ALL write the refusal document now (SPEC §3.1,
+/// candor-spec `1503368` — the carve-out is gone). `gateVerdictSinks` is empty until the flag loop has
+/// resolved `--gate-json`/`--json`, so a usage error inside that loop still writes nothing, which is the
+/// one case where there is no sink to write to.
+private func gateDie(_ msg: String) -> Never { refuseGateAndExit(msg) }
 
-/// ⟨0.24⟩ REFUSE: print the reason, WRITE the refusal document `--gate-json` was promised, exit 2
-/// (SPEC §3.1). See `writeGateRefusal` (Gate.swift) for the stale-verdict hazard this closes and for why
-/// the document carries no `violations` key.
-///
-/// **SCOPED TO THE ANSWERABILITY REFUSALS**, which is what the ⟨0.24⟩ measurement was about: the policy
-/// LOADED and the report LOADED, and the gate cannot answer the question over THIS report
-/// (`forbid`/`allow` whole-policy; a scoped `deny` whose scoping datum is absent). The OTHER exit-2
-/// cause — a gate CONFIG that is broken, or a report that never loaded AS one — keeps writing nothing,
-/// per §3.3's cause (a) and the rows already pinned here (`testCorruptReportIsRefusedNotReadAsEmpty`,
-/// `testUnreadablePolicyAndMissingPolicyBothExit2`): there the INPUT to the verdict is unreadable, so
-/// even `refused: true` would be attributing a refusal to a policy or a report nobody could parse. The
-/// stale-path hazard is identical for that bucket and the two rulings are in tension — recorded for Tom
-/// rather than resolved unilaterally, because the change would move a rule pinned four-way.
-private func gateRefuse(_ reason: String, wantJson: Bool, gateJsonPath: String?) -> Never {
-    FileHandle.standardError.write("candor-swift gate: \(reason)\n".data(using: .utf8)!)
-    var targets: [String] = []
-    if wantJson { targets.append("-") }
-    if let p = gateJsonPath, !(wantJson && p == "-") { targets.append(p) }
-    for t in targets { writeGateRefusal(reason, to: t, spec: specVersion) }
-    exit(2)
-}
 
 // ── the report, read as data ─────────────────────────────────────────────────────────────────────────
 
@@ -437,6 +417,12 @@ func runGateReportCLI(_ args: [String]) -> Never {
                                      : "candor-swift gate: unexpected argument `\(a)` (\(usage))")
         }
     }
+    // ⟨0.24⟩ From here on EVERY exit-2 cause writes the refusal document (SPEC §3.1, candor-spec
+    // `1503368`): a stale green on disk does not care why this run declined to overwrite it, so the
+    // argument that required a document for an answerability refusal is exactly as true for an unreadable
+    // policy or a report that never loaded AS one. `--json` IS `--gate-json -` here, on this path too.
+    if wantJson { gateVerdictSinks.append("-") }
+    if let p = gateJsonPath, !(wantJson && p == "-") { gateVerdictSinks.append(p) }
 
     guard let policyPath = policyFlag ?? discoverPolicy() else {
         gateDie("candor-swift gate: a policy is required — pass `--policy <file>`, set CANDOR_POLICY, or "
@@ -452,7 +438,8 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // the report, so re-classifying its hosts through THIS machine's config would be the re-derivation
     // §3.1 ⟨0.24⟩ forbids (and would make the verdict depend on the consumer's CWD).
     let vocabConfig = discoverConfig(targetPath: policyPath)
-    let pol = parsePolicy(policyText, aliases: parseUnknownAliases(vocabConfig?.text))
+    let parsedAliases = parseUnknownAliases(vocabConfig?.text)
+    let pol = parsePolicy(policyText, aliases: parsedAliases.aliases)
     // ⟨0.24⟩ SPEC §3.1: the config file is named in the verdict only when its vocabulary PARTICIPATED.
     let configSources = pol.usedAliases.isEmpty ? [] : [vocabConfig?.path].compactMap { $0 }
     // ⟨0.24⟩ AN UNRECOGNISED REASON-CLASS TOKEN IS A POLICY ERROR (SPEC §6.2) — the UNREADABLE-POLICY
@@ -460,28 +447,42 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // §3.1 answerability sense: nothing about THIS report is at issue, the policy could not be read as
     // written at all, and §3.1's byte-equality then holds on a broken policy by there being nothing to
     // disagree about. See `policyClassTokenError` (Policy.swift) for the two measured harms.
-    if !pol.errors.isEmpty { gateDie(pol.errors.joined(separator: "\n")) }
+    // ⟨0.24⟩ the ALIAS DEFINITION's own tokens take the same rule (candor-spec `be0b9a9`): a typo in the
+    // vocabulary the policy is written AGAINST fails open identically, and more quietly.
+    let policyErrors = parsedAliases.errors + pol.errors
+    if !policyErrors.isEmpty { gateDie(policyErrors.joined(separator: "\n")) }
 
     // THE POLICY-LEVEL REFUSALS. Whole-policy, not per-rule: enforcing the answerable half and exiting 0
     // is gateless-green — the user believes a rule is enforced that never ran.
+    //
+    // ⟨0.24⟩ **COLLECTED, NOT EXITED ON** (SPEC §3.1, candor-spec `1503368`, which removes this carve-out).
+    // These used to return 2 here, before the report was even opened, so a firing `deny Fs` standing beside
+    // a `forbid` rule exited 2 with the certain violation absent from the document — the same harm the
+    // precedence fix closed one rung up, surviving under a different rule kind. Lemma 2 does not care WHICH
+    // kind of refusal stands beside the firing rule. The whole-policy granularity governs which rules go
+    // UNEVALUATED; it was never a licence to suppress a violation that was evaluated and certain.
+    //
+    // The `allow`/`forbid` rules themselves are still never evaluated: `denyOnly` below hands
+    // `evaluateGate` the deny rules alone, so no AS-EFF-008 can be certified off a wire that does not carry
+    // the surface-completeness marker.
+    var policyRefusals: [String] = []
     if !pol.forbid.isEmpty {
-        gateRefuse("this policy has \(pol.forbid.count) `forbid` rule(s), which "
+        policyRefusals.append("this policy has \(pol.forbid.count) `forbid` rule(s), which "
                    + "`gate --report` cannot evaluate — a report carries an entry only for a function with an "
                    + "EFFECT, so a wholly pure unit has no entry and no edges at all, while `forbid` matches "
                    + "on NAME. The rule would read green over a crossing a scan fails on. Gate layering at "
-                   + "scan time: candor-swift <dir> --policy \(policyPath)",
-                   wantJson: wantJson, gateJsonPath: gateJsonPath)
+                   + "scan time: candor-swift <dir> --policy \(policyPath)")
     }
     if !pol.allow.isEmpty {
         let effects = Set(pol.allow.map { $0.effect }).sorted()
-        gateRefuse("this policy has `allow \(effects.joined(separator: "`/`"))` rule(s), "
+        policyRefusals.append("this policy has `allow \(effects.joined(separator: "`/`"))` rule(s), "
                    + "which `gate --report` cannot evaluate — the AS-EFF-008 surface-completeness marker does "
                    + "not ride the report wire, so a benign visible literal beside a runtime-computed endpoint "
                    + "would be CERTIFIED here and flagged by a scan. (`netClass: unknown-host` is NOT that "
                    + "marker — it also names a merely unrecognised host.) Gate allowlists at scan time: "
-                   + "candor-swift <dir> --policy \(policyPath)",
-                   wantJson: wantJson, gateJsonPath: gateJsonPath)
+                   + "candor-swift <dir> --policy \(policyPath)")
     }
+    let denyOnly = ParsedPolicy(deny: pol.deny, allow: [], forbid: [])
 
     let locator = reportFlag.map(resolveReportLocator) ?? discoverReportPrefix()
     guard let prefix = locator else {
@@ -546,8 +547,8 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // The refusal is NOT swallowed: when a violation dominates, every unanswerable rule is still
     // disclosed on stderr below. Exit 1 reports the violation it is sure of; it does not conceal the part
     // it could not read.
-    let refused = unanswerableScopedFilters(pol.deny, gi)
-    let violations = evaluateGate(pol, gi)
+    let refused = policyRefusals + unanswerableScopedFilters(pol.deny, gi)
+    let violations = evaluateGate(denyOnly, gi)
     if violations.isEmpty, !refused.isEmpty {
         // SOLE refusal: nothing certain to report, so the gate genuinely could not be evaluated as
         // written. Exit 2 — and ⟨0.24⟩ the refusal DOCUMENT, so a CI wrapper reading `--gate-json`
@@ -561,7 +562,7 @@ func runGateReportCLI(_ args: [String]) -> Never {
         }
         // Every unanswerable rule, joined — the message is the document's `reason`, so the human and the
         // machine channel carry the SAME disclosure rather than two drifting statements of it.
-        gateRefuse(refused.joined(separator: "  ·  "), wantJson: wantJson, gateJsonPath: gateJsonPath)
+        refuseGateAndExit("candor-swift gate: " + refused.joined(separator: "\n    "))
     }
     if !refused.isEmpty {
         FileHandle.standardError.write(

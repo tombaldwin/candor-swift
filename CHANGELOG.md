@@ -69,7 +69,7 @@ file anywhere above the policy participates; a verdict changed by a file the ope
 the ambient-input failure this format exists to refuse. Named only when an alias was actually consumed — a
 config defining aliases nobody asked for is not an input to this verdict.
 
-### fixed ⚠ — ⟨0.24⟩ an unrecognised reason-class token silently REWROTE the rule (2026-07-28)
+### fixed ⚠ — ⟨0.24⟩ an unrecognised token silently REWROTE the rule — in EVERY policy value list (2026-07-28)
 
 SPEC §6.2 ⟨0.24⟩ (candor-spec `382a7e0`), which withdraws its own asymmetry argument — "a dropped policy
 token leaves a WIDER rule standing, so the failure is loud". Measured on this engine, over a signature
@@ -93,10 +93,18 @@ unrecognised token. It is the GATE routes (`scan --policy` and `gate --report`) 
 verdict is derived and with no `--gate-json` document, so §3.1's byte-equality holds on a broken policy by
 there being nothing to disagree about. A `.candor/config` `unknown-alias` still resolves.
 
-NOT extended, deliberately, and flagged for a four-way call: the same silent rewrite exists for `Net[…]`
-destination-class tokens and inside an `unknown-alias` DEFINITION. The ruling's wording covers them, but
-fixing them in one engine alone would put swift out of step with three engines on a token grammar
-(candor-rust made the same call).
+**EXTENDED TO ALL THREE VOCABULARIES** after candor-spec `be0b9a9` widened the ruling (it had said
+"reason-class" only because a reason-class token was what the review measured, and the argument in it never
+mentioned which vocabulary the token belonged to). Both siblings are live fail-opens:
+
+    deny Net[known-partner,unknown-hosst]   narrows to [known-partner] — exit 0 where the correctly
+                                            spelled rule exits 1
+    unknown-alias house = dispatch,indirct  the DEFINITION becomes {dispatch}; the policy line
+                                            `deny Unknown[house]` reads perfectly well and gates nothing
+
+The second is the quietest of the three: the typo is in the vocabulary the policy is written AGAINST rather
+than in the policy itself. Reserved-NAME rejection (`unknown-alias reflect = …`) is a different rule and
+stays warn-and-skip, pinned four-way by conformance PART 4.
 
 ### fixed ⚠ — ⟨0.24⟩ a refusal wrote NO `--gate-json` document, so CI re-read yesterday's green (2026-07-28)
 

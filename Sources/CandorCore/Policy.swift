@@ -90,9 +90,16 @@ let DYNAMIC_CLASSES = ["reflect", "dispatch", "indirect", "native", "unresolved"
 /// name→classes map. A name that shadows a built-in (`*`/`dynamic`/a class token) is warned-and-skipped (a
 /// config alias may not redefine a built-in), as is a definition naming no valid class. Byte-shape with the
 /// java `Config.addAlias` / rust `parse_unknown_aliases`.
-public func parseUnknownAliases(_ configText: String?) -> [String: Set<String>] {
+/// ⟨0.24⟩ Returns the alias map AND the tokens it could not honour. An unrecognised class token inside a
+/// DEFINITION is the sharpest form of the §6.2 rule (candor-spec `be0b9a9`): the typo is in the vocabulary
+/// the policy is written AGAINST rather than in the policy itself, so `unknown-alias corp = dispatch,nativ`
+/// silently defines `corp` as `{dispatch}` and the gate goes green on a native hole that
+/// `= dispatch,native` catches. Same treatment as a policy-side token — the GATE routes refuse, the
+/// advisory readers are unchanged.
+public func parseUnknownAliases(_ configText: String?) -> (aliases: [String: Set<String>], errors: [String]) {
     var out: [String: Set<String>] = [:]
-    guard let configText else { return out }
+    var errors: [String] = []
+    guard let configText else { return (out, errors) }
     for raw in configText.split(separator: "\n", omittingEmptySubsequences: false) {
         let line = raw.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0].trimmingCharacters(in: .whitespaces)
         if line.isEmpty { continue }
@@ -114,12 +121,12 @@ public func parseUnknownAliases(_ configText: String?) -> [String: Set<String>] 
             if cn.isEmpty { continue }
             if cn == "dynamic" { DYNAMIC_CLASSES.forEach { classes.insert($0) } }
             else if REASON_CLASSES.contains(cn) { classes.insert(cn) }
-            else { FileHandle.standardError.write("candor: `unknown-alias \(name)` names unknown reason-class `\(cn)` — skipped\n".data(using: .utf8)!) }
+            else { errors.append(policyClassTokenError(cn, "unknown-alias \(name) = …")) }
         }
         if classes.isEmpty { FileHandle.standardError.write("candor: ignoring `unknown-alias \(name)` — no valid reason-class\n".data(using: .utf8)!) }
         else { out[name] = classes }
     }
-    return out
+    return (out, errors)
 }
 
 /// ⟨0.20⟩ Parse `net-partner <host>` lines (NET-DESTINATION-CLASS-DESIGN.md) into a set of host-normalized
@@ -264,6 +271,18 @@ func warnRule(_ why: String, _ line: String) {
 /// cannot be honoured as written is not silently rewritten into a different policy.
 public let POLICY_CLASS_TOKENS = "reflect, dispatch, indirect, native, unresolved, setup "
     + "(aliases: dynamic, *, or a `.candor/config` `unknown-alias`)"
+/// The `Net[<dest…>]` sibling. ⟨0.24⟩ candor-spec `be0b9a9` widened the ruling from "reason-class" to
+/// EVERY policy value list the implementation cannot honour as written: the clause's argument never
+/// mentioned which vocabulary the token belonged to, and every place the rule stayed narrow was a place
+/// the same fail-open survived under a different key.
+func policyDestClassTokenError(_ token: String, _ line: String) -> String {
+    "candor: policy error — unrecognised Net destination-class `\(token)` in: \(line)\n"
+    + "  accepted: \(NET_DEST_CLASSES.sorted().joined(separator: ", ")) (alias: *)\n"
+    + "  a policy that cannot be honoured AS WRITTEN is not silently rewritten into a different policy: "
+    + "dropping the token beside valid ones NARROWS the rule (it stops gating the destinations you meant, "
+    + "while the gate still looks armed), and dropping the only token WIDENS it. Refusing (exit 2) — "
+    + "SPEC §6.2 ⟨0.24⟩"
+}
 func policyClassTokenError(_ token: String, _ line: String) -> String {
     "candor: policy error — unrecognised reason-class/alias `\(token)` in: \(line)\n"
     + "  accepted: \(POLICY_CLASS_TOKENS)\n"
@@ -310,7 +329,11 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
                         if cn.isEmpty { continue }
                         if cn == "*" { netStar = true }
                         else if NET_DEST_CLASSES.contains(cn) { netClasses.insert(cn) }
-                        else { warnRule("unknown Net destination-class `\(cn)` (known: \(NET_DEST_CLASSES.sorted().joined(separator: ",")), or *)", line) }
+                        // ⟨0.24⟩ Same rule as the reason-class token (candor-spec `be0b9a9`): measured,
+                        // `deny Net[known-telemetry,unknown-hosst]` exits 0 where the correctly-spelled
+                        // rule exits 1. The clause was never about reason-classes — it is about a policy
+                        // value list the implementation cannot honour as written.
+                        else { errors.append(policyDestClassTokenError(cn, line)) }
                     }
                     continue
                 }

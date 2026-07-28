@@ -89,9 +89,14 @@ final class PolicyClassTokenProcessTests: XCTestCase {
         XCTAssertEqual(r.code, 2, "the SCAN route must refuse the same policy — two routes that disagree "
                        + "about which policies are readable is the split §3.1 exists to prevent. stderr: \(r.err)")
         XCTAssertTrue(r.err.contains("`indirct`"), "naming the token: \(r.err)")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: v.path),
-                       "and NO verdict document — the unreadable-policy posture writes nothing, so the two "
-                       + "routes cannot disagree about a policy neither of them could read")
+        // ⟨0.24⟩ …and the document IS written, because THE REFUSAL DOCUMENT HAS NO EXEMPT CAUSE
+        // (candor-spec `1503368`). A stale green on disk does not care why this run declined to overwrite
+        // it, so an unreadable policy leaves the same hazard as an answerability refusal. It carries NO
+        // `violations` key — an unreadable policy has no rules to reason about, which is precisely why.
+        let d = try JSONSerialization.jsonObject(with: Data(contentsOf: v)) as? [String: Any]
+        XCTAssertEqual(d?["ok"] as? Bool, false)
+        XCTAssertEqual(d?["refused"] as? Bool, true)
+        XCTAssertFalse(d?.keys.contains("violations") ?? true, "ABSENT, not empty: \(String(describing: d))")
     }
 
     // ── THE SOLE-UNRECOGNISED-TOKEN ROW: it WIDENED, and the disclosure was FALSE ───────────────────
@@ -114,6 +119,67 @@ final class PolicyClassTokenProcessTests: XCTestCase {
         let s = try ProcessHarness.run(bin(), [scanRoot.path, "--out", scanRoot.appendingPathComponent("r").path,
                                                "--policy", pol.path])
         XCTAssertEqual(s.code, 2, "same on the scan route: \(s.err)")
+    }
+
+    // ── ⟨0.24⟩ THE RULE BINDS EVERY POLICY VALUE LIST, NOT JUST THE REASON-CLASS ONE ────────────────
+    //
+    // candor-spec `be0b9a9`: the clause was written as "an unrecognised REASON-CLASS token" because a
+    // reason-class token was what the review had measured, and the argument in it never mentioned which
+    // vocabulary the token belonged to. Every place it stayed narrow was a place the same fail-open
+    // survived under a different key.
+
+    /// The `Net[<dest…>]` sibling: `deny Net[known-partner,unknown-hosst]` narrows to `[known-partner]`,
+    /// so it stops gating the unknown-host destination it was written for. Same shape, same fail-open.
+    func testAnUnrecognisedNetDestinationClassIsAPolicyErrorToo() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-classtok-\(UUID().uuidString)")
+        let candor = root.appendingPathComponent(".candor")
+        try FileManager.default.createDirectory(at: candor, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try """
+        {"candor":{"spec":"0.23","version":"handwritten"},"package":"App",
+         "analyzed":{"count":1,"digest":"1111111111111111"},
+         "functions":[{"fn":"app.send","loc":"a.swift:1:1","inferred":["Net"],"direct":["Net"],
+                       "hash":"App#send","calls":[],"netClass":["unknown-host"]}]}
+        """.write(to: candor.appendingPathComponent("report.App.Swift.json"), atomically: true, encoding: .utf8)
+        func pol(_ name: String, _ text: String) throws -> String {
+            let u = root.appendingPathComponent(name)
+            try text.write(to: u, atomically: true, encoding: .utf8)
+            return u.path
+        }
+        // CONTROL FIRST — the correctly-spelled rule FIRES, so the typo row measures a live gate.
+        let ok = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                                "--policy", try pol("ok.txt", "deny Net[known-partner,unknown-host] app\n")])
+        XCTAssertEqual(ok.code, 1, "control: the correctly-spelled rule must fire. stderr: \(ok.err)")
+        // THE ROW — a typo beside a valid token. Before: exit 0, narrowed to [known-partner].
+        let typo = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                                  "--policy", try pol("typo.txt", "deny Net[known-partner,unknown-hosst] app\n")])
+        XCTAssertEqual(typo.code, 2, "the rule narrowed to [known-partner] and stopped gating the "
+                       + "unknown-host destination it was written for. stderr: \(typo.err)")
+        XCTAssertTrue(typo.err.contains("`unknown-hosst`"), "naming the token: \(typo.err)")
+    }
+
+    /// **THE SHARPEST OF THE THREE**: the typo is in the `unknown-alias` DEFINITION — the vocabulary the
+    /// policy is written AGAINST rather than in the policy itself — so `unknown-alias corp = dispatch,nativ`
+    /// silently defines `corp` as `{dispatch}` and the policy line `deny Unknown[corp]` reads perfectly
+    /// well while gating nothing it was meant to.
+    func testATypoInsideAnAliasDEFINITIONIsAPolicyErrorToo() throws {
+        // CONTROL — the correctly-spelled DEFINITION resolves and fires over the same signature.
+        let good = try makeReportDir("deny Unknown[house] app\n", config: "unknown-alias house = dispatch,indirect\n")
+        defer { try? FileManager.default.removeItem(at: good) }
+        let g = try ProcessHarness.run(bin(), ["gate", "--report", good.path,
+                                               "--policy", good.appendingPathComponent("pol.txt").path])
+        XCTAssertEqual(g.code, 1, "control: `= dispatch,indirect` catches the indirect hole. stderr: \(g.err)")
+
+        let bad = try makeReportDir("deny Unknown[house] app\n", config: "unknown-alias house = dispatch,indirct\n")
+        defer { try? FileManager.default.removeItem(at: bad) }
+        let b = try ProcessHarness.run(bin(), ["gate", "--report", bad.path,
+                                               "--policy", bad.appendingPathComponent("pol.txt").path])
+        XCTAssertEqual(b.code, 2, "the DEFINITION silently became {dispatch} and the gate went green on a "
+                       + "hole `= dispatch,indirect` catches — the policy line itself reads fine, which is "
+                       + "what makes this the quietest of the three. stderr: \(b.err)")
+        XCTAssertTrue(b.err.contains("`indirct`"), "naming the token: \(b.err)")
+        XCTAssertTrue(b.err.contains("unknown-alias house"), "and the DEFINITION it is in: \(b.err)")
     }
 
     // ── THE CONTROLS. Without these the rows above pass on a gate that refuses everything ───────────

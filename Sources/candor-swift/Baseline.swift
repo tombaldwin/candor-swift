@@ -48,9 +48,11 @@ func baselineVersion(_ path: String) -> String? {
     return candor["version"] as? String
 }
 
+/// ⟨0.24⟩ An INVALID BASELINE is an exit-2 gate cause, and it writes the refusal document like every
+/// other one (SPEC §3.1, candor-spec `1503368`). The AS-EFF-005 guard is part of the gate; a run that
+/// declines to evaluate it must not leave the previous run's verdict readable as this one's.
 private func baselineFail(_ msg: String) -> Never {
-    FileHandle.standardError.write("candor-swift: \(msg)\n".data(using: .utf8)!)
-    exit(2)
+    refuseGateAndExit("candor-swift: \(msg)")
 }
 
 /// ⟨0.16⟩ The existence oracle for the AS-EFF-005 guard, keyed on the baseline CALLGRAPH sidecar

@@ -107,6 +107,25 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
 /// A failure to WRITE is not escalated: the exit is already 2 and already fail-closed, and a second exit
 /// code would be a lie about which refusal happened. It is disclosed on stderr naming the stale-read
 /// consequence, because that is the one thing the operator can act on.
+/// ⟨0.24⟩ Where a refusal document goes, set by whichever CLI parsed `--gate-json` / `--json`. Module-wide
+/// because THE REFUSAL DOCUMENT HAS NO EXEMPT CAUSE (SPEC §3.1, candor-spec `1503368`): an unreadable
+/// policy, a broken `.candor/config` and an invalid baseline all leave the same stale document on disk as
+/// an answerability refusal does, and a stale green does not care why this run declined to overwrite it.
+/// Those causes are raised in files that never see the gate's own choreography, so the sink travels
+/// instead of the plumbing. EMPTY until a CLI sets it, which is what keeps a pre-flag usage error (where
+/// `--gate-json`'s value is not yet known, or is the thing being rejected) from writing anywhere.
+///
+/// `nonisolated(unsafe)` because this is a single-threaded CLI process: the value is written once, by the
+/// verb's flag loop, before any work begins, and read only on the way out.
+nonisolated(unsafe) var gateVerdictSinks: [String] = []
+
+/// Print the reason, write the refusal document to every requested sink, exit 2.
+func refuseGateAndExit(_ reason: String) -> Never {
+    FileHandle.standardError.write((reason + "\n").data(using: .utf8)!)
+    for t in gateVerdictSinks { writeGateRefusal(reason, to: t, spec: specVersion) }
+    exit(2)
+}
+
 func writeGateRefusal(_ reason: String, to path: String, spec: String) {
     let dict: [String: Any] = ["spec": spec, "ok": false, "refused": true, "reason": reason]
     guard let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys]),

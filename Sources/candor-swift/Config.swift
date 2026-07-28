@@ -63,8 +63,9 @@ func loadCandorConfig(targetPath: String) -> [String: String] {
     if let override = ProcessInfo.processInfo.environment["CANDOR_CONFIG"] {
         var isDir: ObjCBool = false
         if !FileManager.default.fileExists(atPath: override, isDirectory: &isDir) || isDir.boolValue {
-            FileHandle.standardError.write("candor-swift: CANDOR_CONFIG set but \(override) is not a readable file — failing (exit 2)\n".data(using: .utf8)!)
-            exit(2)
+            // ⟨0.24⟩ a broken gate CONFIG is an exit-2 cause like any other, and it writes the refusal
+            // document too (SPEC §3.1, candor-spec `1503368` — the carve-out is gone).
+            refuseGateAndExit("candor-swift: CANDOR_CONFIG set but \(override) is not a readable file — failing (exit 2)")
         }
         file = override
     } else {
@@ -94,8 +95,7 @@ func loadCandorConfig(targetPath: String) -> [String: String] {
     // permission gap between the fileExists probe above and this read (e.g. a 0000-mode config) —
     // the CANDOR_CONFIG-names-no-file arm above is the tested fail-closed path.
     guard let text = try? String(contentsOfFile: file!, encoding: .utf8) else {
-        FileHandle.standardError.write("candor-swift: config \(file!) exists but could not be read — failing (exit 2)\n".data(using: .utf8)!)
-        exit(2)
+        refuseGateAndExit("candor-swift: config \(file!) exists but could not be read — failing (exit 2)")
     }
     // Name the config that governs this scan — an ancestor-walk discovery is otherwise invisible, and a
     // surprising gate verdict ("where did that policy come from?") needs the provenance on stderr.

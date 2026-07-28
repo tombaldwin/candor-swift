@@ -865,6 +865,99 @@ final class GateReportVerbProcessTests: XCTestCase {
                      "a config that defines aliases nobody asked for is not an input to this verdict")
     }
 
+    // ── ⟨0.24⟩ NEITHER RULE HAS A CARVE-OUT (SPEC §3.1, candor-spec `1503368`) ──────────────────────
+
+    /// **PRECEDENCE BINDS `forbid`/`allow` TOO.** These refusals are whole-policy and used to exit 2
+    /// before the report was even opened, so a firing `deny Fs` standing beside a `forbid` rule exited 2
+    /// with the certain violation absent from the document — the identical harm the precedence fix closed
+    /// one rung up, surviving under a different rule KIND. Lemma 2 does not care which kind of refusal
+    /// stands beside the firing rule. The whole-policy granularity governs which rules go UNEVALUATED; it
+    /// was never a licence to suppress a violation that was evaluated and certain.
+    ///
+    /// AND THE REFUSED RULES ARE STILL NEVER EVALUATED — asserted here by the `allow Exec git` arm: the
+    /// AS-EFF-008 surface-completeness marker does not ride the wire, so certifying that rule off this
+    /// report would be the fail-open the refusal exists for. The document must carry the AS-EFF-006
+    /// finding and NOTHING from AS-EFF-008.
+    func testACertainViolationDominatesTheForbidAndAllowRefusalsToo() throws {
+        for (name, policy) in [("forbid", "deny Fs\nforbid app.Domain -> app.Infra\n"),
+                               ("allow", "deny Fs\nallow Exec git\n")] {
+            let root = try makeReportDir(report: envelope(fnEntry("app.writes", ["Fs", "Exec"]), analyzed: 1),
+                                         policy: policy)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let v = root.appendingPathComponent("v.json")
+            try? FileManager.default.removeItem(at: v)
+            let r = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                                   "--policy", root.appendingPathComponent("pol.txt").path,
+                                                   "--gate-json", v.path])
+            XCTAssertEqual(r.code, 1, "\(name): the `deny Fs` fired on evidence the report carries, and no "
+                           + "resolution of the refused rule can un-reject a rejected policy. stderr: \(r.err)")
+            let d = try JSONSerialization.jsonObject(with: Data(contentsOf: v)) as? [String: Any]
+            let vs = d?["violations"] as? [[String: Any]] ?? []
+            XCTAssertEqual(vs.count, 1, "\(name): exactly the certain finding: \(String(describing: d))")
+            XCTAssertEqual(vs.first?["rule"] as? String, "AS-EFF-006",
+                           "\(name): the REFUSED rule is still never evaluated — an AS-EFF-008 record here "
+                           + "would be the certification the refusal exists to prevent")
+            XCTAssertTrue(r.err.contains(name), "\(name): and the unevaluated rule is disclosed: \(r.err)")
+        }
+    }
+
+    /// **AND THE SOLE `forbid`/`allow` REFUSAL STILL REFUSES** — the control for the row above. Without it
+    /// "a violation dominates" is indistinguishable from "the refusal was deleted".
+    func testAForbidOrAllowRefusalWithNoFiringRuleStillRefuses() throws {
+        for (name, policy) in [("forbid", "forbid app.Domain -> app.Infra\n"), ("allow", "allow Exec git\n")] {
+            let root = try makeReportDir(report: envelope(fnEntry("app.writes", ["Fs", "Exec"]), analyzed: 1),
+                                         policy: policy)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let r = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                                   "--policy", root.appendingPathComponent("pol.txt").path])
+            XCTAssertEqual(r.code, 2, "\(name): with nothing certain beside it, this is still a refusal")
+        }
+    }
+
+    /// **THE REFUSAL DOCUMENT HAS NO EXEMPT CAUSE.** §3.3 mandated writing no document when the policy or
+    /// gate config is unreadable, and two rows here pinned that — but the argument that required a
+    /// document (a CI wrapper re-reads the previous run's verdict as current) is exactly as true there. A
+    /// stale green does not care why this run declined to overwrite it. An unreadable policy has no rules
+    /// to reason about, which is precisely why the document carries no `violations` key.
+    func testEveryExit2CauseWritesTheRefusalDocument() throws {
+        let root = try makeReportDir(report: envelope(fnEntry("app.Wire.send", ["Net"], netClass: ["unknown-host"]), analyzed: 1),
+                                     policy: "deny Net app\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let corrupt = try makeReportDir(report: #"{"candor":{"spec":"0.23"},"package":"App"}"#,
+                                        policy: "deny Net\n")
+        defer { try? FileManager.default.removeItem(at: corrupt) }
+        let cases: [(String, [String])] = [
+            ("an unreadable policy", ["gate", "--report", root.path, "--policy", root.path + "/nope"]),
+            ("a report that never loaded AS one", ["gate", "--report", corrupt.path,
+                                                   "--policy", corrupt.appendingPathComponent("pol.txt").path]),
+            ("no report at the locator", ["gate", "--report", root.path + "/nothing-here",
+                                          "--policy", root.appendingPathComponent("pol.txt").path]),
+        ]
+        for (name, args) in cases {
+            let v = root.appendingPathComponent("cause.json")
+            // SEEDED, not deleted: the hazard is the value that was already there.
+            try #"{"ok":true,"spec":"0.24","violations":[]}"#.write(to: v, atomically: true, encoding: .utf8)
+            let r = try ProcessHarness.run(bin(), args + ["--gate-json", v.path])
+            XCTAssertEqual(r.code, 2, "\(name): still exit 2")
+            let d = try JSONSerialization.jsonObject(with: Data(contentsOf: v)) as? [String: Any]
+            XCTAssertEqual(d?["ok"] as? Bool, false, "\(name): the stale green must be gone")
+            XCTAssertEqual(d?["refused"] as? Bool, true, "\(name)")
+            XCTAssertFalse(d?.keys.contains("violations") ?? true, "\(name): ABSENT, not empty")
+        }
+        // AND THE ONE CASE THAT STILL WRITES NOTHING, because there is no sink yet: a USAGE error inside
+        // the flag loop, where `--gate-json`'s value is not yet known or is the thing being rejected.
+        let v2 = root.appendingPathComponent("usage.json")
+        let seeded = #"{"ok":true,"spec":"0.24","violations":[]}"#
+        try seeded.write(to: v2, atomically: true, encoding: .utf8)
+        let usage = try ProcessHarness.run(bin(), ["gate", "--report", root.path, "--gate-json", "--policy",
+                                                   root.appendingPathComponent("pol.txt").path])
+        XCTAssertEqual(usage.code, 2, usage.err)
+        XCTAssertEqual(try String(contentsOf: v2, encoding: .utf8), seeded,
+                       "a flag-loop usage error has no resolved sink to write to — and `--gate-json "
+                       + "--policy p` is exactly the invocation whose `--gate-json` value is the flag it "
+                       + "would have swallowed")
+    }
+
     /// `--json` IS `--gate-json -` on the refusal path too — otherwise the one consumer that pipes the
     /// verdict instead of filing it gets NOTHING on stdout and reads it as an empty result.
     func testTheRefusalDocumentAlsoRidesJsonToStdout() throws {

@@ -85,14 +85,22 @@ final class PolicyTests: XCTestCase {
     }
 
     func testConfigUnknownAliasResolves() {
-        let aliases = parseUnknownAliases(
+        let parsed = parseUnknownAliases(
             "unknown-alias risky = reflect,native\nunknown-alias telemetry = indirect\nunknown-alias reflect = native\n")
+        let aliases = parsed.aliases
+        XCTAssertEqual(parsed.errors, [], "a RESERVED NAME is warn-and-skip, not a ⟨0.24⟩ token error — "
+                       + "the token rule is about a class token the engine cannot honour, and `reflect` "
+                       + "as a NAME is a different rule, pinned four-way by conformance PART 4")
         XCTAssertEqual(aliases["risky"], ["reflect", "native"])
         XCTAssertEqual(aliases["telemetry"], ["indirect"])
         XCTAssertNil(aliases["reflect"], "a config alias may not shadow a class token")
         XCTAssertEqual(parsePolicy("deny Net Unknown[risky] api", aliases: aliases).deny[0].unknownClasses, ["native", "reflect"])
-        // an UNDEFINED alias name is dropped-with-warning → empty filter (behaves like bare Unknown[*])
-        XCTAssertEqual(parsePolicy("deny Net Unknown[nope] api", aliases: aliases).deny[0].unknownClasses, [])
+        // ⟨0.24⟩ an UNDEFINED alias name still parses to an empty filter — the RULES are unchanged, which
+        // is what keeps `parsepolicy` a four-way grammar witness — but it is now a recorded policy ERROR
+        // that the GATE routes refuse on.
+        let undefined = parsePolicy("deny Net Unknown[nope] api", aliases: aliases)
+        XCTAssertEqual(undefined.deny[0].unknownClasses, [])
+        XCTAssertEqual(undefined.errors.count, 1, "…and the gate refuses rather than silently widening")
     }
 
     func testNetDestinationClassParsesAndClassifies() {

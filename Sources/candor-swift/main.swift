@@ -53,7 +53,7 @@ if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "parsepolicy" {
     }
     // ⟨0.19⟩ config-aware: resolve `Unknown[<alias>]` via a checked-in `unknown-alias`, anchored to the
     // policy file (or CANDOR_CONFIG) — the dump reflects real gate resolution + pins the four-way expansion.
-    let pol = parsePolicy(polText, aliases: parseUnknownAliases(discoverConfigText(targetPath: polPath)))
+    let pol = parsePolicy(polText, aliases: parseUnknownAliases(discoverConfigText(targetPath: polPath)).aliases)
     // Deterministic entry order: each list sorted by its serialized JSON (the reference engine's
     // byJson comparator) — the conformance differential normalizes anyway; this keeps raw dumps diffable.
     func sortedByJson(_ xs: [[String: Any]]) -> [[String: Any]] {
@@ -280,6 +280,12 @@ while let a = argIter.next() {
         target = a
     }
 }
+
+// ⟨0.24⟩ THE REFUSAL DOCUMENT HAS NO EXEMPT CAUSE (SPEC §3.1, candor-spec `1503368`). Set the sink
+// BEFORE the config layer, which is itself an exit-2 cause: a CI wrapper that reads `--gate-json`
+// unconditionally re-reads the PREVIOUS run's document as current, and a stale green does not care why
+// this run declined to overwrite it. Flag-loop usage errors are already past, and they had no sink.
+if let gp = gateJsonPath { gateVerdictSinks.append(gp) }
 
 // (the §3.4 config layer lives in Config.swift)
 let candorConfig = loadCandorConfig(targetPath: target)
@@ -965,8 +971,7 @@ if let bp = baselinePath {
 }
 if let pp = policyPath {
     guard let text = try? String(contentsOfFile: pp, encoding: .utf8) else {
-        FileHandle.standardError.write("candor-swift: policy \(pp) could not be read; gate NOT enforced\n".data(using: .utf8)!)
-        exit(2)
+        refuseGateAndExit("candor-swift: policy \(pp) could not be read; gate NOT enforced")
     }
     // ⟨0.19⟩ reason-class aliases (SPEC §6.2) from `.candor/config`, so `Unknown[<alias>]` resolves at the
     // gate — ⟨0.24⟩ ANCHORED AT THE POLICY FILE, not at the scan target (SPEC §3.1, candor-spec `99eb4e9`).
@@ -992,7 +997,8 @@ if let pp = policyPath {
     // key resolved to, in every case. Restricting this side to the explicit flag would leave the
     // CANDOR_POLICY case anchoring at two different directories — the exact defect the ruling is closing.
     let vocabConfig = discoverConfig(targetPath: pp)
-    let unknownAliases = parseUnknownAliases(vocabConfig?.text)
+    let parsedAliases = parseUnknownAliases(vocabConfig?.text)
+    let unknownAliases = parsedAliases.aliases
     // Parsed ONCE and shared with the purity-hole disclosure below — two `parsePolicy` calls over the same
     // text were two chances for the ⟨0.24⟩ policy-error check to be applied to only one of them.
     let scanPolicy = parsePolicy(text, aliases: unknownAliases)
@@ -1005,10 +1011,11 @@ if let pp = policyPath {
     // lands beside correct tokens far more often than alone), while `deny Unknown[corp]` printed
     // "ignoring policy rule" and then KEPT and WIDENED it. Same check on `gate --report`, so the two
     // routes refuse the same policies.
-    if !scanPolicy.errors.isEmpty {
-        FileHandle.standardError.write((scanPolicy.errors.joined(separator: "\n") + "\n").data(using: .utf8)!)
-        exit(2)
-    }
+    // ⟨0.24⟩ the ALIAS DEFINITION's own tokens are checked FIRST and on the same rule (candor-spec
+    // `be0b9a9`) — a typo in the vocabulary the policy is written AGAINST fails open identically, and
+    // more quietly, because the policy line reads perfectly well.
+    let policyErrors = parsedAliases.errors + scanPolicy.errors
+    if !policyErrors.isEmpty { refuseGateAndExit(policyErrors.joined(separator: "\n")) }
     // ⟨0.24⟩ the SCAN route into the shared gate seam (Gate.swift): the reason-class fixpoint and the
     // per-fn `netClassesOf` derivation moved into `gateInputFromScan`, so `gate --report` can hand
     // `evaluateGate` the same record built from a WRITTEN report instead of from the classifier.
