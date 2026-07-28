@@ -58,7 +58,31 @@ private struct GateReportEnvelope {
 /// Parse ONE report file into `env`. Returns false (loudly) on a file that is not a well-formed §2
 /// report — SPEC §3.1's found-but-corrupt rule: a report with no `functions` key is corrupt input, not
 /// an effect-free package, and gating an empty `map` over it would pass. The caller exits 2.
+///
+/// ⟨0.24⟩ **A KEY THAT IS PRESENT BUT UNPARSEABLE IS CORRUPT INPUT, AND IS NEVER COERCED TO ITS EMPTY
+/// VALUE** (SPEC §2, candor-spec `38ba3e2`). The shape that generalises the count-0 and missing-`functions`
+/// rungs is *a reader that recovers from a type mismatch by substituting the default* — and on every key in
+/// this format the default is the PERMISSIVE value (`0`, `[]`, absent), so the coercion converts corrupt
+/// input into a claim and the claim is always the safe-looking one. `?? []`, `unwrap_or_default` and
+/// `optional().orElse()` are the idiom to grep for; on a §2 key, finding one is a defect until proven
+/// otherwise. MEASURED on this engine before the fix, `deny Net` over a one-entry report:
+///
+///     entry with NO `fn` key, `inferred: ["Net"]`   rust 2   ts 2   java 2   swift 0   ← dropped silently
+///     entry with `inferred: [1]`                    rust 2   ts 0   java 0   swift 0   ← three fail open
+///
+/// The first is the cardinal-sin shape under ⟨0.21⟩ exactly: a CORRUPT entry silently became an ABSENT
+/// one, and absent means pure. So `fn` must be a non-empty string, every list-valued entry key that is
+/// PRESENT must be a list OF STRINGS, and the envelope's `unanalyzed`/`coverage` must parse — each a
+/// refusal naming the key, never a drop. An ABSENT key still takes its documented default: that is the
+/// distinction the rule turns on, and conflating the two would refuse every legitimate report.
 private func mergeGateReport(_ full: String, into env: inout GateReportEnvelope) -> Bool {
+    func corrupt(_ what: String) -> Bool {
+        FileHandle.standardError.write(
+            ("candor-swift gate: report `\(full)` is corrupt — \(what). Refusing to gate over it (exit 2): "
+             + "a key that is PRESENT but unparseable is not an empty one, and reading it as empty would "
+             + "turn a corrupt entry into a ⟨0.21⟩ purity claim. Re-run the scan.\n").data(using: .utf8)!)
+        return false
+    }
     guard let data = FileManager.default.contents(atPath: full),
           let root = try? JSONSerialization.jsonObject(with: data),
           let obj = root as? [String: Any],
@@ -68,20 +92,45 @@ private func mergeGateReport(_ full: String, into env: inout GateReportEnvelope)
                 .data(using: .utf8)!)
         return false
     }
-    func strs(_ k: String, _ e: [String: Any]) -> [String] {
-        (e[k] as? [Any])?.compactMap { $0 as? String } ?? []
+    /// The string list under `k`, or `nil` when the key is PRESENT and is not a list of strings. An ABSENT
+    /// key is `[]` — the documented default, and the whole point of returning an optional is that the
+    /// caller can tell the two apart.
+    func strs(_ k: String, _ e: [String: Any]) -> [String]? {
+        guard let raw = e[k] else { return [] }                     // absent → the documented default
+        guard let arr = raw as? [Any] else { return nil }           // present, not a list
+        let out = arr.compactMap { $0 as? String }
+        return out.count == arr.count ? out : nil                   // a non-string member is corrupt
     }
     for e in fns {
-        guard let fn = e["fn"] as? String, !fn.isEmpty else { continue }
+        guard let fn = e["fn"] as? String, !fn.isEmpty else {
+            // NOT `continue`. A report entry with no readable `fn` cannot be matched by any scope or named
+            // in any violation, so dropping it deletes whatever effect it carried — and under ⟨0.21⟩ the
+            // resulting absence is a positive purity claim about a function this report was trying to tell
+            // you about. Measured: `{"inferred":["Net"]}` with no `fn` exited 0 under `deny Net`.
+            return corrupt("a `functions` entry has no readable `fn` (a non-empty string is §2-required); "
+                           + "an entry that cannot be NAMED cannot be gated, and dropping it would make it "
+                           + "read as pure")
+        }
+        // Every list-valued entry key, checked BEFORE any of them is used — `inferred` is the effect set
+        // the whole verdict is computed from, and `calls` is the graph the ⟨0.19⟩ reason classes resolve
+        // over, so a silently-dropped member of either narrows the gate for lack of evidence.
+        guard let inferred = strs("inferred", e), let direct = strs("direct", e),
+              let calls = strs("calls", e), let hosts = strs("hosts", e), let cmds = strs("cmds", e),
+              let paths = strs("paths", e), let tables = strs("tables", e),
+              let netClass = strs("netClass", e), let unknownWhy = strs("unknownWhy", e) else {
+            return corrupt("the entry `\(fn)` carries a §2 list key that is not a list of strings "
+                           + "(`inferred`, `direct`, `calls`, `hosts`, `cmds`, `paths`, `tables`, "
+                           + "`netClass`, `unknownWhy`)")
+        }
         env.entries.append(GateReportEntry(
             fn: fn,
-            inferred: Set(strs("inferred", e)),
-            direct: Set(strs("direct", e)),
-            calls: strs("calls", e),
-            hosts: Set(strs("hosts", e)), cmds: Set(strs("cmds", e)),
-            paths: Set(strs("paths", e)), tables: Set(strs("tables", e)),
-            netClass: strs("netClass", e),
-            unknownWhy: strs("unknownWhy", e)))
+            inferred: Set(inferred),
+            direct: Set(direct),
+            calls: calls,
+            hosts: Set(hosts), cmds: Set(cmds),
+            paths: Set(paths), tables: Set(tables),
+            netClass: netClass,
+            unknownWhy: unknownWhy))
     }
     // ⟨0.21⟩ the completeness manifest, and ⟨0.15⟩ the κ ledger — the wire fields the scan's own verdict
     // was written from, so the two documents carry the same three facts (Gate.swift's writeGateVerdict).
@@ -92,11 +141,37 @@ private func mergeGateReport(_ full: String, into env: inout GateReportEnvelope)
     // …and the same predicate decides the ⟨0.24⟩ judged-nothing advisory, so the chained-dep route and
     // this one cannot drift into two readings of one integer.
     if !claimsToHaveJudgedNothing(analyzed: obj["analyzed"], entryCount: fns.count) { env.judgedNothing = false }
-    for u in (obj["unanalyzed"] as? [[String: Any]]) ?? [] {
-        env.unanalyzed.append((path: u["path"] as? String ?? "", reason: u["reason"] as? String ?? ""))
+    // ⟨0.24⟩ `unanalyzed` IS THE SHARPEST CASE OF THE PRESENT-BUT-UNPARSEABLE RULE, because its
+    // NON-EMPTINESS is the fail-closed trigger (the `NOT certified` exit 2 at the bottom of this file). The
+    // old spelling — `as? [[String: Any]] ?? []` — read a bare string list (`["src/broken.swift"]`) or a
+    // right-shaped/wrong-named list (`[{"unit":…,"why":…}]`) as an EMPTY one, so a report DECLARING it
+    // could not read some of its own source gated `policy ✓`. candor-spec `38ba3e2` measured all four
+    // engines dropping the bare string list and exiting 0.
+    if let rawU = obj["unanalyzed"] {
+        guard let arr = rawU as? [Any] else { return corrupt("`unanalyzed` is present and is not a list") }
+        for u in arr {
+            guard let m = u as? [String: Any], let p = m["path"] as? String else {
+                return corrupt("an `unanalyzed` member is not a `{path, reason}` object — a completeness "
+                               + "declaration that cannot be read is still a declaration, and reading it as "
+                               + "an empty list is how `NOT certified` becomes `policy ✓`")
+            }
+            env.unanalyzed.append((path: p, reason: m["reason"] as? String ?? ""))
+        }
     }
-    if let cov = obj["coverage"] as? [String: Any], let unc = cov["uncovered"] as? [[String: Any]] {
-        for entry in unc { if let name = entry["name"] as? String { env.coverageModules.insert(name) } }
+    // ⟨0.15⟩ the κ ledger. Same rule: it rides the verdict as `coverage.modules`, so a present-but-garbled
+    // `coverage` silently deletes the one channel that tells a MACHINE consumer of a green gate which
+    // packages were never judged.
+    if let rawC = obj["coverage"] {
+        guard let cov = rawC as? [String: Any] else { return corrupt("`coverage` is present and is not an object") }
+        if let rawUnc = cov["uncovered"] {
+            guard let unc = rawUnc as? [Any] else { return corrupt("`coverage.uncovered` is present and is not a list") }
+            for entry in unc {
+                guard let m = entry as? [String: Any], let name = m["name"] as? String else {
+                    return corrupt("a `coverage.uncovered` member has no readable `name`")
+                }
+                env.coverageModules.insert(name)
+            }
+        }
     }
     return true
 }

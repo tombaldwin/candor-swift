@@ -492,6 +492,79 @@ final class GateReportVerbProcessTests: XCTestCase {
         }
     }
 
+    /// ⟨0.24⟩ A KEY THAT IS PRESENT BUT UNPARSEABLE IS CORRUPT INPUT AND IS NEVER COERCED TO ITS EMPTY
+    /// VALUE (SPEC §2, candor-spec `38ba3e2`). On every key in this format the language's convenience
+    /// default is the PERMISSIVE value (`0`, `[]`, absent), so a reader that recovers from a type mismatch
+    /// by substituting it converts corrupt input into a claim — and the claim is always the safe-looking
+    /// one. MEASURED before the fix, `deny Net` over each of these, all four binaries rebuilt at HEAD:
+    ///
+    ///     entry with NO `fn`, `inferred: ["Net"]`   rust 2   ts 2   java 2   swift 0   <- silently dropped
+    ///     entry with `inferred: [1]`                rust 2   ts 0   java 0   swift 0   <- three fail open
+    ///
+    /// The first row is the cardinal-sin shape exactly: a CORRUPT entry became an ABSENT one, and under
+    /// ⟨0.21⟩ absent is a positive purity claim. Each row here carries an effect the policy denies, so a
+    /// pass can only come from the entry having been dropped — which is what makes the exit code the test.
+    func testAPresentButUnparseableKeyIsRefusedNotCoercedToEmpty() throws {
+        let cases: [(String, String, String)] = [
+            ("no fn key", #"{"loc":"a.swift:1:1","inferred":["Net"],"direct":["Net"],"hash":"App#x"}"#, "`fn`"),
+            ("fn not a string", #"{"fn":7,"inferred":["Net"],"direct":["Net"],"hash":"App#x"}"#, "`fn`"),
+            ("fn empty", #"{"fn":"","inferred":["Net"],"direct":["Net"],"hash":"App#x"}"#, "`fn`"),
+            ("inferred holds a number", #"{"fn":"app.bad","inferred":[1],"direct":[1],"hash":"App#bad"}"#, "app.bad"),
+            ("inferred is a bare string", #"{"fn":"app.bad","inferred":"Net","direct":["Net"],"hash":"App#bad"}"#, "app.bad"),
+            ("calls holds a number", #"{"fn":"app.bad","inferred":["Net"],"direct":["Net"],"calls":[3],"hash":"App#bad"}"#, "app.bad"),
+            ("netClass is an object", #"{"fn":"app.bad","inferred":["Net"],"direct":["Net"],"netClass":{},"hash":"App#bad"}"#, "app.bad"),
+            ("unknownWhy holds null", #"{"fn":"app.bad","inferred":["Unknown"],"direct":["Unknown"],"unknownWhy":[null],"hash":"App#bad"}"#, "app.bad"),
+        ]
+        for (name, entry, mustName) in cases {
+            let root = try makeReportDir(report: envelope(entry, analyzed: 1), policy: "deny Net Unknown\n")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let r = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                                   "--policy", root.appendingPathComponent("pol.txt").path])
+            XCTAssertEqual(r.code, 2, "\(name): a corrupt entry silently becoming an absent one is a ⟨0.21⟩ "
+                           + "purity claim about a function the report was trying to tell you about. stderr: \(r.err)")
+            XCTAssertTrue(r.err.contains(mustName),
+                          "\(name): the refusal must NAME what it could not read (\(mustName)): \(r.err)")
+        }
+    }
+
+    /// THE CONTROL. An ABSENT key still takes its documented default — that is the distinction the rule
+    /// turns on, and conflating absent with present-but-unparseable would refuse every legitimate report.
+    /// A minimal §2 entry carries `fn` and `inferred` and nothing else; it must gate normally, both ways.
+    func testAnAbsentOptionalKeyStillTakesItsDefault() throws {
+        let bare = #"{"fn":"app.Wire.send","inferred":["Net"],"hash":"App#send"}"#
+        let root = try makeReportDir(report: envelope(bare, analyzed: 1), policy: "deny Net\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let deny = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                                  "--policy", root.appendingPathComponent("pol.txt").path])
+        XCTAssertEqual(deny.code, 1, "an entry with no `direct`/`calls`/`hosts`/… is ordinary, not corrupt: \(deny.err)")
+        try "deny Fs\n".write(to: root.appendingPathComponent("fs.txt"), atomically: true, encoding: .utf8)
+        let clean = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                                  "--policy", root.appendingPathComponent("fs.txt").path])
+        XCTAssertEqual(clean.code, 0, "…and it is not refused for a rule it simply does not violate: \(clean.err)")
+    }
+
+    /// `unanalyzed` IS THE SHARPEST CASE, because its NON-EMPTINESS is the fail-closed trigger: read as
+    /// empty, `NOT certified` (exit 2) becomes `policy ✓` (exit 0). Both spellings candor-spec `38ba3e2`
+    /// measured — a bare string list, and the right shape under the wrong field names, which is exactly
+    /// what a hand-built or foreign-produced report yields.
+    func testAnUnparseableUnanalyzedCannotBecomeAnEmptyOne() throws {
+        for (name, raw) in [("bare string list", #"["Sources/App/locked.swift"]"#),
+                            ("wrong field names", #"[{"unit":"App.x","why":"unreadable"}]"#),
+                            ("not a list", #""oops""#)] {
+            let root = try makeReportDir(
+                report: envelope(fnEntry("app.Wire.send", ["Log"]), analyzed: 2,
+                                 extra: ",\"unanalyzed\":\(raw)"),
+                policy: "deny Net\n")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let r = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                                   "--policy", root.appendingPathComponent("pol.txt").path])
+            XCTAssertEqual(r.code, 2, "\(name): a completeness declaration that cannot be read is still a "
+                           + "declaration — reading it as an empty list is how a report saying it could not "
+                           + "read its own source gates green. stderr: \(r.err)")
+            XCTAssertTrue(r.err.contains("unanalyzed"), "\(name): and the refusal names the key: \(r.err)")
+        }
+    }
+
     /// The §3.3.1 locator, all three forms, over the same report — a dir, the full `.json` path, and the
     /// bare prefix must reach the same verdict (`gate` inherits the grammar, it does not redefine it).
     func testAllThreeLocatorFormsReachTheSameVerdict() throws {

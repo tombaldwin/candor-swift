@@ -9,6 +9,31 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed ⚠ — ⟨0.24⟩ a `gate --report` key that is PRESENT but unparseable was coerced to its empty value (2026-07-28)
+
+SPEC §2 ⟨0.24⟩ (candor-spec `38ba3e2`). The shape that generalises the count-0 and missing-`functions`
+rungs is *a reader that recovers from a type mismatch by substituting the default* — and on every key in
+this format that default is the PERMISSIVE value (`0`, `[]`, absent), so the coercion converts corrupt
+input into a claim, and the claim is always the safe-looking one. Measured before, `deny Net` over a
+one-entry report, all four binaries rebuilt at HEAD:
+
+    entry with NO `fn` key, `inferred: ["Net"]`   rust 2   ts 2   java 2   swift 0   <- silently dropped
+    entry with `inferred: [1]`                    rust 2   ts 0   java 0   swift 0   <- three fail open
+
+The first row is the cardinal-sin shape exactly: a CORRUPT entry silently became an ABSENT one, and under
+⟨0.21⟩ absent is a positive purity claim about a function the report was trying to tell you about. Now
+each is a refusal (exit 2) naming what could not be read: `fn` must be a non-empty string; a §2 list key
+that is PRESENT must be a list of strings (`inferred`, `direct`, `calls`, `hosts`, `cmds`, `paths`,
+`tables`, `netClass`, `unknownWhy`); `unanalyzed` and `coverage` must parse.
+
+`unanalyzed` is the sharpest of them, because its **non-emptiness IS the fail-closed trigger**: read as
+empty, `NOT certified` (exit 2) becomes `policy ✓` (exit 0). Both spellings the spec measured now refuse —
+a bare string list (`["src/broken.swift"]`, which all four engines dropped) and a non-list.
+
+An **absent** key still takes its documented default, and that separation is pinned by its own control: a
+minimal entry carrying only `fn` and `inferred` gates normally in both directions. Conflating absent with
+present-but-unparseable would refuse every legitimate report.
+
 ### fixed ⚠ — ⟨0.24⟩ `gate --report`'s reason-class refusal was OVER-BROAD, and named the wrong function (2026-07-28)
 
 SPEC §3.1 ⟨0.24⟩ names this engine's refusal by name. **The refusal is MINIMAL, and monotone denial is
