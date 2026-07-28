@@ -29,6 +29,11 @@ private func gateDie(_ msg: String) -> Never {
 private struct GateReportEntry {
     let fn: String
     let inferred: Set<String>
+    /// ⟨0.24⟩ The §2 `direct` set — the effects raised in this function's OWN body, as distinct from the
+    /// transitive `inferred`. Read for exactly one purpose: to tell a DIRECT `Unknown` the entry named no
+    /// reason for (which CONTRIBUTES `unresolved`, §6.2) from an INHERITED one whose reason lives in a
+    /// callee (which does not, and whose absence is a real hole). See `gateInputFromReport`.
+    let direct: Set<String>
     let calls: [String]
     let hosts: Set<String>, cmds: Set<String>, paths: Set<String>, tables: Set<String>
     let netClass: [String]
@@ -71,6 +76,7 @@ private func mergeGateReport(_ full: String, into env: inout GateReportEnvelope)
         env.entries.append(GateReportEntry(
             fn: fn,
             inferred: Set(strs("inferred", e)),
+            direct: Set(strs("direct", e)),
             calls: strs("calls", e),
             hosts: Set(strs("hosts", e)), cmds: Set(strs("cmds", e)),
             paths: Set(strs("paths", e)), tables: Set(strs("tables", e)),
@@ -172,6 +178,26 @@ private func gateInputFromReport(_ env: GateReportEnvelope) -> GateInput {
             netClasses[e.fn] = Array(Set(netClasses[e.fn] ?? []).union(e.netClass)).sorted()
         }
         for why in e.unknownWhy { whyDirect[e.fn, default: []].insert(reasonClass(why)) }
+        // ⟨0.24⟩ SPEC §6.2's CONTRIBUTION, on the one route where the producer-side repair cannot reach.
+        // A report is DATA: this engine's scan already records an `unknownWhy` beside every `Unknown` it
+        // raises (the §4 invariant, pinned by UnknownMarkerInvariantProcessTests), but that says nothing
+        // about a hand-authored or foreign report. An entry that raises `Unknown` DIRECTLY and names no
+        // reason for it CONTRIBUTES `unresolved` — here, at the ENTRY, BEFORE the fixpoint, which is what
+        // makes it COMPOSE: a caller of one reasonless entry and one `dispatch:` entry accumulates
+        // {unresolved, dispatch} and is caught by both filters. Contributing at the JOIN instead (an
+        // empty-set default, which `evaluateGate` still carries as a fail-closed backstop) cannot do that
+        // — by then the two sets are unioned and the caller of both is byte-identical to the caller of the
+        // reasoned one alone, the §6.2 counterexample in which ADDING a call turned a red verdict green.
+        //
+        // GATED ON A DIRECT `Unknown` IT DID NOT NAME, never on the reason set being empty, because
+        // emptiness is ALSO what an INHERITED `Unknown` looks like and marking those is the mirror
+        // fabrication — it would claim `unresolved` for a function whose hole is real, unmeasurable and
+        // exactly what the refusal below exists to disclose. An ABSENT `direct` key reads as an empty set
+        // and contributes NOTHING: that is a report which did not carry the channel, not a claim of a
+        // direct `Unknown`. Same shape as candor-rust `gate.rs` and candor-java `Loader`.
+        if e.direct.contains("Unknown"), e.unknownWhy.isEmpty {
+            whyDirect[e.fn, default: []].insert("unresolved")
+        }
     }
     for (fn, cs) in edgeSets { edges[fn] = cs.sorted() }
     return GateInput(inferred: inferred,
@@ -209,6 +235,25 @@ private func gateInputFromReport(_ env: GateReportEnvelope) -> GateInput {
 /// (`deny Unknown[unresolved]` DOES fire on the second row, via §6.2's reasonless-Unknown default in
 /// `evaluateGate` — so the fail-open there is class-dependent, which makes it harder to notice, not less
 /// real: `dispatch`, `reflect`, `native`, `indirect` and `setup` all read green.)
+///
+/// ⟨0.24⟩ **THE REFUSAL IS MINIMAL, AND MONOTONE DENIAL IS WHAT MAKES THAT SAFE** (SPEC §3.1). A
+/// class-scoped `deny` is not unanswerable merely because some evidence is missing: the class set only
+/// ever GROWS (§6.2 — a reason is CONTRIBUTED, never retracted) and `Reject` is upward-closed in it
+/// (PAPER3 Lemma 2). So when the classes determinable FROM THE ENTRY ALONE are non-empty the rule is
+/// ANSWERED — it fires or it does not, and no further evidence could change which. Only an EMPTY
+/// determinable set leaves the question open, and that is the only state refused here.
+///
+/// This engine refused one case it could answer, and SPEC §3.1 records the over-broad refusal by name:
+/// a reasonless DIRECT `Unknown` under `deny Unknown[unresolved]`. MEASURED on a one-entry report
+/// (`app.direct`, `inferred: [Unknown]`, `direct: [Unknown]`, no `unknownWhy`, no `calls`):
+///
+///     deny Unknown[unresolved]              rust 1   ts 1   java 1   swift 2   ← over-broad
+///     deny Unknown[unresolved] app.direct   rust 1   ts 1   java 1   swift 2   ← and with a scope
+///
+/// Exit 2 there is not wrong in the fail-closed sense; it is a WORSE answer than the correct one, and a
+/// verb whose value is being a pure function of its input should not decline questions it can answer. The
+/// repair is in `gateInputFromReport`, not here — `unresolved` is CONTRIBUTED at the entry, so the set is
+/// no longer empty and this predicate simply stops firing on it. Nothing in this function changed.
 ///
 /// Refusing costs nothing on a report THIS engine wrote, which is what keeps the equivalence obligation
 /// satisfiable: `netClass` is emitted for every `Net`-bearing entry and is floored at `unknown-host`

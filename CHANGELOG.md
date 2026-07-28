@@ -9,6 +9,44 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed ⚠ — ⟨0.24⟩ `gate --report`'s reason-class refusal was OVER-BROAD, and named the wrong function (2026-07-28)
+
+SPEC §3.1 ⟨0.24⟩ names this engine's refusal by name. **The refusal is MINIMAL, and monotone denial is
+what makes that safe**: a class-scoped `deny` is not unanswerable merely because some evidence is missing,
+because the class set only ever GROWS (§6.2 — a reason is *contributed*, never retracted) and `Reject` is
+upward-closed in it. When the classes determinable FROM THE ENTRY ALONE already intersect the filter, the
+rule FIRES and no further evidence could change that.
+
+A reasonless **DIRECT** `Unknown` contributes `unresolved` from the entry alone, with no transitive step —
+so `deny Unknown[unresolved]` over it is answerable. Measured four-way on a one-entry report, all four
+binaries rebuilt at HEAD:
+
+    deny Unknown[unresolved]              rust 1   ts 1   java 1   swift 2   <- over-broad
+    deny Unknown[unresolved] app.direct   rust 1   ts 1   java 1   swift 2   <- and with a scope
+
+Exit 2 is not wrong in the fail-closed sense; it is a **worse answer than the correct one**, and a verb
+whose value is being a pure function of its input should not decline questions it can answer.
+
+**And the remedy pointed at the wrong function.** Over a report with three `Unknown` carriers — one direct
+and reasonless, one inheriting through a `calls` edge to it, one inheriting from nowhere the report names
+— `deny Unknown[dispatch,unresolved]` refused naming `app.inheritU` where rust, ts and java all name
+`app.orphanU`. Same exit code, and the only actionable part of the message was wrong. Both halves are one
+fix: `unresolved` is now contributed at the ENTRY, before the fixpoint, so `app.mystery` and (transitively)
+`app.inheritU` both have non-empty class sets and the refusal falls through to the one entry whose reason
+channel really is missing. The refusal predicate itself is unchanged.
+
+Contributing at the ENTRY rather than at the join is what makes it COMPOSE: a caller of one reasonless
+entry and one `dispatch:` entry accumulates `{unresolved, dispatch}` and is caught by both filters — the
+§6.2 counterexample in which *adding* a call turned a red verdict green. It is gated on a **direct**
+`Unknown` the entry did not name, never on the reason set being empty, because emptiness is also what an
+inherited `Unknown` looks like and marking those is the mirror fabrication. Same shape as candor-rust
+`gate.rs` and candor-java `Loader` (`82bf4d4`).
+
+One pre-existing fixture moved with it: `testScopedUnknownDenyWithNoReachableReasonIsRefused` posed
+`direct: ["Unknown"]` (the test helper defaults `direct` to `inferred`) while its prose said "an Unknown
+with neither its own `unknownWhy` nor a `calls` edge". Those are two different states and ⟨0.24⟩ separates
+them; the fixture had picked one spelling of two, and now poses the inherited one it meant.
+
 ### fixed — ⟨0.24⟩ `gate --report` over a count-0 report printed `policy ✓` and nothing else (2026-07-28)
 
 SPEC §3.1 ⟨0.24⟩, as corrected in candor-spec `0744d29`. A report presented DIRECTLY to the gate with

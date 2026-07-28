@@ -49,11 +49,15 @@ final class GateReportVerbProcessTests: XCTestCase {
         """
     }
 
+    /// `direct` DEFAULTS to `inferred` — the ordinary entry, whose effects it raises itself — and is
+    /// overridable because ⟨0.24⟩ made the distinction load-bearing: §6.2's contribution fires on a
+    /// DIRECT `Unknown` the entry named no reason for, and never on an INHERITED one. A fixture that
+    /// leaves this defaulted is posing a direct effect whether it means to or not.
     private func fnEntry(_ fn: String, _ inferred: [String], calls: [String] = [], why: [String]? = nil,
-                       netClass: [String]? = nil, hosts: [String]? = nil) -> String {
+                       netClass: [String]? = nil, hosts: [String]? = nil, direct: [String]? = nil) -> String {
         func arr(_ xs: [String]) -> String { "[" + xs.map { "\"\($0)\"" }.joined(separator: ",") + "]" }
         var s = """
-        {"fn":"\(fn)","loc":"a.swift:1:1","inferred":\(arr(inferred)),"direct":\(arr(inferred)),
+        {"fn":"\(fn)","loc":"a.swift:1:1","inferred":\(arr(inferred)),"direct":\(arr(direct ?? inferred)),
          "declared":[],"undeclared":[],"overdeclared":[],"unresolved":\(inferred.contains("Unknown")),
          "hash":"App#\(fn)","calls":\(arr(calls))
         """
@@ -158,8 +162,16 @@ final class GateReportVerbProcessTests: XCTestCase {
         XCTAssertEqual(bare.code, 1, "the BARE deny fires on the same signature — which is what makes the scoped exit 0 a relaxation")
     }
 
+    /// ⟨0.24⟩ THE FIXTURE MOVED, AND THE MOVE IS THE POINT. It used to pose `app.Caller.run` with
+    /// `direct: ["Unknown"]` — because the helper defaults `direct` to `inferred` — while its prose said
+    /// "an Unknown with neither its own unknownWhy nor a `calls` edge". Those are two different states,
+    /// and the minimal-refusal rule (SPEC §3.1) separates them: a reasonless DIRECT `Unknown` CONTRIBUTES
+    /// `unresolved` from the entry alone, so it is ANSWERABLE and this refusal is over-broad on it (pinned
+    /// now by `testAReasonlessDirectUnknownIsAnsweredNotRefused`). The genuinely uncomputable state is the
+    /// INHERITED one — `direct: []`, no `calls` — where the reason lives in a callee the report does not
+    /// name, and it is the one this test now poses. The fixture had picked one spelling of two.
     func testScopedUnknownDenyWithNoReachableReasonIsRefused() throws {
-        let root = try makeReportDir(report: envelope(fnEntry("app.Caller.run", ["Unknown"]), analyzed: 1),
+        let root = try makeReportDir(report: envelope(fnEntry("app.Caller.run", ["Unknown"], direct: []), analyzed: 1),
                                      policy: "deny Unknown[dispatch] app\n")
         defer { try? FileManager.default.removeItem(at: root) }
         let scoped = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
@@ -316,6 +328,95 @@ final class GateReportVerbProcessTests: XCTestCase {
         XCTAssertEqual(d?["ok"] as? Bool, false)
         XCTAssertEqual(d?["incomplete"] as? Bool, true, "the incompleteness is machine-legible in the verdict")
         XCTAssertEqual((d?["unanalyzed"] as? [Any])?.count, 1)
+    }
+
+    // ── ⟨0.24⟩ THE REFUSAL IS MINIMAL (SPEC §3.1) ───────────────────────────────────────────────────
+    //
+    // A class-scoped `deny` is not unanswerable merely because some evidence is missing. The class set
+    // only ever GROWS (§6.2 — a reason is CONTRIBUTED, never retracted) and `Reject` is upward-closed in
+    // it (PAPER3 Lemma 2), so when the classes determinable FROM THE ENTRY ALONE already intersect the
+    // filter, the rule FIRES and no further evidence could change that. Only an EMPTY determinable set is
+    // genuinely open.
+    //
+    // MEASURED four-way on the review's fixture, one entry, `direct: ["Unknown"]`, no `unknownWhy`, no
+    // `calls`, all four binaries rebuilt at HEAD:
+    //
+    //     deny Unknown[unresolved]              rust 1   ts 1   java 1   swift 2   <- over-broad
+    //     deny Unknown[unresolved] app.direct   rust 1   ts 1   java 1   swift 2   <- and with a scope
+    //
+    // SPEC §3.1 names this engine's refusal as the over-broad one: exit 2 is not wrong in the fail-closed
+    // sense, it is a WORSE answer than the correct one.
+
+    /// A reasonless DIRECT `Unknown` CONTRIBUTES `unresolved` (§6.2), which is determinable from the entry
+    /// alone with no transitive step — so `deny Unknown[unresolved]` is ANSWERED, and the answer is that
+    /// it fires. Both the bare and the scoped form, because the review measured both at exit 2.
+    func testAReasonlessDirectUnknownIsAnsweredNotRefused() throws {
+        let entry = """
+        {"fn":"app.direct","loc":"a.swift:1:1","inferred":["Unknown"],"direct":["Unknown"],
+         "declared":[],"undeclared":[],"overdeclared":[],"unresolved":true,"hash":"App#direct"}
+        """
+        for rule in ["deny Unknown[unresolved]", "deny Unknown[unresolved] app.direct"] {
+            let root = try makeReportDir(report: envelope(entry, analyzed: 1), policy: rule + "\n")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let r = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                                   "--policy", root.appendingPathComponent("pol.txt").path])
+            XCTAssertEqual(r.code, 1, "`\(rule)`: a reasonless DIRECT Unknown contributes `unresolved` from "
+                           + "the entry ALONE, so the question is answerable and the answer is that the rule "
+                           + "fires. Refusing is a worse answer than the correct one (SPEC §3.1). stderr: \(r.err)")
+            XCTAssertTrue(r.err.contains("app.direct"), "`\(rule)`: and it names the function: \(r.err)")
+        }
+    }
+
+    /// THE CONTROL FOR THE ROW ABOVE, and the one the fix must NOT swallow: an `Unknown` that is INHERITED
+    /// with no `calls` edge to a reason is still the uncomputable state, and must still be refused. Its
+    /// `direct` set does not contain `Unknown`, which is exactly what separates the two — keying the
+    /// contribution on the reason set being EMPTY instead would mark this one too, and that is the mirror
+    /// fabrication (measured elsewhere at 435 functions where the legitimate count is 0).
+    ///
+    /// THE REFUSAL MUST ALSO NAME THE RIGHT FUNCTION. Three Unknown carriers here: `app.mystery` raises it
+    /// directly with no reason (→ `unresolved`), `app.inheritU` inherits it through a `calls` edge to
+    /// `app.mystery` (→ `unresolved`, transitively), and `app.orphanU` inherits it from NOWHERE the report
+    /// names. Only the third is unanswerable. MEASURED before the fix: swift refused naming `app.inheritU`
+    /// where rust, ts and java all name `app.orphanU` — the same exit code, with the remedy pointing at
+    /// the wrong function.
+    func testTheRefusalNamesTheEntryWhoseReasonChannelIsActuallyMissing() throws {
+        let entries = [
+            #"{"fn":"app.mystery","loc":"a.swift:1:1","inferred":["Unknown"],"direct":["Unknown"],"declared":[],"undeclared":[],"overdeclared":[],"unresolved":true,"hash":"App#mystery"}"#,
+            #"{"fn":"app.inheritU","loc":"a.swift:5:1","inferred":["Unknown"],"direct":[],"declared":[],"undeclared":[],"overdeclared":[],"unresolved":false,"hash":"App#inheritU","calls":["app.mystery"]}"#,
+            #"{"fn":"app.orphanU","loc":"a.swift:9:1","inferred":["Unknown"],"direct":[],"declared":[],"undeclared":[],"overdeclared":[],"unresolved":false,"hash":"App#orphanU"}"#,
+        ].joined(separator: ",")
+        let root = try makeReportDir(report: envelope(entries, analyzed: 3),
+                                     policy: "deny Unknown[dispatch,unresolved]\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                               "--policy", root.appendingPathComponent("pol.txt").path])
+        XCTAssertEqual(r.code, 2, "an Unknown inherited from nowhere the report names is still the "
+                       + "uncomputable state, and must still be refused: \(r.err)")
+        XCTAssertTrue(r.err.contains("app.orphanU"),
+                      "the refusal must name the entry whose reason channel is ACTUALLY missing — a remedy "
+                      + "pointing at the wrong function is worth as little as no remedy: \(r.err)")
+        XCTAssertFalse(r.err.contains("app.inheritU"),
+                       "`app.inheritU` reaches `app.mystery`'s contributed `unresolved` through its own "
+                       + "`calls` edge, so it is not the unanswerable one: \(r.err)")
+        XCTAssertFalse(r.err.contains("app.mystery"),
+                       "…and `app.mystery` contributes `unresolved` from its own DIRECT Unknown: \(r.err)")
+    }
+
+    /// The anti-flood control on the other side: a narrowed filter that does NOT include `unresolved` must
+    /// not be made to fire by the contribution. `unresolved` is a real class now, not a stand-in for "no
+    /// class", so `deny Unknown[dispatch]` over a reasonless direct Unknown is ANSWERED — and the answer
+    /// is that it does not fire.
+    func testTheContributedUnresolvedDoesNotSatisfyAnUnrelatedClassFilter() throws {
+        let entry = """
+        {"fn":"app.direct","loc":"a.swift:1:1","inferred":["Unknown"],"direct":["Unknown"],
+         "declared":[],"undeclared":[],"overdeclared":[],"unresolved":true,"hash":"App#direct"}
+        """
+        let root = try makeReportDir(report: envelope(entry, analyzed: 1), policy: "deny Unknown[dispatch]\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                               "--policy", root.appendingPathComponent("pol.txt").path])
+        XCTAssertEqual(r.code, 0, "`unresolved` is a real class, not a wildcard — `[dispatch]` must not be "
+                       + "satisfied by it, or every narrowed filter matches everything: \(r.err)")
     }
 
     // ── ⟨0.24⟩ A REPORT THAT JUDGED NOTHING (SPEC §2's three-row table, bound to this verb by §3.1) ──
