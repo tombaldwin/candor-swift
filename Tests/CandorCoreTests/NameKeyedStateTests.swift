@@ -132,6 +132,19 @@ final class NameKeyedStateTests: XCTestCase {
             + "records that `req.url` (or `p.launchPath`) was assigned, and dropping that on a rebind "
             + "would re-admit exactly the locator the write moved. Body-wide by construction, and never "
             + "consulted to resolve a name to a binding — only to REFUSE a literal claim about one."),
+        "execLocatorOfLocal": .deliberatelyKept(
+            "the program a `Process` LOCAL was told to execute (`p.launchPath = \"/bin/sh\"`), carried to "
+            + "the launching verb, which takes no argument and so has no other source for it. Kept for the "
+            + "`movedNames` reason and read through it: a rebind of the handle is already recorded there "
+            + "and `recordProcessRun` consults it, so clearing this map on a rebind would only lose the "
+            + "literal while the refusal stands — belt and braces in the WRONG direction, since the "
+            + "refusal is what has to survive, not the value."),
+        "execLocatorInvisible": .deliberatelyKept(
+            "the half that keeps the Exec gate closed: a `launchPath`/`executableURL` write whose value "
+            + "could NOT be read statically. Clearing it on a rebind would let a benign visible literal "
+            + "certify an `allow Exec` for a function that also spawns a runtime program — the AS-EFF-008 "
+            + "masking evasion, and the precise way this mechanism could have made the gate quieter. It "
+            + "is monotone by construction: an entry is only ever ADDED, and never for a name."),
         // ── known defective, measured and filed rather than patched
         "boundLocals": .knownDefect(
             "written by only 2 of the ~7 binder forms. The ENUM-CASE payload forms are now covered by "

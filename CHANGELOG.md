@@ -9,6 +9,35 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed ⚠ — locator provenance 3/3: the property write that names the program (2026-07-29)
+
+`Process()` takes no command. The program is named by a property WRITE (`p.launchPath = "/bin/sh"`,
+`p.executableURL = URL(fileURLWithPath: …)`) and executed by `p.run()`/`p.launch()`, which take no argument
+at all — so the direct-argument rule saw no literal anywhere on the Foundation subprocess surface. EVERY
+`Process` form yielded no `cmds`: `allow Exec` failed closed over all of it, and the `classifyCommandHead`
+cliff refinement (a visible `curl` reaching `Net`) never fired. The write is now carried forward to the
+launching verb.
+
+**The launching verb also marks `Exec` INCOMPLETE when it cannot read the program, and that half is not
+optional.** Before this mechanism the surface was always empty and `allow Exec` failed closed *by accident*.
+The moment a literal can be captured, a benign visible `/bin/sh` would otherwise COVER for a runtime
+program spawned beside it and certify the whole function — the AS-EFF-008 masking evasion, and the precise
+way this work could have made the gate quieter. Marking it changes nothing for the all-invisible case an
+empty surface already refused. Pinned directly and transitively.
+
+**The A/B found a fabrication in this mechanism that all 25 fixtures had passed.** A `SequenceExpr` is
+FLAT — the parser gives `p.launchPath = "/usr/bin/" + tool` as `[lhs, =, "/usr/bin/", +, tool]` — so reading
+the element after the `=` yielded the literal `"/usr/bin/"` and reported *that* as the program, which
+`allow Exec /usr/bin/` would then have certified for an entirely runtime command. It surfaced on a negative
+control written into the corpus, not in a unit fixture; the remainder is now re-wrapped and handed to the
+resolver that already knows how to refuse it. Three fixtures were added from that one finding.
+
+Measured A/B (4 corpora, 8 568 functions): **13 commands gained** — `/usr/bin/iconutil` in pollen's icon
+tool, `/bin/sh` across candor's own soundness fixtures, `/usr/bin/git`/`curl`/`iconutil` in the app target —
+`+1 Net` from a command-head refinement, and **zero losses of any kind**. swift-syntax's `ProcessRunner`
+(`process.executableURL = executableURL`, a parameter) correctly gained nothing: a real-world negative
+control. Conformance four-way OK; smoke 108/108; fuzz 25/25; fabrication-probe clean.
+
 ### fixed ⚠ — locator provenance 2/3: the local the locator was bound to (2026-07-29)
 
 The other half of the URLSession surface: `let u = URL(string: "…")!` then `dataTask(with: u)`, and the
