@@ -29,6 +29,11 @@ struct FnInfo {
                                       // `T...`) lifts the arg-count upper bound (`run(_:String,_:Binding?...)`).
     var loc: String
     var params: [String: String] = [:]       // param name -> type name (concrete)
+    var paramNames: Set<String> = []         // EVERY parameter name, whatever its type resolved to. `params`
+                                             // and its five siblings each hold the subset they could type, so
+                                             // none of them — nor their union — is the signature. A body
+                                             // binder that shadows a parameter is a shadow, so the locator
+                                             // pre-pass needs the WHOLE list (see prescanLocatorMoves).
     var fnTypedParams: Set<String> = []      // params of function type
     var fnTypedParamIndex: [String: Int] = [:] // fn-typed param name -> position
     var protoParams: [String: String] = [:]  // param name -> local protocol name
@@ -511,7 +516,10 @@ final class DeclCollector: SyntaxVisitor {
                     info.body = b
                     info.isAccessor = true
                     // type the setter's implicit value param so `newValue.effectfulMethod()` resolves
-                    if let sp = setterParam, let pt = propType { info.params[sp] = pt }
+                    if let sp = setterParam {
+                        info.paramNames.insert(sp)           // a binder even when its type didn't resolve
+                        if let pt = propType { info.params[sp] = pt }
+                    }
                     fns.append(info)
                 }
                 // A property-wrapper attribute (`@Logged var count`): record the wrapper TYPE so a read/
@@ -710,6 +718,7 @@ final class DeclCollector: SyntaxVisitor {
         for (idx, p) in sig.parameterClause.parameters.enumerated() {
             let pname = (p.secondName ?? p.firstName).text
             let t = typeName(p.type)
+            info.paramNames.insert(pname)
             // ordered signature for overload resolution: the param's simple type name (nil if unresolvable)
             // and whether it has a default (so a call may legitimately omit it).
             info.paramSig.append((t.name, p.defaultValue != nil, p.ellipsis != nil))
@@ -796,7 +805,10 @@ final class DeclCollector: SyntaxVisitor {
             info.enclosingTypePath = tyPath
             info.body = b
             info.isAccessor = true
-            if let sp = setterParam, let et = elemType { info.params[sp] = et }
+            if let sp = setterParam {
+                info.paramNames.insert(sp)                   // a binder even when its type didn't resolve
+                if let et = elemType { info.params[sp] = et }
+            }
             fns.append(info)
         }
         return .skipChildren

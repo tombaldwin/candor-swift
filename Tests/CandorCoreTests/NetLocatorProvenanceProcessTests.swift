@@ -564,4 +564,98 @@ final class NetLocatorProvenanceProcessTests: XCTestCase {
         """, policy: "allow Exec /bin/sh")
         XCTAssertEqual(r.code, 1, "a field-held handle is outside the mechanism — claim nothing")
     }
+
+    // ────────────────────────────────────────────────────────────────────────────────────────────────
+    // THE SHADOW BINDER. A `let p` inside a block is a DIFFERENT binding from the outer `p`, and the
+    // exec maps are keyed by NAME. `movedNames` does not see it (a shadow is not a reassignment) and
+    // `execLocatorInvisible` does not see it either when the outer handle takes no write at all — so
+    // the inner literal stood under the outer name and was reported at the outer launch.
+    // ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// THE FABRICATION. The launched program comes from the factory; `/bin/phantom` is written to a
+    /// binding that is never launched. Reporting it would let `allow Exec /bin/phantom` certify the call.
+    func testFailClosedShadowedProcessBinderClaimsNoCommand() throws {
+        let by = try scan("""
+        import Foundation
+        func spawn(make: () -> Process) {
+            let p = make()
+            if true { let p = Process(); p.launchPath = "/bin/phantom"; _ = p }
+            p.launch()
+        }
+        spawn(make: { Process() })
+        """)
+        XCTAssertEqual(cmds(by, "spawn"), [],
+                       "the inner binding's literal is not the outer handle's program — never fabricate")
+    }
+
+    /// …and the gate half: the surface is INCOMPLETE, not empty-and-certifiable.
+    func testFailClosedShadowedProcessBinderIsUncertifiable() throws {
+        let r = try gate("""
+        import Foundation
+        func spawn(make: () -> Process) {
+            let p = make()
+            if true { let p = Process(); p.launchPath = "/bin/phantom"; _ = p }
+            p.launch()
+        }
+        spawn(make: { Process() })
+        """, policy: "allow Exec /bin/phantom")
+        XCTAssertEqual(r.code, 1, "an unreadable locator must not be certifiable under the shadow's literal")
+    }
+
+    /// The PARAMETER form of the same shadow — the outer binder is in the signature, which the body walk
+    /// cannot see, so the parameter names travel with the pre-pass.
+    func testFailClosedShadowedProcessParameterClaimsNoCommand() throws {
+        let by = try scan("""
+        import Foundation
+        func spawn(p: Process) {
+            if true { let p = Process(); p.launchPath = "/bin/phantom"; _ = p }
+            p.launch()
+        }
+        spawn(p: Process())
+        """)
+        XCTAssertEqual(cmds(by, "spawn"), [], "a body binder shadowing a parameter is the same hazard")
+    }
+
+    /// THE MIRROR OF THE REFUSAL, and the reason it is a binder count and not a scope restore. ONE
+    /// binder, the locator written inside a conditional block: this is the program the handle runs, and
+    /// a rule that dropped writes made inside a nested scope would delete it.
+    func testConditionalLaunchPathWriteStillExtractsCmd() throws {
+        let by = try scan("""
+        import Foundation
+        func spawn(flag: Bool) {
+            let p = Process()
+            if flag { p.launchPath = "/bin/ls" }
+            p.launch()
+        }
+        spawn(flag: true)
+        """)
+        XCTAssertEqual(cmds(by, "spawn"), ["/bin/ls"],
+                       "one binder — a write inside a block is still this handle's program")
+    }
+
+    /// THE PRICE, PINNED. Two DISJOINT bindings can share a name (sibling branches), and the refusal is
+    /// a binder COUNT, so it drops both of their commands even though `cmds` is a per-FUNCTION surface on
+    /// which the union would have been right. Measured cost of the coarse rule: zero rows across five
+    /// real packages (pollen, applike, AppTarget, candor-swift, swift-syntax — 8.6k functions), and this
+    /// shape. Recorded as a test rather than a comment so that a future scope-aware refinement shows up
+    /// here as a deliberate change instead of passing unnoticed.
+    func testKnownCostSiblingScopeHandlesShareANameAndBothAreRefused() throws {
+        let by = try scan("""
+        import Foundation
+        func spawn(flag: Bool) {
+            if flag {
+                let p = Process()
+                p.launchPath = "/bin/a"
+                p.launch()
+            } else {
+                let p = Process()
+                p.launchPath = "/bin/b"
+                p.launch()
+            }
+        }
+        spawn(flag: true)
+        """)
+        XCTAssertEqual(cmds(by, "spawn"), [],
+                       "the coarse binder count cannot tell a shadow from a disjoint reuse of the name")
+    }
 }

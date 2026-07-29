@@ -17,6 +17,41 @@ The per-function analysis loop rebuilt `Set(freeFnByName.keys)` at every `CallCo
 single build before the loop → flat ~0.05 ms/function, **8.4× faster at 10k functions**. Report output
 verified byte-for-byte identical (this is a loop-invariant hoist, not a semantic change); `swift test` green.
 
+### fixed ⚠ — a shadowed `Process` binder named the outer handle's program (2026-07-29)
+
+Backported to the released **0.23** line; `specVersion` unchanged. Present in the original work on BOTH
+lines — unlike the shadowed-host fabrication below it, this one is not a port artefact.
+
+The exec locator maps are keyed by NAME and body-wide. A `let p` inside a block SHADOWS an outer handle,
+writes its literal under the same key, and the outer `p.launch()` below the block then reported a program
+that handle was never given:
+
+```swift
+func spawn(make: () -> Process) {
+    let p = make()                                          // locator unknown, never written here
+    if true { let p = Process(); p.launchPath = "/bin/x" }  // a DIFFERENT binding
+    p.launch()                                              // reported cmds: ["/bin/x"]
+}
+```
+
+`allow Exec /bin/x` certified that call. Neither existing guard covers it: a shadow is not a reassignment,
+so the move pre-pass records nothing, and the outer handle takes no write at all, so `execLocatorInvisible`
+raises no refusal. The gate is now the binder COUNT — a name with more than one binder site in the unit
+(the function's own parameters counted) is not a name a body-wide literal claim can be made about — and it
+sits at the READ, so the suppressing half stays monotone.
+
+The comment on those two maps said they are kept because they are "the RECORD of what happened to a name",
+like `movedNames`. True of a rebind, false of a shadow BINDER — nothing happens to the outer name at all.
+The comment is corrected in the same commit, because the argument for keeping the map was resting on the
+premise that was wrong. (On `main` the same argument is written down as
+`NameKeyedStateTests.disposition["execLocatorOfLocal"]`, and is corrected there.)
+
+Measured cost: **zero rows** across pollen, applike, AppTarget, candor-swift and swift-syntax (8.6k
+functions — no host, command, path or effect losses). The one shape it does cost is two DISJOINT bindings
+sharing a name in sibling branches, where the per-function union would have been right — pinned as
+`testKnownCostSiblingScopeHandlesShareANameAndBothAreRefused` so a future scope-aware refinement shows up
+as a deliberate change rather than passing unnoticed.
+
 ### fixed ⚠ — the singleton FIELD had no type, so the call on it was silent-pure (2026-07-29)
 
 Backported to the released **0.23** line; `specVersion` unchanged. Found by the A/B for the locator work,
