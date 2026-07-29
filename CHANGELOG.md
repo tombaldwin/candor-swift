@@ -17,6 +17,39 @@ The per-function analysis loop rebuilt `Set(freeFnByName.keys)` at every `CallCo
 single build before the loop → flat ~0.05 ms/function, **8.4× faster at 10k functions**. Report output
 verified byte-for-byte identical (this is a loop-invariant hoist, not a semantic change); `swift test` green.
 
+### fixed ⚠ — locator provenance 1/3: the constructor between the literal and the call (2026-07-29)
+
+Backported to the released **0.23** line. `specVersion` is unchanged — this is a soundness fix inside the
+0.23 contract, carrying no rung behaviour from any later spec version.
+
+swift captured a Net host only when the literal was a DIRECT string argument of the establishing call —
+`NWConnection(host:port:)`, the single idiom conformance PART 4e pins. On Apple platforms almost nothing
+is written that way: `URL(string:)` interposes, so **every `URLSession` form yielded no `hosts`** and read
+`netClass: ["unknown-host"]`. Three live consequences on this line: a narrowed `deny Net[known-telemetry]`
+passed GREEN over a `URLSession` call to `api.segment.io`; a call to `api.openai.com` never reached the §1
+⟨0.13⟩ `Llm` refinement or the privacy manifest; and `allow Net` failed closed over essentially all
+Apple-platform code. rust/java/ts all unwrap their equivalents.
+
+`URL(string:)` / `URL(fileURLWithPath:)` / `URL(filePath:)` / `URLRequest(url:)` (and the `NS` twins) now
+resolve to the locator they carry, nested and bounded, through the same const-anchored resolver the direct
+form already used — so `Llm`, `netClass` and the privacy manifest all follow with no new machinery.
+
+This moves the gate in the RELAXING direction, so the guard is an **allowlist of companion arguments**,
+the exact inverse of the denylist rule that governs narrowing an over-approximation: an unrecognised label
+refuses. `relativeTo:` is why — `URL(string: "/v1/track", relativeTo: base)` keeps its authority in `base`,
+and reading the `string:` argument would fabricate the host `/v1/track`. A locally-declared `URL` type or
+free function shadows the unwrap, as every κ entry point in this engine does.
+
+Four fail-closed mirrors (parameter URL, interpolated authority, `relativeTo:` base, a local `URL` type)
+were written first and PASSED against the unmodified 0.23 build; the six gain fixtures FAILED against it.
+
+Measured A/B on this branch (pollen, swift-syntax, candor-swift, an Apple-idiom app target — 8 668
+functions): 1 `paths` literal gained (`Data.write(to: URL(fileURLWithPath:))`), and the column that
+decides it — **zero effect sets shrank, zero hosts/cmds/paths lost, zero report entries dropped.** The
+host gains this mechanism unlocks land once 2/3 and the singleton-field fix reach the call sites that
+carry them (measured cumulatively there); on its own, over these corpora, it is prerequisite rather than
+productive.
+
 ### ⚠ soundness — sync callback-invoker opaque-arg (Swift arm of the four-way parity fix)
 
 Fixes a silent under-report (cardinal sin): an OPAQUE closure passed to a SYNCHRONOUS higher-order

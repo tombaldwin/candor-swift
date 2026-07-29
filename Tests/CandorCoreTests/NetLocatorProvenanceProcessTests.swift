@@ -1,0 +1,206 @@
+import XCTest
+import Foundation
+
+/// LOCATOR PROVENANCE — the Apple-platform network/subprocess surface.
+///
+/// Until this suite, swift extracted a Net host ONLY when the literal was a DIRECT string argument of the
+/// establishing call (`NWConnection(host:port:)` — the single idiom conformance PART 4e pins). Every
+/// `URLSession` form therefore yielded NO `hosts` (the `URL(string:)` ctor interposes) and every `Process`
+/// form yielded NO `cmds` (`launchPath`/`executableURL` are property WRITES, and `run()` takes no argument).
+/// rust/java/ts all extract on their equivalents from an inline literal AND from a local binding.
+///
+/// EVERY mechanism here moves the gate in the RELAXING direction: extracting a host turns a fail-closed
+/// `unknown-host` into a CLASSIFIED destination; extracting a command turns an uncertifiable `allow Exec`
+/// into a certified one. A bug here does not produce a loud wrong answer, it produces a QUIETER one — the
+/// cardinal sin. So each mechanism is pinned in BOTH directions and the negative half is not optional:
+/// where the locator is genuinely unrecoverable (a parameter, a runtime concatenation, a `var`) the entry
+/// MUST keep `netClass: ["unknown-host"]` / MUST stay uncertifiable, and MUST NOT gain a fabricated
+/// literal. `testFailClosed…` is the mirror of every `test…Extracts…` above it.
+final class NetLocatorProvenanceProcessTests: XCTestCase {
+
+    private func scan(_ src: String) throws -> [String: [String: Any]] {
+        let bin = try ProcessHarness.binaryURL(for: NetLocatorProvenanceProcessTests.self)
+        let root = try ProcessHarness.makePackage(src)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try ProcessHarness.run(bin, [root.path, "--json"])
+        XCTAssertEqual(r.code, 0, "scan must succeed — stderr: \(r.err)")
+        return try ProcessHarness.fns(ofJson: r.out)
+    }
+
+    private func gate(_ src: String, policy: String) throws -> (out: String, err: String, code: Int32) {
+        let bin = try ProcessHarness.binaryURL(for: NetLocatorProvenanceProcessTests.self)
+        let root = try ProcessHarness.makePackage(src)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let policyFile = root.appendingPathComponent("policy.txt")
+        try policy.write(to: policyFile, atomically: true, encoding: .utf8)
+        return try ProcessHarness.run(bin, [root.path, "--json", "--policy", policyFile.path])
+    }
+
+    private func hosts(_ by: [String: [String: Any]], _ fn: String) -> [String] {
+        (by[fn]?["hosts"] as? [String] ?? []).sorted()
+    }
+    private func cmds(_ by: [String: [String: Any]], _ fn: String) -> [String] {
+        (by[fn]?["cmds"] as? [String] ?? []).sorted()
+    }
+
+    // ────────────────────────────────────────────────────────────────────────────────────────────────
+    // MECHANISM 1 — CONSTRUCTOR UNWRAP. `URL(string: "…")` interposed between the literal and the call.
+    // ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// THE MIRROR, WRITTEN FIRST. A URL built from a PARAMETER is not recoverable: the entry keeps Net,
+    /// keeps `unknown-host`, and gains NO host. This is the case the mechanism must not reach.
+    func testFailClosedComputedURLKeepsUnknownHost() throws {
+        let by = try scan("""
+        import Foundation
+        func send(to h: String) {
+            let t = URLSession.shared.dataTask(with: URL(string: h)!) { _, _, _ in }
+            t.resume()
+        }
+        send(to: "x")
+        """)
+        XCTAssertEqual(hosts(by, "send"), [], "a parameter-built URL yields NO host — never fabricate")
+        XCTAssertEqual(by["send"]?["netClass"] as? [String], ["unknown-host"],
+                       "the destination is structurally invisible — the gate must stay fail-closed")
+    }
+
+    /// The mirror's second form: a RUNTIME-CONCATENATED URL whose authority is not statically complete.
+    func testFailClosedInterpolatedAuthorityKeepsUnknownHost() throws {
+        let by = try scan("""
+        import Foundation
+        func send(h: String) {
+            let t = URLSession.shared.dataTask(with: URL(string: "https://\\(h)/v1/track")!) { _, _, _ in }
+            t.resume()
+        }
+        send(h: "x")
+        """)
+        XCTAssertEqual(hosts(by, "send"), [], "an interpolated AUTHORITY is not a statically-known host")
+        XCTAssertEqual(by["send"]?["netClass"] as? [String], ["unknown-host"])
+    }
+
+    /// A project's OWN `struct URL` shadows the Foundation ctor — the unwrap must not read a local type's
+    /// argument as a network destination (the standing never-fabricate discipline for every κ shadow).
+    func testFailClosedLocalURLTypeShadowsTheUnwrap() throws {
+        let by = try scan("""
+        import Foundation
+        struct URL { let string: String; init(string: String) { self.string = string } }
+        func send() {
+            let c = NWConnection(host: "10.0.0.1", port: 9)
+            c.start(queue: .main)
+            _ = URL(string: "https://api.segment.io/x")
+        }
+        send()
+        """)
+        XCTAssertFalse(hosts(by, "send()").contains("api.segment.io"),
+                       "a locally-declared URL type shadows the Foundation ctor — no host from its argument")
+    }
+
+    /// THE GAIN. An inline `URL(string:)` feeding `dataTask(with:)` names its destination.
+    func testInlineURLCtorExtractsHost() throws {
+        let by = try scan("""
+        import Foundation
+        func track() {
+            let t = URLSession.shared.dataTask(with: URL(string: "https://api.segment.io/v1/track")!) { _, _, _ in }
+            t.resume()
+        }
+        track()
+        """)
+        XCTAssertEqual(hosts(by, "track"), ["api.segment.io"])
+        XCTAssertEqual(by["track"]?["netClass"] as? [String], ["known-telemetry"],
+                       "⟨0.20⟩ the destination class follows from the host")
+    }
+
+    /// The async `data(from:)` form — the same interposition, a different establishing member.
+    func testAsyncDataFromExtractsHost() throws {
+        let by = try scan("""
+        import Foundation
+        func load() async throws {
+            let (d, _) = try await URLSession.shared.data(from: URL(string: "https://example.com/x")!)
+            _ = d
+        }
+        """)
+        XCTAssertEqual(hosts(by, "load"), ["example.com"])
+    }
+
+    /// `URLRequest(url: URL(string:))` — TWO ctors between the literal and the call.
+    func testNestedURLRequestExtractsHost() throws {
+        let by = try scan("""
+        import Foundation
+        func post() {
+            let t = URLSession.shared.dataTask(with: URLRequest(url: URL(string: "https://api.segment.io/v1/batch")!)) { _, _, _ in }
+            t.resume()
+        }
+        post()
+        """)
+        XCTAssertEqual(hosts(by, "post"), ["api.segment.io"])
+    }
+
+    /// A `relativeTo:` base moves the authority OUT of the `string:` argument. Reading it anyway would
+    /// FABRICATE the host `/v1/track` — so the unwrap refuses and the entry stays fail-closed. This is the
+    /// case the companion-argument allowlist exists for.
+    func testFailClosedRelativeToBaseRefusesTheUnwrap() throws {
+        let by = try scan("""
+        import Foundation
+        func track(base: URL) {
+            let t = URLSession.shared.dataTask(with: URL(string: "/v1/track", relativeTo: base)!) { _, _, _ in }
+            t.resume()
+        }
+        """)
+        XCTAssertEqual(hosts(by, "track"), [], "the authority lives in `base` — claim nothing")
+        XCTAssertEqual(by["track"]?["netClass"] as? [String], ["unknown-host"])
+    }
+
+    /// §1 ⟨0.13⟩ FOLLOWS FOR FREE — a model host reached through the ctor classifies `Llm` as well as `Net`.
+    func testModelHostThroughCtorClassifiesLlm() throws {
+        let by = try scan("""
+        import Foundation
+        func ask() {
+            let t = URLSession.shared.dataTask(with: URL(string: "https://api.openai.com/v1/chat")!) { _, _, _ in }
+            t.resume()
+        }
+        ask()
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "ask"), ["Llm", "Net"])
+        XCTAssertEqual(hosts(by, "ask"), ["api.openai.com"])
+    }
+
+    /// …and the mirror of THAT: a non-model host through the same ctor must NOT classify `Llm`.
+    func testNonModelHostThroughCtorIsNotLlm() throws {
+        let by = try scan("""
+        import Foundation
+        func ping() {
+            let t = URLSession.shared.dataTask(with: URL(string: "https://example.com/v1/chat")!) { _, _, _ in }
+            t.resume()
+        }
+        ping()
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "ping"), ["Net"], "a non-model host stays bare Net")
+    }
+
+    /// THE GATE CONSEQUENCE that motivates the whole suite: a narrowed `deny Net[known-telemetry]` read
+    /// GREEN over a `URLSession` call to a telemetry host. It must now be RED.
+    func testDenyTelemetryCatchesURLSessionCall() throws {
+        let r = try gate("""
+        import Foundation
+        func track() {
+            let t = URLSession.shared.dataTask(with: URL(string: "https://api.segment.io/v1/track")!) { _, _, _ in }
+            t.resume()
+        }
+        track()
+        """, policy: "deny Net[known-telemetry]")
+        XCTAssertEqual(r.code, 1, "the narrowed deny must FIRE — stdout: \(r.out) stderr: \(r.err)")
+    }
+
+    /// …and the mirror: the SAME policy over an INVISIBLE destination must not fire on the class it cannot
+    /// see (`unknown-host` is not `known-telemetry`), which is exactly why the extraction had to be sound.
+    func testDenyTelemetryDoesNotFireOnUnknownHost() throws {
+        let r = try gate("""
+        import Foundation
+        func send(to h: String) {
+            let t = URLSession.shared.dataTask(with: URL(string: h)!) { _, _, _ in }
+            t.resume()
+        }
+        send(to: "x")
+        """, policy: "deny Net[known-telemetry]")
+        XCTAssertEqual(r.code, 0, "an unknown host is not the telemetry class — stdout: \(r.out)")
+    }
+}
