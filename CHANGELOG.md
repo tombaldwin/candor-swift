@@ -9,6 +9,29 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed ⚠ — the singleton FIELD had no type, so the call on it was silent-pure (2026-07-29)
+
+Found by the A/B for the locator work, not looked for. A stored property's type came from its ANNOTATION,
+or from a ctor CALL in its initializer. The dominant Apple-platform spelling is neither —
+`private let session = URLSession.shared` is a member ACCESS — so the field stayed untyped, every call on
+it missed κ and resolved to no unit, and the enclosing function read **silent-pure**. On a realistic
+target, three network-performing methods were absent from the report altogether. No amount of host or
+command extraction reaches this: the effect itself was never charged.
+
+The same inference already existed for a LOCAL binding — `SINGLETON_ACCESSORS` is in the classifier and its
+comment says `let d = UserDefaults.standard` carries the type. Only the field case was missing.
+
+The inference is `Type.member : Type`, true for the canonical singleton accessors and NOT in general, so it
+is guarded by that existing allowlist plus a bare-uppercase-identifier base. A `static let logger: Logger`
+on a local type would otherwise type the field as its OWNER and resolve calls to the owner's methods,
+fabricating whatever those do — the mirror fixture for exactly that was confirmed to FAIL when the
+allowlist is removed, so it is not a vacuous control.
+
+Measured A/B: pollen gained **5 new report entries and 29 enlarged effect sets, with zero losses**. Traced
+to ground truth: a SwiftUI card holding `MedicationStore.shared` calls `store.log(…)`, which calls
+`saveEntries()`, which writes to `UserDefaults` — a real disk write, reported as pure. `MedicationStore`
+declares `public static let shared = MedicationStore()`, so the type premise holds exactly.
+
 ### fixed ⚠ — locator provenance 3/3: the property write that names the program (2026-07-29)
 
 `Process()` takes no command. The program is named by a property WRITE (`p.launchPath = "/bin/sh"`,
