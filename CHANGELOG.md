@@ -9,6 +9,29 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed ⚠ — locator provenance 1/3: the constructor between the literal and the call (2026-07-29)
+
+swift captured a Net host only when the literal was a DIRECT string argument of the establishing call —
+`NWConnection(host:port:)`, the single idiom conformance PART 4e pins. On Apple platforms almost nothing
+is written that way: `URL(string:)` interposes, so **every `URLSession` form yielded no `hosts`** and read
+`netClass: ["unknown-host"]`. Three live consequences, all on the released line: a narrowed
+`deny Net[known-telemetry]` passed GREEN over a `URLSession` call to `api.segment.io`; a call to
+`api.openai.com` never reached the §1 ⟨0.13⟩ `Llm` refinement or the privacy manifest; and `allow Net`
+failed closed over essentially all Apple-platform code. rust/java/ts all unwrap their equivalents.
+
+`URL(string:)` / `URL(fileURLWithPath:)` / `URL(filePath:)` / `URLRequest(url:)` (and the `NS` twins) now
+resolve to the locator they carry, nested and bounded, through the same const-anchored resolver the direct
+form already used — so `Llm`, `netClass` and the privacy manifest all follow with no new machinery.
+
+This moves the gate in the RELAXING direction, so the guard is an **allowlist of companion arguments**,
+the exact inverse of the denylist rule that governs narrowing an over-approximation: an unrecognised label
+refuses. `relativeTo:` is why — `URL(string: "/v1/track", relativeTo: base)` keeps its authority in `base`,
+and reading the `string:` argument would fabricate the host `/v1/track`. A locally-declared `URL` type or
+free function shadows the unwrap, as every κ entry point in this engine does.
+
+Measured A/B (4 corpora, 8 568 functions): 12 hosts gained, 2 `unknown-host` → `known-telemetry`,
+**zero effect sets shrank, zero hosts/cmds/paths lost, zero entries dropped**.
+
 ### fixed ⚠ — ⟨0.24⟩ neither §3.1 rule has a carve-out, and both of ours did (2026-07-28)
 
 SPEC §3.1 ⟨0.24⟩ (candor-spec `1503368`). **Precedence binds `forbid`/`allow` too**: measured,

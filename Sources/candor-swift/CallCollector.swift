@@ -615,12 +615,72 @@ final class CallCollector: SyntaxVisitor {
         return nil
     }
 
-    private func resolveConstString(_ raw: ExprSyntax) -> String? {
+    // LOCATOR-CONSTRUCTOR UNWRAP. Foundation puts a CONSTRUCTOR between the literal and the call that
+    // consumes it — `URLSession.shared.dataTask(with: URL(string: "https://…")!)`, `p.executableURL =
+    // URL(fileURLWithPath: "/bin/sh")`, `URLSession.shared.dataTask(with: URLRequest(url: URL(string:…)!))`.
+    // The direct-argument rule this engine shipped with therefore saw NO literal on the ENTIRE URLSession
+    // surface (only `NWConnection(host:)` — the one idiom conformance PART 4e pins), so every Apple-platform
+    // request read `unknown-host`: a narrowed `deny Net[known-telemetry]` passed GREEN over a call to a
+    // telemetry host, and `api.openai.com` never reached the §1 ⟨0.13⟩ `Llm` refinement. rust/java/ts all
+    // unwrap their equivalents.
+    //
+    // Each entry maps a ctor NAME to the argument label that carries the locator. The direction of this
+    // change is RELAXING (a captured host turns a fail-closed `unknown-host` into a classified destination),
+    // so the guard is an ALLOWLIST of companion arguments — the exact inverse of the denylist rule that
+    // governs NARROWING a sound over-approximation. An unrecognised companion label means the ctor's
+    // semantics are not the ones assumed here, so NO claim is made. `relativeTo:` is precisely why this
+    // matters: `URL(string: "/v1/track", relativeTo: base)` has its authority in `base`, and reading the
+    // `string:` argument as the destination would FABRICATE the host "/v1/track" — the mirror defect.
+    private static let LOCATOR_CTOR_ARG: [String: String] = [
+        "URL": "string", "NSURL": "string", "URLRequest": "url", "NSURLRequest": "url",
+    ]
+    /// `URL`'s FILE spellings — the same ctor, a different locator label. Kept separate only for clarity;
+    /// both resolve through the same allowlisted-companion rule.
+    private static let LOCATOR_CTOR_FILE_ARGS: Set<String> = ["fileURLWithPath", "filePath"]
+    /// Companion arguments that provably do NOT move the locator: they tune parsing/caching, never the
+    /// authority or the path root. ANY other label (`relativeTo`, `relativeToURL`, `baseURL`, …) refuses.
+    private static let LOCATOR_CTOR_INERT_ARGS: Set<String> = [
+        "encodingInvalidCharacters",       // URL(string:encodingInvalidCharacters:) — a parse-strictness knob
+        "isDirectory", "directoryHint",    // URL(fileURLWithPath:isDirectory:) — a trailing-slash hint
+        "cachePolicy", "timeoutInterval",  // URLRequest(url:cachePolicy:timeoutInterval:)
+    ]
+
+    /// Resolve `URL(string: "…")` / `URL(fileURLWithPath: "…")` / `URLRequest(url: URL(string: "…")!)` to the
+    /// locator literal it carries, or nil when the locator is not statically recoverable. Recurses through
+    /// nested locator ctors (bounded). A LOCALLY-DECLARED type or free function of the same name SHADOWS the
+    /// Foundation ctor and refuses, exactly as every other κ entry point in this engine does.
+    private func locatorCtorLiteral(_ raw: ExprSyntax, _ depth: Int = 0) -> String? {
+        if depth > 4 { return nil }
+        guard let call = Self.peel(raw).as(FunctionCallExprSyntax.self),
+              let callee = call.calledExpression.as(DeclReferenceExprSyntax.self) else { return nil }
+        let name = dealias(callee.baseName.text)
+        guard !declaredTypes.contains(name), !localFreeFns.contains(name) else { return nil }
+        var locatorArg: ExprSyntax? = nil
+        for a in call.arguments {
+            let lab = a.label?.text ?? ""
+            if Self.LOCATOR_CTOR_ARG[name] == lab || (name == "URL" || name == "NSURL")
+                && Self.LOCATOR_CTOR_FILE_ARGS.contains(lab) {
+                locatorArg = a.expression
+            } else if !Self.LOCATOR_CTOR_INERT_ARGS.contains(lab) {
+                return nil   // an unrecognised companion (`relativeTo:`) — the locator may not be this arg
+            }
+        }
+        guard let locatorArg else { return nil }
+        // The locator is itself a plain/const-anchored string (`URL(string: "…")`, `URL(string: apiBase)`),
+        // or ANOTHER locator ctor (`URLRequest(url: URL(string: "…")!)`).
+        if let lit = plainStringLiteralValue(locatorArg) { return decodeEscapes(lit) }
+        return resolveConstString(locatorArg, depth + 1)
+    }
+
+    private func resolveConstString(_ raw: ExprSyntax, _ depth: Int = 0) -> String? {
+        if depth > 4 { return nil }
         let expr = Self.peel(raw)
         // a bare const reference
         if let dr = expr.as(DeclReferenceExprSyntax.self), let v = constValue(dr.baseName.text) {
             return v
         }
+        // a LOCATOR CONSTRUCTOR interposed between the literal and the call — see locatorCtorLiteral.
+        if expr.is(FunctionCallExprSyntax.self), let v = locatorCtorLiteral(expr, depth) { return v }
         // an interpolation whose FIRST segment is `\(const)` — the URL prefix is the constant's value
         if let lit = expr.as(StringLiteralExprSyntax.self) {
             var segs = Array(lit.segments)
