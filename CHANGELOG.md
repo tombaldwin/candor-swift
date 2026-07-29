@@ -17,6 +17,43 @@ The per-function analysis loop rebuilt `Set(freeFnByName.keys)` at every `CallCo
 single build before the loop → flat ~0.05 ms/function, **8.4× faster at 10k functions**. Report output
 verified byte-for-byte identical (this is a loop-invariant hoist, not a semantic change); `swift test` green.
 
+### fixed ⚠ — locator provenance 3/3: the property write that names the program (2026-07-29)
+
+Backported to the released **0.23** line; `specVersion` unchanged.
+
+`Process()` takes NO command: the program is named by a property WRITE (`p.launchPath = "/bin/sh"`,
+`p.executableURL = URL(fileURLWithPath: …)`) and executed by `p.run()`/`p.launch()`, which take no
+argument at all. So the direct-argument rule saw no literal anywhere on the Foundation subprocess
+surface — EVERY `Process` form yielded no `cmds`, `allow Exec` failed closed over all of it, and the
+`classifyCommandHead` cliff refinement (a visible `curl` reaching Net) never fired. The write is now
+carried to the launching verb.
+
+**The launching verb also marks `Exec` INCOMPLETE when it cannot read the program**, and that half is not
+optional. Before this the surface was always empty and `allow Exec` failed closed BY ACCIDENT. The moment
+a literal can be captured, a benign visible `/bin/sh` would otherwise COVER for a runtime program spawned
+beside it and certify the whole function — the AS-EFF-008 masking evasion, and the precise way this work
+could have made the gate quieter. Marking it changes nothing for the all-invisible case an empty surface
+already refused. Fixtured directly and transitively.
+
+A Swift `SequenceExpr` is FLAT — `p.launchPath = "/usr/bin/" + tool` parses as
+`[lhs, =, "/usr/bin/", +, tool]` — so reading the element after the `=` yields `"/usr/bin/"` and reports
+THAT as the program, which `allow Exec /usr/bin/` would have certified for an entirely runtime command.
+The remainder is re-wrapped and handed to the resolver that already knows how to refuse it; the shape is
+pinned both as a fixture and as a negative control in the corpus A/B.
+
+Measured A/B on this branch (4 corpora, 8 668 functions): **5 commands gained**, and **zero effect sets
+shrank, zero hosts/cmds/paths lost, zero report entries dropped**. All seven Exec negative controls in the
+app target (parameter program, runtime concatenation, interpolation, ternary, rebound handle, a visible
+literal beside an invisible sibling, a parameter `executableURL` — the swift-syntax `ProcessRunner` shape)
+stayed RED under `allow Exec`, the masking one with its own AS-EFF-008 wording.
+
+Gate-verdict A/B over 12 policies × 4 corpora: two GREEN→RED flips (`deny Net[known-telemetry]`,
+`deny Llm` — destinations that were previously invisible), and every verdict that RELAXED was traced to
+ground truth: `deny Net[unknown-host]` stops firing on four entries that now carry a real host,
+`allow Exec <list>` certifies three functions that genuinely run the listed programs, `allow Fs /tmp`
+certifies a write that genuinely goes to `/tmp/store.json`. No relaxation on pollen, swift-syntax or
+candor-swift.
+
 ### fixed ⚠ — locator provenance 2/3: the local the locator was bound to (2026-07-29)
 
 Backported to the released **0.23** line; `specVersion` unchanged.

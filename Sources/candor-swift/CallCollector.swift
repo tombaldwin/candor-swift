@@ -478,6 +478,78 @@ final class CallCollector: SyntaxVisitor {
         propWrites = s.propWrites
     }
 
+    // ── PROCESS COMMAND PROVENANCE ──────────────────────────────────────────────────────────────────
+    // `Process()` takes NO command: the program is named by a PROPERTY WRITE (`p.launchPath = "/bin/sh"`,
+    // `p.executableURL = URL(fileURLWithPath: …)`) and executed later by `p.run()`/`p.launch()`, which take
+    // no argument at all. The direct-argument rule therefore saw no literal anywhere on the Foundation
+    // subprocess surface, so EVERY `Process` form yielded no `cmds` — `allow Exec` failed closed over all
+    // of it, and the `classifyCommandHead` cliff refinement (a visible `curl` reaching Net) never fired.
+    // These two maps carry the write forward to the launching verb. Like `movedNames`/`propWrites` they are
+    // the RECORD of what happened to a name, not a per-binding fact a rebind invalidates — nothing clears
+    // them, and `execLocatorInvisible` in particular must survive, because it is what suppresses a claim.
+    private var execLocatorOfLocal: [String: Set<String>] = [:]  // name → the literal programs written to it
+    private var execLocatorInvisible: Set<String> = []           // name → some write was NOT statically known
+
+    /// The same idea for a `Process` handle: writes that configure the child WITHOUT changing which program
+    /// is executed. `arguments` is inert BY THE FAMILY'S RULE — the Exec surface is argv[0], the HEAD, and a
+    /// literal `"curl"` in `arguments` must not refine the cliff (conformance `exec_dyn_head`).
+    private static let PROCESS_INERT_WRITES: Set<String> = [
+        "arguments", "environment", "currentDirectoryPath", "currentDirectoryURL",
+        "standardInput", "standardOutput", "standardError", "qualityOfService", "terminationHandler",
+    ]
+    /// The two spellings that DO name the program a `Process` will execute.
+    private static let PROCESS_LOCATOR_WRITES: Set<String> = ["launchPath", "executableURL"]
+
+    /// `p.launchPath = <expr>` / `p.executableURL = <expr>` on a bare local. Records the literal, or the
+    /// fact that there was a write we could not read — which is the half that keeps the gate closed.
+    private func recordProcessLocatorWrite(_ elems: [ExprSyntax]) {
+        for i in 1..<max(elems.count, 1) where elems[i].is(AssignmentExprSyntax.self) && i + 1 < elems.count {
+            guard let ma = Self.peel(elems[i - 1]).as(MemberAccessExprSyntax.self),
+                  Self.PROCESS_LOCATOR_WRITES.contains(ma.declName.baseName.text),
+                  let base = ma.base,
+                  let dr = Self.peel(base).as(DeclReferenceExprSyntax.self) else { continue }
+            let name = dr.baseName.text
+            // THE RHS IS THE WHOLE REMAINDER, not the next element. A `SequenceExpr` is FLAT: the parser
+            // gives `p.launchPath = "/usr/bin/" + tool` as [lhs, =, "/usr/bin/", +, tool], so reading
+            // `elems[i + 1]` yields the literal `"/usr/bin/"` and reports THAT as the program — a
+            // fabricated command that `allow Exec /usr/bin/` would then have certified for an entirely
+            // runtime program. Found by the A/B, on a negative control in the corpus, after 25 fixtures
+            // had passed. Re-wrapping the remainder hands `resolveConstString` the concatenation it
+            // already knows how to refuse (or resolve, when the head is a genuine const).
+            let tail = Array(elems[(i + 1)...])
+            let rhs: ExprSyntax = tail.count == 1
+                ? tail[0]
+                : ExprSyntax(SequenceExprSyntax(elements: ExprListSyntax(tail)))
+            // `resolveConstString` carries the mechanism-1 ctor unwrap, so `URL(fileURLWithPath: "/bin/sh")`
+            // and a const-anchored `let tool = "/bin/sh"` both resolve here through one resolver.
+            if let lit = plainStringLiteralValue(rhs) ?? resolveConstString(rhs) {
+                execLocatorOfLocal[name, default: []].insert(decodeEscapes(lit))
+            } else {
+                execLocatorInvisible.insert(name)
+            }
+        }
+    }
+
+    /// The launching verb on a `Process` LOCAL. Either the program is statically known — in which case the
+    /// command surface is recorded and `allow Exec <list>` can certify it — or it is not, and `Exec` is
+    /// marked INCOMPLETE. That second branch is not optional: without it, a function that spawns one
+    /// visible `/bin/sh` and one runtime program would have its visible literal MASK the invisible one and
+    /// certify under an `allow` that should have failed closed (the AS-EFF-008 gate-evasion). Marking it
+    /// changes nothing for the all-invisible case the engine shipped with — an empty surface already fails.
+    private func recordProcessRun(receiver: ExprSyntax?) {
+        guard let recv = receiver, let dr = Self.peel(recv).as(DeclReferenceExprSyntax.self) else {
+            incompleteSurfaces.insert("Exec"); return          // a field/computed handle — not tracked here
+        }
+        let name = dr.baseName.text
+        let inert = Self.PROCESS_INERT_WRITES.union(Self.PROCESS_LOCATOR_WRITES)
+        let literals = execLocatorOfLocal[name] ?? []
+        guard !literals.isEmpty, !execLocatorInvisible.contains(name),
+              locatorNameIsStable(name, inert: inert) else {
+            incompleteSurfaces.insert("Exec"); return
+        }
+        for lit in literals { recordSurfaces(effect: "Exec", lit: lit) }
+    }
+
     // The PLAIN string-literal value of an expression (no interpolation), else nil. Same pure-segment
     // discipline as firstStringLiteral; used to record a LOCAL `let NAME = "literal"` const.
     private func plainStringLiteralValue(_ raw: ExprSyntax) -> String? {
@@ -1317,6 +1389,12 @@ final class CallCollector: SyntaxVisitor {
                 // locator: capture all literals, mark Fs incomplete if any locator is non-literal.
                 if eff == "Fs", rt == "FileManager", recordTwoPathFs(member: member, node.arguments) {
                     // handled — surfaces + incompleteness recorded per-locator
+                } else if rt == "Process", ["run", "launch"].contains(member) {
+                    // The LAUNCHING verb on a Process handle. Its command was fixed by an earlier property
+                    // write, not by an argument here, so the locator comes from `execLocatorOfLocal` —
+                    // or the surface is marked incomplete. The other PROCESS_MEMBERS (waitUntilExit,
+                    // terminate, interrupt) are teardown/wait: they name no program and are left alone.
+                    recordProcessRun(receiver: ma.base)
                 } else {
                     let est = isEstablishingMember(effect: eff, root: rt, member: member)
                     recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
@@ -1468,6 +1546,7 @@ final class CallCollector: SyntaxVisitor {
     // a typed `Type.op` call and an unqualified free-operator call.
     override func visit(_ node: SequenceExprSyntax) -> SyntaxVisitorContinueKind {
         let elems = Array(node.elements)
+        recordProcessLocatorWrite(elems)
         var i = 0
         while i + 2 < elems.count + 1 && i + 1 < elems.count {
             guard let op = elems[i + 1].as(BinaryOperatorExprSyntax.self) else { i += 1; continue }

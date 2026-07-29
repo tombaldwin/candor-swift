@@ -335,4 +335,233 @@ final class NetLocatorProvenanceProcessTests: XCTestCase {
         XCTAssertEqual(hosts(by, "drain"), [], "a loop-carried rebind invalidates the binding for the whole body")
         XCTAssertEqual(by["drain"]?["netClass"] as? [String], ["unknown-host"])
     }
+
+    // ────────────────────────────────────────────────────────────────────────────────────────────────
+    // MECHANISM 3 — PROPERTY-ASSIGNMENT PROVENANCE. `p.launchPath = "/bin/sh"` then `p.run()`.
+    // ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// THE MIRROR, FIRST. A runtime command must stay UNCERTIFIABLE: `allow Exec` fails closed, because a
+    /// certified `allow` over an invisible command is precisely the gate-evasion AS-EFF-008 exists to stop.
+    func testFailClosedRuntimeLaunchPathStaysUncertifiable() throws {
+        let src = """
+        import Foundation
+        func spawn(cmd: String) throws {
+            let p = Process()
+            p.launchPath = cmd
+            try p.run()
+        }
+        try? spawn(cmd: "/bin/ls")
+        """
+        let by = try scan(src)
+        XCTAssertEqual(cmds(by, "spawn"), [], "a parameter command yields NO cmd — never fabricate")
+        let r = try gate(src, policy: "allow Exec /bin/sh")
+        XCTAssertEqual(r.code, 1, "an invisible command cannot be certified — stdout: \(r.out)")
+    }
+
+    /// The mirror's second form: a `var` Process handle rebound between the write and the run.
+    func testFailClosedRebindProcessHandleStaysUncertifiable() throws {
+        let by = try scan("""
+        import Foundation
+        func spawn(other: Process) throws {
+            var p = Process()
+            p.launchPath = "/bin/sh"
+            p = other
+            try p.run()
+        }
+        """)
+        XCTAssertEqual(cmds(by, "spawn"), [],
+                       "the handle was rebound — the earlier write does not describe what runs")
+    }
+
+    /// THE GAIN. `launchPath` (the legacy spelling) then `run()`.
+    func testLaunchPathExtractsCmd() throws {
+        let src = """
+        import Foundation
+        func spawn() throws {
+            let p = Process()
+            p.launchPath = "/bin/sh"
+            p.arguments = ["-c", "echo hi"]
+            try p.run()
+        }
+        try? spawn()
+        """
+        let by = try scan(src)
+        XCTAssertEqual(cmds(by, "spawn"), ["/bin/sh"])
+        let r = try gate(src, policy: "allow Exec /bin/sh")
+        XCTAssertEqual(r.code, 0, "a visible command certifies — stdout: \(r.out) stderr: \(r.err)")
+    }
+
+    /// `executableURL` (the modern spelling) — the locator arrives through the mechanism-1 ctor unwrap.
+    func testExecutableURLExtractsCmd() throws {
+        let by = try scan("""
+        import Foundation
+        func spawn() throws {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            try p.run()
+        }
+        try? spawn()
+        """)
+        XCTAssertEqual(cmds(by, "spawn"), ["/usr/bin/env"])
+    }
+
+    /// The command-head refinement rides along: a visible `curl` reaches Net, exactly as it does for the
+    /// already-supported `posix_spawn("curl …")` form (`classifyCommandHead`).
+    func testCommandHeadRefinementFollows() throws {
+        let by = try scan("""
+        import Foundation
+        func spawn() throws {
+            let p = Process()
+            p.launchPath = "/usr/bin/curl"
+            try p.run()
+        }
+        try? spawn()
+        """)
+        XCTAssertTrue((ProcessHarness.inferred(by, "spawn") ?? []).contains("Net"),
+                      "a visible curl head refines Exec with Net")
+    }
+
+    /// …and the mirror of the certification: the SAME `allow Exec` must REJECT a command outside its list.
+    func testAllowExecRejectsUnlistedCommand() throws {
+        let r = try gate("""
+        import Foundation
+        func spawn() throws {
+            let p = Process()
+            p.launchPath = "/bin/rm"
+            try p.run()
+        }
+        try? spawn()
+        """, policy: "allow Exec /bin/sh")
+        XCTAssertEqual(r.code, 1, "a visible but unlisted command is a violation — stdout: \(r.out)")
+    }
+
+    /// THE MASKING MIRROR — the reason the launching verb marks `Exec` INCOMPLETE when it cannot read the
+    /// program. Before this mechanism the surface was always empty and `allow Exec` failed closed by
+    /// accident; the moment a literal can be captured, a benign visible `/bin/sh` would otherwise COVER
+    /// for the runtime program spawned beside it and certify the whole function. That is the AS-EFF-008
+    /// gate-evasion, and it is the specific way this work could have made the gate quieter.
+    func testFailClosedVisibleCommandCannotMaskAnInvisibleOne() throws {
+        let src = """
+        import Foundation
+        func spawn(cmd: String) throws {
+            let a = Process()
+            a.launchPath = "/bin/sh"
+            try a.run()
+            let b = Process()
+            b.launchPath = cmd
+            try b.run()
+        }
+        try? spawn(cmd: "/bin/ls")
+        """
+        let by = try scan(src)
+        XCTAssertEqual(cmds(by, "spawn"), ["/bin/sh"], "the visible half is still reported")
+        let r = try gate(src, policy: "allow Exec /bin/sh")
+        XCTAssertEqual(r.code, 1, "the invisible sibling cannot be masked by the visible literal")
+        XCTAssertTrue(r.out.contains("structurally-invisible") || r.err.contains("structurally-invisible"),
+                      "the masking case has its own AS-EFF-008 wording — got: \(r.out)")
+    }
+
+    /// …and the TRANSITIVE form: the invisible spawn sits in a callee. Incompleteness propagates the same
+    /// way the literal surface does, so the caller cannot be certified either.
+    func testFailClosedInvisibleCommandInCalleeBlocksCallerCertification() throws {
+        let r = try gate("""
+        import Foundation
+        func hidden(cmd: String) throws {
+            let p = Process()
+            p.launchPath = cmd
+            try p.run()
+        }
+        func caller(cmd: String) throws {
+            let p = Process()
+            p.launchPath = "/bin/sh"
+            try p.run()
+            try hidden(cmd: cmd)
+        }
+        try? caller(cmd: "/bin/ls")
+        """, policy: "allow Exec /bin/sh")
+        XCTAssertEqual(r.code, 1, "the callee's invisible command reaches the caller — stdout: \(r.out)")
+    }
+
+    /// Two literal writes to the same handle over-approximate to BOTH programs — the union is the sound
+    /// direction, and neither is dropped in favour of the other.
+    func testTwoLiteralWritesRecordBothCommands() throws {
+        let by = try scan("""
+        import Foundation
+        func spawn(useShell: Bool) throws {
+            let p = Process()
+            if useShell { p.launchPath = "/bin/sh" } else { p.launchPath = "/bin/zsh" }
+            try p.run()
+        }
+        try? spawn(useShell: true)
+        """)
+        XCTAssertEqual(cmds(by, "spawn"), ["/bin/sh", "/bin/zsh"])
+    }
+
+    /// THE FIXTURE THE A/B WROTE. A `SequenceExpr` is FLAT — the parser gives `p.launchPath = "/usr/bin/"
+    /// + tool` as [lhs, =, "/usr/bin/", +, tool] — so reading the element after the `=` yielded the literal
+    /// `"/usr/bin/"` and reported it as the program. `allow Exec /usr/bin/` would then have certified an
+    /// entirely runtime command. Twenty-five fixtures passed through that; a negative control in the
+    /// corpus A/B caught it. The concatenation must resolve to NOTHING.
+    func testFailClosedConcatenatedLaunchPathClaimsNoCommand() throws {
+        let src = """
+        import Foundation
+        func spawn(tool: String) throws {
+            let p = Process()
+            p.launchPath = "/usr/bin/" + tool
+            try p.run()
+        }
+        try? spawn(tool: "git")
+        """
+        let by = try scan(src)
+        XCTAssertEqual(cmds(by, "spawn"), [], "a runtime-completed path names no program")
+        let r = try gate(src, policy: "allow Exec /usr/bin/")
+        XCTAssertEqual(r.code, 1, "the literal PREFIX must not certify the whole command — stdout: \(r.out)")
+    }
+
+    /// The same shape with a genuine const head DOES resolve — the refusal above is about the runtime
+    /// tail, not about concatenation as such.
+    func testConstAnchoredConcatenatedLaunchPathExtractsCmd() throws {
+        let by = try scan("""
+        import Foundation
+        let binDir = "/usr/bin"
+        func spawn() throws {
+            let p = Process()
+            p.launchPath = binDir + "/git"
+            try p.run()
+        }
+        try? spawn()
+        """)
+        XCTAssertEqual(cmds(by, "spawn"), ["/usr/bin/git"])
+    }
+
+    /// The interpolated sibling of the same hazard.
+    func testFailClosedInterpolatedLaunchPathClaimsNoCommand() throws {
+        let by = try scan("""
+        import Foundation
+        func spawn(tool: String) throws {
+            let p = Process()
+            p.launchPath = "/usr/bin/\\(tool)"
+            try p.run()
+        }
+        try? spawn(tool: "git")
+        """)
+        XCTAssertEqual(cmds(by, "spawn"), [])
+    }
+
+    /// A `Process` held in a FIELD is not tracked by the local-binder mechanism, and must therefore stay
+    /// fail-closed rather than fall through to a certifiable empty surface.
+    func testFailClosedFieldHeldProcessStaysUncertifiable() throws {
+        let r = try gate("""
+        import Foundation
+        final class Runner {
+            let p = Process()
+            func go() throws {
+                p.launchPath = "/bin/sh"
+                try p.run()
+            }
+        }
+        try? Runner().go()
+        """, policy: "allow Exec /bin/sh")
+        XCTAssertEqual(r.code, 1, "a field-held handle is outside the mechanism — claim nothing")
+    }
 }
