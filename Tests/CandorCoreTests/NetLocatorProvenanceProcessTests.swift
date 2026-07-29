@@ -203,4 +203,136 @@ final class NetLocatorProvenanceProcessTests: XCTestCase {
         """, policy: "deny Net[known-telemetry]")
         XCTAssertEqual(r.code, 0, "an unknown host is not the telemetry class — stdout: \(r.out)")
     }
+
+    // ────────────────────────────────────────────────────────────────────────────────────────────────
+    // MECHANISM 2 — LOCAL-BINDER PROVENANCE. `let u = URL(string: "…")!` then used at the call.
+    // ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// THE MIRROR, FIRST. A `var` is reassignable, so its value at the call site is not the one we saw
+    /// bound — no literal claim (the same discipline the const-string index already applies to strings).
+    func testFailClosedVarURLBinderKeepsUnknownHost() throws {
+        let by = try scan("""
+        import Foundation
+        func send(h: String) {
+            var u = URL(string: "https://api.segment.io/v1/track")!
+            u = URL(string: h)!
+            let t = URLSession.shared.dataTask(with: u) { _, _, _ in }
+            t.resume()
+        }
+        send(h: "x")
+        """)
+        XCTAssertEqual(hosts(by, "send"), [], "a reassignable binder carries no literal claim")
+        XCTAssertEqual(by["send"]?["netClass"] as? [String], ["unknown-host"])
+    }
+
+    /// The mirror's second form: a `let` bound from a PARAMETER-built URL stays invisible.
+    func testFailClosedLetBoundFromParameterKeepsUnknownHost() throws {
+        let by = try scan("""
+        import Foundation
+        func send(h: String) {
+            let u = URL(string: h)!
+            let t = URLSession.shared.dataTask(with: u) { _, _, _ in }
+            t.resume()
+        }
+        send(h: "x")
+        """)
+        XCTAssertEqual(hosts(by, "send"), [])
+        XCTAssertEqual(by["send"]?["netClass"] as? [String], ["unknown-host"])
+    }
+
+    /// THE GAIN. `let u = URL(string: "…")!` then `dataTask(with: u)`.
+    func testLetBoundURLExtractsHost() throws {
+        let by = try scan("""
+        import Foundation
+        func track() {
+            let u = URL(string: "https://api.segment.io/v1/track")!
+            let t = URLSession.shared.dataTask(with: u) { _, _, _ in }
+            t.resume()
+        }
+        track()
+        """)
+        XCTAssertEqual(hosts(by, "track"), ["api.segment.io"])
+        XCTAssertEqual(by["track"]?["netClass"] as? [String], ["known-telemetry"])
+    }
+
+    /// The const-anchored spelling composes: a `let` URL built from a module const resolves the same way
+    /// the direct-literal Net path already did (PART 4q), now through the ctor.
+    func testConstAnchoredURLBinderExtractsHost() throws {
+        let by = try scan("""
+        import Foundation
+        let apiBase = "https://api.openai.com"
+        func ask() {
+            let u = URL(string: apiBase + "/v1/chat")!
+            let t = URLSession.shared.dataTask(with: u) { _, _, _ in }
+            t.resume()
+        }
+        ask()
+        """)
+        XCTAssertEqual(hosts(by, "ask"), ["api.openai.com"])
+        XCTAssertEqual(ProcessHarness.inferred(by, "ask"), ["Llm", "Net"])
+    }
+
+    /// THE DOMINANT POST IDIOM, and the reason a `var` binder is admitted at all: `URLRequest` cannot be
+    /// configured without mutation. The writes here are all on the inert allowlist, so the locator stands.
+    func testVarRequestBinderWithInertMutationExtractsHost() throws {
+        let by = try scan("""
+        import Foundation
+        func post(body: Data) async throws {
+            var req = URLRequest(url: URL(string: "https://api.segment.io/v1/batch")!)
+            req.httpMethod = "POST"
+            req.httpBody = body
+            req.timeoutInterval = 30
+            _ = try await URLSession.shared.data(for: req)
+        }
+        """)
+        XCTAssertEqual(hosts(by, "post"), ["api.segment.io"])
+        XCTAssertEqual(by["post"]?["netClass"] as? [String], ["known-telemetry"])
+    }
+
+    /// THE MIRROR OF THAT ALLOWLIST. `req.url` is the one write that DOES move the destination — the entry
+    /// must fall back to fail-closed rather than keep naming the host it was built with.
+    func testFailClosedRequestURLRewriteKeepsUnknownHost() throws {
+        let by = try scan("""
+        import Foundation
+        func post(other: URL) async throws {
+            var req = URLRequest(url: URL(string: "https://api.segment.io/v1/batch")!)
+            req.url = other
+            _ = try await URLSession.shared.data(for: req)
+        }
+        """)
+        XCTAssertEqual(hosts(by, "post"), [], "the destination was rewritten — the built host is stale")
+        XCTAssertEqual(by["post"]?["netClass"] as? [String], ["unknown-host"])
+    }
+
+    /// An `inout` pass hands the callee a reference it may write through.
+    func testFailClosedInoutPassKeepsUnknownHost() throws {
+        let by = try scan("""
+        import Foundation
+        func retarget(_ r: inout URLRequest) { r.url = URL(string: "https://evil.example/") }
+        func post() async throws {
+            var req = URLRequest(url: URL(string: "https://api.segment.io/v1/batch")!)
+            retarget(&req)
+            _ = try await URLSession.shared.data(for: req)
+        }
+        """)
+        XCTAssertEqual(hosts(by, "post"), [], "the callee may have moved the locator")
+    }
+
+    /// THE FLOW-INSENSITIVITY MIRROR — the case the pre-pass exists for. The rebind sits AFTER the call in
+    /// the text but BEFORE it in time on the second iteration, so a source-order-only rule would have left a
+    /// literal standing for a request the program never sends to that host.
+    func testFailClosedLoopCarriedRebindKeepsUnknownHost() throws {
+        let by = try scan("""
+        import Foundation
+        func drain(next: [URL]) async throws {
+            var u = URL(string: "https://api.segment.io/v1/batch")!
+            for n in next {
+                _ = try await URLSession.shared.data(from: u)
+                u = n
+            }
+        }
+        """)
+        XCTAssertEqual(hosts(by, "drain"), [], "a loop-carried rebind invalidates the binding for the whole body")
+        XCTAssertEqual(by["drain"]?["netClass"] as? [String], ["unknown-host"])
+    }
 }

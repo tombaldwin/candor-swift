@@ -10,6 +10,58 @@ import CandorCore
 // Pass B — calls per function, with light local type inference
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
+/// The locator-move PRE-PASS (see `CallCollector.prescanLocatorMoves`). A single flow-insensitive sweep of
+/// one function body recording every name whose value can move: `moved` for the name ITSELF (a whole-name
+/// or compound assignment, an `inout` pass), `propWrites` for the property spellings written on it. The
+/// caller decides which spellings are inert for the kind of binder it is holding — this class only reports.
+final class LocatorMoveScanner: SyntaxVisitor {
+    private(set) var moved: Set<String> = []
+    private(set) var propWrites: [String: Set<String>] = [:]
+
+    /// The ROOT identifier of an assignment target, plus the property spelling written on it (nil when the
+    /// bare name itself is the target). A deeper target (`a.b.c = …`) reports its root with the OUTERMOST
+    /// spelling, and `a.b` reaching through an unrecognised property already fails the caller's allowlist.
+    private func record(target: ExprSyntax) {
+        let lhs = CallCollector.peel(target)
+        if let dr = lhs.as(DeclReferenceExprSyntax.self) {
+            moved.insert(dr.baseName.text)
+        } else if let ma = lhs.as(MemberAccessExprSyntax.self), let base = ma.base {
+            let spelling = ma.declName.baseName.text
+            var root = CallCollector.peel(base)
+            // `self.p.launchPath = …` / `a.b.c = …` — walk to the leading identifier.
+            while let inner = root.as(MemberAccessExprSyntax.self), let b = inner.base { root = CallCollector.peel(b) }
+            if let dr = root.as(DeclReferenceExprSyntax.self) {
+                propWrites[dr.baseName.text, default: []].insert(spelling)
+            }
+        } else if let sub = lhs.as(SubscriptCallExprSyntax.self) {
+            // `xs[0] = …` — an element write; treat the container as moved (we cannot say which element).
+            record(target: sub.calledExpression)
+        }
+    }
+
+    override func visit(_ node: SequenceExprSyntax) -> SyntaxVisitorContinueKind {
+        let elems = Array(node.elements)
+        for i in 1..<max(elems.count, 1) {
+            // `x = y` parses as [lhs, AssignmentExpr, rhs]; `x += y` as [lhs, BinaryOperator("+="), rhs].
+            var isAssign = elems[i].is(AssignmentExprSyntax.self)
+            if let op = elems[i].as(BinaryOperatorExprSyntax.self) {
+                let t = op.operator.text
+                isAssign = t.hasSuffix("=") && !["==", "!=", "<=", ">=", "===", "!=="].contains(t)
+            }
+            if isAssign { record(target: elems[i - 1]) }
+        }
+        return .visitChildren
+    }
+
+    /// `f(&p)` — the callee may write through the reference, so the name's value can move.
+    override func visit(_ node: InOutExprSyntax) -> SyntaxVisitorContinueKind {
+        if let dr = CallCollector.peel(node.expression).as(DeclReferenceExprSyntax.self) {
+            moved.insert(dr.baseName.text)
+        }
+        return .visitChildren
+    }
+}
+
 /// One argument's disposition at a call site: a closure literal (its body is already charged to
 /// the passer lexically), a named reference (resolvable to a unit), or opaque.
 enum ArgKind { case closure, named(String), opaque }
@@ -378,6 +430,52 @@ final class CallCollector: SyntaxVisitor {
     // the const-string indexes — a `var`, a runtime/computed value, an unknown name → nil (never guess).
     private func constValue(_ name: String) -> String? {
         localConstStrings[name] ?? moduleConstStrings[name]
+    }
+
+    // ── LOCATOR MOVE PRE-PASS ───────────────────────────────────────────────────────────────────────
+    // Locator provenance is a claim about the value a name holds AT THE CALL, but this walk is flow-
+    // INSENSITIVE: it records a binding when it reaches the declaration and reads it when it reaches the
+    // call, in SOURCE order. A rebind that is later in the text — or earlier in TIME, because the pair sits
+    // in a loop — would leave a stale literal standing and the report would name a destination the program
+    // never contacts. That is the fabrication mirror of the under-report this whole vein closes, so the
+    // claim is not made at all for any name whose value can move ANYWHERE in the body.
+    //
+    // "Can move" is deliberately coarse and computed up front, before a single call is collected: a
+    // whole-name assignment (`p = other`), a compound assignment, an `inout` pass (`&p`), or a property
+    // write. Property writes are then filtered by an ALLOWLIST of spellings proven not to move the
+    // locator — `req.httpMethod = "POST"` is the reason a `var` binder is usable at all, since URLRequest
+    // cannot be configured any other way — and everything unrecognised counts as a move. Allowlist, not
+    // denylist, because the direction here is RELAXING: an unknown property might be `req.url`.
+    //
+    // NOTE for the next reader: `movedNames`/`propWrites` are name-keyed but are NOT per-binding FACTS a
+    // rebind invalidates — they ARE the record that a rebind happened. Clearing either on a rebind would
+    // delete the evidence that suppresses the claim, so a shadow-clearing pass must leave them alone.
+    private var movedNames: Set<String> = []            // the name itself was reassigned / passed inout
+    private var propWrites: [String: Set<String>] = [:] // name → the property spellings written on it
+
+    /// Property writes that provably do NOT move the locator of a `URLRequest`/`URL` binder: they set the
+    /// method, body, headers and caching knobs. `url`/`mainDocumentURL` are POINTEDLY absent.
+    private static let LOCATOR_INERT_WRITES: Set<String> = [
+        "httpMethod", "httpBody", "httpBodyStream", "allHTTPHeaderFields", "cachePolicy",
+        "timeoutInterval", "networkServiceType", "allowsCellularAccess", "allowsExpensiveNetworkAccess",
+        "allowsConstrainedNetworkAccess", "httpShouldHandleCookies", "httpShouldUsePipelining",
+        "assumesHTTP3Capable", "attribution",
+    ]
+
+    /// True when `name` may hold a different value at a use site than at its binding — see `movedNames`.
+    /// `inert` is the spelling allowlist for this binder's kind.
+    private func locatorNameIsStable(_ name: String, inert: Set<String>) -> Bool {
+        if movedNames.contains(name) { return false }
+        return (propWrites[name] ?? []).isSubset(of: inert)
+    }
+
+    /// Walk the body ONCE before collection and fill `movedNames`/`propWrites`. Driven from the Driver so
+    /// the ordering is explicit rather than an accident of which visitor happens to fire first.
+    func prescanLocatorMoves(_ body: some SyntaxProtocol) {
+        let s = LocatorMoveScanner(viewMode: .sourceAccurate)
+        s.walk(body)
+        movedNames = s.moved
+        propWrites = s.propWrites
     }
 
     // The PLAIN string-literal value of an expression (no interpolation), else nil. Same pure-segment
@@ -1664,6 +1762,18 @@ final class CallCollector: SyntaxVisitor {
             if node.bindingSpecifier.text == "let", binding.accessorBlock == nil,
                let v0 = binding.initializer?.value, let sv = plainStringLiteralValue(v0) {
                 localConstStrings[name] = sv
+            } else if binding.accessorBlock == nil, let v0 = binding.initializer?.value,
+                      let loc = locatorCtorLiteral(v0),
+                      locatorNameIsStable(name, inert: Self.LOCATOR_INERT_WRITES) {
+                // LOCATOR-BINDER PROVENANCE — `let u = URL(string: "…")!`, `var req = URLRequest(url: u)`.
+                // The literal travels through the SAME const-string index the direct form uses, so the host
+                // refinement, the ⟨0.13⟩ `Llm` classification and the privacy manifest all follow with no
+                // second resolver. Unlike a plain string const this admits `var`: `URLRequest` cannot be
+                // configured without mutation, so `var req = …; req.httpMethod = "POST"` IS the idiom. The
+                // `var` is safe here and not for strings because `locatorNameIsStable` has already proved —
+                // over the WHOLE body, before any call was collected — that nothing reassigns the name and
+                // that every property written on it is on the inert allowlist.
+                localConstStrings[name] = loc
             } else {
                 localConstStrings.removeValue(forKey: name)
             }

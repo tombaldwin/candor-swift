@@ -17,6 +17,35 @@ The per-function analysis loop rebuilt `Set(freeFnByName.keys)` at every `CallCo
 single build before the loop → flat ~0.05 ms/function, **8.4× faster at 10k functions**. Report output
 verified byte-for-byte identical (this is a loop-invariant hoist, not a semantic change); `swift test` green.
 
+### fixed ⚠ — locator provenance 2/3: the local the locator was bound to (2026-07-29)
+
+Backported to the released **0.23** line; `specVersion` unchanged.
+
+`let u = URL(string: "…")!` then `dataTask(with: u)`, and the POST idiom `var req = URLRequest(url: …);
+req.httpMethod = "POST"`. rust/java/ts all extract from a local binding as well as from an inline literal.
+The literal travels through the same const-string index the direct form uses, so `Llm`, `netClass` and the
+privacy manifest follow with no second resolver.
+
+Admitting `var` — which the `URLRequest` idiom forces — needs a claim the walk could not previously make.
+The walk is flow-INSENSITIVE: it records a binding at the declaration and reads it at the call, in SOURCE
+order. A rebind later in the text, or earlier in TIME because the pair sits in a loop, would leave a stale
+literal standing and the report would name a destination the program never contacts — the fabrication
+mirror of the under-report this vein closes. So a **pre-pass** now sweeps the whole body before a single
+call is collected and records every name whose value can move: a whole-name or compound assignment, an
+`inout` pass, or a property write outside an allowlist of spellings proven not to move the locator
+(`httpMethod`/`httpBody`/headers/caching — `url` pointedly absent). A moved name carries no claim at
+EVERY use, including one lexically earlier than the move.
+
+Six fail-closed mirrors (`var` rebind, parameter-built `let`, `req.url` rewrite, `inout` pass,
+loop-carried rebind, and the mechanism-1 controls) were written first and PASSED against the unmodified
+build; the three gain fixtures FAILED against it.
+
+Measured A/B on this branch (4 corpora, 8 668 functions): **4 hosts gained, 4 `unknown-host` →
+`known-telemetry`/`known-partner`, 1 `Llm` classified** — and **zero effect sets shrank, zero
+hosts/cmds/paths lost, zero report entries dropped.** All seven Net negative controls in the app target
+(parameter host, interpolated authority, `relativeTo:`, ternary, rebind, loop-carried rebind, runtime
+concatenation) held `netClass: ["unknown-host"]` with no host.
+
 ### fixed ⚠ — locator provenance 1/3: the constructor between the literal and the call (2026-07-29)
 
 Backported to the released **0.23** line. `specVersion` is unchanged — this is a soundness fix inside the
