@@ -577,6 +577,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                } ?? [],
                                opaqueSeqBuilders: opaqueSeqBuilders, seqBuilderConcrete: seqBuilderConcrete,
                                closureFields: closureFields, moduleConstStrings: globalConstStrings)
+        // The locator-move set is flow-INSENSITIVE and must be complete before the first call is collected
+        // (a rebind later in the text, or earlier in time inside a loop, still invalidates the claim).
+        cc.prescanLocatorMoves(body)
         cc.walk(body)
         // accessor units: a property READ/WRITE of a known accessor unit is an edge (the reader inherits
         // the getter/observer/subscript's effects — `c.data` reaching the Fs inside `var data: Data { … }`).

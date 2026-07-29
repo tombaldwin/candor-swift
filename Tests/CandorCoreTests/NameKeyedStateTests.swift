@@ -117,6 +117,21 @@ final class NameKeyedStateTests: XCTestCase {
             + "read after the block (swift-syntax `IfConfigDiagnostic.asDiagnostic`), and scoping "
             + "`boundLocals` instead un-shadows the Driver's post-walk guard. Both measured; see "
             + "`EnumPayloadBindingProcessTests`."),
+        // ── the locator-move PRE-PASS: kept, and kept for the OPPOSITE reason to the two hedges above
+        "movedNames": .deliberatelyKept(
+            "the flow-insensitive move set behind locator provenance, computed over the WHOLE body "
+            + "BEFORE any call is collected. Every other row here asks what a rebind does to a fact; "
+            + "this map IS the record that a rebind happened, so clearing it on one would delete the "
+            + "evidence that suppresses the claim and leave a stale host/command literal standing — a "
+            + "FABRICATION, the mirror of the silence the other hedges guard. It is not per-binding at "
+            + "all: a name in it is refused for the whole unit, deliberately, including at a use that "
+            + "is lexically EARLIER than the move (the loop-carried rebind case)."),
+        "propWrites": .deliberatelyKept(
+            "the companion of `movedNames` — the property spellings written on each name, judged at the "
+            + "point of use against a per-binder-kind inert allowlist. Same argument for keeping it: it "
+            + "records that `req.url` (or `p.launchPath`) was assigned, and dropping that on a rebind "
+            + "would re-admit exactly the locator the write moved. Body-wide by construction, and never "
+            + "consulted to resolve a name to a binding — only to REFUSE a literal claim about one."),
         // ── known defective, measured and filed rather than patched
         "boundLocals": .knownDefect(
             "written by only 2 of the ~7 binder forms. The ENUM-CASE payload forms are now covered by "

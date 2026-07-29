@@ -9,6 +9,33 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed ⚠ — locator provenance 2/3: the local the locator was bound to (2026-07-29)
+
+The other half of the URLSession surface: `let u = URL(string: "…")!` then `dataTask(with: u)`, and the
+POST idiom `var req = URLRequest(url: …); req.httpMethod = "POST"`. rust/java/ts all extract from a local
+binding as well as from an inline literal. The literal now travels through the SAME const-string index the
+direct form uses, so the host refinement, the ⟨0.13⟩ `Llm` classification and the privacy manifest follow
+without a second resolver.
+
+Admitting `var` — which the `URLRequest` idiom forces, since a request cannot be configured any other way —
+needs a claim the walk could not previously make, because the walk is flow-INSENSITIVE: it records a
+binding at the declaration and reads it at the call, in SOURCE order. A rebind later in the text (or
+earlier in TIME, because the pair sits in a loop) would leave a stale literal standing and the report would
+name a destination the program never contacts. So a **pre-pass** now sweeps the whole body before a single
+call is collected and records every name whose value can move: a whole-name or compound assignment, an
+`inout` pass, or a property write outside an allowlist of spellings proven not to move the locator
+(`httpMethod`/`httpBody`/headers/caching — `url` pointedly absent). A moved name carries no claim at all,
+at EVERY use, including one lexically earlier than the move.
+
+The two pre-pass maps are classified in `NameKeyedStateTests` as `deliberatelyKept`, and for the opposite
+reason to the hedges beside them: every other row there asks what a rebind does to a fact, while these ARE
+the record that a rebind happened — clearing one on a rebind would delete the evidence that suppresses the
+claim and leave a fabricated host standing.
+
+Measured A/B (4 corpora): +1 host, +1 `Llm` classification, +1 `unknown-host` → `known-partner`, zero
+losses of any kind. Cumulative for 1+2: **13 hosts gained, 3 destination classes named, 0 effect sets
+shrank, 0 literals lost, 0 entries dropped.**
+
 ### fixed ⚠ — locator provenance 1/3: the constructor between the literal and the call (2026-07-29)
 
 swift captured a Net host only when the literal was a DIRECT string argument of the establishing call —
