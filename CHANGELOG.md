@@ -55,7 +55,7 @@ the element after the `=` yielded the literal `"/usr/bin/"` and reported *that* 
 control written into the corpus, not in a unit fixture; the remainder is now re-wrapped and handed to the
 resolver that already knows how to refuse it. Three fixtures were added from that one finding.
 
-Measured A/B (4 corpora, 8 568 functions): **13 commands gained** — `/usr/bin/iconutil` in pollen's icon
+Measured A/B (4 corpora, 8 568 functions): **12 functions gained a command surface** — `/usr/bin/iconutil` in pollen's icon
 tool, `/bin/sh` across candor's own soundness fixtures, `/usr/bin/git`/`curl`/`iconutil` in the app target —
 `+1 Net` from a command-head refinement, and **zero losses of any kind**. swift-syntax's `ProcessRunner`
 (`process.executableURL = executableURL`, a parameter) correctly gained nothing: a real-world negative
