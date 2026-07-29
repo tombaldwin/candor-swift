@@ -60,6 +60,34 @@ final class LocatorMoveScanner: SyntaxVisitor {
         }
         return .visitChildren
     }
+
+    // ── BINDER SITES, one count per name ────────────────────────────────────────────────────────
+    // A name bound TWICE in one body is not a name a body-wide literal claim can be made about: the
+    // claim is keyed by NAME, and the second binder is a DIFFERENT binding that happens to spell
+    // itself the same way. `moved` is the same conservatism for the same reason one step along — it
+    // refuses a name whose value can be reassigned — and a SHADOW is not a reassignment, so nothing
+    // in `moved` records it. Counted here, in the pre-pass, so the refusal is body-wide and does not
+    // depend on where in the walk the shadow happens to sit relative to the use.
+    private(set) var binderCounts: [String: Int] = [:]
+    private func countBinder(_ name: String) { binderCounts[name, default: 0] += 1 }
+
+    /// `IdentifierPatternSyntax` is where the language puts every PATTERN binding — `let`/`var`
+    /// declarations, `for`-in patterns, `case`/`if case`/`guard case` patterns, `catch` patterns,
+    /// and optional bindings. Parameters are TOKENS rather than patterns, so the three overrides
+    /// below cover the closure/nested-function forms; the ENCLOSING function's own parameters are
+    /// not in its body at all and are handed in separately (see `prescanLocatorMoves`).
+    override func visit(_ node: IdentifierPatternSyntax) -> SyntaxVisitorContinueKind {
+        countBinder(node.identifier.text); return .visitChildren
+    }
+    override func visit(_ node: ClosureParameterSyntax) -> SyntaxVisitorContinueKind {
+        countBinder((node.secondName ?? node.firstName).text); return .visitChildren
+    }
+    override func visit(_ node: ClosureShorthandParameterSyntax) -> SyntaxVisitorContinueKind {
+        countBinder(node.name.text); return .visitChildren
+    }
+    override func visit(_ node: FunctionParameterSyntax) -> SyntaxVisitorContinueKind {
+        countBinder((node.secondName ?? node.firstName).text); return .visitChildren
+    }
 }
 
 /// One argument's disposition at a call site: a closure literal (its body is already charged to
@@ -660,13 +688,21 @@ final class CallCollector: SyntaxVisitor {
         return (propWrites[name] ?? []).isSubset(of: inert)
     }
 
+    /// Names bound MORE THAN ONCE in this unit — counting the function's own parameters as binders.
+    /// A body-wide, name-keyed literal claim about such a name is a claim about two bindings at once,
+    /// so it is not made at all (see `LocatorMoveScanner.binderCounts` and `recordProcessRun`).
+    private var multiplyBoundNames: Set<String> = []
+
     /// Walk the body ONCE before collection and fill `movedNames`/`propWrites`. Driven from the Driver so
     /// the ordering is explicit rather than an accident of which visitor happens to fire first.
-    func prescanLocatorMoves(_ body: some SyntaxProtocol) {
+    /// `params` are the ENCLOSING function's parameter names: they are binders that are not IN the body,
+    /// and a body binder that shadows one is exactly the shape this refuses.
+    func prescanLocatorMoves(_ body: some SyntaxProtocol, params: Set<String> = []) {
         let s = LocatorMoveScanner(viewMode: .sourceAccurate)
         s.walk(body)
         movedNames = s.moved
         propWrites = s.propWrites
+        multiplyBoundNames = Set(s.binderCounts.filter { $0.value + (params.contains($0.key) ? 1 : 0) > 1 }.keys)
     }
 
     // ── PROCESS COMMAND PROVENANCE ──────────────────────────────────────────────────────────────────
@@ -676,6 +712,24 @@ final class CallCollector: SyntaxVisitor {
     // subprocess surface, so EVERY `Process` form yielded no `cmds` — `allow Exec` failed closed over all
     // of it, and the `classifyCommandHead` cliff refinement (a visible `curl` reaching Net) never fired.
     // These two maps carry the write forward to the launching verb.
+    //
+    // BOTH ARE BODY-WIDE AND NAME-KEYED, AND NEITHER IS IN `ShadowSave` — which is correct for the
+    // second (a refusal must survive its scope) and was a FABRICATION in the first. A `let p` inside a
+    // block that SHADOWS an outer handle wrote its literal under the outer name, and the outer
+    // `p.launch()` below the block then reported a program that handle was never given:
+    //
+    //     func f(make: () -> Process) {
+    //         let p = make()                                        // locator unknown, never written here
+    //         if true { let p = Process(); p.launchPath = "/bin/x" } // a DIFFERENT binding
+    //         p.launch()                                            // reported cmds: ["/bin/x"]
+    //     }
+    //
+    // `movedNames` does not cover it, because a shadow is not a rebind — nothing assigns to the outer
+    // `p`, so there is nothing for the move pre-pass to record. `execLocatorInvisible` does not cover it
+    // either: the outer handle takes no write at all here, so no refusal is ever raised. The gate is the
+    // binder COUNT (`multiplyBoundNames`) — a name with two binder sites in one unit is not a name a
+    // body-wide claim can be made about — and it lives at the READ (`recordProcessRun`) rather than at
+    // the write, so the suppressing half stays monotone.
     private var execLocatorOfLocal: [String: Set<String>] = [:]  // name → the literal programs written to it
     private var execLocatorInvisible: Set<String> = []           // name → some write was NOT statically known
 
@@ -722,7 +776,12 @@ final class CallCollector: SyntaxVisitor {
         let name = dr.baseName.text
         let inert = Self.PROCESS_INERT_WRITES.union(Self.PROCESS_LOCATOR_WRITES)
         let literals = execLocatorOfLocal[name] ?? []
+        // `multiplyBoundNames` is the SHADOW half of the refusal (see `execLocatorOfLocal`): two binder
+        // sites for one name means the literal under it was written about a binding that may not be the
+        // one being launched here. Refusing empties the surface, which `allow Exec` reads as incomplete —
+        // the same direction the two guards beside it fail in.
         guard !literals.isEmpty, !execLocatorInvisible.contains(name),
+              !multiplyBoundNames.contains(name),
               locatorNameIsStable(name, inert: inert) else {
             incompleteSurfaces.insert("Exec"); return
         }

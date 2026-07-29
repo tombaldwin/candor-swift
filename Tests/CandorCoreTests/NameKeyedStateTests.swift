@@ -134,17 +134,31 @@ final class NameKeyedStateTests: XCTestCase {
             + "consulted to resolve a name to a binding — only to REFUSE a literal claim about one."),
         "execLocatorOfLocal": .deliberatelyKept(
             "the program a `Process` LOCAL was told to execute (`p.launchPath = \"/bin/sh\"`), carried to "
-            + "the launching verb, which takes no argument and so has no other source for it. Kept for the "
-            + "`movedNames` reason and read through it: a rebind of the handle is already recorded there "
-            + "and `recordProcessRun` consults it, so clearing this map on a rebind would only lose the "
-            + "literal while the refusal stands — belt and braces in the WRONG direction, since the "
-            + "refusal is what has to survive, not the value."),
+            + "the launching verb, which takes no argument and so has no other source for it. Kept — and "
+            + "THE ARGUMENT FOR KEEPING IT WAS WRONG IN ITS PREMISE. It read: a rebind of the handle is "
+            + "already recorded in `movedNames` and `recordProcessRun` consults it, so clearing this map "
+            + "would lose the literal while the refusal stands. True of a REBIND, false of a shadow "
+            + "BINDER — nothing assigns to the outer name, so the move pre-pass has nothing to record, "
+            + "and `let p = make(); if true { let p = Process(); p.launchPath = \"/bin/x\" }; p.launch()` "
+            + "reported a program that handle never ran (measured; `allow Exec /bin/x` certified it). The "
+            + "CONCLUSION survives — clearing the value while the refusal stands is the wrong direction — "
+            + "but the shadow needed a gate of its own: `multiplyBoundNames`, consulted at the READ."),
         "execLocatorInvisible": .deliberatelyKept(
             "the half that keeps the Exec gate closed: a `launchPath`/`executableURL` write whose value "
             + "could NOT be read statically. Clearing it on a rebind would let a benign visible literal "
             + "certify an `allow Exec` for a function that also spawns a runtime program — the AS-EFF-008 "
             + "masking evasion, and the precise way this mechanism could have made the gate quieter. It "
             + "is monotone by construction: an entry is only ever ADDED, and never for a name."),
+        "multiplyBoundNames": .deliberatelyKept(
+            "names with more than ONE binder site in this unit, the function's own parameters counted as "
+            + "binders. Computed in the locator PRE-PASS, so — like `movedNames` — it is not a fact about "
+            + "a binding but the record that the NAME is ambiguous across the body, and clearing it on a "
+            + "rebind would delete the refusal it exists to raise. It is the SHADOW half of what "
+            + "`movedNames` does for reassignment: `let p = make(); if true { let p = Process(); "
+            + "p.launchPath = \"/bin/x\" }; p.launch()` moves nothing, so the move set is empty and the "
+            + "second binder's literal stood under the outer name. Refusing costs precision on a name "
+            + "reused by two disjoint bindings (both surfaces are dropped, which reads as an incomplete "
+            + "surface — the closed direction) and that is the trade the fabrication is worth."),
         // ── known defective, measured and filed rather than patched
         "boundLocals": .knownDefect(
             "written by only 2 of the ~7 binder forms. The ENUM-CASE payload forms are now covered by "

@@ -9,6 +9,36 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed ⚠ — a shadowed `Process` binder named the outer handle's program (2026-07-29)
+
+The exec locator maps are keyed by NAME and body-wide. A `let p` inside a block SHADOWS an outer handle,
+writes its literal under the same key, and the outer `p.launch()` below the block then reported a program
+that handle was never given:
+
+```swift
+func spawn(make: () -> Process) {
+    let p = make()                                          // locator unknown, never written here
+    if true { let p = Process(); p.launchPath = "/bin/x" }  // a DIFFERENT binding
+    p.launch()                                              // reported cmds: ["/bin/x"]
+}
+```
+
+`allow Exec /bin/x` certified that call. Neither existing guard covers it: a shadow is not a reassignment,
+so the move pre-pass records nothing, and the outer handle takes no write at all, so `execLocatorInvisible`
+raises no refusal. The gate is now the binder COUNT — a name with more than one binder site in the unit
+(the function's own parameters counted) is not a name a body-wide literal claim can be made about — and it
+sits at the READ, so the suppressing half stays monotone.
+
+`NameKeyedStateTests.disposition` said this map was safe because "a rebind of the handle is already
+recorded in `movedNames`". True of a rebind, false of a shadow BINDER; the note is corrected in the same
+commit, because the argument for keeping the map was resting on the premise that was wrong.
+
+Measured cost: **zero rows** across pollen, applike, AppTarget, candor-swift and swift-syntax (8.6k
+functions — no host, command, path or effect losses). The one shape it does cost is two DISJOINT bindings
+sharing a name in sibling branches, where the per-function union would have been right — pinned as
+`testKnownCostSiblingScopeHandlesShareANameAndBothAreRefused` so a future scope-aware refinement shows up
+as a deliberate change rather than passing unnoticed.
+
 ### fixed ⚠ — the singleton FIELD had no type, so the call on it was silent-pure (2026-07-29)
 
 Found by the A/B for the locator work, not looked for. A stored property's type came from its ANNOTATION,
