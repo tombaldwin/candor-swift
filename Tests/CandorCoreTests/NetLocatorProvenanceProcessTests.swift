@@ -658,4 +658,191 @@ final class NetLocatorProvenanceProcessTests: XCTestCase {
         XCTAssertEqual(cmds(by, "spawn"), [],
                        "the coarse binder count cannot tell a shadow from a disjoint reuse of the name")
     }
+
+    // ────────────────────────────────────────────────────────────────────────────────────────────────
+    // THE SHADOW BINDER ON THE **HOST** SIDE. `localConstStrings` is keyed by bare NAME too, and an
+    // inner `let u`/`let base` that shadows an outer binding left its literal standing under that name.
+    // The next use of the OUTER binding then claimed the shadow's host — a destination the program does
+    // not contact, and one an `allow`/`deny` host rule matches on.
+    // ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// THE FABRICATION, in its purest form: the outer binding is a runtime value and the inner literal is
+    /// never used at any call at all. `phantom.example.com` is contacted by nothing in this program.
+    func testFailClosedShadowedURLBinderClaimsNoHost() throws {
+        let by = try scan("""
+        import Foundation
+        func send(dyn: URL) {
+            let u = dyn
+            if true {
+                let u = URL(string: "https://phantom.example.com")!
+                _ = u
+            }
+            URLSession.shared.dataTask(with: u) { _, _, _ in }.resume()
+        }
+        send(dyn: URL(string: "https://real.example.com")!)
+        """)
+        XCTAssertEqual(hosts(by, "send"), [], "the shadow's literal is not the outer binding's destination")
+        XCTAssertEqual(by["send"]?["netClass"] as? [String], ["unknown-host"],
+                       "the destination is a runtime value — the gate must stay fail-closed")
+    }
+
+    /// GATE-VISIBLE, which is why it blocks a release: the fabricated host carried a CLASS, so a narrowed
+    /// `deny` fired on a destination the function never contacts (and the mirror — a real telemetry host —
+    /// keeps firing, so this is not a test that passes by the rule going quiet).
+    func testShadowedHostCannotTripANarrowedDeny() throws {
+        let r = try gate("""
+        import Foundation
+        func send(dyn: URL) {
+            let u = dyn
+            if true {
+                let u = URL(string: "https://api.segment.io/v1/track")!
+                _ = u
+            }
+            URLSession.shared.dataTask(with: u) { _, _, _ in }.resume()
+        }
+        send(dyn: URL(string: "https://real.example.com")!)
+        """, policy: "deny Net[known-telemetry]")
+        XCTAssertEqual(r.code, 0,
+                       "a class the function's own destination does not have must not trip the rule — "
+                       + "stdout: \(r.out)")
+    }
+
+    /// Both bindings hold a literal. The OUTER one is genuinely contacted, so refusing costs precision
+    /// here — but naming the inner one, which is what the name-keyed index did, is a fabrication. Pinned
+    /// with the value it now reports so the trade is explicit.
+    func testShadowedLiteralBinderNamesNeitherHost() throws {
+        let by = try scan("""
+        import Foundation
+        func send() {
+            let u = URL(string: "https://realouter.example.com")!
+            if true {
+                let u = URL(string: "https://phantom.example.com")!
+                _ = u
+            }
+            URLSession.shared.dataTask(with: u) { _, _, _ in }.resume()
+        }
+        send()
+        """)
+        XCTAssertEqual(hosts(by, "send"), [],
+                       "must not name the shadow's host; naming only the outer one needs a lexical scope")
+    }
+
+    /// The `URLRequest` form of the same shadow, with inert writes on both bindings.
+    func testFailClosedShadowedRequestBinderClaimsNoHost() throws {
+        let by = try scan("""
+        import Foundation
+        func post(dyn: URLRequest) {
+            var req = dyn
+            req.httpMethod = "GET"
+            if true {
+                var req = URLRequest(url: URL(string: "https://phantom.example.com")!)
+                req.httpMethod = "POST"
+                _ = req
+            }
+            URLSession.shared.dataTask(with: req) { _, _, _ in }.resume()
+        }
+        post(dyn: URLRequest(url: URL(string: "https://real.example.com")!))
+        """)
+        XCTAssertEqual(hosts(by, "post"), [], "the shadow's request is not the one being sent")
+    }
+
+    /// The PLAIN-CONST form, and the one that needs the parameter list: the outer binding is a PARAMETER,
+    /// so the body walk sees exactly one binder site.
+    func testFailClosedShadowedPlainConstClaimsNoHost() throws {
+        let by = try scan("""
+        import Foundation
+        func send(base: String) {
+            if true {
+                let base = "https://phantom.example.com"
+                _ = base
+            }
+            URLSession.shared.dataTask(with: URL(string: base)!) { _, _, _ in }.resume()
+        }
+        send(base: "https://real.example.com")
+        """)
+        XCTAssertEqual(hosts(by, "send"), [], "the shadowed const is not the parameter's value")
+    }
+
+    /// THE SECOND LAYER. Refusing the LOCAL entry is not enough on its own: `constValue` falls back to the
+    /// MODULE const index, so a function shadowing a module-level `let` would have answered with the
+    /// module's literal for a local that holds something else. (This is why the gate is in the reader.)
+    func testFailClosedShadowedConstDoesNotFallBackToTheModuleConst() throws {
+        let by = try scan("""
+        import Foundation
+        let apiBase = "https://moduleconst.example.com"
+        func send(dyn: String) {
+            let apiBase = dyn
+            if true {
+                let apiBase = "https://phantom.example.com"
+                _ = apiBase
+            }
+            URLSession.shared.dataTask(with: URL(string: apiBase)!) { _, _, _ in }.resume()
+        }
+        send(dyn: "https://real.example.com")
+        """)
+        XCTAssertEqual(hosts(by, "send"), [],
+                       "neither the shadow's literal nor the module const it shadows")
+    }
+
+    /// THE POSITIVE CONTROL FOR THAT LAYER — no local binder, so the module const IS the value and this
+    /// reach must survive the refusal.
+    func testModuleConstWithNoLocalBinderStillExtractsHost() throws {
+        let by = try scan("""
+        import Foundation
+        let apiBase = "https://api.openai.com"
+        func ask() {
+            URLSession.shared.dataTask(with: URL(string: apiBase + "/v1/chat")!) { _, _, _ in }.resume()
+        }
+        ask()
+        """)
+        XCTAssertEqual(hosts(by, "ask"), ["api.openai.com"])
+    }
+
+    /// A NESTED binder that is the ONLY binder of its name keeps its host — the refusal is about the name
+    /// being bound twice, not about the binder sitting inside a block (the `if let` idiom is pervasive).
+    func testSingleNestedBinderStillExtractsHost() throws {
+        let by = try scan("""
+        import Foundation
+        func send(flag: Bool) {
+            if flag {
+                let u = URL(string: "https://api.segment.io/v1/track")!
+                URLSession.shared.dataTask(with: u) { _, _, _ in }.resume()
+            }
+        }
+        send(flag: true)
+        """)
+        XCTAssertEqual(hosts(by, "send"), ["api.segment.io"])
+        XCTAssertEqual(by["send"]?["netClass"] as? [String], ["known-telemetry"])
+    }
+
+    /// …and the outer-binder mirror of it: bound once at the top, used inside a block.
+    func testOuterBinderUsedInsideABlockStillExtractsHost() throws {
+        let by = try scan("""
+        import Foundation
+        func send(flag: Bool) {
+            let u = URL(string: "https://api.segment.io/v1/track")!
+            if flag { URLSession.shared.dataTask(with: u) { _, _, _ in }.resume() }
+        }
+        send(flag: true)
+        """)
+        XCTAssertEqual(hosts(by, "send"), ["api.segment.io"])
+    }
+
+    /// THE PRICE ON THE HOST SIDE, pinned like its `cmds` sibling above. A closure parameter that happens
+    /// to reuse the locator's name refuses the OUTER binding's genuine host; `main`'s lexical scope keeps
+    /// it. Measured cost of the whole refusal on real code: zero rows over five packages.
+    func testKnownCostClosureParameterSharingTheNameRefusesTheOuterHost() throws {
+        let by = try scan("""
+        import Foundation
+        func send(xs: [URL]) {
+            let u = URL(string: "https://api.segment.io/v1/track")!
+            xs.forEach { u in _ = u }
+            URLSession.shared.dataTask(with: u) { _, _, _ in }.resume()
+        }
+        send(xs: [])
+        """)
+        XCTAssertEqual(hosts(by, "send"), [],
+                       "the closure parameter is a second binder site — the coarse rule cannot tell it "
+                       + "from a shadow that reaches the call")
+    }
 }

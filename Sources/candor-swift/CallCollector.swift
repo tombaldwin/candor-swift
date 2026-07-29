@@ -456,8 +456,15 @@ final class CallCollector: SyntaxVisitor {
     // CONST-STRING PROPAGATION — the value of a KNOWN string constant named `name` (a local `let` shadows a
     // module/global of the same name), or nil if it is not a resolvable const. Conservative: only names in
     // the const-string indexes — a `var`, a runtime/computed value, an unknown name → nil (never guess).
+    //
+    // THE ONE READER OF `localConstStrings`, WHICH IS WHY THE AMBIGUITY GATE SITS HERE. A name with two
+    // binder sites in this unit is refused at BOTH layers, and the second layer is the one a `removeValue`
+    // at the binder would have missed: dropping the local entry hands the read to `moduleConstStrings`, so
+    // a function that shadows a module-level `let apiBase` would answer with the MODULE's literal for a
+    // local that holds something else entirely.
     private func constValue(_ name: String) -> String? {
-        localConstStrings[name] ?? moduleConstStrings[name]
+        if multiplyBoundNames.contains(name) { return nil }
+        return localConstStrings[name] ?? moduleConstStrings[name]
     }
 
     // ── LOCATOR MOVE PRE-PASS ───────────────────────────────────────────────────────────────────────
@@ -478,6 +485,24 @@ final class CallCollector: SyntaxVisitor {
     // NOTE for the next reader: `movedNames`/`propWrites` are name-keyed but are NOT per-binding FACTS a
     // rebind invalidates — they ARE the record that a rebind happened. Clearing either on a rebind would
     // delete the evidence that suppresses the claim, so a shadow-clearing pass must leave them alone.
+    //
+    // THAT NOTE STATES THE **KEEP** OBLIGATION AND HALF THE PROBLEM. `localConstStrings` is the opposite
+    // kind of map — a per-binding FACT — and it needs the other half: a SCOPE. It is written at a binder
+    // and read at a call, both keyed by bare NAME, so an inner `let u`/`let base` that SHADOWS an outer
+    // binding of the same name left its literal standing under that name, and the next use of the OUTER
+    // binding claimed the shadow's host. Measured on five shapes, `URL`, `URLRequest` and plain-const
+    // alike; `phantomFromInnerShadow`'s host is contacted by nothing in the program.
+    //
+    // A SHADOW IS NOT A REBIND, so none of the machinery above sees it: nothing is assigned, no property
+    // is written, and `movedNames` is empty for the name. Two disciplines can discharge this. One is
+    // lexical — clear the entry at the binder and RESTORE it when the block closes, which is what `main`
+    // does (`enterShadowScope`/`ShadowSave`, five maps, and two of the five joined that save only after
+    // being found leaking on a fixture). The other is REFUSAL, and it is what this line ships: a name with
+    // more than one binder site in the unit is not a name a body-wide claim can be made about, so no claim
+    // is made — the same conservatism `movedNames` applies to a rebind, one binder form along. It costs
+    // precision where the lexical discipline would have kept it (two DISJOINT bindings sharing a name in
+    // sibling branches lose both literals) and it buys the fabrication being closed without a save/restore
+    // pass over the whole binding model on a release branch. Measured cost: zero rows over five packages.
     private var movedNames: Set<String> = []            // the name itself was reassigned / passed inout
     private var propWrites: [String: Set<String>] = [:] // name → the property spellings written on it
 
@@ -492,14 +517,17 @@ final class CallCollector: SyntaxVisitor {
 
     /// True when `name` may hold a different value at a use site than at its binding — see `movedNames`.
     /// `inert` is the spelling allowlist for this binder's kind.
+    ///
+    /// TWO WAYS A NAME CAN FAIL THIS, and only the first is a move: the value was reassigned, or the NAME
+    /// was bound twice and the two bindings are not the same variable at all (`multiplyBoundNames`).
     private func locatorNameIsStable(_ name: String, inert: Set<String>) -> Bool {
-        if movedNames.contains(name) { return false }
+        if movedNames.contains(name) || multiplyBoundNames.contains(name) { return false }
         return (propWrites[name] ?? []).isSubset(of: inert)
     }
 
     /// Names bound MORE THAN ONCE in this unit — counting the function's own parameters as binders.
     /// A body-wide, name-keyed literal claim about such a name is a claim about two bindings at once,
-    /// so it is not made at all (see `LocatorMoveScanner.binderCounts` and `recordProcessRun`).
+    /// so it is not made at all (see `LocatorMoveScanner.binderCounts`, `constValue`, `recordProcessRun`).
     private var multiplyBoundNames: Set<String> = []
 
     /// Walk the body ONCE before collection and fill `movedNames`/`propWrites`. Driven from the Driver so
@@ -1896,7 +1924,12 @@ final class CallCollector: SyntaxVisitor {
             // const-anchored host in the SAME fn body (`let apiBase = "…"; dataTask(with: "\(apiBase)/x")`).
             // ONLY a `let` with a PLAIN string-literal initializer and no accessor block. A `var` of the
             // same name (reassignable) is explicitly EXCLUDED — remove any stale entry so it never resolves.
+            // A MULTIPLY-BOUND name is excluded for the sibling reason: the entry would be keyed by a name
+            // that denotes two bindings. `constValue` refuses it as well — belt and braces, in the safe
+            // direction, because this map has one reader today and the write is the half a future second
+            // reader would inherit.
             if node.bindingSpecifier.text == "let", binding.accessorBlock == nil,
+               !multiplyBoundNames.contains(name),
                let v0 = binding.initializer?.value, let sv = plainStringLiteralValue(v0) {
                 localConstStrings[name] = sv
             } else if binding.accessorBlock == nil, let v0 = binding.initializer?.value,

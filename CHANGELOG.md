@@ -17,10 +17,46 @@ The per-function analysis loop rebuilt `Set(freeFnByName.keys)` at every `CallCo
 single build before the loop → flat ~0.05 ms/function, **8.4× faster at 10k functions**. Report output
 verified byte-for-byte identical (this is a loop-invariant hoist, not a semantic change); `swift test` green.
 
+### fixed ⚠ — a shadowed binder's host leaked to the outer name (RELEASE-BLOCKING, this line only)
+
+`specVersion` unchanged. **Introduced by the backport, not present on `main`**, and found by a
+three-arm behavioural differential (this branch vs `main` vs the `v0.23.0` tag) rather than by any test:
+
+```swift
+func send(dyn: URL) {
+    let u = dyn
+    if true { let u = URL(string: "https://phantom.example.com")!; _ = u }  // a DIFFERENT binding
+    URLSession.shared.dataTask(with: u) { _, _, _ in }.resume()             // reported that host
+}
+```
+
+Five shapes, `URL` / `URLRequest` / plain-const alike, and gate-visible: the fabricated host carries a
+`netClass`, so `deny Net[known-telemetry]` fired on a function whose destination is a runtime value.
+`v0.23.0` reports no host on any of the five — the port introduced the reachability, because it routes
+locator literals through `localConstStrings`, which on `main` is saved and restored per scope by
+`enterShadowScope`/`ShadowSave`, machinery that postdates the tag and is absent here. The pre-existing map
+was leaky and unreachable for host claims until the constructor look-through landed on top of it.
+
+The shadow-scope wave is NOT backported. A shadow is refused instead: a name with more than one binder site
+in the unit — the function's own parameters counted — is not a name a body-wide, name-keyed literal claim
+can be made about, which is the conservatism `movedNames` already applies to a rebind, one binder form
+along. The refusal sits in `locatorNameIsStable` and in `constValue`; the second is load-bearing, because
+dropping only the LOCAL entry hands the read to the module const index, and a function that shadows a
+module-level `let apiBase` would then answer with the module's literal.
+
+The cost is precision where a lexical scope would have kept it, and it is measured, not assumed: **zero
+rows across pollen, applike, AppTarget, candor-swift and swift-syntax (8.6k functions — no host, command,
+path or effect losses), and the backport's own gain on pollen intact to the row (37 enlarged rows + 5
+recovered units versus `v0.23.0`, before and after)**. Three synthetic shapes DO lose reach, all pinned as
+`testKnownCost…` / `testShadowedLiteralBinderNamesNeitherHost`: two disjoint bindings sharing a name in
+sibling branches (both literals dropped, on a per-function surface where the union would have been right),
+a closure parameter reusing the locator's name, and a shadow whose OUTER binding is itself a literal (where
+`main` names the outer host and this line names neither).
+
 ### fixed ⚠ — a shadowed `Process` binder named the outer handle's program (2026-07-29)
 
 Backported to the released **0.23** line; `specVersion` unchanged. Present in the original work on BOTH
-lines — unlike the shadowed-host fabrication below it, this one is not a port artefact.
+lines — unlike the shadowed-host fabrication above it, this one is not a port artefact.
 
 The exec locator maps are keyed by NAME and body-wide. A `let p` inside a block SHADOWS an outer handle,
 writes its literal under the same key, and the outer `p.launch()` below the block then reported a program
