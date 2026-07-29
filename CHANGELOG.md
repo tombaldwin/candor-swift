@@ -17,6 +17,34 @@ The per-function analysis loop rebuilt `Set(freeFnByName.keys)` at every `CallCo
 single build before the loop → flat ~0.05 ms/function, **8.4× faster at 10k functions**. Report output
 verified byte-for-byte identical (this is a loop-invariant hoist, not a semantic change); `swift test` green.
 
+### fixed ⚠ — the singleton FIELD had no type, so the call on it was silent-pure (2026-07-29)
+
+Backported to the released **0.23** line; `specVersion` unchanged. Found by the A/B for the locator work,
+not looked for — and separate from it, so it is a separate commit that can be dropped on its own.
+
+A stored property's type came from its ANNOTATION, or from a ctor CALL in its initializer. The dominant
+Apple-platform spelling is neither: `private let session = URLSession.shared` is a member ACCESS. So the
+field stayed untyped, every call on it missed κ and resolved to no unit, and the enclosing function read
+**silent-pure** — the cardinal sin, and one no amount of host or command extraction reaches, because the
+effect itself was never charged.
+
+The same inference ALREADY EXISTED for a local binding: `SINGLETON_ACCESSORS` is in the classifier and its
+own comment cites `let d = UserDefaults.standard`. Only the field case was missing.
+
+The inference is `Type.member : Type` — true for the canonical singleton accessors, not in general — so it
+is guarded by that existing allowlist plus a bare-uppercase-identifier base. A `static let logger: Logger`
+on a local type would otherwise type the field as its OWNER and resolve calls to the owner's methods,
+fabricating whatever those do. That mirror fixture was confirmed to FAIL when the allowlist is removed: it
+is not a vacuous control.
+
+Measured A/B on this branch: **pollen gained 5 new report entries and 29 enlarged effect sets, zero
+losses**; the app target gained 4 entries. Traced to ground truth — `MedicationCard` holds
+`@ObservedObject private var store = MedicationStore.shared` and calls `store.log(…)` →
+`saveEntries()` → `defaults.set(…)`, a real persisted write reported as pure; `WeatherService.fetch`
+performs `session.data(from:)` on a `private let session = URLSession.shared` and was charged no `Net` at
+all. `MedicationStore` declares `public static let shared = MedicationStore()`, so the type premise holds
+exactly.
+
 ### fixed ⚠ — locator provenance 3/3: the property write that names the program (2026-07-29)
 
 Backported to the released **0.23** line; `specVersion` unchanged.

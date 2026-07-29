@@ -547,6 +547,25 @@ final class DeclCollector: SyntaxVisitor {
                         // review's free-factory singleton find).
                         staticFactoryFields.append((ty, name, ctor.baseName.text))
                     }
+                } else if let initVal = binding.initializer?.value,
+                          let ma = initVal.as(MemberAccessExprSyntax.self),
+                          let base = ma.base?.as(DeclReferenceExprSyntax.self),
+                          base.baseName.text.first?.isUppercase == true,
+                          SINGLETON_ACCESSORS.contains(ma.declName.baseName.text) {
+                    // THE SINGLETON FIELD. `private let session = URLSession.shared` — the dominant way an
+                    // Apple-platform type holds a system service. There is no type ANNOTATION and the
+                    // initializer is a member access rather than a ctor CALL, so neither branch above fired:
+                    // the field stayed untyped, every `session.dataTask(…)` on it missed κ entirely, and the
+                    // function read SILENT-PURE. Measured on a realistic target: network-performing methods
+                    // absent from the report altogether, which no amount of host extraction can reach.
+                    //
+                    // The inference is `Type.member : Type`, and it is guarded by an ALLOWLIST of the
+                    // canonical singleton spellings rather than applied to every static member — the
+                    // direction is expanding, and a `static let logger: Logger` on a local type would
+                    // otherwise be typed as its OWNER and resolve calls to the owner's methods, fabricating
+                    // effects. A simple `Type.member` only: a nested `Type.Inner.value` would give the wrong
+                    // root, so `base` must be a bare identifier.
+                    fields[ty, default: [:]][name] = (base.baseName.text, false)
                 }
             }
         } else {
