@@ -366,7 +366,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // (a rebind later in the text, or earlier in time inside a loop, still invalidates the claim). The
         // parameter names go with it: a body binder that SHADOWS a parameter is the same hazard, and the
         // signature is the one binder site the body walk cannot see.
-        cc.prescanLocatorMoves(body, params: f.paramNames)
+        cc.prescanLocatorMoves(body, params: f.paramNames, isTopLevel: f.isTopLevel)
         cc.walk(body)
         // accessor units: a property READ/WRITE of a known accessor unit is an edge (the reader inherits
         // the getter/observer/subscript's effects — `c.data` reaching the Fs inside `var data: Data { … }`).

@@ -784,6 +784,27 @@ final class NetLocatorProvenanceProcessTests: XCTestCase {
                        "neither the shadow's literal nor the module const it shadows")
     }
 
+    /// ⟨0.23⟩ THE SINGLE-BINDER SHADOW — the same fabrication one binder down, and the shape that shipped.
+    /// `multiplyBoundNames` refuses a name bound TWICE; a name bound ONCE, to something dynamic, was not
+    /// refused at all: `localConstStrings` has no entry for it (the value is not a literal), so `constValue`
+    /// fell through to `moduleConstStrings` and answered with the MODULE's literal for a local that holds a
+    /// parameter. Measured against a build of the released `v0.23.0`, which reports NOTHING here — so this
+    /// was introduced by the constructor look-through, not inherited: the leak existed and was unreachable
+    /// for host claims until a locator could be read through `URL(string:)`.
+    func testFailClosedSingleBinderShadowDoesNotFallBackToTheModuleConst() throws {
+        let by = try scan("""
+        import Foundation
+        let apiBase = "https://moduleconst.example.com"
+        func send(dyn: String) {
+            let apiBase = dyn
+            URLSession.shared.dataTask(with: URL(string: apiBase)!) { _, _, _ in }.resume()
+        }
+        send(dyn: "https://real.example.com")
+        """)
+        XCTAssertEqual(hosts(by, "send"), [],
+                       "a local binder SHADOWS the module const — the module's literal is not this value")
+    }
+
     /// THE POSITIVE CONTROL FOR THAT LAYER — no local binder, so the module const IS the value and this
     /// reach must survive the refusal.
     func testModuleConstWithNoLocalBinderStillExtractsHost() throws {

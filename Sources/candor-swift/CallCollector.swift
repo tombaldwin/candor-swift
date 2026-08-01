@@ -464,7 +464,16 @@ final class CallCollector: SyntaxVisitor {
     // local that holds something else entirely.
     private func constValue(_ name: String) -> String? {
         if multiplyBoundNames.contains(name) { return nil }
-        return localConstStrings[name] ?? moduleConstStrings[name]
+        if let local = localConstStrings[name] { return local }
+        // ⟨0.23⟩ A SINGLE LOCAL BINDER SHADOWS THE MODULE CONST, and the fallback below must not answer for
+        // it. `multiplyBoundNames` refuses a name bound TWICE; a name bound ONCE to something DYNAMIC was
+        // refused nowhere — `localConstStrings` holds no entry (the value is not a literal), so the read
+        // fell through and returned the MODULE's literal for a local holding a parameter. Measured against
+        // a build of the released `v0.23.0`, which reports nothing here: the leak pre-existed and was
+        // unreachable for host claims until the constructor look-through let a locator be read through
+        // `URL(string:)`. Third defect from that one cause.
+        if locallyBoundNames.contains(name) { return nil }
+        return moduleConstStrings[name]
     }
 
     // ── LOCATOR MOVE PRE-PASS ───────────────────────────────────────────────────────────────────────
@@ -529,17 +538,29 @@ final class CallCollector: SyntaxVisitor {
     /// A body-wide, name-keyed literal claim about such a name is a claim about two bindings at once,
     /// so it is not made at all (see `LocatorMoveScanner.binderCounts`, `constValue`, `recordProcessRun`).
     private var multiplyBoundNames: Set<String> = []
+    /// ⟨0.23⟩ Names with ANY binder site in this unit. A local binder SHADOWS a module-level `let` of the
+    /// same name, so the module's literal is not this name's value — whatever the local holds. Separate
+    /// from `multiplyBoundNames` because ONE binder is enough to shadow, while two are needed to make the
+    /// local itself unresolvable.
+    private var locallyBoundNames: Set<String> = []
 
     /// Walk the body ONCE before collection and fill `movedNames`/`propWrites`. Driven from the Driver so
     /// the ordering is explicit rather than an accident of which visitor happens to fire first.
     /// `params` are the ENCLOSING function's parameter names: they are binders that are not IN the body,
     /// and a body binder that shadows one is exactly the shape this refuses.
-    func prescanLocatorMoves(_ body: some SyntaxProtocol, params: Set<String> = []) {
+    func prescanLocatorMoves(_ body: some SyntaxProtocol, params: Set<String> = [], isTopLevel: Bool = false) {
         let s = LocatorMoveScanner(viewMode: .sourceAccurate)
         s.walk(body)
         movedNames = s.moved
         propWrites = s.propWrites
         multiplyBoundNames = Set(s.binderCounts.filter { $0.value + (params.contains($0.key) ? 1 : 0) > 1 }.keys)
+        // ⟨0.23⟩ NOT AT TOP LEVEL, where the "local" binder IS the module const rather than a shadow of it.
+        // A file's top-level code is the `<main>` unit's BODY, so `let outPath = "tools/preview.html"` is
+        // counted here AND indexed as a module const — the same binding seen twice, not two bindings. The
+        // first cut of this gate refused it and DELETED a real `Fs` path from three pollen functions. Caught
+        // by the A/B against the released tag, not by any fixture: every fixture put the shadowed binder
+        // inside a `func`, which is the one place the distinction does not show.
+        locallyBoundNames = isTopLevel ? [] : Set(s.binderCounts.keys)
     }
 
     // ── PROCESS COMMAND PROVENANCE ──────────────────────────────────────────────────────────────────
