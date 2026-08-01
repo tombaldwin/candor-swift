@@ -18,6 +18,20 @@ import Foundation
 /// literal. `testFailClosed…` is the mirror of every `test…Extracts…` above it.
 final class NetLocatorProvenanceProcessTests: XCTestCase {
 
+    /// `XCTExpectFailure` is Darwin-XCTest ONLY. swift-corelibs-xctest (Linux) does not ship it, so a bare
+    /// call is a COMPILE error there, not a runtime skip — it broke the linux CI leg while macOS stayed
+    /// green (run 30713763050: `cannot find 'XCTExpectFailure' in scope` ×3, then `error: fatalError`).
+    /// On Darwin this keeps the BOTH-WAYS ratchet exactly as it was: the marker fails if the defect is
+    /// ever fixed, so it cannot outlive the defect. On Linux the row SKIPS — the ratchet lives on the
+    /// macOS leg, which is where these three rows were authored and measured.
+    private func expectKnownFailure(_ reason: String) throws {
+        #if canImport(Darwin)
+        XCTExpectFailure(reason)
+        #else
+        throw XCTSkip("\(reason) — ratchet held on the macOS leg; XCTExpectFailure is unavailable in swift-corelibs-xctest")
+        #endif
+    }
+
     private func scan(_ src: String) throws -> [String: [String: Any]] {
         let bin = try ProcessHarness.binaryURL(for: NetLocatorProvenanceProcessTests.self)
         let root = try ProcessHarness.makePackage(src)
@@ -675,7 +689,7 @@ final class NetLocatorProvenanceProcessTests: XCTestCase {
         // regressed `testAShadowedConstStringDoesNotAnchorALiteralHost` and dropped a host `main` reports
         // correctly today. What `main` needs is a SCOPE-AWARE set maintained by the same save/restore, and
         // `NameKeyedStateTests.disposition` is the file that must record what a rebind does to it first.
-        XCTExpectFailure("main's module-const fallback is not scope-guarded; see the 0.23.3 port note")
+        try expectKnownFailure("main's module-const fallback is not scope-guarded; see the 0.23.3 port note")
         let by = try scan("""
         import Foundation
         let apiBase = "https://moduleconst.example.com"
@@ -700,7 +714,7 @@ final class NetLocatorProvenanceProcessTests: XCTestCase {
         // regressed `testAShadowedConstStringDoesNotAnchorALiteralHost` and dropped a host `main` reports
         // correctly today. What `main` needs is a SCOPE-AWARE set maintained by the same save/restore, and
         // `NameKeyedStateTests.disposition` is the file that must record what a rebind does to it first.
-        XCTExpectFailure("main's module-const fallback is not scope-guarded; see the 0.23.3 port note")
+        try expectKnownFailure("main's module-const fallback is not scope-guarded; see the 0.23.3 port note")
         let by = try scan("""
         import Foundation
         let apiBase = "https://moduleconst.example.com"
@@ -726,7 +740,7 @@ final class NetLocatorProvenanceProcessTests: XCTestCase {
         // regressed `testAShadowedConstStringDoesNotAnchorALiteralHost` and dropped a host `main` reports
         // correctly today. What `main` needs is a SCOPE-AWARE set maintained by the same save/restore, and
         // `NameKeyedStateTests.disposition` is the file that must record what a rebind does to it first.
-        XCTExpectFailure("main's module-const fallback is not scope-guarded; see the 0.23.3 port note")
+        try expectKnownFailure("main's module-const fallback is not scope-guarded; see the 0.23.3 port note")
         let by = try scan("""
         import Foundation
         let apiBase = "https://moduleconst.example.com"
