@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.23.2 — locator provenance (spec 0.23)
+
+A soundness patch. Before this release the Swift engine recovered a network host only from a literal passed
+**directly** to the establishing call, which in practice meant `NWConnection(host:port:)` alone. Every
+`URLSession` form went unrecovered, because `URL(string:)` sits between the literal and the call, and every
+`Process` form went unrecovered, because `launchPath`/`executableURL` are property writes.
+
+What that cost you: **`deny Net[known-telemetry]` read GREEN over a real `URLSession` call to a telemetry
+host**, a call to `api.openai.com` was never classified `Llm` so the privacy manifest missed it, and
+`allow Net` / `allow Exec` failed closed over essentially all Apple-platform code.
+
+Now recovered:
+
+- hosts through `URL(string:)`, `URL(fileURLWithPath:)`, `URL(filePath:)` and `URLRequest(url:)`;
+- locators bound to a local first (`let u = URL(string: "…")!`, and the `var` the `URLRequest` idiom forces);
+- programs named by a `Process` property write (`launchPath`, `executableURL`) and carried to `run()`/`launch()`;
+- calls on a singleton **field** (`private let session = URLSession.shared`) — previously the field was left
+  untyped, so the call missed the coverage ledger and **the whole function read pure**.
+
+Three guards keep the new recovery from claiming what it cannot see. A literal that is not the value at the
+call is refused, not reported: string interpolation, concatenation, a ternary, a rebound `var`, and
+`URL(string:relativeTo:)` all leave the entry at `netClass: ["unknown-host"]` with no host. A `Process` whose
+program is unrecoverable still carries `Exec` — the effect is kept and only the literal withheld, so
+`allow Exec` fails closed rather than the function reading pure. And a name that a local binder **shadows**
+no longer answers with the module-level constant it shadows.
+
+That last guard also removes a fabrication that predates this feature: a function binding its own `outPath`
+could be reported as writing an unrelated file's module constant.
+
+Measured on four corpora (8,600+ functions) against 0.23.1: hosts and commands gained, and **no report entry
+dropped, no effect set shrunk, no host, command or path lost**.
+
+
 All notable changes to candor-swift are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
 behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
