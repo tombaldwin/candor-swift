@@ -65,7 +65,7 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
                       analyzedCount: Int,
                       unanalyzed: [(path: String, reason: String)] = [],
                       coverage uncoveredModules: [String] = [],
-                      policyVocabulary: (config: String, aliases: [String])? = nil,
+                      policyVocabulary: (config: String, aliases: [String: [String]])? = nil,
                       unevaluated: [Unevaluated] = []) {
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a gate over source candor could NOT analyze must NOT read green —
     // its effects are invisible, so a `deny`/`allow` that "passes" over it is a false-pure. `ok` requires
@@ -120,8 +120,19 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
     // WITHIN-engine byte-equality is structurally blind to a key every route of one engine spells the same
     // wrong way — measured java and ts on `policyVocabulary: {config, aliases}`, rust on `vocabulary`, and
     // swift on `configSources`. Three names for one field, and none of them wrong on its own.
+    //
+    // ⟨0.24⟩ AND `aliases` IS AN OBJECT — `{"corp": ["reflect"]}`, each alias mapped to the classes it
+    // EXPANDS TO (SPEC §3.1, candor-spec `7f5b5ba`). This engine shipped the ARRAY `["corp"]`, as did rust
+    // and java; candor-ts kept the object and won the argument against the three of us from this section's
+    // own sentence, not from a headcount: `configSources: [path]` is rejected three paragraphs down because
+    // *a disclosure that names the source but not the content leaves the reader knowing they were affected
+    // and not how* — and `aliases: ["corp"]` fails that same test ONE LEVEL DOWN. `corp = reflect` and
+    // `corp = reflect,native` gate DIFFERENTLY under one unchanged policy line, so a reader handed only the
+    // NAME cannot tell which gate ran. The object is a strict superset: a consumer that wanted the array
+    // still has it as the key set. Classes sorted, as the alias names already were, for byte-stability.
     if let pv = policyVocabulary, !pv.aliases.isEmpty {
-        dict["policyVocabulary"] = ["config": pv.config, "aliases": pv.aliases.sorted()] as [String: Any]
+        dict["policyVocabulary"] = ["config": pv.config,
+                                    "aliases": pv.aliases.mapValues { $0.sorted() }] as [String: Any]
     }
     // ⟨0.24⟩ WHICH RULES THIS VERDICT DOES NOT ANSWER (SPEC §3.1) — see `Unevaluated`. Exit 1 reports the
     // violation it is sure of; it does not conceal the part it could not read, and it does not confine

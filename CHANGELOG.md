@@ -9,6 +9,28 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### changed ⚠ — ⟨0.24⟩ `policyVocabulary.aliases` is an OBJECT, mapping each alias to its classes (2026-08-01)
+
+SPEC §3.1 ⟨0.24⟩ (candor-spec `7f5b5ba`). This engine emitted `aliases: ["corp"]`, as did rust and java;
+candor-ts emitted `{"corp": ["reflect"]}` and is right. The ruling did not go to the majority because it
+was argued from §3.1's own sentence: `configSources: [path]` is rejected there because *a disclosure that
+names the source but not the content leaves the reader knowing they were affected and not how* — and the
+array of alias NAMES fails that same test one level down. Measured here, one unchanged policy line
+`deny Unknown[corp] app` over one unchanged report whose only hole is `native:`:
+
+    unknown-alias corp = reflect           exit 0      disclosed  aliases: ["corp"]
+    unknown-alias corp = reflect,native    exit 1      disclosed  aliases: ["corp"]
+
+Two different gates, one identical disclosure — so a reader diffing the two verdicts saw the exit flip with
+nothing in the document accounting for it, and had to open the config file the disclosure exists to save
+them opening. The value is now `{"corp": ["reflect"]}` / `{"corp": ["native","reflect"]}`.
+
+A strict SUPERSET: the key set is exactly the array it replaces, so a consumer that only wanted the names
+still has them. `config` is unchanged, and the block is still emitted only when a vocabulary was actually
+consumed. Both gate routes build it from one shared function (`consumedAliasVocabulary`) — §3.1's
+byte-equality between `scan --policy` and `gate --report` is a MUST, and this field's own history is what
+two independent constructions of one disclosure cost.
+
 ### fixed ⚠ — a shadowed `Process` binder named the outer handle's program (2026-07-29)
 
 The exec locator maps are keyed by NAME and body-wide. A `let p` inside a block SHADOWS an outer handle,

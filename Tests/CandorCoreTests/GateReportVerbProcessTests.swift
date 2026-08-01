@@ -856,9 +856,14 @@ final class GateReportVerbProcessTests: XCTestCase {
         let pv = try XCTUnwrap(d?["policyVocabulary"] as? [String: Any],
                                "the config whose vocabulary PARTICIPATED must be named: \(String(describing: d))")
         XCTAssertEqual(pv["config"] as? String, pdir.appendingPathComponent(".candor/config").path)
-        XCTAssertEqual(pv["aliases"] as? [String], ["corp"],
-                       "…and WHICH aliases it supplied — naming the file alone leaves the reader to diff "
-                       + "a config against a policy to find out what acted")
+        // ⟨0.24⟩ …and `aliases` is an OBJECT mapping each alias to the classes it EXPANDED TO (candor-spec
+        // `7f5b5ba`). It shipped here as the array `["corp"]`; see
+        // `testTheAliasDisclosureCarriesTheClassesNotJustTheName` for the measurement of why a name alone
+        // is not a disclosure. The MIRROR of that move is asserted right here: the `config` path did not
+        // go away, and the alias NAMES are still recoverable — as the object's key set.
+        XCTAssertEqual(pv["aliases"] as? [String: [String]], ["corp": ["reflect"]],
+                       "…and WHICH aliases it supplied AND what each expanded to — naming the file alone "
+                       + "leaves the reader to diff a config against a policy to find out what acted")
 
         // CONTROL — the same policy with a BUILT-IN token uses no config vocabulary, so the key is ABSENT.
         // Without this the assertion above passes on an engine that names the config unconditionally.
@@ -871,6 +876,71 @@ final class GateReportVerbProcessTests: XCTestCase {
         let d2 = try JSONSerialization.jsonObject(with: Data(contentsOf: v2)) as? [String: Any]
         XCTAssertNil(d2?["policyVocabulary"],
                      "a config that defines aliases nobody asked for is not an input to this verdict")
+    }
+
+    /// ⟨0.24⟩ **`aliases` MAPS EACH ALIAS TO THE CLASSES IT EXPANDS TO** (SPEC §3.1, candor-spec
+    /// `7f5b5ba`). This engine shipped `["corp"]`, as did rust and java; candor-ts kept the object and the
+    /// ruling went to the minority-of-one because it argued from §3.1's own sentence rather than from the
+    /// headcount: `configSources: [path]` is rejected there because *a disclosure that names the source
+    /// but not the content leaves the reader knowing they were affected and not how*, and `["corp"]` fails
+    /// that same test one level down.
+    ///
+    /// THIS ROW IS THAT SENTENCE, MEASURED. Two configs differing only in the alias DEFINITION, one
+    /// unchanged policy line, one unchanged report:
+    ///
+    ///     unknown-alias corp = reflect          deny Unknown[corp]  over `native:` -> exit 0
+    ///     unknown-alias corp = reflect,native   deny Unknown[corp]  over `native:` -> exit 1
+    ///
+    /// Two different gates. Under the old array both verdicts disclosed the identical `["corp"]`, so the
+    /// reader who diffed them saw the exit flip with nothing in the document to account for it — and the
+    /// only way to find out was to open a config file the disclosure existed to save them opening. The
+    /// arrays being equal is ASSERTED below, not narrated: it is what makes the object load-bearing rather
+    /// than a shape preference.
+    ///
+    /// The MIRROR: `Object.keys` still recovers the array, so nothing a consumer had was taken away.
+    func testTheAliasDisclosureCarriesTheClassesNotJustTheName() throws {
+        // The hole's reason class is `native:`, which `corp = reflect` does NOT cover and
+        // `corp = reflect,native` does. Same entry for both arms.
+        let report = envelope(fnEntry("app.dyn", ["Unknown"], why: ["native:dlopen"]))
+        var seen: [String: [String: [String]]] = [:]
+        for (def, wantExit, wantClasses) in [("reflect", Int32(0), ["reflect"]),
+                                             ("reflect,native", Int32(1), ["native", "reflect"])] {
+            let root = try makeReportDir(report: report,
+                                         config: "unknown-alias corp = \(def)\n",
+                                         policy: "deny Unknown[corp] app\n")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let v = root.appendingPathComponent("v.json")
+            let r = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                                   "--policy", root.appendingPathComponent("pol.txt").path,
+                                                   "--gate-json", v.path])
+            XCTAssertEqual(r.code, wantExit,
+                           "`corp = \(def)` must gate a `native:` hole differently — without the flip the "
+                           + "row cannot show that the definition's CONTENT changes the verdict. stderr: \(r.err)")
+            let d = try JSONSerialization.jsonObject(with: Data(contentsOf: v)) as? [String: Any]
+            let pv = try XCTUnwrap(d?["policyVocabulary"] as? [String: Any],
+                                   "the participating vocabulary must be disclosed on BOTH arms: \(String(describing: d))")
+            let aliases = try XCTUnwrap(pv["aliases"] as? [String: [String]],
+                                        "`aliases` is an OBJECT, not an array — a name without its classes "
+                                        + "cannot tell these two gates apart: \(String(describing: pv["aliases"]))")
+            XCTAssertEqual(aliases, ["corp": wantClasses],
+                           "the alias maps to the classes it EXPANDED TO, sorted")
+            // MIRROR 1 — the `config` path is still named. The move is to the VALUE; the ambient file's
+            // identity was never the part in dispute.
+            XCTAssertEqual(pv["config"] as? String,
+                           root.appendingPathComponent(".candor/config").path,
+                           "…and the file that supplied it is still named")
+            // MIRROR 2 — `Object.keys` recovers exactly what the array carried, so a consumer that only
+            // ever wanted the names lost nothing.
+            XCTAssertEqual(aliases.keys.sorted(), ["corp"],
+                           "the object is a strict SUPERSET of the array it replaces")
+            seen[def] = aliases
+        }
+        XCTAssertEqual(seen["reflect"]?.keys.sorted(), seen["reflect,native"]?.keys.sorted(),
+                       "…and here is why the key set alone is not the disclosure: the two arms' NAMES are "
+                       + "identical while their verdicts differ, which is precisely what the array shape "
+                       + "showed the reader")
+        XCTAssertNotEqual(seen["reflect"], seen["reflect,native"],
+                          "the object distinguishes them")
     }
 
     // ── ⟨0.24⟩ NEITHER RULE HAS A CARVE-OUT (SPEC §3.1, candor-spec `1503368`) ──────────────────────

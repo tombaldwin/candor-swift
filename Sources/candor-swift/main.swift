@@ -967,7 +967,7 @@ emitSurface(inferred: inferred, direct: direct, calls: edges, loc: locOf)
 var gateViolations: [GateViolation] = []
 /// ⟨0.24⟩ the `.candor/config` whose VOCABULARY participated in this verdict, and which aliases it
 /// supplied (SPEC §3.1) — nil unless a config `unknown-alias` was actually consumed by a policy token.
-var gatePolicyVocabulary: (config: String, aliases: [String])? = nil
+var gatePolicyVocabulary: (config: String, aliases: [String: [String]])? = nil
 // AS-EFF-005 baseline regression guard (SPEC §7 item 5, Baseline.swift) — checked FIRST, matching the
 // reference engine's checker order (candor-java runs checkBaseline before checkPolicy). CANDOR_BASELINE
 // env over the config `baseline` key (the same env-over-config precedence as `policy`; a relative
@@ -1068,8 +1068,11 @@ policyBlock: if let pp = policyPath {
     // text were two chances for the ⟨0.24⟩ policy-error check to be applied to only one of them.
     let scanPolicy = parsePolicy(text, aliases: unknownAliases)
     // ⟨0.24⟩ SPEC §3.1: the config file is named in the verdict only when its vocabulary PARTICIPATED.
+    // ⟨0.24⟩ …and `aliases` maps each consumed alias to the CLASSES it expanded to — see
+    // `consumedAliasVocabulary`, shared with the `gate --report` route so the two cannot disagree.
     gatePolicyVocabulary = scanPolicy.usedAliases.isEmpty ? nil
-        : vocabConfig.map { (config: $0.path, aliases: scanPolicy.usedAliases) }
+        : vocabConfig.map { (config: $0.path,
+                             aliases: consumedAliasVocabulary(scanPolicy, unknownAliases)) }
     // ⟨0.24⟩ AN UNRECOGNISED REASON-CLASS TOKEN IS A POLICY ERROR (SPEC §6.2, candor-spec `382a7e0`) —
     // exit 2, the unreadable-policy posture, BEFORE any verdict is derived and before `--gate-json` is
     // written. Measured on this engine: `deny Unknown[dispatch,nativ]` silently NARROWED to `[dispatch]`

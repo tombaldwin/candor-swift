@@ -174,6 +174,25 @@ public func partitionAliasErrors(_ errs: [AliasTokenError], consumedBy pol: Pars
     return (errs.filter { used.contains($0.alias) }, errs.filter { !used.contains($0.alias) })
 }
 
+/// ⟨0.24⟩ The `policyVocabulary.aliases` VALUE (SPEC §3.1, candor-spec `7f5b5ba`): each alias this policy
+/// CONSUMED, mapped to the reason classes it expanded to. An OBJECT, not the array this engine first
+/// shipped — `corp = reflect` and `corp = reflect,native` gate differently under one unchanged policy
+/// line, so naming the alias without its content tells the reader they were affected and not how, which
+/// is the same test §3.1 already applies one level up to reject `configSources: [path]`.
+///
+/// SHARED BY BOTH GATE ROUTES on purpose: §3.1's byte-equality between `scan --policy` and
+/// `gate --report` is a MUST, and two independent constructions of the same disclosure is exactly how a
+/// key gets spelled two ways (this field's own history — see Gate.swift).
+///
+/// An alias in `usedAliases` is by construction present in `aliases` (it is only recorded when the lookup
+/// hits), so the `?? []` is unreachable rather than a silent drop; it stays because an empty class list is
+/// still a truthful "this alias expanded to nothing here" and inventing a class would be worse.
+public func consumedAliasVocabulary(_ pol: ParsedPolicy, _ aliases: [String: Set<String>]) -> [String: [String]] {
+    var out: [String: [String]] = [:]
+    for name in pol.usedAliases { out[name] = (aliases[name].map { Array($0) } ?? []).sorted() }
+    return out
+}
+
 /// The DISCLOSURE half of `partitionAliasErrors` — one stderr line per unconsumed definition error, so a
 /// broken alias in an ancestor `.candor/config` is still visible without refusing a gate it cannot reach.
 public func discloseUnconsumedAliasErrors(_ errs: [AliasTokenError]) {
