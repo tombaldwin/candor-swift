@@ -34,11 +34,77 @@ struct ReportCoverage {
     var isEmpty: Bool { envelopeModules.isEmpty && invisibleModules.isEmpty }
 }
 
+// ⟨0.24⟩ THE REPORT'S OWN ⟨0.21⟩ COMPLETENESS MANIFEST, as the ADVISORY verbs must read it.
+//
+// The gate has honoured this since ⟨0.21⟩ — `ok` requires no violation AND a complete analysis, and an
+// incomplete-but-clean report exits 2. NOTHING ELSE DID. Measured on this engine, one report declaring
+// one `unanalyzed` unit:
+//
+//     gate --report R --policy P            exit 2   ok:false  incomplete:true  + the manifest
+//     unverified --report R --policy P      exit 0   ok:TRUE   (--strict: still 0)
+//     fix-gate   --report R --policy P      exit 0   ok:TRUE   (--strict: still 0)
+//
+// Two of the three are gates when `--strict` is passed, which is how they are used in CI. So the rule the
+// gate route has enforced for three rungs was absent from every OTHER surface that answers `ok`, and a
+// pipeline that ran `unverified --strict` over a partially-parsed tree got a green.
+//
+// SPEC §3.2 ⟨0.24⟩ (candor-spec `0075987`) supplies the shape, and it is `whatif`'s, not the gate's:
+// **`ok` is OMITTED.** These verbs are ADVISORY by default — they exit 0 whether or not they found
+// something — so their `ok:false` does not mean "this did not pass", it means "a hole/crossing EXISTS,
+// here it is". Answering `false` beside an EMPTY `unverified`/`remedies` array would assert a finding
+// the analysis never made, which is the fabrication mirror and worse than the over-claim it replaces.
+// `ok:true` over a knowingly partial universe is the over-claim. Neither is honest, so neither ships:
+// `incomplete: true` plus the manifest take the field's place, a consumer writing `if (r.ok)` gets
+// undefined and fails safe, and the arrays still ship because a partial answer that says it is partial
+// beats a refusal.
+//
+// The gate keeps `ok:false` and is NOT changed to match: there `false` is TRUE — the gate did not
+// certify. A shape is copied for its reasoning, not its familiarity.
+struct ReportCompleteness {
+    var unanalyzed: [(path: String, reason: String)] = []
+    var isIncomplete: Bool { !unanalyzed.isEmpty }
+    var json: [[String: Any]] { unanalyzed.map { ["path": $0.path, "reason": $0.reason] as [String: Any] } }
+}
+
+// The envelope's `unanalyzed` manifest, merged across sibling reports. A member that is not a
+// `{path, …}` object is SKIPPED rather than failing the load: these are advisory verbs, and the
+// alternative — refusing to answer at all — is strictly less than the partial answer §3.2 asks for.
+// (The GATE route does fail loud on a malformed manifest, deliberately: it is certifying.)
+private func mergeUnanalyzed(_ obj: [String: Any], into c: inout ReportCompleteness) {
+    for case let m as [String: Any] in (obj["unanalyzed"] as? [Any]) ?? [] {
+        guard let p = m["path"] as? String else { continue }
+        c.unanalyzed.append((path: p, reason: m["reason"] as? String ?? ""))
+    }
+}
+
+// ⟨0.24⟩ Emit an advisory verb's answer and exit, applying the §3.2 incompleteness rule in ONE place so
+// `unverified` and `fix-gate` cannot drift apart on it (and a third such verb inherits it by construction).
+//
+// COMPLETE — unchanged from before, byte for byte: `ok` plus the verb's own array, `--strict` exits 1 on
+// a finding. INCOMPLETE — `ok` is omitted, `incomplete`/`unanalyzed` are added, and `--strict` exits 2
+// (could-not-fully-evaluate, the gate's code for the same situation) rather than the 1 that would claim a
+// finding or the 0 that would certify. Without `--strict` these verbs are advisory and still exit 0: the
+// agent fix-loop reads the body, and turning its exit red would be a different change than this one.
+func emitAdvisoryAnswer(_ body: [String: Any], ok: Bool, completeness c: ReportCompleteness,
+                        strict: Bool) -> Never {
+    var out = body
+    if c.isIncomplete {
+        out["incomplete"] = true
+        out["unanalyzed"] = c.json
+        emitJSON(out)
+        exit(strict ? 2 : 0)
+    }
+    out["ok"] = ok
+    emitJSON(out)
+    exit(strict && !ok ? 1 : 0)
+}
+
 // Parse one `functions`-envelope report file into `byName` (+ its coverage disclosure into `coverage`).
 // Returns false (with a stderr note) on an
 // unparseable / non-report file — the caller FAILS LOUD, never reads it as an empty "no crossings".
 private func mergeFixReport(_ full: String, into byName: inout [String: FixFn],
-                            coverage: inout ReportCoverage, who: String) -> Bool {
+                            coverage: inout ReportCoverage,
+                            completeness: inout ReportCompleteness, who: String) -> Bool {
     let fm = FileManager.default
     guard let data = fm.contents(atPath: full),
           let root = try? JSONSerialization.jsonObject(with: data),
@@ -60,6 +126,8 @@ private func mergeFixReport(_ full: String, into byName: inout [String: FixFn],
     if let cov = obj["coverage"] as? [String: Any], let unc = cov["uncovered"] as? [[String: Any]] {
         for entry in unc { if let name = entry["name"] as? String { coverage.envelopeModules.insert(name) } }
     }
+    // ⟨0.21⟩ completeness manifest, ⟨0.24⟩ read HERE for the first time — see `ReportCompleteness`.
+    mergeUnanalyzed(obj, into: &completeness)
     return true
 }
 
@@ -95,23 +163,26 @@ private func mergeCallgraph(_ full: String, into cg: inout [String: [String]]) -
 // dot-segments") — so one engine can query another engine's report by its exact path, even when the filename
 // does not fit the `<prefix>.<pkg>.Swift.json` family shape. A matching `.callgraph.json` sibling (same stem)
 // is still picked up for the graph if present.
-func loadFixModel(prefix: String) -> (byName: [String: FixFn], cg: [String: [String]], coverage: ReportCoverage)? {
+func loadFixModel(prefix: String) -> (byName: [String: FixFn], cg: [String: [String]],
+                                      coverage: ReportCoverage, completeness: ReportCompleteness)? {
     let fm = FileManager.default
     var byName: [String: FixFn] = [:]
     var cg: [String: [String]] = [:]
     var coverage = ReportCoverage()
+    var completeness = ReportCompleteness()
     var foundReport = false
 
     var isDir: ObjCBool = false
     if prefix.hasSuffix(".json"), fm.fileExists(atPath: prefix, isDirectory: &isDir), !isDir.boolValue {
         // Direct single-file load (any `.json` filename).
-        foundReport = mergeFixReport(prefix, into: &byName, coverage: &coverage, who: "fix")
+        foundReport = mergeFixReport(prefix, into: &byName, coverage: &coverage,
+                                     completeness: &completeness, who: "fix")
         let stem = (prefix as NSString).deletingPathExtension
         let sidecar = stem + ".callgraph.json"
         if fm.fileExists(atPath: sidecar) { mergeCallgraph(sidecar, into: &cg) }
         guard foundReport else { return nil }
         if cg.isEmpty { for (fn, f) in byName { cg[fn] = f.calls } }
-        return (byName, cg, coverage)
+        return (byName, cg, coverage, completeness)
     }
 
     let ns = prefix as NSString
@@ -128,14 +199,15 @@ func loadFixModel(prefix: String) -> (byName: [String: FixFn], cg: [String: [Str
             // A report file present but unparseable (truncated / mid-write / not a report) FAILS LOUD;
             // `foundReport` flips true only after a successful parse, so a lone corrupt report leaves it
             // false → loadFixModel returns nil → exit 2.
-            if mergeFixReport(full, into: &byName, coverage: &coverage, who: "fix") { foundReport = true }
+            if mergeFixReport(full, into: &byName, coverage: &coverage,
+                              completeness: &completeness, who: "fix") { foundReport = true }
         }
     }
     guard foundReport else { return nil }
     // The callgraph sidecar is the graph of record; if it is absent (an older/`--json`-only report), fall
     // back to the report's own inline `calls` so a prefix that has only the envelope still answers.
     if cg.isEmpty { for (fn, f) in byName { cg[fn] = f.calls } }
-    return (byName, cg, coverage)
+    return (byName, cg, coverage, completeness)
 }
 
 private func loadDenyOrDie(_ policyPath: String, who: String) -> [DenyRule] {
@@ -374,7 +446,8 @@ private func parseQueryArgs(_ args: [String], expectedVerbArgs: Int) -> QueryArg
 
 // Parse one `functions`-envelope report file into `out` for the `unverified` check. Returns false (with a
 // stderr note) on an unparseable / non-report file — the caller fails loud, never an empty "no holes".
-private func mergeUnverifiedReport(_ full: String, into out: inout [UnverifiedFn]) -> Bool {
+private func mergeUnverifiedReport(_ full: String, into out: inout [UnverifiedFn],
+                                   completeness: inout ReportCompleteness) -> Bool {
     guard let data = FileManager.default.contents(atPath: full),
           let root = try? JSONSerialization.jsonObject(with: data),
           let obj = root as? [String: Any],
@@ -395,20 +468,23 @@ private func mergeUnverifiedReport(_ full: String, into out: inout [UnverifiedFn
         let calls = (e["calls"] as? [Any])?.compactMap { $0 as? String } ?? []
         out.append(UnverifiedFn(fn: fn, inferred: inferred, direct: direct, unknownWhy: why, calls: calls))
     }
+    // ⟨0.21⟩ completeness manifest, ⟨0.24⟩ read HERE for the first time — see `ReportCompleteness`.
+    mergeUnanalyzed(obj, into: &completeness)
     return true
 }
 
 // Load (fn, inferred, unknownWhy) from every `<prefix>*.Swift.json` report for the `unverified` check. As in
 // loadFixModel, a `prefix` that is itself an existing regular `.json` file is loaded DIRECTLY (§3.3.1).
-private func loadUnverifiedFns(prefix: String) -> [UnverifiedFn]? {
+private func loadUnverifiedFns(prefix: String) -> (fns: [UnverifiedFn], completeness: ReportCompleteness)? {
     let fm = FileManager.default
     var out: [UnverifiedFn] = []
+    var completeness = ReportCompleteness()
     var found = false
 
     var isDir: ObjCBool = false
     if prefix.hasSuffix(".json"), fm.fileExists(atPath: prefix, isDirectory: &isDir), !isDir.boolValue {
-        found = mergeUnverifiedReport(prefix, into: &out)
-        return found ? out : nil
+        found = mergeUnverifiedReport(prefix, into: &out, completeness: &completeness)
+        return found ? (out, completeness) : nil
     }
 
     let ns = prefix as NSString
@@ -417,9 +493,9 @@ private func loadUnverifiedFns(prefix: String) -> [UnverifiedFn]? {
     let base = ns.lastPathComponent
     guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return nil }
     for name in entries.sorted() where name.hasPrefix(base + ".") && name.hasSuffix(".Swift.json") {
-        if mergeUnverifiedReport(dir + "/" + name, into: &out) { found = true }
+        if mergeUnverifiedReport(dir + "/" + name, into: &out, completeness: &completeness) { found = true }
     }
-    return found ? out : nil
+    return found ? (out, completeness) : nil
 }
 
 // Dispatched from main.swift when argv[1] is `unverified`. §3.3.1 canonical grammar:
@@ -434,9 +510,10 @@ func runUnverifiedCLI(_ args: [String]) -> Never {
         fixDie("candor-swift unverified: no report — pass --report <locator> or run from a repo with a .candor/ dir (scan: candor-swift <dir>)")
     }
     let deny = loadDenyOrDie(policy, who: "unverified")
-    guard let fns = loadUnverifiedFns(prefix: prefix) else {
+    guard let loaded = loadUnverifiedFns(prefix: prefix) else {
         fixDie("candor-swift unverified: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
     }
+    let fns = loaded.fns
     // §6.2 ⟨0.24⟩: an unrecognised token is a USAGE ERROR (exit 2) and NO answer is emitted — a narrower
     // result one exit code away from a refusal is the same fail-open in a different hat. See
     // `parseClassFilter` for why this half of the rule is not the policy side's drop-with-a-warning.
@@ -445,8 +522,11 @@ func runUnverifiedCLI(_ args: [String]) -> Never {
     catch let e as ClassFilterUsageError { fixDie(e.message) }
     catch { fixDie("candor-swift: --class could not be parsed: \(error)") }
     let (ok, holes) = unverified(fns, deny, classFilter: classFilter)
-    emitJSON(["ok": ok, "unverified": holes.map { $0.toJSON() }])
-    exit(q.strict && !ok ? 1 : 0)
+    // ⟨0.24⟩ over a report declaring `unanalyzed`, `ok` is OMITTED — see `emitAdvisoryAnswer`. The holes
+    // still ship: an unverified layer this report DID see is worth naming whether or not another file
+    // went unread.
+    emitAdvisoryAnswer(["unverified": holes.map { $0.toJSON() }],
+                       ok: ok, completeness: loaded.completeness, strict: q.strict)
 }
 
 // Dispatched from main.swift when argv[1] is `tour` (before the scan flag loop). §3.3.1 canonical grammar,
@@ -719,10 +799,13 @@ func runFixCLI(_ args: [String]) -> Never {
             fixDie("candor-swift fix-gate: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
         }
         let (ok, remedies) = fixGate(byName: model.byName, cg: model.cg, deny: deny)
-        emitJSON(["ok": ok, "remedies": remedies.map { $0.toJSON() }])
         // Advisory by default (exit 0 — the agent fix-loop reads the remedy and edits); `--strict` makes the
         // exit follow `ok`, so CI can REQUIRE zero outstanding crossings (mirrors `unverified --strict`).
-        exit(q.strict && !ok ? 1 : 0)
+        // ⟨0.24⟩ …and over a report declaring `unanalyzed`, `ok` is OMITTED and `--strict` exits 2 — see
+        // `emitAdvisoryAnswer`. The remedies still ship: a crossing this report DID see needs the same
+        // hoist whether or not another file went unread.
+        emitAdvisoryAnswer(["remedies": remedies.map { $0.toJSON() }],
+                           ok: ok, completeness: model.completeness, strict: q.strict)
     }
 }
 

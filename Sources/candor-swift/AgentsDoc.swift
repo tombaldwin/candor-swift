@@ -126,6 +126,13 @@ layer, cleanHoist, policyAlternative }`, byte-for-byte the same remedy as candor
 code; a re-scan with the gate verifies. A policy is required (the fix is defined relative to the
 boundary it crosses); `--report` is optional — omitted, the report is discovered from the repo's
 `.candor/` dir (the scan's default output). An unreadable policy or a missing report fails loud (exit 2).
+⟨0.24⟩ **Over a report declaring `unanalyzed`, `fix-gate` and `unverified` OMIT `ok`** and add
+`incomplete: true` + the `unanalyzed` manifest (SPEC §3.2). Neither boolean is honest there: `true`
+claims a clean result over a universe the report says it could not fully see, and `false` beside an
+empty `remedies`/`unverified` array asserts a finding that was never made. `if (r.ok)` therefore reads
+falsy and fails safe. The arrays still ship — a partial answer that says it is partial beats a refusal —
+and `--strict` exits **2** (could-not-fully-evaluate), the gate's code for the same situation, not the 1
+that would claim a finding. The GATE keeps `ok: false`: there the `false` is true, it did not certify.
 `tour [<N>]` lists the N (default 10) most SURPRISING transitive reaches in the report — a benign-named
 function that reaches a scary effect a few hops down — each with a ready-to-run `candor path` command;
 `--json` for machines. No policy, read-only, the same heuristic as the scan-time note. A missing report

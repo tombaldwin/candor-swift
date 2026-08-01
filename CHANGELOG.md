@@ -9,6 +9,32 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed ⚠ — ⟨0.24⟩ `unverified --strict` and `fix-gate --strict` certified an INCOMPLETE report (2026-08-01)
+
+SPEC §3.2 ⟨0.24⟩ (candor-spec `0075987`). The gate has honoured the ⟨0.21⟩ completeness manifest for three
+rungs — `ok` requires no violation AND a complete analysis, and an incomplete-but-clean report exits 2.
+Nothing else did. candor-ts measured the same hole in its MCP `candor_gate`; this engine ships no MCP and
+no LSP, so the equivalent surfaces are its other machine-output verbs, and two of them had it. Measured,
+one report declaring one `unanalyzed` unit, one policy that finds nothing:
+
+    gate --report R --policy P          exit 2    ok:false   incomplete:true + the manifest
+    unverified --strict …               exit 0    ok:TRUE
+    fix-gate   --strict …               exit 0    ok:TRUE
+
+`--strict` is how CI consumes both, so a pipeline running `unverified --strict` over a partially-parsed
+tree got a green from the verb whose whole job is "not PROVABLY clean".
+
+**The shape is `whatif`'s, not the gate's: `ok` is OMITTED.** These verbs are advisory, and their
+`ok: false` does not mean "did not certify" — it means "a hole/crossing EXISTS, here it is". A `false`
+beside an empty `unverified`/`remedies` array would assert a finding the run never made, which is the
+fabrication mirror and worse than the `true` it replaces; `true` over a knowingly partial universe is the
+over-claim. So `incomplete: true` plus the manifest take the field's place, `if (r.ok)` reads falsy and
+fails safe, and `--strict` exits **2** rather than the 1 that would claim a finding. The arrays still ship:
+a partial answer that says it is partial beats a refusal. The gate keeps `ok: false`, unchanged — there the
+`false` is a statement, not an invention.
+
+A COMPLETE report is byte-identical to before, asserted in the same test.
+
 ### changed ⚠ — ⟨0.24⟩ `policyVocabulary.aliases` is an OBJECT, mapping each alias to its classes (2026-08-01)
 
 SPEC §3.1 ⟨0.24⟩ (candor-spec `7f5b5ba`). This engine emitted `aliases: ["corp"]`, as did rust and java;

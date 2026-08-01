@@ -109,6 +109,85 @@ final class CompletenessManifestTests: XCTestCase {
         XCTAssertEqual(v2?["incomplete"] as? Bool, true, "the incompleteness is still disclosed on a violating run")
     }
 
+    /// ⟨0.24⟩ **THE RULE THE GATE HAS ENFORCED SINCE ⟨0.21⟩ WAS ABSENT FROM EVERY OTHER SURFACE THAT
+    /// ANSWERS `ok`** (SPEC §3.2, candor-spec `0075987`). candor-ts measured its MCP `candor_gate`
+    /// answering `{"ok":true}` over a report declaring `unanalyzed` where its CLI exits 2; this engine
+    /// ships no MCP and no LSP, so the equivalent surfaces are its other machine-output verbs — and two of
+    /// them had the same hole, with `--strict` making each an actual CI gate:
+    ///
+    ///     gate --report R --policy P          exit 2   ok:false  incomplete:true + manifest
+    ///     unverified --strict …               exit 0   ok:TRUE
+    ///     fix-gate   --strict …               exit 0   ok:TRUE
+    ///
+    /// THE ANSWER IS `whatif`'S, NOT THE GATE'S. These verbs are advisory: `ok:false` does not mean "did
+    /// not certify", it means "a hole/crossing EXISTS, here it is". Answering `false` beside an EMPTY
+    /// array would assert a finding the analysis never made — the fabrication mirror — and `true` over a
+    /// knowingly partial universe is the over-claim. So `ok` is OMITTED and `incomplete` + the manifest
+    /// take its place, which is why this row asserts **ABSENT, not false**: a consumer writing
+    /// `if (r.ok)` must get a falsy value without having to know in advance that it might.
+    ///
+    /// THE MIRROR is asserted in the same test: a COMPLETE report still carries `ok` and still exits 1
+    /// under `--strict` on a real finding. Omitting the field unconditionally would trade this fail-open
+    /// for the loss of the answer itself.
+    func testAdvisoryVerbsOmitOkOverAnIncompleteReport() throws {
+        let bin = try ProcessHarness.binaryURL(for: type(of: self))
+        let root = try app()
+        defer { try? FileManager.default.removeItem(at: root) }
+        // `deny Db` finds nothing (the app performs Fs), so both verbs answer a clean `ok:true` — which is
+        // the exact green this row is about. A firing policy would confound "incomplete" with "found
+        // something" and the row would pass for the wrong reason.
+        let pol = root.appendingPathComponent("no-db.policy")
+        try "deny Db\n".write(to: pol, atomically: true, encoding: .utf8)
+
+        // ── CONTROL FIRST: the report is COMPLETE, so `ok` is present and the verbs are unchanged. ──
+        let rep = root.appendingPathComponent("r")
+        let cleanScan = try ProcessHarness.run(bin, [root.path, "--out", rep.path])
+        XCTAssertEqual(cleanScan.code, 0, cleanScan.err)
+        for verb in ["unverified", "fix-gate"] {
+            let r = try ProcessHarness.run(bin, [verb, "--report", rep.path, "--policy", pol.path,
+                                                 "--json", "--strict"])
+            let d = try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any]
+            XCTAssertEqual(d?["ok"] as? Bool, true,
+                           "\(verb) over a COMPLETE report still answers `ok` — the field is omitted for "
+                           + "incompleteness, never wholesale")
+            XCTAssertNil(d?["incomplete"], "\(verb): a complete report is byte-compatible with before")
+            XCTAssertNil(d?["unanalyzed"], "\(verb): …and carries no manifest")
+            XCTAssertEqual(r.code, 0, "\(verb) --strict: nothing found, nothing unread → 0")
+        }
+
+        // ── NOW MAKE IT INCOMPLETE. One unreadable file; same code, same policy. ──
+        try addUnreadable(root)
+        let inc = root.appendingPathComponent("ri")
+        let incScan = try ProcessHarness.run(bin, [root.path, "--out", inc.path])
+        XCTAssertEqual(incScan.code, 0, incScan.err)
+        // The gate's answer is the reference the two advisory verbs were measured against.
+        let gate = try ProcessHarness.run(bin, ["gate", "--report", inc.path, "--policy", pol.path])
+        XCTAssertEqual(gate.code, 2, "the reference: the gate cannot certify over unanalyzed code")
+
+        for verb in ["unverified", "fix-gate"] {
+            let r = try ProcessHarness.run(bin, [verb, "--report", inc.path, "--policy", pol.path, "--json"])
+            let d = try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any]
+            XCTAssertNil(d?["ok"],
+                         "\(verb): `ok` is ABSENT — not false. `false` would assert a finding this run "
+                         + "never made, beside an EMPTY array; that is the fabrication mirror, and worse "
+                         + "than the `true` it replaces. Got: \(String(describing: d))")
+            XCTAssertEqual(d?["incomplete"] as? Bool, true, "\(verb): …and it says so")
+            let un = d?["unanalyzed"] as? [[String: Any]]
+            XCTAssertEqual(un?.count, 1, "\(verb): the manifest travels, so the reader learns WHAT was unread")
+            XCTAssertTrue((un?.first?["path"] as? String ?? "").contains("Corrupt"), "\(verb): …by name")
+            // The partial answer still ships (SPEC §3.2: it beats a refusal).
+            XCTAssertNotNil(d?[verb == "unverified" ? "unverified" : "remedies"],
+                            "\(verb): the array is still there — a partial answer that says it is partial")
+            XCTAssertEqual(r.code, 0, "\(verb): advisory without --strict, exactly as before")
+
+            // …and `--strict`, which is how CI consumes these, is now 2 (could-not-fully-evaluate) — the
+            // gate's code for the same situation. NOT 1: no finding was made.
+            let s = try ProcessHarness.run(bin, [verb, "--report", inc.path, "--policy", pol.path, "--strict"])
+            XCTAssertEqual(s.code, 2,
+                           "\(verb) --strict over an incomplete report exits 2, not the 0 that certified it")
+        }
+    }
+
     // The digest algorithm matches java's FNV-1a-64 byte-for-byte (one spec, one algorithm).
     func testFnv1aHexIsDeterministicAndWellFormed() {
         let a = fnv1aHex(["app.pure(x:)", "app.reads()"])
