@@ -9,6 +9,37 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed ⚠ — a rebound `Process` program reported BOTH commands (2026-08-01)
+
+The command surface was a union of every locator write to a handle, with no notion of one write killing
+another:
+
+```swift
+p.executableURL = URL(fileURLWithPath: "/bin/sh")
+p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+try? p.run()                                    // reported cmds: ["/bin/sh", "/bin/zsh"]
+```
+
+Only `/bin/zsh` can run, so `/bin/sh` sat on the surface for an execution that does not exist and
+`allow Exec /bin/zsh` failed on it. FAIL-CLOSED — a spurious failure, never a missed one — so a false
+positive rather than the cardinal sin.
+
+It was worth fixing because the engine's two locator mechanisms disagreed about one shape: the
+URL/URLRequest path WITHHOLDS on a straight-line rebind (`u = URL(…)` enters `movedNames`, no host is
+claimed) while this path unioned. Withholding here instead would have cost every ordinary single-write
+`Process` its command.
+
+A write W now kills an earlier write V iff **W's enclosing statement list is V's list or an ancestor of
+it** — "control reaching past W has passed through W and can no longer be carrying V". Deliberately NOT
+collapsed, each pinned by its own test: a conditional second write (`if c { p.launchPath = … }`), a pair
+inside a block read from outside it, and anything across a closure boundary. `execLocatorInvisible` is not
+subject to the kill either — a literal that dominates an unreadable write does overwrite it, but that is
+the one direction here that turns a refusal into a claim, and its only support would be the dominance
+argument being introduced in the same change.
+
+A/B: **zero field diffs** across pollen, swift-syntax and candor-swift's own sources (8.5k functions) — no
+command, host, path or effect moved on any real code; the shape is rare, which is also why it survived.
+
 ### fixed ⚠ — ⟨0.24⟩ `unverified --strict` and `fix-gate --strict` certified an INCOMPLETE report (2026-08-01)
 
 SPEC §3.2 ⟨0.24⟩ (candor-spec `0075987`). The gate has honoured the ⟨0.21⟩ completeness manifest for three

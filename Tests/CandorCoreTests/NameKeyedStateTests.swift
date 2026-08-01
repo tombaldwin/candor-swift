@@ -132,7 +132,7 @@ final class NameKeyedStateTests: XCTestCase {
             + "records that `req.url` (or `p.launchPath`) was assigned, and dropping that on a rebind "
             + "would re-admit exactly the locator the write moved. Body-wide by construction, and never "
             + "consulted to resolve a name to a binding — only to REFUSE a literal claim about one."),
-        "execLocatorOfLocal": .deliberatelyKept(
+        "execLocatorWrites": .deliberatelyKept(
             "the program a `Process` LOCAL was told to execute (`p.launchPath = \"/bin/sh\"`), carried to "
             + "the launching verb, which takes no argument and so has no other source for it. Kept — and "
             + "THE ARGUMENT FOR KEEPING IT WAS WRONG IN ITS PREMISE. It read: a rebind of the handle is "
@@ -142,7 +142,14 @@ final class NameKeyedStateTests: XCTestCase {
             + "and `let p = make(); if true { let p = Process(); p.launchPath = \"/bin/x\" }; p.launch()` "
             + "reported a program that handle never ran (measured; `allow Exec /bin/x` certified it). The "
             + "CONCLUSION survives — clearing the value while the refusal stands is the wrong direction — "
-            + "but the shadow needed a gate of its own: `multiplyBoundNames`, consulted at the READ."),
+            + "but the shadow needed a gate of its own: `multiplyBoundNames`, consulted at the READ. "
+            + "RENAMED from `execLocatorOfLocal` and no longer a flat `Set` of literals: each write now "
+            + "carries the chain of statement lists enclosing it, so a LATER write can kill an earlier one "
+            + "it dominates (see `ExecLocatorOverwriteProcessTests` — two straight-line writes to one "
+            + "handle reported BOTH programs, though only the second can run). That is a kill WITHIN one "
+            + "binding and is orthogonal to this file's question: it says nothing about what a REBIND of "
+            + "the name does, which is still `movedNames`/`multiplyBoundNames`' job, and the kill is "
+            + "gated on statement-list ancestry precisely so it can never reach across a binder."),
         "execLocatorInvisible": .deliberatelyKept(
             "the half that keeps the Exec gate closed: a `launchPath`/`executableURL` write whose value "
             + "could NOT be read statically. Clearing it on a rebind would let a benign visible literal "

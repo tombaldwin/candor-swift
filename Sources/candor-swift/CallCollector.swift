@@ -730,8 +730,70 @@ final class CallCollector: SyntaxVisitor {
     // binder COUNT (`multiplyBoundNames`) — a name with two binder sites in one unit is not a name a
     // body-wide claim can be made about — and it lives at the READ (`recordProcessRun`) rather than at
     // the write, so the suppressing half stays monotone.
-    private var execLocatorOfLocal: [String: Set<String>] = [:]  // name → the literal programs written to it
-    private var execLocatorInvisible: Set<String> = []           // name → some write was NOT statically known
+    //
+    // ⟨THE OVERWRITE⟩ THE LITERALS ARE NOT A UNION — A WRITE THAT DOMINATES AN EARLIER ONE KILLS IT.
+    // Straight-line, one handle, two writes:
+    //
+    //     p.executableURL = URL(fileURLWithPath: "/bin/sh")
+    //     p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+    //     try? p.run()                              // reported cmds: ["/bin/sh", "/bin/zsh"]
+    //
+    // Only `/bin/zsh` can run, so `/bin/sh` was on the surface for no execution that exists, and
+    // `allow Exec /bin/zsh` failed on it. FAIL-CLOSED — a spurious failure, never a missed one — so this
+    // is a false positive rather than the cardinal sin, which is why it is fixed narrowly rather than
+    // aggressively. It was worth fixing anyway because THE ENGINE'S TWO LOCATOR MECHANISMS DISAGREED
+    // ABOUT ONE SHAPE: the URL/URLRequest path REFUSES on a straight-line rebind (`u = URL(…)` puts the
+    // name in `movedNames` and no host is claimed at all), while this path unioned. One of the two had to
+    // move, and withholding here would have cost every genuine single-write `Process` its command.
+    //
+    // THE RULE, and it is the whole safety argument: a write W kills an earlier write V **iff W's
+    // enclosing statement list is V's list or an ANCESTOR of it**. That is exactly "control reaching W's
+    // successor has passed through W and can no longer be carrying V". Each recorded literal therefore
+    // travels with the CHAIN of statement lists enclosing it, and the test is `W.list ∈ V.chain`.
+    //
+    // The three shapes this is deliberately unable to collapse, all of which MUST stay unioned — each is
+    // pinned by a test, because the fixture that proves the false positive closed cannot show the reach
+    // closed with it:
+    //
+    //   - `p.launchPath = A; if c { p.launchPath = B }; p.run()` — B is in a NESTED list, so it does not
+    //     kill A, and if `c` is false A is what runs.
+    //   - `p.launchPath = A; if c { p.launchPath = B; p.launchPath = C; p.run() }` — C kills B (same
+    //     list) but NOT A (A's list is an ancestor of C's, not a descendant), and the outer read below
+    //     the block still sees A.
+    //   - anything inside a CLOSURE or a nested function: the chain STOPS at that boundary, so an
+    //     outer write never kills a closure's and vice versa. An escaping closure runs at a time this
+    //     walk cannot order.
+    //
+    // AND `execLocatorInvisible` IS NOT SUBJECT TO IT. A literal that dominates an unreadable write does
+    // in fact overwrite it, so clearing the refusal would be *correct* — and it is the one direction here
+    // that turns a refusal into a claim. The whole surface's value is that it fails closed; a relaxation
+    // whose only support is the same dominance argument that is being introduced in the same commit is
+    // not one to take on trust. The refusal stands, and a mixed literal/runtime handle still reports
+    // nothing.
+    private struct LocatorWrite {
+        let lit: String
+        /// The statement lists enclosing this write, innermost outward, stopping at the nearest closure or
+        /// nested-function boundary. A later write kills this one iff its own list is in here.
+        let enclosing: Set<SyntaxIdentifier>
+    }
+    private var execLocatorWrites: [String: [LocatorWrite]] = [:]  // name → the live literal writes, in order
+    private var execLocatorInvisible: Set<String> = []             // name → some write was NOT statically known
+
+    /// The chain of `CodeBlockItemList`s enclosing `node`, innermost outward, STOPPING at the nearest
+    /// closure / nested-function boundary (see `LocatorWrite.enclosing`). The first element is the list the
+    /// write itself is a statement of — the one a later sibling write must match to kill it.
+    private static func enclosingStatementLists(_ node: Syntax) -> [SyntaxIdentifier] {
+        var out: [SyntaxIdentifier] = []
+        var cur: Syntax? = node.parent
+        while let n = cur {
+            if n.is(ClosureExprSyntax.self) || n.is(FunctionDeclSyntax.self)
+                || n.is(InitializerDeclSyntax.self) || n.is(DeinitializerDeclSyntax.self)
+                || n.is(AccessorDeclSyntax.self) { break }
+            if n.is(CodeBlockItemListSyntax.self) { out.append(n.id) }
+            cur = n.parent
+        }
+        return out
+    }
 
     /// `p.launchPath = <expr>` / `p.executableURL = <expr>` on a bare local. Records the literal, or the
     /// fact that there was a write we could not read — which is the half that keeps the gate closed.
@@ -756,7 +818,16 @@ final class CallCollector: SyntaxVisitor {
             // `resolveConstString` carries the mechanism-1 ctor unwrap, so `URL(fileURLWithPath: "/bin/sh")`
             // and a const-anchored `let tool = "/bin/sh"` both resolve here through one resolver.
             if let lit = plainStringLiteralValue(rhs) ?? resolveConstString(rhs) {
-                execLocatorOfLocal[name, default: []].insert(decodeEscapes(lit))
+                // ⟨THE OVERWRITE⟩ kill every earlier write this one dominates — see `LocatorWrite`. When
+                // the write sits in no statement list at all (a top-level expression, or a shape this walk
+                // does not reach a list from) the chain is empty, nothing matches, and the behaviour is the
+                // union it always was.
+                let chain = Self.enclosingStatementLists(Syntax(ma))
+                if let mine = chain.first {
+                    execLocatorWrites[name]?.removeAll { $0.enclosing.contains(mine) }
+                }
+                execLocatorWrites[name, default: []]
+                    .append(LocatorWrite(lit: decodeEscapes(lit), enclosing: Set(chain)))
             } else {
                 execLocatorInvisible.insert(name)
             }
@@ -775,8 +846,10 @@ final class CallCollector: SyntaxVisitor {
         }
         let name = dr.baseName.text
         let inert = Self.PROCESS_INERT_WRITES.union(Self.PROCESS_LOCATOR_WRITES)
-        let literals = execLocatorOfLocal[name] ?? []
-        // `multiplyBoundNames` is the SHADOW half of the refusal (see `execLocatorOfLocal`): two binder
+        // The writes still LIVE at this point in the walk: dominated ones were removed when the dominating
+        // write was recorded, and writes textually below this launch have not been walked yet.
+        let literals = Set((execLocatorWrites[name] ?? []).map(\.lit))
+        // `multiplyBoundNames` is the SHADOW half of the refusal (see `execLocatorWrites`): two binder
         // sites for one name means the literal under it was written about a binding that may not be the
         // one being launched here. Refusing empties the surface, which `allow Exec` reads as incomplete —
         // the same direction the two guards beside it fail in.
@@ -2139,7 +2212,7 @@ final class CallCollector: SyntaxVisitor {
                     // handled — surfaces + incompleteness recorded per-locator
                 } else if rt == "Process", ["run", "launch"].contains(member) {
                     // The LAUNCHING verb on a Process handle. Its command was fixed by an earlier property
-                    // write, not by an argument here, so the locator comes from `execLocatorOfLocal` —
+                    // write, not by an argument here, so the locator comes from `execLocatorWrites` —
                     // or the surface is marked incomplete. The other PROCESS_MEMBERS (waitUntilExit,
                     // terminate, interrupt) are teardown/wait: they name no program and are left alone.
                     recordProcessRun(receiver: ma.base)
