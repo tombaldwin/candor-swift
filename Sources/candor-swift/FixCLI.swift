@@ -125,7 +125,15 @@ private func mergeFixReport(_ full: String, into byName: inout [String: FixFn],
         // report predating the field loads it empty, which leaves the narrowed rule unmatched there —
         // the same withholding `evaluateGate` applies rather than charging on a default.
         let why = (e["unknownWhy"] as? [Any])?.compactMap { $0 as? String } ?? []
-        byName[fn] = FixFn(inferred: inferred, direct: direct, calls: calls, unknownWhy: why, loc: loc)
+        // ⟨0.20⟩ `netClass` rides along for the destination-class conjunct `deniedLayer` now performs: a
+        // `deny Net[<dest>…]` only forbids `Net` where the destinations meet, and until this field was
+        // read `fix-gate` computed a hoist remedy for endpoints the policy explicitly tolerates. Read
+        // VERBATIM — the producer already accumulated it transitively and already floored it at
+        // `unknown-host`, which is how `gate --report` consumes the same field. A report predating it
+        // loads empty, leaving the narrowed rule unmatched there: the same withholding.
+        let netClass = (e["netClass"] as? [Any])?.compactMap { $0 as? String } ?? []
+        byName[fn] = FixFn(inferred: inferred, direct: direct, calls: calls, unknownWhy: why,
+                           netClass: netClass, loc: loc)
         for case let m as String in (e["invisible"] as? [Any]) ?? [] { coverage.invisibleModules.insert(m) }
     }
     // ⟨0.15 staged⟩ envelope `coverage` ledger (absent on a fully-covered or pre-⟨0.15⟩ report).
@@ -472,7 +480,12 @@ private func mergeUnverifiedReport(_ full: String, into out: inout [UnverifiedFn
         let direct = Set((e["direct"] as? [Any])?.compactMap { $0 as? String } ?? [])
         let why = (e["unknownWhy"] as? [Any])?.compactMap { $0 as? String } ?? []
         let calls = (e["calls"] as? [Any])?.compactMap { $0 as? String } ?? []
-        out.append(UnverifiedFn(fn: fn, inferred: inferred, direct: direct, unknownWhy: why, calls: calls))
+        // ⟨0.20⟩ and `netClass`, which cannot be derived from any of the above — see `FixFn.netClass`.
+        // Without it a `deny Net[<dest>…]` layer that PASSES an Unknown-carrying function read as one
+        // that denies it, and the hole went unnamed by the verb that exists to name it.
+        let netClass = (e["netClass"] as? [Any])?.compactMap { $0 as? String } ?? []
+        out.append(UnverifiedFn(fn: fn, inferred: inferred, direct: direct, unknownWhy: why,
+                                calls: calls, netClass: netClass))
     }
     // ⟨0.21⟩ completeness manifest, ⟨0.24⟩ read HERE for the first time — see `ReportCompleteness`.
     mergeUnanalyzed(obj, into: &completeness)

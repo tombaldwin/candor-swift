@@ -9,6 +9,57 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed — and `deny Net[…]` was the same defect again, one field over (2026-08-01)
+
+`DenyRule.netClasses` had the identical shape to the `unknownClasses` defect below: parsed, populated,
+and read by neither `deniedLayer` nor `unverifiedHoleRule`. Same verb pair, same two directions.
+MEASURED on `deny Net[unknown-host] app` over a report whose only Net reaches a `known-partner` host:
+
+| verb | before | |
+|---|---|---|
+| `gate` | exit 0 | correct — the destination class is excluded |
+| `fix-gate --strict` | exit 1 + a remedy naming `app.callPartner` | OVER-CHARGE: a hoist instruction for a boundary the policy does not deny |
+| `unverified --strict` | exit 0, `ok: true` | UNDER-REPORT: an `Unknown`-carrying passer goes unnamed |
+
+**What made this one different, and it was the whole of the work.** A reason class is DERIVED from
+fields the records already carried (`unknownWhy` + `direct` + `calls`, §6.2's own resolution). A Net
+destination class cannot be: it is a function of the host literal surface and the project's
+`net-partner` set, and neither travels on a `FixFn`. So it is THREADED — the report's own ⟨0.20⟩
+`netClass`, read verbatim the way `gate --report` reads it, on records where the field is
+**non-defaulted** so no construction site can silently rebuild the bug. No second fixpoint: the
+producer writes `netClass` from the already-accumulated host surface, so the transitive answer *is* the
+field's value, and re-deriving it could only disagree with the gate.
+
+An empty class set means NOT-forbidden, for destinations as for reasons — the disclosing direction for
+both callers, and the same withholding `evaluateGate` performs. The unfloored/floored reason-class split
+is untouched (the matcher takes the unfloored map, `--class` keeps the floored one).
+
+MEASURED A/B, pollen and candor-swift's own `Sources`, 6 policies × 3 verbs × 2 corpora:
+
+- **Gate verdicts moved: 0.** All 12 `gate` cells byte-identical, and all 4 scan-route `--policy` runs
+  exit-identical. This changes what is disclosed, not what is decided.
+- **Holes no longer named: 0.** Every A/B cell, both corpora.
+- **Holes newly named: +49** on pollen under `deny Net[known-partner]` (410 → 459) — Unknown-carrying
+  functions the narrowed rule PASSES, which `unverified` had been certifying clean. Same +49 on the
+  scan-time note.
+- **Remedies withdrawn: 6** (pollen, `deny Net[known-partner]`, exit 1 → 0), against a `gate` that exits
+  0 on the same report and policy. Those were hoists proposed for a boundary the policy does not deny.
+- **Unnarrowed policies byte-identical**: `deny Net`/`deny Exec`, `pure`, `deny Unknown[dispatch]`.
+
+Reachable before this fix and much more so after it, so fixed with it: `ruleUpgrade` reconstructed a
+rule from `effects` + `scope` alone, dropping every narrowing filter. Under `deny Net[unknown-host] app`
+it told the operator their rule was `deny Net app` and offered `deny Net Unknown app` as the fix —
+an edit that **silently widens the Net denial from one destination class to all of them** while
+presenting itself as the addition of one token. 408–410 rows per pollen run carried that. Each term is
+now spelled with its own filter and the upgrade widens the `Unknown` term alone, byte-for-byte the rust
+reference's `rule_and_upgrade` (PART 12d pins the two against each other) — which subsumes and replaces
+the raw-line source form the entry below introduced.
+
+Pinned by `ScopedNetRemedyProcessTests` (14 rows: 2 gate controls, and every "must now be silent" paired
+with a "must still fire", including the absent-`netClass` row where the gate's answer is a refusal).
+Suite 535 passing (3 module-const rows still expected failures); smoke 108/108; fuzz 25/25;
+fabrication-probe clean; conformance PART 27 green, 16 live swift cells OK.
+
 ### fixed — a class-scoped `deny Unknown[…]` meant something different to `fix-gate` and `unverified` than to the gate (2026-08-01)
 
 `DenyRule.unknownClasses` was parsed and populated, and **neither `deniedLayer` (the `fix`/`fix-gate`

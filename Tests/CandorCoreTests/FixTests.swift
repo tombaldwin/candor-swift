@@ -10,10 +10,10 @@ final class FixTests: XCTestCase {
 
     private func orderflow() -> (byName: [String: FixFn], cg: [String: [String]]) {
         let byName: [String: FixFn] = [
-            "api.get": FixFn(inferred: ["Net"], direct: [], calls: ["domain.bulk"], unknownWhy: []),
-            "domain.bulk": FixFn(inferred: ["Net"], direct: [], calls: ["domain.price"], unknownWhy: []),
-            "domain.price": FixFn(inferred: ["Net"], direct: [], calls: ["infra.fetch"], unknownWhy: []),
-            "infra.fetch": FixFn(inferred: ["Net"], direct: ["Net"], calls: [], unknownWhy: []),
+            "api.get": FixFn(inferred: ["Net"], direct: [], calls: ["domain.bulk"], unknownWhy: [], netClass: ["unknown-host"]),
+            "domain.bulk": FixFn(inferred: ["Net"], direct: [], calls: ["domain.price"], unknownWhy: [], netClass: ["unknown-host"]),
+            "domain.price": FixFn(inferred: ["Net"], direct: [], calls: ["infra.fetch"], unknownWhy: [], netClass: ["unknown-host"]),
+            "infra.fetch": FixFn(inferred: ["Net"], direct: ["Net"], calls: [], unknownWhy: [], netClass: ["unknown-host"]),
         ]
         let cg: [String: [String]] = [
             "api.get": ["domain.bulk"],
@@ -42,7 +42,7 @@ final class FixTests: XCTestCase {
         // With an allowed-layer caller ABOVE the minimal frontier, the higher option is surfaced: the minimal
         // hoist stays api.get, but main.run (which calls it, also allowed) is a higher place to originate Net.
         var (byName, cg) = orderflow()
-        byName["main.run"] = FixFn(inferred: ["Net"], direct: [], calls: ["api.get"], unknownWhy: [])
+        byName["main.run"] = FixFn(inferred: ["Net"], direct: [], calls: ["api.get"], unknownWhy: [], netClass: ["unknown-host"])
         cg["main.run"] = ["api.get"]
         let deny = parsePolicy("deny Net domain").deny
         guard case let .remedy(r) = fix(target: "price", effect: "Net", byName: byName, cg: cg, deny: deny) else {
@@ -85,8 +85,8 @@ final class FixTests: XCTestCase {
     func testFixPrefersTheEffectPerformingMatch() {
         // `save` matches a pure `cache.save` and the effectful denied `repo.save` — resolve to the latter.
         let byName: [String: FixFn] = [
-            "cache.save": FixFn(inferred: [], direct: [], calls: [], unknownWhy: []),
-            "repo.save": FixFn(inferred: ["Net"], direct: ["Net"], calls: [], unknownWhy: []),
+            "cache.save": FixFn(inferred: [], direct: [], calls: [], unknownWhy: [], netClass: []),
+            "repo.save": FixFn(inferred: ["Net"], direct: ["Net"], calls: [], unknownWhy: [], netClass: ["unknown-host"]),
         ]
         let cg: [String: [String]] = ["cache.save": [], "repo.save": []]
         let deny = parsePolicy("deny Net repo").deny
@@ -100,10 +100,10 @@ final class FixTests: XCTestCase {
         // domain.top → api.mid → domain.inner → infra.fetch, deny Net domain. api.mid is the nearest allowed
         // frontier but domain.top calls it → hoisting there leaves top violating → cleanHoist false.
         let byName: [String: FixFn] = [
-            "domain.top": FixFn(inferred: ["Net"], direct: [], calls: ["api.mid"], unknownWhy: []),
-            "api.mid": FixFn(inferred: ["Net"], direct: [], calls: ["domain.inner"], unknownWhy: []),
-            "domain.inner": FixFn(inferred: ["Net"], direct: [], calls: ["infra.fetch"], unknownWhy: []),
-            "infra.fetch": FixFn(inferred: ["Net"], direct: ["Net"], calls: [], unknownWhy: []),
+            "domain.top": FixFn(inferred: ["Net"], direct: [], calls: ["api.mid"], unknownWhy: [], netClass: ["unknown-host"]),
+            "api.mid": FixFn(inferred: ["Net"], direct: [], calls: ["domain.inner"], unknownWhy: [], netClass: ["unknown-host"]),
+            "domain.inner": FixFn(inferred: ["Net"], direct: [], calls: ["infra.fetch"], unknownWhy: [], netClass: ["unknown-host"]),
+            "infra.fetch": FixFn(inferred: ["Net"], direct: ["Net"], calls: [], unknownWhy: [], netClass: ["unknown-host"]),
         ]
         let cg: [String: [String]] = [
             "domain.top": ["api.mid"], "api.mid": ["domain.inner"],
@@ -120,8 +120,8 @@ final class FixTests: XCTestCase {
         // domain.price is Unknown (a fn-value call) → `pure domain` PASSES it, but its purity is unverified.
         let fns = [
             UnverifiedFn(fn: "domain.price", inferred: ["Unknown"], direct: ["Unknown"],
-                         unknownWhy: ["callback:fetch"], calls: []),
-            UnverifiedFn(fn: "domain.calc", inferred: [], direct: [], unknownWhy: [], calls: []),
+                         unknownWhy: ["callback:fetch"], calls: [], netClass: []),
+            UnverifiedFn(fn: "domain.calc", inferred: [], direct: [], unknownWhy: [], calls: [], netClass: []),
         ]
         let deny = parsePolicy("pure domain").deny
         let (ok, holes) = unverified(fns, deny)

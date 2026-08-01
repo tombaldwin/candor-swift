@@ -29,21 +29,21 @@ final class UnverifiedClassFilterTests: XCTestCase {
         [
             // a DIRECT `Unknown` source with no recorded reason — §6.2's contribution case
             UnverifiedFn(fn: "a.reasonless", inferred: ["Unknown"], direct: ["Unknown"],
-                         unknownWhy: [], calls: []),
+                         unknownWhy: [], calls: [], netClass: []),
             // a DIRECT source that classified itself — the control row: `dispatch`, and nothing else
             UnverifiedFn(fn: "b.reasoned", inferred: ["Unknown"], direct: ["Unknown"],
-                         unknownWhy: ["dispatch:P.m"], calls: []),
+                         unknownWhy: ["dispatch:P.m"], calls: [], netClass: []),
             // INHERITS from the classified source: `dispatch` must travel, `unresolved` must not appear
             UnverifiedFn(fn: "c.inheritsReasoned", inferred: ["Unknown"], direct: [],
-                         unknownWhy: [], calls: ["b.reasoned"]),
+                         unknownWhy: [], calls: ["b.reasoned"], netClass: []),
             // INHERITS from the reasonless source: `unresolved` must travel
             UnverifiedFn(fn: "d.inheritsReasonless", inferred: ["Unknown"], direct: [],
-                         unknownWhy: [], calls: ["a.reasonless"]),
+                         unknownWhy: [], calls: ["a.reasonless"], netClass: []),
             // INHERITS BOTH — the class set is a union, never one or the other
             UnverifiedFn(fn: "e.inheritsBoth", inferred: ["Unknown"], direct: [],
-                         unknownWhy: [], calls: ["a.reasonless", "b.reasoned"]),
+                         unknownWhy: [], calls: ["a.reasonless", "b.reasoned"], netClass: []),
             // not `Unknown` at all: never a hole, whatever the filter
-            UnverifiedFn(fn: "f.clean", inferred: [], direct: [], unknownWhy: [], calls: []),
+            UnverifiedFn(fn: "f.clean", inferred: [], direct: [], unknownWhy: [], calls: [], netClass: []),
         ]
     }
 
@@ -97,7 +97,7 @@ final class UnverifiedClassFilterTests: XCTestCase {
     func testAHoleNothingExplainsStillReadsUnresolved() throws {
         let deny = parsePolicy("deny Exec").deny
         let fns = [UnverifiedFn(fn: "x.opaque", inferred: ["Unknown"], direct: [],
-                                unknownWhy: [], calls: [])]
+                                unknownWhy: [], calls: [], netClass: [])]
         let (_, hs) = unverified(fns, deny, classFilter: try parseClassFilter("unresolved"))
         XCTAssertEqual(hs.map { $0.fn }, ["x.opaque"])
         let (_, none) = unverified(fns, deny, classFilter: try parseClassFilter("dispatch"))

@@ -1113,15 +1113,17 @@ policyBlock: if let pp = policyPath {
     // fn/closure-injected port). Surfaces the gap automatically (eval/fixloop/DISPATCH-NOTE.md).
     // Same predicate + upgrade as `candor-swift unverified` (CandorCore.unverifiedHoleRule) — one source of truth.
     //
-    // ⟨0.19⟩ It is handed the reason classes from the VERY GateInput `evaluateGate` was just given, not a
-    // second derivation of them — which is what makes "the note names the functions the gate passed" a
-    // property of the code. A `deny Unknown[<class>…]` this run did NOT charge leaves the function passing
-    // while it still carries an `Unknown`, and that is exactly a hole this note must name.
+    // ⟨0.19⟩ It is handed the reason classes — and ⟨0.20⟩ the Net destination classes — from the VERY
+    // GateInput `evaluateGate` was just given, not a second derivation of them, which is what makes "the
+    // note names the functions the gate passed" a property of the code. A `deny Unknown[<class>…]` or a
+    // `deny Net[<dest>…]` this run did NOT charge leaves the function passing while it still carries an
+    // `Unknown`, and that is exactly a hole this note must name.
     let disclosePolicy = scanPolicy
     var purityHoles: [(String, String)] = []
     for qual in inferred.keys.sorted() {
         if let r = unverifiedHoleRule(qual, inferred[qual] ?? [], disclosePolicy.deny,
-                                      scanGateInput.reasonClasses[qual] ?? []) {
+                                      scanGateInput.reasonClasses[qual] ?? [],
+                                      Set(scanGateInput.netClasses[qual] ?? [])) {
             purityHoles.append((qual, ruleUpgrade(r).upgrade))
         }
     }
