@@ -9,6 +9,31 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### measured, no change — ⟨0.24⟩ `violations[].conditional` is N/A for candor-swift (2026-08-01)
+
+SPEC §3.1 pins `violations[].conditional: "<the narrowing left unevaluated>"` (candor-spec `6f30540`,
+corrected by `901f14d`), and it is rust-only. Measured here before building anything, because the pin is
+a **`whatif` output** and candor-swift ships no `whatif`:
+
+- Verified against rust's OUTPUT, not a description of it —
+  `candor-query whatif cap_from_name Net --policy 'deny Net[unknown-host]' --json` emits
+  `violations[0].conditional: "the \`Net\` you introduce reaches destination class unknown-host"`, a
+  per-violation STRING, and the bare `deny Net` control emits the same document with the key absent.
+- candor-swift's verb set is `path tour gains fix fix-gate unverified privacy-manifest gate parsepolicy`.
+  `whatif` is not among them and exits 2 (AGENTS.md already points the general read-only queries at
+  `candor-query`/`candor-ts-query`); SPEC §3.1 makes the query verbs SHOULD and names candor-swift's
+  subset explicitly.
+- **And no other surface here asks the question.** `conditional` exists because a hypothetical has no
+  destination or reason class for a narrowing filter to quantify over, so the filter cannot be evaluated
+  and the fail-closed verdict rests on an unevaluated condition. Every candor-swift verb reads a
+  signature that EXISTS: `fix <fn> <Effect>` over an effect the function does not have answers
+  `crossing: false, reason: does-not-perform` rather than charging a hypothetical, and after the
+  `deny Net[…]` fix above a narrowed rule over a REAL `Net` is EVALUATED (`reason: not-forbidden`), not
+  deferred. There is no unanswerable narrowing to disclose, and emitting the field anyway would assert a
+  condition the analysis did not leave open.
+
+No code change. Recorded so the next pass does not re-open it.
+
 ### fixed — and `deny Net[…]` was the same defect again, one field over (2026-08-01)
 
 `DenyRule.netClasses` had the identical shape to the `unknownClasses` defect below: parsed, populated,
