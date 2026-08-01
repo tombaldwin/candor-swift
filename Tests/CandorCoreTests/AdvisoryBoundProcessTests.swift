@@ -397,4 +397,131 @@ final class AdvisoryBoundProcessTests: XCTestCase {
         XCTAssertEqual(d["reason"] as? String, "not-forbidden")
         XCTAssertNil(d["unevaluated"])
     }
+
+    // ── THE PER-ENTRY `why`: the reason must reach the reader who is holding ONE ENTRY ───────────────
+    //
+    // The rung above put the unjudged function into `unverified` and its reason into the top-level
+    // `unevaluated[]`. That is enough for a reader of the DOCUMENT and not enough for a reader of an
+    // ENTRY — the two are joined only by the raw rule string, and nothing in the entry says the join is
+    // even required. MEASURED four-way over the R11 report under `deny Net[unknown-host] app`, per-entry
+    // key sets (NOT the union — the two entry kinds differ, and that is the whole finding):
+    //
+    //                 ORDINARY HOLE (`app.nativeHole`)    UNJUDGED (`app.noClass`)
+    //     rust    [fn, rule, unknownWhy, upgrade]     [fn, rule, why]
+    //     java    [fn, rule, unknownWhy, upgrade]     [fn, rule, unknownWhy, upgrade, why]
+    //     ts      [fn, rule, unknownWhy, upgrade]     [fn, rule, why]
+    //     swift   [fn, rule, unknownWhy, upgrade]     [fn, rule, unknownWhy, upgrade]      ← no `why`
+    //
+    // TWO THINGS THE MEASUREMENT CORRECTS, and both change what gets written:
+    //
+    //  1. `why` IS NOT A UNIVERSAL KEY. No engine puts one on an ordinary hole, and none should — an
+    //     ordinary hole's reason is `unknownWhy`, and a second reason field beside it would invite a
+    //     reader to treat the absence of a gate refusal as a statement about the hole. The key is
+    //     emitted exactly where the gate WITHHELD, which is the one place a per-entry reader currently
+    //     cannot tell that anything was withheld at all.
+    //
+    //  2. THE OVERLAP ARM IS WHERE SWIFT LOSES THE MOST, and it is invisible in the `Net` column above.
+    //     Under `deny Unknown[dispatch] app` over an inherited-Unknown report, the function is BOTH an
+    //     ordinary hole and unjudged. rust and ts emit TWO rows for that one (fn, rule) — the hole row
+    //     and a separate `why` row. java merges. swift dedupes to one row on `seenPair` and the reason
+    //     is dropped: not relocated to `unevaluated` for that ENTRY's sake, just absent. So the fix
+    //     cannot be "add `why` to the rows the answerability pass appends" — the arm that needs it most
+    //     has no such row. It attaches to the (fn, rule) PAIR, whichever pass emitted it, which is
+    //     java's merged shape and the only one of the three that leaves swift's one-row rule intact.
+    //
+    // The three engines that carry it do NOT agree with each other, so this is not a majority vote: it
+    // is that a per-entry reader written against ANY of the three finds nothing in swift's entry, and
+    // the reason is sitting one array away under a key the entry never mentions.
+
+    /// The `unverified` rows, as raw dictionaries.
+    private func rows(_ out: String) throws -> [[String: Any]] {
+        try XCTUnwrap((try doc(out))["unverified"] as? [[String: Any]])
+    }
+
+    /// THE DEFECT, `Net` arm: `app.noClass` is named, and nothing in its entry says why.
+    func testTheUnjudgedEntryCarriesItsOwnWhy() throws {
+        let r = try run(verb: "unverified", policy: "deny Net[unknown-host] app", report: Self.r11,
+                        extra: ["--json"])
+        let row = try XCTUnwrap(try rows(r.out).first(where: { ($0["fn"] as? String) == "app.noClass" }))
+        let why = try XCTUnwrap(row["why"] as? String,
+                                "a consumer holding THIS entry cannot say why it is unverified without "
+                                + "joining back to `unevaluated[]` on the raw rule string — and nothing in "
+                                + "the entry tells them that join exists. rust, java and ts all carry it")
+        XCTAssertTrue(why.contains("netClass") && why.contains("app.noClass"),
+                      "it must name the MISSING EVIDENCE and the function, exactly as the disclosure does")
+    }
+
+    /// THE DEFECT, reason-class arm — the one swift's `seenPair` dedupe hides. The row exists (it is the
+    /// ordinary hole), so every assertion the rung above makes passes, and the refusal still never
+    /// reaches the entry.
+    func testTheOverlappingEntryCarriesItsWhyToo() throws {
+        let r = try run(verb: "unverified", policy: "deny Unknown[dispatch] app",
+                        report: Self.inheritedUnknown, extra: ["--json"])
+        let mine = try rows(r.out).filter { ($0["fn"] as? String) == "app.inherited" }
+        XCTAssertEqual(mine.count, 1,
+                       "swift emits ONE row per (fn, rule) and this change must not make it two — the "
+                       + "reason travels ON the row, it does not earn a row of its own")
+        let why = try XCTUnwrap(mine.first?["why"] as? String,
+                                "the hole row won the tie and the refusal was dropped: `unverified` says "
+                                + "this function is a hole, and never that the gate could not judge it")
+        XCTAssertTrue(why.contains("app.inherited") && why.contains("unknownWhy"),
+                      "the reason-class refusal names the channel that is missing")
+        XCTAssertEqual((mine.first?["unknownWhy"] as? [String]) ?? [], [],
+                       "…and the keys the row already carried are untouched — this ADDS one")
+        XCTAssertEqual(mine.first?["upgrade"] as? String, "deny Unknown app")
+    }
+
+    /// ONE SPELLING (§3.2: inventing a second is the mistake the document has already made four times).
+    /// The entry's reason and the disclosure's are the same bytes, so a reader who does perform the join
+    /// gets no second, subtly different account of the same refusal.
+    func testTheEntryWhyIsTheDisclosuresOwnBytes() throws {
+        for (pol, report, fn) in [("deny Net[unknown-host] app", Self.r11, "app.noClass"),
+                                  ("deny Unknown[dispatch] app", Self.inheritedUnknown, "app.inherited")] {
+            let r = try run(verb: "unverified", policy: pol, report: report, extra: ["--json"])
+            let row = try XCTUnwrap(try rows(r.out).first(where: { ($0["fn"] as? String) == fn }))
+            let disc = try XCTUnwrap(((try doc(r.out))["unevaluated"] as? [[String: Any]])?
+                                        .first(where: { ($0["rule"] as? String) == pol })?["why"] as? String)
+            XCTAssertEqual(row["why"] as? String, disc,
+                           "(\(pol)) the entry and the disclosure must not drift into two accounts")
+        }
+    }
+
+    /// MIRROR — THE LOAD-BEARING ONE. An entry that is unverified for a reason that is NOT a withheld
+    /// rule keeps exactly what it carries today. A blanket `why` would make the key meaningless (every
+    /// entry has one, so its presence says nothing) and would put a gate-refusal reason on rows where no
+    /// rule was refused — the over-report mirror of the lost disclosure.
+    func testAnOrdinaryHoleCarriesNoWhyAtAll() throws {
+        // (a) narrowed rule, evidence PRESENT — nothing is unanswerable anywhere in this run.
+        // (b) a bare rule over the very report the narrowed form could not be answered on.
+        for (name, pol, report) in [("evidence-carried", "deny Net[unknown-host] app",
+                                     Self.netClassed("known-partner")),
+                                    ("bare-rule", "deny Fs app", Self.r11)] {
+            let r = try run(verb: "unverified", policy: pol, report: report, extra: ["--json"])
+            let all = try rows(r.out)
+            XCTAssertEqual(all.map { Set($0.keys) },
+                           all.map { _ in Set(["fn", "rule", "unknownWhy", "upgrade"]) },
+                           "(\(name)) every row here is an ORDINARY hole; the key set is the four-way "
+                           + "agreed one and `why` is not in it: \(all.map { $0.keys.sorted() })")
+            let row = try XCTUnwrap(all.first(where: { ($0["fn"] as? String) == "app.nativeHole" }),
+                                    "(\(name)) vacuous unless the hole is actually there")
+            XCTAssertEqual((row["unknownWhy"] as? [String]) ?? [], ["native:dlopen"],
+                           "(\(name)) the hole's OWN reason, unrepurposed")
+        }
+    }
+
+    /// MIRROR: the shape of the whole answer is unchanged — same rows, same order, same other keys. The
+    /// counts are today's, measured before the change; a fix that added or dropped a row would be doing
+    /// something other than carrying a reason across.
+    func testTheAnswerGainsAKeyAndNothingElse() throws {
+        let r = try run(verb: "unverified", policy: "deny Net[unknown-host] app", report: Self.r11,
+                        extra: ["--json"])
+        let all = try rows(r.out)
+        XCTAssertEqual(all.compactMap { $0["fn"] as? String }, ["app.nativeHole", "app.noClass"],
+                       "two rows, in this order, before and after")
+        XCTAssertEqual(Set(all.first?.keys.map { $0 } ?? []), ["fn", "rule", "unknownWhy", "upgrade"],
+                       "the ordinary hole is untouched")
+        XCTAssertEqual(Set(all.last?.keys.map { $0 } ?? []), ["fn", "rule", "unknownWhy", "upgrade", "why"],
+                       "the unjudged row gains `why` and keeps `unknownWhy` + `upgrade` — java's merged "
+                       + "shape. Dropping them to match rust/ts would trade a lost disclosure for two more")
+    }
 }

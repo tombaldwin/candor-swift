@@ -9,6 +9,47 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed — a per-entry reader of `unverified` could not see the refusal (2026-08-01)
+
+The rung below put the unjudged function into `unverified` and its reason into the top-level
+`unevaluated[]`. That is enough for a reader of the DOCUMENT and not enough for a reader of an ENTRY:
+the two are joined only by the raw rule string, and nothing in the entry says the join exists. A lost
+disclosure, not a fabrication — the information was in the document, one array away from where a
+per-entry consumer looks.
+
+MEASURED four-way over the conformance R11 report under `deny Net[unknown-host] app`, keys **per
+entry** — not the union, because the two entry kinds differ and that is the finding:
+
+| | ordinary hole (`app.nativeHole`) | unjudged (`app.noClass`) |
+|---|---|---|
+| rust | `fn, rule, unknownWhy, upgrade` | `fn, rule, why` |
+| java | `fn, rule, unknownWhy, upgrade` | `fn, rule, unknownWhy, upgrade, why` |
+| ts | `fn, rule, unknownWhy, upgrade` | `fn, rule, why` |
+| swift **before** | `fn, rule, unknownWhy, upgrade` | `fn, rule, unknownWhy, upgrade` |
+| swift **after** | unchanged | `fn, rule, unknownWhy, upgrade, why` |
+
+- **`why` is NOT a universal key**, and the measurement is why. No engine puts one on an ordinary hole
+  — that entry's reason is `unknownWhy`, and a gate-refusal field sitting beside it would invite a
+  reader to take its absence as a statement. It is emitted exactly where a rule was WITHHELD, which is
+  the one place a per-entry reader could not previously tell that anything had been withheld.
+- **The reason-class arm is where swift lost the most**, and it is invisible in the `Net` column above.
+  Under `deny Unknown[dispatch] app` over an inherited-`Unknown` report the function is BOTH an ordinary
+  hole and unjudged. rust and ts emit two rows for that one (fn, rule); java merges; swift dedupes to
+  one row and the refusal was dropped. So the fix could not be *"add `why` to the rows the answerability
+  pass appends"* — the arm that needs it most has no such row. It attaches to the (fn, rule) PAIR,
+  whichever pass emitted it: java's merged shape, and the only one of the three that leaves swift's
+  one-row-per-pair rule intact.
+- The three engines that carry it **do not agree with each other**, so this is not a majority vote. It
+  is that a per-entry consumer written against ANY of the three found nothing in swift's entry.
+- Same bytes as that entry's own `unevaluated[].why` (§3.2: inventing a second spelling is the mistake
+  the document has already made four times) — but per (fn, rule) rather than per rule, since an entry is
+  read about its own function while `unevaluated[]` names one exemplar per rule.
+- Additive: no key repurposed or dropped, no row added or removed, ordinary holes untouched. Pinned by
+  five rows in `AdvisoryBoundProcessTests` — two for the defect (both arms), one for the single
+  spelling, and two mirrors: an ordinary hole must carry no `why` at all, and the row count and key sets
+  must be otherwise unchanged. The over-report mirror passed before the change and is the load-bearing
+  half: a blanket `why` would make the key's presence say nothing.
+
 ### fixed — ⟨0.24⟩ three advisory verbs answered a question the gate had refused (2026-08-01)
 
 SPEC §3.2 (candor-spec `4fd140c`): **an advisory verb may be LESS certain than the gate, never more.**

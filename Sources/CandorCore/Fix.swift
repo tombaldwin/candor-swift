@@ -344,8 +344,34 @@ public struct UnverifiedHole {
     public let rule: String
     public let unknownWhy: [String]
     public let upgrade: String
+    /// WHY THE GATE COULD NOT JUDGE THIS (fn, rule) — the §3.1 refusal's own prose, verbatim, or nil when
+    /// no rule was withheld here. Emitted only in the second case, which is the whole design of the key:
+    ///
+    /// MEASURED four-way over the conformance R11 report under `deny Net[unknown-host] app`, per ENTRY
+    /// (AdvisoryBoundProcessTests records the table). Every engine spells an ORDINARY hole
+    /// `[fn, rule, unknownWhy, upgrade]` and none of them puts a `why` on one — that entry's reason is
+    /// `unknownWhy`, and a gate-refusal field beside it would invite a reader to take its absence as a
+    /// statement. For the UNJUDGED entry rust and ts emit `[fn, rule, why]`, java merges to all five,
+    /// and swift alone carried nothing: the reason existed only in the top-level `unevaluated[]`, joinable
+    /// only by the raw rule string, with nothing in the entry saying a join was required. A per-entry
+    /// consumer written against any of the other three read swift's entry and learned nothing.
+    ///
+    /// So: java's merged shape, not rust's and ts's separate row. Not because two engines beat two, but
+    /// because swift emits ONE row per (fn, rule) on purpose (see `unverified`'s dedupe note) and the
+    /// reason-class arm — where the same function is BOTH an ordinary hole and unjudged — has no
+    /// second row to put a `why` on. Attaching it to the pair covers both arms and adds no row.
+    public let why: String?
+    public init(fn: String, rule: String, unknownWhy: [String], upgrade: String, why: String? = nil) {
+        self.fn = fn
+        self.rule = rule
+        self.unknownWhy = unknownWhy
+        self.upgrade = upgrade
+        self.why = why
+    }
     public func toJSON() -> [String: Any] {
-        ["fn": fn, "rule": rule, "unknownWhy": unknownWhy, "upgrade": upgrade]
+        var o: [String: Any] = ["fn": fn, "rule": rule, "unknownWhy": unknownWhy, "upgrade": upgrade]
+        if let why { o["why"] = why }        // ABSENT, never `null` — the key's presence IS the signal
+        return o
     }
 }
 
@@ -559,6 +585,33 @@ public func unverified(_ fns: [UnverifiedFn], _ deny: [DenyRule], classFilter: S
     let matcherClasses = matcherReasonClasses(fns, deny)
     // ⟨0.20⟩ the destination-class half, which no map here could DERIVE — see `matcherNetClasses`.
     let matcherNet = matcherNetClasses(fns, deny)
+    // ⟨0.24⟩ THE §3.2 BOUND — every (rule, function) the gate could not decide. Resolved BEFORE the hole
+    // loop and not after it, because a row the hole loop is about to emit may be one of these, and then
+    // its refusal has to ride out ON it (see `sortedCells` below).
+    var inferredByFn: [String: Set<String>] = [:]
+    for e in fns { inferredByFn[e.fn, default: []].formUnion(e.inferred) }
+    let cells = unanswerableCells(inferred: inferredByFn, reasonClasses: matcherClasses,
+                                  netClasses: matcherNet, deny: deny)
+    // Sorted ONCE and read twice — by the attachment below and by the append at the end — so that when a
+    // pair has TWO cells (one rule narrowing both `Net` and `Unknown`, defeated on both at one function)
+    // the reason that rides on the row is the same one either path would have appended. `effect` is the
+    // tiebreak and is not decoration: without it the ordering of two cells sharing an (fn, rule) is
+    // whatever the sort happens to do, and the row would carry an arbitrary one of two true reasons.
+    // `Net` < `Unknown` reproduces `unanswerableCells`'s own stated order (Net checked first).
+    let sortedCells = cells.sorted(by: { ($0.fn, $0.rule.raw, $0.effect) < ($1.fn, $1.rule.raw, $1.effect) })
+    // THE REFUSAL, KEYED BY (function, rule) — the join a per-entry consumer would otherwise have to
+    // perform against `unevaluated[]` by hand, and could not know was required. See `UnverifiedHole.why`
+    // for the four-way measurement; the key is on the PAIR rather than on the answerability pass's rows
+    // because the reason-class arm produces no such row (the hole loop already emitted it).
+    //
+    // FINER-GRAINED THAN `unevaluated[]`, which names ONE exemplar function per rule (`unansweredDisclosure`)
+    // because a rule is the field an operator edits. An ENTRY is not read that way: it is read about its own
+    // function, so it carries its own function's reason. For the exemplar the two are the same bytes; for
+    // every other function under the same rule the entry is the one that names the right function.
+    var whyByPair: [String: String] = [:]
+    for c in sortedCells where whyByPair["\(c.fn)|\(c.rule.raw)"] == nil {
+        whyByPair["\(c.fn)|\(c.rule.raw)"] = c.why
+    }
     for e in fns {
         // Same predicate + upgrade as the gate note (main.swift) — one source of truth for a hole.
         guard let r = unverifiedHoleRule(e.fn, e.inferred, deny, matcherClasses[e.fn] ?? [],
@@ -569,16 +622,17 @@ public func unverified(_ fns: [UnverifiedFn], _ deny: [DenyRule], classFilter: S
         // a filter which names every genuine class and therefore cannot exclude one.
         if let cf = classFilter, !(classes[e.fn] ?? []).contains(where: { cf.contains($0) }) { continue }
         let (rule, upgrade) = ruleUpgrade(r)
-        holes.append(UnverifiedHole(fn: e.fn, rule: rule, unknownWhy: e.unknownWhy, upgrade: upgrade))
+        // …and if the gate ALSO could not judge this pair, the row says so itself. This is the whole
+        // reason-class arm: the function is an ordinary hole AND unjudged, the dedupe below then declines
+        // to add a second row for it, and before this the refusal simply did not survive the tie.
+        holes.append(UnverifiedHole(fn: e.fn, rule: rule, unknownWhy: e.unknownWhy, upgrade: upgrade,
+                                    why: whyByPair["\(e.fn)|\(rule)"]))
     }
-    // ⟨0.24⟩ THE §3.2 BOUND. Every (rule, function) the gate could not decide, appended in code-point
-    // order after the holes this verb already knew about — a separate pass because it is a separate
-    // question (`Answerability.swift`: *can this be answered*, not *does this rule forbid it*), and one
-    // entry per pair rather than per rule because the whole point is naming the FUNCTION.
-    var inferredByFn: [String: Set<String>] = [:]
-    for e in fns { inferredByFn[e.fn, default: []].formUnion(e.inferred) }
-    let cells = unanswerableCells(inferred: inferredByFn, reasonClasses: matcherClasses,
-                                  netClasses: matcherNet, deny: deny)
+    // The answerability pass's own rows, appended in code-point order after the holes this verb already
+    // knew about — a separate pass because it is a separate question (`Answerability.swift`: *can this be
+    // answered*, not *does this rule forbid it*), and one entry per pair rather than per rule because the
+    // whole point is naming the FUNCTION.
+    //
     // NOT SUBJECT TO `--class`, and this is the one design choice here worth arguing for. The filter
     // selects among holes BY REASON CLASS; a function the gate could not judge has no reason class to
     // select on, and a `Net` refusal has none at all. Excluding these would make the filter succeed
@@ -592,13 +646,12 @@ public func unverified(_ fns: [UnverifiedFn], _ deny: [DenyRule], classFilter: S
     // narrowed rule is both unanswerable and non-biting at the same function — the reason-class arm is
     // exactly that case, which is how the containment already held there BY ACCIDENT while `--strict`
     // still exited 0. A second row for a function already named would double-count a hole without
-    // naming a new one; the missing-evidence reason travels in `unevaluated`, which is where §3.2 puts
-    // it for both verbs.
+    // naming a new one; the winning row carries the refusal as its `why` (rust and ts instead emit that
+    // second row, which is the same disclosure at the cost of the invariant this dedupe protects).
     var seenPair = Set(holes.map { "\($0.fn)|\($0.rule)" })
-    for c in cells.sorted(by: { ($0.fn, $0.rule.raw) < ($1.fn, $1.rule.raw) })
-    where seenPair.insert("\(c.fn)|\(c.rule.raw)").inserted {
+    for c in sortedCells where seenPair.insert("\(c.fn)|\(c.rule.raw)").inserted {
         holes.append(UnverifiedHole(fn: c.fn, rule: c.rule.raw, unknownWhy: [],
-                                    upgrade: evidenceFreeRule(c.rule, effect: c.effect)))
+                                    upgrade: evidenceFreeRule(c.rule, effect: c.effect), why: c.why))
     }
     return (holes.isEmpty, holes, unansweredDisclosure(cells))
 }
