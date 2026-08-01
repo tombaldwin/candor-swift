@@ -69,11 +69,12 @@ final class GateProcessTests: XCTestCase {
         let outPipe = Pipe(), errPipe = Pipe()
         p.standardOutput = outPipe
         p.standardError = errPipe
+        let exited = ProcessHarness.exitLatch(p)   // NOT waitUntilExit — see ProcessHarness.exitLatch
         try p.run()
-        // Read BEFORE waitUntilExit to avoid a pipe-buffer deadlock on a large report.
+        // Read BEFORE the exit wait to avoid a pipe-buffer deadlock on a large report.
         let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
         let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
+        exited.wait()
         return (String(decoding: outData, as: UTF8.self),
                 String(decoding: errData, as: UTF8.self),
                 p.terminationStatus)
@@ -513,7 +514,8 @@ final class GateProcessTests: XCTestCase {
         var env = ProcessInfo.processInfo.environment
         env["CANDOR_POLICY"] = denyDb.path
         p.environment = env
-        try p.run(); p.waitUntilExit()
+        let pExited = ProcessHarness.exitLatch(p)   // NOT waitUntilExit — see ProcessHarness.exitLatch
+        try p.run(); pExited.wait()
         XCTAssertEqual(p.terminationStatus, 0, "CANDOR_POLICY env overrides the config")
 
         // (c) a set-but-unusable CANDOR_CONFIG fails closed (exit 2)
@@ -524,9 +526,10 @@ final class GateProcessTests: XCTestCase {
         env2["CANDOR_CONFIG"] = root.appendingPathComponent("no-such").path
         p2.environment = env2
         let errPipe = Pipe(); p2.standardError = errPipe; p2.standardOutput = Pipe()
+        let p2Exited = ProcessHarness.exitLatch(p2)   // NOT waitUntilExit — see ProcessHarness.exitLatch
         try p2.run()
         _ = errPipe.fileHandleForReading.readDataToEndOfFile()
-        p2.waitUntilExit()
+        p2Exited.wait()
         XCTAssertEqual(p2.terminationStatus, 2, "a typo'd CANDOR_CONFIG must fail closed")
     }
 

@@ -30,10 +30,11 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
         let outPipe = Pipe(), errPipe = Pipe()
         p.standardOutput = outPipe
         p.standardError = errPipe
+        let exited = ProcessHarness.exitLatch(p)   // NOT waitUntilExit — see ProcessHarness.exitLatch
         try p.run()
         let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
         let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
+        exited.wait()
         return (String(decoding: outData, as: UTF8.self), String(decoding: errData, as: UTF8.self), p.terminationStatus)
     }
 

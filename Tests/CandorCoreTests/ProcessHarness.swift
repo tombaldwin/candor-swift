@@ -56,9 +56,36 @@ enum ProcessHarness {
         return root
     }
 
+    /// THE EXIT LATCH — install BEFORE `run()`, `wait()` after the pipes are drained.
+    ///
+    /// `Process.waitUntilExit()` MUST NOT be used in this repo. On swift-corelibs-foundation it blocks
+    /// forever once the child has already finished, which is precisely the state the read-to-EOF ordering
+    /// below guarantees. Measured in docker `swift:6.1` (the image the linux CI leg runs), spawning
+    /// `/bin/cat` on an 850-byte file and reading both pipes to EOF before waiting:
+    ///
+    ///     waitUntilExit()                                  HUNG 10 of 10 runs
+    ///     terminationHandler + DispatchSemaphore            0 of 10, 30/30 correct
+    ///
+    /// and at the moment of the hang the child is gone, both pipes have delivered EOF, and `p.isRunning`
+    /// is still `true` — the exit was never observed. Draining the pipes on background threads and
+    /// waiting first does NOT help (also 10 of 10): `waitUntilExit()` itself is the broken primitive, not
+    /// the read ordering. `terminationHandler` is delivered by the reaper directly instead of through a
+    /// run loop, so it does not depend on the notification the run loop misses.
+    ///
+    /// The handler must be installed BEFORE `run()` — installing it on an already-exited process races
+    /// with the very delivery it is there to catch. That is why this hands back a semaphore rather than
+    /// offering a `waitForExit(p)` you could call too late.
+    ///
+    /// Verified 30/30 on macOS too (bytes AND exit status), so this is one code path, not a Linux fork.
+    static func exitLatch(_ p: Process) -> DispatchSemaphore {
+        let sem = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in sem.signal() }
+        return sem
+    }
+
     /// Run the binary with a SANITIZED environment (no inherited CANDOR_* leaks into a fixture scan)
     /// plus the given overrides. `cwd` pins the working directory (the config-anchoring tests must
-    /// prove the CWD does NOT matter). Reads BEFORE waitUntilExit (pipe-buffer deadlock guard).
+    /// prove the CWD does NOT matter). Reads BEFORE the exit wait (pipe-buffer deadlock guard).
     static func run(_ binary: URL, _ args: [String], env: [String: String] = [:], cwd: URL? = nil) throws -> (out: String, err: String, code: Int32) {
         let p = Process()
         p.executableURL = binary
@@ -71,10 +98,11 @@ enum ProcessHarness {
         let outPipe = Pipe(), errPipe = Pipe()
         p.standardOutput = outPipe
         p.standardError = errPipe
+        let exited = exitLatch(p)
         try p.run()
         let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
         let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
+        exited.wait()
         return (String(decoding: outData, as: UTF8.self),
                 String(decoding: errData, as: UTF8.self),
                 p.terminationStatus)
