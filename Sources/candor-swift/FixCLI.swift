@@ -119,7 +119,13 @@ private func mergeFixReport(_ full: String, into byName: inout [String: FixFn],
         let direct = Set((e["direct"] as? [Any])?.compactMap { $0 as? String } ?? [])
         let calls = (e["calls"] as? [Any])?.compactMap { $0 as? String } ?? []
         let loc = e["loc"] as? String ?? ""
-        byName[fn] = FixFn(inferred: inferred, direct: direct, calls: calls, loc: loc)
+        // ⟨0.19⟩ `unknownWhy` rides along for the §6.2 reason-class resolution `deniedLayer` now performs:
+        // a `deny Unknown[<class>…]` only forbids `Unknown` where the classes meet, and until this field
+        // was read `fix-gate` computed a hoist remedy for holes the policy explicitly does not deny. A
+        // report predating the field loads it empty, which leaves the narrowed rule unmatched there —
+        // the same withholding `evaluateGate` applies rather than charging on a default.
+        let why = (e["unknownWhy"] as? [Any])?.compactMap { $0 as? String } ?? []
+        byName[fn] = FixFn(inferred: inferred, direct: direct, calls: calls, unknownWhy: why, loc: loc)
         for case let m as String in (e["invisible"] as? [Any]) ?? [] { coverage.invisibleModules.insert(m) }
     }
     // ⟨0.15 staged⟩ envelope `coverage` ledger (absent on a fully-covered or pre-⟨0.15⟩ report).

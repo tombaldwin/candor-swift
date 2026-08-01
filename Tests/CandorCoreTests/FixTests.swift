@@ -10,10 +10,10 @@ final class FixTests: XCTestCase {
 
     private func orderflow() -> (byName: [String: FixFn], cg: [String: [String]]) {
         let byName: [String: FixFn] = [
-            "api.get": FixFn(inferred: ["Net"], direct: [], calls: ["domain.bulk"]),
-            "domain.bulk": FixFn(inferred: ["Net"], direct: [], calls: ["domain.price"]),
-            "domain.price": FixFn(inferred: ["Net"], direct: [], calls: ["infra.fetch"]),
-            "infra.fetch": FixFn(inferred: ["Net"], direct: ["Net"], calls: []),
+            "api.get": FixFn(inferred: ["Net"], direct: [], calls: ["domain.bulk"], unknownWhy: []),
+            "domain.bulk": FixFn(inferred: ["Net"], direct: [], calls: ["domain.price"], unknownWhy: []),
+            "domain.price": FixFn(inferred: ["Net"], direct: [], calls: ["infra.fetch"], unknownWhy: []),
+            "infra.fetch": FixFn(inferred: ["Net"], direct: ["Net"], calls: [], unknownWhy: []),
         ]
         let cg: [String: [String]] = [
             "api.get": ["domain.bulk"],
@@ -42,7 +42,7 @@ final class FixTests: XCTestCase {
         // With an allowed-layer caller ABOVE the minimal frontier, the higher option is surfaced: the minimal
         // hoist stays api.get, but main.run (which calls it, also allowed) is a higher place to originate Net.
         var (byName, cg) = orderflow()
-        byName["main.run"] = FixFn(inferred: ["Net"], direct: [], calls: ["api.get"])
+        byName["main.run"] = FixFn(inferred: ["Net"], direct: [], calls: ["api.get"], unknownWhy: [])
         cg["main.run"] = ["api.get"]
         let deny = parsePolicy("deny Net domain").deny
         guard case let .remedy(r) = fix(target: "price", effect: "Net", byName: byName, cg: cg, deny: deny) else {
@@ -85,8 +85,8 @@ final class FixTests: XCTestCase {
     func testFixPrefersTheEffectPerformingMatch() {
         // `save` matches a pure `cache.save` and the effectful denied `repo.save` — resolve to the latter.
         let byName: [String: FixFn] = [
-            "cache.save": FixFn(inferred: [], direct: [], calls: []),
-            "repo.save": FixFn(inferred: ["Net"], direct: ["Net"], calls: []),
+            "cache.save": FixFn(inferred: [], direct: [], calls: [], unknownWhy: []),
+            "repo.save": FixFn(inferred: ["Net"], direct: ["Net"], calls: [], unknownWhy: []),
         ]
         let cg: [String: [String]] = ["cache.save": [], "repo.save": []]
         let deny = parsePolicy("deny Net repo").deny
@@ -100,10 +100,10 @@ final class FixTests: XCTestCase {
         // domain.top → api.mid → domain.inner → infra.fetch, deny Net domain. api.mid is the nearest allowed
         // frontier but domain.top calls it → hoisting there leaves top violating → cleanHoist false.
         let byName: [String: FixFn] = [
-            "domain.top": FixFn(inferred: ["Net"], direct: [], calls: ["api.mid"]),
-            "api.mid": FixFn(inferred: ["Net"], direct: [], calls: ["domain.inner"]),
-            "domain.inner": FixFn(inferred: ["Net"], direct: [], calls: ["infra.fetch"]),
-            "infra.fetch": FixFn(inferred: ["Net"], direct: ["Net"], calls: []),
+            "domain.top": FixFn(inferred: ["Net"], direct: [], calls: ["api.mid"], unknownWhy: []),
+            "api.mid": FixFn(inferred: ["Net"], direct: [], calls: ["domain.inner"], unknownWhy: []),
+            "domain.inner": FixFn(inferred: ["Net"], direct: [], calls: ["infra.fetch"], unknownWhy: []),
+            "infra.fetch": FixFn(inferred: ["Net"], direct: ["Net"], calls: [], unknownWhy: []),
         ]
         let cg: [String: [String]] = [
             "domain.top": ["api.mid"], "api.mid": ["domain.inner"],

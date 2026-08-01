@@ -1103,19 +1103,25 @@ policyBlock: if let pp = policyPath {
     // `evaluateGate` the same record built from a WRITTEN report instead of from the classifier.
     // ⟨0.20⟩ `net-partner` (NET-DESTINATION-CLASS-DESIGN.md) is the SAME set the report's `netClass` used
     // (hoisted above), so `deny Net[unknown-host]` tolerates a declared partner and the verdict classifies it.
-    gateViolations += evaluateGate(scanPolicy,
-                                   gateInputFromScan(inferred: inferred, whyMap: whyMap, direct: direct, edges: edges, cg: cg,
-                                                     hostsAcc: hostsAcc, cmdsAcc: cmdsAcc,
-                                                     pathsAcc: pathsAcc, tablesAcc: tablesAcc,
-                                                     incompleteAcc: incompleteAcc, netPartners: netPartners))
+    let scanGateInput = gateInputFromScan(inferred: inferred, whyMap: whyMap, direct: direct, edges: edges, cg: cg,
+                                          hostsAcc: hostsAcc, cmdsAcc: cmdsAcc,
+                                          pathsAcc: pathsAcc, tablesAcc: tablesAcc,
+                                          incompleteAcc: incompleteAcc, netPartners: netPartners)
+    gateViolations += evaluateGate(scanPolicy, scanGateInput)
     // Provable-purity DISCLOSURE (advisory — NEVER a violation, so the exit/verdict are untouched): functions
     // in a pure/deny scope that PASS but are Unknown (the Unknown could hide the forbidden effect — a
     // fn/closure-injected port). Surfaces the gap automatically (eval/fixloop/DISPATCH-NOTE.md).
     // Same predicate + upgrade as `candor-swift unverified` (CandorCore.unverifiedHoleRule) — one source of truth.
+    //
+    // ⟨0.19⟩ It is handed the reason classes from the VERY GateInput `evaluateGate` was just given, not a
+    // second derivation of them — which is what makes "the note names the functions the gate passed" a
+    // property of the code. A `deny Unknown[<class>…]` this run did NOT charge leaves the function passing
+    // while it still carries an `Unknown`, and that is exactly a hole this note must name.
     let disclosePolicy = scanPolicy
     var purityHoles: [(String, String)] = []
     for qual in inferred.keys.sorted() {
-        if let r = unverifiedHoleRule(qual, inferred[qual] ?? [], disclosePolicy.deny) {
+        if let r = unverifiedHoleRule(qual, inferred[qual] ?? [], disclosePolicy.deny,
+                                      scanGateInput.reasonClasses[qual] ?? []) {
             purityHoles.append((qual, ruleUpgrade(r).upgrade))
         }
     }

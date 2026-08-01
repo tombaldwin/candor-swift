@@ -12,13 +12,22 @@ public struct FixFn {
     public let inferred: Set<String>
     public let direct: Set<String>
     public let calls: [String]
+    /// The §4 `unknownWhy` reasons this function recorded DIRECTLY. `deniedLayer` needs it: a
+    /// `deny Unknown[<class>…]` rule only forbids `Unknown` at a function whose reason classes intersect
+    /// the rule's, and `direct` + `calls` + this field are exactly the §6.2 resolution's inputs.
+    ///
+    /// NOT defaulted, deliberately, and unlike `loc` below. A construction site that omitted it would
+    /// leave every function classless, every narrowed rule permanently unmatched, and every remedy for a
+    /// scoped `deny Unknown` silently gone — a lost disclosure indistinguishable from a clean report.
+    public let unknownWhy: [String]
     /// "file:line" from the §2 report envelope ("" when absent) — the `tour` verb's source callout uses it;
     /// `fix`/`fix-gate` don't. Defaulted so existing constructions stay valid.
     public let loc: String
-    public init(inferred: Set<String>, direct: Set<String>, calls: [String], loc: String = "") {
+    public init(inferred: Set<String>, direct: Set<String>, calls: [String], unknownWhy: [String], loc: String = "") {
         self.inferred = inferred
         self.direct = direct
         self.calls = calls
+        self.unknownWhy = unknownWhy
         self.loc = loc
     }
 }
@@ -44,13 +53,42 @@ public struct Remedy {
     }
 }
 
+/// Does `r` forbid `effect` at a function whose TRANSITIVE `Unknown` reason classes are `fnClasses`?
+///
+/// THE SINGLE PLACE the `fix`/`unverified` side answers Gate.swift's AS-EFF-006 membership question, and
+/// it has to give the same answer: a `pure` rule (empty effects) forbids every real effect but not the §4
+/// `Unknown` marker; a `deny` fires when it names the effect; and ⟨0.19⟩ a `deny … Unknown[<class>…]`
+/// keeps its `Unknown` hit ONLY for a function whose classes intersect the rule's.
+///
+/// That last conjunct is the one this file did not have. `DenyRule.unknownClasses` was parsed and
+/// populated and neither `deniedLayer` nor `unverifiedHoleRule` read it, so both treated
+/// `deny Unknown[reflect]` as the bare `deny Unknown` — and, off that one omission, broke in OPPOSITE
+/// directions: `fix-gate` invented a remedy for a boundary the policy does not deny, and `unverified`
+/// certified as clean a layer that PASSES while carrying an Unknown, which is precisely the object it
+/// exists to name. See ScopedUnknownRemedyProcessTests for the measurement.
+///
+/// AN EMPTY `fnClasses` MEANS NOT-FORBIDDEN, and that direction is chosen, not incidental. It is what
+/// `evaluateGate` does — the rule is WITHHELD on that (rule, function) pair rather than charged on a
+/// default — and both callers here want it: `fix-gate` withholds a remedy the gate would not charge, and
+/// `unverifiedHoleRule` reads "not forbidden" as "this layer PASSES it", which turns an unclassifiable
+/// `Unknown` into a DISCLOSED hole. The conservative answer is the same answer for both, which is why one
+/// predicate can serve them. It is also why the map handed in here must be the UNFLOORED one: floor the
+/// empty set to `unresolved` and a `deny Unknown[unresolved]` starts firing on functions nobody
+/// classified — fabricating a remedy in `fix-gate` and, in `unverified`, swallowing the hole again.
+public func ruleForbids(_ r: DenyRule, _ effect: String, _ fnClasses: Set<String>) -> Bool {
+    if r.effects.isEmpty { return effect != "Unknown" }
+    guard r.effects.contains(effect) else { return false }
+    guard effect == "Unknown", !r.unknownClasses.isEmpty else { return true }
+    return fnClasses.contains(where: { r.unknownClasses.contains($0) })
+}
+
 // The deny/`pure` scope (the "layer") forbidding `effect` at `fn`, or nil if performing it there is allowed.
-// Mirrors Gate.swift's AS-EFF-006 predicate exactly: a `deny` fires when it names the effect; a `pure` rule
-// (empty effects) forbids every real effect but not Unknown.
-public func deniedLayer(_ fn: String, _ effect: String, _ deny: [DenyRule]) -> String? {
-    for r in deny {
-        let denies = r.effects.isEmpty ? (effect != "Unknown") : r.effects.contains(effect)
-        if denies && scopeMatches(fn, r.scope) { return r.scope }
+// Mirrors Gate.swift's AS-EFF-006 predicate exactly (see `ruleForbids`). `classes` is the UNFLOORED §6.2
+// transitive reason-class map — `matcherReasonClasses`, never `reasonClassesTransitive`.
+public func deniedLayer(_ fn: String, _ effect: String, _ deny: [DenyRule],
+                        _ classes: [String: Set<String>]) -> String? {
+    for r in deny where scopeMatches(fn, r.scope) {
+        if ruleForbids(r, effect, classes[fn] ?? []) { return r.scope }
     }
     return nil
 }
@@ -70,7 +108,7 @@ public func reverseGraph(_ cg: [String: [String]]) -> [String: [String]] {
 // one identical remedy); the allowed-layer callers where the climb stops are the hoist frontier.
 public func computeRemedy(start: String, effect: String, layer: String,
                           byName: [String: FixFn], cg: [String: [String]], rev: [String: [String]],
-                          deny: [DenyRule]) -> Remedy {
+                          deny: [DenyRule], classes: [String: Set<String>]) -> Remedy {
     // direct site(s): forward BFS from `start` through effect-carrying callees to the DIRECT source(s).
     var sites = Set<String>()
     var fseen: Set<String> = [start]
@@ -92,14 +130,14 @@ public func computeRemedy(start: String, effect: String, layer: String,
     var hoist = Set<String>()
     var up: [String] = []
     for a in anchors {
-        if deniedLayer(a, effect, deny) != nil { deniedSpan.insert(a) }
+        if deniedLayer(a, effect, deny, classes) != nil { deniedSpan.insert(a) }
         up.append(a)
     }
     while !up.isEmpty {
         let cur = up.removeFirst()
         for caller in rev[cur] ?? [] {
             guard let ce = byName[caller], ce.inferred.contains(effect) else { continue } // routes the effect?
-            if deniedLayer(caller, effect, deny) != nil {
+            if deniedLayer(caller, effect, deny, classes) != nil {
                 if deniedSpan.insert(caller).inserted { up.append(caller) } // denied → span; keep climbing
             } else {
                 hoist.insert(caller) // allowed → the boundary
@@ -120,7 +158,7 @@ public func computeRemedy(start: String, effect: String, layer: String,
         let cur = hq.removeFirst()
         for caller in rev[cur] ?? [] {
             guard let ce = byName[caller], ce.inferred.contains(effect) else { continue }
-            if deniedLayer(caller, effect, deny) != nil {
+            if deniedLayer(caller, effect, deny, classes) != nil {
                 sandwiched = true
             } else if hseen.insert(caller).inserted {
                 higher.insert(caller)
@@ -146,29 +184,32 @@ public enum FixResult {
 public func fix(target: String, effect: String, byName: [String: FixFn], cg: [String: [String]],
                 deny: [DenyRule]) -> FixResult {
     let names = Array(byName.keys)
+    let classes = matcherReasonClasses(byName, deny)
     guard let m = bestMatches(names, target), !m.isEmpty else { return .noSuchFn }
     // prefer a match that actually performs the effect (so a bare leaf resolves to the violating function)
     let start = m.first(where: { byName[$0]?.inferred.contains(effect) == true }) ?? m[0]
     guard let fe = byName[start], fe.inferred.contains(effect) else {
         return .notACrossing(fn: start, effect: effect, reason: "does-not-perform")
     }
-    guard let layer = deniedLayer(start, effect, deny) else {
+    guard let layer = deniedLayer(start, effect, deny, classes) else {
         return .notACrossing(fn: start, effect: effect, reason: "not-forbidden")
     }
     return .remedy(computeRemedy(start: start, effect: effect, layer: layer,
-                                 byName: byName, cg: cg, rev: reverseGraph(cg), deny: deny))
+                                 byName: byName, cg: cg, rev: reverseGraph(cg), deny: deny, classes: classes))
 }
 
 // fix-gate: a remedy for EVERY deny/`pure` (AS-EFF-006) crossing in the report, collapsing the inheritors of
 // one root cause to a single plan (keyed by effect|layer|site|hoist).
 public func fixGate(byName: [String: FixFn], cg: [String: [String]], deny: [DenyRule]) -> (ok: Bool, remedies: [Remedy]) {
     let rev = reverseGraph(cg)
+    let classes = matcherReasonClasses(byName, deny)
     var plans: [String: Remedy] = [:]
     for fn in byName.keys.sorted() {
         guard let fe = byName[fn] else { continue }
         for effect in fe.inferred.sorted() {
-            guard let layer = deniedLayer(fn, effect, deny) else { continue }
-            let p = computeRemedy(start: fn, effect: effect, layer: layer, byName: byName, cg: cg, rev: rev, deny: deny)
+            guard let layer = deniedLayer(fn, effect, deny, classes) else { continue }
+            let p = computeRemedy(start: fn, effect: effect, layer: layer, byName: byName, cg: cg, rev: rev,
+                                  deny: deny, classes: classes)
             let key = "\(p.effect)|\(p.layer)|\(p.site)|\(p.hoistTo)"
             if plans[key] == nil { plans[key] = p }
         }
@@ -218,6 +259,19 @@ public func ruleUpgrade(_ r: DenyRule) -> (rule: String, upgrade: String) {
         return ("pure\(suffix)", "deny Unknown\(suffix)")
     }
     let effs = r.effects.sorted().joined(separator: " ")
+    // A rule that ALREADY names `Unknown` and still passed this function reached here only because it is
+    // NARROWED (`Unknown[<class>…]`) and the classes did not meet — an unnarrowed one would have caught
+    // it and the gate would own it. That branch was unreachable until `unverifiedHoleRule` learned to
+    // read `unknownClasses`, and it was wrong on BOTH halves: the reconstruction dropped the class filter
+    // from the source form, and appending a second token produced the upgrade `deny Unknown Unknown app`
+    // — offered to an operator as the edit that fixes their gate.
+    //
+    // Source: the RAW line, the only place the classes survive (and the same verbatim-line convention
+    // ⟨0.24⟩ `unevaluated[].rule` uses). Upgrade: the same rule with the narrowing DROPPED, which is
+    // exactly the edit that makes the gate catch the hole this note just named.
+    if r.effects.contains("Unknown") {
+        return (r.raw, "deny \(effs)\(suffix)")
+    }
     return ("deny \(effs)\(suffix)", "deny \(effs) Unknown\(suffix)")
 }
 
@@ -227,13 +281,21 @@ public func ruleUpgrade(_ r: DenyRule) -> (rule: String, upgrade: String) {
 // the classic case is a fn/closure-injected port). A *real* violation is the gate's job, not this. Returns
 // the first governing rule under which the function is such a hole, or nil. Shared by the gate note
 // (main.swift) and `unverified` so "what a hole is" has ONE definition (conformance PART 12d pins agreement).
-public func unverifiedHoleRule(_ fn: String, _ inferred: Set<String>, _ deny: [DenyRule]) -> DenyRule? {
+///
+/// `classes` is the function's UNFLOORED transitive reason-class set (`matcherReasonClasses`). Without it
+/// this predicate read `deny Unknown[reflect] app` as the bare `deny Unknown`, concluded "the gate is
+/// already reporting this one", and returned nil — so a layer that PASSES a function while it carries an
+/// `Unknown` outside the rule's classes was certified clean by the verb whose entire job is to say a
+/// green gate is not provably green. The under-report half of the same missing conjunct `deniedLayer`
+/// over-charged on; see `ruleForbids` and ScopedUnknownRemedyProcessTests.
+public func unverifiedHoleRule(_ fn: String, _ inferred: Set<String>, _ deny: [DenyRule],
+                               _ classes: Set<String>) -> DenyRule? {
     guard inferred.contains("Unknown") else { return nil }
     for r in deny {
         guard scopeMatches(fn, r.scope) else { continue }
-        let violates = r.effects.isEmpty
-            ? inferred.contains(where: { $0 != "Unknown" })       // pure: any real effect is a violation
-            : r.effects.contains(where: { inferred.contains($0) }) // deny: a named effect is a violation
+        // Does this rule actually bite here? `pure` on any real effect; `deny E…` on a named effect —
+        // and on `Unknown` only when the rule's classes reach this function's.
+        let violates = inferred.contains(where: { ruleForbids(r, $0, classes) })
         if !violates { return r }                                  // else a real violation the gate reports
     }
     return nil
@@ -259,11 +321,29 @@ public func unverifiedHoleRule(_ fn: String, _ inferred: Set<String>, _ deny: [D
 /// rule: a function still carrying `Unknown` that nothing in its reach explains (a truncated report, a
 /// callee entry in a report that was not loaded) is a hole nobody classified, and §6.2's conservative
 /// projection for that is `unresolved`.
-func reasonClassesTransitive(_ fns: [UnverifiedFn]) -> [String: Set<String>] {
+/// One §2 entry, reduced to the four fields a §6.2 class resolution reads — so `fix`/`fix-gate` (whose
+/// rows are `FixFn`) and `unverified` (whose rows are `UnverifiedFn`) resolve classes through the SAME
+/// code. Two copies of this fixpoint is exactly the drift SPEC §3.1 forbids between the gate's two routes.
+typealias ReasonRow = (fn: String, inferred: Set<String>, direct: Set<String>, unknownWhy: [String], calls: [String])
+
+/// The §6.2 seed-and-propagate. `floorUnexplained` decides what happens to an `Unknown` that NOTHING in
+/// its reach explains (a truncated report, a callee whose entry was never loaded), and the two callers
+/// need OPPOSITE answers — which is the whole reason this is a parameter and not a constant:
+///
+///  - `--class` FILTERING (`floorUnexplained: true`): §6.2's conservative projection for a hole nobody
+///    classified is `unresolved`, so `--class unresolved` — the filter that exists to catch exactly
+///    those — keeps it. Flooring here makes the filter DISCLOSE more.
+///  - RULE MATCHING (`floorUnexplained: false`): the same floor would make `deny Unknown[unresolved]`
+///    FIRE on that function, which drops it from `unverified` (the gate is presumed to own it) and
+///    invents a `fix-gate` remedy — asserting a reason nobody recorded, in a predicate that CHARGES.
+///    `evaluateGate` refuses the same floor for the same reason (Gate.swift's ⟨0.24⟩ note).
+///
+/// Both settings are the more-disclosing one for their caller. One principle, two maps.
+func reasonClassFixpoint(_ rows: [ReasonRow], floorUnexplained: Bool) -> [String: Set<String>] {
     var seed: [String: Set<String>] = [:]
     var edges: [String: Set<String>] = [:]
     var unknownBearing: Set<String> = []
-    for e in fns {
+    for e in rows {
         if !e.calls.isEmpty { edges[e.fn, default: []].formUnion(e.calls) }
         if e.inferred.contains("Unknown") { unknownBearing.insert(e.fn) }
         if !e.unknownWhy.isEmpty {
@@ -273,8 +353,39 @@ func reasonClassesTransitive(_ fns: [UnverifiedFn]) -> [String: Set<String>] {
         }
     }
     var acc = propagate(seed, over: edges)
-    for fn in unknownBearing where acc[fn]?.isEmpty ?? true { acc[fn] = ["unresolved"] }
+    if floorUnexplained {
+        for fn in unknownBearing where acc[fn]?.isEmpty ?? true { acc[fn] = ["unresolved"] }
+    }
     return acc
+}
+
+func reasonClassesTransitive(_ fns: [UnverifiedFn]) -> [String: Set<String>] {
+    reasonClassFixpoint(fns.map { ($0.fn, $0.inferred, $0.direct, $0.unknownWhy, $0.calls) },
+                        floorUnexplained: true)
+}
+
+/// Does any rule narrow `Unknown` on a reason class? THE ONLY condition under which the class map is
+/// read at all — `ruleForbids` ignores `fnClasses` for every other rule shape — so it is also the only
+/// condition under which the fixpoint is worth walking. Stated once, because `fix`, `fix-gate` and
+/// `unverified` drifting about WHEN they resolve classes is how they would end up disagreeing about a
+/// verdict again.
+func narrowsOnReasonClass(_ deny: [DenyRule]) -> Bool { deny.contains { !$0.unknownClasses.isEmpty } }
+
+/// The UNFLOORED map the rule predicates take — matching `gateInputFromScan`'s `reasonClasses` exactly
+/// (the §6.2 CONTRIBUTION applied at the ENTRY, on a DIRECT `Unknown` the function did not name, and no
+/// floor in the matcher). Empty when nothing narrows, which the predicates then never consult. See
+/// `ruleForbids` for why this map and `reasonClassesTransitive` must not be swapped.
+func matcherReasonClasses(_ fns: [UnverifiedFn], _ deny: [DenyRule]) -> [String: Set<String>] {
+    guard narrowsOnReasonClass(deny) else { return [:] }
+    return reasonClassFixpoint(fns.map { ($0.fn, $0.inferred, $0.direct, $0.unknownWhy, $0.calls) },
+                               floorUnexplained: false)
+}
+
+/// The same map over the `fix`/`fix-gate` rows.
+func matcherReasonClasses(_ byName: [String: FixFn], _ deny: [DenyRule]) -> [String: Set<String>] {
+    guard narrowsOnReasonClass(deny) else { return [:] }
+    return reasonClassFixpoint(byName.map { ($0.key, $0.value.inferred, $0.value.direct, $0.value.unknownWhy, $0.value.calls) },
+                               floorUnexplained: false)
 }
 
 // unverified: the PROVABLE-PURITY disclosure (eval/fixloop/DISPATCH-NOTE.md, mirrors candor-query). A
@@ -285,9 +396,14 @@ public func unverified(_ fns: [UnverifiedFn], _ deny: [DenyRule], classFilter: S
     var holes: [UnverifiedHole] = []
     // Computed once, and ONLY when a filter will consult it — the unfiltered list is unchanged by it.
     let classes = classFilter == nil ? [:] : reasonClassesTransitive(fns)
+    // The MATCHER's map, and a DIFFERENT one: unfloored, because here an unexplained `Unknown` must read
+    // as "the rule does not provably bite" (→ a disclosed hole), where `--class` wants it floored to
+    // `unresolved` (→ kept by the filter that hunts exactly those). See `reasonClassFixpoint`. Computed
+    // only when some rule actually narrows — no narrowed rule, no map consulted, no cost.
+    let matcherClasses = matcherReasonClasses(fns, deny)
     for e in fns {
         // Same predicate + upgrade as the gate note (main.swift) — one source of truth for a hole.
-        guard let r = unverifiedHoleRule(e.fn, e.inferred, deny) else { continue }
+        guard let r = unverifiedHoleRule(e.fn, e.inferred, deny, matcherClasses[e.fn] ?? []) else { continue }
         // ⟨0.20⟩ --class: keep only holes whose Unknown is of a matching reason class. ⟨0.24⟩ that class
         // set is the TRANSITIVE one above, not the report's direct `unknownWhy` field: measured on
         // pollen under `deny Exec`, the direct reading returned 230 of 387 holes for `--class dynamic`,

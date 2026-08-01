@@ -9,6 +9,52 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed — a class-scoped `deny Unknown[…]` meant something different to `fix-gate` and `unverified` than to the gate (2026-08-01)
+
+`DenyRule.unknownClasses` was parsed and populated, and **neither `deniedLayer` (the `fix`/`fix-gate`
+crossing predicate) nor `unverifiedHoleRule` (the provable-purity predicate) consulted it.** Both read a
+narrowed rule as the bare `deny Unknown`, and off that one missing conjunct they broke in OPPOSITE
+directions. MEASURED on `deny Unknown[reflect,unresolved] app` over a report whose only hole is
+`native:dlopen`:
+
+| verb | before | |
+|---|---|---|
+| `gate` | exit 0 | correct — the class is excluded |
+| `fix-gate --strict` | exit 1 + a remedy naming `app.nativeHole` | OVER-CHARGE: a red CI check and a hoist instruction for a boundary the policy does not deny |
+| `unverified --strict` | exit 0, `ok: true` | UNDER-REPORT, and the worse half |
+
+The second is why both halves are one change. The layer PASSES the function while it still carries an
+`Unknown` — that IS a pass-but-Unknown hole — and `unverified`, the verb whose entire job is to say a
+green gate is not provably green, returned a green of its own. Fixing only the fabrication would have left
+its silent mirror standing.
+
+Both predicates now go through one `ruleForbids`, taking the function's TRANSITIVE reason classes
+(`unknownWhy` now rides on `FixFn`, non-defaulted). An empty class set means NOT-forbidden — matching
+`evaluateGate`, which withholds a scoped rule rather than charging on a default — and that is the
+disclosing direction for both callers: `fix-gate` withholds a remedy the gate would not charge, and
+`unverified` reads "not forbidden" as "this layer passes it" and names the hole. The map is UNFLOORED for
+matching and stays FLOORED for `--class` filtering; each is the conservative choice for its own question.
+
+MEASURED, pollen (`~/git/pollen`, 459 Unknown-bearing functions) and candor-swift's own `Sources` (54):
+
+- **The partition is now exact.** Every Unknown-bearing function is either a gate violation or a disclosed
+  hole. Before: up to **459** functions (pollen) and **54** (self) were NEITHER — silently certified.
+  After: **0**, on all 7 narrowed policies tested.
+- **Zero real disclosure loss.** Every function the gate charges is still covered by a remedy — uncovered
+  = 0, before and after. The remedies that disappeared (up to 292 on pollen) were all for functions the
+  gate does not charge.
+- **Unnarrowed policies are byte-identical** — `pure`, `deny Exec`, `deny Net Exec Fs`, `deny Unknown`,
+  and `deny Unknown[dynamic]` (which expands to every genuine class, so it is the convergence control).
+
+Reachable only through this fix, and so fixed with it: `ruleUpgrade` reconstructed a narrowed rule with
+its class filter dropped and appended a second token, offering the operator `deny Unknown Unknown app` as
+the edit that fixes their gate. A narrowed rule's source form is now the raw line and its upgrade is that
+rule UNNARROWED.
+
+Pinned by `ScopedUnknownRemedyProcessTests` (12 rows: 2 gate controls so the comparison cannot go vacuous,
+and every "must now fire" paired with a "must still be named"). Four-way conformance OK incl. PARTs 12b
+and 27.
+
 ### fixed ⚠ — a rebound `Process` program reported BOTH commands (2026-08-01)
 
 The command surface was a union of every locator write to a handle, with no notion of one write killing
