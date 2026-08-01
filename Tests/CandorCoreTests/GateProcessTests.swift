@@ -72,8 +72,8 @@ final class GateProcessTests: XCTestCase {
         let exited = ProcessHarness.exitLatch(p)   // NOT waitUntilExit — see ProcessHarness.exitLatch
         try p.run()
         // Read BEFORE the exit wait to avoid a pipe-buffer deadlock on a large report.
-        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        let outData = ProcessHarness.drain(outPipe)
+        let errData = ProcessHarness.drain(errPipe)
         exited.wait()
         return (String(decoding: outData, as: UTF8.self),
                 String(decoding: errData, as: UTF8.self),
@@ -528,7 +528,7 @@ final class GateProcessTests: XCTestCase {
         let errPipe = Pipe(); p2.standardError = errPipe; p2.standardOutput = Pipe()
         let p2Exited = ProcessHarness.exitLatch(p2)   // NOT waitUntilExit — see ProcessHarness.exitLatch
         try p2.run()
-        _ = errPipe.fileHandleForReading.readDataToEndOfFile()
+        _ = ProcessHarness.drain(errPipe)
         p2Exited.wait()
         XCTAssertEqual(p2.terminationStatus, 2, "a typo'd CANDOR_CONFIG must fail closed")
     }

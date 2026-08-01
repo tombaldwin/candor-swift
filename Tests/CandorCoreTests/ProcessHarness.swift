@@ -83,6 +83,23 @@ enum ProcessHarness {
         return sem
     }
 
+    /// Read a pipe to EOF and CLOSE the read end.
+    ///
+    /// `Pipe` does not close itself and the parent keeps its read end after the child is gone, so without
+    /// this a long suite leaks descriptors — measured at 149 open pipe descriptors in the test process
+    /// partway through one run. Closing them is simply correct.
+    ///
+    /// HONESTY NOTE: I added this expecting it to fix the intermittent Linux hang in XCTest's
+    /// `awaitUsingExpectation`, on the theory that the leaked descriptors fed the poll set under
+    /// `__CFRunLoopServiceFileDescriptors`. A/B'd on `--filter ChainingProcessTests`, it did NOT: the
+    /// hang reproduced with the closes in place. The leak was real and is now fixed; it was not the
+    /// cause. Kept because it is right, not because it cured anything.
+    static func drain(_ pipe: Pipe) -> Data {
+        let d = pipe.fileHandleForReading.readDataToEndOfFile()
+        try? pipe.fileHandleForReading.close()
+        return d
+    }
+
     /// Run the binary with a SANITIZED environment (no inherited CANDOR_* leaks into a fixture scan)
     /// plus the given overrides. `cwd` pins the working directory (the config-anchoring tests must
     /// prove the CWD does NOT matter). Reads BEFORE the exit wait (pipe-buffer deadlock guard).
@@ -100,8 +117,8 @@ enum ProcessHarness {
         p.standardError = errPipe
         let exited = exitLatch(p)
         try p.run()
-        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        let outData = drain(outPipe)
+        let errData = drain(errPipe)
         exited.wait()
         return (String(decoding: outData, as: UTF8.self),
                 String(decoding: errData, as: UTF8.self),
