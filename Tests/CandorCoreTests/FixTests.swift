@@ -27,7 +27,7 @@ final class FixTests: XCTestCase {
     func testFixHoistsNetToApi() {
         let (byName, cg) = orderflow()
         let deny = parsePolicy("deny Net domain").deny
-        guard case let .remedy(r) = fix(target: "price", effect: "Net", byName: byName, cg: cg, deny: deny) else {
+        guard case let .remedy(r, _) = fix(target: "price", effect: "Net", byName: byName, cg: cg, deny: deny) else {
             return XCTFail("expected a remedy for the domain Net crossing")
         }
         XCTAssertEqual(r.layer, "domain")
@@ -45,7 +45,7 @@ final class FixTests: XCTestCase {
         byName["main.run"] = FixFn(inferred: ["Net"], direct: [], calls: ["api.get"], unknownWhy: [], netClass: ["unknown-host"])
         cg["main.run"] = ["api.get"]
         let deny = parsePolicy("deny Net domain").deny
-        guard case let .remedy(r) = fix(target: "price", effect: "Net", byName: byName, cg: cg, deny: deny) else {
+        guard case let .remedy(r, _) = fix(target: "price", effect: "Net", byName: byName, cg: cg, deny: deny) else {
             return XCTFail("expected a remedy")
         }
         XCTAssertEqual(r.hoistTo, ["api.get"], "minimal frontier unchanged")
@@ -56,7 +56,7 @@ final class FixTests: XCTestCase {
         let (byName, cg) = orderflow()
         let deny = parsePolicy("deny Net domain").deny
         // api.get performs Net but in an ALLOWED layer — not a crossing.
-        guard case let .notACrossing(_, _, reason) = fix(target: "api.get", effect: "Net", byName: byName, cg: cg, deny: deny) else {
+        guard case let .notACrossing(_, _, reason, _) = fix(target: "api.get", effect: "Net", byName: byName, cg: cg, deny: deny) else {
             return XCTFail("api.get is not a boundary crossing")
         }
         XCTAssertEqual(reason, "not-forbidden")
@@ -65,7 +65,7 @@ final class FixTests: XCTestCase {
     func testFixGateCollapsesInheritorsToOneRemedy() {
         let (byName, cg) = orderflow()
         let deny = parsePolicy("deny Net domain").deny
-        let (ok, remedies) = fixGate(byName: byName, cg: cg, deny: deny)
+        let (ok, remedies, _) = fixGate(byName: byName, cg: cg, deny: deny)
         XCTAssertFalse(ok)
         // the two domain functions both carry Net — ONE root cause, site-anchored → one remedy.
         XCTAssertEqual(remedies.count, 1)
@@ -77,7 +77,7 @@ final class FixTests: XCTestCase {
     func testFixGateCleanReportIsOk() {
         let (byName, cg) = orderflow()
         let deny = parsePolicy("deny Net nonesuch").deny // matches no function
-        let (ok, remedies) = fixGate(byName: byName, cg: cg, deny: deny)
+        let (ok, remedies, _) = fixGate(byName: byName, cg: cg, deny: deny)
         XCTAssertTrue(ok)
         XCTAssertTrue(remedies.isEmpty)
     }
@@ -90,7 +90,7 @@ final class FixTests: XCTestCase {
         ]
         let cg: [String: [String]] = ["cache.save": [], "repo.save": []]
         let deny = parsePolicy("deny Net repo").deny
-        guard case let .remedy(r) = fix(target: "save", effect: "Net", byName: byName, cg: cg, deny: deny) else {
+        guard case let .remedy(r, _) = fix(target: "save", effect: "Net", byName: byName, cg: cg, deny: deny) else {
             return XCTFail("must resolve to the effectful match and find the crossing")
         }
         XCTAssertEqual(r.fn, "repo.save")
@@ -110,7 +110,7 @@ final class FixTests: XCTestCase {
             "domain.inner": ["infra.fetch"], "infra.fetch": [],
         ]
         let deny = parsePolicy("deny Net domain").deny
-        guard case let .remedy(r) = fix(target: "inner", effect: "Net", byName: byName, cg: cg, deny: deny) else {
+        guard case let .remedy(r, _) = fix(target: "inner", effect: "Net", byName: byName, cg: cg, deny: deny) else {
             return XCTFail("expected a remedy")
         }
         XCTAssertFalse(r.cleanHoist, "a sandwiched frontier is not a clean hoist")
@@ -124,7 +124,7 @@ final class FixTests: XCTestCase {
             UnverifiedFn(fn: "domain.calc", inferred: [], direct: [], unknownWhy: [], calls: [], netClass: []),
         ]
         let deny = parsePolicy("pure domain").deny
-        let (ok, holes) = unverified(fns, deny)
+        let (ok, holes, _) = unverified(fns, deny)
         XCTAssertFalse(ok)
         XCTAssertEqual(holes.count, 1)
         XCTAssertEqual(holes[0].fn, "domain.price")

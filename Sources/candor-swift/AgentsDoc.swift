@@ -133,6 +133,15 @@ empty `remedies`/`unverified` array asserts a finding that was never made. `if (
 falsy and fails safe. The arrays still ship — a partial answer that says it is partial beats a refusal —
 and `--strict` exits **2** (could-not-fully-evaluate), the gate's code for the same situation, not the 1
 that would claim a finding. The GATE keeps `ok: false`: there the `false` is true, it did not certify.
+⟨0.24⟩ **AN ADVISORY VERB MAY BE LESS CERTAIN THAN THE GATE, NEVER MORE** (SPEC §3.2). Where
+`gate --report` refuses for want of evidence — a class-scoped `deny Net[…]` / `deny Unknown[…]` over a
+report carrying no `netClass`, or no reason reachable for an `Unknown` — `unverified` NAMES the function
+the gate could not judge (its `upgrade` is the evidence-free rule, `deny Net[unknown-host] app` →
+`deny Net app`, never a derived class), `fix`/`fix-gate` withhold any remedy premised on that evidence,
+all three carry the gate's own `unevaluated: [{ rule, why }]` array, `ok` is omitted, and `--strict`
+exits **2**. `fix` answers `reason: unanswerable` there rather than `not-forbidden`, which would assert
+the rule was evaluated and did not fire. `--class` does NOT filter these out: a hole nobody classified
+could be of the class you asked for, so dropping it would let the filter succeed for lack of evidence.
 `tour [<N>]` lists the N (default 10) most SURPRISING transitive reaches in the report — a benign-named
 function that reaches a scary effect a few hops down — each with a ready-to-run `candor path` command;
 `--json` for machines. No policy, read-only, the same heuristic as the scan-time note. A missing report

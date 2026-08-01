@@ -353,32 +353,19 @@ private func gateInputFromReport(_ env: GateReportEnvelope) -> GateInput {
 /// ⟨0.24⟩ Each entry carries the RAW policy line separately from the prose, because `fc4b5f6` pins
 /// `unevaluated[].rule` to the verbatim line: a `why` that MENTIONS the rule is not a field a consumer
 /// can read it out of.
+///
+/// ⟨0.24⟩ **THE PREDICATE ITSELF NOW LIVES IN `CandorCore.unanswerableCells`**, and this is an adapter.
+/// SPEC §3.2 makes the advisory verbs' confidence a COMPARISON against this one — `unverified` must name
+/// what the gate could not judge, `fix-gate` must not plan around it — and a comparison checked from two
+/// implementations of the thing being compared is not checked at all. The prose, the iteration order and
+/// the one-entry-per-rule granularity are unchanged, so this verb's bytes are the bytes it emitted
+/// before (R6 pins that four-way).
 private func unanswerableScopedFilters(_ deny: [DenyRule], _ gi: GateInput) -> [Unevaluated] {
-    var out: [Unevaluated] = []
-    for r in deny {
-        for fn in gi.inferred.keys.sorted() where scopeMatches(fn, r.scope) {
-            let inf = gi.inferred[fn] ?? []
-            if !r.netClasses.isEmpty, inf.contains("Net"), (gi.netClasses[fn] ?? []).isEmpty {
-                out.append(Unevaluated(rule: r.raw, why:
-                    "`\(r.raw)` narrows on the Net DESTINATION CLASS, but `\(fn)` carries Net with no "
-                    + "`netClass` in this report — the field the filter reads is absent, so the narrowing "
-                    + "would succeed for lack of evidence and drop a Net the bare `deny Net` catches. "
-                    + "Refusing (exit 2) rather than passing: an absent optional field must not relax a "
-                    + "fail-closed gate. Use the bare `deny Net`, or gate at scan time."))
-                break
-            }
-            if !r.unknownClasses.isEmpty, inf.contains("Unknown"), (gi.reasonClasses[fn] ?? []).isEmpty {
-                out.append(Unevaluated(rule: r.raw, why:
-                    "`\(r.raw)` narrows on the Unknown REASON CLASS, but `\(fn)` carries Unknown with no "
-                    + "reason reachable in this report — neither its own `unknownWhy` nor a `calls` edge to "
-                    + "one. §6.2 resolves the class set TRANSITIVELY over the gate's reach; with the channel "
-                    + "missing, every narrowed filter silently tolerates while only the bare `deny Unknown` "
-                    + "fires. Refusing (exit 2). Use the bare `deny Unknown`, or gate at scan time."))
-                break
-            }
-        }
-    }
-    return out
+    let cells = unanswerableCells(inferred: gi.inferred,
+                                  reasonClasses: gi.reasonClasses,
+                                  netClasses: gi.netClasses.mapValues(Set.init),
+                                  deny: deny)
+    return unansweredDisclosure(cells).map { Unevaluated(rule: $0.rule, why: $0.why) }
 }
 
 // ── the CLI ─────────────────────────────────────────────────────────────────────────────────────────

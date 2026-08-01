@@ -206,35 +206,81 @@ public func computeRemedy(start: String, effect: String, layer: String,
 // it performs the effect but isn't forbidden there (or doesn't perform it); else the remedy.
 public enum FixResult {
     case noSuchFn
-    case notACrossing(fn: String, effect: String, reason: String)
-    case remedy(Remedy)
+    case notACrossing(fn: String, effect: String, reason: String, unanswered: [UnansweredRule])
+    /// ⟨0.24⟩ THE GATE COULD NOT ANSWER THIS ONE (SPEC §3.2). `crossing` is `nil` when the refusal is
+    /// about THIS function — the rule that governs it could not be read, so whether it crosses is
+    /// undetermined and any boolean would be an invention — and `true` when the crossing itself is
+    /// CERTAIN and only the hoist PLAN rests on a boundary the gate declined to adjudicate.
+    ///
+    /// That second case is a defect this change nearly introduced in the other direction: withholding
+    /// the plan by answering `crossing: false` would have turned a violation the gate CHARGES into a
+    /// non-finding — the cardinal sin, arriving inside a fix for its mirror. The crossing is reported;
+    /// only the instruction is withheld.
+    case unanswerable(fn: String, effect: String, crossing: Bool?, unanswered: [UnansweredRule])
+    case remedy(Remedy, unanswered: [UnansweredRule])
 }
 
+/// ⟨0.24⟩ SPEC §3.2 applies here too, and in the sharpest form the verb has: `reason: "not-forbidden"`
+/// asserts *the rule was evaluated and did not fire*. Over a report the gate REFUSES, no rule was
+/// evaluated — so the answer becomes `unanswerable`, with the gate's own `unevaluated` disclosure
+/// beside it. `does-not-perform` is untouched: that one is read off the effect set, which is present.
 public func fix(target: String, effect: String, byName: [String: FixFn], cg: [String: [String]],
                 deny: [DenyRule]) -> FixResult {
     let names = Array(byName.keys)
     let classes = matcherReasonClasses(byName, deny)
     let netClasses = matcherNetClasses(byName, deny)
+    let cells = unanswerableCells(inferred: byName.mapValues(\.inferred), reasonClasses: classes,
+                                  netClasses: netClasses, deny: deny)
+    let unadjudicable = unanswerablePairs(cells)
+    let disclosure = unansweredDisclosure(cells)
     guard let m = bestMatches(names, target), !m.isEmpty else { return .noSuchFn }
     // prefer a match that actually performs the effect (so a bare leaf resolves to the violating function)
     let start = m.first(where: { byName[$0]?.inferred.contains(effect) == true }) ?? m[0]
     guard let fe = byName[start], fe.inferred.contains(effect) else {
-        return .notACrossing(fn: start, effect: effect, reason: "does-not-perform")
+        // NO DISCLOSURE HERE, and the asymmetry is measured rather than tidy. `does-not-perform` is read
+        // off the effect set: it depends on no rule, so it is not a claim the gate could contradict and
+        // the §3.2 bound has nothing to say about it. Attaching the disclosure anyway was a hedge, and
+        // hedges are always ALLOWED — but on the derived pollen corpus it fired on 141 of 195 sampled
+        // answers under one narrowed policy, which is how a disclosure stops being read.
+        return .notACrossing(fn: start, effect: effect, reason: "does-not-perform", unanswered: [])
     }
     guard let layer = deniedLayer(start, effect, deny, classes, netClasses) else {
-        return .notACrossing(fn: start, effect: effect, reason: "not-forbidden")
+        // `not-forbidden` claims the rule fired and missed. When the rule governing THIS function could
+        // not be read, nothing fired and nothing missed — and `crossing` goes unstated with it.
+        if unadjudicable.contains("\(start)|\(effect)") {
+            return .unanswerable(fn: start, effect: effect, crossing: nil, unanswered: disclosure)
+        }
+        return .notACrossing(fn: start, effect: effect, reason: "not-forbidden", unanswered: disclosure)
     }
-    return .remedy(computeRemedy(start: start, effect: effect, layer: layer,
-                                 byName: byName, cg: cg, rev: reverseGraph(cg), deny: deny, classes: classes,
-                                 netClasses: netClasses))
+    let p = computeRemedy(start: start, effect: effect, layer: layer,
+                          byName: byName, cg: cg, rev: reverseGraph(cg), deny: deny, classes: classes,
+                          netClasses: netClasses)
+    // A plan resting on a boundary the gate declined to adjudicate is withheld here for the same reason
+    // `fix-gate` withholds it — the single-function surface is the one an agent acts on directly. The
+    // CROSSING still ships: `deniedLayer` decided it, and the gate charges it (§3.1 precedence).
+    guard !remedyRestsOnRefusedEvidence(p, unadjudicable) else {
+        return .unanswerable(fn: start, effect: effect, crossing: true, unanswered: disclosure)
+    }
+    return .remedy(p, unanswered: disclosure)
 }
 
 // fix-gate: a remedy for EVERY deny/`pure` (AS-EFF-006) crossing in the report, collapsing the inheritors of
 // one root cause to a single plan (keyed by effect|layer|site|hoist).
-public func fixGate(byName: [String: FixFn], cg: [String: [String]], deny: [DenyRule]) -> (ok: Bool, remedies: [Remedy]) {
+//
+// ⟨0.24⟩ …EXCEPT WHERE THE GATE COULD NOT READ THE EVIDENCE (SPEC §3.2, candor-spec `4fd140c`): *"a hoist
+// plan for a boundary the gate could not adjudicate is a confident instruction resting on a guess."* The
+// climb in `computeRemedy` asks `deniedLayer` of every caller, and `deniedLayer` answers NOT-FORBIDDEN
+// for a function whose class set is empty BECAUSE THE FIELD IS ABSENT — so an unadjudicable caller
+// becomes a hoist TARGET, and the operator is told to move the effect to a layer nobody established is
+// allowed to hold it. Withheld, and disclosed instead.
+public func fixGate(byName: [String: FixFn], cg: [String: [String]], deny: [DenyRule])
+    -> (ok: Bool, remedies: [Remedy], unanswered: [UnansweredRule]) {
     let rev = reverseGraph(cg)
     let classes = matcherReasonClasses(byName, deny)
     let netClasses = matcherNetClasses(byName, deny)
+    let cells = unanswerableCells(inferred: byName.mapValues(\.inferred), reasonClasses: classes,
+                                  netClasses: netClasses, deny: deny)
+    let unadjudicable = unanswerablePairs(cells)
     var plans: [String: Remedy] = [:]
     for fn in byName.keys.sorted() {
         guard let fe = byName[fn] else { continue }
@@ -242,12 +288,28 @@ public func fixGate(byName: [String: FixFn], cg: [String: [String]], deny: [Deny
             guard let layer = deniedLayer(fn, effect, deny, classes, netClasses) else { continue }
             let p = computeRemedy(start: fn, effect: effect, layer: layer, byName: byName, cg: cg, rev: rev,
                                   deny: deny, classes: classes, netClasses: netClasses)
+            guard !remedyRestsOnRefusedEvidence(p, unadjudicable) else { continue }
             let key = "\(p.effect)|\(p.layer)|\(p.site)|\(p.hoistTo)"
             if plans[key] == nil { plans[key] = p }
         }
     }
     let remedies = plans.keys.sorted().map { plans[$0]! }
-    return (remedies.isEmpty, remedies)
+    return (remedies.isEmpty, remedies, unansweredDisclosure(cells))
+}
+
+/// Does this plan assert a layer status the gate declined to decide? KEYED ON THE PLAN'S OWN EFFECT, not
+/// on "some rule went unanswered": an unanswerable `Net` filter says nothing about an `Fs` crossing, and
+/// the gate itself keeps charging the violations it is sure of (§3.1 precedence). A suppression coarser
+/// than that would make the advisory verb LESS USEFUL than the gate rather than merely less certain,
+/// which is the opposite error and just as much a defect.
+///
+/// Every function the plan makes a claim about is in scope — the anchor, the span it says becomes pure,
+/// and both hoist frontiers, since "hoist it HERE" is exactly the assertion that HERE is allowed.
+func remedyRestsOnRefusedEvidence(_ p: Remedy, _ unadjudicable: Set<String>) -> Bool {
+    guard !unadjudicable.isEmpty else { return false }
+    for fn in [p.fn] + p.site + p.deniedSpan + p.hoistTo + p.hoistHigher
+    where unadjudicable.contains("\(fn)|\(p.effect)") { return true }
+    return false
 }
 
 // A per-function record the `unverified` check needs (fn name + inferred effects + the Unknown reasons).
@@ -476,7 +538,17 @@ func matcherReasonClasses(_ byName: [String: FixFn], _ deny: [DenyRule]) -> [Str
 // `pure`/`deny E` layer PASSES a function that carries none of its forbidden effects — but if that function is
 // `Unknown` (an unresolvable call), the pass is UNVERIFIED: the Unknown could hide the very effect the rule
 // forbids (the fn/closure-port hole). Returns each such function + the `deny E Unknown <scope>` upgrade.
-public func unverified(_ fns: [UnverifiedFn], _ deny: [DenyRule], classFilter: Set<String>? = nil) -> (ok: Bool, holes: [UnverifiedHole]) {
+///
+/// ⟨0.24⟩ …AND EVERY FUNCTION THE GATE COULD NOT JUDGE (SPEC §3.2, candor-spec `4fd140c`). A function
+/// `gate --report` refuses over is an unverified hole in the strongest sense this verb has — it is
+/// precisely *"your green gate is not provably green"* — and it was being cleared here, because the only
+/// holes this loop knew how to name were `Unknown`-carrying ones and `app.noClass` (Net, `hosts`, no
+/// `netClass`) carries no `Unknown` at all. See `Answerability.swift` for the measurement. The reason
+/// recorded is the MISSING EVIDENCE (`unevaluated[].why`, the gate's own field) and the edit offered is
+/// the evidence-free rule; neither is a class, because a derived class is the second opinion §3.2 says
+/// an advisory verb is not entitled to.
+public func unverified(_ fns: [UnverifiedFn], _ deny: [DenyRule], classFilter: Set<String>? = nil)
+    -> (ok: Bool, holes: [UnverifiedHole], unanswered: [UnansweredRule]) {
     var holes: [UnverifiedHole] = []
     // Computed once, and ONLY when a filter will consult it — the unfiltered list is unchanged by it.
     let classes = classFilter == nil ? [:] : reasonClassesTransitive(fns)
@@ -499,7 +571,36 @@ public func unverified(_ fns: [UnverifiedFn], _ deny: [DenyRule], classFilter: S
         let (rule, upgrade) = ruleUpgrade(r)
         holes.append(UnverifiedHole(fn: e.fn, rule: rule, unknownWhy: e.unknownWhy, upgrade: upgrade))
     }
-    return (holes.isEmpty, holes)
+    // ⟨0.24⟩ THE §3.2 BOUND. Every (rule, function) the gate could not decide, appended in code-point
+    // order after the holes this verb already knew about — a separate pass because it is a separate
+    // question (`Answerability.swift`: *can this be answered*, not *does this rule forbid it*), and one
+    // entry per pair rather than per rule because the whole point is naming the FUNCTION.
+    var inferredByFn: [String: Set<String>] = [:]
+    for e in fns { inferredByFn[e.fn, default: []].formUnion(e.inferred) }
+    let cells = unanswerableCells(inferred: inferredByFn, reasonClasses: matcherClasses,
+                                  netClasses: matcherNet, deny: deny)
+    // NOT SUBJECT TO `--class`, and this is the one design choice here worth arguing for. The filter
+    // selects among holes BY REASON CLASS; a function the gate could not judge has no reason class to
+    // select on, and a `Net` refusal has none at all. Excluding these would make the filter succeed
+    // BECAUSE THE EVIDENCE IS MISSING — the exact shape of the defect this rung closes, one level down.
+    // It is also wrong on §6.2's own terms: the class set only ever GROWS, so an Unknown nobody
+    // classified COULD be `dispatch`, and `--class dispatch` dropping it asserts that it is not.
+    // MEASURED on the derived pollen corpus (`unknownWhy` + `calls` stripped, `deny Unknown[dispatch]`):
+    // 199 functions, every one of them a candidate the report cannot rule in or out.
+    //
+    // ONE ENTRY PER (function, rule), and the loop above wins the tie. The two passes OVERLAP whenever a
+    // narrowed rule is both unanswerable and non-biting at the same function — the reason-class arm is
+    // exactly that case, which is how the containment already held there BY ACCIDENT while `--strict`
+    // still exited 0. A second row for a function already named would double-count a hole without
+    // naming a new one; the missing-evidence reason travels in `unevaluated`, which is where §3.2 puts
+    // it for both verbs.
+    var seenPair = Set(holes.map { "\($0.fn)|\($0.rule)" })
+    for c in cells.sorted(by: { ($0.fn, $0.rule.raw) < ($1.fn, $1.rule.raw) })
+    where seenPair.insert("\(c.fn)|\(c.rule.raw)").inserted {
+        holes.append(UnverifiedHole(fn: c.fn, rule: c.rule.raw, unknownWhy: [],
+                                    upgrade: evidenceFreeRule(c.rule, effect: c.effect)))
+    }
+    return (holes.isEmpty, holes, unansweredDisclosure(cells))
 }
 
 // The query name-match ladder (exact > segment-suffix > substring), same tiers as the family engines.

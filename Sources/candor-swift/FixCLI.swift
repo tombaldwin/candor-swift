@@ -85,12 +85,27 @@ private func mergeUnanalyzed(_ obj: [String: Any], into c: inout ReportCompleten
 // (could-not-fully-evaluate, the gate's code for the same situation) rather than the 1 that would claim a
 // finding or the 0 that would certify. Without `--strict` these verbs are advisory and still exit 0: the
 // agent fix-loop reads the body, and turning its exit red would be a different change than this one.
+//
+// ⟨0.24⟩ **AND THE SAME TREATMENT FOR A RULE THE GATE COULD NOT EVALUATE** (SPEC §3.2, candor-spec
+// `4fd140c`). It arrives here rather than at either call site for the reason the incompleteness rule
+// did: two verbs applying one law in two places is how they drifted the first time. The shape is not a
+// new one — `unevaluated: [{rule, why}]` is the GATE's field (§3.1, `fc4b5f6`), and §3.2 is explicit
+// that inventing a second spelling for it is the mistake that document has made four times.
+//
+// `ok` is OMITTED for the same reason incompleteness omits it, and the reasoning is worth keeping
+// separate for each verb: `unverified` always NAMES the function it could not clear, so its `ok` would
+// read `false` and be defensible — but `fix-gate` WITHHOLDS the remedy, so `ok:true` there would
+// certify "no crossings" over a policy nobody finished evaluating. One rule for both, and it is the
+// fail-safe one: a consumer writing `if (r.ok)` gets undefined.
 func emitAdvisoryAnswer(_ body: [String: Any], ok: Bool, completeness c: ReportCompleteness,
-                        strict: Bool) -> Never {
+                        strict: Bool, unevaluated: [UnansweredRule] = []) -> Never {
     var out = body
-    if c.isIncomplete {
-        out["incomplete"] = true
-        out["unanalyzed"] = c.json
+    if !unevaluated.isEmpty { out["unevaluated"] = unevaluated.map { $0.toJSON() } }
+    if c.isIncomplete || !unevaluated.isEmpty {
+        if c.isIncomplete {
+            out["incomplete"] = true
+            out["unanalyzed"] = c.json
+        }
         emitJSON(out)
         exit(strict ? 2 : 0)
     }
@@ -540,12 +555,14 @@ func runUnverifiedCLI(_ args: [String]) -> Never {
     do { classFilter = try parseClassFilter(q.classFilter) }
     catch let e as ClassFilterUsageError { fixDie(e.message) }
     catch { fixDie("candor-swift: --class could not be parsed: \(error)") }
-    let (ok, holes) = unverified(fns, deny, classFilter: classFilter)
+    let (ok, holes, unanswered) = unverified(fns, deny, classFilter: classFilter)
     // ⟨0.24⟩ over a report declaring `unanalyzed`, `ok` is OMITTED — see `emitAdvisoryAnswer`. The holes
     // still ship: an unverified layer this report DID see is worth naming whether or not another file
-    // went unread.
+    // went unread. Same for a rule the gate could not evaluate (§3.2): the holes ship, `unevaluated`
+    // rides beside them, and `--strict` matches the gate's exit 2.
     emitAdvisoryAnswer(["unverified": holes.map { $0.toJSON() }],
-                       ok: ok, completeness: loaded.completeness, strict: q.strict)
+                       ok: ok, completeness: loaded.completeness, strict: q.strict,
+                       unevaluated: unanswered)
 }
 
 // Dispatched from main.swift when argv[1] is `tour` (before the scan flag loop). §3.3.1 canonical grammar,
@@ -796,12 +813,26 @@ func runFixCLI(_ args: [String]) -> Never {
         switch fix(target: target, effect: effect, byName: model.byName, cg: model.cg, deny: deny) {
         case .noSuchFn:
             fixDie("candor-swift fix: no function matching `\(target)`")
-        case let .notACrossing(fn, eff, reason):
-            emitJSON(["fn": fn, "effect": eff, "crossing": false, "reason": reason])
+        case let .notACrossing(fn, eff, reason, unanswered):
+            // ⟨0.24⟩ `crossing:false` IS a claim, so the §3.2 disclosure rides it — see `CandorCore.fix`.
+            var out: [String: Any] = ["fn": fn, "effect": eff, "crossing": false, "reason": reason]
+            if !unanswered.isEmpty { out["unevaluated"] = unanswered.map { $0.toJSON() } }
+            emitJSON(out)
             exit(0)
-        case let .remedy(r):
+        case let .unanswerable(fn, eff, crossing, unanswered):
+            // ⟨0.24⟩ `crossing` is OMITTED when the gate could not decide it — the same reasoning that
+            // omits `ok` on the array verbs, and for the same reason: a boolean nobody derived is worse
+            // than an absent key a consumer must handle. It IS present, and `true`, when the crossing
+            // was decided and only the hoist plan was withheld.
+            var out: [String: Any] = ["fn": fn, "effect": eff, "reason": "unanswerable"]
+            if let c = crossing { out["crossing"] = c }
+            out["unevaluated"] = unanswered.map { $0.toJSON() }
+            emitJSON(out)
+            exit(0)
+        case let .remedy(r, unanswered):
             var out = r.toJSON()
             out["crossing"] = true
+            if !unanswered.isEmpty { out["unevaluated"] = unanswered.map { $0.toJSON() } }
             emitJSON(out)
             exit(0)
         }
@@ -817,14 +848,15 @@ func runFixCLI(_ args: [String]) -> Never {
         guard let model = loadFixModel(prefix: prefix) else {
             fixDie("candor-swift fix-gate: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
         }
-        let (ok, remedies) = fixGate(byName: model.byName, cg: model.cg, deny: deny)
+        let (ok, remedies, unanswered) = fixGate(byName: model.byName, cg: model.cg, deny: deny)
         // Advisory by default (exit 0 — the agent fix-loop reads the remedy and edits); `--strict` makes the
         // exit follow `ok`, so CI can REQUIRE zero outstanding crossings (mirrors `unverified --strict`).
         // ⟨0.24⟩ …and over a report declaring `unanalyzed`, `ok` is OMITTED and `--strict` exits 2 — see
         // `emitAdvisoryAnswer`. The remedies still ship: a crossing this report DID see needs the same
         // hoist whether or not another file went unread.
         emitAdvisoryAnswer(["remedies": remedies.map { $0.toJSON() }],
-                           ok: ok, completeness: model.completeness, strict: q.strict)
+                           ok: ok, completeness: model.completeness, strict: q.strict,
+                           unevaluated: unanswered)
     }
 }
 

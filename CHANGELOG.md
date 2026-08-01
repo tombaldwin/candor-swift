@@ -9,6 +9,97 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [Unreleased]
 
+### fixed — ⟨0.24⟩ three advisory verbs answered a question the gate had refused (2026-08-01)
+
+SPEC §3.2 (candor-spec `4fd140c`): **an advisory verb may be LESS certain than the gate, never more.**
+Stated as a law after three local patches — a lenient manifest reader, a hole predicate ignoring the
+class filter, and a fallback derivation — that differ in mechanism and share only the direction of the
+error. This is the third instance, and its mechanism here is a fourth one again.
+
+MEASURED on the conformance R11 report (`app.nativeHole` = an Unknown outside the policy's class filter;
+`app.noClass` = `Net` + `hosts` and NO `netClass`; `app.writes` = a plain `Fs` violator) under
+`deny Net[unknown-host] app`:
+
+| | before | after |
+|---|---|---|
+| `gate --report` | exit **2** — it cannot judge `app.noClass` | unchanged |
+| `unverified --json` | `ok:false`, names **only** `app.nativeHole` | names `app.noClass` too, + `unevaluated` |
+| `unverified --strict` | exit **0** — green | exit **2**, `ok` omitted |
+| `fix-gate --strict` | exit **0**, `ok:true` — green | exit **2**, `ok` omitted |
+| `fix app.noClass Net` | `crossing:false, reason:"not-forbidden"` | `reason:"unanswerable"`, `crossing` OMITTED, + `unevaluated` |
+
+`app.noClass` was CLEARED by the verb whose entire job is *"your green gate is not provably green"*,
+while the gate declined to clear it over identical bytes. **The mechanism here is NOT the fallback
+derivation §3.2 describes** — `matcherNetClasses` reads `netClass` verbatim and derives nothing — it is
+that `unverified` only ever considered `Unknown`-carrying functions, so a function the gate could not
+judge for a different reason had no channel and fell off the end. An assertion of the form *the verb
+names SOMETHING* passed throughout, because the verb names a DIFFERENT hole; only the per-function form
+catches it.
+
+- The answerability predicate moved to `CandorCore/Answerability.swift` and `gate --report` now calls
+  it. A law that is a COMPARISON cannot be checked from two implementations of the thing compared. The
+  prose, iteration order and one-entry-per-rule granularity are unchanged, so the gate's bytes are the
+  bytes it emitted before (conformance R6 pins that four-way).
+- `unverified` names every (rule, function) the gate could not decide, with the **missing evidence** as
+  the reason — carried in the gate's own `unevaluated: [{rule, why}]` (§3.1, `fc4b5f6`), not a second
+  spelling — and the **evidence-free rule** as the `upgrade` (`deny Net[unknown-host] app` →
+  `deny Net app`), which is what the gate's own refusal already recommends. Never a derived class.
+- `fix`/`fix-gate` withhold any remedy whose anchor, pure span or hoist frontier contains a function the
+  gate could not adjudicate FOR THAT EFFECT: *"a hoist plan for a boundary the gate could not adjudicate
+  is a confident instruction resting on a guess."* Keyed on the effect, not on "some rule went
+  unanswered" — the gate keeps charging the violations it is sure of (§3.1 precedence), and a verb that
+  went quiet on an `Fs` crossing because a `Net` filter was unreadable would be LESS useful than the
+  gate rather than merely less certain.
+- `--class` does NOT filter these entries out. Excluding them would make the filter succeed BECAUSE THE
+  EVIDENCE IS MISSING — this rung's defect one level down — and it is wrong on §6.2's own terms: the
+  class set only grows, so an `Unknown` nobody classified could be `dispatch`.
+- `fix`'s `does-not-perform` answer carries NO disclosure: it is read off the effect set, depends on no
+  rule, and is not a claim the gate could contradict. Attaching it anyway fired on 141 of 195 sampled
+  answers, which is how a disclosure stops being read.
+- **AND THE DEFECT THIS CHANGE NEARLY INTRODUCED IN THE MIRROR DIRECTION**, caught in self-review before
+  it shipped: the first cut withheld `fix`'s plan by answering `crossing: false`, which over a CERTAIN
+  crossing whose only unadjudicable function is a hoist target would have turned a violation the gate
+  CHARGES into a non-finding — a silent under-report arriving inside a fix for its opposite. `crossing`
+  now says what is known and nothing else: **omitted** when the rule governing the queried function
+  could not be read (undetermined, the same reasoning that omits `ok`), **`true`** when the crossing was
+  decided and only the hoist plan was withheld. One new `reason` token, no new field.
+
+**WHAT THE CORPORA EXERCISE: NOTHING, and that is the measurement.** `~/git/pollen` (1096 entries) and
+this repo's `Sources` (184) carry **0** entries with `hosts` and no `netClass`, **0** `Net` entries
+without `netClass`, and **0** `Unknown` entries with neither `unknownWhy` nor a `calls` edge — because
+this producer floors `netClass` at `unknown-host` and records a reason beside every `Unknown` it raises.
+A report THIS engine wrote cannot reach the defect; the reachable case is a report **another** producer
+wrote, which is exactly what `gate --report` exists for. So the A/B is a no-regression control and the
+value is measured on a DERIVED corpus:
+
+- **A/B, both real corpora**: 288 paired `unverified`/`fix-gate` runs (12 policies × 4 flag sets) and
+  7488 paired `fix` runs (12 policies × a 1-in-17 stride × 3 effects) — **0 differences, 0 functions
+  lost**. Scan report bytes byte-identical.
+- **DERIVED corpus** — the same pollen graph with `netClass` deleted from all 50 `Net` entries, i.e. a
+  report from a producer that does not carry the ⟨0.20⟩ field. `gate --report` exits 2;
+  `unverified --strict` went 1 → 2 and 459 → 460 holes (`AggregationClient.upload`, the one `Net`
+  function not already named as an `Unknown` hole); `fix-gate --strict` went **0 (`ok:true`, green) → 2**.
+- **DERIVED corpus 2** — `unknownWhy` + `calls` stripped (1356 fields). `unverified --strict` 1 → 2 with
+  the same 459 holes: the containment already held here BY ACCIDENT, since those functions carry
+  `Unknown` and the narrowed rule does not bite them. What was missing was the disclosure and the exit
+  code — which is why every row of the new suite asserts a FUNCTION and an exit code, not a count.
+- Across all four corpora: **0 functions lost, 1210 gained**, every gain on a derived corpus.
+
+Conformance **R11 `swift advisory-bound` now OK** (it was FAIL and waived four-way); its baseline waiver
+now reads stale, and that ratchet fires in candor-spec, not here. New `AdvisoryBoundProcessTests` (19
+rows, 9 of them mirrors that pass on the unmodified build); 554 tests, smoke 108, fuzz 25 seeds,
+fabrication-probe clean; PART 27 all-swift-OK and the four-way suite otherwise unchanged.
+
+KNOWN RESIDUAL, stated rather than papered over: when `fix-gate` withholds a plan it drops the CROSSING
+from `remedies` along with it — `remedies[]` has no shape for a crossing without a plan, where the
+single-function `fix` does. The compensating channel is the one §3.2 names: `ok` is omitted,
+`unevaluated` names the rule, and `--strict` exits 2, so no consumer can read it as clean. Not reached
+on either real corpus (0 remedies withheld in 288 paired runs).
+
+*(Amends the `conditional` note below: "there is no unanswerable narrowing to disclose" was true of the
+HYPOTHETICAL surface candor-swift does not ship, and remains so — but the REPORT route does have one,
+and `fix` now answers `unanswerable` rather than `not-forbidden` when it hits it.)*
+
 ### measured, no change — ⟨0.24⟩ `violations[].conditional` is N/A for candor-swift (2026-08-01)
 
 SPEC §3.1 pins `violations[].conditional: "<the narrowing left unevaluated>"` (candor-spec `6f30540`,

@@ -49,7 +49,7 @@ final class UnverifiedClassFilterTests: XCTestCase {
 
     private func holes(_ classSpec: String?) throws -> [String] {
         let deny = parsePolicy("deny Exec").deny
-        let (_, hs) = unverified(rows(), deny, classFilter: try parseClassFilter(classSpec))
+        let (_, hs, _) = unverified(rows(), deny, classFilter: try parseClassFilter(classSpec))
         return hs.map { $0.fn }.sorted()
     }
 
@@ -98,9 +98,9 @@ final class UnverifiedClassFilterTests: XCTestCase {
         let deny = parsePolicy("deny Exec").deny
         let fns = [UnverifiedFn(fn: "x.opaque", inferred: ["Unknown"], direct: [],
                                 unknownWhy: [], calls: [], netClass: [])]
-        let (_, hs) = unverified(fns, deny, classFilter: try parseClassFilter("unresolved"))
+        let (_, hs, _) = unverified(fns, deny, classFilter: try parseClassFilter("unresolved"))
         XCTAssertEqual(hs.map { $0.fn }, ["x.opaque"])
-        let (_, none) = unverified(fns, deny, classFilter: try parseClassFilter("dispatch"))
+        let (_, none, _) = unverified(fns, deny, classFilter: try parseClassFilter("dispatch"))
         XCTAssertEqual(none.map { $0.fn }, [], "…and never a guessed class")
     }
 
