@@ -548,19 +548,21 @@ final class CallCollector: SyntaxVisitor {
     /// the ordering is explicit rather than an accident of which visitor happens to fire first.
     /// `params` are the ENCLOSING function's parameter names: they are binders that are not IN the body,
     /// and a body binder that shadows one is exactly the shape this refuses.
-    func prescanLocatorMoves(_ body: some SyntaxProtocol, params: Set<String> = [], isTopLevel: Bool = false) {
+    func prescanLocatorMoves(_ body: some SyntaxProtocol, params: Set<String> = []) {
         let s = LocatorMoveScanner(viewMode: .sourceAccurate)
         s.walk(body)
         movedNames = s.moved
         propWrites = s.propWrites
         multiplyBoundNames = Set(s.binderCounts.filter { $0.value + (params.contains($0.key) ? 1 : 0) > 1 }.keys)
-        // ⟨0.23⟩ NOT AT TOP LEVEL, where the "local" binder IS the module const rather than a shadow of it.
-        // A file's top-level code is the `<main>` unit's BODY, so `let outPath = "tools/preview.html"` is
-        // counted here AND indexed as a module const — the same binding seen twice, not two bindings. The
-        // first cut of this gate refused it and DELETED a real `Fs` path from three pollen functions. Caught
-        // by the A/B against the released tag, not by any fixture: every fixture put the shadowed binder
-        // inside a `func`, which is the one place the distinction does not show.
-        locallyBoundNames = isTopLevel ? [] : Set(s.binderCounts.keys)
+        // ⟨0.23⟩ NO TOP-LEVEL EXEMPTION. A first cut of this gate skipped the whole `<main>` unit, on the
+        // reasoning that a file's top-level `let` IS the module const rather than a shadow of it. That was
+        // wrong twice over. It re-opened the fabrication for a shadow in a NESTED scope inside top-level
+        // code (`do { let apiBase = dynamic; … }` still claimed the module literal), and the pollen `paths`
+        // it was added to protect turned out to be a FABRICATION being correctly removed — two functions
+        // binding their own computed `outPath` were reported as writing an unrelated file's constant, and
+        // `<main>` inherited that path transitively by calling them. Scoping an exemption to the UNIT when
+        // the condition is about the BINDING is the same error this gate exists to fix.
+        locallyBoundNames = Set(s.binderCounts.keys)
     }
 
     // ── PROCESS COMMAND PROVENANCE ──────────────────────────────────────────────────────────────────

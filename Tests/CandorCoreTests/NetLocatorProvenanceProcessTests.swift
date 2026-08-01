@@ -805,6 +805,24 @@ final class NetLocatorProvenanceProcessTests: XCTestCase {
                        "a local binder SHADOWS the module const — the module's literal is not this value")
     }
 
+    /// ⟨0.23⟩ THE SHADOW IN A NESTED SCOPE INSIDE TOP-LEVEL CODE — the shape a unit-wide exemption re-opens.
+    /// `<main>`'s body is the file's top-level code, so a `do`/`if` block inside it binds names in the same
+    /// unit as the module consts. Exempting the unit (rather than the outermost binder) let this claim the
+    /// module literal again — the very fabrication this gate closes, one scope down.
+    func testFailClosedTopLevelNestedShadowDoesNotClaimTheModuleConst() throws {
+        let by = try scan("""
+        import Foundation
+        let apiBase = "https://moduleconst.example.com"
+        func take(_ s: String) -> String { return s }
+        do {
+            let apiBase = take("runtime")
+            _ = URLSession.shared.dataTask(with: URL(string: apiBase)!)
+        }
+        """)
+        XCTAssertEqual(hosts(by, "<main>"), [],
+                       "a shadow inside top-level code is still a shadow — not the module const")
+    }
+
     /// THE POSITIVE CONTROL FOR THAT LAYER — no local binder, so the module const IS the value and this
     /// reach must survive the refusal.
     func testModuleConstWithNoLocalBinderStillExtractsHost() throws {
