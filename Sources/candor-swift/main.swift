@@ -482,10 +482,34 @@ if wantWorkspace {
                 proc.environment = env
                 let pipe = Pipe(), errPipe = Pipe()
                 proc.standardOutput = pipe; proc.standardError = errPipe
+                // NOT `proc.waitUntilExit()`. On swift-corelibs-foundation it blocks FOREVER once the
+                // child has already finished — which is exactly the state the read-to-EOF below
+                // guarantees by the time we want the status. Measured in docker swift:6.1 (the image the
+                // linux CI leg runs), spawning /bin/cat on an 850-byte file and reading both pipes first:
+                //
+                //     waitUntilExit()                         HUNG 10 of 10
+                //     background-drain + waitUntilExit first   HUNG 10 of 10
+                //     terminationHandler + DispatchSemaphore      0 of 10
+                //
+                // At the hang the child is gone, both pipes gave EOF, and `isRunning` is still true: the
+                // exit is never observed and the run loop `waitUntilExit` spins has nothing left to wake
+                // it. The middle arm rules out read ordering — the primitive itself is broken, so the
+                // pipe-buffer guard below is still required and still not sufficient. The handler is
+                // delivered by the reaper directly rather than through a run loop.
+                //
+                // It MUST be installed before `run()`; installing it on an already-exited process races
+                // with the delivery it exists to catch.
+                //
+                // This made `candor-swift --workspace` hang forever on Linux: measured on a one-dep
+                // workspace, macOS exited 0 with a 630-byte report while Linux had to be killed at 60s
+                // having written nothing. An AVAILABILITY defect, not the cardinal sin — it hangs rather
+                // than reporting a false all-clear, so no silent under-report was ever emitted.
+                let exited = DispatchSemaphore(value: 0)
+                proc.terminationHandler = { _ in exited.signal() }
                 guard (try? proc.run()) != nil else { failures[dp] = "could not be spawned"; continue }
                 let out = pipe.fileHandleForReading.readDataToEndOfFile()
                 let errOut = errPipe.fileHandleForReading.readDataToEndOfFile()
-                proc.waitUntilExit()
+                exited.wait()
                 guard proc.terminationStatus == 0 else {
                     // the child's own last stderr line is the diagnosis (a bad `.candor/config`, an
                     // unreadable tree); relaying it is what turns "silently skipped" into actionable.
