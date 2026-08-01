@@ -658,4 +658,100 @@ final class NetLocatorProvenanceProcessTests: XCTestCase {
         XCTAssertEqual(cmds(by, "spawn"), [],
                        "the coarse binder count cannot tell a shadow from a disjoint reuse of the name")
     }
+
+    // ── ⟨0.24⟩ THE MODULE-CONST FALLBACK, ported from release/0.23 where it shipped as 0.23.3 ─────────
+    // `constValue` reads `localConstStrings[name] ?? moduleConstStrings[name]`. `ShadowSave` scope-protects
+    // the LOCAL map on this line, so a shadow's literal cannot leak — but the MODULE fallback is not scoped
+    // by anything, so a local that shadows a module-level `let` and holds something dynamic answered with
+    // the module's literal. Measured on `main` before this fix: all three shapes below fabricated.
+
+    /// ONE binder, dynamic — the shape that shipped in 0.23.2 and was fixed in 0.23.3.
+    func testFailClosedSingleBinderShadowDoesNotFallBackToTheModuleConst() throws {
+        // ⟨0.24⟩ KNOWN-BROKEN ON `main`, FIXED ON `release/0.23` (shipped 0.23.3). `XCTExpectFailure`
+        // rather than a skip or a deletion: it is a BOTH-WAYS ratchet — it fails if this ever starts
+        // passing, so the marker cannot outlive the defect. The 0.23 fix (a whole-body `locallyBoundNames`
+        // gate in `constValue`) does NOT port here: `main` has `ShadowSave`, which correctly restores an
+        // outer const past a shadow scope, and the blunt whole-body set over-refuses it — measured, it
+        // regressed `testAShadowedConstStringDoesNotAnchorALiteralHost` and dropped a host `main` reports
+        // correctly today. What `main` needs is a SCOPE-AWARE set maintained by the same save/restore, and
+        // `NameKeyedStateTests.disposition` is the file that must record what a rebind does to it first.
+        XCTExpectFailure("main's module-const fallback is not scope-guarded; see the 0.23.3 port note")
+        let by = try scan("""
+        import Foundation
+        let apiBase = "https://moduleconst.example.com"
+        func send(dyn: String) {
+            let apiBase = dyn
+            URLSession.shared.dataTask(with: URL(string: apiBase)!) { _, _, _ in }.resume()
+        }
+        send(dyn: "https://real.example.com")
+        """)
+        XCTAssertEqual(hosts(by, "send"), [],
+                       "a local binder SHADOWS the module const — the module's literal is not this value")
+    }
+
+    /// TWO binders — `release/0.23` refused this via `multiplyBoundNames`; `main`'s `constValue` never
+    /// consulted that set, so it fabricated where the 0.23 line did not.
+    func testFailClosedTwiceBoundShadowDoesNotFallBackToTheModuleConst() throws {
+        // ⟨0.24⟩ KNOWN-BROKEN ON `main`, FIXED ON `release/0.23` (shipped 0.23.3). `XCTExpectFailure`
+        // rather than a skip or a deletion: it is a BOTH-WAYS ratchet — it fails if this ever starts
+        // passing, so the marker cannot outlive the defect. The 0.23 fix (a whole-body `locallyBoundNames`
+        // gate in `constValue`) does NOT port here: `main` has `ShadowSave`, which correctly restores an
+        // outer const past a shadow scope, and the blunt whole-body set over-refuses it — measured, it
+        // regressed `testAShadowedConstStringDoesNotAnchorALiteralHost` and dropped a host `main` reports
+        // correctly today. What `main` needs is a SCOPE-AWARE set maintained by the same save/restore, and
+        // `NameKeyedStateTests.disposition` is the file that must record what a rebind does to it first.
+        XCTExpectFailure("main's module-const fallback is not scope-guarded; see the 0.23.3 port note")
+        let by = try scan("""
+        import Foundation
+        let apiBase = "https://moduleconst.example.com"
+        func send(dyn: String) {
+            let apiBase = dyn
+            if true { let apiBase = "https://phantom.example.com"; _ = apiBase }
+            URLSession.shared.dataTask(with: URL(string: apiBase)!) { _, _, _ in }.resume()
+        }
+        send(dyn: "https://real.example.com")
+        """)
+        XCTAssertEqual(hosts(by, "send"), [], "neither the shadow's literal nor the module const")
+    }
+
+    /// A shadow in a NESTED scope inside TOP-LEVEL code. `<main>`'s body is the file's top-level code, so a
+    /// `do` block inside it binds in the same unit as the module consts. The 0.23 line briefly exempted the
+    /// whole unit here and re-opened the fabrication one scope down; the exemption is not ported.
+    func testFailClosedTopLevelNestedShadowDoesNotClaimTheModuleConst() throws {
+        // ⟨0.24⟩ KNOWN-BROKEN ON `main`, FIXED ON `release/0.23` (shipped 0.23.3). `XCTExpectFailure`
+        // rather than a skip or a deletion: it is a BOTH-WAYS ratchet — it fails if this ever starts
+        // passing, so the marker cannot outlive the defect. The 0.23 fix (a whole-body `locallyBoundNames`
+        // gate in `constValue`) does NOT port here: `main` has `ShadowSave`, which correctly restores an
+        // outer const past a shadow scope, and the blunt whole-body set over-refuses it — measured, it
+        // regressed `testAShadowedConstStringDoesNotAnchorALiteralHost` and dropped a host `main` reports
+        // correctly today. What `main` needs is a SCOPE-AWARE set maintained by the same save/restore, and
+        // `NameKeyedStateTests.disposition` is the file that must record what a rebind does to it first.
+        XCTExpectFailure("main's module-const fallback is not scope-guarded; see the 0.23.3 port note")
+        let by = try scan("""
+        import Foundation
+        let apiBase = "https://moduleconst.example.com"
+        func take(_ s: String) -> String { return s }
+        do {
+            let apiBase = take("runtime")
+            _ = URLSession.shared.dataTask(with: URL(string: apiBase)!)
+        }
+        """)
+        XCTAssertEqual(hosts(by, "<main>"), [],
+                       "a shadow inside top-level code is still a shadow — not the module const")
+    }
+
+    /// THE POSITIVE CONTROL — no local binder anywhere, so the module const IS the value. A fix that kills
+    /// this has traded a fabrication for a lost disclosure.
+    func testModuleConstWithNoLocalBinderKeepsItsHost() throws {
+        let by = try scan("""
+        import Foundation
+        let apiBase = "https://moduleconst.example.com"
+        func send() {
+            URLSession.shared.dataTask(with: URL(string: apiBase + "/v1")!) { _, _, _ in }.resume()
+        }
+        send()
+        """)
+        XCTAssertEqual(hosts(by, "send"), ["moduleconst.example.com"],
+                       "no binder shadows it — the module const is the value and this reach must survive")
+    }
 }
