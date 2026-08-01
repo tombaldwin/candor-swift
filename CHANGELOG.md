@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.23.3 — supersedes 0.23.2, which shipped with a fabrication
+
+**Use this instead of 0.23.2.** 0.23.2 carried the locator-provenance work described below, and a defect in
+one of its own guards: a name shadowed inside **top-level code** still claimed the module-level constant it
+shadows.
+
+    let apiBase = "https://moduleconst.example.com"
+    do {
+        let apiBase = take(runtimeValue)          // shadows it, dynamically
+        URLSession.shared.dataTask(with: URL(string: apiBase)!)   // 0.23.2 reports moduleconst.example.com
+    }
+
+The guard that refuses a shadowed name was skipped for the whole `<main>` unit, on the reasoning that a
+file's top-level `let` IS the module constant rather than a shadow of it. That is true of a binder at the
+outermost level and false of one in a nested scope, so the fabrication reappeared one scope down. The
+exemption is removed; the guard now applies uniformly, and a regression test covers the nested case — no
+previous fixture reached it, because they all placed the shadow inside a `func`, which is the one place the
+distinction cannot show.
+
+Nothing else changes from 0.23.2. Its feature notes follow.
+
 ## 0.23.2 — locator provenance (spec 0.23)
 
 A soundness patch. Before this release the Swift engine recovered a network host only from a literal passed
