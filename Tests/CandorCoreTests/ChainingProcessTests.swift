@@ -19,12 +19,9 @@ import Foundation
 /// config `deps` anchoring, and CANDOR_DEPS-over-config precedence.
 final class ChainingProcessTests: XCTestCase {
 
+    /// See ProcessHarness.binaryURL — the private copy this replaced resolved WRONG on Linux.
     private func binaryURL() throws -> URL {
-        let bundleDir = Bundle(for: ChainingProcessTests.self).bundleURL.deletingLastPathComponent()
-        let exe = bundleDir.appendingPathComponent("candor-swift")
-        try XCTSkipUnless(FileManager.default.fileExists(atPath: exe.path),
-                          "candor-swift binary not built next to the test bundle (\(exe.path)) — run `swift build` first")
-        return exe
+        try ProcessHarness.binaryURL(for: ChainingProcessTests.self)
     }
 
     /// Run the binary with a SANITIZED environment (no inherited CANDOR_* can leak into a fixture

@@ -8,13 +8,11 @@ import Foundation
 /// function boundary the code review named — and gated by `swift test` (offline, no network).
 final class GateProcessTests: XCTestCase {
 
-    /// The debug binary `swift build` produced, alongside this test bundle in .build/<config>/.
+    /// The debug binary `swift build` produced. Delegates to ProcessHarness: this was a private COPY of
+    /// the resolver, and the copies all resolved to the wrong directory on Linux — skipping every process
+    /// suite on that leg. One resolver, one place to be right.
     private func binaryURL() throws -> URL {
-        let bundleDir = Bundle(for: GateProcessTests.self).bundleURL.deletingLastPathComponent()
-        let exe = bundleDir.appendingPathComponent("candor-swift")
-        try XCTSkipUnless(FileManager.default.fileExists(atPath: exe.path),
-                          "candor-swift binary not built next to the test bundle (\(exe.path)) — run `swift build` first")
-        return exe
+        try ProcessHarness.binaryURL(for: GateProcessTests.self)
     }
 
     /// A throwaway package whose single function reaches Net at `urlLiteral` (a κ-classified

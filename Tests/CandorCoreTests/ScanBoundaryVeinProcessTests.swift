@@ -12,12 +12,9 @@ import Foundation
 /// exit 0 (a false all-clear) on identical source.
 final class ScanBoundaryVeinProcessTests: XCTestCase {
 
+    /// See ProcessHarness.binaryURL — the private copy this replaced resolved WRONG on Linux.
     private func binaryURL() throws -> URL {
-        let bundleDir = Bundle(for: ScanBoundaryVeinProcessTests.self).bundleURL.deletingLastPathComponent()
-        let exe = bundleDir.appendingPathComponent("candor-swift")
-        try XCTSkipUnless(FileManager.default.fileExists(atPath: exe.path),
-                          "candor-swift binary not built next to the test bundle (\(exe.path)) — run `swift build` first")
-        return exe
+        try ProcessHarness.binaryURL(for: ScanBoundaryVeinProcessTests.self)
     }
 
     private func run(_ binary: URL, _ args: [String], env: [String: String] = [:]) throws -> (out: String, err: String, code: Int32) {

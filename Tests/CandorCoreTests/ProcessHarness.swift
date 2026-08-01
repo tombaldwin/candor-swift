@@ -3,17 +3,41 @@ import Foundation
 
 /// Shared helpers for the PROCESS-layer suites (TESTING.md §5: one fixture/spawn helper per repo).
 /// Spawns the BUILT `candor-swift` binary the user runs — no SPM rebuild of fixtures (the engine is a
-/// syntactic scan, it never builds its target). New process suites use this; the two pre-existing
-/// suites (GateProcessTests / ChainingProcessTests) keep their private copies to avoid churn.
+/// syntactic scan, it never builds its target). EVERY process suite resolves the binary through
+/// `binaryURL` here — the three suites that once kept private copies of it (GateProcessTests,
+/// ChainingProcessTests, ScanBoundaryVeinProcessTests) now delegate. The copies were tolerated as
+/// "avoiding churn" until all four of them turned out to resolve the WRONG directory on Linux, which
+/// skipped every process suite on that CI leg silently. A resolver with four copies is four bugs.
 enum ProcessHarness {
 
-    /// The debug binary `swift build` produced, alongside the test bundle in .build/<config>/.
+    /// The debug binary `swift build` produced, in the build directory `.build/<triple>/debug/`.
+    ///
+    /// Finding that directory from a test bundle is PLATFORM-DIVERGENT, because the test runner has a
+    /// genuinely different shape on each host — measured, not assumed:
+    ///
+    ///                              macOS (Darwin Foundation)          Linux (swift-corelibs-foundation)
+    ///   Bundle(for:) === main      false                              TRUE (no per-class lookup exists)
+    ///   .bundleURL                 .../debug/<pkg>Tests.xctest        .../debug
+    ///                              (a DIRECTORY bundle)               (the runner is a bare ELF file,
+    ///                                                                  so this is already the build dir)
+    ///   Bundle.main.bundleURL      Xcode's .../Developer/usr/bin      .../debug
+    ///
+    /// So `.deletingLastPathComponent()` is right on Darwin and one level too HIGH on Linux (it yields
+    /// `.build/<triple>/`), while `Bundle.main` is right on Linux and points into Xcode on Darwin. Neither
+    /// one-liner works on both. Rather than fork on `#if os(Linux)` — which would encode the divergence in
+    /// a place no test can check — resolve it by SEARCH: the build directory is whichever candidate
+    /// actually holds the binary. The candidates are disjoint (a `.xctest` bundle directory never contains
+    /// `candor-swift`), so this cannot pick the wrong one, and it is a single code path on both hosts.
     static func binaryURL(for testClass: AnyClass) throws -> URL {
-        let bundleDir = Bundle(for: testClass).bundleURL.deletingLastPathComponent()
-        let exe = bundleDir.appendingPathComponent("candor-swift")
-        try XCTSkipUnless(FileManager.default.fileExists(atPath: exe.path),
-                          "candor-swift binary not built next to the test bundle (\(exe.path)) — run `swift build` first")
-        return exe
+        let bundleURL = Bundle(for: testClass).bundleURL
+        let candidates = [bundleURL,                               // Linux: already .build/<triple>/debug
+                          bundleURL.deletingLastPathComponent()]   // Darwin: parent of the .xctest bundle
+        for dir in candidates {
+            let exe = dir.appendingPathComponent("candor-swift")
+            if FileManager.default.fileExists(atPath: exe.path) { return exe }
+        }
+        throw XCTSkip("candor-swift binary not built in any build directory next to the test bundle "
+                      + "(looked in \(candidates.map(\.path).joined(separator: ", "))) — run `swift build` first")
     }
 
     /// A throwaway SPM package whose single source file is exactly `mainSwift`. Returns the root;
