@@ -665,6 +665,9 @@ let depsIndex = loadDepReports(spec: depsSpec, engineVersion: engineVersion)
 let analysis = analyze(sourcePaths: sourcePaths, rootDir: rootDir, pkgName: pkgName, deps: depsIndex)
 let allFns = analysis.allFns
 let conformers = analysis.conformers
+let declaredTypes = analysis.declaredTypes
+let protocolSupers = analysis.protocolSupers
+let protocolNames = analysis.protocolNames
 let importCounts = analysis.importCounts
 let internalModules = analysis.internalModules
 let direct = analysis.direct
@@ -882,9 +885,31 @@ if wantJson {
     // INVERTING `conformers` (supertype -> subtypes, from pushType). Lets candor-query's dispatch-frontier
     // (callers --include-unknown) resolve whether a confirmed reacher overrides a `dispatch:` owner. Keyed by
     // the bare type name — matching this engine's `Type.member` fn quals + `dispatch:Type.member` reasons.
+    //
+    // ⟨0.26⟩ The KEY SET is the MANIFEST (SPEC §2.2). Inverting `conformers` alone gives a key only to
+    // types that HAVE a supertype, so a consumer walking up from `S: P` into a supertypeless `P` fell off
+    // the indexed set — and read that absence as "P has no supertypes", a positive claim about a type it
+    // had never been told about. Every type this pass INDEXED now carries a key, `[]` included, so absence
+    // means "never analysed" and nothing else. Seeded from `declaredTypes` (types with a REAL local
+    // definition), NOT `localTypes`: the latter also holds extension-only platform types (`extension
+    // Process`), and this pass cannot see a platform type's supertypes, so `[]` there would be the false
+    // claim the rung exists to remove. A local type whose supertype is non-local (`class C: NSObject`)
+    // still keys `["NSObject"]` while `NSObject` itself stays absent — which is exactly right: the chain
+    // beyond it is unanswerable, and a consumer must over-list rather than rule it out.
     var typeHierarchy: [String: [String]] = [:]
+    for t in declaredTypes { typeHierarchy[t] = [] }
+    for p in protocolNames { typeHierarchy[p] = [] }
     for (sup, subs) in conformers {
         for sub in subs { typeHierarchy[sub, default: []].append(sup) }
+    }
+    // SUPER-PROTOCOL edges (`protocol Mid: Base`). Protocols are held out of `conformers` by design, so
+    // this map was the only record of them and the sidecar never saw it: a chain `Impl: Mid`, `Mid: Base`
+    // dead-ended at `Mid` with no key, and a consumer asking "is Impl a Base?" got a walk that ran off the
+    // indexed set. Under the rung that is now correctly UNANSWERABLE rather than a silent NO — but
+    // unanswerable for a relation this pass actually KNOWS is a disclosure that need not be made. MEASURED
+    // on the two-protocol fixture: before, neither `Base` nor `Mid` appeared in the sidecar at all.
+    for (sub, sups) in protocolSupers {
+        for sup in sups { typeHierarchy[sub, default: []].append(sup) }
     }
     for k in typeHierarchy.keys { typeHierarchy[k] = Array(Set(typeHierarchy[k]!)).sorted() }
     writeJson(typeHierarchy, "\(prefix).\(fileSafePkg).Swift.hierarchy.json")

@@ -13,6 +13,20 @@ import CandorCore
 struct Analysis {
     var allFns: [FnInfo]
     var conformers: [String: [String]]
+    /// ⟨0.26⟩ Types with a REAL local definition (see DeclCollector's note). The §2.2 hierarchy sidecar
+    /// keys on this so its KEY SET is a manifest of what the pass indexed — `conformers` alone gives a key
+    /// only to types that HAVE a supertype, which leaves a supertypeless one indistinguishable from one
+    /// that was never analysed. Deliberately NOT `localTypes`: that also holds extension-only platform
+    /// types, whose supertypes this pass cannot see, so an empty list for them would be a false claim.
+    var declaredTypes: Set<String>
+    /// ⟨0.26⟩ `protocol Sub: Sup` edges, and (via `protocolNames`) the set of protocols this pass indexed.
+    /// The hierarchy sidecar needs BOTH: a protocol is a supertype a concrete type's chain runs THROUGH, so
+    /// without these edges every `Impl: Mid` / `Mid: Base` chain dead-ends at `Mid` and the whole relation
+    /// is unanswerable. Kept out of `conformers` on purpose (a protocol name there pollutes concrete
+    /// dispatch CHA and its `impls.count == conf.count` guard) — the SIDECAR is a separate output, so
+    /// writing them there cannot reach CHA.
+    var protocolSupers: [String: Set<String>]
+    var protocolNames: Set<String>
     var importCounts: [String: Int]
     var internalModules: Set<String>
     var direct: [String: Set<String>]
@@ -1172,7 +1186,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 .data(using: .utf8)!)
     }
     return Analysis(
-        allFns: allFns, conformers: conformers, importCounts: importCounts,
+        allFns: allFns, conformers: conformers, declaredTypes: declaredTypes,
+        protocolSupers: protocolSupers, protocolNames: Set(protocolMethods.keys), importCounts: importCounts,
         internalModules: internalModules, direct: direct, edges: edges, whyMap: whyMap,
         locOf: locOf, entryPoints: entryPoints, inferred: inferred, hostsAcc: hostsAcc,
         cmdsAcc: cmdsAcc, pathsAcc: pathsAcc, tablesAcc: tablesAcc, incompleteAcc: incompleteAcc,
