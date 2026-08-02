@@ -81,7 +81,25 @@ jobs:
       - name: Unit tests
         # Same TTY treatment as macOS, in util-linux spelling: `script -qec "<cmd>" /dev/null`
         # (-e propagates the child's exit code; the BSD `script -q /dev/null cmd` form doesn't parse here).
-        run: script -qec "swift test" /dev/null
+        #
+        # BOUNDED at 15m, well under the job's 45m. Added 2026-08-02, after `Process.waitUntilExit()` was
+        # found to block FOREVER on swift-corelibs-foundation once the child has already exited — a defect
+        # that had been invisible because the harness could not locate the test binary on Linux, so every
+        # process suite skipped. Now that those rows actually RUN, a regression of that shape hangs. Without
+        # a bound it would consume the whole 45-minute budget and surface as an opaque job cancellation;
+        # with one it fails as a NAMED step, fast, with the last `Test Case ... started` line still on
+        # screen naming the row that hung. The suite takes ~20s on macOS, so 15m is not a tight fit — it is
+        # a hang detector, not a performance budget.
+        #
+        # Linux only, deliberately: the hang is in swift-corelibs-foundation. macOS uses the real Foundation
+        # and `timeout` is not in its base image anyway (it is `gtimeout`, from coreutils).
+        run: |
+          timeout --signal=TERM --kill-after=30s 15m script -qec "swift test" /dev/null
+          rc=$?
+          if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+            echo "::error title=swift test HUNG::Exceeded 15m. This is a HANG, not a slow suite — the suite runs in ~20s. The last 'Test Case ... started' line above names the row. Prime suspect: a blocking primitive that never returns on swift-corelibs-foundation (see the terminationHandler+semaphore pattern in ProcessHarness and main.swift's --workspace spawner)."
+          fi
+          exit $rc
       - name: Smoke (pinned spec)
         run: |
           git clone https://github.com/tombaldwin/candor-spec ../candor-spec
