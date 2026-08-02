@@ -7,6 +7,13 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## [0.25.0] — 2026-08-02
+
+⟨spec 0.25⟩ **Floor bump only — no behaviour change in this engine.** SPEC §2 chaining rule 1 now states
+that an ambiguous join key is UNIONED rather than dropped; this engine already implemented the union
+(conformance PARTs 25/26 pin it four-way), so 0.25 records the contract catching up with the code. See
+candor-spec/CHANGELOG.md for the measurement and the reversal note.
+
 ## [Unreleased]
 
 ### fixed — a per-entry reader of `unverified` could not see the refusal (2026-08-01)
