@@ -370,7 +370,14 @@ final class ChainingProcessTests: XCTestCase {
         XCTAssertEqual(r.code, 2, "an unparseable dep report must fail closed, never read pure; stderr: \(r.err)")
     }
 
-    // ── §2 rule 1: an ambiguous key is dropped, never picked from ─────────────────────────────────
+    // ── §2 rule 1: a shared key is UNIONED — never picked from, and never dropped ──────────────────
+    /// RULE 1 FORBIDS PICKING. It was read for a long time as also requiring WITHDRAWAL, and that reading
+    /// is what this test used to assert. Withdrawing is not the safe residue of not-picking: it takes the
+    /// CALLER out of `functions`, and under ⟨0.21⟩ an absent entry is a positive claim of purity — so the
+    /// engine answered "definitely pure" to exactly the question it had just declared itself unable to
+    /// answer. Measured on candor-rust's binary over this same shape (one report, `sync::Client::fetch`
+    /// doing Net beside a pure `mock::Client::fetch`): the caller was absent entirely, with no `Unknown`,
+    /// no `invisible` and no hedge of any kind. The union is the third option both readings missed.
     func testAmbiguousJoinKeyIsDropped() throws {
         let bin = try binaryURL()
         let (root, dep, app) = try makeChainFixture()
@@ -396,10 +403,12 @@ final class ChainingProcessTests: XCTestCase {
         XCTAssertEqual(r.code, 0)
         let by = try fns(ofReport: root.appendingPathComponent("app-r.App.Swift.json"))
         let goInferred = Set(by["go"]?["inferred"] as? [String] ?? [])
-        XCTAssertFalse(goInferred.contains("Net") || goInferred.contains("Exec"),
-                       "an ambiguous leaf key must not join either candidate; got \(goInferred)")
+        XCTAssertEqual(goInferred, ["Net", "Exec"],
+                       "a shared leaf key must carry BOTH candidates: picking one fabricates, dropping the "
+                       + "key reads pure, and the caller genuinely may reach either body; got \(goInferred)")
         XCTAssertEqual(by["goMember"]?["inferred"] as? [String], ["Net"],
-                       "the unique tail2 key must still join — ambiguity is per-key")
+                       "the unique tail2 key is untouched — the union reaches only keys that actually "
+                       + "collide, so a caller that CAN name its target still gets the precise answer")
     }
 
     // ── CANDOR_DEPS naming a DIRECTORY (Deps.swift's walk mode): every *.json report under it loads,
@@ -536,10 +545,29 @@ final class ChainingProcessTests: XCTestCase {
     //     FRESH *and* STALE  go -> ABSENT FROM `functions`      the cardinal sin
     //
     // Strictly worse than not chaining at all, and non-monotone: ADDING a report removed an answer.
-    // Rule 1 exists because two DIFFERENT dependency functions can share a leaf key; §2.1 has already
-    // ranked these two producers, so preferring the trusted one is not a guess. Found by candor-rust
-    // and handed over; verified here on this engine's own fixture before a line was written.
-    func testAStaleReportBesideAFreshOneChangesNothing() throws {
+    //
+    // THE FIRST FIX WAS A TRUST LADDER, AND IT IS NOW REPLACED BY THE UNION. That fix argued: rule 1
+    // exists because two DIFFERENT dependency functions can share a leaf key, and §2.1 has already ranked
+    // these two producers, so preferring the trusted one is not a guess. Sound about which report to
+    // BELIEVE — and wrong about what to do with the other, which is why this test's name no longer
+    // describes what it asserts.
+    //
+    // Two reports collide under one key precisely BECAUSE one package name spans two crate versions, and
+    // both bodies are in the build. (candor-spec/ENTRY-COLLISION-DECISION.md: every one of the 123
+    // measured disagreements across three corpora is one function at two versions of one crate — `hyper`
+    // 0.14's `handshake` logging where 1.9's does not, among them.) So the stale report is not a worse
+    // answer to the same question. It is the ONLY thing that knows a second version is present and cannot
+    // be vouched for, and preferring the trusted entry deletes exactly that.
+    //
+    //     FRESH *and* STALE, trust ladder   go -> ['Net']              the other version, silently dropped
+    //     FRESH *and* STALE, union          go -> ['Net','Unknown']    both claims, neither discarded
+    //
+    // THE OLD INVARIANT — "adding an untrusted report changes the consumer's report by nothing at all" —
+    // is deliberately broken, because it is the wrong thing to want: an untrusted report IS evidence, and
+    // an index that absorbs it without changing has thrown it away. What replaces it is stronger and is
+    // what the four-way conformance PART pins: the answer does not depend on the ORDER the reports are
+    // walked in. Union is commutative, associative and idempotent; a trust ladder is none of the three.
+    func testAStaleReportBesideAFreshOneAddsItsHedgeAndRemovesNothing() throws {
         let bin = try binaryURL()
         let (root, dep, app) = try makeChainFixture(extraApp: """
         public func goUnlisted() {
@@ -566,39 +594,37 @@ final class ChainingProcessTests: XCTestCase {
                        "the control must be live, or the row below asserts nothing")
 
         let both = try scanApp("\(depReport.path):\(stale.path)", "app-both")
-        XCTAssertEqual(Set(both["go"]?["inferred"] as? [String] ?? []), ["Net"],
-                       "a stale report BESIDE a fresh one must not withdraw the fresh answer — the key "
-                       + "resolved to nothing and coverage turned that into a ⟨0.21⟩ purity claim")
+        XCTAssertEqual(Set(both["go"]?["inferred"] as? [String] ?? []), ["Net", "Unknown"],
+                       "the fresh answer must SURVIVE (withdrawing it was the ⟨0.21⟩ purity claim) and the "
+                       + "stale report's §2.1 downgrade must be ADDED, not discarded — it is the only thing "
+                       + "that knows a version this build cannot verify is in the tree")
         XCTAssertEqual(both["go"]?["hosts"] as? [String], fresh["go"]?["hosts"] as? [String],
-                       "…and the literal surface travels exactly as it does without the stale report")
-        XCTAssertEqual(Set(both["goMember"]?["inferred"] as? [String] ?? []), ["Net"],
+                       "…and the literal surface still travels: the union adds, so nothing the fresh report "
+                       + "carried is worse off for the stale one being there")
+        XCTAssertEqual(Set(both["goMember"]?["inferred"] as? [String] ?? []), ["Net", "Unknown"],
                        "the same through the member-call key shape")
-        XCTAssertNil(both["goUnlisted"], "coverage is unchanged too: the fresh report's silence still claims")
-        // the ORDER of the two reports must not matter either
+        XCTAssertNil(both["goUnlisted"], "coverage is unchanged: the fresh report's silence still claims")
+        // ORDER-INDEPENDENCE, which is the invariant the union buys and the trust ladder could not state.
         let reversed = try scanApp("\(stale.path):\(depReport.path)", "app-rev")
-        XCTAssertEqual(Set(reversed["go"]?["inferred"] as? [String] ?? []), ["Net"],
-                       "trust decides, not load order")
+        XCTAssertEqual(Set(reversed["go"]?["inferred"] as? [String] ?? []), ["Net", "Unknown"],
+                       "the walk order of the dep directory must not be a fact about the answer")
     }
 
-    /// THE SECOND DIRECTION, and it is §2 rule 1 itself: two TRUSTED reports that disagree about a key
-    /// must still withdraw it. Preferring the trusted producer is a TRUST ordering, not a licence to
-    /// pick between two dependency functions — `testAmbiguousKeyIsDroppedNotGuessed` above is the
-    /// pre-existing pin and must stay green; this row covers the stale side, where the key is
-    /// recoverable so a trusted report arriving afterwards can still answer it.
+    /// THE STALE SIDE OF THE SAME RULE, and it is now the same rule rather than a second one.
     ///
-    /// THE IDENTICAL-ENTRY EXEMPTION APPLIES AT EVERY TRUST LEVEL, and the first arm of this row used
-    /// to assert the opposite. `ca5feb0` landed the exemption on the TRUSTED arm only; candor-rust
-    /// (`6f2210c`) exempts identical entries regardless of trust, and the argument never mentions
-    /// trust — rule 1 forbids PICKING between candidates and there is nothing to pick when they are
-    /// equal. Withdrawing cost the §2.1 `Unknown` downgrade, which is the one thing the stale arm
-    /// exists to produce:
+    /// This row went through three readings and the third deleted the other two. It first asserted that
+    /// two stale reports WITHDRAW the key; `ca5feb0` then exempted identical entries — costing the §2.1
+    /// downgrade otherwise, which is the one thing the stale arm exists to produce:
     ///
     ///   pre   go -> invisible: ['RatesDep']                          the ledger hedge, no class
     ///   post  go -> ['Unknown'], unknownWhy ['dep-stale:RatesDep']   §2.1's downgrade, back
     ///
-    /// so `deny E Unknown[…]` fires again on a package a distrusted report cannot vouch for. The
-    /// direction is a hedge gaining a class, never an effect appearing.
-    func testTwoStaleReportsWithdrawTheKeyButATrustedOneReclaimsIt() throws {
+    /// — but only on the TRUSTED arm, so the stale arm kept a separate recoverable-withdrawal path with
+    /// its own set to maintain. Under the union all three collapse: nothing is withdrawn, so there is no
+    /// permanent-vs-recoverable distinction to draw, no set to maintain, and the identical-entry
+    /// exemption is just idempotence. What is left to pin is that a trusted answer and a distrusted
+    /// hedge COEXIST — neither outranks the other, and neither erases the other.
+    func testTwoStaleReportsAndATrustedOneAllContributeTheirClaims() throws {
         let bin = try binaryURL()
         let (root, dep, app) = try makeChainFixture()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -633,8 +659,10 @@ final class ChainingProcessTests: XCTestCase {
                      "the key ANSWERED, so it is not a blind spot; the answer is that we do not trust it")
         // …and a trusted report arriving after them reclaims it: the stale-level withdrawal is not final.
         let recovered = try scanApp("\(stales.joined(separator: ":")):\(depReport.path)", "app-recover")
-        XCTAssertEqual(Set(recovered.fns["go"]?["inferred"] as? [String] ?? []), ["Net"],
-                       "a stale/stale withdrawal must not outrank a trusted report that answers the key")
+        XCTAssertEqual(Set(recovered.fns["go"]?["inferred"] as? [String] ?? []), ["Net", "Unknown"],
+                       "the trusted report's answer must arrive, and the two distrusted reports' hedge must "
+                       + "still be there beside it — under the union there is no withdrawal to 'reclaim' "
+                       + "from, so what this row now pins is that nothing outranks anything")
     }
 
     // ── ⟨0.21⟩ A REPORT THAT DECLARES ITSELF INCOMPLETE GRANTS NO COVERAGE ────────────────────────
@@ -912,10 +940,19 @@ final class ChainingProcessTests: XCTestCase {
         XCTAssertEqual(r.code, 0)
         let by = try fns(ofReport: root.appendingPathComponent("app-ac.App.Swift.json"))
         XCTAssertNotNil(by["go"],
-                        "the key is withdrawn as ambiguous, which is right — but with the package still "
-                        + "COVERED that withdrawal read as a ⟨0.21⟩ purity claim over a function both "
-                        + "reports call effectful. A withdrawn key must fall back to disclosure.")
-        XCTAssertEqual(by["go"]?["invisible"] as? [String], ["RatesDep"])
+                        "with the package still COVERED, a withdrawn key read as a ⟨0.21⟩ purity claim over "
+                        + "a function BOTH reports call effectful — the defect this row was opened for")
+        // THE ANSWER IS NOW STRONGER THAN THE FALLBACK THIS ROW USED TO REQUIRE. It asserted
+        // `invisible: ['RatesDep']` — the disclosure a withdrawn key fell back to. Nothing is withdrawn
+        // now, so the caller carries the two reports' claims themselves, which is what the hedge was
+        // standing in for. A hedge saying "something here is unaccounted for" is the right answer only
+        // while the engine has no better one; it has one here.
+        XCTAssertEqual(Set(by["go"]?["inferred"] as? [String] ?? []), ["Net", "Exec"],
+                       "both reports' claims must survive — this is the union, and it is what makes the "
+                       + "`invisible` fallback below unnecessary rather than merely absent")
+        XCTAssertNil(by["go"]?["invisible"],
+                     "…and with a real answer present the blind-spot hedge is not just unnecessary but "
+                     + "WRONG: `RatesDep` is not invisible here, it is answered by two reports at once")
     }
 
     /// STALENESS IS CHECKED FIRST. A report this engine does not trust cannot be trusted about its own

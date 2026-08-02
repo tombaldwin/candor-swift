@@ -80,13 +80,44 @@ struct DepEntry: Equatable {
     /// the dependency's report ALREADY carries `unknownWhy` — nothing looked for it. Same here.
     /// `dep:<hash>` is KEPT alongside: it names the origin, which the raw tokens do not.
     var whyClasses: Set<String> = []
+
+    /// Fold another entry filed under the SAME index key into this one — the family-wide entry-collision
+    /// rule (candor-spec/ENTRY-COLLISION-DECISION.md), replacing withdrawal and the trust-level preference.
+    ///
+    /// EXHAUSTIVE, and every field is already a Set, which is what makes the union associative,
+    /// commutative and idempotent. The index no longer depends on the order reports are walked in, and
+    /// chaining one report twice is not observable.
+    mutating func unionWith(_ other: DepEntry) {
+        effects.formUnion(other.effects)
+        hosts.formUnion(other.hosts); cmds.formUnion(other.cmds)
+        paths.formUnion(other.paths); tables.formUnion(other.tables)
+        invisible.formUnion(other.invisible)
+        incomplete.formUnion(other.incomplete)
+        whyClasses.formUnion(other.whyClasses)
+        // `whyReason` is the one non-Set field, so its merge has to be stated rather than fall out.
+        // ORDER-INDEPENDENT BY CONSTRUCTION: a `dep-stale:` reason wins over a `dep:<hash>` one whichever
+        // side it arrives on. Both project to `unresolved` so no gate turns on the choice, but they say
+        // different things to a reader — `dep:<hash>` means "this dependency classified nothing here",
+        // `dep-stale:` means "this report is not the one this build produced, and re-running its scan
+        // fixes it". The second is the actionable one, so a collision that involves a distrusted producer
+        // reports that fact rather than burying it.
+        switch (whyReason, other.whyReason) {
+        case (nil, let o): whyReason = o
+        case (_, nil): break
+        case (let a?, let b?):
+            if a != b, b.hasPrefix("dep-stale:"), !a.hasPrefix("dep-stale:") { whyReason = b }
+        }
+    }
 }
 
 /// The CANDOR_DEPS index: `pkg#leaf` / `pkg#tail2` / `pkg#<full qual>` keys (unambiguous only) + the
 /// covered-package set.
 struct DepIndex {
     var byKey: [String: DepEntry] = [:]
-    var ambiguous: Set<String> = []
+    // NOTE: there is no `ambiguous` set any more — the entry union withdraws nothing, so there is no
+    // third state between "answered" and "absent" to remember. `returnsAmbiguous` below is the RETURN-TYPE
+    // index, a different question: guessing a receiver type fabricates a call target, and its fallback is
+    // disclosure rather than silence, so it still withdraws.
     /// Packages whose silence is a PURITY CLAIM (§2 rule 3) — a package covered by a report this engine
     /// TRUSTS. Consulted by the κ ledger and the per-fn `invisible` disclosure, which are exactly the
     /// hedges coverage is allowed to delete. Never consulted to decide whether to LOOK UP a key.
@@ -187,98 +218,51 @@ struct DepIndex {
             returnsIdx[key] = type
         }
     }
-    /// nil for an unknown OR ambiguous key — an ambiguous key is dropped, never picked from (§2 rule 1).
-    func lookup(_ key: String) -> DepEntry? { ambiguous.contains(key) ? nil : byKey[key] }
+    /// nil for an unknown key only. NOTHING IS WITHDRAWN ANY MORE — a key two reports both answer carries
+    /// the union of their answers, so there is no third state between "answered" and "absent" to check.
+    func lookup(_ key: String) -> DepEntry? { byKey[key] }
 
-    /// Keys currently answered by an entry from an UNTRUSTED (§2.1-stale) report, and keys withdrawn by
-    /// a collision BETWEEN two untrusted reports. Both are recoverable by a trusted report; a collision
-    /// between two TRUSTED reports goes to `ambiguous` and is permanent.
-    private var staleKeys: Set<String> = []
-    private var staleAmbiguous: Set<String> = []
-
-    /// §2 RULE 1 IS ABOUT TWO DEPENDENCY FUNCTIONS, NOT TWO BUILDS OF ONE — and conflating them made
-    /// chaining NON-MONOTONE: adding a report REMOVED an answer that was already there.
+    /// TWO ENTRIES UNDER ONE KEY ARE UNIONED — never withdrawn, never picked between, and NOT ranked by
+    /// trust either. The family-wide rule (candor-spec/ENTRY-COLLISION-DECISION.md), whose open item 4 was
+    /// "does swift's trust-level-first rule COMPOSE with the union or get REPLACED by it?"
     ///
-    /// Measured, on the ordinary situation of one package present in the dep dir twice (a fresh report
-    /// and one left over from a previous engine build — 7/167 dep reports in candor-rust, 9/259 in
-    /// pgman, 30/378 in ebman, where the rust engine found this):
+    /// **REPLACED, and the reason is a soundness one rather than a tidiness one.** The rule this replaces
+    /// let a trusted entry stand alone against a stale one, on the argument that §2.1 has already ranked
+    /// the two producers so preferring the trusted one is not a guess. That argument is sound about which
+    /// report to BELIEVE and wrong about what to DO with the other, because of what the collision means:
+    /// two reports collide under one key precisely BECAUSE one package name spans two crate versions, and
+    /// both bodies are in the build. The measured corpus says so — every one of the 123 disagreements
+    /// across candor-rust/pgman/ebman is one function at two versions of one crate, `hyper` 0.14 vs 1.9
+    /// among them. So the stale report is not a worse answer to the same question; it is the ONLY thing
+    /// that knows a second version is present and cannot be vouched for. Preferring the trusted entry
+    /// deletes that, and the consumer reads the fresh version's `[]` as a purity claim over a call that
+    /// may reach the other body. Under the union it reads `[Unknown]` and discloses.
     ///
-    ///     unchained          go -> invisible: ['RatesDep']         the honest hedge
-    ///     FRESH report only  go -> ['Exec']                        the answer
-    ///     STALE report only  go -> ['Unknown']  dep-stale:RatesDep  rule 2's downgrade
-    ///     FRESH *and* STALE  go -> ABSENT FROM `functions`          a ⟨0.21⟩ PURITY CLAIM
+    /// THE OLD INVARIANT IS DELIBERATELY BROKEN. It read: *adding an untrusted report to a dep dir that
+    /// already holds a trusted one changes the consumer's report by nothing at all.* That is the wrong
+    /// invariant to want. An untrusted report IS evidence — evidence that a version this build cannot
+    /// verify is in the tree — and an index that absorbs it without changing has thrown it away. What
+    /// replaces it is the union's own invariant, which is stronger and is what the conformance PART pins:
+    /// **the result does not depend on the ORDER the reports are walked in**, because union is
+    /// commutative, associative and idempotent.
     ///
-    /// on a function that runs `/bin/ls`. Two mechanisms met: the never-guess rule withdrew `RatesDep#hit`
-    /// because two reports pushed it, and `stalePkgs.subtract(coveredPkgs)` (correctly) left the package
-    /// COVERED on the fresh report's authority — so the withdrawn key resolved to nothing and coverage
-    /// turned that nothing into a claim. Strictly worse than not chaining at all.
+    /// The measurement that motivated the old rule still holds and is still closed — this is strictly
+    /// further in the same direction. On one package present twice, on a function that runs `/bin/ls`:
     ///
-    /// The never-guess rule exists because two DIFFERENT dependency functions can share a leaf/tail2 key
-    /// and nothing distinguishes them. That is not this: here §2.1 has ALREADY ranked the two producers,
-    /// and preferring the trusted one is not a guess, it is the rule the engine spent rule 2 stating.
-    /// So trust decides first and the collision rule applies only WITHIN a trust level:
+    ///     unchained          go -> invisible: ['RatesDep']            the honest hedge
+    ///     FRESH report only  go -> ['Exec']                           the answer
+    ///     STALE report only  go -> ['Unknown']  dep-stale:RatesDep     rule 2's downgrade
+    ///     FRESH *and* STALE  go -> ABSENT FROM `functions`             a ⟨0.21⟩ PURITY CLAIM  (the defect)
+    ///     …under the union   go -> ['Exec','Unknown']                  both claims, neither discarded
     ///
-    ///   trusted vs trusted  -> withdraw permanently (`ambiguous`) — the original rule, untouched
-    ///   trusted vs stale    -> the trusted entry stands, whichever order they load in
-    ///   stale vs stale      -> withdraw, but recoverably: a trusted report may still claim the key
-    ///
-    /// The invariant that follows is the one the test asserts: **adding an untrusted report to a dep dir
-    /// that already holds a trusted one changes the consumer's report by nothing at all.**
-    mutating func insert(key: String, _ entry: DepEntry, stale: Bool) {
-        if ambiguous.contains(key) { return }         // two TRUSTED reports disagreed — stays withdrawn
-        if !stale {
-            if staleKeys.contains(key) || staleAmbiguous.contains(key) {
-                // whatever the untrusted reports left here, a trusted answer supersedes it (§2.1)
-                staleKeys.remove(key); staleAmbiguous.remove(key)
-                byKey[key] = entry
-                return
-            }
-            if let existing = byKey[key] {
-                // TWO ENTRIES THAT SAY THE SAME THING ARE NOT A DISAGREEMENT. The header's canonical-path
-                // dedup catches the same FILE loaded twice; it cannot catch the same report present under
-                // two names, which is the ordinary shape once `--workspace` prepends its own scanned
-                // directory to a configured `CANDOR_DEPS`. Withdrawing there kills a chain over a
-                // collision with no second answer in it. Rule 1 forbids PICKING between candidates; there
-                // is nothing to pick when they are equal.
-                if existing == entry { return }
-                byKey.removeValue(forKey: key)   // two dep fns share the key — drop it, never guess
-                ambiguous.insert(key)
-            } else {
-                byKey[key] = entry
-            }
-            return
-        }
-        // STALE. It may not displace a trusted answer, and may not withdraw one either.
-        if let existing = byKey[key] {
-            guard staleKeys.contains(key) else { return }   // a trusted entry stands — leave it alone
-            // …AND THE IDENTICAL-ENTRY EXEMPTION APPLIES AT EVERY TRUST LEVEL. It landed above on the
-            // trusted arm only; candor-rust (`6f2210c`) exempts identical entries regardless of trust,
-            // and the argument does not mention trust anywhere: rule 1 forbids PICKING between
-            // candidates, and there is nothing to pick when they are equal. Withdrawing here costs the
-            // §2.1 `Unknown` downgrade — the ONE thing the stale arm exists to produce — and hands the
-            // site back to the coverage hedge, so `deny E Unknown[…]` stops firing on a package a stale
-            // report is telling you it cannot vouch for. Measured, two copies of one stale report (the
-            // ordinary `--workspace`-prepends-its-own-dir shape):
-            //
-            //   pre   go -> invisible: ['RatesDep']                  the ledger hedge, no class
-            //   post  go -> ['Unknown'], unknownWhy dep-stale:RatesDep
-            //
-            // THE BRANCH BELOW IS UNREACHABLE TODAY AND THAT IS WORTH STATING RATHER THAN DISCOVERING.
-            // A stale entry is built from nothing but its package (`effects = ["Unknown"]`,
-            // `whyReason = "dep-stale:<pkg>"`) and the key it is filed under BEGINS with that package,
-            // so two stale entries sharing a key are equal by construction — including the genuine
-            // two-functions-one-leaf collision, where both candidates say the identical thing. It is
-            // kept, not deleted, because it becomes live the moment a stale entry carries anything
-            // per-FUNCTION; if that changes, this is the guard that already handles it.
-            if existing == entry { return }
-            byKey.removeValue(forKey: key)                  // stale vs stale: withdraw, recoverably
-            staleKeys.remove(key)
-            staleAmbiguous.insert(key)
-            return
-        }
-        if staleAmbiguous.contains(key) { return }
-        byKey[key] = entry
-        staleKeys.insert(key)
+    /// EVERY SPECIAL CASE THE LADDER NEEDED IS NOW SUBSUMED rather than handled. The identical-restatement
+    /// exemption (the same report present under two names, the ordinary shape once `--workspace` prepends
+    /// its own directory to a configured `CANDOR_DEPS`) is just idempotence. The
+    /// recoverable-vs-permanent distinction between `staleAmbiguous` and `ambiguous` existed only to let a
+    /// trusted report rescue a key two stale ones had withdrawn; nothing is withdrawn, so nothing needs
+    /// rescuing. All three sets are gone, and with them the ordering hazard of maintaining them.
+    mutating func insert(key: String, _ entry: DepEntry) {
+        byKey[key, default: DepEntry()].unionWith(entry)
     }
 }
 
@@ -594,7 +578,7 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
             if segs.count >= 2 { keys.append("\(pkg)#\(segs[segs.count - 2]).\(leaf)") }
             let full = "\(pkg)#\(segs.joined(separator: "."))"
             if !keys.contains(full) { keys.append(full) }
-            for k in keys { idx.insert(key: k, entry, stale: stale) }
+            for k in keys { idx.insert(key: k, entry) }
         }
     }
     // A PACKAGE CHAINED TWICE, ONCE COMPLETE AND ONCE NOT, IS **NOT** COVERED — INCOMPLETENESS WINS.
