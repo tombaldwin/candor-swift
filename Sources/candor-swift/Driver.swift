@@ -4,6 +4,7 @@
 
 import Foundation
 import SwiftParser
+import SwiftParserDiagnostics
 import SwiftSyntax
 import CandorCore
 
@@ -196,6 +197,37 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         let tree = Parser.parse(source: src)
         let rel = p.hasPrefix(rootDir) ? String(p.dropFirst(rootDir.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/")) : p
+        // ⟨0.21⟩ A FILE THAT DID NOT PARSE IS UNANALYZED, and until now this engine could not tell.
+        //
+        // `Parser.parse` is error-tolerant: it always returns a tree and never throws, so a syntax error
+        // arrived here indistinguishable from clean source and the file counted as fully analyzed. The
+        // comment on `unanalyzed` above used to conclude from that "the practical swift unanalyzed case is
+        // an unreadable file, not a parse failure" — which treats a parse failure as not a case. MEASURED,
+        // it is a case, and a gate-flipping one. Two trees, identical `Hidden.leak` performing Net, the
+        // second preceded by one unparseable declaration:
+        //
+        //     well-formed        functions: [Hidden.leak -> Net]   `deny Net Hidden`  exit 1
+        //     one syntax error   functions: [nope -> Net]          `deny Net Hidden`  exit 0, ok: true
+        //
+        // Error recovery folds `enum Hidden { static func leak()` into `nope`'s body, so the effect is
+        // MISATTRIBUTED rather than lost — and `Hidden.leak` disappears from `functions` entirely, which
+        // under ⟨0.21⟩ is a positive claim of purity over a function that performs Net. The scoped gate
+        // then passes green with nothing disclosed anywhere. That is the cardinal sin at gate level,
+        // reached by one stray character. Found by conformance PART 29 (P5) on its first honest run.
+        //
+        // RECORDED AND STILL WALKED — the file is NOT skipped, and that ordering is the whole design.
+        // The recovered tree is partial but TRUE: the Net above is real, and dropping the file would turn
+        // a misattribution into a total loss. It is the same treatment ⟨0.21⟩ already gives an incomplete
+        // dependency report (`Deps.swift`: entries derived from source it DID read are kept exactly as
+        // they are, and only COVERAGE is withheld). So this is strictly additive — it can only add a
+        // hedge and fail a gate closed, never remove an effect.
+        //
+        // ERRORS ONLY, not warnings: a warning is a well-formed tree the parser merely has an opinion
+        // about, and hedging on those would flood `unanalyzed` with files candor read perfectly well.
+        if let firstError = ParseDiagnosticsGenerator.diagnostics(for: tree)
+            .first(where: { $0.diagMessage.severity == .error }) {
+            unanalyzed.append((path: p, reason: "source failed to parse: \(firstError.message)"))
+        }
         let c = DeclCollector(file: rel, tree: tree)
         c.walk(tree)
         collectors.append(c)

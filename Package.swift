@@ -26,6 +26,11 @@ let package = Package(
                 "CandorCore",
                 .product(name: "SwiftSyntax", package: "swift-syntax"),
                 .product(name: "SwiftParser", package: "swift-syntax"),
+                // ⟨0.21⟩ the completeness manifest needs to know a file FAILED TO PARSE. `Parser.parse`
+                // is error-TOLERANT and never throws, so without the diagnostics generator a syntax error
+                // is indistinguishable from clean source and the file counts as fully analyzed. See the
+                // `unanalyzed` loop in Driver.swift for what that cost at gate level.
+                .product(name: "SwiftParserDiagnostics", package: "swift-syntax"),
             ],
             // The agent contract is EMBEDDED as a Swift constant (AgentsDoc.swift, generated from
             // AGENTS.md by gen-agents-doc.py) rather than a bundle resource, so `--agents` survives

