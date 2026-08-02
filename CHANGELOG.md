@@ -7,6 +7,26 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## Unreleased — ⟨spec 0.26⟩
+
+### ⟨0.26⟩ THE HIERARCHY SIDECAR'S KEY SET IS ITS MANIFEST — producer half, and PROTOCOLS WERE MISSING ENTIRELY
+
+SPEC §2.2 `ea3de21`. This engine is a PRODUCER only (it ships no `callers` verb), and it had two gaps.
+The sidecar inverted `conformers`, so only a type that HAS a supertype got a key at all. And protocols
+were absent ALTOGETHER — they are held out of `conformers` by design (a protocol name there pollutes the
+concrete-dispatch CHA and its `impls.count == conf.count` guard) and their `protocol Sub: Sup` edges live
+in a separate map the sidecar never read:
+
+    BEFORE   {"Impl": ["Mid"], "Sub": ["NSObject"]}
+    AFTER    {"Base": [], "Impl": ["Mid"], "Loner": [], "Mid": ["Base"], "Sub": ["NSObject"]}
+
+So `Impl <: Base` was unanswerable for a relation this pass actually knows. Writing them into the SIDECAR
+cannot reach CHA — it is a separate output and `conformers` is untouched.
+
+Keyed from `declaredTypes`, NOT `localTypes`: the latter also holds extension-only platform types, whose
+supertypes this pass cannot see, so `[]` for them would be the false claim the rung exists to remove. Same
+reason `NSObject` stays ABSENT while `Sub` keys `["NSObject"]`.
+
 ## [0.25.0] — 2026-08-02
 
 ⟨spec 0.25⟩ **Floor bump only — no behaviour change in this engine.** SPEC §2 chaining rule 1 now states
@@ -14,7 +34,6 @@ that an ambiguous join key is UNIONED rather than dropped; this engine already i
 (conformance PARTs 25/26 pin it four-way), so 0.25 records the contract catching up with the code. See
 candor-spec/CHANGELOG.md for the measurement and the reversal note.
 
-## [Unreleased]
 
 ### fixed — a per-entry reader of `unverified` could not see the refusal (2026-08-01)
 
