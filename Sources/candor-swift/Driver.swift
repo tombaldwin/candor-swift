@@ -749,6 +749,36 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             resolved = true
                         }
                     }
+                    // ACROSS THE SCAN BOUNDARY (SPEC §2). The walk above resolves against PROJECT units
+                    // only, so when the base class lives in a CHAINED DEPENDENCY it matched nothing and the
+                    // override read silent-pure — `class Sub: DepBase { override func load() { super.load()
+                    // } }` where `DepBase.load` performs Fs. MEASURED on the two-package fixture: one
+                    // package gives `Sub.load -> ['Fs']`; split with the dep report chained it vanished from
+                    // `functions` entirely and `deny Fs` exited 0 with "policy ✓" — a false all-clear on
+                    // identical source.
+                    //
+                    // The dep's report already carried the answer under exactly the key computable here
+                    // (`DepLib#DepBase.load`); nothing looked for it, because the generic dep join below
+                    // keys on `call.extOwner`, and for a `super.` call that is the literal `<super>` MARKER
+                    // rather than a type — so the key it built could never match anything. Found by
+                    // instrumenting `extOwner` for a different question and noticing the marker in the
+                    // distribution.
+                    //
+                    // UNION over the chain, matching what the local walk above already does: the call runs
+                    // exactly one implementation and a syntactic scan cannot say which, so covering all of
+                    // them is the sound direction. Inheritance rather than an edge, because the dep's unit
+                    // lives in another report and there is no node to edge to.
+                    if !resolved, !deps.isEmpty {
+                        let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                        for sup in supertypesOf[et] ?? [] where sup != et {
+                            for m in fileImports[file] ?? [] where deps.isChained(m) {
+                                if let de = deps.lookup("\(m)#\(sup).\(member)") {
+                                    applyDepEntry(de, to: f.qual)
+                                    resolved = true
+                                }
+                            }
+                        }
+                    }
                 }
             } else if call.typed {
                 if overloadedBases.contains(call.path) {

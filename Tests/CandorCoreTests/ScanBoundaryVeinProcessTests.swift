@@ -397,6 +397,83 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
     """
 
     /// (root, depDir, appDir, ctlDir) — the split pair plus the one-package control.
+    /// `super.m()` INTO A CHAINED DEPENDENCY'S BASE CLASS — the vein, found 2026-08-03.
+    ///
+    /// `class Sub: DepBase { override func load() { super.load() } }` where `DepBase.load` performs Fs in
+    /// a chained dependency. The driver's super branch resolves on the supertype chain against PROJECT
+    /// units only, so an external base matched nothing — and the generic §2 dep join could not help,
+    /// because it keys on `call.extOwner`, which for a `super.` call is the literal `<super>` MARKER
+    /// rather than a type. The key it built could never match anything, in silence.
+    ///
+    /// MEASURED before the fix: one package `Sub.load -> ['Fs']`; split with the dep chained, `Sub.load`
+    /// vanished from `functions` entirely and `deny Fs` exited 0 with "policy ✓" — a false all-clear on
+    /// identical source, which is the gate-level form of the cardinal sin.
+    ///
+    /// Found by INSTRUMENTING `extOwner` for an unrelated question (the κ-attribution corpus study) and
+    /// noticing `<super>` in the distribution — 21 records on swift-syntax. It was inert there, since
+    /// `blindModules.contains("<super>")` is false; it is not inert here.
+    ///
+    /// The UNCHAINED arm is the control that keeps this from being a fabrication: with no dep report there
+    /// is nothing to inherit, so the effect must NOT appear.
+    func testSuperIntoAChainedDependencyBaseIsNotSilent() throws {
+        let bin = try binaryURL()
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-super-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        let dep = root.appendingPathComponent("deplib"), app = root.appendingPathComponent("app")
+        let ctl = root.appendingPathComponent("ctl")
+        for (d, sub) in [(dep, "Sources/DepLib"), (app, "Sources/App"), (ctl, "Sources/Ctl")] {
+            try fm.createDirectory(at: d.appendingPathComponent(sub), withIntermediateDirectories: true)
+        }
+        let base = """
+        import Foundation
+        open class DepBase { public init() {} ; open func load() { _ = try? String(contentsOfFile: "/etc/hosts") } }
+        """
+        let over = "class Sub: DepBase { override func load() { super.load() } }"
+
+        try "// swift-tools-version: 6.0\nimport PackageDescription\nlet package = Package(name: \"DepLib\", targets: [.target(name: \"DepLib\")])"
+            .write(to: dep.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try base.write(to: dep.appendingPathComponent("Sources/DepLib/Lib.swift"), atomically: true, encoding: .utf8)
+        try "// swift-tools-version: 6.0\nimport PackageDescription\nlet package = Package(name: \"App\", dependencies: [.package(path: \"../deplib\")], targets: [.target(name: \"App\", dependencies: [.product(name: \"DepLib\", package: \"deplib\")])])"
+            .write(to: app.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try "import DepLib\n\(over)"
+            .write(to: app.appendingPathComponent("Sources/App/App.swift"), atomically: true, encoding: .utf8)
+        try "// swift-tools-version: 6.0\nimport PackageDescription\nlet package = Package(name: \"Ctl\", targets: [.target(name: \"Ctl\")])"
+            .write(to: ctl.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try "\(base)\n\(over)".write(to: ctl.appendingPathComponent("Sources/Ctl/App.swift"),
+                                      atomically: true, encoding: .utf8)
+
+        // CONTROL: one package, fully in-scan — this is the answer the split arm must reproduce.
+        XCTAssertEqual(try run(bin, [ctl.path, "--out", root.appendingPathComponent("ctl-r").path]).code, 0)
+        let ctlFns = try fns(ofReport: root.appendingPathComponent("ctl-r.Ctl.Swift.json"))
+        XCTAssertEqual(Set(ctlFns["Sub.load"]?["inferred"] as? [String] ?? []), ["Fs"],
+                       "CONTROL: in one package the override inherits the base's Fs; got \(ctlFns["Sub.load"] ?? [:])")
+
+        let depReport = try scanDep(bin, dep, root: root)
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path],
+                        env: ["CANDOR_DEPS": depReport.path])
+        XCTAssertEqual(r.code, 0)
+        let by = try fns(ofReport: root.appendingPathComponent("app-r.App.Swift.json"))
+        XCTAssertEqual(Set(by["Sub.load"]?["inferred"] as? [String] ?? []), ["Fs"],
+                       "`super.load()` must inherit the CHAINED base's Fs — the dep report carries it under "
+                       + "exactly the key computable here; got \(by["Sub.load"] ?? [:])")
+
+        // THE GATE, which is what makes this the cardinal sin rather than a report nit.
+        let pol = try policy(root, ["deny Fs"])
+        let g = try run(bin, [app.path, "--policy", pol.path], env: ["CANDOR_DEPS": depReport.path])
+        XCTAssertEqual(g.code, 1, "`deny Fs` must FAIL over the chained base; before the fix it exited 0 "
+                       + "with \"policy ✓\" on identical source")
+
+        // NO-FABRICATION CONTROL: with no dep report there is nothing to inherit and nothing may appear.
+        let u = try run(bin, [app.path, "--out", root.appendingPathComponent("app-u").path])
+        XCTAssertEqual(u.code, 0)
+        let unchained = try fns(ofReport: root.appendingPathComponent("app-u.App.Swift.json"))
+        XCTAssertNil(unchained["Sub.load"]?["inferred"].map { Set($0 as? [String] ?? []) }.flatMap {
+                         $0.contains("Fs") ? $0 : nil },
+                     "UNCHAINED: no dep report means nothing to inherit — Fs here would be a fabrication")
+    }
+
     private func makeFixture() throws -> (root: URL, dep: URL, app: URL, ctl: URL) {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("candor-swift-vein-\(UUID().uuidString)")
