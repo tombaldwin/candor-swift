@@ -896,11 +896,27 @@ if wantJson {
     // claim the rung exists to remove. A local type whose supertype is non-local (`class C: NSObject`)
     // still keys `["NSObject"]` while `NSObject` itself stays absent — which is exactly right: the chain
     // beyond it is unanswerable, and a consumer must over-list rather than rule it out.
+    //
+    // THE KEY SET IS EXACTLY WHAT THIS PASS DECLARED, and the filter on the append loops is the whole
+    // point rather than tidiness. `conformers` also records conformances spelled in an EXTENSION of a type
+    // this package never declared — `extension Process: Marker {}` puts `Process` in it. Seeding alone
+    // therefore did not stop `Process` acquiring the key `["Marker"]`, and under ⟨0.26⟩ a key ASSERTS that
+    // the array is the complete supertype list. It is not: this pass cannot see a platform type's own
+    // supertypes, so a consumer would answer NO to "is Process a subtype of <some platform type>?" where
+    // the truth is UNANSWERABLE — and drop a reacher from a disclosure on the strength of it. That is the
+    // rung's own premise violated by the engine implementing it. MEASURED: a package whose only content is
+    // `extension Process: Marker {}` emitted `{"Process": ["Marker"], ...}`.
+    //
+    // So a non-declared type gets NO key at all, which reads as unanswerable — the safe direction. It
+    // costs the ability to answer YES for `Process <: Marker`, turning a resolvable row into an over-list;
+    // that is the trade the family always takes over a false negative. (An ALLOWLIST here is safe for once
+    // precisely because omission widens: the usual denylist rule exists because an allowlist's omissions
+    // normally go SILENT, and here they go LOUD.)
+    let indexedTypes = declaredTypes.union(protocolNames)
     var typeHierarchy: [String: [String]] = [:]
-    for t in declaredTypes { typeHierarchy[t] = [] }
-    for p in protocolNames { typeHierarchy[p] = [] }
+    for t in indexedTypes { typeHierarchy[t] = [] }
     for (sup, subs) in conformers {
-        for sub in subs { typeHierarchy[sub, default: []].append(sup) }
+        for sub in subs where indexedTypes.contains(sub) { typeHierarchy[sub, default: []].append(sup) }
     }
     // SUPER-PROTOCOL edges (`protocol Mid: Base`). Protocols are held out of `conformers` by design, so
     // this map was the only record of them and the sidecar never saw it: a chain `Impl: Mid`, `Mid: Base`
@@ -908,7 +924,7 @@ if wantJson {
     // indexed set. Under the rung that is now correctly UNANSWERABLE rather than a silent NO — but
     // unanswerable for a relation this pass actually KNOWS is a disclosure that need not be made. MEASURED
     // on the two-protocol fixture: before, neither `Base` nor `Mid` appeared in the sidecar at all.
-    for (sub, sups) in protocolSupers {
+    for (sub, sups) in protocolSupers where indexedTypes.contains(sub) {
         for sup in sups { typeHierarchy[sub, default: []].append(sup) }
     }
     for k in typeHierarchy.keys { typeHierarchy[k] = Array(Set(typeHierarchy[k]!)).sorted() }

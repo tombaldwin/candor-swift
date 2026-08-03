@@ -98,4 +98,43 @@ final class SidecarManifestProcessTests: XCTestCase {
         // And no phantoms: the key set is exactly the locally-declared types (protocols included).
         XCTAssertEqual(Set(h.keys), ["Base", "Mid", "Impl", "Loner", "Sub"])
     }
+
+    /// A type this package EXTENDS but never DECLARED must get no key at all.
+    ///
+    /// Seeding the key set from `declaredTypes` is not sufficient on its own, which is what this pins.
+    /// `conformers` also records a conformance spelled in an EXTENSION of a foreign type — `extension
+    /// Process: Marker {}` puts `Process` in it — so the append loop handed `Process` the key
+    /// `["Marker"]`. Under ⟨0.26⟩ a key ASSERTS the array is complete, and this pass cannot see a platform
+    /// type's own supertypes: a consumer would then answer NO to "is Process a subtype of <some platform
+    /// type>?" where the truth is UNANSWERABLE, and drop a reacher from a disclosure on the strength of
+    /// it. The rung's premise, violated by the engine implementing it.
+    ///
+    /// The `Local` row is the control. Without it the fix would pass by emitting nothing at all: a
+    /// LOCALLY-DECLARED type that gains its conformance the same way must keep its key.
+    func testATypeThisPackageExtendsButNeverDeclaredGetsNoKey() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-sidecar-ext-\(UUID().uuidString)")
+        let src = root.appendingPathComponent("Sources/App")
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "App", targets: [.executableTarget(name: "App")])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try """
+        import Foundation
+        protocol Marker {}
+        extension Process: Marker { }
+        extension Process { func helper() { _ = try? String(contentsOfFile: "/etc/hosts") } }
+        struct Local: Marker {}
+        """.write(to: src.appendingPathComponent("main.swift"), atomically: true, encoding: .utf8)
+
+        let h = try sidecar(at: root)
+        XCTAssertNil(h["Process"], "a type this package EXTENDS but never DECLARED must carry no key — a "
+                     + "key would claim its supertype list is complete, and this pass cannot see a "
+                     + "platform type's supertypes")
+        XCTAssertEqual(h["Local"], ["Marker"], "CONTROL: a locally DECLARED type keeps its conformance")
+        XCTAssertEqual(h["Marker"], [])
+    }
 }
