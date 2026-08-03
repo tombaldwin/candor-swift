@@ -35,8 +35,15 @@ struct Provenance {
     let version: String, toolchain: String, spec: String
     func toJSON() -> [String: Any] { ["version": version, "toolchain": toolchain, "spec": spec] }
 }
-// The per-unit report entry (§2). candor-swift is analyze-only, so declared/undeclared/overdeclared are
-// always empty (no DI-conformance pass) — kept in the wire shape for cross-engine schema parity.
+// The per-unit report entry (§2). candor-swift is ANALYZE-ONLY: it runs §1–§4 (what effects a function
+// performs) and NOT §5 (whether the signature declares them, via a capability parameter). So it never
+// computes `declared`/`undeclared`/`overdeclared`, and per SPEC §2 ⟨0.26⟩ it must OMIT them.
+//
+// It used to emit all three as `[]` "for cross-engine schema parity". That is a positive claim: an empty
+// `undeclared` reads as "this function performs no undeclared effect" — an AS-EFF-001 all-clear from a
+// pass that never ran, which is ⟨0.21⟩'s absence-is-a-claim rule one layer up. The old comment named the
+// cause honestly and then did it anyway, and the cause was a SCHEMA-PARITY CHECK: requiring an OPTIONAL
+// field buys agreement on shape with a claim nobody computed. The spec rule now forbids both halves.
 struct Effector {
     let fn: String, loc: String
     let inferred: EffectSet, direct: EffectSet
@@ -52,7 +59,6 @@ struct Effector {
         var e: [String: Any] = [
             "fn": fn, "loc": loc,
             "inferred": inferred.toNames(), "direct": direct.toNames(),
-            "declared": [String](), "undeclared": [String](), "overdeclared": [String](),
             "unresolved": unresolved,
             "hash": hash,                       // 0.5 MUST: every report is chainable
             "calls": calls,
