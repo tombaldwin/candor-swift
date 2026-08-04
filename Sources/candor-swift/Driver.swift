@@ -36,6 +36,7 @@ struct Analysis {
     var entryPoints: Set<String>
     var inferred: [String: Set<String>]
     var hostsAcc: [String: Set<String>]
+    var fsD: [String: Set<String>]
     var cmdsAcc: [String: Set<String>]
     var pathsAcc: [String: Set<String>]
     var tablesAcc: [String: Set<String>]
@@ -498,6 +499,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var edges: [String: Set<String>] = [:]
     var whyMap: [String: Set<String>] = [:]
     var hostsD: [String: Set<String>] = [:], cmdsD: [String: Set<String>] = [:]
+    // SPEC §2 `fs` — DIRECT ONLY, deliberately, matching candor-java's `fsDirect` ("kind performed
+    // directly"). It must NOT propagate over edges: a caller reaching one callee that writes and another
+    // whose Fs kind is undetermined would inherit `["write"]` and thereby CLAIM "writes but never reads",
+    // which is the partial-claim §2 forbids. Direct-only means `fs` answers a question about this
+    // function's own calls, where every contributing verb was seen.
+    var fsD: [String: Set<String>] = [:]
     var pathsD: [String: Set<String>] = [:], tablesD: [String: Set<String>] = [:]
     var incompleteD: [String: Set<String>] = [:]   // fn -> effects with a structurally-incomplete surface (masking)
     var blindDirect: [String: Set<String>] = [:]    // fn -> blind modules it DIRECTLY reaches (per-fn `invisible`)
@@ -690,6 +697,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         if cc.unresolved { direct[f.qual, default: []].insert("Unknown") }
         whyMap[f.qual, default: []].formUnion(cc.why)
         hostsD[f.qual, default: []].formUnion(cc.hosts)
+        fsD[f.qual, default: []].formUnion(cc.fsKinds)
         cmdsD[f.qual, default: []].formUnion(cc.cmds)
         pathsD[f.qual, default: []].formUnion(cc.paths)
         tablesD[f.qual, default: []].formUnion(cc.tables)
@@ -1219,7 +1227,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         allFns: allFns, conformers: conformers, declaredTypes: declaredTypes,
         protocolSupers: protocolSupers, protocolNames: Set(protocolMethods.keys), importCounts: importCounts,
         internalModules: internalModules, direct: direct, edges: edges, whyMap: whyMap,
-        locOf: locOf, entryPoints: entryPoints, inferred: inferred, hostsAcc: hostsAcc,
+        locOf: locOf, entryPoints: entryPoints, inferred: inferred, hostsAcc: hostsAcc, fsD: fsD,
         cmdsAcc: cmdsAcc, pathsAcc: pathsAcc, tablesAcc: tablesAcc, incompleteAcc: incompleteAcc,
         invisibleAcc: invisibleAcc, unanalyzed: unanalyzed,
         typeSurfaceReturns: buildTypeSurfaceReturns(allFns, localTypePaths))

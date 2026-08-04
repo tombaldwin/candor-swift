@@ -55,6 +55,10 @@ struct Effector {
     var unitKind: String? = nil
     var unknownWhy: [String]? = nil
     var hosts: [String]? = nil, cmds: [String]? = nil, paths: [String]? = nil, tables: [String]? = nil
+    /// SPEC §2 `fs` — the read/write kinds of THIS function's own Fs calls, when their verbs said.
+    /// Optional and omitted when empty, which is the spec's rule and not an optimisation: an empty or
+    /// partial `fs` reads as "reads but never writes", a positive claim in the forbidden direction.
+    var fs: [String]? = nil
     var invisible: [String]? = nil   // per-fn blind-spot disclosure: κ-unknown modules reached (qualifies `inferred`)
     var netClass: [String]? = nil    // ⟨0.20⟩ Net destination classes present in the fn's transitive Net surface
     var interfaceUnion = false       // ⟨workspace-chain⟩ synthetic protocol-CHA union entry (not an analyzed unit)
@@ -73,6 +77,7 @@ struct Effector {
         if let c = cmds, !c.isEmpty { e["cmds"] = c }
         if let p = paths, !p.isEmpty { e["paths"] = p }
         if let t = tables, !t.isEmpty { e["tables"] = t }
+        if let k = fs, !k.isEmpty { e["fs"] = k }
         if let v = invisible, !v.isEmpty { e["invisible"] = v }
         if let n = netClass, !n.isEmpty { e["netClass"] = n }   // ⟨0.20⟩ Net destination-class (SPEC §1)
         if interfaceUnion { e["interfaceUnion"] = true }        // ⟨workspace-chain⟩ synthetic union entry

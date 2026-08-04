@@ -9,6 +9,31 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### SPEC §2 `fs` — candor-swift now emits the read/write refinement it never had
+
+`fs` has been in SPEC §2 since long before this engine, and rust and java carry it. candor-swift did not:
+its only `fs` was the effect-name enum case. So a consumer asking "does this function read the disk or
+mutate it" got the answer from two engines and silence from a third.
+
+It went unnoticed because the spec's own rule makes partial implementation HONEST — an absent `fs` means
+"kind undetermined", never "read-only" — which is the design working, not an excuse. The gap is still a
+gap.
+
+DIRECT ONLY, matching candor-java's `fsDirect`, and the reason is the interesting part: `fs` must NOT
+propagate over call edges. A caller reaching one callee that writes and another whose kind is undetermined
+would inherit `["write"]` and thereby claim "writes but never reads" — exactly the partial claim §2
+forbids. Direct-only means the field answers a question about calls this function makes itself, where
+every contributing verb was seen. Measured on a fixture: `copyItem` → `["read","write"]`, `contents` →
+`["read"]`, `createFile` → `["write"]`, a function that merely REACHES a writer → omitted, and
+`temporaryDirectory` (a verb that reveals nothing) → omitted.
+
+The verb table is deliberately the same shape and vocabulary as candor-java's `fsKind`. The surface is
+spec'd four-way; two engines inventing two verb tables for one field is how a shared field stops meaning
+one thing.
+
+Tests assert what the classifier REFUSES to say as much as what it says — an unrecognised verb returns
+nothing at all, and a bare `FileHandle(...)` reveals no direction. Both probed by breaking them.
+
 ### `privacy/2` — the sensor vocabulary goes from six to eighteen
 
 Writing the privacy-manifest case study is what surfaced this. A real app's `Info.plist` declares

@@ -731,6 +731,9 @@ for qual in reportQuals.sorted() {
     if let c = cmdsAcc[qual], !c.isEmpty { ef.cmds = c.sorted() }
     if let p = pathsAcc[qual], !p.isEmpty { ef.paths = p.sorted() }
     if let t = tablesAcc[qual], !t.isEmpty, inf.contains("Db") { ef.tables = t.sorted() }
+    // SPEC §2 `fs` — gated on `inferred` carrying Fs (the spec: "applies only when `inferred` contains
+    // `Fs`"), and omitted when empty. Direct-only, so a function that merely REACHES a writer carries none.
+    if let k = analysis.fsD[qual], !k.isEmpty, inf.contains("Fs") { ef.fs = k.sorted() }
     if !invisible.isEmpty { ef.invisible = invisible }
     // ⟨0.20⟩ Net destination-class: the classes in this fn's transitive Net surface — exact host-literal
     // match, fail-closed unknown-host on a masked surface (incompleteAcc has Net) OR a Net with no visible host.

@@ -240,6 +240,10 @@ final class CallCollector: SyntaxVisitor {
     var selfElementType: String?   // self's element bound in a collection extension (R28)
     var calls: [Call] = []
     var directEffects: Set<String> = []
+    /// SPEC §2 `fs` — the read/write kinds this function's OWN Fs calls revealed. Accumulated only from
+    /// verbs that actually say; a verb that does not contributes nothing, so an undetermined direction
+    /// stays undetermined rather than defaulting to one side.
+    var fsKinds: Set<String> = []
     var unresolved = false
     var why: Set<String> = []
     var hosts: Set<String> = []
@@ -2108,6 +2112,9 @@ final class CallCollector: SyntaxVisitor {
                 // table knows the member — a declared type shadows κ, a local free fn / shadowing local wins.
                 let est = isEstablishingMember(effect: eff, root: et, member: name)
                 directEffects.insert(eff)
+                // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. A verb that
+                // does not say contributes nothing, so the field stays absent rather than half-claimed.
+                if eff == "Fs" { for k in fsKind(root: et, member: name) { fsKinds.insert(k) } }
                 if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK call IS network I/O
                 recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
                 if lit == nil, est { incompleteSurfaces.insert(eff) }
@@ -2137,6 +2144,9 @@ final class CallCollector: SyntaxVisitor {
                 let aliasName = dealias(name)
                 let est = isEstablishingFree(effect: eff, name: aliasName)
                 directEffects.insert(eff)
+                // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. A verb that
+                // does not say contributes nothing, so the field stays absent rather than half-claimed.
+                if eff == "Fs" { for k in fsKind(root: aliasName, member: "<init>") { fsKinds.insert(k) } }
                 if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK ctor/call IS network I/O
                 recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
                 if lit == nil, est { incompleteSurfaces.insert(eff) }
@@ -2233,6 +2243,9 @@ final class CallCollector: SyntaxVisitor {
                 for e in privacyEventKitEffects(entityType: entityTypeArg(node.arguments)) { directEffects.insert(e) }
             } else if let rt = base.root, let eff = kappaMember(root: rt, member: member) {
                 directEffects.insert(eff)
+                // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. A verb that
+                // does not say contributes nothing, so the field stays absent rather than half-claimed.
+                if eff == "Fs" { for k in fsKind(root: rt, member: member) { fsKinds.insert(k) } }
                 if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK call IS network I/O
                 // A two-path Fs op (copyItem/moveItem/createSymbolicLink/…) carries a SOURCE *and* a
                 // DESTINATION locator; the single-`lit` guard below captures only the first, so a literal
@@ -2356,6 +2369,9 @@ final class CallCollector: SyntaxVisitor {
                // (the real-world dogfood vein: `extension ProcessInfo` nulled all Env detection).
                let eff = kappaPropertyRead(root: root, path: recv.path + [node.declName.baseName.text]) {
                 directEffects.insert(eff)
+                // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. A verb that
+                // does not say contributes nothing, so the field stays absent rather than half-claimed.
+                if eff == "Fs" { for k in fsKind(root: root, member: node.declName.baseName.text) { fsKinds.insert(k) } }
                 kappaClassified = true
             }
             // The accessor-unit edge uses the RECEIVER's type (rootOf of the BASE) — NOT the field-walked

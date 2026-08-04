@@ -60,6 +60,52 @@ public func fnv1aHex(_ sortedQuals: [String]) -> String {
 
 // Root-receiver type/name + member -> effect. Verb-precise where a type mixes pure and effectful
 // surface (the family discipline: tag the execution boundary, not builders).
+/// SPEC §2 `fs` — for a call ALREADY classified `Fs`, the read/write direction its verb implies.
+/// Returns `["read"]`, `["write"]`, `["read","write"]`, or `[]` when the verb does not say.
+///
+/// THE EMPTY CASE IS THE WHOLE DISCIPLINE. §2: *"when `Fs` is reached but its kind is unknown … the field
+/// MUST be omitted rather than guessed. An empty or partial `fs` would be read as a positive claim ('reads
+/// but never writes'), which is the §4 trust contract's forbidden direction."* So a verb this table does
+/// not recognise contributes NOTHING, and a function whose Fs comes from an unrecognised verb — or
+/// transitively from a callee — carries no `fs` at all. Omission says "Fs, kind undetermined"; a present
+/// `fs` is an affirmative classification.
+///
+/// This is a syntactic refinement of an effect candor already proved, NOT a soundness claim: getting the
+/// direction wrong misreports a detail, getting the EFFECT wrong is the cardinal sin, and these are
+/// different failures. Deliberately the same shape and vocabulary as candor-java's `fsKind` — the surface
+/// is spec'd four-way, so two engines inventing two verb tables for one field is how a shared field stops
+/// meaning one thing.
+public func fsKind(root: String, member: String) -> [String] {
+    // Two-locator copies/moves read the source and write the destination — both, in one call.
+    if member == "copyItem" || member == "moveItem" || member == "replaceItem" || member == "replaceItemAt"
+        || member == "linkItem" { return ["read", "write"] }
+    switch member {
+    // WRITE — mutates the disk.
+    case "createFile", "removeItem", "createDirectory", "createSymbolicLink", "write", "writeToFile",
+         "changeCurrentDirectoryPath", "setAttributes", "trashItem", "unlinkItem", "truncate",
+         "createTempFile", "createTempDirectory", "SecItemAdd", "SecItemUpdate", "SecItemDelete":
+        return ["write"]
+    // READ — observes the disk without mutating it. Metadata probes are reads: `fileExists` is an I/O
+    // syscall that leaks whether a path is there, which is the detail the surface exists to expose.
+    case "contents", "contentsOfDirectory", "attributesOfItem", "fileExists", "subpathsOfDirectory",
+         "isReadableFile", "isWritableFile", "isExecutableFile", "isDeletableFile",
+         "destinationOfSymbolicLink", "enumerator", "subpaths", "currentDirectoryPath",
+         "contentsEqual", "attributesOfFileSystem", "read", "readToEnd", "readData", "readDataToEndOfFile",
+         "SecItemCopyMatching":
+        return ["read"]
+    default: break
+    }
+    // A FileHandle OPENED for one direction reveals it by the initializer label; a bare `FileHandle(...)`
+    // does not, and gets no claim. Same shape as java's `<init>` arm.
+    if root == "FileHandle" {
+        if member.hasPrefix("forReading") { return ["read"] }
+        if member.hasPrefix("forWriting") || member.hasPrefix("forUpdating") { return ["write"] }
+    }
+    if member.hasPrefix("write") || member == "append" { return ["write"] }
+    if member.hasPrefix("read") { return ["read"] }
+    return []   // the verb does not say — make NO claim (§2)
+}
+
 public let FS_MEMBERS: Set<String> = ["contents", "contentsOfDirectory", "createFile", "removeItem", "copyItem",
     "moveItem", "attributesOfItem", "fileExists", "createDirectory", "subpathsOfDirectory", "isReadableFile",
     "isWritableFile", "replaceItem", "linkItem", "destinationOfSymbolicLink", "createSymbolicLink",
