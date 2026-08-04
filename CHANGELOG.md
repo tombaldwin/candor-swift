@@ -9,6 +9,24 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### fix: `toShare: nil` is read-only, and claiming otherwise failed every read-only HealthKit app
+
+`privacyKind` treated `requestAuthorization(toShare:read:)` as unconditionally ambiguous and declared BOTH
+directions. But `toShare: nil` is the canonical read-only spelling and is right there in the source — so a
+read-only HealthKit app was charged with a WRITE and told it needed `NSHealthUpdateUsageDescription`.
+
+That is a false under-declaration on the commonest shape in the framework, and it is the FABRICATION
+direction this extension explicitly fences — not the over-disclosure the ambiguity rule is meant to buy.
+Found reviewing my own privacy/2 work, not by a failing test.
+
+Measured: a read-only app against a Share-only plist now exits 0; an app that also calls `save` against the
+same plist still exits 1 naming the write. A non-nil `toShare:` set, or an argument the engine cannot see,
+stays ambiguous and declares both — the invisible case must never resolve to the convenient side.
+
+The durable lesson is narrower than "be careful": before declaring an ambiguity, check whether the
+discriminating argument is actually invisible. Here it was in the source all along, exactly as the
+media-type and entity-type discriminators already assume.
+
 ### `privacy/2` direction — the verify is no longer silent on read vs write
 
 The privacy case study shipped with a stated limit: *"the verify is sound on PRESENCE and silent on

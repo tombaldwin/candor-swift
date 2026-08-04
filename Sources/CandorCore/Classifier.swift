@@ -516,7 +516,7 @@ public let privacyKeyMapByDirection: [String: [String: [String]]] = [
                            "NSCalendarsFullAccessUsageDescription", "NSCalendarsUsageDescription"]],
 ]
 
-public func privacyKind(root: String, member: String) -> [String] {
+public func privacyKind(root: String, member: String, toShareIsNil: Bool? = nil) -> [String] {
     switch member {
     // ── writes: the call mutates the user's store ────────────────────────────────────────────────────
     case "save", "saveObject", "saveObjects", "delete", "deleteObjects", "deleteObject",
@@ -540,10 +540,15 @@ public func privacyKind(root: String, member: String) -> [String] {
         return ["write"]
     default: break
     }
-    // `requestAuthorization(toShare:read:)` names BOTH sides in one call and the argument that would
-    // discriminate is a Set built at runtime — so it is genuinely ambiguous and, on this extension's
-    // standing trade-off (a missed sensor is the App-Store-shaped error), it declares both.
-    if member.hasPrefix("requestAuthorization") { return ["read", "write"] }
+    // `requestAuthorization(toShare:read:)` names both sides in one call — but the discriminating argument
+    // is NOT always runtime. `toShare: nil` is the canonical read-only spelling and is right there in the
+    // source, so treating this as unconditionally ambiguous charged every read-only HealthKit app with a
+    // WRITE and demanded a key it does not need: a false under-declaration on the commonest shape, in the
+    // fabrication direction this extension exists to fence. `toShareIsNil` carries the answer when the
+    // syntactic engine can see it; a non-nil or invisible argument stays ambiguous and declares both.
+    if member.hasPrefix("requestAuthorization") {
+        return toShareIsNil == true ? ["read"] : ["read", "write"]
+    }
     if member.hasPrefix("save") || member.hasPrefix("delete") || member.hasPrefix("remove")
         || member.hasPrefix("write") { return ["write"] }
     if member.hasPrefix("fetch") || member.hasPrefix("query") || member.hasPrefix("read") { return ["read"] }

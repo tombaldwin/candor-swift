@@ -106,9 +106,16 @@ a report predating the field verifies exactly as it did before.
 Note the asymmetry with Add-only and write-only: `NSPhotoLibraryAddUsageDescription` satisfies a write and
 **not** a read; `NSCalendarsWriteOnlyAccessUsageDescription` likewise. The full-access keys satisfy both.
 
-`requestAuthorization(toShare:read:)` names both sides in one call and the discriminating argument is a Set
-built at runtime, so it is genuinely ambiguous and declares **both** — the standing trade-off, since a
-missed sensor is the App-Store-shaped error.
+`requestAuthorization(toShare:read:)` names both sides in one call, but the discriminating argument is not
+always runtime: **`toShare: nil` is the canonical read-only spelling and is statically visible**, so it
+resolves to `read` alone. A non-nil set, or an argument the engine cannot see, stays ambiguous and declares
+both — the standing trade-off, since a missed sensor is the App-Store-shaped error.
+
+Treating the call as *unconditionally* ambiguous was wrong and briefly shipped: it charged every read-only
+HealthKit app with a write and demanded a key it does not need — a false under-declaration on the commonest
+shape in the framework, which is the fabrication direction this extension exists to fence. The lesson is
+narrower than "be careful": **before declaring an ambiguity, check whether the discriminating argument is
+actually invisible.** Here it was in the source all along.
 
 **Wire:** the direction rides the report entry as `privacy: {"<effect>": ["read"|"write"]}`, direct-only
 and omitted when empty, on the same rule as `fs`. It cannot be derived by a consumer — the verb that said

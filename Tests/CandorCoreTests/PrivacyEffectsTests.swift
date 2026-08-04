@@ -427,4 +427,22 @@ final class PrivacyEffectsTests: XCTestCase {
             XCTAssertNil(privacyKeyMapByDirection[e], "\(e) has one key — direction cannot change it")
         }
     }
+
+    /// `toShare: nil` is the canonical READ-ONLY HealthKit authorization, and the discriminating argument
+    /// is right there in the source. Treating `requestAuthorization` as unconditionally ambiguous charged
+    /// every read-only HealthKit app with a WRITE and demanded a key it does not need — a false
+    /// under-declaration on the commonest shape, in the fabrication direction this extension fences.
+    /// Found reviewing my own privacy/2 work rather than by a failing test, which is why it is pinned now.
+    func testReadOnlyAuthorizationDoesNotClaimAWrite() {
+        XCTAssertEqual(privacyKind(root: "HKHealthStore", member: "requestAuthorization",
+                                   toShareIsNil: true), ["read"],
+                       "`toShare: nil` says read-only, statically and unambiguously")
+        // A non-nil set could contain anything, so it stays ambiguous and declares both — as does an
+        // argument the syntactic engine cannot see at all.
+        XCTAssertEqual(privacyKind(root: "HKHealthStore", member: "requestAuthorization",
+                                   toShareIsNil: false).sorted(), ["read", "write"])
+        XCTAssertEqual(privacyKind(root: "HKHealthStore", member: "requestAuthorization",
+                                   toShareIsNil: nil).sorted(), ["read", "write"],
+                       "an invisible argument must stay ambiguous — never resolved to the convenient side")
+    }
 }

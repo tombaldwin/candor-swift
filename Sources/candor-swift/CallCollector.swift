@@ -646,6 +646,17 @@ final class CallCollector: SyntaxVisitor {
         return nil  // no `for:`/positional media-type arg at all (a bare capture) → ambiguous
     }
 
+    /// `privacy/2` — is `toShare:` a literal `nil`? The canonical read-only HealthKit authorization, and
+    /// the one case where the argument that discriminates read from write IS statically visible. Returns
+    /// nil when the label is absent or its value is anything else (a Set, a variable) — ambiguous, and
+    /// the caller then declares both.
+    private func toShareIsNilArg(_ args: LabeledExprListSyntax) -> Bool? {
+        for a in args where a.label?.text == "toShare" {
+            return Self.peel(a.expression).is(NilLiteralExprSyntax.self) ? true : false
+        }
+        return nil
+    }
+
     /// `privacy/2` — EventKit's entity-type discriminant, the exact analog of `mediaTypeArg`. EKEventStore
     /// serves calendars AND reminders and the choice is per call (`requestAccess(to: .event)`,
     /// `predicateForReminders(in:)`), so a statically-visible `.event`/`.reminder` refines and anything
@@ -2253,7 +2264,7 @@ final class CallCollector: SyntaxVisitor {
                 // does not say contributes nothing, so the field stays absent rather than half-claimed.
                 if eff == "Fs" { let ks = fsKind(root: rt, member: member)
                                   if ks.isEmpty { fsKinds.insert("?") } else { for k in ks { fsKinds.insert(k) } } }
-                if PRIVACY_EFFECTS_ALL.contains(eff) { for k in privacyKind(root: rt, member: member) { privacyKinds[eff, default: []].insert(k) } }
+                if PRIVACY_EFFECTS_ALL.contains(eff) { for k in privacyKind(root: rt, member: member, toShareIsNil: toShareIsNilArg(node.arguments)) { privacyKinds[eff, default: []].insert(k) } }
                 if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK call IS network I/O
                 // A two-path Fs op (copyItem/moveItem/createSymbolicLink/…) carries a SOURCE *and* a
                 // DESTINATION locator; the single-`lit` guard below captures only the first, so a literal
