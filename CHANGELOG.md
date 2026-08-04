@@ -7,7 +7,9 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
-## Unreleased — ⟨spec 0.26⟩
+## Unreleased
+
+## [0.26.0] — 2026-08-04 ⟨spec 0.26⟩
 
 ### ⟨0.26⟩ THE HIERARCHY SIDECAR'S KEY SET IS ITS MANIFEST — producer half, and PROTOCOLS WERE MISSING ENTIRELY
 
