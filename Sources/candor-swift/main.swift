@@ -157,6 +157,7 @@ var wantJson = false
 var policyPath: String? = ProcessInfo.processInfo.environment["CANDOR_POLICY"]
 var gateJsonPath: String? = nil
 var wantWorkspace = false
+var scopeTarget: String? = nil
 var argIter = CommandLine.arguments.dropFirst().makeIterator()
 while let a = argIter.next() {
     switch a {
@@ -186,6 +187,14 @@ while let a = argIter.next() {
             FileHandle.standardError.write("candor-swift: --gate-json requires a value\n".data(using: .utf8)!); exit(2)
         }
         gateJsonPath = v
+    case "--target":
+        // Scope the scan to ONE target of a multi-target package and its in-package dependency closure.
+        // Valueless or flag-shaped fails closed: a `--target` that silently became "scan everything"
+        // would answer a different question than the one asked, and the answer LOOKS the same.
+        guard let v = argIter.next(), !v.hasPrefix("-") else {
+            FileHandle.standardError.write("candor-swift: --target requires a target name\n".data(using: .utf8)!); exit(2)
+        }
+        scopeTarget = v
     case "--workspace", "--deps":
         // Auto-discover the target's LOCAL PATH dependencies (`.package(path:)` in Package.swift), scan
         // each into .candor/deps/ with protocol-CHA union entries, and chain them — so a cross-package
@@ -203,6 +212,7 @@ while let a = argIter.next() {
 
         USAGE
           candor-swift [<dir|file.swift>] [options]            scan Swift sources (default target: .)
+          candor-swift <dir> --target <name>                   scan ONE package target + its closure
           candor-swift <action> [args] [options]               query the discovered report (.candor/, walk-up)
           candor-swift privacy-manifest [--verify <plist>]     generate/verify the Apple privacy manifest
           candor-swift gains <current> <baseline>              effects gained between two reports
@@ -240,6 +250,12 @@ while let a = argIter.next() {
           --json               print the report as JSON to stdout (a scan then writes no files)
           --policy <file>      enforce a policy (deny/pure/allow/forbid) — exit 1 on a violation, 2 if unreadable
           --gate-json <file>   write the machine-readable gate verdict as JSON (`-` = stdout)
+          --target <name>     scope the scan to ONE target of a multi-target package plus its in-package
+                              dependency closure — one scan per SHIPPED BINARY. Without it a package with
+                              several products charges each one with every other one's effects, and a
+                              privacy-manifest verify against one product's Info.plist answers about code
+                              that product never compiles. Refuses (exit 2) on an unknown target or a
+                              missing source dir rather than silently scanning less.
           --workspace (--deps) auto-discover the target's local `.package(path:)` deps, scan each into
                                .candor/deps/, and chain them so a cross-package call discloses the sibling's effect
           --report <locator>   (query actions) use this report instead of discovering .candor/
@@ -334,6 +350,48 @@ sourcePaths.sort()
 if sourcePaths.isEmpty {
     FileHandle.standardError.write("candor-swift: no Swift sources under \(target)\n".data(using: .utf8)!)
     exit(2)
+}
+
+// ⟨--target⟩ RESTRICT the scan to one shipped binary. A package with several products sharing a core
+// otherwise charges each one with every other one's effects — measured on a real app, where a whole-repo
+// scan verified against the macOS Info.plist reported a Mic under-declaration for a sensor only the iOS
+// target can reach. Every failure below REFUSES: this feature makes a scan see LESS, and under ⟨0.21⟩
+// absence from `functions` is a positive purity claim, so "resolve less than asked, quietly" is the
+// cardinal sin wearing a convenience flag.
+if let want = scopeTarget {
+    let manifestPath = (rootDir as NSString).appendingPathComponent("Package.swift")
+    guard let manifestSrc = try? String(contentsOfFile: manifestPath, encoding: .utf8) else {
+        FileHandle.standardError.write("candor-swift: \(TargetScopeError.noManifest(dir: rootDir))\n".data(using: .utf8)!)
+        exit(2)
+    }
+    let declared = parsePackageTargets(manifestSource: manifestSrc)
+    do {
+        let closure = try targetClosure(want, in: declared)
+        let dirs = try targetSourceDirs(closure, packageRoot: rootDir, exists: { p in
+            var d: ObjCBool = false
+            return fm.fileExists(atPath: p, isDirectory: &d) && d.boolValue
+        })
+        let prefixes = dirs.map { $0.hasSuffix("/") ? $0 : $0 + "/" }
+        let before = sourcePaths.count
+        sourcePaths = sourcePaths.filter { p in prefixes.contains(where: { p.hasPrefix($0) }) }
+        if sourcePaths.isEmpty {
+            FileHandle.standardError.write(("candor-swift: --target \(want) resolved to "
+                + "\(closure.map(\.name).joined(separator: ", ")) but no Swift sources are under "
+                + "\(dirs.joined(separator: ", ")) — refusing to report an empty scan as a clean one\n").data(using: .utf8)!)
+            exit(2)
+        }
+        // DISCLOSED, not silent. The reader must be able to tell a scoped scan from a whole-tree one:
+        // a clean verdict here is a claim about ONE binary, and the same tree scanned whole may differ.
+        FileHandle.standardError.write(("candor-swift: --target \(want) — scanning \(closure.count) target(s) "
+            + "[\(closure.map(\.name).joined(separator: ", "))], \(sourcePaths.count) of \(before) source file(s). "
+            + "This verdict covers that closure ONLY.\n").data(using: .utf8)!)
+    } catch let e as TargetScopeError {
+        FileHandle.standardError.write("candor-swift: \(e)\n".data(using: .utf8)!)
+        exit(2)
+    } catch {
+        FileHandle.standardError.write("candor-swift: --target \(want): \(error)\n".data(using: .utf8)!)
+        exit(2)
+    }
 }
 
 /// THE package-name parse — the WRITER's, and the only one. `<dir>/Package.swift`'s first `name: "…"`.

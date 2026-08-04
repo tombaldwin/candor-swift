@@ -9,6 +9,53 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### `--target`: scope a scan to one shipped binary
+
+`candor-swift <dir>` scans every `.swift` file under it. For a package with several products sharing a
+core that charges each product with every OTHER product's effects, and the privacy-manifest verify then
+answers about code the product never compiles. On a real app, scanning the repo whole and verifying
+against the macOS `Info.plist` reported
+
+```
+✗ code reaches Mic (via iOSBlowMonitor.actuallyStart, …) but Info.plist declares no NSMicrophoneUsageDescription
+✗ code reaches Motion (via PolleniOSApp.init()#2, …) but Info.plist declares no NSMotionUsageDescription
+```
+
+for two sensors only the **iOS** target can reach. The analysis was right; the UNIT was not a shipped
+binary. The documented remedy was to hand-build a separate `Package.swift` per product — a workaround
+wearing methodology's clothes.
+
+`--target <name>` resolves that target's in-package dependency closure from `Package.swift` and scans
+exactly those sources. Same app, same command, one flag:
+
+| scan | verified against | result |
+|---|---|---|
+| whole repo | `Resources/Info.plist` (macOS) | exit 1 — ✗ Mic, ✗ Motion · **artifact** |
+| `--target Pollen` | `Resources/Info.plist` | **exit 0** — ✓ clean, 4 effects |
+| `--target PolleniOS` | `Apps/PolleniOS/Info.plist` | **exit 1** — ✗ Contacts |
+
+The last row is the finding that survives the correct methodology, and it survives because `Contacts`
+reaches the iOS binary *through the shared core* — a reach no grep of that target's own sources can see.
+
+**Every failure REFUSES.** This feature makes a scan see LESS, and under ⟨0.21⟩ absence from `functions`
+is a positive purity claim — so an unknown target (exit 2, naming the targets that exist), a closure
+member whose source directory is missing (exit 2, naming what was tried), and an empty result all stop
+rather than scanning less and continuing. A scoped scan also DISCLOSES its scope on stderr: a clean
+verdict over one target reads exactly like a clean verdict over the package otherwise.
+
+`Package.swift` is parsed with SwiftSyntax, not by regex — `manifestPackageName` in `main.swift`
+documents at length why the regex form is fragile. `.product(name:package:)` dependencies are external,
+have no sources in this tree, and stay disclosed by the coverage ledger rather than silently joining the
+closure.
+
+**A soundness bug the tests caught on their first run:** `.target(name: "Core")` is *also* the in-package
+form of a dependency reference, so descending into a target's `dependencies:` array parsed the inner call
+as a second DECLARATION of `Core` — one carrying no dependencies. The two entries then raced in the
+by-name lookup, and when the phantom won, the closure walk stopped at `Core` instead of continuing
+through its own dependencies: sources dropped from the scan, i.e. a purity claim over every function in
+them. Found by asserting on the FULL target list rather than on membership.
+
+
 ### fix: `toShare: nil` is read-only, and claiming otherwise failed every read-only HealthKit app
 
 `privacyKind` treated `requestAuthorization(toShare:read:)` as unconditionally ambiguous and declared BOTH

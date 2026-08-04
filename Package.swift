@@ -17,6 +17,11 @@ let package = Package(
             name: "CandorCore",
             dependencies: [
                 .product(name: "SwiftSyntax", package: "swift-syntax"),
+                // PackageTargets.swift parses a target's OWN Package.swift to resolve `--target`'s
+                // dependency closure. A structured parse, not a regex: `manifestPackageName` in main.swift
+                // documents at length why the regex form is fragile (it takes the first `name:` in the
+                // file, which is very often a target's, not the package's).
+                .product(name: "SwiftParser", package: "swift-syntax"),
             ],
             swiftSettings: [.unsafeFlags(["-warnings-as-errors"])]
         ),
