@@ -52,13 +52,16 @@ It went unnoticed because the spec's own rule makes partial implementation HONES
 "kind undetermined", never "read-only" — which is the design working, not an excuse. The gap is still a
 gap.
 
-DIRECT ONLY, matching candor-java's `fsDirect`, and the reason is the interesting part: `fs` must NOT
-propagate over call edges. A caller reaching one callee that writes and another whose kind is undetermined
-would inherit `["write"]` and thereby claim "writes but never reads" — exactly the partial claim §2
-forbids. Direct-only means the field answers a question about calls this function makes itself, where
-every contributing verb was seen. Measured on a fixture: `copyItem` → `["read","write"]`, `contents` →
-`["read"]`, `createFile` → `["write"]`, a function that merely REACHES a writer → omitted, and
-`temporaryDirectory` (a verb that reveals nothing) → omitted.
+**CORRECTED before release — the first version of this was direct-only and that was wrong.** I read
+candor-java's `fsDirect` comment ("kind performed directly") and never followed it to `fsFixpoint()`, which
+propagates over edges AND injects an `FS_UNKNOWN` poison that suppresses the whole field. So kinds DO
+travel: a caller that transitively only writes is a writer, and saying so is the point of the field. What
+must not travel is a PARTIAL answer — if any contributing `Fs` has no determined kind, the field is
+suppressed entirely, because `["write"]` there would claim "writes but never reads" about a function that
+may do both. Conformance PART 31 caught the divergence on its first run.
+
+Measured: `copyItem` → `["read","write"]`, `contents` → `["read"]`, `createFile` → `["write"]`, a caller of
+a writer → `["write"]`, and a function reaching one writer plus one undetermined-kind callee → omitted.
 
 The verb table is deliberately the same shape and vocabulary as candor-java's `fsKind`. The surface is
 spec'd four-way; two engines inventing two verb tables for one field is how a shared field stops meaning

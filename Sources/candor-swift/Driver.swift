@@ -1212,6 +1212,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // fixpoint: effects + literal surfaces propagate over edges (the pure `propagate` lives in CandorCore)
     let inferred = propagate(direct, over: edges)
     let hostsAcc = propagate(hostsD, over: edges), cmdsAcc = propagate(cmdsD, over: edges)
+    // `fs` kinds TRAVEL the call graph — a caller that transitively only writes IS a writer — and the "?"
+    // poison travels with them, so a caller of an undetermined-kind function inherits the SUPPRESSION
+    // rather than a half-answer. Pinned by conformance PART 31.
+    let fsAcc = propagate(fsD, over: edges)
     let pathsAcc = propagate(pathsD, over: edges), tablesAcc = propagate(tablesD, over: edges)
     // the masking surface-incompleteness and the per-fn blind-module disclosure propagate the SAME way: a
     // caller transitively reaches a callee's invisible endpoint / blind module, so it inherits the flag/set.
@@ -1230,7 +1234,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         allFns: allFns, conformers: conformers, declaredTypes: declaredTypes,
         protocolSupers: protocolSupers, protocolNames: Set(protocolMethods.keys), importCounts: importCounts,
         internalModules: internalModules, direct: direct, edges: edges, whyMap: whyMap,
-        locOf: locOf, entryPoints: entryPoints, inferred: inferred, hostsAcc: hostsAcc, fsD: fsD, privKindD: privKindD,
+        locOf: locOf, entryPoints: entryPoints, inferred: inferred, hostsAcc: hostsAcc, fsD: fsAcc, privKindD: privKindD,
         cmdsAcc: cmdsAcc, pathsAcc: pathsAcc, tablesAcc: tablesAcc, incompleteAcc: incompleteAcc,
         invisibleAcc: invisibleAcc, unanalyzed: unanalyzed,
         typeSurfaceReturns: buildTypeSurfaceReturns(allFns, localTypePaths))

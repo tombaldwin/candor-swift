@@ -2117,7 +2117,8 @@ final class CallCollector: SyntaxVisitor {
                 directEffects.insert(eff)
                 // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. A verb that
                 // does not say contributes nothing, so the field stays absent rather than half-claimed.
-                if eff == "Fs" { for k in fsKind(root: et, member: name) { fsKinds.insert(k) } }
+                if eff == "Fs" { let ks = fsKind(root: et, member: name)
+                                  if ks.isEmpty { fsKinds.insert("?") } else { for k in ks { fsKinds.insert(k) } } }
                 if PRIVACY_EFFECTS_ALL.contains(eff) { for k in privacyKind(root: et, member: name) { privacyKinds[eff, default: []].insert(k) } }
                 if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK call IS network I/O
                 recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
@@ -2150,7 +2151,8 @@ final class CallCollector: SyntaxVisitor {
                 directEffects.insert(eff)
                 // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. A verb that
                 // does not say contributes nothing, so the field stays absent rather than half-claimed.
-                if eff == "Fs" { for k in fsKind(root: aliasName, member: "<init>") { fsKinds.insert(k) } }
+                if eff == "Fs" { let ks = fsKind(root: aliasName, member: "<init>")
+                                  if ks.isEmpty { fsKinds.insert("?") } else { for k in ks { fsKinds.insert(k) } } }
                 if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK ctor/call IS network I/O
                 recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
                 if lit == nil, est { incompleteSurfaces.insert(eff) }
@@ -2249,7 +2251,8 @@ final class CallCollector: SyntaxVisitor {
                 directEffects.insert(eff)
                 // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. A verb that
                 // does not say contributes nothing, so the field stays absent rather than half-claimed.
-                if eff == "Fs" { for k in fsKind(root: rt, member: member) { fsKinds.insert(k) } }
+                if eff == "Fs" { let ks = fsKind(root: rt, member: member)
+                                  if ks.isEmpty { fsKinds.insert("?") } else { for k in ks { fsKinds.insert(k) } } }
                 if PRIVACY_EFFECTS_ALL.contains(eff) { for k in privacyKind(root: rt, member: member) { privacyKinds[eff, default: []].insert(k) } }
                 if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK call IS network I/O
                 // A two-path Fs op (copyItem/moveItem/createSymbolicLink/…) carries a SOURCE *and* a
@@ -2376,7 +2379,8 @@ final class CallCollector: SyntaxVisitor {
                 directEffects.insert(eff)
                 // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. A verb that
                 // does not say contributes nothing, so the field stays absent rather than half-claimed.
-                if eff == "Fs" { for k in fsKind(root: root, member: node.declName.baseName.text) { fsKinds.insert(k) } }
+                if eff == "Fs" { let ks = fsKind(root: root, member: node.declName.baseName.text)
+                                  if ks.isEmpty { fsKinds.insert("?") } else { for k in ks { fsKinds.insert(k) } } }
                 if PRIVACY_EFFECTS_ALL.contains(eff) { for k in privacyKind(root: root, member: node.declName.baseName.text) { privacyKinds[eff, default: []].insert(k) } }
                 kappaClassified = true
             }

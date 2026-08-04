@@ -733,7 +733,9 @@ for qual in reportQuals.sorted() {
     if let t = tablesAcc[qual], !t.isEmpty, inf.contains("Db") { ef.tables = t.sorted() }
     // SPEC §2 `fs` — gated on `inferred` carrying Fs (the spec: "applies only when `inferred` contains
     // `Fs`"), and omitted when empty. Direct-only, so a function that merely REACHES a writer carries none.
-    if let k = analysis.fsD[qual], !k.isEmpty, inf.contains("Fs") { ef.fs = k.sorted() }
+    // Present "?" ⇒ some contributing Fs had no determined kind ⇒ suppress the WHOLE field, because
+    // ["write"] there would claim "writes but never reads" about a function that may do both (§2).
+    if let k = analysis.fsD[qual], !k.isEmpty, !k.contains("?"), inf.contains("Fs") { ef.fs = k.sorted() }
     // `privacy/2` direction — only for effects this fn actually carries, and only where a verb said.
     if let pk = analysis.privKindD[qual] {
         let kept = pk.filter { !$0.value.isEmpty && inf.contains($0.key) }
