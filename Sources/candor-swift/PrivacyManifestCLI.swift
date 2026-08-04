@@ -14,7 +14,10 @@ import Foundation
 // (the shared resolveReportLocator + the loud load), no policy. The verb has no positional args.
 
 // The six privacy/1 effects (SPEC-EXTENSION-privacy.md "The effect vocabulary"), in a stable order.
-private let privacyEffects = ["Location", "Camera", "Mic", "Contacts", "Photos", "Notify"]
+private let privacyEffects = ["Location", "Camera", "Mic", "Contacts", "Photos", "Notify",
+                              "Health", "Motion", "Calendar", "Reminders", "Bluetooth", "Speech",
+                              "Biometrics", "MediaLibrary", "HomeKit", "Tracking",
+                              "NearbyInteraction", "Siri"]
 
 // The effect → acceptable Info.plist usage-description keys (SPEC-EXTENSION-privacy.md "The effect →
 // usage-description key mapping"). The FIRST key of each list is the PRIMARY one (what GENERATE names first).
@@ -28,6 +31,30 @@ private let privacyKeyMap: [String: [String]] = [
     "Contacts": ["NSContactsUsageDescription"],
     "Photos": ["NSPhotoLibraryUsageDescription", "NSPhotoLibraryAddUsageDescription"],
     "Notify": [],
+
+    // ── privacy/2 ────────────────────────────────────────────────────────────────────────────────────
+    // A key list is a set of ACCEPTABLE alternatives — any one present satisfies the effect. That is the
+    // established semantic (Location has four), and it is what keeps a verify from inventing an
+    // under-declaration it cannot substantiate.
+    //
+    // The limit that buys, stated rather than buried: HealthKit's two keys are not alternatives in Apple's
+    // model — Share gates READING and Update gates WRITING — and this engine does not discriminate read
+    // from write at the call site, so an app that only declares Share and also writes samples passes here
+    // and is rejected by Apple. Same for the EventKit pairs. Narrowing that needs per-call direction
+    // analysis; until then the verify is sound on PRESENCE and silent on DIRECTION, and says so.
+    "Health": ["NSHealthShareUsageDescription", "NSHealthUpdateUsageDescription"],
+    "Motion": ["NSMotionUsageDescription"],
+    "Calendar": ["NSCalendarsUsageDescription", "NSCalendarsFullAccessUsageDescription",
+                 "NSCalendarsWriteOnlyAccessUsageDescription"],
+    "Reminders": ["NSRemindersUsageDescription", "NSRemindersFullAccessUsageDescription"],
+    "Bluetooth": ["NSBluetoothAlwaysUsageDescription", "NSBluetoothPeripheralUsageDescription"],
+    "Speech": ["NSSpeechRecognitionUsageDescription"],
+    "Biometrics": ["NSFaceIDUsageDescription"],
+    "MediaLibrary": ["NSAppleMusicUsageDescription"],
+    "HomeKit": ["NSHomeKitUsageDescription"],
+    "Tracking": ["NSUserTrackingUsageDescription"],
+    "NearbyInteraction": ["NSNearbyInteractionUsageDescription"],
+    "Siri": ["NSSiriUsageDescription"],
 ]
 
 // The whole privacy-cluster key universe — used to scope the OVER-declaration check to the sensor cluster

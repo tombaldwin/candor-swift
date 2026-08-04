@@ -9,6 +9,50 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### `privacy/2` — the sensor vocabulary goes from six to eighteen
+
+Writing the privacy-manifest case study is what surfaced this. A real app's `Info.plist` declares
+`NSMotionUsageDescription` and two HealthKit keys, and `privacy-manifest --verify` said **nothing about
+them in either direction** — neither required nor flagged as unused — because the effects did not exist.
+`exit 0` meant "the six I model are declared" while reading as "your plist is right", which is the
+absence-is-a-claim shape ⟨0.26⟩ closed for sidecar keys.
+
+Added: `Health`, `Motion`, `Calendar`, `Reminders`, `Bluetooth`, `Speech`, `Biometrics`, `MediaLibrary`,
+`HomeKit`, `Tracking`, `NearbyInteraction`, `Siri` — with their Info.plist key families. Measured on the
+same app: the macOS target now reports 4 effects where it reported 3, and Motion resolves on iOS.
+
+DECISIONS WORTH THE INK:
+· **The extension version moved with the vocabulary.** A consumer that understands `privacy/1` expects
+  exactly six effect names; emitting `Health` under that label would make the extension's own positive
+  declaration inaccurate. The envelope now discloses `privacy/2`.
+· **`EKEventStore` is ambiguous exactly like `AVCaptureDevice`** — one type serving calendars AND reminders,
+  chosen per call by an `EKEntityType` — so it gets the same treatment: a statically-visible
+  `.event`/`.reminder` refines, anything else over-discloses both. Same code shape as `mediaTypeArg`
+  DELIBERATELY, so the two cannot drift into different rules for one problem. Measured and documented: a
+  local CONSTRUCTOR carries no entity type, so a function that builds a store declares both even when every
+  call on it is refined — and `AVCaptureSession()` was verified to behave identically, so this is the
+  trade-off already chosen rather than a new one.
+· **Value types are excluded on the `CLLocation` precedent** — `HKQuantity`, `CMDeviceMotion`, `EKEvent`,
+  `CBUUID`. Holding a reading is not taking one, and there is a test asserting they stay unclassified.
+· **`LocalNetwork` is deliberately absent**, with a test asserting so. `NSLocalNetworkUsageDescription` is
+  real, but the reach is not separable from ordinary `Net` by type (`NWBrowser`/`NWConnection` serve both)
+  and the key travels with an entitlement this engine does not read. Guessing fabricates on every
+  networking app.
+· **`Speech` is not `Mic`** — capturing audio and recognising it are separate authorizations with separate
+  keys, and an app can do either without the other.
+· **A modelled TYPE is still not a covered MODULE, and the ledger keeps saying so.** A scan that charges
+  `Health` on `HKHealthStore` still lists HealthKit as uncovered, because the rest of the framework is
+  genuinely unmodelled. Marking the module covered would convert a disclosed blind spot into a silent
+  purity claim over every other type in it — the cardinal sin, bought for a tidier-looking report.
+
+KNOWN LIMIT, stated rather than left to be discovered: the verify is sound on PRESENCE and silent on
+DIRECTION. HealthKit's two keys are not alternatives in Apple's model (Share gates reading, Update gates
+writing) and this engine does not tell read from write at the call site, so an app declaring only Share
+while also writing passes here and is rejected by Apple. Same for the EventKit pairs.
+
+Tests: every new type asserted, the value-type exclusions asserted, the EventKit discriminator asserted
+against all four inputs, and the LocalNetwork omission asserted. Each probed by breaking it.
+
 ## [0.26.0] — 2026-08-04 ⟨spec 0.26⟩
 
 ### ⟨0.26⟩ THE HIERARCHY SIDECAR'S KEY SET IS ITS MANIFEST — producer half, and PROTOCOLS WERE MISSING ENTIRELY

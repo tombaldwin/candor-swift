@@ -936,7 +936,8 @@ if wantJson {
     for e in effectors { for x in e.inferred.toNames() { counts[x, default: 0] += 1 } }
     let breakdown = ["Net", "Llm", "Fs", "Db", "Exec", "Ipc", "Env", "Clipboard", "Clock", "Log", "Rand",
                      // `privacy/1` SPEC EXTENSION — the Apple privacy-sensor effects (shown after the core set)
-                     "Location", "Camera", "Mic", "Contacts", "Photos", "Notify"]
+                     "Location", "Camera", "Mic", "Contacts", "Photos", "Notify",
+                     "Health", "Motion", "Calendar", "Reminders", "Bluetooth", "Speech", "Biometrics", "MediaLibrary", "HomeKit", "Tracking", "NearbyInteraction", "Siri"]
         .filter { counts[$0] != nil }.map { "\($0) \(counts[$0]!)" }.joined(separator: " · ")
     let unknown = counts["Unknown"] ?? 0
     if !breakdown.isEmpty || unknown > 0 {

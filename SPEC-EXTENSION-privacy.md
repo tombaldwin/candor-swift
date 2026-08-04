@@ -30,6 +30,67 @@ verify a privacy manifest from code-level truth**.
 | `Photos` | the photo library | Photos / PhotosUI (`PHPhotoLibrary`, `PHAsset`, `PHPickerViewController`) |
 | `Notify` | user-attention / notifications | UserNotifications (`UNUserNotificationCenter`) |
 
+### Second wave (`privacy/2`, 2026-08-04)
+
+The first wave covered six sensors, which was not enough to answer the question the product surface asks.
+Measured on a real app: its `Info.plist` declares `NSMotionUsageDescription` and two HealthKit keys, and
+`privacy-manifest --verify` said **nothing about them in either direction** — neither required nor flagged
+as unused — because the effects did not exist. An `exit 0` meaning *"the six I model are declared"* reads
+as *"your plist is right"*, which is the absence-is-a-claim shape the main spec closed at ⟨0.26⟩.
+
+| effect | meaning | sources (Apple frameworks) |
+|---|---|---|
+| `Health` | HealthKit samples | `HKHealthStore`, the sample/observer/statistics/anchored queries, workout sessions and builders |
+| `Motion` | motion & fitness sensors | CoreMotion (`CMMotionManager`, `CMPedometer`, `CMAltimeter`, `CMMotionActivityManager`, `CMHeadphoneMotionManager`, `CMSensorRecorder`) |
+| `Calendar` | the user's calendars | EventKit (`EKEventStore` — ambiguous, see below; `EKEventEditViewController`, `EKCalendarChooser`) |
+| `Reminders` | the user's reminders | EventKit (`EKEventStore` — ambiguous, see below) |
+| `Bluetooth` | BLE scanning / advertising | CoreBluetooth (`CBCentralManager`, `CBPeripheralManager`) |
+| `Speech` | speech recognition | Speech (`SFSpeechRecognizer`, the recognition requests) |
+| `Biometrics` | Face ID / Touch ID | LocalAuthentication (`LAContext`) |
+| `MediaLibrary` | the user's Apple Music / media library | MediaPlayer (`MPMediaLibrary`, `MPMediaQuery`, `MPMusicPlayerController`, `MPMediaPickerController`) |
+| `HomeKit` | home accessories | HomeKit (`HMHomeManager`, `HMAccessoryBrowser`) |
+| `Tracking` | App Tracking Transparency (IDFA) | AppTrackingTransparency (`ATTrackingManager`) |
+| `NearbyInteraction` | UWB ranging | NearbyInteraction (`NISession`) |
+| `Siri` | Siri authorization / donation | Intents (`INPreferences`, `INVoiceShortcutCenter`) |
+
+**Value types that merely carry an already-taken reading are excluded**, on the `CLLocation` precedent —
+`HKQuantity`, `CMDeviceMotion`, `CMAccelerometerData`, `EKEvent`, `CBUUID`. Holding a reading is not taking
+one.
+
+**`LocalNetwork` is deliberately absent.** `NSLocalNetworkUsageDescription` is real, but the reach cannot be
+separated from ordinary `Net` by type: `NWBrowser`/`NWConnection` serve both, and the key travels with a
+`NSBonjourServices` entitlement this engine does not read. Guessing it would fabricate on every networking
+app. It stays uncovered and disclosed, like any other unmodelled surface.
+
+**Speech is not Mic.** Capturing audio and recognising it are separate authorizations with separate keys,
+and an app can do either without the other — so they are separate effects, not one.
+
+**The version moved because the vocabulary did.** A consumer that understands `privacy/1` expects exactly
+six effect names; emitting `Health` under that label would make the extension's own positive declaration
+inaccurate. `extensions: ["privacy/2"]`.
+
+### `EKEventStore` is ambiguous, exactly like `AVCaptureDevice`
+
+One store type serves calendars *and* reminders, chosen per call by an `EKEntityType`. Resolved the same
+way as the capture split: a statically-visible `.event`/`.reminder` refines, and anything else
+over-discloses **both** — for a privacy manifest a missed sensor is the App-Store-rejection-shaped error.
+
+**The consequence, stated rather than discovered later:** a *constructor* carries no entity type, so
+`EKEventStore()` is ambiguous and a function that constructs a store declares both keys even if every call
+on it is refined. The refinement therefore bites on stores that are not locally constructed
+(`store.requestAccess(to: .event)` on a passed-in or property store). This is not new behaviour — measured,
+`AVCaptureSession()` behaves identically — and it is the trade-off this extension already chose. Narrowing
+it needs per-receiver refinement, which is tracked, not silently absent.
+
+### A modelled TYPE is not a covered MODULE
+
+A scan that classifies `Health` on `HKHealthStore` will still report HealthKit in the coverage ledger as a
+module the classifier does not cover — and that is correct, not a contradiction. This extension models a
+curated handful of a framework's types; the rest of HealthKit is genuinely unmodelled, and marking the
+whole module covered would convert a disclosed blind spot into a silent purity claim over every other type
+in it. Both statements in the same report are true: *this* type was classified, and the rest of that module
+was not looked at.
+
 Each is an **outside-world surface** — a sensor, a personal-data store, or the user's attention — on the
 same footing as `Clipboard` (main-spec §6.1). Abstract non-boundaries (crypto, memory, threading) stay
 out — the boundary rule is what keeps the vocabulary coherent.
@@ -55,7 +116,7 @@ An engine that classifies any `privacy/1` effect MUST disclose the extension in 
 
 ```json
 { "candor": { "version": "…", "toolchain": "swiftsyntax", "spec": "0.26" },
-  "extensions": ["privacy/1"],
+  "extensions": ["privacy/2"],
   "functions": [ … ] }
 ```
 

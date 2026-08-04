@@ -346,7 +346,72 @@ public let PRIVACY_SDK_TYPES: [String: String] = [
     "PHPhotoLibrary": "Photos", "PHAsset": "Photos", "PHPickerViewController": "Photos", "PHImageManager": "Photos",
     // Notify — user-attention / notifications.
     "UNUserNotificationCenter": "Notify",
+
+    // ── privacy/2 (2026-08-04) ───────────────────────────────────────────────────────────────────────
+    // The first wave covered six sensors, which was not enough to answer the question the product surface
+    // asks. A real app (pollen) declares Motion and two HealthKit keys, and `privacy-manifest --verify`
+    // said NOTHING about them in either direction — neither required nor flagged as unused — because the
+    // effects did not exist. An `exit 0` that means "the six I model are declared" reads as "your plist is
+    // right", which is the absence-is-a-claim shape this project keeps closing elsewhere.
+    //
+    // Every type below is SINGLE-PURPOSE, which is the bar for no-method-gating: any call into it IS the
+    // access. Value types that merely CARRY already-read data are excluded on the CLLocation precedent
+    // (HKQuantity, CMDeviceMotion, EKEvent, CBUUID …) — holding a reading is not taking one.
+    // Health — HealthKit. The store plus the query/session types that read or write samples.
+    "HKHealthStore": "Health", "HKSampleQuery": "Health", "HKObserverQuery": "Health",
+    "HKAnchoredObjectQuery": "Health", "HKStatisticsQuery": "Health", "HKStatisticsCollectionQuery": "Health",
+    "HKActivitySummaryQuery": "Health", "HKWorkoutSession": "Health", "HKWorkoutBuilder": "Health",
+    "HKLiveWorkoutBuilder": "Health", "HKHeartbeatSeriesBuilder": "Health",
+    // Motion — CoreMotion. The MANAGERS/recorders that start the sensors (CMDeviceMotion/CMAccelerometerData
+    // are value types carrying an already-taken reading, so they are not here).
+    "CMMotionManager": "Motion", "CMPedometer": "Motion", "CMAltimeter": "Motion",
+    "CMMotionActivityManager": "Motion", "CMHeadphoneMotionManager": "Motion", "CMSensorRecorder": "Motion",
+    // Calendar / Reminders — EventKit. `EKEventStore` serves BOTH and the choice is per-call
+    // (`EKEntityType.event` vs `.reminder`), so it is ambiguous exactly like AVCaptureDevice and is handled
+    // by `privacyEventKitEffects` below — it is NOT in this table. The single-purpose UI types are.
+    "EKEventEditViewController": "Calendar", "EKCalendarChooser": "Calendar",
+    // Bluetooth — CoreBluetooth. Scanning or advertising; both gate on the same key family.
+    "CBCentralManager": "Bluetooth", "CBPeripheralManager": "Bluetooth",
+    // Speech — on-device/server speech recognition (distinct from Mic: the AUDIO capture is Mic, the
+    // RECOGNITION is a separate authorization with its own key, and an app can do either without the other).
+    "SFSpeechRecognizer": "Speech", "SFSpeechAudioBufferRecognitionRequest": "Speech",
+    "SFSpeechURLRecognitionRequest": "Speech",
+    // Biometrics — LocalAuthentication. NSFaceIDUsageDescription is required for Face ID; Touch ID needs no
+    // key, and LAContext cannot tell you which the device has, so this over-discloses on a Touch-ID-only
+    // device. Deliberate, and the same direction as the capture ambiguity: a missing key is the costly error.
+    "LAContext": "Biometrics",
+    // MediaLibrary — the user's Apple Music / media library (NOT AVFoundation playback of your own assets).
+    "MPMediaLibrary": "MediaLibrary", "MPMediaQuery": "MediaLibrary", "MPMusicPlayerController": "MediaLibrary",
+    "MPMediaPickerController": "MediaLibrary",
+    // HomeKit — the user's home accessories.
+    "HMHomeManager": "HomeKit", "HMAccessoryBrowser": "HomeKit",
+    // Tracking — App Tracking Transparency (the IDFA prompt).
+    "ATTrackingManager": "Tracking",
+    // NearbyInteraction — UWB ranging with nearby devices.
+    "NISession": "NearbyInteraction",
+    // Siri — donating to / requesting Siri authorization.
+    "INPreferences": "Siri", "INVoiceShortcutCenter": "Siri",
 ]
+
+/// EventKit's `EKEventStore` reaches BOTH calendars and reminders, chosen per call by an `EKEntityType`
+/// argument — the same ambiguity shape as `AVCaptureDevice`'s media type, and resolved the same way: a
+/// statically-visible `.event`/`.reminder` refines, and an ambiguous store over-discloses BOTH.
+///
+/// The over-disclosure is the deliberate trade-off this extension states: for a privacy manifest a MISSED
+/// sensor is App-Store-rejection-shaped, so an ambiguous store declares both rather than silently miss one.
+/// It does mean a calendar-only app is told it also needs a Reminders key — annoying, and the correct
+/// direction to be wrong in. The precision fence still holds for a genuinely unknown receiver: that stays
+/// pure and is never guessed.
+public func privacyEventKitEffects(entityType: String?) -> [String] {
+    switch entityType {
+    case "event":    return ["Calendar"]
+    case "reminder": return ["Reminders"]
+    default:         return ["Calendar", "Reminders"]
+    }
+}
+
+/// The EventKit types whose Calendar/Reminders split is refined by an entity-type argument.
+public let PRIVACY_EVENTKIT_TYPES: Set<String> = ["EKEventStore"]
 
 /// Classify a member call `root.member(...)` (root = the receiver chain's base identifier or the
 /// receiver's inferred TYPE). Returns nil for the pure/unknown surface — never a guess.

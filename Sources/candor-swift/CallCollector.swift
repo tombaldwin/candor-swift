@@ -639,6 +639,23 @@ final class CallCollector: SyntaxVisitor {
         return nil  // no `for:`/positional media-type arg at all (a bare capture) → ambiguous
     }
 
+    /// `privacy/2` — EventKit's entity-type discriminant, the exact analog of `mediaTypeArg`. EKEventStore
+    /// serves calendars AND reminders and the choice is per call (`requestAccess(to: .event)`,
+    /// `predicateForReminders(in:)`), so a statically-visible `.event`/`.reminder` refines and anything
+    /// else is ambiguous → both. Same shape, same trade-off, deliberately the same code shape so the two
+    /// cannot drift into different rules for the same problem.
+    private func entityTypeArg(_ args: LabeledExprListSyntax) -> String? {
+        for a in args where a.label?.text == "to" || a.label?.text == "for" || a.label == nil {
+            let e = Self.peel(a.expression)
+            if let ma = e.as(MemberAccessExprSyntax.self) {
+                let name = ma.declName.baseName.text
+                if name == "event" || name == "reminder" { return name }
+            }
+            return nil   // an arg is present but not a recognized entity type → ambiguous
+        }
+        return nil       // no entity-type arg at all → ambiguous
+    }
+
     // CONST-STRING PROPAGATION — the value of a KNOWN string constant named `name` (a local `let` shadows a
     // module/global of the same name), or nil if it is not a resolvable const. Conservative: only names in
     // the const-string indexes — a `var`, a runtime/computed value, an unknown name → nil (never guess).
@@ -2103,6 +2120,12 @@ final class CallCollector: SyntaxVisitor {
                 // project code. Supersedes the flat Camera in kappaFree for these types.
                 for e in privacyCaptureEffects(mediaType: mediaTypeArg(node.arguments)) { directEffects.insert(e) }
             } else if !localTypes.contains(name), !localFreeFns.contains(name),
+                      PRIVACY_EVENTKIT_TYPES.contains(dealias(name)) {
+                // `privacy/2` — an EventKit store CONSTRUCTOR (`EKEventStore()`). Carries no entity type,
+                // so the store is ambiguous → over-disclose BOTH Calendar and Reminders, on the same
+                // reasoning as the capture ctor directly above.
+                for e in privacyEventKitEffects(entityType: entityTypeArg(node.arguments)) { directEffects.insert(e) }
+            } else if !localTypes.contains(name), !localFreeFns.contains(name),
                       let eff = kappaFree(name: dealias(name), argCount: node.arguments.count) {
                 // A LOCALLY-declared type ctor (`Pipe()` where `class Pipe`) or free fn (`NSLog(...)` where
                 // `func NSLog`) ALWAYS shadows the platform free-call table — else a project's own
@@ -2201,6 +2224,13 @@ final class CallCollector: SyntaxVisitor {
                 // under-declare a real sensor). Confirmed-capture-type only, so an unknown receiver still
                 // never fabricates. Supersedes the flat Camera in PRIVACY_SDK_TYPES for these types.
                 for e in privacyCaptureEffects(mediaType: mediaTypeArg(node.arguments)) { directEffects.insert(e) }
+            } else if let rt = base.root, PRIVACY_EVENTKIT_TYPES.contains(rt), !declaredTypes.contains(rt) {
+                // `privacy/2` — an EventKit STORE call (`store.requestAccess(to: .reminder)`,
+                // `store.predicateForEvents(...)`): refine the Calendar/Reminders split by the entity-type
+                // argument when it is statically visible, and over-disclose both when it is not. The
+                // `!declaredTypes` guard is the same anti-fabrication fence as the capture arm: a project's
+                // own `EKEventStore` is not EventKit's.
+                for e in privacyEventKitEffects(entityType: entityTypeArg(node.arguments)) { directEffects.insert(e) }
             } else if let rt = base.root, let eff = kappaMember(root: rt, member: member) {
                 directEffects.insert(eff)
                 if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK call IS network I/O

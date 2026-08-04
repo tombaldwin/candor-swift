@@ -17,12 +17,15 @@ enum Effect: String, CaseIterable {
     // no host/path to certify — `deny Location`/containment yes, `allow Location <x>` no). The extension is
     // DISCLOSED in the envelope's `extensions` array when any of these appears (Report.privacyActive).
     case location = "Location", camera = "Camera", mic = "Mic", contacts = "Contacts", photos = "Photos", notify = "Notify"
+    // privacy/2 (2026-08-04) — the second wave; see SPEC-EXTENSION-privacy.md
+    case health = "Health", motion = "Motion", calendar = "Calendar", reminders = "Reminders", bluetooth = "Bluetooth", speech = "Speech", biometrics = "Biometrics", mediaLibrary = "MediaLibrary", homeKit = "HomeKit", tracking = "Tracking", nearbyInteraction = "NearbyInteraction", siri = "Siri"
     var specName: String { rawValue }
     static func from(_ name: String) -> Effect? { Effect(rawValue: name) }
 }
 // The `privacy/1` extension's effect NAMES (the six SPEC-EXTENSION-privacy.md effects). Used to detect
 // whether the extension is active (any effector reaches one) so the envelope discloses `extensions`.
-let PRIVACY_EFFECTS: Set<String> = ["Location", "Camera", "Mic", "Contacts", "Photos", "Notify"]
+let PRIVACY_EFFECTS: Set<String> = ["Location", "Camera", "Mic", "Contacts", "Photos", "Notify",
+                                    "Health", "Motion", "Calendar", "Reminders", "Bluetooth", "Speech", "Biometrics", "MediaLibrary", "HomeKit", "Tracking", "NearbyInteraction", "Siri"]
 // A set of effects (SEMANTICS §1). Wire form = spec-name-sorted names — which, for this vocabulary, is the
 // same lexicographic order a `Set<String>.sorted()` produced, so adoption is byte-identical.
 struct EffectSet {
@@ -117,7 +120,11 @@ struct Report {
                                   "functions": effectors.map { $0.toJSON() }]
         // `privacy/1` wire disclosure (REQUIRED when active): a top-level `extensions` array. OMITTED when
         // no extension effect is active, so a plain report is byte-unchanged (SPEC-EXTENSION-privacy.md).
-        if privacyActive { env["extensions"] = ["privacy/1"] }
+        // privacy/2: the vocabulary GREW (six sensors → eighteen), so the version moves with it. A
+        // consumer that understands `privacy/1` expects exactly six effect names; emitting `Health` under
+        // that label would make the extension's own positive declaration inaccurate — the same
+        // absence-is-a-claim failure the sidecar manifest rung closed at ⟨0.26⟩.
+        if privacyActive { env["extensions"] = ["privacy/2"] }
         // ⟨0.15 staged⟩ `coverage` envelope field — omitted when nothing is uncovered (see above).
         if !coverage.isEmpty {
             env["coverage"] = ["uncovered": coverage.map { ["name": $0.name, "calls": $0.calls] as [String: Any] }]

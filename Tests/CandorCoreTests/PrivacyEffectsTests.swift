@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+@testable import CandorCore
 
 /// End-to-end pins for the `privacy/1` SPEC EXTENSION (SPEC-EXTENSION-privacy.md) — the six Apple
 /// privacy-sensor effects (Location/Camera/Mic/Contacts/Photos/Notify). Each is classified by the framework
@@ -44,7 +45,7 @@ final class PrivacyEffectsTests: XCTestCase {
         XCTAssertEqual(ProcessHarness.inferred(by, "Tracker.whereAmI"), ["Location"],
                        "a CLLocationManager call carries Location")
         // NO companion effect: a sensor read is not network I/O (unlike Llm which adds Net).
-        XCTAssertEqual(env["extensions"] as? [String], ["privacy/1"], "the extension must be disclosed")
+        XCTAssertEqual(env["extensions"] as? [String], ["privacy/2"], "the extension must be disclosed")
     }
 
     func testAudioRecorderClassifiesMic() throws {
@@ -314,5 +315,54 @@ final class PrivacyEffectsTests: XCTestCase {
                       "the unsupported allow rule is still warned about; stderr: \(r.err)")
         XCTAssertTrue(r.err.contains("`Location`") && r.err.contains("Db, Exec, Fs, Llm, Net"),
                       "and the refusal names the token AND the closed set it is outside of; stderr: \(r.err)")
+    }
+
+    // ── privacy/2 ────────────────────────────────────────────────────────────────────────────────────
+    // Every second-wave type must classify, and the two ambiguity rules must behave as documented. Written
+    // because the wave exists to stop `exit 0` meaning "the six I model are declared" while reading as
+    // "your plist is right".
+    func testSecondWaveTypesClassify() {
+        let expected: [(String, String)] = [
+            ("HKHealthStore", "Health"), ("HKSampleQuery", "Health"), ("HKLiveWorkoutBuilder", "Health"),
+            ("CMMotionManager", "Motion"), ("CMPedometer", "Motion"), ("CMHeadphoneMotionManager", "Motion"),
+            ("EKEventEditViewController", "Calendar"),
+            ("CBCentralManager", "Bluetooth"), ("CBPeripheralManager", "Bluetooth"),
+            ("SFSpeechRecognizer", "Speech"), ("LAContext", "Biometrics"),
+            ("MPMediaLibrary", "MediaLibrary"), ("MPMediaQuery", "MediaLibrary"),
+            ("HMHomeManager", "HomeKit"), ("ATTrackingManager", "Tracking"),
+            ("NISession", "NearbyInteraction"), ("INPreferences", "Siri"),
+        ]
+        for (type, effect) in expected {
+            XCTAssertEqual(PRIVACY_SDK_TYPES[type], effect, "\(type) must classify as \(effect)")
+        }
+    }
+
+    /// Value types CARRY a reading; they do not take one. The CLLocation precedent, applied to the new wave
+    /// — a fabricated `Health` on a struct holding a already-read quantity is the precision failure.
+    func testSecondWaveValueTypesAreNotClassified() {
+        for t in ["HKQuantity", "HKQuantitySample", "CMDeviceMotion", "CMAccelerometerData",
+                  "EKEvent", "EKReminder", "CBUUID", "MPMediaItem"] {
+            XCTAssertNil(PRIVACY_SDK_TYPES[t], "\(t) carries a reading — classifying it would fabricate")
+        }
+    }
+
+    /// EventKit's split mirrors the capture split exactly, including the ambiguous default.
+    func testEventKitAmbiguityMirrorsCapture() {
+        XCTAssertEqual(privacyEventKitEffects(entityType: "event"), ["Calendar"])
+        XCTAssertEqual(privacyEventKitEffects(entityType: "reminder"), ["Reminders"])
+        XCTAssertEqual(privacyEventKitEffects(entityType: nil).sorted(), ["Calendar", "Reminders"])
+        XCTAssertEqual(privacyEventKitEffects(entityType: "somethingElse").sorted(), ["Calendar", "Reminders"])
+        // and the store itself is NOT in the flat table — it is only reachable through the discriminator,
+        // which is what stops a bare lookup from silently picking one side.
+        XCTAssertNil(PRIVACY_SDK_TYPES["EKEventStore"])
+        XCTAssertTrue(PRIVACY_EVENTKIT_TYPES.contains("EKEventStore"))
+    }
+
+    /// LocalNetwork is absent ON PURPOSE — the reach is not separable from `Net` by type. Asserted so the
+    /// omission is a decision with a test behind it rather than something nobody got round to.
+    func testLocalNetworkIsDeliberatelyAbsent() {
+        for t in ["NWBrowser", "NWListener", "NetServiceBrowser", "NetService"] {
+            XCTAssertNil(PRIVACY_SDK_TYPES[t], "\(t) must not carry a LocalNetwork effect — see the extension doc")
+        }
     }
 }
