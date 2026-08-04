@@ -439,6 +439,117 @@ public let PRIVACY_SDK_TYPES: [String: String] = [
     "INPreferences": "Siri", "INVoiceShortcutCenter": "Siri",
 ]
 
+/// `privacy/2` — for a call ALREADY classified as a privacy effect, the read/write direction its verb
+/// implies. Same contract as `fsKind`: `["read"]`, `["write"]`, `["read","write"]`, or `[]` when the verb
+/// does not say.
+///
+/// WHY THIS EXISTS AT ALL. Apple distinguishes direction in three key families and candor collapsed all
+/// three: HealthKit's Share (read) vs Update (write), Photos' full library vs Add-only, and Calendars'
+/// full vs write-only. Treating each pair as interchangeable ALTERNATIVES means an app that both reads and
+/// writes HealthKit passes a verify while declaring only Share — and is then rejected by Apple. The verify
+/// was sound on presence and silent on direction; this is the direction half.
+///
+/// THE EMPTY CASE IS STILL THE DISCIPLINE. An unrecognised verb contributes nothing, and a privacy effect
+/// with no determined direction keeps the OLD behaviour exactly: any acceptable key satisfies it. So this
+/// can only ever ADD a requirement where the direction was proved, never invent one where it was not.
+/// The full `privacy/2` effect vocabulary, for cheap membership tests at a call site. Kept beside the
+/// type table so a vocabulary rung updates one place.
+public let PRIVACY_EFFECTS_ALL: Set<String> = [
+    "Location", "Camera", "Mic", "Contacts", "Photos", "Notify",
+    "Health", "Motion", "Calendar", "Reminders", "Bluetooth", "Speech",
+    "Biometrics", "MediaLibrary", "HomeKit", "Tracking", "NearbyInteraction", "Siri",
+]
+
+public let privacyKeyMap: [String: [String]] = [
+    "Location": ["NSLocationWhenInUseUsageDescription", "NSLocationAlwaysAndWhenInUseUsageDescription",
+                 "NSLocationAlwaysUsageDescription", "NSLocationUsageDescription"],
+    "Camera": ["NSCameraUsageDescription"],
+    "Mic": ["NSMicrophoneUsageDescription"],
+    "Contacts": ["NSContactsUsageDescription"],
+    "Photos": ["NSPhotoLibraryUsageDescription", "NSPhotoLibraryAddUsageDescription"],
+    "Notify": [],
+
+    // ── privacy/2 ────────────────────────────────────────────────────────────────────────────────────
+    // A key list is a set of ACCEPTABLE alternatives — any one present satisfies the effect. That is the
+    // established semantic (Location has four), and it is what keeps a verify from inventing an
+    // under-declaration it cannot substantiate.
+    //
+    // The limit that buys, stated rather than buried: HealthKit's two keys are not alternatives in Apple's
+    // model — Share gates READING and Update gates WRITING — and this engine does not discriminate read
+    // from write at the call site, so an app that only declares Share and also writes samples passes here
+    // and is rejected by Apple. Same for the EventKit pairs. Narrowing that needs per-call direction
+    // analysis; until then the verify is sound on PRESENCE and silent on DIRECTION, and says so.
+    "Health": ["NSHealthShareUsageDescription", "NSHealthUpdateUsageDescription"],
+    "Motion": ["NSMotionUsageDescription"],
+    "Calendar": ["NSCalendarsUsageDescription", "NSCalendarsFullAccessUsageDescription",
+                 "NSCalendarsWriteOnlyAccessUsageDescription"],
+    "Reminders": ["NSRemindersUsageDescription", "NSRemindersFullAccessUsageDescription"],
+    "Bluetooth": ["NSBluetoothAlwaysUsageDescription", "NSBluetoothPeripheralUsageDescription"],
+    "Speech": ["NSSpeechRecognitionUsageDescription"],
+    "Biometrics": ["NSFaceIDUsageDescription"],
+    "MediaLibrary": ["NSAppleMusicUsageDescription"],
+    "HomeKit": ["NSHomeKitUsageDescription"],
+    "Tracking": ["NSUserTrackingUsageDescription"],
+    "NearbyInteraction": ["NSNearbyInteractionUsageDescription"],
+    "Siri": ["NSSiriUsageDescription"],
+]
+
+/// `privacy/2` — the DIRECTION-SENSITIVE key families. Apple distinguishes reading from writing in exactly
+/// three places, and treating each pair as interchangeable alternatives is what let an app that both reads
+/// and writes HealthKit pass while declaring only Share.
+///
+/// Consulted only when the direction was PROVED. An effect with no determined direction falls through to
+/// `privacyKeyMap` — i.e. to the pre-`privacy/2` any-key semantics — so this can only ever ADD a
+/// requirement where a verb said, never invent one where none did.
+public let privacyKeyMapByDirection: [String: [String: [String]]] = [
+    // Share gates READING samples, Update gates WRITING them. An app doing both needs both keys, which is
+    // the case this table exists for.
+    "Health": ["read":  ["NSHealthShareUsageDescription"],
+               "write": ["NSHealthUpdateUsageDescription"]],
+    // The Add-only key permits writing and nothing else; the full key permits both, so it satisfies a
+    // write too. Reading REQUIRES the full key — Add-only does not grant it.
+    "Photos": ["read":  ["NSPhotoLibraryUsageDescription"],
+               "write": ["NSPhotoLibraryAddUsageDescription", "NSPhotoLibraryUsageDescription"]],
+    // iOS 17 split calendars into full and write-only. Write-only does not grant reading.
+    "Calendar": ["read":  ["NSCalendarsUsageDescription", "NSCalendarsFullAccessUsageDescription"],
+                 "write": ["NSCalendarsWriteOnlyAccessUsageDescription",
+                           "NSCalendarsFullAccessUsageDescription", "NSCalendarsUsageDescription"]],
+]
+
+public func privacyKind(root: String, member: String) -> [String] {
+    switch member {
+    // ── writes: the call mutates the user's store ────────────────────────────────────────────────────
+    case "save", "saveObject", "saveObjects", "delete", "deleteObjects", "deleteObject",
+         "remove", "removeCalendar", "removeEvent", "removeReminder",
+         "add", "addSamples", "addMetadata", "addWorkoutEvents",
+         "creationRequestForAsset", "creationRequestForAssetFromImage", "creationRequestForAssetFromVideo",
+         "requestWriteOnlyAccessToEvents", "saveCalendar", "commit", "finishWorkout", "endCollection":
+        return ["write"]
+    // ── reads: the call observes without mutating ────────────────────────────────────────────────────
+    case "execute", "fetchAssets", "fetchAssetsWithLocalIdentifiers", "fetchTopLevelUserCollections",
+         "requestImage", "requestImageDataAndOrientation", "requestAVAsset", "requestPlayerItem",
+         "events", "reminders", "calendars", "calendarItems", "calendarItem",
+         "predicateForEvents", "predicateForReminders", "predicateForIncompleteReminders",
+         "predicateForCompletedReminders", "requestFullAccessToEvents", "requestFullAccessToReminders",
+         "preferredUnits", "statisticsQuery", "biologicalSex", "dateOfBirthComponents", "bloodType",
+         "unifiedContacts", "unifiedContact", "enumerateContacts", "authorizationStatus":
+        return ["read"]
+    // `performChanges` is the Photos WRITE transaction wrapper — the change requests inside it are what
+    // mutate, and the block body is analysed on its own, but the wrapper itself only ever exists to write.
+    case "performChanges", "performChangesAndWait":
+        return ["write"]
+    default: break
+    }
+    // `requestAuthorization(toShare:read:)` names BOTH sides in one call and the argument that would
+    // discriminate is a Set built at runtime — so it is genuinely ambiguous and, on this extension's
+    // standing trade-off (a missed sensor is the App-Store-shaped error), it declares both.
+    if member.hasPrefix("requestAuthorization") { return ["read", "write"] }
+    if member.hasPrefix("save") || member.hasPrefix("delete") || member.hasPrefix("remove")
+        || member.hasPrefix("write") { return ["write"] }
+    if member.hasPrefix("fetch") || member.hasPrefix("query") || member.hasPrefix("read") { return ["read"] }
+    return []   // the verb does not say — no claim, and the effect keeps its old any-key semantics
+}
+
 /// EventKit's `EKEventStore` reaches BOTH calendars and reminders, chosen per call by an `EKEntityType`
 /// argument — the same ambiguity shape as `AVCaptureDevice`'s media type, and resolved the same way: a
 /// statically-visible `.event`/`.reminder` refines, and an ambiguous store over-discloses BOTH.

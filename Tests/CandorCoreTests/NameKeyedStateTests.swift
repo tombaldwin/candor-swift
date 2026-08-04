@@ -201,6 +201,9 @@ final class NameKeyedStateTests: XCTestCase {
         // save nor clear it: a `let` rebinding a name says nothing about which disk verbs the
         // function called.
         "fsKinds": .notPerBinding,
+        // Same shape as fsKinds: a flat per-FUNCTION accumulator (effect → directions), not keyed by a
+        // binding name. A rebind says nothing about which sensor verbs the function called.
+        "privacyKinds": .notPerBinding,
         "protoDispatches": .notPerBinding, "protoPropReads": .notPerBinding,
         "stringifyDispatches": .notPerBinding, "stringifyExternal": .notPerBinding,
         "deinitExternal": .notPerBinding, "propertyExternal": .notPerBinding,

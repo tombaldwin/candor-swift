@@ -9,6 +9,39 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### `privacy/2` direction — the verify is no longer silent on read vs write
+
+The privacy case study shipped with a stated limit: *"the verify is sound on PRESENCE and silent on
+DIRECTION"*. Apple splits three key families — HealthKit Share/Update, Photos full/Add-only, Calendars
+full/write-only — and treating each pair as interchangeable alternatives meant an app that both reads and
+writes HealthKit passed while declaring only Share, then got rejected. That limit is now closed.
+
+`privacyKind(root:member:)` refines a call ALREADY classified as a privacy effect with the direction its
+verb implies, on exactly SPEC §2 `fs`'s contract: `["read"]`, `["write"]`, `["read","write"]`, or `[]`.
+
+THE EMPTY CASE IS THE SAFETY PROPERTY, and it is why this could ship without re-auditing anything: an
+unrecognised verb contributes nothing, and an effect with no proved direction keeps the pre-`privacy/2`
+behaviour EXACTLY — any acceptable key satisfies it. The refinement can only ADD a requirement where a verb
+said. A report predating the field verifies identically, so the upgrade cannot turn a passing project red
+by itself.
+
+Measured end to end: code that reads and writes HealthKit against a Share-only plist now exits 1 with
+`✗ code reaches Health (write) … declares no NSHealthUpdateUsageDescription`, naming the writing functions;
+with both keys it exits 0. On the real app both targets are PROVED to read and write Health and both plists
+declare both keys — verdicts unchanged, which is the regression check that matters.
+
+Asymmetry worth stating: Add-only satisfies a write and NOT a read, and write-only likewise. Tests assert
+that directly, because getting it backwards is an App-Store-shaped wrong answer.
+
+`requestAuthorization(toShare:read:)` names both sides in one call and its discriminating argument is a
+runtime Set, so it is genuinely ambiguous and declares BOTH — the extension's standing trade-off.
+
+The key tables moved to CandorCore beside `privacyKind`. The discriminator and the key families it selects
+from are one concept, and splitting them across modules is how a pair drifts apart.
+
+KNOWN LIMIT: direction resolves where the receiver's TYPE does. A module-level `let` used across files
+yields none — which falls back to any-key, i.e. fails safe.
+
 ### SPEC §2 `fs` — candor-swift now emits the read/write refinement it never had
 
 `fs` has been in SPEC §2 since long before this engine, and rust and java carry it. candor-swift did not:

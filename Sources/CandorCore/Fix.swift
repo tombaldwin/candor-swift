@@ -20,6 +20,16 @@ public struct FixFn {
     /// leave every function classless, every narrowed rule permanently unmatched, and every remedy for a
     /// scoped `deny Unknown` silently gone — a lost disclosure indistinguishable from a clean report.
     public let unknownWhy: [String]
+    /// `privacy/2` THE READ/WRITE DIRECTIONS THIS FUNCTION'S PRIVACY CALLS REVEALED, off the §2
+    /// report entry verbatim. Like `netClass` this cannot be derived from the other fields: the verb
+    /// that said "save" rather than "execute" is gone by the time a consumer reads a report, so the
+    /// producer's answer has to travel.
+    ///
+    /// Defaulted to empty, unlike `unknownWhy`, because empty is MEANINGFUL here rather than lossy:
+    /// an absent direction means UNDETERMINED, which is exactly the pre-`privacy/2` behaviour (any
+    /// acceptable key satisfies the effect). A report predating the field therefore verifies exactly
+    /// as it did before, and can never be made to FAIL by the upgrade.
+    public var privacyKinds: [String: [String]] = [:]
     /// ⟨0.20⟩ THE `netClass` DESTINATION CLASSES THIS FUNCTION REACHES, off the §2 report entry verbatim.
     ///
     /// A `deny Net[<dest>…]` rule only forbids `Net` at a function reaching one of those, and unlike the

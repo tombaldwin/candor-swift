@@ -82,6 +82,44 @@ on it is refined. The refinement therefore bites on stores that are not locally 
 `AVCaptureSession()` behaves identically — and it is the trade-off this extension already chose. Narrowing
 it needs per-receiver refinement, which is tracked, not silently absent.
 
+### Direction: `read` vs `write` (`privacy/2`)
+
+Apple distinguishes reading from writing in three key families, and the first wave collapsed all three into
+interchangeable alternatives:
+
+| effect | read | write |
+|---|---|---|
+| `Health` | `NSHealthShareUsageDescription` | `NSHealthUpdateUsageDescription` |
+| `Photos` | `NSPhotoLibraryUsageDescription` | `NSPhotoLibraryAddUsageDescription` \| `NSPhotoLibraryUsageDescription` |
+| `Calendar` | `NSCalendarsUsageDescription` \| `…FullAccess…` | `…WriteOnlyAccess…` \| `…FullAccess…` \| `NSCalendarsUsageDescription` |
+
+Treating a pair as alternatives means an app that both **reads and writes** HealthKit passes a verify while
+declaring only Share — and is then rejected by Apple. `privacyKind(root:member:)` refines a call ALREADY
+classified as a privacy effect with the direction its verb implies, on exactly the contract SPEC §2's `fs`
+uses: `["read"]`, `["write"]`, `["read","write"]`, or `[]` when the verb does not say.
+
+**The empty case is the whole safety property.** An unrecognised verb contributes nothing, and an effect
+with no proved direction keeps the pre-`privacy/2` behaviour precisely — any acceptable key satisfies it.
+So the refinement can only ever ADD a requirement where a verb said, never invent one where none did, and
+a report predating the field verifies exactly as it did before.
+
+Note the asymmetry with Add-only and write-only: `NSPhotoLibraryAddUsageDescription` satisfies a write and
+**not** a read; `NSCalendarsWriteOnlyAccessUsageDescription` likewise. The full-access keys satisfy both.
+
+`requestAuthorization(toShare:read:)` names both sides in one call and the discriminating argument is a Set
+built at runtime, so it is genuinely ambiguous and declares **both** — the standing trade-off, since a
+missed sensor is the App-Store-shaped error.
+
+**Wire:** the direction rides the report entry as `privacy: {"<effect>": ["read"|"write"]}`, direct-only
+and omitted when empty, on the same rule as `fs`. It cannot be derived by a consumer — the verb that said
+`save` rather than `execute` is gone by the time a report is read — so, like `netClass`, the producer's
+answer has to travel.
+
+**KNOWN LIMIT.** Direction resolves where the receiver's type does: a local, a parameter, a property with
+a known type. A receiver whose type the syntactic engine cannot pin (a module-level `let` used across
+files, in the case measured) yields no direction — which falls back to the any-key semantics, i.e. fails
+SAFE. Measured on a real app: `Health` proved `read` and `write` on both targets.
+
 ### A modelled TYPE is not a covered MODULE
 
 A scan that classifies `Health` on `HKHealthStore` will still report HealthKit in the coverage ledger as a

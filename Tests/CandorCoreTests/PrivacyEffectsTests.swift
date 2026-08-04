@@ -365,4 +365,66 @@ final class PrivacyEffectsTests: XCTestCase {
             XCTAssertNil(PRIVACY_SDK_TYPES[t], "\(t) must not carry a LocalNetwork effect — see the extension doc")
         }
     }
+
+    // ── privacy/2 direction ──────────────────────────────────────────────────────────────────────────
+    // Apple distinguishes reading from writing in three key families (HealthKit Share/Update, Photos
+    // full/Add, Calendars full/write-only) and the first wave collapsed all three into interchangeable
+    // alternatives — which let an app that both reads and writes HealthKit pass while declaring only
+    // Share, and be rejected by Apple. These assert the direction half, and above all what it REFUSES
+    // to claim.
+    func testPrivacyWriteVerbs() {
+        for m in ["save", "delete", "remove", "addSamples", "performChanges",
+                  "creationRequestForAsset", "requestWriteOnlyAccessToEvents"] {
+            XCTAssertEqual(privacyKind(root: "HKHealthStore", member: m), ["write"], "\(m) mutates the store")
+        }
+    }
+
+    func testPrivacyReadVerbs() {
+        for m in ["execute", "fetchAssets", "events", "predicateForEvents", "requestImage",
+                  "unifiedContacts", "requestFullAccessToEvents"] {
+            XCTAssertEqual(privacyKind(root: "HKHealthStore", member: m), ["read"], "\(m) observes only")
+        }
+    }
+
+    /// `requestAuthorization(toShare:read:)` names BOTH sides in one call and the discriminating argument
+    /// is a Set built at runtime — genuinely ambiguous, so it declares both on this extension's standing
+    /// trade-off (a missed sensor is the App-Store-shaped error).
+    func testAuthorizationRequestIsAmbiguousAndDeclaresBoth() {
+        XCTAssertEqual(privacyKind(root: "HKHealthStore", member: "requestAuthorization").sorted(),
+                       ["read", "write"])
+    }
+
+    /// THE LOAD-BEARING CASE, same as `fs`: a verb that reveals nothing contributes nothing, and the
+    /// effect keeps its pre-`privacy/2` any-key semantics. Anything here returning a direction would ADD
+    /// a key requirement on the strength of a verb that said neither.
+    func testUnrevealingVerbsMakeNoClaim() {
+        for m in ["isAvailable", "authorizationStatus2", "someFutureVerb", "init", "description"] {
+            XCTAssertEqual(privacyKind(root: "HKHealthStore", member: m), [],
+                           "\(m) must not claim a direction it did not reveal")
+        }
+    }
+
+    /// The direction-sensitive key families, asserted as DATA — a wrong key here is an App-Store-shaped
+    /// wrong answer, and the three pairs are exactly the ones Apple splits.
+    func testDirectionSensitiveKeyFamilies() {
+        XCTAssertEqual(privacyKeyMapByDirection["Health"]?["read"], ["NSHealthShareUsageDescription"])
+        XCTAssertEqual(privacyKeyMapByDirection["Health"]?["write"], ["NSHealthUpdateUsageDescription"])
+        // Add-only permits writing and nothing else; the full key permits both, so it satisfies a write.
+        // Reading REQUIRES the full key — Add-only does not grant it.
+        XCTAssertEqual(privacyKeyMapByDirection["Photos"]?["read"], ["NSPhotoLibraryUsageDescription"])
+        XCTAssertTrue(privacyKeyMapByDirection["Photos"]?["write"]?.contains("NSPhotoLibraryAddUsageDescription") ?? false)
+        XCTAssertFalse(privacyKeyMapByDirection["Photos"]?["read"]?.contains("NSPhotoLibraryAddUsageDescription") ?? true,
+                       "Add-only must NOT satisfy a read")
+        XCTAssertFalse(privacyKeyMapByDirection["Calendar"]?["read"]?.contains("NSCalendarsWriteOnlyAccessUsageDescription") ?? true,
+                       "write-only must NOT satisfy a read")
+    }
+
+    /// Only the three families Apple actually splits are direction-sensitive. A single-key effect must
+    /// stay out, or a proved direction would start demanding a key that does not exist.
+    func testOnlyAppleSplitFamiliesAreDirectionSensitive() {
+        XCTAssertEqual(Set(privacyKeyMapByDirection.keys), ["Health", "Photos", "Calendar"])
+        for e in ["Contacts", "Mic", "Location", "Motion", "Bluetooth"] {
+            XCTAssertNil(privacyKeyMapByDirection[e], "\(e) has one key — direction cannot change it")
+        }
+    }
 }

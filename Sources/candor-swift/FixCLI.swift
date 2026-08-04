@@ -147,8 +147,16 @@ private func mergeFixReport(_ full: String, into byName: inout [String: FixFn],
         // `unknown-host`, which is how `gate --report` consumes the same field. A report predating it
         // loads empty, leaving the narrowed rule unmatched there: the same withholding.
         let netClass = (e["netClass"] as? [Any])?.compactMap { $0 as? String } ?? []
-        byName[fn] = FixFn(inferred: inferred, direct: direct, calls: calls, unknownWhy: why,
+        var rec = FixFn(inferred: inferred, direct: direct, calls: calls, unknownWhy: why,
                            netClass: netClass, loc: loc)
+        // `privacy/2` direction, read verbatim like `netClass`. Absent ⇒ undetermined ⇒ the old
+        // any-key semantics, so an older report is never made to fail by this field's arrival.
+        if let pk = e["privacy"] as? [String: Any] {
+            var m: [String: [String]] = [:]
+            for (eff, v) in pk { m[eff] = (v as? [Any])?.compactMap { $0 as? String } ?? [] }
+            rec.privacyKinds = m
+        }
+        byName[fn] = rec
         for case let m as String in (e["invisible"] as? [Any]) ?? [] { coverage.invisibleModules.insert(m) }
     }
     // ⟨0.15 staged⟩ envelope `coverage` ledger (absent on a fully-covered or pre-⟨0.15⟩ report).

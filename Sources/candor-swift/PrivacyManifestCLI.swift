@@ -23,39 +23,8 @@ private let privacyEffects = ["Location", "Camera", "Mic", "Contacts", "Photos",
 // usage-description key mapping"). The FIRST key of each list is the PRIMARY one (what GENERATE names first).
 // `Notify` maps to NO key — notifications gate via a runtime requestAuthorization, so a Notify reach is
 // reported as a declared capability that requires no manifest key (always satisfied, never under-declared).
-private let privacyKeyMap: [String: [String]] = [
-    "Location": ["NSLocationWhenInUseUsageDescription", "NSLocationAlwaysAndWhenInUseUsageDescription",
-                 "NSLocationAlwaysUsageDescription", "NSLocationUsageDescription"],
-    "Camera": ["NSCameraUsageDescription"],
-    "Mic": ["NSMicrophoneUsageDescription"],
-    "Contacts": ["NSContactsUsageDescription"],
-    "Photos": ["NSPhotoLibraryUsageDescription", "NSPhotoLibraryAddUsageDescription"],
-    "Notify": [],
-
-    // ── privacy/2 ────────────────────────────────────────────────────────────────────────────────────
-    // A key list is a set of ACCEPTABLE alternatives — any one present satisfies the effect. That is the
-    // established semantic (Location has four), and it is what keeps a verify from inventing an
-    // under-declaration it cannot substantiate.
-    //
-    // The limit that buys, stated rather than buried: HealthKit's two keys are not alternatives in Apple's
-    // model — Share gates READING and Update gates WRITING — and this engine does not discriminate read
-    // from write at the call site, so an app that only declares Share and also writes samples passes here
-    // and is rejected by Apple. Same for the EventKit pairs. Narrowing that needs per-call direction
-    // analysis; until then the verify is sound on PRESENCE and silent on DIRECTION, and says so.
-    "Health": ["NSHealthShareUsageDescription", "NSHealthUpdateUsageDescription"],
-    "Motion": ["NSMotionUsageDescription"],
-    "Calendar": ["NSCalendarsUsageDescription", "NSCalendarsFullAccessUsageDescription",
-                 "NSCalendarsWriteOnlyAccessUsageDescription"],
-    "Reminders": ["NSRemindersUsageDescription", "NSRemindersFullAccessUsageDescription"],
-    "Bluetooth": ["NSBluetoothAlwaysUsageDescription", "NSBluetoothPeripheralUsageDescription"],
-    "Speech": ["NSSpeechRecognitionUsageDescription"],
-    "Biometrics": ["NSFaceIDUsageDescription"],
-    "MediaLibrary": ["NSAppleMusicUsageDescription"],
-    "HomeKit": ["NSHomeKitUsageDescription"],
-    "Tracking": ["NSUserTrackingUsageDescription"],
-    "NearbyInteraction": ["NSNearbyInteractionUsageDescription"],
-    "Siri": ["NSSiriUsageDescription"],
-]
+// The tables themselves live in CandorCore beside `privacyKind` — the discriminator and the key families
+// it selects from are one concept, and splitting them across modules is how the pair drifts apart.
 
 // The whole privacy-cluster key universe — used to scope the OVER-declaration check to the sensor cluster
 // (a stray unrelated key like NSCalendarsUsageDescription is not this verb's concern). Every acceptable key
@@ -148,10 +117,20 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
     // — the under-declaration detail (a few representative fn names, sorted, capped).
     var reachedSet: Set<String> = []
     var fnsByEffect: [String: [String]] = [:]
+    // `privacy/2` — the union of PROVED directions per effect, and the fns that proved each one. Unioned
+    // across the whole scan: if any function writes Health, the app needs the write key.
+    var dirsByEffect: [String: Set<String>] = [:]
+    var fnsByEffectDir: [String: [String]] = [:]   // "<effect>/<direction>" -> fns
     for (fn, f) in model.byName {
         for eff in f.inferred.union(f.direct) where privacyKeyMap[eff] != nil {
             reachedSet.insert(eff)
             fnsByEffect[eff, default: []].append(fn)
+        }
+        for (eff, kinds) in f.privacyKinds where privacyKeyMap[eff] != nil {
+            for k in kinds {
+                dirsByEffect[eff, default: []].insert(k)
+                fnsByEffectDir["\(eff)/\(k)", default: []].append(fn)
+            }
         }
     }
     // Stable, deterministic order for the reached list (the vocabulary order) and the fn lists (sorted,
@@ -176,6 +155,19 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         for eff in reached {
             let keys = privacyKeyMap[eff] ?? []
             if keys.isEmpty { continue }   // Notify — no key required, never under-declared
+            // `privacy/2` — when the direction was PROVED and this effect's keys are direction-sensitive,
+            // check each proved direction against its own key set. An app that reads AND writes HealthKit
+            // needs BOTH keys, and reports the missing side by name rather than as one vague "Health".
+            let dirs = dirsByEffect[eff] ?? []
+            if let byDir = privacyKeyMapByDirection[eff], !dirs.isEmpty {
+                for d in dirs.sorted() {
+                    guard let dk = byDir[d], !dk.contains(where: { declared.contains($0) }) else { continue }
+                    let fns = (fnsByEffectDir["\(eff)/\(d)"] ?? []).sorted().prefix(fnCap).map { $0 }
+                    underDeclared.append((effect: "\(eff) (\(d))", keys: dk, fns: fns))
+                }
+                continue
+            }
+            // No proved direction (or a direction-insensitive effect) — the pre-`privacy/2` rule exactly.
             if !keys.contains(where: { declared.contains($0) }) {
                 underDeclared.append((effect: eff, keys: keys, fns: fnsFor(eff)))
             }

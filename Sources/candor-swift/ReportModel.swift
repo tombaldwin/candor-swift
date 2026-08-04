@@ -59,6 +59,10 @@ struct Effector {
     /// Optional and omitted when empty, which is the spec's rule and not an optimisation: an empty or
     /// partial `fs` reads as "reads but never writes", a positive claim in the forbidden direction.
     var fs: [String]? = nil
+    /// `privacy/2` — per privacy effect, the read/write directions this function's own calls revealed.
+    /// Extension-scoped (the envelope discloses `privacy/2`), omitted when empty on the same rule as `fs`:
+    /// an absent direction means undetermined, never "reads but never writes".
+    var privacy: [String: [String]]? = nil
     var invisible: [String]? = nil   // per-fn blind-spot disclosure: κ-unknown modules reached (qualifies `inferred`)
     var netClass: [String]? = nil    // ⟨0.20⟩ Net destination classes present in the fn's transitive Net surface
     var interfaceUnion = false       // ⟨workspace-chain⟩ synthetic protocol-CHA union entry (not an analyzed unit)
@@ -78,6 +82,7 @@ struct Effector {
         if let p = paths, !p.isEmpty { e["paths"] = p }
         if let t = tables, !t.isEmpty { e["tables"] = t }
         if let k = fs, !k.isEmpty { e["fs"] = k }
+        if let pk = privacy, !pk.isEmpty { e["privacy"] = pk }
         if let v = invisible, !v.isEmpty { e["invisible"] = v }
         if let n = netClass, !n.isEmpty { e["netClass"] = n }   // ⟨0.20⟩ Net destination-class (SPEC §1)
         if interfaceUnion { e["interfaceUnion"] = true }        // ⟨workspace-chain⟩ synthetic union entry

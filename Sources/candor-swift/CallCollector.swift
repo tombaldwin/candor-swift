@@ -244,6 +244,9 @@ final class CallCollector: SyntaxVisitor {
     /// verbs that actually say; a verb that does not contributes nothing, so an undetermined direction
     /// stays undetermined rather than defaulting to one side.
     var fsKinds: Set<String> = []
+    /// `privacy/2` — per privacy EFFECT, the read/write directions this function's own calls revealed.
+    /// Same direct-only discipline as `fsKinds`: an undetermined direction stays undetermined.
+    var privacyKinds: [String: Set<String>] = [:]
     var unresolved = false
     var why: Set<String> = []
     var hosts: Set<String> = []
@@ -2115,6 +2118,7 @@ final class CallCollector: SyntaxVisitor {
                 // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. A verb that
                 // does not say contributes nothing, so the field stays absent rather than half-claimed.
                 if eff == "Fs" { for k in fsKind(root: et, member: name) { fsKinds.insert(k) } }
+                if PRIVACY_EFFECTS_ALL.contains(eff) { for k in privacyKind(root: et, member: name) { privacyKinds[eff, default: []].insert(k) } }
                 if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK call IS network I/O
                 recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
                 if lit == nil, est { incompleteSurfaces.insert(eff) }
@@ -2246,6 +2250,7 @@ final class CallCollector: SyntaxVisitor {
                 // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. A verb that
                 // does not say contributes nothing, so the field stays absent rather than half-claimed.
                 if eff == "Fs" { for k in fsKind(root: rt, member: member) { fsKinds.insert(k) } }
+                if PRIVACY_EFFECTS_ALL.contains(eff) { for k in privacyKind(root: rt, member: member) { privacyKinds[eff, default: []].insert(k) } }
                 if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK call IS network I/O
                 // A two-path Fs op (copyItem/moveItem/createSymbolicLink/…) carries a SOURCE *and* a
                 // DESTINATION locator; the single-`lit` guard below captures only the first, so a literal
@@ -2372,6 +2377,7 @@ final class CallCollector: SyntaxVisitor {
                 // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. A verb that
                 // does not say contributes nothing, so the field stays absent rather than half-claimed.
                 if eff == "Fs" { for k in fsKind(root: root, member: node.declName.baseName.text) { fsKinds.insert(k) } }
+                if PRIVACY_EFFECTS_ALL.contains(eff) { for k in privacyKind(root: root, member: node.declName.baseName.text) { privacyKinds[eff, default: []].insert(k) } }
                 kappaClassified = true
             }
             // The accessor-unit edge uses the RECEIVER's type (rootOf of the BASE) — NOT the field-walked

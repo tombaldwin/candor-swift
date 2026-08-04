@@ -734,6 +734,11 @@ for qual in reportQuals.sorted() {
     // SPEC §2 `fs` — gated on `inferred` carrying Fs (the spec: "applies only when `inferred` contains
     // `Fs`"), and omitted when empty. Direct-only, so a function that merely REACHES a writer carries none.
     if let k = analysis.fsD[qual], !k.isEmpty, inf.contains("Fs") { ef.fs = k.sorted() }
+    // `privacy/2` direction — only for effects this fn actually carries, and only where a verb said.
+    if let pk = analysis.privKindD[qual] {
+        let kept = pk.filter { !$0.value.isEmpty && inf.contains($0.key) }
+        if !kept.isEmpty { ef.privacy = kept.mapValues { $0.sorted() } }
+    }
     if !invisible.isEmpty { ef.invisible = invisible }
     // ⟨0.20⟩ Net destination-class: the classes in this fn's transitive Net surface — exact host-literal
     // match, fail-closed unknown-host on a masked surface (incompleteAcc has Net) OR a Net with no visible host.
