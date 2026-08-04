@@ -196,6 +196,11 @@ final class NameKeyedStateTests: XCTestCase {
         "calls": .notPerBinding, "directEffects": .notPerBinding, "unresolved": .notPerBinding,
         "why": .notPerBinding, "hosts": .notPerBinding, "cmds": .notPerBinding,
         "paths": .notPerBinding, "tables": .notPerBinding, "incompleteSurfaces": .notPerBinding,
+        // SPEC §2 `fs` — a flat per-FUNCTION accumulator of read/write kinds, exactly like the
+        // literal surfaces beside it. Not keyed by a binding name, so a shadow scope must neither
+        // save nor clear it: a `let` rebinding a name says nothing about which disk verbs the
+        // function called.
+        "fsKinds": .notPerBinding,
         "protoDispatches": .notPerBinding, "protoPropReads": .notPerBinding,
         "stringifyDispatches": .notPerBinding, "stringifyExternal": .notPerBinding,
         "deinitExternal": .notPerBinding, "propertyExternal": .notPerBinding,
