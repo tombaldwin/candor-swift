@@ -135,6 +135,11 @@ struct Report {
         // that label would make the extension's own positive declaration inaccurate — the same
         // absence-is-a-claim failure the sidecar manifest rung closed at ⟨0.26⟩.
         if privacyActive { env["extensions"] = ["privacy/2"] }
+        // ⟨0.27⟩ SPEC §2.1 `resolves`: the OPTIONAL refinement surfaces this producer computes. Without it
+        // an absent `fs` is overloaded between "does not compute kinds" and "computed and could not
+        // determine one", and a consumer cannot read the omission. A producer MUST NOT list a surface it
+        // does not compute — that turns "unimplemented" into a false "undetermined".
+        env["resolves"] = ["fs"]
         // ⟨0.15 staged⟩ `coverage` envelope field — omitted when nothing is uncovered (see above).
         if !coverage.isEmpty {
             env["coverage"] = ["uncovered": coverage.map { ["name": $0.name, "calls": $0.calls] as [String: Any] }]

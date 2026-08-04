@@ -153,7 +153,7 @@ the same name **shadows** the curated one (the `declaredTypes` anti-fabrication 
 An engine that classifies any `privacy/1` effect MUST disclose the extension in the report envelope:
 
 ```json
-{ "candor": { "version": "…", "toolchain": "swiftsyntax", "spec": "0.26" },
+{ "candor": { "version": "…", "toolchain": "swiftsyntax", "spec": "0.27" },
   "extensions": ["privacy/2"],
   "functions": [ … ] }
 ```
