@@ -562,7 +562,16 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // disclosed on stderr below. Exit 1 reports the violation it is sure of; it does not conceal the part
     // it could not read.
     let refused = policyRefusals + unanswerableScopedFilters(pol.deny, gi)
-    let violations = evaluateGate(denyOnly, gi)
+    let (violations, gateZeroMatchRules) = evaluateGate(denyOnly, gi)
+    // ⟨0.24⟩ §3.1 — an unanswerable condition is DISCLOSED, never scored as a satisfied one. A rule whose
+    // scope binds nothing was silently green: `deny Net ordrs` (one character wrong) passed where
+    // `deny Net orders` failed, and `unverified` then reported the layer as PROVABLY clean.
+    for raw in gateZeroMatchRules {
+        FileHandle.standardError.write(
+            ("candor: policy rule matched NO function — `\(raw)`. It was evaluated and bound nothing, so it "
+             + "cannot have caught anything. Legitimate when one policy is shared across repos; a typo'd "
+             + "layer name otherwise.\n").data(using: .utf8)!)
+    }
     if violations.isEmpty, !refused.isEmpty {
         // SOLE refusal: nothing certain to report, so the gate genuinely could not be evaluated as
         // written. Exit 2 — and ⟨0.24⟩ the refusal DOCUMENT, so a CI wrapper reading `--gate-json`

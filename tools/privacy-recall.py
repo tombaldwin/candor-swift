@@ -90,6 +90,18 @@ CASES = [
     # THE FABRICATION GUARD: an ordinary internet call must gain NO local-network key.
     ("public host charges NO LocalNetwork key", None,
      'import Network\nfunc f() { _ = NWConnection(host: "api.example.com", port: 443, using: .tcp) }'),
+    # RUNG 3/4 — computed paths. These were "not determined, but DISCLOSED" until the home-anchored
+    # resolver landed; they are promises now.
+    ("computed: NSHomeDirectory() + literal", "NSDocumentsFolderUsageDescription",
+     'import Foundation\nfunc f() { _ = FileManager.default.contents(atPath: NSHomeDirectory() + "/Documents/y") }'),
+    ("computed: interpolated home", "NSDesktopFolderUsageDescription",
+     'import Foundation\nfunc f() { _ = FileManager.default.contents(atPath: "\\(NSHomeDirectory())/Desktop/x") }'),
+    ("computed: bound to a local", "NSDownloadsFolderUsageDescription",
+     'import Foundation\nfunc f() { let p = NSHomeDirectory() + "/Downloads/z"; _ = FileManager.default.contents(atPath: p) }'),
+    # AND THE GUARD: an app-scoped computed path must still resolve to NOTHING.
+    ("computed: NSTemporaryDirectory charges nothing", None,
+     'import Foundation\nfunc f() { _ = FileManager.default.contents(atPath: NSTemporaryDirectory() + "/cache") }'),
+
     ("macOS Documents folder", "NSDocumentsFolderUsageDescription",
      'import Foundation\nfunc f() { _ = try? FileManager.default.contentsOfDirectory(atPath: NSHomeDirectory() + "/Documents") }'),
     ("macOS Desktop folder", "NSDesktopFolderUsageDescription",

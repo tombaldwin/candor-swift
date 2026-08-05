@@ -204,6 +204,14 @@ final class NameKeyedStateTests: XCTestCase {
         // Same shape as fsKinds: a flat per-FUNCTION accumulator (effect → directions), not keyed by a
         // binding name. A rebind says nothing about which sensor verbs the function called.
         "privacyKinds": .notPerBinding,
+        // CONSTANT PROVENANCE rung 3. Keyed by a BINDING name, so a rebind must drop it — `let p = home
+        // + "/Desktop"` in one function must not charge a later `func f(_ p: String)`'s parameter the
+        // Desktop key. Unscoped like `vars`: the collector walks one function at a time and `shadowName`
+        // fires on every binder, so a stale entry cannot outlive its scope.
+        "homeAnchoredLocals": .clearedOnRebind(scoped: false),
+        // Path VALUES and a per-call flag — not keyed by any binding name.
+        "resolvedHomePaths": .notPerBinding,
+        "lastResolvedHomePath": .notPerBinding,
         "protoDispatches": .notPerBinding, "protoPropReads": .notPerBinding,
         "stringifyDispatches": .notPerBinding, "stringifyExternal": .notPerBinding,
         "deinitExternal": .notPerBinding, "propertyExternal": .notPerBinding,

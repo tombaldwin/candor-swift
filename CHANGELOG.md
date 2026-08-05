@@ -11,6 +11,38 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [0.27.0] — 2026-08-05
 
+### Constant provenance rungs 3–4: computed paths resolve
+
+`CONSTANT-PROVENANCE-DESIGN.md`'s remaining rungs, and the same primitive the Android permission work
+needs. The spellings real code uses now classify:
+
+```
+NSHomeDirectory() + "/Documents/y"                      → NSDocumentsFolderUsageDescription
+"\(NSHomeDirectory())/Desktop/x"                        → NSDesktopFolderUsageDescription
+let p = NSHomeDirectory() + "/Downloads/z"; use(p)      → NSDownloadsFolderUsageDescription
+NSTemporaryDirectory() + "/cache"                       → nothing (app-scoped)
+func f(_ p: String) { use(p) }                          → nothing, and DISCLOSED as undetermined
+```
+
+**Classes, not strings** — the resolver never reconstructs a path. It looks for a proved home-directory
+anchor and takes the literal that follows; an unresolvable tail keeps the prefix, because the prefix is
+what decides the class. Anything without that anchor returns nil rather than a guess, so an ordinary
+computed path stays undetermined and is counted by `incomplete` instead of classified on a hunch.
+
+**`NameKeyedStateTests` caught the fabrication this introduces**, which is the third time that guard has
+paid for itself. `homeAnchoredLocals` is keyed by a BINDING NAME, so without clearing it on rebind,
+`func a() { let p = NSHomeDirectory() + "/Desktop" }` charged a later `func b(_ p: String)`'s parameter
+the Desktop key — a fabrication from a name collision.
+
+**And then the clearing broke the feature**, in the way the file warns about six lines above the site:
+`shadowName` runs before the initializer is walked, so recording the binding first meant the rebind
+immediately wiped it and only the inline form still resolved. The value is now captured before
+`shadowName` and applied after — the same carve-out `fnValueAlias` documents. The file said so and I
+still had to measure it.
+
+Recall battery 66/66 including an app-scoped guard. A/B: candor-swift 38 → 38 with no changed rows, real
+app 4 effects and verify exit 0 — additive.
+
 ### §2 `incomplete` — the per-function direct signal, and the ⊤ count made real
 
 The undetermined-path count read `paths`, which **propagates**: a function counted as determined when

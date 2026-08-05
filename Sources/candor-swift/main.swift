@@ -1286,7 +1286,16 @@ policyBlock: if let pp = policyPath {
                                           hostsAcc: hostsAcc, cmdsAcc: cmdsAcc,
                                           pathsAcc: pathsAcc, tablesAcc: tablesAcc,
                                           incompleteAcc: incompleteAcc, netPartners: netPartners)
-    gateViolations += evaluateGate(scanPolicy, scanGateInput)
+    let scanGateResult = evaluateGate(scanPolicy, scanGateInput)
+    gateViolations += scanGateResult.violations
+    let gateZeroMatchRules = scanGateResult.zeroMatch
+    // ⟨0.24⟩ §3.1 — see GateReportCLI. A rule that bound nothing is disclosed, never scored as satisfied.
+    for raw in gateZeroMatchRules {
+        FileHandle.standardError.write(
+            ("candor: policy rule matched NO function — `\(raw)`. It was evaluated and bound nothing, so it "
+             + "cannot have caught anything. Legitimate when one policy is shared across repos; a typo'd "
+             + "layer name otherwise.\n").data(using: .utf8)!)
+    }
     // Provable-purity DISCLOSURE (advisory — NEVER a violation, so the exit/verdict are untouched): functions
     // in a pure/deny scope that PASS but are Unknown (the Unknown could hide the forbidden effect — a
     // fn/closure-injected port). Surfaces the gap automatically (eval/fixloop/DISPATCH-NOTE.md).

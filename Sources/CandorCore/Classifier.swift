@@ -750,7 +750,7 @@ public let APPLE_PRIVACY_KEYS: [(key: String, why: String)] = [
     ("NSFaceIDUsageDescription", "not modelled"),
     ("NSFallDetectionUsageDescription", "not modelled"),
     ("NSFileProviderDomainUsageDescription", "not modelled"),
-    ("NSFileProviderPresenceUsageDescription", "NO PUBLIC API NAMES IT — Apple's page links only sibling KEYS, no symbol. A file provider's presence capability is declared, not called"),
+    ("NSFileProviderPresenceUsageDescription", "RESEARCHED 2026-08-05 AND GENUINELY UNDETERMINABLE: Apple's key page links no symbol, the FileProvider framework index contains no presence/known-folder/materialised symbol, and no entitlement names it either. It is not a table row anyone forgot — there is nothing in code to see. The verify raises it CONDITIONALLY where a file provider exists, which is the most that can be said"),
     ("NSFinancialDataUsageDescription", "enterprise/managed surface; not modelled"),
     ("NSGKFriendListUsageDescription", "not modelled"),
     ("NSHandsTrackingUsageDescription", "visionOS surface; not modelled"),

@@ -627,4 +627,37 @@ final class GateProcessTests: XCTestCase {
         let tolerated = try run(bin, [root.path, "--policy", policy.path])
         XCTAssertEqual(tolerated.code, 0, "Unknown[reflect] must tolerate a dispatch-class Unknown — stderr: \(tolerated.err)")
     }
+
+    /// A rule whose SCOPE binds no function is UNANSWERABLE — it was evaluated and bound nothing, so it
+    /// cannot have caught anything. Scoring it as satisfied made a one-character typo in a layer name a
+    /// permanently green gate: `deny Contacts Orders` exits 1 on a real violation, `deny Contacts Ordrs`
+    /// exited 0 with `policy ✓`. Disclosure, not refusal — a zero-match rule is legitimate when one
+    /// policy is shared across repos and the layer exists in only some.
+    func testAPolicyRuleMatchingNoFunctionIsDisclosed() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage("""
+        import Contacts
+        public enum Orders {
+            public static func place() { _ = try? CNContactStore().containers(matching: nil) }
+        }
+        """, name: "App")
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try ProcessHarness.run(bin, [root.path], cwd: root)
+
+        // the real layer still fails, or the disclosure would be masking a broken gate
+        let real = root.appendingPathComponent("real.policy")
+        try "deny Contacts Orders\n".write(to: real, atomically: true, encoding: .utf8)
+        let r1 = try ProcessHarness.run(bin, ["gate", "--report", ".candor/report", "--policy", real.path], cwd: root)
+        XCTAssertEqual(r1.code, 1, "the control must still catch the violation: \(r1.out)\(r1.err)")
+
+        let typo = root.appendingPathComponent("typo.policy")
+        try "deny Contacts Ordrs\n".write(to: typo, atomically: true, encoding: .utf8)
+        let r2 = try ProcessHarness.run(bin, ["gate", "--report", ".candor/report", "--policy", typo.path], cwd: root)
+        XCTAssertTrue((r2.err + r2.out).contains("matched NO function"),
+                      "a rule binding nothing must be disclosed: \(r2.err)\(r2.out)")
+        XCTAssertTrue((r2.err + r2.out).contains("deny Contacts Ordrs"),
+                      "and quoted VERBATIM, so the reader can see the typo: \(r2.err)\(r2.out)")
+        XCTAssertEqual(r2.code, 0,
+                       "DISCLOSED, not refused — a zero-match rule is legitimate for a shared policy")
+    }
 }

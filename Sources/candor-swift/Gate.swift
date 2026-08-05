@@ -296,11 +296,34 @@ func gateInputFromScan(inferred: [String: Set<String>],
 /// drives the console lines, --gate-json and the exit code, so they can never disagree. THE ONLY §6.2
 /// matching code in this engine: `scan --policy` and `gate --report` both land here, which makes "the
 /// same verdict from the same signature" a property of the code rather than of two consistent authors.
-func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> [GateViolation] {
+/// Returns the violations AND the rules whose scope bound no function. The second is a DISCLOSURE
+/// beside the verdict, not a new verdict field — the verdict shape is spec-pinned.
+func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateViolation], zeroMatch: [String]) {
     let inferred = gi.inferred
     let hostsAcc = gi.hosts, cmdsAcc = gi.cmds, pathsAcc = gi.paths, tablesAcc = gi.tables
     let incompleteAcc = gi.surfaceIncomplete, cg = gi.edges, reasonClassAcc = gi.reasonClasses
     var gateViolations: [GateViolation] = []
+        // ZERO-MATCH DISCLOSURE. A rule whose SCOPE binds no function is scored as satisfied — so a
+        // one-character typo in a layer name (`deny Net ordrs`) turns a failing gate green and
+        // `unverified` then calls the layer "PROVABLY clean". The asymmetry is the tell: a typo'd EFFECT
+        // token exits 2 naming the accepted vocabulary, a typo'd LAYER token binds nothing and passes.
+        //
+        // The fix is DISCLOSURE, not refusal, and ⟨0.24⟩ §3.1 already rules it: an unanswerable condition
+        // must be disclosed, never scored as a satisfied one. Refusal would be wrong because a zero-match
+        // rule is LEGITIMATE when one policy is shared across repos and a layer exists in only some.
+        var scopeMatchCount: [String: Int] = [:]
+        for r in pol.deny where !r.scope.isEmpty { scopeMatchCount[r.raw] = 0 }
+        for r in pol.forbid { scopeMatchCount[r.raw] = 0 }
+        for qual in inferred.keys {
+            for r in pol.deny where !r.scope.isEmpty && scopeMatches(qual, r.scope) {
+                scopeMatchCount[r.raw, default: 0] += 1
+            }
+            for r in pol.forbid where scopeMatches(qual, r.from) || scopeMatches(qual, r.to) {
+                scopeMatchCount[r.raw, default: 0] += 1
+            }
+        }
+        let zeroMatch = scopeMatchCount.filter { $0.value == 0 }.keys.sorted()
+
         for qual in inferred.keys.sorted() {
             let inf = inferred[qual] ?? []
             if inf.isEmpty { continue }
@@ -411,5 +434,5 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> [GateViolation] {
                 }
             }
         }
-    return gateViolations
+    return (gateViolations, zeroMatch)
 }

@@ -257,6 +257,14 @@ final class CallCollector: SyntaxVisitor {
     // captured host — the masking guard; see isNetEstablishingMember). Propagated transitively; an
     // allowlisted-effect gate fails CLOSED on an incomplete surface (AS-EFF-008).
     var incompleteSurfaces: Set<String> = []
+    /// Locals bound to a home-anchored path expression — `let p = NSHomeDirectory() + "/Desktop"`.
+    var homeAnchoredLocals: [String: String] = [:]
+    /// Home-anchored paths rung 4 resolved — so the `incomplete` marker can be withdrawn.
+    var resolvedHomePaths: Set<String> = []
+    /// Set by `recordSurfaces` when rung 4 resolved THIS call's destination; read by the call site
+    /// immediately after, so a resolved path is not then marked undetermined. Marking a determined
+    /// folder incomplete would be the ⊤-count inflation reintroduced one layer down.
+    var lastResolvedHomePath = false
     var protoDispatches: [(proto: String, member: String)] = []
     var protoPropReads: [(proto: String, member: String)] = []  // protocol PROPERTY/subscript reads — CHA
     // IMPLICIT-STRINGIFICATION dispatch: a PROTOCOL-typed (existential / generic-bound) operand of an
@@ -1130,6 +1138,76 @@ final class CallCollector: SyntaxVisitor {
         return nil
     }
 
+    /// CONSTANT PROVENANCE, rung 4 — resolve a COMPUTED path expression far enough to name its class.
+    ///
+    /// The design's insight is that the answer is a CLASS, not a path: a proved PREFIX decides which
+    /// protected folder a value falls in, and the unknowable tail cannot move it. So this never tries to
+    /// reconstruct a string — it looks for a known home-directory root and the literal that follows,
+    /// which is exactly the shape real code uses:
+    ///
+    ///     NSHomeDirectory() + "/Documents/x"
+    ///     "\(NSHomeDirectory())/Desktop/report.txt"
+    ///     FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
+    ///
+    /// Returns nil — NOT a guess — for anything else, so an ordinary computed path stays undetermined and
+    /// is counted by the `incomplete` disclosure rather than classified on a hunch.
+    private func homeAnchoredPath(_ expr: ExprSyntax, _ depth: Int = 0) -> String? {
+        if depth > 8 { return nil }
+        let e = Self.peel(expr)
+        // `NSHomeDirectory()` / `FileManager.default.homeDirectoryForCurrentUser`
+        if let call = e.as(FunctionCallExprSyntax.self),
+           let dr = call.calledExpression.as(DeclReferenceExprSyntax.self),
+           dr.baseName.text == "NSHomeDirectory" { return "/Users/_" }
+        if let ma = e.as(MemberAccessExprSyntax.self),
+           ma.declName.baseName.text == "homeDirectoryForCurrentUser" { return "/Users/_" }
+        // a plain literal contributes itself
+        if let lit = e.as(StringLiteralExprSyntax.self), lit.segments.count == 1,
+           let seg = lit.segments.first?.as(StringSegmentSyntax.self) { return seg.content.text }
+        // `A + B` — a SequenceExpr. Resolve the head; append literal tails. A non-literal tail STOPS the
+        // walk rather than failing it: the prefix already decided the class.
+        if let seq = e.as(SequenceExprSyntax.self) {
+            let parts = Array(seq.elements)
+            guard let head = parts.first, var out = homeAnchoredPath(head, depth + 1) else { return nil }
+            guard out.hasPrefix("/Users/_") else { return nil }   // only a HOME anchor decides a class
+            var i = 1
+            while i + 1 < parts.count {
+                guard let op = parts[i].as(BinaryOperatorExprSyntax.self), op.operator.text == "+" else { break }
+                guard let piece = homeAnchoredPath(parts[i + 1], depth + 1) else { break }
+                out += piece; i += 2
+            }
+            return out
+        }
+        // `"\(NSHomeDirectory())/Desktop/x"` — an interpolation whose FIRST segment resolves to home.
+        if let lit = e.as(StringLiteralExprSyntax.self) {
+            var out = ""
+            for seg in lit.segments {
+                if let plain = seg.as(StringSegmentSyntax.self) { out += plain.content.text; continue }
+                guard let ex = seg.as(ExpressionSegmentSyntax.self), ex.expressions.count == 1,
+                      let inner = ex.expressions.first?.expression,
+                      let v = homeAnchoredPath(inner, depth + 1) else {
+                    return out.hasPrefix("/Users/_") ? out : nil   // an unresolvable tail keeps the prefix
+                }
+                out += v
+            }
+            return out.hasPrefix("/Users/_") ? out : nil
+        }
+        // `<home>.appendingPathComponent("Downloads")` — the URL spelling of the same thing.
+        if let call = e.as(FunctionCallExprSyntax.self),
+           let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
+           ma.declName.baseName.text == "appendingPathComponent",
+           let base = ma.base, let root = homeAnchoredPath(base, depth + 1),
+           let arg = call.arguments.first.map({ Self.peel($0.expression) }),
+           let lit = arg.as(StringLiteralExprSyntax.self), lit.segments.count == 1,
+           let seg = lit.segments.first?.as(StringSegmentSyntax.self) {
+            return root + "/" + seg.content.text
+        }
+        // a local bound to any of the above
+        if let dr = e.as(DeclReferenceExprSyntax.self), let bound = homeAnchoredLocals[dr.baseName.text] {
+            return bound
+        }
+        return nil
+    }
+
     private func firstStringLiteral(_ args: LabeledExprListSyntax) -> String? {
         for a in args {
             guard let lit = a.expression.as(StringLiteralExprSyntax.self) else {
@@ -1209,6 +1287,17 @@ final class CallCollector: SyntaxVisitor {
     // arms are unaffected: their shape guards (path chars, SQL statement keyword) already reject payloads.
     private func recordSurfaces(effect: String, lit: String?, args: LabeledExprListSyntax? = nil,
                                 netEstablishing: Bool = true) {
+        // CONSTANT PROVENANCE rung 4, in the ONE place every Fs surface passes through. The literal was
+        // unreadable, but a HOME-ANCHORED expression still names a protected folder —
+        // `NSHomeDirectory() + "/Desktop/x"` is the spelling real code uses, and the class is decided by
+        // the proved prefix, so the unknowable tail does not matter. Only when this ALSO fails is the
+        // destination genuinely undetermined, and the caller's `incomplete` marker stands.
+        lastResolvedHomePath = false
+        if lit == nil, effect == "Fs", let args,
+           let resolved = args.lazy.compactMap({ self.homeAnchoredPath($0.expression) }).first {
+            for c in pathClasses(resolved) { directEffects.insert(c) }
+            if !pathClasses(resolved).isEmpty { resolvedHomePaths.insert(resolved); lastResolvedHomePath = true }
+        }
         guard let lit else { return }
         switch effect {
         case "Net":
@@ -1468,6 +1557,11 @@ final class CallCollector: SyntaxVisitor {
         depBoundLocals.removeValue(forKey: name)
         localConstStrings.removeValue(forKey: name)
         fnValueAlias.removeValue(forKey: name)
+        // A REBIND MUST DROP THE PATH. Without this, `func a() { let p = NSHomeDirectory() + "/Desktop" }`
+        // followed by `func b(_ p: String) { …contents(atPath: p) }` charged b's PARAMETER the Desktop
+        // key — a fabrication from a name collision, which is the exact class NameKeyedStateTests exists
+        // to force a decision about, and it caught this one.
+        homeAnchoredLocals.removeValue(forKey: name)
     }
 
     /// A BINDER THAT **CAN** TYPE THE NEW BINDING STILL HAS TO INVALIDATE THE OLD ONE, and the branches
@@ -2128,7 +2222,18 @@ final class CallCollector: SyntaxVisitor {
                 // pure — the 1725d0a guard keyed on `contentsOf` only — the review's under-report find.)
                 directEffects.insert("Fs")
                 recordSurfaces(effect: "Fs", lit: lit)
-                if lit == nil { incompleteSurfaces.insert("Fs") }  // path is the arg → invisible if not literal (masking)
+                if lit == nil {
+                    // CONSTANT PROVENANCE rung 4 — the literal was unreadable, but a HOME-ANCHORED
+                    // expression still names a protected folder: `NSHomeDirectory() + "/Desktop/x"` is
+                    // the spelling real code uses, and the class is decided by the proved prefix. Only
+                    // when that also fails is the destination genuinely undetermined.
+                    let resolved = node.arguments.lazy.compactMap { self.homeAnchoredPath($0.expression) }.first
+                    if let r = resolved, !pathClasses(r).isEmpty {
+                        for c in pathClasses(r) { directEffects.insert(c) }
+                    } else {
+                        incompleteSurfaces.insert("Fs")
+                    }
+                }
             } else if ["Data", "NSData", "String"].contains(name),
                node.arguments.first?.label?.text == "contentsOf" {
                 // `Data/String(contentsOf: url)` reads from a URL that is EITHER a file (Fs) or a
@@ -2207,7 +2312,7 @@ final class CallCollector: SyntaxVisitor {
                 if PRIVACY_EFFECTS_ALL.contains(eff) { for k in privacyKind(root: et, member: name) { privacyKinds[eff, default: []].insert(k) } }
                 if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK call IS network I/O
                 recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
-                if lit == nil, est { incompleteSurfaces.insert(eff) }
+                if lit == nil, est, !(eff == "Fs" && lastResolvedHomePath) { incompleteSurfaces.insert(eff) }
             } else if !localTypes.contains(name), !localFreeFns.contains(name),
                       PRIVACY_CAPTURE_TYPES.contains(dealias(name)) {
                 // `privacy/1` finding 5 — an AVFoundation capture-type CONSTRUCTOR (`AVCaptureSession()`).
@@ -2251,7 +2356,7 @@ final class CallCollector: SyntaxVisitor {
                                   if ks.isEmpty { fsKinds.insert("?") } else { for k in ks { fsKinds.insert(k) } } }
                 if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK ctor/call IS network I/O
                 recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
-                if lit == nil, est { incompleteSurfaces.insert(eff) }
+                if lit == nil, est, !(eff == "Fs" && lastResolvedHomePath) { incompleteSurfaces.insert(eff) }
             } else {
                 // R32 (swift) — an UNQUALIFIED requirement call inside a PROTOCOL EXTENSION (or protocol
                 // default body): `self` is `Self: P`, so a bare `req()` may dispatch to each conformer's
@@ -2326,7 +2431,18 @@ final class CallCollector: SyntaxVisitor {
                 // overloads are excluded by isFileWrite's inout/label guard (never fabricate).
                 directEffects.insert("Fs")
                 recordSurfaces(effect: "Fs", lit: lit)
-                if lit == nil { incompleteSurfaces.insert("Fs") }  // write destination is the arg → invisible if not literal
+                if lit == nil {
+                    // CONSTANT PROVENANCE rung 4 — the literal was unreadable, but a HOME-ANCHORED
+                    // expression still names a protected folder: `NSHomeDirectory() + "/Desktop/x"` is
+                    // the spelling real code uses, and the class is decided by the proved prefix. Only
+                    // when that also fails is the destination genuinely undetermined.
+                    let resolved = node.arguments.lazy.compactMap { self.homeAnchoredPath($0.expression) }.first
+                    if let r = resolved, !pathClasses(r).isEmpty {
+                        for c in pathClasses(r) { directEffects.insert(c) }
+                    } else {
+                        incompleteSurfaces.insert("Fs")
+                    }
+                }
             } else if let rt = base.root, rt == "NWBrowser" || rt == "NetServiceBrowser",
                       !declaredTypes.contains(rt) {
                 // A BONJOUR DESCRIPTOR is local-network by definition — `.bonjour(type:domain:)` is mDNS,
@@ -2419,7 +2535,7 @@ final class CallCollector: SyntaxVisitor {
                 } else {
                     let est = isEstablishingMember(effect: eff, root: rt, member: member)
                     recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
-                    if lit == nil, est { incompleteSurfaces.insert(eff) }
+                    if lit == nil, est, !(eff == "Fs" && lastResolvedHomePath) { incompleteSurfaces.insert(eff) }
                 }
             } else {
                 // `extOwner` carries the CONFIDENTLY-resolved receiver root (a typed value chain, or a
@@ -3129,10 +3245,21 @@ final class CallCollector: SyntaxVisitor {
             // because its RHS is a shadowed local rather than a `localFreeFns` name. Captured before,
             // reinstated after, only when the initializer MENTIONS the name.
             let aliasBeforeRebind = fnValueAlias[name]
+            // CONSTANT PROVENANCE rung 3 — a local bound to a home-anchored path carries it, so
+            // `let docs = NSHomeDirectory() + "/Documents"; …contents(atPath: docs)` resolves.
+            //
+            // AFTER `shadowName`, and that ordering is the whole of it: recorded before, the rebind
+            // immediately wiped it and the binding form silently stopped resolving while the inline form
+            // still worked. This is the same ordering carve-out `fnValueAlias` documents six lines up,
+            // hit for the same reason — the file warned about it and I still had to measure it.
+            var homePathForThisBinding: String? = nil
+            if let iv = binding.initializer?.value, let hp = homeAnchoredPath(iv),
+               hp.hasPrefix("/Users/_") { homePathForThisBinding = hp }
             shadowName(name)          // a rebind: the signature's `some P` opacity and any earlier
                                       // dependency provenance stop applying to the NAME here. Runs
                                       // BEFORE the branches below, one of which re-inserts the
                                       // provenance for this binding's own initializer.
+            if let hp = homePathForThisBinding { homeAnchoredLocals[name] = hp }
             // `protoTyped` is NOT in `shadowName`, and the reason is an ORDERING fact that cost a real
             // reach before it was understood. SwiftSyntax walks a binding's PATTERN before its
             // INITIALIZER, so anything cleared here is already gone by the time the initializer's own

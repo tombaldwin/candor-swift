@@ -311,8 +311,10 @@ private func printPrivacyVocabularyBound(undetermined: (ops: Int, fns: [String])
     // where the capability exists is a lead.
     if fileProvider {
         print("· this app reaches the FileProvider surface, so NSFileProviderPresenceUsageDescription MAY "
-              + "apply. Apple documents no API and no entitlement for it, so candor cannot tell — check it "
-              + "by hand if your provider reports which files are being viewed.")
+              + "apply — the ONE key candor cannot determine at all. Apple's page for it links no symbol, "
+              + "the FileProvider framework index has no presence/known-folder symbol, and no entitlement "
+              + "names it. Check by hand: if your file-provider extension reports which items the user is "
+              + "viewing, declare it.")
     }
     if undetermined.ops > 0 {
         let names = undetermined.fns.prefix(3).joined(separator: ", ")
