@@ -379,6 +379,14 @@ public let MODEL_SDK_TYPES: Set<String> = [
 /// access is member-gated in `kappaPropertyRead` instead (finding 4). This is the opposite direction from
 /// the capture-ambiguity over-disclosure above BECAUSE AVAudioEngine is PREDOMINANTLY not-mic: gating on
 /// the mic-specific member is right, over-disclosing every playback engine as Mic would be a fabrication.
+/// Privacy families whose ENTRY POINT is a member on a SHARED type — see `kappaMember`. Separate from
+/// PRIVACY_SDK_TYPES because charging the whole type would fabricate: HKObjectType vends every HealthKit
+/// type, so only `clinicalType` names the clinical-records resource.
+public let PRIVACY_MEMBER_TYPES: [String: [String: String]] = [
+    "HKObjectType": ["clinicalType": "ClinicalRecords"],
+    "HKSampleType": ["clinicalType": "ClinicalRecords"],
+]
+
 public let PRIVACY_SDK_TYPES: [String: String] = [
     // Location — CoreLocation (the sensor-accessing MANAGER/updater/geocoder; CLLocation itself is a value
     // type carrying already-read coordinates, so it is NOT here) + MapKit user-tracking.
@@ -391,6 +399,27 @@ public let PRIVACY_SDK_TYPES: [String: String] = [
     // Mic — the unambiguous audio-capture type. (AVAudioEngine is NOT here — mic-gated on `.inputNode`
     // in kappaPropertyRead; a bare playback engine must not fabricate Mic. See the note above.)
     "AVAudioRecorder": "Mic",
+    // ── privacy/3 (2026-08-05) ────────────────────────────────────────────────────────────────────────
+    // Added after FETCHING Apple's protected-resources list, which documents 56 usage-description keys
+    // where candor modelled 26. Each family below landed only after a recall fixture measured the miss.
+    // NFC — Core NFC reader sessions.
+    "NFCNDEFReaderSession": "Nfc", "NFCTagReaderSession": "Nfc", "NFCVASReaderSession": "Nfc",
+    // Fall detection — a CoreMotion surface with its OWN key, distinct from NSMotionUsageDescription.
+    "CMFallDetectionManager": "FallDetection",
+    // SensorKit — research sensor streams.
+    "SRSensorReader": "SensorKit", "SRFetchRequest": "SensorKit",
+    // Clinical health records — a HealthKit surface with its own key, separate from Share/Update.
+    "HKClinicalType": "ClinicalRecords", "HKClinicalRecord": "ClinicalRecords",
+    // FileProvider — vending a file-provider domain.
+    "NSFileProviderManager": "FileProvider", "NSFileProviderDomain": "FileProvider",
+    // System extensions — installing a driver / network / endpoint-security extension.
+    "OSSystemExtensionRequest": "SystemExtension",
+    // Apple events — driving another app (macOS automation).
+    "NSAppleScript": "AppleEvents", "NSAppleEventDescriptor": "AppleEvents",
+    // TV provider — single sign-on to a subscription.
+    "VSAccountManager": "VideoSubscriber",
+    // Game Center friends.
+    "GKLocalPlayer": "GameCenterFriends",
     // Contacts — the address book.
     "CNContactStore": "Contacts", "CNContactPickerViewController": "Contacts",
     // Photos — the photo library.
@@ -459,47 +488,117 @@ public let PRIVACY_SDK_TYPES: [String: String] = [
 /// can only ever ADD a requirement where the direction was proved, never invent one where it was not.
 /// The full `privacy/2` effect vocabulary, for cheap membership tests at a call site. Kept beside the
 /// type table so a vocabulary rung updates one place.
-public let PRIVACY_EFFECTS_ALL: Set<String> = [
+/// THE canonical sensor vocabulary. It was duplicated in SIX places (this, ReportModel's
+/// PRIVACY_EFFECTS, PrivacyManifestCLI's privacyEffects, main.swift's effect list, Policy's EFFECTS and
+/// Surface's salience switch) — so adding privacy/3's nine families to the type table and the key map
+/// changed NOTHING until all six moved. A vocabulary with six copies is six places to forget the tenth
+/// family, and the failure is silent: the effect is computed and then dropped for not being on a list.
+/// The other five now derive from this one.
+public let PRIVACY_EFFECTS_ORDER: [String] = [
     "Location", "Camera", "Mic", "Contacts", "Photos", "Notify",
     "Health", "Motion", "Calendar", "Reminders", "Bluetooth", "Speech",
     "Biometrics", "MediaLibrary", "HomeKit", "Tracking", "NearbyInteraction", "Siri",
+    // privacy/3 (2026-08-05) — appended, never interleaved, so existing output ordering is unchanged.
+    "Nfc", "FallDetection", "SensorKit", "FileProvider", "SystemExtension", "AppleEvents",
+    "VideoSubscriber", "GameCenterFriends", "ClinicalRecords",
 ]
 
-/// APPLE USAGE-DESCRIPTION KEYS THIS EXTENSION DOES NOT MODEL — named, so a verify can say so.
+public let PRIVACY_EFFECTS_ALL: Set<String> = Set(PRIVACY_EFFECTS_ORDER)
+
+
+/// EVERY usage-description key Apple documents under "protected resources", verbatim.
 ///
-/// MEASURED, not guessed: a recall battery (one fixture per key family, exercising the canonical API)
-/// found these emit NOTHING. They are listed here so the verify can DISCLOSE its own vocabulary bound
-/// instead of printing "✓ every accessed capability is declared" over a sensor it never looks for.
+/// FETCHED, not recalled — from Apple's own docs JSON (`developer.apple.com/tutorials/data/documentation/
+/// bundleresources/protected-resources.json`) on 2026-08-05. That matters, because the first version of
+/// this disclosure was hand-compiled from memory: it named 14 unmodelled keys when the real number was
+/// 30, so **the warning about the gap itself under-reported the gap by more than half**. A disclosure
+/// that under-states is the same defect as a report that under-states, one level up.
 ///
-/// This is the whole difference between a tool that is incomplete and a tool that LIES about being
-/// complete. A green verify that quietly means "green for the 18 sensors I know" is how somebody
-/// submits to Apple and gets rejected — the one outcome this feature exists to prevent.
+/// The unmodelled set is DERIVED from this minus `privacyKeyMap`, never hand-maintained, so it cannot
+/// silently fall behind again — add a key to the model and it leaves the disclosure automatically.
+/// `PrivacyKeyUniverseTests` pins the arithmetic.
 ///
-/// Each has a reason, and none of them is "we forgot":
-///   · LocalNetwork — `NWBrowser`/`NWConnection` serve ordinary networking too, so the reach is not
-///     separable by type, and the key travels with an entitlement this engine does not read.
-///   · the macOS folder keys — triggered by PATH, not by API: the same `FileManager` call needs a
-///     different key, or none, depending on a string. That is the value-provenance problem.
-///   · FocusStatus / GameKit friends / VideoSubscriberAccount / clinical health records — simply not
-///     modelled yet. Cheap to add; each needs its own fixture and a source read.
-public let PRIVACY_UNMODELLED_KEYS: [(key: String, why: String)] = [
-    ("NSLocalNetworkUsageDescription", "NWBrowser/NWConnection also serve ordinary networking; needs an entitlement this engine does not read"),
-    ("NSDocumentsFolderUsageDescription", "triggered by PATH, not by API — needs value provenance"),
+/// One key is here that the page does not list: NSFocusStatusUsageDescription. It is real (Focus status
+/// sharing) and documented elsewhere; kept, and flagged, rather than dropped because it did not appear
+/// in one source.
+public let APPLE_PRIVACY_KEYS: [(key: String, why: String)] = [
+    ("NFCReaderUsageDescription", "not modelled"),
+    ("NSAccessoryTrackingUsageDescription", "visionOS surface; not modelled"),
+    ("NSAppBundlesUsageDescription", "enterprise/managed surface; not modelled"),
+    ("NSAppDataUsageDescription", "enterprise/managed surface; not modelled"),
+    ("NSAppleEventsUsageDescription", "not modelled"),
+    ("NSAppleMusicUsageDescription", "not modelled"),
+    ("NSAudioCaptureUsageDescription", "visionOS surface; not modelled"),
+    ("NSBluetoothAlwaysUsageDescription", "not modelled"),
+    ("NSBluetoothPeripheralUsageDescription", "not modelled"),
+    ("NSCalendarsFullAccessUsageDescription", "not modelled"),
+    ("NSCalendarsUsageDescription", "not modelled"),
+    ("NSCalendarsWriteOnlyAccessUsageDescription", "not modelled"),
+    ("NSCameraUsageDescription", "not modelled"),
+    ("NSContactsUsageDescription", "not modelled"),
+    ("NSCriticalMessagingUsageDescription", "enterprise/managed surface; not modelled"),
     ("NSDesktopFolderUsageDescription", "triggered by PATH, not by API — needs value provenance"),
+    ("NSDocumentsFolderUsageDescription", "triggered by PATH, not by API — needs value provenance"),
     ("NSDownloadsFolderUsageDescription", "triggered by PATH, not by API — needs value provenance"),
-    ("NSRemovableVolumesUsageDescription", "triggered by PATH, not by API — needs value provenance"),
-    ("NSNetworkVolumesUsageDescription", "triggered by PATH, not by API — needs value provenance"),
-    ("NSFocusStatusUsageDescription", "not modelled"),
-    ("NSGKFriendListUsageDescription", "not modelled"),
-    ("NSVideoSubscriberAccountUsageDescription", "not modelled"),
-    ("NSHealthClinicalHealthRecordsShareUsageDescription", "not modelled"),
-    ("NSSensorKitUsageDescription", "not modelled"),
+    ("NSEnterpriseMCAMUsageDescription", "enterprise/managed surface; not modelled"),
+    ("NSFaceIDUsageDescription", "not modelled"),
+    ("NSFallDetectionUsageDescription", "not modelled"),
     ("NSFileProviderDomainUsageDescription", "not modelled"),
+    ("NSFileProviderPresenceUsageDescription", "enterprise/managed surface; not modelled"),
+    ("NSFinancialDataUsageDescription", "enterprise/managed surface; not modelled"),
+    ("NSGKFriendListUsageDescription", "not modelled"),
+    ("NSHandsTrackingUsageDescription", "visionOS surface; not modelled"),
+    ("NSHealthClinicalHealthRecordsShareUsageDescription", "not modelled"),
+    ("NSHealthShareUsageDescription", "not modelled"),
+    ("NSHealthUpdateUsageDescription", "not modelled"),
+    ("NSHomeKitUsageDescription", "not modelled"),
+    ("NSIdentityUsageDescription", "not modelled"),
+    ("NSLocalNetworkUsageDescription", "NWBrowser/NWConnection also serve ordinary networking; the key travels with an entitlement this engine does not read"),
+    ("NSLocationAlwaysAndWhenInUseUsageDescription", "not modelled"),
+    ("NSLocationAlwaysUsageDescription", "not modelled"),
+    ("NSLocationTemporaryUsageDescription", "a temporary-accuracy REQUEST on a modelled Location manager; the key is purpose-string-keyed, not API-keyed"),
+    ("NSLocationUsageDescription", "not modelled"),
+    ("NSLocationWhenInUseUsageDescription", "not modelled"),
+    ("NSMainCameraUsageDescription", "visionOS surface; not modelled"),
+    ("NSMicrophoneUsageDescription", "not modelled"),
+    ("NSMotionUsageDescription", "not modelled"),
+    ("NSNearbyInteractionAllowOnceUsageDescription", "the allow-once variant of a modelled key; not separable at the call site"),
+    ("NSNearbyInteractionUsageDescription", "not modelled"),
+    ("NSNetworkVolumesUsageDescription", "triggered by PATH, not by API — needs value provenance"),
+    ("NSPhotoLibraryAddUsageDescription", "not modelled"),
+    ("NSPhotoLibraryUsageDescription", "not modelled"),
+    ("NSRemindersFullAccessUsageDescription", "not modelled"),
+    ("NSRemindersUsageDescription", "not modelled"),
+    ("NSRemovableVolumesUsageDescription", "triggered by PATH, not by API — needs value provenance"),
+    ("NSSensorKitUsageDescription", "not modelled"),
+    ("NSSiriUsageDescription", "not modelled"),
+    ("NSSpeechRecognitionUsageDescription", "not modelled"),
     ("NSSystemAdministrationUsageDescription", "not modelled"),
     ("NSSystemExtensionUsageDescription", "not modelled"),
+    ("NSUserTrackingUsageDescription", "not modelled"),
+    ("NSVideoSubscriberAccountUsageDescription", "not modelled"),
+    ("NSWorldSensingUsageDescription", "visionOS surface; not modelled"),
+    ("NSFocusStatusUsageDescription", "not modelled (documented outside the protected-resources page)"),
 ]
 
+/// The keys candor does NOT model — Apple's universe minus what `privacyKeyMap` can emit. Derived.
+public var PRIVACY_UNMODELLED_KEYS: [(key: String, why: String)] {
+    let modelled = Set(privacyKeyMap.values.flatMap { $0 })
+    return APPLE_PRIVACY_KEYS.filter { !modelled.contains($0.key) }
+}
+
 public let privacyKeyMap: [String: [String]] = [
+    // privacy/3 (2026-08-05) — added after FETCHING Apple's protected-resources list and finding candor
+    // modelled 26 of the 56 keys it documents. Each landed only after a recall fixture measured the miss.
+    "Nfc": ["NFCReaderUsageDescription"],
+    "FallDetection": ["NSFallDetectionUsageDescription"],
+    "SensorKit": ["NSSensorKitUsageDescription"],
+    "FileProvider": ["NSFileProviderDomainUsageDescription"],
+    "SystemExtension": ["NSSystemExtensionUsageDescription"],
+    "AppleEvents": ["NSAppleEventsUsageDescription"],
+    "VideoSubscriber": ["NSVideoSubscriberAccountUsageDescription"],
+    "GameCenterFriends": ["NSGKFriendListUsageDescription"],
+    "ClinicalRecords": ["NSHealthClinicalHealthRecordsShareUsageDescription"],
     "Location": ["NSLocationWhenInUseUsageDescription", "NSLocationAlwaysAndWhenInUseUsageDescription",
                  "NSLocationAlwaysUsageDescription", "NSLocationUsageDescription"],
     "Camera": ["NSCameraUsageDescription"],
@@ -623,6 +722,11 @@ public func kappaMember(root: String, member: String) -> String? {
     // `privacy/1`: ANY call into a curated privacy-sensor type is that sensor effect (no method-name
     // gating — single-purpose types). A local same-named type shadows this via declaredTypes at the driver.
     if let priv = PRIVACY_SDK_TYPES[root] { return priv }
+    // MEMBER-GATED privacy families: the type is shared, only a specific member reaches the sensor.
+    // `HKObjectType.clinicalType(forIdentifier:)` needs its own key, but HKObjectType vends EVERY
+    // HealthKit type — putting it in PRIVACY_SDK_TYPES would charge clinical-records access to every app
+    // that touches a step count. Gate on the member, which is what actually names the resource.
+    if let priv = PRIVACY_MEMBER_TYPES[root]?[member] { return priv }
     switch root {
     case "FileManager", "FileHandle": return FS_MEMBERS.contains(member) || member == "readToEnd"
         || member == "write" || member == "read" ? "Fs" : nil

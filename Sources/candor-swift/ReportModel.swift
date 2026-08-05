@@ -3,6 +3,7 @@
 // for the engine architecture overview.
 
 import Foundation
+import CandorCore
 
 // ── The candor domain model (candor-spec/MODEL.md) — candor-swift's named realization of the shared
 // vocabulary. Independently derived (NO shared code across engines — that independence is what the
@@ -19,13 +20,20 @@ enum Effect: String, CaseIterable {
     case location = "Location", camera = "Camera", mic = "Mic", contacts = "Contacts", photos = "Photos", notify = "Notify"
     // privacy/2 (2026-08-04) — the second wave; see SPEC-EXTENSION-privacy.md
     case health = "Health", motion = "Motion", calendar = "Calendar", reminders = "Reminders", bluetooth = "Bluetooth", speech = "Speech", biometrics = "Biometrics", mediaLibrary = "MediaLibrary", homeKit = "HomeKit", tracking = "Tracking", nearbyInteraction = "NearbyInteraction", siri = "Siri"
+    // privacy/3 (2026-08-05) — added after fetching Apple's protected-resources list (56 keys documented,
+    // 26 modelled). THIS ENUM IS THE SEVENTH COPY OF THE SENSOR VOCABULARY and the last one to matter:
+    // `Effect.from` returns nil for a name that is not a case, so a family present in the type table, the
+    // key map, the ordered list and four other places was still COMPUTED AND THEN DISCARDED at
+    // serialisation. Nothing failed; the effect simply never reached the report.
+    case nfc = "Nfc", fallDetection = "FallDetection", sensorKit = "SensorKit", fileProvider = "FileProvider",
+         systemExtension = "SystemExtension", appleEvents = "AppleEvents", videoSubscriber = "VideoSubscriber",
+         gameCenterFriends = "GameCenterFriends", clinicalRecords = "ClinicalRecords"
     var specName: String { rawValue }
     static func from(_ name: String) -> Effect? { Effect(rawValue: name) }
 }
 // The `privacy/1` extension's effect NAMES (the six SPEC-EXTENSION-privacy.md effects). Used to detect
 // whether the extension is active (any effector reaches one) so the envelope discloses `extensions`.
-let PRIVACY_EFFECTS: Set<String> = ["Location", "Camera", "Mic", "Contacts", "Photos", "Notify",
-                                    "Health", "Motion", "Calendar", "Reminders", "Bluetooth", "Speech", "Biometrics", "MediaLibrary", "HomeKit", "Tracking", "NearbyInteraction", "Siri"]
+let PRIVACY_EFFECTS: Set<String> = PRIVACY_EFFECTS_ALL   // derived — see PRIVACY_EFFECTS_ALL
 // A set of effects (SEMANTICS §1). Wire form = spec-name-sorted names — which, for this vocabulary, is the
 // same lexicographic order a `Set<String>.sorted()` produced, so adoption is byte-identical.
 struct EffectSet {
@@ -134,7 +142,7 @@ struct Report {
         // consumer that understands `privacy/1` expects exactly six effect names; emitting `Health` under
         // that label would make the extension's own positive declaration inaccurate — the same
         // absence-is-a-claim failure the sidecar manifest rung closed at ⟨0.26⟩.
-        if privacyActive { env["extensions"] = ["privacy/2"] }
+        if privacyActive { env["extensions"] = ["privacy/3"] }
         // ⟨0.27⟩ SPEC §2.1 `resolves`: the OPTIONAL refinement surfaces this producer computes. Without it
         // an absent `fs` is overloaded between "does not compute kinds" and "computed and could not
         // determine one", and a consumer cannot read the omission. A producer MUST NOT list a surface it

@@ -98,6 +98,22 @@ CASES = [
     ("Clinical health records", "NSHealthClinicalHealthRecordsShareUsageDescription",
      'import HealthKit\nfunc f() { _ = HKObjectType.clinicalType(forIdentifier: .allergyRecord) }'),
 
+    # ── newly modelled in 0.27, each added only after its fixture measured the miss ─────────────────
+    ("NFC / NFCNDEFReaderSession", "NFCReaderUsageDescription",
+     'import CoreNFC\nfunc f() { _ = NFCNDEFReaderSession(delegate: nil as! NFCNDEFReaderSessionDelegate, queue: nil, invalidateAfterFirstRead: true) }'),
+    ("NFC / NFCTagReaderSession", "NFCReaderUsageDescription",
+     'import CoreNFC\nfunc f() { _ = NFCTagReaderSession(pollingOption: .iso14443, delegate: nil as! NFCTagReaderSessionDelegate) }'),
+    ("Fall detection / CMFallDetectionManager", "NSFallDetectionUsageDescription",
+     'import CoreMotion\nfunc f() { _ = CMFallDetectionManager() }'),
+    ("SensorKit / SRSensorReader", "NSSensorKitUsageDescription",
+     'import SensorKit\nfunc f() { _ = SRSensorReader(sensor: .accelerometer) }'),
+    ("FileProvider / NSFileProviderManager", "NSFileProviderDomainUsageDescription",
+     'import FileProvider\nfunc f() { NSFileProviderManager.add(NSFileProviderDomain(identifier: .init("x"), displayName: "x")) { _ in } }'),
+    ("System extension / OSSystemExtensionRequest", "NSSystemExtensionUsageDescription",
+     'import SystemExtensions\nfunc f() { _ = OSSystemExtensionRequest.activationRequest(forExtensionWithIdentifier: "x", queue: .main) }'),
+    ("Apple events / NSAppleScript", "NSAppleEventsUsageDescription",
+     'import Foundation\nfunc f() { var e: NSDictionary?; _ = NSAppleScript(source: "tell app \\"Finder\\" to activate")?.executeAndReturnError(&e) }'),
+
     # ── shapes that could defeat detection even for a MODELLED sensor ───────────────────────────────
     ("Contacts behind a local wrapper type", "NSContactsUsageDescription",
      'import Contacts\nfinal class Svc { let s = CNContactStore()\n  func all() -> [CNContainer] { (try? s.containers(matching: nil)) ?? [] } }\n'
@@ -132,12 +148,14 @@ def scan(src, ws, i):
 # Families the extension does NOT claim, mirroring PRIVACY_UNMODELLED_KEYS. A miss here is DISCLOSED by
 # the verify, so it is reported and does not fail the gate. A miss OUTSIDE this set is a broken promise.
 KNOWN_UNMODELLED = {
-    "NSLocalNetworkUsageDescription", "NSDocumentsFolderUsageDescription", "NSDesktopFolderUsageDescription",
-    "NSDownloadsFolderUsageDescription", "NSRemovableVolumesUsageDescription", "NSNetworkVolumesUsageDescription",
-    "NSFocusStatusUsageDescription", "NSGKFriendListUsageDescription", "NSVideoSubscriberAccountUsageDescription",
-    "NSHealthClinicalHealthRecordsShareUsageDescription", "NSSensorKitUsageDescription",
-    "NSFileProviderDomainUsageDescription", "NSSystemAdministrationUsageDescription",
-    "NSSystemExtensionUsageDescription",
+    # Path-triggered: the same FileManager call needs a different key, or none, depending on a string.
+    "NSDocumentsFolderUsageDescription", "NSDesktopFolderUsageDescription",
+    "NSDownloadsFolderUsageDescription", "NSRemovableVolumesUsageDescription",
+    "NSNetworkVolumesUsageDescription",
+    # Not separable by type / needs an entitlement this engine does not read.
+    "NSLocalNetworkUsageDescription",
+    # Not modelled yet — each needs its own fixture and a source read.
+    "NSFocusStatusUsageDescription",
 }
 
 

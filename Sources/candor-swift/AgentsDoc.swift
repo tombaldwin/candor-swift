@@ -167,7 +167,7 @@ function down to the nearest DIRECT source, each step indented one deeper, the s
 policy, read-only; `--json` emits `{ effect, fn, path:[{ fn, loc, source }] }`. If the fn does not
 perform the effect (or the source is not a local function) the chain is honestly empty. A missing
 report or an unmatched fn fails loud (exit 2).
-`privacy-manifest` (the `privacy/2` extension, SPEC-EXTENSION-privacy.md) turns the report's privacy-sensor
+`privacy-manifest` (the `privacy/3` extension, SPEC-EXTENSION-privacy.md) turns the report's privacy-sensor
 reach — the transitive union of Location/Camera/Mic/Contacts/Photos/Notify, which grep can't see — into an
 Apple privacy declaration. With no `--verify` it GENERATES the required Info.plist usage-description keys
 (each with the reaching functions); `--verify <Info.plist>` diffs the plist's declared keys against the

@@ -73,8 +73,9 @@ public func hostPart(_ s: String) -> String {
 // boundary effects (§6.1) like Clipboard, gate-able through the normal §6.2 grammar (`deny Location ui`).
 // They are NOT in ALLOW_EFFECTS: a sensor read has no host/path/command literal to certify, so
 // `deny Location`/containment applies but `allow Location <x>` is not a thing (same as Ipc/Clipboard).
-public let EFFECTS: Set<String> = ["Net", "Fs", "Db", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard", "Llm",
-    "Location", "Camera", "Mic", "Contacts", "Photos", "Notify"]
+public let EFFECTS: Set<String> = Set(["Net", "Fs", "Db", "Exec", "Env", "Clock", "Ipc", "Log", "Rand", "Clipboard", "Llm"])
+    .union(PRIVACY_EFFECTS_ALL)   // derived — a policy must accept every sensor the engine can EMIT, or
+                                  // `deny Health` errors while the extension spec says it gates.
 // `Llm` ⟨0.13⟩ takes an `allow Llm <host…>` allowlist — it rides Net's host literal (a model host WAS
 // captured as a Net host), so it is allowlistable exactly like Net (matched by hostname; the gate keys
 // its incompleteness off Net's — a runtime/masked host fails `allow Llm` closed too).

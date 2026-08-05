@@ -30,6 +30,28 @@ verify a privacy manifest from code-level truth**.
 | `Photos` | the photo library | Photos / PhotosUI (`PHPhotoLibrary`, `PHAsset`, `PHPickerViewController`) |
 | `Notify` | user-attention / notifications | UserNotifications (`UNUserNotificationCenter`) |
 
+### Third wave (`privacy/3`, 2026-08-05) — measured against Apple's own key list
+
+The first two waves were assembled from what we knew Apple required. This one was assembled from what
+Apple **documents**: the protected-resources list was fetched from developer.apple.com, and it names
+**56 usage-description keys where candor modelled 26**. Nine families closed the commercially likeliest
+part of that gap — NFC, fall detection, SensorKit, FileProvider, system extensions, Apple events, TV
+provider, Game Center friends and clinical health records.
+
+Every one landed only after a fixture in `tools/privacy-recall.py` measured the miss, and that battery
+now runs as a gate: it fails when a family the vocabulary CLAIMS stops being caught, and merely reports
+the families it does not claim. 34/39 fixtures caught, 0 broken promises.
+
+The unmodelled set is now DERIVED (Apple's list minus `privacyKeyMap`) and printed by every verify, so
+it cannot silently fall behind. The hand-written version of that disclosure named 14 keys when the real
+number was 30 — **a warning about a gap that under-reported the gap**.
+
+**What the wave really exposed:** the sensor vocabulary existed in SEVEN copies — the type table, the key
+map, an ordered list, `PRIVACY_EFFECTS`, the policy's `EFFECTS`, the manifest CLI's own array, and an
+`Effect` enum in the report writer. A family added to six of them and missing from the seventh is
+computed and then silently discarded at serialisation: nothing fails, the effect just never reaches the
+report. They now derive from one ordered source.
+
 ### Second wave (`privacy/2`, 2026-08-04)
 
 The first wave covered six sensors, which was not enough to answer the question the product surface asks.
@@ -67,7 +89,7 @@ and an app can do either without the other — so they are separate effects, not
 
 **The version moved because the vocabulary did.** A consumer that understands `privacy/1` expects exactly
 six effect names; emitting `Health` under that label would make the extension's own positive declaration
-inaccurate. `extensions: ["privacy/2"]`.
+inaccurate. `extensions: ["privacy/3"]`.
 
 ### `EKEventStore` is ambiguous, exactly like `AVCaptureDevice`
 

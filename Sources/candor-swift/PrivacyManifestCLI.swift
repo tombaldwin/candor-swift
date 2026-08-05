@@ -14,10 +14,11 @@ import Foundation
 // (the shared resolveReportLocator + the loud load), no policy. The verb has no positional args.
 
 // The six privacy/1 effects (SPEC-EXTENSION-privacy.md "The effect vocabulary"), in a stable order.
-private let privacyEffects = ["Location", "Camera", "Mic", "Contacts", "Photos", "Notify",
-                              "Health", "Motion", "Calendar", "Reminders", "Bluetooth", "Speech",
-                              "Biometrics", "MediaLibrary", "HomeKit", "Tracking",
-                              "NearbyInteraction", "Siri"]
+// DERIVED from the one ordered source (`PRIVACY_EFFECTS_ORDER`). This list was a sixth copy of the
+// sensor vocabulary, and it is the one the manifest ITERATES — so privacy/3's nine families were in the
+// type table, in the key map and in four other lists, and still reported nothing, because this one had
+// not moved. The effect was computed and then dropped for not being on a list.
+private let privacyEffects = PRIVACY_EFFECTS_ORDER
 
 // The effect → acceptable Info.plist usage-description keys (SPEC-EXTENSION-privacy.md "The effect →
 // usage-description key mapping"). The FIRST key of each list is the PRIMARY one (what GENERATE names first).
@@ -133,7 +134,7 @@ private func plistFragment(_ keys: [(effect: String, key: String)]) -> String {
 /// Print what this verify does NOT check. See `PRIVACY_UNMODELLED_KEYS`.
 private func printPrivacyVocabularyBound() {
     let modelled = Set(privacyKeyMap.values.flatMap { $0 }).count
-    print("⚠ this verify covers the \(modelled) usage-description key(s) the privacy/2 vocabulary models. "
+    print("⚠ this verify covers the \(modelled) usage-description key(s) the privacy vocabulary models. "
           + "It says NOTHING — in either direction — about \(PRIVACY_UNMODELLED_KEYS.count) other Apple keys, "
           + "so a clean result here is not a clean App Store review. Declare these yourself if they apply:")
     for k in PRIVACY_UNMODELLED_KEYS {
