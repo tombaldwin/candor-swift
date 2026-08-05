@@ -111,7 +111,7 @@ reports; candor-swift itself carries a few query subcommands, over a report a sc
     candor-swift unverified [--report <locator>] --policy <file> [--json] [--strict]      # pure/deny layers that PASS but are Unknown (not PROVABLY clean)
     candor-swift tour [<N>]                                             # the N most surprising transitive reaches (default 10; no policy)
     candor-swift gains      <current> <baseline> [--json]              # effects the surface GAINED since the baseline (supply-chain alarm)
-    candor-swift privacy-manifest [--verify <Info.plist>]              # generate/verify the Apple privacy manifest from the sensor reach (privacy/2)
+    candor-swift privacy-manifest [--verify <Info.plist>] [--xml]      # generate/verify the Apple privacy manifest from the sensor reach (privacy/2); --xml = a paste-ready Info.plist fragment (on --verify, only the MISSING keys)
     candor-swift gate --report <locator> --policy <file> [--json] [--gate-json <f>]       # apply a policy to an EXISTING report, with NO scan
 
 ⟨0.24⟩ `gate --report <locator> --policy <file>` (SPEC §3.1) applies a policy to an EXISTING report

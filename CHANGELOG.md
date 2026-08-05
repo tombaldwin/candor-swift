@@ -11,6 +11,30 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [0.27.0] — 2026-08-05
 
+### `privacy-manifest --xml`: a paste-ready Info.plist fragment, not a reading exercise
+
+"Generate" printed a requirements list — `Contacts → NSContactsUsageDescription (reached by: …)`. A user
+with an existing `Info.plist` then had to hand-write the XML, invent the description string, and merge it
+themselves. The verb's name promised a manifest and delivered homework. (It never wrote anything, so
+running it against an existing plist was safe — just unhelpful.)
+
+`--xml` emits the fragment. On `--verify` it emits **only the missing keys**, so it pipes, and the exit
+code stays the verdict — the output format does not move it:
+
+```
+$ candor-swift privacy-manifest --verify Apps/PolleniOS/Info.plist --xml
+<!-- candor privacy-manifest — paste into your Info.plist <dict>.
+     REPLACE each placeholder string: Apple reviews these, and this text is not a
+     description of what your app does with the data. -->
+<key>NSContactsUsageDescription</key>
+<string>TODO: why this app needs Contacts access</string>
+```
+
+A FRAGMENT, deliberately, never a whole plist: every real app already has one, and emitting a complete
+document invites overwriting it. The placeholder strings announce themselves because Apple reviews that
+text — a plausible-looking generated sentence would be both wrong and, precisely because it reads well,
+likely to ship.
+
 ### `--target`: scope a scan to one shipped binary
 
 `candor-swift <dir>` scans every `.swift` file under it. For a package with several products sharing a

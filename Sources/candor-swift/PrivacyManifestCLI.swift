@@ -51,6 +51,8 @@ private struct PrivacyManifestArgs {
     var report: String?     // resolved report prefix/path (nil ⇒ discovery failed, caller fails loud)
     var verify: String?     // the Info.plist path to verify against (nil ⇒ GENERATE mode)
     var json = false
+    /// `--xml`: emit a paste-ready Info.plist fragment instead of a human list.
+    var xml = false
 }
 
 // Parse `privacy-manifest [--report <locator>] [--verify <Info.plist>] [--json]`. No positional args are
@@ -62,6 +64,7 @@ private func parsePrivacyManifestArgs(_ args: [String]) -> PrivacyManifestArgs {
     while let a = it.next() {
         switch a {
         case "--json": pm.json = true
+        case "--xml": pm.xml = true
         case "--report":
             // Consume the next token as the value unconditionally (mirrors the fix/tour grammar) so a
             // value beginning `-` can be passed; only a genuinely absent value is the exit-2 error.
@@ -72,7 +75,7 @@ private func parsePrivacyManifestArgs(_ args: [String]) -> PrivacyManifestArgs {
             pm.verify = v
         default:
             if a.hasPrefix("-") { privacyDie("candor-swift: unknown flag \(a)") }
-            privacyDie("usage: candor-swift privacy-manifest [--report <locator>] [--verify <Info.plist>] [--json]")
+            privacyDie("usage: candor-swift privacy-manifest [--report <locator>] [--verify <Info.plist>] [--json|--xml]")
         }
     }
     // Resolve the report: --report flag → discovery. NO positional report (the query-verb grammar).
@@ -101,6 +104,31 @@ private func loadDeclaredKeys(_ path: String) -> Set<String>? {
 }
 
 // Dispatched from main.swift when argv[1] is `privacy-manifest`.
+
+/// A PASTE-READY `Info.plist` fragment for a set of required keys.
+///
+/// WHY THIS EXISTS. "Generate" printed a human list — `Contacts → NSContactsUsageDescription (reached
+/// by: …)` — which is a REQUIREMENTS REPORT, not a manifest. A user with an existing plist had to read
+/// the list, hand-write the XML, invent the description string, and merge by hand. The verb's name
+/// promised a manifest and delivered homework.
+///
+/// It is a FRAGMENT, deliberately, not a whole plist: an Info.plist already exists in every real app and
+/// emitting a complete one would invite overwriting it. This is the thing you paste INTO the `<dict>`.
+///
+/// The description strings are placeholders and say so in the text. Apple reviews these strings and a
+/// generated one would be both wrong and, if it read plausibly, likely to ship — so it is written to be
+/// impossible to leave in by accident.
+private func plistFragment(_ keys: [(effect: String, key: String)]) -> String {
+    var out = ["<!-- candor privacy-manifest — paste into your Info.plist <dict>.",
+               "     REPLACE each placeholder string: Apple reviews these, and this text is not a",
+               "     description of what your app does with the data. -->"]
+    for k in keys {
+        out.append("<key>\(k.key)</key>")
+        out.append("<string>TODO: why this app needs \(k.effect) access</string>")
+    }
+    return out.joined(separator: "\n")
+}
+
 func runPrivacyManifestCLI(_ args: [String]) -> Never {
     let pm = parsePrivacyManifestArgs(args)
     guard let prefix = pm.report else {
@@ -219,6 +247,20 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
             exit(ok ? 0 : 1)   // EXIT UNCHANGED by coverage — disclosure, not a gate
         }
 
+        // `--xml` on a VERIFY prints exactly the fragment that would fix the failure — nothing else, so
+        // it pipes. A verify that tells you what is missing and then makes you go and look up how to
+        // write it has done half a job; this is the other half.
+        if pm.xml {
+            if underDeclared.isEmpty {
+                print("<!-- candor privacy-manifest --verify: nothing missing; no keys to add. -->")
+            } else {
+                print(plistFragment(underDeclared.compactMap { u in
+                    u.keys.first.map { (effect: u.effect, key: $0) }
+                }))
+            }
+            exit(ok ? 0 : 1)   // the exit code is the VERDICT and does not change with the output format
+        }
+
         // HUMAN: the divergences first (the actionable findings), then the verdict line.
         for u in underDeclared {
             let via = u.fns.isEmpty ? "" : " (via \(u.fns.prefix(3).joined(separator: ", ")))"
@@ -258,7 +300,14 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
     }
 
     if reached.isEmpty {
-        print("candor privacy-manifest — no privacy-sensor reach found; no usage-description keys required.")
+        if pm.xml { print("<!-- candor privacy-manifest — no privacy-sensor reach found; no keys required. -->") }
+        else { print("candor privacy-manifest — no privacy-sensor reach found; no usage-description keys required.") }
+        exit(0)
+    }
+    if pm.xml {
+        print(plistFragment(reached.compactMap { eff in
+            (privacyKeyMap[eff] ?? []).first.map { (effect: eff, key: $0) }
+        }))
         exit(0)
     }
     print("candor privacy-manifest — usage-description keys required by the code's sensor reach:")

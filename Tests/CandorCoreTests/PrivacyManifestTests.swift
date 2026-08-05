@@ -192,4 +192,60 @@ final class PrivacyManifestTests: XCTestCase {
         let d = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any])
         XCTAssertEqual(d["ok"] as? Bool, true, r.out)
     }
+
+    /// `--xml`: a paste-ready Info.plist fragment. GENERATE printed a human requirements list
+    /// (`Contacts → NSContactsUsageDescription (reached by: …)`), which left a user with an existing
+    /// plist to hand-write the XML, invent the description string, and merge by hand — the verb's name
+    /// promised a manifest and delivered homework.
+    func testXmlEmitsAPasteReadyFragmentWithPlaceholdersThatCannotShipByAccident() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage("""
+        import Contacts
+        let store = CNContactStore()
+        _ = try? store.unifiedContacts(matching: CNContact.predicateForContacts(matchingName: "a"),
+                                       keysToFetch: [])
+        """, name: "App")
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try ProcessHarness.run(bin, [root.path], cwd: root)
+        let r = try ProcessHarness.run(bin, ["privacy-manifest", "--xml"], cwd: root)
+        XCTAssertEqual(r.code, 0, r.err)
+        XCTAssertTrue(r.out.contains("<key>NSContactsUsageDescription</key>"), r.out)
+        XCTAssertTrue(r.out.contains("<string>"), "a key without a string is not paste-ready: \(r.out)")
+        // The description must be impossible to leave in by accident — Apple reviews these strings, and a
+        // plausible-looking generated one would be both wrong and likely to ship.
+        XCTAssertTrue(r.out.contains("TODO"), "the placeholder must announce itself: \(r.out)")
+        // A FRAGMENT, not a whole plist: every real app already has one, and emitting a complete
+        // document invites overwriting it.
+        XCTAssertFalse(r.out.contains("<plist"), "must be a fragment, not a whole plist: \(r.out)")
+    }
+
+    /// `--verify --xml` prints exactly the fragment that would FIX the failure, and nothing else, so it
+    /// pipes. A verify that names what is missing and then leaves you to look up how to write it has
+    /// done half the job.
+    func testVerifyXmlPrintsOnlyTheMissingKeysAndKeepsTheVerdict() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage("""
+        import Contacts
+        import AVFoundation
+        let store = CNContactStore()
+        _ = try? store.unifiedContacts(matching: CNContact.predicateForContacts(matchingName: "a"),
+                                       keysToFetch: [])
+        let rec = try? AVAudioRecorder(url: URL(fileURLWithPath: "/tmp/x"), settings: [:])
+        """, name: "App")
+        defer { try? FileManager.default.removeItem(at: root) }
+        // A plist that declares the microphone but NOT contacts.
+        let plist = root.appendingPathComponent("Info.plist")
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <plist version="1.0"><dict>
+        <key>NSMicrophoneUsageDescription</key><string>to record</string>
+        </dict></plist>
+        """.write(to: plist, atomically: true, encoding: .utf8)
+        _ = try ProcessHarness.run(bin, [root.path], cwd: root)
+        let r = try ProcessHarness.run(bin, ["privacy-manifest", "--verify", plist.path, "--xml"], cwd: root)
+        XCTAssertEqual(r.code, 1, "an under-declaration is still exit 1 — the FORMAT must not move the verdict")
+        XCTAssertTrue(r.out.contains("NSContactsUsageDescription"), "the missing key must be emitted: \(r.out)")
+        XCTAssertFalse(r.out.contains("NSMicrophoneUsageDescription"),
+                       "a key already declared is not missing and must not be re-emitted: \(r.out)")
+    }
 }
