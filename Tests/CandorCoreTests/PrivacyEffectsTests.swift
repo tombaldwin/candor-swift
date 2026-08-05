@@ -45,7 +45,11 @@ final class PrivacyEffectsTests: XCTestCase {
         XCTAssertEqual(ProcessHarness.inferred(by, "Tracker.whereAmI"), ["Location"],
                        "a CLLocationManager call carries Location")
         // NO companion effect: a sensor read is not network I/O (unlike Llm which adds Net).
-        XCTAssertEqual(env["extensions"] as? [String], ["privacy/2"], "the extension must be disclosed")
+        // DERIVED from the engine's own constant, never a second literal: this assertion hardcoded
+        // "privacy/2" and turned the suite red the moment the third wave landed. A test that must be
+        // edited every time a version moves is a version-coupled assertion, and this project has paid
+        // for that class across six repos already.
+        XCTAssertEqual(env["extensions"] as? [String], [PRIVACY_EXTENSION_ID], "the extension must be disclosed")
     }
 
     func testAudioRecorderClassifiesMic() throws {

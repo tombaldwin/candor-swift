@@ -494,6 +494,12 @@ public let PRIVACY_SDK_TYPES: [String: String] = [
 /// changed NOTHING until all six moved. A vocabulary with six copies is six places to forget the tenth
 /// family, and the failure is silent: the effect is computed and then dropped for not being on a list.
 /// The other five now derive from this one.
+/// The `extensions` value the engine discloses for this wave. ONE constant, in CandorCore so the TESTS
+/// can import it: it used to be a literal in the report writer and a SECOND literal in a test, so
+/// bumping the wave turned the suite red on a version-coupled assertion — a class this project has
+/// already paid for across six repos. The next bump moves this line and nothing else.
+public let PRIVACY_EXTENSION_ID = "privacy/3"
+
 public let PRIVACY_EFFECTS_ORDER: [String] = [
     "Location", "Camera", "Mic", "Contacts", "Photos", "Notify",
     "Health", "Motion", "Calendar", "Reminders", "Bluetooth", "Speech",
