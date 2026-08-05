@@ -423,6 +423,20 @@ func manifestPackageName(atDir dir: String) -> String? {
 // The package name — the first half of the §2 `hash` join key. Package.swift's name, else the dir.
 var pkgName = (rootDir as NSString).lastPathComponent
 if let n = manifestPackageName(atDir: rootDir) { pkgName = n }
+// ⟨--target⟩ A SCOPED REPORT IS NOT AN ANSWER ABOUT THE PACKAGE, and the join key must say so.
+//
+// `pkgName` is the §2 `hash` prefix (`"<pkg>#<qualified>"`) and the report filename. Leaving it alone
+// made a scoped report byte-indistinguishable from a whole-package one to a MACHINE consumer: same
+// `package`, same key namespace, just fewer functions. The stderr scope note is transient and is not in
+// the artifact anyone chains. Under ⟨0.21⟩ absence from `functions` is a POSITIVE purity claim, so a
+// consumer chaining this as `MultiTarget` reads every function in the targets it never scanned as pure —
+// the cardinal sin, introduced by a convenience flag.
+//
+// Qualifying the key fixes it WITHOUT a format change, and fails in the safe direction: a consumer
+// looking for `MultiTarget#foo` simply does not match `MultiTarget/MacApp#foo`, so the call resolves to
+// DISCLOSED (unresolved / invisible) rather than to a silent purity claim. It also stops two targets of
+// one package overwriting each other's report file, which they otherwise did.
+if let want = scopeTarget { pkgName = "\(pkgName)/\(want)" }
 if let manifest = try? String(contentsOfFile: (rootDir as NSString).appendingPathComponent("Package.swift"), encoding: .utf8) {
     // ⟨0.19⟩ SETUP warning (SPEC §6.2 §3, the setup/genuine split): a manifest that declares dependencies but
     // whose `.build/checkouts` is absent hasn't fetched them — the analog of a missing node_modules. Calls into
@@ -924,7 +938,16 @@ for f in allFns { cg[f.qual] = (edges[f.qual] ?? []).sorted() }  // §2.2: EVERY
 // so the unmodified candor-query binary works on Swift reports (this engine's whole consumption
 // story; caught by the first query-interop probe: `show` couldn't find a `<prefix>.json`). The
 // pkg segment is dot-sanitized (`GRDB.swift` would otherwise split the <crate>.<kind> parse).
-let fileSafePkg = pkgName.replacingOccurrences(of: ".", with: "-")
+// THE FILENAME KEEPS THE UNSCOPED PACKAGE NAME, deliberately, and this was measured the other way first.
+//
+// Encoding the target in the filename let a package's scoped reports COEXIST, which sounds like a
+// feature until discovery has to choose between them: after `--target MacApp`, `privacy-manifest`
+// reported the microphone — IosApp's sensor — because three report files sat in `.candor/` and it picked
+// one. A silently wrong answer is worse than the overwrite it replaced. So a scan writes ONE current
+// report, exactly as before; `--out` is how you keep several. The scope lives in the `package` field and
+// the hash keys, where a machine consumer reads it, not in the filename, where discovery trips over it.
+let fileSafePkg = (manifestPackageName(atDir: rootDir) ?? (rootDir as NSString).lastPathComponent)
+    .replacingOccurrences(of: ".", with: "-")
 let reportPath = "\(prefix).\(fileSafePkg).Swift.json"
 if wantJson {
     // --json: emit the §2 envelope to STDOUT and write NO report file(s)/sidecars (the candor-scan

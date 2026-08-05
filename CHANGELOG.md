@@ -57,6 +57,22 @@ by-name lookup, and when the phantom won, the closure walk stopped at `Core` ins
 through its own dependencies: sources dropped from the scan, i.e. a purity claim over every function in
 them. Found by asserting on the FULL target list rather than on membership.
 
+#### A scoped report does not claim the package's identity
+
+Found by asking what a MACHINE consumer sees: a scoped report was byte-shaped exactly like a whole-package one — same `package`, same `hash` key
+namespace, just fewer functions — and the stderr scope note is not in the artifact anyone chains. Under
+⟨0.21⟩ absence from `functions` is a positive purity claim, so chaining a scoped report under the
+package's name reads every function in the unscanned targets as pure. The cardinal sin, introduced by a
+convenience flag.
+
+The fix needs no format change: a scoped scan qualifies the key (`MultiTarget/MacApp#…`), so a consumer
+looking for `MultiTarget#…` simply misses — and a miss is DISCLOSED, not silent.
+
+The first attempt at that also put the target in the FILENAME, so a package's scoped reports could
+coexist. That read as a feature until discovery had to choose between them: after `--target MacApp` the
+privacy verb reported the microphone, which only the iOS target reaches. A silently wrong answer is worse
+than the overwrite it replaced, so a scan writes ONE current report exactly as before, and `--out` is how
+you keep several.
 
 ### fix: `toShare: nil` is read-only, and claiming otherwise failed every read-only HealthKit app
 

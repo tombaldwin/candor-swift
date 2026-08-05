@@ -191,6 +191,54 @@ final class TargetScopeProcessTests: XCTestCase {
                       "a scoped verdict must say what it does NOT cover: \(r.err)")
     }
 
+    /// A SCOPED REPORT MUST NOT BE JOINABLE AS THE WHOLE PACKAGE. This is the cardinal-sin channel the
+    /// feature opened: the report is byte-shaped exactly like a whole-package one — same `package`, same
+    /// key namespace, just fewer functions — and the stderr scope note is not in the artifact anyone
+    /// chains. Under ⟨0.21⟩ absence from `functions` is a positive purity claim, so a consumer chaining a
+    /// scoped report under the package's name reads every function in the unscanned targets as pure.
+    /// Qualifying the key fails in the SAFE direction instead: the lookup simply misses, and a miss is
+    /// disclosed.
+    func testAScopedReportIsNotJoinableAsTheWholePackage() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage("import Foundation\nlet p = FileManager.default.currentDirectoryPath\n",
+                                                  name: "App")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let whole = try ProcessHarness.run(bin, [root.path, "--json"], cwd: root)
+        let scoped = try ProcessHarness.run(bin, [root.path, "--target", "App", "--json"], cwd: root)
+        XCTAssertEqual(whole.code, 0, whole.err); XCTAssertEqual(scoped.code, 0, scoped.err)
+        func env(_ s: String) throws -> [String: Any] {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data(s.utf8)) as? [String: Any])
+        }
+        let w = try env(whole.out), sc = try env(scoped.out)
+        XCTAssertEqual(w["package"] as? String, "App")
+        XCTAssertEqual(sc["package"] as? String, "App/App",
+                       "a scoped scan must not claim the package's identity")
+        // and the per-function join keys must carry it too — `package` alone would leave every `hash`
+        // colliding with the whole-package report's.
+        let hashes = (sc["functions"] as? [[String: Any]] ?? []).compactMap { $0["hash"] as? String }
+        XCTAssertFalse(hashes.isEmpty, "fixture produced no functions to check")
+        XCTAssertTrue(hashes.allSatisfy { $0.hasPrefix("App/App#") },
+                      "scoped hashes must not be joinable as the package's: \(hashes.prefix(3))")
+    }
+
+    /// THE FILENAME MUST NOT carry the scope. Encoding it there let a package's scoped reports coexist,
+    /// and discovery then picked one: after `--target MacApp` the privacy verb reported the MICROPHONE,
+    /// which only the iOS target reaches. A silently wrong answer is worse than the overwrite it replaced.
+    func testAScopedScanWritesTheOneCurrentReport() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage("let x = 1\n", name: "App")
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try ProcessHarness.run(bin, [root.path], cwd: root)
+        _ = try ProcessHarness.run(bin, [root.path, "--target", "App"], cwd: root)
+        let dir = root.appendingPathComponent(".candor")
+        let reports = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+            .filter { $0.hasSuffix(".Swift.json") }
+        XCTAssertEqual(reports.count, 1,
+                       "a scoped scan must REPLACE the current report, not sit beside it — several "
+                       + "reports in one .candor/ is an ambiguity discovery resolves by guessing: \(reports)")
+    }
+
     func testUnknownTargetExitsTwoRatherThanScanningEverything() throws {
         let bin = try ProcessHarness.binaryURL(for: Self.self)
         let root = try ProcessHarness.makePackage("let x = 1\n", name: "App")
