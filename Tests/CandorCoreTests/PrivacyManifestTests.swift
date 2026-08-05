@@ -343,8 +343,13 @@ final class PrivacyManifestTests: XCTestCase {
                       "exactly the undetermined one, not the literal one: \(r.out)")
         XCTAssertTrue(r.out.contains("unknown"), "and it must NAME it: \(r.out)")
         XCTAssertFalse(r.out.contains("(known"), "the determined-path function must not be counted: \(r.out)")
-        // A LOWER BOUND, and it has to say so — undercounting a disclosure is the dangerous direction.
-        XCTAssertTrue(r.out.contains("LOWER BOUND"), r.out)
+        // The caveat must state the REAL limitation. It used to say "a function with one determined path
+        // and one undetermined counts as determined" — same-function, which sounds narrow. A review
+        // measured the actual rule: `paths` PROPAGATES, so one logger with a literal destination masks the
+        // count to zero for a whole call graph. Understating a limitation is the same defect as
+        // understating a finding, so the test pins the honest wording rather than the comfortable one.
+        XCTAssertTrue(r.out.contains("NOT A RELIABLE FLOOR"), r.out)
+        XCTAssertTrue(r.out.contains("A ZERO HERE IS NOT EVIDENCE OF NONE"), r.out)
     }
 
     /// ENTITLEMENT-SOURCED keys: a different kind of evidence, and the only route to a capability that

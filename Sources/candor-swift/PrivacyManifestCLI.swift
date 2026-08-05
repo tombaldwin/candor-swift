@@ -88,7 +88,14 @@ func discoverInfoPlist(from root: String) -> (path: String?, error: String?) {
             if parts.contains(where: { $0.hasSuffix("Tests") || $0.hasSuffix("UITests") }) {
                 en.skipDescendants(); continue
             }
-            if parts.last == "Info.plist" { found.append((root as NSString).appendingPathComponent(rel)) }
+            // `<Target>-Info.plist` is Xcode's long-standing convention. Matching only the bare basename
+            // meant a repo whose REAL manifest is `App-Info.plist` and which had any other plain
+            // `Info.plist` (a sample, a fixture) got a confident green verdict about the wrong file — and
+            // the ambiguity refusal never fired, because by its own name test there was only one candidate.
+            let base = (parts.last ?? "").lowercased()
+            if base == "info.plist" || base.hasSuffix("-info.plist") {
+                found.append((root as NSString).appendingPathComponent(rel))
+            }
         }
     }
     // DEDUPE by resolved path: the enumerator reached several of these twice (a symlinked root yields
@@ -145,7 +152,10 @@ private func parsePrivacyManifestArgs(_ args: [String]) -> PrivacyManifestArgs {
 // BOTH the XML and binary plist encodings transparently. Returns nil (the caller fails loud, exit 2) if the
 // file is missing, unreadable, or not a plist dictionary — never a silent empty "no keys declared", which
 // would flip every reach into a false under-declaration OR (the worse direction) hide a genuine gap.
-private func loadDeclaredKeys(_ path: String) -> Set<String>? {
+private /// Apple REJECTS an empty or whitespace-only purpose string, so presence alone is not a declaration —
+/// a plist with `<key>NSCameraUsageDescription</key><string></string>` verified green and would then be
+/// rejected, which is precisely the outcome this verb exists to prevent, one `.isEmpty` away.
+func loadDeclaredKeys(_ path: String) -> Set<String>? {
     let url = URL(fileURLWithPath: path)
     // PropertyListSerialization is the direct API (NSDictionary(contentsOf:) silently returns nil on ANY
     // failure, indistinguishable from a plist that is a non-dict root); this lets us fail loud on a genuine
@@ -156,9 +166,21 @@ private func loadDeclaredKeys(_ path: String) -> Set<String>? {
         return nil
     }
     // Scope to usage-description keys: any top-level key ending "UsageDescription" (so a newly-minted Apple
-    // usage key is still seen for over-declaration), which is a superset of the mapping's keys. Non-string
-    // values are tolerated — a key's PRESENCE is the declaration, its description string is not inspected.
-    return Set(dict.keys.filter { $0.hasSuffix("UsageDescription") })
+    // usage key is still seen for over-declaration), which is a superset of the mapping's keys.
+    //
+    // AN EMPTY OR WHITESPACE-ONLY STRING IS NOT A DECLARATION. This used to tolerate any value, on the
+    // reasoning that presence is the declaration and the prose is not ours to judge — but Apple REJECTS an
+    // empty purpose string, so `<key>NSCameraUsageDescription</key><string></string>` verified green and
+    // was then rejected: the exact outcome this verb exists to prevent, one `.isEmpty` away. A NON-string
+    // value is still tolerated (it is malformed in a way that is not ours to adjudicate); only a string we
+    // can see is empty is rejected.
+    return Set(dict.keys.filter { k in
+        guard k.hasSuffix("UsageDescription") else { return false }
+        if let str = dict[k] as? String {
+            return !str.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return true
+    })
 }
 
 // Dispatched from main.swift when argv[1] is `privacy-manifest`.
@@ -199,9 +221,12 @@ func discoverEntitlements(from root: String) -> (path: String?, several: Bool) {
     if let en = fm.enumerator(atPath: root) {
         for case let rel as String in en {
             let parts = rel.split(separator: "/").map(String.init)
-            if parts.contains(where: { skip.contains($0) || $0.hasSuffix(".app") || $0 == "Build" }) {
-                en.skipDescendants(); continue
-            }
+                // Same exclusions as the Info.plist discovery — a TEST target's entitlements are not the
+            // shipped binary's, and a built bundle carries a copy of one already found.
+            if parts.contains(where: { p in
+                skip.contains(p) || p == "Build" || p.hasSuffix("Tests") || p.hasSuffix("UITests")
+                || [".app", ".appex", ".framework", ".xcarchive"].contains(where: { p.hasSuffix($0) })
+            }) { en.skipDescendants(); continue }
             if rel.hasSuffix(".entitlements") { found.append((root as NSString).appendingPathComponent(rel)) }
         }
     }
@@ -218,7 +243,21 @@ func entitlementRequiredKeys(_ path: String) -> [String] {
     guard let d = NSDictionary(contentsOfFile: path) as? [String: Any] else { return [] }
     return ENTITLEMENT_REQUIRED_KEYS.compactMap { ent, key in
         guard let v = d[ent] else { return nil }
-        if let b = v as? Bool, b == false { return nil }
+        // NOT GRANTED unless the value says so. Rejecting only a literal Boolean `false` let three
+        // shapes through as granted: the string "false", an array, and — the one that matters — a
+        // nested dict with the capability switched off. `v as? Bool` also succeeds for NSNumber 0, so
+        // that case was right by accident rather than by the guard.
+        if let b = v as? Bool { return b ? key : nil }
+        if let n = v as? NSNumber { return n.boolValue ? key : nil }
+        if let str = v as? String {
+            return ["false", "no", "0", ""].contains(str.lowercased()) ? nil : key
+        }
+        if let dict = v as? [String: Any] {
+            // A dict form is granted only if nothing inside it switches the capability off.
+            let offs = dict.values.compactMap { ($0 as? Bool) }.filter { $0 == false }
+            return offs.isEmpty ? key : nil
+        }
+        if let arr = v as? [Any] { return arr.isEmpty ? nil : key }
         return key
     }.sorted()
 }
@@ -231,7 +270,11 @@ func entitlementRequiredKeys(_ path: String) -> [String] {
 /// direction for a disclosure, which is why the output says so rather than presenting the number bare.
 func undeterminedPaths(_ byName: [String: FixFn]) -> (ops: Int, fns: [String]) {
     var fns: [String] = []
-    for (fn, f) in byName where f.inferred.contains("Fs") || f.direct.contains("Fs") {
+    // DIRECT Fs only. Counting transitive reachers put functions that perform no file I/O at all into the
+    // list — measured at 52% of the number on candor's own source, and because the preview is sorted
+    // alphabetically the plain callers displaced the function that actually writes. A number a reader can
+    // disprove by checking two entries is a number they stop reading.
+    for (fn, f) in byName where f.direct.contains("Fs") {
         if f.paths.isEmpty { fns.append(fn) }
     }
     return (fns.count, fns.sorted())
@@ -271,9 +314,19 @@ private func printPrivacyVocabularyBound(undetermined: (ops: Int, fns: [String])
         let names = undetermined.fns.prefix(3).joined(separator: ", ")
         print("⚠ \(undetermined.ops) function(s) perform file I/O whose PATH this scan could not determine "
               + "(\(names)\(undetermined.fns.count > 3 ? ", …" : "")).")
-        print("  The folder keys above are decided by the path, so those functions are exactly where an "
-              + "NSDesktop/NSDocuments/NSDownloads/removable/network-volume requirement would hide. This is a "
-              + "LOWER BOUND: a function with one determined path and one undetermined counts as determined.")
+        print("  The folder keys above are decided by the path, so these are where an NSDesktop/NSDownloads/"
+              + "removable/network-volume requirement could hide.")
+        // THE CAVEAT WAS WRONG, and understating a limitation is the same defect as understating a
+        // finding. It said "a function with one determined path and one undetermined counts as
+        // determined" — same-function, which sounds narrow. The real rule is far weaker: `paths`
+        // PROPAGATES to callers, so a function counts as determined if ANYTHING IT TRANSITIVELY REACHES
+        // named a literal path. One logger writing "/tmp/app.log" anywhere in a call graph zeroes this
+        // number for the whole graph, and every real app has one.
+        print("  NOT A RELIABLE FLOOR: `paths` propagates to callers, so a function counts as determined "
+              + "when anything it transitively reaches named a literal path — one logger with a literal "
+              + "destination can mask this count to zero for a whole call graph. A ZERO HERE IS NOT "
+              + "EVIDENCE OF NONE; a non-zero is a real lead. Fixing it needs a per-function direct-path "
+              + "signal on the wire (candor-spec/CONSTANT-PROVENANCE-DESIGN.md §4.2).")
     }
 }
 
@@ -318,6 +371,7 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         return Array(all.prefix(fnCap))
     }
 
+    var entitlementUnderDeclared = false
     if var plistPath = pm.verify {
         // ── VERIFY mode ───────────────────────────────────────────────────────────────────────────────
         // Bare `--verify` discovers the plist. Announced on stderr, never silently: a verdict is about a
@@ -403,7 +457,7 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
                 verdict["coverage"] = ["uncovered": uncoveredModules.count, "modules": uncoveredModules] as [String: Any]
             }
             emitPrivacyJSON(verdict)
-            exit(ok ? 0 : 1)   // EXIT UNCHANGED by coverage — disclosure, not a gate
+            exit((ok && !entitlementUnderDeclared) ? 0 : 1)   // EXIT UNCHANGED by coverage — disclosure, not a gate
         }
 
         // `--xml` on a VERIFY prints exactly the fragment that would fix the failure — nothing else, so
@@ -417,7 +471,7 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
                     u.keys.first.map { (effect: u.effect, key: $0) }
                 }))
             }
-            exit(ok ? 0 : 1)   // the exit code is the VERDICT and does not change with the output format
+            exit((ok && !entitlementUnderDeclared) ? 0 : 1)   // the exit code is the VERDICT and does not change with the output format
         }
 
         // HUMAN: the divergences first (the actionable findings), then the verdict line.
@@ -452,10 +506,18 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         // evidence: a plist compared with a plist, not a call graph. Folding them in would present a
         // manifest diff as a code analysis. This is also the only route to keys that have NO call site —
         // Apple's page for NSCriticalMessaging links no symbol at all, because there is nothing to link.
-        let ent = discoverEntitlements(from: FileManager.default.currentDirectoryPath)
+        // ANCHORED TO THE PLIST UNDER TEST, not to the process's cwd. Anchoring on cwd meant verifying an
+        // explicit plist from an unrelated directory read THAT directory's entitlements and reported a
+        // finding about a project not being analysed, attributed to the one that was.
+        let plistDir = (plistPath as NSString).deletingLastPathComponent
+        let ent = discoverEntitlements(from: plistDir.isEmpty ? FileManager.default.currentDirectoryPath : plistDir)
         if let ep = ent.path {
             let need = entitlementRequiredKeys(ep).filter { !declared.contains($0) }
             if !need.isEmpty {
+                // `✗` is this verb's glyph for a rejection-shaped finding, and everywhere else it means
+                // exit 1. It printed AFTER a `✓` verdict line and left the exit code at 0 — a granted
+                // entitlement without its key is a real rejection cause, and the gate passed it.
+                entitlementUnderDeclared = true
                 print("✗ \((ep as NSString).lastPathComponent) grants \(need.count) entitlement(s) whose "
                       + "usage-description key is not declared: \(need.joined(separator: ", "))")
                 print("  (from the ENTITLEMENTS file, not from code — these capabilities have no call site "
@@ -467,7 +529,7 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         }
         printPrivacyVocabularyBound(undetermined: undeterminedPaths(model.byName),
                                     fileProvider: reachedSet.contains("FileProvider"))
-        exit(ok ? 0 : 1)
+        exit((ok && !entitlementUnderDeclared) ? 0 : 1)
     }
 
     // ── GENERATE mode (no --verify) ─────────────────────────────────────────────────────────────────────

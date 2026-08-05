@@ -2334,13 +2334,30 @@ final class CallCollector: SyntaxVisitor {
                 // stay silent, or every networking app gains the key) this argument is a closed set, so an
                 // unrecognised descriptor simply yields nothing rather than needing a judgement call.
                 if bonjourDescriptorArg(node.arguments) { directEffects.insert("LocalNetwork") }
+                // …AND the κ answer, for the same reason as the FileManager arm above: this branch fires
+                // for ANY member on a browser receiver, so without this `b.start(queue:)` — the verb that
+                // actually begins discovery — was silent-pure, and the `Net` entry this very wave added to
+                // kappaMember was unreachable for exactly the receivers it was written for.
+                if let eff = kappaMember(root: rt, member: member) { directEffects.insert(eff) }
             } else if let rt = base.root, rt == "FileManager", member == "urls" || member == "url",
                       !declaredTypes.contains(rt) {
                 // CONSTANT-PROVENANCE rung 2 — `FileManager.default.urls(for: .desktopDirectory, in: …)`.
                 // The CANONICAL spelling: real code asks for the search-path constant far more often than
-                // it writes the path out, and unlike a literal it is always readable. Same argument-gating
-                // pattern as the capture media type and the audio-session category.
+                // it writes the path out, and unlike a literal it is always readable.
+                //
+                // ADDS TO the κ classification, never replaces it. `urls`/`url` are in FS_MEMBERS, and
+                // this arm sits BEFORE the generic κ arm in the else-if chain — so the first cut dropped
+                // the `Fs` those calls had always carried: `urls(for: .cachesDirectory,…)` and
+                // `url(forUbiquityContainerIdentifier:)` went ABSENT from `functions` entirely, which
+                // under ⟨0.21⟩ is a purity claim over a real file operation, and `urls(for:
+                // .documentDirectory)` kept only the folder key. A refinement that swallows what it
+                // refines is the cardinal sin wearing a feature's clothes — and the host-class arm one
+                // screen up says exactly this in its own comment ("never instead of it").
                 for c in searchPathClasses(searchPathArg(node.arguments)) { directEffects.insert(c) }
+                if let eff = kappaMember(root: rt, member: member) {
+                    directEffects.insert(eff)
+                    if eff == "Fs" { fsKinds.insert("?") }   // destination is an enum, not a literal path
+                }
             } else if let rt = base.root, PRIVACY_AUDIO_SESSION_TYPES.contains(rt), !declaredTypes.contains(rt) {
                 // AVAudioSession / AVAudioApplication. `setCategory(.record)` is how essentially every
                 // recording app reaches the microphone, and it emitted NOTHING until a recall battery
@@ -2351,7 +2368,12 @@ final class CallCollector: SyntaxVisitor {
                 // engine cannot read over-discloses.
                 if PRIVACY_MIC_PERMISSION_MEMBERS.contains(member) {
                     directEffects.insert("Mic")                  // permission APIs mean the mic outright
-                } else if member == "setCategory" || member == "setActive" {
+                } else if member == "setCategory" {
+                    // `setActive` WAS here and must not be: it never carries a category, so the argument
+                    // reader returned nil and the unreadable-argument rule over-disclosed Mic to every
+                    // audio app that activates a session — including one that just called
+                    // `setCategory(.playback)`. The over-disclose rule is for a category it cannot READ,
+                    // not for a call that has none.
                     for e in privacyAudioSessionEffects(category: audioCategoryArg(node.arguments)) {
                         directEffects.insert(e)
                     }
@@ -2379,6 +2401,8 @@ final class CallCollector: SyntaxVisitor {
                 if eff == "Fs" { let ks = fsKind(root: rt, member: member)
                                   if ks.isEmpty { fsKinds.insert("?") } else { for k in ks { fsKinds.insert(k) } } }
                 if PRIVACY_EFFECTS_ALL.contains(eff) { for k in privacyKind(root: rt, member: member, toShareIsNil: toShareIsNilArg(node.arguments)) { privacyKinds[eff, default: []].insert(k) } }
+                // A member-gated family that ADDS rather than replaces — see PRIVACY_MEMBER_ALSO.
+                if let also = PRIVACY_MEMBER_ALSO[rt]?[member] { directEffects.insert(also) }
                 if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK call IS network I/O
                 // A two-path Fs op (copyItem/moveItem/createSymbolicLink/…) carries a SOURCE *and* a
                 // DESTINATION locator; the single-`lit` guard below captures only the first, so a literal

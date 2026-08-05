@@ -231,7 +231,18 @@ def undetermined_disclosed(ws, i):
     open(plist, "w").write('<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict></dict></plist>\n')
     out = subprocess.run([BIN, "privacy-manifest", "--report", os.path.join(root, "r"), "--verify", plist],
                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=120).stdout
-    return "perform file I/O whose PATH this scan could not determine" in out
+    # PER-FUNCTION, not per-fixture. Grepping the whole output for one sentence meant ANY undetermined
+    # function in the fixture excused ANY constant-basis miss in it — so a DETERMINED-but-unclassified
+    # Desktop path was reported as "disclosed" by a warning that named a different function entirely.
+    # The gate's own comment states the contract correctly ("caught ⇒ fine, silent ⇒ the cardinal sin");
+    # this makes the implementation match it.
+    if "perform file I/O whose PATH this scan could not determine" not in out:
+        return False
+    named = set(re.findall(r"[(,] ?([A-Za-z_][\w.]*)", out.split("could not determine")[1][:400]))
+    src = open(os.path.join(root, "Sources", "App", "main.swift")).read()
+    funcs = set(re.findall(r"func\s+([A-Za-z_]\w*)", src))
+    # the disclosure must name a function from THIS fixture's own source
+    return bool(named & funcs)
 
 
 def main():

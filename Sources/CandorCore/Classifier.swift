@@ -379,6 +379,18 @@ public let MODEL_SDK_TYPES: Set<String> = [
 /// access is member-gated in `kappaPropertyRead` instead (finding 4). This is the opposite direction from
 /// the capture-ambiguity over-disclosure above BECAUSE AVAudioEngine is PREDOMINANTLY not-mic: gating on
 /// the mic-specific member is right, over-disclosing every playback engine as Mic would be a fabrication.
+/// Member-gated families that ADD to their type's effect rather than replacing it.
+///
+/// `requestTemporaryFullAccuracyAuthorization` needs its own key AND the ordinary Location one — Apple
+/// requires both — but `kappaMember` returns a single effect, so resolving it to `LocationTemporary`
+/// silently DROPPED `Location`. The comment justifying the member-first order said "the general Location
+/// key is still charged by every other call on the manager", which assumes the manager's constructor is
+/// in scan: with an INJECTED manager (`func f(_ m: CLLocationManager)`) it is not, and `deny E Location`
+/// flips green. Third instance today of a refinement swallowing what it refines.
+public let PRIVACY_MEMBER_ALSO: [String: [String: String]] = [
+    "CLLocationManager": ["requestTemporaryFullAccuracyAuthorization": "Location"],
+]
+
 /// Privacy families whose ENTRY POINT is a member on a SHARED type — see `kappaMember`. Separate from
 /// PRIVACY_SDK_TYPES because charging the whole type would fabricate: HKObjectType vends every HealthKit
 /// type, so only `clinicalType` names the clinical-records resource.
@@ -562,17 +574,42 @@ public let PRIVACY_SDK_TYPES: [String: String] = [
 public func hostClasses(_ host: String) -> Set<String> {
     let h = host.split(separator: ":").first.map(String.init) ?? host
     if h.hasSuffix(".local") || h.hasSuffix(".local.") { return ["LocalNetwork"] }
-    for p in ["169.254.", "10.", "192.168.", "224.0.0."] where h.hasPrefix(p) { return ["LocalNetwork"] }
-    if h.hasPrefix("172."), let second = h.split(separator: ".").dropFirst().first,
-       let n = Int(second), (16...31).contains(n) { return ["LocalNetwork"] }
+    // ONLY an actual IPv4 literal. `hasPrefix("10.")` alone matched `10.media.tumblr.com` and
+    // `192.168.example.com` — numbered CDN subdomains are real, and charging them the local-network key
+    // is a fabrication on ordinary public traffic.
+    let labels = h.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+    let isIPv4 = labels.count == 4 && labels.allSatisfy { !$0.isEmpty && $0.allSatisfy(\.isNumber) }
+    if isIPv4 {
+        if h.hasPrefix("169.254.") || h.hasPrefix("10.") || h.hasPrefix("192.168.") { return ["LocalNetwork"] }
+        // 224.0.0.0/4 is the whole multicast range, not the /24 the first cut matched — 239.255.255.250
+        // is SSDP/UPnP, the second-most-common LAN-discovery literal after mDNS.
+        if let first = Int(labels[0]), (224...239).contains(first) { return ["LocalNetwork"] }
+        if h.hasPrefix("172."), let n = Int(labels[1]), (16...31).contains(n) { return ["LocalNetwork"] }
+    }
+    // IPv6 link-local. The port-strip above splits on ":", which mangles a v6 literal, so test the raw
+    // host too rather than the stripped one.
+    let raw = host.lowercased()
+    if raw.hasPrefix("fe80:") || raw.hasPrefix("[fe80:") || raw.hasPrefix("ff02:") || raw.hasPrefix("[ff02:") {
+        return ["LocalNetwork"]
+    }
     return []
 }
 
 public func pathClasses(_ path: String) -> Set<String> {
     // Normalise the two spellings of home: `~/Desktop` and `/Users/<name>/Desktop`.
+    // NORMALISE the spellings macOS actually produces before matching. All three of these are real paths
+    // to the same protected folder and all three were classified as NOTHING — and because they ARE
+    // determined, the ⊤ count could not report them either: a missing key with no disclosure, which the
+    // design's §4.4 contract forbids outright.
     var p = path
+    if p.hasPrefix("/System/Volumes/Data/") { p = String(p.dropFirst("/System/Volumes/Data".count)) }
+    if p.hasPrefix("/private/") { p = String(p.dropFirst("/private".count)) }
     if p.hasPrefix("~") { p = "/Users/_" + p.dropFirst() }
-    if let r = p.range(of: #"^/Users/[^/]+"#, options: .regularExpression) { p = "/Users/_" + p[r.upperBound...] }
+    // `/Users/Shared` is NOT a home directory — it is the shared, unprotected one, and rewriting it to
+    // `/Users/_` charged `/Users/Shared/Documents/x` the Documents key. A fixed non-home name, so this is
+    // a fabrication on an unambiguous input rather than a judgement call.
+    if let r = p.range(of: #"(?i)^/Users/[^/]+"#, options: .regularExpression),
+       String(p[r]).lowercased() != "/users/shared" { p = "/Users/_" + p[r.upperBound...] }
     if p.hasPrefix("/Volumes/") { return ["RemovableVolume", "NetworkVolume"] }
     // ANOTHER APP'S BUNDLE / ANOTHER APP'S CONTAINER. Apple names no API for these two keys because
     // there isn't one — reading another app's bundle is ordinary file I/O, and it is the PATH that makes
@@ -584,7 +621,8 @@ public func pathClasses(_ path: String) -> Set<String> {
     where p.hasPrefix(prefix) { return [cls] }
     for (folder, cls) in [("Desktop", "FolderDesktop"), ("Documents", "FolderDocuments"),
                           ("Downloads", "FolderDownloads")]
-    where p == "/Users/_/" + folder || p.hasPrefix("/Users/_/" + folder + "/") { return [cls] }
+    where p.lowercased() == "/users/_/" + folder.lowercased()
+       || p.lowercased().hasPrefix("/users/_/" + folder.lowercased() + "/") { return [cls] }
     return []
 }
 
@@ -593,8 +631,17 @@ public func pathClasses(_ path: String) -> Set<String> {
 public func searchPathClasses(_ member: String?) -> Set<String> {
     switch member {
     case "desktopDirectory":   return ["FolderDesktop"]
-    case "documentDirectory":  return ["FolderDocuments"]
     case "downloadsDirectory": return ["FolderDownloads"]
+    // `.documentDirectory` is DELIBERATELY ABSENT. On iOS it returns the app's OWN sandbox Documents
+    // directory — the single commonest file-storage line in iOS development — and
+    // NSDocumentsFolderUsageDescription is a macOS TCC key that does not exist there. Mapping it made
+    // `FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)` exit 1 on essentially
+    // every iOS app, demanding a key the platform has no concept of. Same over-fire for a SANDBOXED
+    // macOS app, where it also resolves inside the container.
+    //
+    // The other two are safe because they have no sandbox meaning: `.desktopDirectory` and
+    // `.downloadsDirectory` name the real user folders or nothing. A LITERAL `/Users/x/Documents/…`
+    // still classifies (rung 1) — that spelling is unambiguous in a way the enum is not.
     default: return []   // every other search path is unprotected or app-scoped — never guess a folder
     }
 }
@@ -1163,7 +1210,11 @@ public func privacyAudioSessionEffects(category: String?) -> [String] {
     // Categories that CANNOT reach the microphone. A denylist would be wrong here and an allowlist is
     // right, unusually — because the safe default is to CHARGE, so what must be enumerated is the set
     // that is provably safe, and these are the whole of it in AVFoundation.
-    case "playback", "ambient", "soloAmbient", "multiRoute": return []
+    // PROVABLY mic-free only. `.multiRoute` was here and does not belong: Apple documents it as usable
+    // "for input, output, or both" — it is how an app records USB input while monitoring on headphones.
+    // An allowlist is right here (the safe default is to CHARGE), which makes a wrong entry a MISS, and a
+    // miss on this key is an App Store rejection.
+    case "playback", "ambient", "soloAmbient": return []
     default: return ["Mic"]   // unreadable/absent category → over-disclose (never under-declare)
     }
 }
