@@ -11,6 +11,24 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [0.27.0] — 2026-08-05
 
+### `privacy/4` — seven more families, and 42 of Apple's 57 keys now modelled
+
+Focus status, Wallet identity, FinanceKit, the three visionOS ARKit providers (hands, world-sensing,
+main camera) and temporary location accuracy. **Every type name was verified against Apple's docs JSON
+before being mapped** — a wrong type→key mapping does not merely miss, it fabricates a requirement on
+real apps, and this is a vocabulary it is easy to be confidently wrong about.
+
+Temporary accuracy exposed an ordering bug: `requestTemporaryFullAccuracyAuthorization` has its own key
+but sits on `CLLocationManager`, already modelled as `Location`. The type map was consulted BEFORE the
+member map, so the type always won and the temporary key could never be emitted. Member-gated families
+now match first; a realistic location app gets both keys, which is what Apple requires.
+
+The 15 keys still unmodelled are the four path-triggered macOS folder keys (the same `FileManager` call
+needs a different key depending on a string — value provenance), LocalNetwork, the enterprise/MDM
+surfaces, and allow-once variants that are not separable at a call site. All derived, all disclosed.
+
+Recall battery: 44/48 caught, 0 broken promises.
+
 ### `--verify` finds the Info.plist itself
 
 `candor privacy-manifest --verify` now takes an OPTIONAL path. Bare, it discovers the plist — so the

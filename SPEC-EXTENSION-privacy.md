@@ -30,6 +30,28 @@ verify a privacy manifest from code-level truth**.
 | `Photos` | the photo library | Photos / PhotosUI (`PHPhotoLibrary`, `PHAsset`, `PHPickerViewController`) |
 | `Notify` | user-attention / notifications | UserNotifications (`UNUserNotificationCenter`) |
 
+### Fourth wave (`privacy/4`, 2026-08-05) — the rest of what a type can name
+
+Seven more families, closing everything left that a TYPE or MEMBER can identify: Focus status
+(`INFocusStatusCenter`), Wallet identity (`PKIdentityRequest`/`PKIdentityDocument`), FinanceKit
+(`FinanceStore`), the three visionOS ARKit providers — hands (`HandTrackingProvider`), world-sensing
+(`PlaneDetectionProvider`/`SceneReconstructionProvider`/`ImageTrackingProvider`) and the main camera
+(`CameraFrameProvider`) — and temporary location accuracy.
+
+**Every type name was verified against Apple's docs JSON before being mapped.** A wrong type→key mapping
+does not merely miss; it fabricates a requirement on real apps, and this vocabulary is assembled from
+knowledge that is easy to be confidently wrong about.
+
+Temporary accuracy exposed an ordering bug worth recording: `requestTemporaryFullAccuracyAuthorization`
+has its own key but sits on `CLLocationManager`, which is already modelled as `Location` — and the type
+map was consulted BEFORE the member map, so the type always won and the temporary key could never be
+emitted at all. Member-gated families now match first. A realistic location app correctly gets both
+keys, which is what Apple requires.
+
+**42 of Apple's 57 documented keys are now modelled.** The 15 that remain are the four path-triggered
+macOS folder keys, LocalNetwork, the enterprise/MDM surfaces, and a handful of allow-once variants that
+are not separable at a call site. All are derived, disclosed by every verify, and named with a reason.
+
 ### Third wave (`privacy/3`, 2026-08-05) — measured against Apple's own key list
 
 The first two waves were assembled from what we knew Apple required. This one was assembled from what

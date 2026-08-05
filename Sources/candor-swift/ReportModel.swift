@@ -28,6 +28,10 @@ enum Effect: String, CaseIterable {
     case nfc = "Nfc", fallDetection = "FallDetection", sensorKit = "SensorKit", fileProvider = "FileProvider",
          systemExtension = "SystemExtension", appleEvents = "AppleEvents", videoSubscriber = "VideoSubscriber",
          gameCenterFriends = "GameCenterFriends", clinicalRecords = "ClinicalRecords"
+    // privacy/4 (2026-08-05)
+    case focusStatus = "FocusStatus", identity = "Identity", financialData = "FinancialData",
+         handsTracking = "HandsTracking", worldSensing = "WorldSensing", mainCamera = "MainCamera",
+         locationTemporary = "LocationTemporary"
     var specName: String { rawValue }
     static func from(_ name: String) -> Effect? { Effect(rawValue: name) }
 }

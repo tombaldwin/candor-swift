@@ -114,6 +114,27 @@ CASES = [
     ("Apple events / NSAppleScript", "NSAppleEventsUsageDescription",
      'import Foundation\nfunc f() { var e: NSDictionary?; _ = NSAppleScript(source: "tell app \\"Finder\\" to activate")?.executeAndReturnError(&e) }'),
 
+    # ── privacy/4 (2026-08-05): every type name below was VERIFIED against Apple's docs JSON before
+    # being mapped, because a wrong type→key mapping fabricates a requirement on real apps ──────────
+    ("Focus status / INFocusStatusCenter", "NSFocusStatusUsageDescription",
+     'import Intents\nfunc f() { INFocusStatusCenter.default.requestAuthorization { _ in } }'),
+    ("Identity / PKIdentityRequest", "NSIdentityUsageDescription",
+     'import PassKit\nfunc f() { _ = PKIdentityRequest() }'),
+    ("Financial data / FinanceStore", "NSFinancialDataUsageDescription",
+     'import FinanceKit\nfunc f() { _ = try? await FinanceStore.shared.accounts(query: .init()) }'),
+    ("visionOS hands / HandTrackingProvider", "NSHandsTrackingUsageDescription",
+     'import ARKit\nfunc f() { _ = HandTrackingProvider() }'),
+    ("visionOS planes / PlaneDetectionProvider", "NSWorldSensingUsageDescription",
+     'import ARKit\nfunc f() { _ = PlaneDetectionProvider() }'),
+    ("visionOS scene / SceneReconstructionProvider", "NSWorldSensingUsageDescription",
+     'import ARKit\nfunc f() { _ = SceneReconstructionProvider() }'),
+    ("visionOS image tracking / ImageTrackingProvider", "NSWorldSensingUsageDescription",
+     'import ARKit\nfunc f() { _ = ImageTrackingProvider() }'),
+    ("visionOS main camera / CameraFrameProvider", "NSMainCameraUsageDescription",
+     'import ARKit\nfunc f() { _ = CameraFrameProvider() }'),
+    ("Location temporary accuracy", "NSLocationTemporaryUsageDescription",
+     'import CoreLocation\nfunc f() { CLLocationManager().requestTemporaryFullAccuracyAuthorization(withPurposeKey: "k") }'),
+
     # ── shapes that could defeat detection even for a MODELLED sensor ───────────────────────────────
     ("Contacts behind a local wrapper type", "NSContactsUsageDescription",
      'import Contacts\nfinal class Svc { let s = CNContactStore()\n  func all() -> [CNContainer] { (try? s.containers(matching: nil)) ?? [] } }\n'
@@ -155,7 +176,6 @@ KNOWN_UNMODELLED = {
     # Not separable by type / needs an entitlement this engine does not read.
     "NSLocalNetworkUsageDescription",
     # Not modelled yet — each needs its own fixture and a source read.
-    "NSFocusStatusUsageDescription",
 }
 
 

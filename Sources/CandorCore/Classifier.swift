@@ -384,6 +384,9 @@ public let MODEL_SDK_TYPES: Set<String> = [
 /// type, so only `clinicalType` names the clinical-records resource.
 public let PRIVACY_MEMBER_TYPES: [String: [String: String]] = [
     "HKObjectType": ["clinicalType": "ClinicalRecords"],
+    // `requestTemporaryFullAccuracyAuthorization` has its OWN key, on a manager already modelled as
+    // Location — so it must be member-gated, or every location app would be charged the temporary key.
+    "CLLocationManager": ["requestTemporaryFullAccuracyAuthorization": "LocationTemporary"],
     "HKSampleType": ["clinicalType": "ClinicalRecords"],
 ]
 
@@ -420,6 +423,20 @@ public let PRIVACY_SDK_TYPES: [String: String] = [
     "VSAccountManager": "VideoSubscriber",
     // Game Center friends.
     "GKLocalPlayer": "GameCenterFriends",
+    // ── privacy/4 (2026-08-05) ────────────────────────────────────────────────────────────────────────
+    // Focus status — whether the user is in a Focus mode.
+    "INFocusStatusCenter": "FocusStatus",
+    // Wallet identity — reading an ID document.
+    "PKIdentityRequest": "Identity", "PKIdentityDocument": "Identity",
+    "PKIdentityAuthorizationController": "Identity",
+    // FinanceKit — financial data stored in Wallet.
+    "FinanceStore": "FinancialData",
+    // visionOS ARKit data providers. Each has its OWN key, and they are distinct types, so the split is
+    // precise rather than a guess: hands vs world-sensing vs the main camera.
+    "HandTrackingProvider": "HandsTracking",
+    "PlaneDetectionProvider": "WorldSensing", "SceneReconstructionProvider": "WorldSensing",
+    "ImageTrackingProvider": "WorldSensing",
+    "CameraFrameProvider": "MainCamera",
     // Contacts — the address book.
     "CNContactStore": "Contacts", "CNContactPickerViewController": "Contacts",
     // Photos — the photo library.
@@ -498,7 +515,7 @@ public let PRIVACY_SDK_TYPES: [String: String] = [
 /// can import it: it used to be a literal in the report writer and a SECOND literal in a test, so
 /// bumping the wave turned the suite red on a version-coupled assertion — a class this project has
 /// already paid for across six repos. The next bump moves this line and nothing else.
-public let PRIVACY_EXTENSION_ID = "privacy/3"
+public let PRIVACY_EXTENSION_ID = "privacy/4"
 
 public let PRIVACY_EFFECTS_ORDER: [String] = [
     "Location", "Camera", "Mic", "Contacts", "Photos", "Notify",
@@ -507,6 +524,9 @@ public let PRIVACY_EFFECTS_ORDER: [String] = [
     // privacy/3 (2026-08-05) — appended, never interleaved, so existing output ordering is unchanged.
     "Nfc", "FallDetection", "SensorKit", "FileProvider", "SystemExtension", "AppleEvents",
     "VideoSubscriber", "GameCenterFriends", "ClinicalRecords",
+    // privacy/4 (2026-08-05) — every type name below was verified against Apple's docs JSON first.
+    "FocusStatus", "Identity", "FinancialData", "HandsTracking", "WorldSensing", "MainCamera",
+    "LocationTemporary",
 ]
 
 public let PRIVACY_EFFECTS_ALL: Set<String> = Set(PRIVACY_EFFECTS_ORDER)
@@ -605,6 +625,14 @@ public let privacyKeyMap: [String: [String]] = [
     "VideoSubscriber": ["NSVideoSubscriberAccountUsageDescription"],
     "GameCenterFriends": ["NSGKFriendListUsageDescription"],
     "ClinicalRecords": ["NSHealthClinicalHealthRecordsShareUsageDescription"],
+    // privacy/4
+    "FocusStatus": ["NSFocusStatusUsageDescription"],
+    "Identity": ["NSIdentityUsageDescription"],
+    "FinancialData": ["NSFinancialDataUsageDescription"],
+    "HandsTracking": ["NSHandsTrackingUsageDescription"],
+    "WorldSensing": ["NSWorldSensingUsageDescription"],
+    "MainCamera": ["NSMainCameraUsageDescription"],
+    "LocationTemporary": ["NSLocationTemporaryUsageDescription"],
     "Location": ["NSLocationWhenInUseUsageDescription", "NSLocationAlwaysAndWhenInUseUsageDescription",
                  "NSLocationAlwaysUsageDescription", "NSLocationUsageDescription"],
     "Camera": ["NSCameraUsageDescription"],
@@ -727,8 +755,14 @@ public func kappaMember(root: String, member: String) -> String? {
     if MODEL_SDK_TYPES.contains(root) { return "Llm" }
     // `privacy/1`: ANY call into a curated privacy-sensor type is that sensor effect (no method-name
     // gating — single-purpose types). A local same-named type shadows this via declaredTypes at the driver.
+    // MEMBER-GATED FIRST. A member with its OWN key must beat its type's general one: CLLocationManager
+    // is Location, but `requestTemporaryFullAccuracyAuthorization` additionally requires
+    // NSLocationTemporaryUsageDescription — and with the type checked first, the type always won and the
+    // temporary key could never be emitted. The general Location key is still charged by every other
+    // call on the manager (its constructor included), so nothing is lost by the more specific match.
+    if let priv = PRIVACY_MEMBER_TYPES[root]?[member] { return priv }
     if let priv = PRIVACY_SDK_TYPES[root] { return priv }
-    // MEMBER-GATED privacy families: the type is shared, only a specific member reaches the sensor.
+    // (member-gated map consulted above — the type is shared, only a specific member names the resource)
     // `HKObjectType.clinicalType(forIdentifier:)` needs its own key, but HKObjectType vends EVERY
     // HealthKit type — putting it in PRIVACY_SDK_TYPES would charge clinical-records access to every app
     // that touches a step count. Gate on the member, which is what actually names the resource.
