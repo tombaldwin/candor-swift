@@ -515,6 +515,32 @@ public let PRIVACY_SDK_TYPES: [String: String] = [
 /// can import it: it used to be a literal in the report writer and a SECOND literal in a test, so
 /// bumping the wave turned the suite red on a version-coupled assertion — a class this project has
 /// already paid for across six repos. The next bump moves this line and nothing else.
+/// HOW each modelled key is determined — §6 of CONSTANT-PROVENANCE-DESIGN.md.
+///
+/// The point is NOT precision, it is RECALL: what has to be true for the key to be emitted at all.
+///
+///   `type`       a curated type name appears. Recall-complete by construction.
+///   `argument`   an enum/descriptor argument refines it — and an UNREADABLE argument OVER-discloses
+///                (`privacyCaptureEffects`, `privacyAudioSessionEffects`), so recall is complete too.
+///   `member`     a specific member name on a shared type. Recall-complete.
+///   `constant`   a path/URI CLASS decides it, so an undetermined value means the key can be MISSED.
+///                This is the only lossy basis, and the only one that needs a count beside it.
+///   `entitlement` read from a manifest, not from code.
+///   `none`       no code signal is modelled.
+///
+/// This exists so that reaching 57/57 does not silently delete the "here are the keys I do not check"
+/// warning while coverage WITHIN several keys is still partial. The disclosure changes axis from WHICH
+/// keys to HOW COMPLETELY, and a key resolved by `constant` must always report its undetermined count.
+public let PRIVACY_KEY_BASIS: [String: String] = {
+    var m: [String: String] = [:]
+    for e in PRIVACY_EFFECTS_ORDER { m[e] = "type" }
+    // refined by a readable argument; unreadable over-discloses, so recall stays complete
+    for e in ["Camera", "Mic", "Calendar", "Reminders"] { m[e] = "argument" }
+    // a member on a type that is shared with another family
+    for e in ["ClinicalRecords", "LocationTemporary"] { m[e] = "member" }
+    return m
+}()
+
 public let PRIVACY_EXTENSION_ID = "privacy/4"
 
 public let PRIVACY_EFFECTS_ORDER: [String] = [

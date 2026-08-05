@@ -189,13 +189,47 @@ private func plistFragment(_ keys: [(effect: String, key: String)]) -> String {
 
 
 /// Print what this verify does NOT check. See `PRIVACY_UNMODELLED_KEYS`.
-private func printPrivacyVocabularyBound() {
+/// Functions performing file I/O whose PATH the scan could not name — the ⊤ count of
+/// CONSTANT-PROVENANCE-DESIGN.md, computed from what the report already carries.
+///
+/// A LOWER BOUND, deliberately and stated as one: `paths` is per-FUNCTION, so a function with one
+/// determined path and one undetermined counts here as determined. Undercounting is the dangerous
+/// direction for a disclosure, which is why the output says so rather than presenting the number bare.
+func undeterminedPaths(_ byName: [String: FixFn]) -> (ops: Int, fns: [String]) {
+    var fns: [String] = []
+    for (fn, f) in byName where f.inferred.contains("Fs") || f.direct.contains("Fs") {
+        if f.paths.isEmpty { fns.append(fn) }
+    }
+    return (fns.count, fns.sorted())
+}
+
+/// §6 of CONSTANT-PROVENANCE-DESIGN.md — report HOW COMPLETELY, not just which keys.
+///
+/// `undetermined` is the number of file operations whose PATH this scan could not name. It is reported
+/// even though no key is currently resolved by path, because it is the concrete form of the caveat: the
+/// folder keys are unmodelled AND you cannot rule them out by inspection either, and here is how much
+/// you cannot see. When those keys land it becomes load-bearing rather than contextual.
+private func printPrivacyVocabularyBound(undetermined: (ops: Int, fns: [String])) {
     let modelled = Set(privacyKeyMap.values.flatMap { $0 }).count
-    print("⚠ this verify covers the \(modelled) usage-description key(s) the privacy vocabulary models. "
-          + "It says NOTHING — in either direction — about \(PRIVACY_UNMODELLED_KEYS.count) other Apple keys, "
+    var byBasis: [String: Int] = [:]
+    for (eff, keys) in privacyKeyMap where !keys.isEmpty {
+        byBasis[PRIVACY_KEY_BASIS[eff] ?? "type", default: 0] += keys.count
+    }
+    let bases = byBasis.sorted { $0.key < $1.key }.map { "\($0.value) by \($0.key)" }.joined(separator: " · ")
+    print("⚠ COVERAGE: \(modelled) of Apple's \(APPLE_PRIVACY_KEYS.count) documented usage-description keys "
+          + "are modelled (\(bases)).")
+    print("  It says NOTHING — in either direction — about the other \(PRIVACY_UNMODELLED_KEYS.count), "
           + "so a clean result here is not a clean App Store review. Declare these yourself if they apply:")
     for k in PRIVACY_UNMODELLED_KEYS {
         print("    \(k.key)  (\(k.why))")
+    }
+    if undetermined.ops > 0 {
+        let names = undetermined.fns.prefix(3).joined(separator: ", ")
+        print("⚠ \(undetermined.ops) function(s) perform file I/O whose PATH this scan could not determine "
+              + "(\(names)\(undetermined.fns.count > 3 ? ", …" : "")).")
+        print("  The folder keys above are decided by the path, so those functions are exactly where an "
+              + "NSDesktop/NSDocuments/NSDownloads/removable/network-volume requirement would hide. This is a "
+              + "LOWER BOUND: a function with one determined path and one undetermined counts as determined.")
     }
 }
 
@@ -370,7 +404,7 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         // for the keys this extension models" — and a reader who takes it for "green for Apple" is the
         // person who submits and gets rejected. Measured by a recall battery, not assumed; the reasons
         // travel with the list so this is a limitation a reader can act on rather than a disclaimer.
-        printPrivacyVocabularyBound()
+        printPrivacyVocabularyBound(undetermined: undeterminedPaths(model.byName))
         exit(ok ? 0 : 1)
     }
 

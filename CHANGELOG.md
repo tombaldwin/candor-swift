@@ -11,6 +11,45 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [0.27.0] — 2026-08-05
 
+### The verify reports HOW COMPLETELY, not just which keys
+
+§6 of `candor-spec/CONSTANT-PROVENANCE-DESIGN.md`, landed BEFORE the coverage work it exists to make
+safe. Today the verify's value rests on one sentence — *"here are the keys I do not check"* — and the
+moment every key is nominally modelled that sentence disappears, while coverage WITHIN several keys is
+still partial. Full coverage without this would be a reduction in honesty bought with an increase in
+the count.
+
+So the disclosure changes axis. Each key now carries a **determination basis**, and the verify reports
+per basis rather than as one number:
+
+```
+⚠ COVERAGE: 42 of Apple's 57 documented usage-description keys are modelled
+  (7 by argument · 2 by member · 33 by type).
+```
+
+`type`, `argument` and `member` are recall-complete by construction — an unreadable argument
+OVER-discloses rather than going quiet. `constant` (a path or URI class decides the key) is the only
+lossy basis, and it is the one that must always report a count beside it.
+
+**The ⊤ count.** The verify now names the file operations whose PATH it could not determine:
+
+```
+⚠ 282 function(s) perform file I/O whose PATH this scan could not determine (…).
+  The folder keys above are decided by the path, so those functions are exactly where an
+  NSDesktop/NSDocuments/NSDownloads/removable/network-volume requirement would hide. This is a
+  LOWER BOUND: a function with one determined path and one undetermined counts as determined.
+```
+
+That is the concrete form of a caveat that used to be abstract: those keys are unmodelled **and** you
+cannot rule them out by reading the report either — here is how much you cannot see. When constant
+provenance lands the number becomes load-bearing; today it is honest context. It is a lower bound
+because `paths` is per-function, and undercounting a disclosure is the dangerous direction, so the
+output says so rather than presenting the number bare.
+
+`FixFn` carries `paths` to make this possible — defaulted empty like `privacyKinds`, because empty is
+meaningful (undetermined) rather than lossy, so a report predating the field reads as "nothing
+determined", which is the honest answer for a producer that was not emitting it.
+
 ### `privacy/4` — seven more families, and 42 of Apple's 57 keys now modelled
 
 Focus status, Wallet identity, FinanceKit, the three visionOS ARKit providers (hands, world-sensing,

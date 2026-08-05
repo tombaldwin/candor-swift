@@ -298,4 +298,52 @@ final class PrivacyManifestTests: XCTestCase {
         XCTAssertEqual(r.code, 0, r.err)
         XCTAssertTrue(r.out.contains("\"ok\""), "--json must still have been parsed as a FLAG: \(r.out)")
     }
+
+    /// §6 of CONSTANT-PROVENANCE-DESIGN.md — the verify reports HOW COMPLETELY, not just which keys.
+    /// Without this, reaching 57/57 would silently delete the "here are the keys I do not check" warning
+    /// while coverage WITHIN several keys is still partial.
+    func testVerifyReportsCoverageByDeterminationBasis() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage("import Foundation\nlet x = 1\n", name: "App")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try #"<?xml version="1.0" encoding="UTF-8"?>\#n<plist version="1.0"><dict></dict></plist>"#
+            .write(to: root.appendingPathComponent("Info.plist"), atomically: true, encoding: .utf8)
+        _ = try ProcessHarness.run(bin, [root.path], cwd: root)
+        let r = try ProcessHarness.run(bin, ["privacy-manifest", "--verify"], cwd: root)
+        XCTAssertTrue(r.out.contains("COVERAGE:"), r.out)
+        XCTAssertTrue(r.out.contains("by type"), "the basis breakdown must appear: \(r.out)")
+        XCTAssertTrue(r.out.contains("of Apple's"), "the denominator must be Apple's count, not ours: \(r.out)")
+    }
+
+    /// The ⊤ COUNT: file I/O whose path could not be determined. It is the concrete form of the folder-key
+    /// caveat — those keys are unmodelled AND you cannot rule them out by inspection, and this says by how
+    /// much. A function whose path IS a literal must not be counted, or the number means nothing.
+    func testVerifyCountsFileOpsWithUndeterminedPaths() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-topcount-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Sources/App"),
+                                                withIntermediateDirectories: true)
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "App", targets: [.executableTarget(name: "App")])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try """
+        import Foundation
+        func known() { _ = FileManager.default.contents(atPath: "/Users/me/Desktop/x") }
+        func unknown(_ p: String) { _ = FileManager.default.contents(atPath: p) }
+        """.write(to: root.appendingPathComponent("Sources/App/main.swift"), atomically: true, encoding: .utf8)
+        try #"<?xml version="1.0" encoding="UTF-8"?>\#n<plist version="1.0"><dict></dict></plist>"#
+            .write(to: root.appendingPathComponent("Info.plist"), atomically: true, encoding: .utf8)
+        _ = try ProcessHarness.run(bin, [root.path], cwd: root)
+        let r = try ProcessHarness.run(bin, ["privacy-manifest", "--verify"], cwd: root)
+        XCTAssertTrue(r.out.contains("1 function(s) perform file I/O whose PATH"),
+                      "exactly the undetermined one, not the literal one: \(r.out)")
+        XCTAssertTrue(r.out.contains("unknown"), "and it must NAME it: \(r.out)")
+        XCTAssertFalse(r.out.contains("(known"), "the determined-path function must not be counted: \(r.out)")
+        // A LOWER BOUND, and it has to say so — undercounting a disclosure is the dangerous direction.
+        XCTAssertTrue(r.out.contains("LOWER BOUND"), r.out)
+    }
 }

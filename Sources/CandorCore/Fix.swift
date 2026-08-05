@@ -20,6 +20,16 @@ public struct FixFn {
     /// leave every function classless, every narrowed rule permanently unmatched, and every remedy for a
     /// scoped `deny Unknown` silently gone — a lost disclosure indistinguishable from a clean report.
     public let unknownWhy: [String]
+    /// The §2 `paths` this function's Fs calls named, read verbatim. Carried so a consumer can tell a
+    /// DETERMINED file destination from an undetermined one — §6 of CONSTANT-PROVENANCE-DESIGN.md, where
+    /// the count of Fs functions with NO determined path is the disclosure that stands in for the
+    /// path-triggered folder keys until constant provenance lands.
+    ///
+    /// Defaulted to empty like `privacyKinds`: empty is MEANINGFUL (undetermined), not lossy, so a report
+    /// predating the field reads as "nothing determined" — which is the honest answer for a producer that
+    /// was not emitting it.
+    public var paths: [String] = []
+
     /// `privacy/2` THE READ/WRITE DIRECTIONS THIS FUNCTION'S PRIVACY CALLS REVEALED, off the §2
     /// report entry verbatim. Like `netClass` this cannot be derived from the other fields: the verb
     /// that said "save" rather than "execute" is gone by the time a consumer reads a report, so the
