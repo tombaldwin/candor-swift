@@ -86,7 +86,22 @@ imports; the field name stays `calls` per the spec), OMITTED entirely when nothi
 "all clear": those modules' effects are absent from the report, NOT claimed pure.
 Only effectful-or-unresolved functions appear; a
 function in the SIDECAR but absent from the report is pure **as far as this engine resolved** —
-candor-swift claims §4 (below), but read `unresolved` before trusting any specific entry. For the
+candor-swift claims §4 (below), but read `unresolved` before trusting any specific entry. **A MULTI-TARGET PACKAGE: SCAN ONCE PER SHIPPED BINARY.** `candor-swift <dir>` reads every `.swift`
+file under `<dir>`, so a package with several products sharing a core charges each product with every
+OTHER product's effects — and a `privacy-manifest --verify` against one product's `Info.plist` then
+answers about code that product never compiles. `--target <name>` resolves that target's in-package
+dependency closure from `Package.swift` and scans exactly those sources:
+
+    candor-swift . --target MacApp        # this product and its closure, nothing else
+
+It REFUSES rather than scanning less: an unknown target exits 2 and names the ones that exist, and so
+does a closure member whose sources cannot be found. A scoped scan writes the one current report (use
+`--out` to keep several) and qualifies its identity — `package` and every `hash` become
+`<pkg>/<target>#…`, so the report CANNOT be joined as the whole package's. If you are chaining a scoped
+report, that mismatch is deliberate: a miss resolves to disclosed, where reading it as the package
+would claim purity over every function in the targets it never scanned.
+
+For the
 general read-only queries (show/where/callers/whatif) point candor-query or candor-ts-query at these
 reports; candor-swift itself carries a few query subcommands, over a report a scan already wrote:
 
@@ -96,7 +111,7 @@ reports; candor-swift itself carries a few query subcommands, over a report a sc
     candor-swift unverified [--report <locator>] --policy <file> [--json] [--strict]      # pure/deny layers that PASS but are Unknown (not PROVABLY clean)
     candor-swift tour [<N>]                                             # the N most surprising transitive reaches (default 10; no policy)
     candor-swift gains      <current> <baseline> [--json]              # effects the surface GAINED since the baseline (supply-chain alarm)
-    candor-swift privacy-manifest [--verify <Info.plist>]              # generate/verify the Apple privacy manifest from the sensor reach (privacy/1)
+    candor-swift privacy-manifest [--verify <Info.plist>]              # generate/verify the Apple privacy manifest from the sensor reach (privacy/2)
     candor-swift gate --report <locator> --policy <file> [--json] [--gate-json <f>]       # apply a policy to an EXISTING report, with NO scan
 
 ⟨0.24⟩ `gate --report <locator> --policy <file>` (SPEC §3.1) applies a policy to an EXISTING report
@@ -149,7 +164,7 @@ function down to the nearest DIRECT source, each step indented one deeper, the s
 policy, read-only; `--json` emits `{ effect, fn, path:[{ fn, loc, source }] }`. If the fn does not
 perform the effect (or the source is not a local function) the chain is honestly empty. A missing
 report or an unmatched fn fails loud (exit 2).
-`privacy-manifest` (the `privacy/1` extension, SPEC-EXTENSION-privacy.md) turns the report's privacy-sensor
+`privacy-manifest` (the `privacy/2` extension, SPEC-EXTENSION-privacy.md) turns the report's privacy-sensor
 reach — the transitive union of Location/Camera/Mic/Contacts/Photos/Notify, which grep can't see — into an
 Apple privacy declaration. With no `--verify` it GENERATES the required Info.plist usage-description keys
 (each with the reaching functions); `--verify <Info.plist>` diffs the plist's declared keys against the
