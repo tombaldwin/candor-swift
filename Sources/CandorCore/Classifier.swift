@@ -199,6 +199,11 @@ public let SQLITE_PURE_INTROSPECTION: Set<String> = [
 // var's later member calls classify — `FileManager.default.removeItem` inline is Fs, but via a
 // `let fm = FileManager.default` it dropped to pure (the receiver typed as the bare identifier).
 public let SINGLETON_ACCESSORS: Set<String> = ["default", "shared", "standard", "current", "general", "processInfo", "main"]
+/// The same convention spelled as a METHOD: `AVAudioSession.sharedInstance()`, `X.shared()`. Kept apart
+/// from SINGLETON_ACCESSORS because the syntax differs (a call, not a member read) and so does the risk:
+/// a parenthesised static could be any factory, so only the conventional singleton names qualify, and
+/// only when the type has not recorded a real return type for them.
+public let SINGLETON_FACTORY_METHODS: Set<String> = ["sharedInstance", "shared", "default", "current"]
 // NSPasteboard/UIPasteboard methods that READ no clipboard data and WRITE nothing — capability/metadata
 // queries (the whole-owner Clipboard rule fabricated on them; sweep [33]). Subtracted FIRST, like
 // SQLITE_PURE_INTROSPECTION. Real verbs stay Clipboard: writeObjects/setString/setData/clearContents/
@@ -458,6 +463,40 @@ public let PRIVACY_EFFECTS_ALL: Set<String> = [
     "Location", "Camera", "Mic", "Contacts", "Photos", "Notify",
     "Health", "Motion", "Calendar", "Reminders", "Bluetooth", "Speech",
     "Biometrics", "MediaLibrary", "HomeKit", "Tracking", "NearbyInteraction", "Siri",
+]
+
+/// APPLE USAGE-DESCRIPTION KEYS THIS EXTENSION DOES NOT MODEL — named, so a verify can say so.
+///
+/// MEASURED, not guessed: a recall battery (one fixture per key family, exercising the canonical API)
+/// found these emit NOTHING. They are listed here so the verify can DISCLOSE its own vocabulary bound
+/// instead of printing "✓ every accessed capability is declared" over a sensor it never looks for.
+///
+/// This is the whole difference between a tool that is incomplete and a tool that LIES about being
+/// complete. A green verify that quietly means "green for the 18 sensors I know" is how somebody
+/// submits to Apple and gets rejected — the one outcome this feature exists to prevent.
+///
+/// Each has a reason, and none of them is "we forgot":
+///   · LocalNetwork — `NWBrowser`/`NWConnection` serve ordinary networking too, so the reach is not
+///     separable by type, and the key travels with an entitlement this engine does not read.
+///   · the macOS folder keys — triggered by PATH, not by API: the same `FileManager` call needs a
+///     different key, or none, depending on a string. That is the value-provenance problem.
+///   · FocusStatus / GameKit friends / VideoSubscriberAccount / clinical health records — simply not
+///     modelled yet. Cheap to add; each needs its own fixture and a source read.
+public let PRIVACY_UNMODELLED_KEYS: [(key: String, why: String)] = [
+    ("NSLocalNetworkUsageDescription", "NWBrowser/NWConnection also serve ordinary networking; needs an entitlement this engine does not read"),
+    ("NSDocumentsFolderUsageDescription", "triggered by PATH, not by API — needs value provenance"),
+    ("NSDesktopFolderUsageDescription", "triggered by PATH, not by API — needs value provenance"),
+    ("NSDownloadsFolderUsageDescription", "triggered by PATH, not by API — needs value provenance"),
+    ("NSRemovableVolumesUsageDescription", "triggered by PATH, not by API — needs value provenance"),
+    ("NSNetworkVolumesUsageDescription", "triggered by PATH, not by API — needs value provenance"),
+    ("NSFocusStatusUsageDescription", "not modelled"),
+    ("NSGKFriendListUsageDescription", "not modelled"),
+    ("NSVideoSubscriberAccountUsageDescription", "not modelled"),
+    ("NSHealthClinicalHealthRecordsShareUsageDescription", "not modelled"),
+    ("NSSensorKitUsageDescription", "not modelled"),
+    ("NSFileProviderDomainUsageDescription", "not modelled"),
+    ("NSSystemAdministrationUsageDescription", "not modelled"),
+    ("NSSystemExtensionUsageDescription", "not modelled"),
 ]
 
 public let privacyKeyMap: [String: [String]] = [
@@ -803,6 +842,35 @@ public func kappaPropertyRead(root: String, path: [String]) -> String? {
 ///
 /// Applied only when the receiver is a CONFIRMED capture type (AVCaptureDevice/AVCaptureSession), so the
 /// no-fabrication-on-unknown-receiver rule still holds — the over-disclosure is bounded to a real capture.
+/// AVAudioSession / AVAudioApplication → `Mic`, gated on the CATEGORY, on exactly the AVCaptureDevice
+/// pattern above.
+///
+/// FOUND BY A RECALL BATTERY, not by review: `AVAudioSession.sharedInstance().setCategory(.record)` —
+/// the canonical spelling in every voice-recording app — emitted NOTHING. Mic is a MODELLED sensor, so
+/// this was not a vocabulary gap; it was a covered sensor with its most common entry point missing, and
+/// a clean `privacy-manifest --verify` over an app that records audio is an App Store rejection.
+///
+/// The type cannot simply join `PRIVACY_SDK_TYPES`: configuring an audio session is what PLAYBACK apps
+/// do too, and charging every one of them Mic is the fabrication mirror. So it is discriminated by the
+/// category argument, and an argument this engine cannot read OVER-DISCLOSES — the same ruling, for the
+/// same reason, as an ambiguous capture: on a privacy manifest a false prompt costs a confused user, a
+/// false silence costs a rejection.
+public func privacyAudioSessionEffects(category: String?) -> [String] {
+    switch category {
+    case "record", "playAndRecord": return ["Mic"]
+    // Categories that CANNOT reach the microphone. A denylist would be wrong here and an allowlist is
+    // right, unusually — because the safe default is to CHARGE, so what must be enumerated is the set
+    // that is provably safe, and these are the whole of it in AVFoundation.
+    case "playback", "ambient", "soloAmbient", "multiRoute": return []
+    default: return ["Mic"]   // unreadable/absent category → over-disclose (never under-declare)
+    }
+}
+
+/// The AVAudioSession/AVAudioApplication members that mean the microphone REGARDLESS of category.
+public let PRIVACY_MIC_PERMISSION_MEMBERS: Set<String> = [
+    "requestRecordPermission", "recordPermission", "requestRecordPermissionWithCompletionHandler",
+]
+
 public func privacyCaptureEffects(mediaType: String?) -> [String] {
     switch mediaType {
     case "video": return ["Camera"]
@@ -813,6 +881,10 @@ public func privacyCaptureEffects(mediaType: String?) -> [String] {
 
 /// The AVFoundation capture types whose Camera/Mic split is refined by the media-type argument (finding 5).
 public let PRIVACY_CAPTURE_TYPES: Set<String> = ["AVCaptureDevice", "AVCaptureSession"]
+/// The audio-session types whose CATEGORY decides whether the microphone is reached — see
+/// `privacyAudioSessionEffects`. Kept separate from PRIVACY_CAPTURE_TYPES because the discriminating
+/// argument is different (a category, not a media type) and the safe default differs in shape.
+public let PRIVACY_AUDIO_SESSION_TYPES: Set<String> = ["AVAudioSession", "AVAudioApplication"]
 
 /// Fluent (Vapor's ORM) persistence verbs → Db. A project entity `final class X: Model` INHERITS these
 /// from FluentKit's `Model` protocol extension; called on the project type (`x.save(on:)`,

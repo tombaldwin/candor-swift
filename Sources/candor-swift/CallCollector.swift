@@ -489,6 +489,21 @@ final class CallCollector: SyntaxVisitor {
                 if n.first?.isUppercase == true { return (dealias(n), true, [n], false) }
                 if let rt = returns[n] { return (rt, true, [n], false) }
             }
+            // `AVAudioSession.sharedInstance()` — a SINGLETON FACTORY METHOD on a type, returning an
+            // instance of that type by convention. `SINGLETON_ACCESSORS` already covers the PROPERTY
+            // spellings (`FileManager.default`, `URLSession.shared`); the parenthesised form is a call
+            // and fell through here, so `AVAudioSession.sharedInstance().setCategory(.record)` resolved
+            // to no root at all — the microphone entry point every recording app uses, reading pure.
+            // Restricted to the conventional NAMES on an uppercase base: a factory whose return type is
+            // recorded is already handled above, and guessing Self for an arbitrary static method is the
+            // free-factory fabrication a previous review caught.
+            if let fm = call.calledExpression.as(MemberAccessExprSyntax.self),
+               let fb = fm.base?.as(DeclReferenceExprSyntax.self),
+               fb.baseName.text.first?.isUppercase == true,
+               SINGLETON_FACTORY_METHODS.contains(fm.declName.baseName.text),
+               returns[fm.declName.baseName.text] == nil {
+                return (dealias(fb.baseName.text), true, [fb.baseName.text], false)
+            }
             // `Outer.Inner()` — a NESTED-TYPE constructor: the callee is a member-access spelling a dotted
             // TYPE path (`Outer.Inner`), not a factory member. When that dotted path is a known local type,
             // the value carries it so its methods resolve (`let i = Outer.Inner(); i.wipe()` → Fs). Checked
@@ -631,6 +646,19 @@ final class CallCollector: SyntaxVisitor {
     /// (`.audio`→"audio", `.video`→"video"; also `AVMediaType.audio`/`.video` spelled in full). Returns nil
     /// when the media type is NOT statically visible — no such arg (a bare `AVCaptureSession()`), or a
     /// computed/variable value (`for: mt`) — so the caller over-discloses BOTH sensors (never under-declare).
+    /// The AVAudioSession category argument, on exactly `mediaTypeArg`'s pattern: a leading-dot or
+    /// fully-qualified static member is readable, anything computed is not — and "not readable" means
+    /// AMBIGUOUS, which `privacyAudioSessionEffects` resolves by charging Mic.
+    private func audioCategoryArg(_ args: LabeledExprListSyntax) -> String? {
+        for a in args where a.label == nil || a.label?.text == "category" {
+            if let ma = Self.peel(a.expression).as(MemberAccessExprSyntax.self) {
+                return ma.declName.baseName.text
+            }
+            return nil
+        }
+        return nil
+    }
+
     private func mediaTypeArg(_ args: LabeledExprListSyntax) -> String? {
         for a in args where a.label?.text == "for" || a.label == nil {
             let e = Self.peel(a.expression)
@@ -2242,6 +2270,21 @@ final class CallCollector: SyntaxVisitor {
                 directEffects.insert("Fs")
                 recordSurfaces(effect: "Fs", lit: lit)
                 if lit == nil { incompleteSurfaces.insert("Fs") }  // write destination is the arg → invisible if not literal
+            } else if let rt = base.root, PRIVACY_AUDIO_SESSION_TYPES.contains(rt), !declaredTypes.contains(rt) {
+                // AVAudioSession / AVAudioApplication. `setCategory(.record)` is how essentially every
+                // recording app reaches the microphone, and it emitted NOTHING until a recall battery
+                // measured it. Mic is a MODELLED sensor, so this was not a vocabulary gap — it was a
+                // covered sensor with its most common entry point missing, which is exactly the shape
+                // that gets an app rejected AFTER a green verify. Playback apps configure sessions too,
+                // so the type cannot be charged flatly; the category discriminates, and a category this
+                // engine cannot read over-discloses.
+                if PRIVACY_MIC_PERMISSION_MEMBERS.contains(member) {
+                    directEffects.insert("Mic")                  // permission APIs mean the mic outright
+                } else if member == "setCategory" || member == "setActive" {
+                    for e in privacyAudioSessionEffects(category: audioCategoryArg(node.arguments)) {
+                        directEffects.insert(e)
+                    }
+                }
             } else if let rt = base.root, PRIVACY_CAPTURE_TYPES.contains(rt), !declaredTypes.contains(rt) {
                 // `privacy/1` finding 5 — an AVFoundation CAPTURE call (`AVCaptureDevice.default(for: .audio)`,
                 // `.devices(for: .video)`, a bare `AVCaptureSession.startRunning()`): refine the Camera/Mic

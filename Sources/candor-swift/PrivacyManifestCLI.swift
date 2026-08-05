@@ -129,6 +129,18 @@ private func plistFragment(_ keys: [(effect: String, key: String)]) -> String {
     return out.joined(separator: "\n")
 }
 
+
+/// Print what this verify does NOT check. See `PRIVACY_UNMODELLED_KEYS`.
+private func printPrivacyVocabularyBound() {
+    let modelled = Set(privacyKeyMap.values.flatMap { $0 }).count
+    print("⚠ this verify covers the \(modelled) usage-description key(s) the privacy/2 vocabulary models. "
+          + "It says NOTHING — in either direction — about \(PRIVACY_UNMODELLED_KEYS.count) other Apple keys, "
+          + "so a clean result here is not a clean App Store review. Declare these yourself if they apply:")
+    for k in PRIVACY_UNMODELLED_KEYS {
+        print("    \(k.key)  (\(k.why))")
+    }
+}
+
 func runPrivacyManifestCLI(_ args: [String]) -> Never {
     let pm = parsePrivacyManifestArgs(args)
     guard let prefix = pm.report else {
@@ -273,11 +285,11 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         }
         if ok && overDeclared.isEmpty {
             let n = reached.count
-            print("✓ every accessed capability is declared (\(n) effect\(n == 1 ? "" : "s"))")
+            print("✓ every MODELLED capability is declared (\(n) effect\(n == 1 ? "" : "s"))")
         } else if ok {
             // Clean of under-declaration, but an over-declaration warning was printed above.
             let n = reached.count
-            print("✓ every accessed capability is declared (\(n) effect\(n == 1 ? "" : "s")) — see the ⚠ over-declaration note(s) above")
+            print("✓ every MODELLED capability is declared (\(n) effect\(n == 1 ? "" : "s")) — see the ⚠ over-declaration note(s) above")
         }
         // ⟨0.15 staged⟩ the conditionality caveat travels with the human verdict too — LAST, so the
         // verdict line above stays where consumers expect it. Exit unchanged (disclosure, not a gate).
@@ -285,6 +297,11 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
             let n = uncoveredModules.count
             print("⚠ verdict is conditional on \(n) uncovered module\(n == 1 ? "" : "s") — sensor usage there is invisible to this verify (chain dep reports or scan the workspace root to close the gap)")
         }
+        // THE VOCABULARY BOUND, on every verify and especially on a PASS. A green verify means "green
+        // for the keys this extension models" — and a reader who takes it for "green for Apple" is the
+        // person who submits and gets rejected. Measured by a recall battery, not assumed; the reasons
+        // travel with the list so this is a limitation a reader can act on rather than a disclaimer.
+        printPrivacyVocabularyBound()
         exit(ok ? 0 : 1)
     }
 
