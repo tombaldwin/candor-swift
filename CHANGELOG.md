@@ -11,6 +11,26 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [0.27.0] — 2026-08-05
 
+### Two more copies of the sensor vocabulary — one of them predates today
+
+The seven-copy problem was fixed for the copies that decide WHETHER an effect is reported. Two that
+decide how it is PRESENTED were missed, and a review pass over my own claim found them.
+
+- **The scan summary dropped effects it had computed.** `main.swift`'s effect breakdown is a
+  `.filter` over a hardcoded list, so an effect absent from that list was computed, counted, written
+  to the report — and silently omitted from the line a user reads first. Measured: a scan reaching NFC
+  and HealthKit printed `Health 1` while the report carried `['Health', 'Nfc']`. Nothing was wrong with
+  the artifact; the terminal was quieter than it.
+- **`tour` could not rank any sensor added after `privacy/1`.** The salience switch scored only the
+  original six at 5; Health, Motion, Calendar, Bluetooth and every family since fell to `default: 0`.
+  An app quietly reaching HealthKit is the exact case `tour` exists to surface, and it was the case
+  `tour` ranked last. **This one has been true since `privacy/2`**, not since today.
+
+Both now derive from `PRIVACY_EFFECTS_ORDER`. The lesson is narrower than "there were seven copies": the
+copies that gate reporting were obvious to check because a missing entry made a test fail loudly, and
+the copies that gate PRESENTATION failed silently — a correct report, a quieter terminal, and no
+assertion anywhere with an opinion about it.
+
 ### Entitlements: 56 of 57, and one key that is honestly out of reach
 
 **`NSCriticalMessagingUsageDescription` has no call site — Apple's page for it links no symbol at all**,

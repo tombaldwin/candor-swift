@@ -1040,10 +1040,14 @@ if wantJson {
     // Effect breakdown — make the result visible at a glance, not just a count + a file path.
     var counts: [String: Int] = [:]
     for e in effectors { for x in e.inferred.toNames() { counts[x, default: 0] += 1 } }
-    let breakdown = ["Net", "Llm", "Fs", "Db", "Exec", "Ipc", "Env", "Clipboard", "Clock", "Log", "Rand",
-                     // `privacy/1` SPEC EXTENSION — the Apple privacy-sensor effects (shown after the core set)
-                     "Location", "Camera", "Mic", "Contacts", "Photos", "Notify",
-                     "Health", "Motion", "Calendar", "Reminders", "Bluetooth", "Speech", "Biometrics", "MediaLibrary", "HomeKit", "Tracking", "NearbyInteraction", "Siri"]
+    // DERIVED from the one ordered source. This was a hardcoded copy of the sensor vocabulary, and
+    // because the line is a `.filter { counts[$0] != nil }` over it, an effect NOT in the list was
+    // computed, counted, written to the report — and silently dropped from the summary the user reads
+    // first. Measured: a scan reaching NFC and HealthKit printed "Health 1" and said nothing about NFC,
+    // while the report carried both. The artifact was right and the terminal was quieter than it, which
+    // is the same shape of gap even when nothing is technically wrong.
+    let breakdown = (["Net", "Llm", "Fs", "Db", "Exec", "Ipc", "Env", "Clipboard", "Clock", "Log", "Rand"]
+                     + PRIVACY_EFFECTS_ORDER)
         .filter { counts[$0] != nil }.map { "\($0) \(counts[$0]!)" }.joined(separator: " · ")
     let unknown = counts["Unknown"] ?? 0
     if !breakdown.isEmpty || unknown > 0 {

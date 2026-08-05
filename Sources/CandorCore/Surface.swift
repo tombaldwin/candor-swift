@@ -96,10 +96,12 @@ private func hasToken(_ name: String, _ lexicon: Set<String>) -> String? {
 /// candor-classify/src/surface.rs).
 private func salience(_ effect: String) -> Int {
     switch effect {
-    case "Net", "Exec", "Db", "Ipc", "Llm",
-         // `privacy/1` (SPEC-EXTENSION-privacy.md): a benign-named fn reaching Location/Camera/Mic/… is
-         // exactly the §3.1 surprising-reach shape — the sensor cluster scores sharp like any boundary reach.
-         "Location", "Camera", "Mic", "Contacts", "Photos", "Notify": return 5  // `Llm` ⟨0.13⟩ is a boundary reach — scores sharp
+    // EVERY privacy sensor scores sharp, derived rather than listed. Only `privacy/1`'s original six were
+    // here, so Health, Motion, Calendar, Bluetooth and every family added since scored 0 and could not
+    // reach `tour` — the verb whose whole job is surfacing a surprising reach. An app quietly reaching
+    // HealthKit was exactly the case that should rank first and was the case that ranked last.
+    case let e where PRIVACY_EFFECTS_ALL.contains(e): return 5
+    case "Net", "Exec", "Db", "Ipc", "Llm": return 5  // boundary reaches — `Llm` ⟨0.13⟩ scores sharp
     case "Fs", "Env": return 3
     default: return 0
     }
