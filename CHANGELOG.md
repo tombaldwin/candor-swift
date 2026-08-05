@@ -9,6 +9,11 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **The Linux leg builds again.** `entitlementRequiredKeys` read the `.entitlements` plist with
+  `NSDictionary(contentsOfFile:)`, which is deprecated on swift-corelibs-foundation — and this package
+  compiles with `-warnings-as-errors`, so the macOS-green change failed CI on Linux. Now uses
+  `PropertyListSerialization`, which `loadDeclaredKeys` forty lines above had been using all along.
+
 ## [0.27.0] — 2026-08-05
 
 ### Constant provenance rungs 3–4: computed paths resolve
