@@ -30,6 +30,36 @@ verify a privacy manifest from code-level truth**.
 | `Photos` | the photo library | Photos / PhotosUI (`PHPhotoLibrary`, `PHAsset`, `PHPickerViewController`) |
 | `Notify` | user-attention / notifications | UserNotifications (`UNUserNotificationCenter`) |
 
+### The last five, and the two that are not code
+
+**55 of Apple's 57.** The five that remained with no obvious type were resolved by reading the DocC
+`references` block on Apple's own key pages rather than the prose — the linked symbols were there all
+along:
+
+| key | what Apple's page links | how it is modelled |
+|---|---|---|
+| `NSSystemAdministration` | `ODRecordSetValue` | OpenDirectory: `ODRecord`/`ODNode`/`ODSession` |
+| `NSAudioCapture` | *Capturing system audio with Core Audio taps* | `CATapDescription`, `AudioHardwareCreateProcessTap` |
+| `NSEnterpriseMCAM` | *Accessing the main camera* — the SAME article as `NSMainCamera` | an ALTERNATIVE key on the existing effect |
+| `NSAppBundles` | nothing — because there is no API | a PATH class: `/Applications/*.app/` |
+| `NSAppData` | nothing — because there is no API | a PATH class: `~/Library/Containers/` |
+
+The last two are the interesting ones. Apple names no API because **there isn't one**: reading another
+app's bundle or container is ordinary file I/O, and it is the *path* that makes it protected. That is
+exactly what a path class is for, so two keys that looked like they needed a new mechanism needed none.
+
+**Two keys stay unmodelled, and the reason is now accurate rather than a shrug.** They previously read
+"enterprise/managed surface; not modelled", which implied someone had simply not got to them:
+
+- `NSCriticalMessagingUsageDescription` — Apple's page links **no symbol at all**. It gates an
+  entitlement for emergency SMS, so the evidence is a `.entitlements` file, not a call site.
+- `NSFileProviderPresenceUsageDescription` — links only sibling *keys*. A file provider's presence
+  capability is declared, not called.
+
+Neither is a gap in the model; both are outside what code analysis can see, and the disclosure now says
+so in those words. Closing them means reading a second manifest, which is a different kind of evidence
+and should be labelled as one.
+
 > **All four waves below ship as ONE version, `privacy/2`.** `privacy/1` is the only id any release has
 > carried (v0.25.0 and v0.26.0 both ship it), so the intermediate numbers never existed for a consumer,
 > and publishing four of them would present our git history as somebody's upgrade path. The waves are

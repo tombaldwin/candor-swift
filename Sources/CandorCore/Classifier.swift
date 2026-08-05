@@ -439,6 +439,13 @@ public let PRIVACY_SDK_TYPES: [String: String] = [
     "CameraFrameProvider": "MainCamera",
     // Accessory tracking (visionOS) — AccessoryTrackingProvider / AccessoryAnchor, both confirmed.
     "AccessoryTrackingProvider": "AccessoryTracking", "AccessoryAnchor": "AccessoryTracking",
+    // System administration (macOS) — Open Directory. Apple's own page for the key links
+    // `ODRecordSetValue`, so the directory-record surface is what it means by "manipulate the system
+    // configuration"; ODNode/ODSession are the same surface's entry points.
+    "ODRecord": "SystemAdministration", "ODNode": "SystemAdministration",
+    "ODSession": "SystemAdministration",
+    // System-audio capture — Core Audio process taps, which Apple's key page links directly.
+    "CATapDescription": "AudioCapture",
     // Contacts — the address book.
     "CNContactStore": "Contacts", "CNContactPickerViewController": "Contacts",
     // Photos — the photo library.
@@ -567,6 +574,11 @@ public func pathClasses(_ path: String) -> Set<String> {
     if p.hasPrefix("~") { p = "/Users/_" + p.dropFirst() }
     if let r = p.range(of: #"^/Users/[^/]+"#, options: .regularExpression) { p = "/Users/_" + p[r.upperBound...] }
     if p.hasPrefix("/Volumes/") { return ["RemovableVolume", "NetworkVolume"] }
+    // ANOTHER APP'S BUNDLE / ANOTHER APP'S CONTAINER. Apple names no API for these two keys because
+    // there isn't one — reading another app's bundle is ordinary file I/O, and it is the PATH that makes
+    // it protected. That is precisely what a path class is for, so they need no new mechanism at all.
+    if p.hasPrefix("/Applications/") && p.contains(".app/") { return ["AppBundles"] }
+    if p.hasPrefix("/Users/_/Library/Containers/") { return ["AppData"] }
     for (prefix, cls) in [("/net/", "NetworkVolume"), ("smb://", "NetworkVolume"),
                           ("afp://", "NetworkVolume"), ("nfs://", "NetworkVolume")]
     where p.hasPrefix(prefix) { return [cls] }
@@ -620,7 +632,8 @@ public let PRIVACY_EFFECTS_ORDER: [String] = [
     "VideoSubscriber", "GameCenterFriends", "ClinicalRecords",
     // privacy/4 (2026-08-05) — every type name below was verified against Apple's docs JSON first.
     "FocusStatus", "Identity", "FinancialData", "HandsTracking", "WorldSensing", "MainCamera",
-    "LocationTemporary", "AccessoryTracking",
+    "LocationTemporary", "AccessoryTracking", "SystemAdministration", "AudioCapture",
+    "AppBundles", "AppData",
     // constant-basis (path class) — CONSTANT-PROVENANCE-DESIGN.md
     "FolderDesktop", "FolderDocuments", "FolderDownloads", "RemovableVolume", "NetworkVolume",
     "LocalNetwork",
@@ -659,7 +672,7 @@ public let APPLE_PRIVACY_KEYS: [(key: String, why: String)] = [
     ("NSCalendarsWriteOnlyAccessUsageDescription", "not modelled"),
     ("NSCameraUsageDescription", "not modelled"),
     ("NSContactsUsageDescription", "not modelled"),
-    ("NSCriticalMessagingUsageDescription", "enterprise/managed surface; not modelled"),
+    ("NSCriticalMessagingUsageDescription", "NO PUBLIC API NAMES IT — Apple's page for this key links no symbol at all. It gates an entitlement for emergency SMS, so the evidence is a .entitlements file, not a call site"),
     ("NSDesktopFolderUsageDescription", "triggered by PATH, not by API — needs value provenance"),
     ("NSDocumentsFolderUsageDescription", "triggered by PATH, not by API — needs value provenance"),
     ("NSDownloadsFolderUsageDescription", "triggered by PATH, not by API — needs value provenance"),
@@ -667,7 +680,7 @@ public let APPLE_PRIVACY_KEYS: [(key: String, why: String)] = [
     ("NSFaceIDUsageDescription", "not modelled"),
     ("NSFallDetectionUsageDescription", "not modelled"),
     ("NSFileProviderDomainUsageDescription", "not modelled"),
-    ("NSFileProviderPresenceUsageDescription", "enterprise/managed surface; not modelled"),
+    ("NSFileProviderPresenceUsageDescription", "NO PUBLIC API NAMES IT — Apple's page links only sibling KEYS, no symbol. A file provider's presence capability is declared, not called"),
     ("NSFinancialDataUsageDescription", "enterprise/managed surface; not modelled"),
     ("NSGKFriendListUsageDescription", "not modelled"),
     ("NSHandsTrackingUsageDescription", "visionOS surface; not modelled"),
@@ -728,8 +741,17 @@ public let privacyKeyMap: [String: [String]] = [
     "FinancialData": ["NSFinancialDataUsageDescription"],
     "HandsTracking": ["NSHandsTrackingUsageDescription"],
     "WorldSensing": ["NSWorldSensingUsageDescription"],
-    "MainCamera": ["NSMainCameraUsageDescription"],
+    // The enterprise variant is the SAME `CameraFrameProvider` surface under a managed entitlement —
+    // Apple's page for NSEnterpriseMCAM links the very same "Accessing the main camera" article. Which of
+    // the two keys applies is an entitlement fact this engine cannot read, and `privacyKeyMap` is a list
+    // whose members are ALTERNATIVES, so declaring either satisfies the requirement. Exactly the
+    // NearbyInteraction allow-once shape.
+    "MainCamera": ["NSMainCameraUsageDescription", "NSEnterpriseMCAMUsageDescription"],
     "AccessoryTracking": ["NSAccessoryTrackingUsageDescription"],
+    "SystemAdministration": ["NSSystemAdministrationUsageDescription"],
+    "AudioCapture": ["NSAudioCaptureUsageDescription"],
+    "AppBundles": ["NSAppBundlesUsageDescription"],
+    "AppData": ["NSAppDataUsageDescription"],
     // constant-basis: decided by the PATH, so these always report an undetermined count beside them (§6)
     "FolderDesktop": ["NSDesktopFolderUsageDescription"],
     "FolderDocuments": ["NSDocumentsFolderUsageDescription"],
@@ -1020,6 +1042,8 @@ public func kappaFree(name: String, argCount: Int) -> String? {
     // JohnSundell's ShellOut: `shellOut(to:)` runs a subprocess via /bin/bash → Exec. A distinctive,
     // collision-unlikely name; a local `func shellOut` (localFreeFns) still shadows it (never fabricate).
     case "shellOut": return "Exec"
+    // Core Audio process taps — the C entry points for system-audio capture (NSAudioCaptureUsageDescription).
+    case "AudioHardwareCreateProcessTap": return "AudioCapture"
     case "NWConnection", "NWListener": return "Net"
     case "NWBrowser", "NetService", "NetServiceBrowser": return "Net"   // bonjour/mDNS discovery
     case "SystemRandomNumberGenerator": return "Rand"

@@ -35,7 +35,9 @@ enum Effect: String, CaseIterable {
     // constant-basis families (CONSTANT-PROVENANCE-DESIGN.md rungs 1-2)
     case folderDesktop = "FolderDesktop", folderDocuments = "FolderDocuments",
          folderDownloads = "FolderDownloads", removableVolume = "RemovableVolume",
-         networkVolume = "NetworkVolume", localNetwork = "LocalNetwork"
+         networkVolume = "NetworkVolume", localNetwork = "LocalNetwork",
+         systemAdministration = "SystemAdministration", audioCapture = "AudioCapture",
+         appBundles = "AppBundles", appData = "AppData"
     var specName: String { rawValue }
     static func from(_ name: String) -> Effect? { Effect(rawValue: name) }
 }

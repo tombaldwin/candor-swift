@@ -158,6 +158,18 @@ CASES = [
     ("app-scoped write charges NO folder key", None,
      'import Foundation\nfunc f() { try? "x".write(toFile: "/tmp/app/cache.txt", atomically: true, encoding: .utf8) }'),
 
+    # ── the last families with a code signal, each API taken from Apple's OWN key page ──────────────
+    ("SystemAdministration / ODRecord", "NSSystemAdministrationUsageDescription",
+     'import OpenDirectory\nfunc f(_ r: ODRecord) { _ = try? r.setValue("x", forAttribute: "attr") }'),
+    ("AudioCapture / CATapDescription", "NSAudioCaptureUsageDescription",
+     'import CoreAudio\nfunc f() { _ = CATapDescription(stereoMixdownOfProcesses: []) }'),
+    ("EnterpriseMCAM (alias of MainCamera)", "NSEnterpriseMCAMUsageDescription",
+     'import ARKit\nfunc f() { _ = CameraFrameProvider() }'),
+    ("AppBundles / another app's bundle", "NSAppBundlesUsageDescription",
+     'import Foundation\nfunc f() { _ = FileManager.default.contents(atPath: "/Applications/Mail.app/Contents/Info.plist") }'),
+    ("AppData / another app's container", "NSAppDataUsageDescription",
+     'import Foundation\nfunc f() { _ = try? FileManager.default.contentsOfDirectory(atPath: "/Users/me/Library/Containers/com.other.app/Data") }'),
+
     # ── shapes that could defeat detection even for a MODELLED sensor ───────────────────────────────
     ("Contacts behind a local wrapper type", "NSContactsUsageDescription",
      'import Contacts\nfinal class Svc { let s = CNContactStore()\n  func all() -> [CNContainer] { (try? s.containers(matching: nil)) ?? [] } }\n'

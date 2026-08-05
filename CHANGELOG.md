@@ -11,6 +11,32 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [0.27.0] — 2026-08-05
 
+### 55 of Apple's 57 — the last five, found in the docs' `references` block
+
+The five keys that named no type in their prose named one in their DocC **references**: Apple's own page
+for `NSSystemAdministrationUsageDescription` links `ODRecordSetValue`, and `NSAudioCapture` links
+*Capturing system audio with Core Audio taps*. Reading the wrong part of the JSON was the whole
+obstacle.
+
+- **SystemAdministration** → OpenDirectory (`ODRecord`, `ODNode`, `ODSession`)
+- **AudioCapture** → Core Audio taps (`CATapDescription`, `AudioHardwareCreateProcessTap`)
+- **EnterpriseMCAM** → the SAME visionOS camera API as `NSMainCamera`, under a managed entitlement, so
+  it is an ALTERNATIVE key on the existing effect rather than a family. Which of the two applies is an
+  entitlement fact this engine cannot read, and declaring either satisfies the requirement.
+- **AppBundles** (`/Applications/*.app/`) and **AppData** (`~/Library/Containers/`) → **path classes**.
+  Apple names no API for these because there isn't one: reading another app's bundle is ordinary file
+  I/O and it is the PATH that makes it protected. Two keys that looked like they needed a new mechanism
+  needed none.
+
+**Two keys stay unmodelled, with an accurate reason instead of a shrug.** They used to read
+"enterprise/managed surface; not modelled", which implies nobody got to them.
+`NSCriticalMessagingUsageDescription` links no symbol at all (an entitlement for emergency SMS — the
+evidence is a `.entitlements` file, not a call site) and `NSFileProviderPresenceUsageDescription` links
+only sibling keys (a presence capability is declared, not called). Neither is a gap in the model; both
+are outside what code analysis can see, and the verify now says that in those words.
+
+Recall battery: **62/62, 0 broken promises.**
+
 ### LocalNetwork — and `NWBrowser` was not modelled at all
 
 **50 of Apple's 57 keys.** The `.local` host, the RFC1918/link-local literals and the bonjour descriptor
