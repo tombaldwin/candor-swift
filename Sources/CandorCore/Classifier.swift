@@ -665,7 +665,13 @@ public let PRIVACY_KEY_BASIS: [String: String] = {
     var m: [String: String] = [:]
     for e in PRIVACY_EFFECTS_ORDER { m[e] = "type" }
     // refined by a readable argument; unreadable over-discloses, so recall stays complete
-    for e in ["Camera", "Mic", "Calendar", "Reminders"] { m[e] = "argument" }
+    // Camera/Mic ARE argument-refined (the capture media type, the audio-session category). Calendar and
+    // Reminders are NOT: `EKEventStore` is a plain type match and their read/write split comes from the
+    // METHOD NAME via `privacyKind(member:)` — which is the `member` basis this table already uses for
+    // ClinicalRecords and LocationTemporary. Labelling 5 keys `argument` overstated the strongest basis
+    // in a breakdown whose entire purpose is being accurate about HOW something was determined.
+    for e in ["Camera", "Mic"] { m[e] = "argument" }
+    for e in ["Calendar", "Reminders"] { m[e] = "member" }
     // a member on a type that is shared with another family
     for e in ["ClinicalRecords", "LocationTemporary"] { m[e] = "member" }
     // read from a MANIFEST, never from code — labelled separately in the output

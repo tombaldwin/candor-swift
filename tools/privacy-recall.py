@@ -33,7 +33,7 @@ import subprocess
 import sys
 import tempfile
 
-BIN = os.path.expanduser("~/git/candor-swift/.build/debug/candor-swift")
+BIN = os.environ.get("RECALL_BIN") or os.path.expanduser("~/git/candor-swift/.build/debug/candor-swift")
 
 # (label, expected NS…UsageDescription or None, swift source exercising the canonical API)
 CASES = [
@@ -123,8 +123,6 @@ CASES = [
 
     # ── privacy/4 (2026-08-05): every type name below was VERIFIED against Apple's docs JSON before
     # being mapped, because a wrong type→key mapping fabricates a requirement on real apps ──────────
-    ("Focus status / INFocusStatusCenter", "NSFocusStatusUsageDescription",
-     'import Intents\nfunc f() { INFocusStatusCenter.default.requestAuthorization { _ in } }'),
     ("Identity / PKIdentityRequest", "NSIdentityUsageDescription",
      'import PassKit\nfunc f() { _ = PKIdentityRequest() }'),
     ("Financial data / FinanceStore", "NSFinancialDataUsageDescription",
@@ -149,8 +147,15 @@ CASES = [
 
     ("macOS Downloads via search-path enum", "NSDownloadsFolderUsageDescription",
      'import Foundation\nfunc f() { _ = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask) }'),
-    ("macOS Documents via search-path enum", "NSDocumentsFolderUsageDescription",
+    # `.documentDirectory` is DELIBERATELY unmapped and this row is now a FABRICATION GUARD, not a
+    # recall row. On iOS it returns the app's OWN sandbox Documents directory — the commonest
+    # file-storage line in iOS development — and NSDocumentsFolderUsageDescription is a macOS-only key.
+    # Mapping it exited 1 on essentially every iOS app. A LITERAL `/Users/x/Documents/…` still
+    # classifies, because that spelling is unambiguous in a way the enum is not.
+    ("iOS sandbox .documentDirectory charges NO folder key", None,
      'import Foundation\nfunc f() { _ = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask) }'),
+    ("literal ~/Documents path DOES classify", "NSDocumentsFolderUsageDescription",
+     'import Foundation\nfunc f() { _ = FileManager.default.contents(atPath: "/Users/me/Documents/x") }'),
     ("network volume literal", "NSNetworkVolumesUsageDescription",
      'import Foundation\nfunc f() { _ = try? FileManager.default.contentsOfDirectory(atPath: "/net/share/x") }'),
     # ORDINARY sandbox I/O must gain NOTHING — this is the fabrication guard, and it is the row that
@@ -174,8 +179,12 @@ CASES = [
     ("Contacts behind a local wrapper type", "NSContactsUsageDescription",
      'import Contacts\nfinal class Svc { let s = CNContactStore()\n  func all() -> [CNContainer] { (try? s.containers(matching: nil)) ?? [] } }\n'
      'func f() { _ = Svc().all() }'),
-    ("Camera via ObjC selector dispatch", "NSCameraUsageDescription",
-     'import AVFoundation\nimport Foundation\nfunc f() {\n  let o: NSObject = AVCaptureDevice.default(for: .video) ?? NSObject()\n'
+    # The ObjC-dispatch row USED to make a direct `AVCaptureDevice.default(for:)` call in the same
+    # function, so it passed on that and asserted nothing about selector dispatch. The receiver is now
+    # obtained without a classified call, which is what the row claims to test. It is expected to MISS —
+    # candor models no `reflect:` producer — so it is a known-unmodelled row rather than a promise.
+    ("Camera via ObjC selector dispatch ONLY", None,
+     'import AVFoundation\nimport Foundation\nfunc f(_ o: NSObject) {\n'
      '  _ = o.perform(NSSelectorFromString("unlockForConfiguration")) }'),
     ("Mic reached only through a stored closure", "NSMicrophoneUsageDescription",
      'import AVFoundation\nfinal class H { var go: (() -> Void)?\n  init() { go = { _ = try? AVAudioRecorder(url: URL(fileURLWithPath: "/tmp/a"), settings: [:]) } } }\n'
@@ -183,7 +192,7 @@ CASES = [
 ]
 
 
-def scan(src, ws, i):
+def scan(src, ws, i, label=""):
     root = os.path.join(ws, f"c{i}")
     os.makedirs(os.path.join(root, "Sources", "App"), exist_ok=True)
     open(os.path.join(root, "Package.swift"), "w").write(
@@ -194,10 +203,14 @@ def scan(src, ws, i):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
     out = subprocess.run([BIN, "privacy-manifest", "--report", os.path.join(root, "r"), "--json"],
                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=120).stdout
+    # FAIL LOUD. This returned `set()` on any failure — a non-zero exit, an unparseable document — so with
+    # a broken binary every `want=None` row evaluated to a PASS. The two fabrication guards, which exist
+    # to catch the worst failure mode in the file, were the rows that passed with nothing having run.
     try:
         d = json.loads(out[out.index("{"):])
-    except Exception:
-        return set()
+    except Exception as e:
+        raise RuntimeError(f"fixture {i} ({label!r}): the engine produced no parseable report — "
+                           f"a silent set() here makes every want=None row vacuous. {e}") from e
     return {k for ks in (d.get("required") or {}).values() for k in ks}
 
 
@@ -252,7 +265,7 @@ def main():
     hits, misses = [], []
     try:
         for i, (label, want, src) in enumerate(CASES):
-            got = scan(src, ws, i)
+            got = scan(src, ws, i, label)
             ok = want in got if want else True
             # A constant-basis miss is acceptable ONLY if §6's disclosure names it.
             if not ok and want in CONSTANT_BASIS and undetermined_disclosed(ws, i):

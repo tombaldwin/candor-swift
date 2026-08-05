@@ -36,9 +36,14 @@ public struct PackageTarget: Equatable, Sendable {
     /// The `path:` argument if the manifest declared one, else nil (convention applies).
     public let path: String?
     public let isTest: Bool
+    /// A `dependencies:` argument was present but not a literal array, so this target's dependency list
+    /// is UNKNOWN rather than empty. Resolving a closure through it would silently scan a subset.
+    public let dependenciesUnreadable: Bool
 
-    public init(name: String, dependencies: [String], path: String?, isTest: Bool) {
+    public init(name: String, dependencies: [String], path: String?, isTest: Bool,
+                dependenciesUnreadable: Bool = false) {
         self.name = name; self.dependencies = dependencies; self.path = path; self.isTest = isTest
+        self.dependenciesUnreadable = dependenciesUnreadable
     }
 }
 
@@ -47,6 +52,7 @@ public enum TargetScopeError: Error, CustomStringConvertible, Equatable {
     case noTargets(manifest: String)
     case unknownTarget(name: String, available: [String])
     case missingSourceDir(target: String, tried: [String])
+    case unreadableDependencies(target: String)
 
     public var description: String {
         switch self {
@@ -56,6 +62,11 @@ public enum TargetScopeError: Error, CustomStringConvertible, Equatable {
             return "no targets found in \(m) — --target cannot be resolved (is this a SwiftPM manifest?)"
         case .unknownTarget(let name, let available):
             return "no target named `\(name)`. This package declares: \(available.joined(separator: ", "))"
+        case .unreadableDependencies(let target):
+            return "target `\(target)`'s `dependencies:` is not a literal array (a hoisted variable, a "
+                 + "concatenation, or a helper call), so its in-package dependencies cannot be read. "
+                 + "Refusing to scan a closure that would silently omit them — inline the list, or scan "
+                 + "without --target."
         case .missingSourceDir(let target, let tried):
             // REFUSES rather than scanning less: a target in the closure whose sources cannot be found
             // would silently drop real code from the scan, and absence from `functions` is a purity claim.
@@ -88,6 +99,7 @@ public func targetClosure(_ name: String, in targets: [PackageTarget]) throws ->
     var stack = [name]
     while let n = stack.popLast() {
         guard seen.insert(n).inserted, let t = byName[n] else { continue }
+        if t.dependenciesUnreadable { throw TargetScopeError.unreadableDependencies(target: t.name) }
         out.append(t)
         // A dependency naming something this package does not declare is an EXTERNAL product referred to
         // by its bare name. Dropping it here is correct — it has no sources in this tree — and it stays
@@ -135,12 +147,26 @@ private final class TargetFinder: SyntaxVisitor {
               Self.kinds.contains(member.declName.baseName.text) else { return .visitChildren }
         let isTest = member.declName.baseName.text == "testTarget"
         var name: String?, path: String?, deps: [String] = []
+        var unreadableDeps = false
         for arg in node.arguments {
             switch arg.label?.text {
             case "name": name = Self.literal(arg.expression)
             case "path": path = Self.literal(arg.expression)
             case "dependencies":
-                guard let arr = arg.expression.as(ArrayExprSyntax.self) else { break }
+                // A `dependencies:` argument that EXISTS but is not a literal array must REFUSE, not
+                // resolve to none. Two ordinary manifest idioms defeated the literal-only read —
+                //     let coreDeps: [Target.Dependency] = ["Core"]
+                //     .executableTarget(name: "App", dependencies: coreDeps)
+                //     .executableTarget(name: "App", dependencies: ["Core"] + extra)
+                // — and each produced `deps: []`, so `--target App` scanned App ALONE and reported it as
+                // performing nothing while the truth was that it reaches Fs through Core. An empty
+                // report is a purity claim over every function in the dropped targets, and the header's
+                // promise that an excluded dep "stays disclosed by the coverage ledger" is false here:
+                // a target that was never scanned leaves no ledger entry at all.
+                guard let arr = arg.expression.as(ArrayExprSyntax.self) else {
+                    unreadableDeps = true
+                    break
+                }
                 for el in arr.elements {
                     if let s = Self.literal(el.expression) { deps.append(s); continue }
                     // `.target(name: "X")` and `.byName(name: "X")` are in-package references;
@@ -154,7 +180,10 @@ private final class TargetFinder: SyntaxVisitor {
             default: break
             }
         }
-        if let n = name { targets.append(PackageTarget(name: n, dependencies: deps, path: path, isTest: isTest)) }
+        if let n = name {
+            targets.append(PackageTarget(name: n, dependencies: deps, path: path, isTest: isTest,
+                                         dependenciesUnreadable: unreadableDeps))
+        }
         // DO NOT DESCEND. `.target(name: "Core")` is also the in-package form of a DEPENDENCY reference
         // (`.testTarget(name: "CoreTests", dependencies: [.target(name: "Core")])`), and visiting children
         // parsed that inner call as a second DECLARATION of Core — one carrying no dependencies. Two

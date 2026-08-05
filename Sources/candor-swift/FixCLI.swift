@@ -152,6 +152,7 @@ private func mergeFixReport(_ full: String, into byName: inout [String: FixFn],
         // `privacy/2` direction, read verbatim like `netClass`. Absent ⇒ undetermined ⇒ the old
         // any-key semantics, so an older report is never made to fail by this field's arrival.
         rec.paths = (e["paths"] as? [Any])?.compactMap { $0 as? String } ?? []
+        rec.incomplete = (e["incomplete"] as? [Any])?.compactMap { $0 as? String } ?? []
         if let pk = e["privacy"] as? [String: Any] {
             var m: [String: [String]] = [:]
             for (eff, v) in pk { m[eff] = (v as? [Any])?.compactMap { $0 as? String } ?? [] }

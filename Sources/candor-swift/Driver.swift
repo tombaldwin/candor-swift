@@ -42,6 +42,12 @@ struct Analysis {
     var pathsAcc: [String: Set<String>]
     var tablesAcc: [String: Set<String>]
     var incompleteAcc: [String: Set<String>]
+    /// The UNPROPAGATED incompleteness — a function's OWN surface whose locator could not be determined.
+    /// `incompleteAcc` is the transitive view, which is right for the gate and WRONG for a per-function
+    /// disclosure: propagation means a caller inherits its callees' incompleteness and, symmetrically, a
+    /// determined callee masks nothing. The privacy verify needs "did THIS function's own file write name
+    /// its destination", which only the direct map can answer.
+    var incompleteDirect: [String: Set<String>]
     var invisibleAcc: [String: Set<String>]
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): the TARGET's own .swift source candor could NOT read/parse —
     // a file whose `String(contentsOfFile:)` returned nil (unreadable: EACCES, invalid UTF-8, gone).
@@ -1236,6 +1242,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         internalModules: internalModules, direct: direct, edges: edges, whyMap: whyMap,
         locOf: locOf, entryPoints: entryPoints, inferred: inferred, hostsAcc: hostsAcc, fsD: fsAcc, privKindD: privKindD,
         cmdsAcc: cmdsAcc, pathsAcc: pathsAcc, tablesAcc: tablesAcc, incompleteAcc: incompleteAcc,
+        incompleteDirect: incompleteD,
         invisibleAcc: invisibleAcc, unanalyzed: unanalyzed,
         typeSurfaceReturns: buildTypeSurfaceReturns(allFns, localTypePaths))
 }

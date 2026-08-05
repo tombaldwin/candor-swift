@@ -11,6 +11,37 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [0.27.0] — 2026-08-05
 
+### §2 `incomplete` — the per-function direct signal, and the ⊤ count made real
+
+The undetermined-path count read `paths`, which **propagates**: a function counted as determined when
+anything it transitively reached named a literal. One logger writing `/tmp/app.log` zeroed the count for
+a whole call graph, and every real app has one — so the "clean, and zero undetermined" state the design
+asked for was manufactured by ordinary code. In the other direction it counted transitive callers that
+perform no file I/O at all (52% of the number on candor's own source).
+
+The report now carries a per-function `incomplete` list: the effects whose locator **this function
+itself** could not determine. Omitted when empty, so a scan that determined everything is byte-identical
+to one from before the field. `FixFn` carries it; the verify counts from it.
+
+On the real app: **282 → 57 → 4**. The first cut was inflated, the second still masked, and 4 is the
+number of functions whose own file destination is genuinely unknown. That number is small enough to act
+on, which is the whole difference between a warning and noise.
+
+`--verify --json` now carries the disclosure too — `keyCoverage`, `undeterminedPaths`,
+`entitlementUnderDeclared`, and `ok` agreeing with the exit code. Every §6 mechanism had lived in the
+human branch only, so CI — the intended consumer of `--json` — got a bare `"ok": true`. The field is
+`keyCoverage` and not `coverage` because the verdict already had a `coverage` key (the ⟨0.15⟩ uncovered-
+modules block) and the first version silently overwrote it: two different questions under one name.
+
+### `--target` refuses an unreadable dependency list
+
+`dependencies:` read only a literal array, so two ordinary manifest idioms — a hoisted
+`let coreDeps: [Target.Dependency] = ["Core"]`, or `["Core"] + extra` — yielded `deps: []`. `--target App`
+then scanned App alone and reported it performing **nothing**, while the truth was that it reaches `Fs`
+through Core. An empty report is a purity claim over every function in the dropped targets, and the
+"stays disclosed by the coverage ledger" promise is false for a target that was never scanned. It now
+exits 2 naming the idiom.
+
 ### Two more copies of the sensor vocabulary — one of them predates today
 
 The seven-copy problem was fixed for the copies that decide WHETHER an effect is reported. Two that

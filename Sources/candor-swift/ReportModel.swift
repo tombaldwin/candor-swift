@@ -74,6 +74,15 @@ struct Effector {
     var unitKind: String? = nil
     var unknownWhy: [String]? = nil
     var hosts: [String]? = nil, cmds: [String]? = nil, paths: [String]? = nil, tables: [String]? = nil
+    /// The effects whose LOCATOR this function could not determine, DIRECTLY — its own file write whose
+    /// path is a parameter, its own exec whose command is computed. Omitted when empty, so a scan that
+    /// determined everything stays byte-identical to one from before the field existed.
+    ///
+    /// Distinct from `paths`, which is PROPAGATED: a function inherits its callees' paths, so `paths`
+    /// being non-empty says only that something downstream named a literal. A privacy verify asking
+    /// "could this function's own destination be a protected folder" was answering with the transitive
+    /// view and could be masked to silence by one logger anywhere in the call graph.
+    var incomplete: [String]? = nil
     /// SPEC §2 `fs` — the read/write kinds of THIS function's own Fs calls, when their verbs said.
     /// Optional and omitted when empty, which is the spec's rule and not an optimisation: an empty or
     /// partial `fs` reads as "reads but never writes", a positive claim in the forbidden direction.
@@ -99,6 +108,7 @@ struct Effector {
         if let h = hosts, !h.isEmpty { e["hosts"] = h }
         if let c = cmds, !c.isEmpty { e["cmds"] = c }
         if let p = paths, !p.isEmpty { e["paths"] = p }
+        if let i = incomplete, !i.isEmpty { e["incomplete"] = i }
         if let t = tables, !t.isEmpty { e["tables"] = t }
         if let k = fs, !k.isEmpty { e["fs"] = k }
         if let pk = privacy, !pk.isEmpty { e["privacy"] = pk }

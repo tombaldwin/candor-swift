@@ -817,6 +817,9 @@ for qual in reportQuals.sorted() {
     if let h = hostsAcc[qual], !h.isEmpty { ef.hosts = h.sorted() }
     if let c = cmdsAcc[qual], !c.isEmpty { ef.cmds = c.sorted() }
     if let p = pathsAcc[qual], !p.isEmpty { ef.paths = p.sorted() }
+    // DIRECT, deliberately — see Effector.incomplete. This is the signal a consumer needs to tell
+    // "this function's own destination was undetermined" from "something it calls named a literal".
+    if let i = analysis.incompleteDirect[qual], !i.isEmpty { ef.incomplete = i.sorted() }
     if let t = tablesAcc[qual], !t.isEmpty, inf.contains("Db") { ef.tables = t.sorted() }
     // SPEC §2 `fs` — gated on `inferred` carrying Fs (the spec: "applies only when `inferred` contains
     // `Fs`"), and omitted when empty. Direct-only, so a function that merely REACHES a writer carries none.

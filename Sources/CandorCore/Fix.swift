@@ -30,6 +30,11 @@ public struct FixFn {
     /// was not emitting it.
     public var paths: [String] = []
 
+    /// The §2 `incomplete` list — effects whose locator this function could NOT determine, directly.
+    /// Defaulted empty like `paths`: a report predating the field reads as "nothing known to be
+    /// undetermined", which is the honest answer for a producer that was not emitting it.
+    public var incomplete: [String] = []
+
     /// `privacy/2` THE READ/WRITE DIRECTIONS THIS FUNCTION'S PRIVACY CALLS REVEALED, off the §2
     /// report entry verbatim. Like `netClass` this cannot be derived from the other fields: the verb
     /// that said "save" rather than "execute" is gone by the time a consumer reads a report, so the

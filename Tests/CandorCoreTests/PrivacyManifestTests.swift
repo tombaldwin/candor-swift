@@ -348,8 +348,7 @@ final class PrivacyManifestTests: XCTestCase {
         // measured the actual rule: `paths` PROPAGATES, so one logger with a literal destination masks the
         // count to zero for a whole call graph. Understating a limitation is the same defect as
         // understating a finding, so the test pins the honest wording rather than the comfortable one.
-        XCTAssertTrue(r.out.contains("NOT A RELIABLE FLOOR"), r.out)
-        XCTAssertTrue(r.out.contains("A ZERO HERE IS NOT EVIDENCE OF NONE"), r.out)
+        XCTAssertTrue(r.out.contains("ZERO here means zero"), r.out)
     }
 
     /// ENTITLEMENT-SOURCED keys: a different kind of evidence, and the only route to a capability that
@@ -393,5 +392,31 @@ final class PrivacyManifestTests: XCTestCase {
         let r = try ProcessHarness.run(bin, ["privacy-manifest", "--verify"], cwd: root)
         XCTAssertFalse(r.out.contains("grants 1 entitlement"),
                        "an entitlement set to false is not granted: \(r.out)")
+    }
+
+    /// THE MASKING CASE, which is why the count reads a per-function signal rather than `paths`.
+    /// `paths` PROPAGATES: a caller inherits its callees' literals, so a function writing to a computed
+    /// destination looked "determined" the moment anything it called named a literal path. One logger
+    /// zeroed the count for a whole call graph, and every real app has one.
+    func testUndeterminedCountIsNotMaskedByALiteralPathElsewhereInTheGraph() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage("""
+        import Foundation
+        func cfg() -> Data? { FileManager.default.contents(atPath: "/etc/hosts") }
+        func exportAll(_ dest: String) {
+            _ = cfg()
+            try? "x".write(toFile: dest, atomically: true, encoding: .utf8)
+        }
+        """, name: "App")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try #"<?xml version="1.0" encoding="UTF-8"?>\#n<plist version="1.0"><dict></dict></plist>"#
+            .write(to: root.appendingPathComponent("Info.plist"), atomically: true, encoding: .utf8)
+        _ = try ProcessHarness.run(bin, [root.path], cwd: root)
+        let r = try ProcessHarness.run(bin, ["privacy-manifest", "--verify"], cwd: root)
+        XCTAssertTrue(r.out.contains("exportAll"),
+                      "the computed-destination write must be counted even though its callee named a "
+                      + "literal path: \(r.out)")
+        XCTAssertFalse(r.out.contains("(cfg,") || r.out.contains(" cfg)"),
+                       "the literal-path function must NOT be counted: \(r.out)")
     }
 }

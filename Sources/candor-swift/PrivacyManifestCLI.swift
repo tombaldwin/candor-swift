@@ -270,13 +270,17 @@ func entitlementRequiredKeys(_ path: String) -> [String] {
 /// direction for a disclosure, which is why the output says so rather than presenting the number bare.
 func undeterminedPaths(_ byName: [String: FixFn]) -> (ops: Int, fns: [String]) {
     var fns: [String] = []
-    // DIRECT Fs only. Counting transitive reachers put functions that perform no file I/O at all into the
-    // list — measured at 52% of the number on candor's own source, and because the preview is sorted
-    // alphabetically the plain callers displaced the function that actually writes. A number a reader can
-    // disprove by checking two entries is a number they stop reading.
-    for (fn, f) in byName where f.direct.contains("Fs") {
-        if f.paths.isEmpty { fns.append(fn) }
-    }
+    // THE DIRECT SIGNAL, not the propagated one. Two defects lived in the earlier version, in opposite
+    // directions, and both are gone:
+    //   · INFLATION — counting transitive reachers put functions performing no file I/O into the list
+    //     (52% of the number on candor's own source), and alphabetical sorting put them first.
+    //   · MASKING — `paths` PROPAGATES, so a function counted as determined when anything it
+    //     transitively reached named a literal. One logger writing "/tmp/app.log" zeroed the count for a
+    //     whole call graph, and every real app has one. The maximum-confidence state the design asked
+    //     for — "clean, and zero undetermined" — was manufactured by ordinary code.
+    // `incomplete` is per-function and unpropagated: it says THIS function's own Fs destination could not
+    // be determined, which is the question actually being asked.
+    for (fn, f) in byName where f.incomplete.contains("Fs") { fns.append(fn) }
     return (fns.count, fns.sorted())
 }
 
@@ -316,17 +320,14 @@ private func printPrivacyVocabularyBound(undetermined: (ops: Int, fns: [String])
               + "(\(names)\(undetermined.fns.count > 3 ? ", …" : "")).")
         print("  The folder keys above are decided by the path, so these are where an NSDesktop/NSDownloads/"
               + "removable/network-volume requirement could hide.")
-        // THE CAVEAT WAS WRONG, and understating a limitation is the same defect as understating a
-        // finding. It said "a function with one determined path and one undetermined counts as
-        // determined" — same-function, which sounds narrow. The real rule is far weaker: `paths`
-        // PROPAGATES to callers, so a function counts as determined if ANYTHING IT TRANSITIVELY REACHES
-        // named a literal path. One logger writing "/tmp/app.log" anywhere in a call graph zeroes this
-        // number for the whole graph, and every real app has one.
-        print("  NOT A RELIABLE FLOOR: `paths` propagates to callers, so a function counts as determined "
-              + "when anything it transitively reaches named a literal path — one logger with a literal "
-              + "destination can mask this count to zero for a whole call graph. A ZERO HERE IS NOT "
-              + "EVIDENCE OF NONE; a non-zero is a real lead. Fixing it needs a per-function direct-path "
-              + "signal on the wire (candor-spec/CONSTANT-PROVENANCE-DESIGN.md §4.2).")
+        // The caveat now describes the mechanism that actually ships. Two earlier versions were wrong:
+        // the first claimed a same-function weakness (narrow, and false), the second correctly reported
+        // that propagation masked the count — which was true until the per-function `incomplete` signal
+        // landed and made it unnecessary.
+        print("  Counted per function from its OWN undetermined destination, not inherited from what it "
+              + "calls — so a literal path elsewhere in the call graph cannot mask this, and ZERO here "
+              + "means zero. What it still cannot see: a path this scan determined but does not "
+              + "recognise as protected.")
     }
 }
 
@@ -372,6 +373,7 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
     }
 
     var entitlementUnderDeclared = false
+    var entitlementFindings: [String] = []
     if var plistPath = pm.verify {
         // ── VERIFY mode ───────────────────────────────────────────────────────────────────────────────
         // Bare `--verify` discovers the plist. Announced on stderr, never silently: a verdict is about a
@@ -432,6 +434,40 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         let uncoveredModules = model.coverage.modules
         let conditional = !model.coverage.isEmpty
 
+        // COMPUTED BEFORE THE JSON BRANCH, which used to exit ~100 lines above this and so
+        // carried no entitlement finding at all — the CI-facing form was the one missing it.
+        // ENTITLEMENT-SOURCED requirements, reported SEPARATELY because they are a different kind of
+        // evidence: a plist compared with a plist, not a call graph. Folding them in would present a
+        // manifest diff as a code analysis. This is also the only route to keys that have NO call site —
+        // Apple's page for NSCriticalMessaging links no symbol at all, because there is nothing to link.
+        // ANCHORED TO THE PLIST UNDER TEST, not to the process's cwd. Anchoring on cwd meant verifying an
+        // explicit plist from an unrelated directory read THAT directory's entitlements and reported a
+        // finding about a project not being analysed, attributed to the one that was.
+        let plistDir = (plistPath as NSString).deletingLastPathComponent
+        let ent = discoverEntitlements(from: plistDir.isEmpty ? FileManager.default.currentDirectoryPath : plistDir)
+        if let ep = ent.path {
+            let need = entitlementRequiredKeys(ep).filter { !declared.contains($0) }
+            if !need.isEmpty {
+                // `✗` is this verb's glyph for a rejection-shaped finding, and everywhere else it means
+                // exit 1. It printed AFTER a `✓` verdict line and left the exit code at 0 — a granted
+                // entitlement without its key is a real rejection cause, and the gate passed it.
+                entitlementUnderDeclared = true
+                entitlementFindings = need
+                // PROSE ONLY IN HUMAN MODE. The block moved above the `--json` branch so the machine
+                // form would carry the finding — and then printed to stdout ahead of the JSON document,
+                // making it unparseable. The finding travels as `entitlementUnderDeclared` in the JSON.
+                if !pm.json && !pm.xml {
+                    print("✗ \((ep as NSString).lastPathComponent) grants \(need.count) entitlement(s) whose "
+                          + "usage-description key is not declared: \(need.joined(separator: ", "))")
+                    print("  (from the ENTITLEMENTS file, not from code — these capabilities have no call "
+                          + "site for candor to find, so this is a manifest-to-manifest check.)")
+                }
+            }
+        } else if ent.several, !pm.json, !pm.xml {
+            print("· several .entitlements files here — not read. Entitlement-sourced keys "
+                  + "(\(ENTITLEMENT_REQUIRED_KEYS.count)) are unchecked; pass one target's tree, as with --target.")
+        }
+
         if pm.json {
             // The pinned JSON shape (SPEC-EXTENSION-privacy.md): reached / required / declared /
             // underDeclared[{effect,keys,fns}] / overDeclared / ok. `required` names the acceptable keys
@@ -456,8 +492,36 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
                 verdict["conditional"] = true
                 verdict["coverage"] = ["uncovered": uncoveredModules.count, "modules": uncoveredModules] as [String: Any]
             }
+            // THE MACHINE CONSUMER GETS THE DISCLOSURE TOO. Every §6 mechanism lived in the human branch
+            // only, so `--json` — the form CI reads — returned a bare `"ok": true` with no coverage, no
+            // undetermined count, no unmodelled list and no entitlement finding. The reader who can weigh
+            // a caveat was the only one receiving it, and the reader who cannot was the one being told
+            // "clean". That is the machine-consumer channel ⟨0.21⟩ closed elsewhere, reopened here.
+            let und = undeterminedPaths(model.byName)
+            // `keyCoverage`, NOT `coverage`. The verdict ALREADY carries a `coverage` key — the ⟨0.15⟩
+            // conditionality block naming the uncovered MODULES — and writing this one over it replaced
+            // a disclosure with a different disclosure, silently. Two different questions ("which
+            // modules could I not see" vs "how many of Apple's keys do I model") wearing one name.
+            verdict["keyCoverage"] = [
+                "modelledKeys": Set(privacyKeyMap.values.flatMap { $0 }).count,
+                "appleDocumentedKeys": APPLE_PRIVACY_KEYS.count,
+                "unmodelled": PRIVACY_UNMODELLED_KEYS.map { ["key": $0.key, "why": $0.why] },
+                "byBasis": Dictionary(grouping: privacyKeyMap.filter { !$0.value.isEmpty },
+                                      by: { PRIVACY_KEY_BASIS[$0.key] ?? "type" })
+                    .mapValues { $0.reduce(0) { $0 + $1.value.count } },
+            ] as [String: Any]
+            if und.ops > 0 {
+                verdict["undeterminedPaths"] = ["count": und.ops, "functions": und.fns] as [String: Any]
+            }
+            if !entitlementFindings.isEmpty {
+                verdict["entitlementUnderDeclared"] = entitlementFindings
+                // `ok` MUST AGREE WITH THE EXIT CODE. Leaving it as the code-derived verdict meant a
+                // machine reading the field it is named for saw `"ok": true` beside exit 1 — the naive
+                // CI check is `if ok`, and it would pass a manifest that is about to be rejected.
+                verdict["ok"] = false
+            }
             emitPrivacyJSON(verdict)
-            exit((ok && !entitlementUnderDeclared) ? 0 : 1)   // EXIT UNCHANGED by coverage — disclosure, not a gate
+            exit((ok && !entitlementUnderDeclared) ? 0 : 1)
         }
 
         // `--xml` on a VERIFY prints exactly the fragment that would fix the failure — nothing else, so
@@ -502,31 +566,6 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         // for the keys this extension models" — and a reader who takes it for "green for Apple" is the
         // person who submits and gets rejected. Measured by a recall battery, not assumed; the reasons
         // travel with the list so this is a limitation a reader can act on rather than a disclaimer.
-        // ENTITLEMENT-SOURCED requirements, reported SEPARATELY because they are a different kind of
-        // evidence: a plist compared with a plist, not a call graph. Folding them in would present a
-        // manifest diff as a code analysis. This is also the only route to keys that have NO call site —
-        // Apple's page for NSCriticalMessaging links no symbol at all, because there is nothing to link.
-        // ANCHORED TO THE PLIST UNDER TEST, not to the process's cwd. Anchoring on cwd meant verifying an
-        // explicit plist from an unrelated directory read THAT directory's entitlements and reported a
-        // finding about a project not being analysed, attributed to the one that was.
-        let plistDir = (plistPath as NSString).deletingLastPathComponent
-        let ent = discoverEntitlements(from: plistDir.isEmpty ? FileManager.default.currentDirectoryPath : plistDir)
-        if let ep = ent.path {
-            let need = entitlementRequiredKeys(ep).filter { !declared.contains($0) }
-            if !need.isEmpty {
-                // `✗` is this verb's glyph for a rejection-shaped finding, and everywhere else it means
-                // exit 1. It printed AFTER a `✓` verdict line and left the exit code at 0 — a granted
-                // entitlement without its key is a real rejection cause, and the gate passed it.
-                entitlementUnderDeclared = true
-                print("✗ \((ep as NSString).lastPathComponent) grants \(need.count) entitlement(s) whose "
-                      + "usage-description key is not declared: \(need.joined(separator: ", "))")
-                print("  (from the ENTITLEMENTS file, not from code — these capabilities have no call site "
-                      + "for candor to find, so this is a manifest-to-manifest check.)")
-            }
-        } else if ent.several {
-            print("· several .entitlements files here — not read. Entitlement-sourced keys "
-                  + "(\(ENTITLEMENT_REQUIRED_KEYS.count)) are unchecked; pass one target's tree, as with --target.")
-        }
         printPrivacyVocabularyBound(undetermined: undeterminedPaths(model.byName),
                                     fileProvider: reachedSet.contains("FileProvider"))
         exit((ok && !entitlementUnderDeclared) ? 0 : 1)
