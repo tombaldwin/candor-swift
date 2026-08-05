@@ -240,7 +240,15 @@ func discoverEntitlements(from root: String) -> (path: String?, several: Bool) {
 /// present-but-false is not granted, and treating it as granted would demand a key for a capability the
 /// app has switched off.
 func entitlementRequiredKeys(_ path: String) -> [String] {
-    guard let d = NSDictionary(contentsOfFile: path) as? [String: Any] else { return [] }
+    // `PropertyListSerialization`, not `NSDictionary(contentsOfFile:)` — the same API `loadDeclaredKeys`
+    // uses, and for the second of the two reasons its comment gives. The first is that NSDictionary
+    // returns nil on ANY failure, indistinguishable from a plist whose root is not a dict. The second
+    // only showed up in CI: the initialiser is DEPRECATED on swift-corelibs-foundation, and this repo
+    // compiles its own code with `-warnings-as-errors`, so it built on macOS and failed the Linux leg.
+    // A rule the file already documented, in a function written six hours later that ignored it.
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+          let obj = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+          let d = obj as? [String: Any] else { return [] }
     return ENTITLEMENT_REQUIRED_KEYS.compactMap { ent, key in
         guard let v = d[ent] else { return nil }
         // NOT GRANTED unless the value says so. Rejecting only a literal Boolean `false` let three
