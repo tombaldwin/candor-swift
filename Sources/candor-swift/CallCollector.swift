@@ -649,6 +649,22 @@ final class CallCollector: SyntaxVisitor {
     /// The AVAudioSession category argument, on exactly `mediaTypeArg`'s pattern: a leading-dot or
     /// fully-qualified static member is readable, anything computed is not — and "not readable" means
     /// AMBIGUOUS, which `privacyAudioSessionEffects` resolves by charging Mic.
+    /// The `FileManager.urls(for:in:)` search-path constant — `mediaTypeArg`'s pattern a third time.
+    /// Unreadable ⇒ nil ⇒ NO folder class, unlike the capture/audio cases which over-disclose. The
+    /// asymmetry is deliberate: an unreadable MEDIA TYPE still means a capture is happening, whereas an
+    /// unreadable search path is overwhelmingly an app-scoped directory that needs no key at all, and
+    /// charging all three folders on every `urls(for:)` call would fabricate on ordinary code. The miss
+    /// is caught by the undetermined-path disclosure instead.
+    private func searchPathArg(_ args: LabeledExprListSyntax) -> String? {
+        for a in args where a.label?.text == "for" {
+            if let ma = Self.peel(a.expression).as(MemberAccessExprSyntax.self) {
+                return ma.declName.baseName.text
+            }
+            return nil
+        }
+        return nil
+    }
+
     private func audioCategoryArg(_ args: LabeledExprListSyntax) -> String? {
         for a in args where a.label == nil || a.label?.text == "category" {
             if let ma = Self.peel(a.expression).as(MemberAccessExprSyntax.self) {
@@ -1203,7 +1219,16 @@ final class CallCollector: SyntaxVisitor {
             cmds.insert(head)
             // a known literal head refines the cliff (curl→Net, candor→Fs/Env); Exec stays
             for e in classifyCommandHead(head) { directEffects.insert(e) }
-        case "Fs": if lit.contains("/") || lit.hasPrefix(".") || lit.hasPrefix("~") { paths.insert(lit) }
+        case "Fs":
+            if lit.contains("/") || lit.hasPrefix(".") || lit.hasPrefix("~") {
+                paths.insert(lit)
+                // CONSTANT-PROVENANCE rung 1: a determined path also names a protected FOLDER, and Apple
+                // requires a usage-description key for three of them plus mounted volumes. The class is
+                // decided by the prefix; an unrecognised path yields nothing, so ordinary sandbox I/O is
+                // untouched. The UNDETERMINED case is not handled here at all — it is the absence of a
+                // path, counted and disclosed by the verify rather than guessed at from this side.
+                for c in pathClasses(lit) { directEffects.insert(c) }
+            }
         case "Db": for t in tablesInSql(lit) { tables.formUnion([t]) }
         default: break
         }
@@ -2270,6 +2295,13 @@ final class CallCollector: SyntaxVisitor {
                 directEffects.insert("Fs")
                 recordSurfaces(effect: "Fs", lit: lit)
                 if lit == nil { incompleteSurfaces.insert("Fs") }  // write destination is the arg → invisible if not literal
+            } else if let rt = base.root, rt == "FileManager", member == "urls" || member == "url",
+                      !declaredTypes.contains(rt) {
+                // CONSTANT-PROVENANCE rung 2 — `FileManager.default.urls(for: .desktopDirectory, in: …)`.
+                // The CANONICAL spelling: real code asks for the search-path constant far more often than
+                // it writes the path out, and unlike a literal it is always readable. Same argument-gating
+                // pattern as the capture media type and the audio-session category.
+                for c in searchPathClasses(searchPathArg(node.arguments)) { directEffects.insert(c) }
             } else if let rt = base.root, PRIVACY_AUDIO_SESSION_TYPES.contains(rt), !declaredTypes.contains(rt) {
                 // AVAudioSession / AVAudioApplication. `setCategory(.record)` is how essentially every
                 // recording app reaches the microphone, and it emitted NOTHING until a recall battery

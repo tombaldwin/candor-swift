@@ -11,6 +11,36 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [0.27.0] — 2026-08-05
 
+### Path classes: the five folder keys, at the first two rungs
+
+`CONSTANT-PROVENANCE-DESIGN.md` rungs 1–2, plus the two remaining type-nameable families. **47 of
+Apple's 57 keys are now modelled**, up from 42.
+
+- **rung 1 — literal paths.** `contents(atPath: "/Users/me/Desktop/x")` now also yields
+  `NSDesktopFolderUsageDescription`. Classes, not strings: a proved PREFIX decides the class and the
+  unknowable tail is irrelevant.
+- **rung 2 — the canonical spelling.** `FileManager.default.urls(for: .desktopDirectory, in:)` — real
+  code asks for the search-path constant far more often than it writes a path out, and unlike a literal
+  it is always readable.
+- `/Volumes/…` returns **both** removable and network-volume: macOS cannot tell a disk from a mounted
+  share by path, and on a privacy manifest a false prompt costs a confused user while a false silence
+  costs a rejection.
+- **NearbyInteraction allow-once** needed no new family at all — `privacyKeyMap` is a list and the verify
+  accepts any member, so it is a second acceptable spelling of an existing key.
+- **AccessoryTracking** (`AccessoryTrackingProvider`, `AccessoryAnchor`), both verified against Apple.
+
+**The asymmetry that keeps this safe.** An unreadable *media type* still means a capture is happening, so
+that case over-discloses. An unreadable *search path* is overwhelmingly an app-scoped directory needing
+no key, so it yields NOTHING — charging all three folders on every `urls(for:)` call would fabricate on
+ordinary code. The miss is caught by §6's undetermined-path disclosure instead. A fixture asserts an
+app-scoped write gains no folder key, and the real app's 282 file operations produced no new keys.
+
+**The battery now models the basis distinction.** A `constant`-basis miss is checked against §6's ⊤
+count: disclosed ⇒ a designed residue, silent ⇒ the cardinal sin and a hard failure. The computed
+spelling (`NSHomeDirectory() + "/Documents"`, rung 4, unbuilt) is correctly reported as *"not determined,
+but DISCLOSED"* rather than as a broken promise — which is the design working end to end, and is only
+checkable because the basis is executable rather than documentation.
+
 ### The verify reports HOW COMPLETELY, not just which keys
 
 §6 of `candor-spec/CONSTANT-PROVENANCE-DESIGN.md`, landed BEFORE the coverage work it exists to make

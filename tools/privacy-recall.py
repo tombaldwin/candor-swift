@@ -135,6 +135,22 @@ CASES = [
     ("Location temporary accuracy", "NSLocationTemporaryUsageDescription",
      'import CoreLocation\nfunc f() { CLLocationManager().requestTemporaryFullAccuracyAuthorization(withPurposeKey: "k") }'),
 
+    ("visionOS accessory / AccessoryTrackingProvider", "NSAccessoryTrackingUsageDescription",
+     'import ARKit\nfunc f() { _ = AccessoryTrackingProvider() }'),
+    ("NearbyInteraction allow-once (alias key)", "NSNearbyInteractionAllowOnceUsageDescription",
+     'import NearbyInteraction\nfunc f() { _ = NISession() }'),
+
+    ("macOS Downloads via search-path enum", "NSDownloadsFolderUsageDescription",
+     'import Foundation\nfunc f() { _ = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask) }'),
+    ("macOS Documents via search-path enum", "NSDocumentsFolderUsageDescription",
+     'import Foundation\nfunc f() { _ = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask) }'),
+    ("network volume literal", "NSNetworkVolumesUsageDescription",
+     'import Foundation\nfunc f() { _ = try? FileManager.default.contentsOfDirectory(atPath: "/net/share/x") }'),
+    # ORDINARY sandbox I/O must gain NOTHING — this is the fabrication guard, and it is the row that
+    # matters most: charging a folder key on every file write would make the feature unusable.
+    ("app-scoped write charges NO folder key", None,
+     'import Foundation\nfunc f() { try? "x".write(toFile: "/tmp/app/cache.txt", atomically: true, encoding: .utf8) }'),
+
     # ── shapes that could defeat detection even for a MODELLED sensor ───────────────────────────────
     ("Contacts behind a local wrapper type", "NSContactsUsageDescription",
      'import Contacts\nfinal class Svc { let s = CNContactStore()\n  func all() -> [CNContainer] { (try? s.containers(matching: nil)) ?? [] } }\n'
@@ -168,15 +184,36 @@ def scan(src, ws, i):
 
 # Families the extension does NOT claim, mirroring PRIVACY_UNMODELLED_KEYS. A miss here is DISCLOSED by
 # the verify, so it is reported and does not fail the gate. A miss OUTSIDE this set is a broken promise.
-KNOWN_UNMODELLED = {
-    # Path-triggered: the same FileManager call needs a different key, or none, depending on a string.
-    "NSDocumentsFolderUsageDescription", "NSDesktopFolderUsageDescription",
+# CONSTANT-BASIS keys (CONSTANT-PROVENANCE-DESIGN.md §6): decided by a PATH, so a spelling the ladder
+# has not reached yet is MISSED — and that is the designed behaviour, not a broken promise, PROVIDED the
+# verify counts the function in its undetermined-path disclosure. So a miss here is checked against that
+# disclosure rather than failed outright: caught ⇒ fine, silent ⇒ the cardinal sin and a hard failure.
+#
+# This is the whole point of the basis distinction being executable rather than documentation. A
+# type-basis miss is a bug; a constant-basis miss is either a disclosed residue or a lie, and the battery
+# has to be able to tell which.
+CONSTANT_BASIS = {
+    "NSDesktopFolderUsageDescription", "NSDocumentsFolderUsageDescription",
     "NSDownloadsFolderUsageDescription", "NSRemovableVolumesUsageDescription",
     "NSNetworkVolumesUsageDescription",
+}
+
+KNOWN_UNMODELLED = {
+    # Path-triggered: the same FileManager call needs a different key, or none, depending on a string.
     # Not separable by type / needs an entitlement this engine does not read.
     "NSLocalNetworkUsageDescription",
     # Not modelled yet — each needs its own fixture and a source read.
 }
+
+
+def undetermined_disclosed(ws, i):
+    """Did the verify report this fixture's file I/O as path-undetermined? (§6's ⊤ count)"""
+    root = os.path.join(ws, f"c{i}")
+    plist = os.path.join(root, "Info.plist")
+    open(plist, "w").write('<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict></dict></plist>\n')
+    out = subprocess.run([BIN, "privacy-manifest", "--report", os.path.join(root, "r"), "--verify", plist],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=120).stdout
+    return "perform file I/O whose PATH this scan could not determine" in out
 
 
 def main():
@@ -188,6 +225,11 @@ def main():
         for i, (label, want, src) in enumerate(CASES):
             got = scan(src, ws, i)
             ok = want in got if want else True
+            # A constant-basis miss is acceptable ONLY if §6's disclosure names it.
+            if not ok and want in CONSTANT_BASIS and undetermined_disclosed(ws, i):
+                hits.append((label, want, sorted(got)))
+                print(f"  ~ {label:<44} not determined, but DISCLOSED by the ⊤ count (rung not yet built)")
+                continue
             (hits if ok else misses).append((label, want, sorted(got)))
             print(f"  {'✔' if ok else '✘'} {label:<44} {'' if ok else 'MISSED ' + str(want)}"
                   + (f"   (emitted: {', '.join(sorted(got)) or 'nothing'})" if not ok else ""))

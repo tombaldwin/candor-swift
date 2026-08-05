@@ -31,7 +31,11 @@ enum Effect: String, CaseIterable {
     // privacy/4 (2026-08-05)
     case focusStatus = "FocusStatus", identity = "Identity", financialData = "FinancialData",
          handsTracking = "HandsTracking", worldSensing = "WorldSensing", mainCamera = "MainCamera",
-         locationTemporary = "LocationTemporary"
+         locationTemporary = "LocationTemporary", accessoryTracking = "AccessoryTracking"
+    // constant-basis families (CONSTANT-PROVENANCE-DESIGN.md rungs 1-2)
+    case folderDesktop = "FolderDesktop", folderDocuments = "FolderDocuments",
+         folderDownloads = "FolderDownloads", removableVolume = "RemovableVolume",
+         networkVolume = "NetworkVolume"
     var specName: String { rawValue }
     static func from(_ name: String) -> Effect? { Effect(rawValue: name) }
 }

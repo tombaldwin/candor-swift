@@ -437,6 +437,8 @@ public let PRIVACY_SDK_TYPES: [String: String] = [
     "PlaneDetectionProvider": "WorldSensing", "SceneReconstructionProvider": "WorldSensing",
     "ImageTrackingProvider": "WorldSensing",
     "CameraFrameProvider": "MainCamera",
+    // Accessory tracking (visionOS) — AccessoryTrackingProvider / AccessoryAnchor, both confirmed.
+    "AccessoryTrackingProvider": "AccessoryTracking", "AccessoryAnchor": "AccessoryTracking",
     // Contacts — the address book.
     "CNContactStore": "Contacts", "CNContactPickerViewController": "Contacts",
     // Photos — the photo library.
@@ -531,6 +533,45 @@ public let PRIVACY_SDK_TYPES: [String: String] = [
 /// This exists so that reaching 57/57 does not silently delete the "here are the keys I do not check"
 /// warning while coverage WITHIN several keys is still partial. The disclosure changes axis from WHICH
 /// keys to HOW COMPLETELY, and a key resolved by `constant` must always report its undetermined count.
+/// PATH CLASS — which protected folder a file path falls in. CONSTANT-PROVENANCE-DESIGN.md rung 1.
+///
+/// CLASSES, NOT STRINGS: the answer needed is not the path, it is which protected folder it is under, so
+/// a proved PREFIX decides it and the unknowable tail is irrelevant. That is what turns a string-solver
+/// problem into a table lookup.
+///
+/// Returns a SET because `/Volumes/…` is genuinely both — macOS cannot tell a removable disk from a
+/// mounted network share by path alone, and on a privacy manifest a false prompt costs a confused user
+/// while a false silence costs a rejection. Over-disclose, exactly as an ambiguous capture does.
+///
+/// Returns EMPTY for the app sandbox and for anything unrecognised — an ordinary file write must not
+/// invent a folder requirement. The undetermined case is not represented here at all: it is the ABSENCE
+/// of a determined path, counted and disclosed by the verify (§6), never guessed at from this side.
+public func pathClasses(_ path: String) -> Set<String> {
+    // Normalise the two spellings of home: `~/Desktop` and `/Users/<name>/Desktop`.
+    var p = path
+    if p.hasPrefix("~") { p = "/Users/_" + p.dropFirst() }
+    if let r = p.range(of: #"^/Users/[^/]+"#, options: .regularExpression) { p = "/Users/_" + p[r.upperBound...] }
+    if p.hasPrefix("/Volumes/") { return ["RemovableVolume", "NetworkVolume"] }
+    for (prefix, cls) in [("/net/", "NetworkVolume"), ("smb://", "NetworkVolume"),
+                          ("afp://", "NetworkVolume"), ("nfs://", "NetworkVolume")]
+    where p.hasPrefix(prefix) { return [cls] }
+    for (folder, cls) in [("Desktop", "FolderDesktop"), ("Documents", "FolderDocuments"),
+                          ("Downloads", "FolderDownloads")]
+    where p == "/Users/_/" + folder || p.hasPrefix("/Users/_/" + folder + "/") { return [cls] }
+    return []
+}
+
+/// `FileManager.urls(for:in:)`'s search-path argument → the same classes. Rung 2, and the CANONICAL
+/// spelling: real code asks for `.desktopDirectory` far more often than it writes the path out.
+public func searchPathClasses(_ member: String?) -> Set<String> {
+    switch member {
+    case "desktopDirectory":   return ["FolderDesktop"]
+    case "documentDirectory":  return ["FolderDocuments"]
+    case "downloadsDirectory": return ["FolderDownloads"]
+    default: return []   // every other search path is unprotected or app-scoped — never guess a folder
+    }
+}
+
 public let PRIVACY_KEY_BASIS: [String: String] = {
     var m: [String: String] = [:]
     for e in PRIVACY_EFFECTS_ORDER { m[e] = "type" }
@@ -538,10 +579,14 @@ public let PRIVACY_KEY_BASIS: [String: String] = {
     for e in ["Camera", "Mic", "Calendar", "Reminders"] { m[e] = "argument" }
     // a member on a type that is shared with another family
     for e in ["ClinicalRecords", "LocationTemporary"] { m[e] = "member" }
+    // the LOSSY basis: an undetermined path means the key can be MISSED, so §6 always prints a count
+    for e in ["FolderDesktop", "FolderDocuments", "FolderDownloads", "RemovableVolume", "NetworkVolume"] {
+        m[e] = "constant"
+    }
     return m
 }()
 
-public let PRIVACY_EXTENSION_ID = "privacy/4"
+public let PRIVACY_EXTENSION_ID = "privacy/5"
 
 public let PRIVACY_EFFECTS_ORDER: [String] = [
     "Location", "Camera", "Mic", "Contacts", "Photos", "Notify",
@@ -552,7 +597,9 @@ public let PRIVACY_EFFECTS_ORDER: [String] = [
     "VideoSubscriber", "GameCenterFriends", "ClinicalRecords",
     // privacy/4 (2026-08-05) — every type name below was verified against Apple's docs JSON first.
     "FocusStatus", "Identity", "FinancialData", "HandsTracking", "WorldSensing", "MainCamera",
-    "LocationTemporary",
+    "LocationTemporary", "AccessoryTracking",
+    // constant-basis (path class) — CONSTANT-PROVENANCE-DESIGN.md
+    "FolderDesktop", "FolderDocuments", "FolderDownloads", "RemovableVolume", "NetworkVolume",
 ]
 
 public let PRIVACY_EFFECTS_ALL: Set<String> = Set(PRIVACY_EFFECTS_ORDER)
@@ -605,7 +652,7 @@ public let APPLE_PRIVACY_KEYS: [(key: String, why: String)] = [
     ("NSHealthUpdateUsageDescription", "not modelled"),
     ("NSHomeKitUsageDescription", "not modelled"),
     ("NSIdentityUsageDescription", "not modelled"),
-    ("NSLocalNetworkUsageDescription", "NWBrowser/NWConnection also serve ordinary networking; the key travels with an entitlement this engine does not read"),
+    ("NSLocalNetworkUsageDescription", "not separable by type (NWBrowser/NWConnection also serve ordinary networking) and the key travels with an entitlement this engine does not read; the bonjour-descriptor and .local-host spellings are tractable — CONSTANT-PROVENANCE-DESIGN.md step 3"),
     ("NSLocationAlwaysAndWhenInUseUsageDescription", "not modelled"),
     ("NSLocationAlwaysUsageDescription", "not modelled"),
     ("NSLocationTemporaryUsageDescription", "a temporary-accuracy REQUEST on a modelled Location manager; the key is purpose-string-keyed, not API-keyed"),
@@ -658,6 +705,13 @@ public let privacyKeyMap: [String: [String]] = [
     "HandsTracking": ["NSHandsTrackingUsageDescription"],
     "WorldSensing": ["NSWorldSensingUsageDescription"],
     "MainCamera": ["NSMainCameraUsageDescription"],
+    "AccessoryTracking": ["NSAccessoryTrackingUsageDescription"],
+    // constant-basis: decided by the PATH, so these always report an undetermined count beside them (§6)
+    "FolderDesktop": ["NSDesktopFolderUsageDescription"],
+    "FolderDocuments": ["NSDocumentsFolderUsageDescription"],
+    "FolderDownloads": ["NSDownloadsFolderUsageDescription"],
+    "RemovableVolume": ["NSRemovableVolumesUsageDescription"],
+    "NetworkVolume": ["NSNetworkVolumesUsageDescription"],
     "LocationTemporary": ["NSLocationTemporaryUsageDescription"],
     "Location": ["NSLocationWhenInUseUsageDescription", "NSLocationAlwaysAndWhenInUseUsageDescription",
                  "NSLocationAlwaysUsageDescription", "NSLocationUsageDescription"],
@@ -688,7 +742,11 @@ public let privacyKeyMap: [String: [String]] = [
     "MediaLibrary": ["NSAppleMusicUsageDescription"],
     "HomeKit": ["NSHomeKitUsageDescription"],
     "Tracking": ["NSUserTrackingUsageDescription"],
-    "NearbyInteraction": ["NSNearbyInteractionUsageDescription"],
+    "NearbyInteraction": ["NSNearbyInteractionUsageDescription",
+                          // Apple accepts EITHER spelling; the allow-once variant is a developer choice
+                          // about the prompt, not a distinguishable call site. `privacyKeyMap` is a list
+                          // and the verify is satisfied by any member, so this needs no new family.
+                          "NSNearbyInteractionAllowOnceUsageDescription"],
     "Siri": ["NSSiriUsageDescription"],
 ]
 
