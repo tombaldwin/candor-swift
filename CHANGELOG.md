@@ -11,6 +11,31 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [0.27.0] — 2026-08-05
 
+### LocalNetwork — and `NWBrowser` was not modelled at all
+
+**50 of Apple's 57 keys.** The `.local` host, the RFC1918/link-local literals and the bonjour descriptor
+each name the local network by definition, so the key is decided without a judgement call. A public host
+gains nothing — asserted by a fixture, because charging every networking app is exactly the fabrication
+that kept this key unmodelled.
+
+**The more serious half is not the key.** `NWBrowser` — Bonjour/mDNS service discovery — was in no table
+anywhere: `NWBrowser(for: .bonjour(…), using: .tcp)` produced **no effect at all**, so a
+service-discovery app read pure. `NetService`/`NetServiceBrowser` likewise. That is a silent under-report
+on the floor `Net` effect, found while chasing an extension key, and it is fixed independently of the
+privacy vocabulary.
+
+The bonjour descriptor is gated at the CONSTRUCTOR as well as the member, because
+`NWBrowser(for: .bonjour(…))` is the spelling real code uses and the member arm only sees
+`browser.start()`.
+
+### All privacy waves ship as ONE version
+
+Development ran through four increments in two days and each bumped the extension id. But `privacy/1` is
+the only version any release has carried — v0.25.0 and v0.26.0 both ship it — so `privacy/2` … `/5` never
+existed for a consumer, and publishing four of them would present our git history as somebody's upgrade
+path. It ships as `privacy/2`. The increments survive as narrative here and in the extension spec, where
+the *order* is the useful part: each wave was found by measuring the previous one.
+
 ### Path classes: the five folder keys, at the first two rungs
 
 `CONSTANT-PROVENANCE-DESIGN.md` rungs 1–2, plus the two remaining type-nameable families. **47 of

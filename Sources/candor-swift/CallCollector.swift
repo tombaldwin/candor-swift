@@ -655,6 +655,23 @@ final class CallCollector: SyntaxVisitor {
     /// unreadable search path is overwhelmingly an app-scoped directory that needs no key at all, and
     /// charging all three folders on every `urls(for:)` call would fabricate on ordinary code. The miss
     /// is caught by the undetermined-path disclosure instead.
+    /// Is a `.bonjour(…)` service descriptor among these arguments? mDNS by definition, so this needs no
+    /// over-disclosure rule: a descriptor that is not bonjour is simply not local-network.
+    private func bonjourDescriptorArg(_ args: LabeledExprListSyntax) -> Bool {
+        for a in args {
+            guard let call = Self.peel(a.expression).as(FunctionCallExprSyntax.self),
+                  let m = call.calledExpression.as(MemberAccessExprSyntax.self) else {
+                if let ma = Self.peel(a.expression).as(MemberAccessExprSyntax.self),
+                   ma.declName.baseName.text == "bonjour" { return true }
+                continue
+            }
+            if m.declName.baseName.text == "bonjour" || m.declName.baseName.text == "bonjourWithTXTRecord" {
+                return true
+            }
+        }
+        return false
+    }
+
     private func searchPathArg(_ args: LabeledExprListSyntax) -> String? {
         for a in args where a.label?.text == "for" {
             if let ma = Self.peel(a.expression).as(MemberAccessExprSyntax.self) {
@@ -1213,6 +1230,10 @@ final class CallCollector: SyntaxVisitor {
                 // runtime host) IS a real host literal → captured below like any Net host.
                 if !hostPart(h).contains(".") { break }
             }
+            // CONSTANT-PROVENANCE, host axis: a determined endpoint also says whether it is on the LOCAL
+            // network, which Apple gates behind its own key. Exactly the `isModelHost` refinement one line
+            // up — a host literal classifying an ADDITIONAL effect beside Net, never instead of it.
+            for c in hostClasses(h) { directEffects.insert(c) }
             hosts.insert(h)
         case "Exec":
             let head = lit.split(separator: " ").first.map(String.init) ?? lit
@@ -2196,6 +2217,17 @@ final class CallCollector: SyntaxVisitor {
                 // project code. Supersedes the flat Camera in kappaFree for these types.
                 for e in privacyCaptureEffects(mediaType: mediaTypeArg(node.arguments)) { directEffects.insert(e) }
             } else if !localTypes.contains(name), !localFreeFns.contains(name),
+                      dealias(name) == "NWBrowser" || dealias(name) == "NetServiceBrowser" {
+                // A BONJOUR BROWSER CONSTRUCTOR — `NWBrowser(for: .bonjour(…), using:)`, which is the
+                // spelling real code uses; the member arm below only sees `browser.start()`. `.bonjour` is
+                // mDNS by definition, so the descriptor decides the key with no over-disclosure rule
+                // needed: a non-bonjour descriptor is simply not local-network. `Net` still comes from
+                // kappaFree, which now knows this type at all — it did not before.
+                if bonjourDescriptorArg(node.arguments) { directEffects.insert("LocalNetwork") }
+                if let eff = kappaFree(name: dealias(name), argCount: node.arguments.count) {
+                    directEffects.insert(eff)
+                }
+            } else if !localTypes.contains(name), !localFreeFns.contains(name),
                       PRIVACY_EVENTKIT_TYPES.contains(dealias(name)) {
                 // `privacy/2` — an EventKit store CONSTRUCTOR (`EKEventStore()`). Carries no entity type,
                 // so the store is ambiguous → over-disclose BOTH Calendar and Reminders, on the same
@@ -2295,6 +2327,13 @@ final class CallCollector: SyntaxVisitor {
                 directEffects.insert("Fs")
                 recordSurfaces(effect: "Fs", lit: lit)
                 if lit == nil { incompleteSurfaces.insert("Fs") }  // write destination is the arg → invisible if not literal
+            } else if let rt = base.root, rt == "NWBrowser" || rt == "NetServiceBrowser",
+                      !declaredTypes.contains(rt) {
+                // A BONJOUR DESCRIPTOR is local-network by definition — `.bonjour(type:domain:)` is mDNS,
+                // there is no non-LAN spelling of it. Unlike a HOST literal (where an unreadable value must
+                // stay silent, or every networking app gains the key) this argument is a closed set, so an
+                // unrecognised descriptor simply yields nothing rather than needing a judgement call.
+                if bonjourDescriptorArg(node.arguments) { directEffects.insert("LocalNetwork") }
             } else if let rt = base.root, rt == "FileManager", member == "urls" || member == "url",
                       !declaredTypes.contains(rt) {
                 // CONSTANT-PROVENANCE rung 2 — `FileManager.default.urls(for: .desktopDirectory, in: …)`.

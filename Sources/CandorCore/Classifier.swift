@@ -546,6 +546,21 @@ public let PRIVACY_SDK_TYPES: [String: String] = [
 /// Returns EMPTY for the app sandbox and for anything unrecognised — an ordinary file write must not
 /// invent a folder requirement. The undetermined case is not represented here at all: it is the ABSENCE
 /// of a determined path, counted and disclosed by the verify (§6), never guessed at from this side.
+/// HOST CLASS — is this endpoint on the LOCAL network? The host axis of CONSTANT-PROVENANCE-DESIGN.md.
+///
+/// `.local` is mDNS by definition, and link-local / RFC1918 literals are LAN addresses by definition.
+/// Everything else — including every computed or unresolvable host — returns EMPTY, because charging
+/// NSLocalNetworkUsageDescription to every networking app is exactly the fabrication that kept this key
+/// unmodelled. The residue is disclosed, not guessed.
+public func hostClasses(_ host: String) -> Set<String> {
+    let h = host.split(separator: ":").first.map(String.init) ?? host
+    if h.hasSuffix(".local") || h.hasSuffix(".local.") { return ["LocalNetwork"] }
+    for p in ["169.254.", "10.", "192.168.", "224.0.0."] where h.hasPrefix(p) { return ["LocalNetwork"] }
+    if h.hasPrefix("172."), let second = h.split(separator: ".").dropFirst().first,
+       let n = Int(second), (16...31).contains(n) { return ["LocalNetwork"] }
+    return []
+}
+
 public func pathClasses(_ path: String) -> Set<String> {
     // Normalise the two spellings of home: `~/Desktop` and `/Users/<name>/Desktop`.
     var p = path
@@ -580,13 +595,21 @@ public let PRIVACY_KEY_BASIS: [String: String] = {
     // a member on a type that is shared with another family
     for e in ["ClinicalRecords", "LocationTemporary"] { m[e] = "member" }
     // the LOSSY basis: an undetermined path means the key can be MISSED, so §6 always prints a count
-    for e in ["FolderDesktop", "FolderDocuments", "FolderDownloads", "RemovableVolume", "NetworkVolume"] {
+    for e in ["FolderDesktop", "FolderDocuments", "FolderDownloads", "RemovableVolume",
+              "NetworkVolume", "LocalNetwork"] {
         m[e] = "constant"
     }
     return m
 }()
 
-public let PRIVACY_EXTENSION_ID = "privacy/5"
+// CONSOLIDATED to a single unpublished wave. Development ran through four increments in two days
+// (six→eighteen sensors + direction, Apple's real key list, the remaining type-nameable families, path
+// and host classes) and each bumped this constant. But `privacy/1` is the only version any RELEASE has
+// ever carried — v0.25.0 and v0.26.0 both ship it — so `privacy/2`, `/3`, `/4` and `/5` never existed
+// for a consumer. Publishing four wave numbers that nothing was ever built against would be describing
+// our git history as if it were their upgrade path. It ships as ONE wave; the increments survive as
+// narrative in CHANGELOG.md and SPEC-EXTENSION-privacy.md, where they are history rather than contract.
+public let PRIVACY_EXTENSION_ID = "privacy/2"
 
 public let PRIVACY_EFFECTS_ORDER: [String] = [
     "Location", "Camera", "Mic", "Contacts", "Photos", "Notify",
@@ -600,6 +623,7 @@ public let PRIVACY_EFFECTS_ORDER: [String] = [
     "LocationTemporary", "AccessoryTracking",
     // constant-basis (path class) — CONSTANT-PROVENANCE-DESIGN.md
     "FolderDesktop", "FolderDocuments", "FolderDownloads", "RemovableVolume", "NetworkVolume",
+    "LocalNetwork",
 ]
 
 public let PRIVACY_EFFECTS_ALL: Set<String> = Set(PRIVACY_EFFECTS_ORDER)
@@ -712,6 +736,7 @@ public let privacyKeyMap: [String: [String]] = [
     "FolderDownloads": ["NSDownloadsFolderUsageDescription"],
     "RemovableVolume": ["NSRemovableVolumesUsageDescription"],
     "NetworkVolume": ["NSNetworkVolumesUsageDescription"],
+    "LocalNetwork": ["NSLocalNetworkUsageDescription"],
     "LocationTemporary": ["NSLocationTemporaryUsageDescription"],
     "Location": ["NSLocationWhenInUseUsageDescription", "NSLocationAlwaysAndWhenInUseUsageDescription",
                  "NSLocationAlwaysUsageDescription", "NSLocationUsageDescription"],
@@ -875,6 +900,11 @@ public func kappaMember(root: String, member: String) -> String? {
     case "Bundle": return BUNDLE_RESOURCE_MEMBERS.contains(member) ? "Fs" : nil
     case "Date": return member == "now" ? "Clock" : nil
     case "ContinuousClock", "SuspendingClock", "DispatchTime": return member == "now" ? "Clock" : nil
+    case "NWBrowser", "NetService", "NetServiceBrowser":
+        // BONJOUR / mDNS DISCOVERY, modelled nowhere until now: `NWBrowser(for: .bonjour(…))` produced no
+        // effect whatever, so a service-discovery app read PURE. Found while adding the LocalNetwork
+        // privacy key; the missing `Net` is the more serious half and is a soundness fix on its own.
+        return NW_PURE_VERBS.contains(member) ? nil : "Net"
     case "NWConnection", "NWListener":
         // cancel/forceCancel TEAR DOWN (no bytes), batch{} is a pure grouping bracket (the I/O is in the
         // closure, attributed separately) — the whole-owner rule fabricated Net on them (sweep [34]).
@@ -991,6 +1021,7 @@ public func kappaFree(name: String, argCount: Int) -> String? {
     // collision-unlikely name; a local `func shellOut` (localFreeFns) still shadows it (never fabricate).
     case "shellOut": return "Exec"
     case "NWConnection", "NWListener": return "Net"
+    case "NWBrowser", "NetService", "NetServiceBrowser": return "Net"   // bonjour/mDNS discovery
     case "SystemRandomNumberGenerator": return "Rand"
     case "arc4random", "arc4random_uniform", "getentropy": return "Rand"
     case "getenv", "setenv", "unsetenv": return "Env"

@@ -81,8 +81,15 @@ CASES = [
      'import Intents\nfunc f() { INPreferences.requestSiriAuthorization { _ in } }'),
 
     # ── families candor does NOT claim. Measured, not assumed. ──────────────────────────────────────
-    ("LocalNetwork / NWBrowser", "NSLocalNetworkUsageDescription",
+    ("LocalNetwork / .local host", "NSLocalNetworkUsageDescription",
+     'import Network\nfunc f() { _ = NWConnection(host: "printer.local", port: 9100, using: .tcp) }'),
+    ("LocalNetwork / RFC1918 literal", "NSLocalNetworkUsageDescription",
+     'import Network\nfunc f() { _ = NWConnection(host: "192.168.1.50", port: 80, using: .tcp) }'),
+    ("LocalNetwork / NWBrowser bonjour", "NSLocalNetworkUsageDescription",
      'import Network\nfunc f() { _ = NWBrowser(for: .bonjour(type: "_http._tcp", domain: nil), using: .tcp) }'),
+    # THE FABRICATION GUARD: an ordinary internet call must gain NO local-network key.
+    ("public host charges NO LocalNetwork key", None,
+     'import Network\nfunc f() { _ = NWConnection(host: "api.example.com", port: 443, using: .tcp) }'),
     ("macOS Documents folder", "NSDocumentsFolderUsageDescription",
      'import Foundation\nfunc f() { _ = try? FileManager.default.contentsOfDirectory(atPath: NSHomeDirectory() + "/Documents") }'),
     ("macOS Desktop folder", "NSDesktopFolderUsageDescription",
@@ -201,7 +208,6 @@ CONSTANT_BASIS = {
 KNOWN_UNMODELLED = {
     # Path-triggered: the same FileManager call needs a different key, or none, depending on a string.
     # Not separable by type / needs an entitlement this engine does not read.
-    "NSLocalNetworkUsageDescription",
     # Not modelled yet — each needs its own fixture and a source read.
 }
 

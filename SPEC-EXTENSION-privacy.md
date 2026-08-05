@@ -30,6 +30,12 @@ verify a privacy manifest from code-level truth**.
 | `Photos` | the photo library | Photos / PhotosUI (`PHPhotoLibrary`, `PHAsset`, `PHPickerViewController`) |
 | `Notify` | user-attention / notifications | UserNotifications (`UNUserNotificationCenter`) |
 
+> **All four waves below ship as ONE version, `privacy/2`.** `privacy/1` is the only id any release has
+> carried (v0.25.0 and v0.26.0 both ship it), so the intermediate numbers never existed for a consumer,
+> and publishing four of them would present our git history as somebody's upgrade path. The waves are
+> kept as narrative because the *order* of discovery is the useful part — each one was found by measuring
+> the previous one.
+
 ### Fourth wave (`privacy/4`, 2026-08-05) — the rest of what a type can name
 
 Seven more families, closing everything left that a TYPE or MEMBER can identify: Focus status
