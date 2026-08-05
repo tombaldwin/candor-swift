@@ -50,3 +50,29 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
           fi
+
+      # THE BINARY. Until 2026-08-05 this workflow built, tested, smoked and cut a release — and attached
+      # NOTHING, so every candor-swift release had zero assets and `candor update` could only say "build
+      # from the candor-swift repo (macOS): swift build -c release". Every other engine installs itself;
+      # swift asked for a Swift toolchain and a source build. That is the entire install story for the
+      # PRIVACY MANIFEST, a swift-only capability — so the one feature with a case study written about it
+      # was the one nobody could install to try.
+      #
+      # macos-15 is arm64 and Package.swift targets macOS 13+, where the Swift runtime ships with the OS,
+      # so a release build here runs on a supported Mac with no toolchain. Named to candor-java's
+      # convention (`candor-macos-arm64`).
+      - name: Build the release binary and attach it
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          swift build -c release
+          BIN=.build/release/candor-swift
+          test -x "$BIN" || { echo "::error::no release binary at $BIN"; exit 1; }
+          # The gate above checks the SOURCE version; this checks the ARTIFACT a user actually runs.
+          got="$("$BIN" --version | head -1)"
+          case "$got" in
+            *"${GITHUB_REF_NAME#v}"*) ;;
+            *) echo "::error::binary reports '$got', which does not name ${GITHUB_REF_NAME#v}"; exit 1;;
+          esac
+          cp "$BIN" candor-swift-macos-arm64
+          gh release upload "$GITHUB_REF_NAME" candor-swift-macos-arm64 --clobber
