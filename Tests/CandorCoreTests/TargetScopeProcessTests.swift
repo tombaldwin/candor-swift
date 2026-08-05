@@ -239,6 +239,57 @@ final class TargetScopeProcessTests: XCTestCase {
                        + "reports in one .candor/ is an ambiguity discovery resolves by guessing: \(reports)")
     }
 
+    /// `path: "."` is legal SwiftPM — a single-target package rooted at the manifest. The naive prefix
+    /// match refused it with "no Swift sources are under ./." while the sources sat right there: a dead
+    /// end whose stated remedy could not work. `standardizingPath` alone did NOT fix it, because it
+    /// strips a leading `./` from the files while leaving `.` as `.`, so the two sides still never met.
+    func testATargetRootedAtThePackageDirectoryResolves() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-dot-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Sources/Everything"),
+                                                withIntermediateDirectories: true)
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "Rev2", targets: [.target(name: "Everything", path: ".")])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try "import Foundation\npublic func e() { _ = FileManager.default.contents(atPath: \"/tmp/e\") }\n"
+            .write(to: root.appendingPathComponent("Sources/Everything/e.swift"),
+                   atomically: true, encoding: .utf8)
+        let r = try ProcessHarness.run(bin, [root.path, "--target", "Everything"], cwd: root)
+        XCTAssertEqual(r.code, 0, "a target rooted at `.` must resolve, not refuse: \(r.err)")
+        XCTAssertTrue(r.err.contains("--target Everything"), r.err)
+    }
+
+    /// A target name that is a PREFIX of another must not swallow it. `Sources/App` and
+    /// `Sources/AppKit2` differ by a suffix, and a prefix match without the trailing separator would
+    /// scan both while reporting the scope as one — charging a product with effects it never compiles.
+    func testASiblingTargetWithAPrefixNameIsNotSwallowed() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-prefix-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fm = FileManager.default
+        for t in ["App", "AppKit2"] {
+            try fm.createDirectory(at: root.appendingPathComponent("Sources/\(t)"),
+                                   withIntermediateDirectories: true)
+            try "import Foundation\npublic func \(t.lowercased())() { _ = FileManager.default.contents(atPath: \"/tmp/x\") }\n"
+                .write(to: root.appendingPathComponent("Sources/\(t)/f.swift"),
+                       atomically: true, encoding: .utf8)
+        }
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "Rev", targets: [.target(name: "App"), .target(name: "AppKit2")])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        let r = try ProcessHarness.run(bin, [root.path, "--target", "App"], cwd: root)
+        XCTAssertEqual(r.code, 0, r.err)
+        XCTAssertTrue(r.err.contains("1 of 2 source file(s)"),
+                      "App must scan ONE file, not swallow AppKit2's: \(r.err)")
+    }
+
     func testUnknownTargetExitsTwoRatherThanScanningEverything() throws {
         let bin = try ProcessHarness.binaryURL(for: Self.self)
         let root = try ProcessHarness.makePackage("let x = 1\n", name: "App")

@@ -371,9 +371,24 @@ if let want = scopeTarget {
             var d: ObjCBool = false
             return fm.fileExists(atPath: p, isDirectory: &d) && d.boolValue
         })
-        let prefixes = dirs.map { $0.hasSuffix("/") ? $0 : $0 + "/" }
+        // STANDARDIZE BOTH SIDES before comparing. `path: "."` is legal SwiftPM (a single-target package
+        // rooted at the manifest) and `appendingPathComponent(".")` yields `./.`, which prefix-matches
+        // nothing — so the scan refused with "no Swift sources are under ./.", naming a remedy that could
+        // not work while the sources sat right there. Compare on the standardized forms; `sourcePaths`
+        // itself is left alone, since the report's `loc:` is written from it.
+        // Compare ABSOLUTE, standardized paths on both sides. Two forms defeated the naive prefix match:
+        // `path: "."` is legal SwiftPM and `appendingPathComponent(".")` yields `./.`, and
+        // `standardizingPath` alone does not help — it strips a leading `./` from the FILES while leaving
+        // `.` as `.`, so the two sides still never line up. The symptom was a scan refusing with
+        // "no Swift sources are under ./." while the sources sat right there: a dead end whose stated
+        // remedy could not work. `sourcePaths` itself is left alone, since the report's `loc:` uses it.
+        func abs(_ p: String) -> String { URL(fileURLWithPath: p).standardized.path }
+        let prefixes = dirs.map { d -> String in
+            let n = abs(d)
+            return n.hasSuffix("/") ? n : n + "/"
+        }
         let before = sourcePaths.count
-        sourcePaths = sourcePaths.filter { p in prefixes.contains(where: { p.hasPrefix($0) }) }
+        sourcePaths = sourcePaths.filter { p in prefixes.contains(where: { abs(p).hasPrefix($0) }) }
         if sourcePaths.isEmpty {
             FileHandle.standardError.write(("candor-swift: --target \(want) resolved to "
                 + "\(closure.map(\.name).joined(separator: ", ")) but no Swift sources are under "
