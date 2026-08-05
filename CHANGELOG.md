@@ -11,6 +11,27 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [0.27.0] — 2026-08-05
 
+### `--verify` finds the Info.plist itself
+
+`candor privacy-manifest --verify` now takes an OPTIONAL path. Bare, it discovers the plist — so the
+documented flow is two commands with nothing to look up:
+
+```
+brew install candor
+candor privacy-manifest --verify
+```
+
+**It refuses when a repo ships several.** The real app this was built against has two (a macOS one and
+an iOS one), and verifying the wrong one is a confident verdict about a binary the reader never asked
+about — the exact artifact `--target` exists to remove, reintroduced through the back door. So more than
+one candidate is exit 2 with all of them named, never a pick. Exactly one is used and SAID on stderr,
+because a verdict is about a specific binary's manifest and the reader has to know which.
+
+Build output is excluded (`.app`, `.appex`, `.framework`, `Build/`, `DerivedData`, `Pods`), and so are
+test bundles: the first cut listed 22 plists for an app that has 2, because every built bundle carries a
+copy of one already found. A refusal that buries the two real answers in twenty derived ones has
+technically not guessed and has practically not helped.
+
 ### `privacy-manifest --xml`: a paste-ready Info.plist fragment, not a reading exercise
 
 "Generate" printed a requirements list — `Contacts → NSContactsUsageDescription (reached by: …)`. A user

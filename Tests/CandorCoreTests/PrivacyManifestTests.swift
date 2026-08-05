@@ -248,4 +248,54 @@ final class PrivacyManifestTests: XCTestCase {
         XCTAssertFalse(r.out.contains("NSMicrophoneUsageDescription"),
                        "a key already declared is not missing and must not be re-emitted: \(r.out)")
     }
+
+    /// Bare `--verify` discovers the Info.plist, so the documented flow has nothing to look up.
+    func testBareVerifyDiscoversTheOnlyInfoPlist() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage("""
+        import Contacts
+        let s = CNContactStore()
+        _ = try? s.containers(matching: nil)
+        """, name: "App")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try #"<?xml version="1.0" encoding="UTF-8"?>\#n<plist version="1.0"><dict></dict></plist>"#
+            .write(to: root.appendingPathComponent("Info.plist"), atomically: true, encoding: .utf8)
+        _ = try ProcessHarness.run(bin, [root.path], cwd: root)
+        let r = try ProcessHarness.run(bin, ["privacy-manifest", "--verify"], cwd: root)
+        XCTAssertEqual(r.code, 1, "the fixture under-declares Contacts, so the verdict is 1: \(r.err)")
+        XCTAssertTrue(r.err.contains("discovered"), "it must SAY which file it chose: \(r.err)")
+        XCTAssertTrue(r.out.contains("NSContactsUsageDescription"), r.out)
+    }
+
+    /// SEVERAL plists → REFUSE. A repo with several shipped binaries has several manifests, and
+    /// verifying the wrong one is a confident verdict about a binary the reader did not ask about —
+    /// exactly the artifact `--target` exists to remove, reintroduced through the back door.
+    func testBareVerifyRefusesWhenSeveralPlistsExist() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage("import Foundation\nlet x = 1\n", name: "App")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let plist = #"<?xml version="1.0" encoding="UTF-8"?>\#n<plist version="1.0"><dict></dict></plist>"#
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Apps/Other"),
+                                                withIntermediateDirectories: true)
+        try plist.write(to: root.appendingPathComponent("Info.plist"), atomically: true, encoding: .utf8)
+        try plist.write(to: root.appendingPathComponent("Apps/Other/Info.plist"), atomically: true, encoding: .utf8)
+        _ = try ProcessHarness.run(bin, [root.path], cwd: root)
+        let r = try ProcessHarness.run(bin, ["privacy-manifest", "--verify"], cwd: root)
+        XCTAssertEqual(r.code, 2, "ambiguity is could-not-evaluate, never a guess: \(r.err)\(r.out)")
+        XCTAssertTrue((r.err + r.out).contains("refusing to guess"), r.err + r.out)
+        XCTAssertTrue((r.err + r.out).contains("Apps/Other/Info.plist"), "it must NAME the candidates")
+    }
+
+    /// A bare `--verify` followed by another flag must not swallow it as a path.
+    func testBareVerifyDoesNotEatTheNextFlag() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage("import Foundation\nlet x = 1\n", name: "App")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try #"<?xml version="1.0" encoding="UTF-8"?>\#n<plist version="1.0"><dict></dict></plist>"#
+            .write(to: root.appendingPathComponent("Info.plist"), atomically: true, encoding: .utf8)
+        _ = try ProcessHarness.run(bin, [root.path], cwd: root)
+        let r = try ProcessHarness.run(bin, ["privacy-manifest", "--verify", "--json"], cwd: root)
+        XCTAssertEqual(r.code, 0, r.err)
+        XCTAssertTrue(r.out.contains("\"ok\""), "--json must still have been parsed as a FLAG: \(r.out)")
+    }
 }

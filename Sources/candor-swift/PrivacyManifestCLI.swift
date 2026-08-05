@@ -58,25 +58,82 @@ private struct PrivacyManifestArgs {
 
 // Parse `privacy-manifest [--report <locator>] [--verify <Info.plist>] [--json]`. No positional args are
 // accepted — a stray positional is a usage error (exit 2), never mis-read as a report/plist.
+
+/// Sentinel meaning "`--verify` was given with no path — go and find the Info.plist".
+let PLIST_DISCOVER = "\u{0}discover"
+
+/// Find the app's `Info.plist` when `--verify` was passed bare.
+///
+/// AMBIGUITY IS THE HAZARD, not absence. A repo with several shipped binaries has several plists — the
+/// real app this feature was built against has two — and verifying against the WRONG one produces
+/// exactly the artifact `--target` exists to remove: a confident verdict about a binary the reader was
+/// not asking about. So this REFUSES on more than one rather than picking, on the same reasoning as
+/// every other ambiguity in this engine: a wrong answer here is worse than a question.
+func discoverInfoPlist(from root: String) -> (path: String?, error: String?) {
+    let fm = FileManager.default
+    let skip: Set<String> = [".build", ".git", "DerivedData", "Pods", "node_modules", "Carthage", ".swiftpm"]
+    // BUILD OUTPUT IS NOT A SOURCE MANIFEST. The first version of this listed 22 plists for an app that
+    // has two, because every built `.app`, `.appex` and `Build/Products` tree carries a COPY of one it
+    // already found. A refusal that buries the two real answers in twenty derived ones has technically
+    // not guessed and has practically not helped.
+    let derivedSuffix = [".app", ".appex", ".framework", ".xcarchive", ".xctest", ".bundle", ".playground"]
+    var found: [String] = []
+    if let en = fm.enumerator(atPath: root) {
+        for case let rel as String in en {
+            let parts = rel.split(separator: "/").map(String.init)
+            if parts.contains(where: { p in
+                skip.contains(p) || derivedSuffix.contains(where: { p.hasSuffix($0) }) || p == "Build"
+            }) { en.skipDescendants(); continue }
+            // A TEST bundle's plist is not a shipped binary's — same rule the scanner uses for sources.
+            if parts.contains(where: { $0.hasSuffix("Tests") || $0.hasSuffix("UITests") }) {
+                en.skipDescendants(); continue
+            }
+            if parts.last == "Info.plist" { found.append((root as NSString).appendingPathComponent(rel)) }
+        }
+    }
+    // DEDUPE by resolved path: the enumerator reached several of these twice (a symlinked root yields
+    // both spellings), and a refusal that lists the same file twice reads as two different binaries.
+    var seen = Set<String>()
+    found = found.filter { seen.insert(URL(fileURLWithPath: $0).resolvingSymlinksInPath().path).inserted }
+    switch found.count {
+    case 0: return (nil, "no Info.plist found under \(root) — pass one: --verify <path>")
+    case 1: return (found[0], nil)
+    default:
+        let list = found.sorted().map { "    " + $0 }.joined(separator: "\n")
+        return (nil, """
+            \(found.count) Info.plist files under \(root) — refusing to guess which binary you meant, \
+            because verifying the wrong one is a confident answer about the wrong app. Pass one:
+            \(list)
+            """)
+    }
+}
+
 private func parsePrivacyManifestArgs(_ args: [String]) -> PrivacyManifestArgs {
     var pm = PrivacyManifestArgs()
     var reportFlag: String?
-    var it = args.dropFirst(2).makeIterator()   // drop the binary name + the verb
-    while let a = it.next() {
+    // Index-based, not an iterator: `--verify` takes an OPTIONAL value, so it must PEEK at the next
+    // token and leave it alone when it is another flag. An iterator can only consume.
+    let rest = Array(args.dropFirst(2))          // drop the binary name + the verb
+    var i = 0
+    while i < rest.count {
+        let a = rest[i]; i += 1
         switch a {
         case "--json": pm.json = true
         case "--xml": pm.xml = true
         case "--report":
             // Consume the next token as the value unconditionally (mirrors the fix/tour grammar) so a
             // value beginning `-` can be passed; only a genuinely absent value is the exit-2 error.
-            guard let v = it.next() else { privacyDie("candor-swift: --report requires a value") }
-            reportFlag = v
+            guard i < rest.count else { privacyDie("candor-swift: --report requires a value") }
+            reportFlag = rest[i]; i += 1
         case "--verify":
-            guard let v = it.next() else { privacyDie("candor-swift: --verify requires a value") }
-            pm.verify = v
+            // OPTIONAL value. `--verify <path>` verifies that plist; bare `--verify` DISCOVERS one, so
+            // the documented flow is `candor privacy-manifest --verify` with nothing to look up. A
+            // following token that starts with `-` is the next flag, not a path.
+            if i < rest.count, !rest[i].hasPrefix("-") { pm.verify = rest[i]; i += 1 }
+            else { pm.verify = PLIST_DISCOVER }
         default:
             if a.hasPrefix("-") { privacyDie("candor-swift: unknown flag \(a)") }
-            privacyDie("usage: candor-swift privacy-manifest [--report <locator>] [--verify <Info.plist>] [--json|--xml]")
+            privacyDie("usage: candor-swift privacy-manifest [--report <locator>] [--verify [<Info.plist>]] [--json|--xml]")
         }
     }
     // Resolve the report: --report flag → discovery. NO positional report (the query-verb grammar).
@@ -183,8 +240,19 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         return Array(all.prefix(fnCap))
     }
 
-    if let plistPath = pm.verify {
+    if var plistPath = pm.verify {
         // ── VERIFY mode ───────────────────────────────────────────────────────────────────────────────
+        // Bare `--verify` discovers the plist. Announced on stderr, never silently: a verdict is about a
+        // SPECIFIC binary's manifest, so the reader has to be told which file it was about.
+        if plistPath == PLIST_DISCOVER {
+            let d = discoverInfoPlist(from: FileManager.default.currentDirectoryPath)
+            guard let p = d.path else {
+                privacyDie("candor-swift privacy-manifest --verify: \(d.error ?? "no Info.plist")")
+            }
+            plistPath = p
+            FileHandle.standardError.write("candor-swift: verifying against \(p) (discovered — pass --verify <path> to choose)\n"
+                .data(using: .utf8)!)
+        }
         guard let declared = loadDeclaredKeys(plistPath) else {
             privacyDie("candor-swift privacy-manifest: Info.plist `\(plistPath)` could not be read or parsed (expected an XML or binary property list) — refusing to report a verify result over an unreadable manifest.")
         }
