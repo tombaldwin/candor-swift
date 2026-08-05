@@ -346,4 +346,47 @@ final class PrivacyManifestTests: XCTestCase {
         // A LOWER BOUND, and it has to say so — undercounting a disclosure is the dangerous direction.
         XCTAssertTrue(r.out.contains("LOWER BOUND"), r.out)
     }
+
+    /// ENTITLEMENT-SOURCED keys: a different kind of evidence, and the only route to a capability that
+    /// has NO call site. Apple's page for NSCriticalMessaging links no symbol at all, because the
+    /// capability is granted by an entitlement and the API it unlocks is ordinary messaging code.
+    func testEntitlementGrantsRequireTheirKeyAndSayWhereThatCameFrom() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage("import Foundation\nlet x = 1\n", name: "App")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let empty = #"<?xml version="1.0" encoding="UTF-8"?>\#n<plist version="1.0"><dict></dict></plist>"#
+        try empty.write(to: root.appendingPathComponent("Info.plist"), atomically: true, encoding: .utf8)
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <plist version="1.0"><dict>
+        <key>com.apple.developer.messages.critical-messaging</key><true/>
+        </dict></plist>
+        """.write(to: root.appendingPathComponent("App.entitlements"), atomically: true, encoding: .utf8)
+        _ = try ProcessHarness.run(bin, [root.path], cwd: root)
+        let r = try ProcessHarness.run(bin, ["privacy-manifest", "--verify"], cwd: root)
+        XCTAssertTrue(r.out.contains("NSCriticalMessagingUsageDescription"), r.out)
+        // It MUST say the evidence is a manifest, not code — presenting a plist diff as a call-graph
+        // result would misrepresent what was checked.
+        XCTAssertTrue(r.out.contains("not from code"), "the evidence must be labelled: \(r.out)")
+    }
+
+    /// An entitlement present but FALSE is not granted. Demanding a key for a capability the app has
+    /// switched off is the fabrication direction, and cheap to get wrong when reading a plist.
+    func testEntitlementSetToFalseDemandsNothing() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage("import Foundation\nlet x = 1\n", name: "App")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try #"<?xml version="1.0" encoding="UTF-8"?>\#n<plist version="1.0"><dict></dict></plist>"#
+            .write(to: root.appendingPathComponent("Info.plist"), atomically: true, encoding: .utf8)
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <plist version="1.0"><dict>
+        <key>com.apple.developer.messages.critical-messaging</key><false/>
+        </dict></plist>
+        """.write(to: root.appendingPathComponent("App.entitlements"), atomically: true, encoding: .utf8)
+        _ = try ProcessHarness.run(bin, [root.path], cwd: root)
+        let r = try ProcessHarness.run(bin, ["privacy-manifest", "--verify"], cwd: root)
+        XCTAssertFalse(r.out.contains("grants 1 entitlement"),
+                       "an entitlement set to false is not granted: \(r.out)")
+    }
 }

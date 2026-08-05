@@ -599,6 +599,21 @@ public func searchPathClasses(_ member: String?) -> Set<String> {
     }
 }
 
+/// ENTITLEMENT → REQUIRED USAGE-DESCRIPTION KEY.
+///
+/// A DIFFERENT KIND OF EVIDENCE, and the verify says so rather than folding it in. Everything else this
+/// extension reports comes from analysing code; this comes from reading a second manifest and comparing
+/// it with the first. Both are useful and only one is candor's usual claim, so a finding sourced here is
+/// labelled at the point of output — presenting a plist diff as a code analysis would misrepresent what
+/// was actually checked.
+///
+/// It exists because some protected capabilities have NO call site at all. `NSCriticalMessaging` is the
+/// clear case: Apple's page for it links no symbol, because the capability is granted by an entitlement
+/// and the API it unlocks is ordinary messaging code. No amount of call-graph analysis will ever see it.
+public let ENTITLEMENT_REQUIRED_KEYS: [String: String] = [
+    "com.apple.developer.messages.critical-messaging": "NSCriticalMessagingUsageDescription",
+]
+
 public let PRIVACY_KEY_BASIS: [String: String] = {
     var m: [String: String] = [:]
     for e in PRIVACY_EFFECTS_ORDER { m[e] = "type" }
@@ -606,6 +621,8 @@ public let PRIVACY_KEY_BASIS: [String: String] = {
     for e in ["Camera", "Mic", "Calendar", "Reminders"] { m[e] = "argument" }
     // a member on a type that is shared with another family
     for e in ["ClinicalRecords", "LocationTemporary"] { m[e] = "member" }
+    // read from a MANIFEST, never from code — labelled separately in the output
+    m["CriticalMessaging"] = "entitlement"
     // the LOSSY basis: an undetermined path means the key can be MISSED, so §6 always prints a count
     for e in ["FolderDesktop", "FolderDocuments", "FolderDownloads", "RemovableVolume",
               "NetworkVolume", "LocalNetwork"] {
@@ -633,7 +650,7 @@ public let PRIVACY_EFFECTS_ORDER: [String] = [
     // privacy/4 (2026-08-05) — every type name below was verified against Apple's docs JSON first.
     "FocusStatus", "Identity", "FinancialData", "HandsTracking", "WorldSensing", "MainCamera",
     "LocationTemporary", "AccessoryTracking", "SystemAdministration", "AudioCapture",
-    "AppBundles", "AppData",
+    "AppBundles", "AppData", "CriticalMessaging",
     // constant-basis (path class) — CONSTANT-PROVENANCE-DESIGN.md
     "FolderDesktop", "FolderDocuments", "FolderDownloads", "RemovableVolume", "NetworkVolume",
     "LocalNetwork",
@@ -752,6 +769,8 @@ public let privacyKeyMap: [String: [String]] = [
     "AudioCapture": ["NSAudioCaptureUsageDescription"],
     "AppBundles": ["NSAppBundlesUsageDescription"],
     "AppData": ["NSAppDataUsageDescription"],
+    // entitlement-sourced (see ENTITLEMENT_REQUIRED_KEYS) — no call site exists for it
+    "CriticalMessaging": ["NSCriticalMessagingUsageDescription"],
     // constant-basis: decided by the PATH, so these always report an undetermined count beside them (§6)
     "FolderDesktop": ["NSDesktopFolderUsageDescription"],
     "FolderDocuments": ["NSDocumentsFolderUsageDescription"],

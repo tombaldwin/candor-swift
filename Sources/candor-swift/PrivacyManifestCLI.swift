@@ -189,6 +189,40 @@ private func plistFragment(_ keys: [(effect: String, key: String)]) -> String {
 
 
 /// Print what this verify does NOT check. See `PRIVACY_UNMODELLED_KEYS`.
+/// The `.entitlements` beside a plist, if there is exactly one. Same discovery discipline as the
+/// Info.plist: exactly one is used, several REFUSE to guess (an app with several targets has several,
+/// and reading the wrong one answers about the wrong binary), none is simply absent.
+func discoverEntitlements(from root: String) -> (path: String?, several: Bool) {
+    let fm = FileManager.default
+    let skip: Set<String> = [".build", ".git", "DerivedData", "Pods", "node_modules", ".swiftpm"]
+    var found: [String] = []
+    if let en = fm.enumerator(atPath: root) {
+        for case let rel as String in en {
+            let parts = rel.split(separator: "/").map(String.init)
+            if parts.contains(where: { skip.contains($0) || $0.hasSuffix(".app") || $0 == "Build" }) {
+                en.skipDescendants(); continue
+            }
+            if rel.hasSuffix(".entitlements") { found.append((root as NSString).appendingPathComponent(rel)) }
+        }
+    }
+    var seen = Set<String>()
+    found = found.filter { seen.insert(URL(fileURLWithPath: $0).resolvingSymlinksInPath().path).inserted }
+    if found.count == 1 { return (found[0], false) }
+    return (nil, found.count > 1)
+}
+
+/// Usage-description keys an entitlements file makes REQUIRED. Boolean-true entries only: an entitlement
+/// present-but-false is not granted, and treating it as granted would demand a key for a capability the
+/// app has switched off.
+func entitlementRequiredKeys(_ path: String) -> [String] {
+    guard let d = NSDictionary(contentsOfFile: path) as? [String: Any] else { return [] }
+    return ENTITLEMENT_REQUIRED_KEYS.compactMap { ent, key in
+        guard let v = d[ent] else { return nil }
+        if let b = v as? Bool, b == false { return nil }
+        return key
+    }.sorted()
+}
+
 /// Functions performing file I/O whose PATH the scan could not name — the ⊤ count of
 /// CONSTANT-PROVENANCE-DESIGN.md, computed from what the report already carries.
 ///
@@ -209,7 +243,8 @@ func undeterminedPaths(_ byName: [String: FixFn]) -> (ops: Int, fns: [String]) {
 /// even though no key is currently resolved by path, because it is the concrete form of the caveat: the
 /// folder keys are unmodelled AND you cannot rule them out by inspection either, and here is how much
 /// you cannot see. When those keys land it becomes load-bearing rather than contextual.
-private func printPrivacyVocabularyBound(undetermined: (ops: Int, fns: [String])) {
+private func printPrivacyVocabularyBound(undetermined: (ops: Int, fns: [String]),
+                                         fileProvider: Bool) {
     let modelled = Set(privacyKeyMap.values.flatMap { $0 }).count
     var byBasis: [String: Int] = [:]
     for (eff, keys) in privacyKeyMap where !keys.isEmpty {
@@ -222,6 +257,15 @@ private func printPrivacyVocabularyBound(undetermined: (ops: Int, fns: [String])
           + "so a clean result here is not a clean App Store review. Declare these yourself if they apply:")
     for k in PRIVACY_UNMODELLED_KEYS {
         print("    \(k.key)  (\(k.why))")
+    }
+    // CONDITIONAL, and only raised where it is even possible. NSFileProviderPresence has no documented
+    // API and no documented entitlement, so it cannot be determined — but it applies ONLY to an app that
+    // ships a file provider, and that candor CAN see. Naming it at every app would be noise; naming it
+    // where the capability exists is a lead.
+    if fileProvider {
+        print("· this app reaches the FileProvider surface, so NSFileProviderPresenceUsageDescription MAY "
+              + "apply. Apple documents no API and no entitlement for it, so candor cannot tell — check it "
+              + "by hand if your provider reports which files are being viewed.")
     }
     if undetermined.ops > 0 {
         let names = undetermined.fns.prefix(3).joined(separator: ", ")
@@ -404,7 +448,25 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         // for the keys this extension models" — and a reader who takes it for "green for Apple" is the
         // person who submits and gets rejected. Measured by a recall battery, not assumed; the reasons
         // travel with the list so this is a limitation a reader can act on rather than a disclaimer.
-        printPrivacyVocabularyBound(undetermined: undeterminedPaths(model.byName))
+        // ENTITLEMENT-SOURCED requirements, reported SEPARATELY because they are a different kind of
+        // evidence: a plist compared with a plist, not a call graph. Folding them in would present a
+        // manifest diff as a code analysis. This is also the only route to keys that have NO call site —
+        // Apple's page for NSCriticalMessaging links no symbol at all, because there is nothing to link.
+        let ent = discoverEntitlements(from: FileManager.default.currentDirectoryPath)
+        if let ep = ent.path {
+            let need = entitlementRequiredKeys(ep).filter { !declared.contains($0) }
+            if !need.isEmpty {
+                print("✗ \((ep as NSString).lastPathComponent) grants \(need.count) entitlement(s) whose "
+                      + "usage-description key is not declared: \(need.joined(separator: ", "))")
+                print("  (from the ENTITLEMENTS file, not from code — these capabilities have no call site "
+                      + "for candor to find, so this is a manifest-to-manifest check.)")
+            }
+        } else if ent.several {
+            print("· several .entitlements files here — not read. Entitlement-sourced keys "
+                  + "(\(ENTITLEMENT_REQUIRED_KEYS.count)) are unchecked; pass one target's tree, as with --target.")
+        }
+        printPrivacyVocabularyBound(undetermined: undeterminedPaths(model.byName),
+                                    fileProvider: reachedSet.contains("FileProvider"))
         exit(ok ? 0 : 1)
     }
 

@@ -37,7 +37,7 @@ enum Effect: String, CaseIterable {
          folderDownloads = "FolderDownloads", removableVolume = "RemovableVolume",
          networkVolume = "NetworkVolume", localNetwork = "LocalNetwork",
          systemAdministration = "SystemAdministration", audioCapture = "AudioCapture",
-         appBundles = "AppBundles", appData = "AppData"
+         appBundles = "AppBundles", appData = "AppData", criticalMessaging = "CriticalMessaging"
     var specName: String { rawValue }
     static func from(_ name: String) -> Effect? { Effect(rawValue: name) }
 }

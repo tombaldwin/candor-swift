@@ -11,6 +11,42 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [0.27.0] — 2026-08-05
 
+### Entitlements: 56 of 57, and one key that is honestly out of reach
+
+**`NSCriticalMessagingUsageDescription` has no call site — Apple's page for it links no symbol at all**,
+because the capability is granted by an entitlement and the API it unlocks is ordinary messaging code.
+No call-graph analysis will ever see it. So candor reads the `.entitlements` file:
+`com.apple.developer.messages.critical-messaging` present ⇒ the key is required.
+
+**This is a different kind of evidence and the output says so**, rather than folding it in:
+
+```
+✗ App.entitlements grants 1 entitlement(s) whose usage-description key is not declared: NS…
+  (from the ENTITLEMENTS file, not from code — these capabilities have no call site for candor
+   to find, so this is a manifest-to-manifest check.)
+```
+
+Everything else this extension reports comes from analysing code. Presenting a plist diff as a
+call-graph result would misrepresent what was actually checked, so the finding is labelled at the point
+of output and `entitlement` is its own determination basis in the §6 breakdown.
+
+Same discovery discipline as the Info.plist: exactly one is read, **several REFUSE to guess** (an app
+with several targets has several, and reading the wrong one answers about the wrong binary — the real
+app hits exactly this and says so). An entitlement present but **false** demands nothing, which is a
+cheap mistake to make when reading a plist and is pinned by a test.
+
+**`NSFileProviderPresenceUsageDescription` stays unmodelled, and that is the honest answer.** Apple
+documents no API and no entitlement for it — its page links only sibling *keys*. But it applies ONLY to
+an app that ships a file provider, and candor can see that, so the verify raises it **conditionally**:
+
+```
+· this app reaches the FileProvider surface, so NSFileProviderPresenceUsageDescription MAY apply.
+  Apple documents no API and no entitlement for it, so candor cannot tell — check it by hand…
+```
+
+A lead where the capability is even possible, silence everywhere else. Naming it on every app would be
+noise; naming it nowhere would be the gap.
+
 ### 55 of Apple's 57 — the last five, found in the docs' `references` block
 
 The five keys that named no type in their prose named one in their DocC **references**: Apple's own page
