@@ -9,6 +9,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.27.0] — 2026-08-05
+
 ### `--target`: scope a scan to one shipped binary
 
 `candor-swift <dir>` scans every `.swift` file under it. For a package with several products sharing a
