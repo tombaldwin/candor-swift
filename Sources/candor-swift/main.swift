@@ -772,6 +772,10 @@ let invisibleAcc = analysis.invisibleAcc
 let unanalyzedUnits = analysis.unanalyzed
 // ⟨0.20⟩ Net destination-class partners from `.candor/config` — read ONCE here, used by the report's per-fn
 // `netClass` field (below) and the gate (deny Net[unknown-host]); the SAME set both surfaces resolve.
+// ⟨0.27⟩ §3.4 — the engine pin, checked before the report is written: a wrong engine costs a
+// message rather than an analysis followed by a refusal.
+enforceEnginePin(targetPath: target, running: releaseVersion)
+
 let netPartners = parseNetPartners(discoverConfigText(targetPath: target))
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════

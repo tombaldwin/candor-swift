@@ -26,7 +26,7 @@ let candorConfigKeys: Set<String> = ["policy", "baseline", "strict", "no-ambient
 // → the baseline guard's Unknown opt-in (main.swift). `unknown-alias` is ALSO implemented — Policy.swift's
 // parseUnknownAliases reads it straight off the config TEXT — but it is multi-value, so it exits this
 // loop at the `continue` below and never reaches the check, exactly as in rust.
-let candorConfigKeysImplemented: Set<String> = ["policy", "baseline", "deps", "unknown-ratchet"]
+let candorConfigKeysImplemented: Set<String> = ["policy", "baseline", "deps", "unknown-ratchet", "engine"]
 
 // ⟨0.19⟩ Discover `.candor/config` TEXT anchored at `targetPath`: $CANDOR_CONFIG if set + readable, else the
 // nearest `.candor/config` walking UP, else nil. Read-only + LENIENT (no exit — the caller decides
@@ -160,4 +160,91 @@ func loadCandorConfig(targetPath: String) -> [String: String] {
             .joined(separator: " ")
     }
     return cfg
+}
+
+// ── ⟨0.27⟩ SPEC §3.4 `engine` — THE ENGINE↔BASELINE COUPLING ─────────────────────────────────────
+// The committed baseline is a snapshot of what ONE engine build reported, and an engine swap is
+// baseline-invalidating. What a PIN adds over the provenance checks already in place is that it is
+// DECLARATIVE — a build id is a hash nobody can write down, so the intended version lived in CI config,
+// decoupled from the baseline it is married to. It also tells tooling which engine to FETCH, and it
+// reaches a run with NO baseline configured at all.
+//
+// TWO OF THE FIVE VERDICTS MUST NOT CHANGE THE EXIT CODE: an ABSENT pin (opt-in by construction) and an
+// UNDETERMINED one, where §3.1's unanswerable-condition rule applies — disclosed, never scored,
+// INCLUDING as satisfied. A mismatch is exit 2, never 1: the run is unevaluable, not violating.
+
+enum PinVerdict { case absent, match, mismatch, malformed, undetermined }
+
+private let enginePinImpls: Set<String> = ["java", "rust", "ts", "swift", "agents"]
+
+/// The pin that applies to `impl`: the qualified form wins over the unqualified one. Two lines that
+/// DISAGREE about the same key are kept BOTH, so the value cannot parse as a version and surfaces as
+/// `.malformed` — one silently discarding the other is the failure this key exists to stop.
+func enginePinFor(_ text: String?, _ implName: String) -> String? {
+    guard let text else { return nil }
+    var wild: String?, qual: String?
+    var bad = false
+    for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+        let line = rawLine.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0]
+            .trimmingCharacters(in: .whitespaces)
+        if line.isEmpty { continue }
+        let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+        guard parts.first?.lowercased() == "engine" else { continue }
+        let rest = Array(parts.dropFirst())
+        func slot(_ cur: String?, _ v: String) -> String { (cur != nil && cur != v) ? "\(cur!) / \(v)" : v }
+        if rest.isEmpty { bad = true }
+        else if rest.count == 1 { wild = slot(wild, rest[0]) }
+        else if rest.count == 2, enginePinImpls.contains(rest[0].lowercased()) {
+            if rest[0].lowercased() == implName { qual = slot(qual, rest[1]) }
+        } else { bad = true }
+    }
+    if bad { return "<unreadable>" }
+    return qual ?? wild
+}
+
+/// A pin token → its comparable form, or nil when it is not a version at all. `latest` is MALFORMED
+/// rather than a version that can never match: the difference decides whether the operator reads
+/// "wrong version" or "that is not a version".
+func normalizePinVersion(_ raw: String?) -> String? {
+    var s = (raw ?? "").trimmingCharacters(in: .whitespaces)
+    if s.hasPrefix("v") || s.hasPrefix("V") { s.removeFirst() }
+    let parts = s.split(separator: ".", omittingEmptySubsequences: false)
+    guard parts.count == 2 || parts.count == 3,
+          parts.allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isNumber) }) else { return nil }
+    return parts.count == 2 ? "\(s).0" : s
+}
+
+func pinVerdict(_ pin: String?, _ running: String) -> PinVerdict {
+    guard let pin else { return .absent }
+    guard let want = normalizePinVersion(pin) else { return .malformed }
+    let r = running.trimmingCharacters(in: .whitespaces)
+    if r.isEmpty || r == "unknown" { return .undetermined }
+    return want == (normalizePinVersion(r) ?? r) ? .match : .mismatch
+}
+
+/// Enforce the pin for a scan of `targetPath`. Exits 2 on a mismatch or an unreadable pin.
+func enforceEnginePin(targetPath: String, running: String) {
+    let pin = enginePinFor(discoverConfigText(targetPath: targetPath), "swift")
+    func say(_ s: String) { FileHandle.standardError.write((s + "\n").data(using: .utf8)!) }
+    switch pinVerdict(pin, running) {
+    case .absent, .match:
+        return
+    case .malformed:
+        say("candor-swift: .candor/config has an `engine` line that is not an engine version.")
+        say("        want `engine <version>` (e.g. `engine v\(running)`) or `engine <impl> <version>`")
+        say("        (e.g. `engine swift v\(running)`) for a repo scanned by more than one engine.")
+        say("        Failing (exit 2) rather than ignoring it: a pin that cannot be read is a")
+        say("        guard the operator believes is on.")
+        exit(2)
+    case .mismatch:
+        say("candor-swift: .candor/config pins engine \(pin ?? "") but this build is candor-swift \(running).")
+        say("        The pin and the committed baseline move together — a newer engine resolves more")
+        say("        dispatch, so its report is not comparable with a baseline the pinned engine wrote.")
+        say("        Either run the pinned engine, or update the pin and regenerate the baseline in the")
+        say("        same change. Exit 2 (unevaluable), not 1 — this is not a policy violation.")
+        exit(2)
+    case .undetermined:
+        say("candor-swift: .candor/config pins engine \(pin ?? ""), and this build does not know its own")
+        say("        release, so the pin CANNOT be checked. Disclosed, not scored — neither passed nor failed.")
+    }
 }
