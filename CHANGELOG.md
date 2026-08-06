@@ -11,6 +11,20 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [0.27.0] — 2026-08-05
 
+- **`CMMotionManager` requires no usage key, and candor said it did** — reporting a shipping app as
+  under-declared. Apple's `NSMotionUsageDescription` page names four APIs (`CMSensorRecorder`,
+  `CMPedometer`, `CMMotionActivityManager`, `CMMovementDisorderManager`); `CMMotionManager` references
+  none. The raw stream now has its own effect with no key — the access is still reported, it just isn't
+  a manifest requirement. Reading Apple's list also found `CMMovementDisorderManager` mapped nowhere.
+- **The build-settings reader is a value evaluator now, not a substring scanner** — it flipped to the
+  cardinal sin seven more ways, every one a way somebody turns a key off or splits a file: last-wins
+  empty (the Debug-declares/Release-does-not shape, and an archive is Release), CRLF resurrecting both
+  earlier fixes, a `[sdk=…]` condition swallowing the `=`, `${FOO}`/`$FOO`, an unclosed `/*`, and an
+  unmarked tree searching shared ancestors. Also stopped treating `#`/`//` inside a quoted value as a
+  comment, which had judged real declarations empty.
+- **Arming, not sink-registration.** A kill mid-run and a bare `exit(2)` both left the previous verdict;
+  registering a sink only covers refusals that route through it, and enumerating exits keeps missing one.
+
 - **A refusal must never leave the last run's green: `--gate-json` is now armed FAIL-CLOSED at run
   start.** With a mismatched or unreadable `engine` pin this engine exited 2 and left the PREVIOUS run's
   verdict document on disk, so a CI wrapper reading the artifact rather than the exit code reported a
