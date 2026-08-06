@@ -11,6 +11,20 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [0.27.0] — 2026-08-05
 
+- **A refusal must never leave the last run's green: `--gate-json` is now armed FAIL-CLOSED at run
+  start.** With a mismatched or unreadable `engine` pin this engine exited 2 and left the PREVIOUS run's
+  verdict document on disk, so a CI wrapper reading the artifact rather than the exit code reported a
+  **pass over a run that refused** — from the release's flagship guard. Arming at the start makes it a
+  class fix rather than a branch fix: every exit path leaves a refusal unless the run got far enough to
+  replace it. candor-java's `armGateJson` is the model.
+- **The build-settings reader flipped to the cardinal sin twice**, both by *disabling* a key — the way
+  a person actually turns one off. A commented-out `INFOPLIST_KEY_…` and `= $(inherited)` each counted
+  as declared, silencing the App-Store-rejection finding the verb exists to raise. The directory walk
+  also had no boundary, so a stray `.xcconfig` in a shared parent satisfied the verify. Fixed, along
+  with the false-alarm direction: `sdk=` conditionals and `#include`d configs now count, and `--json`
+  carries `declaredViaBuildSettings` so a machine consumer can tell a plist declaration from a build
+  setting seen up the tree — those are not the same claim.
+
 - **A bare `engine <impl>` still split the family five ways.** `engine swift` — an operator forgetting
   the version on a qualified line — was skipped by candor-java and treated by the other four as a
   WILDCARD pin whose version is the literal `swift`, so it exited 2 in every engine that is *not* swift:
