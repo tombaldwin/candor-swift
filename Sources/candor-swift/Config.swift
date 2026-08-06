@@ -204,6 +204,10 @@ func enginePinFor(_ text: String?, _ implName: String) -> String? {
         else { bad = true }
     }
     if bad { return "<unreadable>" }
+    // AN UNREADABLE UNQUALIFIED LINE IS NOT HIDDEN BY A QUALIFIED PIN. `qual ?? wild` returned the quali
+    // fied value, so `engine garbage` beside a good qualified line passed SILENTLY here while candor-java exit
+    // ed 2 — the exact mirror of the bug just fixed in java, four engines the other way. Unreadability is a property of the LINE; precedence only decides which VERSION applies.
+    if let w = wild, normalizePinVersion(w) == nil { return w }
     return qual ?? wild
 }
 

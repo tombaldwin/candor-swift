@@ -321,6 +321,23 @@ while let a = argIter.next() {
 // unconditionally re-reads the PREVIOUS run's document as current, and a stale green does not care why
 // this run declined to overwrite it. Flag-loop usage errors are already past, and they had no sink.
 if let gp = gateJsonPath { gateVerdictSinks.append(gp) }
+// …AND ARM IT, which registering the sink does NOT do. The sink only covers refusals that go through
+// `refuseGateAndExit`; a review killed a scan mid-run and found the PREVIOUS run's green still on disk,
+// and a bare `exit(2)` (a nonexistent scan target) left it too. Enumerating every exit is the approach
+// that keeps missing one — candor-java writes a refusal document the instant the path is known, so a
+// crash, an OOM, a CI timeout or an un-enumerated exit all leave a refusal rather than a stale verdict.
+if let gp = gateJsonPath, gp != "-" {
+    let armed = "{\n  \"spec\" : \"\(specVersion)\",\n  \"ok\" : false,\n  \"refused\" : true,\n"
+        + "  \"reason\" : \"the gate did not complete — this document was written when the run STARTED "
+        + "and was never replaced by a verdict, so the run failed, crashed or was killed before it could "
+        + "decide. It is NOT a verdict about the code; see the run's stderr for the cause.\"\n}\n"
+    do { try armed.write(toFile: gp, atomically: true, encoding: .utf8) }
+    catch {
+        FileHandle.standardError.write(("candor-swift: could not arm --gate-json \(gp) fail-closed "
+            + "(\(error.localizedDescription)) — if this run does not complete, that path may still hold "
+            + "a PREVIOUS run's verdict\n").data(using: .utf8)!)
+    }
+}
 
 // (the §3.4 config layer lives in Config.swift)
 let candorConfig = loadCandorConfig(targetPath: target)
