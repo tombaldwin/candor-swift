@@ -192,16 +192,16 @@ func enginePinFor(_ text: String?, _ implName: String) -> String? {
         guard parts.first?.lowercased() == "engine" else { continue }
         let rest = Array(parts.dropFirst())
         func slot(_ cur: String?, _ v: String) -> String { (cur != nil && cur != v) ? "\(cur!) / \(v)" : v }
-        if rest.isEmpty { bad = true }
-        else if rest.count == 1 { wild = slot(wild, rest[0]) }
-        else if enginePinImpls.contains(rest[0].lowercased()) {
-            // A KNOWN qualifier decides the line's OWNER first (SPEC §3.4 whole-line skip): a junked
-            // line naming ANOTHER engine is that engine's problem, and it refuses on it. Refusing here
-            // as well turns one typo into a family-wide outage.
-            if rest[0].lowercased() == implName {
+        // A KNOWN QUALIFIER DECIDES OWNERSHIP BEFORE ARITY. Checking the one-token case first made `engine swift` a WILDCARD pin whose version is the literal "swift" -> MALFORMED -> exit 2 in every engine, so one operator forgetting a version on a qualified line killed the whole family. SPEC 3.4 says the skip is whole-line 'whatever follows it' -- and nothing following it is a case of that too.
+        if let head = rest.first, enginePinImpls.contains(head.lowercased()) {
+            if head.lowercased() == implName {
                 if rest.count == 2 { qual = slot(qual, rest[1]) } else { bad = true }
             }
-        } else { bad = true }
+            continue                     // another impl's line, whatever follows it
+        }
+        if rest.isEmpty { bad = true }
+        else if rest.count == 1 { wild = slot(wild, rest[0]) }
+        else { bad = true }
     }
     if bad { return "<unreadable>" }
     return qual ?? wild

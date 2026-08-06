@@ -183,6 +183,68 @@ func loadDeclaredKeys(_ path: String) -> Set<String>? {
     })
 }
 
+/// Usage-description keys declared as XCODE BUILD SETTINGS rather than in the `Info.plist` file, keyed
+/// by the file they were found in.
+///
+/// WHY THIS EXISTS, and it is the difference between a useful verb and an embarrassing one. Since Xcode
+/// 13, `GENERATE_INFOPLIST_FILE = YES` is the DEFAULT for a new target: usage descriptions are written as
+/// `INFOPLIST_KEY_NSCameraUsageDescription = …` build settings and Xcode SYNTHESISES the final plist at
+/// build time. The `Info.plist` in the source tree then contains none of them — and verifying it reports
+/// every sensor the app reaches as under-declared.
+///
+/// MEASURED on three shipping open-source apps before this existed: IceCubesApp declares
+/// NSCamera/NSPhotoLibrary/NSPhotoLibraryAdd in its `.pbxproj` and NONE in `Info.plist`, so the verify
+/// produced THREE false "under-declared" findings against an app that is on the App Store. duckduckgo/iOS
+/// and WordPress-iOS carry 8 and 12 such settings. This was not an edge case; it was the common case, and
+/// a false rejection-warning is worse than no verb at all — it teaches the reader to distrust the tool.
+///
+/// SCOPE, deliberately conservative in the direction that matters: this can only ADD to the declared set,
+/// so its failure mode is missing a real under-declaration — the cardinal sin. Two guards. (1) An empty
+/// or whitespace-only value is NOT a declaration, exactly as in the plist reader (Apple rejects an empty
+/// purpose string). (2) The provenance is REPORTED, never silently merged: a key satisfied only by a
+/// build setting is named with the file it came from, because "declared somewhere in this project" is a
+/// weaker statement than "declared in the plist this target ships" — a setting can belong to a DIFFERENT
+/// target, and this cannot tell which without resolving the whole build graph.
+func buildSettingUsageKeys(near plistPath: String) -> [String: Set<String>] {
+    let fm = FileManager.default
+    var found: [String: Set<String>] = [:]
+    // Walk UP from the plist to the repository root, collecting every project file and xcconfig. The
+    // plist usually sits beside or below its .xcodeproj, and an .xcconfig can carry the same settings.
+    var dir = URL(fileURLWithPath: plistPath).deletingLastPathComponent()
+    for _ in 0..<6 {
+        guard let entries = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { break }
+        for e in entries {
+            var candidates: [URL] = []
+            if e.pathExtension == "xcodeproj" { candidates.append(e.appendingPathComponent("project.pbxproj")) }
+            if e.pathExtension == "xcconfig" { candidates.append(e) }
+            for c in candidates {
+                guard let text = try? String(contentsOf: c, encoding: .utf8) else { continue }
+                for raw in text.split(separator: "\n") {
+                    guard let r = raw.range(of: "INFOPLIST_KEY_") else { continue }
+                    let after = raw[r.upperBound...]
+                    guard let eq = after.firstIndex(of: "=") else { continue }
+                    let key = after[..<eq].trimmingCharacters(in: .whitespaces)
+                    guard key.hasSuffix("UsageDescription") else { continue }
+                    // The value: strip a trailing `;` (pbxproj) and surrounding quotes, then require it
+                    // to be non-empty — an empty purpose string is an App Store rejection, not a
+                    // declaration.
+                    var val = after[after.index(after: eq)...]
+                        .trimmingCharacters(in: .whitespaces)
+                    if val.hasSuffix(";") { val.removeLast() }
+                    val = val.trimmingCharacters(in: .whitespaces)
+                    if val.hasPrefix("\"") && val.hasSuffix("\"") && val.count >= 2 { val = String(val.dropFirst().dropLast()) }
+                    guard !val.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                    found[c.path, default: []].insert(key)
+                }
+            }
+        }
+        let parent = dir.deletingLastPathComponent()
+        if parent.path == dir.path { break }
+        dir = parent
+    }
+    return found
+}
+
 // Dispatched from main.swift when argv[1] is `privacy-manifest`.
 
 /// A PASTE-READY `Info.plist` fragment for a set of required keys.
@@ -400,7 +462,27 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         guard let declared = loadDeclaredKeys(plistPath) else {
             privacyDie("candor-swift privacy-manifest: Info.plist `\(plistPath)` could not be read or parsed (expected an XML or binary property list) — refusing to report a verify result over an unreadable manifest.")
         }
-        let declaredSorted = declared.sorted()
+        // ⟨build settings⟩ Xcode 13+ generates the shipped plist FROM build settings by default, so a
+        // key absent here may still be declared — see buildSettingUsageKeys for the measurement that
+        // forced this. Merged into the declared set so the verify does not raise a false rejection
+        // warning, and DISCLOSED below so "declared" never silently means "declared somewhere else".
+        let fromSettings = buildSettingUsageKeys(near: plistPath)
+        let settingKeys = fromSettings.values.reduce(into: Set<String>()) { $0.formUnion($1) }
+        let onlyInSettings = settingKeys.subtracting(declared)
+        let declaredAll = declared.union(settingKeys)
+        let declaredSorted = declaredAll.sorted()
+        if !onlyInSettings.isEmpty {
+            for (file, keys) in fromSettings.sorted(by: { $0.key < $1.key }) {
+                let here = keys.intersection(onlyInSettings).sorted()
+                if here.isEmpty { continue }
+                FileHandle.standardError.write(
+                    ("· \(here.count) key(s) declared as Xcode BUILD SETTINGS, not in this plist: "
+                     + "\(here.joined(separator: ", ")) (\(URL(fileURLWithPath: file).lastPathComponent)). "
+                     + "Xcode synthesises them into the shipped Info.plist. Counted as declared — but a "
+                     + "setting can belong to a DIFFERENT target, which this cannot tell without the build "
+                     + "graph; verify the BUILT app's Info.plist to be certain.\n").data(using: .utf8)!)
+            }
+        }
 
         // UNDER-declaration: a reached effect (except Notify, which needs no key) whose acceptable-key set
         // has NO member present in the plist — the App-Store-rejection finding.
@@ -414,14 +496,14 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
             let dirs = dirsByEffect[eff] ?? []
             if let byDir = privacyKeyMapByDirection[eff], !dirs.isEmpty {
                 for d in dirs.sorted() {
-                    guard let dk = byDir[d], !dk.contains(where: { declared.contains($0) }) else { continue }
+                    guard let dk = byDir[d], !dk.contains(where: { declaredAll.contains($0) }) else { continue }
                     let fns = (fnsByEffectDir["\(eff)/\(d)"] ?? []).sorted().prefix(fnCap).map { $0 }
                     underDeclared.append((effect: "\(eff) (\(d))", keys: dk, fns: fns))
                 }
                 continue
             }
             // No proved direction (or a direction-insensitive effect) — the pre-`privacy/2` rule exactly.
-            if !keys.contains(where: { declared.contains($0) }) {
+            if !keys.contains(where: { declaredAll.contains($0) }) {
                 underDeclared.append((effect: eff, keys: keys, fns: fnsFor(eff)))
             }
         }
@@ -456,7 +538,7 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         let plistDir = (plistPath as NSString).deletingLastPathComponent
         let ent = discoverEntitlements(from: plistDir.isEmpty ? FileManager.default.currentDirectoryPath : plistDir)
         if let ep = ent.path {
-            let need = entitlementRequiredKeys(ep).filter { !declared.contains($0) }
+            let need = entitlementRequiredKeys(ep).filter { !declaredAll.contains($0) }
             if !need.isEmpty {
                 // `✗` is this verb's glyph for a rejection-shaped finding, and everywhere else it means
                 // exit 1. It printed AFTER a `✓` verdict line and left the exit code at 0 — a granted
