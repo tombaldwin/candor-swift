@@ -110,7 +110,8 @@ func loadBaselineCallgraph(reportPath: String) -> BaselineSidecar {
 /// code — a fn already Unknown in the baseline shows no gain ⇒ GRANDFATHERED, only a NEWLY-introduced
 /// Unknown (a blind spot the baseline lacked) fails, so the strict gate ratchets the Unknown surface
 /// DOWN rather than failing everywhere on day one. Grandfather one by regenerating the baseline.
-func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion: String, unknownRatchet: Bool = false) -> [GateViolation] {
+func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion: String,
+                   unknownRatchet: Bool = false, declaredInConfig: Bool = false) -> [GateViolation] {
     // A configured-but-EMPTY value (bare `baseline` config line, CANDOR_BASELINE="") is invalid gate
     // input, not an un-adopted guard: the user declared a ratchet and named no file. java/scan/ts all
     // exit 2 here (verified 2026-07-10); swift briefly took the absent-file note path — family-aligned.
@@ -121,6 +122,16 @@ func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion:
     }
     guard let base = loadBaseline(path) else {
         if !FileManager.default.fileExists(atPath: path) {
+            // A CHECKED-IN DECLARATION IS NOT THE SAME ABSENCE. `.candor/config` naming a baseline says
+            // this repo HAS one, so a missing file was deleted or never committed and the guard passing
+            // green over it is the gateless-green class. `CANDOR_BASELINE` is set unconditionally by the
+            // adopt workflow, so an absent path THERE means the ratchet is not adopted yet — a note.
+            if declaredInConfig {
+                baselineFail(".candor/config declares `baseline \(path)` but that file is not there — "
+                    + "failing (exit 2). A checked-in declaration says this repo HAS a baseline, so an "
+                    + "absent one was deleted or never committed. Commit it, or record one: "
+                    + "candor-swift <target> --json > \(path)")
+            }
             FileHandle.standardError.write(("candor-swift: CANDOR_BASELINE \(path) does not exist — the "
                 + "regression guard is not active (record one: candor-swift <target> --json > \(path)).\n").data(using: .utf8)!)
             return []

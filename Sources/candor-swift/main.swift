@@ -1157,7 +1157,12 @@ var gatePolicyVocabulary: (config: String, aliases: [String: [String]])? = nil
 // config value was anchored to the config's home dir in Config.swift). May exit 2 (invalid gate input:
 // unparseable / versionless / cross-build baseline); an ABSENT file is a note, guard inactive.
 var baselinePath: String? = ProcessInfo.processInfo.environment["CANDOR_BASELINE"]
-if baselinePath == nil, let b = candorConfig["baseline"] { baselinePath = b }
+// WHICH SOURCE supplied it decides what a MISSING file means (see checkBaseline): `CANDOR_BASELINE` is
+// set unconditionally by the adopt workflow, so an absent path there is "the ratchet is not adopted
+// yet"; a checked-in `baseline` line DECLARES that this repo has one, so an absent path there was
+// deleted or never committed — and passing green over it is a gate that silently stopped gating.
+var baselineFromConfig = false
+if baselinePath == nil, let b = candorConfig["baseline"] { baselinePath = b; baselineFromConfig = true }
 // ⟨unknown-ratchet⟩ OPT-IN (default OFF): env CANDOR_UNKNOWN_RATCHET over config `unknown-ratchet`, the
 // same env-over-config precedence + truthiness as candor-java's Config.flag — env PRESENT (any value,
 // even empty) is true; else the config key present with an empty / true / 1 / yes value. When ON an
@@ -1169,7 +1174,8 @@ let unknownRatchet: Bool = {
     return v.isEmpty || lc == "true" || v == "1" || lc == "yes"
 }()
 if let bp = baselinePath {
-    gateViolations += checkBaseline(inferred: inferred, path: bp, engineVersion: engineVersion, unknownRatchet: unknownRatchet)
+    gateViolations += checkBaseline(inferred: inferred, path: bp, engineVersion: engineVersion,
+                                    unknownRatchet: unknownRatchet, declaredInConfig: baselineFromConfig)
 }
 // ⟨0.24⟩ **PRECEDENCE BINDS THE VERDICT, NOT THE POLICY GATE** (SPEC §3.1, candor-spec `4c79958`).
 //

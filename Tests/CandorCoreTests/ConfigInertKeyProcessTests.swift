@@ -92,13 +92,35 @@ final class ConfigInertKeyProcessTests: XCTestCase {
     }
 
     /// The other three wired keys — `baseline`, `deps` and `unknown-ratchet` — in one config. Values are
-    /// benign (an absent baseline is a note, an empty deps dir chains nothing), so this isolates the
-    /// classification: the run stays clean AND says nothing about them.
+    /// benign (an empty deps dir chains nothing), so this isolates the classification: the run stays
+    /// clean AND says nothing about them.
+    ///
+    /// THE BASELINE IS RECORDED FIRST, and it did not used to be: this test's own comment said "an
+    /// absent baseline is a note", which stopped being true when a baseline DECLARED in `.candor/config`
+    /// became exit 2 (a checked-in declaration says the repo HAS one, so an absent file was deleted or
+    /// never committed). The test was right about its intent and wrong about its premise — so it now
+    /// supplies a real baseline rather than relying on an absent one being harmless, which keeps it
+    /// testing the classification instead of the guard.
     func testTheOtherImplementedKeysStaySilent() throws {
-        let (root, _) = try makeFixture(config: "baseline .candor/baseline\ndeps .candor/deps\nunknown-ratchet true\n")
+        let (root, _) = try makeFixture(config: "baseline .candor/baseline.json\ndeps .candor/deps\nunknown-ratchet true\n")
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root.appendingPathComponent(".candor/deps"),
                                                 withIntermediateDirectories: true)
+        // Record the baseline with THIS build, so the guard is active and SATISFIED rather than absent.
+        // `--out` is a PREFIX the engine decorates (`<prefix>.<package>.Swift.json`) — `--json` prints to
+        // stdout and writes nothing — so the produced report is found and copied to the exact path the
+        // config names.
+        let pre = root.appendingPathComponent(".candor/rec")
+        _ = try scan(root, ["--out", pre.path])
+        let produced = try FileManager.default
+            .contentsOfDirectory(at: root.appendingPathComponent(".candor"), includingPropertiesForKeys: nil)
+            .first { $0.lastPathComponent.hasPrefix("rec.") && $0.pathExtension == "json"
+                     && !$0.lastPathComponent.contains("callgraph") }
+        XCTAssertNotNil(produced, "precondition: the scan wrote a report to copy as the baseline")
+        if let produced {
+            try? FileManager.default.removeItem(at: root.appendingPathComponent(".candor/baseline.json"))
+            try FileManager.default.copyItem(at: produced, to: root.appendingPathComponent(".candor/baseline.json"))
+        }
         let r = try scan(root)
         XCTAssertEqual(r.code, 0, "no gate configured, so a clean exit: \(r.err)")
         XCTAssertFalse(r.err.contains(inertMark),
