@@ -112,11 +112,27 @@ final class ConfigInertKeyProcessTests: XCTestCase {
         // config names.
         let pre = root.appendingPathComponent(".candor/rec")
         _ = try scan(root, ["--out", pre.path])
+        // EVERY SIDECAR IS EXCLUDED, not just the callgraph. `--out rec` also writes
+        // `rec.<pkg>.Swift.hierarchy.json` and can write `.locs.json`, all of which match "starts with
+        // rec., ends in .json" — so the first version of this picked whichever the filesystem happened
+        // to enumerate first and copied a SIDECAR in as the baseline. It passed on macOS and failed the
+        // Linux CI leg, which is the tell for an ordering assumption: `contentsOfDirectory` promises no
+        // order, and two platforms obliged differently.
+        let sidecars = ["callgraph", "hierarchy", "locs"]
         let produced = try FileManager.default
             .contentsOfDirectory(at: root.appendingPathComponent(".candor"), includingPropertiesForKeys: nil)
-            .first { $0.lastPathComponent.hasPrefix("rec.") && $0.pathExtension == "json"
-                     && !$0.lastPathComponent.contains("callgraph") }
+            .first { u in
+                u.lastPathComponent.hasPrefix("rec.") && u.pathExtension == "json"
+                    && !sidecars.contains(where: { u.lastPathComponent.contains(".\($0).") })
+            }
         XCTAssertNotNil(produced, "precondition: the scan wrote a report to copy as the baseline")
+        // …and that it is the REPORT. Asserting only non-nil is what let a sidecar through: the copy
+        // then "succeeded" and the failure surfaced two steps later as an unexplained exit 2.
+        if let produced {
+            let body = try String(contentsOf: produced, encoding: .utf8)
+            XCTAssertTrue(body.contains("\"functions\""),
+                          "picked \(produced.lastPathComponent), which is not a §2 report")
+        }
         if let produced {
             try? FileManager.default.removeItem(at: root.appendingPathComponent(".candor/baseline.json"))
             try FileManager.default.copyItem(at: produced, to: root.appendingPathComponent(".candor/baseline.json"))
