@@ -5,53 +5,9 @@
 import Foundation
 import CandorCore
 
-// ── The candor domain model (candor-spec/MODEL.md) — candor-swift's named realization of the shared
-// vocabulary. Independently derived (NO shared code across engines — that independence is what the
-// conformance differential proves); mirrors candor-java's `io.poly.candor.model` and Rust's candor-report
-// structs. These types OWN the §2 wire serialization, so the entry/envelope shape lives in one place.
-enum Effect: String, CaseIterable {
-    case clipboard = "Clipboard", clock = "Clock", db = "Db", env = "Env", exec = "Exec"
-    case fs = "Fs", ipc = "Ipc", llm = "Llm", log = "Log", net = "Net", rand = "Rand", unknown = "Unknown"
-    // `privacy/1` SPEC EXTENSION (SPEC-EXTENSION-privacy.md) — Apple privacy-sensor effects. Each is an
-    // outside-world surface (a sensor / personal-data store / the user's attention) on the same footing as
-    // Clipboard (main-spec §6.1): a boundary effect, high-salience, NOT allowlistable via a literal (there is
-    // no host/path to certify — `deny Location`/containment yes, `allow Location <x>` no). The extension is
-    // DISCLOSED in the envelope's `extensions` array when any of these appears (Report.privacyActive).
-    case location = "Location", camera = "Camera", mic = "Mic", contacts = "Contacts", photos = "Photos", notify = "Notify"
-    // privacy/2 (2026-08-04) — the second wave; see SPEC-EXTENSION-privacy.md
-    case health = "Health", motion = "Motion", calendar = "Calendar", reminders = "Reminders", bluetooth = "Bluetooth", speech = "Speech", biometrics = "Biometrics", mediaLibrary = "MediaLibrary", homeKit = "HomeKit", tracking = "Tracking", nearbyInteraction = "NearbyInteraction", siri = "Siri"
-    // privacy/3 (2026-08-05) — added after fetching Apple's protected-resources list (56 keys documented,
-    // 26 modelled). THIS ENUM IS THE SEVENTH COPY OF THE SENSOR VOCABULARY and the last one to matter:
-    // `Effect.from` returns nil for a name that is not a case, so a family present in the type table, the
-    // key map, the ordered list and four other places was still COMPUTED AND THEN DISCARDED at
-    // serialisation. Nothing failed; the effect simply never reached the report.
-    case nfc = "Nfc", fallDetection = "FallDetection", sensorKit = "SensorKit", fileProvider = "FileProvider",
-         systemExtension = "SystemExtension", appleEvents = "AppleEvents", videoSubscriber = "VideoSubscriber",
-         gameCenterFriends = "GameCenterFriends", clinicalRecords = "ClinicalRecords"
-    // privacy/4 (2026-08-05)
-    case focusStatus = "FocusStatus", identity = "Identity", financialData = "FinancialData",
-         handsTracking = "HandsTracking", worldSensing = "WorldSensing", mainCamera = "MainCamera",
-         locationTemporary = "LocationTemporary", accessoryTracking = "AccessoryTracking"
-    // constant-basis families (CONSTANT-PROVENANCE-DESIGN.md rungs 1-2)
-    case folderDesktop = "FolderDesktop", folderDocuments = "FolderDocuments",
-         folderDownloads = "FolderDownloads", removableVolume = "RemovableVolume",
-         networkVolume = "NetworkVolume", localNetwork = "LocalNetwork",
-         systemAdministration = "SystemAdministration", audioCapture = "AudioCapture",
-         appBundles = "AppBundles", appData = "AppData", criticalMessaging = "CriticalMessaging"
-    var specName: String { rawValue }
-    static func from(_ name: String) -> Effect? { Effect(rawValue: name) }
-}
-// The `privacy/1` extension's effect NAMES (the six SPEC-EXTENSION-privacy.md effects). Used to detect
-// whether the extension is active (any effector reaches one) so the envelope discloses `extensions`.
+// The domain model's EFFECT VOCABULARY (the `Effect` enum + `EffectSet`) now lives in
+// CandorCore/EffectVocabulary.swift so a unit test can reach it; see that file for why.
 
-let PRIVACY_EFFECTS: Set<String> = PRIVACY_EFFECTS_ALL   // derived — see PRIVACY_EFFECTS_ALL
-// A set of effects (SEMANTICS §1). Wire form = spec-name-sorted names — which, for this vocabulary, is the
-// same lexicographic order a `Set<String>.sorted()` produced, so adoption is byte-identical.
-struct EffectSet {
-    private(set) var effects: Set<Effect>
-    init(names: some Sequence<String>) { self.effects = Set(names.compactMap(Effect.from)) }
-    func toNames() -> [String] { effects.map { $0.specName }.sorted() }
-}
 // Which engine produced a report and which contract it conforms to (§2.1).
 struct Provenance {
     let version: String, toolchain: String, spec: String

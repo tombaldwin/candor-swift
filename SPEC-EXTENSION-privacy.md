@@ -121,7 +121,8 @@ as *"your plist is right"*, which is the absence-is-a-claim shape the main spec 
 | effect | meaning | sources (Apple frameworks) |
 |---|---|---|
 | `Health` | HealthKit samples | `HKHealthStore`, the sample/observer/statistics/anchored queries, workout sessions and builders |
-| `Motion` | motion & fitness sensors | CoreMotion (`CMMotionManager`, `CMPedometer`, `CMAltimeter`, `CMMotionActivityManager`, `CMHeadphoneMotionManager`, `CMSensorRecorder`) |
+| `Motion` | motion & fitness sensors **that require the key** | CoreMotion (`CMPedometer`, `CMAltimeter`, `CMMotionActivityManager`, `CMHeadphoneMotionManager`, `CMSensorRecorder`, `CMMovementDisorderManager`) |
+| `MotionRaw` | the raw accelerometer / gyroscope / magnetometer stream — **no Info.plist key** | CoreMotion (`CMMotionManager`) |
 | `Calendar` | the user's calendars | EventKit (`EKEventStore` — ambiguous, see below; `EKEventEditViewController`, `EKCalendarChooser`) |
 | `Reminders` | the user's reminders | EventKit (`EKEventStore` — ambiguous, see below) |
 | `Bluetooth` | BLE scanning / advertising | CoreBluetooth (`CBCentralManager`, `CBPeripheralManager`) |
@@ -132,6 +133,15 @@ as *"your plist is right"*, which is the absence-is-a-claim shape the main spec 
 | `Tracking` | App Tracking Transparency (IDFA) | AppTrackingTransparency (`ATTrackingManager`) |
 | `NearbyInteraction` | UWB ranging | NearbyInteraction (`NISession`) |
 | `Siri` | Siri authorization / donation | Intents (`INPreferences`, `INVoiceShortcutCenter`) |
+
+**`MotionRaw` is split from `Motion` because Apple splits it.** The documentation page for
+`NSMotionUsageDescription` names exactly four APIs — `CMSensorRecorder`, `CMPedometer`,
+`CMMotionActivityManager`, `CMMovementDisorderManager` — all of which read *stored or derived* motion.
+`CMMotionManager`'s live accelerometer/gyroscope stream requires no key at all. Mapping every CoreMotion
+class to the key made candor report a missing declaration against an app that needed none, so the reach
+still has to be **reported** (it is a sensor, and a policy can `deny MotionRaw`) while requiring nothing
+of the plist. Reporting it under a separate name is what keeps both halves true; dropping it from the
+report instead would have traded the over-report for silence.
 
 **Value types that merely carry an already-taken reading are excluded**, on the `CLLocation` precedent —
 `HKQuantity`, `CMDeviceMotion`, `CMAccelerometerData`, `EKEvent`, `CBUUID`. Holding a reading is not taking

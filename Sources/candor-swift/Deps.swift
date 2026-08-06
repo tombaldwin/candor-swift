@@ -53,6 +53,7 @@
 // "corrupt report ≠ pure" care, undone one level up.
 
 import Foundation
+import CandorCore  // the Effect vocabulary (moved there so a test can reach it)
 
 /// One chained dependency function: effects + the four literal surfaces (the spec says a consumer
 /// inherits BOTH — effects alone would make every chained `allow` rule fail on an empty surface),
