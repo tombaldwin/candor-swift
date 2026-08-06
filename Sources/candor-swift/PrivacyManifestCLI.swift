@@ -238,10 +238,38 @@ func buildSettingUsageKeys(near plistPath: String) -> [String: Set<String>] {
             for c in candidates {
                 guard let text = try? String(contentsOf: c, encoding: .utf8) else { continue }
                 for key in usageKeysInBuildSettings(text) { found[c.path, default: []].insert(key) }
+                // FOLLOW `#include`, one level. An xcconfig that splits its settings into a shared file
+                // is an ordinary layout, and missing it produced a FALSE under-declaration — the exact
+                // "teaches the reader to distrust the tool" failure this reader exists to remove. One
+                // level, and only relative paths inside the project: enough for the split-config case
+                // without turning a config read into an unbounded file walk.
+                for inc in includedConfigPaths(text, relativeTo: c) {
+                    guard let itext = try? String(contentsOf: inc, encoding: .utf8) else { continue }
+                    for key in usageKeysInBuildSettings(itext) { found[inc.path, default: []].insert(key) }
+                }
             }
         }
     }
     return found
+}
+
+/// The files an `.xcconfig` `#include`s, resolved against its own directory. Relative paths only, and
+/// anything escaping the config's directory tree is dropped — the same boundary reasoning as the
+/// directory walk: a config read must not become a way to consult arbitrary files.
+func includedConfigPaths(_ text: String, relativeTo config: URL) -> [URL] {
+    let base = config.deletingLastPathComponent()
+    var out: [URL] = []
+    for rawLine in text.split(separator: "\n") {
+        let line = rawLine.trimmingCharacters(in: .whitespaces)
+        guard line.hasPrefix("#include") else { continue }
+        // `#include "a.xcconfig"` and the optional form `#include? "a.xcconfig"`.
+        guard let open = line.firstIndex(of: "\""),
+              let close = line.lastIndex(of: "\""), open < close else { continue }
+        let rel = String(line[line.index(after: open)..<close])
+        guard !rel.isEmpty, !rel.hasPrefix("/"), !rel.contains("..") else { continue }
+        out.append(base.appendingPathComponent(rel).standardizedFileURL)
+    }
+    return out
 }
 
 /// The `INFOPLIST_KEY_*UsageDescription` settings a build-settings file DECLARES, with a real value.
@@ -638,6 +666,23 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
                 "overDeclared": overDeclared,
                 "ok": ok,
             ]
+            // PROVENANCE TRAVELS ON THE MACHINE CHANNEL TOO. `declared` merges plist keys with keys read
+            // from Xcode BUILD SETTINGS, and the function that does the merge documents that the
+            // provenance is "REPORTED, never silently merged" — which was true only of the human stderr
+            // line. A CI consumer reading the JSON could not tell a key declared in the plist this
+            // target ships from one seen in a project file up the tree, and those are not the same
+            // claim: a build setting can belong to a DIFFERENT target. Present only when there is
+            // something to say, so a plist-only verify's JSON keeps its previous shape exactly.
+            if !onlyInSettings.isEmpty {
+                verdict["declaredViaBuildSettings"] = fromSettings
+                    .filter { !$0.value.intersection(onlyInSettings).isEmpty }
+                    .map { file, keys in
+                        ["file": URL(fileURLWithPath: file).lastPathComponent,
+                         "path": file,
+                         "keys": keys.intersection(onlyInSettings).sorted()] as [String: Any]
+                    }
+                    .sorted { ($0["path"] as? String ?? "") < ($1["path"] as? String ?? "") }
+            }
             // ⟨0.15 staged⟩ conditionality block — ABSENT when fully covered, so a fully-covered
             // verify's JSON is byte-identical to the pre-⟨0.15⟩ shape.
             if conditional {
