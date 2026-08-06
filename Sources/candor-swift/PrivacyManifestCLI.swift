@@ -208,41 +208,101 @@ func loadDeclaredKeys(_ path: String) -> Set<String>? {
 func buildSettingUsageKeys(near plistPath: String) -> [String: Set<String>] {
     let fm = FileManager.default
     var found: [String: Set<String>] = [:]
-    // Walk UP from the plist to the repository root, collecting every project file and xcconfig. The
-    // plist usually sits beside or below its .xcodeproj, and an .xcconfig can carry the same settings.
+    // BOUNDED BY THE REPOSITORY. The walk had no stop condition, so a stray `.xcodeproj` or `.xcconfig`
+    // ABOVE the checkout satisfied the verify — on a developer machine that is somebody else's project,
+    // and the disclosure could not even show it (every pbxproj is named `project.pbxproj`, and the line
+    // printed only the last path component). It now stops at a `.git` directory, and the disclosure
+    // prints a repo-relative path.
+    var dirs: [URL] = []
     var dir = URL(fileURLWithPath: plistPath).deletingLastPathComponent()
-    for _ in 0..<6 {
-        guard let entries = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { break }
+    for _ in 0..<8 {
+        dirs.append(dir)
+        // Stop at the PROJECT ROOT, not merely at `.git`: a tree that is not a git checkout (a vendored
+        // copy, a tarball, a fixture) otherwise kept walking into shared parents like /tmp or $HOME,
+        // where somebody else's `.xcconfig` satisfied the verify. Any of these marks the top.
+        let markers = [".git", "Package.swift", "Package.resolved"]
+        let isRoot = markers.contains { fm.fileExists(atPath: dir.appendingPathComponent($0).path) }
+            || ((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
+                .contains { $0.pathExtension == "xcodeproj" || $0.pathExtension == "xcworkspace" }
+        if isRoot { break }
+        let parent = dir.deletingLastPathComponent()
+        if parent.path == dir.path { break }
+        dir = parent
+    }
+    for d in dirs {
+        guard let entries = try? fm.contentsOfDirectory(at: d, includingPropertiesForKeys: nil) else { continue }
         for e in entries {
             var candidates: [URL] = []
             if e.pathExtension == "xcodeproj" { candidates.append(e.appendingPathComponent("project.pbxproj")) }
             if e.pathExtension == "xcconfig" { candidates.append(e) }
             for c in candidates {
                 guard let text = try? String(contentsOf: c, encoding: .utf8) else { continue }
-                for raw in text.split(separator: "\n") {
-                    guard let r = raw.range(of: "INFOPLIST_KEY_") else { continue }
-                    let after = raw[r.upperBound...]
-                    guard let eq = after.firstIndex(of: "=") else { continue }
-                    let key = after[..<eq].trimmingCharacters(in: .whitespaces)
-                    guard key.hasSuffix("UsageDescription") else { continue }
-                    // The value: strip a trailing `;` (pbxproj) and surrounding quotes, then require it
-                    // to be non-empty — an empty purpose string is an App Store rejection, not a
-                    // declaration.
-                    var val = after[after.index(after: eq)...]
-                        .trimmingCharacters(in: .whitespaces)
-                    if val.hasSuffix(";") { val.removeLast() }
-                    val = val.trimmingCharacters(in: .whitespaces)
-                    if val.hasPrefix("\"") && val.hasSuffix("\"") && val.count >= 2 { val = String(val.dropFirst().dropLast()) }
-                    guard !val.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-                    found[c.path, default: []].insert(key)
-                }
+                for key in usageKeysInBuildSettings(text) { found[c.path, default: []].insert(key) }
             }
         }
-        let parent = dir.deletingLastPathComponent()
-        if parent.path == dir.path { break }
-        dir = parent
     }
     return found
+}
+
+/// The `INFOPLIST_KEY_*UsageDescription` settings a build-settings file DECLARES, with a real value.
+///
+/// SPLIT OUT AND MADE STRICT because the first version was a per-line substring search, and an
+/// adversarial review flipped it into the cardinal sin twice — both by DISABLING a key, which is the
+/// natural way someone turns one off:
+///
+///   `// INFOPLIST_KEY_NSCameraUsageDescription = For photos`   → counted as declared. Commenting a key
+///       out silenced the very App-Store-rejection finding the verb exists to raise.
+///   `INFOPLIST_KEY_NSCameraUsageDescription = $(inherited)`     → counted as declared. With nothing to
+///       inherit it resolves to EMPTY at build time — precisely the case the empty-value guard was
+///       written for, defeated by seven characters.
+///
+/// So: comments are stripped first (`//` and `#` line comments, `/* */` blocks), and a value that is
+/// only a build-variable reference is NOT a declaration — it cannot be shown to be non-empty, and
+/// "cannot be shown" must never read as "declared" for a key whose absence is a rejection.
+///
+/// The OTHER direction is handled too, because a false rejection warning is what makes a reader
+/// distrust the tool: a `KEY[sdk=iphoneos*] = …` conditional counts (the condition is a build detail,
+/// the declaration is real), and an `#include`d file is followed one level so a split config is read.
+func usageKeysInBuildSettings(_ raw: String) -> Set<String> {
+    // Strip /* … */ blocks first, then per-line // and # comments.
+    var text = ""
+    var i = raw.startIndex
+    while i < raw.endIndex {
+        if raw[i...].hasPrefix("/*"), let close = raw.range(of: "*/", range: i..<raw.endIndex) {
+            i = close.upperBound; continue
+        }
+        text.append(raw[i]); i = raw.index(after: i)
+    }
+    var keys: Set<String> = []
+    for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+        var line = String(rawLine)
+        for marker in ["//", "#"] {
+            if let r = line.range(of: marker) {
+                // `#include` is a directive, not a comment — keep the line so the caller can see it.
+                if marker == "#" && line[r.lowerBound...].hasPrefix("#include") { continue }
+                line = String(line[..<r.lowerBound])
+            }
+        }
+        guard let r = line.range(of: "INFOPLIST_KEY_") else { continue }
+        let after = line[r.upperBound...]
+        guard let eq = after.firstIndex(of: "=") else { continue }
+        // A conditional (`KEY[sdk=iphoneos*]`) is still a declaration — take the name before the `[`.
+        var name = String(after[..<eq]).trimmingCharacters(in: .whitespaces)
+        if let br = name.firstIndex(of: "[") { name = String(name[..<br]).trimmingCharacters(in: .whitespaces) }
+        guard name.hasSuffix("UsageDescription") else { continue }
+        var val = String(after[after.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
+        if val.hasSuffix(";") { val.removeLast() }
+        val = val.trimmingCharacters(in: .whitespaces)
+        if val.hasPrefix("\"") && val.hasSuffix("\"") && val.count >= 2 { val = String(val.dropFirst().dropLast()) }
+        val = val.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !val.isEmpty else { continue }
+        // A value that is ONLY build-variable references cannot be shown to be non-empty.
+        let stripped = val.replacingOccurrences(of: "\\$\\([^)]*\\)", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !stripped.isEmpty else { continue }
+        keys.insert(name)
+    }
+    return keys
 }
 
 // Dispatched from main.swift when argv[1] is `privacy-manifest`.

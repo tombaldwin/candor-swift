@@ -231,23 +231,26 @@ func pinVerdict(_ pin: String?, _ running: String) -> PinVerdict {
 func enforceEnginePin(targetPath: String, running: String) {
     let pin = enginePinFor(discoverConfigText(targetPath: targetPath), "swift")
     func say(_ s: String) { FileHandle.standardError.write((s + "\n").data(using: .utf8)!) }
+    // REFUSALS GO THROUGH `refuseGateAndExit`, NOT A BARE `exit(2)`. A bare exit left the PREVIOUS run's
+    // `--gate-json` document on disk, so a CI wrapper reading the artifact instead of the exit code
+    // reported a pass over a run that refused over a wrong engine version — the stale-artifact false
+    // green this format exists to refuse, from the release's flagship guard. The sink is registered
+    // before this point precisely so any exit-2 cause can use it; this one simply did not.
     switch pinVerdict(pin, running) {
     case .absent, .match:
         return
     case .malformed:
-        say("candor-swift: .candor/config has an `engine` line that is not an engine version.")
-        say("        want `engine <version>` (e.g. `engine v\(running)`) or `engine <impl> <version>`")
-        say("        (e.g. `engine swift v\(running)`) for a repo scanned by more than one engine.")
-        say("        Failing (exit 2) rather than ignoring it: a pin that cannot be read is a")
-        say("        guard the operator believes is on.")
-        exit(2)
+        refuseGateAndExit("candor-swift: .candor/config has an `engine` line that is not an engine version. "
+            + "Want `engine <version>` (e.g. `engine v\(running)`) or `engine <impl> <version>` "
+            + "(e.g. `engine swift v\(running)`) for a repo scanned by more than one engine. "
+            + "Failing (exit 2) rather than ignoring it: a pin that cannot be read is a guard the "
+            + "operator believes is on.")
     case .mismatch:
-        say("candor-swift: .candor/config pins engine \(pin ?? "") but this build is candor-swift \(running).")
-        say("        The pin and the committed baseline move together — a newer engine resolves more")
-        say("        dispatch, so its report is not comparable with a baseline the pinned engine wrote.")
-        say("        Either run the pinned engine, or update the pin and regenerate the baseline in the")
-        say("        same change. Exit 2 (unevaluable), not 1 — this is not a policy violation.")
-        exit(2)
+        refuseGateAndExit("candor-swift: .candor/config pins engine \(pin ?? "") but this build is "
+            + "candor-swift \(running). The pin and the committed baseline move together — a newer engine "
+            + "resolves more dispatch, so its report is not comparable with a baseline the pinned engine "
+            + "wrote. Either run the pinned engine, or update the pin and regenerate the baseline in the "
+            + "same change. Exit 2 (unevaluable), not 1 — this is not a policy violation.")
     case .undetermined:
         say("candor-swift: .candor/config pins engine \(pin ?? ""), and this build does not know its own")
         say("        release, so the pin CANNOT be checked. Disclosed, not scored — neither passed nor failed.")
