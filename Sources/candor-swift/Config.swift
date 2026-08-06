@@ -106,11 +106,11 @@ func loadCandorConfig(targetPath: String) -> [String: String] {
     var cfg: [String: String] = [:]
     for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
         let line = raw.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0]
-            .trimmingCharacters(in: .whitespaces)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         if line.isEmpty { continue }
         let parts = line.split(maxSplits: 1, whereSeparator: { $0 == " " || $0 == "\t" })
         let key = parts[0].lowercased()
-        let val = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespaces) : ""
+        let val = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespacesAndNewlines) : ""
         if !candorConfigKeys.contains(key) {
             FileHandle.standardError.write("candor-swift: ignoring unknown config key '\(key)' in \(file!)\n".data(using: .utf8)!)
             continue
@@ -186,7 +186,7 @@ func enginePinFor(_ text: String?, _ implName: String) -> String? {
     var bad = false
     for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
         let line = rawLine.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0]
-            .trimmingCharacters(in: .whitespaces)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         if line.isEmpty { continue }
         let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
         guard parts.first?.lowercased() == "engine" else { continue }
@@ -194,8 +194,13 @@ func enginePinFor(_ text: String?, _ implName: String) -> String? {
         func slot(_ cur: String?, _ v: String) -> String { (cur != nil && cur != v) ? "\(cur!) / \(v)" : v }
         if rest.isEmpty { bad = true }
         else if rest.count == 1 { wild = slot(wild, rest[0]) }
-        else if rest.count == 2, enginePinImpls.contains(rest[0].lowercased()) {
-            if rest[0].lowercased() == implName { qual = slot(qual, rest[1]) }
+        else if enginePinImpls.contains(rest[0].lowercased()) {
+            // A KNOWN qualifier decides the line's OWNER first (SPEC §3.4 whole-line skip): a junked
+            // line naming ANOTHER engine is that engine's problem, and it refuses on it. Refusing here
+            // as well turns one typo into a family-wide outage.
+            if rest[0].lowercased() == implName {
+                if rest.count == 2 { qual = slot(qual, rest[1]) } else { bad = true }
+            }
         } else { bad = true }
     }
     if bad { return "<unreadable>" }
@@ -206,7 +211,7 @@ func enginePinFor(_ text: String?, _ implName: String) -> String? {
 /// rather than a version that can never match: the difference decides whether the operator reads
 /// "wrong version" or "that is not a version".
 func normalizePinVersion(_ raw: String?) -> String? {
-    var s = (raw ?? "").trimmingCharacters(in: .whitespaces)
+    var s = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     if s.hasPrefix("v") || s.hasPrefix("V") { s.removeFirst() }
     let parts = s.split(separator: ".", omittingEmptySubsequences: false)
     guard parts.count == 2 || parts.count == 3,
@@ -217,7 +222,7 @@ func normalizePinVersion(_ raw: String?) -> String? {
 func pinVerdict(_ pin: String?, _ running: String) -> PinVerdict {
     guard let pin else { return .absent }
     guard let want = normalizePinVersion(pin) else { return .malformed }
-    let r = running.trimmingCharacters(in: .whitespaces)
+    let r = running.trimmingCharacters(in: .whitespacesAndNewlines)
     if r.isEmpty || r == "unknown" { return .undetermined }
     return want == (normalizePinVersion(r) ?? r) ? .match : .mismatch
 }
