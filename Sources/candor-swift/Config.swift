@@ -108,7 +108,12 @@ func loadCandorConfig(targetPath: String) -> [String: String] {
         let line = raw.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0]
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if line.isEmpty { continue }
-        let parts = line.split(maxSplits: 1, whereSeparator: { $0 == " " || $0 == "\t" })
+        // UNICODE whitespace, matching the other four engines. Splitting on ASCII space/tab only left
+        // a NO-BREAK SPACE (U+00A0 — the ordinary artifact of pasting a config out of a rendered doc)
+        // glued to the key, so `engine\u{00A0} 0.26.0` became the token `engine\u{00A0}`: not the key
+        // `engine`, so it was reported as an "unknown config key 'engine '" while the pin it names went
+        // silently UNENFORCED and a MISMATCHED pin passed at exit 0. A false disclosure over a fail-open.
+        let parts = line.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
         let key = parts[0].lowercased()
         let val = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespacesAndNewlines) : ""
         if !candorConfigKeys.contains(key) {
@@ -152,7 +157,7 @@ func loadCandorConfig(targetPath: String) -> [String: String] {
     // relative token to the config's home dir (the dir containing `.candor/`), same rule as `policy`.
     // Rejoined with spaces (the canonical separator); the loader re-splits identically.
     if let d = cfg["deps"], !d.isEmpty {
-        cfg["deps"] = d.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == ":" || $0 == "," })
+        cfg["deps"] = d.split(whereSeparator: { $0.isWhitespace || $0 == ":" || $0 == "," })
             .map { tok -> String in
                 let t = String(tok)
                 return (t as NSString).isAbsolutePath ? t : (anchor as NSString).appendingPathComponent(t)
@@ -188,7 +193,7 @@ func enginePinFor(_ text: String?, _ implName: String) -> String? {
         let line = rawLine.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0]
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if line.isEmpty { continue }
-        let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+        let parts = line.split(whereSeparator: { $0.isWhitespace }).map(String.init)
         guard parts.first?.lowercased() == "engine" else { continue }
         let rest = Array(parts.dropFirst())
         func slot(_ cur: String?, _ v: String) -> String { (cur != nil && cur != v) ? "\(cur!) / \(v)" : v }

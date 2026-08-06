@@ -152,6 +152,7 @@ if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "gate" {
 }
 
 var target = "."
+var sawPositional = false
 var outPrefix: String? = nil
 var wantJson = false
 var policyPath: String? = ProcessInfo.processInfo.environment["CANDOR_POLICY"]
@@ -180,6 +181,12 @@ if let gp = preScanned.gate {
     refuseGateJsonOverInput(gp, ProcessInfo.processInfo.environment["CANDOR_CONFIG"], "CANDOR_CONFIG")
     refuseGateJsonAtConfig(gp)
     if gp != "-" { armGateJsonFailClosed(gp) }
+    // A `-` SINK CANNOT BE PRE-ARMED — there is no file to replace, and emitting a refusal now would put
+    // two documents on the same stream. Register it instead, so the exits below route their refusal to
+    // stdout rather than emitting NOTHING: measured, an unknown flag and a nonexistent target each gave
+    // a `--gate-json -` consumer zero bytes while an unreadable policy on the same sink gave a proper
+    // refusal. Same run, same sink, three different answers.
+    else { gateVerdictSinks.append("-") }
 }
 var argIter = CommandLine.arguments.dropFirst().makeIterator()
 while let a = argIter.next() {
@@ -333,8 +340,23 @@ while let a = argIter.next() {
         // silently drop the gate).
         if a.hasPrefix("-") {
             FileHandle.standardError.write("candor-swift: unknown flag \(a) (see --help)\n".data(using: .utf8)!)
+            // …and if a verdict sink was requested, it gets the refusal too (SPEC §3.3 names an unknown
+            // flag as a broken-gate-config exit-2 cause). For a FILE sink the armed document already
+            // says this; this covers the `-` stream, which cannot be armed in advance.
+            if !gateVerdictSinks.isEmpty { refuseGateAndExit("candor-swift: unknown flag \(a)") }
             exit(2)
         }
+        // A SECOND POSITIONAL IS A USAGE ERROR, NOT A SILENT REPLACEMENT. `candor-swift a b` scanned `b`
+        // and said nothing about `a` — so `candor-swift . rep.json`, a plausible misreading of the flag
+        // grammar, scanned a path that did not exist and the operator had no way to see which target the
+        // run had chosen. The scan takes exactly one.
+        if sawPositional {
+            FileHandle.standardError.write(
+                ("candor-swift: unexpected extra argument `\(a)` — the scan takes ONE target (got `\(target)` "
+                 + "and `\(a)`). Did you mean a flag? See --help.\n").data(using: .utf8)!)
+            exit(2)
+        }
+        sawPositional = true
         target = a
     }
 }
@@ -343,7 +365,11 @@ while let a = argIter.next() {
 // BEFORE the config layer, which is itself an exit-2 cause: a CI wrapper that reads `--gate-json`
 // unconditionally re-reads the PREVIOUS run's document as current, and a stale green does not care why
 // this run declined to overwrite it. Flag-loop usage errors are already past, and they had no sink.
-if let gp = gateJsonPath { gateVerdictSinks.append(gp) }
+// `contains` guard: the pre-pass above already registers a `-` sink (a stream cannot be pre-armed, so it
+// is registered instead), and appending it twice put TWO refusal documents on one stdout — a consumer
+// parsing it gets "extra data" and no verdict at all, which is a worse answer than the zero bytes this
+// registration was added to fix.
+if let gp = gateJsonPath, !gateVerdictSinks.contains(gp) { gateVerdictSinks.append(gp) }
 // (armed by the pre-pass above the flag loop — SPEC §3.3.1 ⟨0.27⟩, GateSinkArming.swift. Arming HERE
 // was still after the loop's usage exits, so the contract depended on argv order.)
 
@@ -357,6 +383,9 @@ let fm = FileManager.default
 var isDir: ObjCBool = false
 guard fm.fileExists(atPath: target, isDirectory: &isDir) else {
     FileHandle.standardError.write("candor-swift: no such path: \(target)\n".data(using: .utf8)!)
+    // A file sink already holds the armed refusal; this is for the `-` stream, which cannot be armed in
+    // advance and was giving a piping consumer ZERO BYTES on this exit.
+    if !gateVerdictSinks.isEmpty { refuseGateAndExit("candor-swift: no such path: \(target)") }
     exit(2)
 }
 let rootDir = isDir.boolValue ? target : (target as NSString).deletingLastPathComponent

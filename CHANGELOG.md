@@ -9,6 +9,56 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ `MotionRaw` was classified, gated on, and then dropped before the report.** The CoreMotion split
+  shipped without an `Effect` case, so `EffectSet.init`'s `compactMap` discarded it at serialisation and
+  a function whose only effect was the raw accelerometer stream serialised as `inferred: []` — under
+  ⟨0.21⟩ a positive purity claim about a function with a live sensor reach. The two gate routes
+  DISAGREED on the same policy and the same code (live scan exit 1, `gate --report` exit 0), because one
+  reads the in-process effect set and the other reads the report the effect never reached. Removing an
+  over-report had replaced it with silence, which is the worse half. `Effect` and `EffectSet` move to
+  CandorCore — they were in the executable target, which SwiftPM cannot `@testable import`, so the last
+  and most consequential copy of the vocabulary was untestable by construction; that is why the same
+  failure had already happened once, to nine families at `privacy/3`. `EffectVocabularyTests` now pins
+  the round-trip in both directions.
+- **The `--gate-json` sink could be armed over the gate's own inputs.** `--policy P --gate-json P` armed
+  the fail-closed refusal over `P`, the now-JSON policy parsed as zero rules, and a run that exits 1 on
+  the same code exited **0 with `"ok": true`** — a machine-readable all-clear produced by deleting the
+  question. Introduced by the arming commit itself: before it the sink was written only on a refusal, so
+  there was nothing to destroy. Aimed at `<target>/.candor/config` the same mechanism deleted the config
+  that DECLARED the policy. Now refused (exit 2, nothing written), with sameness resolved as artifacts —
+  symlinks and `./` spellings included — and `.candor/config` refused by shape wherever it is.
+- **Arming moved ahead of every exit, including usage errors.** It ran after the flag loop, so
+  `--gate-json G --frobnicate` wrote a refusal into `G` while `--frobnicate --gate-json G` left the
+  previous run's green at `G`: the contract depended on argv ORDER. SPEC §3.3 names an unknown flag as a
+  broken-gate-config exit-2 cause. The `gate` verb registered a sink but never armed at all — and its
+  own comment explained why registering is not arming.
+- **A `--gate-json -` consumer got zero bytes on two exit paths** (unknown flag, nonexistent target)
+  while an unreadable policy on the same sink produced a proper refusal — same run, same sink, three
+  different answers. All three now emit exactly one refusal document.
+- **The build-settings reader is a real evaluator, not a substring scan.** Eight further cardinal-sin
+  flips, all with one root: it asked "does this text appear on this line" when the question is "what
+  does this assignment evaluate to". A key name inside another setting's quoted value declared the key;
+  two settings on one line broke BOTH honesty halves at once (the empty one read as declared, the
+  genuine one was never seen); only the first `[cond]` group was skipped; a `/*` inside a quoted search
+  path opened a comment that swallowed a later undeclare; a commented-out `#include` was still followed;
+  and a symlinked include escaped the project tree. It now strips comments with quote awareness, splits
+  into statements, and parses `NAME[cond][cond] = VALUE` with quote and bracket depth tracked. **Moved
+  to CandorCore** — like the effect vocabulary it was untestable by construction, which is why three
+  rewrites produced fourteen flips with no test ever going red; `BuildSettingsTests` now carries every
+  one. Verified against the previous evaluator on 129 real build-settings files: identical answers.
+- **Last-assignment-wins is replaced by a consistency rule.** A key assigned a real value in one place
+  and left empty in another is no longer declared by whichever file was read last — an App Store archive
+  is Release, and the engine cannot tell which configuration ships without the build graph. It reports
+  the key as not declared and DISCLOSES the disagreement, on stderr and in the verdict JSON, because an
+  inconsistent declaration is a real finding about the project rather than a limit of the reader.
+- **A NO-BREAK SPACE hid an engine pin.** Config lines split on ASCII space/tab only, so
+  `engine\u00A00.26.0` — what you get pasting a config out of a rendered doc — became one token, was
+  reported as an "unknown config key 'engine '", and the pin went silently unenforced while a MISMATCHED
+  version passed at exit 0. A false disclosure over a fail-open. Now Unicode whitespace, matching the
+  other four engines; pinned five-way by conformance PART 33.
+- **A second positional silently replaced the scan target** — `candor-swift . rep.json` scanned
+  `rep.json` and said nothing about `.`. Now a usage error naming both.
+
 ## [0.27.0] — 2026-08-05
 
 - **`CMMotionManager` requires no usage key, and candor said it did** — reporting a shipping app as

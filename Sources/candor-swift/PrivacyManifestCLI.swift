@@ -205,7 +205,8 @@ func loadDeclaredKeys(_ path: String) -> Set<String>? {
 /// build setting is named with the file it came from, because "declared somewhere in this project" is a
 /// weaker statement than "declared in the plist this target ships" — a setting can belong to a DIFFERENT
 /// target, and this cannot tell which without resolving the whole build graph.
-func buildSettingUsageKeys(near plistPath: String) -> [String: Set<String>] {
+func buildSettingUsageKeys(near plistPath: String)
+    -> (byFile: [String: Set<String>], inconsistent: Set<String>) {
     let fm = FileManager.default
     var found: [String: Set<String>] = [:]
     // BOUNDED BY THE REPOSITORY. The walk had no stop condition, so a stray `.xcodeproj` or `.xcconfig`
@@ -236,6 +237,18 @@ func buildSettingUsageKeys(near plistPath: String) -> [String: Set<String>] {
         if parent.path == dir.path { break }
         dir = parent
     }
+    // THE CONSISTENCY RULE APPLIES ACROSS FILES, so assignments are gathered first and judged once. A
+    // key set to a real value in an xcconfig and to "" in the pbxproj's build settings is not declared
+    // in the build that ships either way — judging each file alone made it declared by whichever file
+    // happened to be read, which is the cross-file form of last-assignment-wins.
+    var assignments: [BuildSettingAssignment] = []
+    var perFile: [String: [BuildSettingAssignment]] = [:]
+    func take(_ text: String, _ at: String) {
+        let a = usageAssignmentsInBuildSettings(text)
+        guard !a.isEmpty else { return }
+        assignments += a
+        perFile[at, default: []] += a
+    }
     for d in dirs {
         guard let entries = try? fm.contentsOfDirectory(at: d, includingPropertiesForKeys: nil) else { continue }
         for e in entries {
@@ -244,7 +257,7 @@ func buildSettingUsageKeys(near plistPath: String) -> [String: Set<String>] {
             if e.pathExtension == "xcconfig" { candidates.append(e) }
             for c in candidates {
                 guard let text = try? String(contentsOf: c, encoding: .utf8) else { continue }
-                for key in usageKeysInBuildSettings(text) { found[c.path, default: []].insert(key) }
+                take(text, c.path)
                 // FOLLOW `#include`, one level. An xcconfig that splits its settings into a shared file
                 // is an ordinary layout, and missing it produced a FALSE under-declaration — the exact
                 // "teaches the reader to distrust the tool" failure this reader exists to remove. One
@@ -252,137 +265,59 @@ func buildSettingUsageKeys(near plistPath: String) -> [String: Set<String>] {
                 // without turning a config read into an unbounded file walk.
                 for inc in includedConfigPaths(text, relativeTo: c) {
                     guard let itext = try? String(contentsOf: inc, encoding: .utf8) else { continue }
-                    for key in usageKeysInBuildSettings(itext) { found[inc.path, default: []].insert(key) }
+                    take(itext, inc.path)
                 }
             }
         }
     }
-    return found
+    let verdict = declaredKeys(from: assignments)
+    for (file, a) in perFile {
+        let here = Set(a.map(\.name)).intersection(verdict.declared)
+        if !here.isEmpty { found[file] = here }
+    }
+    // `inconsistent`: keys some file assigns a real value and another leaves EMPTY. Not counted as
+    // declared — the engine cannot tell which configuration ships without the build graph, and the App
+    // Store archive is the strict case — but REPORTED, because an inconsistent declaration is a genuine
+    // finding about the project rather than a limitation of the reader.
+    return (found, verdict.inconsistent)
 }
 
-/// The files an `.xcconfig` `#include`s, resolved against its own directory. Relative paths only, and
-/// anything escaping the config's directory tree is dropped — the same boundary reasoning as the
-/// directory walk: a config read must not become a way to consult arbitrary files.
+/// The files an `.xcconfig` `#include`s, resolved against its own directory.
+///
+/// Two boundaries, both breached in review:
+///
+///   * COMMENTS FIRST. Includes were extracted from RAW text, so `/* #include "keys.xcconfig" */` was
+///     still followed and the keys in it counted — a declaration the build never sees. The text is now
+///     comment-stripped by the same evaluator the settings go through.
+///   * THE CONTAINMENT CHECK IS ON THE RESOLVED PATH. It tested the literal string for `".."`, and
+///     `standardizedFileURL` does not resolve symlinks — so `#include "configs/link.xcconfig"`, a
+///     symlink pointing anywhere on the filesystem, was read and its planted keys counted. Both sides
+///     are now resolved before the containment test: resolve the artifact, not the string.
 func includedConfigPaths(_ text: String, relativeTo config: URL) -> [URL] {
     let base = config.deletingLastPathComponent()
+    let root = base.resolvingSymlinksInPath().standardizedFileURL.path
     var out: [URL] = []
-    for rawLine in text.split(separator: "\n") {
-        let line = rawLine.trimmingCharacters(in: .whitespaces)
+    for rawLine in stripBlockCommentsOutsideQuotes(text).split(separator: "\n") {
+        let line = stripCommentsOutsideQuotes(String(rawLine)).trimmingCharacters(in: .whitespaces)
         guard line.hasPrefix("#include") else { continue }
         // `#include "a.xcconfig"` and the optional form `#include? "a.xcconfig"`.
         guard let open = line.firstIndex(of: "\""),
               let close = line.lastIndex(of: "\""), open < close else { continue }
         let rel = String(line[line.index(after: open)..<close])
-        guard !rel.isEmpty, !rel.hasPrefix("/"), !rel.contains("..") else { continue }
-        out.append(base.appendingPathComponent(rel).standardizedFileURL)
+        guard !rel.isEmpty, !rel.hasPrefix("/") else { continue }
+        let target = base.appendingPathComponent(rel)
+        // Resolve BOTH sides. A file that does not exist resolves to itself, which is fine: it will
+        // fail to read a moment later.
+        let resolved = target.resolvingSymlinksInPath().standardizedFileURL
+        guard resolved.path == root || resolved.path.hasPrefix(root + "/") else { continue }
+        out.append(resolved)
     }
     return out
 }
 
-/// The `INFOPLIST_KEY_*UsageDescription` settings a build-settings file DECLARES, with a real value.
-///
-/// SPLIT OUT AND MADE STRICT because the first version was a per-line substring search, and an
-/// adversarial review flipped it into the cardinal sin twice — both by DISABLING a key, which is the
-/// natural way someone turns one off:
-///
-///   `// INFOPLIST_KEY_NSCameraUsageDescription = For photos`   → counted as declared. Commenting a key
-///       out silenced the very App-Store-rejection finding the verb exists to raise.
-///   `INFOPLIST_KEY_NSCameraUsageDescription = $(inherited)`     → counted as declared. With nothing to
-///       inherit it resolves to EMPTY at build time — precisely the case the empty-value guard was
-///       written for, defeated by seven characters.
-///
-/// So: comments are stripped first (`//` and `#` line comments, `/* */` blocks), and a value that is
-/// only a build-variable reference is NOT a declaration — it cannot be shown to be non-empty, and
-/// "cannot be shown" must never read as "declared" for a key whose absence is a rejection.
-///
-/// The OTHER direction is handled too, because a false rejection warning is what makes a reader
-/// distrust the tool: a `KEY[sdk=iphoneos*] = …` conditional counts (the condition is a build detail,
-/// the declaration is real), and an `#include`d file is followed one level so a split config is read.
-/// Remove `//` and `#` comments, but only OUTSIDE a quoted string — a `#` or `//` inside a value is
-/// part of the value (`= "#1 best camera app"`, `= "https://…"`), and cutting there judged a real
-/// declaration empty. `#include` is a directive, not a comment, and is kept.
-func stripCommentsOutsideQuotes(_ line: String) -> String {
-    if line.trimmingCharacters(in: .whitespaces).hasPrefix("#include") { return line }
-    var out = ""
-    var inQuotes = false
-    var i = line.startIndex
-    while i < line.endIndex {
-        let c = line[i]
-        if c == "\"" { inQuotes.toggle(); out.append(c); i = line.index(after: i); continue }
-        if !inQuotes {
-            if c == "#" { break }
-            if c == "/", line.index(after: i) < line.endIndex, line[line.index(after: i)] == "/" { break }
-        }
-        out.append(c); i = line.index(after: i)
-    }
-    return out
-}
-
-func usageKeysInBuildSettings(_ raw: String) -> Set<String> {
-    // NORMALISE, then EVALUATE — this was a per-line substring scan, and a review flipped it to the
-    // cardinal sin seven ways. Every one had the same root: it asked "does the string appear" instead of
-    // "does this key hold a non-empty value in the configuration that ships". Each is recorded because
-    // each is a way somebody actually turns a key off or splits a file:
-    //
-    //   KEY = "real";  … later …  KEY = "";     LAST-WINS is empty at build time -> was declared.
-    //                                            (The Debug-declares/Release-does-not shape is this one:
-    //                                            an App Store archive is Release.)
-    //   KEY = "";\r\n                            CRLF: `.whitespaces` never trims `\r`, so the `;` and
-    //   KEY = $(inherited);\r\n                   quote strips missed and BOTH earlier fixes came back.
-    //   KEY[sdk=iphoneos*] = "";                 the first `=` is INSIDE the condition, so the "value"
-    //                                            was `iphoneos*] = ""` — non-empty, so declared.
-    //   KEY = "${INHERITED}";  /  = $UNDEFINED;  the empty-variable guard matched only `$(...)`.
-    //   /* KEY = disabled            <no close>  the block stripper skipped only CLOSED blocks, so a
-    //                                            comment-to-EOF (which is what xcodebuild sees) declared.
-    var text = raw.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
-    // Block comments, INCLUDING an unclosed one — everything after an unterminated `/*` is comment.
-    while let open = text.range(of: "/*") {
-        if let close = text.range(of: "*/", range: open.upperBound..<text.endIndex) {
-            text.removeSubrange(open.lowerBound..<close.upperBound)
-        } else {
-            text.removeSubrange(open.lowerBound..<text.endIndex)
-        }
-    }
-    // LAST ASSIGNMENT WINS, so the map is built in order and filtered at the end.
-    var assigned: [String: String] = [:]
-    for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
-        var line = String(rawLine)
-        // COMMENT MARKERS DO NOT APPLY INSIDE A QUOTED VALUE. `= "#1 best camera app"` and
-        // `= "https://x"` were truncated to nothing and then judged EMPTY — a false MISSING key, which
-        // is the direction that teaches a reader to distrust the verb.
-        line = stripCommentsOutsideQuotes(line)
-        guard let r = line.range(of: "INFOPLIST_KEY_") else { continue }
-        let after = line[r.upperBound...]
-        // The name ends at `[` (a build condition) or `=`, whichever comes FIRST — taking the first `=`
-        // outright put the condition's own `=` inside the value.
-        let nameEnd = after.firstIndex(where: { $0 == "[" || $0 == "=" })
-        guard let nameEnd else { continue }
-        let name = String(after[..<nameEnd]).trimmingCharacters(in: .whitespaces)
-        guard name.hasSuffix("UsageDescription") else { continue }
-        // The value starts after the assignment `=`, which is the first `=` AFTER any `]`.
-        var rest = after[nameEnd...]
-        if rest.first == "[" {
-            guard let closeBracket = rest.firstIndex(of: "]") else { continue }
-            rest = rest[rest.index(after: closeBracket)...]
-        }
-        guard let eq = rest.firstIndex(of: "=") else { continue }
-        var val = String(rest[rest.index(after: eq)...]).trimmingCharacters(in: .whitespacesAndNewlines)
-        if val.hasSuffix(";") { val.removeLast() }
-        val = val.trimmingCharacters(in: .whitespacesAndNewlines)
-        if val.hasPrefix("\"") && val.hasSuffix("\"") && val.count >= 2 { val = String(val.dropFirst().dropLast()) }
-        assigned[name] = val.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-    // A value that is only build-variable references cannot be shown to be non-empty. All three
-    // spellings Xcode accepts: `$(FOO)`, `${FOO}` and bare `$FOO`.
-    return Set(assigned.filter { _, v in
-        let stripped = v
-            .replacingOccurrences(of: "\\$\\([^)]*\\)", with: "", options: .regularExpression)
-            .replacingOccurrences(of: "\\$\\{[^}]*\\}", with: "", options: .regularExpression)
-            .replacingOccurrences(of: "\\$[A-Za-z_][A-Za-z0-9_]*", with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return !stripped.isEmpty
-    }.keys)
-}
+// The build-settings EVALUATOR lives in CandorCore/BuildSettings.swift — moved there so it can be
+// unit-tested at all. See that file: it had been rewritten three times and flipped fourteen times
+// while sitting in this executable target, which SwiftPM cannot `@testable import`.
 
 // Dispatched from main.swift when argv[1] is `privacy-manifest`.
 
@@ -605,8 +540,22 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         // key absent here may still be declared — see buildSettingUsageKeys for the measurement that
         // forced this. Merged into the declared set so the verify does not raise a false rejection
         // warning, and DISCLOSED below so "declared" never silently means "declared somewhere else".
-        let fromSettings = buildSettingUsageKeys(near: plistPath)
+        let (fromSettings, inconsistentSettings) = buildSettingUsageKeys(near: plistPath)
         let settingKeys = fromSettings.values.reduce(into: Set<String>()) { $0.formUnion($1) }
+        // A key some file declares and another leaves EMPTY is NOT counted (see declaredKeys) — but
+        // saying nothing would leave the operator reading a "missing key" they can see declared right
+        // there in an xcconfig, which is how a reader learns to distrust the verb. Name it, and say
+        // which way the engine resolved it.
+        let stillMissingAndInconsistent = inconsistentSettings.subtracting(declared)
+        if !stillMissingAndInconsistent.isEmpty {
+            FileHandle.standardError.write(
+                ("· \(stillMissingAndInconsistent.count) key(s) declared INCONSISTENTLY in build "
+                 + "settings — assigned a value in one place and left EMPTY in another: "
+                 + "\(stillMissingAndInconsistent.sorted().joined(separator: ", ")). NOT counted as "
+                 + "declared: which one ships depends on the configuration being built, and an App "
+                 + "Store archive is Release. Give the key a value in every configuration that ships, "
+                 + "or verify the BUILT app's Info.plist.\n").data(using: .utf8)!)
+        }
         let onlyInSettings = settingKeys.subtracting(declared)
         let declaredAll = declared.union(settingKeys)
         let declaredSorted = declaredAll.sorted()
@@ -733,6 +682,12 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
                          "keys": keys.intersection(onlyInSettings).sorted()] as [String: Any]
                     }
                     .sorted { ($0["path"] as? String ?? "") < ($1["path"] as? String ?? "") }
+            }
+            // The machine channel gets the same disclosure the console does: a key resolved as NOT
+            // declared because the project disagrees with itself is a different answer from one that is
+            // simply absent, and a consumer that cannot tell them apart cannot act on it.
+            if !inconsistentSettings.isEmpty {
+                verdict["inconsistentInBuildSettings"] = inconsistentSettings.sorted()
             }
             // ⟨0.15 staged⟩ conditionality block — ABSENT when fully covered, so a fully-covered
             // verify's JSON is byte-identical to the pre-⟨0.15⟩ shape.

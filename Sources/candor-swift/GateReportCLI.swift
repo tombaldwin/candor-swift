@@ -383,6 +383,24 @@ private func unanswerableScopedFilters(_ deny: [DenyRule], _ gi: GateInput) -> [
 /// one place a consumer could tell the two routes apart.
 func runGateReportCLI(_ args: [String]) -> Never {
     let usage = "usage: candor-swift gate --report <locator> --policy <file> [--json] [--gate-json <file>]"
+    // ── SPEC §3.3.1 ⟨0.27⟩ ARM FIRST, AND NEVER OVER AN INPUT.
+    //
+    // REGISTERING A SINK IS NOT ARMING. The sink list below only covers refusals routed through
+    // `gateDie`, and main.swift's own comment says exactly this about the scan path — a crash, an OOM, a
+    // CI timeout or a `kill -9` all leave the PREVIOUS run's green document on disk. Enumerating exits
+    // is the approach that keeps missing one. It also ran AFTER the flag loop, so an unknown flag exited
+    // with the stale document untouched while the same mistake spelled the other way round refused,
+    // which made the contract depend on argv ORDER.
+    //
+    // And arming WRITES, so a sink naming the policy destroys it: measured on this engine's scan path as
+    // a red gate exiting 0 with `"ok": true` over a policy that no longer existed.
+    let pre = preScanSinkAndInputs(["gate"] + args)
+    if let gp = pre.gate {
+        refuseGateJsonOverInput(gp, pre.policy, "--policy")
+        refuseGateJsonOverInput(gp, ProcessInfo.processInfo.environment["CANDOR_POLICY"], "CANDOR_POLICY")
+        refuseGateJsonAtConfig(gp)
+        if gp != "-" { armGateJsonFailClosed(gp) }
+    }
     var reportFlag: String?, policyFlag: String?, gateJsonPath: String?
     var wantJson = false
     var it = args.dropFirst(2).makeIterator()   // drop the binary name + the verb
