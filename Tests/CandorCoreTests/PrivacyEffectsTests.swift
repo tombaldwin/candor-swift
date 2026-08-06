@@ -328,7 +328,12 @@ final class PrivacyEffectsTests: XCTestCase {
     func testSecondWaveTypesClassify() {
         let expected: [(String, String)] = [
             ("HKHealthStore", "Health"), ("HKSampleQuery", "Health"), ("HKLiveWorkoutBuilder", "Health"),
-            ("CMMotionManager", "Motion"), ("CMPedometer", "Motion"), ("CMHeadphoneMotionManager", "Motion"),
+            // CMMotionManager is MotionRaw, not Motion — Apple's NSMotionUsageDescription page names
+            // CMSensorRecorder, CMPedometer, CMMotionActivityManager and CMMovementDisorderManager, and
+            // CMMotionManager references no usage key at all. This assertion said "Motion" and was the
+            // reason a corpus run reported a FALSE under-declaration against a shipping app.
+            ("CMMotionManager", "MotionRaw"), ("CMPedometer", "Motion"), ("CMHeadphoneMotionManager", "Motion"),
+            ("CMMovementDisorderManager", "Motion"),
             ("EKEventEditViewController", "Calendar"),
             ("CBCentralManager", "Bluetooth"), ("CBPeripheralManager", "Bluetooth"),
             ("SFSpeechRecognizer", "Speech"), ("LAContext", "Biometrics"),
@@ -339,6 +344,22 @@ final class PrivacyEffectsTests: XCTestCase {
         for (type, effect) in expected {
             XCTAssertEqual(PRIVACY_SDK_TYPES[type], effect, "\(type) must classify as \(effect)")
         }
+    }
+
+    /// THE RAW COREMOTION STREAM REQUIRES NO KEY, and that is the whole point of splitting it out.
+    /// Classifying CMMotionManager is not enough — if `MotionRaw` mapped to NSMotionUsageDescription the
+    /// false requirement would return by another route, so the KEY MAP is asserted too. Apple's own key
+    /// page is the source: four APIs named there, plus CMAltimeter and CMHeadphoneMotionManager which
+    /// reference the key on their own pages.
+    func testRawMotionRequiresNoUsageKey() {
+        XCTAssertEqual(privacyKeyMap["MotionRaw"], [], "CMMotionManager's stream needs no Info.plist key")
+        XCTAssertEqual(privacyKeyMap["Motion"], ["NSMotionUsageDescription"],
+                       "the stored/derived CoreMotion APIs still require it")
+        for keyed in ["CMPedometer", "CMMotionActivityManager", "CMSensorRecorder",
+                      "CMMovementDisorderManager", "CMAltimeter", "CMHeadphoneMotionManager"] {
+            XCTAssertEqual(PRIVACY_SDK_TYPES[keyed], "Motion", "\(keyed) is key-requiring per Apple")
+        }
+        XCTAssertEqual(PRIVACY_SDK_TYPES["CMMotionManager"], "MotionRaw")
     }
 
     /// Value types CARRY a reading; they do not take one. The CLLocation precedent, applied to the new wave

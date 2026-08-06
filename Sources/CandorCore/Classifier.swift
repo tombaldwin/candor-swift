@@ -482,8 +482,24 @@ public let PRIVACY_SDK_TYPES: [String: String] = [
     "HKLiveWorkoutBuilder": "Health", "HKHeartbeatSeriesBuilder": "Health",
     // Motion — CoreMotion. The MANAGERS/recorders that start the sensors (CMDeviceMotion/CMAccelerometerData
     // are value types carrying an already-taken reading, so they are not here).
-    "CMMotionManager": "Motion", "CMPedometer": "Motion", "CMAltimeter": "Motion",
-    "CMMotionActivityManager": "Motion", "CMHeadphoneMotionManager": "Motion", "CMSensorRecorder": "Motion",
+    // WHICH CoreMotion CLASSES REQUIRE THE KEY IS NOT ALL OF THEM, and mapping them uniformly produced a
+    // FALSE requirement on a shipping app: a corpus run reported WordPress-iOS as under-declared for
+    // NSMotionUsageDescription, and the reach was `CMMotionManager.startDeviceMotionUpdates()`.
+    //
+    // Apple's own key page (fetched 2026-08-06) names exactly four APIs — CMSensorRecorder, CMPedometer,
+    // CMMotionActivityManager, CMMovementDisorderManager — and CMAltimeter and CMHeadphoneMotionManager
+    // reference the key on their own pages. CMMotionManager references NO usage key: raw accelerometer,
+    // gyroscope and device-motion streams need none and prompt for nothing.
+    //
+    // So the raw stream gets its OWN effect with no key, exactly as `Notify` does. The access is still
+    // REPORTED — it is real sensor use and a reader should see it — but it is not a manifest requirement,
+    // and asserting one is the fabrication that makes a verify untrustworthy.
+    "CMMotionManager": "MotionRaw",
+    "CMPedometer": "Motion", "CMAltimeter": "Motion", "CMMotionActivityManager": "Motion",
+    "CMHeadphoneMotionManager": "Motion", "CMSensorRecorder": "Motion",
+    // Apple lists this one on the key page and candor mapped it NOWHERE — an under-report on a
+    // documented API, found by reading the list rather than trusting the table.
+    "CMMovementDisorderManager": "Motion",
     // Calendar / Reminders — EventKit. `EKEventStore` serves BOTH and the choice is per-call
     // (`EKEntityType.event` vs `.reminder`), so it is ambiguous exactly like AVCaptureDevice and is handled
     // by `privacyEventKitEffects` below — it is NOT in this table. The single-purpose UI types are.
@@ -707,6 +723,9 @@ public let PRIVACY_EFFECTS_ORDER: [String] = [
     // constant-basis (path class) — CONSTANT-PROVENANCE-DESIGN.md
     "FolderDesktop", "FolderDocuments", "FolderDownloads", "RemovableVolume", "NetworkVolume",
     "LocalNetwork",
+    // privacy/4 (2026-08-06) — appended. The raw CoreMotion stream, split from `Motion` because Apple
+    // requires NSMotionUsageDescription for the stored/derived APIs and not for CMMotionManager.
+    "MotionRaw",
 ]
 
 public let PRIVACY_EFFECTS_ALL: Set<String> = Set(PRIVACY_EFFECTS_ORDER)
@@ -852,6 +871,9 @@ public let privacyKeyMap: [String: [String]] = [
     // analysis; until then the verify is sound on PRESENCE and silent on DIRECTION, and says so.
     "Health": ["NSHealthShareUsageDescription", "NSHealthUpdateUsageDescription"],
     "Motion": ["NSMotionUsageDescription"],
+    // No key: Apple's NSMotionUsageDescription page does not list CMMotionManager, and its own page
+    // references no usage key. Reported as reach, never as a requirement — see the sensor table.
+    "MotionRaw": [],
     "Calendar": ["NSCalendarsUsageDescription", "NSCalendarsFullAccessUsageDescription",
                  "NSCalendarsWriteOnlyAccessUsageDescription"],
     "Reminders": ["NSRemindersUsageDescription", "NSRemindersFullAccessUsageDescription"],

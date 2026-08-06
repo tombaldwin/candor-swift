@@ -215,16 +215,23 @@ func buildSettingUsageKeys(near plistPath: String) -> [String: Set<String>] {
     // prints a repo-relative path.
     var dirs: [URL] = []
     var dir = URL(fileURLWithPath: plistPath).deletingLastPathComponent()
-    for _ in 0..<8 {
+    var sawMarker = false
+    for level in 0..<8 {
+        if level >= 3 && !sawMarker { break }   // unmarked tree: never past the plist's 2nd ancestor
         dirs.append(dir)
         // Stop at the PROJECT ROOT, not merely at `.git`: a tree that is not a git checkout (a vendored
         // copy, a tarball, a fixture) otherwise kept walking into shared parents like /tmp or $HOME,
         // where somebody else's `.xcconfig` satisfied the verify. Any of these marks the top.
+        // A TREE WITH NO MARKER MUST NOT SEARCH SHARED ANCESTORS. Without one, all 8 levels were walked,
+        // so a planted `.xcconfig` in /tmp or $HOME satisfied the verify — the original above-checkout
+        // defect, back for tarball and vendored trees. The walk now stops at the first marker OR at the
+        // plist's own 2nd ancestor, whichever comes first: a project keeps its configs beside or just
+        // above its plist, and anything further up is somebody else's.
         let markers = [".git", "Package.swift", "Package.resolved"]
         let isRoot = markers.contains { fm.fileExists(atPath: dir.appendingPathComponent($0).path) }
             || ((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
                 .contains { $0.pathExtension == "xcodeproj" || $0.pathExtension == "xcworkspace" }
-        if isRoot { break }
+        if isRoot { sawMarker = true; break }
         let parent = dir.deletingLastPathComponent()
         if parent.path == dir.path { break }
         dir = parent
@@ -291,46 +298,90 @@ func includedConfigPaths(_ text: String, relativeTo config: URL) -> [URL] {
 /// The OTHER direction is handled too, because a false rejection warning is what makes a reader
 /// distrust the tool: a `KEY[sdk=iphoneos*] = …` conditional counts (the condition is a build detail,
 /// the declaration is real), and an `#include`d file is followed one level so a split config is read.
-func usageKeysInBuildSettings(_ raw: String) -> Set<String> {
-    // Strip /* … */ blocks first, then per-line // and # comments.
-    var text = ""
-    var i = raw.startIndex
-    while i < raw.endIndex {
-        if raw[i...].hasPrefix("/*"), let close = raw.range(of: "*/", range: i..<raw.endIndex) {
-            i = close.upperBound; continue
+/// Remove `//` and `#` comments, but only OUTSIDE a quoted string — a `#` or `//` inside a value is
+/// part of the value (`= "#1 best camera app"`, `= "https://…"`), and cutting there judged a real
+/// declaration empty. `#include` is a directive, not a comment, and is kept.
+func stripCommentsOutsideQuotes(_ line: String) -> String {
+    if line.trimmingCharacters(in: .whitespaces).hasPrefix("#include") { return line }
+    var out = ""
+    var inQuotes = false
+    var i = line.startIndex
+    while i < line.endIndex {
+        let c = line[i]
+        if c == "\"" { inQuotes.toggle(); out.append(c); i = line.index(after: i); continue }
+        if !inQuotes {
+            if c == "#" { break }
+            if c == "/", line.index(after: i) < line.endIndex, line[line.index(after: i)] == "/" { break }
         }
-        text.append(raw[i]); i = raw.index(after: i)
+        out.append(c); i = line.index(after: i)
     }
-    var keys: Set<String> = []
+    return out
+}
+
+func usageKeysInBuildSettings(_ raw: String) -> Set<String> {
+    // NORMALISE, then EVALUATE — this was a per-line substring scan, and a review flipped it to the
+    // cardinal sin seven ways. Every one had the same root: it asked "does the string appear" instead of
+    // "does this key hold a non-empty value in the configuration that ships". Each is recorded because
+    // each is a way somebody actually turns a key off or splits a file:
+    //
+    //   KEY = "real";  … later …  KEY = "";     LAST-WINS is empty at build time -> was declared.
+    //                                            (The Debug-declares/Release-does-not shape is this one:
+    //                                            an App Store archive is Release.)
+    //   KEY = "";\r\n                            CRLF: `.whitespaces` never trims `\r`, so the `;` and
+    //   KEY = $(inherited);\r\n                   quote strips missed and BOTH earlier fixes came back.
+    //   KEY[sdk=iphoneos*] = "";                 the first `=` is INSIDE the condition, so the "value"
+    //                                            was `iphoneos*] = ""` — non-empty, so declared.
+    //   KEY = "${INHERITED}";  /  = $UNDEFINED;  the empty-variable guard matched only `$(...)`.
+    //   /* KEY = disabled            <no close>  the block stripper skipped only CLOSED blocks, so a
+    //                                            comment-to-EOF (which is what xcodebuild sees) declared.
+    var text = raw.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+    // Block comments, INCLUDING an unclosed one — everything after an unterminated `/*` is comment.
+    while let open = text.range(of: "/*") {
+        if let close = text.range(of: "*/", range: open.upperBound..<text.endIndex) {
+            text.removeSubrange(open.lowerBound..<close.upperBound)
+        } else {
+            text.removeSubrange(open.lowerBound..<text.endIndex)
+        }
+    }
+    // LAST ASSIGNMENT WINS, so the map is built in order and filtered at the end.
+    var assigned: [String: String] = [:]
     for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
         var line = String(rawLine)
-        for marker in ["//", "#"] {
-            if let r = line.range(of: marker) {
-                // `#include` is a directive, not a comment — keep the line so the caller can see it.
-                if marker == "#" && line[r.lowerBound...].hasPrefix("#include") { continue }
-                line = String(line[..<r.lowerBound])
-            }
-        }
+        // COMMENT MARKERS DO NOT APPLY INSIDE A QUOTED VALUE. `= "#1 best camera app"` and
+        // `= "https://x"` were truncated to nothing and then judged EMPTY — a false MISSING key, which
+        // is the direction that teaches a reader to distrust the verb.
+        line = stripCommentsOutsideQuotes(line)
         guard let r = line.range(of: "INFOPLIST_KEY_") else { continue }
         let after = line[r.upperBound...]
-        guard let eq = after.firstIndex(of: "=") else { continue }
-        // A conditional (`KEY[sdk=iphoneos*]`) is still a declaration — take the name before the `[`.
-        var name = String(after[..<eq]).trimmingCharacters(in: .whitespaces)
-        if let br = name.firstIndex(of: "[") { name = String(name[..<br]).trimmingCharacters(in: .whitespaces) }
+        // The name ends at `[` (a build condition) or `=`, whichever comes FIRST — taking the first `=`
+        // outright put the condition's own `=` inside the value.
+        let nameEnd = after.firstIndex(where: { $0 == "[" || $0 == "=" })
+        guard let nameEnd else { continue }
+        let name = String(after[..<nameEnd]).trimmingCharacters(in: .whitespaces)
         guard name.hasSuffix("UsageDescription") else { continue }
-        var val = String(after[after.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
+        // The value starts after the assignment `=`, which is the first `=` AFTER any `]`.
+        var rest = after[nameEnd...]
+        if rest.first == "[" {
+            guard let closeBracket = rest.firstIndex(of: "]") else { continue }
+            rest = rest[rest.index(after: closeBracket)...]
+        }
+        guard let eq = rest.firstIndex(of: "=") else { continue }
+        var val = String(rest[rest.index(after: eq)...]).trimmingCharacters(in: .whitespacesAndNewlines)
         if val.hasSuffix(";") { val.removeLast() }
-        val = val.trimmingCharacters(in: .whitespaces)
-        if val.hasPrefix("\"") && val.hasSuffix("\"") && val.count >= 2 { val = String(val.dropFirst().dropLast()) }
         val = val.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !val.isEmpty else { continue }
-        // A value that is ONLY build-variable references cannot be shown to be non-empty.
-        let stripped = val.replacingOccurrences(of: "\\$\\([^)]*\\)", with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !stripped.isEmpty else { continue }
-        keys.insert(name)
+        if val.hasPrefix("\"") && val.hasSuffix("\"") && val.count >= 2 { val = String(val.dropFirst().dropLast()) }
+        assigned[name] = val.trimmingCharacters(in: .whitespacesAndNewlines)
     }
-    return keys
+    // A value that is only build-variable references cannot be shown to be non-empty. All three
+    // spellings Xcode accepts: `$(FOO)`, `${FOO}` and bare `$FOO`.
+    return Set(assigned.filter { _, v in
+        let stripped = v
+            .replacingOccurrences(of: "\\$\\([^)]*\\)", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\\$\\{[^}]*\\}", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\\$[A-Za-z_][A-Za-z0-9_]*", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return !stripped.isEmpty
+    }.keys)
 }
 
 // Dispatched from main.swift when argv[1] is `privacy-manifest`.
