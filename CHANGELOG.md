@@ -9,6 +9,19 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **A version is ASCII digits, and `Character.isNumber` is not.** `engine ٣.٣` (Arabic-Indic) and
+  `engine ².0` NORMALISED as versions, so they read as a MISMATCH rather than MALFORMED — and that
+  difference is load-bearing, because the "an unreadable unqualified line is not hidden by a qualified
+  pin" rule keys on the normaliser REFUSING. Beside a good qualified pin the junk line was handed over
+  silently and the run passed at **exit 0** while three engines exited 2. Alone, every engine already
+  refused, which is why it survived a review and a five-engine matrix: only the paired shape shows it.
+  Found by writing the pin grammar's first UNIT test, which contradicted an end-to-end measurement I had
+  read as a refutation. candor-agents had the same defect (`str.isdigit()`); both fixed, five-way now.
+- **The pin grammar moves to CandorCore** (`EnginePin.swift`), for the reason two cardinal sins already
+  gave today: it was in the executable target, which SwiftPM cannot `@testable import`, so the only
+  instrument that could reach it was a forty-minute cross-engine suite with one row per rule.
+  `EnginePinTests` carries the fifteen spellings that matrix covered by hand.
+
 - **⚠ `MotionRaw` was classified, gated on, and then dropped before the report.** The CoreMotion split
   shipped without an `Effect` case, so `EffectSet.init`'s `compactMap` discarded it at serialisation and
   a function whose only effect was the raw accelerometer stream serialised as `inferred: []` — under
