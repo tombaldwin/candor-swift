@@ -176,10 +176,7 @@ var scopeTarget: String? = nil
 //      `<target>/.candor/config` destroyed the config that declared the policy.
 let preScanned = preScanSinkAndInputs(CommandLine.arguments)
 if let gp = preScanned.gate {
-    refuseGateJsonOverInput(gp, preScanned.policy, "--policy")
-    refuseGateJsonOverInput(gp, ProcessInfo.processInfo.environment["CANDOR_POLICY"], "CANDOR_POLICY")
-    refuseGateJsonOverInput(gp, ProcessInfo.processInfo.environment["CANDOR_CONFIG"], "CANDOR_CONFIG")
-    refuseGateJsonAtConfig(gp)
+    refuseGateJsonOverAnyInput(gp, preScanned.target, preScanned.policy)
     if gp != "-" { armGateJsonFailClosed(gp) }
     // A `-` SINK CANNOT BE PRE-ARMED — there is no file to replace, and emitting a refusal now would put
     // two documents on the same stream. Register it instead, so the exits below route their refusal to
@@ -1359,6 +1356,26 @@ policyBlock: if let pp = policyPath {
             ("candor: policy rule matched NO function — `\(raw)`. It was evaluated and bound nothing, so it "
              + "cannot have caught anything. Legitimate when one policy is shared across repos; a typo'd "
              + "layer name otherwise.\n").data(using: .utf8)!)
+    }
+    // A SPLIT NARROWS EVERY POLICY THAT NAMED THE PARENT, AND DOES IT SILENTLY. `MotionRaw` was split
+    // out of `Motion` because Apple requires no usage key for the raw CoreMotion stream — correct, and
+    // it means an existing `deny Motion` written to mean "no CoreMotion here" now PASSES a
+    // CMMotionManager reach while still binding, still evaluating, and still reporting nothing. That is
+    // a guard the operator believes is on, which is the zero-match shape one level up, so it gets the
+    // same remedy: disclosed, never scored, verdict untouched.
+    do {
+        let denied = Set(scanPolicy.deny.flatMap { $0.effects })
+        for (child, parent) in EFFECT_SPLIT_PARENT.sorted(by: { $0.key < $1.key })
+        where denied.contains(parent) && !denied.contains(child) {
+            let reaching = inferred.filter { $0.value.contains(child) }.keys.sorted()
+            guard !reaching.isEmpty else { continue }
+            FileHandle.standardError.write(
+                ("candor: `deny \(parent)` does NOT cover \(child), which \(reaching.count) function(s) "
+                 + "reach (\(reaching.prefix(3).joined(separator: ", "))\(reaching.count > 3 ? ", …" : "")). "
+                 + "\(child) was split out of \(parent) because Apple requires no usage-description key "
+                 + "for it — so this rule is narrower than it was. Add `deny \(child)` if you meant the "
+                 + "sensor rather than the manifest requirement.\n").data(using: .utf8)!)
+        }
     }
     // Provable-purity DISCLOSURE (advisory — NEVER a violation, so the exit/verdict are untouched): functions
     // in a pure/deny scope that PASS but are Unknown (the Unknown could hide the forbidden effect — a

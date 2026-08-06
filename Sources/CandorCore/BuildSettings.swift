@@ -80,22 +80,60 @@ private func quoteAwareScan(_ chars: [Character], _ body: (Int, Character, Bool)
     }
 }
 
-/// Strip `/* … */`, including an UNCLOSED one (everything after it is comment, which is what xcodebuild
-/// sees) — but never a `/*` that falls inside a quoted string. A `"$(SRCROOT)/Vendor/**"` search path
-/// opened a comment that ate a later undeclare, turning an empty key into a declared one.
-public func stripBlockCommentsOutsideQuotes(_ text: String) -> String {
-    let chars = Array(text)
-    var out = "", inQuotes = false, i = 0
+/// Remove every comment, preserving string literals, in ONE pass.
+///
+/// THIS IS ONE FUNCTION BECAUSE THREE WERE A DEFECT. The previous shape ran three scans — block
+/// comments over the RAW text with whole-file quote tracking, then line comments PER LINE with a fresh
+/// quote state each time, then statement splitting with whole-file tracking again — and any disagreement
+/// between them desynchronised everything after it. Measured (flip #15):
+///
+///     // the "shared config          <- one stray quote, inside a LINE comment
+///     /*
+///     INFOPLIST_KEY_NSCameraUsageDescription = "For photos"
+///     */
+///
+/// The block-comment pass had not yet removed the line comment, so its lone `"` opened a string, the
+/// `/* … */` that followed was read as string content and never stripped, and a COMMENTED-OUT key was
+/// reported as DECLARED — verified end to end through the shipped binary as "every MODELLED capability
+/// is declared", exit 0, on an app whose plist has none. That is the flip this file's own docstring
+/// already records as closed, back through a different door. The mirror reproduced too:
+/// `// see the note /* about camera` lost every declaration in the rest of the file.
+///
+/// A single state machine cannot desynchronise with itself. It also handles multi-line string literals
+/// for free — legal in an OpenStep plist, and previously able to swallow a later undeclare.
+///
+/// `#include` is a DIRECTIVE, not a comment, and survives. `#` is otherwise treated as a comment in both
+/// formats even though only `//` formally is, and deliberately: a `# INFOPLIST_KEY_X = "y"` someone
+/// wrote to disable a key must NOT read as a declaration. The cost is a false MISSING on an unquoted `#`
+/// in a value, which is the safe direction.
+public func stripCommentsPreservingStrings(_ raw: String) -> String {
+    let chars = Array(raw.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n"))
+    var out = ""
+    var i = 0, inString = false
     while i < chars.count {
         let c = chars[i]
-        if c == "\\", inQuotes, i + 1 < chars.count { out.append(c); out.append(chars[i + 1]); i += 2; continue }
-        if c == "\"" { inQuotes.toggle(); out.append(c); i += 1; continue }
-        if !inQuotes, c == "/", i + 1 < chars.count, chars[i + 1] == "*" {
+        if inString {
+            if c == "\\", i + 1 < chars.count { out.append(c); out.append(chars[i + 1]); i += 2; continue }
+            if c == "\"" { inString = false }
+            out.append(c); i += 1; continue
+        }
+        if c == "\"" { inString = true; out.append(c); i += 1; continue }
+        if c == "/", i + 1 < chars.count, chars[i + 1] == "*" {
             var j = i + 2
             while j + 1 < chars.count, !(chars[j] == "*" && chars[j + 1] == "/") { j += 1 }
-            // Unclosed: the rest of the file is comment. Preserve newlines so line-based callers keep
-            // their structure.
-            i = (j + 1 < chars.count) ? j + 2 : chars.count
+            i = (j + 1 < chars.count) ? j + 2 : chars.count      // unclosed: rest of file is comment
+            continue
+        }
+        if c == "/", i + 1 < chars.count, chars[i + 1] == "/" {
+            while i < chars.count, chars[i] != "\n" { i += 1 }
+            continue
+        }
+        if c == "#" {
+            if String(chars[i...]).hasPrefix("#include") {
+                while i < chars.count, chars[i] != "\n" { out.append(chars[i]); i += 1 }
+                continue
+            }
+            while i < chars.count, chars[i] != "\n" { i += 1 }
             continue
         }
         out.append(c); i += 1
@@ -103,46 +141,24 @@ public func stripBlockCommentsOutsideQuotes(_ text: String) -> String {
     return out
 }
 
-/// Remove `//` and `#` line comments, but only OUTSIDE a quoted string — a `#` or `//` inside a value is
-/// part of the value (`= "#1 best camera app"`, `= "https://…"`), and cutting there judged a real
-/// declaration empty. `#include` is a directive, not a comment, and is kept.
-///
-/// `#` is treated as a comment in both formats even though only `//` formally is, and deliberately: a
-/// `# INFOPLIST_KEY_X = "y"` someone wrote to disable a key must NOT read as a declaration. The cost is
-/// a false MISSING on an unquoted `#` in a value, which is the safe direction.
-public func stripCommentsOutsideQuotes(_ line: String) -> String {
-    if line.trimmingCharacters(in: .whitespaces).hasPrefix("#include") { return line }
-    let chars = Array(line)
-    var cut = chars.count
-    quoteAwareScan(chars) { i, c, inQuotes in
-        guard !inQuotes else { return true }
-        if c == "#" { cut = i; return false }
-        if c == "/", i + 1 < chars.count, chars[i + 1] == "/" { cut = i; return false }
-        return true
-    }
-    return String(chars[0..<cut])
-}
-
-/// Split a build-settings file into STATEMENTS: `;` and newlines outside quotes end one.
+/// Split a build-settings file into STATEMENTS: `;`, a newline, `{` or `}` outside a string ends one.
 ///
 /// This is what makes `CAM = ""; MIC = "Record audio";` two assignments instead of one whose value ran
-/// to the end of the line — which had counted the empty key as declared AND lost the real one.
+/// to the end of the line — which had counted the empty key as declared AND lost the real one. Comments
+/// are already gone by the time this runs, so its string tracking is the only state in play.
 public func buildSettingStatements(_ raw: String) -> [String] {
-    var text = raw.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
-    text = stripBlockCommentsOutsideQuotes(text)
-    text = text.split(separator: "\n", omittingEmptySubsequences: false)
-        .map { stripCommentsOutsideQuotes(String($0)) }
-        .joined(separator: "\n")
-    let chars = Array(text)
+    let chars = Array(stripCommentsPreservingStrings(raw))
     var out: [String] = [], cur = ""
-    var inQuotes = false, i = 0
+    var inString = false, i = 0
     while i < chars.count {
         let c = chars[i]
-        if c == "\\", inQuotes, i + 1 < chars.count { cur.append(c); cur.append(chars[i + 1]); i += 2; continue }
-        if c == "\"" { inQuotes.toggle(); cur.append(c); i += 1; continue }
-        if !inQuotes, c == ";" || c == "\n" || c == "{" || c == "}" {
-            out.append(cur); cur = ""; i += 1; continue
+        if inString {
+            if c == "\\", i + 1 < chars.count { cur.append(c); cur.append(chars[i + 1]); i += 2; continue }
+            if c == "\"" { inString = false }
+            cur.append(c); i += 1; continue
         }
+        if c == "\"" { inString = true; cur.append(c); i += 1; continue }
+        if c == ";" || c == "\n" || c == "{" || c == "}" { out.append(cur); cur = ""; i += 1; continue }
         cur.append(c); i += 1
     }
     out.append(cur)

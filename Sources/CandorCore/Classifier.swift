@@ -730,6 +730,18 @@ public let PRIVACY_EFFECTS_ORDER: [String] = [
 
 public let PRIVACY_EFFECTS_ALL: Set<String> = Set(PRIVACY_EFFECTS_ORDER)
 
+/// Effects SPLIT OUT of a broader one, and the effect they used to be part of.
+///
+/// A split narrows every existing policy that named the parent, SILENTLY. An operator who wrote
+/// `deny Motion` to mean "no CoreMotion in this layer" now passes a `CMMotionManager` reach, and nothing
+/// tells them: the rule still binds, still evaluates, still reports no violation. That is a gate the
+/// operator believes is on — the same shape as the zero-match rule ⟨0.24⟩ §3.1 made disclosable, one
+/// level up, and the same remedy applies. Not a violation (the narrowing is deliberate and correct —
+/// Apple requires no key for the raw stream), but never silent.
+public let EFFECT_SPLIT_PARENT: [String: String] = [
+    "MotionRaw": "Motion",
+]
+
 
 /// EVERY usage-description key Apple documents under "protected resources", verbatim.
 ///

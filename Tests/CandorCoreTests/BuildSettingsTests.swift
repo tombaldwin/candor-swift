@@ -118,6 +118,45 @@ final class BuildSettingsTests: XCTestCase {
         XCTAssertEqual(keys(#"\#(cam) /* why */ = "For photos";"#), [camKey])
     }
 
+    // ── FLIP #15: the comment strippers and the statement splitter each tracked quotes SEPARATELY, so
+    // any one of them desynchronising corrupted everything after it. Now one state machine.
+
+    func testAStrayQuoteInALineCommentDoesNotResurrectACommentedOutBlock() {
+        // The block-comment pass ran on RAW text, so this line comment's lone `"` opened a string and the
+        // `/* … */` after it was never stripped — a commented-out key read as DECLARED, verified end to
+        // end as exit 0 on an app whose plist has none.
+        XCTAssertEqual(keys("""
+        // the "shared config
+        /*
+        \(cam) = "For photos"
+        */
+        """), [])
+    }
+
+    func testALineCommentContainingASlashStarDoesNotEatTheRestOfTheFile() {
+        // The mirror of the above, in the loss direction.
+        XCTAssertEqual(keys("""
+        // see the note /* about camera
+        \(cam) = "For photos";
+        \(mic) = "Rec";
+        """), [camKey, micKey])
+    }
+
+    func testAMultiLineQuotedValueDoesNotSwallowALaterUndeclare() {
+        // Legal in an OpenStep plist. The per-line comment pass cut this value's `#` with a fresh quote
+        // state, taking the closing quote with it, and the splitter then absorbed the empty undeclare.
+        XCTAssertEqual(keys("""
+        \(cam) = "For photos";
+        RELEASE_NOTES = "line one
+        see # note";
+        \(cam) = "";
+        """), [])
+    }
+
+    func testAnIncludeDirectiveSurvivesCommentStripping() {
+        XCTAssertEqual(keys("#include \"other.xcconfig\"\n\(cam) = \"For photos\";"), [camKey])
+    }
+
     // ── The consistency rule itself, which replaced last-wins.
 
     func testInconsistentDeclarationIsReportedSeparatelyAndNotCountedAsDeclared() {

@@ -16,22 +16,92 @@ import Foundation
 /// Deliberately permissive — it is not the validator, and the real flag loop still owns every
 /// diagnostic. It only needs the paths early enough that the collision check and the arming can both
 /// precede the first write.
-func preScanSinkAndInputs(_ argv: [String]) -> (gate: String?, policy: String?) {
-    var gate: String? = nil, policy: String? = nil
+func preScanSinkAndInputs(_ argv: [String]) -> (gate: String?, policy: String?, target: String?) {
+    var gate: String? = nil, policy: String? = nil, target: String? = nil
     var i = 1
     while i < argv.count {
         let a = argv[i]
-        if a == "--gate-json" || a == "--policy", i + 1 < argv.count {
+        if a == "--gate-json" || a == "--policy" || a == "--out", i + 1 < argv.count {
             let v = argv[i + 1]
             if v == "-" || !v.hasPrefix("-") {
-                if a == "--gate-json" { gate = v } else { policy = v }
+                if a == "--gate-json" { gate = v } else if a == "--policy" { policy = v }
                 i += 2
                 continue
             }
         }
+        // The scan TARGET, needed to discover the `.candor/config` whose `policy` key may name an input
+        // this sink must not overwrite.
+        if !a.hasPrefix("-"), target == nil { target = a }
         i += 1
     }
-    return (gate, policy)
+    return (gate, policy, target)
+}
+
+/// Every path this run READS, whatever channel it arrived through (SPEC §3.3.1 ⟨0.27⟩).
+///
+/// THE FIRST VERSION OF THIS GUARD KEYED ON THE FLAG. With the policy declared by `.candor/config` —
+/// the checked-in form, i.e. the one a CI job actually has — `--gate-json <that policy>` destroyed it
+/// and exited 0 with `"ok": true` in ALL FOUR ENGINES, because the pre-pass only looked at `--policy`
+/// and `CANDOR_POLICY`. A policy does not change what it is according to how the operator handed it
+/// over. The config is read LENIENTLY here — no exit, no diagnostic — because this runs before the real
+/// config load and must not pre-empt its refusal.
+func runInputs(_ target: String?, _ policyFlag: String?) -> [(String, String)] {
+    var out: [(String, String)] = []
+    let env = ProcessInfo.processInfo.environment
+    if let p = policyFlag { out.append((p, "--policy")) }
+    for (v, label) in [("CANDOR_POLICY", "CANDOR_POLICY"), ("CANDOR_BASELINE", "CANDOR_BASELINE"),
+                       ("CANDOR_CONFIG", "CANDOR_CONFIG")] {
+        if let x = env[v], !x.isEmpty { out.append((x, label)) }
+    }
+    for d in (env["CANDOR_DEPS"] ?? "").split(separator: ":").map(String.init) where !d.isEmpty {
+        out.append((d, "a CANDOR_DEPS report"))
+    }
+    let fm = FileManager.default
+    var cfg: String? = nil
+    if let o = env["CANDOR_CONFIG"], fm.fileExists(atPath: o) { cfg = o }
+    if cfg == nil {
+        var dir = (URL(fileURLWithPath: target ?? ".").standardizedFileURL.path as NSString).standardizingPath
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: dir, isDirectory: &isDir), !isDir.boolValue {
+            dir = (dir as NSString).deletingLastPathComponent
+        }
+        for _ in 0..<64 {
+            let c = (dir as NSString).appendingPathComponent(".candor/config")
+            if fm.fileExists(atPath: c) { cfg = c; break }
+            let up = (dir as NSString).deletingLastPathComponent
+            if up == dir { break }
+            dir = up
+        }
+    }
+    if let cfg {
+        out.append((cfg, "the discovered .candor/config"))
+        let home = ((cfg as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
+        if let text = try? String(contentsOfFile: cfg, encoding: .utf8) {
+            for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
+                let line = raw.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let parts = line.split(maxSplits: 1, whereSeparator: { $0.isWhitespace }).map(String.init)
+                guard parts.count == 2 else { continue }
+                let key = parts[0].lowercased()
+                guard ["policy", "baseline", "deps"].contains(key) else { continue }
+                let vals = key == "deps"
+                    ? parts[1].split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == ":" || $0 == "," }).map(String.init)
+                    : [parts[1].trimmingCharacters(in: .whitespaces)]
+                for one in vals where !one.isEmpty {
+                    let abs = one.hasPrefix("/") ? one : (home as NSString).appendingPathComponent(one)
+                    out.append((abs, "the config's `\(key)`"))
+                }
+            }
+        }
+    }
+    return out
+}
+
+/// Refuse the sink if it names ANY input of this run, whatever channel that input arrived through.
+func refuseGateJsonOverAnyInput(_ gate: String, _ target: String?, _ policyFlag: String?) {
+    guard gate != "-" else { return }
+    for (path, label) in runInputs(target, policyFlag) { refuseGateJsonOverInput(gate, path, label) }
+    refuseGateJsonAtConfig(gate)
 }
 
 /// Are these two path spellings the SAME ARTIFACT?

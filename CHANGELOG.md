@@ -9,6 +9,38 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **A split narrows every policy that named the parent, silently — now disclosed.** `MotionRaw` was
+  split out of `Motion` because Apple requires no usage key for the raw CoreMotion stream, which is
+  correct and means an existing `deny Motion` — written by an operator who meant "no CoreMotion in this
+  layer" — now PASSES a `CMMotionManager` reach while still binding, still evaluating, and still
+  reporting nothing. That is a guard the operator believes is on, which is the ⟨0.24⟩ zero-match shape
+  one level up, so it gets the same remedy: a stderr note naming the functions that reach the split-off
+  effect and the rule to add. Verdict and exit code untouched; silent when both are denied, when neither
+  is, or when nothing reaches it.
+- **⚠ Flip #15 in the build-settings evaluator: the comment strippers and the statement splitter each
+  tracked quotes SEPARATELY**, so any one desynchronising corrupted everything after it. A stray quote in
+  a line comment — `// the "shared config` — made the block stripper read the following `/* … */` as
+  string content, so a COMMENTED-OUT key was reported as declared: verified end to end through the
+  shipped binary as "every MODELLED capability is declared", exit 0, on an app whose plist has none. That
+  is the flip the file's own docstring records as already closed, back through a different door. The
+  mirror reproduced too (`// see the note /* about camera` lost every declaration after it), as did a
+  multi-line quoted value swallowing a later undeclare. Now ONE state machine, which cannot disagree with
+  itself, and which handles multi-line string literals for free.
+- **⚠ The collision guard keyed on the FLAG**, so a policy declared by `.candor/config` — the checked-in
+  form CI uses — was invisible to it: `--gate-json <that policy>` destroyed it and exited 0 with
+  `"ok": true`, in all four engines. It now enumerates every channel, including the `gate` verb's
+  `--report`, which §3.3.1 names as an input.
+- **An unreadable config was silently "no config" on the QUERY route**, dropping whatever it declared —
+  a policy, a baseline, an engine pin. The scan route already refused; §3.4's posture does not vary by
+  verb.
+- **The `deps` splitter became Unicode-aware and refused a working config** — a dep PATH containing a
+  non-breaking space was split into two nonexistent ones and the run exited 2, where java and rust loaded
+  it. It also disagreed with this engine's own `CANDOR_DEPS` splitter. Paths separate on ASCII whitespace;
+  only the key/value split is Unicode-aware.
+- **Every keyless effect printed `Notify`'s reason.** `MotionRaw → (no Info.plist key — notifications
+  gate at runtime via requestAuthorization)` is a wrong explanation attached to a right answer, which is
+  the shape a reader learns to distrust. One reason per effect now.
+
 - **A version is ASCII digits, and `Character.isNumber` is not.** `engine ٣.٣` (Arabic-Indic) and
   `engine ².0` NORMALISED as versions, so they read as a MISMATCH rather than MALFORMED — and that
   difference is load-bearing, because the "an unreadable unqualified line is not hidden by a qualified

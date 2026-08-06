@@ -41,8 +41,18 @@ func discoverConfigText(targetPath: String) -> String? { discoverConfig(targetPa
 /// unable to act unnamed. Discovery walks parent directories, so an alias file anywhere ABOVE the anchor
 /// participates; naming it is the only thing that makes that visible.
 func discoverConfig(targetPath: String) -> (path: String, text: String)? {
+    // CONFIGURED-BUT-UNUSABLE FAILS LOUD, ON THIS ROUTE TOO. Both `try?`s here returned nil, so a
+    // CANDOR_CONFIG naming a nonexistent file — or a discovered config that exists and cannot be read —
+    // silently became "no config" and the run continued WITHOUT whatever it declared: a policy, a
+    // baseline, an engine pin, an `unknown-alias` vocabulary. The SCAN route already refuses; the QUERY
+    // route did not, so `gate --report R --policy P` exited 1 here and 2 in java and ts on the same
+    // input. §3.4's posture is the unreadable-policy one, and it does not vary by verb.
     if let override = ProcessInfo.processInfo.environment["CANDOR_CONFIG"] {
-        guard let t = try? String(contentsOfFile: override, encoding: .utf8) else { return nil }
+        guard let t = try? String(contentsOfFile: override, encoding: .utf8) else {
+            refuseGateAndExit("candor-swift: CANDOR_CONFIG set but \(override) could not be read — "
+                + "failing (exit 2, unevaluable). A config that cannot be read is a guard the operator "
+                + "believes is on.")
+        }
         return (override, t)
     }
     var dir = (URL(fileURLWithPath: targetPath).standardizedFileURL.path as NSString).standardizingPath
@@ -53,7 +63,11 @@ func discoverConfig(targetPath: String) -> (path: String, text: String)? {
     for _ in 0..<64 {
         let cand = (dir as NSString).appendingPathComponent(".candor/config")
         if FileManager.default.fileExists(atPath: cand) {
-            guard let t = try? String(contentsOfFile: cand, encoding: .utf8) else { return nil }
+            guard let t = try? String(contentsOfFile: cand, encoding: .utf8) else {
+                refuseGateAndExit("candor-swift: \(cand) exists but could not be read — failing "
+                    + "(exit 2, unevaluable). Treating it as absent would run without whatever it "
+                    + "declares.")
+            }
             return (cand, t)
         }
         let parent = (dir as NSString).deletingLastPathComponent
@@ -158,7 +172,14 @@ func loadCandorConfig(targetPath: String) -> [String: String] {
     // relative token to the config's home dir (the dir containing `.candor/`), same rule as `policy`.
     // Rejoined with spaces (the canonical separator); the loader re-splits identically.
     if let d = cfg["deps"], !d.isEmpty {
-        cfg["deps"] = d.split(whereSeparator: { $0.isWhitespace || $0 == ":" || $0 == "," })
+        // ASCII whitespace ONLY here, deliberately, and NOT `isWhitespace`: these are PATHS, and a path
+        // may legitimately contain a NO-BREAK SPACE. Making this Unicode-aware alongside the key/value
+        // split turned such a dep into two nonexistent ones and refused the run at exit 2, where java and
+        // rust loaded it and ts silently dropped it — four engines, four answers, and this one's was a
+        // FALSE refusal introduced by a fix for a fail-open elsewhere. It also disagreed with THIS
+        // engine's own CANDOR_DEPS splitter, which is ASCII. The separator is a space; the value is a
+        // filename.
+        cfg["deps"] = d.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == ":" || $0 == "," })
             .map { tok -> String in
                 let t = String(tok)
                 return (t as NSString).isAbsolutePath ? t : (anchor as NSString).appendingPathComponent(t)

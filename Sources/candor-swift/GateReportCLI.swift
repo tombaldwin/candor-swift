@@ -396,9 +396,14 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // a red gate exiting 0 with `"ok": true` over a policy that no longer existed.
     let pre = preScanSinkAndInputs(["gate"] + args)
     if let gp = pre.gate {
-        refuseGateJsonOverInput(gp, pre.policy, "--policy")
-        refuseGateJsonOverInput(gp, ProcessInfo.processInfo.environment["CANDOR_POLICY"], "CANDOR_POLICY")
-        refuseGateJsonAtConfig(gp)
+        // §3.3.1 names "a report being read (`gate --report`)" as an input: writing the verdict there
+        // destroys the very report the gate was asked to judge.
+        var reportFlag: String? = nil
+        for (i, a) in args.enumerated() where a == "--report" && i + 1 < args.count {
+            if !args[i + 1].hasPrefix("-") { reportFlag = args[i + 1] }
+        }
+        refuseGateJsonOverInput(gp, reportFlag, "--report")
+        refuseGateJsonOverAnyInput(gp, reportFlag ?? ".", pre.policy)
         if gp != "-" { armGateJsonFailClosed(gp) }
     }
     var reportFlag: String?, policyFlag: String?, gateJsonPath: String?

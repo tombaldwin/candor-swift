@@ -297,8 +297,10 @@ func includedConfigPaths(_ text: String, relativeTo config: URL) -> [URL] {
     let base = config.deletingLastPathComponent()
     let root = base.resolvingSymlinksInPath().standardizedFileURL.path
     var out: [URL] = []
-    for rawLine in stripBlockCommentsOutsideQuotes(text).split(separator: "\n") {
-        let line = stripCommentsOutsideQuotes(String(rawLine)).trimmingCharacters(in: .whitespaces)
+    // Same single-pass stripper the settings go through, so an include cannot be found by a scan that
+    // disagrees with the one that reads the file's settings.
+    for rawLine in stripCommentsPreservingStrings(text).split(separator: "\n") {
+        let line = String(rawLine).trimmingCharacters(in: .whitespaces)
         guard line.hasPrefix("#include") else { continue }
         // `#include "a.xcconfig"` and the optional form `#include? "a.xcconfig"`.
         guard let open = line.firstIndex(of: "\""),
@@ -320,6 +322,14 @@ func includedConfigPaths(_ text: String, relativeTo config: URL) -> [URL] {
 // while sitting in this executable target, which SwiftPM cannot `@testable import`.
 
 // Dispatched from main.swift when argv[1] is `privacy-manifest`.
+
+/// Why an effect this engine reports needs NO usage-description key. One reason per effect, because
+/// they differ: a runtime authorization prompt is not the same statement as "Apple requires nothing".
+let keylessReason: [String: String] = [
+    "Notify": "notifications gate at runtime via requestAuthorization",
+    "MotionRaw": "Apple requires NSMotionUsageDescription only for the stored/derived CoreMotion APIs, "
+        + "not for the raw accelerometer/gyroscope stream",
+]
 
 /// A PASTE-READY `Info.plist` fragment for a set of required keys.
 ///
@@ -804,8 +814,13 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         if let primary = keys.first {
             print("  \(eff) → \(primary)\(byWhom)")
         } else {
-            // Notify — no Info.plist key; declared at runtime.
-            print("  \(eff) → (no Info.plist key — notifications gate at runtime via requestAuthorization)\(byWhom)")
+            // NO Info.plist key — but there is more than one REASON for that now, and printing one
+            // effect's reason for all of them states something false. `Notify` gates at runtime;
+            // `MotionRaw` is a sensor Apple simply does not require a key for. The line said
+            // "notifications gate at runtime via requestAuthorization" next to `MotionRaw`, which is a
+            // wrong explanation attached to a right answer — the shape a reader learns to distrust.
+            let why = keylessReason[eff] ?? "Apple documents no usage-description key for it"
+            print("  \(eff) → (no Info.plist key — \(why))\(byWhom)")
         }
     }
     exit(0)
