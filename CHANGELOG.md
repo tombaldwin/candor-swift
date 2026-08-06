@@ -11,6 +11,23 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [0.27.0] — 2026-08-05
 
+- **A bare `engine <impl>` still split the family five ways.** `engine swift` — an operator forgetting
+  the version on a qualified line — was skipped by candor-java and treated by the other four as a
+  WILDCARD pin whose version is the literal `swift`, so it exited 2 in every engine that is *not* swift:
+  one typo, a family-wide outage, on the exact property PART 33 exists to pin. The cause was arm ORDER —
+  arity was tested before ownership, so the one-token case was claimed by the wildcard arm before anyone
+  asked whose line it was. **A known qualifier now decides ownership first**, per §3.4's "whatever
+  follows it" — and nothing following it is a case of that too.
+- **`privacy-manifest --verify` now reads `INFOPLIST_KEY_*` from `.xcodeproj` and `.xcconfig`.** Since
+  Xcode 13 that is where usage descriptions live by default, and the source tree's `Info.plist` often has
+  none of them. Measured before the fix on three shipping open-source apps: IceCubesApp produced THREE
+  false "under-declared" findings against an App Store app whose keys are all in its `.pbxproj`;
+  duckduckgo/iOS carries 8 such settings and WordPress-iOS 12. A false rejection warning is worse than no
+  verb — it teaches the reader to distrust the tool. It can only ADD to the declared set, so an empty
+  purpose string is still not a declaration and the provenance is reported rather than silently merged (a
+  setting can belong to a different target). Verified it still catches a real gap, and it found a true
+  positive in the wild: WordPress-iOS calls `startDeviceMotionUpdates()` with no `NSMotionUsageDescription`.
+
 - **A baseline DECLARED in `.candor/config` but missing is now exit 2, not a green pass.** An adopter
   review measured this as the second-likeliest first-commit mistake (`.candor/` committed, the baseline
   not) and found every engine printing a note and exiting **0** — the gate quietly not gating. The split
