@@ -9,6 +9,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.27.0] — 2026-08-05
+
 - **Panel review: the pin grammar disagreed across engines on a shared config.** Three confirmed
   divergences, each a case conformance PART 33 had not thought of, all now fixed and pinned there:
   a junked line qualified for ANOTHER implementation (`engine swift 0.99.0 junk`) killed this engine's
@@ -17,7 +19,6 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   family-wide outage; `vv0.27.0` was accepted as a version by engines that stripped every leading `v`;
   and a CRLF config broke a MATCHING pin where `\r` was not treated as whitespace.
 
-## [0.27.0] — 2026-08-05
 
 - **⟨0.27⟩ SPEC §3.4 `engine` — the engine↔baseline coupling, enforced here too.** A build that is not
   the pinned one FAILS with exit 2 (UNEVALUABLE, never 1 — a machine consumer must not read "I could not
