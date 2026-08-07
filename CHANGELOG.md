@@ -34,6 +34,14 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   mirror reproduced too (`// see the note /* about camera` lost every declaration after it), as did a
   multi-line quoted value swallowing a later undeclare. Now ONE state machine, which cannot disagree with
   itself, and which handles multi-line string literals for free.
+- **⚠ Flip #16: an `#include` line could not open a block comment.** The `#include` branch copied its
+  whole line VERBATIM — to preserve the directive — so a `/*` sitting on that line never registered and
+  the commented-out key after it was reported as DECLARED. The identical file without the include line
+  answered correctly, which is what makes it diagnostic. Only the DIRECTIVE is a directive now: the token
+  is emitted and the scan continues in normal mode, so quotes, `//` and `/*` after an include behave as
+  they do anywhere else. A bare `hasPrefix` also matched `#includes` and `#include_foo`, which are not
+  the directive; xcconfig's optional `#include?` still is. Identical answers on 129 real build-settings
+  files, and the plutil differential stays green.
 - **⚠ The collision guard keyed on the FLAG**, so a policy declared by `.candor/config` — the checked-in
   form CI uses — was invisible to it: `--gate-json <that policy>` destroyed it and exited 0 with
   `"ok": true`, in all four engines. It now enumerates every channel, including the `gate` verb's

@@ -157,6 +157,36 @@ final class BuildSettingsTests: XCTestCase {
         XCTAssertEqual(keys("#include \"other.xcconfig\"\n\(cam) = \"For photos\";"), [camKey])
     }
 
+    // ── FLIP #16: the `#include` branch copied its whole line VERBATIM to preserve the directive, so a
+    // comment opened on that line never registered.
+
+    func testAnIncludeLineCanStillOpenABlockComment() {
+        // Identical to the control below except for the `#include`, which is what makes it diagnostic.
+        XCTAssertEqual(keys("""
+        #include "shared.xcconfig" /* disabled:
+        \(cam) = "For photos"
+        */
+        """), [])
+        XCTAssertEqual(keys("""
+        /* disabled:
+        \(cam) = "For photos"
+        */
+        """), [], "control: the same file without the include line")
+    }
+
+    func testALineCommentOnAnIncludeLineIsStillAComment() {
+        XCTAssertEqual(keys("#include \"x.xcconfig\" // \(mic) = \"m\"\n\(cam) = \"For photos\";"),
+                       [camKey], "the mic key is inside a comment; the camera key is not")
+    }
+
+    func testOnlyTheDirectiveItselfIsADirective() {
+        // A bare `hasPrefix` also matched these, so the rest of the line survived as code.
+        XCTAssertEqual(keys("#includes \(cam) = \"For photos\";"), [])
+        XCTAssertEqual(keys("#include_foo \(cam) = \"For photos\";"), [])
+        XCTAssertEqual(keys("#include? \"x.xcconfig\"\n\(cam) = \"For photos\";"), [camKey],
+                       "…but xcconfig's optional form IS one")
+    }
+
     // ── The consistency rule itself, which replaced last-wins.
 
     func testInconsistentDeclarationIsReportedSeparatelyAndNotCountedAsDeclared() {

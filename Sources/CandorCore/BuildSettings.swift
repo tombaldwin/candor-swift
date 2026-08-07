@@ -129,10 +129,34 @@ public func stripCommentsPreservingStrings(_ raw: String) -> String {
             continue
         }
         if c == "#" {
-            if String(chars[i...]).hasPrefix("#include") {
-                while i < chars.count, chars[i] != "\n" { out.append(chars[i]); i += 1 }
+            // `#include` IS A DIRECTIVE, NOT A COMMENT — but only the DIRECTIVE is; the rest of the line
+            // is ordinary text and must keep being scanned. Copying the whole line verbatim (flip #16)
+            // meant a `/*` sitting on an include line never registered, so
+            //
+            //     #include "shared.xcconfig" /* disabled:
+            //     INFOPLIST_KEY_NSCameraUsageDescription = "For photos"
+            //     */
+            //
+            // declared the key, while the identical file WITHOUT the include line correctly did not. So
+            // the token is emitted and the scan CONTINUES in normal mode: quotes, `//` and `/*` after an
+            // include behave exactly as they do anywhere else.
+            //
+            // The suffix check matters too — a bare `hasPrefix` also matched `#includes` and
+            // `#include_foo`, which are not the directive. xcconfig's optional form is `#include?`.
+            let rest = chars[i...]
+            let kw = Array("#include")
+            let isDirective = rest.count >= kw.count && Array(rest.prefix(kw.count)) == kw
+                && (rest.count == kw.count || {
+                    let n = rest[rest.index(rest.startIndex, offsetBy: kw.count)]
+                    return n == "?" || n == "\"" || n.isWhitespace
+                }())
+            if isDirective {
+                out.append(contentsOf: kw)
+                i += kw.count
                 continue
             }
+            // `#` is otherwise a comment in both formats even though only `//` formally is: a
+            // `# INFOPLIST_KEY_X = "y"` written to disable a key must NOT read as a declaration.
             while i < chars.count, chars[i] != "\n" { i += 1 }
             continue
         }
