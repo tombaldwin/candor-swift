@@ -77,7 +77,8 @@ final class BuildSettingsOracleTests: XCTestCase {
     /// under the SAME rule the evaluator applies — declared only if no assignment leaves it empty.
     /// Returns nil when plutil could not read the file at all (which the caller treats as a failure,
     /// never as agreement).
-    private func oracle(_ path: String) -> Set<String>? {
+    /// The raw `plutil -convert json` result, or nil when the tool is absent or refuses.
+    private func oracleRaw(_ path: String) -> Any? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/plutil")
         p.arguments = ["-convert", "json", "-o", "-", path]
@@ -85,8 +86,12 @@ final class BuildSettingsOracleTests: XCTestCase {
         guard (try? p.run()) != nil else { return nil }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
-        guard p.terminationStatus == 0,
-              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+        guard p.terminationStatus == 0 else { return nil }
+        return try? JSONSerialization.jsonObject(with: data)
+    }
+
+    private func oracle(_ path: String) -> Set<String>? {
+        guard let root = oracleRaw(path) as? [String: Any],
               let objects = root["objects"] as? [String: Any] else { return nil }
         var real: Set<String> = [], empty: Set<String> = []
         for case let obj as [String: Any] in objects.values
@@ -106,9 +111,42 @@ final class BuildSettingsOracleTests: XCTestCase {
         return real.subtracting(empty)
     }
 
+    private var runningOnMacOS: Bool {
+        #if os(macOS)
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    /// Does the `plutil` on this machine actually behave like Apple's? Verified against a trivial
+    /// old-style plist rather than assumed from the binary's presence.
+    private func plutilSpeaksAppleFlags() -> Bool {
+        let probe = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-plutil-probe-\(ProcessInfo.processInfo.processIdentifier).plist")
+        defer { try? FileManager.default.removeItem(at: probe) }
+        guard (try? "{ a = b; }".write(to: probe, atomically: true, encoding: .utf8)) != nil else { return false }
+        guard let out = oracleRaw(probe.path), let obj = out as? [String: Any] else { return false }
+        return (obj["a"] as? String) == "b"
+    }
+
     func testEvaluatorAgreesWithApplesOwnParser() throws {
-        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: "/usr/bin/plutil"),
-                          "plutil is macOS-only; this differential does not run on Linux")
+        // A CAPABILITY probe, not a path check, AND a platform guard — as one condition, so there is
+        // no unreachable code on either platform.
+        //
+        // The first version skipped unless `/usr/bin/plutil` existed. The Linux CI image HAS one
+        // (libplist's), which does not speak Apple's `-convert json` flags — so the test ran, every
+        // generated case "failed to parse", and the battery reported 38 disagreements that were really
+        // one missing tool. Asking whether the binary is there is not the same question as whether it
+        // can answer.
+        //
+        // The `checked` assertion at the end of this test is what caught it: 0 cells compared, 38
+        // claimed. A differential that cannot say how many cells it actually ran is not reporting a
+        // result — which is the same reason the corpus differentials count live cells.
+        try XCTSkipUnless(runningOnMacOS && plutilSpeaksAppleFlags(),
+                          "Apple's property-list parser is macOS-only, and a `plutil` that does not "
+                          + "accept `-convert json` is not the reference parser this compares against")
+
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("candor-bsoracle-\(ProcessInfo.processInfo.processIdentifier)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

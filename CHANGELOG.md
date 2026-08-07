@@ -9,6 +9,14 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **CI-only: the plutil differential ran on Linux and reported 38 false disagreements.** Its skip asked
+  whether `/usr/bin/plutil` EXISTS — and the Linux CI image has one (libplist's) that does not accept
+  Apple's `-convert json`. So the test ran, every generated case "failed to parse", and the battery
+  claimed 38 disagreements that were one missing tool. Asking whether the binary is there is not the same
+  question as whether it can answer. The skip is now a platform guard AND a capability probe (convert a
+  trivial old-style plist and check the value comes back), as one condition so neither platform compiles
+  unreachable code. The `checked` assertion — 0 cells compared, 38 claimed — is what caught it.
+
 - **The sink guard now uses the engine's own discovery and loader** (`discoverConfigFile` +
   `loadCandorConfig`) rather than re-deriving the walk and the parse. The hand-written copy anchored an
   out-of-tree `CANDOR_CONFIG` one level too high and split `deps` on `:` alone; a second parser is a
