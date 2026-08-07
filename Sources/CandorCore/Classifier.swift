@@ -13,6 +13,29 @@ import SwiftSyntax
 // Production-source filter
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
+/// Does this file's TEXT mark it as a test? `import XCTest` (or `import Testing`) is unambiguous —
+/// production code never imports either.
+///
+/// `isHarnessPath` reads the PATH, and SPM's conventions are directory-shaped: `Tests/`, `*Tests/`,
+/// `*TestHelpers/`. An app whose tests live BESIDE their sources — `.../AuthenticatorKeyCapture/
+/// AuthenticatorKeyCaptureCoordinatorTests.swift` — defeats every one of them, so its test code was
+/// analysed as production. Measured on Bitwarden: a bare `AVCaptureSession()` in a test `setUp()` was
+/// the sole evidence for "your app reaches Mic but declares no NSMicrophoneUsageDescription" — unit
+/// test code cited as proof that a SHIPPING manifest is wrong.
+///
+/// The check is on the IMPORT and deliberately not on the filename: a file called `ABTests.swift` is
+/// A/B-testing production code, and excluding it would silently drop real sources, which is the
+/// cardinal sin this filter must never commit to avoid a false alarm.
+public func isTestSource(_ text: String) -> Bool {
+    for raw in text.split(separator: "\n", omittingEmptySubsequences: true).prefix(400) {
+        let line = raw.trimmingCharacters(in: .whitespaces)
+        guard line.hasPrefix("import ") else { continue }
+        let mod = line.dropFirst("import ".count).trimmingCharacters(in: .whitespaces)
+        if mod == "XCTest" || mod == "Testing" { return true }
+    }
+    return false
+}
+
 // Production sources only: tests are the harness's effects, not the package's (the family rule).
 public func isHarnessPath(_ p: String) -> Bool {
     let parts = p.split(separator: "/").map(String.init)
@@ -400,17 +423,40 @@ public let PRIVACY_MEMBER_TYPES: [String: [String: String]] = [
     // Location — so it must be member-gated, or every location app would be charged the temporary key.
     "CLLocationManager": ["requestTemporaryFullAccuracyAuthorization": "LocationTemporary"],
     "HKSampleType": ["clinicalType": "ClinicalRecords"],
+    // `GKLocalPlayer.local.authenticate` is the FIRST LINE of every Game Center game and requires no
+    // key; Apple attaches NSGKFriendListUsageDescription to the friends APIs alone. Charging the type
+    // made every Game Center title report a missing key it does not need — and GKLocalPlayer is not
+    // single-purpose, which is this table's own stated bar for member-gating.
+    "GKLocalPlayer": ["loadFriends": "GameCenterFriends",
+                      "loadFriendsAuthorizationStatus": "GameCenterFriends",
+                      "loadChallengeableFriends": "GameCenterFriends",
+                      "loadFriendsList": "GameCenterFriends"],
 ]
 
 public let PRIVACY_SDK_TYPES: [String: String] = [
     // Location — CoreLocation (the sensor-accessing MANAGER/updater/geocoder; CLLocation itself is a value
     // type carrying already-read coordinates, so it is NOT here) + MapKit user-tracking.
-    "CLLocationManager": "Location", "CLLocationUpdate": "Location", "CLGeocoder": "Location",
+    "CLLocationManager": "Location", "CLLocationUpdate": "Location",
+    // CLGeocoder is NOT here: it converts a coordinate or address the CALLER supplies, "in conjunction
+    // with, or independent of" MapKit, and needs only network access. The NSLocation* keys govern
+    // reading the USER's location, which a geocoder never does. wikipedia-ios reverse-geocodes in a
+    // view model and was charged Location for it.
     "MKUserTrackingMode": "Location",
     // Camera — AVFoundation capture (bare AVCaptureDevice/Session DEFAULT to Camera; the media-type arg
     // refines to Mic/Camera, and an ambiguous capture over-discloses BOTH — see the ambiguity note and
     // `privacyCaptureEffects`) + UIImagePickerController (its camera source).
-    "AVCaptureDevice": "Camera", "AVCaptureSession": "Camera", "UIImagePickerController": "Camera",
+    "AVCaptureDevice": "Camera", "UIImagePickerController": "Camera",
+    // ARKit and VisionKit — CAMERA BY ANOTHER FRAMEWORK'S DOOR, and the tables were AVFoundation-shaped
+    // so neither was here. An ARKit app or a document scanner verified CLEAN with "0 effects", exit 0,
+    // against an empty plist — and ARKit does not merely get rejected, it TRAPS at runtime without
+    // NSCameraUsageDescription. The "conditional on N uncovered modules" line did fire, but it fires on
+    // apps whose AVFoundation use IS modelled too, so it carries no signal a reader can act on while the
+    // exit code says clean. A whole category of camera app (every AR app, every scanner) was invisible.
+    "ARSession": "Camera", "ARWorldTrackingConfiguration": "Camera", "ARFaceTrackingConfiguration": "Camera",
+    "ARBodyTrackingConfiguration": "Camera", "ARImageTrackingConfiguration": "Camera",
+    "ARGeoTrackingConfiguration": "Camera", "ARObjectScanningConfiguration": "Camera",
+    "ARPositionalTrackingConfiguration": "Camera", "ARSCNView": "Camera", "ARView": "Camera",
+    "VNDocumentCameraViewController": "Camera", "DataScannerViewController": "Camera",
     // Mic — the unambiguous audio-capture type. (AVAudioEngine is NOT here — mic-gated on `.inputNode`
     // in kappaPropertyRead; a bare playback engine must not fabricate Mic. See the note above.)
     "AVAudioRecorder": "Mic",
@@ -434,7 +480,6 @@ public let PRIVACY_SDK_TYPES: [String: String] = [
     // TV provider — single sign-on to a subscription.
     "VSAccountManager": "VideoSubscriber",
     // Game Center friends.
-    "GKLocalPlayer": "GameCenterFriends",
     // ── privacy/4 (2026-08-05) ────────────────────────────────────────────────────────────────────────
     // Focus status — whether the user is in a Focus mode.
     "INFocusStatusCenter": "FocusStatus",
@@ -459,9 +504,21 @@ public let PRIVACY_SDK_TYPES: [String: String] = [
     // System-audio capture — Core Audio process taps, which Apple's key page links directly.
     "CATapDescription": "AudioCapture",
     // Contacts — the address book.
-    "CNContactStore": "Contacts", "CNContactPickerViewController": "Contacts",
+    "CNContactStore": "Contacts",
+    // OUT-OF-PROCESS PICKERS REQUIRE NO KEY, and Apple says so in terms. CNContactPickerViewController:
+    // "The app using contact picker view does not need access to the user's contacts and the user will
+    // not be prompted for 'grant permission' access. The app has access only to the user's final
+    // selection." Charging the key told Bitwarden-class apps their shipping manifest was wrong.
+    // Reported, not required — the MotionRaw shape: the reach is real, the manifest requirement is not.
+    "CNContactPickerViewController": "ContactsPicker",
     // Photos — the photo library.
-    "PHPhotoLibrary": "Photos", "PHAsset": "Photos", "PHPickerViewController": "Photos", "PHImageManager": "Photos",
+    "PHPhotoLibrary": "Photos", "PHAsset": "Photos", "PHImageManager": "Photos",
+    // PHPicker is the same out-of-process design as the contacts picker — it exists so an app can offer
+    // photo selection WITHOUT photo-library authorization. Recorded as suspected on 2026-08-07 when the
+    // evidence was not citable; the contacts-picker page states the principle for the picker family, and
+    // Kingfisher's demo (which reaches PHPicker and declares the key nowhere) is the corroborating
+    // measurement. Keyless, not dropped.
+    "PHPickerViewController": "PhotosPicker",
     // Notify — user-attention / notifications.
     "UNUserNotificationCenter": "Notify",
 
@@ -524,7 +581,12 @@ public let PRIVACY_SDK_TYPES: [String: String] = [
     // NearbyInteraction — UWB ranging with nearby devices.
     "NISession": "NearbyInteraction",
     // Siri — donating to / requesting Siri authorization.
-    "INPreferences": "Siri", "INVoiceShortcutCenter": "Siri",
+    // NSSiriUsageDescription is required for "APIs that SEND USER DATA TO SIRI" — the authorization
+    // flow, which is `INPreferences.requestSiriAuthorization`. INVoiceShortcutCenter manages the app's
+    // OWN shortcuts and names no key on its page; charging it told firefox-ios and focus-ios — two
+    // shipping browsers that declare no Siri key and never request Siri authorization — that their
+    // manifests were wrong.
+    "INPreferences": "Siri",
 ]
 
 /// `privacy/2` — for a call ALREADY classified as a privacy effect, the read/write direction its verb
@@ -726,6 +788,10 @@ public let PRIVACY_EFFECTS_ORDER: [String] = [
     // privacy/4 (2026-08-06) — appended. The raw CoreMotion stream, split from `Motion` because Apple
     // requires NSMotionUsageDescription for the stored/derived APIs and not for CMMotionManager.
     "MotionRaw",
+    // privacy/4 (2026-08-07) — the OUT-OF-PROCESS SYSTEM PICKERS. Apple states for the contacts picker
+    // that the app "does not need access" and is never prompted; PHPicker is the same design. The reach
+    // is reported (a policy can `deny ContactsPicker`) and no Info.plist key is required.
+    "ContactsPicker", "PhotosPicker",
 ]
 
 public let PRIVACY_EFFECTS_ALL: Set<String> = Set(PRIVACY_EFFECTS_ORDER)
@@ -886,6 +952,7 @@ public let privacyKeyMap: [String: [String]] = [
     // No key: Apple's NSMotionUsageDescription page does not list CMMotionManager, and its own page
     // references no usage key. Reported as reach, never as a requirement — see the sensor table.
     "MotionRaw": [],
+    "ContactsPicker": [], "PhotosPicker": [],
     "Calendar": ["NSCalendarsUsageDescription", "NSCalendarsFullAccessUsageDescription",
                  "NSCalendarsWriteOnlyAccessUsageDescription"],
     "Reminders": ["NSRemindersUsageDescription", "NSRemindersFullAccessUsageDescription"],
@@ -1273,7 +1340,36 @@ public func privacyCaptureEffects(mediaType: String?) -> [String] {
 }
 
 /// The AVFoundation capture types whose Camera/Mic split is refined by the media-type argument (finding 5).
-public let PRIVACY_CAPTURE_TYPES: Set<String> = ["AVCaptureDevice", "AVCaptureSession"]
+/// The types whose calls DECIDE a capture's medium. `AVCaptureSession` is NOT one of them.
+///
+/// A session is a COORDINATOR: it captures nothing until an `AVCaptureDeviceInput` built from an
+/// `AVCaptureDevice` is added, and that device call carries the media type that says Camera or Mic. So
+/// the session contributes no information the device call does not, and treating it as an ambiguous
+/// capture over-disclosed BOTH on every function that merely touches one.
+///
+/// Measured on Bitwarden, a QR scanner with no microphone key: `stopCameraSession()` — whose body is
+/// `outputs.forEach { removeOutput($0) }` and `stopRunning()` — reported Mic, and so did a SwiftUI
+/// preview. A member denylist did not hold, because `.forEach` on `session.outputs` is a member call
+/// like any other; the fragility was the signal that the type was the wrong place to ask.
+///
+/// The recall this gives up is a session fed by a device from a source the scan cannot resolve — which
+/// is exactly what the Unknown machinery and the coverage ledger exist to disclose, rather than
+/// something to guess a microphone from.
+public let PRIVACY_CAPTURE_TYPES: Set<String> = ["AVCaptureDevice"]
+
+/// Members of a capture type that TEAR DOWN or configure rather than capture.
+///
+/// A DENYLIST, not an allowlist, deliberately: an allowlist of "capturing" members would silently miss
+/// the one I forgot, which is the cardinal sin, while a denylist that is too short only leaves an
+/// over-disclosure standing. Every name here is carved out because it provably cannot capture.
+///
+/// Measured on Bitwarden: `stopCameraSession()` — whose whole body is `stopRunning()` and
+/// `removeOutput()` on a stored property — was the evidence that a shipping QR scanner "reaches Mic".
+/// Stopping a session is not using a microphone.
+public let PRIVACY_CAPTURE_TEARDOWN_MEMBERS: Set<String> = [
+    "stopRunning", "removeOutput", "removeInput", "removeConnection",
+    "beginConfiguration", "commitConfiguration",
+]
 /// The audio-session types whose CATEGORY decides whether the microphone is reached — see
 /// `privacyAudioSessionEffects`. Kept separate from PRIVACY_CAPTURE_TYPES because the discriminating
 /// argument is different (a category, not a media type) and the safe default differs in shape.

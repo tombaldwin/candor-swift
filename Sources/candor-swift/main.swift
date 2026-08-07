@@ -391,7 +391,13 @@ var sourcePaths: [String] = []
 if isDir.boolValue {
     if let en = fm.enumerator(atPath: target) {
         for case let rel as String in en {
-            if rel.hasSuffix(".swift") && !isHarnessPath(rel) { sourcePaths.append((target as NSString).appendingPathComponent(rel)) }
+            guard rel.hasSuffix(".swift"), !isHarnessPath(rel) else { continue }
+            let abs = (target as NSString).appendingPathComponent(rel)
+            // …and a file that IMPORTS XCTest is a test wherever it sits. See `isTestSource`: an app
+            // whose tests live beside their sources had them analysed as production, and a capture in a
+            // test `setUp()` became the evidence that a shipping app's manifest was wrong.
+            if let text = try? String(contentsOfFile: abs, encoding: .utf8), isTestSource(text) { continue }
+            sourcePaths.append(abs)
         }
     }
 } else {

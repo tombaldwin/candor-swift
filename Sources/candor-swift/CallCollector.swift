@@ -240,6 +240,28 @@ final class CallCollector: SyntaxVisitor {
     var selfElementType: String?   // self's element bound in a collection extension (R28)
     var calls: [Call] = []
     var directEffects: Set<String> = []
+    /// A capture whose media type this function did NOT make statically visible — a bare
+    /// `AVCaptureSession()`, or a device call whose media-type argument is a computed value.
+    ///
+    /// DEFERRED rather than resolved at the call site, because the answer is a property of the FUNCTION.
+    /// Charging Camera+Mic the moment a bare session appeared made the commonest camera-only idiom in
+    /// iOS — construct a session, add a `.video` device — report Mic, and a shipping app (Bitwarden, a
+    /// QR scanner with no microphone key) was told its manifest was wrong. The over-disclosure is right
+    /// when nothing in the function says which medium; it is a fabrication when the next line says.
+    var ambiguousCapture = false
+    /// Capture effects this function established from a VISIBLE media type. Their presence is what
+    /// resolves `ambiguousCapture`; their absence is what leaves the over-disclosure standing.
+    var determinateCapture: Set<String> = []
+
+    /// Fold a deferred ambiguous capture into the function's effects. Called once, after the whole body
+    /// has been walked, so `determinateCapture` is complete.
+    func resolveAmbiguousCapture() {
+        guard ambiguousCapture else { return }
+        if determinateCapture.isEmpty {
+            directEffects.insert("Camera")
+            directEffects.insert("Mic")
+        }
+    }
     /// SPEC §2 `fs` — the read/write kinds this function's OWN Fs calls revealed. Accumulated only from
     /// verbs that actually say; a verb that does not contributes nothing, so an undetermined direction
     /// stays undetermined rather than defaulting to one side.
@@ -701,7 +723,13 @@ final class CallCollector: SyntaxVisitor {
     }
 
     private func mediaTypeArg(_ args: LabeledExprListSyntax) -> String? {
-        for a in args where a.label?.text == "for" || a.label == nil {
+        // `mediaType:` TOO — `AVCaptureDevice.DiscoverySession(deviceTypes:mediaType:position:)` spells
+        // the same discriminant with a different label, and reading only `for:`/positional made that
+        // call ambiguous. Ambiguous over-discloses BOTH, so a camera-only QR scanner was charged Mic:
+        // Bitwarden, on the App Store without a microphone key, was told its manifest was wrong. The
+        // over-disclosure rule is deliberate and stays — but it must fire on calls whose media type is
+        // genuinely undetermined, not on ones spelled with the other label.
+        for a in args where a.label?.text == "for" || a.label?.text == "mediaType" || a.label == nil {
             let e = Self.peel(a.expression)
             // `.audio` / `.video` — a leading-dot member access (contextual enum-like static member).
             if let ma = e.as(MemberAccessExprSyntax.self) {
@@ -2320,7 +2348,10 @@ final class CallCollector: SyntaxVisitor {
                 // AND Mic (privacy: never under-declare a real sensor). A local type of the same name
                 // already short-circuited above (declaredTypes/localTypes), so this never fabricates on
                 // project code. Supersedes the flat Camera in kappaFree for these types.
-                for e in privacyCaptureEffects(mediaType: mediaTypeArg(node.arguments)) { directEffects.insert(e) }
+                // DEFER the ambiguous case to `resolveAmbiguousCapture` — see `ambiguousCapture`.
+                let mt = mediaTypeArg(node.arguments)
+                if mt == nil { ambiguousCapture = true }
+                else { for e in privacyCaptureEffects(mediaType: mt) { directEffects.insert(e); determinateCapture.insert(e) } }
             } else if !localTypes.contains(name), !localFreeFns.contains(name),
                       dealias(name) == "NWBrowser" || dealias(name) == "NetServiceBrowser" {
                 // A BONJOUR BROWSER CONSTRUCTOR — `NWBrowser(for: .bonjour(…), using:)`, which is the
@@ -2494,7 +2525,8 @@ final class CallCollector: SyntaxVisitor {
                         directEffects.insert(e)
                     }
                 }
-            } else if let rt = base.root, PRIVACY_CAPTURE_TYPES.contains(rt), !declaredTypes.contains(rt) {
+            } else if let rt = base.root, PRIVACY_CAPTURE_TYPES.contains(rt), !declaredTypes.contains(rt),
+                      !PRIVACY_CAPTURE_TEARDOWN_MEMBERS.contains(member) {
                 // `privacy/1` finding 5 — an AVFoundation CAPTURE call (`AVCaptureDevice.default(for: .audio)`,
                 // `.devices(for: .video)`, a bare `AVCaptureSession.startRunning()`): refine the Camera/Mic
                 // split by the media-type argument the syntactic engine CAN see. A statically-visible
@@ -2502,7 +2534,10 @@ final class CallCollector: SyntaxVisitor {
                 // AVCaptureSession, or a computed `for:` value) over-discloses BOTH (privacy: never
                 // under-declare a real sensor). Confirmed-capture-type only, so an unknown receiver still
                 // never fabricates. Supersedes the flat Camera in PRIVACY_SDK_TYPES for these types.
-                for e in privacyCaptureEffects(mediaType: mediaTypeArg(node.arguments)) { directEffects.insert(e) }
+                // DEFER the ambiguous case to `resolveAmbiguousCapture` — see `ambiguousCapture`.
+                let mt = mediaTypeArg(node.arguments)
+                if mt == nil { ambiguousCapture = true }
+                else { for e in privacyCaptureEffects(mediaType: mt) { directEffects.insert(e); determinateCapture.insert(e) } }
             } else if let rt = base.root, PRIVACY_EVENTKIT_TYPES.contains(rt), !declaredTypes.contains(rt) {
                 // `privacy/2` — an EventKit STORE call (`store.requestAccess(to: .reminder)`,
                 // `store.predicateForEvents(...)`): refine the Calendar/Reminders split by the entity-type

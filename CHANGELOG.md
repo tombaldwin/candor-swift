@@ -9,6 +9,49 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ Flip #17: a Debug-only build setting counted as DECLARED, and the App Store archive is Release.**
+  Verified end to end — `✓ every MODELLED capability is declared`, exit 0, on a project whose Release
+  configuration ships no camera key. It is one click in Xcode's per-config editor, and it was invisible
+  because the statement splitter threw `{`/`}` away, taking the block structure and the `name = Debug;`
+  line with it. Configuration blocks are now parsed and attributed by name; a key absent from Release is
+  disclosed, not counted. Only fires when the file HAS a Release configuration, so a project using
+  custom names is not told its keys are missing.
+- **⚠ ARKit and VisionKit were absent from the classifier entirely** — every AR app and document scanner
+  verified clean with "0 effects" against an empty plist, and ARKit does not merely get rejected, it
+  TRAPS at runtime without `NSCameraUsageDescription`.
+- **⚠ A non-string plist value counted as a declaration.** `<key>NSCameraUsageDescription</key><false/>`
+  verified green; Apple does not accept it. Only a non-empty string is a usage description.
+- **THE OVER-REPORT ROUND — six ways candor told a shipping app it was broken.** All found by running
+  the verb on apps it had NOT been developed against, which is the only way an over-report surfaces:
+  - the system **contacts and photo pickers** were charged usage keys. Apple, on the contacts picker:
+    *"The app using contact picker view does not need access to the user's contacts."* PHPicker is the
+    same out-of-process design. Both are now keyless effects — the reach is still reported.
+  - **`GKLocalPlayer` authentication** — the first line of every Game Center game — was charged the
+    friend-list key. Member-gated to the friends APIs, like `HKObjectType.clinicalType`.
+  - **`CLGeocoder`** was charged Location though it converts coordinates the CALLER supplies, and
+    **`INVoiceShortcutCenter`** was charged Siri though managing an app's own shortcuts sends Siri no
+    user data. Two shipping browsers were told their manifests were wrong on the latter.
+  - **a labelled `mediaType:` argument went unread**, so `DiscoverySession(deviceTypes:mediaType:…)`
+    fell through to "ambiguous" and fabricated Mic on a camera-only QR scanner.
+  - **`AVCaptureSession` is a coordinator, not a capture.** It captures nothing until an input built
+    from an `AVCaptureDevice` is added, and that call carries the media type — so the session
+    contributed no information the device call does not, while over-disclosing Mic on every function
+    that merely touched one, including pure teardown. A member denylist did not hold (`.forEach` on
+    `session.outputs` is a member call like any other), which was the signal that the TYPE was the wrong
+    place to ask. Capture ambiguity is now resolved per FUNCTION: a determinate device call in the same
+    body settles it, and only a genuinely undetermined capture still over-discloses both.
+  - **test code sitting beside its sources** was cited as evidence a shipping manifest was wrong. Now
+    excluded by `import XCTest`/`import Testing` — deliberately NOT by filename, because `ABTests.swift`
+    is production code and dropping it would be the cardinal sin this filter exists to avoid.
+- **A same-file build variable read as a missing key.** `INFOPLIST_KEY_… = $(SHARED_TEXT)` with
+  `SHARED_TEXT` defined two lines above is a real declaration; it was discarded with NO disclosure at
+  all — silence in the false-alarm direction. Same-file variables are now substituted, one level.
+- **The over-declaration warning no longer reads as "delete this key."** Several keys are required by
+  framework-mediated access with no call site — a web view's geolocation, a share sheet's Save Image —
+  and acting on the old phrasing crashes the app at the share sheet.
+
+## [0.27.0] — 2026-08-07
+
 - **CI-only: the plutil differential ran on Linux and reported 38 false disagreements.** Its skip asked
   whether `/usr/bin/plutil` EXISTS — and the Linux CI image has one (libplist's) that does not accept
   Apple's `-convert json`. So the test ran, every generated case "failed to parse", and the battery
@@ -128,7 +171,6 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 - **A second positional silently replaced the scan target** — `candor-swift . rep.json` scanned
   `rep.json` and said nothing about `.`. Now a usage error naming both.
 
-## [0.27.0] — 2026-08-05
 
 - **`CMMotionManager` requires no usage key, and candor said it did** — reporting a shipping app as
   under-declared. Apple's `NSMotionUsageDescription` page names four APIs (`CMSensorRecorder`,

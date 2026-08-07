@@ -71,7 +71,7 @@ final class PrivacyEffectsTests: XCTestCase {
     // finding 5 — a bare AVCaptureSession (no visible media-type arg) is AMBIGUOUS: it could capture audio
     // OR video, so it over-discloses BOTH Camera AND Mic. A missed sensor in a privacy manifest is the
     // App-Store-rejection-shaped error, so an ambiguous capture declares both (never silently under-declare).
-    func testBareCaptureSessionClassifiesBothCameraAndMic() throws {
+    func testABareCaptureSessionAloneIsNotACapture() throws {
         let (by, _) = try scan("""
         import Foundation
         import AVFoundation
@@ -83,8 +83,112 @@ final class PrivacyEffectsTests: XCTestCase {
         }
         Cam().start()
         """)
-        XCTAssertEqual(ProcessHarness.inferred(by, "Cam.start"), ["Camera", "Mic"],
-                       "a bare AVCaptureSession is an ambiguous capture → over-disclose BOTH Camera and Mic")
+        // ⟨2026-08-07⟩ REVERSED, and the reason is a fact about AVFoundation rather than a softening.
+        // An AVCaptureSession is a COORDINATOR: it captures nothing until an input built from an
+        // AVCaptureDevice is added, and THAT call carries the media type. So the session contributes no
+        // information the device call does not, while charging it over-disclosed Mic on every function
+        // that merely touched one — including `stopCameraSession()`, whose body is `outputs.forEach {
+        // removeOutput($0) }`. Bitwarden, a QR scanner shipping without a microphone key, was told its
+        // manifest was wrong on that evidence.
+        //
+        // The recall this gives up is a session fed by a device the scan cannot resolve, which is what
+        // the Unknown machinery and the coverage ledger exist to disclose rather than guess a microphone
+        // from. The over-disclosure that REMAINS is the one that carries information: a capture whose
+        // media type is genuinely undetermined still charges both (see `ambiguousCapture`).
+        XCTAssertEqual(ProcessHarness.inferred(by, "Cam.start"), [],
+                       "a session alone captures nothing — the DEVICE call is what says Camera or Mic")
+    }
+
+    // ⟨2026-08-07⟩ THE OVER-REPORT ROUND. Every case below is a finding candor made against a SHIPPING
+    // app that was wrong — found by running the verb on code it had not been developed against, which is
+    // the only way an over-report surfaces. Each one told a developer their App Store app was broken.
+
+    func testTeardownOfACaptureSessionIsNotACapture() throws {
+        // Bitwarden's `stopCameraSession()` — `outputs.forEach { removeOutput($0) }`, `stopRunning()` —
+        // was the evidence that a QR scanner with no microphone key "reaches Mic".
+        let (by, _) = try scan("""
+        import AVFoundation
+        final class S {
+            private var session: AVCaptureSession?
+            func teardown() {
+                guard let session else { return }
+                session.outputs.forEach { session.removeOutput($0) }
+                session.stopRunning()
+            }
+        }
+        S().teardown()
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "S.teardown"), [])
+    }
+
+    func testAVideoOnlySessionIsNotChargedMic() throws {
+        // The commonest camera idiom in iOS: build a session, add a `.video` device. The function says
+        // which medium one line after the ambiguous constructor.
+        let (by, _) = try scan("""
+        import AVFoundation
+        func videoOnly() {
+            let s = AVCaptureSession()
+            guard let d = AVCaptureDevice.default(for: .video) else { return }
+            s.addInput(try! AVCaptureDeviceInput(device: d))
+        }
+        videoOnly()
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "videoOnly"), ["Camera"])
+    }
+
+    func testALabelledMediaTypeArgumentIsRead() throws {
+        // `DiscoverySession(deviceTypes:mediaType:position:)` spells the discriminant with a different
+        // label; reading only `for:` made it ambiguous and fabricated Mic.
+        let (by, _) = try scan("""
+        import AVFoundation
+        func qr() {
+            _ = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInWideAngleCamera],
+                                                 mediaType: .video, position: .back)
+        }
+        qr()
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "qr"), ["Camera"])
+    }
+
+    func testTheOutOfProcessPickersRequireNoKey() throws {
+        // Apple, on the contacts picker: "The app using contact picker view does not need access to the
+        // user's contacts." PHPicker is the same design. Reported, not required.
+        XCTAssertEqual(PRIVACY_SDK_TYPES["CNContactPickerViewController"], "ContactsPicker")
+        XCTAssertEqual(PRIVACY_SDK_TYPES["PHPickerViewController"], "PhotosPicker")
+        XCTAssertEqual(privacyKeyMap["ContactsPicker"], [])
+        XCTAssertEqual(privacyKeyMap["PhotosPicker"], [])
+        XCTAssertEqual(PRIVACY_SDK_TYPES["CNContactStore"], "Contacts", "the real store still needs its key")
+    }
+
+    func testGameCenterLoginIsNotFriendListAccess() throws {
+        // `GKLocalPlayer.local.authenticate` is the first line of every Game Center game.
+        XCTAssertNil(PRIVACY_SDK_TYPES["GKLocalPlayer"], "the TYPE must not carry the friends key")
+        XCTAssertEqual(PRIVACY_MEMBER_TYPES["GKLocalPlayer"]?["loadFriends"], "GameCenterFriends")
+    }
+
+    func testGeocodingAndShortcutManagementAreNotSensorAccess() throws {
+        // CLGeocoder converts coordinates the CALLER supplies; INVoiceShortcutCenter manages the app's
+        // own shortcuts. Neither reads user data the keys govern.
+        XCTAssertNil(PRIVACY_SDK_TYPES["CLGeocoder"])
+        XCTAssertNil(PRIVACY_SDK_TYPES["INVoiceShortcutCenter"])
+        XCTAssertEqual(PRIVACY_SDK_TYPES["INPreferences"], "Siri", "the authorization API still is")
+    }
+
+    func testARKitAndVisionKitAreCamera() throws {
+        // A whole category of camera app was invisible: ARKit TRAPS at runtime without the key.
+        for t in ["ARSession", "ARWorldTrackingConfiguration", "VNDocumentCameraViewController",
+                  "DataScannerViewController"] {
+            XCTAssertEqual(PRIVACY_SDK_TYPES[t], "Camera", "\(t) requires NSCameraUsageDescription")
+        }
+    }
+
+    func testTestSourcesAreNotProduction() throws {
+        // An app whose tests live BESIDE its sources had a capture in a test `setUp()` cited as proof
+        // that its shipping manifest was wrong. The signal is the import, not the filename: a file
+        // called `ABTests.swift` is production code and dropping it would be the cardinal sin.
+        XCTAssertTrue(isTestSource("import XCTest\nfinal class T: XCTestCase {}"))
+        XCTAssertTrue(isTestSource("import Foundation\nimport Testing"))
+        XCTAssertFalse(isTestSource("import Foundation\n// ABTests live here\nstruct ABTests {}"))
     }
 
     // finding 5 — the media-type argument is STATICALLY VISIBLE on AVCaptureDevice.default(for:), so the

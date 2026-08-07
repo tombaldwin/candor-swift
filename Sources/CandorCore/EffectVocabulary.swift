@@ -61,6 +61,9 @@ public enum Effect: String, CaseIterable, Sendable {
     // `testEveryClassifiedEffectReachesTheReport` now pins the round-trip so the eighth copy of the
     // vocabulary cannot drift from the first again without a red test.
     case motionRaw = "MotionRaw"
+    // privacy/4 (2026-08-07) — the out-of-process system pickers, keyless for the same reason as
+    // MotionRaw: a real surface, no manifest requirement.
+    case contactsPicker = "ContactsPicker", photosPicker = "PhotosPicker"
     // constant-basis families (CONSTANT-PROVENANCE-DESIGN.md rungs 1-2)
     case folderDesktop = "FolderDesktop", folderDocuments = "FolderDocuments",
          folderDownloads = "FolderDownloads", removableVolume = "RemovableVolume",

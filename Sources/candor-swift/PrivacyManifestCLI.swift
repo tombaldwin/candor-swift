@@ -176,10 +176,12 @@ func loadDeclaredKeys(_ path: String) -> Set<String>? {
     // can see is empty is rejected.
     return Set(dict.keys.filter { k in
         guard k.hasSuffix("UsageDescription") else { return false }
-        if let str = dict[k] as? String {
-            return !str.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
-        return true
+        // A usage description is a STRING. `<key>NSCameraUsageDescription</key><false/>` is not a
+        // declaration Apple accepts, and counting it green was a false all-clear in the one direction
+        // that gets a build rejected. The previous `return true` treated any non-string value as a
+        // declaration; only a non-empty string is one.
+        guard let str = dict[k] as? String else { return false }
+        return !str.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     })
 }
 
@@ -243,7 +245,12 @@ func buildSettingUsageKeys(near plistPath: String)
     // happened to be read, which is the cross-file form of last-assignment-wins.
     var assignments: [BuildSettingAssignment] = []
     var perFile: [String: [BuildSettingAssignment]] = [:]
+    // Keys a file declares in SOME configuration but not in the one that ships. Collected alongside the
+    // assignments because the App Store archive is Release: a Debug-only key is not a declaration, and
+    // counting it was flip #17.
+    var configScoped: Set<String> = []
     func take(_ text: String, _ at: String) {
+        configScoped.formUnion(configurationScopedKeys(text))
         let a = usageAssignmentsInBuildSettings(text)
         guard !a.isEmpty else { return }
         assignments += a
@@ -271,15 +278,16 @@ func buildSettingUsageKeys(near plistPath: String)
         }
     }
     let verdict = declaredKeys(from: assignments)
+    let declared = verdict.declared.subtracting(configScoped)
     for (file, a) in perFile {
-        let here = Set(a.map(\.name)).intersection(verdict.declared)
+        let here = Set(a.map(\.name)).intersection(declared)
         if !here.isEmpty { found[file] = here }
     }
     // `inconsistent`: keys some file assigns a real value and another leaves EMPTY. Not counted as
     // declared — the engine cannot tell which configuration ships without the build graph, and the App
     // Store archive is the strict case — but REPORTED, because an inconsistent declaration is a genuine
     // finding about the project rather than a limitation of the reader.
-    return (found, verdict.inconsistent)
+    return (found, verdict.inconsistent.union(configScoped))
 }
 
 /// The files an `.xcconfig` `#include`s, resolved against its own directory.
@@ -329,6 +337,10 @@ let keylessReason: [String: String] = [
     "Notify": "notifications gate at runtime via requestAuthorization",
     "MotionRaw": "Apple requires NSMotionUsageDescription only for the stored/derived CoreMotion APIs, "
         + "not for the raw accelerometer/gyroscope stream",
+    "ContactsPicker": "the system contacts picker runs out of process — the app never gains access to "
+        + "the library, only to what the user picked, so Apple requires no usage description",
+    "PhotosPicker": "PHPicker runs out of process — the app never gains photo-library access, only the "
+        + "assets the user selected, so Apple requires no usage description",
 ]
 
 /// A PASTE-READY `Info.plist` fragment for a set of required keys.
@@ -560,7 +572,7 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         if !stillMissingAndInconsistent.isEmpty {
             FileHandle.standardError.write(
                 ("· \(stillMissingAndInconsistent.count) key(s) declared INCONSISTENTLY in build "
-                 + "settings — assigned a value in one place and left EMPTY in another: "
+                 + "settings — set in one configuration and empty or ABSENT in another: "
                  + "\(stillMissingAndInconsistent.sorted().joined(separator: ", ")). NOT counted as "
                  + "declared: which one ships depends on the configuration being built, and an App "
                  + "Store archive is Release. Give the key a value in every configuration that ships, "
@@ -759,7 +771,15 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         for key in overDeclared {
             // Name the effect this key would satisfy, for context.
             let eff = privacyKeyMap.first { $0.value.contains(key) }?.key ?? "sensor"
-            print("⚠ \(key) declared but no \(eff) reach found")
+            // NOT "unused — delete it", which is how the old wording read. Several keys are required by
+            // FRAMEWORK-MEDIATED access that has no call site to find: WKWebView's site geolocation
+            // needs NSLocationWhenInUseUsageDescription, and UIActivityViewController's built-in Save
+            // Image activity needs NSPhotoLibraryAddUsageDescription. Both fired on shipping browsers
+            // here, and acting on the old phrasing crashes the app at the share sheet. The line is true
+            // about REACH and must not be read as advice about the key.
+            print("⚠ \(key) declared, and this scan found no \(eff) reach for it — which may simply mean "
+                  + "the access is framework-mediated (a web view's geolocation, a share-sheet activity) "
+                  + "and has no call site to find. NOT a recommendation to remove it.")
         }
         if ok && overDeclared.isEmpty {
             let n = reached.count

@@ -701,6 +701,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if hits.count == 1, let de = hits.first { applyDepEntry(de, to: f.qual) }
             }
         }
+        cc.resolveAmbiguousCapture()   // the function is fully walked by here — see `ambiguousCapture`
         direct[f.qual, default: []].formUnion(cc.directEffects)
         if cc.unresolved { direct[f.qual, default: []].insert("Unknown") }
         whyMap[f.qual, default: []].formUnion(cc.why)

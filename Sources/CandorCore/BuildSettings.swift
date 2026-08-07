@@ -189,6 +189,97 @@ public func buildSettingStatements(_ raw: String) -> [String] {
     return out.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
 }
 
+/// The usage-description assignments of a pbxproj, grouped by the CONFIGURATION they belong to.
+///
+/// FLIP #17: a key set in the Debug block and absent from Release counted as DECLARED, and the App
+/// Store archive is RELEASE. Verified end to end — `✓ every MODELLED capability is declared`, exit 0,
+/// on a project whose Release configuration ships no camera key. It is one click in Xcode's per-config
+/// settings editor, and it was invisible because `buildSettingStatements` throws `{` and `}` away as
+/// separators, taking the block structure and the `name = Debug;` line with it.
+///
+/// The evaluator's consistency rule only ever fired on an EXPLICIT empty assignment; ABSENCE from a
+/// configuration had no representation at all. Its own docstring's example (`Release: KEY = ""`) is the
+/// rare spelling; not mentioning the key in Release is the common one.
+///
+/// This does NOT model configuration semantics — it reads the `name` each `XCBuildConfiguration` block
+/// already carries. `buildSettings = { … }` is nested INSIDE that block and comes BEFORE its `name`,
+/// so the assignments are collected on a frame stack and attributed when the block closes.
+struct ConfigurationBlock {
+    let name: String?
+    let assignments: [BuildSettingAssignment]
+}
+
+public func configurationBlocks(_ raw: String) -> [(name: String?, keys: Set<String>)] {
+    let chars = Array(stripCommentsPreservingStrings(raw))
+    // One frame per `{`: what was assigned directly in it, what bubbled up from its children, and the
+    // `name` it declares (which arrives after its children have closed).
+    struct Frame { var own: [BuildSettingAssignment] = []; var name: String? = nil }
+    var stack: [Frame] = [Frame()]
+    var out: [(name: String?, keys: Set<String>)] = []
+    var cur = "", inString = false, i = 0
+
+    func endStatement() {
+        defer { cur = "" }
+        let stmt = cur.trimmingCharacters(in: .whitespaces)
+        guard !stmt.isEmpty else { return }
+        if let a = parseUsageAssignment(stmt) {
+            stack[stack.count - 1].own.append(a)
+            return
+        }
+        // `name = Debug;` — the configuration this block IS.
+        let parts = stmt.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+        if parts.count == 2, parts[0] == "name" {
+            stack[stack.count - 1].name = unquoted(parts[1])
+        }
+    }
+
+    while i < chars.count {
+        let c = chars[i]
+        if inString {
+            if c == "\\", i + 1 < chars.count { cur.append(c); cur.append(chars[i + 1]); i += 2; continue }
+            if c == "\"" { inString = false }
+            cur.append(c); i += 1; continue
+        }
+        if c == "\"" { inString = true; cur.append(c); i += 1; continue }
+        if c == "{" {
+            endStatement(); stack.append(Frame()); i += 1; continue
+        }
+        if c == "}" {
+            endStatement()
+            let done = stack.removeLast()
+            if stack.isEmpty { stack = [Frame()] }
+            if done.name != nil || !done.own.isEmpty {
+                // A block that names itself IS a configuration; one that does not (a bare
+                // `buildSettings = { … }`) hands its assignments to the parent, which does.
+                if let n = done.name {
+                    out.append((n, Set(done.own.map(\.name))))
+                } else {
+                    stack[stack.count - 1].own += done.own
+                }
+            }
+            i += 1; continue
+        }
+        if c == ";" || c == "\n" { endStatement(); i += 1; continue }
+        cur.append(c); i += 1
+    }
+    endStatement()
+    return out
+}
+
+/// Keys declared in some configuration but NOT in the one that ships.
+///
+/// Only fires when the file actually HAS a `Release` configuration — a project using custom names
+/// (`Staging`, `AppStore`) must not be told its keys are missing, which would be the false-alarm mirror
+/// of the flip this closes.
+public func configurationScopedKeys(_ raw: String) -> Set<String> {
+    let blocks = configurationBlocks(raw)
+    let release = blocks.filter { ($0.name ?? "").caseInsensitiveCompare("Release") == .orderedSame }
+    guard !release.isEmpty else { return [] }
+    let inRelease = release.reduce(into: Set<String>()) { $0.formUnion($1.keys) }
+    let anywhere = blocks.reduce(into: Set<String>()) { $0.formUnion($1.keys) }
+    return anywhere.subtracting(inRelease)
+}
+
 /// Strip one layer of surrounding double quotes, honouring `\"` escapes inside.
 private func unquoted(_ s: String) -> String {
     let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -228,9 +319,38 @@ public func parseUsageAssignment(_ statement: String) -> BuildSettingAssignment?
     return BuildSettingAssignment(name: name, value: value)
 }
 
-/// Every usage-description assignment a build-settings file makes, in order.
+/// Every usage-description assignment a build-settings file makes, in order, with same-file variable
+/// references RESOLVED.
+///
+/// `INFOPLIST_KEY_NSCameraUsageDescription = $(SHARED_CAMERA_TEXT)` with `SHARED_CAMERA_TEXT` defined
+/// two lines above is a REAL declaration, and shared/white-label configs are written exactly that way.
+/// `isEffectivelyEmpty` strips every variable reference — which is right when the variable is defined
+/// elsewhere and cannot be seen (`$(inherited)` with nothing to inherit resolves to empty at build
+/// time) and WRONG when the file defines it itself. The result was a false "missing key" with no
+/// disclosure at all: the key never held a "real" value, so the inconsistency channel never fired
+/// either. Silence in the false-alarm direction is the failure that teaches a reader to distrust the
+/// verb.
+///
+/// Only SAME-FILE definitions are substituted, and only one level: a variable this file does not define
+/// stays unresolved and keeps the conservative reading.
 public func usageAssignmentsInBuildSettings(_ raw: String) -> [BuildSettingAssignment] {
-    buildSettingStatements(raw).compactMap(parseUsageAssignment)
+    let statements = buildSettingStatements(raw)
+    var vars: [String: String] = [:]
+    for st in statements {
+        guard let eq = st.firstIndex(of: "="), !st.contains("[") else { continue }
+        let name = String(st[st.startIndex..<eq]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, !name.contains(" "), !name.hasPrefix("INFOPLIST_KEY_") else { continue }
+        vars[name] = unquoted(String(st[st.index(after: eq)...]))
+    }
+    return statements.compactMap(parseUsageAssignment).map { a in
+        guard a.value.contains("$") else { return a }
+        var v = a.value
+        for (k, sub) in vars where !sub.isEmpty {
+            v = v.replacingOccurrences(of: "$(\(k))", with: sub)
+                 .replacingOccurrences(of: "${\(k)}", with: sub)
+        }
+        return BuildSettingAssignment(name: a.name, value: v)
+    }
 }
 
 /// The keys a build-settings file DECLARES with a real value — see the consistency rule above.

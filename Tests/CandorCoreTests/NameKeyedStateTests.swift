@@ -204,6 +204,12 @@ final class NameKeyedStateTests: XCTestCase {
         // Same shape as fsKinds: a flat per-FUNCTION accumulator (effect → directions), not keyed by a
         // binding name. A rebind says nothing about which sensor verbs the function called.
         "privacyKinds": .notPerBinding,
+        // The deferred capture-ambiguity pair. Both are FUNCTION-scoped accumulators like `directEffects`
+        // — nothing about them is keyed by a binding name, so a rebind is not their concern. What IS
+        // their concern is that `resolveAmbiguousCapture` runs once after the whole body is walked, and
+        // that is the collector's contract with Driver, not this file's.
+        "ambiguousCapture": .notPerBinding,
+        "determinateCapture": .notPerBinding,
         // CONSTANT PROVENANCE rung 3. Keyed by a BINDING name, so a rebind must drop it — `let p = home
         // + "/Desktop"` in one function must not charge a later `func f(_ p: String)`'s parameter the
         // Desktop key. Unscoped like `vars`: the collector walks one function at a time and `shadowName`
