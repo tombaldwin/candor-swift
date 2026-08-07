@@ -26,13 +26,16 @@ verify a privacy manifest from code-level truth**.
 | `Location` | device location | CoreLocation (`CLLocationManager`, `CLLocationUpdate`), MapKit user-tracking (`MKUserTrackingMode`) |
 | `Camera` | camera capture | AVFoundation (`AVCaptureDevice` video, `AVCaptureSession`), `UIImagePickerController` camera source |
 | `Mic` | microphone capture | AVFoundation (`AVCaptureDevice` audio, `AVAudioRecorder`, `AVAudioEngine.inputNode`) |
-| `Contacts` | the address book | Contacts / ContactsUI (`CNContactStore`, `CNContactPickerViewController`) |
-| `Photos` | the photo library | Photos / PhotosUI (`PHPhotoLibrary`, `PHAsset`, `PHPickerViewController`) |
+| `Contacts` | the address book | Contacts (`CNContactStore`) — the ContactsUI PICKER is `ContactsPicker`, below |
+| `Photos` | the photo library | Photos (`PHPhotoLibrary`, `PHAsset`) — the PhotosUI PICKER is `PhotosPicker`, below |
 | `Notify` | user-attention / notifications | UserNotifications (`UNUserNotificationCenter`) |
 
 ### The last five, and the two that are not code
 
-**55 of Apple's 57.** The five that remained with no obvious type were resolved by reading the DocC
+**56 of Apple's 57** — and the verify PRINTS that figure itself, derived from the tables rather than
+maintained here, so the number a reader is given cannot drift from the number the engine models. (This
+paragraph said 55 while the engine said 56, which is the drift the derived figure exists to prevent.)
+The five that had no obvious type were resolved by reading the DocC
 `references` block on Apple's own key pages rather than the prose — the linked symbols were there all
 along:
 
@@ -65,6 +68,35 @@ and should be labelled as one.
 > and publishing four of them would present our git history as somebody's upgrade path. The waves are
 > kept as narrative because the *order* of discovery is the useful part — each one was found by measuring
 > the previous one.
+
+### The over-report round (`privacy/4`, 2026-08-07) — three rows Apple does not require, and one it does conditionally
+
+Running the verb against shipping apps it had never seen produced a wrong finding on **every** app in
+that second group, and every one was an over-report. Each is recorded here because the reasoning is the
+model for the next such row, not because the row itself is interesting.
+
+| effect | keys | why it is not a plain sensor row |
+|---|---|---|
+| `ContactsPicker` | **none** | `CNContactPickerViewController` runs OUT OF PROCESS: the app never gains access to the library, only to what the user picked. Apple's statement is unconditional, so the effect is KEYLESS — the reach is still reported, and a `deny ContactsPicker` still binds. |
+| `PhotosPicker` | **none** | `PHPickerViewController`, same shape and the same unconditional statement. |
+| `CalendarUI` | `NSCalendars*`, **conditionally** | Apple, "Accessing the event store": *"EventKitUI presents chooser and editor UI outside of your app's process on iOS 17 and later. Your app can use EventKitUI without requesting write-only or full calendar access."* Below iOS 17 the key IS required, and this engine cannot see a deployment target. So the requirement is raised as a NAMED CONDITION (`PRIVACY_CONDITIONAL_REQUIREMENT`, ⚠, exit unchanged), never a hard ✗ and never silently: a ✗ is a false misconfiguration claim against every 17+-only app, and an empty key list is a silent under-report against every pre-17 one. The reader holds the one fact that settles it. |
+
+Two more, without new effects. `GKLocalPlayer` authentication was charged the FRIEND-LIST key and is now
+member-gated to the members that read friends. `CLGeocoder` was charged `Location` though it only converts
+coordinates the caller already supplies — no authorization, no key — and is removed.
+
+**`NSAppleEventDescriptor` was the same error in the other direction.** `NSAppleEventsUsageDescription`
+gates *sending* ("required if your app uses APIs that send Apple events" — Apple's key page), and the
+descriptor is the wrapper BOTH sides touch: every `kAEGetURL` receive handler takes two as parameters, so
+type-level charging flagged the receive-only half of the world. The effect now rides the one member that
+transmits (`sendEvent(options:timeout:)`), the C send route (`AESendMessage`) and the send-by-design types
+(`NSAppleScript`, whose script body is invisible to static analysis, and `SBApplication`, whose class page
+says "send Apple events" in terms). `NSAppleEventManager` is mapped nowhere, correctly: installing a
+handler is pure receive.
+
+**The pattern, stated because it will recur: an over-report is found only by running the tool on code you
+did not write and then checking whether the app is actually wrong.** A fixture corpus cannot produce one,
+because a fixture is written to the model the classifier already has.
 
 ### Fourth wave (`privacy/4`, 2026-08-05) — the rest of what a type can name
 
@@ -123,7 +155,7 @@ as *"your plist is right"*, which is the absence-is-a-claim shape the main spec 
 | `Health` | HealthKit samples | `HKHealthStore`, the sample/observer/statistics/anchored queries, workout sessions and builders |
 | `Motion` | motion & fitness sensors **that require the key** | CoreMotion (`CMPedometer`, `CMAltimeter`, `CMMotionActivityManager`, `CMHeadphoneMotionManager`, `CMSensorRecorder`, `CMMovementDisorderManager`) |
 | `MotionRaw` | the raw accelerometer / gyroscope / magnetometer stream — **no Info.plist key** | CoreMotion (`CMMotionManager`) |
-| `Calendar` | the user's calendars | EventKit (`EKEventStore` — ambiguous, see below; `EKEventEditViewController`, `EKCalendarChooser`) |
+| `Calendar` | the user's calendars | EventKit (`EKEventStore` — ambiguous, see below). The EventKitUI classes are `CalendarUI`, below |
 | `Reminders` | the user's reminders | EventKit (`EKEventStore` — ambiguous, see below) |
 | `Bluetooth` | BLE scanning / advertising | CoreBluetooth (`CBCentralManager`, `CBPeripheralManager`) |
 | `Speech` | speech recognition | Speech (`SFSpeechRecognizer`, the recognition requests) |
@@ -132,7 +164,7 @@ as *"your plist is right"*, which is the absence-is-a-claim shape the main spec 
 | `HomeKit` | home accessories | HomeKit (`HMHomeManager`, `HMAccessoryBrowser`) |
 | `Tracking` | App Tracking Transparency (IDFA) | AppTrackingTransparency (`ATTrackingManager`) |
 | `NearbyInteraction` | UWB ranging | NearbyInteraction (`NISession`) |
-| `Siri` | Siri authorization / donation | Intents (`INPreferences`, `INVoiceShortcutCenter`) |
+| `Siri` | Siri authorization / donation | Intents (`INPreferences`) |
 
 **`MotionRaw` is split from `Motion` because Apple splits it.** The documentation page for
 `NSMotionUsageDescription` names exactly four APIs — `CMSensorRecorder`, `CMPedometer`,
