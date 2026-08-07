@@ -438,7 +438,10 @@ final class PrivacyEffectsTests: XCTestCase {
             // reason a corpus run reported a FALSE under-declaration against a shipping app.
             ("CMMotionManager", "MotionRaw"), ("CMPedometer", "Motion"), ("CMHeadphoneMotionManager", "Motion"),
             ("CMMovementDisorderManager", "Motion"),
-            ("EKEventEditViewController", "Calendar"),
+            // CalendarUI, not Calendar, since 2026-08-07: EventKitUI presents out of process on iOS 17+
+            // and needs no calendar access there (Apple, "Accessing the event store"), so the pair is a
+            // split effect whose keys are conditionally required. See testEventKitUIKeysAreConditional.
+            ("EKEventEditViewController", "CalendarUI"),
             ("CBCentralManager", "Bluetooth"), ("CBPeripheralManager", "Bluetooth"),
             ("SFSpeechRecognizer", "Speech"), ("LAContext", "Biometrics"),
             ("MPMediaLibrary", "MediaLibrary"), ("MPMediaQuery", "MediaLibrary"),
@@ -573,5 +576,61 @@ final class PrivacyEffectsTests: XCTestCase {
         XCTAssertEqual(privacyKind(root: "HKHealthStore", member: "requestAuthorization",
                                    toShareIsNil: nil).sorted(), ["read", "write"],
                        "an invisible argument must stay ambiguous — never resolved to the convenient side")
+    }
+
+    // ── privacy/4 corrections measured on shipping apps ──────────────────────────────────────────────
+
+    /// NSAppleEventsUsageDescription gates SENDING — Apple's key page (fetched 2026-08-07): "This key is
+    /// required if your app uses APIs that send Apple events." NSAppleEventDescriptor is the wrapper BOTH
+    /// sides touch: NetNewsWire's `AppDelegate.getURL` — the kAEGetURL RECEIVE handler every Mac app with
+    /// a custom URL scheme installs — was the evidence candor printed for a send-only key. So the type is
+    /// out of the flat table and `sendEvent(options:timeout:)`, the one member that transmits, carries
+    /// the effect; the C route (`AESendMessage`, NetNewsWire's UserApp idiom) and the send-by-design
+    /// types (NSAppleScript, SBApplication) keep the send-side recall.
+    func testAppleEventReceiveSideDoesNotChargeTheSendKey() {
+        // The shared wrapper: no type-level charge, or every URL-scheme handler is misconfigured.
+        XCTAssertNil(PRIVACY_SDK_TYPES["NSAppleEventDescriptor"],
+                     "type-level charge flags kAEGetURL receive handlers — measured on NetNewsWire")
+        // The receive registrar was never mapped and must stay unmapped.
+        XCTAssertNil(PRIVACY_SDK_TYPES["NSAppleEventManager"], "installing a handler is pure receive")
+        // Reply-marshalling members a receive handler calls make no claim…
+        for m in ["paramDescriptor", "setParam", "setDescriptor", "record", "stringValue"] {
+            XCTAssertNil(kappaMember(root: "NSAppleEventDescriptor", member: m),
+                         "\(m) is marshalling, not transmission")
+        }
+        // …and the send member, the C send route, and the send-by-design types still charge.
+        XCTAssertEqual(kappaMember(root: "NSAppleEventDescriptor", member: "sendEvent"), "AppleEvents")
+        XCTAssertEqual(kappaFree(name: "AESendMessage", argCount: 4), "AppleEvents")
+        XCTAssertEqual(PRIVACY_SDK_TYPES["NSAppleScript"], "AppleEvents",
+                       "a script body is invisible to static analysis; over-disclosing is the safe side")
+        XCTAssertEqual(PRIVACY_SDK_TYPES["SBApplication"], "AppleEvents",
+                       "ScriptingBridge exists to send Apple events — its class page says so in terms")
+    }
+
+    /// EventKitUI's key requirement is DEPLOYMENT-TARGET-CONDITIONAL — Apple's "Accessing the event
+    /// store" (fetched 2026-08-07): "EventKitUI presents chooser and editor UI outside of your app's
+    /// process on iOS 17 and later. Your app can use EventKitUI without requesting write-only or full
+    /// calendar access." Below iOS 17 the UI is in-process and the key IS required, and candor cannot
+    /// see a deployment target — so the pair is a SPLIT effect that keeps Calendar's keys but is raised
+    /// as a named condition, never a hard ✗ (false claim against every 17+-only app) and never keyless
+    /// (silent under-report against every pre-17 one).
+    func testEventKitUIKeysAreConditional() {
+        XCTAssertEqual(PRIVACY_SDK_TYPES["EKEventEditViewController"], "CalendarUI")
+        XCTAssertEqual(PRIVACY_SDK_TYPES["EKCalendarChooser"], "CalendarUI")
+        // NOT keyless — the ContactsPicker shape requires an UNCONDITIONAL Apple statement, and this one
+        // is version-fenced. The keys are Calendar's own, so declaring for pre-17 satisfies both.
+        XCTAssertEqual(privacyKeyMap["CalendarUI"], privacyKeyMap["Calendar"],
+                       "the conditional side accepts exactly the parent's keys")
+        // The condition travels as data, and names the fence a reader can settle at a glance.
+        XCTAssertTrue(PRIVACY_CONDITIONAL_REQUIREMENT["CalendarUI"]?.contains("iOS 17") ?? false,
+                      "the verify must be able to NAME the condition, not just soften the glyph")
+        // The split discloses like MotionRaw's: `deny Calendar` written before it no longer binds here.
+        XCTAssertEqual(EFFECT_SPLIT_PARENT["CalendarUI"], "Calendar")
+        // And the name survives serialisation — the EffectVocabulary compactMap dropped TWO prior
+        // families whose classifier rows were perfect; asserting the round-trip here keeps this row's
+        // reach out of `inferred: []` purity claims.
+        XCTAssertEqual(Effect.from("CalendarUI")?.specName, "CalendarUI")
+        // Direction analysis must not touch the conditional side: it is not an Apple direction-split.
+        XCTAssertNil(privacyKeyMapByDirection["CalendarUI"])
     }
 }

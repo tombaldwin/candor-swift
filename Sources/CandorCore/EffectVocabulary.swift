@@ -64,6 +64,11 @@ public enum Effect: String, CaseIterable, Sendable {
     // privacy/4 (2026-08-07) — the out-of-process system pickers, keyless for the same reason as
     // MotionRaw: a real surface, no manifest requirement.
     case contactsPicker = "ContactsPicker", photosPicker = "PhotosPicker"
+    // privacy/4 (2026-08-07) — EventKit's UI classes, split from `Calendar`: their NSCalendars* key is
+    // required only below iOS 17 (EventKitUI is out-of-process on 17+), which the verify reports as a
+    // NAMED CONDITION rather than a hard failure. Case added IN THE SAME EDIT as the classifier row —
+    // the MotionRaw note above is about forgetting exactly this.
+    case calendarUI = "CalendarUI"
     // constant-basis families (CONSTANT-PROVENANCE-DESIGN.md rungs 1-2)
     case folderDesktop = "FolderDesktop", folderDocuments = "FolderDocuments",
          folderDownloads = "FolderDownloads", removableVolume = "RemovableVolume",

@@ -23,7 +23,105 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   Swift. Mixed-language apps are most mature iOS apps. Now counted and disclosed as a conditionality,
   bounded by the same project-root walk the build-settings reader uses. Measured: 0 on IceCubesApp and
   duckduckgo (pure Swift), 129 on WordPress-iOS.
+- **…and THREE walks anchored on the plist searched trees that are not the app's — one of them at 72
+  seconds a call.** Each looked for a project root above the plist and then read whatever it was pointed
+  at, so a plist handed to `--verify` from a directory that is not a checkout — a temp directory,
+  `/tmp`, an extracted archive — searched somebody else's: the non-Swift source count at **21 minutes
+  for one `swift test` case**, the `.entitlements` discovery at **233 seconds**, and the build-settings
+  reader's ancestor walk at **72 seconds per verify**. Together that is most of why this suite ran for
+  an hour instead of ten minutes.
+  - **The rule, applied three times: no checkout ⇒ the ancestors are not this app's directories.** One
+    shared `projectRootAbove` now gates all three. The count is not taken and says so
+    (`nonSwiftSourcesCounted: false` on the JSON channel, its own ⚠ on the console, printed even when
+    nothing else is conditional — a clean verify with no caveat is exactly the case it exists for);
+    "beside" reverts to literally beside for the entitlements file; and the build-settings walk reads
+    the plist's own directory only. Falling back to the plist's directory fixes nothing on its own,
+    because that directory IS `$TMPDIR` in the case that produced the 21 minutes, and a depth cap would
+    trade the cost for an under-count — the wrong currency, since the count is a DISCLOSURE and a quiet
+    `0` is a "nothing unread here" the run has no grounds for. Direction check on the build-settings
+    half: what is lost is an `.xcconfig` above a plist in a tree with NONE of the five markers, which
+    then reads as undeclared — an over-report, not a silent under-report. Where a root IS found nothing
+    changes, verified end to end.
+  - **`contentsOfDirectory(at:)` vs `(atPath:)` was worth 70 of those 72 seconds.** The URL variant
+    builds a `URL` and stats every entry; sampling one `--verify` put every second inside
+    `_FSURLCreateWithPathAndExtendedAttributes`. The marker test only needs names. (The directory it was
+    listing had 185,000 entries — 130,000 of them candor's own leaked test fixtures, which is a
+    separate housekeeping item now recorded.)
+- **⚠ The over-report round, continued — the two remaining rows that asserted keys Apple does not
+  require.** Both settled by fetching Apple's own pages, both verified on the corpus:
+  - **`NSAppleEventDescriptor` charged the SEND-only key to RECEIVE-side code.** Apple's key page:
+    *"This key is required if your app uses APIs that send Apple events"* — and the descriptor is the
+    wrapper BOTH sides touch. Measured on NetNewsWire: the evidence candor printed for
+    `NSAppleEventsUsageDescription` was `AppDelegate.getURL`, the kAEGetURL receive handler every Mac
+    app with a custom URL scheme installs. The type is out of the flat table; the effect now rides the
+    one member that transmits (`sendEvent(options:timeout:)` — member-gated like `GKLocalPlayer`), the
+    C send route (`AESendMessage`, a new kappaFree row), and the send-by-design types (`NSAppleScript`
+    kept — a script body is invisible to static analysis — plus `SBApplication`, whose class page says
+    "send Apple events" in terms, previously unmodelled). NetNewsWire's genuine send
+    (`SendToBlogEditorApp.send`) still charges; its receive-only half no longer does.
+  - **EventKit UI's key requirement changed with the OS, and candor asserted the old half
+    unconditionally.** Apple, "Accessing the event store": *"EventKitUI presents chooser and editor UI
+    outside of your app's process on iOS 17 and later. Your app can use EventKitUI without requesting
+    write-only or full calendar access."* Below iOS 17 the key IS required, and candor cannot see a
+    deployment target — so `EKEventEditViewController`/`EKCalendarChooser` are now a SPLIT effect,
+    `CalendarUI` (parent `Calendar`, same acceptable keys, `EFFECT_SPLIT_PARENT` disclosure), and the
+    verify raises an undeclared key as a NAMED CONDITION: a ⚠ carrying "required only when the
+    deployment target is below iOS 17…", exit code unchanged, `conditionallyUnderDeclared` on the JSON
+    channel, and a verdict line that says "no MODELLED capability is provably missing" rather than
+    over-claiming. Not keyless (the ContactsPicker shape needs an UNCONDITIONAL Apple statement; this
+    one is version-fenced, and keyless would silently under-report every pre-17 app), not a hard ✗ (a
+    false misconfiguration claim against every 17+-only app). The reader holds the one fact that
+    settles it, so the verify hands them exactly that question.
 
+- **`--target` now resolves `.xcodeproj` targets — the audience privacy-manifest is promoted to.**
+  It resolved only against a `Package.swift` and exited 2 on every Xcode-project repo, so those scans
+  stayed whole-repo and charged each shipped product with every other one's sensors: NetNewsWire's iOS
+  plist was charged `NSAppleEventsUsageDescription` from Mac-only code, Focus's plist was charged
+  Speech reached from firefox's QuickAnswers code in a sibling project (both measured, both false, both
+  gone under scoping — and the IceCubes/DuckDuckGo/WordPress app targets keep their full
+  Camera/Photos/Mic/Speech reach under scoping, measured, because the fix that loses real reach is
+  worse than the false alarm). The pbxproj is parsed by a hand-written OpenStep reader sharing the
+  build-settings evaluator's comment stripper — no `plutil`, so the Linux leg behaves identically.
+  Resolution covers the classic Sources-phase/group-tree form and Xcode 16 synchronized folders with
+  both halves of their per-target membership exceptions, plus the in-project dependency closure.
+  SwiftPM keeps priority whenever the manifest declares the name; the fallback states which resolver
+  answered. Every failure REFUSES (exit 2) — unparseable project, unknown name (listing the real
+  targets, applications first), dangling reference, missing synchronized folder — because a scope
+  silently resolved short is a purity claim over the files it dropped.
+
+  **Which package dependencies resolve, and which are disclosed.** LOCAL Swift packages — drag-in
+  `wrapper` file references, `XCLocalSwiftPackageReference`s, and packages sitting in a synchronized
+  folder's subdirectories (NetNewsWire's `Modules/`) — resolve INTO the scope: the product's targets,
+  their in-package closure, and `.product(…)` edges between local packages, transitively. This was a
+  stated boundary first and the measurement killed it: IceCubesApp's app target is a thin shell over
+  `Packages/*`, and scoping analyzed `[Notify]` while the app's real Camera/Photos reach sat beside a
+  green tick as a conditionality footnote. REMOTE packages (and cross-project target dependencies)
+  stay outside — counted in the scope note and κ-disclosed as uncovered, never silently pure. A local
+  product that cannot be resolved soundly REFUSES rather than narrowing the scan; a manifest that
+  builds its lists in code (WordPress's `XcodeSupport.products`) is read by
+  `swift package dump-package` — SwiftPM itself — and that execution is disclosed in the scope note.
+  When the target's build settings name its platform (SDKROOT/SUPPORTED_PLATFORMS, xcconfig
+  `#include` chains followed), files whose every top-level declaration sits in `#if os(…)` clauses
+  provably false for it are excluded — RSCore's Apple-events code is a member of the package but
+  compiles to nothing on iOS, and without this the false finding returned through the packages the
+  scoping had just resolved. Undecidable conditions (`canImport`, custom flags) always keep the file.
+
+- **⟨0.27⟩ `zeroMatch` on the verdict document (SPEC §4, conformance PART 36).** The zero-match list —
+  a rule whose scope bound no function — now rides the `--gate-json` document on BOTH routes (scan and
+  `gate --report`), code-point sorted via the UTF-8 view (Swift's default String `<` is canonical order,
+  and a Swift String cannot hold a lone surrogate, so the UTF-8 comparison is not lossy), deduplicated,
+  omitted when empty; it was stderr-only in all five engines. Never on the refusal document: the stash
+  is written by the one `evaluateGate` a run performs, and a refused run never evaluates.
+
+- **⟨0.27⟩ …and the SCAN route's COMPOSED document now carries `unevaluated` too (SPEC §3.1, PART 36
+  row (a4), no longer waived).** A certain AS-EFF-005 beside a refused policy exited 1 with the
+  violation and NOTHING saying the policy had never run — so a consumer reading `violations` with no
+  `unevaluated` beside it takes the document as *the policy ran and this is all it found*. Every rule of
+  the refused policy is now listed, raw line verbatim, the unhonourable one(s) with their specific cause
+  and the rest with a `why` naming the whole-policy refusal; an unreadable file gets one entry for the
+  whole policy, because an exit-1 document with an EMPTY list makes the same false claim in a quieter
+  way. This engine's composed document was already right about the other half (no `refused`/`reason`
+  beside `violations`), and a sole refusal is unchanged: exit 2, refusal document, its own list.
 - **⚠ Flip #17: a Debug-only build setting counted as DECLARED, and the App Store archive is Release.**
   Verified end to end — `✓ every MODELLED capability is declared`, exit 0, on a project whose Release
   configuration ships no camera key. It is one click in Xcode's per-config editor, and it was invisible

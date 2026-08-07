@@ -138,6 +138,13 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
     // violation it is sure of; it does not conceal the part it could not read, and it does not confine
     // that admission to stderr.
     if !unevaluated.isEmpty { dict["unevaluated"] = unevaluatedJson(unevaluated) }
+    // ⟨0.27⟩ SPEC §4 `zeroMatch` — the rules whose SCOPE bound no function, verbatim: the same list the
+    // stderr lines carry, in the machine channel, on BOTH routes (this writer serves them both). It was
+    // stderr-only in all five engines, so a wrapper reading the document could not see that a rule bound
+    // nothing — the typo'd-scope silent green, one channel over. Disclosure only: `ok` above and the
+    // caller's exit code never consult it; omitted when empty so a fully-binding verdict is
+    // byte-identical. Stashed by `evaluateGate` rather than passed, so no caller can forget it.
+    if !lastGateZeroMatch.isEmpty { dict["zeroMatch"] = lastGateZeroMatch }
     if path == "-" {
         if let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys]),
            let s = String(data: data, encoding: .utf8) { print(s) }
@@ -182,6 +189,24 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
 /// `nonisolated(unsafe)` because this is a single-threaded CLI process: the value is written once, by the
 /// verb's flag loop, before any work begins, and read only on the way out.
 nonisolated(unsafe) var gateVerdictSinks: [String] = []
+
+/// ⟨0.27⟩ The refused policy's rules, when a certain violation DOMINATED a whole-policy refusal and the
+/// run therefore writes a VERDICT (exit 1) rather than a refusal document. Set by the scan route's
+/// `refuseUnlessAViolationStands`; read by the one `writeGateVerdict` call on that route. It lives here
+/// rather than beside the caller because the write happens ~150 lines later, past `break policyBlock`,
+/// and a local would have had to be threaded through a scope the refusal jumps out of.
+///
+/// Empty on every other path — including a SOLE refusal, which writes the refusal document with its own
+/// `unevaluated` argument and never reaches the verdict tail.
+nonisolated(unsafe) var gateUnevaluated: [Unevaluated] = []
+
+/// ⟨0.27⟩ SPEC §4 `zeroMatch` — the raw text of every rule whose SCOPE bound no function, stashed by the
+/// one `evaluateGate` call a run performs and read by `writeGateVerdict` so the disclosure reaches the
+/// machine channel on BOTH routes without threading a parameter through every caller. Same shape and
+/// same single-threaded-one-shot-CLI safety argument as `gateVerdictSinks` above. Empty until a gate
+/// evaluates, which is also why the refusal document (written when the gate never evaluated) can never
+/// carry it.
+nonisolated(unsafe) var lastGateZeroMatch: [String] = []
 
 /// Print the reason, write the refusal document to every requested sink, exit 2.
 /// ⟨0.24⟩ `unevaluated` travels with it when the refusal IS a set of undecidable rules (SPEC §3.1) — the
@@ -322,7 +347,18 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
                 scopeMatchCount[r.raw, default: 0] += 1
             }
         }
-        let zeroMatch = scopeMatchCount.filter { $0.value == 0 }.keys.sorted()
+        // ⟨0.27⟩ CODE-POINT order, explicitly (the `zeroMatch` verdict key pins the `viaDispatchOn`
+        // collation, SPEC §4). Swift's default String `<` orders by Unicode canonical comparison, which
+        // agrees with code-point order on ASCII and can disagree off it — and the raw line is built from
+        // user identifiers. UTF-8 byte order IS code-point order, and unlike Java/JS a Swift String
+        // cannot hold a lone surrogate, so comparing the UTF-8 views is not lossy here.
+        let zeroMatch = scopeMatchCount.filter { $0.value == 0 }.keys
+            .sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }
+        // …stashed module-wide so `writeGateVerdict` can carry the same list on the verdict document
+        // (SPEC §4 `zeroMatch`) without threading a parameter through every caller — the same shape as
+        // `gateVerdictSinks`, and safe for the same reason (a single-threaded one-shot CLI: written by
+        // the one gate evaluation a run performs, read on the way out).
+        lastGateZeroMatch = zeroMatch
 
         for qual in inferred.keys.sorted() {
             let inf = inferred[qual] ?? []

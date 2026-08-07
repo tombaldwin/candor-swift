@@ -155,4 +155,37 @@ final class VerdictPrecedenceProcessTests: XCTestCase {
                        + "engine refused to read must NOT fire — the policy is unevaluated, not enforced. "
                        + "Got: \(String(describing: rules))")
     }
+
+    /// ⟨0.27⟩ …AND THE COMPOSED DOCUMENT MUST SAY SO. The test above pins that the refused policy did not
+    /// FIRE; this one pins that its silence is DISCLOSED. `violations` with no `unevaluated` beside it
+    /// reads as "the policy ran and this is all it found" — the fail-open's quiet twin, arriving through
+    /// the channel a CI wrapper actually parses. Every rule of the refused policy, raw line verbatim,
+    /// because a `deny Fs` absent from the list reads as enforced-and-passed one rule at a time.
+    func testTheComposedDocumentDisclosesEveryRuleOfTheRefusedPolicy() throws {
+        let f = try makeRegressedFixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let pol = f.root.appendingPathComponent("pol.txt")
+        try "deny Fs\ndeny Unknown[dispatch,nativ]\n".write(to: pol, atomically: true, encoding: .utf8)
+        let v = f.root.appendingPathComponent("v.json")
+        let r = try ProcessHarness.run(bin(), [f.root.path, "--out", f.root.appendingPathComponent("r").path,
+                                               "--policy", pol.path, "--gate-json", v.path],
+                                       env: ["CANDOR_BASELINE": f.baseline])
+        XCTAssertEqual(r.code, 1, "stderr: \(r.err)")
+        let d = try verdict(v)
+        let unev = (d["unevaluated"] as? [[String: Any]])?.compactMap { $0["rule"] as? String }
+        XCTAssertEqual(unev, ["deny Fs", "deny Unknown[dispatch,nativ]"],
+                       "EVERY rule, verbatim — not only the offending line: \(d)")
+        XCTAssertFalse(d.keys.contains("refused"),
+                       "a document carrying `violations` is a VERDICT and must not also carry the refusal "
+                       + "document's discriminator: \(d)")
+        // An unreadable policy has no lines to name, and an EMPTY list makes the same false claim.
+        let v2 = f.root.appendingPathComponent("v2.json")
+        _ = try ProcessHarness.run(bin(), [f.root.path, "--out", f.root.appendingPathComponent("r2").path,
+                                           "--policy", f.root.appendingPathComponent("nope.txt").path,
+                                           "--gate-json", v2.path],
+                                   env: ["CANDOR_BASELINE": f.baseline])
+        let d2 = try verdict(v2)
+        XCTAssertEqual((d2["unevaluated"] as? [[String: Any]])?.count, 1,
+                       "one entry naming the whole policy — never an empty list: \(d2)")
+    }
 }

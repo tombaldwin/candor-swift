@@ -39,11 +39,89 @@ public struct PackageTarget: Equatable, Sendable {
     /// A `dependencies:` argument was present but not a literal array, so this target's dependency list
     /// is UNKNOWN rather than empty. Resolving a closure through it would silently scan a subset.
     public let dependenciesUnreadable: Bool
+    /// `.product(name:package:)` NAMES in this target's dependency list. The SPM `--target` closure
+    /// still excludes them (they may be remote, and remote stays κ-disclosed) — but the `.xcodeproj`
+    /// scoping resolves the LOCAL ones across a repo's sibling packages, and it needs the names to do
+    /// so. Recorded, not resolved, here.
+    public let productDependencies: [String]
+    /// A `.product(…)` entry whose `name:` is not a literal — the Xcode-path resolver must REFUSE
+    /// rather than treat "could not read" as "not there".
+    public let productDependenciesUnreadable: Bool
 
     public init(name: String, dependencies: [String], path: String?, isTest: Bool,
-                dependenciesUnreadable: Bool = false) {
+                dependenciesUnreadable: Bool = false,
+                productDependencies: [String] = [], productDependenciesUnreadable: Bool = false) {
         self.name = name; self.dependencies = dependencies; self.path = path; self.isTest = isTest
         self.dependenciesUnreadable = dependenciesUnreadable
+        self.productDependencies = productDependencies
+        self.productDependenciesUnreadable = productDependenciesUnreadable
+    }
+}
+
+/// One `products:` declaration of a SwiftPM manifest: `.library(name:targets:)` / `.executable(…)`.
+public struct PackageProduct: Equatable, Sendable {
+    public let name: String
+    /// The member target names — EMPTY plus `targetsUnreadable` when the list is not literal.
+    public let targets: [String]
+    public let targetsUnreadable: Bool
+
+    public init(name: String, targets: [String], targetsUnreadable: Bool = false) {
+        self.name = name; self.targets = targets; self.targetsUnreadable = targetsUnreadable
+    }
+}
+
+/// Every product a SwiftPM manifest declares. Same structured parse as `parsePackageTargets`, same
+/// reason: the product name is the join key the `.xcodeproj` scoping resolves a
+/// `XCSwiftPackageProductDependency` against, and a regex over `name:` matches targets first.
+public func parsePackageProducts(manifestSource: String) -> [PackageProduct] {
+    let tree = Parser.parse(source: manifestSource)
+    let finder = ProductFinder()
+    finder.walk(tree)
+    return finder.products
+}
+
+/// Are the `Package(products:targets:)` LISTS themselves fully readable — i.e. literal arrays whose
+/// every element is a call the walkers above collect?
+///
+/// WHY THIS EXISTS. The walkers find `.library(…)`/`.target(…)` calls ANYWHERE in the file, so a
+/// helper like WordPress's `XcodeSupport.products` still yields its literal members. But
+/// `products: makeProducts()` — or an array holding a VARIABLE — hides entries entirely, and a
+/// consumer that treats "not found among the parsed products" as "must be a remote product" turns a
+/// hidden LOCAL product into a silently-narrowed scan. This is the checkable difference between
+/// "absent from a complete list" (a sound negative) and "absent from a list I could not fully read"
+/// (no answer at all). A missing argument counts as complete: an empty list is a real answer.
+public func packageManifestListsAreComplete(manifestSource: String) -> (products: Bool, targets: Bool) {
+    let tree = Parser.parse(source: manifestSource)
+    let finder = PackageCallFinder()
+    finder.walk(tree)
+    return (finder.productsComplete, finder.targetsComplete)
+}
+
+private final class PackageCallFinder: SyntaxVisitor {
+    var productsComplete = true
+    var targetsComplete = true
+
+    init() { super.init(viewMode: .sourceAccurate) }
+
+    override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
+        guard let callee = node.calledExpression.as(DeclReferenceExprSyntax.self),
+              callee.baseName.text == "Package" else { return .visitChildren }
+        for arg in node.arguments {
+            let complete = Self.isLiteralCallArray(arg.expression)
+            switch arg.label?.text {
+            case "products": productsComplete = complete
+            case "targets": targetsComplete = complete
+            default: break
+            }
+        }
+        return .visitChildren
+    }
+
+    /// A literal array whose elements are all direct calls (`.library(…)`, `.target(…)`) — anything
+    /// else (a concatenation, a function call, an identifier element) can hide entries.
+    static func isLiteralCallArray(_ expr: ExprSyntax) -> Bool {
+        guard let arr = expr.as(ArrayExprSyntax.self) else { return false }
+        return arr.elements.allSatisfy { $0.expression.as(FunctionCallExprSyntax.self) != nil }
     }
 }
 
@@ -148,6 +226,8 @@ private final class TargetFinder: SyntaxVisitor {
         let isTest = member.declName.baseName.text == "testTarget"
         var name: String?, path: String?, deps: [String] = []
         var unreadableDeps = false
+        var productDeps: [String] = []
+        var unreadableProductDeps = false
         for arg in node.arguments {
             switch arg.label?.text {
             case "name": name = Self.literal(arg.expression)
@@ -170,10 +250,20 @@ private final class TargetFinder: SyntaxVisitor {
                 for el in arr.elements {
                     if let s = Self.literal(el.expression) { deps.append(s); continue }
                     // `.target(name: "X")` and `.byName(name: "X")` are in-package references;
-                    // `.product(name:package:)` is external and is deliberately not collected.
+                    // `.product(name:package:)` is external to THIS package — excluded from the
+                    // in-package closure as ever, but its NAME is recorded so the `.xcodeproj` scoping
+                    // can resolve it against the repo's sibling local packages.
                     guard let call = el.expression.as(FunctionCallExprSyntax.self),
-                          let m = call.calledExpression.as(MemberAccessExprSyntax.self),
-                          ["target", "byName"].contains(m.declName.baseName.text) else { continue }
+                          let m = call.calledExpression.as(MemberAccessExprSyntax.self) else { continue }
+                    let kind = m.declName.baseName.text
+                    if kind == "product" {
+                        if let n = call.arguments.first(where: { $0.label?.text == "name" })
+                            .flatMap({ Self.literal($0.expression) }) { productDeps.append(n) }
+                        else { unreadableProductDeps = true }   // a product we cannot NAME cannot be
+                                                                // proved absent from the local set
+                        continue
+                    }
+                    guard ["target", "byName"].contains(kind) else { continue }
                     if let n = call.arguments.first(where: { $0.label?.text == "name" })
                         .flatMap({ Self.literal($0.expression) }) { deps.append(n) }
                 }
@@ -182,7 +272,9 @@ private final class TargetFinder: SyntaxVisitor {
         }
         if let n = name {
             targets.append(PackageTarget(name: n, dependencies: deps, path: path, isTest: isTest,
-                                         dependenciesUnreadable: unreadableDeps))
+                                         dependenciesUnreadable: unreadableDeps,
+                                         productDependencies: productDeps,
+                                         productDependenciesUnreadable: unreadableProductDeps))
         }
         // DO NOT DESCEND. `.target(name: "Core")` is also the in-package form of a DEPENDENCY reference
         // (`.testTarget(name: "CoreTests", dependencies: [.target(name: "Core")])`), and visiting children
@@ -201,5 +293,46 @@ private final class TargetFinder: SyntaxVisitor {
         guard let lit = expr.as(StringLiteralExprSyntax.self), lit.segments.count == 1,
               let seg = lit.segments.first?.as(StringSegmentSyntax.self) else { return nil }
         return seg.content.text
+    }
+}
+
+/// The `products:` walk. `.library(name:targets:)` / `.executable(name:targets:)` /
+/// `.plugin(name:targets:)`. A product whose `targets:` is not a literal array is kept with
+/// `targetsUnreadable` — the consumer must refuse to resolve THROUGH it, but its NAME still proves the
+/// product is local, which is the difference between a refusal and a silent remote-misclassification.
+private final class ProductFinder: SyntaxVisitor {
+    var products: [PackageProduct] = []
+    private static let kinds: Set<String> = ["library", "executable", "plugin"]
+
+    init() { super.init(viewMode: .sourceAccurate) }
+
+    override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
+        guard let member = node.calledExpression.as(MemberAccessExprSyntax.self),
+              member.base == nil,
+              Self.kinds.contains(member.declName.baseName.text) else { return .visitChildren }
+        var name: String?
+        var targets: [String] = []
+        var sawTargets = false, unreadable = false
+        for arg in node.arguments {
+            switch arg.label?.text {
+            case "name": name = TargetFinder.literal(arg.expression)
+            case "targets":
+                sawTargets = true
+                guard let arr = arg.expression.as(ArrayExprSyntax.self) else { unreadable = true; break }
+                for el in arr.elements {
+                    if let s = TargetFinder.literal(el.expression) { targets.append(s) }
+                    else { unreadable = true }
+                }
+            default: break
+            }
+        }
+        if let n = name {
+            products.append(PackageProduct(name: n, targets: targets,
+                                           targetsUnreadable: unreadable || !sawTargets))
+        }
+        // `.library(…)` does not nest another product declaration; and NOT descending keeps a
+        // `targets:` list's own strings from ever being re-read as anything else — the same
+        // phantom-declaration hazard TargetFinder documents.
+        return .skipChildren
     }
 }

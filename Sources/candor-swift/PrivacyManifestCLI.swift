@@ -219,7 +219,16 @@ func buildSettingUsageKeys(near plistPath: String)
     var dirs: [URL] = []
     var dir = URL(fileURLWithPath: plistPath).deletingLastPathComponent()
     var sawMarker = false
-    for level in 0..<8 {
+    // …AND NOT UP AT ALL WHEN THERE IS NO REPOSITORY. Same rule as `countNonSwiftSources` and
+    // `discoverEntitlements`, for the third time and the same reason: the ancestors of a plist that is
+    // not in a checkout are not this app's directories. Without this the marker-less arm below still
+    // listed two ancestors, and on a developer machine one of them is `$TMPDIR` — 185,000 entries here,
+    // which is a 72-second directory listing per verify and most of why this suite ran for an hour.
+    // Direction check: what is lost is an `.xcconfig` one or two levels above a plist in a tree with
+    // NONE of the five markers, which would then read as undeclared — an over-report, not a silent
+    // under-report, and a tree with no marker within eight hops is not a project.
+    let inACheckout = projectRootAbove(plistPath) != nil
+    for level in 0..<(inACheckout ? 8 : 1) {
         if level >= 3 && !sawMarker { break }   // unmarked tree: never past the plist's 2nd ancestor
         dirs.append(dir)
         // Stop at the PROJECT ROOT, not merely at `.git`: a tree that is not a git checkout (a vendored
@@ -232,8 +241,7 @@ func buildSettingUsageKeys(near plistPath: String)
         // above its plist, and anything further up is somebody else's.
         let markers = [".git", "Package.swift", "Package.resolved"]
         let isRoot = markers.contains { fm.fileExists(atPath: dir.appendingPathComponent($0).path) }
-            || ((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
-                .contains { $0.pathExtension == "xcodeproj" || $0.pathExtension == "xcworkspace" }
+            || directoryHasXcodeProject(dir.path)
         if isRoot { sawMarker = true; break }
         let parent = dir.deletingLastPathComponent()
         if parent.path == dir.path { break }
@@ -257,8 +265,10 @@ func buildSettingUsageKeys(near plistPath: String)
         perFile[at, default: []] += a
     }
     for d in dirs {
-        guard let entries = try? fm.contentsOfDirectory(at: d, includingPropertiesForKeys: nil) else { continue }
-        for e in entries {
+        // `atPath:` again, for the reason `directoryHasXcodeProject` carries: the URL variant stats every
+        // entry, and these are directories chosen by a walk, not by this function.
+        guard let names = try? fm.contentsOfDirectory(atPath: d.path) else { continue }
+        for e in names.map({ d.appendingPathComponent($0) }) {
             var candidates: [URL] = []
             if e.pathExtension == "xcodeproj" { candidates.append(e.appendingPathComponent("project.pbxproj")) }
             if e.pathExtension == "xcconfig" { candidates.append(e) }
@@ -363,26 +373,69 @@ let keylessReason: [String: String] = [
         + "assets the user selected, so Apple requires no usage description",
 ]
 
-/// How many NON-SWIFT source files sit in the tree this plist belongs to.
-///
-/// Bounded by the same project-root walk the build-settings reader uses, so it cannot wander above the
-/// checkout and count somebody else's code. Counts only languages that can reach a sensor directly.
-func countNonSwiftSources(near plistPath: String) -> Int {
+/// Does this directory hold an `.xcodeproj`/`.xcworkspace`? The `atPath:` listing, NOT `at:` — the URL
+/// variant builds a `URL` (and stats) for every entry, which on a directory with 185,000 of them is a
+/// 72-second call. Sampling one `--verify` put every second of it inside
+/// `contentsOfDirectoryAtURL` → `_FSURLCreateWithPathAndExtendedAttributes`. Names are all this test
+/// needs.
+func directoryHasXcodeProject(_ path: String) -> Bool {
+    guard let names = try? FileManager.default.contentsOfDirectory(atPath: path) else { return false }
+    return names.contains { $0.hasSuffix(".xcodeproj") || $0.hasSuffix(".xcworkspace") }
+}
+
+/// The checkout `path` belongs to — `.git` / `Package.swift` / `Package.resolved` / an `.xcodeproj` or
+/// `.xcworkspace` within eight hops up — or nil when there is none. ONE definition, because both
+/// callers below use it for the same purpose: deciding whether a directory tree is this app's, and so
+/// whether descending it answers about this app at all.
+func projectRootAbove(_ path: String) -> String? {
     let fm = FileManager.default
-    var dir = URL(fileURLWithPath: plistPath).deletingLastPathComponent()
+    var dir = URL(fileURLWithPath: path)
+    var isD: ObjCBool = false
+    if !(fm.fileExists(atPath: path, isDirectory: &isD) && isD.boolValue) {
+        dir = dir.deletingLastPathComponent()
+    }
     for _ in 0..<8 {
         let markers = [".git", "Package.swift", "Package.resolved"]
         let isRoot = markers.contains { fm.fileExists(atPath: dir.appendingPathComponent($0).path) }
-            || ((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
-                .contains { $0.pathExtension == "xcodeproj" || $0.pathExtension == "xcworkspace" }
-        if isRoot { break }
+            || directoryHasXcodeProject(dir.path)
+        if isRoot { return dir.path }
         let parent = dir.deletingLastPathComponent()
         if parent.path == dir.path { break }
         dir = parent
     }
+    return nil
+}
+
+/// How many NON-SWIFT source files sit in the tree this plist belongs to.
+///
+/// Bounded by the same project-root walk the build-settings reader uses, so it cannot wander above the
+/// checkout and count somebody else's code. Counts only languages that can reach a sensor directly.
+///
+/// **THE WALK MUST FIND A ROOT, NOT MERELY RUN OUT OF HOPS — and `nil` when it doesn't.** The first
+/// version enumerated `dir` whichever way the loop ended, so a plist with no project marker above it (a
+/// temp directory, `/tmp`, an extracted archive) walked eight levels up and enumerated THAT: measured at
+/// **21 minutes on one `swift test` case**, from `/var/folders/…/T/` — a census of the machine's temp
+/// tree. Wrong twice over: unbounded work, and every `.c` found there is somebody else's code counted as
+/// this app's undisclosed reach.
+///
+/// The obvious repair — fall back to the plist's own directory — fixes neither half, because that
+/// directory IS `/var/folders/…/T` in the case that produced the 21 minutes. And a depth cap would trade
+/// the cost for an under-count, which is the wrong currency: this number is a DISCLOSURE, so a quiet `0`
+/// is a "nothing unread here" the run has no grounds for. So: no project root located ⇒ **nil**, and the
+/// caller discloses that the count could not be taken rather than printing a zero it cannot support.
+/// When a root IS found the enumeration is bounded by the checkout and skips the build and dependency
+/// trees the other walkers skip — a vendored `Pods/` is not this target's un-analyzed source.
+func countNonSwiftSources(near plistPath: String) -> Int? {
+    let fm = FileManager.default
+    guard let root = projectRootAbove(plistPath) else { return nil }
+    let dir = URL(fileURLWithPath: root)
+    let skip: Set<String> = [".build", ".git", "DerivedData", "Pods", "node_modules", "Carthage", ".swiftpm"]
     var n = 0
-    guard let en = fm.enumerator(atPath: dir.path) else { return 0 }
+    guard let en = fm.enumerator(atPath: dir.path) else { return nil }
     for case let rel as String in en {
+        if let leaf = rel.split(separator: "/").last.map(String.init), skip.contains(leaf) {
+            en.skipDescendants(); continue
+        }
         let ext = (rel as NSString).pathExtension.lowercased()
         if ["m", "mm", "c", "cc", "cpp", "cxx"].contains(ext), !isHarnessPath(rel) {
             n += 1
@@ -421,10 +474,26 @@ private func plistFragment(_ keys: [(effect: String, key: String)]) -> String {
 /// The `.entitlements` beside a plist, if there is exactly one. Same discovery discipline as the
 /// Info.plist: exactly one is used, several REFUSE to guess (an app with several targets has several,
 /// and reading the wrong one answers about the wrong binary), none is simply absent.
+///
+/// **RECURSIVE ONLY INSIDE A CHECKOUT.** `root` is the directory holding the plist, and when that is a
+/// real target directory the descent is bounded by the app. When the plist was handed to `--verify`
+/// from somewhere that is NOT a checkout — a temp directory, `/tmp`, an extracted archive — the descent
+/// is bounded by nothing: measured at **233 seconds for one `swift test` case**, enumerating the
+/// machine's whole temp tree to look for a file "beside" the plist. So the same project-root test
+/// `countNonSwiftSources` uses gates the recursion: no root above the plist ⇒ "beside" means literally
+/// beside, the plist's own directory and no deeper. Nothing is lost where anything could be — an
+/// entitlements file three levels under a directory that is not a checkout is not this app's.
 func discoverEntitlements(from root: String) -> (path: String?, several: Bool) {
     let fm = FileManager.default
     let skip: Set<String> = [".build", ".git", "DerivedData", "Pods", "node_modules", ".swiftpm"]
     var found: [String] = []
+    guard projectRootAbove(root) != nil else {
+        let here = ((try? fm.contentsOfDirectory(atPath: root)) ?? [])
+            .filter { $0.hasSuffix(".entitlements") }
+            .map { (root as NSString).appendingPathComponent($0) }
+        if here.count == 1 { return (here[0], false) }
+        return (nil, here.count > 1)
+    }
     if let en = fm.enumerator(atPath: root) {
         for case let rel as String in en {
             let parts = rel.split(separator: "/").map(String.init)
@@ -499,6 +568,21 @@ func undeterminedPaths(_ byName: [String: FixFn]) -> (ops: Int, fns: [String]) {
     return (fns.count, fns.sorted())
 }
 
+/// The determination BASIS of each DISTINCT modelled key. Per key, not per effect-row: `CalendarUI`
+/// accepts Calendar's own three keys, and summing rows counted them twice — a breakdown that did not
+/// add up to the `modelled` total it explains. When two effects share a key, the FIRST in
+/// `PRIVACY_EFFECTS_ORDER` names the basis (deterministic, and it is the parent of a split — the
+/// established row — that wins over the newcomer).
+private func privacyKeyBasisByKey() -> [String: String] {
+    var basisByKey: [String: String] = [:]
+    for eff in PRIVACY_EFFECTS_ORDER {
+        for k in privacyKeyMap[eff] ?? [] where basisByKey[k] == nil {
+            basisByKey[k] = PRIVACY_KEY_BASIS[eff] ?? "type"
+        }
+    }
+    return basisByKey
+}
+
 /// §6 of CONSTANT-PROVENANCE-DESIGN.md — report HOW COMPLETELY, not just which keys.
 ///
 /// `undetermined` is the number of file operations whose PATH this scan could not name. It is reported
@@ -509,9 +593,7 @@ private func printPrivacyVocabularyBound(undetermined: (ops: Int, fns: [String])
                                          fileProvider: Bool) {
     let modelled = Set(privacyKeyMap.values.flatMap { $0 }).count
     var byBasis: [String: Int] = [:]
-    for (eff, keys) in privacyKeyMap where !keys.isEmpty {
-        byBasis[PRIVACY_KEY_BASIS[eff] ?? "type", default: 0] += keys.count
-    }
+    for (_, basis) in privacyKeyBasisByKey() { byBasis[basis, default: 0] += 1 }
     let bases = byBasis.sorted { $0.key < $1.key }.map { "\($0.value) by \($0.key)" }.joined(separator: " · ")
     print("⚠ COVERAGE: \(modelled) of Apple's \(APPLE_PRIVACY_KEYS.count) documented usage-description keys "
           + "are modelled (\(bases)).")
@@ -646,9 +728,21 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         // UNDER-declaration: a reached effect (except Notify, which needs no key) whose acceptable-key set
         // has NO member present in the plist — the App-Store-rejection finding.
         var underDeclared: [(effect: String, keys: [String], fns: [String])] = []
+        // CONDITIONALLY under-declared: the effect's keys are absent but required only under a condition
+        // this engine cannot decide (PRIVACY_CONDITIONAL_REQUIREMENT — today, EventKitUI's iOS 17
+        // deployment-target fence). A ⚠ with the condition NAMED, never a ✗ and never silence: a hard
+        // failure is a false claim against every iOS-17+-only app, and dropping the key is the silent
+        // under-report against every pre-17 one. Exit code unchanged — disclosure, not a gate.
+        var conditionallyUnder: [(effect: String, keys: [String], fns: [String], condition: String)] = []
         for eff in reached {
             let keys = privacyKeyMap[eff] ?? []
             if keys.isEmpty { continue }   // Notify — no key required, never under-declared
+            if let cond = PRIVACY_CONDITIONAL_REQUIREMENT[eff] {
+                if !keys.contains(where: { declaredAll.contains($0) }) {
+                    conditionallyUnder.append((effect: eff, keys: keys, fns: fnsFor(eff), condition: cond))
+                }
+                continue
+            }
             // `privacy/2` — when the direction was PROVED and this effect's keys are direction-sensitive,
             // check each proved direction against its own key set. An app that reads AND writes HealthKit
             // needs BOTH keys, and reports the missing side by name rather than as one vague "Health".
@@ -665,6 +759,14 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
             if !keys.contains(where: { declaredAll.contains($0) }) {
                 underDeclared.append((effect: eff, keys: keys, fns: fnsFor(eff)))
             }
+        }
+        // A conditional finding is REDUNDANT when its parent effect already failed hard over the same
+        // keys — "you must declare NSCalendars*" followed by "…and separately, you might need
+        // NSCalendars*" is one finding wearing two glyphs. The hard row governs; declaring its key
+        // satisfies both.
+        conditionallyUnder.removeAll { c in
+            guard let parent = EFFECT_SPLIT_PARENT[c.effect] else { return false }
+            return underDeclared.contains { $0.effect == parent || $0.effect.hasPrefix("\(parent) (") }
         }
 
         // OVER-declaration: a declared privacy-cluster key that satisfies NO reached effect — an unused
@@ -694,7 +796,12 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         // "Absence from the report is never a claim of purity" is this project's rule; a language the
         // scanner cannot read is exactly the case it exists for.
         let nonSwiftSources = countNonSwiftSources(near: plistPath)
-        let conditional = !model.coverage.isEmpty || nonSwiftSources > 0
+        // nil = no project root could be located from the plist, so the count was NOT taken (see
+        // `countNonSwiftSources`). That is disclosed on its own channel rather than through
+        // `conditional`: this flag gates the COVERAGE block, and folding an unrelated "we could not
+        // look" into it emitted an empty `coverage: {modules: [], uncovered: 0}` — a disclosure that
+        // says nothing, attached to a question it does not answer.
+        let conditional = !model.coverage.isEmpty || (nonSwiftSources ?? 0) > 0
 
         // COMPUTED BEFORE THE JSON BRANCH, which used to exit ~100 lines above this and so
         // carried no entitlement finding at all — the CI-facing form was the one missing it.
@@ -748,6 +855,16 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
                 "overDeclared": overDeclared,
                 "ok": ok,
             ]
+            // The machine consumer gets the conditional finding too — `ok: true` beside a condition the
+            // reader must settle is not the same claim as a bare `ok: true`, and CI is the reader that
+            // cannot weigh a caveat it never receives. Absent when empty, so the shape is unchanged for
+            // everyone else.
+            if !conditionallyUnder.isEmpty {
+                verdict["conditionallyUnderDeclared"] = conditionallyUnder.map {
+                    ["effect": $0.effect, "keys": $0.keys, "fns": $0.fns,
+                     "condition": $0.condition] as [String: Any]
+                }
+            }
             // PROVENANCE TRAVELS ON THE MACHINE CHANNEL TOO. `declared` merges plist keys with keys read
             // from Xcode BUILD SETTINGS, and the function that does the merge documents that the
             // provenance is "REPORTED, never silently merged" — which was true only of the human stderr
@@ -777,6 +894,11 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
                 verdict["conditional"] = true
                 verdict["coverage"] = ["uncovered": uncoveredModules.count, "modules": uncoveredModules] as [String: Any]
             }
+            // …and the language bound on its own key, present ONLY when the count could not be taken, so
+            // a verify that DID count stays byte-identical. A machine consumer reading `ok: true` with no
+            // caveat is the one this exists for: no project root means no tree to call the app's, so this
+            // run cannot say whether unread Objective-C exists.
+            if nonSwiftSources == nil { verdict["nonSwiftSourcesCounted"] = false }
             // THE MACHINE CONSUMER GETS THE DISCLOSURE TOO. Every §6 mechanism lived in the human branch
             // only, so `--json` — the form CI reads — returned a bare `"ok": true` with no coverage, no
             // undetermined count, no unmodelled list and no entitlement finding. The reader who can weigh
@@ -791,9 +913,8 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
                 "modelledKeys": Set(privacyKeyMap.values.flatMap { $0 }).count,
                 "appleDocumentedKeys": APPLE_PRIVACY_KEYS.count,
                 "unmodelled": PRIVACY_UNMODELLED_KEYS.map { ["key": $0.key, "why": $0.why] },
-                "byBasis": Dictionary(grouping: privacyKeyMap.filter { !$0.value.isEmpty },
-                                      by: { PRIVACY_KEY_BASIS[$0.key] ?? "type" })
-                    .mapValues { $0.reduce(0) { $0 + $1.value.count } },
+                "byBasis": Dictionary(grouping: privacyKeyBasisByKey(), by: { $0.value })
+                    .mapValues { $0.count },
             ] as [String: Any]
             if und.ops > 0 {
                 verdict["undeterminedPaths"] = ["count": und.ops, "functions": und.fns] as [String: Any]
@@ -828,6 +949,12 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
             let via = u.fns.isEmpty ? "" : " (via \(u.fns.prefix(3).joined(separator: ", ")))"
             print("✗ code reaches \(u.effect)\(via) but Info.plist declares no \(u.keys.first ?? "usage-description key")")
         }
+        for c in conditionallyUnder {
+            let via = c.fns.isEmpty ? "" : " (via \(c.fns.prefix(3).joined(separator: ", ")))"
+            print("⚠ code reaches \(c.effect)\(via) and no \(c.keys.first ?? "usage-description key") is "
+                  + "declared — \(c.condition). Candor cannot see the deployment target, so this is not "
+                  + "counted as missing; if it applies to you, declare the key.")
+        }
         for key in overDeclared {
             // Name the effect this key would satisfy, for context.
             let eff = privacyKeyMap.first { $0.value.contains(key) }?.key ?? "sensor"
@@ -841,13 +968,18 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
                   + "the access is framework-mediated (a web view's geolocation, a share-sheet activity) "
                   + "and has no call site to find. NOT a recommendation to remove it.")
         }
-        if ok && overDeclared.isEmpty {
+        if ok && overDeclared.isEmpty && conditionallyUnder.isEmpty {
             let n = reached.count
             print("✓ every MODELLED capability is declared (\(n) effect\(n == 1 ? "" : "s"))")
         } else if ok {
-            // Clean of under-declaration, but an over-declaration warning was printed above.
+            // Clean of under-declaration, but an over-declaration or conditional warning was printed
+            // above. With a CONDITIONAL key undeclared, "every modelled capability is declared" would be
+            // an overclaim — the honest verdict is that nothing is PROVABLY missing.
             let n = reached.count
-            print("✓ every MODELLED capability is declared (\(n) effect\(n == 1 ? "" : "s")) — see the ⚠ over-declaration note(s) above")
+            let verdictNoun = conditionallyUnder.isEmpty
+                ? "every MODELLED capability is declared"
+                : "no MODELLED capability is provably missing"
+            print("✓ \(verdictNoun) (\(n) effect\(n == 1 ? "" : "s")) — see the ⚠ note(s) above")
         }
         // ⟨0.15 staged⟩ the conditionality caveat travels with the human verdict too — LAST, so the
         // verdict line above stays where consumers expect it. Exit unchanged (disclosure, not a gate).
@@ -858,12 +990,21 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
             }
             // …and the language bound, which had no line at all. A mixed-language app can reach a
             // sensor entirely from Objective-C, and this engine reads `.swift` only.
-            if nonSwiftSources > 0 {
-                print("⚠ verdict is conditional on \(nonSwiftSources) NON-SWIFT source file"
-                      + "\(nonSwiftSources == 1 ? "" : "s") (.m/.mm/.c/.cpp) that this engine does not read "
+            if let ns = nonSwiftSources, ns > 0 {
+                print("⚠ verdict is conditional on \(ns) NON-SWIFT source file"
+                      + "\(ns == 1 ? "" : "s") (.m/.mm/.c/.cpp) that this engine does not read "
                       + "— a sensor reached only from Objective-C is invisible here, and absence from the "
                       + "report is not a claim it is not used. Verify the BUILT app's Info.plist to be certain.")
             }
+        }
+        // …and its own arm, OUTSIDE `if conditional`, because "we could not look" is not the same claim
+        // as "we looked and here is what is uncovered", and it must not be silent when nothing else is
+        // conditional — that combination (a clean verify, no caveat) is precisely the false all-clear.
+        if nonSwiftSources == nil {
+            print("⚠ non-Swift sources were NOT counted: no project root (.git / Package.swift / "
+                  + ".xcodeproj) could be located above \((plistPath as NSString).lastPathComponent), so "
+                  + "there is no tree this verify can call the app's. A sensor reached only from "
+                  + "Objective-C would be invisible here and this run cannot say whether any exist.")
         }
         // THE VOCABULARY BOUND, on every verify and especially on a PASS. A green verify means "green
         // for the keys this extension models" — and a reader who takes it for "green for Apple" is the
@@ -902,7 +1043,10 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         let fns = fnsFor(eff)
         let byWhom = fns.isEmpty ? "" : " (reached by: \(fns.prefix(3).joined(separator: ", "))\(fns.count > 3 ? ", …" : ""))"
         if let primary = keys.first {
-            print("  \(eff) → \(primary)\(byWhom)")
+            // A conditionally-required key (EventKitUI's iOS 17 fence) must not read as an unconditional
+            // requirement here either — generate is the same claim as verify, made forwards.
+            let cond = PRIVACY_CONDITIONAL_REQUIREMENT[eff].map { " — \($0)" } ?? ""
+            print("  \(eff) → \(primary)\(cond)\(byWhom)")
         } else {
             // NO Info.plist key — but there is more than one REASON for that now, and printing one
             // effect's reason for all of them states something false. `Notify` gates at runtime;

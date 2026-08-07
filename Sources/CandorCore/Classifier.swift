@@ -431,6 +431,14 @@ public let PRIVACY_MEMBER_TYPES: [String: [String: String]] = [
                       "loadFriendsAuthorizationStatus": "GameCenterFriends",
                       "loadChallengeableFriends": "GameCenterFriends",
                       "loadFriendsList": "GameCenterFriends"],
+    // NSAppleEventsUsageDescription gates SENDING ("required if your app uses APIs that send Apple
+    // events" — Apple's key page, fetched 2026-08-07), and NSAppleEventDescriptor is a shared
+    // send/receive wrapper: every kAEGetURL receive handler takes two of them as parameters. Type-level
+    // charging flagged the receive-only half of the world (measured on NetNewsWire's AppDelegate.getURL);
+    // `sendEvent(options:timeout:)` is the one member that transmits, so it alone carries the effect.
+    // The C send route is kappaFree's `AESendMessage`; the reply-building members (setParam,
+    // paramDescriptor, record, …) are pure marshalling.
+    "NSAppleEventDescriptor": ["sendEvent": "AppleEvents"],
 ]
 
 public let PRIVACY_SDK_TYPES: [String: String] = [
@@ -475,8 +483,22 @@ public let PRIVACY_SDK_TYPES: [String: String] = [
     "NSFileProviderManager": "FileProvider", "NSFileProviderDomain": "FileProvider",
     // System extensions — installing a driver / network / endpoint-security extension.
     "OSSystemExtensionRequest": "SystemExtension",
-    // Apple events — driving another app (macOS automation).
-    "NSAppleScript": "AppleEvents", "NSAppleEventDescriptor": "AppleEvents",
+    // Apple events — driving another app (macOS automation). The key gates SENDING, in Apple's words
+    // (NSAppleEventsUsageDescription, fetched 2026-08-07): "This key is required if your app uses APIs
+    // that SEND Apple events." NSAppleEventDescriptor is NOT here any more: Apple's page for it says the
+    // most common uses are supplying "information in a RETURN Apple event" and extracting information
+    // "when an Apple event handler installed by your application is invoked" — i.e. the RECEIVE side,
+    // which every Mac app with a custom URL scheme touches (the kAEGetURL handler's parameters are
+    // descriptors). Charging the type told NetNewsWire's `AppDelegate.getURL` receive handler it needed
+    // a send-only key. The send members are gated in PRIVACY_MEMBER_TYPES (`sendEvent`) and kappaFree
+    // (`AESendMessage`). NSAppleScript stays type-level: executing a script whose `tell application`
+    // body is a runtime string is the send surface static analysis cannot see inside — over-disclosing
+    // a compute-only script is the deliberate direction (a missed key is the costly error).
+    // NSAppleEventManager is mapped NOWHERE, correctly: installing a handler is pure receive.
+    "NSAppleScript": "AppleEvents",
+    // ScriptingBridge — its class page (fetched 2026-08-07): "provides a mechanism enabling an
+    // Objective-C program to SEND Apple events to a scriptable application". Send-side by definition.
+    "SBApplication": "AppleEvents",
     // TV provider — single sign-on to a subscription.
     "VSAccountManager": "VideoSubscriber",
     // Game Center friends.
@@ -559,8 +581,18 @@ public let PRIVACY_SDK_TYPES: [String: String] = [
     "CMMovementDisorderManager": "Motion",
     // Calendar / Reminders — EventKit. `EKEventStore` serves BOTH and the choice is per-call
     // (`EKEntityType.event` vs `.reminder`), so it is ambiguous exactly like AVCaptureDevice and is handled
-    // by `privacyEventKitEffects` below — it is NOT in this table. The single-purpose UI types are.
-    "EKEventEditViewController": "Calendar", "EKCalendarChooser": "Calendar",
+    // by `privacyEventKitEffects` below — it is NOT in this table.
+    // The EventKit UI classes are NOT plain `Calendar` any more — their key requirement changed with the
+    // OS. Apple's "Accessing the event store" (fetched 2026-08-07): "EventKitUI presents chooser and
+    // editor UI outside of your app's process on iOS 17 and later. Your app can use EventKitUI without
+    // requesting write-only or full calendar access." Below iOS 17 the UI runs IN process and the
+    // NSCalendars* key IS required — and this engine cannot see a deployment target. So the pair is a
+    // SPLIT effect whose keys are CONDITIONALLY required (PRIVACY_CONDITIONAL_REQUIREMENT): the reach is
+    // always reported, the verify raises the key as a condition the reader can settle in one glance at
+    // their deployment target, and neither the pre-17 app (silent under-report) nor the 17+-only app
+    // (false misconfiguration claim) is told something untrue. Not the ContactsPicker keyless shape,
+    // deliberately: Apple's picker statement is unconditional, this one is version-fenced.
+    "EKEventEditViewController": "CalendarUI", "EKCalendarChooser": "CalendarUI",
     // Bluetooth — CoreBluetooth. Scanning or advertising; both gate on the same key family.
     "CBCentralManager": "Bluetooth", "CBPeripheralManager": "Bluetooth",
     // Speech — on-device/server speech recognition (distinct from Mic: the AUDIO capture is Mic, the
@@ -792,6 +824,10 @@ public let PRIVACY_EFFECTS_ORDER: [String] = [
     // that the app "does not need access" and is never prompted; PHPicker is the same design. The reach
     // is reported (a policy can `deny ContactsPicker`) and no Info.plist key is required.
     "ContactsPicker", "PhotosPicker",
+    // privacy/4 (2026-08-07) — EventKit's UI classes, split from Calendar because their key requirement
+    // is DEPLOYMENT-TARGET-CONDITIONAL (out-of-process on iOS 17+, in-process before). Appended, never
+    // interleaved.
+    "CalendarUI",
 ]
 
 public let PRIVACY_EFFECTS_ALL: Set<String> = Set(PRIVACY_EFFECTS_ORDER)
@@ -806,6 +842,26 @@ public let PRIVACY_EFFECTS_ALL: Set<String> = Set(PRIVACY_EFFECTS_ORDER)
 /// Apple requires no key for the raw stream), but never silent.
 public let EFFECT_SPLIT_PARENT: [String: String] = [
     "MotionRaw": "Motion",
+    // The EventKit UI pair, split 2026-08-07: `deny Calendar` written before the split no longer binds
+    // an EKEventEditViewController reach, and the operator is told so by the same mechanism.
+    "CalendarUI": "Calendar",
+]
+
+/// Effects whose `privacyKeyMap` keys are required only under a condition THIS ENGINE CANNOT DECIDE —
+/// today, a deployment-target fence. The verify reports these as a NAMED CONDITION (⚠, exit unchanged),
+/// never as a hard ✗ and never silently: a hard ✗ is a false misconfiguration claim against every app
+/// on the condition's clean side, and an empty key list is a silent under-report against every app on
+/// the other. The reader holds the one fact (their deployment target) that settles it, so the verify
+/// hands them exactly that question. Same disclosure-not-gate posture as the coverage conditionality and
+/// the NSFileProviderPresence lead; determination (reading the target from the build graph, per-target)
+/// is the follow-on that could retire an entry from this table.
+public let PRIVACY_CONDITIONAL_REQUIREMENT: [String: String] = [
+    // Apple, "Accessing the event store" (fetched 2026-08-07): "EventKitUI presents chooser and editor
+    // UI outside of your app's process on iOS 17 and later. Your app can use EventKitUI without
+    // requesting write-only or full calendar access." Below iOS 17 the UI runs in-process and the key
+    // is required.
+    "CalendarUI": "required only when the deployment target is below iOS 17 — EventKitUI presents its "
+        + "UI outside the app's process on iOS 17 and later and needs no calendar access",
 ]
 
 
@@ -955,6 +1011,11 @@ public let privacyKeyMap: [String: [String]] = [
     "ContactsPicker": [], "PhotosPicker": [],
     "Calendar": ["NSCalendarsUsageDescription", "NSCalendarsFullAccessUsageDescription",
                  "NSCalendarsWriteOnlyAccessUsageDescription"],
+    // The SAME acceptable keys as Calendar — but conditionally required (PRIVACY_CONDITIONAL_REQUIREMENT):
+    // EventKitUI needs no calendar access on iOS 17+ (out-of-process UI) and does need it below. NOT an
+    // empty list: keyless would tell every pre-17 app its missing key is fine, the cardinal-sin direction.
+    "CalendarUI": ["NSCalendarsUsageDescription", "NSCalendarsFullAccessUsageDescription",
+                   "NSCalendarsWriteOnlyAccessUsageDescription"],
     "Reminders": ["NSRemindersUsageDescription", "NSRemindersFullAccessUsageDescription"],
     "Bluetooth": ["NSBluetoothAlwaysUsageDescription", "NSBluetoothPeripheralUsageDescription"],
     "Speech": ["NSSpeechRecognitionUsageDescription"],
@@ -1217,6 +1278,11 @@ public func kappaFree(name: String, argCount: Int) -> String? {
     case "shellOut": return "Exec"
     // Core Audio process taps — the C entry points for system-audio capture (NSAudioCaptureUsageDescription).
     case "AudioHardwareCreateProcessTap": return "AudioCapture"
+    // The C route for SENDING an Apple event ("Sends an AppleEvent to a target process" — Apple's page,
+    // fetched 2026-08-07). This is what keeps send-side recall after NSAppleEventDescriptor was demoted
+    // from type-level to sendEvent-gated: a descriptor built by hand and posted via the Carbon call
+    // (NetNewsWire's UserApp idiom) still charges. Distinctive PascalCase C name, SecItem* precedent.
+    case "AESendMessage": return "AppleEvents"
     case "NWConnection", "NWListener": return "Net"
     case "NWBrowser", "NetService", "NetServiceBrowser": return "Net"   // bonjour/mDNS discovery
     case "SystemRandomNumberGenerator": return "Rand"

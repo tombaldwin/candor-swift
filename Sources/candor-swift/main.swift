@@ -239,7 +239,7 @@ while let a = argIter.next() {
 
         USAGE
           candor-swift [<dir|file.swift>] [options]            scan Swift sources (default target: .)
-          candor-swift <dir> --target <name>                   scan ONE package target + its closure
+          candor-swift <dir> --target <name>                   scan ONE target + its closure (SwiftPM or .xcodeproj)
           candor-swift <action> [args] [options]               query the discovered report (.candor/, walk-up)
           candor-swift privacy-manifest [--verify <plist>]     generate/verify the Apple privacy manifest
           candor-swift gains <current> <baseline>              effects gained between two reports
@@ -277,12 +277,18 @@ while let a = argIter.next() {
           --json               print the report as JSON to stdout (a scan then writes no files)
           --policy <file>      enforce a policy (deny/pure/allow/forbid) — exit 1 on a violation, 2 if unreadable
           --gate-json <file>   write the machine-readable gate verdict as JSON (`-` = stdout)
-          --target <name>     scope the scan to ONE target of a multi-target package plus its in-package
-                              dependency closure — one scan per SHIPPED BINARY. Without it a package with
+          --target <name>     scope the scan to ONE target plus its dependency closure — one scan per
+                              SHIPPED BINARY. Resolves against Package.swift first, and falls back to
+                              the repo's .xcodeproj project file(s) when the manifest is absent or does
+                              not declare the name (stating which resolver answered). The Xcode closure
+                              includes the target's LOCAL Swift packages, transitively; REMOTE packages
+                              stay outside, counted and disclosed as uncovered. Without it a repo with
                               several products charges each one with every other one's effects, and a
-                              privacy-manifest verify against one product's Info.plist answers about code
-                              that product never compiles. Refuses (exit 2) on an unknown target or a
-                              missing source dir rather than silently scanning less.
+                              privacy-manifest verify against one product's Info.plist answers about
+                              code that product never compiles. Refuses (exit 2) on an unknown target
+                              (listing the names that exist), an unparseable project, a missing source
+                              dir/folder, or a local package it cannot read soundly — never silently
+                              scanning less than the target compiles.
           --workspace (--deps) auto-discover the target's local `.package(path:)` deps, scan each into
                                .candor/deps/, and chain them so a cross-package call discloses the sibling's effect
           --report <locator>   (query actions) use this report instead of discovering .candor/
@@ -415,13 +421,202 @@ if sourcePaths.isEmpty {
 // target can reach. Every failure below REFUSES: this feature makes a scan see LESS, and under ⟨0.21⟩
 // absence from `functions` is a positive purity claim, so "resolve less than asked, quietly" is the
 // cardinal sin wearing a convenience flag.
-if let want = scopeTarget {
-    let manifestPath = (rootDir as NSString).appendingPathComponent("Package.swift")
-    guard let manifestSrc = try? String(contentsOfFile: manifestPath, encoding: .utf8) else {
-        FileHandle.standardError.write("candor-swift: \(TargetScopeError.noManifest(dir: rootDir))\n".data(using: .utf8)!)
+// ⟨--target on .xcodeproj⟩ The SPM resolution above this needs a `Package.swift`, and the audience the
+// privacy-manifest verb is promoted to — iOS developers — overwhelmingly has an `.xcodeproj` instead.
+// The old behaviour was an exit-2 dead end on exactly those repos, which left their scans whole-repo:
+// NetNewsWire's iOS plist charged NSAppleEventsUsageDescription from Mac-only code, Focus's plist
+// charged Speech from firefox's QuickAnswers code (both measured, both false). This resolves the target
+// in the project file(s) instead: PBXNativeTarget -> Sources phase file refs through the group tree,
+// plus Xcode 16 synchronized folders with their per-target membership exceptions, plus the in-project
+// dependency closure. Same refusal contract as the SPM path — every failure exits 2, because a
+// half-resolved scope is a purity claim over the files it silently dropped.
+func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [String],
+                        packageSwiftExists: Bool = false, alsoDeclaredInPackageSwift: [String] = []) {
+    let fm = FileManager.default
+    let projects = findXcodeProjects(under: rootDir)
+    guard !projects.isEmpty else {
+        FileHandle.standardError.write(("candor-swift: --target needs a Package.swift or an .xcodeproj "
+            + "to resolve against; neither found under \(rootDir)\n").data(using: .utf8)!)
         exit(2)
     }
-    let declared = parsePackageTargets(manifestSource: manifestSrc)
+    do {
+        // Parse EVERY project before matching. A repo like firefox-ios carries several (`Client`,
+        // `Blockzilla`, sample apps); matching against the first parseable one would resolve a name
+        // that another project also defines — or miss the one the user meant entirely.
+        var parsed: [(path: String, model: PbxprojModel)] = []
+        for proj in projects {
+            let pbx = (proj as NSString).appendingPathComponent("project.pbxproj")
+            guard let text = try? String(contentsOfFile: pbx, encoding: .utf8) else {
+                throw XcodeScopeError.unparseable(file: pbx, reason: "unreadable")
+            }
+            parsed.append((proj, try parsePbxproj(text: text, file: pbx)))
+        }
+        let hits = parsed.filter { pbxprojTargets($0.model).contains(where: { $0.name == want }) }
+        if hits.count > 1 {
+            FileHandle.standardError.write(("candor-swift: --target \(want) — \(hits.count) projects "
+                + "define a target of that name (\(hits.map { rel($0.path, to: rootDir) }.joined(separator: ", "))). "
+                + "Refusing to pick one: they are different products. Point the scan at one project's "
+                + "directory instead.\n").data(using: .utf8)!)
+            exit(2)
+        }
+        guard let hit = hits.first else {
+            // The vocabulary refusal, across every project found: a user who mistypes needs the real
+            // names, shipped products first, test bundles labelled as what they are.
+            var msg = "candor-swift: --target \(want) — no project here defines that target.\n"
+            for (proj, model) in parsed {
+                let ts = pbxprojTargets(model)
+                guard !ts.isEmpty else { continue }
+                msg += "  \(rel(proj, to: rootDir)) declares:\n"
+                for t in ts { msg += "    \(t.name)  (\(t.kindLabel))\n" }
+            }
+            if !alsoDeclaredInPackageSwift.isEmpty {
+                msg += "  Package.swift declares: \(alsoDeclaredInPackageSwift.joined(separator: ", "))\n"
+            }
+            FileHandle.standardError.write(msg.data(using: .utf8)!)
+            exit(2)
+        }
+        let projectDir = (hit.path as NSString).deletingLastPathComponent
+        func isDirectory(_ p: String) -> Bool {
+            var isD: ObjCBool = false
+            return fm.fileExists(atPath: p, isDirectory: &isD) && isD.boolValue
+        }
+        let scope = try xcodeTargetScope(model: hit.model, projectDir: projectDir, targetName: want,
+                                         fs: XcodeScopeFS(
+            swiftFilesUnder: { dir in
+                guard isDirectory(dir), let en = fm.enumerator(atPath: dir) else { return nil }
+                var out: [String] = []
+                for case let sub as String in en where sub.hasSuffix(".swift") {
+                    out.append((dir as NSString).appendingPathComponent(sub))
+                }
+                return out
+            },
+            readFile: { try? String(contentsOfFile: $0, encoding: .utf8) },
+            subdirectories: { dir in
+                ((try? fm.contentsOfDirectory(atPath: dir)) ?? [])
+                    .map { (dir as NSString).appendingPathComponent($0) }
+                    .filter(isDirectory)
+            },
+            directoryExists: isDirectory,
+            dumpPackage: { dir in
+                // `swift package dump-package`: SwiftPM itself reading a manifest the structural
+                // parser proved it cannot (targets built by helper functions over hoisted arrays —
+                // WordPress's Modules). This EXECUTES the manifest, which is why it is a last resort,
+                // is disclosed in the scope note, and is never reached for a manifest the structural
+                // parse fully reads. No toolchain ⇒ nil ⇒ the resolution refuses loudly downstream.
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+                p.arguments = ["swift", "package", "dump-package", "--package-path", dir]
+                let out = Pipe(), err = Pipe()
+                p.standardOutput = out
+                p.standardError = err
+                guard (try? p.run()) != nil else { return nil }
+                let data = out.fileHandleForReading.readDataToEndOfFile()
+                _ = err.fileHandleForReading.readDataToEndOfFile()
+                p.waitUntilExit()
+                guard p.terminationStatus == 0 else { return nil }
+                return String(data: data, encoding: .utf8)
+            }))
+        // CASE-INSENSITIVE membership. macOS filesystems are; a pbxproj path whose case drifted from
+        // the disk's still builds in Xcode, and an exact-case compare would silently drop that file
+        // from the scope — the miss-shaped failure. Two repo files differing only by case would
+        // over-include, which merely keeps a file the unscoped scan already had.
+        let member = Set(scope.files.map { $0.lowercased() })
+        // `.path`, not `.standardized.path` — the same relative-`..` quirk documented at
+        // `xcodeTargetScope`'s `std`, and the two sides of this membership test must agree byte-for-byte.
+        func std(_ p: String) -> String { URL(fileURLWithPath: p).path.lowercased() }
+        let before = sourcePaths.count
+        sourcePaths = sourcePaths.filter { member.contains(std($0)) }
+        if sourcePaths.isEmpty {
+            FileHandle.standardError.write(("candor-swift: --target \(want) resolved to "
+                + "\(scope.closure.map(\.name).joined(separator: ", ")) but none of its \(scope.files.count) "
+                + "Swift file(s) are under the scanned tree — refusing to report an empty scan as a clean one\n")
+                .data(using: .utf8)!)
+            exit(2)
+        }
+        // DISCLOSED, not silent — and it says WHICH resolver answered: an Xcode target and an SPM
+        // target are different structures, and the SPM form is what this flag means on a Package.swift
+        // repo. The κ boundary is stated in the same breath so a conditional verify has its referent.
+        // Say WHY the Xcode resolver answered, truthfully: "no Package.swift" when there is none, and
+        // "Package.swift does not declare it" when one exists but the name is only a project target —
+        // the first draft printed "(no Package.swift)" beside firefox-ios's Danger manifest, a false
+        // statement in the one line whose whole job is provenance.
+        let why = packageSwiftExists ? "Package.swift declares no target of this name"
+                                     : "no Package.swift"
+        var note = "candor-swift: --target \(want) — resolved via \(rel(hit.path, to: rootDir)) "
+            + "(\(why)): scanning \(scope.closure.count) target(s) "
+            + "[\(scope.closure.map(\.name).joined(separator: ", "))]"
+        if !scope.localPackages.isEmpty {
+            note += " + \(scope.localPackages.count) local Swift package(s) "
+                + "[\(scope.localPackages.joined(separator: ", "))]"
+        }
+        if !scope.packagesReadViaDump.isEmpty {
+            // Manifest code was EXECUTED for these (SwiftPM's own reader) — that is a different trust
+            // statement from a structural parse, and the reader gets to know it happened.
+            note += " (\(scope.packagesReadViaDump.joined(separator: ", ")) read via "
+                + "`swift package dump-package` — manifest too dynamic for the structural parser)"
+        }
+        note += ", \(sourcePaths.count) of \(before) source file(s)."
+        if let p = scope.platform, scope.platformExcludedCount > 0 {
+            // The platform prune is a MEMBERSHIP statement and it is disclosed like one: these files
+            // are in the target's packages but compile to nothing on its platform (`#if os(…)`).
+            note += " \(scope.platformExcludedCount) file(s) excluded as compiling to nothing on \(p)."
+        }
+        note += " This verdict covers that closure ONLY."
+        if scope.remoteProductCount > 0 || scope.crossProjectDependencyCount > 0 {
+            var outside: [String] = []
+            if scope.remoteProductCount > 0 { outside.append("\(scope.remoteProductCount) REMOTE package product(s)") }
+            if scope.crossProjectDependencyCount > 0 { outside.append("\(scope.crossProjectDependencyCount) cross-project dependenc(ies)") }
+            note += " Depends on \(outside.joined(separator: " and ")) NOT in the closure — calls into "
+                + "them are disclosed as uncovered, never silently pure."
+        }
+        note += "\n"
+        FileHandle.standardError.write(note.data(using: .utf8)!)
+        // A test bundle is selectable by name — but its verdict is about test code, and saying so is
+        // the difference between a feature and a trap for whoever scoped to `MyAppTests` by accident.
+        if scope.target.isTest {
+            FileHandle.standardError.write(("candor-swift: note — `\(want)` is a \(scope.target.kindLabel) "
+                + "target, not a shipped binary; its manifest verdict is about test code.\n").data(using: .utf8)!)
+        }
+    } catch let e as XcodeScopeError {
+        FileHandle.standardError.write("candor-swift: --target \(want): \(e)\n".data(using: .utf8)!)
+        exit(2)
+    } catch {
+        FileHandle.standardError.write("candor-swift: --target \(want): \(error)\n".data(using: .utf8)!)
+        exit(2)
+    }
+}
+
+/// `path` relative to `root`, for messages — an absolute pbxproj path in a refusal is noise.
+func rel(_ path: String, to root: String) -> String {
+    let p = URL(fileURLWithPath: path).standardized.path
+    let r = URL(fileURLWithPath: root).standardized.path
+    return p.hasPrefix(r + "/") ? String(p.dropFirst(r.count + 1)) : p
+}
+
+if let want = scopeTarget {
+    let manifestPath = (rootDir as NSString).appendingPathComponent("Package.swift")
+    // A repo with BOTH a Package.swift and an .xcodeproj resolves via SwiftPM, unchanged — the Xcode
+    // path is a FALLBACK, and which resolver answered is stated in each disclosure line, because the
+    // two resolve different structures and a verdict's reader needs to know which it is about.
+    let manifestSrc = try? String(contentsOfFile: manifestPath, encoding: .utf8)
+    let declaredSPM = manifestSrc.map(parsePackageTargets(manifestSource:)) ?? []
+    // The SPM resolution keeps priority for every name it CAN resolve — its behaviour is unchanged.
+    // The Xcode path runs when there is no Package.swift at all, OR when the manifest does not declare
+    // the name and a `.xcodeproj` might: a repo whose root Package.swift is tooling-only (firefox-ios
+    // ships a Danger manifest beside two products' project files) otherwise dead-ends with
+    // "declares: DangerDependencies" while the target the user named sits right there in a project
+    // file. A name BOTH declare resolves via SwiftPM, exactly as before.
+    let spmHasTarget = declaredSPM.contains { $0.name == want }
+    let xcodeProjects = (manifestSrc == nil || !spmHasTarget) ? findXcodeProjects(under: rootDir) : []
+    if manifestSrc == nil || (!spmHasTarget && !xcodeProjects.isEmpty) {
+        // Exits 2 on any failure, so reaching the code after this `if` means sourcePaths IS the
+        // target's file list, whichever resolver ran.
+        scopeToXcodeTarget(want, rootDir: rootDir, sourcePaths: &sourcePaths,
+                           packageSwiftExists: manifestSrc != nil,
+                           alsoDeclaredInPackageSwift: declaredSPM.map(\.name).sorted())
+    }
+    if manifestSrc != nil && (spmHasTarget || xcodeProjects.isEmpty) {
+    let declared = declaredSPM
     do {
         let closure = try targetClosure(want, in: declared)
         let dirs = try targetSourceDirs(closure, packageRoot: rootDir, exists: { p in
@@ -454,7 +649,8 @@ if let want = scopeTarget {
         }
         // DISCLOSED, not silent. The reader must be able to tell a scoped scan from a whole-tree one:
         // a clean verdict here is a claim about ONE binary, and the same tree scanned whole may differ.
-        FileHandle.standardError.write(("candor-swift: --target \(want) — scanning \(closure.count) target(s) "
+        FileHandle.standardError.write(("candor-swift: --target \(want) — resolved via Package.swift: "
+            + "scanning \(closure.count) target(s) "
             + "[\(closure.map(\.name).joined(separator: ", "))], \(sourcePaths.count) of \(before) source file(s). "
             + "This verdict covers that closure ONLY.\n").data(using: .utf8)!)
     } catch let e as TargetScopeError {
@@ -463,6 +659,7 @@ if let want = scopeTarget {
     } catch {
         FileHandle.standardError.write("candor-swift: --target \(want): \(error)\n".data(using: .utf8)!)
         exit(2)
+    }
     }
 }
 
@@ -1266,8 +1463,35 @@ policyBlock: if let pp = policyPath {
     /// Refuse — UNLESS a violation is already established, in which case it dominates and the run falls
     /// through to the common verdict tail (document + exit 1) with the refusal disclosed beside it.
     /// Returns true when the caller must `break policyBlock`; it never returns on the sole-refusal path.
-    func refuseUnlessAViolationStands(_ reason: String) -> Bool {
-        if gateViolations.isEmpty { refuseGateAndExit(reason) }
+    /// ⟨0.27⟩ SPEC §3.1's composed-document clause: on a WHOLE-POLICY refusal that a certain violation
+    /// dominates, the document lists EVERY rule of the refused policy under `unevaluated`, raw line
+    /// verbatim — the unhonourable one(s) with their specific cause, the rest with a `why` naming the
+    /// whole-policy refusal. Not only the offending line: a consumer that finds `deny Fs` ABSENT from the
+    /// list on an exit-1 document reads it as enforced-and-passed, a per-rule false all-clear arriving
+    /// through the disclosure channel. Where there are no lines to name (the file itself unreadable), the
+    /// list carries one entry for the whole policy — an exit-1 document with `violations` and no
+    /// `unevaluated` claims the policy ran and passed.
+    func refusedPolicyRules(_ policyText: String?, at path: String, causes: [String]) -> [Unevaluated] {
+        let whole = "NOT evaluated — this policy was refused as a whole (the run's verdict does not "
+            + "answer it); a violation established elsewhere is what set the exit code"
+        guard let policyText else {
+            return [Unevaluated(rule: "(entire policy \(path) — unreadable, no rules parsed)", why: whole)]
+        }
+        let lines = policyText.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0]
+                     .trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard !lines.isEmpty else {
+            return [Unevaluated(rule: "(entire policy \(path) — no rules parsed)", why: whole)]
+        }
+        return lines.map { line in
+            // A cause message names the line it is about, verbatim, at its end — the family's wording.
+            let mine = causes.filter { $0.hasSuffix(line) }
+            return Unevaluated(rule: line, why: mine.isEmpty ? whole : mine.joined(separator: "; "))
+        }
+    }
+    func refuseUnlessAViolationStands(_ reason: String, unevaluated: [Unevaluated]) -> Bool {
+        if gateViolations.isEmpty { refuseGateAndExit(reason, unevaluated: unevaluated) }
         FileHandle.standardError.write(
             (reason + "\n"
              + "candor-swift: the policy above was NOT evaluated — but \(gateViolations.count) violation(s) "
@@ -1275,10 +1499,12 @@ policyBlock: if let pp = policyPath {
              + "refusal (SPEC §3.1, PAPER3 Lemma 2: no resolution of an unevaluated rule can un-reject a "
              + "rejected verdict). Reporting them below; the verdict does NOT answer the policy.\n")
                 .data(using: .utf8)!)
+        gateUnevaluated = unevaluated
         return true
     }
     guard let text = try? String(contentsOfFile: pp, encoding: .utf8) else {
-        if refuseUnlessAViolationStands("candor-swift: policy \(pp) could not be read; gate NOT enforced") {
+        if refuseUnlessAViolationStands("candor-swift: policy \(pp) could not be read; gate NOT enforced",
+                                        unevaluated: refusedPolicyRules(nil, at: pp, causes: [])) {
             break policyBlock
         }
         // unreachable — `refuseUnlessAViolationStands` exits when nothing stands. `guard` needs an exit.
@@ -1341,7 +1567,9 @@ policyBlock: if let pp = policyPath {
     let aliasErrors = partitionAliasErrors(parsedAliases.errors, consumedBy: scanPolicy)
     discloseUnconsumedAliasErrors(aliasErrors.disclosed)
     let policyErrors = aliasErrors.refusing.map(\.message) + scanPolicy.gateRefusals
-    if !policyErrors.isEmpty, refuseUnlessAViolationStands(policyErrors.joined(separator: "\n")) {
+    if !policyErrors.isEmpty,
+       refuseUnlessAViolationStands(policyErrors.joined(separator: "\n"),
+                                    unevaluated: refusedPolicyRules(text, at: pp, causes: policyErrors)) {
         break policyBlock
     }
     // ⟨0.24⟩ the SCAN route into the shared gate seam (Gate.swift): the reason-class fixpoint and the
@@ -1416,7 +1644,7 @@ for v in gateViolations { FileHandle.standardError.write(("[\(v.rule)] \(v.detai
 // --gate-json ⟨0.8⟩: the machine verdict, from the SAME gateViolations that set the exit code — written
 // BEFORE the exit below (ok:true,[] when no gate is configured). Unreadable policy already exited 2 above;
 // AS-EFF-005 records join the same list, so the verdict and the exit code can never disagree.
-if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVersion, analyzedCount: allFns.count, unanalyzed: unanalyzedUnits, coverage: unlisted.map(\.key), policyVocabulary: gatePolicyVocabulary) }   // ⟨0.15 staged⟩ advisory, verdict-preserving; ⟨0.21⟩ analyzed + fail-closed unanalyzed; ⟨0.24⟩ the config vocabulary that participated
+if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVersion, analyzedCount: allFns.count, unanalyzed: unanalyzedUnits, coverage: unlisted.map(\.key), policyVocabulary: gatePolicyVocabulary, unevaluated: gateUnevaluated) }   // ⟨0.15 staged⟩ advisory, verdict-preserving; ⟨0.21⟩ analyzed + fail-closed unanalyzed; ⟨0.24⟩ the config vocabulary that participated
 let gateConfigured = policyPath != nil || baselinePath != nil
 if gateConfigured {
     if gateViolations.isEmpty {

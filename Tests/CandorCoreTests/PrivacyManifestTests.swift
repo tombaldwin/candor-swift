@@ -193,6 +193,48 @@ final class PrivacyManifestTests: XCTestCase {
         XCTAssertEqual(d["ok"] as? Bool, true, r.out)
     }
 
+    /// THE NON-SWIFT COUNT MUST NOT WANDER OUT OF THE APP'S TREE.
+    ///
+    /// The project-root walk that bounds it gives up after eight hops, and the first version enumerated
+    /// wherever it stopped — so a plist with NO project marker above it (a temp dir, `/tmp`, an
+    /// extracted archive) walked to the filesystem root and enumerated THAT. This test is the exact
+    /// shape that caught it: the very same marker-less temp layout `testBinaryPlistParses` uses, plus a
+    /// `.c` file planted two levels ABOVE the plist. Before the fix the run took 21 minutes and counted
+    /// that file (and every other `.c` on the machine) as this app's unread source — unbounded work AND
+    /// a disclosure about somebody else's code attributed to the target.
+    func testNonSwiftCountStaysInsideTheAppsTreeWhenNoProjectRootIsFound() throws {
+        let fm = FileManager.default
+        let outer = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-nsw-\(UUID().uuidString)")
+        let holder = outer.appendingPathComponent("holder")
+        try fm.createDirectory(at: holder, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: outer) }
+        // Two levels above the plist, and NOT under any marker — the tree the walk must refuse to claim.
+        try "void foreign(void) {}\n".write(to: outer.appendingPathComponent("foreign.c"),
+                                            atomically: true, encoding: .utf8)
+        let (bin, prefix, cleanup) = try scanToReport(locationAndContacts)
+        defer { cleanup() }
+        let plist = holder.appendingPathComponent("Info.plist")
+        try #"<?xml version="1.0" encoding="UTF-8"?>\#n<plist version="1.0"><dict>\#n"#
+            .appending("<key>NSLocationWhenInUseUsageDescription</key><string>because</string>\n")
+            .appending("<key>NSContactsUsageDescription</key><string>because</string>\n")
+            .appending("</dict></plist>\n")
+            .write(to: plist, atomically: true, encoding: .utf8)
+        let started = Date()
+        let r = try ProcessHarness.run(bin, ["privacy-manifest", "--report", prefix, "--verify", plist.path])
+        XCTAssertEqual(r.code, 0, r.err)
+        XCTAssertFalse(r.out.contains("NON-SWIFT source file"),
+                       "a .c file with no project root to justify a wider tree must not be counted as "
+                       + "this target's unread source: \(r.out)")
+        XCTAssertTrue(r.out.contains("NOT counted"),
+                      "…and the run must SAY the count was not taken. A silent `0` here is a "
+                      + "\"nothing unread\" claim over a tree the run could not identify: \(r.out)")
+        // The wall-clock assertion is the other half of the same defect and is deliberately loose: the
+        // failure mode it guards is a filesystem-root census, which is minutes, not seconds.
+        XCTAssertLessThan(Date().timeIntervalSince(started), 60,
+                          "the root walk enumerated a tree far larger than the app's")
+    }
+
     /// `--xml`: a paste-ready Info.plist fragment. GENERATE printed a human requirements list
     /// (`Contacts → NSContactsUsageDescription (reached by: …)`), which left a user with an existing
     /// plist to hand-write the XML, invent the description string, and merge by hand — the verb's name
