@@ -270,9 +270,29 @@ func buildSettingUsageKeys(near plistPath: String)
                 // "teaches the reader to distrust the tool" failure this reader exists to remove. One
                 // level, and only relative paths inside the project: enough for the split-config case
                 // without turning a config read into an unbounded file walk.
-                for inc in includedConfigPaths(text, relativeTo: c) {
-                    guard let itext = try? String(contentsOf: inc, encoding: .utf8) else { continue }
-                    take(itext, inc.path)
+                // FOLLOW THE WHOLE CHAIN, not one level. A three-deep split config —
+                // `App.xcconfig` → `Configs/mid.xcconfig` (declares) → `deep.xcconfig` (undeclares) —
+                // resolves EMPTY at build time, because a later include wins. Reading one level saw the
+                // declaration and never the undeclare, so the key counted as declared and the verify
+                // passed: flip #18. The engine's own consistency rule would have caught it had the file
+                // been read at all; the defect was purely the depth bound, and three-deep xcconfig
+                // chains are an ordinary layout.
+                //
+                // Bounded and cycle-safe: a `visited` set (xcconfigs include each other in real
+                // projects) and a depth cap, so a config read cannot become an unbounded file walk. Each
+                // hop still passes through `includedConfigPaths`, which keeps the containment check.
+                var frontier = includedConfigPaths(text, relativeTo: c)
+                var visited: Set<String> = [c.standardizedFileURL.path]
+                var depth = 0
+                while !frontier.isEmpty, depth < 16 {
+                    var next: [URL] = []
+                    for inc in frontier where visited.insert(inc.standardizedFileURL.path).inserted {
+                        guard let itext = try? String(contentsOf: inc, encoding: .utf8) else { continue }
+                        take(itext, inc.path)
+                        next += includedConfigPaths(itext, relativeTo: inc)
+                    }
+                    frontier = next
+                    depth += 1
                 }
             }
         }
@@ -342,6 +362,35 @@ let keylessReason: [String: String] = [
     "PhotosPicker": "PHPicker runs out of process — the app never gains photo-library access, only the "
         + "assets the user selected, so Apple requires no usage description",
 ]
+
+/// How many NON-SWIFT source files sit in the tree this plist belongs to.
+///
+/// Bounded by the same project-root walk the build-settings reader uses, so it cannot wander above the
+/// checkout and count somebody else's code. Counts only languages that can reach a sensor directly.
+func countNonSwiftSources(near plistPath: String) -> Int {
+    let fm = FileManager.default
+    var dir = URL(fileURLWithPath: plistPath).deletingLastPathComponent()
+    for _ in 0..<8 {
+        let markers = [".git", "Package.swift", "Package.resolved"]
+        let isRoot = markers.contains { fm.fileExists(atPath: dir.appendingPathComponent($0).path) }
+            || ((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
+                .contains { $0.pathExtension == "xcodeproj" || $0.pathExtension == "xcworkspace" }
+        if isRoot { break }
+        let parent = dir.deletingLastPathComponent()
+        if parent.path == dir.path { break }
+        dir = parent
+    }
+    var n = 0
+    guard let en = fm.enumerator(atPath: dir.path) else { return 0 }
+    for case let rel as String in en {
+        let ext = (rel as NSString).pathExtension.lowercased()
+        if ["m", "mm", "c", "cc", "cpp", "cxx"].contains(ext), !isHarnessPath(rel) {
+            n += 1
+            if n > 5000 { break }   // a count, not a census
+        }
+    }
+    return n
+}
 
 /// A PASTE-READY `Info.plist` fragment for a set of required keys.
 ///
@@ -634,7 +683,18 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         // a "clean" answer holds only for the covered part of the code. DISCLOSURE, not a gate: the
         // exit code is computed exactly as before (under-declaration 1, otherwise 0).
         let uncoveredModules = model.coverage.modules
-        let conditional = !model.coverage.isEmpty
+        // NON-SWIFT SOURCES ARE A BLIND SPOT AND MUST SAY SO. This engine reads `.swift` only, and a
+        // mixed-language app — which is what most mature iOS apps are — can reach a sensor entirely
+        // from Objective-C. Measured: a target with one trivial `.swift` file beside a `.m` that calls
+        // `AVCaptureDevice` verified `✓ (0 effects)`, exit 0, against an EMPTY plist, with no
+        // conditionality line and nothing naming the files that were not read. The uncovered-MODULE
+        // ledger did not fire because nothing Swift imported anything uncovered — the code simply was
+        // not Swift.
+        //
+        // "Absence from the report is never a claim of purity" is this project's rule; a language the
+        // scanner cannot read is exactly the case it exists for.
+        let nonSwiftSources = countNonSwiftSources(near: plistPath)
+        let conditional = !model.coverage.isEmpty || nonSwiftSources > 0
 
         // COMPUTED BEFORE THE JSON BRANCH, which used to exit ~100 lines above this and so
         // carried no entitlement finding at all — the CI-facing form was the one missing it.
@@ -793,7 +853,17 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         // verdict line above stays where consumers expect it. Exit unchanged (disclosure, not a gate).
         if conditional {
             let n = uncoveredModules.count
-            print("⚠ verdict is conditional on \(n) uncovered module\(n == 1 ? "" : "s") — sensor usage there is invisible to this verify (chain dep reports or scan the workspace root to close the gap)")
+            if n > 0 {
+                print("⚠ verdict is conditional on \(n) uncovered module\(n == 1 ? "" : "s") — sensor usage there is invisible to this verify (chain dep reports or scan the workspace root to close the gap)")
+            }
+            // …and the language bound, which had no line at all. A mixed-language app can reach a
+            // sensor entirely from Objective-C, and this engine reads `.swift` only.
+            if nonSwiftSources > 0 {
+                print("⚠ verdict is conditional on \(nonSwiftSources) NON-SWIFT source file"
+                      + "\(nonSwiftSources == 1 ? "" : "s") (.m/.mm/.c/.cpp) that this engine does not read "
+                      + "— a sensor reached only from Objective-C is invisible here, and absence from the "
+                      + "report is not a claim it is not used. Verify the BUILT app's Info.plist to be certain.")
+            }
         }
         // THE VOCABULARY BOUND, on every verify and especially on a PASS. A green verify means "green
         // for the keys this extension models" — and a reader who takes it for "green for Apple" is the

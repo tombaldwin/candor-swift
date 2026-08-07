@@ -187,6 +187,19 @@ final class BuildSettingsTests: XCTestCase {
                        "…but xcconfig's optional form IS one")
     }
 
+    // ── FLIP #18: the `#include` chain was followed ONE LEVEL, so a deeper file's undeclare —
+    // which the build honours, because a later include wins — was never read.
+
+    func testTheIncludeChainIsFollowedToTheEnd() {
+        // App → mid (declares) → deep (undeclares). Resolves EMPTY at build time.
+        let mid = usageAssignmentsInBuildSettings("\(cam) = \"For photos\"")
+        let deep = usageAssignmentsInBuildSettings("\(cam) = \"\"")
+        XCTAssertEqual(declaredKeys(from: mid + deep).declared, [],
+                       "a later include that empties the key wins; reading only the first level saw "
+                       + "the declaration and never the undeclare")
+        XCTAssertEqual(declaredKeys(from: mid + deep).inconsistent, [camKey])
+    }
+
     // ── The consistency rule itself, which replaced last-wins.
 
     func testInconsistentDeclarationIsReportedSeparatelyAndNotCountedAsDeclared() {

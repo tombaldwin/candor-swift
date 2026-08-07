@@ -9,6 +9,21 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ Flip #18: the `#include` chain was followed ONE LEVEL.** A three-deep split config —
+  `App.xcconfig` → `Configs/mid.xcconfig` (declares) → `deep.xcconfig` (undeclares) — resolves EMPTY at
+  build time, because a later include wins. Reading one level saw the declaration and never the
+  undeclare, so the key counted as declared and the verify passed. The consistency rule would have
+  caught it had the file been read at all; the defect was purely the depth bound, and three-deep
+  xcconfig chains are an ordinary layout. Now followed to the end, cycle-safe and depth-capped, with the
+  containment check on every hop.
+- **⚠ Sensor use reachable only from Objective-C was invisible with NO caveat.** A target with one
+  trivial `.swift` file beside a `.m` calling `AVCaptureDevice` verified `✓ (0 effects)`, exit 0, against
+  an empty plist — and nothing said that non-Swift sources had not been read. The uncovered-MODULE
+  ledger could not fire, because nothing Swift imported anything uncovered: the code simply was not
+  Swift. Mixed-language apps are most mature iOS apps. Now counted and disclosed as a conditionality,
+  bounded by the same project-root walk the build-settings reader uses. Measured: 0 on IceCubesApp and
+  duckduckgo (pure Swift), 129 on WordPress-iOS.
+
 - **⚠ Flip #17: a Debug-only build setting counted as DECLARED, and the App Store archive is Release.**
   Verified end to end — `✓ every MODELLED capability is declared`, exit 0, on a project whose Release
   configuration ships no camera key. It is one click in Xcode's per-config editor, and it was invisible
