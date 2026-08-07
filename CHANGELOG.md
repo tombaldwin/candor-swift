@@ -9,6 +9,31 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ `--target` on an `.xcodeproj` resolved the local-package closure ONE HOP SHORT — found by running
+  it on NetNewsWire.** `Modules/` holds **17** local packages; the scope resolved **14**. The three
+  missing were exactly those no app TARGET names directly — `CloudKitSync`, `FeedFinder`, `NewsBlur` —
+  reachable only through `Account`. `NewsBlurAPICaller` is the app's sync layer, so the scoped scan
+  analyzed the app minus its network client.
+
+  The cause was one spelling. The walk followed `.product(name:package:)` edges, which is what its own
+  comment claimed, and Account writes every dependency as a **bare string** (`.package(path:
+  "../NewsBlur")` beside a plain `"NewsBlur"` in the target) — SwiftPM resolves a bare name against a
+  dependency package's products, and `targetClosure` drops a name its own package does not declare.
+  That drop is right on the SPM `--target` path, where "not declared here" does mean "no sources in this
+  tree", and wrong on the `.xcodeproj` path, where the sibling package is three directories away. Bare
+  names that match no in-package target now go through the same local-product index the `.product(…)`
+  edges use.
+
+  **Not a purity claim** — the import ledger still disclosed all three as uncovered modules, so nothing
+  read as pure. The scope was simply smaller than the product. And the fix is disclosure-positive in the
+  other direction too: a bare name matching no local product now reaches the REMOTE counter instead of
+  being dropped at closure level, where it reached no counter at all. Measured after: NetNewsWire iOS
+  422 → 441 files (17 packages, 2 remote), Mac 449 → 468; the only file now in neither app's scope is
+  `buildscripts/VerifyNoBS.swift`, which is a build script. The A/B that motivated `--target` is
+  unchanged — whole-repo verify against the iOS plist still reports the false AppleEvents
+  under-declaration, the scoped one still passes. Both new tests were run against the pre-fix code and
+  fail there.
+
 - **⚠ Flip #18: the `#include` chain was followed ONE LEVEL.** A three-deep split config —
   `App.xcconfig` → `Configs/mid.xcconfig` (declares) → `deep.xcconfig` (undeclares) — resolves EMPTY at
   build time, because a later include wins. Reading one level saw the declaration and never the

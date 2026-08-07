@@ -435,6 +435,69 @@ final class XcodeTargetScopeTests: XCTestCase {
                                          "/repo/Packages/Kit/Sources/Kit"])
     }
 
+    /// THE BARE-NAME SPELLING OF THE SAME EDGE — the one NetNewsWire actually uses.
+    ///
+    /// SwiftPM resolves a bare dependency string against a dependency package's PRODUCTS, so
+    /// `.package(path: "../Base")` beside a plain `"Base"` in the target is a cross-package edge with
+    /// no `.product(…)` anywhere. `targetClosure` drops a name its own package does not declare —
+    /// correct on the SPM `--target` path, where "not declared here" really does mean "no sources in
+    /// this tree", and wrong here, where the sibling package is three directories away.
+    ///
+    /// MEASURED, which is why this test exists: NetNewsWire's `Modules/` holds 17 local packages and
+    /// the scope resolved 14. The three missing — CloudKitSync, FeedFinder, NewsBlur — were exactly
+    /// those no app TARGET names directly, reachable only through `Account`, whose manifest spells
+    /// every dependency as a bare string. `NewsBlurAPICaller` is the app's sync layer, so the scope
+    /// analyzed the app minus its network client.
+    func testABareNameDependencyOnASiblingLocalPackageResolvesToo() throws {
+        let bareNameKit = """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(
+            name: "Kit",
+            products: [.library(name: "Kit", targets: ["Kit"])],
+            dependencies: [.package(path: "../Base")],
+            targets: [.target(name: "Kit", dependencies: ["Base"])]
+        )
+        """
+        let scope = try xcodeTargetScope(model: model(withPackages), projectDir: "/repo",
+                                         targetName: "App", fs: fsStub(
+            swiftFilesUnder: { dir in ["\(dir)/A.swift"] },
+            manifests: ["/repo/Packages/Kit": bareNameKit, "/repo/Packages/Base": baseManifest]))
+        XCTAssertEqual(scope.files.sorted(), [
+            "/repo/App.swift",
+            "/repo/Packages/Base/Sources/BaseCore/A.swift",
+            "/repo/Packages/Kit/Sources/Kit/A.swift",
+        ], "Base is reachable ONLY through Kit's bare-string dependency — dropping it scopes the app "
+           + "minus a package it compiles")
+        XCTAssertEqual(scope.localPackages, ["Base", "Kit"])
+    }
+
+    /// …and the floor under it: a bare name matching NO local product is still remote. Without this,
+    /// the fix above could be satisfied by resolving every bare string to something.
+    func testABareNameMatchingNoLocalPackageStaysRemote() throws {
+        let bareRemote = """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(
+            name: "Kit",
+            products: [.library(name: "Kit", targets: ["Kit"])],
+            targets: [.target(name: "Kit", dependencies: ["Alamofire"])]
+        )
+        """
+        let noBase = withPackages
+            .replacingOccurrences(of: "FBASE = { isa = PBXFileReference; lastKnownFileType = wrapper; path = Packages/Base; sourceTree = \"<group>\"; };\n", with: "")
+            .replacingOccurrences(of: "children = ( FAPP, FKIT, FBASE )", with: "children = ( FAPP, FKIT )")
+        let scope = try xcodeTargetScope(model: model(noBase), projectDir: "/repo",
+                                         targetName: "App", fs: fsStub(
+            swiftFilesUnder: { dir in ["\(dir)/A.swift"] },
+            manifests: ["/repo/Packages/Kit": bareRemote]))
+        XCTAssertEqual(scope.localPackages, ["Kit"])
+        XCTAssertEqual(scope.files.sorted(), ["/repo/App.swift", "/repo/Packages/Kit/Sources/Kit/A.swift"])
+        // RemoteKit (project-level) + Alamofire (Kit's bare name, no local product): both COUNTED.
+        // Previously the bare name was dropped at closure level and reached no counter at all.
+        XCTAssertEqual(scope.remoteProductCount, 2)
+    }
+
     func testARemoteOnlyProductDependencyIsDisclosedNotRefused() throws {
         // Remove the local packages entirely: the remaining product deps are remote (one by explicit
         // XCRemoteSwiftPackageReference, one a bare name no local package declares). Both must

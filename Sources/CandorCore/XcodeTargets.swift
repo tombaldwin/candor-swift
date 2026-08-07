@@ -774,7 +774,27 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
                 // IceCubes' StatusKit -> MediaUI chain lands in the scope. A miss here is a remote
                 // product (BrowserServicesKit et al) — counted, κ-disclosed, exactly like a remote
                 // dependency named at the project level.
-                for pd in t.productDependencies {
+                //
+                // ⟨the bare-name half⟩ …AND a BARE-STRING dependency naming nothing this package
+                // declares is the SAME edge in the other spelling. SwiftPM resolves a bare name
+                // against a dependency package's PRODUCTS, and real manifests use it: NetNewsWire's
+                // Account writes `.package(path: "../NewsBlur")` beside a plain `"NewsBlur"` in its
+                // target, never `.product(name:package:)`. `targetClosure` drops such a name — correct
+                // for the SPM `--target` path, where "not declared here" does mean "no sources in this
+                // tree", and WRONG here, where the sibling package is three directories away.
+                //
+                // MEASURED on NetNewsWire, which is why this exists: `Modules/` holds 17 local
+                // packages and the scope resolved 14. The three missing — CloudKitSync, FeedFinder,
+                // NewsBlur — were exactly the ones no app TARGET names directly, reachable only
+                // through Account. NewsBlurAPICaller is the app's sync layer; leaving it out analyzed
+                // the app minus its network client. Not a purity claim (the import ledger still
+                // disclosed the modules as uncovered), but the scope was smaller than the product.
+                //
+                // Both misses land in the same arm below, so a bare name that matches no local
+                // product is counted remote and κ-disclosed rather than dropped in silence — which is
+                // strictly more disclosure than the closure-level drop it replaces.
+                let inPackage = Set(pkg.targets.map(\.name))
+                for pd in t.productDependencies + t.dependencies.filter({ !inPackage.contains($0) }) {
                     let hits = lookupLocal(pd)
                     if hits.count > 1 {
                         throw XcodeScopeError.unresolvableLocalProduct(
