@@ -53,46 +53,25 @@ func runInputs(_ target: String?, _ policyFlag: String?) -> [(String, String)] {
                        ("CANDOR_CONFIG", "CANDOR_CONFIG")] {
         if let x = env[v], !x.isEmpty { out.append((x, label)) }
     }
-    for d in (env["CANDOR_DEPS"] ?? "").split(separator: ":").map(String.init) where !d.isEmpty {
+    // The SEPARATOR SET the dep loader accepts, not just `:` — a space-separated list registered as one
+    // unresolvable token, so no dep in it was protected.
+    for d in (env["CANDOR_DEPS"] ?? "").split(whereSeparator: { $0 == ":" || $0 == "," || $0 == " " || $0 == "\t" })
+        .map(String.init) where !d.isEmpty {
         out.append((d, "a CANDOR_DEPS report"))
     }
-    let fm = FileManager.default
-    var cfg: String? = nil
-    if let o = env["CANDOR_CONFIG"], fm.fileExists(atPath: o) { cfg = o }
-    if cfg == nil {
-        var dir = (URL(fileURLWithPath: target ?? ".").standardizedFileURL.path as NSString).standardizingPath
-        var isDir: ObjCBool = false
-        if fm.fileExists(atPath: dir, isDirectory: &isDir), !isDir.boolValue {
-            dir = (dir as NSString).deletingLastPathComponent
-        }
-        for _ in 0..<64 {
-            let c = (dir as NSString).appendingPathComponent(".candor/config")
-            if fm.fileExists(atPath: c) { cfg = c; break }
-            let up = (dir as NSString).deletingLastPathComponent
-            if up == dir { break }
-            dir = up
-        }
+    // …AND THE CONFIG'S OWN KEYS, THROUGH THE ENGINE'S OWN DISCOVERY AND ITS OWN LOADER. This used to
+    // re-derive both, and a review took it apart: a second parser is a second set of holes, and every
+    // place it disagreed with the real one was a file the guard failed to protect.
+    guard let cfg = discoverConfigFile(targetPath: target ?? ".") else { return out }
+    out.append((cfg, "the discovered .candor/config"))
+    let values = loadCandorConfig(targetPath: target ?? ".")
+    for key in ["policy", "baseline"] {
+        if let v = values[key], !v.isEmpty { out.append((v, "the config's `\(key)`")) }
     }
-    if let cfg {
-        out.append((cfg, "the discovered .candor/config"))
-        let home = ((cfg as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
-        if let text = try? String(contentsOfFile: cfg, encoding: .utf8) {
-            for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
-                let line = raw.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0]
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                let parts = line.split(maxSplits: 1, whereSeparator: { $0.isWhitespace }).map(String.init)
-                guard parts.count == 2 else { continue }
-                let key = parts[0].lowercased()
-                guard ["policy", "baseline", "deps"].contains(key) else { continue }
-                let vals = key == "deps"
-                    ? parts[1].split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == ":" || $0 == "," }).map(String.init)
-                    : [parts[1].trimmingCharacters(in: .whitespaces)]
-                for one in vals where !one.isEmpty {
-                    let abs = one.hasPrefix("/") ? one : (home as NSString).appendingPathComponent(one)
-                    out.append((abs, "the config's `\(key)`"))
-                }
-            }
-        }
+    for one in (values["deps"] ?? "")
+        .split(whereSeparator: { $0 == ":" || $0 == "," || $0 == " " || $0 == "\t" })
+        .map(String.init) where !one.isEmpty {
+        out.append((one, "the config's `deps`"))
     }
     return out
 }

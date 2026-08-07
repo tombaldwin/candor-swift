@@ -76,6 +76,33 @@ func discoverConfig(targetPath: String) -> (path: String, text: String)? {
     }
     return nil
 }
+/// WHICH config file this run reads, with NO side effects (SPEC §3.4).
+///
+/// Extracted so the §3.3.1 sink guard asks the same question the loader answers instead of re-deriving
+/// the walk. A review took the guard's own copy apart on exactly that divergence: it computed the
+/// config's home directory as parent-of-parent unconditionally, where the loader only steps out of a
+/// trailing `.candor/` segment, so an out-of-tree `CANDOR_CONFIG` had its relative values anchored one
+/// level too high and the guard protected a path the run never reads.
+func discoverConfigFile(targetPath: String) -> String? {
+    let fm = FileManager.default
+    if let override = ProcessInfo.processInfo.environment["CANDOR_CONFIG"] {
+        return fm.fileExists(atPath: override) ? override : nil
+    }
+    var dir = (URL(fileURLWithPath: targetPath).standardizedFileURL.path as NSString).standardizingPath
+    var isDir: ObjCBool = false
+    if !(fm.fileExists(atPath: dir, isDirectory: &isDir) && isDir.boolValue) {
+        dir = (dir as NSString).deletingLastPathComponent
+    }
+    for _ in 0..<64 {
+        let cand = (dir as NSString).appendingPathComponent(".candor/config")
+        if fm.fileExists(atPath: cand) { return cand }
+        let parent = (dir as NSString).deletingLastPathComponent
+        if parent == dir || parent.isEmpty { break }
+        dir = parent
+    }
+    return nil
+}
+
 func loadCandorConfig(targetPath: String) -> [String: String] {
     var file: String? = nil
     if let override = ProcessInfo.processInfo.environment["CANDOR_CONFIG"] {

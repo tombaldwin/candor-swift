@@ -9,6 +9,14 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **The sink guard now uses the engine's own discovery and loader** (`discoverConfigFile` +
+  `loadCandorConfig`) rather than re-deriving the walk and the parse. The hand-written copy anchored an
+  out-of-tree `CANDOR_CONFIG` one level too high and split `deps` on `:` alone; a second parser is a
+  second set of holes.
+- **⚠ `gate --report` enumerated the config channel from the REPORT's directory** while this verb's
+  policy ladder discovers it from the CWD — a different question, so a config-declared policy was
+  destroyed at exit 0.
+
 - **A split narrows every policy that named the parent, silently — now disclosed.** `MotionRaw` was
   split out of `Motion` because Apple requires no usage key for the raw CoreMotion stream, which is
   correct and means an existing `deny Motion` — written by an operator who meant "no CoreMotion in this

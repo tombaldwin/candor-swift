@@ -403,7 +403,10 @@ func runGateReportCLI(_ args: [String]) -> Never {
             if !args[i + 1].hasPrefix("-") { reportFlag = args[i + 1] }
         }
         refuseGateJsonOverInput(gp, reportFlag, "--report")
-        refuseGateJsonOverAnyInput(gp, reportFlag ?? ".", pre.policy)
+        // The gate verb's policy fallback is CWD-anchored (CANDOR_POLICY, then the config discovered
+        // from the CWD), so the config channel must be enumerated from "." — anchoring it at the REPORT
+        // asked a different directory's question and left a config-declared policy unguarded.
+        refuseGateJsonOverAnyInput(gp, ".", pre.policy)
         if gp != "-" { armGateJsonFailClosed(gp) }
     }
     var reportFlag: String?, policyFlag: String?, gateJsonPath: String?
