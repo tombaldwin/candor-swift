@@ -342,20 +342,24 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// what makes the cause unambiguous. The comment on the old function said "products, not every
     /// target"; the line below it did otherwise.
     var exposedCache: [String: Set<String>] = [:]
-    func exposed(by pkgDir: String, seen: inout Set<String>) -> Set<String> {
+    func exposed(by pkgDir: String) -> Set<String> {
         if let c = exposedCache[pkgDir] { return c }
-        guard seen.insert(pkgDir).inserted else { return [] }        // cycle-safe
         var out = Set<String>()
         if let src = try? String(contentsOfFile: (pkgDir as NSString).appendingPathComponent("Package.swift"),
                                  encoding: .utf8) {
+            let analyzed = analyzedTargets(in: pkgDir)
             for prod in parsePackageProducts(manifestSource: src) {
-                out.insert(prod.name)
-                for t in prod.targets { out.insert(t) }
+                // MEMBER TARGETS ONLY. A product NAME is not a module: `.library(name: "Pay", targets:
+                // ["PayCore"])` is imported as `PayCore`, and claiming `Pay` silences a real remote
+                // module of that name. The product is the unit of EXPOSURE; the target is the unit of
+                // IMPORT, and they are not interchangeable.
+                for t in prod.targets where analyzed.contains(t) { out.insert(t) }
             }
         }
         exposedCache[pkgDir] = out
         return out
     }
+
     /// Which modules a file inside `pkgDir` may import: the package's own declared targets, plus what
     /// each DIRECTLY declared local dependency exposes. Not transitive: SwiftPM requires a direct
     /// dependency declaration to import a product, so inheriting a grandchild's products would claim on
@@ -363,15 +367,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var importableCache: [String: Set<String>] = [:]
     func importable(from pkgDir: String) -> Set<String> {
         if let c = importableCache[pkgDir] { return c }
-        var out = Set(targetsIn(pkgDir).map(\.name))
+        var out = analyzedTargets(in: pkgDir)
         for dep in localDepsOf[pkgDir] ?? [] {
             _ = targetsIn(dep)                                       // populates localDepsOf for the dep
-            var seen = Set<String>()
-            out.formUnion(exposed(by: dep, seen: &seen))
+            out.formUnion(exposed(by: dep))
         }
         importableCache[pkgDir] = out
         return out
     }
+
     /// The package that owns an analyzed file — the nearest ancestor manifest one of whose declared
     /// target roots contains it. nil when no manifest claims the file, which claims nothing.
     var ownerCache: [String: String?] = [:]
@@ -393,33 +397,28 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // use site, and keying one absolutely and the other relatively would silently return the empty set
     // for every file, which reads as "nothing importable" and floods the disclosure rather than
     // suppressing it. (The safe direction, but a defect all the same: nothing would ever be internal.)
-    // …AND IT MUST HAVE BEEN ANALYZED. Importable answers "could this file name that module"; it does
-    // NOT answer "did we read it". A `.package(path: "../Dep")` makes Dep importable while its sources
-    // sit outside the scan entirely, and a target declared with `path: "Modules/Core"` is importable
-    // from a scan of `Sources/` that never touched `Modules/`. Claiming either silences a call into
-    // code this run never read — the cardinal sin, one conjunct short. Caught by the existing workspace
-    // tests, which my own nine-round battery could not see because every fixture in it had the module
-    // either analyzed or undeclared, never declared-and-absent.
-    var analyzedModules: Set<String> = []
-    do {
+    // …AND IT MUST HAVE BEEN ANALYZED — **BY THE PACKAGE THE NAME RESOLVES TO**.
+    //
+    // This was a scan-wide set of bare NAMES, and that made it the tenth instance of the pattern every
+    // defect in this derivation has been: two questions sharing one answer. "Can this file import X" is
+    // answered per dependency graph; "did this run read X" was answered against ANY package's
+    // same-named target. Measured: a scan root declaring `.package(path: "../LibA")` — LibA outside the
+    // scan, its `URLSession` client never read — plus an unrelated in-scan package whose target is also
+    // called `Core`, and the root's `import Core` went silent on both channels. Rename that unrelated
+    // target and the disclosure returns.
+    //
+    // So the conjunct is per (package, target): a name counts as read only where the package that
+    // exposes it actually had files in this scan.
+    var analyzedInCache: [String: Set<String>] = [:]
+    func analyzedTargets(in pkgDir: String) -> Set<String> {
+        if let c = analyzedInCache[pkgDir] { return c }
         let absPaths = sourcePaths.map { URL(fileURLWithPath: $0).standardized.path }
-        var pkgDirs = Set<String>()
-        for f in absPaths {
-            var dir = (f as NSString).deletingLastPathComponent
-            while dir.count > 1 {
-                if FileManager.default.fileExists(atPath: (dir as NSString).appendingPathComponent("Package.swift")) {
-                    pkgDirs.insert(dir)
-                }
-                let parent = (dir as NSString).deletingLastPathComponent
-                if parent == dir { break }
-                dir = parent
-            }
+        var out = Set<String>()
+        for t in targetsIn(pkgDir) where absPaths.contains(where: { $0.hasPrefix(t.root + "/") }) {
+            out.insert(t.name)
         }
-        for pkg in pkgDirs {
-            for t in targetsIn(pkg) where absPaths.contains(where: { $0.hasPrefix(t.root + "/") }) {
-                analyzedModules.insert(t.name)
-            }
-        }
+        analyzedInCache[pkgDir] = out
+        return out
     }
     var importableByFile: [String: Set<String>] = [:]                 // rel file -> importable modules
     for raw in sourcePaths {
@@ -429,7 +428,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             : raw
         if let pkg = owningPackage(of: abs) {
             // BOTH conjuncts: the file's package can import it, AND this run actually read it.
-            importableByFile[rel] = importable(from: pkg).intersection(analyzedModules)
+            importableByFile[rel] = importable(from: pkg)
         } else if !xcodeLocalPackageDirs.isEmpty {
             // AN XCODE TARGET'S FILE has no owning `Package.swift` — a folder in an Xcode target is not
             // a module, and the target compiles all of its files into one. What it may import is the
@@ -440,11 +439,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // EXPOSED, not importable: an Xcode target links a local package's PRODUCTS, so it sees
             // what that package publishes — not the internal targets only its own files may import.
             var out = Set<String>()
-            for dep in xcodeLocalPackageDirs {
-                var seen = Set<String>()
-                out.formUnion(exposed(by: dep, seen: &seen))
-            }
-            importableByFile[rel] = out.intersection(analyzedModules)
+            for dep in xcodeLocalPackageDirs { out.formUnion(exposed(by: dep)) }
+            importableByFile[rel] = out
         }
     }
     var collectors: [DeclCollector] = []

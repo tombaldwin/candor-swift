@@ -1432,4 +1432,60 @@ final class XcodeTargetScopeTests: XCTestCase {
                       "`AcmePay` is an INTERNAL target of the dependency, in no product — the parent "
                       + "cannot import it, so it must not silence the parent's real remote SDK")
     }
+
+    /// ⟨0.28 rung, review 2⟩ **"ANALYZED" IS A FACT ABOUT A PACKAGE, NOT ABOUT A NAME.** The conjunct
+    /// gating every claim was a scan-wide set of bare target names, so "did this run read X" was
+    /// answered against ANY package's same-named target rather than the one the file's dependency graph
+    /// resolves X to.
+    ///
+    /// Tenth instance of the pattern every defect in this derivation has been: two questions sharing one
+    /// answer. `importable` asks per dependency graph; `analyzedModules` answered per name.
+    func testAnUnrelatedPackagesTargetNameDoesNotCertifyADependency() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        func probe(unrelatedTargetNamed name: String) throws -> String {
+            let root = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("candor-amcol-\(UUID().uuidString)")
+            for d in ["app/Sources/App", "app/Unrelated/Sources/\(name)", "LibA/Sources/Core"] {
+                try fm.createDirectory(at: root.appendingPathComponent(d), withIntermediateDirectories: true)
+            }
+            defer { try? fm.removeItem(at: root) }
+            // The scan root is `app/`; LibA sits OUTSIDE it and is never read.
+            try """
+            // swift-tools-version:5.9
+            import PackageDescription
+            let package = Package(name: "App",
+                dependencies: [.package(path: "../LibA")],
+                targets: [.executableTarget(name: "App",
+                    dependencies: [.product(name: "Core", package: "LibA")])])
+            """.write(to: root.appendingPathComponent("app/Package.swift"), atomically: true, encoding: .utf8)
+            try """
+            // swift-tools-version:5.9
+            import PackageDescription
+            let package = Package(name: "LibA",
+                products: [.library(name: "Core", targets: ["Core"])],
+                targets: [.target(name: "Core")])
+            """.write(to: root.appendingPathComponent("LibA/Package.swift"), atomically: true, encoding: .utf8)
+            try "import Foundation\npublic struct CoreClient { public init() {}\n  public func send() { _ = URLSession.shared } }\n"
+                .write(to: root.appendingPathComponent("LibA/Sources/Core/C.swift"), atomically: true, encoding: .utf8)
+            // An unrelated package INSIDE the scan, which the app does not depend on.
+            try """
+            // swift-tools-version:5.9
+            import PackageDescription
+            let package = Package(name: "Unrelated", targets: [.target(name: "\(name)")])
+            """.write(to: root.appendingPathComponent("app/Unrelated/Package.swift"), atomically: true, encoding: .utf8)
+            try "public func helper() {}\n"
+                .write(to: root.appendingPathComponent("app/Unrelated/Sources/\(name)/U.swift"),
+                       atomically: true, encoding: .utf8)
+            try "import Foundation\nimport Core\nfunc ship() { CoreClient().send() }\nship()\n"
+                .write(to: root.appendingPathComponent("app/Sources/App/main.swift"), atomically: true, encoding: .utf8)
+            return try ProcessHarness.run(bin, [root.appendingPathComponent("app").path,
+                                                "--out", root.appendingPathComponent("r").path]).err
+        }
+        XCTAssertTrue(try probe(unrelatedTargetNamed: "Helpers").contains("Core"),
+                      "control: LibA's Core was never read, so it must be disclosed")
+        XCTAssertTrue(try probe(unrelatedTargetNamed: "Core").contains("Core"),
+                      "an UNRELATED package's analyzed target that happens to share the name must not "
+                      + "certify a dependency this run never opened")
+    }
 }
