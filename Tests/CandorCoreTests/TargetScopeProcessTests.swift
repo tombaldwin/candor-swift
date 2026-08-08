@@ -309,4 +309,40 @@ final class TargetScopeProcessTests: XCTestCase {
             XCTAssertEqual(r.code, 2, "`\(args.joined(separator: " "))` must fail closed")
         }
     }
+
+    /// A REFUSAL MUST CARRY ITS REMEDY. bitwarden/ios GENERATES its Xcode project (XcodeGen), so a fresh
+    /// clone has no `.xcodeproj` at all — and the bare "neither found" told a user with a perfectly
+    /// ordinary repo only that something was missing. The spec file is sitting right there; naming it,
+    /// and the command, is the difference between a dead end and an instruction.
+    ///
+    /// It names EVERY spec rather than picking one: bitwarden has five and the alphabetically-first
+    /// builds the Authenticator, not the app. Suggesting one command that generates the wrong product
+    /// is the same guess this resolver refuses to make everywhere else.
+    func testAGeneratedProjectRepoIsToldWhatToGenerate() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-gen-\(UUID().uuidString)")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        try "import Foundation\nfunc f() {}\n".write(to: root.appendingPathComponent("a.swift"),
+                                                     atomically: true, encoding: .utf8)
+        // The CONTROL first: Swift sources, no project, no generator — the plain message, and no advice
+        // this repo cannot act on.
+        let bare = try ProcessHarness.run(bin, [root.path, "--target", "App"], cwd: root)
+        XCTAssertEqual(bare.code, 2, bare.err)
+        XCTAssertTrue(bare.err.contains("neither found"), bare.err)
+        XCTAssertFalse(bare.err.contains("GENERATES"),
+                       "a repo with no generator must not be told to run one: \(bare.err)")
+        // Now the split-spec shape.
+        for spec in ["project-bwa.yml", "project-pm.yml"] {
+            try "name: X\n".write(to: root.appendingPathComponent(spec), atomically: true, encoding: .utf8)
+        }
+        let gen = try ProcessHarness.run(bin, [root.path, "--target", "App"], cwd: root)
+        XCTAssertEqual(gen.code, 2, gen.err)
+        XCTAssertTrue(gen.err.contains("GENERATES"), gen.err)
+        XCTAssertTrue(gen.err.contains("xcodegen generate --spec project-bwa.yml")
+                      && gen.err.contains("xcodegen generate --spec project-pm.yml"),
+                      "every spec must be named — picking one guesses which product you meant: \(gen.err)")
+    }
 }

@@ -9,6 +9,16 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **A `--target` refusal on a GENERATED-project repo was a dead end.** bitwarden/ios builds its Xcode
+  project with XcodeGen, so a fresh clone has no `.xcodeproj` at all and the refusal said only "needs a
+  Package.swift or an .xcodeproj … neither found" — accurate, and useless to a user whose repo is
+  perfectly ordinary. The spec file is sitting in the same directory; the refusal now names it and the
+  command that turns it into a project, then says to re-run the same `--target`. It names EVERY spec
+  rather than picking one — bitwarden has five and the alphabetically-first builds the Authenticator,
+  not the app, so suggesting one command is the same guess this resolver refuses to make everywhere
+  else. `project.yml`/`Project.swift`/`Tuist.swift` are recognised too. Pinned with its control: a repo
+  with Swift sources and no generator still gets the plain message and no advice it cannot act on.
+
 - **⚠ `--target` on an `.xcodeproj` resolved the local-package closure ONE HOP SHORT — found by running
   it on NetNewsWire.** `Modules/` holds **17** local packages; the scope resolved **14**. The three
   missing were exactly those no app TARGET names directly — `CloudKitSync`, `FeedFinder`, `NewsBlur` —

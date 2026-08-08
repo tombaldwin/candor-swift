@@ -435,8 +435,44 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
     let fm = FileManager.default
     let projects = findXcodeProjects(under: rootDir)
     guard !projects.isEmpty else {
-        FileHandle.standardError.write(("candor-swift: --target needs a Package.swift or an .xcodeproj "
-            + "to resolve against; neither found under \(rootDir)\n").data(using: .utf8)!)
+        // A REFUSAL THAT NAMES THE REMEDY. Measured on bitwarden/ios, which GENERATES its project:
+        // a fresh clone has no `.xcodeproj` at all, and the bare message above told a user with a
+        // perfectly ordinary repo only that something was missing — a dead end, which is the one thing
+        // this project's failures are not allowed to be. If a generator's manifest is sitting right
+        // there, say so and say what to run; the file is the evidence, so this cannot mis-advise a repo
+        // that simply has no project.
+        let generators: [(file: String, run: String)] = [
+            ("project.yml", "xcodegen generate"), ("Project.swift", "tuist generate"),
+            ("Tuist.swift", "tuist generate"), ("workspace.yml", "xcodegen generate"),
+        ]
+        var found: [(String, String)] = []
+        for g in generators where fm.fileExists(atPath: (rootDir as NSString).appendingPathComponent(g.file)) {
+            found.append((g.file, g.run))
+        }
+        // XcodeGen's split-spec convention: `project-<name>.yml` with no plain `project.yml`.
+        // NAME THEM ALL rather than pick one — bitwarden/ios has five (`project-bwa`, `-bwk`, `-bwth`,
+        // `-common`, `-pm`) and the alphabetically-first is the Authenticator, not the app. Suggesting
+        // one command that generates the wrong product is the same guess this resolver refuses to make
+        // everywhere else; a list the reader can choose from is not.
+        var splitSpecs: [String] = []
+        if found.isEmpty, let names = try? fm.contentsOfDirectory(atPath: rootDir) {
+            splitSpecs = names.filter { $0.hasPrefix("project") && $0.hasSuffix(".yml") }.sorted()
+        }
+        var msg = "candor-swift: --target needs a Package.swift or an .xcodeproj to resolve against; "
+            + "neither found under \(rootDir)\n"
+        if let g = found.first {
+            msg += "  This repo GENERATES its project (\(g.0) is here), so there is nothing to read "
+                + "until you generate it:\n      \(g.1)\n"
+        } else if !splitSpecs.isEmpty {
+            msg += "  This repo GENERATES its project — \(splitSpecs.count) XcodeGen spec(s) are here "
+                + "and which one builds the product you mean is yours to say:\n"
+            for spec in splitSpecs { msg += "      xcodegen generate --spec \(spec)\n" }
+        }
+        if found.first != nil || !splitSpecs.isEmpty {
+            msg += "  Then re-run the same --target. Without a target the scan is whole-repo, which is "
+                + "sound but answers about every product at once.\n"
+        }
+        FileHandle.standardError.write(msg.data(using: .utf8)!)
         exit(2)
     }
     do {
