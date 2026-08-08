@@ -254,7 +254,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // name are the phantoms and are dropped.
             let parsed = parsePackageTargets(manifestSource: src)
             let pathPinned = Set(parsed.filter { $0.path != nil }.map(\.name))
-            for t in parsed where t.path != nil || !pathPinned.contains(t.name) {
+            // PLUGINS ARE NOT IMPORTABLE MODULES, so a plugin declaration can never account for an
+            // analyzed file — its sources live under `Plugins/<name>`, which discovery excludes outright.
+            // `targetSourceDirs` was written for scope resolution, where a plugin is unreachable, so it
+            // maps every non-test target to `Sources/<name>`: a path-less `.plugin(name: "Stripe")`
+            // beside a stale `Sources/Stripe/` therefore claimed module Stripe and silenced a real SDK.
+            // That is round 3's defect, reintroduced by the commit that deleted the parser which knew
+            // about `Plugins/`. Excluded on the SEMANTICS — not importable — rather than by teaching a
+            // second place about directory layouts.
+            for t in parsed where !t.isPlugin && (t.path != nil || !pathPinned.contains(t.name)) {
                 // Per target, and non-throwing: a manifest may name a target whose directory is absent,
                 // and that is not this derivation's business — it just means no root to claim.
                 if let dirs = try? targetSourceDirs([t], packageRoot: pkgDir, exists: isDir) {

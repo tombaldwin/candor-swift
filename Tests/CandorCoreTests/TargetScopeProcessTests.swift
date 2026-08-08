@@ -88,7 +88,12 @@ final class TargetScopeProcessTests: XCTestCase {
                 return XCTFail("wrong error: \(e)")
             }
             XCTAssertEqual(t, "Core")
-            XCTAssertEqual(tried, ["/pkg/Sources/Core", "/pkg/Core"], "the error must name what it TRIED")
+            // `Source/` (singular) joined the candidates: it is one of SwiftPM's predefined source
+            // directories, and omitting it made an ANALYZED module read as a third-party blind spot.
+            // The assertion is the full list on purpose — the refusal must name everything it tried, so
+            // adding a candidate without adding it here would leave the message and the code disagreeing.
+            XCTAssertEqual(tried, ["/pkg/Sources/Core", "/pkg/Source/Core", "/pkg/Core"],
+                           "the error must name what it TRIED")
         }
     }
 

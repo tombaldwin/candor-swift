@@ -9,6 +9,25 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ AN EIGHTH SPELLING, and this one I reintroduced three hours after fixing it.** A path-less
+  `.plugin(name: "Stripe")` beside a stale `Sources/Stripe/` claimed module Stripe and silenced a real
+  SDK on both disclosure channels. `targetSourceDirs` was written to resolve a scan SCOPE, where a
+  `.plugin` target is unreachable — plugins never appear in `dependencies:` — so it maps every non-test
+  target to `Sources/<name>`. The hand-rolled parser that the consolidation deleted DID know about
+  `Plugins/`; that line was round 3's own fix. Deleting the duplicate was right, and it took the one
+  piece of knowledge the copy had that the original lacked.
+
+  Fixed on the SEMANTICS rather than the layout: app code cannot `import` a plugin, and this engine's
+  discovery excludes `Plugins/` outright, so a plugin declaration can never legitimately account for an
+  analyzed file. `PackageTarget` now carries `isPlugin` and module identity skips those targets. Teaching
+  a second place about directory conventions is what put the knowledge in two places to begin with.
+- **`Source/` (singular) was a blind spot that isn't one.** One of SwiftPM's predefined source
+  directories, unknown to the shared resolver, so an ANALYZED local module was named third-party — a
+  false disclosure, the noise this whole thread began by trying to remove. Added as a candidate, which
+  also means `--target` can now resolve packages using that layout instead of refusing them. The
+  refusal's "tried" list grew by one entry and its test was updated to match, because a message that
+  does not name everything it tried is the next defect.
+
 - **⚠ A SEVENTH SPELLING, and it was the SEED: `internalModules` started life holding the package
   NAME.** A package name is not a module — and it is not even a declaration, since it comes from a
   first-`name:` regex over the manifest, falling back to the directory basename. When a package is named

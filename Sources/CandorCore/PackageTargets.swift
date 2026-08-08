@@ -36,6 +36,13 @@ public struct PackageTarget: Equatable, Sendable {
     /// The `path:` argument if the manifest declared one, else nil (convention applies).
     public let path: String?
     public let isTest: Bool
+    /// `.plugin(…)` — a BUILD-TOOL or COMMAND plugin. Carried because a plugin is **not an importable
+    /// module**: app code cannot `import` it, and its sources live under `Plugins/<name>`, which this
+    /// engine's discovery excludes outright — so a plugin target can never legitimately account for an
+    /// analyzed file. A consumer deciding module IDENTITY must skip it; a consumer resolving a scan
+    /// SCOPE never reaches one (plugins do not appear in `dependencies:`), which is why the distinction
+    /// did not exist until identity became a second caller.
+    public let isPlugin: Bool
     /// A `dependencies:` argument was present but not a literal array, so this target's dependency list
     /// is UNKNOWN rather than empty. Resolving a closure through it would silently scan a subset.
     public let dependenciesUnreadable: Bool
@@ -49,9 +56,11 @@ public struct PackageTarget: Equatable, Sendable {
     public let productDependenciesUnreadable: Bool
 
     public init(name: String, dependencies: [String], path: String?, isTest: Bool,
+                isPlugin: Bool = false,
                 dependenciesUnreadable: Bool = false,
                 productDependencies: [String] = [], productDependenciesUnreadable: Bool = false) {
         self.name = name; self.dependencies = dependencies; self.path = path; self.isTest = isTest
+        self.isPlugin = isPlugin
         self.dependenciesUnreadable = dependenciesUnreadable
         self.productDependencies = productDependencies
         self.productDependenciesUnreadable = productDependenciesUnreadable
@@ -201,8 +210,13 @@ public func targetSourceDirs(_ closure: [PackageTarget], packageRoot: String,
         // SwiftPM's conventional layout when no `path:` is declared: `Sources/<name>` (`Tests/<name>` for
         // a test target), falling back to a bare `<name>/` at the package root, which SwiftPM also accepts.
         let base = t.isTest ? "Tests" : "Sources"
-        let candidates = [(packageRoot as NSString).appendingPathComponent("\(base)/\(t.name)"),
-                          (packageRoot as NSString).appendingPathComponent(t.name)]
+        // `Source/` (singular) is one of SwiftPM's predefined source directories and a real layout
+        // (Alamofire ships it). Omitting it made an ANALYZED local module read as a third-party blind
+        // spot — a false disclosure — and for `--target` it would have meant refusing a package this
+        // resolver can in fact resolve.
+        var candidates = [(packageRoot as NSString).appendingPathComponent("\(base)/\(t.name)")]
+        if !t.isTest { candidates.append((packageRoot as NSString).appendingPathComponent("Source/\(t.name)")) }
+        candidates.append((packageRoot as NSString).appendingPathComponent(t.name))
         guard let hit = candidates.first(where: exists) else {
             throw TargetScopeError.missingSourceDir(target: t.name, tried: candidates)
         }
@@ -224,6 +238,7 @@ private final class TargetFinder: SyntaxVisitor {
               member.base == nil,                                   // `.target(…)`, not `Foo.target(…)`
               Self.kinds.contains(member.declName.baseName.text) else { return .visitChildren }
         let isTest = member.declName.baseName.text == "testTarget"
+        let isPlugin = member.declName.baseName.text == "plugin"
         var name: String?, path: String?, deps: [String] = []
         var unreadableDeps = false
         var productDeps: [String] = []
@@ -272,6 +287,7 @@ private final class TargetFinder: SyntaxVisitor {
         }
         if let n = name {
             targets.append(PackageTarget(name: n, dependencies: deps, path: path, isTest: isTest,
+                                         isPlugin: isPlugin,
                                          dependenciesUnreadable: unreadableDeps,
                                          productDependencies: productDeps,
                                          productDependenciesUnreadable: unreadableProductDeps))

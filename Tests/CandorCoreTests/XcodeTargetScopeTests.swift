@@ -1091,4 +1091,77 @@ final class XcodeTargetScopeTests: XCTestCase {
                       "the stale `Sources/Core/` is not the declared target's source root — that lives at "
                       + "`Modules/Core` and was never scanned: \(r.err)")
     }
+
+    /// ⟨2026-08-08, round 6⟩ **A PLUGIN IS NOT AN IMPORTABLE MODULE**, and forgetting that reintroduced
+    /// round 3's defect three hours after it was fixed.
+    ///
+    /// `targetSourceDirs` was written to resolve a scan SCOPE, where a `.plugin` target is unreachable
+    /// (plugins never appear in `dependencies:`), so it maps every non-test target to `Sources/<name>`.
+    /// The hand-rolled parser deleted in `53a733e` knew about `Plugins/`; the shared function does not.
+    /// So a path-less `.plugin(name: "Stripe")` beside a stale `Sources/Stripe/` claimed module Stripe
+    /// and silenced a real SDK on both channels.
+    ///
+    /// The fix is on the SEMANTICS rather than the layout: app code cannot `import` a plugin, and this
+    /// engine's discovery excludes `Plugins/` outright, so a plugin declaration can never legitimately
+    /// account for an analyzed file. Teaching a second place about directory conventions is what put the
+    /// knowledge in two places to begin with.
+    func testAPluginDeclarationCannotClaimASourcesFolder() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        func probe(_ extraTarget: String) throws -> String {
+            let root = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("candor-plug-\(UUID().uuidString)")
+            for d in ["Sources/App", "Sources/Stripe", "Plugins/Stripe"] {
+                try fm.createDirectory(at: root.appendingPathComponent(d), withIntermediateDirectories: true)
+            }
+            defer { try? fm.removeItem(at: root) }
+            try """
+            // swift-tools-version:5.9
+            import PackageDescription
+            let package = Package(name: "P", targets: [
+                .executableTarget(name: "App"),
+            \(extraTarget)
+            ])
+            """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+            try "public struct Stale {}\n".write(to: root.appendingPathComponent("Sources/Stripe/Shim.swift"),
+                                                 atomically: true, encoding: .utf8)
+            try "struct P {}\n".write(to: root.appendingPathComponent("Plugins/Stripe/plugin.swift"),
+                                      atomically: true, encoding: .utf8)
+            try "import Foundation\nimport Stripe\nfunc charge() { StripeClient().pay() }\ncharge()\n"
+                .write(to: root.appendingPathComponent("Sources/App/main.swift"), atomically: true, encoding: .utf8)
+            return try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path]).err
+        }
+        XCTAssertTrue(try probe("").contains("Stripe"),
+                      "control: with no declaration at all the SDK import must be disclosed")
+        XCTAssertTrue(try probe("    .plugin(name: \"Stripe\", capability: .buildTool()),").contains("Stripe"),
+                      "a plugin is not importable and its sources are excluded from discovery — it can "
+                      + "never account for an analyzed file, so it must not claim `Sources/Stripe`")
+    }
+
+    /// …and the same commit's other regression, in the safe direction: `Source/` (singular) is one of
+    /// SwiftPM's predefined source directories, and the shared resolver did not know it — so an ANALYZED
+    /// local module was named a third-party blind spot. A false disclosure, which is the noise this
+    /// whole thread began by trying to remove.
+    func testTheSingularSourceLayoutIsNotABlindSpot() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-srcsing-\(UUID().uuidString)")
+        for d in ["Source/Core", "Source/App"] {
+            try fm.createDirectory(at: root.appendingPathComponent(d), withIntermediateDirectories: true)
+        }
+        defer { try? fm.removeItem(at: root) }
+        try """
+        // swift-tools-version:5.9
+        import PackageDescription
+        let package = Package(name: "P", targets: [.target(name: "Core"), .executableTarget(name: "App")])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try "import Foundation\npublic func leak() { _ = FileManager.default.contents(atPath: \"/x\") }\n"
+            .write(to: root.appendingPathComponent("Source/Core/C.swift"), atomically: true, encoding: .utf8)
+        try "import Core\nfunc run() { leak() }\nrun()\n"
+            .write(to: root.appendingPathComponent("Source/App/main.swift"), atomically: true, encoding: .utf8)
+        let r = try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path])
+        XCTAssertFalse(r.err.contains("Core ("),
+                       "`Core` is a declared target whose sources were analyzed under `Source/`: \(r.err)")
+    }
 }
