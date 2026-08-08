@@ -206,95 +206,35 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // only where an SPM manifest says so. That makes this strict rule correct in BOTH directions rather
     // than merely safe in one.
     var internalModules: Set<String> = [pkgName]
+    // ONE MANIFEST PARSER IN THIS CODEBASE, not two. What stood here was a hand-rolled scan — a regex
+    // for `.target(`, a paren matcher, a hand-written argument reader — sitting a few files away from
+    // `parsePackageTargets`, which does the same job with SwiftSyntax and is covered by tests because
+    // the `--target` resolver depends on it. Every defect this derivation produced was a rediscovery of
+    // something the real parser already handles: comments, string literals, nesting, a computed value
+    // where a literal was assumed, an unclosed paren. Six silent under-reports across four review
+    // rounds, each found in the fix for the last, and every one of them lived in the copy.
+    //
+    // `Self.literal` in the parser returns nil for anything that is not a plain string literal, so a
+    // computed name yields no target rather than a wrong one — the safe direction, by construction
+    // rather than by my remembering to check. `targetSourceDirs` then gives the target's REAL source
+    // directory, including SwiftPM's bare `<name>/` fallback, which the hand-rolled version did not know
+    // about at all.
     var manifestRoots: [String: [(name: String, root: String)]] = [:]
     func targetsOf(_ pkgDir: String) -> [(name: String, root: String)] {
         if let c = manifestRoots[pkgDir] { return c }
         var out: [(name: String, root: String)] = []
-        if let raw = try? String(contentsOfFile: (pkgDir as NSString).appendingPathComponent("Package.swift"),
+        if let src = try? String(contentsOfFile: (pkgDir as NSString).appendingPathComponent("Package.swift"),
                                  encoding: .utf8) {
-            // COMMENTS FIRST. A commented-out declaration is not a declaration — and a commented-out
-            // target is PRECISELY a directory that is not a module, which is the whole exposure this
-            // derivation exists to close. Measured: `// .target(name: "Stripe"),` beside a folder named
-            // `Sources/Stripe/` silenced the ledger and the `invisible` hedge for a real SDK import.
-            // Reusing the build-settings reader's one-pass stripper rather than writing a second one.
-            let text = stripCommentsPreservingStrings(raw)
-            let chars = Array(text)
-            var k = 0
-            while k < chars.count {
-                // Find the next `.<kind>(` at this scan position.
-                guard let r = text.range(of: #"\.(executableTarget|testTarget|target|plugin|macro)\("#,
-                                         options: .regularExpression,
-                                         range: text.index(text.startIndex, offsetBy: k)..<text.endIndex)
-                else { break }
-                let kind = String(text[r]).dropFirst().dropLast()
-                let open = text.distance(from: text.startIndex, to: r.upperBound)
-                // Span to the matching `)`, tracking nesting and string literals.
-                var depth = 1, p = open, inStr = false
-                while p < chars.count, depth > 0 {
-                    let c = chars[p]
-                    if inStr { if c == "\\" { p += 1 } else if c == "\"" { inStr = false } }
-                    else if c == "\"" { inStr = true }
-                    else if c == "(" { depth += 1 }
-                    else if c == ")" { depth -= 1 }
-                    p += 1
+            let isDir: (String) -> Bool = { p in
+                var d: ObjCBool = false
+                return FileManager.default.fileExists(atPath: p, isDirectory: &d) && d.boolValue
+            }
+            for t in parsePackageTargets(manifestSource: src) {
+                // Per target, and non-throwing: a manifest may name a target whose directory is absent,
+                // and that is not this derivation's business — it just means no root to claim.
+                if let dirs = try? targetSourceDirs([t], packageRoot: pkgDir, exists: isDir) {
+                    for d in dirs { out.append((t.name, URL(fileURLWithPath: d).standardized.path)) }
                 }
-                // AN UNCLOSED CALL IS NOT A DECLARATION. `depth > 0` means the matcher ran to EOF on a
-                // malformed manifest; the old code then formed a range with a negative upper bound and
-                // TRAPPED, killing the whole scan over one bad `Package.swift` in an ancestor directory.
-                guard depth == 0, p - 1 > open else { break }
-                let span = Array(chars[open..<(p - 1)])
-
-                /// The value of a TOP-LEVEL argument of THIS call. Depth-aware on purpose: reading the
-                /// first `name: "…"` anywhere in the span took a DEPENDENCY's
-                /// `.product(name: "Stripe", …)` whenever the target's own name was computed — the
-                /// WordPress helper shape, which is live in this corpus — so the name silenced was, by
-                /// construction, a real third-party module. Also anchored on a non-identifier char, so
-                /// `publicHeadersPath:` can no longer satisfy a request for `path:`.
-                func arg(_ label: String) -> String? {
-                    var d = 0, q = false, i2 = 0
-                    while i2 < span.count {
-                        let c = span[i2]
-                        if q { if c == "\\" { i2 += 2; continue }; if c == "\"" { q = false }; i2 += 1; continue }
-                        if c == "\"" { q = true; i2 += 1; continue }
-                        if c == "(" || c == "[" { d += 1; i2 += 1; continue }
-                        if c == ")" || c == "]" { d -= 1; i2 += 1; continue }
-                        if d == 0, c == label.first {
-                            let end = i2 + label.count
-                            if end < span.count, String(span[i2..<end]) == label, span[end] == ":" {
-                                let before: Character? = i2 > 0 ? span[i2 - 1] : nil
-                                let isIdent = before.map { $0.isLetter || $0.isNumber || $0 == "_" } ?? false
-                                if !isIdent {
-                                    var v = end + 1
-                                    while v < span.count, span[v] == " " || span[v] == "\n" || span[v] == "\t" { v += 1 }
-                                    guard v < span.count, span[v] == "\"" else { return nil }  // computed ⇒ unknown
-                                    var w = v + 1, acc = ""
-                                    while w < span.count, span[w] != "\"" {
-                                        if span[w] == "\\" { w += 1 }
-                                        if w < span.count { acc.append(span[w]) }
-                                        w += 1
-                                    }
-                                    return acc
-                                }
-                            }
-                        }
-                        i2 += 1
-                    }
-                    return nil
-                }
-                if let name = arg("name") {
-                    let root: String
-                    if let pth = arg("path") {
-                        root = URL(fileURLWithPath: (pkgDir as NSString).appendingPathComponent(pth)).standardized.path
-                    } else {
-                        let dir = kind == "testTarget" ? "Tests" : (kind == "plugin" ? "Plugins" : "Sources")
-                        root = (pkgDir as NSString).appendingPathComponent(dir + "/" + name)
-                    }
-                    out.append((name, root))
-                    if arg("path") == nil, kind != "testTarget", kind != "plugin" {
-                        out.append((name, (pkgDir as NSString).appendingPathComponent("Source/" + name)))
-                    }
-                }
-                k = p
             }
         }
         manifestRoots[pkgDir] = out
@@ -306,8 +246,6 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // ABSOLUTE FIRST. A scan invoked as `candor-swift .` yields RELATIVE paths, so walking up from
         // `./Sources/CandorCore` reached `.` — whose length stops the loop before the repo root is ever
         // examined — and candor-swift's own `CandorCore` was reported as an uncovered third-party module.
-        // A false disclosure, which is the defect this whole thread began with, arriving through the
-        // repair for it. Caught by scanning this engine with itself.
         let f = URL(fileURLWithPath: raw).standardized.path
         var dir = (f as NSString).deletingLastPathComponent
         while dir.count > 1 {

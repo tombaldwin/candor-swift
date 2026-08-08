@@ -9,26 +9,28 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
-- **⚠ TWO MORE SPELLINGS OF THE SAME SIN, both inside the rewrite that closed the previous two.** A
-  fourth review round, both reproduced on the built binary with controls:
-  - **The manifest parse was comment-blind.** `// .target(name: "Stripe"),` was read as a live
-    declaration — and a commented-out target is precisely a directory that is NOT a module, the exact
-    exposure this derivation exists to close. Now stripped with the build-settings reader's own one-pass
-    stripper rather than a second copy of that logic.
-  - **The name was read from anywhere in the declaration's span.** When a target's own name is computed
-    (`name: appName` — the helper shape live in WordPress-iOS's manifest), the first string-literal
-    `name:` inside the span belongs to a DEPENDENCY's `.product(name: "…")`. So the module silenced was,
-    by construction, a real third-party one. The read is now depth-scoped to the declaration's own
-    arguments, and anchored on a non-identifier character so `publicHeadersPath:` can no longer answer a
-    request for `path:`.
-  - **And a malformed manifest could kill the scan.** An unclosed `.target(` ran the paren matcher to
-    EOF and formed a range with a negative upper bound, trapping the process — one bad `Package.swift`
-    anywhere in an analyzed file's ancestor chain took the whole run down. It is now skipped.
+- **⚠ SIX SILENT UNDER-REPORTS FROM ONE DERIVATION, and the cause was that there were TWO manifest
+  parsers in this codebase.** `internalModules` decides whether a module was analyzed; it gates the κ
+  coverage ledger AND the per-function `invisible` hedge, and `invisible` is the only thing between an
+  unresolved call into a blind module and a ⟨0.21⟩ purity claim. Across four review rounds it produced a
+  cardinal sin in six spellings, each found in the fix for the last: every entry of `<root>/Sources/`
+  taken on trust; any `Sources/<X>/` anywhere; a `.testTarget`/`.plugin`/`path:`-relocated declaration
+  read as a source root; a commented-out `.target(…)` read as live; the first `name:` in a declaration's
+  span, which for a computed target name is a DEPENDENCY's `.product(name:)` — by construction a real
+  third-party module; and, in the other direction, relative paths making the walk stop before the
+  manifest, so candor-swift called its own `CandorCore` a blind spot.
 
-  Verified in both directions and on the corpus: the four sin fixtures all disclose, candor-swift
-  scanned relatively still does NOT flag its own `CandorCore`, and NetNewsWire iOS's uncovered set is
-  byte-identical at 14.
+  Every one of those was a rediscovery of something `parsePackageTargets` — the SwiftSyntax manifest
+  parser already in CandorCore, already covered by tests because `--target` depends on it — handles
+  correctly. The hand-rolled scan sitting a few files away from it was the defect; the six spellings were
+  symptoms. It is deleted. Targets now come from that parser and their directories from
+  `targetSourceDirs`, which also knows SwiftPM's bare `<name>/` fallback the copy had never heard of.
+  `Self.literal` returns nil for anything that is not a plain string literal, so a computed name yields
+  no target rather than a wrong one — safe by construction rather than by my remembering to check.
 
+  All six fixtures disclose, the controls stay clean, candor-swift scanned relatively does not flag its
+  own `CandorCore`, NetNewsWire iOS's uncovered set is byte-identical at 14 (from 31 before this work),
+  and WordPress-iOS's 2570 files still scan in 46s.
 - **⚠ THE SAME CARDINAL SIN IN TWO MORE SPELLINGS — one of them inside the fix for the last one.**
   A third review round measured both on the built binary:
   - **(a)** the pre-existing root rule inserted EVERY entry of `<root>/Sources/` into `internalModules`
