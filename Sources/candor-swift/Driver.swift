@@ -210,48 +210,91 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     func targetsOf(_ pkgDir: String) -> [(name: String, root: String)] {
         if let c = manifestRoots[pkgDir] { return c }
         var out: [(name: String, root: String)] = []
-        if let text = try? String(contentsOfFile: (pkgDir as NSString).appendingPathComponent("Package.swift"),
-                                  encoding: .utf8) {
+        if let raw = try? String(contentsOfFile: (pkgDir as NSString).appendingPathComponent("Package.swift"),
+                                 encoding: .utf8) {
+            // COMMENTS FIRST. A commented-out declaration is not a declaration — and a commented-out
+            // target is PRECISELY a directory that is not a module, which is the whole exposure this
+            // derivation exists to close. Measured: `// .target(name: "Stripe"),` beside a folder named
+            // `Sources/Stripe/` silenced the ledger and the `invisible` hedge for a real SDK import.
+            // Reusing the build-settings reader's one-pass stripper rather than writing a second one.
+            let text = stripCommentsPreservingStrings(raw)
             let chars = Array(text)
-            var idx = text.startIndex
-            // ONLY target declarations — a bare `name:` scan also swallowed `.product(name: "NIOCore", …)`
-            // dependency products, silencing exactly the third-party modules the ledger exists to name.
-            while let r = text.range(of: #"\.(executableTarget|testTarget|target|plugin|macro)\("#,
-                                     options: .regularExpression, range: idx..<text.endIndex) {
-                let kind = String(text[r]).dropFirst().dropLast()   // e.g. "testTarget"
-                // Span to the matching `)`, respecting nesting and string literals, so a `path:` in a
-                // LATER declaration cannot be read as this one's.
-                var depth = 1, k = text.distance(from: text.startIndex, to: r.upperBound), inStr = false
-                while k < chars.count, depth > 0 {
-                    let c = chars[k]
-                    if inStr { if c == "\\" { k += 1 } else if c == "\"" { inStr = false } }
+            var k = 0
+            while k < chars.count {
+                // Find the next `.<kind>(` at this scan position.
+                guard let r = text.range(of: #"\.(executableTarget|testTarget|target|plugin|macro)\("#,
+                                         options: .regularExpression,
+                                         range: text.index(text.startIndex, offsetBy: k)..<text.endIndex)
+                else { break }
+                let kind = String(text[r]).dropFirst().dropLast()
+                let open = text.distance(from: text.startIndex, to: r.upperBound)
+                // Span to the matching `)`, tracking nesting and string literals.
+                var depth = 1, p = open, inStr = false
+                while p < chars.count, depth > 0 {
+                    let c = chars[p]
+                    if inStr { if c == "\\" { p += 1 } else if c == "\"" { inStr = false } }
                     else if c == "\"" { inStr = true }
                     else if c == "(" { depth += 1 }
                     else if c == ")" { depth -= 1 }
-                    k += 1
+                    p += 1
                 }
-                let span = String(chars[text.distance(from: text.startIndex, to: r.upperBound)..<max(k - 1, 0)])
+                // AN UNCLOSED CALL IS NOT A DECLARATION. `depth > 0` means the matcher ran to EOF on a
+                // malformed manifest; the old code then formed a range with a negative upper bound and
+                // TRAPPED, killing the whole scan over one bad `Package.swift` in an ancestor directory.
+                guard depth == 0, p - 1 > open else { break }
+                let span = Array(chars[open..<(p - 1)])
+
+                /// The value of a TOP-LEVEL argument of THIS call. Depth-aware on purpose: reading the
+                /// first `name: "…"` anywhere in the span took a DEPENDENCY's
+                /// `.product(name: "Stripe", …)` whenever the target's own name was computed — the
+                /// WordPress helper shape, which is live in this corpus — so the name silenced was, by
+                /// construction, a real third-party module. Also anchored on a non-identifier char, so
+                /// `publicHeadersPath:` can no longer satisfy a request for `path:`.
                 func arg(_ label: String) -> String? {
-                    guard let a = span.range(of: "\(label):\\s*\"", options: .regularExpression) else { return nil }
-                    guard let close = span[a.upperBound...].firstIndex(of: "\"") else { return nil }
-                    return String(span[a.upperBound..<close])
+                    var d = 0, q = false, i2 = 0
+                    while i2 < span.count {
+                        let c = span[i2]
+                        if q { if c == "\\" { i2 += 2; continue }; if c == "\"" { q = false }; i2 += 1; continue }
+                        if c == "\"" { q = true; i2 += 1; continue }
+                        if c == "(" || c == "[" { d += 1; i2 += 1; continue }
+                        if c == ")" || c == "]" { d -= 1; i2 += 1; continue }
+                        if d == 0, c == label.first {
+                            let end = i2 + label.count
+                            if end < span.count, String(span[i2..<end]) == label, span[end] == ":" {
+                                let before: Character? = i2 > 0 ? span[i2 - 1] : nil
+                                let isIdent = before.map { $0.isLetter || $0.isNumber || $0 == "_" } ?? false
+                                if !isIdent {
+                                    var v = end + 1
+                                    while v < span.count, span[v] == " " || span[v] == "\n" || span[v] == "\t" { v += 1 }
+                                    guard v < span.count, span[v] == "\"" else { return nil }  // computed ⇒ unknown
+                                    var w = v + 1, acc = ""
+                                    while w < span.count, span[w] != "\"" {
+                                        if span[w] == "\\" { w += 1 }
+                                        if w < span.count { acc.append(span[w]) }
+                                        w += 1
+                                    }
+                                    return acc
+                                }
+                            }
+                        }
+                        i2 += 1
+                    }
+                    return nil
                 }
                 if let name = arg("name") {
-                    // The target's ACTUAL source root: `path:` when given, else SPM's per-kind default.
                     let root: String
                     if let pth = arg("path") {
-                        root = URL(fileURLWithPath: (pkgDir as NSString).appendingPathComponent(pth)).path
+                        root = URL(fileURLWithPath: (pkgDir as NSString).appendingPathComponent(pth)).standardized.path
                     } else {
                         let dir = kind == "testTarget" ? "Tests" : (kind == "plugin" ? "Plugins" : "Sources")
                         root = (pkgDir as NSString).appendingPathComponent(dir + "/" + name)
                     }
                     out.append((name, root))
-                    // `Source/` is the other conventional spelling SPM accepts for a regular target.
                     if arg("path") == nil, kind != "testTarget", kind != "plugin" {
                         out.append((name, (pkgDir as NSString).appendingPathComponent("Source/" + name)))
                     }
                 }
-                idx = text.index(text.startIndex, offsetBy: min(k, chars.count))
+                k = p
             }
         }
         manifestRoots[pkgDir] = out

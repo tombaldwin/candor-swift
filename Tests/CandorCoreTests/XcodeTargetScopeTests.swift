@@ -950,4 +950,68 @@ final class XcodeTargetScopeTests: XCTestCase {
                        "`Kit` IS a declared target whose sources were analyzed — naming it uncovered is "
                        + "the false disclosure this rule exists to remove: \(rc.err)")
     }
+
+    /// ⟨2026-08-08, round 4⟩ TWO MORE SPELLINGS, both in the rewrite that closed the last two.
+    ///
+    /// The manifest parse decides which directories are target source roots, and a name wrongly taken
+    /// from it is marked internal — which silences the coverage ledger AND the per-function `invisible`
+    /// hedge, leaving an effectful call reading pure under ⟨0.21⟩.
+    ///   (a) **COMMENTS.** The scan had no comment awareness, so `// .target(name: "Stripe"),` was read
+    ///       as a live declaration — and a commented-out target is precisely a directory that is NOT a
+    ///       module, the exact exposure this whole derivation exists to close.
+    ///   (b) **THE FIRST `name:` IN THE SPAN.** When a target's own name is computed (`name: appName` —
+    ///       the helper shape that is live in WordPress-iOS's manifest), the first string-literal `name:`
+    ///       inside the declaration belongs to a DEPENDENCY's `.product(name: "…")`. So the name being
+    ///       silenced was, by construction, a real third-party module. The read is now depth-scoped to
+    ///       the declaration's own arguments.
+    func testACommentedOrComputedTargetNameCannotClaimAFolder() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        func probe(_ targets: String) throws -> String {
+            let root = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("candor-mf-\(UUID().uuidString)")
+            try fm.createDirectory(at: root.appendingPathComponent("Sources/Stripe"), withIntermediateDirectories: true)
+            try fm.createDirectory(at: root.appendingPathComponent("Sources/App"), withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: root) }
+            try """
+            // swift-tools-version:5.9
+            import PackageDescription
+            let appName = "App"
+            let package = Package(name: "App", targets: [
+            \(targets)
+            ])
+            """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+            try "public struct X {}\n".write(to: root.appendingPathComponent("Sources/Stripe/Shim.swift"),
+                                             atomically: true, encoding: .utf8)
+            try "import Foundation\nimport Stripe\nfunc pay() { StripeAPI.charge() }\npay()\n"
+                .write(to: root.appendingPathComponent("Sources/App/main.swift"), atomically: true, encoding: .utf8)
+            return try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path]).err
+        }
+        // The control first: with no manifest mention of Stripe at all, the folder proves nothing.
+        XCTAssertTrue(try probe("    .executableTarget(name: \"App\"),").contains("Stripe"),
+                      "control: an SDK-named folder with no declaration must be disclosed")
+        XCTAssertTrue(try probe("    // .target(name: \"Stripe\"),\n    .executableTarget(name: \"App\"),").contains("Stripe"),
+                      "a COMMENTED-OUT target is not a target — reading it as one silences a real import")
+        XCTAssertTrue(try probe("    .target(name: appName, dependencies: [.product(name: \"Stripe\", package: \"s\")]),").contains("Stripe"),
+                      "with a computed target name the first literal `name:` in the span is a DEPENDENCY "
+                      + "product — by construction the name of a real third-party module")
+    }
+
+    /// …and the manifest parse must not be able to kill the scan. An unclosed `.target(` ran the paren
+    /// matcher to EOF and formed a range with a negative upper bound, trapping the process — one
+    /// malformed `Package.swift` anywhere in an analyzed file's ancestor chain took the whole run down.
+    func testAnUnclosedTargetDeclarationDoesNotTrapTheScan() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-eof-\(UUID().uuidString)")
+        try fm.createDirectory(at: root.appendingPathComponent("Sources/App"), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        try "// swift-tools-version:5.9\nimport PackageDescription\nlet package = Package(name: \"App\", targets: [.target(name: \"App\"\n"
+            .write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try "import Foundation\nfunc f() { _ = FileManager.default.contents(atPath: \"/x\") }\nf()\n"
+            .write(to: root.appendingPathComponent("Sources/App/main.swift"), atomically: true, encoding: .utf8)
+        let r = try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path])
+        XCTAssertEqual(r.code, 0, "a malformed manifest must not trap the scan — exit \(r.code): \(r.err)")
+    }
 }
