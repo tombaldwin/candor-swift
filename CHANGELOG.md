@@ -9,6 +9,25 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ A NINTH SPELLING: a DEAD reference read as a declaration.** SwiftPM never validates an unused
+  `let`, so a leftover `let legacyDeps: [Target.Dependency] = [.target(name: "Analytics")]` sits happily
+  in a manifest that builds. Read as a declaration, and given a source root by a stale
+  `Sources/Analytics/`, it claimed module Analytics — and a function calling into the real remote SDK
+  vanished from `functions` with no ledger entry and no `invisible` hedge. **One dead line in a manifest,
+  both disclosure channels off**, with the A/B differing by that line alone.
+
+  The repair separates two questions that had been sharing one answer. `parsePackageTargets` collects
+  `.target(…)` calls ANYWHERE, which is right for resolving a scan SCOPE — a stray one either names a
+  real target (dedups harmlessly) or resolves to no sources. It is wrong for module IDENTITY, where a
+  name alone is the whole answer. Identity now asks `parsePackageTargetDeclarations`, which returns only
+  the elements of `Package(targets: [...])`, and returns **nil** rather than an empty list when that
+  argument is hoisted or computed — "cannot be read" is not "declares nothing", and a caller that
+  conflated them would claim nothing while believing it had claimed everything.
+
+  Worth recording because it changes what the fallback plan was worth: this sin also exists in the
+  SHIPPED 0.26 engine, and disabling directory inference would NOT have closed it — the phantom claim is
+  name-derived, and 0.26's regex matches the dead reference just as readily.
+
 - **⚠ AN EIGHTH SPELLING, and this one I reintroduced three hours after fixing it.** A path-less
   `.plugin(name: "Stripe")` beside a stale `Sources/Stripe/` claimed module Stripe and silenced a real
   SDK on both disclosure channels. `targetSourceDirs` was written to resolve a scan SCOPE, where a

@@ -167,6 +167,55 @@ public enum TargetScopeError: Error, CustomStringConvertible, Equatable {
 /// Every target a SwiftPM manifest declares. Parsed with SwiftSyntax rather than by regex: the manifest is
 /// Swift, and the regex forms already in this repo (`manifestPackageName`) are documented as fragile for
 /// exactly the reason a structured parse avoids — a `name:` belonging to something else, matched first.
+/// The targets a manifest DECLARES — only the elements of `Package(targets: [...])`.
+///
+/// Distinct from `parsePackageTargets`, and the distinction is load-bearing. That function collects
+/// `.target(…)` calls ANYWHERE in the file, which is right for resolving a scan SCOPE: a stray one
+/// either names a target that also appears properly (dedups harmlessly) or names nothing (resolves to
+/// no sources). It is wrong for deciding module IDENTITY, where a name alone is the whole answer.
+///
+/// The input that forced this apart, measured on the built engine: a leftover
+/// `let legacyDeps: [Target.Dependency] = [.target(name: "Analytics")]` that NOTHING references — SwiftPM
+/// never validates an unused `let`, so the manifest builds — beside a stale `Sources/Analytics/`. The
+/// dead reference read as a declaration, the stale directory gave it a source root, and a function
+/// calling into the real remote Analytics SDK vanished from `functions` with no ledger entry and no
+/// `invisible` hedge. One dead line, both disclosure channels off.
+///
+/// Returns nil when the `targets:` argument is not a literal array (a hoisted or computed list), so a
+/// caller can tell "declares nothing" from "cannot be read here" — the second is what
+/// `packageManifestListsAreComplete` exists to route to SwiftPM itself.
+public func parsePackageTargetDeclarations(manifestSource: String) -> [PackageTarget]? {
+    let tree = Parser.parse(source: manifestSource)
+    let finder = DeclaredTargetFinder()
+    finder.walk(tree)
+    return finder.sawLiteralTargets ? finder.targets : nil
+}
+
+private final class DeclaredTargetFinder: SyntaxVisitor {
+    var targets: [PackageTarget] = []
+    var sawLiteralTargets = false
+
+    init() { super.init(viewMode: .sourceAccurate) }
+
+    override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
+        guard let callee = node.calledExpression.as(DeclReferenceExprSyntax.self),
+              callee.baseName.text == "Package" else { return .visitChildren }
+        for arg in node.arguments where arg.label?.text == "targets" {
+            guard let array = arg.expression.as(ArrayExprSyntax.self) else { continue }
+            sawLiteralTargets = true
+            // Each ELEMENT of the array, and only the element itself — a `.target(name:)` nested inside
+            // one of them is a dependency reference, which is what `TargetFinder`'s own skip-children
+            // guard already established.
+            for el in array.elements {
+                let sub = TargetFinder()
+                sub.walk(el.expression)
+                targets += sub.targets
+            }
+        }
+        return .visitChildren
+    }
+}
+
 public func parsePackageTargets(manifestSource: String) -> [PackageTarget] {
     let tree = Parser.parse(source: manifestSource)
     let finder = TargetFinder()

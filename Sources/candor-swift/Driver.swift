@@ -252,7 +252,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // (`path: "Modules/Core"`) were never scanned. A real manifest declares each target once, so
             // when any declaration of a name carries a `path:`, the convention-derived roots for that
             // name are the phantoms and are dropped.
-            let parsed = parsePackageTargets(manifestSource: src)
+            // DECLARATIONS ONLY, for identity. `parsePackageTargets` collects `.target(…)` anywhere,
+            // which is right for scope resolution and wrong here: a dead `let legacyDeps:
+            // [Target.Dependency] = [.target(name: "Analytics")]` that nothing references — SwiftPM
+            // never validates an unused `let` — read as a declaration, and a stale `Sources/Analytics/`
+            // then silenced a real remote SDK on both channels. One dead line in a manifest.
+            //
+            // nil means the `targets:` list is not literal (hoisted or computed) — "cannot be read",
+            // not "declares nothing" — and this derivation then claims NOTHING from that manifest,
+            // which errs toward disclosure.
+            let parsed = parsePackageTargetDeclarations(manifestSource: src) ?? []
             let pathPinned = Set(parsed.filter { $0.path != nil }.map(\.name))
             // PLUGINS ARE NOT IMPORTABLE MODULES, so a plugin declaration can never account for an
             // analyzed file — its sources live under `Plugins/<name>`, which discovery excludes outright.

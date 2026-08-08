@@ -1164,4 +1164,68 @@ final class XcodeTargetScopeTests: XCTestCase {
         XCTAssertFalse(r.err.contains("Core ("),
                        "`Core` is a declared target whose sources were analyzed under `Source/`: \(r.err)")
     }
+
+    /// ⟨2026-08-08, round 7⟩ **A DEAD REFERENCE IS NOT A DECLARATION.** SwiftPM never validates an
+    /// unused `let`, so a leftover `let legacyDeps: [Target.Dependency] = [.target(name: "Analytics")]`
+    /// sits in a manifest that builds perfectly. Read as a declaration, and given a source root by a
+    /// stale `Sources/Analytics/`, it claimed module Analytics — and a function calling into the real
+    /// remote SDK vanished from `functions` with no ledger entry and no `invisible` hedge.
+    ///
+    /// One dead line, both disclosure channels off. The A/B is the whole test: the two trees differ by
+    /// that line alone.
+    ///
+    /// Identity now asks a stricter question than scope resolution does —
+    /// `parsePackageTargetDeclarations` returns only the elements of `Package(targets: [...])`. The
+    /// permissive collect-anywhere read stays correct for `--target`, where a stray reference either
+    /// names a real target (dedups) or resolves to no sources.
+    func testADeadTargetReferenceIsNotADeclaration() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        func probe(_ deadLine: String) throws -> String {
+            let root = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("candor-dead-\(UUID().uuidString)")
+            for d in ["Sources/App", "Sources/Analytics"] {
+                try fm.createDirectory(at: root.appendingPathComponent(d), withIntermediateDirectories: true)
+            }
+            defer { try? fm.removeItem(at: root) }
+            try """
+            // swift-tools-version:5.9
+            import PackageDescription
+            \(deadLine)
+            let package = Package(name: "P",
+                dependencies: [.package(url: "https://x/analytics-swift", from: "1.0.0")],
+                targets: [
+                    .executableTarget(name: "App",
+                        dependencies: [.product(name: "Analytics", package: "analytics-swift")]),
+                ])
+            """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+            try "public struct Leftover {}\n".write(to: root.appendingPathComponent("Sources/Analytics/Old.swift"),
+                                                    atomically: true, encoding: .utf8)
+            try "import Foundation\nimport Analytics\nfunc track() { AnalyticsClient().send() }\ntrack()\n"
+                .write(to: root.appendingPathComponent("Sources/App/main.swift"), atomically: true, encoding: .utf8)
+            return try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path]).err
+        }
+        XCTAssertTrue(try probe("").contains("Analytics"),
+                      "control: the remote SDK must be disclosed when nothing claims its name")
+        XCTAssertTrue(try probe("let legacyDeps: [Target.Dependency] = [.target(name: \"Analytics\")]").contains("Analytics"),
+                      "a dead hoisted reference is not a declaration — one unused `let` must not silence "
+                      + "a real remote SDK on both channels")
+    }
+
+    /// …and the floor under that: a manifest whose `targets:` list is HOISTED or computed is "cannot be
+    /// read", not "declares nothing". Identity claims nothing from it, which errs toward disclosure —
+    /// the opposite of treating an unreadable list as an empty one.
+    func testAnUnreadableTargetsListClaimsNothing() throws {
+        XCTAssertNil(parsePackageTargetDeclarations(manifestSource: """
+        // swift-tools-version:5.9
+        import PackageDescription
+        let allTargets: [Target] = [.target(name: "Core")]
+        let package = Package(name: "P", targets: allTargets)
+        """), "a non-literal `targets:` must be nil (unreadable), never an empty list")
+        XCTAssertEqual(parsePackageTargetDeclarations(manifestSource: """
+        // swift-tools-version:5.9
+        import PackageDescription
+        let package = Package(name: "P", targets: [.target(name: "Core")])
+        """)?.map(\.name), ["Core"], "and a literal list reads exactly its elements")
+    }
 }
