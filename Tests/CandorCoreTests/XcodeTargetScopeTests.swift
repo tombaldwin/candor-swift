@@ -1586,6 +1586,11 @@ final class XcodeTargetScopeTests: XCTestCase {
     /// does — so in a real build App's `import Shared` resolves to something else entirely (a binary
     /// framework, a remote package, or nothing). Claiming it internal on Ext's evidence silences a module
     /// App may genuinely never have read.
+    /// `localProductsByTarget` as "dir#product" strings, for readable assertions.
+    private func links(_ scope: XcodeTargetScope, _ target: String) -> [String] {
+        (scope.localProductsByTarget[target] ?? []).map { "\($0.packageDir)#\($0.product)" }
+    }
+
     func testAFileDoesNotInheritASiblingTargetsPackageLink() throws {
         let scope = try xcodeTargetScope(model: model(twoTargetProject), projectDir: "/repo",
                                          targetName: "App", fs: fsStub(
@@ -1595,9 +1600,9 @@ final class XcodeTargetScopeTests: XCTestCase {
         XCTAssertTrue(scope.closure.map(\.name).contains("Ext"), "Ext is an embedded dependency of App")
         XCTAssertEqual(scope.localPackages, ["Fork"], "and Fork's sources are in the scan")
         // …but the LINK is Ext's, and per-target evidence must say so.
-        XCTAssertEqual(scope.localPackageDirsByTarget["Ext"] ?? [], ["/repo/Fork"],
-                       "Ext links Fork")
-        XCTAssertEqual(scope.localPackageDirsByTarget["App"] ?? [], [],
+        XCTAssertEqual(links(scope, "Ext"), ["/repo/Fork#Shared"],
+                       "Ext links Fork's `Shared` product")
+        XCTAssertEqual(links(scope, "App"), [],
                        "App links NO local package — inheriting Ext's link is the cardinal sin this "
                        + "pins: a file in App importing `Shared` must stay disclosed")
         // And the file→target mapping the driver needs to use it.
@@ -1616,8 +1621,8 @@ final class XcodeTargetScopeTests: XCTestCase {
                                          targetName: "Ext", fs: fsStub(
             swiftFilesUnder: { dir in ["\(dir)/S.swift"] },
             manifests: ["/repo/Fork": forkManifest]))
-        XCTAssertEqual(scope.localPackageDirsByTarget["Ext"] ?? [], ["/repo/Fork"],
-                       "scoping to Ext itself must still resolve the package it links")
+        XCTAssertEqual(links(scope, "Ext"), ["/repo/Fork#Shared"],
+                       "scoping to Ext itself must still resolve the product it links")
         XCTAssertEqual(scope.localPackages, ["Fork"])
     }
 
@@ -1676,7 +1681,7 @@ final class XcodeTargetScopeTests: XCTestCase {
                                          targetName: "App", fs: fsStub(
             swiftFilesUnder: { dir in ["\(dir)/S.swift"] },
             manifests: ["/repo/PkgA": pkgAManifest, "/repo/PkgB": pkgBManifest]))
-        XCTAssertEqual(scope.localPackageDirsByTarget["App"] ?? [], ["/repo/PkgA", "/repo/PkgB"],
+        XCTAssertEqual(links(scope, "App"), ["/repo/PkgA#A", "/repo/PkgB#B"],
                        "App links A only, but B is on its import path — recording direct links alone "
                        + "names an analyzed module a blind spot")
         XCTAssertEqual(scope.localPackages, ["PkgA", "PkgB"])
@@ -1776,9 +1781,9 @@ final class XcodeTargetScopeTests: XCTestCase {
             swiftFilesUnder: { dir in ["\(dir)/S.swift"] },
             manifests: ["/repo/PkgA": pkgAOnlyManifest, "/repo/PkgB": pkgBToCManifest,
                         "/repo/PkgC": pkgCManifest]))
-        XCTAssertEqual(scope.localPackageDirsByTarget["App"] ?? [], ["/repo/PkgA"],
+        XCTAssertEqual(links(scope, "App"), ["/repo/PkgA#AProd"],
                        "App links AProd, which declares no dependencies — PkgC is Ext's reach, not App's")
-        XCTAssertEqual(scope.localPackageDirsByTarget["Ext"] ?? [], ["/repo/PkgB", "/repo/PkgC"],
+        XCTAssertEqual(links(scope, "Ext"), ["/repo/PkgB#BProd", "/repo/PkgC#CProd"],
                        "and Ext keeps the whole graph behind BProd")
         XCTAssertEqual(scope.localPackages, ["PkgA", "PkgB", "PkgC"],
                        "all three are still in the SCAN — scope is the closure's union, unchanged")
@@ -1793,9 +1798,9 @@ final class XcodeTargetScopeTests: XCTestCase {
                                          targetName: "App", fs: fsStub(
             swiftFilesUnder: { dir in ["\(dir)/S.swift"] },
             manifests: ["/repo/PkgA": pkgTwoProductsManifest, "/repo/PkgC": pkgCManifest]))
-        XCTAssertEqual(scope.localPackageDirsByTarget["App"] ?? [], ["/repo/PkgA"],
+        XCTAssertEqual(links(scope, "App"), ["/repo/PkgA#AProd"],
                        "App links AProd, whose target declares nothing — PkgC is BProd's reach")
-        XCTAssertEqual(scope.localPackageDirsByTarget["Ext"] ?? [], ["/repo/PkgA", "/repo/PkgC"],
+        XCTAssertEqual(links(scope, "Ext"), ["/repo/PkgA#BProd", "/repo/PkgC#CProd"],
                        "and Ext, which links BProd, keeps the whole graph behind it")
     }
 
@@ -1840,8 +1845,98 @@ final class XcodeTargetScopeTests: XCTestCase {
                        "App compiles it")
         XCTAssertEqual(scope.filesByTarget["Ext"]?.contains("/repo/Both.swift"), true,
                        "and so does Ext — a set-growth diff credits only whichever target ran first")
-        XCTAssertEqual(scope.localPackageDirsByTarget["Ext"] ?? [], ["/repo/Fork"])
+        XCTAssertEqual(links(scope, "Ext"), ["/repo/Fork#Shared"])
     }
+
+    /// **THE SIBLING PRODUCT, AT HOP ZERO — and the reason a resolver fixture could not catch it.**
+    ///
+    /// `testAProductsGraphDoesNotLeakToASiblingProductOfTheSamePackage` above passes on the code that
+    /// has this defect: the resolver\'s answer was right. The driver then looked up only the package
+    /// DIRECTORY and asked `exposed(by:)`, which returns every product\'s member targets — so the
+    /// product granularity survived the walk and was spent one line later.
+    ///
+    /// One package vends `AProd` and `BProd`. `App` links `AProd`, its sibling `Ext` links `BProd`.
+    /// Four imports, one binary, one run each; the asymmetry is the whole point — each target claims
+    /// its own product and discloses the other\'s.
+    func testATargetDoesNotClaimTheSiblingProductOfAPackageItLinks() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-sibprod-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        for d in ["P.xcodeproj", "PkgA/Sources/ATarget", "PkgA/Sources/BTarget"] {
+            try fm.createDirectory(at: root.appendingPathComponent(d), withIntermediateDirectories: true)
+        }
+        try siblingProductProject.write(to: root.appendingPathComponent("P.xcodeproj/project.pbxproj"),
+                                        atomically: true, encoding: .utf8)
+        try pkgTwoLibrariesManifest.write(to: root.appendingPathComponent("PkgA/Package.swift"),
+                                          atomically: true, encoding: .utf8)
+        try "public func aThing() {}\n".write(to: root.appendingPathComponent("PkgA/Sources/ATarget/A.swift"),
+                                              atomically: true, encoding: .utf8)
+        try "public func bThing() {}\n".write(to: root.appendingPathComponent("PkgA/Sources/BTarget/B.swift"),
+                                              atomically: true, encoding: .utf8)
+
+        func uncovered(target: String, importing module: String, otherFile: String) throws -> [String] {
+            try "import \(module)\nfunc entry_\(target)() { print(1) }\n"
+                .write(to: root.appendingPathComponent(target == "App" ? "AppMain.swift" : "ExtMain.swift"),
+                       atomically: true, encoding: .utf8)
+            try "func filler_\(target)() {}\n"
+                .write(to: root.appendingPathComponent(otherFile), atomically: true, encoding: .utf8)
+            let r = try ProcessHarness.run(bin, [root.path, "--target", target, "--json"])
+            let doc = try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any]
+            let cov = doc?["coverage"] as? [String: Any]
+            return ((cov?["uncovered"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String }
+        }
+
+        XCTAssertEqual(try uncovered(target: "App", importing: "BTarget", otherFile: "ExtMain.swift"),
+                       ["BTarget"],
+                       "App links AProd only. It cannot import BTarget, so that name is something else "
+                       + "— a remote SDK, a system module — and must stay disclosed.")
+        XCTAssertEqual(try uncovered(target: "App", importing: "ATarget", otherFile: "ExtMain.swift"), [],
+                       "THE REACH FLOOR: App does link AProd, and ATarget is read in this very run.")
+        XCTAssertEqual(try uncovered(target: "Ext", importing: "ATarget", otherFile: "AppMain.swift"),
+                       ["ATarget"], "and the mirror — Ext links BProd, so ATarget is not its to claim")
+        XCTAssertEqual(try uncovered(target: "Ext", importing: "BTarget", otherFile: "AppMain.swift"), [],
+                       "while BTarget is")
+    }
+
+    private let siblingProductProject = """
+    {
+        objects = {
+            ROOT = { isa = PBXProject; mainGroup = G0; targets = ( TAPP, TEXT ); };
+            G0 = { isa = PBXGroup; children = ( FAPP, FEXT, FA ); sourceTree = "<group>"; };
+            FAPP = { isa = PBXFileReference; path = AppMain.swift; sourceTree = "<group>"; };
+            FEXT = { isa = PBXFileReference; path = ExtMain.swift; sourceTree = "<group>"; };
+            FA = { isa = PBXFileReference; lastKnownFileType = wrapper; path = PkgA; sourceTree = "<group>"; };
+            BAPP = { isa = PBXBuildFile; fileRef = FAPP; };
+            BEXT = { isa = PBXBuildFile; fileRef = FEXT; };
+            PSAPP = { isa = PBXSourcesBuildPhase; files = ( BAPP ); };
+            PSEXT = { isa = PBXSourcesBuildPhase; files = ( BEXT ); };
+            PDA = { isa = XCSwiftPackageProductDependency; productName = AProd; };
+            PDB = { isa = XCSwiftPackageProductDependency; productName = BProd; };
+            DEPEXT = { isa = PBXTargetDependency; target = TEXT; };
+            TAPP = { isa = PBXNativeTarget; buildPhases = ( PSAPP ); dependencies = ( DEPEXT );
+                     name = App; packageProductDependencies = ( PDA );
+                     productType = "com.apple.product-type.application"; };
+            TEXT = { isa = PBXNativeTarget; buildPhases = ( PSEXT ); name = Ext;
+                     packageProductDependencies = ( PDB );
+                     productType = "com.apple.product-type.framework"; };
+        };
+        rootObject = ROOT;
+    }
+    """
+    private let pkgTwoLibrariesManifest = """
+    // swift-tools-version: 6.0
+    import PackageDescription
+    let package = Package(
+        name: "PkgA",
+        products: [
+            .library(name: "AProd", targets: ["ATarget"]),
+            .library(name: "BProd", targets: ["BTarget"]),
+        ],
+        targets: [.target(name: "ATarget"), .target(name: "BTarget")]
+    )
+    """
 
     /// **A GROUP PATH THAT ESCAPES THE PROJECT DIRECTORY, under an ABSOLUTE scan root.** Reported by
     /// review, reproduced on the built binary, and silent on main too — a pre-existing sin this branch

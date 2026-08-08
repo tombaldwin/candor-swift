@@ -183,6 +183,23 @@ public func candorAbsolutePath(_ p: String) -> String {
     return "/" + twice.split(separator: "/").joined(separator: "/")
 }
 
+/// One LOCAL Swift package product an Xcode target may import from: the package's directory AND the
+/// product name, kept together.
+///
+/// The product half is load-bearing and was lost once already. A package commonly vends several
+/// libraries, and an Xcode target links them ONE AT A TIME — so "which package" is not an answer to
+/// "what may this target import". Collapsing the pair to a directory let a target linking `AProd`
+/// claim the targets behind its sibling `BProd`: measured, `import BTarget` in that target went silent
+/// on both disclosure channels.
+public struct LocalProductRef: Hashable, Sendable {
+    public let packageDir: String
+    public let product: String
+    public init(packageDir: String, product: String) {
+        self.packageDir = packageDir
+        self.product = product
+    }
+}
+
 /// The resolved scope of one Xcode target: which targets ended up in the closure and which `.swift`
 /// files they compile, plus the boundary the closure deliberately does not cross.
 public struct XcodeTargetScope {
@@ -198,15 +215,16 @@ public struct XcodeTargetScope {
     /// IceCubes shape — a thin app shell whose real code is `Packages/*` — is scoped correctly only
     /// because these are in.
     public let localPackages: [String]
-    /// …and their DIRECTORIES, per Xcode target: the local packages THAT target may import, which is
-    /// the packages it links plus the graph behind the specific products it links.
+    /// …and per Xcode target, the local package PRODUCTS that target may import: the ones it links plus
+    /// the graph behind those specific products. Package AND product, never just the package — see
+    /// `LocalProductRef`.
     ///
     /// THERE IS DELIBERATELY NO FLAT UNION HERE. There was — `localPackageDirs`, the closure's union —
     /// and it was the right answer to the SCOPE question (what code is in the scan) and the wrong one to
     /// the IDENTITY question (what a given file may import), which is what it got used for. A file in
     /// the app target does not gain the share extension's package links. Once identity moved per target
     /// nothing read the union any more, so it is gone rather than left lying beside the correct answer.
-    public let localPackageDirsByTarget: [String: [String]]
+    public let localProductsByTarget: [String: [LocalProductRef]]
     /// REMOTE package products the closure depends on — not in this tree, κ-disclosed, never silent.
     public let remoteProductCount: Int
     /// Dependencies living in other `.xcodeproj`s — NOT resolved, κ-disclosed.
@@ -770,22 +788,28 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
     for (i, pkg) in localPackages.enumerated() {
         for p in pkg.products { productIndex[p.name, default: []].append(i) }
     }
+    /// AMBIGUITY IS ABOUT PACKAGES, NOT ENTRIES. The returned indices are deduped because
+    /// `productIndex` is built from a parser that collects `.library(…)` ANYWHERE in the manifest, so a
+    /// dead hoisted `let legacyProducts = [.library(name: "Kit", …)]` beside the live declaration
+    /// appends the same package twice. Measured on a manifest SwiftPM accepts (an unused `let` is never
+    /// validated): exit 2, refusing a product as "declared by 2 local packages" and then naming the
+    /// same directory twice — the message refuting itself. A dead end on a repo that builds.
     func lookupLocal(_ product: String) -> [Int] {
-        if let hits = productIndex[product], !hits.isEmpty { return hits }
+        if let hits = productIndex[product], !hits.isEmpty { return Array(Set(hits)).sorted() }
         // Fallback: a target of the same name. Products nearly always mirror a target's name, and a
         // manifest that hoists its products into a variable would otherwise misread as "remote".
-        return localPackages.enumerated().compactMap { i, pkg in
+        return Array(Set(localPackages.enumerated().compactMap { i, pkg in
             pkg.targets.contains { $0.name == product } ? i : nil
-        }
+        })).sorted()
     }
 
     // 3. Resolve every product dependency: local -> sources (transitively), remote -> disclosed count.
     var remoteProducts = 0
     var resolvedLocalNames: Set<String> = []
     var resolvedLocalDirs: Set<String> = []
-    /// Xcode target name -> the local package dirs THAT TARGET may import: the DIRECTLY linked
-    /// packages, widened along the graph behind the specific PRODUCTS it links. Filled at the end of
-    /// this function from the three maps below.
+    /// Xcode target name -> the local package PRODUCTS that target may import: the ones it links
+    /// directly, widened along the graph behind those specific products. Filled at the end of this
+    /// function from the three maps below.
     ///
     /// The widening is needed because direct links are not the import path — Xcode puts the whole
     /// package graph reachable from a linked product on the target's import path, and real code relies
@@ -793,7 +817,7 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
     /// `ExtensionContainersFile` imports `RSParser`, in the graph because Account's manifest declares
     /// `.package(path: "../RSParser")`. A directs-only answer named RSParser a blind spot in a run that
     /// had just read it.
-    var localDirsByTarget: [String: Set<String>] = [:]
+    var localProdsByTarget: [String: Set<LocalProductRef>] = [:]
     /// Xcode target name -> the `dir\0product` pairs it links directly. The SEEDS of that walk.
     var localProductsByTarget: [String: Set<String>] = [:]
 
@@ -1000,13 +1024,14 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
     // import. Nothing enters that `expand` did not already resolve into `resolvedLocalDirs`, so this
     // can only restore reach the per-target split removed, never claim a package the closure never saw.
     for (tname, seeds) in localProductsByTarget {
-        var dirs = Set<String>()
+        var reached = Set<LocalProductRef>()
         var seenProducts = Set<String>()
         var stack = Array(seeds)
         while let key = stack.popLast() {
             guard seenProducts.insert(key).inserted else { continue }
             let dir = String(key.prefix(while: { $0 != "\u{0}" }))
-            dirs.insert(dir)
+            reached.insert(LocalProductRef(packageDir: dir,
+                                           product: String(key.dropFirst(dir.count + 1))))
             for tn in productMembers[key] ?? [] {
                 // …and each member target's IN-PACKAGE closure: a product's target may depend on a
                 // sibling target that holds the cross-package edge.
@@ -1015,7 +1040,7 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
                 }
             }
         }
-        localDirsByTarget[tname] = dirs
+        localProdsByTarget[tname] = reached
     }
 
     let infoByName = Dictionary(uniqueKeysWithValues: all.map { ($0.name, $0) })
@@ -1030,7 +1055,8 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
                             // (platform pruning runs on `files` above, after the accumulation).
                             filesByTarget: filesByTarget.mapValues { $0.intersection(files) },
                             localPackages: resolvedLocalNames.sorted(),
-                            localPackageDirsByTarget: localDirsByTarget.mapValues { $0.sorted() },
+                            localProductsByTarget: localProdsByTarget.mapValues {
+                                $0.sorted { ($0.packageDir, $0.product) < ($1.packageDir, $1.product) } },
                             remoteProductCount: remoteProducts,
                             crossProjectDependencyCount: crossProject,
                             packagesReadViaDump: packagesReadViaDump.sorted(),
@@ -1240,7 +1266,13 @@ private func inferPlatform(of targetId: String, model: PbxprojModel, rootDir: St
         guard depth < 6, visited.insert(path).inserted, let text = fs.readFile(path) else { return }
         for st in buildSettingStatements(text) {
             guard let eq = st.firstIndex(of: "=") else { continue }
-            let name = String(st[st.startIndex..<eq]).trimmingCharacters(in: .whitespaces)
+            var name = String(st[st.startIndex..<eq]).trimmingCharacters(in: .whitespaces)
+            // STRIP THE CONDITIONAL SUFFIX, as the other reader of this format does. `SDKROOT[sdk=
+            // iphoneos*] = iphoneos` is an ordinary spelling, and reading the key literally made it
+            // invisible here — fewer tokens makes a single-family answer MORE likely, and a wrong
+            // single family prunes files that do compile. Silence, from a one-line divergence between
+            // two readers of one format.
+            if let br = name.firstIndex(of: "[") { name = String(name[name.startIndex..<br]) }
             guard name == "SDKROOT" || name == "SUPPORTED_PLATFORMS" else { continue }
             let value = String(st[st.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
             tokens += value.split(separator: " ").map(String.init)

@@ -162,7 +162,7 @@ func swiftModuleOf(_ loc: String) -> String {
 }
 
 func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepIndex = DepIndex(),
-             xcodeLinksByFile: [String: [String]] = [:]) -> Analysis {
+             xcodeLinksByFile: [String: [LocalProductRef]] = [:]) -> Analysis {
 
     var allFns: [FnInfo] = []
     var fields: [String: [String: (name: String?, isFunction: Bool)]] = [:]
@@ -318,6 +318,35 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         exposedCache[pkgDir] = out
         return out
     }
+    /// …and the SAME question for ONE product of that package.
+    ///
+    /// `exposed(by:)` is the right answer where the importer declared a dependency on the whole PACKAGE
+    /// — the SwiftPM arm, where a manifest's `.package(path:)` does exactly that. An Xcode target links
+    /// PRODUCTS, one at a time, and a package commonly vends several. Measured: `PkgA` vending `AProd`
+    /// and `BProd`, with target `App` linking `AProd` only — `import BTarget` in App went silent on BOTH
+    /// channels, `appEntry` absent from `functions` under ⟨0.21⟩, while a control import of an undeclared
+    /// name was correctly disclosed. App cannot link `BProd`, so that name belongs to something else.
+    ///
+    /// The resolver's walk was already product-granular; the answer was collapsed to a directory on the
+    /// way out and this is where it got spent. Keeping the product costs nothing — it is the key the
+    /// walk already used.
+    var exposedProductCache: [String: Set<String>] = [:]
+    func exposed(product: String, in pkgDir: String) -> Set<String> {
+        let key = pkgDir + "\u{0}" + product
+        if let c = exposedProductCache[key] { return c }
+        var out = Set<String>()
+        if let src = try? String(contentsOfFile: (pkgDir as NSString).appendingPathComponent("Package.swift"),
+                                 encoding: .utf8) {
+            let analyzed = analyzedTargets(in: pkgDir)
+            // DECLARATIONS ONLY, and MEMBER TARGETS ONLY — for the same two reasons as `exposed(by:)`
+            // above. nil (unreadable or non-literal) exposes nothing, which errs toward disclosure.
+            for p in parsePackageProductDeclarations(manifestSource: src) ?? [] where p.name == product {
+                for t in p.targets where analyzed.contains(t) { out.insert(t) }
+            }
+        }
+        exposedProductCache[key] = out
+        return out
+    }
 
     /// Which modules a file inside `pkgDir` may import: the package's own declared targets, plus what
     /// each DIRECTLY declared local dependency exposes. Not transitive: SwiftPM requires a direct
@@ -418,7 +447,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // EXPOSED, not importable: an Xcode target links a local package's PRODUCTS, so it sees
             // what that package publishes — not the internal targets only its own files may import.
             var out = Set<String>()
-            for dep in deps { out.formUnion(exposed(by: dep)) }
+            for dep in deps { out.formUnion(exposed(product: dep.product, in: dep.packageDir)) }
             importableByFile[rel] = out
         }
     }

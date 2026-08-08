@@ -166,9 +166,9 @@ var resolvedXcodeScope: (target: String, project: String, entitlements: String?)
 // ⟨0.28⟩ The local packages the `.xcodeproj` closure resolved. An Xcode target has no `Package.swift`,
 // so this is the ONLY record of what its files may import — and it is a dependency closure the resolver
 // already walked, not a fresh guess from directory shape.
-/// Absolute source file -> the local package dirs the Xcode target(s) compiling it link DIRECTLY.
+/// Absolute source file -> the local package PRODUCTS the Xcode target(s) compiling it may import.
 /// Per file, because a file's importable set is its target's link list, not the closure's union.
-var resolvedXcodeLinksByFile: [String: [String]] = [:]
+var resolvedXcodeLinksByFile: [String: [LocalProductRef]] = [:]
 // ── SPEC §3.3.1 ⟨0.27⟩ ARM FIRST, AND NEVER OVER AN INPUT.
 //
 // A pre-pass that learns the sink and this run's inputs with NO side effects, before the flag loop. It
@@ -442,7 +442,7 @@ if sourcePaths.isEmpty {
 // half-resolved scope is a purity claim over the files it silently dropped.
 func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [String],
                         resolved: inout (target: String, project: String, entitlements: String?)?,
-                        resolvedLinksByFile: inout [String: [String]],
+                        resolvedLinksByFile: inout [String: [LocalProductRef]],
                         packageSwiftExists: Bool = false, alsoDeclaredInPackageSwift: [String] = []) {
     let fm = FileManager.default
     let projects = findXcodeProjects(under: rootDir)
@@ -631,7 +631,7 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
         // compiled by two targets takes the UNION of their links — it must build in both, so both link
         // whatever it imports. A file no target claims gets no entry and therefore claims nothing.
         for (tname, tfiles) in scope.filesByTarget {
-            guard let dirs = scope.localPackageDirsByTarget[tname], !dirs.isEmpty else { continue }
+            guard let prods = scope.localProductsByTarget[tname], !prods.isEmpty else { continue }
             for f in tfiles {
                 // Key EXACTLY as the driver looks up. The resolver's paths can carry a `..` segment
                 // (a group whose path escapes the project dir — firefox's `BrowserKit` sits at
@@ -640,7 +640,7 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
                 // give back the reach this rung exists to keep.
                 let f = candorAbsolutePath(f)
                 var have = resolvedLinksByFile[f] ?? []
-                for d in dirs where !have.contains(d) { have.append(d) }
+                for d in prods where !have.contains(d) { have.append(d) }
                 resolvedLinksByFile[f] = have
             }
         }
@@ -816,18 +816,19 @@ if wantWorkspace {
     let selfPath = CommandLine.arguments[0]
     let depsDir = (rootDir as NSString).appendingPathComponent(".candor/deps")
     try? fm.createDirectory(atPath: depsDir, withIntermediateDirectories: true)
-    // discover local path-deps: lines that declare `.package(... path: "...")` (target `path:` is excluded
-    // by requiring `.package(` on the same line — a single-line dep decl, the common monorepo form).
+    // Local path-deps, through the SAME parser everything else uses. What stood here was a line regex
+    // requiring `.package(` and `path:` on ONE line, with no comment handling — so a commented-out
+    // `.package(path: "../Old")` was discovered and CHAINED, putting a package the root does not depend
+    // on into `deps.coveredPkgs`, where its silence reads as a purity claim. It also missed every
+    // multi-line declaration, which is merely a scope loss.
+    //
+    // `parsePackageLocalDependencies` was written for this and wired only into the driver; its own doc
+    // comment described this reader in the PAST TENSE while it was still running. That is the fourth
+    // hand-rolled manifest reader in this codebase and the last one.
     var depPaths: [String] = []
     if let manifest = try? String(contentsOfFile: (rootDir as NSString).appendingPathComponent("Package.swift"), encoding: .utf8) {
-        for rawLine in manifest.split(separator: "\n") {
-            let line = String(rawLine)
-            guard line.contains(".package(") && line.contains("path:") else { continue }
-            guard let r = line.range(of: #"path:\s*"([^"]+)""#, options: .regularExpression) else { continue }
-            let seg = String(line[r])
-            guard let q1 = seg.firstIndex(of: "\""), let q2 = seg.lastIndex(of: "\""), q1 < q2 else { continue }
-            let rel = String(seg[seg.index(after: q1)..<q2])
-            let abs = ((rootDir as NSString).appendingPathComponent(rel) as NSString).standardizingPath
+        for rel in parsePackageLocalDependencies(manifestSource: manifest) ?? [] {
+            let abs = candorAbsolutePath((rootDir as NSString).appendingPathComponent(rel))
             if fm.fileExists(atPath: (abs as NSString).appendingPathComponent("Package.swift")) { depPaths.append(abs) }
         }
     }

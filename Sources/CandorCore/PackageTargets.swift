@@ -223,6 +223,12 @@ public enum TargetScopeError: Error, CustomStringConvertible, Equatable {
 /// it goes through the parser like everything else: multi-line declarations, comments, and string
 /// literals are the parser's problem, not a convention's.
 ///
+/// That sentence was written in the past tense while the regex was still running: this function was
+/// wired into the driver only, and review caught the mismatch. `--workspace` now calls it too, which is
+/// what makes the tense correct. The regex's live cost was a commented-out `.package(path:)` being
+/// discovered and CHAINED — a package the root does not depend on entering `deps.coveredPkgs`, where
+/// SPEC §2 rule 3 turns its silence into a purity claim.
+///
 /// Returns nil when `dependencies:` is present but not a literal array — the same "cannot be read" that
 /// `parsePackageTargetDeclarations` returns, and for the same reason: a caller must be able to tell it
 /// apart from "declares none", because treating unreadable as empty is how a claim gets made on no
