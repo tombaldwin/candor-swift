@@ -1014,4 +1014,81 @@ final class XcodeTargetScopeTests: XCTestCase {
         let r = try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path])
         XCTAssertEqual(r.code, 0, "a malformed manifest must not trap the scan — exit \(r.code): \(r.err)")
     }
+
+    /// ⟨2026-08-08, round 5⟩ **A PACKAGE NAME IS NOT A MODULE.** `internalModules` used to be seeded with
+    /// the package name — which is not even a declaration: it comes from a first-`name:` regex over the
+    /// manifest, falling back to the directory basename. When a package is named after the dependency it
+    /// WRAPS, that seed marked a remote, never-analyzed module internal and silenced both disclosure
+    /// channels.
+    ///
+    /// Live on firefox-ios at HEAD, which is how it was found: its `Package.swift` says `name: "Danger"`
+    /// and wraps `.product(name: "Danger", package: "swift")`. Across `Dangerfile.swift`'s 41 report
+    /// functions, every one hedged `DangerSwiftCoverage` — the sibling import in the SAME file — and
+    /// none hedged `Danger`, the dominant one, which was absent from the ledger entirely. The within-file
+    /// control is what makes it unarguable.
+    func testAPackageNamedAfterItsDependencyDoesNotSilenceIt() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-seed-\(UUID().uuidString)")
+        try fm.createDirectory(at: root.appendingPathComponent("Sources/Runner"), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        // The package is NAMED Danger and merely wraps the real one; no target of that name exists.
+        try """
+        // swift-tools-version:5.9
+        import PackageDescription
+        let package = Package(name: "Danger",
+            targets: [.executableTarget(name: "Runner")])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try """
+        import Foundation
+        import Danger
+        import DangerSwiftCoverage
+        func check() { Danger().warn("x"); Coverage.report() }
+        check()
+        """.write(to: root.appendingPathComponent("Sources/Runner/main.swift"), atomically: true, encoding: .utf8)
+        let r = try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path])
+        XCTAssertTrue(r.err.contains("DangerSwiftCoverage"),
+                      "the sibling import is the control — if it is absent the fixture proves nothing: \(r.err)")
+        XCTAssertTrue(r.err.contains("Danger ("),
+                      "`Danger` is the PACKAGE's name, not a declared target — naming the package after "
+                      + "the dependency it wraps must not silence that dependency: \(r.err)")
+    }
+
+    /// …and a HOISTED dependency array is not a declaration. `parsePackageTargets` collects `.target(…)`
+    /// anywhere in the file, which is right for resolving a scan SCOPE (a stray one dedups harmlessly)
+    /// and wrong for deciding module IDENTITY: `let coreDeps: [Target.Dependency] = [.target(name:
+    /// "Core")]` reads as a second, path-less declaration, widening Core's claimed roots to the
+    /// conventional `Sources/Core` even though the real target lives at `path: "Modules/Core"`. A real
+    /// manifest declares each target once, so a `path:`-carrying declaration settles that name.
+    func testAHoistedDependencyArrayIsNotASecondDeclaration() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-phantom-\(UUID().uuidString)")
+        // A STALE `Sources/Core/` that is not the real target's source root.
+        try fm.createDirectory(at: root.appendingPathComponent("Sources/Core"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: root.appendingPathComponent("Sources/App"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: root.appendingPathComponent("Modules/Core"), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        try """
+        // swift-tools-version:5.9
+        import PackageDescription
+        let coreDeps: [Target.Dependency] = [.target(name: "Core")]
+        let package = Package(name: "P", targets: [
+            .target(name: "Core", path: "Modules/Core"),
+            .executableTarget(name: "App", dependencies: coreDeps),
+        ])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try "public struct Stale {}\n".write(to: root.appendingPathComponent("Sources/Core/Stale.swift"),
+                                             atomically: true, encoding: .utf8)
+        try "import Foundation\nimport Core\nfunc run() { Core.leak() }\nrun()\n"
+            .write(to: root.appendingPathComponent("Sources/App/main.swift"), atomically: true, encoding: .utf8)
+        // Scan the Sources/ subtree only: the real Core is outside it and genuinely unanalyzed.
+        let r = try ProcessHarness.run(bin, [root.appendingPathComponent("Sources").path,
+                                             "--out", root.appendingPathComponent("r").path])
+        XCTAssertTrue(r.err.contains("Core"),
+                      "the stale `Sources/Core/` is not the declared target's source root — that lives at "
+                      + "`Modules/Core` and was never scanned: \(r.err)")
+    }
 }

@@ -9,6 +9,29 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ A SEVENTH SPELLING, and it was the SEED: `internalModules` started life holding the package
+  NAME.** A package name is not a module — and it is not even a declaration, since it comes from a
+  first-`name:` regex over the manifest, falling back to the directory basename. When a package is named
+  after the dependency it WRAPS, that seed marked a remote, never-analyzed module internal and silenced
+  both disclosure channels.
+
+  **Live on firefox-ios at HEAD**, which is how it was found rather than reasoned: its `Package.swift`
+  declares `name: "Danger"` and wraps `.product(name: "Danger", package: "swift")`. Across
+  `Dangerfile.swift`'s 41 report functions, every one hedged `DangerSwiftCoverage` — the sibling import
+  in the SAME file — and none hedged `Danger`, its dominant one, which was absent from the 53-entry
+  ledger entirely. Everything reached through the real Danger SDK read pure with nothing disclosed. The
+  seed predates this session; the within-file control is what makes it unarguable. Gone: if a manifest
+  genuinely declares a target of that name, the ordinary rule claims it on a declaration and a source
+  root rather than on what the package happens to be called.
+- **…and a hoisted dependency array was read as a second declaration.** `parsePackageTargets` collects
+  `.target(…)` calls anywhere in the file — right for resolving a scan SCOPE, where a stray one dedups
+  harmlessly, and wrong for deciding module IDENTITY. `let coreDeps: [Target.Dependency] = [.target(name:
+  "Core")]` (an idiom the parser's own comment calls ordinary) widened Core's claimed roots to the
+  conventional `Sources/Core`, so a stale directory of that name could claim a module whose real sources
+  (`path: "Modules/Core"`) were never scanned. A real manifest declares each target once, so a
+  `path:`-carrying declaration now settles that name and the convention-derived phantoms are dropped.
+  Reusing a tested function for a purpose it was not written for is its own risk; this is what it cost.
+
 - **⚠ SIX SILENT UNDER-REPORTS FROM ONE DERIVATION, and the cause was that there were TWO manifest
   parsers in this codebase.** `internalModules` decides whether a module was analyzed; it gates the κ
   coverage ledger AND the per-function `invisible` hedge, and `invisible` is the only thing between an

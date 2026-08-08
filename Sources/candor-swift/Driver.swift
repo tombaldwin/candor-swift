@@ -205,7 +205,20 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // package, never to the folder. `Sources/<X>` ⇒ module X is an SPM convention, so it is honoured
     // only where an SPM manifest says so. That makes this strict rule correct in BOTH directions rather
     // than merely safe in one.
-    var internalModules: Set<String> = [pkgName]
+    // NO `pkgName` SEED. A package NAME is not a module — and `pkgName` is not even a declaration: it
+    // comes from a first-`name:` regex over the manifest, falling back to the directory basename. When a
+    // package is named after the dependency it WRAPS, the seed marked a remote, never-analyzed module
+    // internal and both disclosure channels vanished.
+    //
+    // Live on firefox-ios at HEAD, which is how this was caught: its `Package.swift` declares
+    // `name: "Danger"` and wraps `.product(name: "Danger", package: "swift")`. Measured on the full
+    // repo — `Dangerfile.swift`'s 41 functions all hedge `DangerSwiftCoverage`, the sibling import in
+    // the SAME file, and NONE hedge `Danger`, its dominant one; `Danger` is absent from the ledger
+    // entirely. Everything reached through the real Danger SDK read pure with nothing disclosed.
+    //
+    // If the manifest genuinely declares a target of that name, the loop below claims it on the
+    // evidence — a declaration and a source root — rather than on the package being called something.
+    var internalModules: Set<String> = []
     // ONE MANIFEST PARSER IN THIS CODEBASE, not two. What stood here was a hand-rolled scan — a regex
     // for `.target(`, a paren matcher, a hand-written argument reader — sitting a few files away from
     // `parsePackageTargets`, which does the same job with SwiftSyntax and is covered by tests because
@@ -229,7 +242,19 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 var d: ObjCBool = false
                 return FileManager.default.fileExists(atPath: p, isDirectory: &d) && d.boolValue
             }
-            for t in parsePackageTargets(manifestSource: src) {
+            // A DECLARATION WITH AN EXPLICIT `path:` SETTLES THAT NAME. `parsePackageTargets` collects
+            // `.target(…)` calls anywhere in the file — correct for scope resolution, where a stray one
+            // dedups harmlessly — but a HOISTED dependency array
+            // (`let coreDeps: [Target.Dependency] = [.target(name: "Core")]`, which the parser's own
+            // comment calls an ordinary idiom) then reads as a second, path-less DECLARATION of Core.
+            // For module IDENTITY that widens the name's claimed roots to the conventional
+            // `Sources/Core`, so a stale directory of that name could claim a module whose real sources
+            // (`path: "Modules/Core"`) were never scanned. A real manifest declares each target once, so
+            // when any declaration of a name carries a `path:`, the convention-derived roots for that
+            // name are the phantoms and are dropped.
+            let parsed = parsePackageTargets(manifestSource: src)
+            let pathPinned = Set(parsed.filter { $0.path != nil }.map(\.name))
+            for t in parsed where t.path != nil || !pathPinned.contains(t.name) {
                 // Per target, and non-throwing: a manifest may name a target whose directory is absent,
                 // and that is not this derivation's business — it just means no root to claim.
                 if let dirs = try? targetSourceDirs([t], packageRoot: pkgDir, exists: isDir) {
