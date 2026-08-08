@@ -119,7 +119,9 @@ func emitAdvisoryAnswer(_ body: [String: Any], ok: Bool, completeness c: ReportC
 // unparseable / non-report file — the caller FAILS LOUD, never reads it as an empty "no crossings".
 private func mergeFixReport(_ full: String, into byName: inout [String: FixFn],
                             coverage: inout ReportCoverage,
-                            completeness: inout ReportCompleteness, who: String) -> Bool {
+                            completeness: inout ReportCompleteness,
+                            scopeEntitlements: inout [String],
+                            who: String) -> Bool {
     let fm = FileManager.default
     guard let data = fm.contents(atPath: full),
           let root = try? JSONSerialization.jsonObject(with: data),
@@ -127,6 +129,12 @@ private func mergeFixReport(_ full: String, into byName: inout [String: FixFn],
           let fns = obj["functions"] as? [[String: Any]] else {
         FileHandle.standardError.write("candor-swift \(who): report `\(full)` could not be parsed — OMITTED.\n".data(using: .utf8)!)
         return false
+    }
+    // ⟨scope travels⟩ the `.entitlements` this report's `--target` resolved. COLLECTED, not decided
+    // here: several reports may be merged, and if they name DIFFERENT files they are different binaries
+    // and the caller must not pick one.
+    if let sc = obj["scope"] as? [String: Any], let ent = sc["entitlements"] as? String {
+        scopeEntitlements.append(ent)
     }
     for e in fns {
         guard let fn = e["fn"] as? String, !fn.isEmpty else { continue }
@@ -203,25 +211,29 @@ private func mergeCallgraph(_ full: String, into cg: inout [String: [String]]) -
 // does not fit the `<prefix>.<pkg>.Swift.json` family shape. A matching `.callgraph.json` sibling (same stem)
 // is still picked up for the graph if present.
 func loadFixModel(prefix: String) -> (byName: [String: FixFn], cg: [String: [String]],
-                                      coverage: ReportCoverage, completeness: ReportCompleteness)? {
+                                      coverage: ReportCoverage, completeness: ReportCompleteness,
+                                      scopeEntitlements: String?)? {
     let fm = FileManager.default
     var byName: [String: FixFn] = [:]
     var cg: [String: [String]] = [:]
     var coverage = ReportCoverage()
     var completeness = ReportCompleteness()
     var foundReport = false
+    // ⟨scope travels⟩ every scoped report's entitlements path; ONE distinct value is an answer, several
+    // are different binaries and the caller keeps its own discovery.
+    var scopeEnts: [String] = []
 
     var isDir: ObjCBool = false
     if prefix.hasSuffix(".json"), fm.fileExists(atPath: prefix, isDirectory: &isDir), !isDir.boolValue {
         // Direct single-file load (any `.json` filename).
         foundReport = mergeFixReport(prefix, into: &byName, coverage: &coverage,
-                                     completeness: &completeness, who: "fix")
+                                     completeness: &completeness, scopeEntitlements: &scopeEnts, who: "fix")
         let stem = (prefix as NSString).deletingPathExtension
         let sidecar = stem + ".callgraph.json"
         if fm.fileExists(atPath: sidecar) { mergeCallgraph(sidecar, into: &cg) }
         guard foundReport else { return nil }
         if cg.isEmpty { for (fn, f) in byName { cg[fn] = f.calls } }
-        return (byName, cg, coverage, completeness)
+        return (byName, cg, coverage, completeness, Set(scopeEnts).count == 1 ? scopeEnts[0] : nil)
     }
 
     let ns = prefix as NSString
@@ -239,14 +251,14 @@ func loadFixModel(prefix: String) -> (byName: [String: FixFn], cg: [String: [Str
             // `foundReport` flips true only after a successful parse, so a lone corrupt report leaves it
             // false → loadFixModel returns nil → exit 2.
             if mergeFixReport(full, into: &byName, coverage: &coverage,
-                              completeness: &completeness, who: "fix") { foundReport = true }
+                              completeness: &completeness, scopeEntitlements: &scopeEnts, who: "fix") { foundReport = true }
         }
     }
     guard foundReport else { return nil }
     // The callgraph sidecar is the graph of record; if it is absent (an older/`--json`-only report), fall
     // back to the report's own inline `calls` so a prefix that has only the envelope still answers.
     if cg.isEmpty { for (fn, f) in byName { cg[fn] = f.calls } }
-    return (byName, cg, coverage, completeness)
+    return (byName, cg, coverage, completeness, Set(scopeEnts).count == 1 ? scopeEnts[0] : nil)
 }
 
 private func loadDenyOrDie(_ policyPath: String, who: String) -> [DenyRule] {

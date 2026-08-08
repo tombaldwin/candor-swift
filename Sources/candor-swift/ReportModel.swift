@@ -101,6 +101,13 @@ struct Report {
     // lookup. OMITTED when empty, so a report with nothing to say is byte-identical to a pre-rung one and
     // a 0.22 consumer is unaffected. Set in main.swift from `analysis.typeSurfaceReturns`.
     var typeSurfaceReturns: [String: String] = [:]
+    // ⟨scope travels⟩ What `--target` resolved, when it resolved against an `.xcodeproj`. The report is
+    // read LATER by `privacy-manifest --verify`, which has only a report and a plist — so everything the
+    // scan learned about which binary this is has to be IN the artifact or it is lost. Today the verify
+    // re-discovers `.entitlements` by walking the plist's directory and refuses to guess among several,
+    // leaving entitlement-sourced keys unchecked on exactly the multi-target repos `--target` exists for.
+    // OMITTED when empty, so an unscoped report and every other engine's are byte-unchanged.
+    var scope: (target: String, project: String, entitlements: String?)?
     // Is the `privacy/1` extension ACTIVE — does any effector reach one of its six sensor effects (in its
     // inferred OR direct set)? Computed from the effectors so the envelope discloses the extension exactly
     // when one of its effects appears (SPEC-EXTENSION-privacy.md "Wire disclosure").
@@ -125,6 +132,14 @@ struct Report {
         // determine one", and a consumer cannot read the omission. A producer MUST NOT list a surface it
         // does not compute — that turns "unimplemented" into a false "undetermined".
         env["resolves"] = ["fs"]
+        // ⟨scope travels⟩ see `scope` above. `entitlements` is present only when the target's
+        // `CODE_SIGN_ENTITLEMENTS` named a file that EXISTS — absent means "not determined", never
+        // "this target has none", which is the distinction a consumer has to be able to make.
+        if let sc = scope {
+            var d: [String: Any] = ["target": sc.target, "project": sc.project]
+            if let e = sc.entitlements { d["entitlements"] = e }
+            env["scope"] = d
+        }
         // ⟨0.15 staged⟩ `coverage` envelope field — omitted when nothing is uncovered (see above).
         if !coverage.isEmpty {
             env["coverage"] = ["uncovered": coverage.map { ["name": $0.name, "calls": $0.calls] as [String: Any] }]

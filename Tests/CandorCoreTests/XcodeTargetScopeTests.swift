@@ -737,4 +737,79 @@ final class XcodeTargetScopeTests: XCTestCase {
         // Import-only content is no contribution:
         XCTAssertTrue(swiftFileCompilesToNothing(source: "import Foundation", on: "iOS"))
     }
+
+    // ── the scope travels: this target's own entitlements ─────────────────────────────────────────
+    // `--target` scopes the SCAN, but the `privacy-manifest --verify` that follows has only a report
+    // and a plist — so it re-discovered `.entitlements` by walking the plist's directory and, on a repo
+    // with several shipped binaries, refused to guess and left the entitlement-sourced keys unchecked.
+    // Narrowing that SEARCH would still be a search. `CODE_SIGN_ENTITLEMENTS` NAMES the file, per target.
+
+    func testTheTargetsOwnEntitlementsFileIsResolvedFromItsBuildSettings() throws {
+        let withEnt = withPackages.replacingOccurrences(
+            of: "TAPP = {",
+            with: """
+            XCAPP = { isa = XCBuildConfiguration; buildSettings = { CODE_SIGN_ENTITLEMENTS = iOS/App.entitlements; }; name = Release; };
+                        CLAPP = { isa = XCConfigurationList; buildConfigurations = ( XCAPP ); };
+                        TAPP = {
+                            buildConfigurationList = CLAPP;
+            """)
+        let scope = try xcodeTargetScope(model: model(withEnt), projectDir: "/repo",
+                                         targetName: "App", fs: XcodeScopeFS(
+            swiftFilesUnder: { _ in nil },
+            readFile: { path in path == "/repo/iOS/App.entitlements" ? "<plist/>" : nil },
+            subdirectories: { _ in [] }, directoryExists: { _ in true }))
+        XCTAssertEqual(scope.entitlements, "/repo/iOS/App.entitlements")
+    }
+
+    /// **AN UNDEFINED BUILD VARIABLE EXPANDS TO THE EMPTY STRING** — Xcode's rule, and the one that makes
+    /// this exact rather than a guess. NetNewsWire writes
+    /// `CODE_SIGN_ENTITLEMENTS = iOS/Resources/NetNewsWire$(DEVELOPER_ENTITLEMENTS).entitlements`, and
+    /// `DEVELOPER_ENTITLEMENTS` is defined only in a personal file OUTSIDE the checkout (an optional
+    /// `#include?` of `../../SharedXcodeSettings/…`). In a clone it is undefined, so the path is
+    /// `NetNewsWire.entitlements` — precisely the file that checkout builds against, and the reason both
+    /// `NetNewsWire.entitlements` and `NetNewsWire-dev.entitlements` exist beside each other.
+    func testAnUndefinedBuildVariableExpandsToEmptyLikeXcode() throws {
+        let withVar = withPackages.replacingOccurrences(
+            of: "TAPP = {",
+            with: """
+            XCAPP = { isa = XCBuildConfiguration; buildSettings = { CODE_SIGN_ENTITLEMENTS = "iOS/App$(DEVELOPER_ENTITLEMENTS).entitlements"; }; name = Release; };
+                        CLAPP = { isa = XCConfigurationList; buildConfigurations = ( XCAPP ); };
+                        TAPP = {
+                            buildConfigurationList = CLAPP;
+            """)
+        var asked: [String] = []
+        let scope = try xcodeTargetScope(model: model(withVar), projectDir: "/repo",
+                                         targetName: "App", fs: XcodeScopeFS(
+            swiftFilesUnder: { _ in nil },
+            readFile: { path in
+                asked.append(path)
+                return path == "/repo/iOS/App.entitlements" ? "<plist/>" : nil
+            },
+            subdirectories: { _ in [] }, directoryExists: { _ in true }))
+        XCTAssertEqual(scope.entitlements, "/repo/iOS/App.entitlements",
+                       "asked for: \(asked.filter { $0.hasSuffix(".entitlements") })")
+        XCTAssertEqual(expandBuildVariables("a$(X)b${Y}c", defs: ["Y": "Q"]), "abQc",
+                       "undefined -> empty, defined -> its value, both spellings")
+    }
+
+    /// A PATH THAT NAMES NO FILE IS NOT AN ANSWER. A variable this cannot resolve, a generated
+    /// entitlements, a stale setting — each would produce a path, and handing the verify a path to a
+    /// file that is not there would replace "we did not check" with "we checked the wrong thing".
+    func testAnEntitlementsPathThatDoesNotExistResolvesToNil() throws {
+        let missing = withPackages.replacingOccurrences(
+            of: "TAPP = {",
+            with: """
+            XCAPP = { isa = XCBuildConfiguration; buildSettings = { CODE_SIGN_ENTITLEMENTS = nowhere/App.entitlements; }; name = Release; };
+                        CLAPP = { isa = XCConfigurationList; buildConfigurations = ( XCAPP ); };
+                        TAPP = {
+                            buildConfigurationList = CLAPP;
+            """)
+        let scope = try xcodeTargetScope(model: model(missing), projectDir: "/repo",
+                                         targetName: "App", fs: fsStub())
+        XCTAssertNil(scope.entitlements)
+        // …and a target whose settings name none at all.
+        let none = try xcodeTargetScope(model: model(withPackages), projectDir: "/repo",
+                                        targetName: "App", fs: fsStub())
+        XCTAssertNil(none.entitlements)
+    }
 }

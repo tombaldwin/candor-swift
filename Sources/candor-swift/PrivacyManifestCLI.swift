@@ -813,7 +813,22 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         // explicit plist from an unrelated directory read THAT directory's entitlements and reported a
         // finding about a project not being analysed, attributed to the one that was.
         let plistDir = (plistPath as NSString).deletingLastPathComponent
-        let ent = discoverEntitlements(from: plistDir.isEmpty ? FileManager.default.currentDirectoryPath : plistDir)
+        // ⟨scope travels⟩ THE SCAN ALREADY KNEW WHICH FILE. `--target` resolved this binary's
+        // `CODE_SIGN_ENTITLEMENTS` from its build settings — an exact, per-target answer — and recorded
+        // it in the report. Discovery is the fallback, not the rule: it walks a directory and, on the
+        // multi-target repos `--target` exists for, finds several and refuses to guess, leaving the
+        // entitlement-sourced keys unchecked (measured on NetNewsWire: 8 `.entitlements` in the tree, one
+        // key never checked). Narrowing that SEARCH would still be a search; the build settings NAME the
+        // file. A recorded path that no longer exists falls back rather than failing — the report can be
+        // older than the tree.
+        var ent: (path: String?, several: Bool)
+        var entFromScope = false
+        if let scoped = model.scopeEntitlements, FileManager.default.fileExists(atPath: scoped) {
+            ent = (scoped, false)
+            entFromScope = true
+        } else {
+            ent = discoverEntitlements(from: plistDir.isEmpty ? FileManager.default.currentDirectoryPath : plistDir)
+        }
         if let ep = ent.path {
             let need = entitlementRequiredKeys(ep).filter { !declaredAll.contains($0) }
             if !need.isEmpty {
@@ -834,7 +849,15 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
             }
         } else if ent.several, !pm.json, !pm.xml {
             print("· several .entitlements files here — not read. Entitlement-sourced keys "
-                  + "(\(ENTITLEMENT_REQUIRED_KEYS.count)) are unchecked; pass one target's tree, as with --target.")
+                  + "(\(ENTITLEMENT_REQUIRED_KEYS.count)) are unchecked; re-scan with --target so the "
+                  + "report carries this binary's own CODE_SIGN_ENTITLEMENTS.")
+        }
+        // PROVENANCE, on a PASS as much as a finding: "we checked the entitlements" is only actionable
+        // if the reader can see WHICH file, and an entitlements check that silently read the wrong
+        // target's file is the failure this rung exists to remove.
+        if entFromScope, let ep = ent.path, !pm.json, !pm.xml {
+            print("· entitlements read from \((ep as NSString).lastPathComponent), named by the scanned "
+                  + "target's CODE_SIGN_ENTITLEMENTS — not discovered by searching.")
         }
 
         if pm.json {

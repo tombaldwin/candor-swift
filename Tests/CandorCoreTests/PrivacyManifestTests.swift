@@ -461,4 +461,63 @@ final class PrivacyManifestTests: XCTestCase {
         XCTAssertFalse(r.out.contains("(cfg,") || r.out.contains(" cfg)"),
                        "the literal-path function must NOT be counted: \(r.out)")
     }
+
+    /// ⟨scope travels⟩ THE VERIFY MUST USE THE FILE THE SCAN RESOLVED, NOT SEARCH FOR ONE.
+    ///
+    /// `--target` scopes the scan; the verify that follows has only a report and a plist, so it walked
+    /// the plist's directory looking for `.entitlements` and — on exactly the multi-binary repos
+    /// `--target` exists for — found several, refused to guess, and left the entitlement-sourced keys
+    /// unchecked. This drives the consumer directly with a hand-built report so the assertion is about
+    /// the PREFERENCE, not about resolving a project: two `.entitlements` sit beside the plist (so
+    /// discovery would refuse), and the report names one.
+    func testTheVerifyPrefersTheEntitlementsTheScanResolved() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-scope-\(UUID().uuidString)")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        // Two entitlements files: discovery alone cannot choose, which is the whole point.
+        let mine = root.appendingPathComponent("App.entitlements")
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <plist version="1.0"><dict>
+        <key>com.apple.developer.messages.critical-messaging</key><true/>
+        </dict></plist>
+        """.write(to: mine, atomically: true, encoding: .utf8)
+        try "<?xml version=\"1.0\"?>\n<plist version=\"1.0\"><dict></dict></plist>\n"
+            .write(to: root.appendingPathComponent("Other.entitlements"), atomically: true, encoding: .utf8)
+        try "<?xml version=\"1.0\"?>\n<plist version=\"1.0\"><dict></dict></plist>\n"
+            .write(to: root.appendingPathComponent("Info.plist"), atomically: true, encoding: .utf8)
+
+        func report(_ scope: String?) throws -> String {
+            let p = root.appendingPathComponent("r\(scope == nil ? "0" : "1").json").path
+            let body = scope.map { ",\n \"scope\": {\"target\": \"App\", \"project\": \"A.xcodeproj\", \"entitlements\": \"\($0)\"}" } ?? ""
+            try("{\n \"candor\": {\"spec\": \"0.27\"},\n \"package\": \"App\",\n"
+                + " \"functions\": []\(body)\n}\n").write(toFile: p, atomically: true, encoding: .utf8)
+            return p
+        }
+        // WITHOUT a scope: the pre-rung behaviour — several files, none read.
+        let bare = try ProcessHarness.run(bin, ["privacy-manifest", "--report", try report(nil),
+                                                "--verify", root.appendingPathComponent("Info.plist").path])
+        XCTAssertTrue(bare.out.contains("several .entitlements files here — not read"),
+                      "the control must show the ambiguity this rung removes: \(bare.out)")
+        // WITH a scope: the named file is read, its finding appears, and the provenance is stated.
+        let scoped = try ProcessHarness.run(bin, ["privacy-manifest", "--report", try report(mine.path),
+                                                  "--verify", root.appendingPathComponent("Info.plist").path])
+        XCTAssertFalse(scoped.out.contains("several .entitlements files here"),
+                       "the scan already named the file — the verify must not be searching: \(scoped.out)")
+        XCTAssertTrue(scoped.out.contains("named by the scanned target's CODE_SIGN_ENTITLEMENTS"),
+                      "provenance must be stated on a pass too: \(scoped.out)")
+        XCTAssertTrue(scoped.out.contains("NSCriticalMessagingUsageDescription"),
+                      "the granted entitlement's key must now be CHECKED — that key was previously "
+                      + "unchecked on every multi-binary repo: \(scoped.out)")
+        // A RECORDED PATH THAT NO LONGER EXISTS falls back rather than failing — the report can be
+        // older than the tree, and "we checked a file that is not there" is not an answer.
+        let stale = try ProcessHarness.run(bin, ["privacy-manifest",
+                                                 "--report", try report(root.appendingPathComponent("gone.entitlements").path),
+                                                 "--verify", root.appendingPathComponent("Info.plist").path])
+        XCTAssertTrue(stale.out.contains("several .entitlements files here — not read"),
+                      "a stale scope must fall back to discovery, not silently check nothing: \(stale.out)")
+    }
 }

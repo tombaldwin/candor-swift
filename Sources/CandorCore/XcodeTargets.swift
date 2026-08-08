@@ -177,6 +177,10 @@ public struct XcodeTargetScope {
     /// Files dropped because every top-level declaration sits inside `#if os(…)` clauses provably
     /// FALSE for `platform` — they compile to NOTHING in this target's build.
     public let platformExcludedCount: Int
+    /// ⟨scope travels⟩ The `.entitlements` file THIS target signs with, from `CODE_SIGN_ENTITLEMENTS`
+    /// — absolute, and only when it EXISTS. nil when the settings name none, or name one this cannot
+    /// resolve: the consumer then keeps the discovery it had, so nil is never worse than before.
+    public let entitlements: String?
 }
 
 // MARK: - the OpenStep value parser
@@ -899,7 +903,9 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
                             crossProjectDependencyCount: crossProject,
                             packagesReadViaDump: packagesReadViaDump.sorted(),
                             platform: platform,
-                            platformExcludedCount: platformExcluded)
+                            platformExcludedCount: platformExcluded,
+                            entitlements: resolveEntitlements(of: rootTid, model: model, rootDir: rootDir,
+                                                              resolvedPath: resolvedPath, fs: fs))
 }
 
 // MARK: - reading a `swift package dump-package` document
@@ -949,6 +955,138 @@ public func parseDumpPackageJSON(_ text: String) -> (targets: [PackageTarget], p
     }
     guard !targets.isEmpty else { return nil }
     return (targets, products)
+}
+
+// MARK: - one target's build settings, from the project AND its xcconfig chain
+
+/// Every value a target's build settings give the named keys, in the order the build system would see
+/// them: the target's own `XCBuildConfiguration` dictionaries first, then the `baseConfigurationReference`
+/// xcconfig CHAIN (bounded, cycle-safe, `#include` followed to the end).
+///
+/// ONE traversal, two consumers, because they were the same walk with different aggregation: the platform
+/// prune unions its tokens across configurations, and the entitlements lookup needs LAST-WINS per key
+/// (Xcode's own rule, and the reason flip #17 existed). Splitting the aggregation out of the traversal is
+/// what let the second consumer exist without a second copy of the xcconfig-chain reader — including the
+/// Xcode 16 spelling for an xcconfig inside a SYNCHRONIZED folder (an anchor group plus a relative path,
+/// no file reference at all), which NetNewsWire's entire build hangs off.
+private func targetSettingValues(_ keys: Set<String>, of targetId: String, model: PbxprojModel,
+                                 resolvedPath: (String) -> String?,
+                                 fs: XcodeScopeFS) -> [(key: String, value: String)] {
+    var out: [(key: String, value: String)] = []
+    func takeXcconfig(path: String, depth: Int, visited: inout Set<String>) {
+        guard depth < 6, visited.insert(path).inserted, let text = fs.readFile(path) else { return }
+        // INCLUDES FIRST: an including file's own assignment must win over the file it includes, and
+        // `out` is read last-wins by the entitlements consumer. (The platform consumer unions, so the
+        // order is immaterial to it.)
+        let base = (path as NSString).deletingLastPathComponent
+        for rawLine in stripCommentsPreservingStrings(text).split(separator: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("#include") else { continue }
+            guard let open = line.firstIndex(of: "\""), let close = line.lastIndex(of: "\""),
+                  open < close else { continue }
+            let rel = String(line[line.index(after: open)..<close])
+            guard !rel.isEmpty, !rel.hasPrefix("/") else { continue }
+            takeXcconfig(path: URL(fileURLWithPath: (base as NSString).appendingPathComponent(rel)).path,
+                         depth: depth + 1, visited: &visited)
+        }
+        for st in buildSettingStatements(text) {
+            guard let eq = st.firstIndex(of: "=") else { continue }
+            var name = String(st[st.startIndex..<eq]).trimmingCharacters(in: .whitespaces)
+            // `KEY[sdk=iphoneos*]` — a CONDITIONAL assignment. The base name is what it assigns.
+            if let br = name.firstIndex(of: "[") { name = String(name[name.startIndex..<br]) }
+            guard keys.contains(name) else { continue }
+            out.append((name, String(st[st.index(after: eq)...]).trimmingCharacters(in: .whitespaces)))
+        }
+    }
+    var visited = Set<String>()
+    for cid in configurationIds(of: targetId, model: model) {
+        guard let conf = model.obj(cid) else { continue }
+        if let baseRef = conf["baseConfigurationReference"]?.string, let path = resolvedPath(baseRef) {
+            takeXcconfig(path: path, depth: 0, visited: &visited)
+        }
+        if let anchor = conf["baseConfigurationReferenceAnchor"]?.string,
+           let rel = conf["baseConfigurationReferenceRelativePath"]?.string,
+           let anchorDir = resolvedPath(anchor) {
+            takeXcconfig(path: URL(fileURLWithPath: (anchorDir as NSString).appendingPathComponent(rel)).path,
+                         depth: 0, visited: &visited)
+        }
+        // The project's own dictionary wins over the xcconfig it is based on — Xcode's precedence.
+        if let bs = conf["buildSettings"]?.dict {
+            for k in keys { if let v = bs[k]?.string { out.append((k, v)) } }
+        }
+    }
+    return out
+}
+
+/// Expand `$(NAME)` / `${NAME}` using `defs`. **An undefined variable expands to the EMPTY STRING** —
+/// that is Xcode's rule, not a fallback, and it is the rule that makes this exact rather than a guess:
+/// NetNewsWire writes `CODE_SIGN_ENTITLEMENTS = iOS/Resources/NetNewsWire$(DEVELOPER_ENTITLEMENTS)
+/// .entitlements`, and `DEVELOPER_ENTITLEMENTS` is defined only in a personal file OUTSIDE the checkout
+/// (`#include?` of `../../SharedXcodeSettings/…`). In a clone it is undefined, so the path is
+/// `NetNewsWire.entitlements` — which is precisely the file that checkout builds against.
+func expandBuildVariables(_ raw: String, defs: [String: String]) -> String {
+    var out = ""
+    var i = raw.startIndex
+    while i < raw.endIndex {
+        guard raw[i] == "$", raw.index(after: i) < raw.endIndex else { out.append(raw[i]); i = raw.index(after: i); continue }
+        let open = raw[raw.index(after: i)]
+        guard open == "(" || open == "{" else { out.append(raw[i]); i = raw.index(after: i); continue }
+        let close: Character = open == "(" ? ")" : "}"
+        guard let end = raw[raw.index(i, offsetBy: 2)...].firstIndex(of: close) else {
+            out.append(raw[i]); i = raw.index(after: i); continue
+        }
+        let name = String(raw[raw.index(i, offsetBy: 2)..<end])
+        out += defs[name] ?? ""      // undefined ⇒ empty, per Xcode
+        i = raw.index(after: end)
+    }
+    return out
+}
+
+/// The `.entitlements` file THIS target signs with, resolved from `CODE_SIGN_ENTITLEMENTS` — absolute,
+/// and only when the file actually EXISTS.
+///
+/// WHY THIS IS WORTH RESOLVING. `--target` scopes the scan, but the `privacy-manifest --verify` that
+/// follows reads a REPORT and a plist, so it re-discovered entitlements by walking the plist's directory
+/// — and a repo with several shipped binaries has several `.entitlements`, so it refused to guess and
+/// left the entitlement-sourced keys unchecked (measured on NetNewsWire: 8 files, 1 key unchecked).
+/// Narrowing that SEARCH would still be a search. The build settings do not search: they name the file,
+/// per target, which is the answer the question was always asking for.
+///
+/// Returns nil rather than a guess when the setting is absent, or when the expanded path names no file
+/// (a variable this cannot resolve, a generated entitlements) — the caller then keeps the disclosure it
+/// had, which is never worse than before.
+private func resolveEntitlements(of targetId: String, model: PbxprojModel, rootDir: String,
+                                 resolvedPath: (String) -> String?, fs: XcodeScopeFS) -> String? {
+    let pairs = targetSettingValues(["CODE_SIGN_ENTITLEMENTS"], of: targetId, model: model,
+                                    resolvedPath: resolvedPath, fs: fs)
+    guard let raw = pairs.last?.value, !raw.isEmpty else { return nil }
+    // The variables the same chain defines. Collected from the SAME traversal so a value defined beside
+    // the entitlements line resolves; anything else is undefined and expands to empty, per Xcode.
+    var names = Set<String>()
+    var i = raw.startIndex
+    while let dollar = raw[i...].firstIndex(of: "$") {
+        let after = raw.index(after: dollar)
+        guard after < raw.endIndex, raw[after] == "(" || raw[after] == "{" else {
+            i = after; if i >= raw.endIndex { break }; continue
+        }
+        let close: Character = raw[after] == "(" ? ")" : "}"
+        guard let end = raw[raw.index(after: after)...].firstIndex(of: close) else { break }
+        names.insert(String(raw[raw.index(after: after)..<end]))
+        i = raw.index(after: end)
+        if i >= raw.endIndex { break }
+    }
+    var defs: [String: String] = [:]
+    if !names.isEmpty {
+        for (k, v) in targetSettingValues(names, of: targetId, model: model,
+                                          resolvedPath: resolvedPath, fs: fs) {
+            defs[k] = v
+        }
+    }
+    let expanded = expandBuildVariables(raw, defs: defs).trimmingCharacters(in: .whitespaces)
+    guard !expanded.isEmpty else { return nil }
+    let abs = expanded.hasPrefix("/") ? expanded
+        : URL(fileURLWithPath: (rootDir as NSString).appendingPathComponent(expanded)).path
+    return fs.readFile(abs) != nil ? abs : nil
 }
 
 // MARK: - the target's platform, from its build settings

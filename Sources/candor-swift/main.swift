@@ -159,6 +159,10 @@ var policyPath: String? = ProcessInfo.processInfo.environment["CANDOR_POLICY"]
 var gateJsonPath: String? = nil
 var wantWorkspace = false
 var scopeTarget: String? = nil
+// ⟨scope travels⟩ what the `.xcodeproj` resolver learned, for the report envelope. See
+// `ReportModel.scope`: the verify that reads this report later has only a report and a plist, so
+// anything the scan knew about WHICH binary this is must be in the artifact or it is lost.
+var resolvedXcodeScope: (target: String, project: String, entitlements: String?)? = nil
 // ── SPEC §3.3.1 ⟨0.27⟩ ARM FIRST, AND NEVER OVER AN INPUT.
 //
 // A pre-pass that learns the sink and this run's inputs with NO side effects, before the flag loop. It
@@ -431,6 +435,7 @@ if sourcePaths.isEmpty {
 // dependency closure. Same refusal contract as the SPM path — every failure exits 2, because a
 // half-resolved scope is a purity claim over the files it silently dropped.
 func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [String],
+                        resolved: inout (target: String, project: String, entitlements: String?)?,
                         packageSwiftExists: Bool = false, alsoDeclaredInPackageSwift: [String] = []) {
     let fm = FileManager.default
     let projects = findXcodeProjects(under: rootDir)
@@ -605,8 +610,15 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
             note += " Depends on \(outside.joined(separator: " and ")) NOT in the closure — calls into "
                 + "them are disclosed as uncovered, never silently pure."
         }
+        if let ent = scope.entitlements {
+            // The reader is told WHICH file, because "we found your entitlements" is only useful if you
+            // can check it is the one you meant.
+            note += " Entitlements: \(rel(ent, to: rootDir)) (from this target's CODE_SIGN_ENTITLEMENTS)."
+        }
         note += "\n"
         FileHandle.standardError.write(note.data(using: .utf8)!)
+        resolved = (target: want, project: rel(hit.path, to: rootDir),
+                    entitlements: scope.entitlements)
         // A test bundle is selectable by name — but its verdict is about test code, and saying so is
         // the difference between a feature and a trap for whoever scoped to `MyAppTests` by accident.
         if scope.target.isTest {
@@ -648,6 +660,7 @@ if let want = scopeTarget {
         // Exits 2 on any failure, so reaching the code after this `if` means sourcePaths IS the
         // target's file list, whichever resolver ran.
         scopeToXcodeTarget(want, rootDir: rootDir, sourcePaths: &sourcePaths,
+                           resolved: &resolvedXcodeScope,
                            packageSwiftExists: manifestSrc != nil,
                            alsoDeclaredInPackageSwift: declaredSPM.map(\.name).sorted())
     }
@@ -1235,6 +1248,7 @@ report.coverage = unlisted.map { (name: $0.key, calls: $0.value) }   // ⟨0.15 
 let analyzedQuals = allFns.map { $0.qual }.sorted()
 report.analyzed = (count: allFns.count, digest: fnv1aHex(analyzedQuals))
 report.unanalyzed = unanalyzedUnits   // ⟨0.21⟩ (Gap 2) omitted when empty by toJSON()
+report.scope = resolvedXcodeScope     // ⟨scope travels⟩ omitted when nil by toJSON()
 // ⟨0.23⟩ `typeSurface.returns` — PREFIXED here with this report's package, so both ends land in the same
 // namespace the entry hashes use and a consumer forms `<pkg>#<type>.<method>` with no extra convention.
 if !analysis.typeSurfaceReturns.isEmpty {

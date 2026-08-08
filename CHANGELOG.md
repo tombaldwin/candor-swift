@@ -9,6 +9,34 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ The scan's SCOPE now travels with the report (`scope`, SPEC-EXTENSION-privacy.md).** `--target`
+  scopes the SCAN; the `privacy-manifest --verify` that follows reads a REPORT and a plist, so
+  everything the scan learned about which binary this is had to be in the artifact or it was lost — and
+  it was lost. The verify re-discovered `.entitlements` by walking the plist's directory, found several
+  on exactly the multi-target repos `--target` exists for, refused to guess, and left the
+  entitlement-sourced keys unchecked. Measured on NetNewsWire: eight `.entitlements` in the tree, one
+  key never checked, on both the iOS and the Mac answer.
+
+  Narrowing that SEARCH would still be a search. `CODE_SIGN_ENTITLEMENTS` NAMES the file, per target,
+  which is the answer the question was always asking for. The `.xcodeproj` resolver reads it from the
+  target's build settings — its own `XCBuildConfiguration` dictionaries and its `baseConfigurationReference`
+  xcconfig chain, `#include`s followed, the Xcode 16 synchronized-folder spelling included — and the
+  report carries `scope: {target, project, entitlements}`. The verify prefers it and states the
+  provenance on a pass as well as a finding, because an entitlements check that silently read the wrong
+  target's file is the failure this removes.
+
+  **An undefined build variable expands to the empty string**, which is Xcode's rule and the thing that
+  makes this exact rather than a guess: NetNewsWire writes
+  `iOS/Resources/NetNewsWire$(DEVELOPER_ENTITLEMENTS).entitlements`, and `DEVELOPER_ENTITLEMENTS` lives
+  only in a personal file outside the checkout, so a clone resolves the release entitlements — which is
+  what that checkout builds. The iOS and Mac targets resolve files with the SAME basename in different
+  directories; discovery could never have told them apart. One shared settings walker now serves this
+  and the platform prune, so there is no second copy of the xcconfig-chain reader.
+
+  Fail-safe throughout: `entitlements` is emitted only when the resolved path names a file that EXISTS,
+  a recorded path that has since gone falls back to discovery rather than checking nothing, and the key
+  is omitted entirely when no scope was applied — so an unscoped report is byte-unchanged.
+
 - **A `--target` refusal on a GENERATED-project repo was a dead end.** bitwarden/ios builds its Xcode
   project with XcodeGen, so a fresh clone has no `.xcodeproj` at all and the refusal said only "needs a
   Package.swift or an .xcodeproj … neither found" — accurate, and useless to a user whose repo is

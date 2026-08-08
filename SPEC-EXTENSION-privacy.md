@@ -277,6 +277,44 @@ the same name **shadows** the curated one (the `declaredTypes` anti-fabrication 
 - **Purpose is not required:** unlike a privacy manifest, candor charges the effect on the *reach*, not
   on a declared purpose string — the point is the code-level truth the manifest is checked against.
 
+## The scan's SCOPE travels with the report (`scope`, OPTIONAL)
+
+`--target` scopes the **scan**. The `privacy-manifest --verify` that follows reads a **report and a
+plist** — so everything the scan learned about *which binary this is* has to be in the artifact or it is
+lost. It was lost: the verify re-discovered `.entitlements` by walking the plist's directory, and a repo
+with several shipped binaries has several, so it refused to guess and left the entitlement-sourced keys
+unchecked — on exactly the multi-target repos `--target` exists for. Measured on NetNewsWire: eight
+`.entitlements` in the tree, one key never checked.
+
+Narrowing that *search* would still be a search. `CODE_SIGN_ENTITLEMENTS` **names** the file, per target,
+which is the answer the question was always asking for. When `--target` resolves against an `.xcodeproj`
+the report carries:
+
+```json
+"scope": { "target": "NetNewsWire-iOS",
+           "project": "NetNewsWire.xcodeproj",
+           "entitlements": "…/iOS/Resources/NetNewsWire.entitlements" }
+```
+
+OMITTED entirely when no scope was applied, so an unscoped report — and every other engine's — is
+byte-unchanged. `entitlements` is present **only when the resolved path names a file that exists**:
+absent means *not determined*, never *this target has none*, and the verify then keeps the discovery it
+had, so the key can only ever be better informed than before.
+
+**An undefined build variable expands to the empty string** — Xcode's rule, and the one that makes this
+exact rather than a guess. NetNewsWire writes
+`CODE_SIGN_ENTITLEMENTS = iOS/Resources/NetNewsWire$(DEVELOPER_ENTITLEMENTS).entitlements`, and
+`DEVELOPER_ENTITLEMENTS` is defined only in a personal file outside the checkout (an optional `#include?`
+of `../../SharedXcodeSettings/…`). In a clone it is undefined, so the path is `NetNewsWire.entitlements`
+— precisely the file that checkout builds against, and the reason `NetNewsWire.entitlements` and
+`NetNewsWire-dev.entitlements` sit beside each other. The iOS and Mac targets resolve files with the
+SAME basename in different directories, which is the case discovery could never have disambiguated.
+
+The verify states the provenance on a pass as well as a finding: *"entitlements read from
+`NetNewsWire.entitlements`, named by the scanned target's CODE_SIGN_ENTITLEMENTS — not discovered by
+searching."* An entitlements check that silently read the wrong target's file is the failure this
+removes, so saying which file was read is part of the answer.
+
 ## Wire disclosure (REQUIRED when the extension is active)
 
 An engine that classifies any `privacy/1` effect MUST disclose the extension in the report envelope:
