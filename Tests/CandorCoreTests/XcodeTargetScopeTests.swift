@@ -1381,4 +1381,55 @@ final class XcodeTargetScopeTests: XCTestCase {
                       "declared is not analyzed — a local dependency outside the scan must stay blind, or "
                       + "a call into code this run never opened reads pure: \(r.err)")
     }
+
+    /// ⟨0.28 rung, review 1⟩ **A PACKAGE EXPOSES ITS PRODUCTS, NOT ITS TARGETS.** The rung lets a file
+    /// import what its package's local dependencies expose — and "expose" is the products list. A target
+    /// left out of every product cannot be imported from outside the package at all.
+    ///
+    /// The two sets were one function for an hour: `importable` began with every declared target (right
+    /// for a file INSIDE the package) and the dependency recursion unioned that whole set into the
+    /// parent. So a dependency's INTERNAL target silenced the parent's import of a same-named remote
+    /// module — the branch's own motivating sin, one declared `.package(path:)` edge deeper, and the
+    /// more common real arrangement: a mocks package you consume for its mock product, whose internal
+    /// targets are named after the SDKs they stand in for.
+    func testADependencysInternalTargetIsNotImportableByItsParent() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        func probe(internalTargetNamed name: String) throws -> String {
+            let root = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("candor-exposed-\(UUID().uuidString)")
+            for d in ["Sources/App", "Mocks/Sources/MockKit", "Mocks/Sources/\(name)"] {
+                try fm.createDirectory(at: root.appendingPathComponent(d), withIntermediateDirectories: true)
+            }
+            defer { try? fm.removeItem(at: root) }
+            try """
+            // swift-tools-version:5.9
+            import PackageDescription
+            let package = Package(name: "App",
+                dependencies: [.package(path: "Mocks")],
+                targets: [.executableTarget(name: "App",
+                    dependencies: [.product(name: "MockKit", package: "Mocks")])])
+            """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+            try """
+            // swift-tools-version:5.9
+            import PackageDescription
+            let package = Package(name: "Mocks",
+                products: [.library(name: "MockKit", targets: ["MockKit"])],
+                targets: [.target(name: "MockKit"), .target(name: "\(name)")])
+            """.write(to: root.appendingPathComponent("Mocks/Package.swift"), atomically: true, encoding: .utf8)
+            try "public func m() {}\n".write(to: root.appendingPathComponent("Mocks/Sources/MockKit/M.swift"),
+                                             atomically: true, encoding: .utf8)
+            try "public func stub() {}\n".write(to: root.appendingPathComponent("Mocks/Sources/\(name)/S.swift"),
+                                                atomically: true, encoding: .utf8)
+            try "import Foundation\nimport AcmePay\nfunc ship(_ s: String) { acmeUpload(s) }\nship(\"x\")\n"
+                .write(to: root.appendingPathComponent("Sources/App/main.swift"), atomically: true, encoding: .utf8)
+            return try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path]).err
+        }
+        // Control first — with no name collision the remote SDK is disclosed, so the fixture binds.
+        XCTAssertTrue(try probe(internalTargetNamed: "PayMock").contains("AcmePay"),
+                      "control: the remote SDK must be disclosed when nothing shadows it")
+        XCTAssertTrue(try probe(internalTargetNamed: "AcmePay").contains("AcmePay"),
+                      "`AcmePay` is an INTERNAL target of the dependency, in no product — the parent "
+                      + "cannot import it, so it must not silence the parent's real remote SDK")
+    }
 }
