@@ -208,24 +208,59 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
     }
 
-    // …AND THE SAME CONVENTION ANYWHERE IN THE ANALYZED SET, not just at the root. The two rules above
-    // read the ROOT `Sources/` and the ROOT `Package.swift`, which is every module of a single-package
-    // repo and none of a multi-package one. When `--target` resolves an `.xcodeproj` it pulls LOCAL
-    // Swift packages into the scan — NetNewsWire's `Modules/Account/Sources/Account/…` — and those
-    // modules were then named in the κ ledger as "effects INVISIBLE to the scan" while their sources
-    // were being analyzed in that very run. Measured: RSCore (20 analyzed files), Account (53),
-    // Articles (4), NewsBlur (7), all listed as blind spots, with the disclosure telling the reader to
-    // "chain dep reports or scan the workspace root to close the gap" that was already closed.
+    // …AND THE SAME CONVENTION ANYWHERE IN THE ANALYZED SET — but ONLY AT A REAL SPM TARGET ROOT.
     //
-    // A FALSE DISCLOSURE IS WORSE THAN A MISSING ONE — it prescribes work that does nothing and spends
-    // the reader's trust in the ledger that DOES carry the real blind spots (WebKit, CloudKit, the
-    // remote packages). Same `Sources/<Target>/` convention, same name-collision exposure the root rule
-    // already accepts, applied to the files this scan actually read. Found by a go/no-go review.
-    for p in sourcePaths {
-        let parts = p.split(separator: "/")
-        if let i = parts.lastIndex(of: "Sources"), i + 1 < parts.count {
-            internalModules.insert(String(parts[i + 1]))
+    // The problem this solves: the two rules above read the ROOT `Sources/` and the ROOT
+    // `Package.swift`, which is every module of a single-package repo and none of a multi-package one.
+    // When `--target` resolves an `.xcodeproj` it pulls LOCAL Swift packages into the scan —
+    // NetNewsWire's `Modules/Account/Sources/Account/…` — and those modules were then named in the κ
+    // ledger as "effects INVISIBLE to the scan" while their sources were analyzed in that very run.
+    //
+    // THE FIRST ATTEMPT AT THIS WAS A CARDINAL SIN, and the fixture is one directory name:
+    //
+    //     App/Sources/Stripe/Shim.swift   →  `import Stripe`, an unresolved `StripeClient()` call
+    //
+    // Taking any `Sources/<X>/` segment as proof that module X was analyzed proves only that a
+    // DIRECTORY named X was read. Naming an integration folder after the SDK it wraps is ordinary in
+    // `.xcodeproj` trees — the very trees this release's `--target` serves — and `internalModules`
+    // gates BOTH disclosure channels: the coverage ledger AND the per-function `invisible` set, which
+    // is the only thing standing between an unresolved call into a blind module and a purity claim.
+    // Measured on the shipped binary: the `Stripe` spelling reported ZERO effectful functions, no
+    // ledger, no `invisible` — `chargeCard` absent from `functions` under ⟨0.21⟩ — while the
+    // `StripeIntegration` spelling disclosed both. A visible false disclosure traded for a silent
+    // missing one is precisely the trade this project forbids.
+    //
+    // The sound rule: a `Sources/<X>/` counts only when it IS an SPM target root — an ancestor
+    // `Package.swift` sitting directly above that `Sources/` and DECLARING a target named X. NetNewsWire's
+    // `Modules/Account/Package.swift` declares `Account`, so the win survives; the root manifest of the
+    // Stripe fixture declares `App`, not `Stripe`, so nothing is silenced. It also drops the flat-layout
+    // artefact where `Sources/main.swift` inserted the FILENAME as a module.
+    var targetsOfManifest: [String: Set<String>] = [:]     // package dir -> declared target names
+    func declaredTargets(at pkgDir: String) -> Set<String> {
+        if let c = targetsOfManifest[pkgDir] { return c }
+        var names: Set<String> = []
+        if let text = try? String(contentsOfFile: (pkgDir as NSString).appendingPathComponent("Package.swift"),
+                                  encoding: .utf8) {
+            var search = text[...]
+            while let r = search.range(of: #"\.(executableTarget|testTarget|target|plugin|macro)\(\s*name:\s*"([^"]+)""#,
+                                       options: .regularExpression) {
+                let m = String(search[r])
+                if let q1 = m.firstIndex(of: "\""), let q2 = m.lastIndex(of: "\""), q1 < q2 {
+                    names.insert(String(m[m.index(after: q1)..<q2]))
+                }
+                search = search[r.upperBound...]
+            }
         }
+        targetsOfManifest[pkgDir] = names
+        return names
+    }
+    for p in sourcePaths {
+        let parts = p.split(separator: "/").map(String.init)
+        guard let i = parts.lastIndex(of: "Sources"), i + 1 < parts.count else { continue }
+        let candidate = parts[i + 1]
+        // The package root is everything above `Sources`. Absolute paths keep their leading slash.
+        let pkgDir = (p.hasPrefix("/") ? "/" : "") + parts[..<i].joined(separator: "/")
+        if declaredTargets(at: pkgDir).contains(candidate) { internalModules.insert(candidate) }
     }
     var collectors: [DeclCollector] = []
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a file that fails to read used to be SILENTLY skipped by the

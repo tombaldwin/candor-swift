@@ -144,6 +144,27 @@ final class PrivacyEffectsTests: XCTestCase {
                        "the deferral still resolves for a session whose devices DO name their medium")
     }
 
+    /// …and the third row of the same story: a LABELLED `for:` must win over an UNLABELLED positional.
+    /// `AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)` is the commonest
+    /// setup call in AVFoundation, and reading the FIRST argument that could be a media type found
+    /// `.builtInWideAngleCamera`, judged it undetermined, and charged Mic to a camera-only function —
+    /// the exact complaint the deferral was built to kill, back through a different overload.
+    func testALabelledMediaTypeWinsOverAnUnlabelledDeviceType() throws {
+        let (by, _) = try scan("""
+        import AVFoundation
+        func cameraOnly() {
+            let s = AVCaptureSession()
+            let d = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)!
+            s.addInput(try! AVCaptureDeviceInput(device: d))
+            s.startRunning()
+        }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "cameraOnly"), ["Camera"],
+                       "the `for: .video` two arguments along is statically visible — reading the "
+                       + "deviceType instead and calling the medium undetermined charges a microphone "
+                       + "this function never opens")
+    }
+
     // ⟨2026-08-07⟩ THE OVER-REPORT ROUND. Every case below is a finding candor made against a SHIPPING
     // app that was wrong — found by running the verb on code it had not been developed against, which is
     // the only way an over-report surfaces. Each one told a developer their App Store app was broken.

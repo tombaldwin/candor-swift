@@ -9,19 +9,32 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
-- **⚠ The κ coverage ledger named modules the scan had just ANALYZED — a false disclosure.** On a
-  `--target`-scoped NetNewsWire scan the ledger listed 31 uncovered modules including `RSCore` (20
-  analyzed files in that very report), `Account` (53), `NewsBlur` (7) and `Articles` (4), saying their
-  "effects are INVISIBLE to the scan" and telling the reader to "chain dep reports or scan the workspace
-  root to close the gap" that was already closed. The internal-module rule read the ROOT `Sources/` and
-  the ROOT `Package.swift` — every module of a single-package repo and none of a multi-package one — so
-  the local Swift packages `--target` resolves into the scope all read as third-party blind spots.
-  A false disclosure is worse than a missing one: it prescribes work that does nothing, and it spends
-  the reader's trust in the ledger that carries the REAL blind spots. Now any `Sources/<Target>/` in the
-  analyzed set counts as internal, same convention and same name-collision exposure the root rule
-  already accepts. Measured on NetNewsWire iOS: 31 → 14, and what remains is exactly right — Apple
-  frameworks the classifier does not model, the Objective-C `RSDatabaseObjC`, and the remote packages.
+- **⚠ The κ coverage ledger named modules the scan had just ANALYZED — and the first fix for it was a
+  CARDINAL SIN.** On a `--target`-scoped NetNewsWire scan the ledger listed 31 uncovered modules
+  including `RSCore` (20 analyzed files in that very report), `Account` (53) and `NewsBlur` (7), saying
+  their effects were "INVISIBLE to the scan" and advising work that was already done. A false disclosure
+  spends the reader's trust in the ledger that carries the REAL blind spots.
 
+  The first repair took any analyzed path segment `Sources/<X>/` as proof module X had been read. **It
+  proves a DIRECTORY named X was read.** `internalModules` gates BOTH disclosure channels — the ledger
+  and the per-function `invisible` set, which is the only thing between an unresolved call into a blind
+  module and a purity claim — so the fixture is one directory name: `App/Sources/Stripe/Shim.swift`
+  importing `Stripe` and calling `StripeClient()` reported **zero effectful functions, no ledger, no
+  `invisible`**, while `App/Sources/StripeIntegration/` disclosed both. Naming an integration folder
+  after the SDK it wraps is ordinary in the `.xcodeproj` trees `--target` serves. Caught by a go/no-go
+  re-review, reproduced on the shipped binary before believing it.
+
+  The sound rule: a `Sources/<X>/` counts only when it IS an SPM target root — an ancestor
+  `Package.swift` directly above that `Sources/` declaring a target named X. NetNewsWire's
+  `Modules/Account/Package.swift` declares `Account`, so the win is unchanged at 31 → 14; the Stripe
+  fixture's root manifest declares `App`, so nothing is silenced. It also drops the flat-layout artefact
+  where `Sources/main.swift` inserted a FILENAME as a module.
+- **A labelled `for:` now wins over an unlabelled positional in the capture media type.** Reading the
+  first argument that could be a media type found `.builtInWideAngleCamera` in
+  `AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)` — the commonest setup
+  call in AVFoundation — judged the medium undetermined, and charged Mic to a camera-only function. The
+  exact complaint the deferral was built to kill, returning through a different overload. The unlabelled
+  arm still matters (`devices(.audio)`) and stays, as the fallback it should always have been.
 - **⚠ CARDINAL SIN, found by a go/no-go review of THIS release's own fabrication fix: a computed media
   type was settled by an unrelated sibling call.** A function opening `AVCaptureDevice.default(for:
   .video)` and, two lines later, `AVCaptureDevice.default(for: kind)` reported `[Camera]` — the possible

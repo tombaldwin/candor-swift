@@ -737,13 +737,26 @@ final class CallCollector: SyntaxVisitor {
         case absent
     }
     private func mediaTypeArgKind(_ args: LabeledExprListSyntax) -> MediaTypeArg {
-        for a in args where a.label?.text == "for" || a.label?.text == "mediaType" || a.label == nil {
-            let e = Self.peel(a.expression)
-            if let ma = e.as(MemberAccessExprSyntax.self) {
+        // A LABELLED `for:`/`mediaType:` WINS OVER AN UNLABELLED POSITIONAL. Taking the first argument
+        // that could be the media type read the deviceType of the commonest setup call there is —
+        // `AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)` — saw
+        // `.builtInWideAngleCamera` was neither `.audio` nor `.video`, and returned `.undetermined`
+        // without ever looking at the `for: .video` sitting two arguments along. A camera-only function
+        // charged Mic, which is the exact user-facing complaint the deferral was built to kill, coming
+        // back through a different overload. The unlabelled arm still matters — `devices(.audio)` — so
+        // it stays, as the FALLBACK it should always have been.
+        func classify(_ expr: ExprSyntax) -> MediaTypeArg {
+            if let ma = Self.peel(expr).as(MemberAccessExprSyntax.self) {
                 let name = ma.declName.baseName.text
                 if name == "audio" || name == "video" { return .determined(name) }
             }
             return .undetermined
+        }
+        for a in args where a.label?.text == "for" || a.label?.text == "mediaType" {
+            return classify(a.expression)
+        }
+        for a in args where a.label == nil {
+            return classify(a.expression)
         }
         return .absent
     }

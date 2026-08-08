@@ -832,4 +832,51 @@ final class XcodeTargetScopeTests: XCTestCase {
         XCTAssertTrue(swiftFileCompilesToNothing(source: legacy, on: "iOS"),
                       "the alias must not make the condition true everywhere")
     }
+
+    /// ⟨2026-08-08⟩ **A DIRECTORY NAMED LIKE A MODULE IS NOT THAT MODULE.** The first attempt at
+    /// trimming the κ ledger took any analyzed path segment `Sources/<X>/` as proof module X had been
+    /// read. It proves a DIRECTORY named X was read — and naming an integration folder after the SDK it
+    /// wraps is ordinary in the `.xcodeproj` trees this release's `--target` serves.
+    ///
+    /// `internalModules` gates BOTH disclosure channels: the coverage ledger and the per-function
+    /// `invisible` set, which is the only thing between an unresolved call into a blind module and a
+    /// purity claim. Measured on the shipped binary with a ONE-DIRECTORY-NAME diff: `App/Sources/Stripe/`
+    /// reported ZERO effectful functions and no ledger at all, while `App/Sources/StripeIntegration/`
+    /// disclosed the import and hedged both functions. A visible false disclosure traded for a silent
+    /// missing one — the trade this project forbids.
+    ///
+    /// This is a PROCESS test rather than a unit one because the rule lives in the scan driver and the
+    /// property is about the whole report.
+    func testAFolderNamedAfterAnSDKDoesNotSilenceItsDisclosure() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        func build(_ folder: String) throws -> URL {
+            let root = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("candor-sdkdir-\(UUID().uuidString)")
+            try fm.createDirectory(at: root.appendingPathComponent("App/Sources/\(folder)"),
+                                   withIntermediateDirectories: true)
+            try """
+            // swift-tools-version:5.9
+            import PackageDescription
+            let package = Package(name: "App", targets: [.executableTarget(name: "App", path: "App")])
+            """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+            try """
+            import Foundation
+            import Stripe
+            func chargeCard() { StripeClient().charge(amount: 100) }
+            chargeCard()
+            """.write(to: root.appendingPathComponent("App/Sources/\(folder)/Shim.swift"),
+                      atomically: true, encoding: .utf8)
+            return root
+        }
+        for folder in ["Stripe", "StripeIntegration"] {
+            let root = try build(folder)
+            defer { try? fm.removeItem(at: root) }
+            let r = try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path])
+            XCTAssertTrue(r.err.contains("Stripe"),
+                          "folder `\(folder)`: the uncovered import must be named — the root manifest "
+                          + "declares target `App`, not `Stripe`, so nothing here was analyzed under "
+                          + "that module name. stderr: \(r.err)")
+        }
+    }
 }
