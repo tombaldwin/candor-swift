@@ -198,16 +198,14 @@ public struct XcodeTargetScope {
     /// IceCubes shape — a thin app shell whose real code is `Packages/*` — is scoped correctly only
     /// because these are in.
     public let localPackages: [String]
-    /// …and their DIRECTORIES. The basenames above are for the human scope note; a consumer that needs
-    /// to read those manifests needs paths. Module identity does: for an `.xcodeproj` target there is no
-    /// owning `Package.swift`, so the only record of what that target may import is the closure this
-    /// resolver already computed. Reusing that answer is not a second inference from filesystem shape.
-    public let localPackageDirs: [String]
-    /// …and the same answer NOT flattened: Xcode target name -> the local package dirs THAT target
-    /// links directly. `localPackageDirs` is the closure's union, which is the right scope answer
-    /// (what code is in) and the WRONG identity answer (what a given file may import). A file in the
-    /// app target does not gain the share extension's package links, and taking the union made every
-    /// file inherit every member's.
+    /// …and their DIRECTORIES, per Xcode target: the local packages THAT target may import, which is
+    /// the packages it links plus the graph behind the specific products it links.
+    ///
+    /// THERE IS DELIBERATELY NO FLAT UNION HERE. There was — `localPackageDirs`, the closure's union —
+    /// and it was the right answer to the SCOPE question (what code is in the scan) and the wrong one to
+    /// the IDENTITY question (what a given file may import), which is what it got used for. A file in
+    /// the app target does not gain the share extension's package links. Once identity moved per target
+    /// nothing read the union any more, so it is gone rather than left lying beside the correct answer.
     public let localPackageDirsByTarget: [String: [String]]
     /// REMOTE package products the closure depends on — not in this tree, κ-disclosed, never silent.
     public let remoteProductCount: Int
@@ -546,7 +544,19 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
     var allFiles = Set<String>()
     var filesByTarget: [String: Set<String>] = [:]
     for tid in closureIds {
-        guard let t = model.obj(tid), let tname = t["name"]?.string else { continue }
+        // A closure member with no readable name used to be SKIPPED, contributing none of its files to
+        // the scope — a silent under-scope over whatever that target compiles, and exactly the shape
+        // this resolver refuses everywhere else. Nothing about the scan can be right if a member of the
+        // closure is unidentifiable, so refuse.
+        guard let t = model.obj(tid) else {
+            throw XcodeScopeError.unresolvableSource(
+                target: targetName, what: "dependency closure member \(tid) is not an object in this project file")
+        }
+        guard let tname = t["name"]?.string else {
+            throw XcodeScopeError.unresolvableSource(
+                target: targetName, what: "dependency closure member \(tid) has no `name`, so its source list "
+                    + "cannot be attributed to a target")
+        }
         // A FRESH set per target, deliberately not a diff of the shared one. Diffing was the first
         // spelling and it is wrong wherever two closure members compile the SAME file — Target
         // Membership ticked twice is ordinary — because the second target's pass sees no growth and
@@ -1020,7 +1030,6 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
                             // (platform pruning runs on `files` above, after the accumulation).
                             filesByTarget: filesByTarget.mapValues { $0.intersection(files) },
                             localPackages: resolvedLocalNames.sorted(),
-                            localPackageDirs: resolvedLocalDirs.sorted(),
                             localPackageDirsByTarget: localDirsByTarget.mapValues { $0.sorted() },
                             remoteProductCount: remoteProducts,
                             crossProjectDependencyCount: crossProject,

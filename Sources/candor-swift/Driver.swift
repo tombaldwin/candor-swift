@@ -222,69 +222,21 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     //
     // If the manifest genuinely declares a target of that name, the loop below claims it on the
     // evidence — a declaration and a source root — rather than on the package being called something.
-    // ONE MANIFEST PARSER IN THIS CODEBASE, not two. What stood here was a hand-rolled scan — a regex
-    // for `.target(`, a paren matcher, a hand-written argument reader — sitting a few files away from
-    // `parsePackageTargets`, which does the same job with SwiftSyntax and is covered by tests because
-    // the `--target` resolver depends on it. Every defect this derivation produced was a rediscovery of
-    // something the real parser already handles: comments, string literals, nesting, a computed value
-    // where a literal was assumed, an unclosed paren. Six silent under-reports across four review
-    // rounds, each found in the fix for the last, and every one of them lived in the copy.
+    // ONE MANIFEST PARSER IN THIS CODEBASE, not two — and for a while there were two, which is worth
+    // recording because the second one was DEAD and carried all the reasoning. What stood beside
+    // `targetsIn` was a hand-rolled scan — a regex for `.target(`, a paren matcher, a hand-written
+    // argument reader — a few files away from `parsePackageTargets`, which does the same job with
+    // SwiftSyntax and is covered by tests because the `--target` resolver depends on it. Every defect
+    // that derivation produced was a rediscovery of something the real parser already handles: comments,
+    // string literals, nesting, a computed value where a literal was assumed, an unclosed paren. Six
+    // silent under-reports across four review rounds, each found in the fix for the last, and every one
+    // of them lived in the copy. It is gone; this rationale belongs to the function BELOW, which runs.
     //
     // `Self.literal` in the parser returns nil for anything that is not a plain string literal, so a
     // computed name yields no target rather than a wrong one — the safe direction, by construction
     // rather than by my remembering to check. `targetSourceDirs` then gives the target's REAL source
     // directory, including SwiftPM's bare `<name>/` fallback, which the hand-rolled version did not know
     // about at all.
-    var manifestRoots: [String: [(name: String, root: String)]] = [:]
-    func targetsOf(_ pkgDir: String) -> [(name: String, root: String)] {
-        if let c = manifestRoots[pkgDir] { return c }
-        var out: [(name: String, root: String)] = []
-        if let src = try? String(contentsOfFile: (pkgDir as NSString).appendingPathComponent("Package.swift"),
-                                 encoding: .utf8) {
-            let isDir: (String) -> Bool = { p in
-                var d: ObjCBool = false
-                return FileManager.default.fileExists(atPath: p, isDirectory: &d) && d.boolValue
-            }
-            // A DECLARATION WITH AN EXPLICIT `path:` SETTLES THAT NAME. `parsePackageTargets` collects
-            // `.target(…)` calls anywhere in the file — correct for scope resolution, where a stray one
-            // dedups harmlessly — but a HOISTED dependency array
-            // (`let coreDeps: [Target.Dependency] = [.target(name: "Core")]`, which the parser's own
-            // comment calls an ordinary idiom) then reads as a second, path-less DECLARATION of Core.
-            // For module IDENTITY that widens the name's claimed roots to the conventional
-            // `Sources/Core`, so a stale directory of that name could claim a module whose real sources
-            // (`path: "Modules/Core"`) were never scanned. A real manifest declares each target once, so
-            // when any declaration of a name carries a `path:`, the convention-derived roots for that
-            // name are the phantoms and are dropped.
-            // DECLARATIONS ONLY, for identity. `parsePackageTargets` collects `.target(…)` anywhere,
-            // which is right for scope resolution and wrong here: a dead `let legacyDeps:
-            // [Target.Dependency] = [.target(name: "Analytics")]` that nothing references — SwiftPM
-            // never validates an unused `let` — read as a declaration, and a stale `Sources/Analytics/`
-            // then silenced a real remote SDK on both channels. One dead line in a manifest.
-            //
-            // nil means the `targets:` list is not literal (hoisted or computed) — "cannot be read",
-            // not "declares nothing" — and this derivation then claims NOTHING from that manifest,
-            // which errs toward disclosure.
-            let parsed = parsePackageTargetDeclarations(manifestSource: src) ?? []
-            let pathPinned = Set(parsed.filter { $0.path != nil }.map(\.name))
-            // PLUGINS ARE NOT IMPORTABLE MODULES, so a plugin declaration can never account for an
-            // analyzed file — its sources live under `Plugins/<name>`, which discovery excludes outright.
-            // `targetSourceDirs` was written for scope resolution, where a plugin is unreachable, so it
-            // maps every non-test target to `Sources/<name>`: a path-less `.plugin(name: "Stripe")`
-            // beside a stale `Sources/Stripe/` therefore claimed module Stripe and silenced a real SDK.
-            // That is round 3's defect, reintroduced by the commit that deleted the parser which knew
-            // about `Plugins/`. Excluded on the SEMANTICS — not importable — rather than by teaching a
-            // second place about directory layouts.
-            for t in parsed where !t.isPlugin && (t.path != nil || !pathPinned.contains(t.name)) {
-                // Per target, and non-throwing: a manifest may name a target whose directory is absent,
-                // and that is not this derivation's business — it just means no root to claim.
-                if let dirs = try? targetSourceDirs([t], packageRoot: pkgDir, exists: isDir) {
-                    for d in dirs { out.append((t.name, candorAbsolutePath(d))) }
-                }
-            }
-        }
-        manifestRoots[pkgDir] = out
-        return out
-    }
     // ── MODULE IDENTITY IS PER-FILE, AND HONOURS THE DEPENDENCY GRAPH ─────────────────────────────
     //
     // `internalModules` was a per-SCAN set answering a per-FILE question. That mismatch is what nine
@@ -296,8 +248,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // The question a disclosure channel actually asks is: *can THIS FILE's package import THAT module?*
     // Which is answered by the dependency graph, not by the filesystem:
     //   · a file's OWNING package is the one whose declared target roots contain it;
-    //   · a package can import its own targets, plus — through each `.package(path:)` it declares,
-    //     transitively — the PRODUCTS those local packages expose and the targets those products name.
+    //   · a package can import its own targets, plus — through each `.package(path:)` it DIRECTLY
+    //     declares — the PRODUCTS those local packages expose and the targets those products name.
+    //     ONE HOP, not transitive: SwiftPM requires a package to declare a dependency itself before its
+    //     targets may import from it, so a grandchild's products are not on this file's import path.
+    //     (The `.xcodeproj` arm IS transitive, and for the opposite reason — Xcode puts the whole
+    //     reachable graph on a target's import path. Two build systems, two answers; see
+    //     `localPackageDirsByTarget`.)
     // A module outside that set is genuinely invisible to this file, whatever else the scan analyzed.
     //
     // Everything unreadable resolves toward disclosure: no owning package, an unreadable `targets:` or
@@ -387,6 +344,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         var found: String? = nil
         while dir.count > 1 {
             if targetsIn(dir).contains(where: { file.hasPrefix($0.root + "/") }) { found = dir; break }
+            // STOP AT THE FIRST PACKAGE BOUNDARY, claim or no claim. A manifest that yields nothing —
+            // unreadable, a `.binaryTarget`, a computed `path:` — used to let the walk continue UP, and
+            // the file then inherited an ANCESTOR package's importable set. A vendored package under
+            // `Sources/App/Vendor/`, or any root target with `path: "."`, is enough: the vendored file
+            // gets the root's dependency list, and a name the root may import but the vendored package
+            // may not reads as internal. Stopping here yields no owner, so the file claims nothing and
+            // every module it imports stays named.
+            if FileManager.default.fileExists(
+                atPath: (dir as NSString).appendingPathComponent("Package.swift")) { break }
             let parent = (dir as NSString).deletingLastPathComponent
             if parent == dir { break }
             dir = parent
@@ -412,9 +378,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // So the conjunct is per (package, target): a name counts as read only where the package that
     // exposes it actually had files in this scan.
     var analyzedInCache: [String: Set<String>] = [:]
+    // HOISTED. This was rebuilt inside `analyzedTargets` on every uncached package: on a large
+    // `.xcodeproj` corpus that is one `URL` construction per file per package — ~300k of them at
+    // 10k files × 30 packages — for an answer that does not vary.
+    let absSourcePaths = sourcePaths.map { candorAbsolutePath($0) }
     func analyzedTargets(in pkgDir: String) -> Set<String> {
         if let c = analyzedInCache[pkgDir] { return c }
-        let absPaths = sourcePaths.map { candorAbsolutePath($0) }
+        let absPaths = absSourcePaths
         var out = Set<String>()
         for t in targetsIn(pkgDir) where absPaths.contains(where: { $0.hasPrefix(t.root + "/") }) {
             out.insert(t.name)
