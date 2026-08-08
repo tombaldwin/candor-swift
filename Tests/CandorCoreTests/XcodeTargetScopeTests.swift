@@ -938,8 +938,12 @@ final class XcodeTargetScopeTests: XCTestCase {
         try """
         // swift-tools-version:5.9
         import PackageDescription
+        // `dependencies: ["Kit"]` is not decoration: without it `import Kit` does not compile, and since
+        // module identity became per TARGET rather than per package, a tree that cannot build is not
+        // evidence about one that can. The property under test — a declared, analyzed target must not be
+        // named a blind spot — is unchanged.
         let package = Package(name: "App",
-            targets: [.executableTarget(name: "App"), .target(name: "Kit")])
+            targets: [.executableTarget(name: "App", dependencies: ["Kit"]), .target(name: "Kit")])
         """.write(to: c.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
         try "public func helper() {}\n".write(to: c.appendingPathComponent("Sources/Kit/K.swift"),
                                               atomically: true, encoding: .utf8)
@@ -1154,7 +1158,8 @@ final class XcodeTargetScopeTests: XCTestCase {
         try """
         // swift-tools-version:5.9
         import PackageDescription
-        let package = Package(name: "P", targets: [.target(name: "Core"), .executableTarget(name: "App")])
+        let package = Package(name: "P", targets: [.target(name: "Core"),
+                                                   .executableTarget(name: "App", dependencies: ["Core"])])
         """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
         try "import Foundation\npublic func leak() { _ = FileManager.default.contents(atPath: \"/x\") }\n"
             .write(to: root.appendingPathComponent("Source/Core/C.swift"), atomically: true, encoding: .utf8)
@@ -1489,7 +1494,7 @@ final class XcodeTargetScopeTests: XCTestCase {
                       + "certify a dependency this run never opened")
     }
 
-    /// ⟨0.28 rung, review 2 follow-on⟩ **A DEAD `.library(…)` IS NOT AN EXPOSURE.** `exposed(by:)` was
+    /// ⟨0.27 rung, review 2 follow-on⟩ **A DEAD `.library(…)` IS NOT AN EXPOSURE.** package exposure was
     /// built on `parsePackageProducts`, the collect-anywhere SCOPE parser — so a `.library(…)` sitting in
     /// a hoisted `let` that nothing references (SwiftPM never validates an unused one) read as a real
     /// product, and the package claimed to expose a module it does not publish.
@@ -1852,7 +1857,7 @@ final class XcodeTargetScopeTests: XCTestCase {
     ///
     /// `testAProductsGraphDoesNotLeakToASiblingProductOfTheSamePackage` above passes on the code that
     /// has this defect: the resolver\'s answer was right. The driver then looked up only the package
-    /// DIRECTORY and asked `exposed(by:)`, which returns every product\'s member targets — so the
+    /// DIRECTORY and asked for the PACKAGE\'s exposure, which is every product\'s member targets — so the
     /// product granularity survived the walk and was spent one line later.
     ///
     /// One package vends `AProd` and `BProd`. `App` links `AProd`, its sibling `Ext` links `BProd`.
@@ -1898,6 +1903,68 @@ final class XcodeTargetScopeTests: XCTestCase {
                        ["ATarget"], "and the mirror — Ext links BProd, so ATarget is not its to claim")
         XCTAssertEqual(try uncovered(target: "Ext", importing: "BTarget", otherFile: "AppMain.swift"), [],
                        "while BTarget is")
+    }
+
+    /// **A SIBLING TARGET IS NOT ON YOUR IMPORT PATH — the SwiftPM twin of the `.xcodeproj` defect that
+    /// took three review rounds to close.** Module identity was decided per PACKAGE: a file could claim
+    /// every target its package declares. SwiftPM lets a target import only what its own `dependencies:`
+    /// name, so a package\'s other targets are not on its import path, and starting from all of them let
+    /// a local stub silence the real SDK of the same name.
+    ///
+    /// Measured on the built binary. One package, `App` declaring NO dependencies beside a `.target`
+    /// whose name is the only thing that changes between the two runs:
+    ///
+    ///     sibling named `Stripe`    functions: []                      ← `ship` absent = purity claim
+    ///     sibling named `Payments`  ship, invisible: ["Stripe"]        ← correct
+    ///
+    /// It sat twelve lines from the `.xcodeproj` fixes through three review rounds, because every round
+    /// was briefed on the arm that had just been changed.
+    func testASiblingTargetTheFilesTargetDoesNotDependOnCannotSilenceIt() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        func run(sibling: String, appDependsOnIt: Bool) throws -> (unc: [String], fns: [String]) {
+            let root = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("candor-sib-\(UUID().uuidString)")
+            defer { try? fm.removeItem(at: root) }
+            for d in ["Sources/App", "Sources/\(sibling)"] {
+                try fm.createDirectory(at: root.appendingPathComponent(d), withIntermediateDirectories: true)
+            }
+            let deps = appDependsOnIt ? ", dependencies: [\"\(sibling)\"]" : ""
+            try """
+            // swift-tools-version:5.9
+            import PackageDescription
+            let package = Package(name: "Root", targets: [
+                .executableTarget(name: "App"\(deps)),
+                .target(name: "\(sibling)"),
+            ])
+            """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+            try "public func localStub() {}\n"
+                .write(to: root.appendingPathComponent("Sources/\(sibling)/S.swift"),
+                       atomically: true, encoding: .utf8)
+            try "import Stripe\nfunc ship() { StripeClient().charge(amount: 100) }\nship()\n"
+                .write(to: root.appendingPathComponent("Sources/App/main.swift"),
+                       atomically: true, encoding: .utf8)
+            let r = try ProcessHarness.run(bin, [root.path, "--json"])
+            let doc = try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any]
+            let cov = doc?["coverage"] as? [String: Any]
+            let fns = (doc?["functions"] as? [[String: Any]]) ?? []
+            return (((cov?["uncovered"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String },
+                    fns.compactMap { $0["fn"] as? String })
+        }
+        // THE SIN: App declares nothing, so `import Stripe` cannot be the sibling target.
+        let sin = try run(sibling: "Stripe", appDependsOnIt: false)
+        XCTAssertEqual(sin.unc, ["Stripe"],
+                       "App declares no dependency on the `Stripe` target, so `import Stripe` is the "
+                       + "remote SDK and must stay disclosed")
+        XCTAssertTrue(sin.fns.contains("ship"),
+                      "and `ship` must be IN the report — absence is a purity claim over an SDK call")
+        // THE CONTROL: the same tree with the sibling renamed. If this ever stops disclosing, the
+        // fixture above has stopped testing what it says.
+        let control = try run(sibling: "Payments", appDependsOnIt: false)
+        XCTAssertEqual(control.unc, ["Stripe"])
+        // THE REACH FLOOR: when App DOES declare it, the name is claimed and nothing is disclosed.
+        let floor = try run(sibling: "Stripe", appDependsOnIt: true)
+        XCTAssertEqual(floor.unc, [], "a declared dependency IS on the import path")
     }
 
     /// **THE PBXPROJ\'S SPELLING IS NOT THE DISK\'S.** The membership filter matches case-INSENSITIVELY

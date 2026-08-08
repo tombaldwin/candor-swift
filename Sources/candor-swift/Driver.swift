@@ -261,6 +261,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // `dependencies:` list, a computed path — each yields no claim, so the module stays named. That is
     // the direction the whole 0.27 thread had to be beaten into, and it is the default here.
     var declaredIn: [String: [(name: String, root: String)]] = [:]   // package dir -> its targets
+    var declTargets: [String: [PackageTarget]] = [:]                 // …and their full declarations
     var localDepsOf: [String: [String]] = [:]                        // package dir -> local dep dirs
     func targetsIn(_ pkgDir: String) -> [(name: String, root: String)] {
         if let c = declaredIn[pkgDir] { return c }
@@ -272,6 +273,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 return FileManager.default.fileExists(atPath: p, isDirectory: &d) && d.boolValue
             }
             let parsed = parsePackageTargetDeclarations(manifestSource: src) ?? []
+            declTargets[pkgDir] = parsed
             let pathPinned = Set(parsed.filter { $0.path != nil }.map(\.name))
             for t in parsed where !t.isPlugin && (t.path != nil || !pathPinned.contains(t.name)) {
                 if let dirs = try? targetSourceDirs([t], packageRoot: pkgDir, exists: isDir) {
@@ -285,40 +287,22 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         declaredIn[pkgDir] = out
         return out
     }
-    /// What a package EXPOSES to importers: its `products:` and the targets those products name. Nothing
+    /// What ONE PRODUCT of a package EXPOSES to importers: the targets that product names, and nothing
     /// else — SwiftPM exposes products, and a target left out of every product cannot be imported from
     /// outside the package at all.
     ///
-    /// SEPARATE FROM `importable` ON PURPOSE, and the two were one function for an hour. `importable`
-    /// began `Set(targetsIn(pkgDir).map(\.name))` — every declared target, correct for a file INSIDE the
-    /// package — and the dependency recursion then unioned that whole set into the parent. So a
-    /// dependency's INTERNAL target silenced the parent's import of a same-named remote module. Measured:
-    /// a `Mocks` package exposing only `MockKit` while declaring an internal `.target(name: "AcmePay")`
-    /// made the root's `import AcmePay` — a real remote SDK — vanish from every channel, `ship` absent
-    /// from `functions` under ⟨0.21⟩. Renaming that internal target restored the disclosure, which is
-    /// what makes the cause unambiguous. The comment on the old function said "products, not every
-    /// target"; the line below it did otherwise.
-    var exposedCache: [String: Set<String>] = [:]
-    func exposed(by pkgDir: String) -> Set<String> {
-        if let c = exposedCache[pkgDir] { return c }
-        var out = Set<String>()
-        if let src = try? String(contentsOfFile: (pkgDir as NSString).appendingPathComponent("Package.swift"),
-                                 encoding: .utf8) {
-            let analyzed = analyzedTargets(in: pkgDir)
-            // DECLARATIONS ONLY — see parsePackageProductDeclarations. nil (an unreadable or
-            // non-literal products list) exposes nothing, which errs toward disclosure.
-            for prod in parsePackageProductDeclarations(manifestSource: src) ?? [] {
-                // MEMBER TARGETS ONLY. A product NAME is not a module: `.library(name: "Pay", targets:
-                // ["PayCore"])` is imported as `PayCore`, and claiming `Pay` silences a real remote
-                // module of that name. The product is the unit of EXPOSURE; the target is the unit of
-                // IMPORT, and they are not interchangeable.
-                for t in prod.targets where analyzed.contains(t) { out.insert(t) }
-            }
-        }
-        exposedCache[pkgDir] = out
-        return out
-    }
-    /// …and the SAME question for ONE product of that package.
+    /// This function had a coarser sibling, `exposed(by pkgDir:)`, answering for a whole package. It is
+    /// deleted rather than left here, because every defect in this area has been a consumer reaching for
+    /// the coarse answer to a fine question. Two of them were exactly this pair: `importable` once began
+    /// `Set(targetsIn(pkgDir).map(\.name))` — every declared target, so a dependency's INTERNAL target
+    /// silenced the parent's import of a same-named remote module (a `Mocks` package exposing only
+    /// `MockKit` while declaring an internal `.target(name: "AcmePay")` made the root's `import AcmePay`
+    /// vanish from every channel) — and later the `.xcodeproj` arm called the package-wide version for a
+    /// target that links ONE product, so a sibling product's targets were claimed.
+    ///
+    /// A PRODUCT NAME IS NOT A MODULE: `.library(name: "Pay", targets: ["PayCore"])` is imported as
+    /// `PayCore`, and claiming `Pay` silences a real remote module of that name. The product is the unit
+    /// of exposure; the target is the unit of import; they are not interchangeable.
     ///
     /// `exposed(by:)` is the right answer where the importer declared a dependency on the whole PACKAGE
     /// — the SwiftPM arm, where a manifest's `.package(path:)` does exactly that. An Xcode target links
@@ -353,20 +337,90 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// dependency declaration to import a product, so inheriting a grandchild's products would claim on
     /// evidence the manifest does not carry.
     var importableCache: [String: Set<String>] = [:]
-    func importable(from pkgDir: String) -> Set<String> {
-        if let c = importableCache[pkgDir] { return c }
-        var out = analyzedTargets(in: pkgDir)
+    /// Which local package declares PRODUCT `name`, among the packages `pkgDir` directly depends on.
+    /// nil unless exactly one does — two candidates is an ambiguous key, and an ambiguous key must not
+    /// license a purity claim.
+    func localPackageDeclaring(product name: String, dependencyOf pkgDir: String) -> String? {
+        var hit: String? = nil
         for dep in localDepsOf[pkgDir] ?? [] {
-            _ = targetsIn(dep)                                       // populates localDepsOf for the dep
-            out.formUnion(exposed(by: dep))
+            _ = targetsIn(dep)                                       // populates declTargets for the dep
+            guard let src = try? String(contentsOfFile: (dep as NSString).appendingPathComponent("Package.swift"),
+                                        encoding: .utf8),
+                  let prods = parsePackageProductDeclarations(manifestSource: src),
+                  prods.contains(where: { $0.name == name }) else { continue }
+            if hit != nil { return nil }
+            hit = dep
         }
-        importableCache[pkgDir] = out
+        return hit
+    }
+    /// What a file in TARGET `t` of package `pkgDir` may import.
+    ///
+    /// PER TARGET, NOT PER PACKAGE — and this was per package until it was measured. SwiftPM lets a
+    /// target import only what its own `dependencies:` name, so a package's OTHER targets are not on
+    /// its import path. Starting from every declared target of the package meant a sibling target could
+    /// silence a real external module of the same name:
+    ///
+    ///     .executableTarget(name: "App")          // declares NO dependencies
+    ///     .target(name: "Stripe")                 // a local stub, used by something else
+    ///
+    /// with `App/main.swift` doing `import Stripe` and calling into the real SDK. Measured on the built
+    /// binary: `functions: []` and an empty ledger — `ship` absent under ⟨0.21⟩ is a purity claim over
+    /// an SDK call. Rename that sibling to `Payments`, change nothing else, and the same tree reports
+    /// `ship` with `invisible: ["Stripe"]`. One target name in the manifest was the whole difference.
+    ///
+    /// This is the SwiftPM twin of the defect fixed three times over on the `.xcodeproj` side: a
+    /// per-container answer to a per-member question. It sat twelve lines from those fixes through
+    /// three review rounds because every round was briefed on the Xcode arm.
+    ///
+    /// TRANSITIVE, deliberately: SwiftPM puts a transitive dependency's module on the import path, so
+    /// excluding it would name a readable module a blind spot. Anything unreadable at any step — a
+    /// non-literal `dependencies:`, an unresolvable product, a target this parse never saw — yields
+    /// NOTHING for that file, so it claims nothing and every module it imports stays named.
+    func importable(forTarget t: String, in pkgDir: String) -> Set<String> {
+        let key = pkgDir + "\u{0}" + t
+        if let c = importableCache[key] { return c }
+        _ = targetsIn(pkgDir)                                        // populates declTargets/localDepsOf
+        let byName = Dictionary(grouping: declTargets[pkgDir] ?? [], by: \.name).compactMapValues(\.first)
+        var inPackage: Set<String> = []
+        var wantProducts: [String] = []
+        var stack = [t]
+        var unreadable = false
+        while let cur = stack.popLast() {
+            guard inPackage.insert(cur).inserted else { continue }
+            guard let pt = byName[cur] else { continue }
+            if pt.dependenciesUnreadable || pt.productDependenciesUnreadable { unreadable = true; break }
+            for d in pt.dependencies {
+                // A plain string naming an in-package target is a TARGET edge; one that names nothing
+                // here is a PRODUCT of a dependency package — SwiftPM accepts both spellings.
+                if byName[d] != nil { stack.append(d) } else { wantProducts.append(d) }
+            }
+            wantProducts.append(contentsOf: pt.productDependencies)
+        }
+        var out: Set<String> = []
+        if !unreadable {
+            // THE INVARIANT: only names whose sources this run actually read. Everything else is a
+            // module we have nothing to say about, and saying nothing about it means disclosing it.
+            let analyzed = analyzedTargets(in: pkgDir)
+            out = inPackage.filter { analyzed.contains($0) }
+            for prod in wantProducts {
+                guard let dep = localPackageDeclaring(product: prod, dependencyOf: pkgDir) else { continue }
+                out.formUnion(exposed(product: prod, in: dep))
+            }
+        }
+        importableCache[key] = out
         return out
     }
 
     /// The package that owns an analyzed file — the nearest ancestor manifest one of whose declared
     /// target roots contains it. nil when no manifest claims the file, which claims nothing.
     var ownerCache: [String: String?] = [:]
+    /// Which of `pkgDir`'s declared targets owns `file` — the one whose real source root contains it.
+    /// nil when two roots do (a `path:` nesting one target's directory inside another's), because the
+    /// file's import path would then be ambiguous and an ambiguous answer must not license a claim.
+    func owningTarget(of file: String, in pkgDir: String) -> String? {
+        let hits = targetsIn(pkgDir).filter { file.hasPrefix($0.root + "/") }
+        return hits.count == 1 ? hits[0].name : nil
+    }
     func owningPackage(of file: String) -> String? {
         if let c = ownerCache[file] { return c }
         var dir = (file as NSString).deletingLastPathComponent
@@ -427,9 +481,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         let rel = raw.hasPrefix(rootDir)
             ? String(raw.dropFirst(rootDir.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             : raw
-        if let pkg = owningPackage(of: abs) {
-            // BOTH conjuncts: the file's package can import it, AND this run actually read it.
-            importableByFile[rel] = importable(from: pkg)
+        if let pkg = owningPackage(of: abs), let own = owningTarget(of: abs, in: pkg) {
+            // BOTH conjuncts: the file's TARGET can import it, AND this run actually read it.
+            importableByFile[rel] = importable(forTarget: own, in: pkg)
         } else if let deps = xcodeLinksByFile[abs] {
             // AN XCODE TARGET'S FILE has no owning `Package.swift` — a folder in an Xcode target is not
             // a module, and the target compiles all of its files into one. What it may import is the

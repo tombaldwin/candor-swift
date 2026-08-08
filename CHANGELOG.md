@@ -50,6 +50,27 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   17608 analyzed) with the fix. Under the second, a `../repo`-style scan root disabled per-file identity
   outright. One normalizer now serves every site.
 
+- **⚠ A SIBLING TARGET COULD SILENCE A REAL SDK.** The SwiftPM half of the rung above, and the same
+  defect in the arm nobody looked at. Module identity was decided per PACKAGE — a file could claim every
+  target its package declares — when SwiftPM lets a target import only what its own `dependencies:` name.
+
+  One package, `App` declaring no dependencies beside a `.target` used by something else, and the only
+  difference between the two runs is that target's name:
+
+  ```
+  .target(name: "Stripe")     import Stripe → functions: []        ← `ship` absent = purity claim
+  .target(name: "Payments")   import Stripe → ship, invisible: ["Stripe"]
+  ```
+
+  `App/main.swift` calls `StripeClient().charge(amount: 100)`, and in the first tree that call reads
+  pure. Identity is now the file's TARGET: its dependency closure, plus the products those targets name,
+  intersected with what the run analyzed. Transitive, because SwiftPM puts a transitive dependency's
+  module on the import path; and anything unreadable at any step yields nothing, so the file claims
+  nothing and every module it imports stays named.
+
+  All 20 corpus target scans are unchanged by this, which is what you would expect: real manifests
+  declare their dependencies, so nothing that could legitimately be imported was lost.
+
 - **FOUR DEFECTS THAT WERE ALREADY SHIPPING, found by reviewing the work above rather than by using it.**
   Two of them silent, two of them dead ends.
 
