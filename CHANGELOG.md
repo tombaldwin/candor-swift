@@ -13,16 +13,21 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   had already shipped.** This entry replaces the running account of that work, because the running
   account described a feature that is no longer here.
 
-  It began as a cosmetic fix: on a `--target`-scoped NetNewsWire scan the κ ledger named 31 uncovered
-  modules including local packages the scan had just analyzed — a false disclosure, prescribing work that
-  was already done. Reducing that to 14 required deciding, from the filesystem, which modules had been
-  analyzed. **Nine review rounds found ten distinct silent under-reports in that decision**, six of them
+  It began as a cosmetic fix: a NetNewsWire scan's κ ledger named local packages the scan had just
+  analyzed — a false disclosure, prescribing work that was already done. Removing those required
+  deciding, from the filesystem, which modules had been analyzed. **Nine review rounds found ten distinct silent under-reports in that decision**, six of them
   introduced by the fix for the previous one, and the tenth — a nested package's target silencing the
   root package's import of a real remote SDK — reads names the shipped 0.26 engine could not see at all.
 
   So the derivation is now bounded to the ROOT manifest: a module is internal when an analyzed file lives
-  under a target declared in `rootDir/Package.swift`. NetNewsWire's ledger goes back to 31. The noise this
-  set out to remove is still there.
+  under a target declared in `rootDir/Package.swift`. The noise this set out to remove is still there:
+  measured on NetNewsWire at its 2026-08-08 HEAD, a whole-repo scan names **35** uncovered modules and
+  several are `Modules/` packages analyzed in the same run.
+
+  (An earlier draft of this entry put that figure at 31 and said the improvement took it to 14. Neither
+  number reproduces against today's checkout, and the two were not even the same invocation — 14 is what
+  a `--target NetNewsWire-iOS` scan reports, on this build, WITH the derivation bounded as described. A
+  measurement is only a claim if it says which command produced it.)
 
   **What survives is worth more than what was withdrawn.** Every name now claimed is a literal declaration
   in the root manifest, while the shipped 0.26 derivation claimed the package NAME, every `Sources/` and
