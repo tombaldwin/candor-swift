@@ -162,7 +162,7 @@ func swiftModuleOf(_ loc: String) -> String {
 }
 
 func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepIndex = DepIndex(),
-             xcodeLocalPackageDirs: [String] = []) -> Analysis {
+             xcodeLinksByFile: [String: [String]] = [:]) -> Analysis {
 
     var allFns: [FnInfo] = []
     var fields: [String: [String: (name: String?, isFunction: Bool)]] = [:]
@@ -431,17 +431,24 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         if let pkg = owningPackage(of: abs) {
             // BOTH conjuncts: the file's package can import it, AND this run actually read it.
             importableByFile[rel] = importable(from: pkg)
-        } else if !xcodeLocalPackageDirs.isEmpty {
+        } else if let deps = xcodeLinksByFile[abs] {
             // AN XCODE TARGET'S FILE has no owning `Package.swift` — a folder in an Xcode target is not
             // a module, and the target compiles all of its files into one. What it may import is the
             // local-package closure the `--target` resolver ALREADY walked, so this reads that answer
             // rather than deriving a second one. Without it, an `.xcodeproj` repo claims nothing and
             // every local package it genuinely depends on is named a blind spot (NetNewsWire: 27 of
             // them, nearly all analyzed in the same run).
+            //
+            // PER FILE, not per closure. The closure's union answers the SCOPE question — what code is
+            // in the scan — and answering identity with it lets a file in the app target inherit the
+            // share extension's package links, which is a purity claim over a module this file cannot
+            // see. `deps` is what THIS file's target(s) link. A file the resolver could not attribute
+            // to a target is simply absent here and claims nothing, so the failure direction is
+            // disclosure.
             // EXPOSED, not importable: an Xcode target links a local package's PRODUCTS, so it sees
             // what that package publishes — not the internal targets only its own files may import.
             var out = Set<String>()
-            for dep in xcodeLocalPackageDirs { out.formUnion(exposed(by: dep)) }
+            for dep in deps { out.formUnion(exposed(by: dep)) }
             importableByFile[rel] = out
         }
     }

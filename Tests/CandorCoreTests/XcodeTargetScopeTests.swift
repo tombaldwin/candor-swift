@@ -1530,4 +1530,242 @@ final class XcodeTargetScopeTests: XCTestCase {
                       "the dependency's `products:` is empty — a dead hoisted `.library(…)` must not "
                       + "make it expose a module, and so must not silence the real remote one: \(r.err)")
     }
+
+    // ── ⟨0.28 rung, review 3⟩ PER-TARGET LINK EVIDENCE ────────────────────────────────────────────
+    //
+    // WRITTEN BEFORE THE CODE, deliberately. The defect is that `localPackageDirs` is a flat union over
+    // the closure, so a file in target T inherits a claim justified only by sibling target S's link. The
+    // obvious narrowing reintroduces the blind-spot flood the whole rung exists to remove, so BOTH
+    // directions are pinned here first and the implementation has to satisfy both at once.
+    //
+    // A two-target project: `App` (application) embeds `Ext` (framework). Only `Ext` links the local
+    // package `Fork`, which exposes a target named `Shared`. `App` links nothing local.
+    private let twoTargetProject = """
+    {
+        objects = {
+            ROOT = { isa = PBXProject; mainGroup = G0; targets = ( TAPP, TEXT ); };
+            G0 = { isa = PBXGroup; children = ( FAPP, FEXT, FFORK ); sourceTree = "<group>"; };
+            FAPP = { isa = PBXFileReference; path = AppMain.swift; sourceTree = "<group>"; };
+            FEXT = { isa = PBXFileReference; path = ExtMain.swift; sourceTree = "<group>"; };
+            FFORK = { isa = PBXFileReference; lastKnownFileType = wrapper; path = Fork; sourceTree = "<group>"; };
+            BAPP = { isa = PBXBuildFile; fileRef = FAPP; };
+            BEXT = { isa = PBXBuildFile; fileRef = FEXT; };
+            PSAPP = { isa = PBXSourcesBuildPhase; files = ( BAPP ); };
+            PSEXT = { isa = PBXSourcesBuildPhase; files = ( BEXT ); };
+            PDSHARED = { isa = XCSwiftPackageProductDependency; productName = Shared; };
+            DEPEXT = { isa = PBXTargetDependency; target = TEXT; };
+            TAPP = {
+                isa = PBXNativeTarget;
+                buildPhases = ( PSAPP );
+                dependencies = ( DEPEXT );
+                name = App;
+                productType = "com.apple.product-type.application";
+            };
+            TEXT = {
+                isa = PBXNativeTarget;
+                buildPhases = ( PSEXT );
+                name = Ext;
+                packageProductDependencies = ( PDSHARED );
+                productType = "com.apple.product-type.framework";
+            };
+        };
+        rootObject = ROOT;
+    }
+    """
+    private let forkManifest = """
+    // swift-tools-version: 6.0
+    import PackageDescription
+    let package = Package(
+        name: "Fork",
+        products: [.library(name: "Shared", targets: ["Shared"])],
+        targets: [.target(name: "Shared")]
+    )
+    """
+
+    /// THE SIN. `AppMain.swift` imports `Shared`. App links no local package — only its sibling `Ext`
+    /// does — so in a real build App's `import Shared` resolves to something else entirely (a binary
+    /// framework, a remote package, or nothing). Claiming it internal on Ext's evidence silences a module
+    /// App may genuinely never have read.
+    func testAFileDoesNotInheritASiblingTargetsPackageLink() throws {
+        let scope = try xcodeTargetScope(model: model(twoTargetProject), projectDir: "/repo",
+                                         targetName: "App", fs: fsStub(
+            swiftFilesUnder: { dir in ["\(dir)/S.swift"] },
+            manifests: ["/repo/Fork": forkManifest]))
+        // The closure DOES include Ext and its package — that is correct for a scan scope.
+        XCTAssertTrue(scope.closure.map(\.name).contains("Ext"), "Ext is an embedded dependency of App")
+        XCTAssertEqual(scope.localPackages, ["Fork"], "and Fork's sources are in the scan")
+        // …but the LINK is Ext's, and per-target evidence must say so.
+        XCTAssertEqual(scope.localPackageDirsByTarget["Ext"] ?? [], ["/repo/Fork"],
+                       "Ext links Fork")
+        XCTAssertEqual(scope.localPackageDirsByTarget["App"] ?? [], [],
+                       "App links NO local package — inheriting Ext's link is the cardinal sin this "
+                       + "pins: a file in App importing `Shared` must stay disclosed")
+        // And the file→target mapping the driver needs to use it.
+        XCTAssertEqual(scope.filesByTarget["App"]?.contains("/repo/AppMain.swift"), true)
+        XCTAssertEqual(scope.filesByTarget["Ext"]?.contains("/repo/ExtMain.swift"), true)
+        XCTAssertNotEqual(scope.filesByTarget["App"]?.contains("/repo/ExtMain.swift"), true,
+                          "App's sources phase does not compile Ext's file")
+    }
+
+    /// THE REACH FLOOR, and the reason this fixture is written beside the one above rather than after
+    /// it. Narrowing the claim is easy; narrowing it until nothing is claimed reintroduces the
+    /// blind-spot flood the rung exists to remove — NetNewsWire went back to 27 uncovered under the
+    /// bounded version on main. A target that DOES link a local package must still claim what it exposes.
+    func testATargetStillClaimsThePackagesItDoesLink() throws {
+        let scope = try xcodeTargetScope(model: model(twoTargetProject), projectDir: "/repo",
+                                         targetName: "Ext", fs: fsStub(
+            swiftFilesUnder: { dir in ["\(dir)/S.swift"] },
+            manifests: ["/repo/Fork": forkManifest]))
+        XCTAssertEqual(scope.localPackageDirsByTarget["Ext"] ?? [], ["/repo/Fork"],
+                       "scoping to Ext itself must still resolve the package it links")
+        XCTAssertEqual(scope.localPackages, ["Fork"])
+    }
+
+    /// One target, linking ONE product of a local package that itself depends on a second local package.
+    private let chainProject = """
+    {
+        objects = {
+            ROOT = { isa = PBXProject; mainGroup = G0; targets = ( TAPP ); };
+            G0 = { isa = PBXGroup; children = ( FAPP, FA, FB ); sourceTree = "<group>"; };
+            FAPP = { isa = PBXFileReference; path = AppMain.swift; sourceTree = "<group>"; };
+            FA = { isa = PBXFileReference; lastKnownFileType = wrapper; path = PkgA; sourceTree = "<group>"; };
+            FB = { isa = PBXFileReference; lastKnownFileType = wrapper; path = PkgB; sourceTree = "<group>"; };
+            BAPP = { isa = PBXBuildFile; fileRef = FAPP; };
+            PSAPP = { isa = PBXSourcesBuildPhase; files = ( BAPP ); };
+            PDA = { isa = XCSwiftPackageProductDependency; productName = A; };
+            TAPP = { isa = PBXNativeTarget; buildPhases = ( PSAPP ); name = App;
+                     packageProductDependencies = ( PDA );
+                     productType = "com.apple.product-type.application"; };
+        };
+        rootObject = ROOT;
+    }
+    """
+    private let pkgAManifest = """
+    // swift-tools-version: 6.0
+    import PackageDescription
+    let package = Package(
+        name: "PkgA",
+        products: [.library(name: "A", targets: ["A"])],
+        dependencies: [.package(path: "../PkgB")],
+        targets: [.target(name: "A", dependencies: [.product(name: "B", package: "PkgB")])]
+    )
+    """
+    private let pkgBManifest = """
+    // swift-tools-version: 6.0
+    import PackageDescription
+    let package = Package(
+        name: "PkgB",
+        products: [.library(name: "B", targets: ["B"])],
+        targets: [.target(name: "B")]
+    )
+    """
+
+    /// **A DIRECT LINK IS NOT THE IMPORT PATH.** Xcode puts the whole package graph reachable from a
+    /// linked product on the target's import path, and shipping code relies on it: NetNewsWire's share
+    /// extension links `Account` and `RSCore` only, while `Shared/ShareExtension/ExtensionContainersFile`
+    /// imports `RSParser` — in the graph because Account's manifest declares `.package(path: "../RSParser")`.
+    ///
+    /// This is the fixture for a measured regression in this rung's own first version, which recorded
+    /// only the DIRECTLY linked dirs: three NetNewsWire targets then named `RSParser`, `Articles` and
+    /// `CloudKitSync` blind spots in a run that had read all three. A false disclosure rather than a
+    /// silence — but the rung's whole claim is that narrowing the union costs no reach, and that version
+    /// cost some. The widening walks only edges `expand` already resolved, so it can restore reach and
+    /// never invent it.
+    func testATargetReachesThePackageGraphBehindWhatItLinks() throws {
+        let scope = try xcodeTargetScope(model: model(chainProject), projectDir: "/repo",
+                                         targetName: "App", fs: fsStub(
+            swiftFilesUnder: { dir in ["\(dir)/S.swift"] },
+            manifests: ["/repo/PkgA": pkgAManifest, "/repo/PkgB": pkgBManifest]))
+        XCTAssertEqual(scope.localPackageDirsByTarget["App"] ?? [], ["/repo/PkgA", "/repo/PkgB"],
+                       "App links A only, but B is on its import path — recording direct links alone "
+                       + "names an analyzed module a blind spot")
+        XCTAssertEqual(scope.localPackages, ["PkgA", "PkgB"])
+    }
+
+    /// A pbxproj where ONE file sits in BOTH targets' Sources phases — "Target Membership" ticked
+    /// twice, which is ordinary in a shipping project.
+    private let sharedFileProject = """
+    {
+        objects = {
+            ROOT = { isa = PBXProject; mainGroup = G0; targets = ( TAPP, TEXT ); };
+            G0 = { isa = PBXGroup; children = ( FBOTH, FFORK ); sourceTree = "<group>"; };
+            FBOTH = { isa = PBXFileReference; path = Both.swift; sourceTree = "<group>"; };
+            FFORK = { isa = PBXFileReference; lastKnownFileType = wrapper; path = Fork; sourceTree = "<group>"; };
+            BA = { isa = PBXBuildFile; fileRef = FBOTH; };
+            BE = { isa = PBXBuildFile; fileRef = FBOTH; };
+            PSAPP = { isa = PBXSourcesBuildPhase; files = ( BA ); };
+            PSEXT = { isa = PBXSourcesBuildPhase; files = ( BE ); };
+            PDSHARED = { isa = XCSwiftPackageProductDependency; productName = Shared; };
+            DEPEXT = { isa = PBXTargetDependency; target = TEXT; };
+            TAPP = { isa = PBXNativeTarget; buildPhases = ( PSAPP ); dependencies = ( DEPEXT );
+                     name = App; productType = "com.apple.product-type.application"; };
+            TEXT = { isa = PBXNativeTarget; buildPhases = ( PSEXT ); name = Ext;
+                     packageProductDependencies = ( PDSHARED );
+                     productType = "com.apple.product-type.framework"; };
+        };
+        rootObject = ROOT;
+    }
+    """
+
+    /// THE MIRROR OF THE FIX, and it caught a defect in the fix's own first spelling. Per-target files
+    /// were originally read off the SHARED set — each target credited with however much the set grew
+    /// during its pass. That is right only while no two targets compile the same file. Here they do:
+    /// the second target's pass sees no growth, so `Both.swift` keeps only App's (empty) link list, and
+    /// its `import Shared` — which Ext genuinely links and this run genuinely reads — is named a blind
+    /// spot. A false disclosure rather than a silence, so not the cardinal sin, but it gives back
+    /// exactly the reach the rung is here to keep.
+    func testAFileCompiledByTwoTargetsGetsBothTargetsLinks() throws {
+        let scope = try xcodeTargetScope(model: model(sharedFileProject), projectDir: "/repo",
+                                         targetName: "App", fs: fsStub(
+            swiftFilesUnder: { dir in ["\(dir)/S.swift"] },
+            manifests: ["/repo/Fork": forkManifest]))
+        XCTAssertEqual(scope.filesByTarget["App"]?.contains("/repo/Both.swift"), true,
+                       "App compiles it")
+        XCTAssertEqual(scope.filesByTarget["Ext"]?.contains("/repo/Both.swift"), true,
+                       "and so does Ext — a set-growth diff credits only whichever target ran first")
+        XCTAssertEqual(scope.localPackageDirsByTarget["Ext"] ?? [], ["/repo/Fork"])
+    }
+
+    /// THE DRIVER HALF, on the built binary. The resolver fixtures above prove the per-target evidence
+    /// is COMPUTED; they cannot prove the scan USES it — and the whole of the previous attempt's defect
+    /// was in the consumer, which read the closure's union. Both directions, one tree:
+    ///
+    ///   `--target App`  App links nothing local → `AppMain`'s `import Shared` is UNCOVERED (disclosed)
+    ///   `--target Ext`  Ext links Fork          → `ExtMain`'s `import Shared` is COVERED  (claimed)
+    ///
+    /// The same module name, the same repository, the same run of the same binary — only the target
+    /// differs. Under the union answer the first case goes silent, which is a purity claim over a module
+    /// this target cannot see.
+    func testTheScanAsksWhatThisFilesTargetLinksNotWhatTheClosureLinks() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-pertarget-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        try fm.createDirectory(at: root.appendingPathComponent("P.xcodeproj"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: root.appendingPathComponent("Fork/Sources/Shared"),
+                               withIntermediateDirectories: true)
+        try twoTargetProject.write(to: root.appendingPathComponent("P.xcodeproj/project.pbxproj"),
+                                   atomically: true, encoding: .utf8)
+        try forkManifest.write(to: root.appendingPathComponent("Fork/Package.swift"),
+                               atomically: true, encoding: .utf8)
+        try "public func sharedThing() {}\n"
+            .write(to: root.appendingPathComponent("Fork/Sources/Shared/S.swift"),
+                   atomically: true, encoding: .utf8)
+        try "import Shared\nfunc appDoes() { sharedThing() }\n"
+            .write(to: root.appendingPathComponent("AppMain.swift"), atomically: true, encoding: .utf8)
+        try "import Shared\nfunc extDoes() { sharedThing() }\n"
+            .write(to: root.appendingPathComponent("ExtMain.swift"), atomically: true, encoding: .utf8)
+
+        let app = try ProcessHarness.run(bin, [root.path, "--target", "App",
+                                               "--out", root.appendingPathComponent("a").path])
+        XCTAssertTrue(app.err.contains("Shared"),
+                      "App links no local package, so its `import Shared` must stay DISCLOSED — "
+                      + "inheriting Ext\'s link is the silent under-report. stderr: \(app.err)")
+        let ext = try ProcessHarness.run(bin, [root.path, "--target", "Ext",
+                                               "--out", root.appendingPathComponent("e").path])
+        XCTAssertFalse(ext.err.contains("Shared"),
+                       "THE REACH FLOOR: Ext does link Fork, so `Shared` is read in this very run and "
+                       + "naming it a blind spot would be a false disclosure. stderr: \(ext.err)")
+    }
 }

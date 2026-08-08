@@ -160,6 +160,9 @@ public struct XcodeTargetScope {
     public let closure: [XcodeTargetInfo]
     /// Absolute, standardized `.swift` paths the closure compiles.
     public let files: Set<String>
+    /// …attributed to the closure member that compiles each. Empty for a file no Xcode target owns
+    /// (a local package's own sources) — those have a `Package.swift` and get their identity there.
+    public let filesByTarget: [String: Set<String>]
     /// LOCAL Swift packages resolved INTO the closure (directory basenames, sorted, deduped): the
     /// IceCubes shape — a thin app shell whose real code is `Packages/*` — is scoped correctly only
     /// because these are in.
@@ -169,6 +172,12 @@ public struct XcodeTargetScope {
     /// owning `Package.swift`, so the only record of what that target may import is the closure this
     /// resolver already computed. Reusing that answer is not a second inference from filesystem shape.
     public let localPackageDirs: [String]
+    /// …and the same answer NOT flattened: Xcode target name -> the local package dirs THAT target
+    /// links directly. `localPackageDirs` is the closure's union, which is the right scope answer
+    /// (what code is in) and the WRONG identity answer (what a given file may import). A file in the
+    /// app target does not gain the share extension's package links, and taking the union made every
+    /// file inherit every member's.
+    public let localPackageDirsByTarget: [String: [String]]
     /// REMOTE package products the closure depends on — not in this tree, κ-disclosed, never silent.
     public let remoteProductCount: Int
     /// Dependencies living in other `.xcodeproj`s — NOT resolved, κ-disclosed.
@@ -476,7 +485,11 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
     var crossProject = 0
     /// (product name, the `package` ref id when the dependency carries one). Drag-in local packages —
     /// the common spelling in every corpus app — carry NO ref; the name is the whole join key.
-    var productDeps: [(name: String, refId: String?)] = []
+    /// PER TARGET, not just flat. A file in target T may import what T links — not what a sibling in
+    /// the same closure links. Accumulating only the union made every ownerless file inherit every
+    /// member's links, so an app importing a binary `Lottie.xcframework` was silenced by a sibling
+    /// framework's local `Lottie` package. Sixth instance of one answer serving two questions.
+    var productDeps: [(name: String, refId: String?, target: String)] = []
     var stack = [rootTid]
     var seenT = Set<String>()
     while let tid = stack.popLast() {
@@ -484,7 +497,7 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
         closureIds.append(tid)
         for pid in (t["packageProductDependencies"]?.array ?? []).compactMap(\.string) {
             guard let p = model.obj(pid), let pname = p["productName"]?.string else { continue }
-            productDeps.append((pname, p["package"]?.string))
+            productDeps.append((pname, p["package"]?.string, t["name"]?.string ?? ""))
         }
         for did in (t["dependencies"]?.array ?? []).compactMap(\.string) {
             guard let dep = model.obj(did) else { continue }
@@ -503,9 +516,16 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
     }
 
     // ── each closure member's compiled Swift files ────────────────────────────────────────────────
-    var files = Set<String>()
+    var allFiles = Set<String>()
+    var filesByTarget: [String: Set<String>] = [:]
     for tid in closureIds {
         guard let t = model.obj(tid), let tname = t["name"]?.string else { continue }
+        // A FRESH set per target, deliberately not a diff of the shared one. Diffing was the first
+        // spelling and it is wrong wherever two closure members compile the SAME file — Target
+        // Membership ticked twice is ordinary — because the second target's pass sees no growth and
+        // the file keeps only the first target's links. Shadowing leaves all eight insert sites below
+        // untouched, so there is no site to forget.
+        var files = Set<String>()
 
         // (a) the classic explicit list: Sources phase -> PBXBuildFile -> PBXFileReference.
         for phaseId in (t["buildPhases"]?.array ?? []).compactMap(\.string) {
@@ -583,7 +603,10 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
             }
             for f in everything.map(std) where !excluded.contains(f) { files.insert(f) }
         }
+        filesByTarget[tname, default: []].formUnion(files)
+        allFiles.formUnion(files)
     }
+    var files = allFiles
 
     // (c) the ADDITION half of exception sets: a file inside a folder some OTHER target synchronizes
     // can be a member of THIS target ("Target Membership" ticked across products — NetNewsWire's Mac
@@ -611,9 +634,14 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
                     target: targetName, what: "synchronized group \(g["path"]?.string ?? gid) (membership "
                         + "additions for this target) has no resolvable location")
             }
+            let addName = model.obj(tgt)?["name"]?.string
             for rel in (ex["membershipExceptions"]?.array ?? []).compactMap(\.string) where rel.hasSuffix(".swift") {
                 let r = rel.hasPrefix("/") ? String(rel.dropFirst()) : rel
-                files.insert(std((dir as NSString).appendingPathComponent(r)))
+                let f = std((dir as NSString).appendingPathComponent(r))
+                files.insert(f)
+                // A membership addition names the target that compiles it — attribute it there, not to
+                // the group's owner, which is precisely the target it was excluded from.
+                if let addName { filesByTarget[addName, default: []].insert(f) }
             }
         }
     }
@@ -718,6 +746,20 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
     var remoteProducts = 0
     var resolvedLocalNames: Set<String> = []
     var resolvedLocalDirs: Set<String> = []
+    /// Xcode target name -> the local package dirs THAT TARGET links DIRECTLY. The flat set above
+    /// answers "what did the closure link"; a file's importable modules are decided by what ITS target
+    /// links. Widened transitively through `pkgEdges` below before it leaves this function.
+    var localDirsByTarget: [String: Set<String>] = [:]
+    /// package dir -> the local package dirs it depends on. Recorded as `expand` walks, so the graph
+    /// costs nothing extra to build, and it is owner-independent: an edge found while expanding for one
+    /// Xcode target is the same edge for every other.
+    ///
+    /// NEEDED because DIRECT links are not what a target may import. Xcode puts the whole package
+    /// graph reachable from a linked product on the target's import path, and real code relies on it:
+    /// NetNewsWire's share extension links `Account` and `RSCore` only, yet `ExtensionContainersFile`
+    /// imports `RSParser` — reachable because Account's manifest declares `.package(path: "../RSParser")`.
+    /// A directs-only answer named RSParser a blind spot in a run that had just read it.
+    var pkgEdges: [String: Set<String>] = [:]
     var expandedTargets = Set<String>()   // "dir\u{0}target" — the cross-package recursion's visited set
     /// The refusal when a name misses the index but some local manifest could not be fully read: the
     /// miss proves nothing, and "probably remote" is exactly the guess this resolver must not make.
@@ -815,6 +857,7 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
                     if let hit = hits.first {
                         resolvedLocalNames.insert((localPackages[hit].dir as NSString).lastPathComponent)
                         resolvedLocalDirs.insert(localPackages[hit].dir)
+                        pkgEdges[pkg.dir, default: []].insert(localPackages[hit].dir)
                         try expand(pkgIndex: hit, product: pd)
                     } else {
                         try refuseIfAnyIncomplete(pd)
@@ -847,6 +890,7 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
                 }
                 resolvedLocalNames.insert((dir as NSString).lastPathComponent)
                 resolvedLocalDirs.insert(dir)
+                localDirsByTarget[dep.target, default: []].insert(dir)
                 try expand(pkgIndex: idx, product: dep.name)
                 continue
             default:
@@ -864,7 +908,8 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
         }
         if let hit = hits.first {
             resolvedLocalNames.insert((localPackages[hit].dir as NSString).lastPathComponent)
-                        resolvedLocalDirs.insert(localPackages[hit].dir)
+            resolvedLocalDirs.insert(localPackages[hit].dir)
+            localDirsByTarget[dep.target, default: []].insert(localPackages[hit].dir)
             try expand(pkgIndex: hit, product: dep.name)
         } else {
             // A bare name found nowhere local is remote — but ONLY when every local manifest was
@@ -899,6 +944,18 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
         })
     }
 
+    // Widen each target's DIRECT links along the package graph. Nothing enters that was not already
+    // in `resolvedLocalDirs` — every edge here was walked by `expand` — so this can only ever restore
+    // reach the per-target split removed, never claim a package the closure never resolved.
+    for (tname, direct) in localDirsByTarget {
+        var seen = direct
+        var stack = Array(direct)
+        while let d = stack.popLast() {
+            for n in pkgEdges[d] ?? [] where seen.insert(n).inserted { stack.append(n) }
+        }
+        localDirsByTarget[tname] = seen
+    }
+
     let infoByName = Dictionary(uniqueKeysWithValues: all.map { ($0.name, $0) })
     let closureInfos = closureIds.compactMap { model.obj($0)?["name"]?.string }
         .compactMap { infoByName[$0] }
@@ -907,8 +964,12 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
                                 ?? XcodeTargetInfo(name: targetName, productType: nil),
                             closure: closureInfos,
                             files: files,
+                            // Intersect so per-target sets can never claim a file the closure dropped
+                            // (platform pruning runs on `files` above, after the accumulation).
+                            filesByTarget: filesByTarget.mapValues { $0.intersection(files) },
                             localPackages: resolvedLocalNames.sorted(),
                             localPackageDirs: resolvedLocalDirs.sorted(),
+                            localPackageDirsByTarget: localDirsByTarget.mapValues { $0.sorted() },
                             remoteProductCount: remoteProducts,
                             crossProjectDependencyCount: crossProject,
                             packagesReadViaDump: packagesReadViaDump.sorted(),

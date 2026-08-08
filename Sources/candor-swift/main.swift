@@ -166,7 +166,9 @@ var resolvedXcodeScope: (target: String, project: String, entitlements: String?)
 // ⟨0.28⟩ The local packages the `.xcodeproj` closure resolved. An Xcode target has no `Package.swift`,
 // so this is the ONLY record of what its files may import — and it is a dependency closure the resolver
 // already walked, not a fresh guess from directory shape.
-var resolvedXcodeLocalPackageDirs: [String] = []
+/// Absolute source file -> the local package dirs the Xcode target(s) compiling it link DIRECTLY.
+/// Per file, because a file's importable set is its target's link list, not the closure's union.
+var resolvedXcodeLinksByFile: [String: [String]] = [:]
 // ── SPEC §3.3.1 ⟨0.27⟩ ARM FIRST, AND NEVER OVER AN INPUT.
 //
 // A pre-pass that learns the sink and this run's inputs with NO side effects, before the flag loop. It
@@ -440,7 +442,7 @@ if sourcePaths.isEmpty {
 // half-resolved scope is a purity claim over the files it silently dropped.
 func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [String],
                         resolved: inout (target: String, project: String, entitlements: String?)?,
-                        resolvedLocalPkgDirs: inout [String],
+                        resolvedLinksByFile: inout [String: [String]],
                         packageSwiftExists: Bool = false, alsoDeclaredInPackageSwift: [String] = []) {
     let fm = FileManager.default
     let projects = findXcodeProjects(under: rootDir)
@@ -624,7 +626,23 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
         FileHandle.standardError.write(note.data(using: .utf8)!)
         resolved = (target: want, project: rel(hit.path, to: rootDir),
                     entitlements: scope.entitlements)
-        resolvedLocalPkgDirs = scope.localPackageDirs
+        // Invert files-by-target × links-by-target into the per-file answer the driver needs. A file
+        // compiled by two targets takes the UNION of their links — it must build in both, so both link
+        // whatever it imports. A file no target claims gets no entry and therefore claims nothing.
+        for (tname, tfiles) in scope.filesByTarget {
+            guard let dirs = scope.localPackageDirsByTarget[tname], !dirs.isEmpty else { continue }
+            for f in tfiles {
+                // Key EXACTLY as the driver looks up. The resolver's paths can carry a `..` segment
+                // (a group whose path escapes the project dir — firefox's `BrowserKit` sits at
+                // `firefox-ios/../BrowserKit`), and the driver standardizes before asking. Keying the
+                // raw string would miss every such file: safe in direction, but it would silently
+                // give back the reach this rung exists to keep.
+                let f = URL(fileURLWithPath: f).standardized.path
+                var have = resolvedLinksByFile[f] ?? []
+                for d in dirs where !have.contains(d) { have.append(d) }
+                resolvedLinksByFile[f] = have
+            }
+        }
         // A test bundle is selectable by name — but its verdict is about test code, and saying so is
         // the difference between a feature and a trap for whoever scoped to `MyAppTests` by accident.
         if scope.target.isTest {
@@ -667,7 +685,7 @@ if let want = scopeTarget {
         // target's file list, whichever resolver ran.
         scopeToXcodeTarget(want, rootDir: rootDir, sourcePaths: &sourcePaths,
                            resolved: &resolvedXcodeScope,
-                           resolvedLocalPkgDirs: &resolvedXcodeLocalPackageDirs,
+                           resolvedLinksByFile: &resolvedXcodeLinksByFile,
                            packageSwiftExists: manifestSrc != nil,
                            alsoDeclaredInPackageSwift: declaredSPM.map(\.name).sorted())
     }
@@ -1060,7 +1078,7 @@ let depsSpec = [workspaceDepsDir, envOrConfigDeps].compactMap { $0 }.joined(sepa
 let depsIndex = loadDepReports(spec: depsSpec, engineVersion: engineVersion)
 
 let analysis = analyze(sourcePaths: sourcePaths, rootDir: rootDir, pkgName: pkgName, deps: depsIndex,
-                       xcodeLocalPackageDirs: resolvedXcodeLocalPackageDirs)
+                       xcodeLinksByFile: resolvedXcodeLinksByFile)
 let allFns = analysis.allFns
 let conformers = analysis.conformers
 let declaredTypes = analysis.declaredTypes
