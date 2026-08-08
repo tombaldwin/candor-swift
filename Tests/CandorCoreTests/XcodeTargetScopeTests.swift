@@ -1339,4 +1339,46 @@ final class XcodeTargetScopeTests: XCTestCase {
                       "a NESTED package's target of the same name is a different module the root cannot "
                       + "import — it must not silence the root's dependency on the real one")
     }
+
+    /// ⟨0.28 rung⟩ **A LOCAL DEPENDENCY IS ONLY INTERNAL IF THIS RUN READ IT.** The rung's whole idea is
+    /// that a file's package can import its local `.package(path:)` dependencies — but "can import" is
+    /// not "was analyzed", and conflating them silences a call into code the run never opened.
+    ///
+    /// This is the conjunct my own nine-round fixture battery could not see, because every fixture in it
+    /// had the module either analyzed or undeclared — never declared-and-absent. The EXISTING workspace
+    /// tests caught it.
+    func testADeclaredButUnscannedLocalDependencyStaysBlind() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-unscanned-\(UUID().uuidString)")
+        // The dependency exists on disk, one level OUTSIDE the scan target.
+        try fm.createDirectory(at: root.appendingPathComponent("App/Sources/App"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: root.appendingPathComponent("Dep/Sources/DepLib"), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        try """
+        // swift-tools-version:5.9
+        import PackageDescription
+        let package = Package(name: "App",
+            dependencies: [.package(path: "../Dep")],
+            targets: [.executableTarget(name: "App", dependencies: [.product(name: "DepLib", package: "Dep")])])
+        """.write(to: root.appendingPathComponent("App/Package.swift"), atomically: true, encoding: .utf8)
+        try """
+        // swift-tools-version:5.9
+        import PackageDescription
+        let package = Package(name: "Dep",
+            products: [.library(name: "DepLib", targets: ["DepLib"])],
+            targets: [.target(name: "DepLib")])
+        """.write(to: root.appendingPathComponent("Dep/Package.swift"), atomically: true, encoding: .utf8)
+        try "import Foundation\npublic func leak() { _ = FileManager.default.contents(atPath: \"/x\") }\n"
+            .write(to: root.appendingPathComponent("Dep/Sources/DepLib/D.swift"), atomically: true, encoding: .utf8)
+        try "import Foundation\nimport DepLib\nfunc use() { leak() }\nuse()\n"
+            .write(to: root.appendingPathComponent("App/Sources/App/main.swift"), atomically: true, encoding: .utf8)
+        // Scan ONLY the App package: DepLib is importable by declaration but was never read.
+        let r = try ProcessHarness.run(bin, [root.appendingPathComponent("App").path,
+                                             "--out", root.appendingPathComponent("r").path])
+        XCTAssertTrue(r.err.contains("DepLib"),
+                      "declared is not analyzed — a local dependency outside the scan must stay blind, or "
+                      + "a call into code this run never opened reads pure: \(r.err)")
+    }
 }

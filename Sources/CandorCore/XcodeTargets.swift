@@ -164,6 +164,11 @@ public struct XcodeTargetScope {
     /// IceCubes shape — a thin app shell whose real code is `Packages/*` — is scoped correctly only
     /// because these are in.
     public let localPackages: [String]
+    /// …and their DIRECTORIES. The basenames above are for the human scope note; a consumer that needs
+    /// to read those manifests needs paths. Module identity does: for an `.xcodeproj` target there is no
+    /// owning `Package.swift`, so the only record of what that target may import is the closure this
+    /// resolver already computed. Reusing that answer is not a second inference from filesystem shape.
+    public let localPackageDirs: [String]
     /// REMOTE package products the closure depends on — not in this tree, κ-disclosed, never silent.
     public let remoteProductCount: Int
     /// Dependencies living in other `.xcodeproj`s — NOT resolved, κ-disclosed.
@@ -712,6 +717,7 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
     // 3. Resolve every product dependency: local -> sources (transitively), remote -> disclosed count.
     var remoteProducts = 0
     var resolvedLocalNames: Set<String> = []
+    var resolvedLocalDirs: Set<String> = []
     var expandedTargets = Set<String>()   // "dir\u{0}target" — the cross-package recursion's visited set
     /// The refusal when a name misses the index but some local manifest could not be fully read: the
     /// miss proves nothing, and "probably remote" is exactly the guess this resolver must not make.
@@ -808,6 +814,7 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
                     }
                     if let hit = hits.first {
                         resolvedLocalNames.insert((localPackages[hit].dir as NSString).lastPathComponent)
+                        resolvedLocalDirs.insert(localPackages[hit].dir)
                         try expand(pkgIndex: hit, product: pd)
                     } else {
                         try refuseIfAnyIncomplete(pd)
@@ -839,6 +846,7 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
                         product: dep.name, why: "no readable Package.swift at \(dir)")
                 }
                 resolvedLocalNames.insert((dir as NSString).lastPathComponent)
+                resolvedLocalDirs.insert(dir)
                 try expand(pkgIndex: idx, product: dep.name)
                 continue
             default:
@@ -856,6 +864,7 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
         }
         if let hit = hits.first {
             resolvedLocalNames.insert((localPackages[hit].dir as NSString).lastPathComponent)
+                        resolvedLocalDirs.insert(localPackages[hit].dir)
             try expand(pkgIndex: hit, product: dep.name)
         } else {
             // A bare name found nowhere local is remote — but ONLY when every local manifest was
@@ -899,6 +908,7 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
                             closure: closureInfos,
                             files: files,
                             localPackages: resolvedLocalNames.sorted(),
+                            localPackageDirs: resolvedLocalDirs.sorted(),
                             remoteProductCount: remoteProducts,
                             crossProjectDependencyCount: crossProject,
                             packagesReadViaDump: packagesReadViaDump.sorted(),

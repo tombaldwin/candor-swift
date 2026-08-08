@@ -161,7 +161,8 @@ func swiftModuleOf(_ loc: String) -> String {
     return ""
 }
 
-func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepIndex = DepIndex()) -> Analysis {
+func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepIndex = DepIndex(),
+             xcodeLocalPackageDirs: [String] = []) -> Analysis {
 
     var allFns: [FnInfo] = []
     var fields: [String: [String: (name: String?, isFunction: Bool)]] = [:]
@@ -404,10 +405,29 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         let rel = raw.hasPrefix(rootDir)
             ? String(raw.dropFirst(rootDir.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             : raw
-        guard let pkg = owningPackage(of: abs) else { continue }
         var seen = Set<String>()
-        // BOTH conjuncts: the file's package can import it, AND this run actually read it.
-        importableByFile[rel] = importable(from: pkg, seen: &seen).intersection(analyzedModules)
+        if let pkg = owningPackage(of: abs) {
+            // BOTH conjuncts: the file's package can import it, AND this run actually read it.
+            importableByFile[rel] = importable(from: pkg, seen: &seen).intersection(analyzedModules)
+        } else if !xcodeLocalPackageDirs.isEmpty {
+            // AN XCODE TARGET'S FILE has no owning `Package.swift` — a folder in an Xcode target is not
+            // a module, and the target compiles all of its files into one. What it may import is the
+            // local-package closure the `--target` resolver ALREADY walked, so this reads that answer
+            // rather than deriving a second one. Without it, an `.xcodeproj` repo claims nothing and
+            // every local package it genuinely depends on is named a blind spot (NetNewsWire: 27 of
+            // them, nearly all analyzed in the same run).
+            var out = Set<String>()
+            for dep in xcodeLocalPackageDirs {
+                guard let src = try? String(contentsOfFile: (dep as NSString).appendingPathComponent("Package.swift"),
+                                            encoding: .utf8) else { continue }
+                for prod in parsePackageProducts(manifestSource: src) {
+                    out.insert(prod.name)
+                    for t in prod.targets { out.insert(t) }
+                }
+                out.formUnion(importable(from: dep, seen: &seen))
+            }
+            importableByFile[rel] = out.intersection(analyzedModules)
+        }
     }
     var collectors: [DeclCollector] = []
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a file that fails to read used to be SILENTLY skipped by the

@@ -163,6 +163,10 @@ var scopeTarget: String? = nil
 // `ReportModel.scope`: the verify that reads this report later has only a report and a plist, so
 // anything the scan knew about WHICH binary this is must be in the artifact or it is lost.
 var resolvedXcodeScope: (target: String, project: String, entitlements: String?)? = nil
+// ⟨0.28⟩ The local packages the `.xcodeproj` closure resolved. An Xcode target has no `Package.swift`,
+// so this is the ONLY record of what its files may import — and it is a dependency closure the resolver
+// already walked, not a fresh guess from directory shape.
+var resolvedXcodeLocalPackageDirs: [String] = []
 // ── SPEC §3.3.1 ⟨0.27⟩ ARM FIRST, AND NEVER OVER AN INPUT.
 //
 // A pre-pass that learns the sink and this run's inputs with NO side effects, before the flag loop. It
@@ -436,6 +440,7 @@ if sourcePaths.isEmpty {
 // half-resolved scope is a purity claim over the files it silently dropped.
 func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [String],
                         resolved: inout (target: String, project: String, entitlements: String?)?,
+                        resolvedLocalPkgDirs: inout [String],
                         packageSwiftExists: Bool = false, alsoDeclaredInPackageSwift: [String] = []) {
     let fm = FileManager.default
     let projects = findXcodeProjects(under: rootDir)
@@ -619,6 +624,7 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
         FileHandle.standardError.write(note.data(using: .utf8)!)
         resolved = (target: want, project: rel(hit.path, to: rootDir),
                     entitlements: scope.entitlements)
+        resolvedLocalPkgDirs = scope.localPackageDirs
         // A test bundle is selectable by name — but its verdict is about test code, and saying so is
         // the difference between a feature and a trap for whoever scoped to `MyAppTests` by accident.
         if scope.target.isTest {
@@ -661,6 +667,7 @@ if let want = scopeTarget {
         // target's file list, whichever resolver ran.
         scopeToXcodeTarget(want, rootDir: rootDir, sourcePaths: &sourcePaths,
                            resolved: &resolvedXcodeScope,
+                           resolvedLocalPkgDirs: &resolvedXcodeLocalPackageDirs,
                            packageSwiftExists: manifestSrc != nil,
                            alsoDeclaredInPackageSwift: declaredSPM.map(\.name).sorted())
     }
@@ -1052,7 +1059,8 @@ let depsSpec = [workspaceDepsDir, envOrConfigDeps].compactMap { $0 }.joined(sepa
     ? nil : [workspaceDepsDir, envOrConfigDeps].compactMap { $0 }.joined(separator: ":")
 let depsIndex = loadDepReports(spec: depsSpec, engineVersion: engineVersion)
 
-let analysis = analyze(sourcePaths: sourcePaths, rootDir: rootDir, pkgName: pkgName, deps: depsIndex)
+let analysis = analyze(sourcePaths: sourcePaths, rootDir: rootDir, pkgName: pkgName, deps: depsIndex,
+                       xcodeLocalPackageDirs: resolvedXcodeLocalPackageDirs)
 let allFns = analysis.allFns
 let conformers = analysis.conformers
 let declaredTypes = analysis.declaredTypes
