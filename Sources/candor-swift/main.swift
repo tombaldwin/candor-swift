@@ -630,19 +630,42 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
         // Invert files-by-target × links-by-target into the per-file answer the driver needs. A file
         // compiled by two targets takes the UNION of their links — it must build in both, so both link
         // whatever it imports. A file no target claims gets no entry and therefore claims nothing.
+        //
+        // KEYED BY THE DISK'S SPELLING, not the pbxproj's. The membership filter above matches
+        // case-INSENSITIVELY on purpose (a pbxproj path whose case drifted from disk still builds in
+        // Xcode, and dropping that file would be the miss-shaped failure), while the driver looks this
+        // map up with the path it walked off disk. Keying it the resolver's way meant one character of
+        // case in one `PBXFileReference` silently reverted this whole rung for that file: it stayed in
+        // scope, missed its links, and every module it imports was named a blind spot.
+        //
+        // The two spellings are joined through the lowercased form — but ONLY where that form picks out
+        // exactly one file on each side. On a case-sensitive volume `A.swift` and `a.swift` are two
+        // files; letting them share a key would hand one the other's links, which trades this false
+        // disclosure for a purity claim. Ambiguity here yields no entry, so it discloses.
+        var linksByLowerKey: [String: [LocalProductRef]] = [:]
+        var ambiguousLowerKeys = Set<String>()
         for (tname, tfiles) in scope.filesByTarget {
             guard let prods = scope.localProductsByTarget[tname], !prods.isEmpty else { continue }
             for f in tfiles {
-                // Key EXACTLY as the driver looks up. The resolver's paths can carry a `..` segment
-                // (a group whose path escapes the project dir — firefox's `BrowserKit` sits at
-                // `firefox-ios/../BrowserKit`), and the driver standardizes before asking. Keying the
-                // raw string would miss every such file: safe in direction, but it would silently
-                // give back the reach this rung exists to keep.
-                let f = candorAbsolutePath(f)
-                var have = resolvedLinksByFile[f] ?? []
+                // The resolver's paths can carry a `..` segment (a group whose path escapes the project
+                // dir — firefox's `BrowserKit` sits at `firefox-ios/../BrowserKit`), so normalize both
+                // sides with the one normalizer before lowercasing.
+                let key = candorAbsolutePath(f).lowercased()
+                var have = linksByLowerKey[key] ?? []
                 for d in prods where !have.contains(d) { have.append(d) }
-                resolvedLinksByFile[f] = have
+                linksByLowerKey[key] = have
             }
+        }
+        var seenLower = Set<String>()
+        for raw in sourcePaths {
+            let key = candorAbsolutePath(raw).lowercased()
+            if !seenLower.insert(key).inserted { ambiguousLowerKeys.insert(key) }
+        }
+        for raw in sourcePaths {
+            let abs = candorAbsolutePath(raw)
+            let key = abs.lowercased()
+            guard !ambiguousLowerKeys.contains(key), let prods = linksByLowerKey[key] else { continue }
+            resolvedLinksByFile[abs] = prods
         }
         // A test bundle is selectable by name — but its verdict is about test code, and saying so is
         // the difference between a feature and a trap for whoever scoped to `MyAppTests` by accident.

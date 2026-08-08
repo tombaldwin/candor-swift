@@ -447,7 +447,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // EXPOSED, not importable: an Xcode target links a local package's PRODUCTS, so it sees
             // what that package publishes — not the internal targets only its own files may import.
             var out = Set<String>()
-            for dep in deps { out.formUnion(exposed(product: dep.product, in: dep.packageDir)) }
+            for dep in deps {
+                // The RESOLVER's membership, intersected with what this run analyzed. Re-deriving the
+                // membership here was the third instance in this branch of a consumer throwing away a
+                // producer's answer — and the manifests it got wrong were exactly the ones the resolver
+                // had already repaired with `swift package dump-package`, so the scope note said "read
+                // via SwiftPM" while the ledger called the same package's module invisible.
+                let analyzed = analyzedTargets(in: dep.packageDir)
+                for t in dep.members where analyzed.contains(t) { out.insert(t) }
+            }
             importableByFile[rel] = out
         }
     }

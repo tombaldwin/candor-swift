@@ -194,9 +194,21 @@ public func candorAbsolutePath(_ p: String) -> String {
 public struct LocalProductRef: Hashable, Sendable {
     public let packageDir: String
     public let product: String
-    public init(packageDir: String, product: String) {
+    /// The product's MEMBER TARGET NAMES, as the resolver resolved them — which is not the same thing
+    /// as what a fresh parse of `Package.swift` would say. When the structural read is provably partial
+    /// the resolver runs `swift package dump-package` and asks SwiftPM itself; a consumer that re-parses
+    /// the manifest gets nil for exactly those manifests, exposes nothing, and names every module of
+    /// that package a blind spot — in a run whose own scope note says the package was read via SwiftPM.
+    /// The repaired answer travels with the reference so no consumer has to re-derive a weaker one.
+    ///
+    /// A consumer must still intersect these with what the run ANALYZED. That intersection is the
+    /// invariant standing between this whole mechanism and a purity claim: a name can be called internal
+    /// only if a file under that target's real source root was read.
+    public let members: [String]
+    public init(packageDir: String, product: String, members: [String]) {
         self.packageDir = packageDir
         self.product = product
+        self.members = members
     }
 }
 
@@ -1030,8 +1042,9 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
         while let key = stack.popLast() {
             guard seenProducts.insert(key).inserted else { continue }
             let dir = String(key.prefix(while: { $0 != "\u{0}" }))
-            reached.insert(LocalProductRef(packageDir: dir,
-                                           product: String(key.dropFirst(dir.count + 1))))
+            let prodName = String(key.dropFirst(dir.count + 1))
+            reached.insert(LocalProductRef(packageDir: dir, product: prodName,
+                                           members: productMembers[key] ?? []))
             for tn in productMembers[key] ?? [] {
                 // …and each member target's IN-PACKAGE closure: a product's target may depend on a
                 // sibling target that holds the cross-package edge.
@@ -1043,7 +1056,21 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
         localProdsByTarget[tname] = reached
     }
 
-    let infoByName = Dictionary(uniqueKeysWithValues: all.map { ($0.name, $0) })
+    // NOT `Dictionary(uniqueKeysWithValues:)`, which TRAPS on a duplicate — two `PBXNativeTarget`s of
+    // one name in a project killed the process with exit 133 and a Swift runtime message. Loud, so not
+    // the cardinal sin, but the only outcome for that input and a dead end for whoever hit it. It also
+    // means every name-keyed map downstream (`filesByTarget`, `localProductsByTarget`) is answering
+    // about an ambiguous key, which is why this refuses rather than picking a winner.
+    var infoByName: [String: XcodeTargetInfo] = [:]
+    var duplicateNames: [String] = []
+    for info in all {
+        if infoByName.updateValue(info, forKey: info.name) != nil { duplicateNames.append(info.name) }
+    }
+    if let dup = duplicateNames.sorted().first {
+        throw XcodeScopeError.unresolvableSource(
+            target: targetName, what: "two targets are named `\(dup)` in this project, so a scope keyed "
+                + "by target name cannot say which one a file belongs to")
+    }
     let closureInfos = closureIds.compactMap { model.obj($0)?["name"]?.string }
         .compactMap { infoByName[$0] }
         .sorted { $0.name < $1.name }

@@ -1900,6 +1900,145 @@ final class XcodeTargetScopeTests: XCTestCase {
                        "while BTarget is")
     }
 
+    /// **THE PBXPROJ\'S SPELLING IS NOT THE DISK\'S.** The membership filter matches case-INSENSITIVELY
+    /// on purpose — a `PBXFileReference` whose case drifted from disk still builds in Xcode, and dropping
+    /// that file would be the miss-shaped failure — while the driver looks up its link map with the path
+    /// it walked off disk. Keying that map the resolver\'s way meant ONE CHARACTER of case reverted this
+    /// entire rung for that file: in scope, no links, every module it imports named a blind spot.
+    ///
+    /// Measured on the built binary, two trees identical but for `path = AppMain.swift` vs
+    /// `path = appmain.swift`. The fix joins the two spellings through the lowercased form, but only
+    /// where that form picks out exactly one file on each side — on a case-sensitive volume `A.swift`
+    /// and `a.swift` are two files, and letting them share a key would hand one the other\'s links,
+    /// trading a false disclosure for a purity claim.
+    func testAPbxprojPathWhoseCaseDriftedStillGetsItsTargetsLinks() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        for spelling in ["AppMain.swift", "appmain.swift"] {
+            let root = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("candor-case-\(UUID().uuidString)")
+            defer { try? fm.removeItem(at: root) }
+            for d in ["P.xcodeproj", "Fork/Sources/Shared"] {
+                try fm.createDirectory(at: root.appendingPathComponent(d), withIntermediateDirectories: true)
+            }
+            try twoTargetProject.replacingOccurrences(of: "path = AppMain.swift", with: "path = \(spelling)")
+                .write(to: root.appendingPathComponent("P.xcodeproj/project.pbxproj"),
+                       atomically: true, encoding: .utf8)
+            try forkManifest.write(to: root.appendingPathComponent("Fork/Package.swift"),
+                                   atomically: true, encoding: .utf8)
+            try "public func sharedThing() {}\n"
+                .write(to: root.appendingPathComponent("Fork/Sources/Shared/S.swift"),
+                       atomically: true, encoding: .utf8)
+            // The DISK always spells it `AppMain.swift`; only the project file drifts.
+            try "func appDoes() {}\n".write(to: root.appendingPathComponent("AppMain.swift"),
+                                            atomically: true, encoding: .utf8)
+            try "import Shared\nfunc extDoes() { sharedThing() }\n"
+                .write(to: root.appendingPathComponent("ExtMain.swift"), atomically: true, encoding: .utf8)
+            let r = try ProcessHarness.run(bin, [root.path, "--target", "Ext", "--json"])
+            let doc = try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any]
+            let cov = doc?["coverage"] as? [String: Any]
+            let unc = ((cov?["uncovered"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String }
+            XCTAssertEqual(unc, [], "pbxproj spelling `\(spelling)`: Ext links Fork and `Shared` is read "
+                           + "in this run, so it must not be named a blind spot. stderr: \(r.err)")
+        }
+    }
+
+    /// **THE RESOLVER ASKED SwiftPM; THE CONSUMER RE-ASKED THE PARSER SwiftPM WAS CALLED FOR.** When the
+    /// structural manifest read is provably partial the resolver runs `swift package dump-package`,
+    /// repairs the product and target lists, and DISCLOSES that it did. That repaired answer used not to
+    /// leave the resolver, so `exposed(product:in:)` re-parsed `Package.swift` — returning nil for
+    /// exactly those manifests, exposing nothing, and naming every module of that package a blind spot.
+    ///
+    /// The two halves of the same stderr contradicted each other: "PkgA read via `swift package
+    /// dump-package`" beside "ATarget — INVISIBLE to the scan". The membership now travels on
+    /// `LocalProductRef`. Third instance in this branch of a consumer discarding a producer\'s answer.
+    func testAProductWhoseManifestNeededSwiftPMStillExposesItsTargets() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        // Same tree twice; only the `products:` spelling differs. The literal arm is the control that
+        // shows the fixture would notice if exposure broke for an unrelated reason.
+        let manifests = [
+            "literal": """
+            // swift-tools-version: 6.0
+            import PackageDescription
+            let package = Package(
+                name: "Fork",
+                products: [.library(name: "Shared", targets: ["Shared"])],
+                targets: [.target(name: "Shared")]
+            )
+            """,
+            "programmatic": """
+            // swift-tools-version: 6.0
+            import PackageDescription
+            func makeProducts() -> [Product] { [.library(name: "Shared", targets: ["Shared"])] }
+            let package = Package(
+                name: "Fork",
+                products: makeProducts(),
+                targets: [.target(name: "Shared")]
+            )
+            """,
+        ]
+        for (label, manifest) in manifests {
+            let root = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("candor-dump-\(UUID().uuidString)")
+            defer { try? fm.removeItem(at: root) }
+            for d in ["P.xcodeproj", "Fork/Sources/Shared"] {
+                try fm.createDirectory(at: root.appendingPathComponent(d), withIntermediateDirectories: true)
+            }
+            try twoTargetProject.write(to: root.appendingPathComponent("P.xcodeproj/project.pbxproj"),
+                                       atomically: true, encoding: .utf8)
+            try manifest.write(to: root.appendingPathComponent("Fork/Package.swift"),
+                               atomically: true, encoding: .utf8)
+            try "public func sharedThing() {}\n"
+                .write(to: root.appendingPathComponent("Fork/Sources/Shared/S.swift"),
+                       atomically: true, encoding: .utf8)
+            try "func appDoes() {}\n".write(to: root.appendingPathComponent("AppMain.swift"),
+                                            atomically: true, encoding: .utf8)
+            try "import Shared\nfunc extDoes() { sharedThing() }\n"
+                .write(to: root.appendingPathComponent("ExtMain.swift"), atomically: true, encoding: .utf8)
+            let r = try ProcessHarness.run(bin, [root.path, "--target", "Ext", "--json"])
+            let doc = try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any]
+            let cov = doc?["coverage"] as? [String: Any]
+            let unc = ((cov?["uncovered"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String }
+            XCTAssertEqual(unc, [], "\(label) manifest: `Shared` is read in this run either way. A scope "
+                           + "note that says the package was read via SwiftPM cannot sit beside a ledger "
+                           + "calling its module invisible. stderr: \(r.err)")
+        }
+    }
+
+    /// Two `PBXNativeTarget`s of one name used to kill the process — `Dictionary(uniqueKeysWithValues:)`
+    /// traps, exit 133 with a Swift runtime message. Loud, so never the cardinal sin, but the only
+    /// outcome for that input and a dead end for whoever hit it. It also means every name-keyed map this
+    /// resolver returns would be answering about an ambiguous key, which is why this refuses rather than
+    /// picking a winner.
+    func testTwoTargetsOfOneNameRefuseRatherThanTrap() throws {
+        XCTAssertThrowsError(try xcodeTargetScope(model: model(duplicateNameProject), projectDir: "/repo",
+                                                  targetName: "App",
+                                                  fs: fsStub(swiftFilesUnder: { _ in [] }))) { err in
+            XCTAssertTrue("\(err)".contains("two targets are named"), "got: \(err)")
+        }
+    }
+
+    private let duplicateNameProject = """
+    {
+        objects = {
+            ROOT = { isa = PBXProject; mainGroup = G0; targets = ( T1, T2 ); };
+            G0 = { isa = PBXGroup; children = ( F1, F2 ); sourceTree = "<group>"; };
+            F1 = { isa = PBXFileReference; path = One.swift; sourceTree = "<group>"; };
+            F2 = { isa = PBXFileReference; path = Two.swift; sourceTree = "<group>"; };
+            B1 = { isa = PBXBuildFile; fileRef = F1; };
+            B2 = { isa = PBXBuildFile; fileRef = F2; };
+            PS1 = { isa = PBXSourcesBuildPhase; files = ( B1 ); };
+            PS2 = { isa = PBXSourcesBuildPhase; files = ( B2 ); };
+            T1 = { isa = PBXNativeTarget; buildPhases = ( PS1 ); name = App;
+                   productType = "com.apple.product-type.application"; };
+            T2 = { isa = PBXNativeTarget; buildPhases = ( PS2 ); name = App;
+                   productType = "com.apple.product-type.framework"; };
+        };
+        rootObject = ROOT;
+    }
+    """
+
     private let siblingProductProject = """
     {
         objects = {
