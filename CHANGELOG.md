@@ -9,6 +9,19 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ The κ coverage ledger named modules the scan had just ANALYZED — a false disclosure.** On a
+  `--target`-scoped NetNewsWire scan the ledger listed 31 uncovered modules including `RSCore` (20
+  analyzed files in that very report), `Account` (53), `NewsBlur` (7) and `Articles` (4), saying their
+  "effects are INVISIBLE to the scan" and telling the reader to "chain dep reports or scan the workspace
+  root to close the gap" that was already closed. The internal-module rule read the ROOT `Sources/` and
+  the ROOT `Package.swift` — every module of a single-package repo and none of a multi-package one — so
+  the local Swift packages `--target` resolves into the scope all read as third-party blind spots.
+  A false disclosure is worse than a missing one: it prescribes work that does nothing, and it spends
+  the reader's trust in the ledger that carries the REAL blind spots. Now any `Sources/<Target>/` in the
+  analyzed set counts as internal, same convention and same name-collision exposure the root rule
+  already accepts. Measured on NetNewsWire iOS: 31 → 14, and what remains is exactly right — Apple
+  frameworks the classifier does not model, the Objective-C `RSDatabaseObjC`, and the remote packages.
+
 - **⚠ CARDINAL SIN, found by a go/no-go review of THIS release's own fabrication fix: a computed media
   type was settled by an unrelated sibling call.** A function opening `AVCaptureDevice.default(for:
   .video)` and, two lines later, `AVCaptureDevice.default(for: kind)` reported `[Camera]` — the possible

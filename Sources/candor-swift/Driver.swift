@@ -208,6 +208,25 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
     }
 
+    // …AND THE SAME CONVENTION ANYWHERE IN THE ANALYZED SET, not just at the root. The two rules above
+    // read the ROOT `Sources/` and the ROOT `Package.swift`, which is every module of a single-package
+    // repo and none of a multi-package one. When `--target` resolves an `.xcodeproj` it pulls LOCAL
+    // Swift packages into the scan — NetNewsWire's `Modules/Account/Sources/Account/…` — and those
+    // modules were then named in the κ ledger as "effects INVISIBLE to the scan" while their sources
+    // were being analyzed in that very run. Measured: RSCore (20 analyzed files), Account (53),
+    // Articles (4), NewsBlur (7), all listed as blind spots, with the disclosure telling the reader to
+    // "chain dep reports or scan the workspace root to close the gap" that was already closed.
+    //
+    // A FALSE DISCLOSURE IS WORSE THAN A MISSING ONE — it prescribes work that does nothing and spends
+    // the reader's trust in the ledger that DOES carry the real blind spots (WebKit, CloudKit, the
+    // remote packages). Same `Sources/<Target>/` convention, same name-collision exposure the root rule
+    // already accepts, applied to the files this scan actually read. Found by a go/no-go review.
+    for p in sourcePaths {
+        let parts = p.split(separator: "/")
+        if let i = parts.lastIndex(of: "Sources"), i + 1 < parts.count {
+            internalModules.insert(String(parts[i + 1]))
+        }
+    }
     var collectors: [DeclCollector] = []
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a file that fails to read used to be SILENTLY skipped by the
     // `guard…else { continue }` — a green report would then hide the code candor never saw. Track it.
