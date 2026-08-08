@@ -879,4 +879,75 @@ final class XcodeTargetScopeTests: XCTestCase {
                           + "that module name. stderr: \(r.err)")
         }
     }
+
+    /// ⟨2026-08-08, round 3⟩ THE SAME SIN IN TWO MORE SPELLINGS, both measured on the built binary.
+    ///
+    /// `internalModules` gates the coverage ledger AND the per-function `invisible` hedge, so a name
+    /// wrongly marked internal is a purity claim. Three separate rules produced one:
+    ///   (a) every entry of `<root>/Sources/` inserted with NO manifest check — a manifest-less,
+    ///       `.xcodeproj`-shaped tree with `Sources/Stripe/` reported zero functions. Pre-existing.
+    ///   (b) a `.testTarget` (or `.plugin`, or a `path:`-relocated target) named like the SDK accepted
+    ///       as proof that `Sources/<X>` is that target's source root — when its sources live under
+    ///       `Tests/<X>`, `Plugins/<X>`, or wherever `path:` says. That one was inside the fix for the
+    ///       round-2 finding.
+    ///
+    /// The rule that closes both: an analyzed file must live under a DECLARED TARGET'S ACTUAL SOURCE
+    /// ROOT. In an Xcode tree a folder is not a module — an app target compiles everything into one —
+    /// so `Sources/<X>` ⇒ module X is honoured only where an SPM manifest says so.
+    func testAFolderIsNotAModuleWithoutAManifestSayingSo() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        let shim = """
+        import Foundation
+        import Stripe
+        func chargeCard() { StripeClient().charge(amount: 100) }
+        chargeCard()
+        """
+        // (a) no manifest anywhere — the root-level rule.
+        let a = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("candor-nm-\(UUID().uuidString)")
+        try fm.createDirectory(at: a.appendingPathComponent("Sources/Stripe"), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: a) }
+        try shim.write(to: a.appendingPathComponent("Sources/Stripe/Shim.swift"), atomically: true, encoding: .utf8)
+        let ra = try ProcessHarness.run(bin, [a.path, "--out", a.appendingPathComponent("r").path])
+        XCTAssertTrue(ra.err.contains("Stripe"),
+                      "no manifest declares `Stripe` a target, so the folder proves nothing: \(ra.err)")
+
+        // (b) a manifest that declares `Stripe` — but as a TEST target, whose sources are Tests/Stripe.
+        let b = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("candor-tt-\(UUID().uuidString)")
+        try fm.createDirectory(at: b.appendingPathComponent("Sources/Stripe"), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: b) }
+        try """
+        // swift-tools-version:5.9
+        import PackageDescription
+        let package = Package(name: "App",
+            targets: [.executableTarget(name: "App", path: "Src"), .testTarget(name: "Stripe")])
+        """.write(to: b.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try shim.write(to: b.appendingPathComponent("Sources/Stripe/Shim.swift"), atomically: true, encoding: .utf8)
+        let rb = try ProcessHarness.run(bin, [b.path, "--out", b.appendingPathComponent("r").path])
+        XCTAssertTrue(rb.err.contains("Stripe"),
+                      "a testTarget named Stripe has its sources in Tests/Stripe — it says nothing about "
+                      + "Sources/Stripe: \(rb.err)")
+
+        // …AND THE OTHER DIRECTION, which is how the path bug was caught: a genuinely declared target
+        // must NOT be reported as a blind spot. Scanned RELATIVELY, because that is the invocation that
+        // broke it — walking up from `./Sources/X` stopped at `.` before reaching the manifest.
+        let c = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("candor-ok-\(UUID().uuidString)")
+        try fm.createDirectory(at: c.appendingPathComponent("Sources/Kit"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: c.appendingPathComponent("Sources/App"), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: c) }
+        try """
+        // swift-tools-version:5.9
+        import PackageDescription
+        let package = Package(name: "App",
+            targets: [.executableTarget(name: "App"), .target(name: "Kit")])
+        """.write(to: c.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try "public func helper() {}\n".write(to: c.appendingPathComponent("Sources/Kit/K.swift"),
+                                              atomically: true, encoding: .utf8)
+        try "import Kit\nfunc use() { helper() }\nuse()\n"
+            .write(to: c.appendingPathComponent("Sources/App/main.swift"), atomically: true, encoding: .utf8)
+        let rc = try ProcessHarness.run(bin, [".", "--out", c.appendingPathComponent("r").path], cwd: c)
+        XCTAssertFalse(rc.err.contains("Kit ("),
+                       "`Kit` IS a declared target whose sources were analyzed — naming it uncovered is "
+                       + "the false disclosure this rule exists to remove: \(rc.err)")
+    }
 }

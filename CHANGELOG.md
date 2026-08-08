@@ -9,6 +9,29 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ THE SAME CARDINAL SIN IN TWO MORE SPELLINGS — one of them inside the fix for the last one.**
+  A third review round measured both on the built binary:
+  - **(a)** the pre-existing root rule inserted EVERY entry of `<root>/Sources/` into `internalModules`
+    with no manifest check, so a manifest-less `.xcodeproj`-shaped tree with `Sources/Stripe/Shim.swift`
+    reported **zero effectful functions** — `chargeCard` absent under ⟨0.21⟩, no ledger, no `invisible`.
+    Shipped since ≤0.10; not a regression, but live, and the previous round's comment had waved at it as
+    "the same exposure the root rule already accepts" — documented rather than measured.
+  - **(b)** the NEW guard accepted a `.testTarget`/`.plugin`/`path:`-relocated declaration as proof that
+    `Sources/<X>` is that target's source root, when its sources live in `Tests/<X>`, `Plugins/<X>`, or
+    wherever `path:` says. A `.testTarget(name: "Stripe")` beside `Sources/Stripe/` silenced everything.
+
+  **The rule that closes both, and the one the previous repair claimed while not implementing:** a module
+  is internal when an analyzed file lives under a DECLARED TARGET'S ACTUAL SOURCE ROOT — `path:` when
+  given, else SPM's per-kind default. Not a directory that looks like one. **In an Xcode tree a folder is
+  not a module** (an app target compiles everything into one), so `Sources/<X>` ⇒ module X is honoured
+  only where an SPM manifest says so — which makes the strict rule correct in both directions rather than
+  merely safe in one.
+
+  Caught in the other direction while checking it: scanned RELATIVELY, the walk up from `./Sources/X`
+  stopped at `.` before reaching the manifest, so candor-swift reported its own `CandorCore` as an
+  uncovered third-party module. Paths are standardized first. Found by scanning this engine with itself;
+  NetNewsWire's uncovered set is byte-identical across the change.
+
 - **⚠ The κ coverage ledger named modules the scan had just ANALYZED — and the first fix for it was a
   CARDINAL SIN.** On a `--target`-scoped NetNewsWire scan the ledger listed 31 uncovered modules
   including `RSCore` (20 analyzed files in that very report), `Account` (53) and `NewsBlur` (7), saying

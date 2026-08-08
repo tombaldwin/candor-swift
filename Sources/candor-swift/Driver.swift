@@ -159,7 +159,6 @@ func swiftModuleOf(_ loc: String) -> String {
 }
 
 func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepIndex = DepIndex()) -> Analysis {
-    let fm = FileManager.default
 
     var allFns: [FnInfo] = []
     var fields: [String: [String: (name: String?, isFunction: Bool)]] = [:]
@@ -182,85 +181,98 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var returnsIdx: [String: String] = [:]
     var importCounts: [String: Int] = [:]
     var fileImports: [String: [String]] = [:]   // file (rel path) -> modules it imports (per-fn blind disclosure)
-    // The package's OWN target modules (SPM convention: Sources/<TargetName>/) — an internal import is
-    // local code the walk already analyzes, not a third-party blind spot (the sweep's ledger noise:
-    // swift-log importing its own Logging target read as unknown).
+    // ── INTERNAL MODULES: A DECLARED TARGET'S ACTUAL SOURCE ROOT, AND NOTHING ELSE ────────────────
+    //
+    // `internalModules` gates BOTH disclosure channels — the κ coverage ledger and the per-function
+    // `invisible` hedge — and `invisible` is the only thing between an unresolved call into a blind
+    // module and a ⟨0.21⟩ purity claim. So a name wrongly marked internal is a SILENT UNDER-REPORT, and
+    // this derivation has now produced one three times, each in a different spelling:
+    //
+    //   · every entry of `<root>/Sources/` inserted with no manifest check at all, so a manifest-less
+    //     `.xcodeproj`-shaped tree with `Sources/Stripe/Shim.swift` reported ZERO functions;
+    //   · any analyzed `Sources/<X>/` anywhere taken as proof of module X (the folder-named-after-an-SDK
+    //     case, round 2);
+    //   · a `.testTarget`/`.plugin`/`path:`-relocated declaration accepted as proof that
+    //     `Sources/<X>` is that target's source root, when its sources live in `Tests/<X>`,
+    //     `Plugins/<X>` or wherever `path:` says (round 3, inside the fix for round 2).
+    //
+    // The rule that closes all three, and the one the previous repair claimed while not implementing:
+    // a module is internal when an analyzed file lives under a DECLARED TARGET'S ACTUAL SOURCE ROOT.
+    // Not a directory that looks like one.
+    //
+    // **In an Xcode tree a folder is not a module** — an app target compiles all its files into ONE
+    // module, so `import Networking` beside a `Sources/Networking/` folder refers to a framework or a
+    // package, never to the folder. `Sources/<X>` ⇒ module X is an SPM convention, so it is honoured
+    // only where an SPM manifest says so. That makes this strict rule correct in BOTH directions rather
+    // than merely safe in one.
     var internalModules: Set<String> = [pkgName]
-    for sub in ["Sources", "Source"] {
-        let p = (rootDir as NSString).appendingPathComponent(sub)
-        if let entries = try? fm.contentsOfDirectory(atPath: p) {
-            for e in entries where !e.hasPrefix(".") { internalModules.insert(e) }
-        }
-    }
-    // Non-Sources layouts (GRDB/, Alamofire's Source/*.swift): the manifest's own TARGET names are
-    // the internal-module ground truth — and ONLY target declarations: a bare `name:` regex also
-    // swallowed `.product(name: "NIOCore", …)` dependency products, silencing exactly the third-party
-    // modules the κ ledger exists to name (vapor's whole NIO surface vanished from the disclosure).
-    if let manifest = try? String(contentsOfFile: (rootDir as NSString).appendingPathComponent("Package.swift"), encoding: .utf8) {
-        var search = manifest[...]
-        while let r = search.range(of: #"\.(executableTarget|testTarget|target|plugin|macro)\(\s*name:\s*"([^"]+)""#,
-                                   options: .regularExpression) {
-            let m = String(search[r])
-            if let q1 = m.firstIndex(of: "\""), let q2 = m.lastIndex(of: "\""), q1 < q2 {
-                internalModules.insert(String(m[m.index(after: q1)..<q2]))
-            }
-            search = search[r.upperBound...]
-        }
-    }
-
-    // …AND THE SAME CONVENTION ANYWHERE IN THE ANALYZED SET — but ONLY AT A REAL SPM TARGET ROOT.
-    //
-    // The problem this solves: the two rules above read the ROOT `Sources/` and the ROOT
-    // `Package.swift`, which is every module of a single-package repo and none of a multi-package one.
-    // When `--target` resolves an `.xcodeproj` it pulls LOCAL Swift packages into the scan —
-    // NetNewsWire's `Modules/Account/Sources/Account/…` — and those modules were then named in the κ
-    // ledger as "effects INVISIBLE to the scan" while their sources were analyzed in that very run.
-    //
-    // THE FIRST ATTEMPT AT THIS WAS A CARDINAL SIN, and the fixture is one directory name:
-    //
-    //     App/Sources/Stripe/Shim.swift   →  `import Stripe`, an unresolved `StripeClient()` call
-    //
-    // Taking any `Sources/<X>/` segment as proof that module X was analyzed proves only that a
-    // DIRECTORY named X was read. Naming an integration folder after the SDK it wraps is ordinary in
-    // `.xcodeproj` trees — the very trees this release's `--target` serves — and `internalModules`
-    // gates BOTH disclosure channels: the coverage ledger AND the per-function `invisible` set, which
-    // is the only thing standing between an unresolved call into a blind module and a purity claim.
-    // Measured on the shipped binary: the `Stripe` spelling reported ZERO effectful functions, no
-    // ledger, no `invisible` — `chargeCard` absent from `functions` under ⟨0.21⟩ — while the
-    // `StripeIntegration` spelling disclosed both. A visible false disclosure traded for a silent
-    // missing one is precisely the trade this project forbids.
-    //
-    // The sound rule: a `Sources/<X>/` counts only when it IS an SPM target root — an ancestor
-    // `Package.swift` sitting directly above that `Sources/` and DECLARING a target named X. NetNewsWire's
-    // `Modules/Account/Package.swift` declares `Account`, so the win survives; the root manifest of the
-    // Stripe fixture declares `App`, not `Stripe`, so nothing is silenced. It also drops the flat-layout
-    // artefact where `Sources/main.swift` inserted the FILENAME as a module.
-    var targetsOfManifest: [String: Set<String>] = [:]     // package dir -> declared target names
-    func declaredTargets(at pkgDir: String) -> Set<String> {
-        if let c = targetsOfManifest[pkgDir] { return c }
-        var names: Set<String> = []
+    var manifestRoots: [String: [(name: String, root: String)]] = [:]
+    func targetsOf(_ pkgDir: String) -> [(name: String, root: String)] {
+        if let c = manifestRoots[pkgDir] { return c }
+        var out: [(name: String, root: String)] = []
         if let text = try? String(contentsOfFile: (pkgDir as NSString).appendingPathComponent("Package.swift"),
                                   encoding: .utf8) {
-            var search = text[...]
-            while let r = search.range(of: #"\.(executableTarget|testTarget|target|plugin|macro)\(\s*name:\s*"([^"]+)""#,
-                                       options: .regularExpression) {
-                let m = String(search[r])
-                if let q1 = m.firstIndex(of: "\""), let q2 = m.lastIndex(of: "\""), q1 < q2 {
-                    names.insert(String(m[m.index(after: q1)..<q2]))
+            let chars = Array(text)
+            var idx = text.startIndex
+            // ONLY target declarations — a bare `name:` scan also swallowed `.product(name: "NIOCore", …)`
+            // dependency products, silencing exactly the third-party modules the ledger exists to name.
+            while let r = text.range(of: #"\.(executableTarget|testTarget|target|plugin|macro)\("#,
+                                     options: .regularExpression, range: idx..<text.endIndex) {
+                let kind = String(text[r]).dropFirst().dropLast()   // e.g. "testTarget"
+                // Span to the matching `)`, respecting nesting and string literals, so a `path:` in a
+                // LATER declaration cannot be read as this one's.
+                var depth = 1, k = text.distance(from: text.startIndex, to: r.upperBound), inStr = false
+                while k < chars.count, depth > 0 {
+                    let c = chars[k]
+                    if inStr { if c == "\\" { k += 1 } else if c == "\"" { inStr = false } }
+                    else if c == "\"" { inStr = true }
+                    else if c == "(" { depth += 1 }
+                    else if c == ")" { depth -= 1 }
+                    k += 1
                 }
-                search = search[r.upperBound...]
+                let span = String(chars[text.distance(from: text.startIndex, to: r.upperBound)..<max(k - 1, 0)])
+                func arg(_ label: String) -> String? {
+                    guard let a = span.range(of: "\(label):\\s*\"", options: .regularExpression) else { return nil }
+                    guard let close = span[a.upperBound...].firstIndex(of: "\"") else { return nil }
+                    return String(span[a.upperBound..<close])
+                }
+                if let name = arg("name") {
+                    // The target's ACTUAL source root: `path:` when given, else SPM's per-kind default.
+                    let root: String
+                    if let pth = arg("path") {
+                        root = URL(fileURLWithPath: (pkgDir as NSString).appendingPathComponent(pth)).path
+                    } else {
+                        let dir = kind == "testTarget" ? "Tests" : (kind == "plugin" ? "Plugins" : "Sources")
+                        root = (pkgDir as NSString).appendingPathComponent(dir + "/" + name)
+                    }
+                    out.append((name, root))
+                    // `Source/` is the other conventional spelling SPM accepts for a regular target.
+                    if arg("path") == nil, kind != "testTarget", kind != "plugin" {
+                        out.append((name, (pkgDir as NSString).appendingPathComponent("Source/" + name)))
+                    }
+                }
+                idx = text.index(text.startIndex, offsetBy: min(k, chars.count))
             }
         }
-        targetsOfManifest[pkgDir] = names
-        return names
+        manifestRoots[pkgDir] = out
+        return out
     }
-    for p in sourcePaths {
-        let parts = p.split(separator: "/").map(String.init)
-        guard let i = parts.lastIndex(of: "Sources"), i + 1 < parts.count else { continue }
-        let candidate = parts[i + 1]
-        // The package root is everything above `Sources`. Absolute paths keep their leading slash.
-        let pkgDir = (p.hasPrefix("/") ? "/" : "") + parts[..<i].joined(separator: "/")
-        if declaredTargets(at: pkgDir).contains(candidate) { internalModules.insert(candidate) }
+    // Walk each analyzed file up to every ancestor that holds a manifest, and claim the module only when
+    // the file is genuinely inside one of that manifest's declared source roots.
+    for raw in sourcePaths {
+        // ABSOLUTE FIRST. A scan invoked as `candor-swift .` yields RELATIVE paths, so walking up from
+        // `./Sources/CandorCore` reached `.` — whose length stops the loop before the repo root is ever
+        // examined — and candor-swift's own `CandorCore` was reported as an uncovered third-party module.
+        // A false disclosure, which is the defect this whole thread began with, arriving through the
+        // repair for it. Caught by scanning this engine with itself.
+        let f = URL(fileURLWithPath: raw).standardized.path
+        var dir = (f as NSString).deletingLastPathComponent
+        while dir.count > 1 {
+            for t in targetsOf(dir) where f.hasPrefix(t.root + "/") { internalModules.insert(t.name) }
+            let parent = (dir as NSString).deletingLastPathComponent
+            if parent == dir { break }
+            dir = parent
+        }
     }
     var collectors: [DeclCollector] = []
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a file that fails to read used to be SILENTLY skipped by the
