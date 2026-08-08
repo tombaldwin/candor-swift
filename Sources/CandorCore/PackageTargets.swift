@@ -82,6 +82,53 @@ public struct PackageProduct: Equatable, Sendable {
 /// Every product a SwiftPM manifest declares. Same structured parse as `parsePackageTargets`, same
 /// reason: the product name is the join key the `.xcodeproj` scoping resolves a
 /// `XCSwiftPackageProductDependency` against, and a regex over `name:` matches targets first.
+/// The products a manifest DECLARES — only the elements of `Package(products: [...])`.
+///
+/// Same split, same reason, as `parsePackageTargetDeclarations`: `parsePackageProducts` collects
+/// `.library(…)` calls anywhere in the file, which is right for resolving a scan SCOPE (a stray one
+/// either names a real product or resolves to nothing) and wrong for deciding what a package EXPOSES,
+/// where a name alone is the whole answer. A `.library(…)` sitting in a dead hoisted `let` — SwiftPM
+/// never validates an unused one — would otherwise read as an exposure and let a package claim a module
+/// it does not publish.
+///
+/// The lesson was already learned here for targets and not carried across; this is that gap closed
+/// rather than rediscovered. Returns nil when `products:` is present but not a literal array, and when
+/// any element is not a plain declaration call — "cannot be read", which claims nothing.
+public func parsePackageProductDeclarations(manifestSource: String) -> [PackageProduct]? {
+    let tree = Parser.parse(source: manifestSource)
+    let finder = DeclaredProductFinder()
+    finder.walk(tree)
+    return finder.sawLiteral ? finder.products : nil
+}
+
+private final class DeclaredProductFinder: SyntaxVisitor {
+    var products: [PackageProduct] = []
+    var sawLiteral = false
+    private static let kinds: Set<String> = ["library", "executable", "plugin"]
+
+    init() { super.init(viewMode: .sourceAccurate) }
+
+    override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
+        guard DeclaredTargetFinder.isPackageCall(node) else { return .visitChildren }
+        for arg in node.arguments where arg.label?.text == "products" {
+            guard let array = arg.expression.as(ArrayExprSyntax.self) else { continue }
+            for el in array.elements {
+                guard let call = el.expression.as(FunctionCallExprSyntax.self),
+                      let member = call.calledExpression.as(MemberAccessExprSyntax.self),
+                      member.base == nil
+                        || member.base?.as(DeclReferenceExprSyntax.self)?.baseName.text == "Product",
+                      Self.kinds.contains(member.declName.baseName.text)
+                else { return .visitChildren }   // unreadable ⇒ sawLiteral stays false ⇒ nil
+                let sub = ProductFinder()
+                sub.walk(call)
+                products += sub.products
+            }
+            sawLiteral = true
+        }
+        return .visitChildren
+    }
+}
+
 public func parsePackageProducts(manifestSource: String) -> [PackageProduct] {
     let tree = Parser.parse(source: manifestSource)
     let finder = ProductFinder()
@@ -437,7 +484,7 @@ private final class TargetFinder: SyntaxVisitor {
 /// `.plugin(name:targets:)`. A product whose `targets:` is not a literal array is kept with
 /// `targetsUnreadable` — the consumer must refuse to resolve THROUGH it, but its NAME still proves the
 /// product is local, which is the difference between a refusal and a silent remote-misclassification.
-private final class ProductFinder: SyntaxVisitor {
+final class ProductFinder: SyntaxVisitor {
     var products: [PackageProduct] = []
     private static let kinds: Set<String> = ["library", "executable", "plugin"]
 

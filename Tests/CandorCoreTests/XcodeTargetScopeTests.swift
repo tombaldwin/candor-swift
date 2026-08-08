@@ -1488,4 +1488,46 @@ final class XcodeTargetScopeTests: XCTestCase {
                       "an UNRELATED package's analyzed target that happens to share the name must not "
                       + "certify a dependency this run never opened")
     }
+
+    /// ⟨0.28 rung, review 2 follow-on⟩ **A DEAD `.library(…)` IS NOT AN EXPOSURE.** `exposed(by:)` was
+    /// built on `parsePackageProducts`, the collect-anywhere SCOPE parser — so a `.library(…)` sitting in
+    /// a hoisted `let` that nothing references (SwiftPM never validates an unused one) read as a real
+    /// product, and the package claimed to expose a module it does not publish.
+    ///
+    /// The codebase learned this exact distinction for TARGETS and did not carry it to products. This is
+    /// that gap closed rather than rediscovered by a later review.
+    func testADeadProductDeclarationIsNotAnExposure() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-deadprod-\(UUID().uuidString)")
+        for d in ["Sources/App", "Mocks/Sources/AcmePay"] {
+            try fm.createDirectory(at: root.appendingPathComponent(d), withIntermediateDirectories: true)
+        }
+        defer { try? fm.removeItem(at: root) }
+        try """
+        // swift-tools-version:5.9
+        import PackageDescription
+        let package = Package(name: "App",
+            dependencies: [.package(path: "Mocks")],
+            targets: [.executableTarget(name: "App")])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        // `dead` is referenced by nothing; `products:` is empty. The package exposes NOTHING.
+        try """
+        // swift-tools-version:5.9
+        import PackageDescription
+        let dead = [Product.library(name: "AcmePay", targets: ["AcmePay"])]
+        let package = Package(name: "Mocks",
+            products: [],
+            targets: [.target(name: "AcmePay")])
+        """.write(to: root.appendingPathComponent("Mocks/Package.swift"), atomically: true, encoding: .utf8)
+        try "public func stub() {}\n".write(to: root.appendingPathComponent("Mocks/Sources/AcmePay/S.swift"),
+                                            atomically: true, encoding: .utf8)
+        try "import Foundation\nimport AcmePay\nfunc ship() { acmeUpload() }\nship()\n"
+            .write(to: root.appendingPathComponent("Sources/App/main.swift"), atomically: true, encoding: .utf8)
+        let r = try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path])
+        XCTAssertTrue(r.err.contains("AcmePay"),
+                      "the dependency's `products:` is empty — a dead hoisted `.library(…)` must not "
+                      + "make it expose a module, and so must not silence the real remote one: \(r.err)")
+    }
 }

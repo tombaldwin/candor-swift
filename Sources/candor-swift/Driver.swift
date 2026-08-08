@@ -348,7 +348,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         if let src = try? String(contentsOfFile: (pkgDir as NSString).appendingPathComponent("Package.swift"),
                                  encoding: .utf8) {
             let analyzed = analyzedTargets(in: pkgDir)
-            for prod in parsePackageProducts(manifestSource: src) {
+            // DECLARATIONS ONLY — see parsePackageProductDeclarations. nil (an unreadable or
+            // non-literal products list) exposes nothing, which errs toward disclosure.
+            for prod in parsePackageProductDeclarations(manifestSource: src) ?? [] {
                 // MEMBER TARGETS ONLY. A product NAME is not a module: `.library(name: "Pay", targets:
                 // ["PayCore"])` is imported as `PayCore`, and claiming `Pay` silences a real remote
                 // module of that name. The product is the unit of EXPOSURE; the target is the unit of
