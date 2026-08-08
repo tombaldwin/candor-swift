@@ -9,6 +9,21 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ A TENTH SPELLING — a ternary's DEAD BRANCH read as a declaration — plus the mirror it exposed.**
+  `useMock ? .target(name: "Stripe") : .executableTarget(name: "App")` had BOTH branches read as
+  declarations, because each array element was sub-walked for `.target(…)` anywhere inside it. The dead
+  branch claimed module Stripe, a stale `Sources/Stripe/` gave it a root, and a call into the real SDK
+  read pure. Present in the shipped 0.26 engine too, on the same input, by a broader route.
+
+  Every element must now BE a plain declaration call; anything else means the list **cannot be read**,
+  which is what `packageManifestListsAreComplete` already said about the same array sixty lines away —
+  the two agree now, and unreadable claims nothing.
+
+  The mirror, found in the same round and introduced by the previous one: `PackageDescription.Package(…)`
+  and `Target.target(…)` are ordinary spellings that were being rejected, so a package's OWN analyzed
+  modules were named third-party blind spots. Both accepted; any other base is still refused, because
+  `Foo.target(…)` is not a target declaration.
+
 - **⚠ A NINTH SPELLING: a DEAD reference read as a declaration.** SwiftPM never validates an unused
   `let`, so a leftover `let legacyDeps: [Target.Dependency] = [.target(name: "Analytics")]` sits happily
   in a manifest that builds. Read as a declaration, and given a source root by a stale

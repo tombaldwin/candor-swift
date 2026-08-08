@@ -1228,4 +1228,68 @@ final class XcodeTargetScopeTests: XCTestCase {
         let package = Package(name: "P", targets: [.target(name: "Core")])
         """)?.map(\.name), ["Core"], "and a literal list reads exactly its elements")
     }
+
+    /// ⟨2026-08-08, round 8⟩ **EVERY ELEMENT MUST *BE* A DECLARATION CALL.** Sub-walking each element of
+    /// `Package(targets: [...])` found `.target(…)` anywhere inside it — so a ternary read BOTH branches
+    /// as declarations, and the dead one claimed a module whose stale directory then silenced a real SDK.
+    ///
+    /// An element that is not a plain declaration call means the list cannot be READ, which is exactly
+    /// what `packageManifestListsAreComplete` already said about the same array sixty lines away. The two
+    /// now agree — and "cannot be read" claims nothing, which errs toward disclosure.
+    func testATernaryElementsDeadBranchIsNotADeclaration() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-tern-\(UUID().uuidString)")
+        for d in ["Sources/App", "Sources/Stripe"] {
+            try fm.createDirectory(at: root.appendingPathComponent(d), withIntermediateDirectories: true)
+        }
+        defer { try? fm.removeItem(at: root) }
+        try """
+        // swift-tools-version:5.9
+        import PackageDescription
+        let useMock = false
+        let package = Package(name: "P", targets: [
+            useMock ? .target(name: "Stripe") : .executableTarget(name: "App"),
+        ])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try "public struct Old {}\n".write(to: root.appendingPathComponent("Sources/Stripe/S.swift"),
+                                           atomically: true, encoding: .utf8)
+        try "import Foundation\nimport Stripe\nfunc charge() { StripeClient().pay() }\ncharge()\n"
+            .write(to: root.appendingPathComponent("Sources/App/main.swift"), atomically: true, encoding: .utf8)
+        let r = try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path])
+        XCTAssertTrue(r.err.contains("Stripe"),
+                      "the dead branch of a ternary is not a declaration — it must not claim a folder and "
+                      + "silence a real SDK: \(r.err)")
+    }
+
+    /// …and the mirror, which the same round found INTRODUCED: `PackageDescription.Package(…)` and
+    /// `Target.target(…)` are ordinary spellings, and rejecting them made a package's OWN analyzed
+    /// modules read as third-party blind spots. Safe direction, but it is the false-disclosure noise this
+    /// whole thread began by trying to remove.
+    func testTheQualifiedPackageAndTargetSpellingsAreRead() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-qual-\(UUID().uuidString)")
+        for d in ["Sources/Core", "Sources/App"] {
+            try fm.createDirectory(at: root.appendingPathComponent(d), withIntermediateDirectories: true)
+        }
+        defer { try? fm.removeItem(at: root) }
+        try """
+        // swift-tools-version:5.9
+        import PackageDescription
+        let package = PackageDescription.Package(name: "P", targets: [
+            Target.target(name: "Core"),
+            .executableTarget(name: "App", dependencies: ["Core"]),
+        ])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try "import Foundation\npublic func leak() { _ = FileManager.default.contents(atPath: \"/x\") }\n"
+            .write(to: root.appendingPathComponent("Sources/Core/C.swift"), atomically: true, encoding: .utf8)
+        try "import Core\nfunc run() { leak() }\nrun()\n"
+            .write(to: root.appendingPathComponent("Sources/App/main.swift"), atomically: true, encoding: .utf8)
+        let r = try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path])
+        XCTAssertFalse(r.err.contains("Core ("),
+                       "`Core` is declared — via the qualified spellings — and analyzed: \(r.err)")
+    }
 }

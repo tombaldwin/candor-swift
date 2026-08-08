@@ -197,20 +197,41 @@ private final class DeclaredTargetFinder: SyntaxVisitor {
 
     init() { super.init(viewMode: .sourceAccurate) }
 
+    /// `Package(…)` or `PackageDescription.Package(…)` — both are ordinary spellings, and matching only
+    /// the bare one made a qualified manifest read as declaring nothing, so its own analyzed modules were
+    /// named third-party blind spots.
+    private static func isPackageCall(_ node: FunctionCallExprSyntax) -> Bool {
+        if let d = node.calledExpression.as(DeclReferenceExprSyntax.self) { return d.baseName.text == "Package" }
+        if let m = node.calledExpression.as(MemberAccessExprSyntax.self) {
+            return m.declName.baseName.text == "Package"
+                && m.base?.as(DeclReferenceExprSyntax.self)?.baseName.text == "PackageDescription"
+        }
+        return false
+    }
+
     override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
-        guard let callee = node.calledExpression.as(DeclReferenceExprSyntax.self),
-              callee.baseName.text == "Package" else { return .visitChildren }
+        guard Self.isPackageCall(node) else { return .visitChildren }
         for arg in node.arguments where arg.label?.text == "targets" {
             guard let array = arg.expression.as(ArrayExprSyntax.self) else { continue }
-            sawLiteralTargets = true
-            // Each ELEMENT of the array, and only the element itself — a `.target(name:)` nested inside
-            // one of them is a dependency reference, which is what `TargetFinder`'s own skip-children
-            // guard already established.
+            // EVERY ELEMENT MUST *BE* A DECLARATION CALL. Sub-walking each element found `.target(…)`
+            // anywhere inside it, so a ternary — `useMock ? .target(name: "Stripe") : .executableTarget(
+            // name: "App")` — read BOTH branches as declarations, and the dead one claimed a module whose
+            // stale directory then silenced a real SDK. An element that is not a plain declaration call
+            // means the list cannot be read, which is exactly what `packageManifestListsAreComplete`
+            // (sixty lines above) already says about the same array — the two now agree.
             for el in array.elements {
+                guard let call = el.expression.as(FunctionCallExprSyntax.self),
+                      let member = call.calledExpression.as(MemberAccessExprSyntax.self),
+                      // `.target(…)` and the qualified `Target.target(…)`, which is a real spelling.
+                      member.base == nil
+                        || member.base?.as(DeclReferenceExprSyntax.self)?.baseName.text == "Target",
+                      TargetFinder.kinds.contains(member.declName.baseName.text)
+                else { return .visitChildren }   // unreadable ⇒ sawLiteralTargets stays false ⇒ nil
                 let sub = TargetFinder()
-                sub.walk(el.expression)
+                sub.walk(call)
                 targets += sub.targets
             }
+            sawLiteralTargets = true
         }
         return .visitChildren
     }
@@ -278,13 +299,19 @@ public func targetSourceDirs(_ closure: [PackageTarget], packageRoot: String,
 
 private final class TargetFinder: SyntaxVisitor {
     var targets: [PackageTarget] = []
-    private static let kinds: Set<String> = ["target", "executableTarget", "testTarget", "macro", "plugin"]
+    static let kinds: Set<String> = ["target", "executableTarget", "testTarget", "macro", "plugin"]
 
     init() { super.init(viewMode: .sourceAccurate) }
 
     override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
         guard let member = node.calledExpression.as(MemberAccessExprSyntax.self),
-              member.base == nil,                                   // `.target(…)`, not `Foo.target(…)`
+              // `.target(…)` — and the QUALIFIED `Target.target(…)`, which is an ordinary spelling that
+              // this guard used to reject. The rejection was safe for scope resolution (a package
+              // written that way simply resolved nothing) and showed up as a FALSE DISCLOSURE in module
+              // identity: the package's own analyzed modules were named third-party blind spots. Any
+              // OTHER base is still refused — `Foo.target(…)` is not a target declaration.
+              member.base == nil
+                || member.base?.as(DeclReferenceExprSyntax.self)?.baseName.text == "Target",
               Self.kinds.contains(member.declName.baseName.text) else { return .visitChildren }
         let isTest = member.declName.baseName.text == "testTarget"
         let isPlugin = member.declName.baseName.text == "plugin"
