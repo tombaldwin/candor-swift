@@ -812,4 +812,24 @@ final class XcodeTargetScopeTests: XCTestCase {
                                         targetName: "App", fs: fsStub())
         XCTAssertNil(none.entitlements)
     }
+
+    /// **`os(OSX)` IS LIVE SWIFT.** It is the legacy spelling of `os(macOS)` and Swift 6.3 still compiles
+    /// its body on macOS — verified with `swiftc`, not assumed. Comparing the condition token to the
+    /// platform name alone judged such a file to compile to NOTHING on a macOS target, so the prune
+    /// dropped it and its functions were absent from `functions` — a ⟨0.21⟩ purity claim over live code,
+    /// with the stderr count asserting a justification that is false for that file. Legacy Mac codebases
+    /// are exactly where this spelling survives, and exactly where the Apple-events reach lives.
+    func testTheLegacyOSXSpellingIsNotPrunedFromAMacTarget() throws {
+        let legacy = """
+        import Foundation
+        #if os(OSX)
+        public struct MacOnly { public func send() {} }
+        #endif
+        """
+        XCTAssertFalse(swiftFileCompilesToNothing(source: legacy, on: "macOS"),
+                       "os(OSX) is os(macOS) — pruning it drops live code from a macOS target's scope")
+        // …and the control: it really IS inactive on iOS, so the prune still does its job.
+        XCTAssertTrue(swiftFileCompilesToNothing(source: legacy, on: "iOS"),
+                      "the alias must not make the condition true everywhere")
+    }
 }

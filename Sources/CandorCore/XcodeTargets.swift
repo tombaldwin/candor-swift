@@ -1220,7 +1220,14 @@ private func evalPlatformCondition(_ expr: ExprSyntax, platform: String) -> Bool
               let arg = call.arguments.first?.expression.as(DeclReferenceExprSyntax.self) else {
             return nil   // canImport / targetEnvironment / arch / swift / compiler / a custom flag
         }
-        return arg.baseName.text == platform
+        // `os(OSX)` IS LIVE SWIFT. It is the legacy spelling of `os(macOS)` and Swift 6.3 still compiles
+        // its body on macOS — verified with `swiftc`, not assumed. Comparing the token to `platform`
+        // alone judged such a file to compile to NOTHING on a macOS target, dropped it from the scope,
+        // and left its functions absent from `functions` — a ⟨0.21⟩ purity claim over live code, with
+        // the stderr count asserting a justification that is false for that file. Legacy Mac codebases
+        // are exactly where this spelling survives, and exactly where the Apple-events reach lives.
+        let named = arg.baseName.text == "OSX" ? "macOS" : arg.baseName.text
+        return named == platform
     }
     // `a || b || c`: the parser leaves the sequence UNFOLDED. Only a chain of ONE operator is
     // decided; mixed `&&`/`||` without parentheses is rare enough that UNKNOWN (keep) is the

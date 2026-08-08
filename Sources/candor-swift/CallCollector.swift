@@ -722,6 +722,32 @@ final class CallCollector: SyntaxVisitor {
         return nil
     }
 
+    /// Three-valued, because "no media argument exists" and "a media argument exists and is computed"
+    /// are DIFFERENT FACTS and only one of them may be deferred. See `MediaTypeArg`.
+    enum MediaTypeArg {
+        /// `.audio` / `.video` — statically visible.
+        case determined(String)
+        /// A media-type argument IS present and is not statically readable (a var, a computed value).
+        /// This call is an INDEPENDENT capture source of unknown medium: nothing else in the function
+        /// speaks for it, so it must charge BOTH here and now.
+        case undetermined
+        /// No media-type position at all — a bare `AVCaptureSession()`, a `startRunning()`. The medium
+        /// comes from the devices this function adds, so this one may be DEFERRED to the whole-body
+        /// resolution and dropped if a sibling call names the medium.
+        case absent
+    }
+    private func mediaTypeArgKind(_ args: LabeledExprListSyntax) -> MediaTypeArg {
+        for a in args where a.label?.text == "for" || a.label?.text == "mediaType" || a.label == nil {
+            let e = Self.peel(a.expression)
+            if let ma = e.as(MemberAccessExprSyntax.self) {
+                let name = ma.declName.baseName.text
+                if name == "audio" || name == "video" { return .determined(name) }
+            }
+            return .undetermined
+        }
+        return .absent
+    }
+
     private func mediaTypeArg(_ args: LabeledExprListSyntax) -> String? {
         // `mediaType:` TOO — `AVCaptureDevice.DiscoverySession(deviceTypes:mediaType:position:)` spells
         // the same discriminant with a different label, and reading only `for:`/positional made that
@@ -2349,9 +2375,24 @@ final class CallCollector: SyntaxVisitor {
                 // already short-circuited above (declaredTypes/localTypes), so this never fabricates on
                 // project code. Supersedes the flat Camera in kappaFree for these types.
                 // DEFER the ambiguous case to `resolveAmbiguousCapture` — see `ambiguousCapture`.
-                let mt = mediaTypeArg(node.arguments)
-                if mt == nil { ambiguousCapture = true }
-                else { for e in privacyCaptureEffects(mediaType: mt) { directEffects.insert(e); determinateCapture.insert(e) } }
+                // ⟨fixed⟩ DEFER ONLY WHAT MAY BE DEFERRED. Deferring on `mt == nil` folded two different
+                // facts into one flag: a call with NO media argument (a bare session — the medium comes
+                // from the devices added beside it, so a sibling `.video` really does settle it) and a
+                // call whose media argument IS present and computed (an INDEPENDENT capture source whose
+                // medium nothing else in the function speaks for). Measured: a function opening a
+                // `.video` device beside `AVCaptureDevice.default(for: kind)` reported Camera ALONE — the
+                // possible Mic reach absent from `functions`, no `Unknown`, nothing in the ledger, and
+                // `privacy-manifest --verify` telling the developer to declare only the camera key. A
+                // silent under-report, introduced by the fabrication fix that added the deferral.
+                switch mediaTypeArgKind(node.arguments) {
+                case .determined(let name):
+                    for e in privacyCaptureEffects(mediaType: name) { directEffects.insert(e); determinateCapture.insert(e) }
+                case .undetermined:
+                    // No sibling call can settle THIS one — charge both where it stands.
+                    directEffects.insert("Camera"); directEffects.insert("Mic")
+                case .absent:
+                    ambiguousCapture = true
+                }
             } else if !localTypes.contains(name), !localFreeFns.contains(name),
                       dealias(name) == "NWBrowser" || dealias(name) == "NetServiceBrowser" {
                 // A BONJOUR BROWSER CONSTRUCTOR — `NWBrowser(for: .bonjour(…), using:)`, which is the
@@ -2535,9 +2576,24 @@ final class CallCollector: SyntaxVisitor {
                 // under-declare a real sensor). Confirmed-capture-type only, so an unknown receiver still
                 // never fabricates. Supersedes the flat Camera in PRIVACY_SDK_TYPES for these types.
                 // DEFER the ambiguous case to `resolveAmbiguousCapture` — see `ambiguousCapture`.
-                let mt = mediaTypeArg(node.arguments)
-                if mt == nil { ambiguousCapture = true }
-                else { for e in privacyCaptureEffects(mediaType: mt) { directEffects.insert(e); determinateCapture.insert(e) } }
+                // ⟨fixed⟩ DEFER ONLY WHAT MAY BE DEFERRED. Deferring on `mt == nil` folded two different
+                // facts into one flag: a call with NO media argument (a bare session — the medium comes
+                // from the devices added beside it, so a sibling `.video` really does settle it) and a
+                // call whose media argument IS present and computed (an INDEPENDENT capture source whose
+                // medium nothing else in the function speaks for). Measured: a function opening a
+                // `.video` device beside `AVCaptureDevice.default(for: kind)` reported Camera ALONE — the
+                // possible Mic reach absent from `functions`, no `Unknown`, nothing in the ledger, and
+                // `privacy-manifest --verify` telling the developer to declare only the camera key. A
+                // silent under-report, introduced by the fabrication fix that added the deferral.
+                switch mediaTypeArgKind(node.arguments) {
+                case .determined(let name):
+                    for e in privacyCaptureEffects(mediaType: name) { directEffects.insert(e); determinateCapture.insert(e) }
+                case .undetermined:
+                    // No sibling call can settle THIS one — charge both where it stands.
+                    directEffects.insert("Camera"); directEffects.insert("Mic")
+                case .absent:
+                    ambiguousCapture = true
+                }
             } else if let rt = base.root, PRIVACY_EVENTKIT_TYPES.contains(rt), !declaredTypes.contains(rt) {
                 // `privacy/2` — an EventKit STORE call (`store.requestAccess(to: .reminder)`,
                 // `store.predicateForEvents(...)`): refine the Calendar/Reminders split by the entity-type

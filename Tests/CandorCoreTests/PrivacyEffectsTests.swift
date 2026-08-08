@@ -99,6 +99,51 @@ final class PrivacyEffectsTests: XCTestCase {
                        "a session alone captures nothing — the DEVICE call is what says Camera or Mic")
     }
 
+    /// ⟨2026-08-08⟩ **THE DEFERRAL'S OWN CARDINAL SIN**, found by a go/no-go review of the fix above
+    /// and confirmed by running the shipped binary.
+    ///
+    /// Deferring on "no visible media type" folded two DIFFERENT facts into one flag: a call with **no
+    /// media argument** (a bare session — the medium comes from the devices added beside it, so a
+    /// sibling `.video` genuinely does settle it) and a call whose media argument **is present and
+    /// computed** — an INDEPENDENT capture source that nothing else in the function speaks for. A
+    /// function opening a `.video` device beside `AVCaptureDevice.default(for: kind)` reported Camera
+    /// ALONE: the possible Mic reach absent from `functions`, no `Unknown`, nothing in the coverage
+    /// ledger, and `privacy-manifest --verify` telling the developer to declare only the camera key.
+    ///
+    /// That is the shape this project has measured over and over — the silent under-report introduced
+    /// BY the fabrication fix, invisible to the fixture that proved the fabrication closed.
+    func testAComputedMediaTypeIsNotSettledByASiblingCallsVisibleOne() throws {
+        let (by, _) = try scan("""
+        import AVFoundation
+        func mixedSetup(kind: AVMediaType) {
+            let s = AVCaptureSession()
+            s.addInput(try! AVCaptureDeviceInput(device: AVCaptureDevice.default(for: .video)!))
+            s.addInput(try! AVCaptureDeviceInput(device: AVCaptureDevice.default(for: kind)!))
+            s.startRunning()
+        }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "mixedSetup")?.sorted(), ["Camera", "Mic"],
+                       "the computed-media device call is its own capture source — a `.video` call on "
+                       + "the line above says NOTHING about it, and dropping its Mic is a purity claim "
+                       + "over a microphone this function may open")
+    }
+
+    /// …and the FLOOR under that fix: the fabrication it was introduced to kill must stay killed. A
+    /// camera-only QR scanner — bare session, one `.video` device, `startRunning()` — must NOT be
+    /// charged Mic. This is Bitwarden's shape, an app shipping on the App Store with no microphone key.
+    func testACameraOnlyScannerIsStillNotChargedMic() throws {
+        let (by, _) = try scan("""
+        import AVFoundation
+        func scanQR() {
+            let s = AVCaptureSession()
+            s.addInput(try! AVCaptureDeviceInput(device: AVCaptureDevice.default(for: .video)!))
+            s.startRunning()
+        }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "scanQR"), ["Camera"],
+                       "the deferral still resolves for a session whose devices DO name their medium")
+    }
+
     // ⟨2026-08-07⟩ THE OVER-REPORT ROUND. Every case below is a finding candor made against a SHIPPING
     // app that was wrong — found by running the verb on code it had not been developed against, which is
     // the only way an over-report surfaces. Each one told a developer their App Store app was broken.

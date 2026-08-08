@@ -51,13 +51,17 @@ The last two are the interesting ones. Apple names no API because **there isn't 
 app's bundle or container is ordinary file I/O, and it is the *path* that makes it protected. That is
 exactly what a path class is for, so two keys that looked like they needed a new mechanism needed none.
 
-**Two keys stay unmodelled, and the reason is now accurate rather than a shrug.** They previously read
+**ONE key stays unmodelled, and the reason is now accurate rather than a shrug.** Both previously read
 "enterprise/managed surface; not modelled", which implied someone had simply not got to them:
 
 - `NSCriticalMessagingUsageDescription` — Apple's page links **no symbol at all**. It gates an
-  entitlement for emergency SMS, so the evidence is a `.entitlements` file, not a call site.
+  entitlement for emergency SMS, so the evidence is a `.entitlements` file, not a call site — which is
+  why it IS modelled now, on the ENTITLEMENT basis (`ENTITLEMENT_REQUIRED_KEYS`), the one row in the
+  breakdown whose evidence is a manifest rather than code. It was still counted as unmodelled here long
+  after it stopped being: the paragraph two screens up says the printed figure is the authority
+  precisely because a hand-maintained count drifts, and this is the count that drifted.
 - `NSFileProviderPresenceUsageDescription` — links only sibling *keys*. A file provider's presence
-  capability is declared, not called.
+  capability is declared, not called. This is the one the verify still says nothing about.
 
 Neither is a gap in the model; both are outside what code analysis can see, and the disclosure now says
 so in those words. Closing them means reading a second manifest, which is a different kind of evidence
@@ -69,7 +73,7 @@ and should be labelled as one.
 > kept as narrative because the *order* of discovery is the useful part — each one was found by measuring
 > the previous one.
 
-### The over-report round (`privacy/4`, 2026-08-07) — three rows Apple does not require, and one it does conditionally
+### The over-report round (2026-08-07) — three rows Apple does not require, and one it does conditionally
 
 Running the verb against shipping apps it had never seen produced a wrong finding on **every** app in
 that second group, and every one was an over-report. Each is recorded here because the reasoning is the
@@ -179,17 +183,23 @@ report instead would have traded the over-report for silence.
 `HKQuantity`, `CMDeviceMotion`, `CMAccelerometerData`, `EKEvent`, `CBUUID`. Holding a reading is not taking
 one.
 
-**`LocalNetwork` is deliberately absent.** `NSLocalNetworkUsageDescription` is real, but the reach cannot be
-separated from ordinary `Net` by type: `NWBrowser`/`NWConnection` serve both, and the key travels with a
-`NSBonjourServices` entitlement this engine does not read. Guessing it would fabricate on every networking
-app. It stays uncovered and disclosed, like any other unmodelled surface.
+**`LocalNetwork` was deliberately absent, and is now modelled on the CONSTANT basis.** The reach cannot
+be separated from ordinary `Net` *by type* — `NWBrowser`/`NWConnection` serve both — and charging the key
+to every networking app is the fabrication that kept it out. What made it modellable was the same move
+the folder keys use: decide it by the HOST LITERAL, not the type. A destination ending `.local`, or a
+link-local/private address, is local-network by construction; anything undetermined stays plain `Net`.
+So the row is earned rather than guessed, and the guessing version stays rejected.
 
 **Speech is not Mic.** Capturing audio and recognising it are separate authorizations with separate keys,
 and an app can do either without the other — so they are separate effects, not one.
 
 **The version moved because the vocabulary did.** A consumer that understands `privacy/1` expects exactly
 six effect names; emitting `Health` under that label would make the extension's own positive declaration
-inaccurate. `extensions: ["privacy/3"]`.
+inaccurate — so the wire id moved off `privacy/1` and has stayed put since. **What ships is
+`extensions: ["privacy/2"]`**, for every wave including this one: see the note at the top of this section
+and `PRIVACY_EXTENSION_ID`. The `### N-th wave (privacy/N …)` headings below are DRAFTING labels for when
+each batch of rows was added — they are not wire ids, and reading them as such is what put a `privacy/3`
+in this paragraph while every report said `privacy/2`.
 
 ### `EKEventStore` is ambiguous, exactly like `AVCaptureDevice`
 
@@ -400,7 +410,9 @@ union across every target in the tree. A multi-target app (an iOS app + a macOS 
 targets have SEPARATE Info.plists should scan and verify each target's sources against its own plist —
 verifying the whole-tree report against one target's plist can flag a capability another target reaches.
 The verb reports the divergence for REVIEW (report-reach vs plist-declaration); confirming a target-
-membership violation is the reviewer's step. (Per-target scoping is a future refinement.)
+membership violation is the reviewer's step. **Per-target scoping SHIPPED** — `--target` resolves against
+a `Package.swift` or an `.xcodeproj`, and the scope travels with the report (see "The scan's SCOPE travels
+with the report"), so the two halves can be named explicitly instead of reviewed by hand.
 
 ## Versioning
 

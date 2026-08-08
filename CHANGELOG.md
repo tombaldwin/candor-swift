@@ -9,6 +9,38 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ CARDINAL SIN, found by a go/no-go review of THIS release's own fabrication fix: a computed media
+  type was settled by an unrelated sibling call.** A function opening `AVCaptureDevice.default(for:
+  .video)` and, two lines later, `AVCaptureDevice.default(for: kind)` reported `[Camera]` — the possible
+  Mic reach absent from `functions`, no `Unknown`, nothing in the coverage ledger, and
+  `privacy-manifest --verify` telling the developer to declare only the camera key for a function that
+  opens a microphone at runtime. Confirmed by running the shipped binary before fixing.
+
+  One flag was doing two jobs. Deferring the ambiguous case to whole-body resolution is right for a call
+  with NO media argument (a bare `AVCaptureSession()` — the medium comes from the devices added beside
+  it, so a sibling `.video` genuinely does settle it) and wrong for a call whose media argument IS
+  present and computed: that is an independent capture source nothing else in the function speaks for.
+  `mediaTypeArgKind` is now three-valued — determined / undetermined / absent — and only `absent` defers.
+  The fabrication this deferral was introduced to kill (Bitwarden's camera-only QR scanner charged Mic)
+  stays killed, pinned as the floor beside the new test. **This is the measured shape this project keeps
+  hitting: the silent under-report introduced BY the over-report fix, invisible to the fixture that
+  proved the over-report closed.**
+- **⚠ …and a second silent under-report in the platform prune: `os(OSX)` is LIVE Swift.** It is the
+  legacy spelling of `os(macOS)` and Swift 6.3 still compiles its body on macOS — verified with
+  `swiftc`, not assumed. Comparing the condition token to the platform name alone judged such a file to
+  compile to nothing on a macOS target, dropped it from the scope, and left its functions absent from
+  `functions` — a ⟨0.21⟩ purity claim over live code, with the stderr count asserting a justification
+  false for that file. Legacy Mac codebases are where the spelling survives, and where the Apple-events
+  reach lives. One-line alias, with a control proving the condition is still correctly inactive on iOS.
+- **`SPEC-EXTENSION-privacy.md` contradicted itself and the code in four places**, all found by the same
+  review: "two keys stay unmodelled" (it is one — `NSCriticalMessagingUsageDescription` is modelled on
+  the entitlement basis, and the count that drifted sits directly under the paragraph explaining that
+  the printed figure is the authority BECAUSE hand-maintained counts drift); "`LocalNetwork` is
+  deliberately absent" (it is modelled now, on the constant basis — decided by the host literal, not the
+  type, which is what made it earnable rather than a guess); "per-target scoping is a future refinement"
+  (it shipped); and a `privacy/3` wire id in prose while every report emits `privacy/2` — the `### N-th
+  wave` headings are drafting labels, and the doc now says so rather than inviting the misreading again.
+
 - **⚠ The scan's SCOPE now travels with the report (`scope`, SPEC-EXTENSION-privacy.md).** `--target`
   scopes the SCAN; the `privacy-manifest --verify` that follows reads a REPORT and a plist, so
   everything the scan learned about which binary this is had to be in the artifact or it was lost — and
