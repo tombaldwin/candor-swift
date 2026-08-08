@@ -1059,7 +1059,6 @@ let declaredTypes = analysis.declaredTypes
 let protocolSupers = analysis.protocolSupers
 let protocolNames = analysis.protocolNames
 let importCounts = analysis.importCounts
-let internalModules = analysis.internalModules
 let direct = analysis.direct
 let edges = analysis.edges
 let whyMap = analysis.whyMap
@@ -1235,7 +1234,10 @@ if ProcessInfo.processInfo.environment["CANDOR_WORKSPACE_CHAIN"] != nil {
 // Computed HERE (before the envelope is built) because ⟨0.15 staged⟩ the same list rides the report
 // as the `coverage` envelope field — one computation feeds the stderr line (printed below, after the
 // receipt, keeping the disclosure order) AND the wire field, so they can never disagree.
-let unlisted = importCounts.filter { !PLATFORM_MODULES.contains($0.key) && !KAPPA_MODULES.contains($0.key) && !internalModules.contains($0.key) && !depsIndex.coveredPkgs.contains($0.key) }
+// ⟨0.28⟩ COMPUTED IN THE DRIVER, where the per-FILE answer lives. This used to filter a scan-global
+// `importCounts` by a scan-global `internalModules` — a set that could not express "internal for THIS
+// file", which is the question both disclosure channels actually ask. See `analyze`.
+let unlisted = analysis.uncoveredCounts
     .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
 
 var report = Report(

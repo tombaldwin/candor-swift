@@ -28,7 +28,10 @@ struct Analysis {
     var protocolSupers: [String: Set<String>]
     var protocolNames: Set<String>
     var importCounts: [String: Int]
-    var internalModules: Set<String>
+    /// module -> how many analyzed FILES import it while their own package cannot. The κ ledger, computed
+    /// where the per-file answer lives rather than reconstructed from a scan-global set that could not
+    /// express it. See the derivation in `analyze`.
+    var uncoveredCounts: [String: Int]
     var direct: [String: Set<String>]
     var edges: [String: Set<String>]
     var whyMap: [String: Set<String>]
@@ -218,7 +221,6 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     //
     // If the manifest genuinely declares a target of that name, the loop below claims it on the
     // evidence — a declaration and a source root — rather than on the package being called something.
-    var internalModules: Set<String> = []
     // ONE MANIFEST PARSER IN THIS CODEBASE, not two. What stood here was a hand-rolled scan — a regex
     // for `.target(`, a paren matcher, a hand-written argument reader — sitting a few files away from
     // `parsePackageTargets`, which does the same job with SwiftSyntax and is covered by tests because
@@ -282,33 +284,130 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         manifestRoots[pkgDir] = out
         return out
     }
-    // THE ROOT MANIFEST ONLY — and this bound is the point, not an omission.
+    // ── MODULE IDENTITY IS PER-FILE, AND HONOURS THE DEPENDENCY GRAPH ─────────────────────────────
     //
-    // The previous version walked each analyzed file up through EVERY ancestor holding a manifest. That
-    // reads names v0.26 could not see (it looked at `rootDir/Package.swift` and nothing else), and on
-    // that new ground it produced a silent under-report: a nested mock package declaring
-    // `.target(name: "AcmePay")` made the ROOT package's `import AcmePay` — a real remote SDK — read
-    // pure on both channels. Measured at HEAD. Module identity is package-LOCAL (the root package
-    // declares no dependency on `./Mocks`, so its import cannot resolve there) while this claim is
-    // scan-GLOBAL, and name-plus-file-presence is not enough to bridge that.
+    // `internalModules` was a per-SCAN set answering a per-FILE question. That mismatch is what nine
+    // review rounds kept finding: a name claimed anywhere silenced it everywhere, so a nested mock
+    // package's `.target(name: "AcmePay")` made the ROOT package's import of the real AcmePay read pure.
+    // Bounding the claim to the root manifest (0.27.0) removed that at the cost of naming every local
+    // package a blind spot again — sound, and noisy.
     //
-    // Restricting to the root manifest restores a containment that is now actually true: every name
-    // claimed here is a literal declaration in `rootDir/Package.swift`, and v0.26's regex over that same
-    // file matched all of those and more — comments, dead code, ternary branches, anywhere in the file —
-    // on top of claiming every `Sources/` entry with no manifest check and the package name itself. So
-    // claims ⊆ 0.26 claims, by construction rather than by fixture.
+    // The question a disclosure channel actually asks is: *can THIS FILE's package import THAT module?*
+    // Which is answered by the dependency graph, not by the filesystem:
+    //   · a file's OWNING package is the one whose declared target roots contain it;
+    //   · a package can import its own targets, plus — through each `.package(path:)` it declares,
+    //     transitively — the PRODUCTS those local packages expose and the targets those products name.
+    // A module outside that set is genuinely invisible to this file, whatever else the scan analyzed.
     //
-    // What it costs: a multi-package repo's local packages are named in the κ ledger again, which is the
-    // noise this thread began by trying to remove (NetNewsWire iOS goes back up from 14). That is a false
-    // disclosure — over-hedging — and this project's rule is unambiguous about which way to err. The
-    // dependency-aware version (a nested target is internal only to consumers that can actually import
-    // it, which needs per-file rather than per-scan identity) is a rung, not a patch, and is queued.
-    for t in targetsOf(rootDir) {
-        for raw in sourcePaths where URL(fileURLWithPath: raw).standardized.path.hasPrefix(t.root + "/") {
-            _ = raw
-            internalModules.insert(t.name)
-            break
+    // Everything unreadable resolves toward disclosure: no owning package, an unreadable `targets:` or
+    // `dependencies:` list, a computed path — each yields no claim, so the module stays named. That is
+    // the direction the whole 0.27 thread had to be beaten into, and it is the default here.
+    var declaredIn: [String: [(name: String, root: String)]] = [:]   // package dir -> its targets
+    var localDepsOf: [String: [String]] = [:]                        // package dir -> local dep dirs
+    func targetsIn(_ pkgDir: String) -> [(name: String, root: String)] {
+        if let c = declaredIn[pkgDir] { return c }
+        var out: [(name: String, root: String)] = []
+        if let src = try? String(contentsOfFile: (pkgDir as NSString).appendingPathComponent("Package.swift"),
+                                 encoding: .utf8) {
+            let isDir: (String) -> Bool = { p in
+                var d: ObjCBool = false
+                return FileManager.default.fileExists(atPath: p, isDirectory: &d) && d.boolValue
+            }
+            let parsed = parsePackageTargetDeclarations(manifestSource: src) ?? []
+            let pathPinned = Set(parsed.filter { $0.path != nil }.map(\.name))
+            for t in parsed where !t.isPlugin && (t.path != nil || !pathPinned.contains(t.name)) {
+                if let dirs = try? targetSourceDirs([t], packageRoot: pkgDir, exists: isDir) {
+                    for d in dirs { out.append((t.name, URL(fileURLWithPath: d).standardized.path)) }
+                }
+            }
+            localDepsOf[pkgDir] = (parsePackageLocalDependencies(manifestSource: src) ?? []).map {
+                URL(fileURLWithPath: (pkgDir as NSString).appendingPathComponent($0)).standardized.path
+            }
         }
+        declaredIn[pkgDir] = out
+        return out
+    }
+    /// Which modules a package may import: its own targets, then transitively each LOCAL dependency's
+    /// products and the targets those products expose. Products, not every target — a package exposes
+    /// what its `products:` list says, and claiming more would be a claim on no evidence.
+    var importableCache: [String: Set<String>] = [:]
+    func importable(from pkgDir: String, seen: inout Set<String>) -> Set<String> {
+        if let c = importableCache[pkgDir] { return c }
+        guard seen.insert(pkgDir).inserted else { return [] }        // cycle-safe
+        var out = Set(targetsIn(pkgDir).map(\.name))
+        for dep in localDepsOf[pkgDir] ?? [] {
+            guard let src = try? String(contentsOfFile: (dep as NSString).appendingPathComponent("Package.swift"),
+                                        encoding: .utf8) else { continue }
+            for prod in parsePackageProducts(manifestSource: src) {
+                out.insert(prod.name)
+                for t in prod.targets { out.insert(t) }
+            }
+            // …and onward through that package's own local deps.
+            _ = targetsIn(dep)
+            out.formUnion(importable(from: dep, seen: &seen))
+        }
+        importableCache[pkgDir] = out
+        return out
+    }
+    /// The package that owns an analyzed file — the nearest ancestor manifest one of whose declared
+    /// target roots contains it. nil when no manifest claims the file, which claims nothing.
+    var ownerCache: [String: String?] = [:]
+    func owningPackage(of file: String) -> String? {
+        if let c = ownerCache[file] { return c }
+        var dir = (file as NSString).deletingLastPathComponent
+        var found: String? = nil
+        while dir.count > 1 {
+            if targetsIn(dir).contains(where: { file.hasPrefix($0.root + "/") }) { found = dir; break }
+            let parent = (dir as NSString).deletingLastPathComponent
+            if parent == dir { break }
+            dir = parent
+        }
+        ownerCache[file] = found
+        return found
+    }
+    /// module -> the absolute analyzed files that may import it. Used by both disclosure channels.
+    // KEYED BY THE RELATIVE PATH, exactly as `fileImports` is — the two are looked up together at every
+    // use site, and keying one absolutely and the other relatively would silently return the empty set
+    // for every file, which reads as "nothing importable" and floods the disclosure rather than
+    // suppressing it. (The safe direction, but a defect all the same: nothing would ever be internal.)
+    // …AND IT MUST HAVE BEEN ANALYZED. Importable answers "could this file name that module"; it does
+    // NOT answer "did we read it". A `.package(path: "../Dep")` makes Dep importable while its sources
+    // sit outside the scan entirely, and a target declared with `path: "Modules/Core"` is importable
+    // from a scan of `Sources/` that never touched `Modules/`. Claiming either silences a call into
+    // code this run never read — the cardinal sin, one conjunct short. Caught by the existing workspace
+    // tests, which my own nine-round battery could not see because every fixture in it had the module
+    // either analyzed or undeclared, never declared-and-absent.
+    var analyzedModules: Set<String> = []
+    do {
+        let absPaths = sourcePaths.map { URL(fileURLWithPath: $0).standardized.path }
+        var pkgDirs = Set<String>()
+        for f in absPaths {
+            var dir = (f as NSString).deletingLastPathComponent
+            while dir.count > 1 {
+                if FileManager.default.fileExists(atPath: (dir as NSString).appendingPathComponent("Package.swift")) {
+                    pkgDirs.insert(dir)
+                }
+                let parent = (dir as NSString).deletingLastPathComponent
+                if parent == dir { break }
+                dir = parent
+            }
+        }
+        for pkg in pkgDirs {
+            for t in targetsIn(pkg) where absPaths.contains(where: { $0.hasPrefix(t.root + "/") }) {
+                analyzedModules.insert(t.name)
+            }
+        }
+    }
+    var importableByFile: [String: Set<String>] = [:]                 // rel file -> importable modules
+    for raw in sourcePaths {
+        let abs = URL(fileURLWithPath: raw).standardized.path
+        let rel = raw.hasPrefix(rootDir)
+            ? String(raw.dropFirst(rootDir.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            : raw
+        guard let pkg = owningPackage(of: abs) else { continue }
+        var seen = Set<String>()
+        // BOTH conjuncts: the file's package can import it, AND this run actually read it.
+        importableByFile[rel] = importable(from: pkg, seen: &seen).intersection(analyzedModules)
     }
     var collectors: [DeclCollector] = []
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a file that fails to read used to be SILENTLY skipped by the
@@ -628,9 +727,33 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // §2.1 refused to trust is still CHAINED (its keys are looked up, so rule 2's `Unknown` downgrade
     // fires) but makes NO coverage claim, so the package it names stays blind HERE and a key it does not
     // answer keeps its `invisible` hedge instead of reading pure. See the rule-3 note in Deps.swift.
-    let blindModules = Set(importCounts.keys.filter {
-        !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !internalModules.contains($0)
-            && !deps.coveredPkgs.contains($0) })
+    // PER FILE. The global set answered "is this module internal to the SCAN"; the question every use
+    // site actually asks is "is it invisible to THIS file", and those differ the moment a scan holds
+    // more than one package. `importableByFile` carries the dependency-graph answer; a file with no
+    // owning package gets an empty set, so nothing is claimed and everything it imports stays named.
+    func blindModules(inFile file: String) -> Set<String> {
+        let importable = importableByFile[file] ?? []
+        return Set((fileImports[file] ?? []).filter {
+            !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !importable.contains($0)
+                && !deps.coveredPkgs.contains($0) })
+    }
+
+    // COMPUTED HERE, NOT WHERE `importableByFile` IS BUILT. `fileImports` is filled by the collector
+    // loop, which runs after it — so computing the ledger up there produced an EMPTY one, and every
+    // fixture in the nine-round battery went silent at once. Caught by running that battery, which is
+    // the entire argument for keeping it.
+    // The ledger, as a union over files. A module is uncovered when SOME analyzed file imports it and
+    // that file's own package cannot — which is the same question the per-function hedge asks, so the
+    // two channels cannot drift apart the way they could while one read a global set. A file with no
+    // owning package contributes every import it has: unknown provenance claims nothing.
+    var uncoveredCounts: [String: Int] = [:]
+    for (file, imports) in fileImports {
+        let importable = importableByFile[file] ?? []
+        for m in imports where !PLATFORM_MODULES.contains(m) && !KAPPA_MODULES.contains(m)
+                                && !importable.contains(m) && !deps.coveredPkgs.contains(m) {
+            uncoveredCounts[m, default: 0] += 1
+        }
+    }
     var locOf: [String: String] = [:]
     var entryPoints: Set<String> = []
     var callsiteArgs: [String: [[ArgKind]]] = [:]   // resolved target -> each call site's arg kinds
@@ -1158,10 +1281,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // the honest signal; a member-only blind receiver is covered by the scan-level κ-ledger.
             if !resolved && call.unqualified {
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
-                for m in fileImports[file] ?? [] where blindModules.contains(m) {
+                let blind = blindModules(inFile: file)
+                for m in fileImports[file] ?? [] where blind.contains(m) {
                     blindDirect[f.qual, default: []].insert(m)
                 }
-            } else if !resolved, let owner = call.extOwner, blindModules.contains(owner) {
+            } else if !resolved, let owner = call.extOwner,
+                      blindModules(inFile: String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })).contains(owner) {
                 // ⟨0.15 staged⟩ a MODULE-QUALIFIED member call whose confidently-resolved receiver root IS
                 // a blind imported module (`SomeSDK.doThing()` — extOwner == the module name, in this file's
                 // import scope) demonstrably reaches that exact module. PRECISE, not file-granular — it names
@@ -1342,7 +1467,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     return Analysis(
         allFns: allFns, conformers: conformers, declaredTypes: declaredTypes,
         protocolSupers: protocolSupers, protocolNames: Set(protocolMethods.keys), importCounts: importCounts,
-        internalModules: internalModules, direct: direct, edges: edges, whyMap: whyMap,
+        uncoveredCounts: uncoveredCounts, direct: direct, edges: edges, whyMap: whyMap,
         locOf: locOf, entryPoints: entryPoints, inferred: inferred, hostsAcc: hostsAcc, fsD: fsAcc, privKindD: privKindD,
         cmdsAcc: cmdsAcc, pathsAcc: pathsAcc, tablesAcc: tablesAcc, incompleteAcc: incompleteAcc,
         incompleteDirect: incompleteD,

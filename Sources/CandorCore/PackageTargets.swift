@@ -167,6 +167,51 @@ public enum TargetScopeError: Error, CustomStringConvertible, Equatable {
 /// Every target a SwiftPM manifest declares. Parsed with SwiftSyntax rather than by regex: the manifest is
 /// Swift, and the regex forms already in this repo (`manifestPackageName`) are documented as fragile for
 /// exactly the reason a structured parse avoids — a `name:` belonging to something else, matched first.
+/// The LOCAL path dependencies a manifest declares: the `path:` of every `.package(path: …)` in
+/// `Package(dependencies: [...])`, relative to the manifest's own directory.
+///
+/// A fourth hand-written manifest reader existed for this — a line regex in `main.swift`'s `--workspace`
+/// path requiring `.package(` and `path:` on the SAME line, "the common monorepo form". The day this was
+/// written, that assumption class had just cost ten silent under-reports elsewhere in the same file, so
+/// it goes through the parser like everything else: multi-line declarations, comments, and string
+/// literals are the parser's problem, not a convention's.
+///
+/// Returns nil when `dependencies:` is present but not a literal array — the same "cannot be read" that
+/// `parsePackageTargetDeclarations` returns, and for the same reason: a caller must be able to tell it
+/// apart from "declares none", because treating unreadable as empty is how a claim gets made on no
+/// evidence.
+public func parsePackageLocalDependencies(manifestSource: String) -> [String]? {
+    let tree = Parser.parse(source: manifestSource)
+    let finder = LocalDependencyFinder()
+    finder.walk(tree)
+    return finder.unreadable ? nil : finder.paths
+}
+
+private final class LocalDependencyFinder: SyntaxVisitor {
+    var paths: [String] = []
+    var unreadable = false
+
+    init() { super.init(viewMode: .sourceAccurate) }
+
+    override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
+        guard DeclaredTargetFinder.isPackageCall(node) else { return .visitChildren }
+        for arg in node.arguments where arg.label?.text == "dependencies" {
+            guard let array = arg.expression.as(ArrayExprSyntax.self) else { unreadable = true; continue }
+            for el in array.elements {
+                guard let call = el.expression.as(FunctionCallExprSyntax.self),
+                      let member = call.calledExpression.as(MemberAccessExprSyntax.self),
+                      member.declName.baseName.text == "package"
+                else { continue }   // `.package(url:)` and friends are not local; not unreadable
+                for a in call.arguments where a.label?.text == "path" {
+                    if let lit = TargetFinder.literal(a.expression) { paths.append(lit) }
+                    else { unreadable = true }   // a computed path is not "no local dep"
+                }
+            }
+        }
+        return .visitChildren
+    }
+}
+
 /// The targets a manifest DECLARES — only the elements of `Package(targets: [...])`.
 ///
 /// Distinct from `parsePackageTargets`, and the distinction is load-bearing. That function collects
@@ -200,7 +245,7 @@ private final class DeclaredTargetFinder: SyntaxVisitor {
     /// `Package(…)` or `PackageDescription.Package(…)` — both are ordinary spellings, and matching only
     /// the bare one made a qualified manifest read as declaring nothing, so its own analyzed modules were
     /// named third-party blind spots.
-    private static func isPackageCall(_ node: FunctionCallExprSyntax) -> Bool {
+    static func isPackageCall(_ node: FunctionCallExprSyntax) -> Bool {
         if let d = node.calledExpression.as(DeclReferenceExprSyntax.self) { return d.baseName.text == "Package" }
         if let m = node.calledExpression.as(MemberAccessExprSyntax.self) {
             return m.declName.baseName.text == "Package"
