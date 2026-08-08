@@ -278,7 +278,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // Per target, and non-throwing: a manifest may name a target whose directory is absent,
                 // and that is not this derivation's business — it just means no root to claim.
                 if let dirs = try? targetSourceDirs([t], packageRoot: pkgDir, exists: isDir) {
-                    for d in dirs { out.append((t.name, URL(fileURLWithPath: d).standardized.path)) }
+                    for d in dirs { out.append((t.name, candorAbsolutePath(d))) }
                 }
             }
         }
@@ -318,11 +318,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             let pathPinned = Set(parsed.filter { $0.path != nil }.map(\.name))
             for t in parsed where !t.isPlugin && (t.path != nil || !pathPinned.contains(t.name)) {
                 if let dirs = try? targetSourceDirs([t], packageRoot: pkgDir, exists: isDir) {
-                    for d in dirs { out.append((t.name, URL(fileURLWithPath: d).standardized.path)) }
+                    for d in dirs { out.append((t.name, candorAbsolutePath(d))) }
                 }
             }
             localDepsOf[pkgDir] = (parsePackageLocalDependencies(manifestSource: src) ?? []).map {
-                URL(fileURLWithPath: (pkgDir as NSString).appendingPathComponent($0)).standardized.path
+                candorAbsolutePath((pkgDir as NSString).appendingPathComponent($0))
             }
         }
         declaredIn[pkgDir] = out
@@ -414,7 +414,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var analyzedInCache: [String: Set<String>] = [:]
     func analyzedTargets(in pkgDir: String) -> Set<String> {
         if let c = analyzedInCache[pkgDir] { return c }
-        let absPaths = sourcePaths.map { URL(fileURLWithPath: $0).standardized.path }
+        let absPaths = sourcePaths.map { candorAbsolutePath($0) }
         var out = Set<String>()
         for t in targetsIn(pkgDir) where absPaths.contains(where: { $0.hasPrefix(t.root + "/") }) {
             out.insert(t.name)
@@ -424,7 +424,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
     var importableByFile: [String: Set<String>] = [:]                 // rel file -> importable modules
     for raw in sourcePaths {
-        let abs = URL(fileURLWithPath: raw).standardized.path
+        let abs = candorAbsolutePath(raw)
         let rel = raw.hasPrefix(rootDir)
             ? String(raw.dropFirst(rootDir.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             : raw

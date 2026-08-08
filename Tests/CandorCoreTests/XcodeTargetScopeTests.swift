@@ -1682,6 +1682,123 @@ final class XcodeTargetScopeTests: XCTestCase {
         XCTAssertEqual(scope.localPackages, ["PkgA", "PkgB"])
     }
 
+    /// Two Xcode targets. App links `AProd` (whose target has NO dependencies); Ext links `BProd`
+    /// (whose target pulls in a THIRD package, C). Only Ext should reach C.
+    private let siblingGraphProject = """
+    {
+        objects = {
+            ROOT = { isa = PBXProject; mainGroup = G0; targets = ( TAPP, TEXT ); };
+            G0 = { isa = PBXGroup; children = ( FAPP, FEXT, FA, FB, FC ); sourceTree = "<group>"; };
+            FAPP = { isa = PBXFileReference; path = AppMain.swift; sourceTree = "<group>"; };
+            FEXT = { isa = PBXFileReference; path = ExtMain.swift; sourceTree = "<group>"; };
+            FA = { isa = PBXFileReference; lastKnownFileType = wrapper; path = PkgA; sourceTree = "<group>"; };
+            FB = { isa = PBXFileReference; lastKnownFileType = wrapper; path = PkgB; sourceTree = "<group>"; };
+            FC = { isa = PBXFileReference; lastKnownFileType = wrapper; path = PkgC; sourceTree = "<group>"; };
+            BAPP = { isa = PBXBuildFile; fileRef = FAPP; };
+            BEXT = { isa = PBXBuildFile; fileRef = FEXT; };
+            PSAPP = { isa = PBXSourcesBuildPhase; files = ( BAPP ); };
+            PSEXT = { isa = PBXSourcesBuildPhase; files = ( BEXT ); };
+            PDA = { isa = XCSwiftPackageProductDependency; productName = AProd; };
+            PDB = { isa = XCSwiftPackageProductDependency; productName = BProd; };
+            DEPEXT = { isa = PBXTargetDependency; target = TEXT; };
+            TAPP = { isa = PBXNativeTarget; buildPhases = ( PSAPP ); dependencies = ( DEPEXT );
+                     name = App; packageProductDependencies = ( PDA );
+                     productType = "com.apple.product-type.application"; };
+            TEXT = { isa = PBXNativeTarget; buildPhases = ( PSEXT ); name = Ext;
+                     packageProductDependencies = ( PDB );
+                     productType = "com.apple.product-type.framework"; };
+        };
+        rootObject = ROOT;
+    }
+    """
+    /// A and B live in ONE package directory on purpose in the review's reproduction; here they are
+    /// separate packages, which is the ordinary shape and still exhibits it once B reaches C.
+    private let pkgAOnlyManifest = """
+    // swift-tools-version: 6.0
+    import PackageDescription
+    let package = Package(
+        name: "PkgA",
+        products: [.library(name: "AProd", targets: ["ATarget"])],
+        targets: [.target(name: "ATarget")]
+    )
+    """
+    /// ONE package vending BOTH products — `AProd` inert, `BProd` reaching PkgC.
+    private let pkgTwoProductsManifest = """
+    // swift-tools-version: 6.0
+    import PackageDescription
+    let package = Package(
+        name: "PkgA",
+        products: [
+            .library(name: "AProd", targets: ["ATarget"]),
+            .library(name: "BProd", targets: ["BTarget"]),
+        ],
+        dependencies: [.package(path: "../PkgC")],
+        targets: [
+            .target(name: "ATarget"),
+            .target(name: "BTarget", dependencies: [.product(name: "CProd", package: "PkgC")]),
+        ]
+    )
+    """
+    private let pkgBToCManifest = """
+    // swift-tools-version: 6.0
+    import PackageDescription
+    let package = Package(
+        name: "PkgB",
+        products: [.library(name: "BProd", targets: ["BTarget"])],
+        dependencies: [.package(path: "../PkgC")],
+        targets: [.target(name: "BTarget", dependencies: [.product(name: "CProd", package: "PkgC")])]
+    )
+    """
+    private let pkgCManifest = """
+    // swift-tools-version: 6.0
+    import PackageDescription
+    let package = Package(
+        name: "PkgC",
+        products: [.library(name: "CProd", targets: ["CTarget"])],
+        targets: [.target(name: "CTarget")]
+    )
+    """
+
+    /// **THE WIDENING MUST FOLLOW THE PRODUCT, NOT THE PACKAGE.** Reported by review of the first
+    /// per-target commit, and reproduced here before the fix: the transitive walk was keyed by package
+    /// DIRECTORY, so a package accumulated the union of the edges of every one of its targets that any
+    /// closure member had caused to expand — and each Xcode target linking that package then inherited
+    /// the lot.
+    ///
+    /// Here App links `AProd`, whose target declares nothing. Ext links `BProd`, whose target reaches
+    /// PkgC. Under directory-keyed edges App reached PkgC too, so an `import CTarget` in App resolved to
+    /// a module App cannot see — the cardinal sin, one hop further out than the union answer this rung
+    /// replaced, and invisible to the single-target graph fixture above because there "the graph behind
+    /// what App links" and "the graph behind what the closure links" are the same set.
+    func testOneTargetsProductGraphIsNotAnothersEvenInTheSamePackageTree() throws {
+        let scope = try xcodeTargetScope(model: model(siblingGraphProject), projectDir: "/repo",
+                                         targetName: "App", fs: fsStub(
+            swiftFilesUnder: { dir in ["\(dir)/S.swift"] },
+            manifests: ["/repo/PkgA": pkgAOnlyManifest, "/repo/PkgB": pkgBToCManifest,
+                        "/repo/PkgC": pkgCManifest]))
+        XCTAssertEqual(scope.localPackageDirsByTarget["App"] ?? [], ["/repo/PkgA"],
+                       "App links AProd, which declares no dependencies — PkgC is Ext's reach, not App's")
+        XCTAssertEqual(scope.localPackageDirsByTarget["Ext"] ?? [], ["/repo/PkgB", "/repo/PkgC"],
+                       "and Ext keeps the whole graph behind BProd")
+        XCTAssertEqual(scope.localPackages, ["PkgA", "PkgB", "PkgC"],
+                       "all three are still in the SCAN — scope is the closure's union, unchanged")
+    }
+
+    /// THE SAME PROPERTY WITH BOTH PRODUCTS IN ONE PACKAGE, which is where directory-keyed edges
+    /// actually merge. Separate packages (above) never did — the reproduction needs `AProd` and `BProd`
+    /// to be two libraries of the SAME manifest, one inert and one reaching PkgC. Then `pkgEdges[PkgA]`
+    /// holds BTarget's edge and App, which links only AProd, inherits it.
+    func testAProductsGraphDoesNotLeakToASiblingProductOfTheSamePackage() throws {
+        let scope = try xcodeTargetScope(model: model(siblingGraphProject), projectDir: "/repo",
+                                         targetName: "App", fs: fsStub(
+            swiftFilesUnder: { dir in ["\(dir)/S.swift"] },
+            manifests: ["/repo/PkgA": pkgTwoProductsManifest, "/repo/PkgC": pkgCManifest]))
+        XCTAssertEqual(scope.localPackageDirsByTarget["App"] ?? [], ["/repo/PkgA"],
+                       "App links AProd, whose target declares nothing — PkgC is BProd's reach")
+        XCTAssertEqual(scope.localPackageDirsByTarget["Ext"] ?? [], ["/repo/PkgA", "/repo/PkgC"],
+                       "and Ext, which links BProd, keeps the whole graph behind it")
+    }
+
     /// A pbxproj where ONE file sits in BOTH targets' Sources phases — "Target Membership" ticked
     /// twice, which is ordinary in a shipping project.
     private let sharedFileProject = """
@@ -1724,6 +1841,65 @@ final class XcodeTargetScopeTests: XCTestCase {
         XCTAssertEqual(scope.filesByTarget["Ext"]?.contains("/repo/Both.swift"), true,
                        "and so does Ext — a set-growth diff credits only whichever target ran first")
         XCTAssertEqual(scope.localPackageDirsByTarget["Ext"] ?? [], ["/repo/Fork"])
+    }
+
+    /// **A GROUP PATH THAT ESCAPES THE PROJECT DIRECTORY, under an ABSOLUTE scan root.** Reported by
+    /// review, reproduced on the built binary, and silent on main too — a pre-existing sin this branch
+    /// inherited rather than introduced.
+    ///
+    /// `std` was `URL(fileURLWithPath:).path`, which absolutizes a relative path correctly but leaves
+    /// `..` sitting in an absolute one. The membership filter in `scopeToXcodeTarget` then compared
+    /// those keys against discovery paths, which never contain `..`, so every file behind such a group
+    /// fell out of the scoped scan — no `unanalyzed` entry, no warning, and the verdict flipping on
+    /// whether the user wrote `candor-swift .` or `candor-swift /abs/path`. This is firefox-ios's real
+    /// shape: its packages sit at `firefox-ios/../BrowserKit`.
+    ///
+    /// Both spellings of the root must now answer the same, which is what `candorAbsolutePath` is for.
+    func testAGroupPathEscapingTheProjectDirSurvivesAnAbsoluteScanRoot() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-escaped-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        try fm.createDirectory(at: root.appendingPathComponent("Proj/Repo.xcodeproj"),
+                               withIntermediateDirectories: true)
+        try fm.createDirectory(at: root.appendingPathComponent("Outside"), withIntermediateDirectories: true)
+        try """
+        {
+            objects = {
+                ROOT = { isa = PBXProject; mainGroup = G0; targets = ( TAPP ); };
+                G0 = { isa = PBXGroup; children = ( FIN, GOUT ); sourceTree = "<group>"; };
+                FIN = { isa = PBXFileReference; path = Inside.swift; sourceTree = "<group>"; };
+                GOUT = { isa = PBXGroup; children = ( FOUT ); path = "../Outside"; sourceTree = "<group>"; };
+                FOUT = { isa = PBXFileReference; path = Escaped.swift; sourceTree = "<group>"; };
+                BIN = { isa = PBXBuildFile; fileRef = FIN; };
+                BOUT = { isa = PBXBuildFile; fileRef = FOUT; };
+                PS = { isa = PBXSourcesBuildPhase; files = ( BIN, BOUT ); };
+                TAPP = { isa = PBXNativeTarget; buildPhases = ( PS ); name = App;
+                         productType = "com.apple.product-type.application"; };
+            };
+            rootObject = ROOT;
+        }
+        """.write(to: root.appendingPathComponent("Proj/Repo.xcodeproj/project.pbxproj"),
+                  atomically: true, encoding: .utf8)
+        try "func inside() {}\n".write(to: root.appendingPathComponent("Proj/Inside.swift"),
+                                       atomically: true, encoding: .utf8)
+        try "import Foundation\nfunc escapedNetCall() { _ = URLSession.shared.dataTask(with: URL(string: \"https://x.example\")!) }\n"
+            .write(to: root.appendingPathComponent("Outside/Escaped.swift"), atomically: true, encoding: .utf8)
+
+        // Both spellings of the same tree, run from inside it.
+        for (label, arg) in [("absolute", root.path), ("relative", ".")] {
+            let r = try ProcessHarness.run(bin, [arg, "--target", "App", "--json"], cwd: root)
+            let doc = try JSONSerialization.jsonObject(
+                with: Data(r.out.utf8)) as? [String: Any]
+            let fns = (doc?["functions"] as? [[String: Any]]) ?? []
+            XCTAssertTrue(fns.contains { ($0["fn"] as? String) == "escapedNetCall" },
+                          "\(label) root: `Escaped.swift` is in App\'s Sources phase, so its Net must be "
+                          + "reported — dropping it is a purity claim over a file the project lists. "
+                          + "stderr: \(r.err)")
+            XCTAssertTrue(r.err.contains("2 of 2 source file(s)"),
+                          "\(label) root: both files must survive the membership filter. stderr: \(r.err)")
+        }
     }
 
     /// THE DRIVER HALF, on the built binary. The resolver fixtures above prove the per-target evidence

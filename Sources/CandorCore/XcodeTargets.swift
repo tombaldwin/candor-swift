@@ -152,6 +152,37 @@ public struct XcodeScopeFS {
     }
 }
 
+/// THE ONE PATH NORMALIZER. Every path this engine compares, keys a dictionary by, or hands to another
+/// component goes through here, because NEITHER half of the obvious spelling is correct on its own and
+/// they fail in opposite directions — measured, not read:
+///
+///     input                    `.path`                    `.standardized.path`
+///     /a/b/../c/f.swift        /a/b/../c/f.swift          /a/c/f.swift
+///     ../repo/Sources/f.swift  <cwd-parent>/repo/…        <cwd>/repo/…        ← wrong directory
+///     ./x/../y/f.swift         <cwd>/y/f.swift            /y/f.swift          ← wrong, and at root
+///     /a//b/f.swift            /a//b/f.swift              /a//b/f.swift
+///
+/// `.path` absolutizes a relative path correctly but leaves `..` and `//` in an absolute one;
+/// `.standardized` collapses those but, on a relative path, drops the base and can produce a path at
+/// the filesystem root. Composing them is right for every row above.
+///
+/// Both halves of that were live defects. Under `.path` alone, a pbxproj group whose path escapes the
+/// project directory (`firefox-ios/../BrowserKit`) produced keys the membership filter — which compares
+/// against discovery paths that never contain `..` — could not match, so files the project explicitly
+/// lists were dropped from a `--target` scan with no `unanalyzed` entry and no warning: a silent
+/// under-report that flipped on whether the user spelled the scan root absolute or relative. Under
+/// `.standardized` alone, a `../repo`-style scan root sent `owningPackage` walking a directory chain
+/// that exists nowhere, disabling per-file module identity entirely.
+///
+/// `//` is left alone by both; it is collapsed here too, since two spellings of one file must not key
+/// two entries.
+public func candorAbsolutePath(_ p: String) -> String {
+    let once = URL(fileURLWithPath: p).path
+    let twice = URL(fileURLWithPath: once).standardized.path
+    guard twice.contains("//") else { return twice }
+    return "/" + twice.split(separator: "/").joined(separator: "/")
+}
+
 /// The resolved scope of one Xcode target: which targets ended up in the closure and which `.swift`
 /// files they compile, plus the boundary the closure deliberately does not cross.
 public struct XcodeTargetScope {
@@ -407,11 +438,7 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
     if let pd = project["projectDirPath"]?.string, !pd.isEmpty {
         rootDir = (rootDir as NSString).appendingPathComponent(pd)
     }
-    // `URL(fileURLWithPath:).path`, NOT `.standardized.path`: on a URL built from a RELATIVE path,
-    // `.standardized` collapses `..` and then DROPS the cwd base — measured, `./Proj/../Sources`
-    // became `/Sources`, which refused WordPress's (real, existing) synchronized folder with a path on
-    // nobody's disk. `.path` both absolutizes against cwd and collapses `..` correctly.
-    func std(_ p: String) -> String { URL(fileURLWithPath: p).path }
+    func std(_ p: String) -> String { candorAbsolutePath(p) }
 
     // ── the group tree ────────────────────────────────────────────────────────────────────────────
     // Paths are group-relative: each reference resolves against its PARENT group's directory, and a
@@ -746,20 +773,29 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
     var remoteProducts = 0
     var resolvedLocalNames: Set<String> = []
     var resolvedLocalDirs: Set<String> = []
-    /// Xcode target name -> the local package dirs THAT TARGET links DIRECTLY. The flat set above
-    /// answers "what did the closure link"; a file's importable modules are decided by what ITS target
-    /// links. Widened transitively through `pkgEdges` below before it leaves this function.
-    var localDirsByTarget: [String: Set<String>] = [:]
-    /// package dir -> the local package dirs it depends on. Recorded as `expand` walks, so the graph
-    /// costs nothing extra to build, and it is owner-independent: an edge found while expanding for one
-    /// Xcode target is the same edge for every other.
+    /// Xcode target name -> the local package dirs THAT TARGET may import: the DIRECTLY linked
+    /// packages, widened along the graph behind the specific PRODUCTS it links. Filled at the end of
+    /// this function from the three maps below.
     ///
-    /// NEEDED because DIRECT links are not what a target may import. Xcode puts the whole package
-    /// graph reachable from a linked product on the target's import path, and real code relies on it:
-    /// NetNewsWire's share extension links `Account` and `RSCore` only, yet `ExtensionContainersFile`
-    /// imports `RSParser` — reachable because Account's manifest declares `.package(path: "../RSParser")`.
-    /// A directs-only answer named RSParser a blind spot in a run that had just read it.
-    var pkgEdges: [String: Set<String>] = [:]
+    /// The widening is needed because direct links are not the import path — Xcode puts the whole
+    /// package graph reachable from a linked product on the target's import path, and real code relies
+    /// on it: NetNewsWire's share extension links `Account` and `RSCore` only, yet
+    /// `ExtensionContainersFile` imports `RSParser`, in the graph because Account's manifest declares
+    /// `.package(path: "../RSParser")`. A directs-only answer named RSParser a blind spot in a run that
+    /// had just read it.
+    var localDirsByTarget: [String: Set<String>] = [:]
+    /// Xcode target name -> the `dir\0product` pairs it links directly. The SEEDS of that walk.
+    var localProductsByTarget: [String: Set<String>] = [:]
+
+    // The package graph, recorded as `expand` walks it, at PRODUCT and TARGET granularity — not at
+    // package granularity, which was this rung's own first spelling and leaked. A package vending two
+    // libraries accumulated the union of both their edges, so an Xcode target linking the inert one
+    // inherited the graph behind the other: the cardinal sin again, one hop further out than the union
+    // answer this rung replaced. Every map here is owner-independent — an edge found while expanding
+    // for one Xcode target is the same edge for every other — so `expand`'s memo cannot lose one.
+    var productMembers: [String: [String]] = [:]      // dir\0product -> its member target names
+    var intraClosure: [String: [String]] = [:]        // dir\0target  -> its in-package target closure
+    var targetProducts: [String: Set<String>] = [:]   // dir\0target  -> the dir\0products it depends on
     var expandedTargets = Set<String>()   // "dir\u{0}target" — the cross-package recursion's visited set
     /// The refusal when a name misses the index but some local manifest could not be fully read: the
     /// miss proves nothing, and "probably remote" is exactly the guess this resolver must not make.
@@ -794,6 +830,7 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
         } else {
             targetNames = [product]   // reached via the same-name-target fallback
         }
+        productMembers[pkg.dir + "\u{0}" + product] = targetNames
         for tn in targetNames {
             let closure: [PackageTarget]
             do { closure = try targetClosure(tn, in: pkg.targets) }
@@ -801,6 +838,9 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
                 throw XcodeScopeError.unresolvableLocalProduct(
                     product: product, why: "\(error) (in \(pkg.dir)/Package.swift)")
             }
+            // BEFORE the per-target memo below, deliberately: this is a fact about `tn` that every
+            // product reaching it needs, and the memo would hide it from the second one.
+            intraClosure[pkg.dir + "\u{0}" + tn] = closure.map(\.name)
             for t in closure {
                 guard expandedTargets.insert(pkg.dir + "\u{0}" + t.name).inserted else { continue }
                 let dirs: [String]
@@ -857,7 +897,8 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
                     if let hit = hits.first {
                         resolvedLocalNames.insert((localPackages[hit].dir as NSString).lastPathComponent)
                         resolvedLocalDirs.insert(localPackages[hit].dir)
-                        pkgEdges[pkg.dir, default: []].insert(localPackages[hit].dir)
+                        targetProducts[pkg.dir + "\u{0}" + t.name, default: []]
+                            .insert(localPackages[hit].dir + "\u{0}" + pd)
                         try expand(pkgIndex: hit, product: pd)
                     } else {
                         try refuseIfAnyIncomplete(pd)
@@ -890,7 +931,7 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
                 }
                 resolvedLocalNames.insert((dir as NSString).lastPathComponent)
                 resolvedLocalDirs.insert(dir)
-                localDirsByTarget[dep.target, default: []].insert(dir)
+                localProductsByTarget[dep.target, default: []].insert(dir + "\u{0}" + dep.name)
                 try expand(pkgIndex: idx, product: dep.name)
                 continue
             default:
@@ -909,7 +950,8 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
         if let hit = hits.first {
             resolvedLocalNames.insert((localPackages[hit].dir as NSString).lastPathComponent)
             resolvedLocalDirs.insert(localPackages[hit].dir)
-            localDirsByTarget[dep.target, default: []].insert(localPackages[hit].dir)
+            localProductsByTarget[dep.target, default: []]
+                .insert(localPackages[hit].dir + "\u{0}" + dep.name)
             try expand(pkgIndex: hit, product: dep.name)
         } else {
             // A bare name found nowhere local is remote — but ONLY when every local manifest was
@@ -944,16 +986,26 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
         })
     }
 
-    // Widen each target's DIRECT links along the package graph. Nothing enters that was not already
-    // in `resolvedLocalDirs` — every edge here was walked by `expand` — so this can only ever restore
-    // reach the per-target split removed, never claim a package the closure never resolved.
-    for (tname, direct) in localDirsByTarget {
-        var seen = direct
-        var stack = Array(direct)
-        while let d = stack.popLast() {
-            for n in pkgEdges[d] ?? [] where seen.insert(n).inserted { stack.append(n) }
+    // Walk each Xcode target's linked PRODUCTS through the graph, collecting the packages it may
+    // import. Nothing enters that `expand` did not already resolve into `resolvedLocalDirs`, so this
+    // can only restore reach the per-target split removed, never claim a package the closure never saw.
+    for (tname, seeds) in localProductsByTarget {
+        var dirs = Set<String>()
+        var seenProducts = Set<String>()
+        var stack = Array(seeds)
+        while let key = stack.popLast() {
+            guard seenProducts.insert(key).inserted else { continue }
+            let dir = String(key.prefix(while: { $0 != "\u{0}" }))
+            dirs.insert(dir)
+            for tn in productMembers[key] ?? [] {
+                // …and each member target's IN-PACKAGE closure: a product's target may depend on a
+                // sibling target that holds the cross-package edge.
+                for t in intraClosure[dir + "\u{0}" + tn] ?? [tn] {
+                    stack.append(contentsOf: targetProducts[dir + "\u{0}" + t] ?? [])
+                }
+            }
         }
-        localDirsByTarget[tname] = seen
+        localDirsByTarget[tname] = dirs
     }
 
     let infoByName = Dictionary(uniqueKeysWithValues: all.map { ($0.name, $0) })

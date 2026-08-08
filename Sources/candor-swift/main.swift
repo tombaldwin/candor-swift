@@ -569,9 +569,10 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
         // from the scope — the miss-shaped failure. Two repo files differing only by case would
         // over-include, which merely keeps a file the unscoped scan already had.
         let member = Set(scope.files.map { $0.lowercased() })
-        // `.path`, not `.standardized.path` — the same relative-`..` quirk documented at
-        // `xcodeTargetScope`'s `std`, and the two sides of this membership test must agree byte-for-byte.
-        func std(_ p: String) -> String { URL(fileURLWithPath: p).path.lowercased() }
+        // The SAME normalizer the resolver used — the two sides of this membership test must agree
+        // byte for byte, and `candorAbsolutePath` is the only spelling that is right for both an
+        // absolute and a relative scan root. See its doc comment for what each half alone got wrong.
+        func std(_ p: String) -> String { candorAbsolutePath(p).lowercased() }
         let before = sourcePaths.count
         sourcePaths = sourcePaths.filter { member.contains(std($0)) }
         if sourcePaths.isEmpty {
@@ -637,7 +638,7 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
                 // `firefox-ios/../BrowserKit`), and the driver standardizes before asking. Keying the
                 // raw string would miss every such file: safe in direction, but it would silently
                 // give back the reach this rung exists to keep.
-                let f = URL(fileURLWithPath: f).standardized.path
+                let f = candorAbsolutePath(f)
                 var have = resolvedLinksByFile[f] ?? []
                 for d in dirs where !have.contains(d) { have.append(d) }
                 resolvedLinksByFile[f] = have
@@ -660,8 +661,8 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
 
 /// `path` relative to `root`, for messages — an absolute pbxproj path in a refusal is noise.
 func rel(_ path: String, to root: String) -> String {
-    let p = URL(fileURLWithPath: path).standardized.path
-    let r = URL(fileURLWithPath: root).standardized.path
+    let p = candorAbsolutePath(path)
+    let r = candorAbsolutePath(root)
     return p.hasPrefix(r + "/") ? String(p.dropFirst(r.count + 1)) : p
 }
 
@@ -708,7 +709,7 @@ if let want = scopeTarget {
         // `.` as `.`, so the two sides still never line up. The symptom was a scan refusing with
         // "no Swift sources are under ./." while the sources sat right there: a dead end whose stated
         // remedy could not work. `sourcePaths` itself is left alone, since the report's `loc:` uses it.
-        func abs(_ p: String) -> String { URL(fileURLWithPath: p).standardized.path }
+        func abs(_ p: String) -> String { candorAbsolutePath(p) }
         let prefixes = dirs.map { d -> String in
             let n = abs(d)
             return n.hasSuffix("/") ? n : n + "/"
