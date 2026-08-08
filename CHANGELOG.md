@@ -9,6 +9,41 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ THE LEDGER-NOISE IMPROVEMENT IS WITHDRAWN. What ships is ten closed cardinal sins in code that
+  had already shipped.** This entry replaces the running account of that work, because the running
+  account described a feature that is no longer here.
+
+  It began as a cosmetic fix: on a `--target`-scoped NetNewsWire scan the κ ledger named 31 uncovered
+  modules including local packages the scan had just analyzed — a false disclosure, prescribing work that
+  was already done. Reducing that to 14 required deciding, from the filesystem, which modules had been
+  analyzed. **Nine review rounds found ten distinct silent under-reports in that decision**, six of them
+  introduced by the fix for the previous one, and the tenth — a nested package's target silencing the
+  root package's import of a real remote SDK — reads names the shipped 0.26 engine could not see at all.
+
+  So the derivation is now bounded to the ROOT manifest: a module is internal when an analyzed file lives
+  under a target declared in `rootDir/Package.swift`. NetNewsWire's ledger goes back to 31. The noise this
+  set out to remove is still there.
+
+  **What survives is worth more than what was withdrawn.** Every name now claimed is a literal declaration
+  in the root manifest, while the shipped 0.26 derivation claimed the package NAME, every `Sources/` and
+  `Source/` directory entry with no manifest check whatsoever, and every regex hit anywhere in the file —
+  comments, dead code, ternary branches, hoisted dependency arrays. Claims are a strict subset of 0.26's
+  by construction, so every one of these is closed rather than argued:
+  - the package name itself, when a package is named after the dependency it wraps (**live on
+    firefox-ios**: `Dangerfile.swift`'s 41 functions hedged the sibling import and not `Danger`);
+  - any directory under `Sources/` (an integration folder named after the SDK it wraps);
+  - a commented-out `.target(…)`; a dead hoisted `.target(name:)` reference; a ternary's dead branch;
+  - a `.testTarget`/`.plugin`/`path:`-relocated declaration read as a source root;
+  - the first `name:` in a declaration's span, which for a computed target name is a DEPENDENCY's
+    `.product(name:)` — by construction a real third-party module;
+  - a nested package's same-named target claiming the root's import.
+  Plus a crash (an unclosed `.target(` trapped the process) and, in the other direction, candor-swift
+  reporting its own `CandorCore` as a blind spot when scanned relatively.
+
+  The dependency-aware version — a nested target is internal only to consumers that can actually import
+  it, which needs per-FILE rather than per-scan identity — is queued as a 0.28 rung. It is a rung, not a
+  patch, and this entry is the argument for that.
+
 - **⚠ A TENTH SPELLING — a ternary's DEAD BRANCH read as a declaration — plus the mirror it exposed.**
   `useMock ? .target(name: "Stripe") : .executableTarget(name: "App")` had BOTH branches read as
   declarations, because each array element was sub-walked for `.target(…)` anywhere inside it. The dead

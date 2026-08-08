@@ -282,19 +282,32 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         manifestRoots[pkgDir] = out
         return out
     }
-    // Walk each analyzed file up to every ancestor that holds a manifest, and claim the module only when
-    // the file is genuinely inside one of that manifest's declared source roots.
-    for raw in sourcePaths {
-        // ABSOLUTE FIRST. A scan invoked as `candor-swift .` yields RELATIVE paths, so walking up from
-        // `./Sources/CandorCore` reached `.` — whose length stops the loop before the repo root is ever
-        // examined — and candor-swift's own `CandorCore` was reported as an uncovered third-party module.
-        let f = URL(fileURLWithPath: raw).standardized.path
-        var dir = (f as NSString).deletingLastPathComponent
-        while dir.count > 1 {
-            for t in targetsOf(dir) where f.hasPrefix(t.root + "/") { internalModules.insert(t.name) }
-            let parent = (dir as NSString).deletingLastPathComponent
-            if parent == dir { break }
-            dir = parent
+    // THE ROOT MANIFEST ONLY — and this bound is the point, not an omission.
+    //
+    // The previous version walked each analyzed file up through EVERY ancestor holding a manifest. That
+    // reads names v0.26 could not see (it looked at `rootDir/Package.swift` and nothing else), and on
+    // that new ground it produced a silent under-report: a nested mock package declaring
+    // `.target(name: "AcmePay")` made the ROOT package's `import AcmePay` — a real remote SDK — read
+    // pure on both channels. Measured at HEAD. Module identity is package-LOCAL (the root package
+    // declares no dependency on `./Mocks`, so its import cannot resolve there) while this claim is
+    // scan-GLOBAL, and name-plus-file-presence is not enough to bridge that.
+    //
+    // Restricting to the root manifest restores a containment that is now actually true: every name
+    // claimed here is a literal declaration in `rootDir/Package.swift`, and v0.26's regex over that same
+    // file matched all of those and more — comments, dead code, ternary branches, anywhere in the file —
+    // on top of claiming every `Sources/` entry with no manifest check and the package name itself. So
+    // claims ⊆ 0.26 claims, by construction rather than by fixture.
+    //
+    // What it costs: a multi-package repo's local packages are named in the κ ledger again, which is the
+    // noise this thread began by trying to remove (NetNewsWire iOS goes back up from 14). That is a false
+    // disclosure — over-hedging — and this project's rule is unambiguous about which way to err. The
+    // dependency-aware version (a nested target is internal only to consumers that can actually import
+    // it, which needs per-file rather than per-scan identity) is a rung, not a patch, and is queued.
+    for t in targetsOf(rootDir) {
+        for raw in sourcePaths where URL(fileURLWithPath: raw).standardized.path.hasPrefix(t.root + "/") {
+            _ = raw
+            internalModules.insert(t.name)
+            break
         }
     }
     var collectors: [DeclCollector] = []

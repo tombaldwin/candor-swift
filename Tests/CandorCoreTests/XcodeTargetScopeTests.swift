@@ -1292,4 +1292,51 @@ final class XcodeTargetScopeTests: XCTestCase {
         XCTAssertFalse(r.err.contains("Core ("),
                        "`Core` is declared — via the qualified spellings — and analyzed: \(r.err)")
     }
+
+    /// ⟨2026-08-08, round 9⟩ **MODULE IDENTITY IS PACKAGE-LOCAL; THIS CLAIM IS SCAN-GLOBAL.** Walking
+    /// each analyzed file up through every ancestor manifest read names the shipped 0.26 engine could not
+    /// see — it looked at the root `Package.swift` and nothing else — and on that new ground it produced
+    /// a silent under-report: a nested mock package declaring `.target(name: "AcmePay")` made the ROOT
+    /// package's `import AcmePay`, a real remote SDK, read pure on both channels. The root package
+    /// declares no dependency on `./Mocks`, so its import cannot resolve there; name-plus-file-presence
+    /// is not enough to bridge that.
+    ///
+    /// The derivation is now bounded to the root manifest, which restores a containment that is actually
+    /// true rather than argued: every name claimed is a literal declaration in `rootDir/Package.swift`,
+    /// and 0.26's regex over that same file matched all of those and more.
+    func testANestedPackagesTargetDoesNotClaimTheRootsImport() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        func probe(withMock: Bool) throws -> String {
+            let root = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("candor-nest-\(UUID().uuidString)")
+            try fm.createDirectory(at: root.appendingPathComponent("Sources/App"), withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: root) }
+            try """
+            // swift-tools-version:5.9
+            import PackageDescription
+            let package = Package(name: "Root", targets: [.executableTarget(name: "App")])
+            """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+            try "import Foundation\nimport AcmePay\nfunc checkout() { AcmePayClient().charge(1) }\ncheckout()\n"
+                .write(to: root.appendingPathComponent("Sources/App/AppMain.swift"), atomically: true, encoding: .utf8)
+            if withMock {
+                try fm.createDirectory(at: root.appendingPathComponent("Mocks/Sources/AcmePay"),
+                                       withIntermediateDirectories: true)
+                try """
+                // swift-tools-version:5.9
+                import PackageDescription
+                let package = Package(name: "Mocks", targets: [.target(name: "AcmePay")])
+                """.write(to: root.appendingPathComponent("Mocks/Package.swift"), atomically: true, encoding: .utf8)
+                try "public struct Unrelated {}\n"
+                    .write(to: root.appendingPathComponent("Mocks/Sources/AcmePay/Mock.swift"),
+                           atomically: true, encoding: .utf8)
+            }
+            return try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path]).err
+        }
+        XCTAssertTrue(try probe(withMock: false).contains("AcmePay"),
+                      "baseline: the remote SDK is disclosed when nothing shadows its name")
+        XCTAssertTrue(try probe(withMock: true).contains("AcmePay"),
+                      "a NESTED package's target of the same name is a different module the root cannot "
+                      + "import — it must not silence the root's dependency on the real one")
+    }
 }
