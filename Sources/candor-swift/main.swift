@@ -163,7 +163,7 @@ var scopeTarget: String? = nil
 // `ReportModel.scope`: the verify that reads this report later has only a report and a plist, so
 // anything the scan knew about WHICH binary this is must be in the artifact or it is lost.
 var resolvedXcodeScope: (target: String, project: String, entitlements: String?)? = nil
-// ⟨0.28⟩ The local packages the `.xcodeproj` closure resolved. An Xcode target has no `Package.swift`,
+// ⟨0.27⟩ The local packages the `.xcodeproj` closure resolved. An Xcode target has no `Package.swift`,
 // so this is the ONLY record of what its files may import — and it is a dependency closure the resolver
 // already walked, not a fresh guess from directory shape.
 /// Absolute source file -> the local package PRODUCTS the Xcode target(s) compiling it may import.
@@ -1285,7 +1285,7 @@ if ProcessInfo.processInfo.environment["CANDOR_WORKSPACE_CHAIN"] != nil {
 // Computed HERE (before the envelope is built) because ⟨0.15 staged⟩ the same list rides the report
 // as the `coverage` envelope field — one computation feeds the stderr line (printed below, after the
 // receipt, keeping the disclosure order) AND the wire field, so they can never disagree.
-// ⟨0.28⟩ COMPUTED IN THE DRIVER, where the per-FILE answer lives. This used to filter a scan-global
+// ⟨0.27⟩ COMPUTED IN THE DRIVER, where the per-FILE answer lives. This used to filter a scan-global
 // `importCounts` by a scan-global `internalModules` — a set that could not express "internal for THIS
 // file", which is the question both disclosure channels actually ask. See `analyze`.
 let unlisted = analysis.uncoveredCounts

@@ -9,7 +9,68 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
-- **⚠ THE LEDGER-NOISE IMPROVEMENT IS WITHDRAWN. What ships is ten closed cardinal sins in code that
+- **⚠ MODULE IDENTITY IS NOW PER FILE, AND HONOURS THE DEPENDENCY GRAPH.** The rung the entry below
+  promised, built and reviewed three times. It replaces the withdrawal: the improvement that entry gave
+  up is here, on evidence rather than on filesystem shape.
+
+  **The question the disclosure channels ask is per FILE**: *can THIS file's package — or THIS file's
+  Xcode target — import THAT module?* It was being answered per SCAN: a name claimed anywhere silenced
+  it everywhere. That mismatch is what nine earlier review rounds kept rediscovering, and no bound on
+  the derivation fixes it, because the derivation was answering the wrong question.
+
+  A file's owning package can import its own targets plus, through each `.package(path:)` it declares,
+  the PRODUCTS those local packages expose — the product is the unit of exposure, the target is the unit
+  of import, and they are not interchangeable. An `.xcodeproj` target has no `Package.swift`, so its
+  answer comes from the closure the `--target` resolver already walked: the products it links, plus the
+  graph behind those specific products, since Xcode puts the whole reachable graph on a target's import
+  path. Anything unreadable at any step — a computed `path:`, a non-literal `targets:`, no owning
+  package at all — yields no claim, so the module stays named.
+
+  **Measured**, 20 `--target` scans across NetNewsWire, IceCubesApp and firefox-ios. NetNewsWire and
+  firefox are byte-identical to 0.26 apart from a scan-size gain noted below; IceCubesApp's app target
+  goes from 48 uncovered modules to 38, and **all ten names removed have analyzed functions in the same
+  report** (StatusKit 284, Account 109, DesignSystem 46, …). The 279 entries that leave `functions` with
+  them carried no inferred effect between them — each held only an `invisible` hedge for a module this
+  run had read.
+
+  **The invariant that makes this safe to state**: every name that can be claimed internal has passed
+  `analyzedTargets`, so a module is called internal only if a file under that target's real source root
+  was read in this run. Absence is still never a claim of purity for anything unread.
+
+- **⚠ A `--target` SCAN COULD SILENTLY DROP FILES THE PROJECT LISTS, depending on how you spelled the
+  scan root.** Two halves of one defect, both live in 0.26, found by review of the work above.
+
+  `URL(fileURLWithPath:).path` absolutizes a relative path correctly but leaves `..` in an absolute one;
+  `.standardized.path` collapses those but, on a relative path, drops the base and can produce a path at
+  the filesystem root. Both spellings were in use. Under the first, a pbxproj group whose path escapes
+  the project directory produced keys the membership filter could never match, so every file behind it
+  fell out of the scan with **no `unanalyzed` entry and no warning** — a purity claim over files the
+  project explicitly lists, flipping on whether you wrote `.` or an absolute path. This is firefox-ios's
+  real shape: its packages sit at `firefox-ios/../BrowserKit`, and the scan gains **46 files** (17562 →
+  17608 analyzed) with the fix. Under the second, a `../repo`-style scan root disabled per-file identity
+  outright. One normalizer now serves every site.
+
+- **FOUR DEFECTS THAT WERE ALREADY SHIPPING, found by reviewing the work above rather than by using it.**
+  Two of them silent, two of them dead ends.
+
+  - **A commented-out `.package(path: "../Old")` was discovered and CHAINED** by `--workspace`. The
+    reader was a line regex requiring `.package(` and `path:` on one line, with no comment handling, so
+    a package the root does not depend on was scanned and its report written to `.candor/deps` — where
+    SPEC §2 rule 3 turns that package's silence into a purity claim. It now goes through the same
+    SwiftSyntax parser as everything else, which was written for this and had been wired into one caller
+    while its own comment described the regex in the past tense.
+  - **`SDKROOT[sdk=iphoneos*]` was invisible to platform inference.** Two readers of the xcconfig format
+    existed side by side and only one stripped conditional key suffixes. Fewer platform tokens makes a
+    single-family answer more likely, and a wrong single family prunes files that do compile — from a
+    one-line divergence between two copies.
+  - **A dead hoisted `let legacyProducts = [.library(name: "Kit", …)]` refused the scan** (exit 2,
+    "declared by 2 local packages" naming the same directory twice — the message refuting itself), on a
+    manifest SwiftPM accepts, because an unused `let` is never validated.
+  - **Two Xcode targets of one name killed the process** with a Swift runtime trap and exit 133. Now a
+    contractual exit 2 that says what is ambiguous, because every name-keyed answer about that project
+    would have been answering an ambiguous key.
+
+- **⚠ THE LEDGER-NOISE IMPROVEMENT WAS WITHDRAWN — and is restored above. What ships is ten closed cardinal sins in code that
   had already shipped.** This entry replaces the running account of that work, because the running
   account described a feature that is no longer here.
 
@@ -46,8 +107,10 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   reporting its own `CandorCore` as a blind spot when scanned relatively.
 
   The dependency-aware version — a nested target is internal only to consumers that can actually import
-  it, which needs per-FILE rather than per-scan identity — is queued as a 0.28 rung. It is a rung, not a
-  patch, and this entry is the argument for that.
+  it, which needs per-FILE rather than per-scan identity — is the first entry above. It is a rung, not a
+  patch, and this entry is the argument for that. It was built after this one was written and before
+  either shipped, so both are in this release: the account of the withdrawal is kept because the ten
+  fixes are what made the rung possible to attempt again.
 
 - **⚠ A TENTH SPELLING — a ternary's DEAD BRANCH read as a declaration — plus the mirror it exposed.**
   `useMock ? .target(name: "Stripe") : .executableTarget(name: "App")` had BOTH branches read as
