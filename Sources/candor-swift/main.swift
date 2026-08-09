@@ -1393,6 +1393,29 @@ if ProcessInfo.processInfo.environment["CANDOR_WORKSPACE_CHAIN"] != nil {
 let unlisted = analysis.uncoveredCounts
     .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
 
+// ⟨0.27⟩ CHAINED COVERAGE NOBODY DECLARED. SPEC §2 rule 3 makes coverage name-keyed and scan-global,
+// and this engine obeys it — a package a loaded report covers is accounted for, full stop. That rule is
+// also the one place a NAME alone can delete a disclosure, and when the name is wrong the failure is
+// silent: an unresolved call into a same-named module the report is not actually about reads pure.
+//
+// Disclosed, not changed. Gating the claim on this would be a spec rung across four engines, and it
+// would cost real reach — a module re-exported through a dependency is legitimately imported by code
+// whose own manifest never names it. A note costs nothing and turns a silent trap into a visible one.
+if !analysis.coverageNotDeclared.isEmpty {
+    let rows = analysis.coverageNotDeclared.sorted { $0.key < $1.key }
+    var msg = "candor-swift: note — \(rows.count) chained report(s) cover a package that the importing "
+        + "code's own target never names as a dependency, so their silence is being read as a purity "
+        + "claim on the strength of a NAME:\n"
+    for (mod, files) in rows.prefix(8) {
+        let example = files.sorted().first ?? "?"
+        msg += "  \(mod) — imported by \(files.count) file(s), e.g. \(example)\n"
+    }
+    if rows.count > 8 { msg += "  … and \(rows.count - 8) more\n" }
+    msg += "  If that is the package you meant, nothing is wrong. If your code imports a DIFFERENT "
+        + "module of that name, its effects are being taken from the wrong report.\n"
+    FileHandle.standardError.write(msg.data(using: .utf8)!)
+}
+
 var report = Report(
     provenance: Provenance(version: engineVersion, toolchain: "swiftsyntax", spec: specVersion),
     package: pkgName, effectors: effectors)

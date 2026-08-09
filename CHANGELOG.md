@@ -50,6 +50,23 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   17608 analyzed) with the fix. Under the second, a `../repo`-style scan root disabled per-file identity
   outright. One normalizer now serves every site.
 
+- **CHAINED COVERAGE THAT NOBODY DECLARED IS NOW DISCLOSED.** SPEC §2 rule 3 makes a chained report's
+  coverage name-keyed and scan-global — every package a loaded report covers is accounted for, full
+  stop — and this engine obeys it. It is also the one place where a NAME alone can delete a disclosure,
+  and when the name is wrong the failure is silent: a package declaring no dependencies at all, whose
+  `import Utils` call reaches an unresolved SDK, goes to `functions: []` the moment an unrelated package
+  called `Utils` is chained.
+
+  Where a covered package is imported by a file whose own target never names it, the scan now says so
+  and changes no answer. Measured on real repos with every package chained: silent on NetNewsWire (17
+  packages, 0 mismatches), and on IceCubesApp it names three — `AppAccount`, `Env`, `MediaUI` — each a
+  file importing a module its manifest does not declare.
+
+  Gating the CLAIM on this was implemented and reverted: it contradicts rule 3, 31 chaining tests pin
+  that contract, and the measurement says it would have cost reach on all three IceCubes cases (shipping
+  code that builds) while gaining nothing on NetNewsWire. A note needs no floor bump and cannot cost
+  reach.
+
 - **⚠ A WHOLE-REPO SCAN OF AN `.xcodeproj` TREE NOW ANSWERS MODULE IDENTITY TOO.** Without `--target`
   an app-level file had no owning `Package.swift` and no resolved scope, so it claimed nothing and every
   module it imports was named a blind spot — including local packages the run had just analyzed.

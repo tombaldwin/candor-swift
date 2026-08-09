@@ -32,6 +32,8 @@ struct Analysis {
     /// where the per-file answer lives rather than reconstructed from a scan-global set that could not
     /// express it. See the derivation in `analyze`.
     var uncoveredCounts: [String: Int]
+    /// module -> files importing it whose target does not name it, though a chained report covers it.
+    var coverageNotDeclared: [String: Set<String>]
     var direct: [String: Set<String>]
     var edges: [String: Set<String>]
     var whyMap: [String: Set<String>]
@@ -377,6 +379,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// excluding it would name a readable module a blind spot. Anything unreadable at any step — a
     /// non-literal `dependencies:`, an unresolvable product, a target this parse never saw — yields
     /// NOTHING for that file, so it claims nothing and every module it imports stays named.
+    /// Every dependency name a target's closure NAMES — in-package targets plus product names, whether
+    /// or not they resolve to anything local. Wider than `importable` on purpose: a REMOTE product is
+    /// named here and absent there. Used ONLY to report the chained-coverage mismatch below; it does not
+    /// gate any claim, because SPEC §2 rule 3 says coverage applies to every package a loaded report
+    /// covers, full stop.
+    var declaredNamesCache: [String: Set<String>] = [:]
+    func declaredNames(forTarget t: String, in pkgDir: String) -> Set<String> {
+        let key = pkgDir + "\u{0}" + t
+        if let c = declaredNamesCache[key] { return c }
+        _ = importable(forTarget: t, in: pkgDir)
+        return declaredNamesCache[key] ?? []
+    }
     func importable(forTarget t: String, in pkgDir: String) -> Set<String> {
         let key = pkgDir + "\u{0}" + t
         if let c = importableCache[key] { return c }
@@ -397,6 +411,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             }
             wantProducts.append(contentsOf: pt.productDependencies)
         }
+        declaredNamesCache[key] = unreadable ? [] : inPackage.union(wantProducts)
         var out: Set<String> = []
         if !unreadable {
             // THE INVARIANT: only names whose sources this run actually read. Everything else is a
@@ -477,6 +492,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         return out
     }
     var importableByFile: [String: Set<String>] = [:]                 // rel file -> importable modules
+    var declaredByFile: [String: Set<String>] = [:]                   // …and what its target NAMES
     for raw in sourcePaths {
         let abs = candorAbsolutePath(raw)
         let rel = raw.hasPrefix(rootDir)
@@ -485,6 +501,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         if let pkg = owningPackage(of: abs), let own = owningTarget(of: abs, in: pkg) {
             // BOTH conjuncts: the file's TARGET can import it, AND this run actually read it.
             importableByFile[rel] = importable(forTarget: own, in: pkg)
+            declaredByFile[rel] = declaredNames(forTarget: own, in: pkg)
         } else if xcodeLinksByFile[abs] != nil || xcodeModulesByFile[abs] != nil {
             let deps = xcodeLinksByFile[abs] ?? []
             // AN XCODE TARGET'S FILE has no owning `Package.swift` — a folder in an Xcode target is not
@@ -857,11 +874,35 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // that file's own package cannot — which is the same question the per-function hedge asks, so the
     // two channels cannot drift apart the way they could while one read a global set. A file with no
     // owning package contributes every import it has: unknown provenance claims nothing.
+    /// ⟨0.27⟩ CHAINED COVERAGE THAT NOBODY DECLARED — reported, never acted on.
+    ///
+    /// SPEC §2 rule 3 is explicit: a coverage disclosure treats EVERY package a loaded report covers as
+    /// accounted for, even with zero joins. That is deliberately name-keyed and scan-global, and this
+    /// engine obeys it. But it is the one place where a name alone can delete a disclosure, and the
+    /// failure is silent: chain a report for a package your code does not use, have your code import a
+    /// DIFFERENT module of that name, and an unresolved call into it reads pure. Measured on a package
+    /// declaring no dependencies at all — `functions: []`, empty ledger, the calling function absent
+    /// from the report entirely.
+    ///
+    /// So the situation is DISCLOSED rather than changed. A note is not a verdict, needs no floor bump,
+    /// and cannot cost reach the way gating on it would (a package re-exported through a dependency is
+    /// legitimately imported by code whose own manifest never names it).
+    ///
+    /// Only where the module is actually IMPORTED by a file whose target does not name it: a report for
+    /// `swift-log` beside a target declaring the product `Logging` is the ordinary case, nobody imports
+    /// `swift-log`, and warning about it would be the false disclosure this note exists to avoid.
+    var coverageNotDeclared: [String: Set<String>] = [:]   // module -> files importing it
     var uncoveredCounts: [String: Int] = [:]
     for (file, imports) in fileImports {
         let importable = importableByFile[file] ?? []
         for m in imports where !PLATFORM_MODULES.contains(m) && !KAPPA_MODULES.contains(m)
-                                && !importable.contains(m) && !deps.coveredPkgs.contains(m) {
+                                && !importable.contains(m) {
+            guard !deps.coveredPkgs.contains(m) else {
+                if let declared = declaredByFile[file], !declared.contains(m) {
+                    coverageNotDeclared[m, default: []].insert(file)
+                }
+                continue
+            }
             uncoveredCounts[m, default: 0] += 1
         }
     }
@@ -1578,7 +1619,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     return Analysis(
         allFns: allFns, conformers: conformers, declaredTypes: declaredTypes,
         protocolSupers: protocolSupers, protocolNames: Set(protocolMethods.keys), importCounts: importCounts,
-        uncoveredCounts: uncoveredCounts, direct: direct, edges: edges, whyMap: whyMap,
+        uncoveredCounts: uncoveredCounts, coverageNotDeclared: coverageNotDeclared,
+        direct: direct, edges: edges, whyMap: whyMap,
         locOf: locOf, entryPoints: entryPoints, inferred: inferred, hostsAcc: hostsAcc, fsD: fsAcc, privKindD: privKindD,
         cmdsAcc: cmdsAcc, pathsAcc: pathsAcc, tablesAcc: tablesAcc, incompleteAcc: incompleteAcc,
         incompleteDirect: incompleteD,
