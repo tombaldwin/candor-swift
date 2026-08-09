@@ -1905,6 +1905,88 @@ final class XcodeTargetScopeTests: XCTestCase {
                        "while BTarget is")
     }
 
+    /// **THE PROJECT FILE LISTING A SOURCE IS NOT THIS RUN HAVING READ IT.** Found by the 0.27 go/no-go
+    /// panel, in the release's own least-reviewed commits.
+    ///
+    /// An Xcode target is a module, and a target that contributes no files cannot be one — so the module
+    /// claim was guarded on `filesByTarget` being non-empty. But `filesByTarget` is what the PBXPROJ
+    /// LISTS, and a group whose path escapes the scan root (`path = "../Shared"` — the shape
+    /// `candorAbsolutePath` exists to support) lists files discovery never walks. The target was then
+    /// claimed as an analyzed module on the strength of sources this run never opened.
+    ///
+    /// Measured on the built binary, one framework target whose only file sits outside the scan root:
+    ///
+    ///     target named `Shared`    functions: []                  ← purity claim over a URLSession upload
+    ///     target named `SharedX`   appEntry, invisible: [Shared]  ← correct, and the ONLY difference
+    ///
+    /// The read-set check now lives in the driver, where the read set exists — the same guard the
+    /// `LocalProductRef` channel always had, which is why that channel never showed this.
+    func testAModuleIsOnlyClaimedWhenThisRunReadItsSources() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        func run(targetNamed: String, scanFromRoot: Bool) throws -> (fns: [String], unc: [String]) {
+            let root = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("candor-outside-\(UUID().uuidString)")
+            defer { try? fm.removeItem(at: root) }
+            for d in ["repo/App.xcodeproj", "repo/App", "Shared"] {
+                try fm.createDirectory(at: root.appendingPathComponent(d), withIntermediateDirectories: true)
+            }
+            try escapedTargetProject.replacingOccurrences(of: "name = Shared;",
+                                                         with: "name = \(targetNamed);")
+                .write(to: root.appendingPathComponent("repo/App.xcodeproj/project.pbxproj"),
+                       atomically: true, encoding: .utf8)
+            try "import Shared\nfunc appEntry() { ship() }\n"
+                .write(to: root.appendingPathComponent("repo/App/main.swift"),
+                       atomically: true, encoding: .utf8)
+            try "import Foundation\npublic func ship() { _ = URLSession.shared.dataTask(with: URL(string: \"https://x.example\")!) }\n"
+                .write(to: root.appendingPathComponent("Shared/Net.swift"), atomically: true, encoding: .utf8)
+            // Scanning `repo/` leaves `Shared/` OUTSIDE the scan; scanning the parent takes it in.
+            let target = scanFromRoot ? root.path : root.appendingPathComponent("repo").path
+            let r = try ProcessHarness.run(bin, [target, "--json"])
+            let doc = try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any]
+            let fns = ((doc?["functions"] as? [[String: Any]]) ?? []).compactMap { $0["fn"] as? String }
+            let cov = (doc?["coverage"] as? [String: Any])?["uncovered"] as? [[String: Any]] ?? []
+            return (fns, cov.compactMap { $0["name"] as? String })
+        }
+        let sin = try run(targetNamed: "Shared", scanFromRoot: false)
+        XCTAssertTrue(sin.fns.contains("appEntry"),
+                      "`Shared`'s sources are outside the scan, so `appEntry`'s call into it is "
+                      + "unresolved — absence from `functions` is a purity claim over a network upload")
+        XCTAssertEqual(sin.unc, ["Shared"], "and the ledger must name it")
+        // THE CONTROL: identical tree, one target name different. If this ever stops disclosing, the
+        // assertion above has stopped testing what it says.
+        let control = try run(targetNamed: "SharedX", scanFromRoot: false)
+        XCTAssertEqual(control.unc, ["Shared"])
+        // THE REACH FLOOR: scanned from above, the run DOES read those sources, so the module is
+        // claimed and the effect travels rather than being hedged.
+        let floor = try run(targetNamed: "Shared", scanFromRoot: true)
+        XCTAssertEqual(floor.unc, [], "read in this run — claiming it is correct")
+        XCTAssertTrue(floor.fns.contains("ship"), "and its own function is in the report")
+    }
+
+    private let escapedTargetProject = """
+    {
+        objects = {
+            ROOT = { isa = PBXProject; mainGroup = G0; targets = ( TAPP, TSH ); };
+            G0 = { isa = PBXGroup; children = ( GAPP, GOUT ); sourceTree = "<group>"; };
+            GAPP = { isa = PBXGroup; children = ( FMAIN ); path = App; sourceTree = "<group>"; };
+            GOUT = { isa = PBXGroup; children = ( FNET ); path = "../Shared"; sourceTree = "<group>"; };
+            FMAIN = { isa = PBXFileReference; path = main.swift; sourceTree = "<group>"; };
+            FNET = { isa = PBXFileReference; path = Net.swift; sourceTree = "<group>"; };
+            BMAIN = { isa = PBXBuildFile; fileRef = FMAIN; };
+            BNET = { isa = PBXBuildFile; fileRef = FNET; };
+            PSAPP = { isa = PBXSourcesBuildPhase; files = ( BMAIN ); };
+            PSSH = { isa = PBXSourcesBuildPhase; files = ( BNET ); };
+            DEP = { isa = PBXTargetDependency; target = TSH; };
+            TAPP = { isa = PBXNativeTarget; buildPhases = ( PSAPP ); dependencies = ( DEP );
+                     name = App; productType = "com.apple.product-type.application"; };
+            TSH = { isa = PBXNativeTarget; buildPhases = ( PSSH ); name = Shared;
+                    productType = "com.apple.product-type.framework"; };
+        };
+        rootObject = ROOT;
+    }
+    """
+
     /// **WHOLE-REPO IDENTITY, and it is still PER FILE.** Without `--target` an app-level file had no
     /// owning `Package.swift` and no resolved scope, so it claimed nothing and every module it imports
     /// was named a blind spot — including local packages this very run analyzed. NetNewsWire: 32

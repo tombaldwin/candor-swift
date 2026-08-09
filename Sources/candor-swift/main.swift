@@ -511,10 +511,33 @@ func mergePerFileXcodeEvidence(scopes: [XcodeTargetScope], sourcePaths: [String]
                                modules: inout [String: [String]]) {
     var linksByLowerKey: [String: [LocalProductRef]] = [:]
     var modulesByLowerKey: [String: [String]] = [:]
+    // WHICH MODULES DID THIS RUN ACTUALLY READ.
+    //
+    // `xcodeModulesByTarget` is derived from `filesByTarget`, which is what the PROJECT FILE lists — not
+    // what the scan read. A group whose path escapes the scan root (`path = "../Shared"`, the shape
+    // `candorAbsolutePath` exists to support) lists files discovery never walks, so a target could be
+    // claimed as an analyzed module on the strength of sources this run never opened. Measured: a
+    // framework target named `Shared` whose only file sits outside the scan root took `appEntry` to
+    // `functions: []` — a purity claim over a URLSession upload — while renaming that target to
+    // `SharedX`, changing nothing else, disclosed it. A release-introduced silence, caught by the
+    // go/no-go panel.
+    //
+    // The check belongs HERE because this is where the read set exists. Same shape as the guard the
+    // `LocalProductRef` channel already had, which is why that channel was never exposed.
+    let readKeys = Set(sourcePaths.map { candorAbsolutePath($0).lowercased() })
+    var readModules = Set<String>()
+    for scope in scopes {
+        for (tname, tfiles) in scope.filesByTarget {
+            guard let m = scope.moduleNameByTarget[tname] else { continue }
+            if tfiles.contains(where: { readKeys.contains(candorAbsolutePath($0).lowercased()) }) {
+                readModules.insert(m)
+            }
+        }
+    }
     for scope in scopes {
         for (tname, tfiles) in scope.filesByTarget {
             let prods = scope.localProductsByTarget[tname] ?? []
-            let mods = scope.xcodeModulesByTarget[tname] ?? []
+            let mods = (scope.xcodeModulesByTarget[tname] ?? []).filter { readModules.contains($0) }
             if prods.isEmpty && mods.isEmpty { continue }
             for f in tfiles {
                 let key = candorAbsolutePath(f).lowercased()
