@@ -432,8 +432,11 @@ if isDir.boolValue {
 }
 sourcePaths.sort()
 if sourcePaths.isEmpty {
-    FileHandle.standardError.write("candor-swift: no Swift sources under \(target)\n".data(using: .utf8)!)
-    exit(2)
+    // An EMPTY SCAN is an exit-2 cause like any other, and §3.1 exempts none: a consumer reading the
+    // stream after it must not get nothing. Easy to hit in CI when a path moves, and the last cause in
+    // this engine still exiting raw — found by probing causes a user can trigger rather than by reading
+    // exit sites.
+    refuseGateAndExit("candor-swift: no Swift sources under \(target)")
 }
 
 // ⟨--target⟩ RESTRICT the scan to one shipped binary. A package with several products sharing a core

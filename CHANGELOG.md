@@ -15,6 +15,10 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 
 
+
+- **An EMPTY SCAN now reaches the machine channel.** `no Swift sources under <target>` exited raw, so a
+  consumer reading `--gate-json -` got nothing — an ordinary CI accident (a path that moved) and the
+  last cause in this engine still exiting that way. Pinned by conformance PART 36 (b17).
 - **An UNREADABLE config left a stale green at the FILE sink**, while the same cause streamed its
   refusal correctly. The §3.3.1 pre-pass reads the config to learn what the sink must not overwrite and
   runs BEFORE arming; its own comment said that read was "LENIENT — no exit, no diagnostic", which was
