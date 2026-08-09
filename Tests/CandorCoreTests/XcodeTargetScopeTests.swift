@@ -1905,6 +1905,60 @@ final class XcodeTargetScopeTests: XCTestCase {
                        "while BTarget is")
     }
 
+    /// **WHOLE-REPO IDENTITY, and it is still PER FILE.** Without `--target` an app-level file had no
+    /// owning `Package.swift` and no resolved scope, so it claimed nothing and every module it imports
+    /// was named a blind spot — including local packages this very run analyzed. NetNewsWire: 32
+    /// uncovered modules, 14 of them local packages whose sources are in the same report.
+    ///
+    /// The fix resolves EVERY target and merges per file, and the fixture that matters is the one
+    /// showing it did not become a repo-wide union: in a single unscoped run of one tree, `Ext` links
+    /// Fork so its file CLAIMS `Shared`, while `App` links nothing so its file still DISCLOSES it. Same
+    /// run, same module name, two answers, because they are two files with two targets.
+    func testAWholeRepoScanAnswersPerFileNotPerRepo() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-whole-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        for d in ["P.xcodeproj", "Fork/Sources/Shared"] {
+            try fm.createDirectory(at: root.appendingPathComponent(d), withIntermediateDirectories: true)
+        }
+        try twoTargetProject.write(to: root.appendingPathComponent("P.xcodeproj/project.pbxproj"),
+                                   atomically: true, encoding: .utf8)
+        try forkManifest.write(to: root.appendingPathComponent("Fork/Package.swift"),
+                               atomically: true, encoding: .utf8)
+        try "import Foundation\npublic func sharedThing() { _ = FileManager.default.contents(atPath: \"/x\") }\n"
+            .write(to: root.appendingPathComponent("Fork/Sources/Shared/S.swift"),
+                   atomically: true, encoding: .utf8)
+        // BOTH files import `Shared`. Only Ext links Fork.
+        try "import Shared\nfunc appDoes() { sharedThing() }\n"
+            .write(to: root.appendingPathComponent("AppMain.swift"), atomically: true, encoding: .utf8)
+        try "import Shared\nfunc extDoes() { sharedThing() }\n"
+            .write(to: root.appendingPathComponent("ExtMain.swift"), atomically: true, encoding: .utf8)
+
+        let r = try ProcessHarness.run(bin, [root.path, "--json"])   // NO --target
+        let doc = try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any]
+        let cov = (doc?["coverage"] as? [String: Any])?["uncovered"] as? [[String: Any]] ?? []
+        let shared = cov.first { ($0["name"] as? String) == "Shared" }
+
+        // THE LEDGER COUNT IS THE OBSERVABLE, and it separates all three behaviours in one number.
+        // Both files import `Shared`; only Ext links Fork.
+        //
+        //   2  no claims at all      — what shipped before this pass: every app-level import disclosed,
+        //                              including the 14 NetNewsWire modules the run had analyzed
+        //   0  a repo-wide union     — the one-line shortcut, and the cardinal sin: App's import
+        //                              silenced on evidence that belongs to its sibling
+        //   1  per FILE              — correct, and the only one of the three that is
+        //
+        // The per-function `invisible` hedge is deliberately NOT asserted here: both calls RESOLVE (the
+        // package's source is in an unscoped scan either way), so neither function needs a hedge and an
+        // assertion on it would pass for a reason unrelated to this pass.
+        XCTAssertEqual(shared?["calls"] as? Int, 1,
+                       "`Shared` must be disclosed EXACTLY once — App's import, not Ext's. 2 means the "
+                       + "pass claimed nothing; 0 means it claimed repo-wide, which silences a module "
+                       + "App cannot see. stderr: \(r.err)")
+    }
+
     /// **A SIBLING TARGET IS NOT ON YOUR IMPORT PATH — the SwiftPM twin of the `.xcodeproj` defect that
     /// took three review rounds to close.** Module identity was decided per PACKAGE: a file could claim
     /// every target its package declares. SwiftPM lets a target import only what its own `dependencies:`

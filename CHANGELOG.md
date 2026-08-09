@@ -50,6 +50,23 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   17608 analyzed) with the fix. Under the second, a `../repo`-style scan root disabled per-file identity
   outright. One normalizer now serves every site.
 
+- **⚠ A WHOLE-REPO SCAN OF AN `.xcodeproj` TREE NOW ANSWERS MODULE IDENTITY TOO.** Without `--target`
+  an app-level file had no owning `Package.swift` and no resolved scope, so it claimed nothing and every
+  module it imports was named a blind spot — including local packages the run had just analyzed.
+  NetNewsWire listed 32 uncovered modules, **14 of them local packages whose sources are in the same
+  report**; it now lists 17, and each of the 15 removed is confirmed by functions from that module's own
+  sources appearing in the report.
+
+  It resolves every target and merges the evidence PER FILE. Not a union over the repo's targets: in one
+  unscoped run of one tree, a file in a target that links the package claims its module while a file in a
+  sibling target that does not link it still discloses the same name. A union would be one line and
+  would silence the second file — the shortcut this ships a fixture against, because the ledger count
+  separates all three possible behaviours (2 = claims nothing, 0 = claimed repo-wide, 1 = correct).
+
+  A target that cannot be resolved is skipped rather than fatal, and the count is disclosed: whole-repo
+  makes no scoping promise, so its files simply keep disclosing. Cost is one resolution per target,
+  measured at 2.4s for NetNewsWire and 5.6s for firefox-ios whole-repo.
+
 - **⚠ AN XCODE TARGET IS A MODULE, and the scan used to name its own framework targets blind spots.**
   `--target Client` on firefox-ios scans eleven Xcode targets, and then reported four of them —
   `Storage` (112 imports), `Account` (20), `Localizations` (4), `Sync` (2) — as "INVISIBLE to the scan",

@@ -443,6 +443,107 @@ if sourcePaths.isEmpty {
 // plus Xcode 16 synchronized folders with their per-target membership exceptions, plus the in-project
 // dependency closure. Same refusal contract as the SPM path — every failure exits 2, because a
 // half-resolved scope is a purity claim over the files it silently dropped.
+/// The filesystem the Xcode resolver reads through — ONE construction, used by the `--target`
+/// path and the whole-repo pass. It was inline in the first and would have been copied into the
+/// second; a second copy of a filesystem stub is a second set of answers about the same disk.
+func makeXcodeScopeFS() -> XcodeScopeFS {
+    let fm = FileManager.default
+    func isDirectory(_ p: String) -> Bool {
+        var isD: ObjCBool = false
+        return fm.fileExists(atPath: p, isDirectory: &isD) && isD.boolValue
+    }
+    return XcodeScopeFS(
+            swiftFilesUnder: { dir in
+                guard isDirectory(dir), let en = fm.enumerator(atPath: dir) else { return nil }
+                var out: [String] = []
+                for case let sub as String in en where sub.hasSuffix(".swift") {
+                    out.append((dir as NSString).appendingPathComponent(sub))
+                }
+                return out
+            },
+            readFile: { try? String(contentsOfFile: $0, encoding: .utf8) },
+            subdirectories: { dir in
+                ((try? fm.contentsOfDirectory(atPath: dir)) ?? [])
+                    .map { (dir as NSString).appendingPathComponent($0) }
+                    .filter(isDirectory)
+            },
+            directoryExists: isDirectory,
+            dumpPackage: { dir in
+                // `swift package dump-package`: SwiftPM itself reading a manifest the structural
+                // parser proved it cannot (targets built by helper functions over hoisted arrays —
+                // WordPress's Modules). This EXECUTES the manifest, which is why it is a last resort,
+                // is disclosed in the scope note, and is never reached for a manifest the structural
+                // parse fully reads. No toolchain ⇒ nil ⇒ the resolution refuses loudly downstream.
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+                p.arguments = ["swift", "package", "dump-package", "--package-path", dir]
+                let out = Pipe(), err = Pipe()
+                p.standardOutput = out
+                p.standardError = err
+                guard (try? p.run()) != nil else { return nil }
+                let data = out.fileHandleForReading.readDataToEndOfFile()
+                _ = err.fileHandleForReading.readDataToEndOfFile()
+                p.waitUntilExit()
+                guard p.terminationStatus == 0 else { return nil }
+                return String(data: data, encoding: .utf8)
+            })
+}
+
+/// Fold resolved Xcode scopes into the two PER-FILE maps the driver consults: which local package
+/// products, and which sibling Xcode-target modules, each source file may import.
+///
+/// ONE IMPLEMENTATION, called by both the `--target` path and the whole-repo path. The whole-repo path
+/// arrived second, and writing a second copy of this is precisely the mistake this file has now made
+/// four times under different names — two manifest readers, two xcconfig readers, two path
+/// normalizers, a dead twin of a live function. The subtle parts below are why it matters.
+///
+/// A file compiled by SEVERAL targets takes the UNION of their evidence: it must build in every one of
+/// them, so anything it imports is on all their import paths.
+///
+/// KEYED BY THE DISK'S SPELLING. The membership join is case-INSENSITIVE because a `PBXFileReference`
+/// whose case drifted from disk still builds in Xcode, while the driver looks this map up with the path
+/// it walked off disk. But only where the lowercased form picks out exactly ONE file on each side — on
+/// a case-sensitive volume `A.swift` and `a.swift` are two files, and letting them share a key would
+/// hand one the other's claims, which trades a false disclosure for a purity claim. Ambiguity yields no
+/// entry, so it discloses.
+func mergePerFileXcodeEvidence(scopes: [XcodeTargetScope], sourcePaths: [String],
+                               links: inout [String: [LocalProductRef]],
+                               modules: inout [String: [String]]) {
+    var linksByLowerKey: [String: [LocalProductRef]] = [:]
+    var modulesByLowerKey: [String: [String]] = [:]
+    for scope in scopes {
+        for (tname, tfiles) in scope.filesByTarget {
+            let prods = scope.localProductsByTarget[tname] ?? []
+            let mods = scope.xcodeModulesByTarget[tname] ?? []
+            if prods.isEmpty && mods.isEmpty { continue }
+            for f in tfiles {
+                let key = candorAbsolutePath(f).lowercased()
+                if !prods.isEmpty {
+                    var have = linksByLowerKey[key] ?? []
+                    for d in prods where !have.contains(d) { have.append(d) }
+                    linksByLowerKey[key] = have
+                }
+                if !mods.isEmpty {
+                    var have = modulesByLowerKey[key] ?? []
+                    for m in mods where !have.contains(m) { have.append(m) }
+                    modulesByLowerKey[key] = have
+                }
+            }
+        }
+    }
+    var seenLower = Set<String>(), ambiguous = Set<String>()
+    for raw in sourcePaths {
+        let key = candorAbsolutePath(raw).lowercased()
+        if !seenLower.insert(key).inserted { ambiguous.insert(key) }
+    }
+    for raw in sourcePaths {
+        let abs = candorAbsolutePath(raw), key = abs.lowercased()
+        guard !ambiguous.contains(key) else { continue }
+        if let prods = linksByLowerKey[key] { links[abs] = prods }
+        if let mods = modulesByLowerKey[key] { modules[abs] = mods }
+    }
+}
+
 func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [String],
                         resolved: inout (target: String, project: String, entitlements: String?)?,
                         resolvedLinksByFile: inout [String: [LocalProductRef]],
@@ -533,41 +634,7 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
             return fm.fileExists(atPath: p, isDirectory: &isD) && isD.boolValue
         }
         let scope = try xcodeTargetScope(model: hit.model, projectDir: projectDir, targetName: want,
-                                         fs: XcodeScopeFS(
-            swiftFilesUnder: { dir in
-                guard isDirectory(dir), let en = fm.enumerator(atPath: dir) else { return nil }
-                var out: [String] = []
-                for case let sub as String in en where sub.hasSuffix(".swift") {
-                    out.append((dir as NSString).appendingPathComponent(sub))
-                }
-                return out
-            },
-            readFile: { try? String(contentsOfFile: $0, encoding: .utf8) },
-            subdirectories: { dir in
-                ((try? fm.contentsOfDirectory(atPath: dir)) ?? [])
-                    .map { (dir as NSString).appendingPathComponent($0) }
-                    .filter(isDirectory)
-            },
-            directoryExists: isDirectory,
-            dumpPackage: { dir in
-                // `swift package dump-package`: SwiftPM itself reading a manifest the structural
-                // parser proved it cannot (targets built by helper functions over hoisted arrays —
-                // WordPress's Modules). This EXECUTES the manifest, which is why it is a last resort,
-                // is disclosed in the scope note, and is never reached for a manifest the structural
-                // parse fully reads. No toolchain ⇒ nil ⇒ the resolution refuses loudly downstream.
-                let p = Process()
-                p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-                p.arguments = ["swift", "package", "dump-package", "--package-path", dir]
-                let out = Pipe(), err = Pipe()
-                p.standardOutput = out
-                p.standardError = err
-                guard (try? p.run()) != nil else { return nil }
-                let data = out.fileHandleForReading.readDataToEndOfFile()
-                _ = err.fileHandleForReading.readDataToEndOfFile()
-                p.waitUntilExit()
-                guard p.terminationStatus == 0 else { return nil }
-                return String(data: data, encoding: .utf8)
-            }))
+                                         fs: makeXcodeScopeFS())
         // CASE-INSENSITIVE membership. macOS filesystems are; a pbxproj path whose case drifted from
         // the disk's still builds in Xcode, and an exact-case compare would silently drop that file
         // from the scope — the miss-shaped failure. Two repo files differing only by case would
@@ -646,39 +713,8 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
         // exactly one file on each side. On a case-sensitive volume `A.swift` and `a.swift` are two
         // files; letting them share a key would hand one the other's links, which trades this false
         // disclosure for a purity claim. Ambiguity here yields no entry, so it discloses.
-        var linksByLowerKey: [String: [LocalProductRef]] = [:]
-        var modulesByLowerKey: [String: [String]] = [:]
-        var ambiguousLowerKeys = Set<String>()
-        for (tname, tfiles) in scope.filesByTarget {
-            for f in tfiles {
-                let mk = candorAbsolutePath(f).lowercased()
-                var have = modulesByLowerKey[mk] ?? []
-                for m in scope.xcodeModulesByTarget[tname] ?? [] where !have.contains(m) { have.append(m) }
-                if !have.isEmpty { modulesByLowerKey[mk] = have }
-            }
-            guard let prods = scope.localProductsByTarget[tname], !prods.isEmpty else { continue }
-            for f in tfiles {
-                // The resolver's paths can carry a `..` segment (a group whose path escapes the project
-                // dir — firefox's `BrowserKit` sits at `firefox-ios/../BrowserKit`), so normalize both
-                // sides with the one normalizer before lowercasing.
-                let key = candorAbsolutePath(f).lowercased()
-                var have = linksByLowerKey[key] ?? []
-                for d in prods where !have.contains(d) { have.append(d) }
-                linksByLowerKey[key] = have
-            }
-        }
-        var seenLower = Set<String>()
-        for raw in sourcePaths {
-            let key = candorAbsolutePath(raw).lowercased()
-            if !seenLower.insert(key).inserted { ambiguousLowerKeys.insert(key) }
-        }
-        for raw in sourcePaths {
-            let abs = candorAbsolutePath(raw)
-            let key = abs.lowercased()
-            guard !ambiguousLowerKeys.contains(key) else { continue }
-            if let prods = linksByLowerKey[key] { resolvedLinksByFile[abs] = prods }
-            if let mods = modulesByLowerKey[key] { resolvedModulesByFile[abs] = mods }
-        }
+        mergePerFileXcodeEvidence(scopes: [scope], sourcePaths: sourcePaths,
+                                  links: &resolvedLinksByFile, modules: &resolvedModulesByFile)
         // A test bundle is selectable by name — but its verdict is about test code, and saying so is
         // the difference between a feature and a trap for whoever scoped to `MyAppTests` by accident.
         if scope.target.isTest {
@@ -771,6 +807,58 @@ if let want = scopeTarget {
         FileHandle.standardError.write("candor-swift: --target \(want): \(error)\n".data(using: .utf8)!)
         exit(2)
     }
+    }
+} else {
+    // ── WHOLE-REPO IDENTITY FOR AN `.xcodeproj` TREE ─────────────────────────────────────────────
+    //
+    // Without `--target`, an app-level file had no owning `Package.swift` and no resolved scope, so it
+    // claimed NOTHING and every module it imports was named a blind spot — including local packages and
+    // sibling framework targets this very run had analyzed. Measured on NetNewsWire: 32 uncovered
+    // modules, 14 of them local packages whose sources are in the same report.
+    //
+    // The answer is the same evidence `--target` uses, gathered for EVERY target instead of one. A file
+    // compiled by several targets takes the union of their evidence, which is sound because it must
+    // build in all of them.
+    //
+    // NOT A UNION OVER TARGETS' CLOSURES. That shortcut is one line and re-opens the class that produced
+    // ten silent under-reports: a file in the Widget Extension would be claimed on the app's links. The
+    // merge is per FILE, from each target's own file list.
+    //
+    // A target that REFUSES is skipped, not fatal. Whole-repo is not the scoped promise — the scan
+    // proceeds over every file either way, and a skipped target simply contributes no claims, so its
+    // files keep disclosing. Refusing the whole run because one auxiliary target is unresolvable would
+    // turn a disclosure improvement into a dead end.
+    let projects = findXcodeProjects(under: rootDir)
+    if !projects.isEmpty {
+        var scopes: [XcodeTargetScope] = []
+        var refused = 0
+        let scopeFS = makeXcodeScopeFS()
+        for projPath in projects {
+            let pbx = (projPath as NSString).appendingPathComponent("project.pbxproj")
+            guard let text = try? String(contentsOfFile: pbx, encoding: .utf8),
+                  let model = try? parsePbxproj(text: text, file: pbx) else { continue }
+            let projectDir = (projPath as NSString).deletingLastPathComponent
+            for info in pbxprojTargets(model) {
+                if let scope = try? xcodeTargetScope(model: model, projectDir: projectDir,
+                                                     targetName: info.name, fs: scopeFS) {
+                    scopes.append(scope)
+                } else {
+                    refused += 1
+                }
+            }
+        }
+        mergePerFileXcodeEvidence(scopes: scopes, sourcePaths: sourcePaths,
+                                  links: &resolvedXcodeLinksByFile,
+                                  modules: &resolvedXcodeModulesByFile)
+        // DISCLOSE THE SKIPS. A target this could not resolve is a set of files answering with less
+        // than the rest, and a reader comparing a whole-repo ledger against a scoped one deserves to
+        // know why they differ.
+        if refused > 0 {
+            FileHandle.standardError.write(("candor-swift: note — \(refused) Xcode target(s) could not be "
+                + "resolved for module identity; files only they compile keep disclosing every module "
+                + "they import. Scan with `--target <name>` to see why one of them refuses.\n")
+                .data(using: .utf8)!)
+        }
     }
 }
 
