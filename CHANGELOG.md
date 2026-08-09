@@ -10,6 +10,10 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 ## Unreleased
 
 
+
+- **The configured-dep refusal reaches the machine channel.** `depsFail` exited raw, so `--gate-json -`
+  got nothing and a file sink kept the armed placeholder rather than the reason. PART 35 has pinned the
+  EXIT CODE for this cause in four engines for a release; nothing pinned the CHANNEL until PART 36 (b8).
 - **The `gate` verb registers its stream sink before anything can exit, and writes it once.**
   `refuseGateAndExit` already knew how to write `-` to stdout; the gate verbs pre-pass never put it in
   the sink list, so an exit-2 during argument parsing left stdout empty. Registering it then exposed the
