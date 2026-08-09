@@ -172,6 +172,11 @@ var resolvedXcodeLinksByFile: [String: [LocalProductRef]] = [:]
 /// …and the Xcode-target MODULES each file's target(s) may import. Separate map, same keys, because a
 /// target can link no local package and still import a sibling framework target.
 var resolvedXcodeModulesByFile: [String: [String]] = [:]
+// A VALUELESS GATE-ADJACENT FLAG IS AN EXIT-2 CAUSE LIKE ANY OTHER. These three exited raw, so
+// `--gate-json -` got nothing — the only cause left doing that after every other one had been routed,
+// and found by sweeping the causes a user can actually trigger rather than by reading exit sites. rust
+// and ts both answered it already. `refuseGateAndExit` reaches the stream because the pre-pass below
+// has already registered it; on a run with no sink it degrades to the same stderr line and exit 2.
 // ── SPEC §3.3.1 ⟨0.27⟩ ARM FIRST, AND NEVER OVER AN INPUT.
 //
 // A pre-pass that learns the sink and this run's inputs with NO side effects, before the flag loop. It
@@ -206,7 +211,8 @@ while let a = argIter.next() {
     // CANDOR_POLICY env gate with nil and exit 0 — the §6.2 'gateless green' state. exit 2.
     case "--out":
         guard let v = argIter.next(), !v.hasPrefix("-") else {
-            FileHandle.standardError.write("candor-swift: --out requires a value\n".data(using: .utf8)!); exit(2)
+            FileHandle.standardError.write("candor-swift: --out requires a value\n".data(using: .utf8)!)
+            refuseGateAndExit("candor-swift: --out requires a value")
         }
         outPrefix = v
     case "--json":
@@ -216,7 +222,8 @@ while let a = argIter.next() {
         wantJson = true
     case "--policy":
         guard let v = argIter.next(), !v.hasPrefix("-") else {
-            FileHandle.standardError.write("candor-swift: --policy requires a value\n".data(using: .utf8)!); exit(2)
+            FileHandle.standardError.write("candor-swift: --policy requires a value\n".data(using: .utf8)!)
+            refuseGateAndExit("candor-swift: --policy requires a value")
         }
         policyPath = v
     case "--gate-json":
@@ -224,7 +231,8 @@ while let a = argIter.next() {
         // closed like --policy — but `-` (stream the verdict to stdout, the §3.3 pipe form the other
         // three engines accept) is valid; the old guard rejected it, a cross-engine divergence.
         guard let v = argIter.next(), v == "-" || !v.hasPrefix("-") else {
-            FileHandle.standardError.write("candor-swift: --gate-json requires a value\n".data(using: .utf8)!); exit(2)
+            FileHandle.standardError.write("candor-swift: --gate-json requires a value\n".data(using: .utf8)!)
+            refuseGateAndExit("candor-swift: --gate-json requires a value")
         }
         gateJsonPath = v
     case "--target":

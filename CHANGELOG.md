@@ -11,6 +11,12 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 
 
+
+- **A gate-adjacent flag given NO VALUE now reaches the machine channel.** `--policy`, `--out` and
+  `--gate-json` with a missing value exited raw, so `--gate-json -` got nothing — the last cause in this
+  engine still doing that after every other had been routed, and the one §3.1 names beside the unknown
+  flag. rust and ts already answered it. Found by sweeping the causes a user can TRIGGER rather than by
+  reading exit sites, which is a different list and a shorter one.
 - **The configured-dep refusal reaches the machine channel.** `depsFail` exited raw, so `--gate-json -`
   got nothing and a file sink kept the armed placeholder rather than the reason. PART 35 has pinned the
   EXIT CODE for this cause in four engines for a release; nothing pinned the CHANNEL until PART 36 (b8).
