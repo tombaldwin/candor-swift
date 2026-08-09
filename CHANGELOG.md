@@ -12,6 +12,15 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 
 
+
+- **⚠ A `--gate-json` sink INSIDE a `deps` DIRECTORY destroyed the operator's dep report.** `deps`
+  accepts a directory — `--workspace` writes `.candor/deps/` and hands that back, so it is the common
+  spelling — and the loader walks it and reads each report inside. The §3.3.1 sink-over-input guard
+  registered only the DIRECTORY, which never equals a file within it, so `--gate-json <depdir>/lib.json`
+  was unguarded: arming destroyed the report, the run chained the wreckage and exited 0 with `ok: true`
+  written over the input. All four engines. The FILE spelling of this channel had been guarded for a
+  release; the directory spelling had not, and no row posed it. Now pinned by conformance PART 36 (b14),
+  which asserts both the refusal AND that nothing was written.
 - **A gate-adjacent flag given NO VALUE now reaches the machine channel.** `--policy`, `--out` and
   `--gate-json` with a missing value exited raw, so `--gate-json -` got nothing — the last cause in this
   engine still doing that after every other had been routed, and the one §3.1 names beside the unknown
