@@ -29,7 +29,10 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   **Measured**, 20 `--target` scans across NetNewsWire, IceCubesApp and firefox-ios. THIS entry's change
   leaves NetNewsWire and firefox untouched. Their gains come from two OTHER entries below — an Xcode
   target being a module, and the path-normalization fix — so on the released build firefox's `Client`
-  reads 17608 analyzed files and 51 uncovered modules against 0.26's 17562 and 55. What THIS one moves is IceCubesApp's app target: 48 uncovered modules to 38, and **all
+  reads 17608 analyzed functions and 51 uncovered modules, against 17562 and 55 at the start of this
+  release's work. NOT "against 0.26": the released 0.26 engine has no `--target` flag at all and cannot
+  produce those numbers. Every before/after figure in this section is measured against `430c5ef`, the
+  commit this thread started from, which is already past 0.26. What THIS one moves is IceCubesApp's app target: 48 uncovered modules to 38, and **all
   ten names removed have analyzed functions in the same report** (StatusKit 284, Account 109,
   DesignSystem 46, …). The 279 entries that leave `functions` with
   them carried no inferred effect between them — each held only an `invisible` hedge for a module this
@@ -48,8 +51,10 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   the project directory produced keys the membership filter could never match, so every file behind it
   fell out of the scan with **no `unanalyzed` entry and no warning** — a purity claim over files the
   project explicitly lists, flipping on whether you wrote `.` or an absolute path. This is firefox-ios's
-  real shape: its packages sit at `firefox-ios/../BrowserKit`, and the scan gains **46 files** (17562 →
-  17608 analyzed) with the fix. Under the second, a `../repo`-style scan root disabled per-file identity
+  real shape: its packages sit at `firefox-ios/../BrowserKit`, and with the fix its `Client` scan recovers
+  **one source file** (1191 → 1192 of 1197) carrying **46 analyzed functions** (17562 → 17608). An earlier
+  draft of this entry called that "46 files": `analyzed.count` is the analyzed-FUNCTION set, as its own
+  definition says, and one file is what the header reports. Under the second, a `../repo`-style scan root disabled per-file identity
   outright. One normalizer now serves every site.
 
 - **`scripts/scope-monotonicity.sh` — a self-differential property, one engine against itself.** For a
@@ -760,8 +765,13 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   duckduckgo/iOS carries 8 such settings and WordPress-iOS 12. A false rejection warning is worse than no
   verb — it teaches the reader to distrust the tool. It can only ADD to the declared set, so an empty
   purpose string is still not a declaration and the provenance is reported rather than silently merged (a
-  setting can belong to a different target). Verified it still catches a real gap, and it found a true
-  positive in the wild: WordPress-iOS calls `startDeviceMotionUpdates()` with no `NSMotionUsageDescription`.
+  setting can belong to a different target). Verified it still catches a real gap.
+
+  **That sentence used to end "and it found a true positive in the wild: WordPress-iOS calls
+  `startDeviceMotionUpdates()` with no `NSMotionUsageDescription`". It was not a true positive**, and the
+  entry below on the `CMMotionManager` split says so: Apple's page for that key names four APIs, raw
+  accelerometer streams are not among them, and WordPress needs no key. A retraction two entries away
+  from the claim is not a retraction, so it is made here.
 
 - **A baseline DECLARED in `.candor/config` but missing is now exit 2, not a green pass.** An adopter
   review measured this as the second-likeliest first-commit mistake (`.candor/` committed, the baseline
