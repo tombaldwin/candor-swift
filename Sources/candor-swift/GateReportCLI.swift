@@ -408,6 +408,17 @@ func runGateReportCLI(_ args: [String]) -> Never {
         // asked a different directory's question and left a config-declared policy unguarded.
         refuseGateJsonOverAnyInput(gp, ".", pre.policy)
         if gp != "-" { armGateJsonFailClosed(gp) }
+        // …AND THE STREAM SINK MUST BE REGISTERED HERE, which it was not. `armGateJsonFailClosed`
+        // writes a fail-closed placeholder to a FILE; a stream cannot hold one, so the stream's analog
+        // is being in `gateVerdictSinks` before anything can exit — `refuseGateAndExit` already knows
+        // how to write "-" to stdout, it just had an empty sink list to write to.
+        //
+        // The SCAN path registers it (main.swift). This verb did not, so an exit-2 during argument
+        // parsing left stdout EMPTY while the very same verb, refusing later from inside `gate()`,
+        // streamed the document. Measured across the family at the 0.27 go/no-go: java, ts and swift
+        // all had this hole on the gate verb, and PART 36's stream rows never caught it because every
+        // one of them runs the scan route.
+        else if !gateVerdictSinks.contains("-") { gateVerdictSinks.append("-") }
     }
     var reportFlag: String?, policyFlag: String?, gateJsonPath: String?
     var wantJson = false
