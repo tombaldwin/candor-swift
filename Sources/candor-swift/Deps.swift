@@ -331,6 +331,17 @@ func readableAnalyzedCount(_ analyzed: Any?) -> Int? {
     return Int(d)
 }
 
+/// The `deps` / `CANDOR_DEPS` separator set. ONE PREDICATE BECAUSE TWO SPELLINGS WERE A SILENT GREEN:
+/// the §3.3.1 sink-over-input guard carried its own list omitting `\n`/`\r`, so a newline-separated
+/// spec was one unresolvable token to the guard and two real paths here — and a `--gate-json` naming
+/// one of those reports destroyed it, the run exiting 0 with `ok: true` over the operator's input.
+///
+/// NOT `isWhitespace`, which is true for U+00A0: these are PATHS, and a non-breaking space inside one
+/// is part of the path rather than a separator, which is how java, rust and ts read it.
+func isDepSeparator(_ c: Character) -> Bool {
+    c == " " || c == "\t" || c == "\n" || c == "\r" || c == ":" || c == ","
+}
+
 private func depsFail(_ msg: String) -> Never {
     FileHandle.standardError.write("candor-swift: \(msg) — failing (exit 2), a configured dep must not silently read pure\n".data(using: .utf8)!)
     // THROUGH THE GATE SINKS. This exited raw, so `--gate-json -` got nothing and a file sink kept the
@@ -364,7 +375,7 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
         let norm = (canon as NSString).standardizingPath
         if seen.insert(norm).inserted { files.append(f) }
     }
-    for tok in spec.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" || $0 == "\r" || $0 == ":" || $0 == "," }) {
+    for tok in spec.split(whereSeparator: isDepSeparator) {
         let t = String(tok)
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: t, isDirectory: &isDir) else {

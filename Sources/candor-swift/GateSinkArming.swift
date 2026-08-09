@@ -53,9 +53,12 @@ func runInputs(_ target: String?, _ policyFlag: String?) -> [(String, String)] {
                        ("CANDOR_CONFIG", "CANDOR_CONFIG")] {
         if let x = env[v], !x.isEmpty { out.append((x, label)) }
     }
-    // The SEPARATOR SET the dep loader accepts, not just `:` — a space-separated list registered as one
-    // unresolvable token, so no dep in it was protected.
-    for d in (env["CANDOR_DEPS"] ?? "").split(whereSeparator: { $0 == ":" || $0 == "," || $0 == " " || $0 == "\t" })
+    // THE SAME SET THE LOADER USES — `isDepSeparator`. This comment claimed that while spelling a
+    // DIFFERENT set: it omitted `\n` and `\r`, so a newline-separated `CANDOR_DEPS` was ONE
+    // unresolvable token here and two real paths in the loader. A `--gate-json` naming one of those
+    // reports was then unguarded — arming overwrote it and the run exited 0 with `ok: true` written
+    // over the operator's own dep report. Measured live in three engines; java was the intact control.
+    for d in (env["CANDOR_DEPS"] ?? "").split(whereSeparator: isDepSeparator)
         .map(String.init) where !d.isEmpty {
         out.append((d, "a CANDOR_DEPS report"))
     }

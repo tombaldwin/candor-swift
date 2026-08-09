@@ -639,12 +639,19 @@ func runGateReportCLI(_ args: [String]) -> Never {
     for v in violations { FileHandle.standardError.write(("[\(v.rule)] \(v.detail)\n").data(using: .utf8)!) }
     // `--json` IS `--gate-json -`: the same document, from the same writer the scan uses, so a consumer
     // cannot tell a scanned verdict from a report-gated one.
-    if wantJson { writeGateVerdict(violations, to: "-", spec: specVersion, analyzedCount: env.analyzedCount,
-                                   unanalyzed: env.unanalyzed, coverage: Array(env.coverageModules),
-                                   policyVocabulary: policyVocabulary, unevaluated: refused) }
-    if let gp = gateJsonPath { writeGateVerdict(violations, to: gp, spec: specVersion, analyzedCount: env.analyzedCount,
-                                                unanalyzed: env.unanalyzed, coverage: Array(env.coverageModules),
-                                                policyVocabulary: policyVocabulary, unevaluated: refused) }
+    // DEDUPED, like the refusal path. `--json` IS `--gate-json -`, so naming both wrote the SAME
+    // document twice onto one stream — two concatenated JSON objects, which parse as neither. The
+    // round-2 dedupe went into `refuseGateAndExit` and covered only the REFUSAL; these verdict writes
+    // kept their per-flag shape, so exit 0 and exit 1 still double-wrote while exit 2 was clean. That
+    // asymmetry is why PART 36 (b6) passed: it poses the refusal path only.
+    var verdictSinks: [String] = []
+    if wantJson { verdictSinks.append("-") }
+    if let gp = gateJsonPath, !verdictSinks.contains(gp) { verdictSinks.append(gp) }
+    for sink in verdictSinks {
+        writeGateVerdict(violations, to: sink, spec: specVersion, analyzedCount: env.analyzedCount,
+                         unanalyzed: env.unanalyzed, coverage: Array(env.coverageModules),
+                         policyVocabulary: policyVocabulary, unevaluated: refused)
+    }
     if violations.isEmpty {
         FileHandle.standardError.write("candor-swift: policy ✓\n".data(using: .utf8)!)
     } else {
