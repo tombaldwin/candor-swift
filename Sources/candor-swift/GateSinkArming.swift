@@ -66,12 +66,8 @@ func runInputs(_ target: String?, _ policyFlag: String?) -> [(String, String)] {
         // operator's report at exit 0. Expanded HERE rather than in `sameArtifact`: the scan TARGET is
         // an input too, and a verdict written into the scanned tree is ordinary usage — the general
         // rule refused it and took 33 tests with it. Only a dep directory has its CONTENTS read.
-        var isDir: ObjCBool = false
-        if FileManager.default.fileExists(atPath: d, isDirectory: &isDir), isDir.boolValue,
-           let entries = try? FileManager.default.contentsOfDirectory(atPath: d) {
-            for f in entries where f.hasSuffix(".json") && !f.contains("callgraph") && !f.contains("hierarchy") {
-                out.append(((d as NSString).appendingPathComponent(f), "a CANDOR_DEPS report"))
-            }
+        for f in depReportFiles(d) where f != d {
+            out.append((f, "a CANDOR_DEPS report"))
         }
     }
     // …AND THE CONFIG'S OWN KEYS, THROUGH THE ENGINE'S OWN DISCOVERY AND ITS OWN LOADER. This used to

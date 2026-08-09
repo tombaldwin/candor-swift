@@ -338,6 +338,29 @@ func readableAnalyzedCount(_ analyzed: Any?) -> Int? {
 ///
 /// NOT `isWhitespace`, which is true for U+00A0: these are PATHS, and a non-breaking space inside one
 /// is part of the path rather than a separator, which is how java, rust and ts read it.
+/// Every report file a `deps` TOKEN names — the one enumeration, used by the loader below AND by the
+/// §3.3.1 sink-over-input guard in `GateSinkArming.swift`.
+///
+/// SHARED BECAUSE WRITING IT TWICE WAS WRONG TWICE. The guard first registered only the directory
+/// token, so a sink inside a dep directory destroyed the operator's report at exit 0. The repair then
+/// hand-wrote a FLAT `contentsOfDirectory` beside this RECURSIVE `enumerator`, so a report one level
+/// down stayed unguarded. A guard that enumerates differently from the loader guards a different set.
+func depReportFiles(_ tok: String) -> [String] {
+    let fm = FileManager.default
+    var isDir: ObjCBool = false
+    guard fm.fileExists(atPath: tok, isDirectory: &isDir) else { return [] }
+    guard isDir.boolValue else { return [tok] }
+    guard let en = fm.enumerator(atPath: tok) else { return [] }
+    var found: [String] = []
+    for case let rel as String in en {
+        let name = (rel as NSString).lastPathComponent
+        if name.hasSuffix(".json") && !name.contains("callgraph") && !name.contains("hierarchy") {
+            found.append((tok as NSString).appendingPathComponent(rel))
+        }
+    }
+    return found.sorted()
+}
+
 func isDepSeparator(_ c: Character) -> Bool {
     c == " " || c == "\t" || c == "\n" || c == "\r" || c == ":" || c == ","
 }
@@ -382,15 +405,7 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
             depsFail("CANDOR_DEPS names \(t) but it is not a readable file or directory")
         }
         if isDir.boolValue {
-            guard let en = fm.enumerator(atPath: t) else { depsFail("CANDOR_DEPS cannot walk directory \(t)") }
-            var found: [String] = []
-            for case let rel as String in en {
-                let name = (rel as NSString).lastPathComponent
-                if name.hasSuffix(".json") && !name.contains("callgraph") && !name.contains("hierarchy") {
-                    found.append((t as NSString).appendingPathComponent(rel))
-                }
-            }
-            for f in found.sorted() { push(f) }
+            for f in depReportFiles(t) { push(f) }
         } else {
             push(t)
         }
