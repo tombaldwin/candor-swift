@@ -8,6 +8,8 @@ verdicts, so an engine upgrade across it is baseline-invalidating (regenerate an
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
 ## Unreleased
+## [0.27.0] — 2026-08-07
+
 
 
 
@@ -645,7 +647,6 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   framework-mediated access with no call site — a web view's geolocation, a share sheet's Save Image —
   and acting on the old phrasing crashes the app at the share sheet.
 
-## [0.27.0] — 2026-08-07
 
 - **CI-only: the plutil differential ran on Linux and reported 38 false disagreements.** Its skip asked
   whether `/usr/bin/plutil` EXISTS — and the Linux CI image has one (libplist's) that does not accept
