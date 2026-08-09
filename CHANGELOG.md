@@ -14,6 +14,15 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 
 
+
+- **An UNREADABLE config left a stale green at the FILE sink**, while the same cause streamed its
+  refusal correctly. The §3.3.1 pre-pass reads the config to learn what the sink must not overwrite and
+  runs BEFORE arming; its own comment said that read was "LENIENT — no exit, no diagnostic", which was
+  an assumption about the reader rather than a property of it. Three exit sites in that reader could
+  fire, so the process died before arming and a previous run's `ok: true` survived on disk — the exact
+  outcome arming exists to prevent. Third engine with this shape (ts and agents had it), and the first
+  where only ONE of the two sink forms was affected: the stream was already right, which is why it took
+  a file-sink probe to see. Pinned by conformance PART 36 (b15).
 - **…and the guard now enumerates a dep directory exactly as the LOADER does.** The first repair
   registered the directory's files with a FLAT read beside a RECURSIVE loader walk, so a report one
   level down stayed unguarded — and for `--deps`, which writes one subdirectory per `name@version`, the

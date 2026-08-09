@@ -75,7 +75,7 @@ func runInputs(_ target: String?, _ policyFlag: String?) -> [(String, String)] {
     // place it disagreed with the real one was a file the guard failed to protect.
     guard let cfg = discoverConfigFile(targetPath: target ?? ".") else { return out }
     out.append((cfg, "the discovered .candor/config"))
-    let values = loadCandorConfig(targetPath: target ?? ".")
+    let values = loadCandorConfig(targetPath: target ?? ".", lenient: true)
     for key in ["policy", "baseline"] {
         if let v = values[key], !v.isEmpty { out.append((v, "the config's `\(key)`")) }
     }

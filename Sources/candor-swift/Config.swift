@@ -40,7 +40,7 @@ func discoverConfigText(targetPath: String) -> String? { discoverConfig(targetPa
 /// format exists to refuse, and the remedy is the usual one — not to forbid the input, but to make it
 /// unable to act unnamed. Discovery walks parent directories, so an alias file anywhere ABOVE the anchor
 /// participates; naming it is the only thing that makes that visible.
-func discoverConfig(targetPath: String) -> (path: String, text: String)? {
+func discoverConfig(targetPath: String, lenient: Bool = false) -> (path: String, text: String)? {
     // CONFIGURED-BUT-UNUSABLE FAILS LOUD, ON THIS ROUTE TOO. Both `try?`s here returned nil, so a
     // CANDOR_CONFIG naming a nonexistent file — or a discovered config that exists and cannot be read —
     // silently became "no config" and the run continued WITHOUT whatever it declared: a policy, a
@@ -49,6 +49,18 @@ func discoverConfig(targetPath: String) -> (path: String, text: String)? {
     // input. §3.4's posture is the unreadable-policy one, and it does not vary by verb.
     if let override = ProcessInfo.processInfo.environment["CANDOR_CONFIG"] {
         guard let t = try? String(contentsOfFile: override, encoding: .utf8) else {
+            // `lenient` RETURNS NIL WHERE THIS WOULD EXIT. The §3.3.1 pre-pass reads the config to learn
+            // which files the sink must not overwrite, and it runs BEFORE arming — its own comment says
+            // the read is "LENIENT … no exit, no diagnostic", which was an assumption about this
+            // function rather than a property of it. An unreadable CANDOR_CONFIG therefore exited inside
+            // the pre-pass, before `armGateJsonFailClosed`, leaving a previous run's `ok: true` intact
+            // at the file sink. Measured: swift STALE-GREEN where java, rust and ts all wrote a refusal.
+            //
+            // Third engine with this exact shape — ts and agents had it too, both fixed the same way.
+            // Nothing is lost: a config nobody can read declares no inputs anyone can name, so the
+            // collision check over them is vacuous, and the REAL load refuses a moment later with the
+            // sink armed.
+            if lenient { return nil }
             refuseGateAndExit("candor-swift: CANDOR_CONFIG set but \(override) could not be read — "
                 + "failing (exit 2, unevaluable). A config that cannot be read is a guard the operator "
                 + "believes is on.")
@@ -64,6 +76,7 @@ func discoverConfig(targetPath: String) -> (path: String, text: String)? {
         let cand = (dir as NSString).appendingPathComponent(".candor/config")
         if FileManager.default.fileExists(atPath: cand) {
             guard let t = try? String(contentsOfFile: cand, encoding: .utf8) else {
+                if lenient { return nil }
                 refuseGateAndExit("candor-swift: \(cand) exists but could not be read — failing "
                     + "(exit 2, unevaluable). Treating it as absent would run without whatever it "
                     + "declares.")
@@ -103,13 +116,16 @@ func discoverConfigFile(targetPath: String) -> String? {
     return nil
 }
 
-func loadCandorConfig(targetPath: String) -> [String: String] {
+func loadCandorConfig(targetPath: String, lenient: Bool = false) -> [String: String] {
     var file: String? = nil
     if let override = ProcessInfo.processInfo.environment["CANDOR_CONFIG"] {
         var isDir: ObjCBool = false
         if !FileManager.default.fileExists(atPath: override, isDirectory: &isDir) || isDir.boolValue {
             // ⟨0.24⟩ a broken gate CONFIG is an exit-2 cause like any other, and it writes the refusal
             // document too (SPEC §3.1, candor-spec `1503368` — the carve-out is gone).
+            // See the `lenient` note above: the pre-pass must be able to ask this question without the
+            // process dying before the sink is armed.
+            if lenient { return [:] }
             refuseGateAndExit("candor-swift: CANDOR_CONFIG set but \(override) is not a readable file — failing (exit 2)")
         }
         file = override
@@ -140,6 +156,7 @@ func loadCandorConfig(targetPath: String) -> [String: String] {
     // permission gap between the fileExists probe above and this read (e.g. a 0000-mode config) —
     // the CANDOR_CONFIG-names-no-file arm above is the tested fail-closed path.
     guard let text = try? String(contentsOfFile: file!, encoding: .utf8) else {
+        if lenient { return [:] }
         refuseGateAndExit("candor-swift: config \(file!) exists but could not be read — failing (exit 2)")
     }
     // Name the config that governs this scan — an ancestor-walk discovery is otherwise invisible, and a
