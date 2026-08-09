@@ -162,7 +162,8 @@ func swiftModuleOf(_ loc: String) -> String {
 }
 
 func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepIndex = DepIndex(),
-             xcodeLinksByFile: [String: [LocalProductRef]] = [:]) -> Analysis {
+             xcodeLinksByFile: [String: [LocalProductRef]] = [:],
+             xcodeModulesByFile: [String: [String]] = [:]) -> Analysis {
 
     var allFns: [FnInfo] = []
     var fields: [String: [String: (name: String?, isFunction: Bool)]] = [:]
@@ -484,7 +485,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         if let pkg = owningPackage(of: abs), let own = owningTarget(of: abs, in: pkg) {
             // BOTH conjuncts: the file's TARGET can import it, AND this run actually read it.
             importableByFile[rel] = importable(forTarget: own, in: pkg)
-        } else if let deps = xcodeLinksByFile[abs] {
+        } else if xcodeLinksByFile[abs] != nil || xcodeModulesByFile[abs] != nil {
+            let deps = xcodeLinksByFile[abs] ?? []
             // AN XCODE TARGET'S FILE has no owning `Package.swift` — a folder in an Xcode target is not
             // a module, and the target compiles all of its files into one. What it may import is the
             // local-package closure the `--target` resolver ALREADY walked, so this reads that answer
@@ -500,7 +502,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // disclosure.
             // EXPOSED, not importable: an Xcode target links a local package's PRODUCTS, so it sees
             // what that package publishes — not the internal targets only its own files may import.
-            var out = Set<String>()
+            // An Xcode target is a MODULE. Its files compile into one, and a target that depends on it
+            // imports it by name — so a scan that reads both and still calls the dependency invisible is
+            // describing a blind spot it does not have. These names come from the resolver, which
+            // already knows each member's own dependency closure and admits only members that
+            // contributed files: the run-analyzed conjunct, kept.
+            var out = Set(xcodeModulesByFile[abs] ?? [])
             for dep in deps {
                 // The RESOLVER's membership, intersected with what this run analyzed. Re-deriving the
                 // membership here was the third instance in this branch of a consumer throwing away a

@@ -237,6 +237,16 @@ public struct XcodeTargetScope {
     /// the app target does not gain the share extension's package links. Once identity moved per target
     /// nothing read the union any more, so it is gone rather than left lying beside the correct answer.
     public let localProductsByTarget: [String: [LocalProductRef]]
+    /// …and per Xcode target, the MODULE NAMES of the other Xcode targets in ITS OWN dependency
+    /// closure — because an Xcode target is a module too, and until this existed the scan named its own
+    /// framework targets blind spots. Measured on `firefox-ios --target Client`, whose closure scans
+    /// eleven of them: `Storage` was reported INVISIBLE against 112 imports while 332 of its functions
+    /// sat in that same report; `Account` 20, `Localizations` 4, `Sync` 2.
+    ///
+    /// PER MEMBER, not the selected target's closure, because dependency is directional: the app may
+    /// import its embedded framework and never the reverse. Only members that actually contributed
+    /// files appear, which keeps the run-analyzed conjunct that stands between this and a purity claim.
+    public let xcodeModulesByTarget: [String: [String]]
     /// REMOTE package products the closure depends on — not in this tree, κ-disclosed, never silent.
     public let remoteProductCount: Int
     /// Dependencies living in other `.xcodeproj`s — NOT resolved, κ-disclosed.
@@ -547,6 +557,10 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
     var productDeps: [(name: String, refId: String?, target: String)] = []
     var stack = [rootTid]
     var seenT = Set<String>()
+    // Xcode target id -> the ids it depends on DIRECTLY. The closure below is the SELECTED target's; a
+    // file belonging to a closure MEMBER needs that member's own closure, since dependency is
+    // directional — the app may import its embedded framework, never the reverse.
+    var targetEdges: [String: [String]] = [:]
     while let tid = stack.popLast() {
         guard seenT.insert(tid).inserted, let t = model.obj(tid) else { continue }
         closureIds.append(tid)
@@ -556,12 +570,14 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
         }
         for did in (t["dependencies"]?.array ?? []).compactMap(\.string) {
             guard let dep = model.obj(did) else { continue }
-            if let dt = dep["target"]?.string, model.obj(dt) != nil { stack.append(dt); continue }
+            if let dt = dep["target"]?.string, model.obj(dt) != nil {
+                targetEdges[tid, default: []].append(dt); stack.append(dt); continue }
             if let proxyId = dep["targetProxy"]?.string, let proxy = model.obj(proxyId) {
                 // Same-project proxy: the container IS this project's root object. Anything else
                 // points into another .xcodeproj — counted and disclosed, not resolved.
                 if proxy["containerPortal"]?.string == model.rootObject,
                    let remote = proxy["remoteGlobalIDString"]?.string, model.obj(remote) != nil {
+                    targetEdges[tid, default: []].append(remote)
                     stack.append(remote)
                 } else {
                     crossProject += 1
@@ -1032,6 +1048,73 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
         })
     }
 
+    // An Xcode target's own MODULE NAME. Xcode derives it from `PRODUCT_MODULE_NAME`, else
+    // `PRODUCT_NAME`, else the target name, then replaces every character that cannot appear in a Swift
+    // identifier with `_` — which is why `PaymentSheet Example` is imported as `PaymentSheet_Example`.
+    // Getting this wrong in the CLAIMING direction would be a purity claim over a module the target does
+    // not produce, so a value still holding an unexpanded `$(…)` is discarded rather than guessed at,
+    // falling back to the name Xcode itself would use.
+    func moduleName(ofTarget tid: String, named tname: String) -> String {
+        let settings = targetSettingValues(["PRODUCT_MODULE_NAME", "PRODUCT_NAME"], of: tid, model: model,
+                                           resolvedPath: resolvedPath, fs: fs)
+        func pick(_ key: String) -> String? {
+            guard let v = settings.last(where: { $0.0 == key })?.1 else { return nil }
+            let expanded = v.replacingOccurrences(of: "$(TARGET_NAME)", with: tname)
+                            .replacingOccurrences(of: "${TARGET_NAME}", with: tname)
+            return expanded.contains("$(") || expanded.contains("${") || expanded.isEmpty ? nil : expanded
+        }
+        let raw = pick("PRODUCT_MODULE_NAME") ?? pick("PRODUCT_NAME") ?? tname
+        return String(raw.map { $0.isLetter || $0.isNumber || $0 == "_" ? $0 : "_" })
+    }
+    var moduleOfTarget: [String: String] = [:]      // target id -> module name
+    for tid in closureIds {
+        guard let n = model.obj(tid)?["name"]?.string else { continue }
+        moduleOfTarget[tid] = moduleName(ofTarget: tid, named: n)
+    }
+    // …AND THE OTHER LINKING CHANNEL. A pbxproj states "target A uses target B" in two independent
+    // places: a `PBXTargetDependency` (build ORDER) and a `PBXBuildFile` in A's Frameworks phase
+    // pointing at B's `productReference` (the actual LINK). Real projects use one without the other:
+    // firefox's `WidgetKitExtension` links `Storage.framework` with no dependency entry, and reading
+    // only `dependencies` left 5 functions hedging a module the run had read. This is exact — the
+    // product file reference identifies its target — not a name match.
+    //
+    // Edges only, NOT the scan closure: what gets SCANNED is a separate question and changing it here
+    // would silently move every scope. The emptiness guard below is what keeps that safe — a target
+    // that contributed no files is never claimed, so an edge to something outside the scan claims
+    // nothing.
+    var targetOfProduct: [String: String] = [:]
+    for (tid, obj) in model.objects where obj["isa"]?.string == "PBXNativeTarget" {
+        if let pr = obj["productReference"]?.string { targetOfProduct[pr] = tid }
+    }
+    for tid in closureIds {
+        guard let t = model.obj(tid) else { continue }
+        for phaseId in (t["buildPhases"]?.array ?? []).compactMap(\.string) {
+            guard let phase = model.obj(phaseId),
+                  phase["isa"]?.string == "PBXFrameworksBuildPhase" else { continue }
+            for bfId in (phase["files"]?.array ?? []).compactMap(\.string) {
+                guard let bf = model.obj(bfId), let ref = bf["fileRef"]?.string,
+                      let linked = targetOfProduct[ref], linked != tid else { continue }
+                if !(targetEdges[tid] ?? []).contains(linked) { targetEdges[tid, default: []].append(linked) }
+            }
+        }
+    }
+    var xcodeModulesByTarget: [String: [String]] = [:]
+    for tid in closureIds {
+        guard let tname = model.obj(tid)?["name"]?.string else { continue }
+        var seen: Set<String> = [tid]
+        var stack = targetEdges[tid] ?? []
+        var mods: Set<String> = []
+        while let cur = stack.popLast() {
+            guard seen.insert(cur).inserted else { continue }
+            // A member that contributed NO files is not a module this run read, so claiming its name
+            // would be exactly the purity claim this mechanism exists to avoid.
+            if let n = model.obj(cur)?["name"]?.string, !(filesByTarget[n] ?? []).isEmpty,
+               let m = moduleOfTarget[cur] { mods.insert(m) }
+            stack.append(contentsOf: targetEdges[cur] ?? [])
+        }
+        xcodeModulesByTarget[tname] = mods.sorted()
+    }
+
     // Walk each Xcode target's linked PRODUCTS through the graph, collecting the packages it may
     // import. Nothing enters that `expand` did not already resolve into `resolvedLocalDirs`, so this
     // can only restore reach the per-target split removed, never claim a package the closure never saw.
@@ -1084,6 +1167,7 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
                             localPackages: resolvedLocalNames.sorted(),
                             localProductsByTarget: localProdsByTarget.mapValues {
                                 $0.sorted { ($0.packageDir, $0.product) < ($1.packageDir, $1.product) } },
+                            xcodeModulesByTarget: xcodeModulesByTarget,
                             remoteProductCount: remoteProducts,
                             crossProjectDependencyCount: crossProject,
                             packagesReadViaDump: packagesReadViaDump.sorted(),

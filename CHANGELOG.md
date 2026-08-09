@@ -50,6 +50,24 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   17608 analyzed) with the fix. Under the second, a `../repo`-style scan root disabled per-file identity
   outright. One normalizer now serves every site.
 
+- **⚠ AN XCODE TARGET IS A MODULE, and the scan used to name its own framework targets blind spots.**
+  `--target Client` on firefox-ios scans eleven Xcode targets, and then reported four of them —
+  `Storage` (112 imports), `Account` (20), `Localizations` (4), `Sync` (2) — as "INVISIBLE to the scan",
+  while 332 of `Storage`'s functions sat in that same report. A false disclosure, and the largest one
+  left: the line teaches a reader to skim a list whose other entries are real.
+
+  A file may now import the Xcode targets in ITS OWN target's dependency closure — per member, because
+  dependency is directional, and only members that actually contributed files, so a name is still
+  claimed only when the run read its sources. Module names come from `PRODUCT_MODULE_NAME`, else
+  `PRODUCT_NAME`, else the target name, sanitized the way Xcode sanitizes them; a value still holding an
+  unexpanded `$(…)` is discarded rather than guessed at.
+
+  A pbxproj states "A uses B" in TWO independent places — a `PBXTargetDependency` (build order) and a
+  build file in A's Frameworks phase pointing at B's `productReference` (the link) — and real projects
+  use one without the other. Reading only the first left 5 functions still hedging `Storage`, because
+  firefox's `WidgetKitExtension` links `Storage.framework` and declares no dependency on it. Both are
+  read now. Seven firefox target scans lose blind spots; no effect set anywhere shrinks.
+
 - **⚠ A SIBLING TARGET COULD SILENCE A REAL SDK.** The SwiftPM half of the rung above, and the same
   defect in the arm nobody looked at. Module identity was decided per PACKAGE — a file could claim every
   target its package declares — when SwiftPM lets a target import only what its own `dependencies:` name.

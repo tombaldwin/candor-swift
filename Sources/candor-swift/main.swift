@@ -169,6 +169,9 @@ var resolvedXcodeScope: (target: String, project: String, entitlements: String?)
 /// Absolute source file -> the local package PRODUCTS the Xcode target(s) compiling it may import.
 /// Per file, because a file's importable set is its target's link list, not the closure's union.
 var resolvedXcodeLinksByFile: [String: [LocalProductRef]] = [:]
+/// …and the Xcode-target MODULES each file's target(s) may import. Separate map, same keys, because a
+/// target can link no local package and still import a sibling framework target.
+var resolvedXcodeModulesByFile: [String: [String]] = [:]
 // ── SPEC §3.3.1 ⟨0.27⟩ ARM FIRST, AND NEVER OVER AN INPUT.
 //
 // A pre-pass that learns the sink and this run's inputs with NO side effects, before the flag loop. It
@@ -443,6 +446,7 @@ if sourcePaths.isEmpty {
 func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [String],
                         resolved: inout (target: String, project: String, entitlements: String?)?,
                         resolvedLinksByFile: inout [String: [LocalProductRef]],
+                        resolvedModulesByFile: inout [String: [String]],
                         packageSwiftExists: Bool = false, alsoDeclaredInPackageSwift: [String] = []) {
     let fm = FileManager.default
     let projects = findXcodeProjects(under: rootDir)
@@ -643,8 +647,15 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
         // files; letting them share a key would hand one the other's links, which trades this false
         // disclosure for a purity claim. Ambiguity here yields no entry, so it discloses.
         var linksByLowerKey: [String: [LocalProductRef]] = [:]
+        var modulesByLowerKey: [String: [String]] = [:]
         var ambiguousLowerKeys = Set<String>()
         for (tname, tfiles) in scope.filesByTarget {
+            for f in tfiles {
+                let mk = candorAbsolutePath(f).lowercased()
+                var have = modulesByLowerKey[mk] ?? []
+                for m in scope.xcodeModulesByTarget[tname] ?? [] where !have.contains(m) { have.append(m) }
+                if !have.isEmpty { modulesByLowerKey[mk] = have }
+            }
             guard let prods = scope.localProductsByTarget[tname], !prods.isEmpty else { continue }
             for f in tfiles {
                 // The resolver's paths can carry a `..` segment (a group whose path escapes the project
@@ -664,8 +675,9 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
         for raw in sourcePaths {
             let abs = candorAbsolutePath(raw)
             let key = abs.lowercased()
-            guard !ambiguousLowerKeys.contains(key), let prods = linksByLowerKey[key] else { continue }
-            resolvedLinksByFile[abs] = prods
+            guard !ambiguousLowerKeys.contains(key) else { continue }
+            if let prods = linksByLowerKey[key] { resolvedLinksByFile[abs] = prods }
+            if let mods = modulesByLowerKey[key] { resolvedModulesByFile[abs] = mods }
         }
         // A test bundle is selectable by name — but its verdict is about test code, and saying so is
         // the difference between a feature and a trap for whoever scoped to `MyAppTests` by accident.
@@ -710,6 +722,7 @@ if let want = scopeTarget {
         scopeToXcodeTarget(want, rootDir: rootDir, sourcePaths: &sourcePaths,
                            resolved: &resolvedXcodeScope,
                            resolvedLinksByFile: &resolvedXcodeLinksByFile,
+                           resolvedModulesByFile: &resolvedXcodeModulesByFile,
                            packageSwiftExists: manifestSrc != nil,
                            alsoDeclaredInPackageSwift: declaredSPM.map(\.name).sorted())
     }
@@ -1103,7 +1116,8 @@ let depsSpec = [workspaceDepsDir, envOrConfigDeps].compactMap { $0 }.joined(sepa
 let depsIndex = loadDepReports(spec: depsSpec, engineVersion: engineVersion)
 
 let analysis = analyze(sourcePaths: sourcePaths, rootDir: rootDir, pkgName: pkgName, deps: depsIndex,
-                       xcodeLinksByFile: resolvedXcodeLinksByFile)
+                       xcodeLinksByFile: resolvedXcodeLinksByFile,
+                       xcodeModulesByFile: resolvedXcodeModulesByFile)
 let allFns = analysis.allFns
 let conformers = analysis.conformers
 let declaredTypes = analysis.declaredTypes
