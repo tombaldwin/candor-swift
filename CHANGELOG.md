@@ -26,10 +26,12 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   path. Anything unreadable at any step — a computed `path:`, a non-literal `targets:`, no owning
   package at all — yields no claim, so the module stays named.
 
-  **Measured**, 20 `--target` scans across NetNewsWire, IceCubesApp and firefox-ios. NetNewsWire and
-  firefox are byte-identical to 0.26 apart from a scan-size gain noted below; IceCubesApp's app target
-  goes from 48 uncovered modules to 38, and **all ten names removed have analyzed functions in the same
-  report** (StatusKit 284, Account 109, DesignSystem 46, …). The 279 entries that leave `functions` with
+  **Measured**, 20 `--target` scans across NetNewsWire, IceCubesApp and firefox-ios. THIS entry's change
+  leaves NetNewsWire and firefox untouched. Their gains come from two OTHER entries below — an Xcode
+  target being a module, and the path-normalization fix — so on the released build firefox's `Client`
+  reads 17608 analyzed files and 51 uncovered modules against 0.26's 17562 and 55. What THIS one moves is IceCubesApp's app target: 48 uncovered modules to 38, and **all
+  ten names removed have analyzed functions in the same report** (StatusKit 284, Account 109,
+  DesignSystem 46, …). The 279 entries that leave `functions` with
   them carried no inferred effect between them — each held only an `invisible` hedge for a module this
   run had read.
 
@@ -49,6 +51,19 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   real shape: its packages sit at `firefox-ios/../BrowserKit`, and the scan gains **46 files** (17562 →
   17608 analyzed) with the fix. Under the second, a `../repo`-style scan root disabled per-file identity
   outright. One normalizer now serves every site.
+
+- **`scripts/scope-monotonicity.sh` — a self-differential property, one engine against itself.** For a
+  leaf function in a file a `Package.swift` owns, present in both runs, a `--target` scan's `invisible`
+  set must be a SUPERSET of the unscoped scan's: scoping may disclose more, never less. No expected-value
+  table and nothing to keep in sync with the engine — the two runs are each other's oracle. Run it
+  against any repo; it prints its live-cell count and calls a zero-cell run vacuous rather than passing.
+
+  The naive form of that property — "a scoped scan is never more silent" — is FALSE and is documented
+  in the script as such, because scoping ADDS evidence (an app-level file has no owning manifest, so the
+  unscoped run claims nothing about it while the scoped run knows its target's links). It reported 991
+  violations on NetNewsWire before the two restrictions that make it sound.
+
+  Current: swift-composable-architecture 2850 cells / 0, NetNewsWire 976 / 0, IceCubesApp 684 / 0.
 
 - **CHAINED COVERAGE THAT NOBODY DECLARED IS NOW DISCLOSED.** SPEC §2 rule 3 makes a chained report's
   coverage name-keyed and scan-global — every package a loaded report covers is accounted for, full
