@@ -9,6 +9,12 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+
+- **The `gate` verb registers its stream sink before anything can exit, and writes it once.**
+  `refuseGateAndExit` already knew how to write `-` to stdout; the gate verbs pre-pass never put it in
+  the sink list, so an exit-2 during argument parsing left stdout empty. Registering it then exposed the
+  mirror — the flag loop registered the same sink again, and one exit-2 wrote the refusal document
+  TWICE. Deduped at the write, which covers every appender rather than the two that exist today.
 - **⚠ MODULE IDENTITY IS NOW PER FILE, AND HONOURS THE DEPENDENCY GRAPH.** The rung the entry below
   promised, built and reviewed three times. It replaces the withdrawal: the improvement that entry gave
   up is here, on evidence rather than on filesystem shape.

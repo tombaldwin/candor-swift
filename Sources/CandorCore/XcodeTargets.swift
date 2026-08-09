@@ -246,7 +246,15 @@ public struct XcodeTargetScope {
     /// PER MEMBER, not the selected target's closure, because dependency is directional: the app may
     /// import its embedded framework and never the reverse. Only members that actually contributed
     /// files appear, which keeps the run-analyzed conjunct that stands between this and a purity claim.
-    public let xcodeModulesByTarget: [String: [String]]
+    /// Xcode target name -> the closure-member TARGET NAMES whose modules it may import.
+    ///
+    /// TARGETS, NOT MODULE NAMES, and that distinction is the whole of a defect. The consumer must
+    /// check that THIS RUN READ the producing target's sources, and a module name cannot answer that:
+    /// two targets sharing a `PRODUCT_MODULE_NAME` — the ordinary platform-variant layout, `Kit-iOS`
+    /// and `Kit-macOS` both producing `Kit` — let a target that WAS read vouch for one that was not.
+    /// Measured: `functions: []` over an unread URLSession upload, flipping to full disclosure when the
+    /// read target's module name alone was changed.
+    public let xcodeModuleTargetsByTarget: [String: [String]]
     /// Xcode target name -> the MODULE NAME it produces. Needed by a consumer that must check whether
     /// this RUN actually read that target's sources: the module names above are only safe to claim for
     /// targets whose files are in the scan, and the scan's read set lives in the driver, not here.
@@ -1106,7 +1114,7 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
     for tid in closureIds {
         if let n = model.obj(tid)?["name"]?.string, let m = moduleOfTarget[tid] { moduleNameByTarget[n] = m }
     }
-    var xcodeModulesByTarget: [String: [String]] = [:]
+    var xcodeModuleTargetsByTarget: [String: [String]] = [:]
     for tid in closureIds {
         guard let tname = model.obj(tid)?["name"]?.string else { continue }
         var seen: Set<String> = [tid]
@@ -1119,10 +1127,10 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
             // scan root (`path = "../Shared"`) lists files this run never read. The consumer applies
             // the read-set check, because the read set only exists there; this is the cheap half.
             if let n = model.obj(cur)?["name"]?.string, !(filesByTarget[n] ?? []).isEmpty,
-               let m = moduleOfTarget[cur] { mods.insert(m) }
+               moduleOfTarget[cur] != nil { mods.insert(n) }
             stack.append(contentsOf: targetEdges[cur] ?? [])
         }
-        xcodeModulesByTarget[tname] = mods.sorted()
+        xcodeModuleTargetsByTarget[tname] = mods.sorted()
     }
 
     // Walk each Xcode target's linked PRODUCTS through the graph, collecting the packages it may
@@ -1177,7 +1185,7 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
                             localPackages: resolvedLocalNames.sorted(),
                             localProductsByTarget: localProdsByTarget.mapValues {
                                 $0.sorted { ($0.packageDir, $0.product) < ($1.packageDir, $1.product) } },
-                            xcodeModulesByTarget: xcodeModulesByTarget,
+                            xcodeModuleTargetsByTarget: xcodeModuleTargetsByTarget,
                             moduleNameByTarget: moduleNameByTarget,
                             remoteProductCount: remoteProducts,
                             crossProjectDependencyCount: crossProject,

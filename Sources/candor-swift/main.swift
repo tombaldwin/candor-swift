@@ -525,19 +525,29 @@ func mergePerFileXcodeEvidence(scopes: [XcodeTargetScope], sourcePaths: [String]
     // The check belongs HERE because this is where the read set exists. Same shape as the guard the
     // `LocalProductRef` channel already had, which is why that channel was never exposed.
     let readKeys = Set(sourcePaths.map { candorAbsolutePath($0).lowercased() })
-    var readModules = Set<String>()
-    for scope in scopes {
-        for (tname, tfiles) in scope.filesByTarget {
-            guard let m = scope.moduleNameByTarget[tname] else { continue }
-            if tfiles.contains(where: { readKeys.contains(candorAbsolutePath($0).lowercased()) }) {
-                readModules.insert(m)
-            }
+    // PER SCOPE, AND KEYED BY TARGET. The first version of this gate collected read MODULE NAMES into
+    // one set across every scope, which let a target that WAS read vouch for a different, unread target
+    // producing the same module name — the platform-variant layout (`Kit-iOS`/`Kit-macOS` both
+    // producing `Kit`) makes that ordinary, and in whole-repo mode the set also spanned separate
+    // `.xcodeproj`s. Measured: `functions: []` over an unread URLSession upload, flipping to full
+    // disclosure when only the READ target's module name changed. A name-keyed guard against a
+    // name-collision defect.
+    var readTargetsByScope: [Int: Set<String>] = [:]
+    for (i, scope) in scopes.enumerated() {
+        var read = Set<String>()
+        for (tname, tfiles) in scope.filesByTarget
+        where tfiles.contains(where: { readKeys.contains(candorAbsolutePath($0).lowercased()) }) {
+            read.insert(tname)
         }
+        readTargetsByScope[i] = read
     }
-    for scope in scopes {
+    for (i, scope) in scopes.enumerated() {
         for (tname, tfiles) in scope.filesByTarget {
             let prods = scope.localProductsByTarget[tname] ?? []
-            let mods = (scope.xcodeModulesByTarget[tname] ?? []).filter { readModules.contains($0) }
+            // Resolve producing TARGET -> module name only for targets read IN THIS SCOPE.
+            let mods = (scope.xcodeModuleTargetsByTarget[tname] ?? [])
+                .filter { readTargetsByScope[i]?.contains($0) == true }
+                .compactMap { scope.moduleNameByTarget[$0] }
             if prods.isEmpty && mods.isEmpty { continue }
             for f in tfiles {
                 let key = candorAbsolutePath(f).lowercased()

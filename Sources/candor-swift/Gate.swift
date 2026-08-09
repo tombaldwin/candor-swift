@@ -213,7 +213,19 @@ nonisolated(unsafe) var lastGateZeroMatch: [String] = []
 /// machine channel for the same disclosure the `reason` string carries for the human.
 func refuseGateAndExit(_ reason: String, unevaluated: [Unevaluated] = []) -> Never {
     FileHandle.standardError.write((reason + "\n").data(using: .utf8)!)
-    for t in gateVerdictSinks { writeGateRefusal(reason, to: t, spec: specVersion, unevaluated: unevaluated) }
+    // DEDUPE AT THE WRITE, not at each append. Two code paths register the stream sink — the gate verb's
+    // pre-pass (so a refusal during ARGUMENT PARSING still reaches stdout) and the flag loop that learns
+    // `--gate-json` normally — and with both, one exit-2 wrote the refusal document TWICE onto one
+    // stream. §3.1/§4's "one input means one document" is what a machine consumer parses against; two
+    // concatenated objects are not a document at all.
+    //
+    // Introduced by the fix that added the pre-pass registration, and caught by the second go/no-go
+    // panel rather than by any test. Deduping here covers every appender, present and future, which is
+    // the reason it is here and not in the two call sites that happen to exist today.
+    var written = Set<String>()
+    for t in gateVerdictSinks where written.insert(t).inserted {
+        writeGateRefusal(reason, to: t, spec: specVersion, unevaluated: unevaluated)
+    }
     exit(2)
 }
 
