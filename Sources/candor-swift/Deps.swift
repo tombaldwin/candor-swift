@@ -333,7 +333,12 @@ func readableAnalyzedCount(_ analyzed: Any?) -> Int? {
 
 private func depsFail(_ msg: String) -> Never {
     FileHandle.standardError.write("candor-swift: \(msg) — failing (exit 2), a configured dep must not silently read pure\n".data(using: .utf8)!)
-    exit(2)
+    // THROUGH THE GATE SINKS. This exited raw, so `--gate-json -` got nothing and a file sink kept the
+    // armed placeholder rather than this reason — the machine channel silent on a cause the operator
+    // configured, while stderr explained it. PART 35 pins the EXIT CODE for this cause in all four
+    // engines; nothing pinned the CHANNEL until PART 36 (b8), which then found it here, in the engine
+    // this release is mostly about, after the same gap had been fixed in rust and ts.
+    refuseGateAndExit("candor-swift: \(msg)")
 }
 
 /// The qual's segments with the family separators normalized: `a.b.C.m` / `mod::fn` / `Owner.member`
