@@ -1110,6 +1110,42 @@ printf 'pure\n' > "$W/pu/pure.policy"; printf 'deny Unknown\n' > "$W/pu/unknown.
 "$BIN" "$W/pu" --out "$W/pu/o2" --policy "$W/pu/unknown.policy" >/dev/null 2>&1
 [ $? -eq 1 ] && ok "deny Unknown remains the strictness knob (fires, exit 1)" || bad "deny Unknown did not fire"
 
+# ── ⟨0.28⟩ A CONFIGURED POLICY THAT YIELDED ZERO RULES REFUSES (SPEC §6.2). `--policy <a README>` used to
+# write `{"ok":true,"violations":[]}` and exit 0 — byte-identical to a gate that ran and found nothing AND
+# to the no-gate-configured verdict. Three input forms reach it (every line ignored / empty / comments
+# only) and each must exit 2 with the fail-closed document. THE CONTROL, which is the reason this is a
+# rule and not a blanket, and the two rows that catch the emptiness test reading only ONE rule vector:
+# no policy at all stays exit 0, and an allow-only / forbid-only policy is an ordinary gate, never a 2.
+mkdir -p "$W/zr"
+printf 'import Foundation\nfunc reads() -> String { (try? String(contentsOfFile: "/etc/hosts", encoding: .utf8)) ?? "" }\n' > "$W/zr/a.swift"
+printf '# Project README\n\nThis is documentation, not a policy file.\n' > "$W/zr/readme.md"
+: > "$W/zr/empty.policy"
+printf '# just a comment\n\n# another\n' > "$W/zr/comments.policy"
+printf 'allow Fs /nowhere\n' > "$W/zr/allow.policy"
+printf 'forbid zr -> nosuchscope\n' > "$W/zr/forbid.policy"
+for form in readme.md empty.policy comments.policy; do
+  rm -f "$W/zr/v.json"
+  "$BIN" "$W/zr" --out "$W/zr/r" --policy "$W/zr/$form" --gate-json "$W/zr/v.json" >/dev/null 2>&1
+  ZRC=$?
+  ZRD=$(python3 -c 'import json,sys
+try: d=json.load(open(sys.argv[1]))
+except Exception as e: print("no document"); raise SystemExit
+print("PASS" if (d.get("ok") is False and d.get("refused") is True and "violations" not in d) else "not fail-closed: "+json.dumps(d)[:160])' "$W/zr/v.json" 2>/dev/null)
+  [ "$ZRC" -eq 2 ] && [ "$ZRD" = "PASS" ] \
+    && ok "⟨0.28⟩ a zero-rule policy ($form) refuses: exit 2 + the fail-closed document" \
+    || bad "zero-rule policy $form: exit $ZRC, document $ZRD"
+done
+rm -f "$W/zr/v.json"
+"$BIN" "$W/zr" --out "$W/zr/r" --gate-json "$W/zr/v.json" >/dev/null 2>&1
+[ $? -eq 0 ] && ok "⟨0.28⟩ THE CONTROL: no policy configured stays exit 0 (not gating is not a broken gate)" \
+             || bad "zero-rule control: a run with NO policy did not exit 0"
+"$BIN" "$W/zr" --out "$W/zr/r" --policy "$W/zr/allow.policy" >/dev/null 2>&1
+[ $? -ne 2 ] && ok "⟨0.28⟩ an allow-only policy is a gate, not an absent one (never exit 2)" \
+             || bad "zero-rule check refused an allow-only policy — it reads only some rule vectors"
+"$BIN" "$W/zr" --out "$W/zr/r" --policy "$W/zr/forbid.policy" >/dev/null 2>&1
+[ $? -ne 2 ] && ok "⟨0.28⟩ a forbid-only policy is a gate, not an absent one (never exit 2)" \
+             || bad "zero-rule check refused a forbid-only policy — it reads only some rule vectors"
+
 # ── Net literal surface: ESTABLISHING forms only (family parity, 2026-07-10). A string arg at a USE
 # verb on an established channel (`Channel.writeAndFlush("x")`) is a PAYLOAD, not a destination —
 # capturing it minted a bogus host that could trip `allow Net` on data. candor-java and candor-ts
