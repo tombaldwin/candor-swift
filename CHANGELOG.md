@@ -9,6 +9,17 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.28⟩ the report stream sink is fail-closed on exit-2, not empty** (SPEC §3.3.1 (4)). Measured:
+  `candor-swift <target> --json --zzz-not-a-flag` exited 2 with STDOUT EMPTY — a JSON consumer keying on
+  stdout throws a parse error and is thrown back to scraping stderr, the distinction that made the
+  incomplete-analysis defect a defect. The report sink one hop upstream from the ⟨0.27⟩ verdict-stream
+  rule, arriving through the door that rule was written for the verdict sink and no engine extended.
+  Now on any exit-2 while `--json` (report stream) is active and stdout isn't already claimed by
+  `--gate-json -` (that two-stream case is refused earlier), the ⟨0.21⟩ Row-1 manifest-carrying empty
+  goes to stdout as its only content — `functions: []` + `analyzed.count: 0` + `unanalyzed` naming the
+  cause. A `reportStreamWritten` latch on the successful stdout print keeps a later `exit2_refused` from
+  double-writing. Conformance PART 37 candor-swift (b) flips from SKIP to PASS. The `--json <file>` sink
+  is deferred: on this engine `--json` takes no value, so the file form doesn't exist here.
 - **⚠ An extra positional exited 2 with a ZERO-BYTE `--gate-json -`.** The flag loop's unknown-flag arm
   routes through `refuseGateAndExit` when a sink is registered; the extra-positional arm directly below
   it — same class of usage error, same `default:` block — exited raw. candor-scan had no such refusal

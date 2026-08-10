@@ -210,6 +210,51 @@ nonisolated(unsafe) var gateUnevaluated: [Unevaluated] = []
 /// carry it.
 nonisolated(unsafe) var lastGateZeroMatch: [String] = []
 
+/// SPEC §3.3.1 ⟨0.28⟩ (4) — was `--json` (the REPORT stream) requested? Set once in the scan CLI before
+/// the pre-pass, so every exit-2 path downstream can decide *what to write on exit-2* the same way
+/// `gateVerdictSinks` decides for the verdict sink. On this engine `--json` is stdout-only (it takes no
+/// value; a following non-flag token is a second positional, refused later), so
+/// `argv.contains("--json")` is exact.
+///
+/// Rule (4) of the ⟨0.28⟩ report-sink clause: on any exit-2 in a `--json` run, the fail-closed report is
+/// written to stdout, exactly once, as the stream's only content. An empty stream on exit-2 throws a
+/// JSON consumer back to scraping stderr — the distinction that made the incomplete-analysis defect a
+/// defect. Measured four-way on the unknown-flag exit-2, stdout was 0 bytes on every engine.
+nonisolated(unsafe) var wantJsonStream = false
+
+/// SPEC §3.3.1 ⟨0.28⟩ — has the successful scan already printed the report to stdout via `--json`?
+/// Set on the successful `--json` write in main.swift, so a later `exit(2)` from the gate-completeness
+/// arm below the report does not double-write a fail-closed placeholder over the real report a
+/// consumer just parsed. Two documents on one stream is exactly the shape the two-stream refusal
+/// clause already exists to prevent, arriving through a different door.
+nonisolated(unsafe) var reportStreamWritten = false
+
+/// SPEC §3.3.1 ⟨0.28⟩ (4) — the fail-closed REPORT is written to stdout as its only content on any
+/// exit-2, if `--json` (stream) was requested. Shape is the ⟨0.21⟩ Row-1 manifest-carrying empty:
+/// `functions: []` + `analyzed.count: 0` + `unanalyzed` naming the cause. A ⟨0.24⟩ consumer already
+/// reads this as *nothing was judged, no purity licence*, so no new reader logic is needed. Called
+/// from `refuseGateAndExit` and every direct-`exit(2)` site in the scan CLI.
+///
+/// A no-op if `--json` was not requested, if `--gate-json -` also claims stdout (the two-stream case
+/// is refused with a verdict document earlier, and its refusal document IS the one document on that
+/// stream), or if the report has already been printed to stdout (a completed scan on `--json`;
+/// guarded by `reportStreamWritten`).
+func writeReportStreamFailClosed(reasonKey: String, why: String) {
+    guard wantJsonStream else { return }
+    if gateVerdictSinks.contains("-") { return }
+    if reportStreamWritten { return }
+    let doc: [String: Any] = [
+        "candor": ["version": engineVersion, "toolchain": "swiftsyntax", "spec": specVersion] as [String: Any],
+        "functions": [] as [Any],
+        "analyzed": ["count": 0] as [String: Any],
+        "unanalyzed": [["path": "<run>", "reason": "\(reasonKey): \(why)"] as [String: Any]] as [Any],
+    ]
+    guard let data = try? JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted, .sortedKeys]),
+          let text = String(data: data, encoding: .utf8) else { return }
+    print(text)
+    reportStreamWritten = true
+}
+
 /// Print the reason, write the refusal document to every requested sink, exit 2.
 /// ⟨0.24⟩ `unevaluated` travels with it when the refusal IS a set of undecidable rules (SPEC §3.1) — the
 /// machine channel for the same disclosure the `reason` string carries for the human.
@@ -228,6 +273,13 @@ func refuseGateAndExit(_ reason: String, unevaluated: [Unevaluated] = []) -> Nev
     for t in gateVerdictSinks where written.insert(t).inserted {
         writeGateRefusal(reason, to: t, spec: specVersion, unevaluated: unevaluated)
     }
+    // ⟨0.28⟩ REPORT STREAM: the same rule the verdict stream gets, one hop upstream. If `--json`
+    // (report to stdout) was requested and stdout is not already claimed by `--gate-json -` (that
+    // two-stream case is refused earlier and its refusal document IS the one document on stdout),
+    // write the ⟨0.21⟩ Row-1 fail-closed report as stdout's only content. Without this, an
+    // unknown-flag exit-2 left stdout EMPTY — the report-sink analog of the defect ⟨0.27⟩ closed for
+    // the verdict sink.
+    writeReportStreamFailClosed(reasonKey: "refused", why: reason)
     exit(2)
 }
 
