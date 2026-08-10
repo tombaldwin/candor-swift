@@ -207,11 +207,14 @@ func sameArtifact(_ a: String?, _ b: String?) -> Bool {
 /// operator's policy.
 func refuseGateJsonOverInput(_ gate: String, _ other: String?, _ flag: String) {
     guard sameArtifact(gate, other) else { return }
-    FileHandle.standardError.write(
-        ("candor-swift: --gate-json \(gate) names the SAME FILE as \(flag) \(other ?? "") — refusing "
-         + "(exit 2). The verdict is armed before the policy is read, so this would overwrite your "
-         + "policy and then gate on the wreckage. Nothing was written; give the verdict its own path.\n")
-            .data(using: .utf8)!)
+    let why = "candor-swift: --gate-json \(gate) names the SAME FILE as \(flag) \(other ?? "") — refusing "
+        + "(exit 2). The verdict is armed before the policy is read, so this would overwrite your "
+        + "policy and then gate on the wreckage. Nothing was written; give the verdict its own path."
+    FileHandle.standardError.write((why + "\n").data(using: .utf8)!)
+    // ⟨0.28⟩ REPORT STREAM on exit-2: if `--json` (stream) was requested, write the fail-closed report as
+    // stdout's only content — the report sink is one hop upstream from the verdict sink this refusal is
+    // about, and it is not exempt from §3.3.1's every-machine-path rule.
+    writeReportStreamFailClosed(reasonKey: "refused", why: why)
     exit(2)
 }
 
@@ -246,9 +249,11 @@ func isGateJsonAtConfig(_ gate: String) -> Bool {
 
 func refuseGateJsonAtConfig(_ gate: String) {
     guard isGateJsonAtConfig(gate) else { return }
-    FileHandle.standardError.write(
-        ("candor-swift: --gate-json \(gate) is a .candor/config — refusing (exit 2). The verdict is armed "
-         + "before the config is read, so this would destroy the config that configures this run. Nothing "
-         + "was written; give the verdict its own path.\n").data(using: .utf8)!)
+    let why = "candor-swift: --gate-json \(gate) is a .candor/config — refusing (exit 2). The verdict is armed "
+        + "before the config is read, so this would destroy the config that configures this run. Nothing "
+        + "was written; give the verdict its own path."
+    FileHandle.standardError.write((why + "\n").data(using: .utf8)!)
+    // ⟨0.28⟩ REPORT STREAM on exit-2 — see refuseGateJsonOverInput above.
+    writeReportStreamFailClosed(reasonKey: "refused", why: why)
     exit(2)
 }

@@ -177,6 +177,15 @@ var resolvedXcodeModulesByFile: [String: [String]] = [:]
 // and found by sweeping the causes a user can actually trigger rather than by reading exit sites. rust
 // and ts both answered it already. `refuseGateAndExit` reaches the stream because the pre-pass below
 // has already registered it; on a run with no sink it degrades to the same stderr line and exit 2.
+// ⟨0.28⟩ SPEC §3.3.1 (4) — REGISTER THE REPORT STREAM BEFORE ANY EXIT-2 CAN FIRE. `--json` takes no value
+// on this engine (a following non-flag token is a second positional, refused later), so a bare `contains`
+// check is exact. The pre-pass below can exit-2 on argv-shape refusals; `refuseGateAndExit` and every
+// direct exit-2 in this file consult `wantJsonStream` to decide whether to write the fail-closed report
+// to stdout as the stream's only content. Measured 2026-08-10 on all four engines: an unknown flag beside
+// `--json` gave stdout 0 bytes on every one, which threw JSON consumers back to scraping stderr — the
+// distinction that made the incomplete-analysis defect a defect. Only the SCAN CLI sets this; subcommands
+// above have already exited before reaching here.
+wantJsonStream = CommandLine.arguments.dropFirst().contains("--json")
 // ── SPEC §3.3.1 ⟨0.27⟩ ARM FIRST, AND NEVER OVER AN INPUT.
 //
 // A pre-pass that learns the sink and this run's inputs with NO side effects, before the flag loop. It
@@ -289,7 +298,11 @@ while let a = argIter.next() {
         // Valueless or flag-shaped fails closed: a `--target` that silently became "scan everything"
         // would answer a different question than the one asked, and the answer LOOKS the same.
         guard let v = argIter.next(), !v.hasPrefix("-") else {
-            FileHandle.standardError.write("candor-swift: --target requires a target name\n".data(using: .utf8)!); exit(2)
+            FileHandle.standardError.write("candor-swift: --target requires a target name\n".data(using: .utf8)!)
+            // ⟨0.28⟩ the report stream on exit-2: see writeReportStreamFailClosed's doc.
+            writeReportStreamFailClosed(reasonKey: "unknown-flag",
+                                        why: "candor-swift: --target requires a target name")
+            exit(2)
         }
         scopeTarget = v
     case "--workspace", "--deps":
@@ -417,6 +430,9 @@ while let a = argIter.next() {
             // flag as a broken-gate-config exit-2 cause). For a FILE sink the armed document already
             // says this; this covers the `-` stream, which cannot be armed in advance.
             if !gateVerdictSinks.isEmpty { refuseGateAndExit("candor-swift: unknown flag \(a)") }
+            // ⟨0.28⟩ …and the REPORT stream on exit-2 for the `--json` case with no verdict sink at all
+            // (the trigger PART 37 (b) probes: `--json --zzz-not-a-flag`). Empty on other runs.
+            writeReportStreamFailClosed(reasonKey: "unknown-flag", why: "candor-swift: unknown flag \(a)")
             exit(2)
         }
         // A SECOND POSITIONAL IS A USAGE ERROR, NOT A SILENT REPLACEMENT. `candor-swift a b` scanned `b`
@@ -436,6 +452,8 @@ while let a = argIter.next() {
             // note here cited candor-scan's refusal as the reference; it had none for this argv at the
             // time — it silently scanned the wrong tree, fixed minutes earlier the same day.)
             if !gateVerdictSinks.isEmpty { refuseGateAndExit(why) }
+            // ⟨0.28⟩ REPORT STREAM on exit-2 — same reasoning as the unknown-flag arm above.
+            writeReportStreamFailClosed(reasonKey: "unknown-flag", why: why)
             exit(2)
         }
         sawPositional = true
@@ -468,6 +486,9 @@ guard fm.fileExists(atPath: target, isDirectory: &isDir) else {
     // A file sink already holds the armed refusal; this is for the `-` stream, which cannot be armed in
     // advance and was giving a piping consumer ZERO BYTES on this exit.
     if !gateVerdictSinks.isEmpty { refuseGateAndExit("candor-swift: no such path: \(target)") }
+    // ⟨0.28⟩ REPORT STREAM on exit-2 — the `--json` case with no verdict sink.
+    writeReportStreamFailClosed(reasonKey: "target-missing",
+                                why: "candor-swift: no such path: \(target)")
     exit(2)
 }
 let rootDir = isDir.boolValue ? target : (target as NSString).deletingLastPathComponent
@@ -692,6 +713,8 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
                 + "sound but answers about every product at once.\n"
         }
         FileHandle.standardError.write(msg.data(using: .utf8)!)
+        // ⟨0.28⟩ REPORT STREAM on exit-2 — see writeReportStreamFailClosed.
+        writeReportStreamFailClosed(reasonKey: "target-missing", why: "--target \(want): no Package.swift or .xcodeproj to resolve against")
         exit(2)
     }
     do {
@@ -712,6 +735,7 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
                 + "define a target of that name (\(hits.map { rel($0.path, to: rootDir) }.joined(separator: ", "))). "
                 + "Refusing to pick one: they are different products. Point the scan at one project's "
                 + "directory instead.\n").data(using: .utf8)!)
+            writeReportStreamFailClosed(reasonKey: "target-missing", why: "--target \(want) is ambiguous across projects")
             exit(2)
         }
         guard let hit = hits.first else {
@@ -728,6 +752,7 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
                 msg += "  Package.swift declares: \(alsoDeclaredInPackageSwift.joined(separator: ", "))\n"
             }
             FileHandle.standardError.write(msg.data(using: .utf8)!)
+            writeReportStreamFailClosed(reasonKey: "target-missing", why: "--target \(want) not declared by any project here")
             exit(2)
         }
         let projectDir = (hit.path as NSString).deletingLastPathComponent
@@ -753,6 +778,7 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
                 + "\(scope.closure.map(\.name).joined(separator: ", ")) but none of its \(scope.files.count) "
                 + "Swift file(s) are under the scanned tree — refusing to report an empty scan as a clean one\n")
                 .data(using: .utf8)!)
+            writeReportStreamFailClosed(reasonKey: "target-missing", why: "--target \(want) resolved but no sources under the scanned tree")
             exit(2)
         }
         // DISCLOSED, not silent — and it says WHICH resolver answered: an Xcode target and an SPM
@@ -825,9 +851,11 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
         }
     } catch let e as XcodeScopeError {
         FileHandle.standardError.write("candor-swift: --target \(want): \(e)\n".data(using: .utf8)!)
+        writeReportStreamFailClosed(reasonKey: "target-missing", why: "--target \(want): \(e)")
         exit(2)
     } catch {
         FileHandle.standardError.write("candor-swift: --target \(want): \(error)\n".data(using: .utf8)!)
+        writeReportStreamFailClosed(reasonKey: "target-missing", why: "--target \(want): \(error)")
         exit(2)
     }
 }
@@ -894,6 +922,7 @@ if let want = scopeTarget {
             FileHandle.standardError.write(("candor-swift: --target \(want) resolved to "
                 + "\(closure.map(\.name).joined(separator: ", ")) but no Swift sources are under "
                 + "\(dirs.joined(separator: ", ")) — refusing to report an empty scan as a clean one\n").data(using: .utf8)!)
+            writeReportStreamFailClosed(reasonKey: "target-missing", why: "--target \(want): no sources under resolved dirs")
             exit(2)
         }
         // DISCLOSED, not silent. The reader must be able to tell a scoped scan from a whole-tree one:
@@ -904,9 +933,11 @@ if let want = scopeTarget {
             + "This verdict covers that closure ONLY.\n").data(using: .utf8)!)
     } catch let e as TargetScopeError {
         FileHandle.standardError.write("candor-swift: \(e)\n".data(using: .utf8)!)
+        writeReportStreamFailClosed(reasonKey: "target-missing", why: "\(e)")
         exit(2)
     } catch {
         FileHandle.standardError.write("candor-swift: --target \(want): \(error)\n".data(using: .utf8)!)
+        writeReportStreamFailClosed(reasonKey: "target-missing", why: "--target \(want): \(error)")
         exit(2)
     }
     }
@@ -1572,6 +1603,11 @@ if wantJson {
     }
     FileHandle.standardOutput.write(data)
     FileHandle.standardOutput.write("\n".data(using: .utf8)!)
+    // ⟨0.28⟩ LATCH: a successful report went to stdout, so a later `exit(2)` (the gate-completeness arm
+    // below, or any un-enumerated path) MUST NOT also write a fail-closed placeholder there. Two
+    // documents on one stream is the shape the two-stream-refusal clause exists to prevent, arriving
+    // through a different door.
+    reportStreamWritten = true
 } else {
     // Create `.candor/` (or the --out parent) only on the file-writing path — --json is documented as
     // writing NO files, so it must not leave an empty directory behind as a side effect.
