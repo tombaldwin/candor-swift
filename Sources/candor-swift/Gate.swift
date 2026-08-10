@@ -154,7 +154,9 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
         // (max-review find). One stderr line instead; the process keeps the gate's true exit.
         do {
             let data = try JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            // ⟨0.28⟩ through the shared sink writer: `.atomic` renames, which replaces a symlink and
+            // strands a hard link's other name. See writeSinkAtomically.
+            try writeSinkAtomically(String(decoding: data, as: UTF8.self), to: path)
         } catch {
             FileHandle.standardError.write("candor-swift: could not write --gate-json \(path): \(error.localizedDescription)\n".data(using: .utf8)!)
         }

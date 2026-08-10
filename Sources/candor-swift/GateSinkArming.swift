@@ -129,6 +129,38 @@ func refuseGateJsonOverAnyInput(_ gate: String, _ target: String?, _ policyFlag:
     refuseGateJsonAtConfig(gate)
 }
 
+/// ⟨0.28⟩ Resolve a sink to the artifact it finally names, following a chain of symlinks and working for
+/// a DANGLING one (the target need not exist yet, which is why `resolvingSymlinksInPath` is not enough).
+func resolveSinkArtifact(_ p: String) -> String {
+    var cur = p
+    for _ in 0..<32 {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: cur),
+              (attrs[.type] as? FileAttributeType) == .typeSymbolicLink,
+              let t = try? FileManager.default.destinationOfSymbolicLink(atPath: cur) else { return cur }
+        cur = (t as NSString).isAbsolutePath
+            ? t
+            : (URL(fileURLWithPath: cur).deletingLastPathComponent().appendingPathComponent(t)).path
+    }
+    return cur
+}
+
+/// ⟨0.28⟩ WRITE WHERE THE OPERATOR POINTS. `write(…atomically: true)` writes a temp file and RENAMES it,
+/// which replaces a symlink instead of following it — so an `artifacts/verdict.json` linked into a shared
+/// directory kept a previous run's `{"ok": true}` while this run's document landed on the link. A stale
+/// green with a single `--gate-json`. Rename also gives the destination a NEW inode, stranding a hard
+/// link's other name with the previous document; there the write goes in place, which costs the atomicity
+/// window and is the right trade — that reader is not racing this write, they are reading a file this
+/// write was meant to update.
+func writeSinkAtomically(_ text: String, to path: String) throws {
+    let target = resolveSinkArtifact(path)
+    if let attrs = try? FileManager.default.attributesOfItem(atPath: target),
+       let links = attrs[.referenceCount] as? Int, links > 1 {
+        try text.write(toFile: target, atomically: false, encoding: .utf8)
+        return
+    }
+    try text.write(toFile: target, atomically: true, encoding: .utf8)
+}
+
 /// Are these two path spellings the SAME ARTIFACT?
 ///
 /// Not a string comparison: `--policy /w/P --gate-json ./P` run from `/w` names one file twice, and the
@@ -138,6 +170,22 @@ func refuseGateJsonOverAnyInput(_ gate: String, _ target: String?, _ policyFlag:
 /// the file name appended. Resolve the artifact, not just the string.
 func sameArtifact(_ a: String?, _ b: String?) -> Bool {
     guard let a, let b, a != "-", b != "-" else { return false }
+    // ⟨0.28⟩ DEVICE+INODE FIRST. Path equality alone called two HARDLINKS to one inode two sinks and
+    // refused a legal command — the mirror of the stale green. And a DANGLING symlink still names its
+    // target, which `resolvingSymlinksInPath` cannot reach.
+    if let fa = try? FileManager.default.attributesOfItem(atPath: a),
+       let fb = try? FileManager.default.attributesOfItem(atPath: b),
+       let da = fa[.systemNumber] as? Int, let db = fb[.systemNumber] as? Int,
+       let ia = fa[.systemFileNumber] as? Int, let ib = fb[.systemFileNumber] as? Int,
+       da == db, ia == ib {
+        return true
+    }
+    let (ra, rb) = (resolveSinkArtifact(a), resolveSinkArtifact(b))
+    if ra != a || rb != b {
+        if URL(fileURLWithPath: ra).standardized.path == URL(fileURLWithPath: rb).standardized.path {
+            return true
+        }
+    }
     func resolve(_ p: String) -> String? {
         let url = URL(fileURLWithPath: p)
         if FileManager.default.fileExists(atPath: url.path) {
@@ -173,7 +221,7 @@ func armGateJsonFailClosed(_ gp: String) {
         + "  \"reason\" : \"the gate did not complete — this document was written when the run STARTED "
         + "and was never replaced by a verdict, so the run failed, crashed or was killed before it could "
         + "decide. It is NOT a verdict about the code; see the run's stderr for the cause.\"\n}\n"
-    do { try armed.write(toFile: gp, atomically: true, encoding: .utf8) }
+    do { try writeSinkAtomically(armed, to: gp) }
     catch {
         FileHandle.standardError.write(("candor-swift: could not arm --gate-json \(gp) fail-closed "
             + "(\(error.localizedDescription)) — if this run does not complete, that path may still hold "
