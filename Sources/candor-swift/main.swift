@@ -1938,6 +1938,52 @@ policyBlock: if let pp = policyPath {
                                     unevaluated: refusedPolicyRules(text, at: pp, causes: policyErrors)) {
         break policyBlock
     }
+    // ⟨0.28⟩ A CONFIGURED POLICY THAT YIELDED ZERO RULES IS A BROKEN GATE CONFIG (SPEC §6.2) — the same
+    // refusal posture as the two branches above (unreadable file, unhonourable token), for the reason §6.2
+    // already gives for an unreadable file: "a typo'd policy path that runs green is a gate that silently
+    // passes everything". MEASURED four-way 2026-08-10: `--policy <a README>` wrote
+    // `{"ok":true,"violations":[]}` and exited 0 on every engine — byte-identical to a gate that ran and
+    // found nothing, AND byte-identical to the no-gate-configured verdict, so the one consumer this format
+    // exists for cannot tell "your code is clean" from "your gate had no rules". The per-line "ignoring
+    // policy rule" warnings go to stderr, which is not the machine channel.
+    //
+    // The line-level leniency is UNTOUCHED and still right: an unrecognised line stays
+    // ignored-with-a-warning, because silent reinterpretation is the one thing a security gate must not do,
+    // and an engine meeting a rule kind from a newer rung must not refuse the file over it. This is about
+    // what that leniency COMPOSES TO — every line ignored is a gate that asked nothing.
+    //
+    // THE CONTROL, which is what makes this a rule and not a blanket: reaching here at all means a policy
+    // was CONFIGURED (`--policy`, CANDOR_POLICY, or the config `policy` key — `policyBlock` is entered on
+    // `policyPath != nil`). A run that configured no gate never enters this block and stays exit 0 — that
+    // is the honest way to say "I am not gating", and it is precisely why a configured zero-rule policy is
+    // never a legitimate expression of that intent.
+    //
+    // EVERY RULE VECTOR THE PARSER CAN PRODUCE, and the reference engine's first draft read only one of
+    // them (candor-rust `960b879`): `ParsedPolicy` splits the four kinds across `deny` (which `pure` also
+    // appends to), `allow` and `forbid`, so keying on `deny` alone would make an allow-only or forbid-only
+    // policy — `allow Net api.stripe.com`, a perfectly ordinary allowlist gate — refuse as if it had no
+    // rules at all. A zero-rule check that reads a SUBSET of the rule kinds is the same false-answer shape
+    // this rung exists to close, pointed the other way.
+    if scanPolicy.deny.isEmpty, scanPolicy.allow.isEmpty, scanPolicy.forbid.isEmpty {
+        let why = "candor-swift: the policy \(pp) yielded NO RULES — refusing (exit 2, gate NOT enforced). "
+            + "Every line was ignored (see the `ignoring policy rule` warnings above), the file is empty, "
+            + "or it holds only comments. A gate with no rules cannot have caught anything, and reporting "
+            + "`ok: true` here would be indistinguishable from a gate that ran and found nothing. If you "
+            + "did not mean to gate this run, remove the `policy` setting rather than pointing it at a file "
+            + "with no rules in it."
+        // SPEC §3.1 — the whole-policy entry, the shape pinned for a policy with no lines to NAME (there
+        // are no honoured rules to list, and listing the ignored lines would imply they were rules).
+        // …and the SAME precedence as both branches above: a certain violation dominates a refusal (§3.1,
+        // `Reject` is upward-closed). No POLICY violation can exist with zero rules, but an AS-EFF-005
+        // baseline regression is a finding from evidence this run carries and it outranks.
+        if refuseUnlessAViolationStands(why, unevaluated: [
+            Unevaluated(rule: "(entire policy \(pp) — no rules parsed)",
+                        why: "the configured policy yielded zero rules, so nothing was evaluated and no "
+                           + "rule can have passed")
+        ]) {
+            break policyBlock
+        }
+    }
     // ⟨0.24⟩ the SCAN route into the shared gate seam (Gate.swift): the reason-class fixpoint and the
     // per-fn `netClassesOf` derivation moved into `gateInputFromScan`, so `gate --report` can hand
     // `evaluateGate` the same record built from a WRITTEN report instead of from the classifier.

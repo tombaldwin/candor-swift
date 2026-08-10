@@ -9,6 +9,22 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ ⟨0.28⟩ a configured policy that yielded ZERO RULES refuses** (SPEC §6.2). Measured four-way
+  2026-08-10: `--policy <a README>` — the wrong path in a CI script, the commonest spelling of this
+  mistake — wrote `{"ok":true,"violations":[]}` and exited 0, byte-identical to a gate that ran and found
+  nothing AND to the no-gate-configured verdict, so the one consumer this format exists for could not tell
+  *your code is clean* from *your gate had no rules*. The per-line `ignoring policy rule` warnings go to
+  stderr, which is not the machine channel. Now exit 2 with the fail-closed refusal document, the same
+  posture as the two branches beside it (unreadable file, unhonourable token) and with the same
+  precedence: a certain violation — an AS-EFF-005 baseline regression is one, on evidence this run
+  carries — still dominates with exit 1 and carries the refusal beside it as `unevaluated`. The
+  `unevaluated` list holds the whole-policy entry §3.1 pins for a policy with no rules to name. The
+  line-level ignore-with-a-warning leniency is UNTOUCHED; the rung is about what it composes to. A run
+  that configures NO policy stays exit 0 — that is the honest way to say "I am not gating", and it is why
+  a configured zero-rule policy is never a legitimate expression of that intent. The emptiness test reads
+  every rule vector the parser can produce (`deny`, which `pure` also fills, `allow`, `forbid`): the
+  reference engine's first draft read one of three and would have refused every ordinary allow-only
+  allowlist gate. Conformance PART 38 candor-swift: three rows SKIP → PASS, control row still green.
 - **⟨0.28⟩ the report stream sink is fail-closed on exit-2, not empty** (SPEC §3.3.1 (4)). Measured:
   `candor-swift <target> --json --zzz-not-a-flag` exited 2 with STDOUT EMPTY — a JSON consumer keying on
   stdout throws a parse error and is thrown back to scraping stderr, the distinction that made the
