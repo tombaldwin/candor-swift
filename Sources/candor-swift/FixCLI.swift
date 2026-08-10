@@ -753,7 +753,7 @@ func runTourCLI(_ args: [String]) -> Never {
         let total = inferred.values.filter { !$0.isEmpty }.count
         let unknown = inferred.values.filter { $0.contains("Unknown") }.count
         if total > 0 && unknown * 3 >= total {
-            print("candor: no surprising reaches — but \(unknown) of \(total) function(s) are Unknown (unresolved calls; their transitive effects are NOT analyzed). Run `candor blindspots`; unresolvable imports or missing project config are the usual cause.")
+            print("candor: no surprising reaches — but \(unknown) of \(total) function(s) are Unknown (unresolved calls; their transitive effects are NOT analyzed). Run `candor blindspots` — the report records a reason for each.")
             exit(0)
         }
         print("candor: nothing hidden — every effect sits where its name says it should.")

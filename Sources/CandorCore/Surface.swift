@@ -317,7 +317,7 @@ public func emitSurface(
         let total = inferred.values.filter { !$0.isEmpty }.count
         let unknown = inferred.values.filter { $0.contains("Unknown") }.count
         let msg = (total > 0 && unknown * 3 >= total)
-            ? "candor: no surprising reaches — but \(unknown) of \(total) function(s) are Unknown (unresolved calls; their transitive effects are NOT analyzed). Run `candor blindspots`; unresolvable imports or missing project config are the usual cause.\n"
+            ? "candor: no surprising reaches — but \(unknown) of \(total) function(s) are Unknown (unresolved calls; their transitive effects are NOT analyzed). Run `candor blindspots`; unresolvable imports are the usual cause.\n"
             : "candor: nothing hidden — every effect sits where its name says it should.\n"
         FileHandle.standardError.write(msg.data(using: .utf8)!)
     case .winner(let f):
