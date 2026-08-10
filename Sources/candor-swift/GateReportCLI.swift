@@ -407,6 +407,25 @@ func runGateReportCLI(_ args: [String]) -> Never {
         // from the CWD), so the config channel must be enumerated from "." — anchoring it at the REPORT
         // asked a different directory's question and left a config-declared policy unguarded.
         refuseGateJsonOverAnyInput(gp, ".", pre.policy)
+        // ⟨0.28⟩ THE RUNG BINDS EVERY ROUTE, and it shipped on the scan CLI only — so this verb kept
+        // last-wins and a gate that FIRED left the first named sink holding a previous run's
+        // `{"ok": true}`. Every named sink gets the input checks too; the input exemption covers THAT
+        // PATH, not the run.
+        let namedSinks = distinctGateSinks(allGateSinks(args))
+        if namedSinks.count > 1 {
+            for sNamed in namedSinks where sNamed != "-" {
+                refuseGateJsonOverInput(sNamed, reportFlag, "--report")
+                refuseGateJsonOverAnyInput(sNamed, ".", pre.policy)
+            }
+            let list = namedSinks.joined(separator: ", ")
+            FileHandle.standardError.write(
+                ("candor-swift gate: --gate-json given more than once (\(list)) — refusing (exit 2). A gate "
+                 + "publishes ONE verdict. Naming two sinks says where it goes twice, and the reader of the "
+                 + "path that loses cannot tell it lost.\n").data(using: .utf8)!)
+            gateVerdictSinks = namedSinks
+            refuseGateAndExit("candor-swift gate: --gate-json was given more than once (\(list)) — a run "
+                              + "publishes one verdict to one sink")
+        }
         if gp != "-" { armGateJsonFailClosed(gp) }
         // …AND THE STREAM SINK MUST BE REGISTERED HERE, which it was not. `armGateJsonFailClosed`
         // writes a fail-closed placeholder to a FILE; a stream cannot hold one, so the stream's analog

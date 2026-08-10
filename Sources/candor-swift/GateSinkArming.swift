@@ -55,6 +55,14 @@ func allGateSinks(_ argv: [String]) -> [String] {
     return out
 }
 
+/// ⟨0.28⟩ Is this sink an input? Non-exiting, so the duplicate path can ask without taking the run down.
+func gateJsonIsInput(_ gate: String, _ target: String?, _ policy: String?) -> Bool {
+    if gate == "-" { return false }
+    if isGateJsonAtConfig(gate) { return true }
+    for other in runInputs(target, policy) where sameArtifact(gate, other.0) { return true }
+    return false
+}
+
 /// Two spellings of one path are ONE sink (the §3.3.1 artifact rule); two artifacts are the ambiguity.
 func distinctGateSinks(_ all: [String]) -> [String] {
     var out: [String] = []
@@ -180,11 +188,16 @@ func armGateJsonFailClosed(_ gp: String) {
 /// Measured on this engine: `--gate-json <target>/.candor/config` deleted the config that declared the
 /// policy, and the run then exited 0 with no gate at all. A check on the SHAPE needs no discovery, so it
 /// runs before the first write and covers a config found anywhere up the tree.
-func refuseGateJsonAtConfig(_ gate: String) {
-    guard gate != "-" else { return }
+/// The SHAPE test alone, so the refusing and the probing forms share one copy.
+func isGateJsonAtConfig(_ gate: String) -> Bool {
+    guard gate != "-" else { return false }
     let url = URL(fileURLWithPath: gate).standardizedFileURL
-    guard url.lastPathComponent == "config",
-          url.deletingLastPathComponent().lastPathComponent == ".candor" else { return }
+    return url.lastPathComponent == "config"
+        && url.deletingLastPathComponent().lastPathComponent == ".candor"
+}
+
+func refuseGateJsonAtConfig(_ gate: String) {
+    guard isGateJsonAtConfig(gate) else { return }
     FileHandle.standardError.write(
         ("candor-swift: --gate-json \(gate) is a .candor/config — refusing (exit 2). The verdict is armed "
          + "before the config is read, so this would destroy the config that configures this run. Nothing "
