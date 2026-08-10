@@ -194,6 +194,22 @@ var resolvedXcodeModulesByFile: [String: [String]] = [:]
 //      `<target>/.candor/config` destroyed the config that declared the policy.
 let preScanned = preScanSinkAndInputs(CommandLine.arguments)
 if let gp = preScanned.gate {
+    // ⟨0.28⟩ `--json` BESIDE `--gate-json -`: a report and a verdict cannot share one stream. Decided in
+    // the pre-pass so the refusal is stdout's ONLY content — refusing after the report has gone out is the
+    // defect rather than the fix. `--json <file>` writes the report elsewhere and is not this case.
+    if gp == "-" {
+        // `--json` takes no value on this engine — it always means stdout.
+        if CommandLine.arguments.dropFirst().contains("--json") {
+            FileHandle.standardError.write(
+                ("candor-swift: --json and --gate-json - both name STDOUT — refusing (exit 2). `--json` "
+                 + "writes the REPORT there and `--gate-json -` the VERDICT, so this would put two JSON "
+                 + "documents on one stream and a consumer parsing it gets neither. Send one to a file, "
+                 + "or run the scan twice.\n").data(using: .utf8)!)
+            if !gateVerdictSinks.contains("-") { gateVerdictSinks.append("-") }
+            refuseGateAndExit("candor-swift: --json and --gate-json - both name stdout — a report and a "
+                              + "verdict cannot share one stream")
+        }
+    }
     // ⟨0.28⟩ The DUPLICATE case is decided FIRST: the single-sink guard below acts on `gp` alone — the
     // LAST sink — so `--gate-json - --gate-json <the policy>` exited on the policy before the STREAM was
     // told anything. And the input exemption covers the offending PATH, not the run: the other named
