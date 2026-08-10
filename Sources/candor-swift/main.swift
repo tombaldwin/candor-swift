@@ -375,9 +375,16 @@ while let a = argIter.next() {
         // grammar, scanned a path that did not exist and the operator had no way to see which target the
         // run had chosen. The scan takes exactly one.
         if sawPositional {
-            FileHandle.standardError.write(
-                ("candor-swift: unexpected extra argument `\(a)` — the scan takes ONE target (got `\(target)` "
-                 + "and `\(a)`). Did you mean a flag? See --help.\n").data(using: .utf8)!)
+            let why = "candor-swift: unexpected extra argument `\(a)` — the scan takes ONE target "
+                    + "(got `\(target)` and `\(a)`). Did you mean a flag? See --help."
+            FileHandle.standardError.write((why + "\n").data(using: .utf8)!)
+            // Same sink obligation as the unknown-flag arm directly above, and it was missing here. This
+            // is the SECOND SPELLING of one usage error, and closing one spelling of a channel while its
+            // sibling stays open is how the sink defects in this file got in. Found by the argv
+            // COMBINATION sweep in candor/bin/probe-causes.sh rather than by the hand-written cause list:
+            // an extra positional was not a cause anyone had enumerated. Differential when found —
+            // candor-scan wrote a 106-byte refusal for the identical argv, candor-swift wrote zero bytes.
+            if !gateVerdictSinks.isEmpty { refuseGateAndExit(why) }
             exit(2)
         }
         sawPositional = true
