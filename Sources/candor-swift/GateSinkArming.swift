@@ -37,6 +37,33 @@ func preScanSinkAndInputs(_ argv: [String]) -> (gate: String?, policy: String?, 
     return (gate, policy, target)
 }
 
+/// SPEC §3.3.1 ⟨0.28⟩ — every `--gate-json` this argv names, duplicates kept.
+///
+/// `preScanSinkAndInputs` keeps only the last. That is the behaviour this rung refuses: measured across
+/// four engines, three wrote the verdict to the LAST path and this one refused — and all four left the
+/// FIRST path exactly as they found it, so a previous run's `{"ok": true}` survived a gate that fired.
+func allGateSinks(_ argv: [String]) -> [String] {
+    var out: [String] = []
+    var i = 1
+    while i < argv.count {
+        if argv[i] == "--gate-json", i + 1 < argv.count {
+            let v = argv[i + 1]
+            if v == "-" || !v.hasPrefix("-") { out.append(v); i += 2; continue }
+        }
+        i += 1
+    }
+    return out
+}
+
+/// Two spellings of one path are ONE sink (the §3.3.1 artifact rule); two artifacts are the ambiguity.
+func distinctGateSinks(_ all: [String]) -> [String] {
+    var out: [String] = []
+    for s in all where !out.contains(where: { $0 == s || ($0 != "-" && s != "-" && sameArtifact($0, s)) }) {
+        out.append(s)
+    }
+    return out
+}
+
 /// Every path this run READS, whatever channel it arrived through (SPEC §3.3.1 ⟨0.27⟩).
 ///
 /// THE FIRST VERSION OF THIS GUARD KEYED ON THE FLAG. With the policy declared by `.candor/config` —

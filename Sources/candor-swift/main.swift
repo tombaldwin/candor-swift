@@ -195,6 +195,25 @@ var resolvedXcodeModulesByFile: [String: [String]] = [:]
 let preScanned = preScanSinkAndInputs(CommandLine.arguments)
 if let gp = preScanned.gate {
     refuseGateJsonOverAnyInput(gp, preScanned.target, preScanned.policy)
+    // ⟨0.28⟩ A REPEATED `--gate-json` IS REFUSED, AND EVERY PATH NAMED GETS THE REFUSAL. This engine
+    // already exited 2 on the shape — it was the only one that did — but it left the FIRST path exactly
+    // as it found it, so a previous run's `{"ok": true}` survived a gate that fired. Refusing without
+    // telling the losing sink is most of the defect: its reader has no way to learn that it lost.
+    //
+    // Placed after the input-collision guard and before arming: a sink that is an INPUT is refused
+    // having written nothing, and that exemption outranks this one.
+    let namedSinks = distinctGateSinks(allGateSinks(CommandLine.arguments))
+    if namedSinks.count > 1 {
+        let list = namedSinks.joined(separator: ", ")
+        for s in namedSinks { refuseGateJsonOverAnyInput(s, preScanned.target, preScanned.policy) }
+        FileHandle.standardError.write(
+            ("candor-swift: --gate-json given more than once (\(list)) — refusing (exit 2). A gate "
+             + "publishes ONE verdict. Naming two sinks says where it goes twice, and the reader of the "
+             + "path that loses cannot tell it lost. Name one, or run the gate twice.\n").data(using: .utf8)!)
+        gateVerdictSinks = namedSinks
+        refuseGateAndExit("candor-swift: --gate-json was given more than once (\(list)) — a run "
+                          + "publishes one verdict to one sink")
+    }
     if gp != "-" { armGateJsonFailClosed(gp) }
     // A `-` SINK CANNOT BE PRE-ARMED — there is no file to replace, and emitting a refusal now would put
     // two documents on the same stream. Register it instead, so the exits below route their refusal to
