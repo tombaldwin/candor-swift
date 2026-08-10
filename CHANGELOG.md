@@ -8,6 +8,21 @@ verdicts, so an engine upgrade across it is baseline-invalidating (regenerate an
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
 ## Unreleased
+
+- **⚠ An extra positional exited 2 with a ZERO-BYTE `--gate-json -`.** The flag loop's unknown-flag arm
+  routes through `refuseGateAndExit` when a sink is registered; the extra-positional arm directly below
+  it — same class of usage error, same `default:` block — exited raw. candor-scan wrote a 106-byte
+  refusal for the identical argv. One usage error, two spellings, and only the spelling someone had
+  thought about was closed. Found by the argv COMBINATION sweep in the umbrella's `probe-causes.sh`, not
+  by its hand-written list of twelve causes; pinned by conformance PART 36 (b18).
+- **⟨0.28⟩ a repeated `--gate-json` is refused, and every path named gets the refusal** (SPEC §3.3.1).
+  This engine already exited 2 on the shape — the only one that did — but it left the FIRST path exactly
+  as it found it, so a previous run's `{"ok": true}` survived a gate that fired. Refusing without telling
+  the losing sink is most of the defect: its reader has no way to learn that it lost.
+- **The mostly-Unknown note stops naming a cause it cannot know.** `tour --report R` reads a report it did
+  not produce, so "missing project config" was a guess about a build it never ran; it now points at the
+  reasons the report itself records. Four-way, and pinned by conformance PART 4l — which had been checking
+  the COUNTS only, which is how all four engines drifted here unnoticed.
 ## [0.27.0] — 2026-08-07
 
 
