@@ -243,16 +243,33 @@ func writeReportStreamFailClosed(reasonKey: String, why: String) {
     guard wantJsonStream else { return }
     if gateVerdictSinks.contains("-") { return }
     if reportStreamWritten { return }
+    guard let text = failClosedReportDocument(reason: "\(reasonKey): \(why)") else { return }
+    print(text)
+    reportStreamWritten = true
+}
+
+/// SPEC §3.3.1 ⟨0.28⟩ (2) — THE FAIL-CLOSED REPORT, as text. ONE builder for BOTH report sinks.
+///
+/// The ⟨0.21⟩ Row-1 manifest-carrying empty: `functions: []` + `analyzed.count: 0` + a non-empty
+/// `unanalyzed`. Row 1 of the ⟨0.24⟩ table pins the reading — *nothing was judged*, not *nothing to
+/// judge* — so a consumer needs no new logic to refuse a purity licence over it.
+///
+/// Extracted from `writeReportStreamFailClosed` when the `--out <prefix>` armer needed the same
+/// document, and the inline copy is GONE (the `bffc868` rule: two copies of one shape is how the
+/// stream form and the file form later disagree about what "no claim" looks like, and a consumer
+/// keying on one of them then reads the other as a report). The `--out` armer additionally needs the
+/// EXACT BYTES back, to tell "this run rewrote the file" from "this file is still holding the
+/// placeholder" — which only works while there is a single builder.
+func failClosedReportDocument(reason: String) -> String? {
     let doc: [String: Any] = [
         "candor": ["version": engineVersion, "toolchain": "swiftsyntax", "spec": specVersion] as [String: Any],
         "functions": [] as [Any],
         "analyzed": ["count": 0] as [String: Any],
-        "unanalyzed": [["path": "<run>", "reason": "\(reasonKey): \(why)"] as [String: Any]] as [Any],
+        "unanalyzed": [["path": "<run>", "reason": reason] as [String: Any]] as [Any],
     ]
     guard let data = try? JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted, .sortedKeys]),
-          let text = String(data: data, encoding: .utf8) else { return }
-    print(text)
-    reportStreamWritten = true
+          let text = String(data: data, encoding: .utf8) else { return nil }
+    return text
 }
 
 /// ⟨0.28⟩ A CONFIGURED POLICY THAT YIELDED ZERO RULES IS A BROKEN GATE CONFIG (SPEC §6.2) — the refusal

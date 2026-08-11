@@ -37,6 +37,143 @@ func preScanSinkAndInputs(_ argv: [String]) -> (gate: String?, policy: String?, 
     return (gate, policy, target)
 }
 
+/// SPEC §3.3.1 ⟨0.28⟩ — the `--out <prefix>` this argv names, side-effect free, learned early enough that
+/// the armer below can run BEFORE the flag loop's own `unknown flag` exit — the exit this rung is most
+/// often reached through. Mirrors `preScanSinkAndInputs`, which already skips over `--out`'s value without
+/// keeping it, and is deliberately a second tiny reader rather than a fourth tuple member: the `gate
+/// --report` verb calls that one and has no `--out`.
+/// LAST WINS, because the flag loop's `outPrefix = v` does: on `--out a --out b` the run writes its report
+/// under `b`, so `b` is the set that would otherwise be read as current after this run fails. Arming `a`
+/// instead would arm a set nothing was going to replace and leave the real hazard untouched.
+func preScanOutPrefix(_ argv: [String]) -> String? {
+    var out: String? = nil
+    var i = 1
+    while i < argv.count {
+        if argv[i] == "--out", i + 1 < argv.count, !argv[i + 1].hasPrefix("-") { out = argv[i + 1]; i += 2; continue }
+        i += 1
+    }
+    return out
+}
+
+/// `(path, the bytes that were there before)` for every report this run armed under an `--out` prefix.
+/// The previous bytes are the whole reason this is a list and not a count — see `disarmUnwrittenOutReports`.
+nonisolated(unsafe) var armedOutReports: [(path: String, previous: Data)] = []
+/// The exact placeholder bytes this run wrote, so `disarm` can tell "still armed" from "this run
+/// rewrote it with a real report".
+nonisolated(unsafe) var armedOutDocument: String? = nil
+
+/// SPEC §3.3.1 ⟨0.28⟩ (1) — **ARM THE `--out <prefix>` REPORT SET.**
+///
+/// The verdict sink arms by writing a placeholder to a path the run is about to own. A report PREFIX
+/// cannot do that: at parse time the run does not yet know which package it will write (the filename is
+/// `<prefix>.<pkg>.Swift.json`, and `<pkg>` comes from a `Package.swift` that has not been read yet, or
+/// from an `.xcodeproj` that has not been resolved yet). The set the run DOES know at parse time is the
+/// one the PREVIOUS run left on disk — and that is exactly the set at risk of being read as current after
+/// this run fails.
+///
+/// MEASURED on this engine 2026-08-11: `<target> --out p --zzz-not-a-flag` exited 2 with
+/// `p.Fx.Swift.json` byte-identical to the previous good run (same md5). A downstream `gate --report`
+/// then reads a green report the failed run never produced.
+///
+/// So arming rewrites every `<prefix>.*.json` to the ⟨0.21⟩ Row-1 manifest-carrying empty, and the scan
+/// overwrites its own with a real report a moment later.
+///
+/// SIDECARS ARE NOT TOUCHED, deliberately — whether `.callgraph`/`.hierarchy`/`.locs` must arm alongside
+/// their report is an OPEN question against §2.2 ⟨0.26⟩'s own manifest rules (a sidecar's KEY SET is its
+/// manifest, which is a different fail-closed shape from a report's), and answering it here would put a
+/// second answer in the tree.
+///
+/// THE INPUT EXEMPTION FROM ⟨0.27⟩ (2) APPLIES TO THIS WRITER TOO. Arming happens before the run knows its
+/// answer, so a prefix whose expansion collides with something this run READS would destroy it — the same
+/// hazard that made `--policy P --gate-json P` a machine-readable all-clear. A policy or a chained dep
+/// report can perfectly well be named `<prefix>.something.json`. One resolver, `sameArtifact`, over the
+/// one input list, `runInputs` — not a second copy that later disagrees with it.
+///
+/// **AND WHAT THIS RUN TURNS OUT NOT TO OWN IS HANDED BACK — see `disarmUnwrittenOutReports`.** The
+/// reference engine's first version of this armer (candor-rust, undone in `f439dea`) left every
+/// un-overwritten file holding the placeholder and described it as closing the orphaned-report defect for
+/// free. It did not: a placeholder's non-empty `unanalyzed` is the ⟨0.21⟩ incomplete-analysis trigger, so
+/// a COMPLETE scan began refusing with exit 2 and went on refusing until someone deleted the leftover by
+/// hand. Claiming an incompleteness the run never experienced is the mirror of the staleness this rung
+/// closes.
+func armOutPrefixReports(_ prefix: String, target: String?, policyFlag: String?) {
+    guard !prefix.isEmpty else { return }
+    let ns = prefix as NSString
+    let stem = ns.lastPathComponent
+    guard !stem.isEmpty else { return }
+    let dirPart = ns.deletingLastPathComponent
+    let dir = dirPart.isEmpty ? "." : dirPart
+    guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir) else { return }
+    guard let doc = failClosedReportDocument(reason:
+        "armed: this report was written when the run STARTED and was never replaced, so the run failed "
+        + "before it could describe this package — or the package is no longer part of the scan and this "
+        + "file is a leftover. Either way it is NOT a claim about any code.") else { return }
+    var inputs: [(String, String)]? = nil
+    for name in names.sorted() {
+        // `<stem>.….json`, minus the §2.2 reserved sidecar segments.
+        guard name.hasPrefix(stem + "."), name.hasSuffix(".json") else { continue }
+        if name.hasSuffix(".callgraph.json") || name.hasSuffix(".hierarchy.json")
+            || name.hasSuffix(".locs.json") { continue }
+        let full = (dir as NSString).appendingPathComponent(name)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: full, isDirectory: &isDir), !isDir.boolValue else { continue }
+        if inputs == nil { inputs = runInputs(target, policyFlag) }
+        if let hit = inputs!.first(where: { sameArtifact(full, $0.0) }) {
+            FileHandle.standardError.write(
+                ("candor-swift: --out \(prefix) would arm over \(full), which this run READS (\(hit.1)) — "
+                 + "leaving it untouched, so nothing this run depends on is destroyed. If that file is "
+                 + "meant to be a report of this scan, give the report set its own prefix.\n")
+                    .data(using: .utf8)!)
+            continue
+        }
+        // Remember the bytes BEFORE overwriting, so a run that completes can hand back anything it turned
+        // out not to own. A file we cannot read is not armed either — we could not put it back.
+        guard let prev = FileManager.default.contents(atPath: full) else { continue }
+        do {
+            try writeSinkAtomically(doc, to: full)
+            armedOutReports.append((full, prev))
+            armedOutDocument = doc
+        } catch {
+            FileHandle.standardError.write(
+                ("candor-swift: could not arm the report \(full) fail-closed "
+                 + "(\(error.localizedDescription)) — if this run does not complete, that path may still "
+                 + "hold a PREVIOUS run's report\n").data(using: .utf8)!)
+        }
+    }
+}
+
+/// SPEC §3.3.1 ⟨0.28⟩ — **HAND BACK WHAT THIS RUN TURNED OUT NOT TO OWN.**
+///
+/// Arming cannot know at parse time which report file the run will write, so it arms the whole previous
+/// set. Once the run has finished writing, a file STILL holding the placeholder is one the run never
+/// claimed — a leftover from a package that is no longer scanned under this prefix. That is NOT an
+/// incomplete analysis, and leaving the ⟨0.21⟩ placeholder there asserts one: measured on the reference
+/// engine, it turned a complete scan into a permanent exit-2 refusal that only manual deletion cleared.
+///
+/// So the previous bytes go back, and **the orphan is left exactly as this run found it.** The orphan
+/// remains an OPEN defect — a report for a package no longer in the scan still describes code that may be
+/// gone, and still reaches a gate over the prefix — and that is deliberate: it is PRE-EXISTING, it has its
+/// own wire question (delete it? mark it not-in-scan? a prefix can legitimately be shared between two
+/// scans), and resolving it inside a staleness fix would be deciding it by accident.
+///
+/// Deleting the placeholder rather than restoring it is rejected for §3.3.1's own reason: a consumer that
+/// treats a missing file as "nothing to report" fails open by a different route.
+func disarmUnwrittenOutReports() {
+    guard let doc = armedOutDocument, let want = doc.data(using: .utf8) else { return }
+    for (path, prev) in armedOutReports {
+        // Only files this run left untouched since arming — anything it rewrote is a real report.
+        guard FileManager.default.contents(atPath: path) == want else { continue }
+        do { try writeSinkAtomically(prev, to: path) }
+        catch {
+            FileHandle.standardError.write(
+                ("candor-swift: could not restore \(path), which this run armed but did not write "
+                 + "(\(error.localizedDescription)) — it is holding the fail-closed placeholder, which "
+                 + "reads as `analyzed nothing`, not as a report\n").data(using: .utf8)!)
+        }
+    }
+    armedOutReports = []
+}
+
 /// SPEC §3.3.1 ⟨0.28⟩ — every `--gate-json` this argv names, duplicates kept.
 ///
 /// `preScanSinkAndInputs` keeps only the last. That is the behaviour this rung refuses: measured across
@@ -152,13 +289,20 @@ func resolveSinkArtifact(_ p: String) -> String {
 /// window and is the right trade — that reader is not racing this write, they are reading a file this
 /// write was meant to update.
 func writeSinkAtomically(_ text: String, to path: String) throws {
+    try writeSinkAtomically(Data(text.utf8), to: path)
+}
+
+/// The BYTES form, because ⟨0.28⟩'s `--out` disarm hands back a file's PREVIOUS content and a report this
+/// engine did not write need not be UTF-8 — round-tripping it through `String` would silently rewrite the
+/// operator's file rather than restore it. The String form above is this one over `Data(text.utf8)`.
+func writeSinkAtomically(_ data: Data, to path: String) throws {
     let target = resolveSinkArtifact(path)
     if let attrs = try? FileManager.default.attributesOfItem(atPath: target),
        let links = attrs[.referenceCount] as? Int, links > 1 {
-        try text.write(toFile: target, atomically: false, encoding: .utf8)
+        try data.write(to: URL(fileURLWithPath: target), options: [])
         return
     }
-    try text.write(toFile: target, atomically: true, encoding: .utf8)
+    try data.write(to: URL(fileURLWithPath: target), options: .atomic)
 }
 
 /// Are these two path spellings the SAME ARTIFACT?

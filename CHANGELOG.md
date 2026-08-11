@@ -9,6 +9,32 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.28⟩ the `--out <prefix>` report SET is armed too, and what the run did not write is handed back**
+  (SPEC §3.3.1 (1)). The stream half shipped first and left the FILE set one hop behind: measured
+  2026-08-11, `<target> --out p --zzz-not-a-flag` exited 2 with `p.<pkg>.Swift.json` byte-identical to the
+  previous good run (same md5), so a downstream `gate --report` read a green report the failed run never
+  produced. The verdict sink arms by writing to a path the run is about to own; a report PREFIX cannot,
+  because `<pkg>` comes from a `Package.swift` that has not been read at parse time. The set the run DOES
+  know then is the one the PREVIOUS run left — and that is exactly the set at risk — so arming rewrites
+  every `<prefix>.*.json` to the ⟨0.21⟩ Row-1 manifest-carrying empty, from ABOVE the flag loop, before
+  its own unknown-flag exit (the exit this rung is most often reached through). The default prefix
+  (`.candor/report.*`) is armed on the same argument. §2.2 SIDECARS are deliberately untouched — whether
+  they must arm is an open question against ⟨0.26⟩'s own manifest rules and answering it here would put a
+  second answer in the tree. The ⟨0.27⟩ (2) input exemption applies to this writer: a prefix expansion
+  that collides with something the run READS is left alone and named on stderr, through the same
+  `runInputs`/`sameArtifact` resolver the verdict sink uses. **AND WHAT THE RUN TURNS OUT NOT TO OWN IS
+  RESTORED, NOT LEFT ARMED** — the reference engine's first version kept the placeholder on every
+  un-overwritten file and called it a free fix for orphaned reports; it was a new defect, because a
+  placeholder's non-empty `unanalyzed` IS the ⟨0.21⟩ incomplete-analysis trigger, so a COMPLETE run began
+  asserting an incompleteness it never experienced (measured here: `gate --report <the orphan>` went 0 → 2
+  and no further clean run could clear it). Arming therefore remembers the previous BYTES and hands them
+  back once the run has finished writing. The orphan is left exactly as found: it is a separate,
+  pre-existing defect with its own wire question, and resolving it inside a staleness fix would be
+  deciding it by accident. Deleting rather than restoring is rejected for §3.3.1's own reason — a consumer
+  treating a missing file as "nothing to report" fails open by another route. One fail-closed document
+  builder now serves both report sinks (`failClosedReportDocument`), and `writeSinkAtomically` gained the
+  bytes form so a restore returns the operator's file rather than a UTF-8 round-trip of it. Conformance
+  PART 37 candor-swift (a) SKIP → PASS, (b) still PASS.
 - **⚠ ⟨0.28⟩ a configured policy that yielded ZERO RULES refuses** (SPEC §6.2). Measured four-way
   2026-08-10: `--policy <a README>` — the wrong path in a CI script, the commonest spelling of this
   mistake — wrote `{"ok":true,"violations":[]}` and exited 0, byte-identical to a gate that ran and found
