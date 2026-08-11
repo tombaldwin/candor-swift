@@ -1146,6 +1146,73 @@ rm -f "$W/zr/v.json"
 [ $? -ne 2 ] && ok "⟨0.28⟩ a forbid-only policy is a gate, not an absent one (never exit 2)" \
              || bad "zero-rule check refused a forbid-only policy — it reads only some rule vectors"
 
+# ── ⟨0.28⟩ THE `--out <prefix>` REPORT SET IS ARMED ON EXIT-2 (SPEC §3.3.1 (1)). Measured before the fix:
+# `--out p --zzz-not-a-flag` exited 2 with `p.<pkg>.Swift.json` byte-identical to the previous good run, so
+# a downstream `gate --report` read a green report the failed run never produced. Five rows, and the LAST
+# one is the regression test for the reference engine's undone first version (candor-rust `f439dea`).
+mkdir -p "$W/oa"
+printf 'import Foundation\nfunc oa_reads() -> String { (try? String(contentsOfFile: "/etc/hosts", encoding: .utf8)) ?? "" }\n' > "$W/oa/a.swift"
+OA_ROW1='import json,sys
+d=json.load(open(sys.argv[1]))
+print("ROW1" if (d.get("functions")==[] and (d.get("analyzed") or {}).get("count")==0 and bool(d.get("unanalyzed"))) else "NOT-ROW1")'
+oa_reports() { ls "$W/oa/$1".*.json 2>/dev/null | grep -vE '\.(callgraph|hierarchy|locs)\.json$'; }
+# (A) a clean run, then the same command with an unknown flag: every REPORT under the prefix must carry the
+# ⟨0.21⟩ Row-1 manifest-carrying empty. The §2.2 SIDECARS are deliberately excluded from arming — whether
+# they must arm is an OPEN question against ⟨0.26⟩'s own manifest rules and must not be decided here.
+"$BIN" "$W/oa" --out "$W/oa/p" >/dev/null 2>&1
+OA_BEFORE=$(cat $(oa_reports p) | cksum)
+"$BIN" "$W/oa" --out "$W/oa/p" --zzz-not-a-flag >/dev/null 2>&1; OA_RC=$?
+OA_ALL=1; OA_N=0
+for f in $(oa_reports p); do OA_N=$((OA_N+1)); [ "$(python3 -c "$OA_ROW1" "$f" 2>/dev/null)" = "ROW1" ] || OA_ALL=0; done
+{ [ "$OA_RC" -eq 2 ] && [ "$OA_N" -ge 1 ] && [ "$OA_ALL" -eq 1 ]; } \
+  && ok "⟨0.28⟩ --out: an unknown flag exits 2 and arms all $OA_N report file(s) with the Row-1 fail-closed shape" \
+  || bad "--out arming: exit $OA_RC, $OA_N report(s), all-fail-closed=$OA_ALL (before cksum $OA_BEFORE)"
+# (B) …and the very next clean run puts the REAL report back. An armer that could not be cleared would be
+# the ⟨0.21⟩ incomplete-analysis trigger stuck on.
+"$BIN" "$W/oa" --out "$W/oa/p" >/dev/null 2>&1; OA_RC=$?
+OA_FN=$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(",".join(sorted(f["fn"].split(".")[-1] for f in d["functions"])))' "$W/oa/p.oa.Swift.json" 2>/dev/null)
+{ [ "$OA_RC" -eq 0 ] && [ "$OA_FN" = "oa_reads" ]; } \
+  && ok "⟨0.28⟩ --out: the next clean run replaces the placeholder with the real report (exit 0, oa_reads)" \
+  || bad "--out disarm: exit $OA_RC, functions [$OA_FN]"
+# (C) a prefix with no previous run has nothing to arm, and must not crash on the way to its exit 2.
+"$BIN" "$W/oa" --out "$W/oa/never-run-before" --zzz-not-a-flag >/dev/null 2>&1
+[ $? -eq 2 ] && ok "⟨0.28⟩ --out: a prefix with no previous run is exit 2 with nothing to arm (no crash)" \
+             || bad "--out arming: a fresh prefix did not exit 2"
+# (D) THE INPUT EXEMPTION (⟨0.27⟩ (2), same writer). The armer writes before the run knows its answer, so a
+# prefix expansion that collides with a file this run READS would destroy it — `--policy P --gate-json P`
+# aimed at the report set. The file is left untouched and named on stderr.
+printf 'deny Clipboard\n' > "$W/oa/q.policy.json"
+OA_POL=$(cksum < "$W/oa/q.policy.json")
+"$BIN" "$W/oa" --out "$W/oa/q" --policy "$W/oa/q.policy.json" >/dev/null 2>&1
+"$BIN" "$W/oa" --out "$W/oa/q" --policy "$W/oa/q.policy.json" --zzz-not-a-flag >/dev/null 2>"$W/oa/q.err"; OA_RC=$?
+{ [ "$OA_RC" -eq 2 ] && [ "$(cksum < "$W/oa/q.policy.json")" = "$OA_POL" ] && grep -q 'which this run READS' "$W/oa/q.err"; } \
+  && ok "⟨0.28⟩ --out: a prefix expansion that is also the --policy is left untouched, and said so on stderr" \
+  || bad "--out input exemption: exit $OA_RC, policy cksum changed or stderr silent"
+# (E) THE ORPHAN IS RESTORED, NOT LEFT ARMED. This is the regression test for candor-rust's undone first
+# version, which kept the placeholder on every un-overwritten file and called it a free fix for orphaned
+# reports: a placeholder's non-empty `unanalyzed` IS the ⟨0.21⟩ incomplete-analysis trigger, so a COMPLETE
+# scan started refusing exit 2 permanently, clearable only by hand-deleting the leftover. The orphan is a
+# separate PRE-EXISTING defect with its own wire question and must not be resolved as a side effect here —
+# so it goes back exactly as found, byte for byte.
+printf '{"candor":{"spec":"0.27"},"package":"gone","functions":[{"fn":"leftover"}]}\n' > "$W/oa/p.stale.Swift.json"
+OA_ORPH=$(cksum < "$W/oa/p.stale.Swift.json")
+"$BIN" "$W/oa" --out "$W/oa/p" >/dev/null 2>&1; OA_RC=$?
+{ [ "$OA_RC" -eq 0 ] && [ "$(cksum < "$W/oa/p.stale.Swift.json")" = "$OA_ORPH" ]; } \
+  && ok "⟨0.28⟩ --out: an orphan the run did not write is RESTORED to its previous bytes, not left armed" \
+  || bad "--out disarm: the orphan was not handed back (exit $OA_RC, cksum $(cksum < "$W/oa/p.stale.Swift.json") want $OA_ORPH)"
+# …and the CONSEQUENCE that made the first version wrong, measured on the route that carries it on this
+# engine: `gate --report <the orphan>` is a verdict about a file the run never claimed, and a clean rerun
+# must not change what it says. Left armed, the placeholder's non-empty `unanalyzed` flips that verdict to
+# a "NOT certified" exit 2 that no further clean run can clear — an incompleteness the run never had.
+printf '{"candor":{"spec":"0.27","version":"x","toolchain":"swiftsyntax"},"package":"gone","analyzed":{"count":3},"functions":[{"fn":"leftover","inferred":["Fs"]}]}\n' > "$W/oa/p.stale.Swift.json"
+printf 'deny Exec\n' > "$W/oa/exec.policy"
+"$BIN" gate --report "$W/oa/p.stale.Swift.json" --policy "$W/oa/exec.policy" >/dev/null 2>&1; OA_G0=$?
+"$BIN" "$W/oa" --out "$W/oa/p" >/dev/null 2>&1
+"$BIN" gate --report "$W/oa/p.stale.Swift.json" --policy "$W/oa/exec.policy" >/dev/null 2>&1; OA_G1=$?
+{ [ "$OA_G0" -eq 0 ] && [ "$OA_G1" -eq 0 ]; } \
+  && ok "⟨0.28⟩ --out: a clean rerun does not turn a gate over an untouched orphan into a stuck exit 2 ($OA_G0 -> $OA_G1)" \
+  || bad "--out disarm: gate over the orphan went $OA_G0 -> $OA_G1 — a left-armed placeholder is asserting an incompleteness the run never had"
+
 # ── Net literal surface: ESTABLISHING forms only (family parity, 2026-07-10). A string arg at a USE
 # verb on an established channel (`Channel.writeAndFlush("x")`) is a PAYLOAD, not a destination —
 # capturing it minted a bogus host that could trip `allow Net` on data. candor-java and candor-ts

@@ -261,6 +261,24 @@ if let gp = preScanned.gate {
     // refusal. Same run, same sink, three different answers.
     else { gateVerdictSinks.append("-") }
 }
+// ⟨0.28⟩ …AND ARM THE REPORT SET, for the same reason and at the same moment (SPEC §3.3.1 (1)). The
+// verdict sink above arms a path this run is about to OWN; a report PREFIX cannot, because the filename
+// is `<prefix>.<pkg>.Swift.json` and `<pkg>` is not known until a `Package.swift` has been read. The set
+// the run knows NOW is the one the PREVIOUS run left, which is exactly the set at risk of being read as
+// current after this run fails — measured, `--out p --zzz-not-a-flag` exited 2 leaving `p.Fx.Swift.json`
+// byte-identical to the previous good run. Placed HERE, above the flag loop, because that loop's own
+// unknown-flag exit is the exit this rung is most often reached through.
+//
+// THE DEFAULT PREFIX IS ARMED TOO: an operator who never passes `--out` still has a previous run's
+// `.candor/report.*.json` on disk to go stale, and `gate --report` is pointed at those by default. It is
+// approximated from the pre-pass TARGET rather than the resolved root (an `.xcodeproj` resolution has not
+// happened yet); when the two differ, the approximation arms a directory holding no matching file and the
+// run writes its real report as before — the armer never invents a file, it only rewrites ones already
+// there. See `armOutPrefixReports` / `disarmUnwrittenOutReports` for the whole shape, including why what
+// this run turns out NOT to write is handed back rather than left holding the placeholder.
+armOutPrefixReports(preScanOutPrefix(CommandLine.arguments)
+                        ?? ((preScanned.target ?? ".") as NSString).appendingPathComponent(".candor/report"),
+                    target: preScanned.target, policyFlag: preScanned.policy)
 var argIter = CommandLine.arguments.dropFirst().makeIterator()
 while let a = argIter.next() {
     switch a {
@@ -1682,6 +1700,14 @@ if wantJson {
         FileHandle.standardError.write("  \(breakdown)\(u)\n".data(using: .utf8)!)
     }
 }
+// ⟨0.28⟩ THE RUN HAS FINISHED WRITING REPORTS: hand back any file the ⟨0.28⟩ armer above turned out not to
+// own. Everything below this line is the GATE, which writes a verdict, never a report — so a file still
+// holding the placeholder here is a leftover this scan never claimed, and leaving it armed would assert an
+// incompleteness the run never experienced (the ⟨0.21⟩ trigger; see `disarmUnwrittenOutReports`, and the
+// reference engine's undone first version in candor-rust `f439dea`). Reached only on the paths that
+// completed the analysis — every exit-2 above this point leaves the placeholders in place, which is the
+// whole point of arming. `--json` writes no report file, so it restores the whole armed set.
+disarmUnwrittenOutReports()
 
 // the coverage ledger's stderr line (the ledger itself is computed above, before the envelope,
 // and ALSO rides the report as the ⟨0.15 staged⟩ `coverage` field — same list, same counts).
