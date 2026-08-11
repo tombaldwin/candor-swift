@@ -157,6 +157,16 @@ empty `remedies`/`unverified` array asserts a finding that was never made. `if (
 falsy and fails safe. The arrays still ship — a partial answer that says it is partial beats a refusal —
 and `--strict` exits **2** (could-not-fully-evaluate), the gate's code for the same situation, not the 1
 that would claim a finding. The GATE keeps `ok: false`: there the `false` is true, it did not certify.
+⟨0.28⟩ **AND `analyzed.count: 0` DOES THE SAME, ON THE SAME TERMS — plus `tour` and `path`** (SPEC §2).
+The re-disclosure binds any verb whose output could read as a NEGATIVE FINDING about the code: a verdict,
+an empty result set, or a zero count. So over a report that judged nothing, or one naming source it could
+not analyze, `tour` and `path` add `incomplete: true` + the manifest to their JSON and print a
+`⚠ INCOMPLETE` note above their prose, and the reassuring sentences ("nothing hidden", "X does not
+perform E") are WITHDRAWN. The judged-nothing cause is named separately as `judgedNothing: [<report>…]`,
+because the two want different repairs: `unanalyzed` wants a scan that can READ a file, this wants a scan
+that reached a conclusion. **It is a disclosure, not an exit code** — `gate --report` exits 0 over a
+judged-nothing report (⟨0.24⟩), so nothing downstream fails closed on those bytes and no verb here
+refuses over them either: every exit code on this page is unchanged by that rung.
 ⟨0.24⟩ **AN ADVISORY VERB MAY BE LESS CERTAIN THAN THE GATE, NEVER MORE** (SPEC §3.2). Where
 `gate --report` refuses for want of evidence — a class-scoped `deny Net[…]` / `deny Unknown[…]` over a
 report carrying no `netClass`, or no reason reachable for an `Unknown` — `unverified` NAMES the function

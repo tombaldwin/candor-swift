@@ -60,20 +60,143 @@ struct ReportCoverage {
 //
 // The gate keeps `ok:false` and is NOT changed to match: there `false` is TRUE — the gate did not
 // certify. A shape is copied for its reasoning, not its familiarity.
+//
+// ⟨0.28⟩ **AND "THE ADVISORY VERBS" WAS ITSELF THE SCOPING MISTAKE.** The header above says this is read
+// for the verbs that answer `ok`, and the DESCRIPTIVE verbs — the ones that answer a QUESTION rather than
+// render a verdict — were never given it. SPEC §2 ⟨0.28⟩ corrects the clause to the condition that always
+// justified it: the obligation binds *"any verb whose output could be read as a NEGATIVE FINDING about the
+// code — a verdict, an empty result set, or a zero count"*. An empty result set is exactly what these
+// verbs produce. MEASURED on this engine over a report declaring `analyzed.count: 0` and a non-empty
+// `unanalyzed` — the standard post-failure artifact since the ⟨0.28⟩ arming rung, i.e. what is on disk
+// after a failed run:
+//
+//     tour 3 --json   {"reaches":[]}                                     exit 0, no hedge
+//     tour 3          candor: nothing hidden — every effect sits …       exit 0, no hedge
+//
+// "nothing hidden" is the single most reassuring sentence this binary prints, and there it is printed out
+// of a report whose own manifest names a file it could not read. A consumer cannot tell *nothing is
+// hidden* from *nothing was examined*. Same struct, same two channels, same no-op-when-complete rule —
+// `mustHedge` is the trigger a descriptive verb asks, `isIncomplete` stays the one an EXIT CODE asks.
+//
+// ⟨0.28⟩ **AND `analyzed.count: 0` IS THE SECOND CAUSE, WHICH THIS STRUCT DID NOT READ AT ALL.** SPEC §2:
+// *"a report-consuming verb MUST re-disclose a non-empty `unanalyzed`, **and an `analyzed.count` of 0**,
+// on the same terms."* A report that judged nothing carries no `unanalyzed` — there is no unread FILE to
+// name, the scan simply reached no conclusion — so the manifest reader saw a COMPLETE report and the
+// verbs answered over it just the same. `judgedNothing` is that arm, decided by the SHARED
+// `claimsToHaveJudgedNothing` predicate the chained dep-join and `gate --report` already use, so a report
+// cannot be judged-nothing on one route and not the other.
 struct ReportCompleteness {
     var unanalyzed: [(path: String, reason: String)] = []
+    /// ⟨0.28⟩ The report FILES under this locator that say they judged nothing — SPEC §2's
+    /// `analyzed.count == 0` row. A THIRD CAUSE, not a third spelling of the first: `unanalyzed` names
+    /// source the scan could not READ, this is a scan that read whatever it read and reached no
+    /// conclusion about any of it. Only the union of the two covers both the post-failure artifact
+    /// (which carries both) and the facade/re-export report (which carries only this).
+    var judgedNothing: [String] = []
+
+    /// Is the universe this verb reasoned over known-partial? **EITHER ARM OF THIS IS AN EXIT CODE**, and
+    /// that is why `judgedNothing` is deliberately NOT one of them. `unverified --strict` and
+    /// `fix-gate --strict` answer 2 off this — *"the gate refuses over these bytes, so do I"* — but
+    /// ⟨0.24⟩ ruled count-0 the other way for exactly those bytes: *"A DISCLOSURE, NOT AN EXIT CODE"*,
+    /// because `gate --report` exits 0 over a facade package and a verb exiting 2 there would claim it
+    /// got LESS far than the gate on identical input. So the count-0 cause reaches the two DISCLOSURE
+    /// channels via `mustHedge` and stops at the exit code.
     var isIncomplete: Bool { !unanalyzed.isEmpty }
+
+    /// ⟨0.28⟩ **Is there anything at all to disclose — the trigger for an ANSWER, where `isIncomplete` is
+    /// the trigger for a VERDICT.** A descriptive verb asks THIS: its empty set is a negative finding
+    /// under both causes, and it has no exit code for the distinction above to matter to. Both channels
+    /// are keyed on it, so a caller cannot get the JSON half's trigger and the prose half's trigger to
+    /// disagree — one channel going quiet is the mutant this family has already shipped once.
+    var mustHedge: Bool { isIncomplete || !judgedNothing.isEmpty }
+
+    var units: Int { unanalyzed.count }
     var json: [[String: Any]] { unanalyzed.map { ["path": $0.path, "reason": $0.reason] as [String: Any] } }
+
+    /// The MACHINE half: the ⟨0.28⟩ disclosure keys, or EMPTY when there is nothing to disclose — so
+    /// merging it into an ordinary run's document is a no-op and that output stays byte-identical.
+    /// `incomplete: true` is the flag EITHER cause raises (a consumer that only branches on it is safe
+    /// under both); each manifest is omitted when empty, so a document raised by `unanalyzed` alone is
+    /// byte-identical to the pre-⟨0.28⟩ one.
+    var disclosureJSON: [String: Any] {
+        guard mustHedge else { return [:] }
+        var d: [String: Any] = ["incomplete": true]
+        if !unanalyzed.isEmpty { d["unanalyzed"] = json }
+        if !judgedNothing.isEmpty { d["judgedNothing"] = judgedNothing }
+        return d
+    }
+
+    /// What `gate --report` does over THESE SAME BYTES, as one sentence for a note's tail — a computed
+    /// property rather than a fixed string because the two causes get OPPOSITE answers. Every pre-⟨0.28⟩
+    /// disclosure closes with *"`gate --report` exits 2 over these bytes"*, which is true of `unanalyzed`
+    /// (§3.3 makes an incomplete analysis of the target's own code an exit-2 cause) and FALSE of
+    /// `analyzed.count: 0` (⟨0.24⟩: a disclosure, not an exit code). A note that sends the reader to a CI
+    /// job which then passes teaches them the note is noise — the disclosure discrediting itself.
+    var gateLine: String {
+        isIncomplete
+            ? "`gate --report` exits 2 over these bytes."
+            : "NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU — `gate --report` exits 0 over a judged-nothing "
+              + "report (⟨0.24⟩: a disclosure, not an exit code), so this note is the whole of the warning."
+    }
+
+    /// The HUMAN half — nil on a complete report, so an ordinary run stays byte-identical. ONE prose
+    /// implementation for every caller: two copies of this text is exactly how the family arrived at two
+    /// element rules for the manifest reader. Wording is the Rust reference's, character for character.
+    func note(so soWhat: String, tail: String) -> String? {
+        guard mustHedge else { return nil }
+        // The unanalyzed-ONLY sentence is unchanged from the reference's pre-⟨0.28⟩ one: that is the case
+        // every existing caller was measured on, and the count-0 arm is additive.
+        let head: String
+        switch (isIncomplete, judgedNothing.count) {
+        case (true, 0):
+            head = "the report(s) under this locator declare \(units) unit(s) candor could not analyze,"
+        case (true, let n):
+            head = "the report(s) under this locator declare \(units) unit(s) candor could not analyze, "
+                 + "and \(n) report(s) that judged nothing at all,"
+        case (false, let n):
+            head = "\(n) report(s) under this locator say they JUDGED NOTHING (`analyzed.count: 0`),"
+        }
+        var lines = ["  ⚠ INCOMPLETE — \(head)", "      so \(soWhat):"]
+        for u in unanalyzed { lines.append("      \(u.path) — \(u.reason)") }
+        for p in judgedNothing {
+            lines.append("      \(p) — `analyzed.count: 0`: this report judged NOTHING, so it names no "
+                       + "function at all and its silence is not a purity claim")
+        }
+        lines.append("      \(tail)")
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// `note` to STDOUT, BEFORE the answer — the Rust reference's channel and position, MEASURED rather
+    /// than assumed. The first draft here sent it to stderr, on the reasoning that stdout is the machine
+    /// surface even in prose mode; diffing the two engines over the SAME report file showed the text
+    /// matching character for character on OPPOSITE channels, which is a divergence a consumer sees and
+    /// no assertion in either tree would have caught. It goes above the answer because it qualifies what
+    /// the verb DID find as much as what it did not.
+    func printNote(so soWhat: String, tail: String) {
+        guard let n = note(so: soWhat, tail: tail) else { return }
+        print(n, terminator: "")
+    }
 }
 
-// The envelope's `unanalyzed` manifest, merged across sibling reports. A member that is not a
+// The envelope's ⟨0.21⟩/⟨0.28⟩ completeness manifest, merged across sibling reports — BOTH causes, in one
+// place, so a caller cannot pick up one and miss the other. A member of `unanalyzed` that is not a
 // `{path, …}` object is SKIPPED rather than failing the load: these are advisory verbs, and the
 // alternative — refusing to answer at all — is strictly less than the partial answer §3.2 asks for.
 // (The GATE route does fail loud on a malformed manifest, deliberately: it is certifying.)
-private func mergeUnanalyzed(_ obj: [String: Any], into c: inout ReportCompleteness) {
+//
+// ⟨0.28⟩ the judged-nothing arm is decided PER FILE and by `claimsToHaveJudgedNothing` (Deps.swift), the
+// predicate the chained dep-join already uses: a locator naming several siblings must disclose EACH
+// silent one by name, and reimplementing the `analyzed.count` reading here is how two routes come to
+// disagree about the same bytes. Its fail-closed arms travel with it — a manifest that is PRESENT but
+// garbled reads as judged-nothing, exactly as it does for coverage.
+private func mergeCompleteness(_ obj: [String: Any], path: String, entryCount: Int,
+                               into c: inout ReportCompleteness) {
     for case let m as [String: Any] in (obj["unanalyzed"] as? [Any]) ?? [] {
         guard let p = m["path"] as? String else { continue }
         c.unanalyzed.append((path: p, reason: m["reason"] as? String ?? ""))
+    }
+    if claimsToHaveJudgedNothing(analyzed: obj["analyzed"], entryCount: entryCount) {
+        c.judgedNothing.append(path)
     }
 }
 
@@ -101,13 +224,21 @@ func emitAdvisoryAnswer(_ body: [String: Any], ok: Bool, completeness c: ReportC
                         strict: Bool, unevaluated: [UnansweredRule] = []) -> Never {
     var out = body
     if !unevaluated.isEmpty { out["unevaluated"] = unevaluated.map { $0.toJSON() } }
-    if c.isIncomplete || !unevaluated.isEmpty {
-        if c.isIncomplete {
-            out["incomplete"] = true
-            out["unanalyzed"] = c.json
-        }
+    // ⟨0.28⟩ THE DOCUMENT GATE AND THE EXIT ARGUMENT ARE NOW DIFFERENT PREDICATES, deliberately.
+    //
+    //   · the DOCUMENT withdraws `ok` on `mustHedge`: a report that judged NOTHING licenses `ok` no more
+    //     than one naming source it could not read does, and leaving this on `isIncomplete` would have
+    //     let a `true` ship beside the INCOMPLETE note the same struct is printing — one channel going
+    //     quiet, the split this family has already been bitten by;
+    //   · the EXIT stays on `isIncomplete`, because ⟨0.24⟩ fixed count-0's exit at the gate's (exit 0),
+    //     and a verb answering 2 where `gate --report` answers 0 would claim it got LESS far than the
+    //     gate on identical bytes. So a count-0 report with a HOLE still exits 1 under `--strict`, as it
+    //     did before this rung: the caveat is added, the refusal is not.
+    let refuses = c.isIncomplete || !unevaluated.isEmpty
+    if c.mustHedge || !unevaluated.isEmpty {
+        for (k, v) in c.disclosureJSON { out[k] = v }
         emitJSON(out)
-        exit(strict ? 2 : 0)
+        exit(refuses ? (strict ? 2 : 0) : (strict && !ok ? 1 : 0))
     }
     out["ok"] = ok
     emitJSON(out)
@@ -174,7 +305,8 @@ private func mergeFixReport(_ full: String, into byName: inout [String: FixFn],
         for entry in unc { if let name = entry["name"] as? String { coverage.envelopeModules.insert(name) } }
     }
     // ⟨0.21⟩ completeness manifest, ⟨0.24⟩ read HERE for the first time — see `ReportCompleteness`.
-    mergeUnanalyzed(obj, into: &completeness)
+    // ⟨0.28⟩ …and its `analyzed.count: 0` row alongside it, from the SAME reader.
+    mergeCompleteness(obj, path: full, entryCount: fns.count, into: &completeness)
     return true
 }
 
@@ -525,7 +657,8 @@ private func mergeUnverifiedReport(_ full: String, into out: inout [UnverifiedFn
                                 calls: calls, netClass: netClass))
     }
     // ⟨0.21⟩ completeness manifest, ⟨0.24⟩ read HERE for the first time — see `ReportCompleteness`.
-    mergeUnanalyzed(obj, into: &completeness)
+    // ⟨0.28⟩ …and its `analyzed.count: 0` row alongside it, from the SAME reader.
+    mergeCompleteness(obj, path: full, entryCount: fns.count, into: &completeness)
     return true
 }
 
@@ -730,6 +863,17 @@ func runTourCLI(_ args: [String]) -> Never {
     // back to the prefix basename (Rust: `prefix_base(pre)`) — e.g. `.candor/report` → `report`.
     let crateName = reportPackage(prefix: prefix) ?? (prefix as NSString).lastPathComponent
 
+    // ⟨0.28⟩ AND THE SAME ARGUMENT AS THE `unknown` FIELD BELOW, ONE CAUSE OVER. That field exists because
+    // `{"reaches":[]}` read as clean to a JSON consumer over a mostly-Unknown graph; a report that judged
+    // nothing, or one naming a file it could not read, produces the IDENTICAL empty array from strictly
+    // less evidence — and the ⅓-Unknown threshold cannot see it (an unread unit contributes no entry, so
+    // it moves neither `unknown` nor `total`). Same shape, same two channels, and a no-op on a complete
+    // report so an ordinary tour stays byte-identical. See `ReportCompleteness`.
+    let comp = model.completeness
+    let tourSoWhat = "the reaches below are ranked over only the call graph candor could see"
+    let tourTail = "A surprising reach whose path runs through an unread unit is not ranked here at all, "
+                 + "and cannot be. \(comp.gateLine) Re-scan for the full tour."
+
     if t.json {
         // Pure JSON to stdout: {"reaches":[{"fn","effect","hops","source","loc","score"}, …]}.
         let reaches: [[String: Any]] = finds.map { f in
@@ -741,10 +885,12 @@ func runTourCLI(_ args: [String]) -> Never {
         // ADDITIVE + present only when the ≥⅓-Unknown threshold trips (byte-identical otherwise).
         let total = inferred.values.filter { !$0.isEmpty }.count
         let unknown = inferred.values.filter { $0.contains("Unknown") }.count
-        emitTourJSON(reaches, unknown: (total > 0 && unknown * 3 >= total) ? (unknown, total) : nil)
+        emitTourJSON(reaches, unknown: (total > 0 && unknown * 3 >= total) ? (unknown, total) : nil,
+                     completeness: comp)
         exit(0)
     }
 
+    comp.printNote(so: tourSoWhat, tail: tourTail)
     if finds.isEmpty {
         // Effectful-but-nothing-surprising vs genuinely-pure both land here; either way the honest line is
         // the useful answer (never a manufactured surprise) — mirrors the scan-note fallback. BUT never
@@ -754,6 +900,13 @@ func runTourCLI(_ args: [String]) -> Never {
         let unknown = inferred.values.filter { $0.contains("Unknown") }.count
         if total > 0 && unknown * 3 >= total {
             print("candor: no surprising reaches — but \(unknown) of \(total) function(s) are Unknown (unresolved calls; their transitive effects are NOT analyzed). Run `candor blindspots` — the report records a reason for each.")
+            exit(0)
+        }
+        // ⟨0.28⟩ "nothing hidden" is the single most reassuring sentence this binary prints, and over a
+        // report that judged nothing it is the false all-clear in plain English. The ⅓-Unknown branch
+        // above cannot catch this case, for the reason given where `comp` is read.
+        if comp.mustHedge {
+            print("candor: nothing hidden in what candor COULD SEE — but see the INCOMPLETE note above; this is NOT \"nothing is hidden\".")
             exit(0)
         }
         print("candor: nothing hidden — every effect sits where its name says it should.")
@@ -775,7 +928,8 @@ func runTourCLI(_ args: [String]) -> Never {
 // `serde_json::Value`, whose object is a sorted map, so each reach's keys come out ALPHABETICALLY sorted:
 // effect, fn, hops, loc, score, source. Built by hand (JSONSerialization neither guarantees key order nor a
 // compact form), so this is emitted explicitly rather than via JSONSerialization.
-private func emitTourJSON(_ reaches: [[String: Any]], unknown: (count: Int, total: Int)? = nil) {
+private func emitTourJSON(_ reaches: [[String: Any]], unknown: (count: Int, total: Int)? = nil,
+                          completeness comp: ReportCompleteness = ReportCompleteness()) {
     func jstr(_ s: String) -> String {
         // Minimal JSON string escaping (the fields are qualified names / effects / file:line — no control
         // chars in practice, but escape the JSON-significant characters for correctness).
@@ -807,7 +961,27 @@ private func emitTourJSON(_ reaches: [[String: Any]], unknown: (count: Int, tota
     // `unknown` (when present) sorts AFTER `reaches` (reaches < unknown) with count < total — matching the
     // Rust reference's serde sorted-map output byte-for-byte (Fable-review finding E, additive disclosure).
     let unknownPart = unknown.map { ",\"unknown\":{\"count\":\($0.count),\"total\":\($0.total)}" } ?? ""
-    print("{\"reaches\":[\(parts.joined(separator: ","))]\(unknownPart)}")
+    // ⟨0.28⟩ the completeness disclosure, in the SAME sorted-map positions the Rust reference emits it:
+    // `incomplete` and `judgedNothing` sort BEFORE `reaches`, `unanalyzed` after it and before `unknown`.
+    // Empty on a complete report, so an ordinary tour is byte-identical to the pre-⟨0.28⟩ one — this file
+    // hand-builds its JSON precisely because key ORDER is the pinned four-way contract here, and a
+    // disclosure rung that silently re-sorts the answers it is disclosing about has changed the one thing
+    // it promised not to touch.
+    var head = ""
+    var unanalyzedPart = ""
+    if comp.mustHedge {
+        head = "\"incomplete\":true,"
+        if !comp.judgedNothing.isEmpty {
+            head += "\"judgedNothing\":[" + comp.judgedNothing.map(jstr).joined(separator: ",") + "],"
+        }
+        if !comp.unanalyzed.isEmpty {
+            unanalyzedPart = ",\"unanalyzed\":["
+                + comp.unanalyzed.map { "{\"path\":\(jstr($0.path)),\"reason\":\(jstr($0.reason))}" }
+                    .joined(separator: ",")
+                + "]"
+        }
+    }
+    print("{\(head)\"reaches\":[\(parts.joined(separator: ","))]\(unanalyzedPart)\(unknownPart)}")
 }
 
 // Dispatched from main.swift when argv[1] is `fix` or `fix-gate` (before the scan flag loop). §3.3.1:
@@ -943,6 +1117,22 @@ func runPathCLI(_ args: [String]) -> Never {
     let byName = model.byName
     let cg = model.cg
 
+    // ⟨0.28⟩ SPEC §2 binds the re-disclosure to *any* verb whose output could read as a NEGATIVE FINDING —
+    // "a verdict, an empty result set, or a zero count" — and `path` has TWO empty-result answers, both
+    // phrased as facts about the code: `{"fn":…,"effect":…,"path":[]}`, printed as *"X does not perform
+    // E"* and *"…not statically traceable"*. Over a report naming source it could not read, neither is
+    // supportable: the chain that would have answered may run through a function that is simply absent
+    // from the report. Over an ARMED / count-0 report `path` already refuses at exit 2 (no fn matches),
+    // which is why this is the PARTIAL report's case. Same struct, same two channels, no-op when complete.
+    //
+    // The note is printed BEFORE the answer and on EVERY branch, not just the empty ones: an unread unit
+    // qualifies a chain that WAS found as much as one that was not — the chain may not be the shortest,
+    // and its `source` may not be the nearest.
+    let comp = model.completeness
+    let pathSoWhat = "the call chain below is traced through only the call graph candor could see"
+    let pathTail = "A function in an unread unit is ABSENT from the report, so no chain can be traced "
+                 + "through it and none can be ruled out. \(comp.gateLine) Re-scan for a complete answer."
+
     // Resolve <fn>: EXACT name first, else the first (deterministic) fn whose qual CONTAINS the substring —
     // mirrors the Rust reference (`find(func == arg).or_else(find(func.contains(arg)))`). Sorted so the
     // substring fallback is stable across dictionary orderings.
@@ -954,15 +1144,35 @@ func runPathCLI(_ args: [String]) -> Never {
     }
     let startFn = byName[start]!
 
+    // ⟨0.28⟩ ONE attachment point for the machine half, so the three `path` documents cannot drift into
+    // three different manifests. `disclosureJSON` is EMPTY on a complete report and `emitJSON` sorts its
+    // keys, so an ordinary run is byte-identical.
+    func emitPathJSON(_ steps: [[String: Any]]) {
+        var out: [String: Any] = ["fn": start, "effect": effect, "path": steps]
+        for (k, v) in comp.disclosureJSON { out[k] = v }
+        emitJSON(out)
+    }
+    // …and one for the human half, BEFORE any answer reaches stdout. The `--json` branches below exit
+    // before this could matter; they carry the keys instead.
+    if !p.json { comp.printNote(so: pathSoWhat, tail: pathTail) }
+
     // The honest empty answer (NOT an error): the fn does not carry the effect at all. In --json mode emit
     // the pinned {effect,fn,path:[]} object (a `jq` consumer would choke on human text on stdout); in human
     // mode name it, matching the Rust wording, including the sorted inferred set for context.
     if !startFn.inferred.contains(effect) {
         if p.json {
-            emitJSON(["fn": start, "effect": effect, "path": [[String: Any]]()])
+            emitPathJSON([])
         } else {
             let inf = "[" + startFn.inferred.sorted().map { "\"\($0)\"" }.joined(separator: ", ") + "]"
-            print("\(start) does not perform \(effect)  (inferred: \(inf))")
+            // ⟨0.28⟩ NOT the bare "does not perform" over a partial report: that sentence is the prose
+            // spelling of the empty `path` array, and it is a claim about the whole function, which is
+            // more than the report candor was handed can support.
+            if comp.mustHedge {
+                print("\(start) does not perform \(effect) in what candor COULD SEE  (inferred: \(inf))"
+                    + " — but see the INCOMPLETE note above; this is NOT \"\(start) never performs \(effect)\".")
+            } else {
+                print("\(start) does not perform \(effect)  (inferred: \(inf))")
+            }
         }
         exit(0)
     }
@@ -992,10 +1202,13 @@ func runPathCLI(_ args: [String]) -> Never {
     guard let src = source else {
         // Reached via a cross-package call / Unknown — the honest empty-path answer (§3.1), not an error.
         if p.json {
-            emitJSON(["fn": start, "effect": effect, "path": [[String: Any]]()])
+            emitPathJSON([])
         } else {
+            // ⟨0.28⟩ "not statically traceable" reads as a property of the CODE; over a partial report it
+            // may only be a property of what was read, and the difference is the whole point of the note.
             print("\(start) performs \(effect) but its source is not a local function "
-                + "(cross-crate, or via Unknown) — not statically traceable.")
+                + "(cross-crate, or via Unknown) — not statically traceable"
+                + (comp.mustHedge ? " in what candor could see (see the INCOMPLETE note above)." : "."))
         }
         exit(0)
     }
@@ -1013,7 +1226,7 @@ func runPathCLI(_ args: [String]) -> Never {
         let steps: [[String: Any]] = chain.enumerated().map { (i, name) in
             ["fn": name, "loc": byName[name]?.loc ?? "", "source": i == chain.count - 1]
         }
-        emitJSON(["fn": start, "effect": effect, "path": steps])
+        emitPathJSON(steps)
         exit(0)
     }
 
