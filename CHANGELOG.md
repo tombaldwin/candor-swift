@@ -9,6 +9,25 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.28⟩ the DESCRIPTIVE query verbs carry the ⟨0.21⟩ completeness manifest too** (SPEC §2). The
+  re-disclosure MUST binds *any* verb whose output could read as a NEGATIVE FINDING — "a verdict, an
+  empty result set, or a zero count" — and this engine read the manifest only for the two verbs that
+  answer `ok`. Measured 2026-08-11 over a report declaring `analyzed.count: 0` and a non-empty
+  `unanalyzed` — the standard artifact on disk after a failed run since the ⟨0.28⟩ arming rung —
+  `tour --json` answered `{"reaches":[]}` and the prose answered *"nothing hidden — every effect sits
+  where its name says it should"*, both at exit 0, out of a report whose own manifest names a file it
+  could not read. A consumer could not tell *nothing is hidden* from *nothing was examined*. `tour` and
+  `path` (this engine's two descriptive verbs; it has no `map`/`blindspots`/`reachable`/`containment`)
+  now carry `incomplete: true` plus the manifest on the JSON channel and the ⚠ INCOMPLETE note on the
+  prose one, with the reassuring sentence withdrawn — byte-identical to the candor-rust reference on
+  both channels over five artifact states. **`analyzed.count: 0` is a SECOND cause the manifest reader
+  did not read at all** (a report that judged nothing names no unread FILE, so the reader saw a complete
+  report), decided by the same `claimsToHaveJudgedNothing` predicate the chained dep-join uses, and
+  surfaced as `judgedNothing`. It reaches both DISCLOSURE channels and stops at the EXIT CODE: ⟨0.24⟩
+  fixed count-0 at `gate --report`'s exit 0, so `unverified --strict` over a judged-nothing report with a
+  hole still exits 1, not 2. `unverified`/`fix-gate` withdraw `ok` under the new cause for the same
+  reason they withdraw it under the old one. Verdict-preserving: exit codes unchanged in all 70 measured
+  (state × verb × mode) cells, and every intact-report cell byte-identical. 732 unit tests, smoke 137/0.
 - **⚠ ⟨0.28⟩ the §2.2 sidecars go with the armed report — deleted, not emptied** (SPEC §3.3.1). Arming an
   `--out` report left `<stem>.callgraph.json` and `<stem>.hierarchy.json` live beside it: a pair that
   contradicts itself, with no provenance on the sidecar to arbitrate. Not decorative on this engine,

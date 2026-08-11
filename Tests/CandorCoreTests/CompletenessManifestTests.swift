@@ -260,6 +260,157 @@ final class CompletenessManifestTests: XCTestCase {
         }
     }
 
+    // ── ⟨0.28⟩ the DESCRIPTIVE verbs carry the manifest too ───────────────────────────────────────────
+    //
+    // SPEC §2 ⟨0.28⟩ widened the re-disclosure MUST from "a verb whose VERDICT could change" to *any* verb
+    // whose output could read as a NEGATIVE FINDING — "a verdict, an empty result set, or a zero count".
+    // The row above covers the two verbs that answer `ok`; these cover the two this engine has that answer
+    // a QUESTION, and the `analyzed.count: 0` cause the manifest reader did not read at all.
+
+    /// One hand-built §2 report at `<dir>/rep.fixture.Swift.json`, so a test can produce any row of the
+    /// artifact-state table verbatim — including rows a SCAN cannot be made to emit on demand (a report
+    /// that judged nothing while still naming functions is the ⟨0.24⟩ contradictory row).
+    private func reportFixture(_ name: String, _ envelope: [String: Any]) throws -> String {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-comp028-\(name)-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let f = dir.appendingPathComponent("rep.fixture.Swift.json")
+        try JSONSerialization.data(withJSONObject: envelope).write(to: f)
+        return f.path
+    }
+
+    /// A COMPUTED property, not a `static let`: `[String: Any]` is not `Sendable`, so a stored global
+    /// is a strict-concurrency error in this package's Swift 6 mode.
+    private var effectfulFn: [String: Any] {
+        ["fn": "transitive_leaf", "inferred": ["Fs"], "direct": ["Fs"], "loc": "main.swift:1:1"]
+    }
+
+    /// `tour` and `path` over the two nothing-judged states disclose on BOTH channels, and over an INTACT
+    /// report they are silent on both.
+    ///
+    /// The ARMED report — `analyzed.count: 0` plus a non-empty `unanalyzed`, sidecars gone — is the
+    /// standard artifact on disk after a FAILED run since the ⟨0.28⟩ arming rung, so this is not an exotic
+    /// input. Measured on this engine before the rung: `tour --json` answered `{"reaches":[]}` and the
+    /// prose answered *"nothing hidden — every effect sits where its name says it should"*, both at exit
+    /// 0, out of a report whose own manifest names a file it could not read.
+    func testDescriptiveVerbsDiscloseOverANothingJudgedReport() throws {
+        let bin = try ProcessHarness.binaryURL(for: type(of: self))
+        let armed = try reportFixture("armed", [
+            "candor": ["version": "t", "toolchain": "swiftsyntax", "spec": "0.28"],
+            "functions": [], "analyzed": ["count": 0],
+            "unanalyzed": [["path": "<run>", "reason": "armed"]],
+        ])
+        // COUNT-0 WITH ENTRIES — the ⟨0.24⟩ contradictory row, and the one that makes this a SECOND cause
+        // rather than a second spelling of the first: there is no unread FILE to name, so `unanalyzed` is
+        // legitimately absent and the pre-⟨0.28⟩ reader saw a COMPLETE report. It keeps a function so the
+        // verbs can still answer — an empty answer here would prove nothing about the disclosure.
+        let count0 = try reportFixture("count0", [
+            "candor": ["version": "t", "toolchain": "swiftsyntax", "spec": "0.28"],
+            "functions": [effectfulFn], "analyzed": ["count": 0],
+        ])
+        let intact = try reportFixture("intact", [
+            "candor": ["version": "t", "toolchain": "swiftsyntax", "spec": "0.28"],
+            "functions": [effectfulFn], "analyzed": ["count": 2],
+        ])
+
+        for (state, rep) in [("armed", armed), ("count0", count0)] {
+            for argv in [["tour", "3"], ["path", "transitive_leaf", "Db"]] {
+                let verb = argv[0]
+                // `path` over the ARMED report matches no function and FAILS LOUD (exit 2) — the strongest
+                // form of not answering, and nothing for this rung to add. Only the rows that ANSWER are
+                // this row's business.
+                if verb == "path" && state == "armed" { continue }
+
+                let j = try ProcessHarness.run(bin, argv + ["--report", rep, "--json"])
+                XCTAssertEqual(j.code, 0, "\(state)/\(verb): THIS RUNG ADDS A CAVEAT, IT DOES NOT REFUSE")
+                let d = try JSONSerialization.jsonObject(with: Data(j.out.utf8)) as? [String: Any]
+                XCTAssertEqual(d?["incomplete"] as? Bool, true,
+                               "\(state)/\(verb) --json: a consumer cannot tell an empty answer from an "
+                               + "unexamined one without this key. Got: \(j.out)")
+                XCTAssertEqual((d?["judgedNothing"] as? [String])?.count, 1,
+                               "\(state)/\(verb) --json: …and the report that judged nothing is NAMED — "
+                               + "the two causes want different repairs")
+
+                // The PROSE half must move with it. One channel going quiet is the mutant this family has
+                // already shipped once, and no assertion that reads JSON keys can see it.
+                let t = try ProcessHarness.run(bin, argv + ["--report", rep])
+                XCTAssertEqual(t.code, 0, "\(state)/\(verb): the prose route does not refuse either")
+                XCTAssertTrue(t.out.contains("⚠ INCOMPLETE"),
+                              "\(state)/\(verb): the prose channel discloses too. Got: \(t.out)")
+                XCTAssertTrue(t.out.contains("judged NOTHING"),
+                              "\(state)/\(verb): …naming the `analyzed.count: 0` cause. Got: \(t.out)")
+            }
+        }
+
+        // The reassuring sentences are WITHDRAWN, not merely accompanied: a note above a line still saying
+        // "nothing hidden" leaves the false all-clear in place for anyone reading the last line.
+        let tourText = try ProcessHarness.run(bin, ["tour", "3", "--report", armed])
+        XCTAssertFalse(tourText.out.contains("nothing hidden — every effect"),
+                       "the unqualified all-clear is gone over an armed report. Got: \(tourText.out)")
+        XCTAssertTrue(tourText.out.contains("nothing hidden in what candor COULD SEE"),
+                      "…replaced by the weaker sentence the input licenses. Got: \(tourText.out)")
+
+        // ── CONTROL: an INTACT report is a NO-OP on both channels, so an ordinary run stays as it was. ──
+        for argv in [["tour", "3"], ["path", "transitive_leaf", "Db"]] {
+            let verb = argv[0]
+            let j = try ProcessHarness.run(bin, argv + ["--report", intact, "--json"])
+            XCTAssertEqual(j.code, 0, "\(verb) over an intact report answers")
+            let d = try JSONSerialization.jsonObject(with: Data(j.out.utf8)) as? [String: Any]
+            XCTAssertNil(d?["incomplete"], "\(verb): no disclosure key on a complete report — byte-identical")
+            XCTAssertNil(d?["judgedNothing"], "\(verb): …nor this one")
+            XCTAssertNil(d?["unanalyzed"], "\(verb): …nor the manifest")
+            let t = try ProcessHarness.run(bin, argv + ["--report", intact])
+            XCTAssertFalse(t.out.contains("INCOMPLETE"),
+                           "\(verb): the prose half is a no-op too — a hedge on every run trains the "
+                           + "reader to ignore it. Got: \(t.out)")
+        }
+    }
+
+    /// `analyzed.count: 0` MUST raise the disclosure and MUST NOT raise the EXIT CODE.
+    ///
+    /// This is the whole reason `mustHedge` and `isIncomplete` are separate predicates. ⟨0.24⟩ ruled
+    /// count-0 *"A DISCLOSURE, NOT AN EXIT CODE"*: `gate --report` exits 0 over a judged-nothing report,
+    /// so an advisory verb answering 2 there would claim it got LESS far than the gate on identical bytes
+    /// — the mirror of the over-claim `--strict`'s exit 2 exists to prevent. Fold the count-0 arm into the
+    /// exit predicate and this row fails; NOTHING ELSE in the tree would notice, because the conformance
+    /// suite has no cell for a `--strict` advisory verb over a judged-nothing report.
+    func testJudgedNothingHedgesTheAnswerWithoutTouchingTheExitCode() throws {
+        let bin = try ProcessHarness.binaryURL(for: type(of: self))
+        // A count-0 report that still names a function with an unrecorded `Unknown`, so `pure` leaves a
+        // HOLE: the cell where the two predicates give different answers.
+        let rep = try reportFixture("count0-hole", [
+            "candor": ["version": "t", "toolchain": "swiftsyntax", "spec": "0.28"],
+            "analyzed": ["count": 0],
+            "functions": [["fn": "mystery", "inferred": ["Unknown"], "direct": ["Unknown"],
+                           "unknownWhy": ["dispatch:x"], "loc": "main.swift:1:1"]],
+        ])
+        let dir = (rep as NSString).deletingLastPathComponent
+        let pol = dir + "/pure.policy"
+        try "pure mystery\n".write(toFile: pol, atomically: true, encoding: .utf8)
+
+        // The reference for the exit code: the GATE answers 0 over these bytes.
+        let gate = try ProcessHarness.run(bin, ["gate", "--report", rep, "--policy", pol])
+        XCTAssertEqual(gate.code, 0,
+                       "the reference: ⟨0.24⟩ fixed count-0 at the gate's exit 0, not the manifest's 2")
+
+        let r = try ProcessHarness.run(bin, ["unverified", "--report", rep, "--policy", pol, "--json"])
+        let d = try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any]
+        XCTAssertNil(d?["ok"], "count-0 withdraws `ok` — a report that judged nothing licenses it no more "
+                             + "than one naming source it could not read. Got: \(r.out)")
+        XCTAssertEqual(d?["incomplete"] as? Bool, true, "…and says so")
+        XCTAssertNil(d?["unanalyzed"], "there is no unread FILE in the count-0 row — the key stays absent")
+        XCTAssertEqual((d?["judgedNothing"] as? [String])?.count, 1, "…the OTHER manifest names the report")
+        XCTAssertEqual((d?["unverified"] as? [Any])?.count, 1,
+                       "the partial answer still ships: the hole this report DID show is worth naming")
+
+        // …AND THE EXIT CODE IS UNTOUCHED. 1 = "a hole exists", the answer a COMPLETE report with the same
+        // hole gives; NOT the 2 that would say candor could not evaluate what the gate just evaluated.
+        let s = try ProcessHarness.run(bin, ["unverified", "--report", rep, "--policy", pol, "--strict"])
+        XCTAssertEqual(s.code, 1,
+                       "count-0 must NOT reach the exit-code predicate — `gate --report` exits 0 over "
+                       + "these very bytes, so a 2 here claims candor got less far than the gate did")
+    }
+
     // The digest algorithm matches java's FNV-1a-64 byte-for-byte (one spec, one algorithm).
     func testFnv1aHexIsDeterministicAndWellFormed() {
         let a = fnv1aHex(["app.pure(x:)", "app.reads()"])
