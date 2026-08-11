@@ -9,6 +9,24 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.28⟩ `gains` carries the ⟨0.21⟩ completeness manifest, on BOTH SIDES** (SPEC §2, conformance
+  PART 39 (ii)). The last verb of the §2 re-disclosure MUST left open by the entry below. The coverage
+  rider has ridden this verb since ⟨0.15⟩ — *a "no gains" over an uncovered dep reads clean with false
+  confidence* — and the SAME verb, on the SAME report, in the SAME output, dropped the STRONGER caveat:
+  `coverage.uncovered` says "I could not see into this dependency", `unanalyzed` says "I could not read
+  this file of YOUR OWN CODE", `analyzed.count: 0` says "I judged nothing at all". The `--json` answer
+  now carries `incomplete: true` + `unanalyzed` for the CURRENT report and `baselineIncomplete: true` +
+  `baselineUnanalyzed` for the BASELINE — **two disclosures, not one flag**, because the answer rests on
+  two reports that fail differently: an incomplete current means the gained set may be SHORT, an
+  incomplete baseline means the comparison FLOOR is soft and the existing-vs-new `origin` split this
+  verb exists for is unreliable. A combined flag would say "something here is incomplete" and leave a
+  supply-chain reviewer unable to act on it. Key names are the candor-rust `fe5d831` set (a cross-engine
+  wire surface). NOT a second manifest reader: the element rule stays in `mergeCompleteness` and the
+  judged-nothing rule in `claimsToHaveJudgedNothing` — the new code only says which FILES to ask, on the
+  one prefix walk the version and coverage riders now share. Verdict-preserving: the human `fn\teffect`
+  TSV is byte-unchanged, a complete pair emits the pre-⟨0.28⟩ document key-for-key, and `--strict` still
+  keys on the GAINED SET (a hedged pair that gained nothing exits 0; one that gained Net exits 1).
+  733 unit tests, smoke 137/0.
 - **⟨0.28⟩ the DESCRIPTIVE query verbs carry the ⟨0.21⟩ completeness manifest too** (SPEC §2). The
   re-disclosure MUST binds *any* verb whose output could read as a NEGATIVE FINDING — "a verdict, an
   empty result set, or a zero count" — and this engine read the manifest only for the two verbs that

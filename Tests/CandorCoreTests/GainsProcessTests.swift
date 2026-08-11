@@ -262,4 +262,107 @@ final class GainsProcessTests: XCTestCase {
         let entries = try XCTUnwrap(d["byFunction"] as? [[String: Any]])
         XCTAssertEqual(entries.first?["origin"] as? String, "existing", r.out)
     }
+
+    // ── ⟨0.28⟩ the ⟨0.21⟩ completeness manifest travels into `gains`, on BOTH sides ──────────────────
+
+    /// SPEC §2 ⟨0.28⟩ / conformance PART 39 (ii). The `coverage` rider has ridden this verb since ⟨0.15⟩
+    /// for the reason §2 gives — *a "no gains" over an uncovered dep reads clean with false confidence* —
+    /// and the SAME verb, on the SAME report, in the SAME output, dropped the STRONGER caveat:
+    /// `coverage.uncovered` says "I could not see into this dependency", `unanalyzed` says "I could not
+    /// read this file of YOUR OWN CODE", `analyzed.count: 0` says "I judged nothing at all".
+    ///
+    /// BOTH SIDES, SEPARATELY, because the answer rests on two reports that fail differently: an
+    /// incomplete CURRENT means the gained set may be SHORT, an incomplete BASELINE means the comparison
+    /// floor is soft and the existing-vs-new `origin` split is unreliable. One combined flag would leave a
+    /// supply-chain reviewer unable to act on it. Key names are the candor-rust `fe5d831` wire set,
+    /// character for character — this is a cross-engine surface and PART 39's row greps it.
+    func testTheCompletenessManifestTravelsOnBothSidesOfGains() throws {
+        let binary = try ProcessHarness.binaryURL(for: Self.self)
+        let dir = try makeDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // The PART 39 fixture shape: a baseline carrying BOTH caveats, a clean current that gained Net.
+        _ = try write(#"""
+        {"candor":{"version":"t"},"analyzed":{"count":3},
+         "coverage":{"uncovered":[{"name":"mystery-crate","calls":7}]},
+         "unanalyzed":[{"path":"src/broken.swift","reason":"parse error"}],
+         "functions":[{"fn":"a","inferred":["Fs"]}]}
+        """#, dir, "hedged.M.Swift.json")
+        _ = try write(#"""
+        {"candor":{"version":"t"},"analyzed":{"count":3},
+         "functions":[{"fn":"a","inferred":["Fs","Net"]}]}
+        """#, dir, "clean.M.Swift.json")
+        let hedgedPre = dir.appendingPathComponent("hedged").path
+        let cleanPre = dir.appendingPathComponent("clean").path
+
+        // A — an incomplete BASELINE: the floor is soft, and the output says which half.
+        let a = try ProcessHarness.run(binary, ["gains", cleanPre, hedgedPre, "--json"])
+        XCTAssertEqual(a.code, 0, a.err)
+        let da = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(a.out.utf8)) as? [String: Any])
+        XCTAssertEqual(da["baselineIncomplete"] as? Bool, true,
+                       "the comparison floor is soft, so the existing-vs-new split is unreliable: \(a.out)")
+        XCTAssertEqual((da["baselineUnanalyzed"] as? [[String: Any]])?.first?["path"] as? String,
+                       "src/broken.swift", "…and the unread file is NAMED: \(a.out)")
+        XCTAssertNil(da["incomplete"], "the CURRENT side is complete — its flag must stay off: \(a.out)")
+        XCTAssertNil(da["unanalyzed"], "…and so must its manifest: \(a.out)")
+        // The ⟨0.15⟩ precedent still rides alongside — PART 39 (i) is a hard FAIL, never a SKIP.
+        XCTAssertTrue(a.out.contains("mystery-crate"), "coverage still travels: \(a.out)")
+
+        // B — an incomplete CURRENT: the gained set may be SHORT, which is the other failure entirely.
+        let b = try ProcessHarness.run(binary, ["gains", hedgedPre, cleanPre, "--json"])
+        XCTAssertEqual(b.code, 0, b.err)
+        let db = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(b.out.utf8)) as? [String: Any])
+        XCTAssertEqual(db["incomplete"] as? Bool, true,
+                       "effects the reader is not being told about: \(b.out)")
+        XCTAssertEqual((db["unanalyzed"] as? [[String: Any]])?.first?["path"] as? String, "src/broken.swift",
+                       b.out)
+        XCTAssertNil(db["baselineIncomplete"], "the two sides are disclosed SEPARATELY: \(b.out)")
+        XCTAssertNil(db["baselineUnanalyzed"], b.out)
+        XCTAssertEqual(db["gained"] as? [String], [],
+                       "AND THE ANSWER IS AN EMPTY GAINED SET — a supply-chain all-clear out of a report "
+                       + "that names a file it could not read is exactly what the caveat is for: \(b.out)")
+
+        // …and `analyzed.count: 0` is the SECOND CAUSE — no unread FILE to name, so the flag rises alone.
+        _ = try write(#"{"candor":{"version":"t"},"analyzed":{"count":0},"functions":[{"fn":"a","inferred":["Fs"]}]}"#,
+                      dir, "zero.M.Swift.json")
+        let z = try ProcessHarness.run(binary,
+                                       ["gains", cleanPre, dir.appendingPathComponent("zero").path, "--json"])
+        let dz = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(z.out.utf8)) as? [String: Any])
+        XCTAssertEqual(dz["baselineIncomplete"] as? Bool, true,
+                       "a baseline that judged NOTHING is the softest floor of all: \(z.out)")
+        XCTAssertNil(dz["baselineUnanalyzed"], "…with no unread file to name: \(z.out)")
+
+        // C — TWO INTACT REPORTS: the document is exactly what it was. Asserted as the whole KEY SET
+        // rather than four `XCTAssertNil`s, because the failure this control exists to catch is a
+        // re-serialisation that reorders or ADDS something — the BTreeMap re-sort candor-rust caught.
+        _ = try write(#"{"candor":{"version":"t"},"analyzed":{"count":3},"functions":[{"fn":"a","inferred":["Fs"]}]}"#,
+                      dir, "intact.M.Swift.json")
+        let c = try ProcessHarness.run(binary,
+                                       ["gains", cleanPre, dir.appendingPathComponent("intact").path, "--json"])
+        XCTAssertEqual(c.code, 0, c.err)
+        let dc = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(c.out.utf8)) as? [String: Any])
+        XCTAssertEqual(Set(dc.keys), ["baseline_version", "byFunction", "engine_version", "gained"],
+                       "a complete pair emits the pre-⟨0.28⟩ document unchanged: \(c.out)")
+
+        // D — THE VERDICT DOES NOT MOVE. `gains` is advisory by default and `--strict` keys on the GAINED
+        // SET, which this rung does not touch: a hedged pair that gained Net still exits 1 under --strict
+        // (not the 2 that would claim candor could not evaluate), and a hedged pair that gained NOTHING
+        // still exits 0. A caveat is added; nothing is refused.
+        // A hedged CURRENT that also gained, so the row is about the caveat and not about the empty set.
+        _ = try write(#"""
+        {"candor":{"version":"t"},"analyzed":{"count":3},
+         "unanalyzed":[{"path":"src/broken.swift","reason":"parse error"}],
+         "functions":[{"fn":"a","inferred":["Fs","Net"]}]}
+        """#, dir, "hedgedgain.M.Swift.json")
+        let hedgedGainPre = dir.appendingPathComponent("hedgedgain").path
+        let intactPre = dir.appendingPathComponent("intact").path
+        for (label, argv, want) in [
+            ("hedged baseline, gained",  ["gains", cleanPre, hedgedPre, "--json", "--strict"], Int32(1)),
+            ("hedged current, gained",   ["gains", hedgedGainPre, intactPre, "--strict"], Int32(1)),
+            ("hedged current, NO gain",  ["gains", hedgedPre, cleanPre, "--json", "--strict"], Int32(0)),
+            ("hedged baseline, NO gain", ["gains", hedgedPre, hedgedPre, "--json", "--strict"], Int32(0)),
+        ] {
+            let r = try ProcessHarness.run(binary, argv)
+            XCTAssertEqual(r.code, want, "\(label): the exit keys on the gained set, not the caveat")
+        }
+    }
 }
