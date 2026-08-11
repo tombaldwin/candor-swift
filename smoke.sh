@@ -1174,6 +1174,19 @@ OA_FN=$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(",".joi
 { [ "$OA_RC" -eq 0 ] && [ "$OA_FN" = "oa_reads" ]; } \
   && ok "⟨0.28⟩ --out: the next clean run replaces the placeholder with the real report (exit 0, oa_reads)" \
   || bad "--out disarm: exit $OA_RC, functions [$OA_FN]"
+# (A2) …AND ONLY AN EXPLICITLY NAMED `--out`. THE DEFAULT PREFIX IS NEVER ARMED: the first version of this
+# armer took it too, and measured, `candor-swift . --zzz-not-a-flag` overwrote `.candor/report.*.json` with
+# the placeholder — committed reports and baselines are the pattern this project recommends and ships in
+# CI, so that destroys version-controlled data, a worse outcome than the staleness the rung closes. A run
+# that dies in argv parsing was never told it owned that path. ⟨0.27⟩ never faced this because
+# `--gate-json` has no default: "arm at the instant the sink is known" presumes a sink the operator NAMED.
+rm -rf "$W/oa/.candor"
+"$BIN" "$W/oa" >/dev/null 2>&1
+OA_DEF=$(cksum < "$W/oa/.candor/report.oa.Swift.json" 2>/dev/null)
+"$BIN" "$W/oa" --zzz-not-a-flag >/dev/null 2>&1; OA_RC=$?
+{ [ "$OA_RC" -eq 2 ] && [ -n "$OA_DEF" ] && [ "$(cksum < "$W/oa/.candor/report.oa.Swift.json")" = "$OA_DEF" ]; } \
+  && ok "⟨0.28⟩ --out: the DEFAULT prefix is never armed — a failed run leaves .candor/report.* byte-intact" \
+  || bad "--out arming: a failed run overwrote the UNNAMED default .candor/report.* (exit $OA_RC) — that destroys committed reports"
 # (C) a prefix with no previous run has nothing to arm, and must not crash on the way to its exit 2.
 "$BIN" "$W/oa" --out "$W/oa/never-run-before" --zzz-not-a-flag >/dev/null 2>&1
 [ $? -eq 2 ] && ok "⟨0.28⟩ --out: a prefix with no previous run is exit 2 with nothing to arm (no crash)" \

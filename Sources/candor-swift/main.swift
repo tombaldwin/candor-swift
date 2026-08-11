@@ -269,16 +269,25 @@ if let gp = preScanned.gate {
 // byte-identical to the previous good run. Placed HERE, above the flag loop, because that loop's own
 // unknown-flag exit is the exit this rung is most often reached through.
 //
-// THE DEFAULT PREFIX IS ARMED TOO: an operator who never passes `--out` still has a previous run's
-// `.candor/report.*.json` on disk to go stale, and `gate --report` is pointed at those by default. It is
-// approximated from the pre-pass TARGET rather than the resolved root (an `.xcodeproj` resolution has not
-// happened yet); when the two differ, the approximation arms a directory holding no matching file and the
-// run writes its real report as before — the armer never invents a file, it only rewrites ones already
-// there. See `armOutPrefixReports` / `disarmUnwrittenOutReports` for the whole shape, including why what
+// **ONLY AN EXPLICITLY NAMED `--out`, NEVER THE DEFAULT PREFIX.** The first version of this armer took
+// the default `<target>/.candor/report` too, on the reasoning that an operator who passes no `--out`
+// still has yesterday's reports there to go stale. That reasoning is right about STALENESS and wrong
+// about OWNERSHIP, and the difference destroys data: measured, `candor-swift . --zzz-not-a-flag`
+// overwrote a `.candor/report.<pkg>.Swift.json` with the placeholder, and committed reports and
+// baselines are the pattern this project recommends and ships in CI. A run that dies in argv parsing was
+// never going to write there, and had not been told it owned that path. Destroying a version-controlled
+// artifact is a worse outcome than the staleness the rung closes.
+//
+// ⟨0.27⟩'s arming rule never had to face this because `--gate-json` has NO DEFAULT: every verdict sink is
+// named. So "arm at the instant the sink is known" presumes a sink the operator NAMED, and that
+// presumption is explicit here. With `--out p` the operator has declared that p is this run's output, so
+// arming is correct even when p is checked in; with no flag there is no such declaration.
+//
+// See `armOutPrefixReports` / `disarmUnwrittenOutReports` for the rest of the shape, including why what
 // this run turns out NOT to write is handed back rather than left holding the placeholder.
-armOutPrefixReports(preScanOutPrefix(CommandLine.arguments)
-                        ?? ((preScanned.target ?? ".") as NSString).appendingPathComponent(".candor/report"),
-                    target: preScanned.target, policyFlag: preScanned.policy)
+if let prePrefix = preScanOutPrefix(CommandLine.arguments) {
+    armOutPrefixReports(prePrefix, target: preScanned.target, policyFlag: preScanned.policy)
+}
 var argIter = CommandLine.arguments.dropFirst().makeIterator()
 while let a = argIter.next() {
     switch a {

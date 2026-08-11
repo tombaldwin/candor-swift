@@ -35,6 +35,16 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   builder now serves both report sinks (`failClosedReportDocument`), and `writeSinkAtomically` gained the
   bytes form so a restore returns the operator's file rather than a UTF-8 round-trip of it. Conformance
   PART 37 candor-swift (a) SKIP → PASS, (b) still PASS.
+  **ONLY AN EXPLICITLY NAMED `--out`, NEVER THE DEFAULT PREFIX.** The first version armed
+  `<target>/.candor/report` as well, on the reasoning that an operator who passes no `--out` still has
+  yesterday's reports there to go stale — right about STALENESS, wrong about OWNERSHIP, and the
+  difference destroys data: measured, `candor-swift . --zzz-not-a-flag` overwrote
+  `.candor/report.<pkg>.Swift.json` with the placeholder, and committed reports and baselines are the
+  pattern this project recommends and ships in CI. A run that dies in argv parsing was never going to
+  write there and had not been told it owned that path; destroying a version-controlled artifact is a
+  worse outcome than the staleness the rung closes. ⟨0.27⟩'s rule never faced this because `--gate-json`
+  has NO DEFAULT — every verdict sink is named — so "arm at the instant the sink is known" presumes a
+  sink the operator NAMED, and that presumption is now explicit.
 - **⚠ ⟨0.28⟩ a configured policy that yielded ZERO RULES refuses** (SPEC §6.2). Measured four-way
   2026-08-10: `--policy <a README>` — the wrong path in a CI script, the commonest spelling of this
   mistake — wrote `{"ok":true,"violations":[]}` and exited 0, byte-identical to a gate that ran and found
