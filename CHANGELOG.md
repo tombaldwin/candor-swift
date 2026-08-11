@@ -45,6 +45,20 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   worse outcome than the staleness the rung closes. ⟨0.27⟩'s rule never faced this because `--gate-json`
   has NO DEFAULT — every verdict sink is named — so "arm at the instant the sink is known" presumes a
   sink the operator NAMED, and that presumption is now explicit.
+  **AND ONLY FILES POSITIVELY IDENTIFIED AS THIS ENGINE'S §2 REPORT — never a name denylist.** The first
+  version excluded `.callgraph`/`.hierarchy`/`.locs` by suffix and armed everything else. SPEC §2.2 ⟨0.24⟩
+  reserves SEVEN trailing segments — `callgraph`, `hierarchy`, `calibrated`, `layerreach`, `locs`, `gate`,
+  and the `encountered-*` family — and records that the engines were already drifting on the list, one
+  carving out six and another two; this carved out three. Measured: the armer overwrote
+  `<prefix>.calibrated.json`, `.layerreach.json`, `.encountered-hosts.json` and — worst —
+  `<prefix>.gate.json`, a GATE VERDICT, each with a report-shaped placeholder, so a run whose REPORT sink
+  was armed silently destroyed the VERDICT sink's document beside it. THE MECHANISM WAS WRONG, NOT JUST
+  THE LIST: denylist-over-allowlist is a CLASSIFYING rule, where over-approximating is the safe direction,
+  and §2.2 can call an incomplete denylist "loud" because an unregistered suffix merely falls back into a
+  candidate set — for a WRITER it inverts, silently destroying a file. The armer now parses each candidate
+  and writes only a JSON object carrying both a `candor` envelope and `functions`, which cannot drift as
+  the reserved family grows and needs no list; the input exemption is still asked first, so a `--policy`
+  that is not JSON at all is named rather than skipped in silence.
 - **⚠ ⟨0.28⟩ a configured policy that yielded ZERO RULES refuses** (SPEC §6.2). Measured four-way
   2026-08-10: `--policy <a README>` — the wrong path in a CI script, the commonest spelling of this
   mistake — wrote `{"ok":true,"violations":[]}` and exited 0, byte-identical to a gate that ran and found

@@ -75,12 +75,15 @@ nonisolated(unsafe) var armedOutDocument: String? = nil
 /// `p.Fx.Swift.json` byte-identical to the previous good run (same md5). A downstream `gate --report`
 /// then reads a green report the failed run never produced.
 ///
-/// So arming rewrites every `<prefix>.*.json` to the ⟨0.21⟩ Row-1 manifest-carrying empty, and the scan
-/// overwrites its own with a real report a moment later.
+/// So arming rewrites every `<prefix>.*.json` THAT IT CAN POSITIVELY IDENTIFY AS ITS OWN §2 REPORT to the
+/// ⟨0.21⟩ Row-1 manifest-carrying empty, and the scan overwrites its own with a real report a moment
+/// later. Identification is by CONTENT, never by a name denylist — see the loop below for the measurement
+/// that settled it (a suffix denylist destroyed four sidecars, one of them a gate VERDICT).
 ///
-/// SIDECARS ARE NOT TOUCHED, deliberately — whether `.callgraph`/`.hierarchy`/`.locs` must arm alongside
-/// their report is an OPEN question against §2.2 ⟨0.26⟩'s own manifest rules (a sidecar's KEY SET is its
-/// manifest, which is a different fail-closed shape from a report's), and answering it here would put a
+/// SIDECARS ARE NOT TOUCHED, deliberately, and now by construction rather than by a list: none of them
+/// carries a `candor` envelope beside `functions`. Whether `.callgraph`/`.hierarchy`/`.locs` MUST arm
+/// alongside their report stays an OPEN question against §2.2 ⟨0.26⟩'s own manifest rules (a sidecar's KEY
+/// SET is its manifest, a different fail-closed shape from a report's), and answering it here would put a
 /// second answer in the tree.
 ///
 /// THE INPUT EXEMPTION FROM ⟨0.27⟩ (2) APPLIES TO THIS WRITER TOO. Arming happens before the run knows its
@@ -110,13 +113,40 @@ func armOutPrefixReports(_ prefix: String, target: String?, policyFlag: String?)
         + "file is a leftover. Either way it is NOT a claim about any code.") else { return }
     var inputs: [(String, String)]? = nil
     for name in names.sorted() {
-        // `<stem>.….json`, minus the §2.2 reserved sidecar segments.
         guard name.hasPrefix(stem + "."), name.hasSuffix(".json") else { continue }
-        if name.hasSuffix(".callgraph.json") || name.hasSuffix(".hierarchy.json")
-            || name.hasSuffix(".locs.json") { continue }
         let full = (dir as NSString).appendingPathComponent(name)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: full, isDirectory: &isDir), !isDir.boolValue else { continue }
+        // ONLY FILES POSITIVELY IDENTIFIED AS §2 REPORTS — never a name denylist.
+        //
+        // The first version of this armer excluded `.callgraph`/`.hierarchy`/`.locs` by SUFFIX and armed
+        // everything else under the prefix. SPEC §2.2 ⟨0.24⟩ (the "reserved set, family-wide" paragraph)
+        // lists SEVEN reserved trailing segments — `callgraph`, `hierarchy`, `calibrated`, `layerreach`,
+        // `locs`, `gate`, and the `encountered-*` family — and records that the engines were already
+        // drifting on it, one carving out six and another two. This carved out three. Measured on the
+        // reference engine: the armer overwrote `<prefix>.calibrated.json`, `.layerreach.json`,
+        // `.encountered-hosts.json` and — worst — `<prefix>.gate.json`, a GATE VERDICT, each replaced by a
+        // report-shaped placeholder. A run whose REPORT sink is armed was silently destroying the VERDICT
+        // sink's document beside it.
+        //
+        // THE MECHANISM WAS WRONG, NOT JUST THE LIST. This project's standing rule is
+        // denylist-over-allowlist, but that rule is about CLASSIFYING, where over-approximating is the
+        // safe direction. FOR A WRITER IT INVERTS: over-approximating destroys a file. §2.2 can call an
+        // incomplete denylist "loud" because there an unregistered suffix merely falls back into a
+        // candidate set and prints a disclosure; in an armer it is silent and destructive.
+        //
+        // So this writes only what it positively recognises as its OWN §2 report: a JSON object carrying
+        // both a `candor` envelope and `functions`. That cannot drift as the reserved family grows, it
+        // needs no list, and on this engine it is a strict improvement over any name rule — the report
+        // name embeds the package and the language (`<prefix>.<pkg>.Swift.json`), which no sidecar
+        // convention constrains. Anything that does not parse, or lacks either key, is not ours to write.
+        //
+        // THE INPUT EXEMPTION IS ASKED FIRST, THOUGH, and that order is deliberate. A `--policy` naming
+        // `<prefix>.policy.json` is not JSON at all, so the identification test alone would skip it
+        // SILENTLY — and the operator whose policy sits inside their own report prefix is exactly the one
+        // who needs telling, because the next reserved-looking name they choose may not be so lucky. The
+        // exemption also has to outrank identification for the case where a collision IS a valid report:
+        // a chained dep report under `CANDOR_DEPS` parses as one, and it is still an input.
         if inputs == nil { inputs = runInputs(target, policyFlag) }
         if let hit = inputs!.first(where: { sameArtifact(full, $0.0) }) {
             FileHandle.standardError.write(
@@ -127,8 +157,12 @@ func armOutPrefixReports(_ prefix: String, target: String?, policyFlag: String?)
             continue
         }
         // Remember the bytes BEFORE overwriting, so a run that completes can hand back anything it turned
-        // out not to own. A file we cannot read is not armed either — we could not put it back.
-        guard let prev = FileManager.default.contents(atPath: full) else { continue }
+        // out not to own. A file we cannot read is not armed either — we could not put it back; and the
+        // same read is what identifies it, so an unreadable file never reaches the write below.
+        guard let prev = FileManager.default.contents(atPath: full),
+              let obj = try? JSONSerialization.jsonObject(with: prev),
+              let map = obj as? [String: Any],
+              map["candor"] != nil, map["functions"] != nil else { continue }
         do {
             try writeSinkAtomically(doc, to: full)
             armedOutReports.append((full, prev))

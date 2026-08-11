@@ -1157,8 +1157,8 @@ d=json.load(open(sys.argv[1]))
 print("ROW1" if (d.get("functions")==[] and (d.get("analyzed") or {}).get("count")==0 and bool(d.get("unanalyzed"))) else "NOT-ROW1")'
 oa_reports() { ls "$W/oa/$1".*.json 2>/dev/null | grep -vE '\.(callgraph|hierarchy|locs)\.json$'; }
 # (A) a clean run, then the same command with an unknown flag: every REPORT under the prefix must carry the
-# ⟨0.21⟩ Row-1 manifest-carrying empty. The §2.2 SIDECARS are deliberately excluded from arming — whether
-# they must arm is an OPEN question against ⟨0.26⟩'s own manifest rules and must not be decided here.
+# ⟨0.21⟩ Row-1 manifest-carrying empty. The §2.2 SIDECARS are deliberately NOT armed — whether they must is
+# an OPEN question against ⟨0.26⟩'s own manifest rules and must not be decided here (row A3 pins that).
 "$BIN" "$W/oa" --out "$W/oa/p" >/dev/null 2>&1
 OA_BEFORE=$(cat $(oa_reports p) | cksum)
 "$BIN" "$W/oa" --out "$W/oa/p" --zzz-not-a-flag >/dev/null 2>&1; OA_RC=$?
@@ -1187,6 +1187,31 @@ OA_DEF=$(cksum < "$W/oa/.candor/report.oa.Swift.json" 2>/dev/null)
 { [ "$OA_RC" -eq 2 ] && [ -n "$OA_DEF" ] && [ "$(cksum < "$W/oa/.candor/report.oa.Swift.json")" = "$OA_DEF" ]; } \
   && ok "⟨0.28⟩ --out: the DEFAULT prefix is never armed — a failed run leaves .candor/report.* byte-intact" \
   || bad "--out arming: a failed run overwrote the UNNAMED default .candor/report.* (exit $OA_RC) — that destroys committed reports"
+# (A3) …AND ONLY FILES POSITIVELY IDENTIFIED AS THIS ENGINE'S §2 REPORT — never a name denylist. SPEC §2.2
+# ⟨0.24⟩ reserves SEVEN trailing segments (callgraph, hierarchy, calibrated, layerreach, locs, gate, and the
+# `encountered-*` family) and records that the engines were already drifting on the list; this armer's first
+# version carved out three, and measured on the reference engine it overwrote `.calibrated`, `.layerreach`,
+# `.encountered-hosts` and — worst — `<prefix>.gate.json`, A GATE VERDICT, each with a report-shaped
+# placeholder. Denylist-over-allowlist is a CLASSIFYING rule, where over-approximating is safe; for a WRITER
+# it inverts, because over-approximating destroys a file. So: parse it, require `candor` AND `functions`.
+printf '{"crate":"x","calibrated":true}\n'       > "$W/oa/p.calibrated.json"
+printf '{"layers":{"a":["b"]}}\n'                > "$W/oa/p.layerreach.json"
+printf '{"hosts":["api.example.com"]}\n'         > "$W/oa/p.encountered-hosts.json"
+printf '{"totals":{"loc":42}}\n'                 > "$W/oa/p.locs.json"
+printf '{"ok":true,"violations":[],"spec":"x"}\n' > "$W/oa/p.gate.json"
+"$BIN" "$W/oa" --out "$W/oa/p" >/dev/null 2>&1
+OA_RES=""; for s in calibrated layerreach encountered-hosts locs gate Fx.Swift.callgraph oa.Swift.callgraph oa.Swift.hierarchy; do
+  [ -f "$W/oa/p.$s.json" ] && OA_RES="$OA_RES $s:$(cksum < "$W/oa/p.$s.json" | cut -d' ' -f1)"
+done
+"$BIN" "$W/oa" --out "$W/oa/p" --zzz-not-a-flag >/dev/null 2>&1; OA_RC=$?
+OA_RES2=""; for s in calibrated layerreach encountered-hosts locs gate Fx.Swift.callgraph oa.Swift.callgraph oa.Swift.hierarchy; do
+  [ -f "$W/oa/p.$s.json" ] && OA_RES2="$OA_RES2 $s:$(cksum < "$W/oa/p.$s.json" | cut -d' ' -f1)"
+done
+{ [ "$OA_RC" -eq 2 ] && [ "$OA_RES" = "$OA_RES2" ] && [ -n "$OA_RES" ] \
+  && [ "$(python3 -c "$OA_ROW1" "$W/oa/p.oa.Swift.json")" = "ROW1" ]; } \
+  && ok "⟨0.28⟩ --out: every §2.2 reserved sidecar is byte-intact (incl. a gate VERDICT) while the report still arms" \
+  || bad "--out arming: a reserved sidecar was overwritten (exit $OA_RC)$OA_RES ->$OA_RES2"
+rm -f "$W/oa/p.calibrated.json" "$W/oa/p.layerreach.json" "$W/oa/p.encountered-hosts.json" "$W/oa/p.locs.json" "$W/oa/p.gate.json"
 # (C) a prefix with no previous run has nothing to arm, and must not crash on the way to its exit 2.
 "$BIN" "$W/oa" --out "$W/oa/never-run-before" --zzz-not-a-flag >/dev/null 2>&1
 [ $? -eq 2 ] && ok "⟨0.28⟩ --out: a prefix with no previous run is exit 2 with nothing to arm (no crash)" \
