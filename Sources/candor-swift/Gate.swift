@@ -255,6 +255,56 @@ func writeReportStreamFailClosed(reasonKey: String, why: String) {
     reportStreamWritten = true
 }
 
+/// ⟨0.28⟩ A CONFIGURED POLICY THAT YIELDED ZERO RULES IS A BROKEN GATE CONFIG (SPEC §6.2) — the refusal
+/// text and the whole-policy `unevaluated` entry, for BOTH routes. Returns nil when the policy carries at
+/// least one rule of any kind, i.e. when there is nothing to refuse.
+///
+/// The same refusal posture as the unreadable-policy and unhonourable-token branches each route already
+/// has, for the reason §6.2 gives for an unreadable file: "a typo'd policy path that runs green is a gate
+/// that silently passes everything". MEASURED four-way 2026-08-10: `--policy <a README>` wrote
+/// `{"ok":true,"violations":[]}` and exited 0 on every engine — byte-identical to a gate that ran and
+/// found nothing, AND byte-identical to the no-gate-configured verdict, so the one consumer this format
+/// exists for cannot tell "your code is clean" from "your gate had no rules". The per-line "ignoring
+/// policy rule" warnings go to stderr, which is not the machine channel.
+///
+/// The line-level leniency is UNTOUCHED and still right: an unrecognised line stays
+/// ignored-with-a-warning, because silent reinterpretation is the one thing a security gate must not do,
+/// and an engine meeting a rule kind from a newer rung must not refuse the file over it. This is about
+/// what that leniency COMPOSES TO — every line ignored is a gate that asked nothing.
+///
+/// THE CONTROL, which is what makes this a rule and not a blanket: a caller only asks this question once a
+/// policy has been CONFIGURED (`--policy`, CANDOR_POLICY, or the config `policy` key). A run that
+/// configured no gate never reaches it and stays exit 0 — that is the honest way to say "I am not gating",
+/// and it is precisely why a configured zero-rule policy is never a legitimate expression of that intent.
+///
+/// EVERY RULE VECTOR THE PARSER CAN PRODUCE, and the reference engine's first draft read only one of them
+/// (candor-rust `960b879`): `ParsedPolicy` splits the four kinds across `deny` (which `pure` also appends
+/// to), `allow` and `forbid`, so keying on `deny` alone would make an allow-only or forbid-only policy —
+/// `allow Net api.stripe.com`, a perfectly ordinary allowlist gate — refuse as if it had no rules at all. A
+/// zero-rule check that reads a SUBSET of the rule kinds is the same false-answer shape this rung exists to
+/// close, pointed the other way.
+///
+/// ONE PREDICATE, TWO ROUTES. The scan CLI shipped this rung first (`5552a36`) with the check inline, and
+/// `gate --report` — the SUPPLY-CHAIN surface, where a consumer points the gate at a report someone else
+/// produced — kept exiting 0 over a README. SPEC §6.2 says the defect was measured on both and that "a
+/// route is not covered by its sibling"; two copies of the emptiness test is how one of them later narrows
+/// to `deny` alone without the other noticing, so there is exactly one and both routes call it.
+func zeroRulePolicyRefusal(_ pol: ParsedPolicy, at path: String,
+                           who: String) -> (why: String, unevaluated: [Unevaluated])? {
+    guard pol.deny.isEmpty, pol.allow.isEmpty, pol.forbid.isEmpty else { return nil }
+    let why = "\(who): the policy \(path) yielded NO RULES — refusing (exit 2, gate NOT enforced). "
+        + "Every line was ignored (see the `ignoring policy rule` warnings above), the file is empty, "
+        + "or it holds only comments. A gate with no rules cannot have caught anything, and reporting "
+        + "`ok: true` here would be indistinguishable from a gate that ran and found nothing. If you "
+        + "did not mean to gate this run, remove the `policy` setting rather than pointing it at a file "
+        + "with no rules in it."
+    // SPEC §3.1 — the whole-policy entry, the shape pinned for a policy with no lines to NAME (there are
+    // no honoured rules to list, and listing the ignored lines would imply they were rules).
+    return (why, [Unevaluated(rule: "(entire policy \(path) — no rules parsed)",
+                              why: "the configured policy yielded zero rules, so nothing was evaluated "
+                                 + "and no rule can have passed")])
+}
+
 /// Print the reason, write the refusal document to every requested sink, exit 2.
 /// ⟨0.24⟩ `unevaluated` travels with it when the refusal IS a set of undecidable rules (SPEC §3.1) — the
 /// machine channel for the same disclosure the `reason` string carries for the human.

@@ -511,6 +511,33 @@ func runGateReportCLI(_ args: [String]) -> Never {
     discloseUnconsumedAliasErrors(aliasErrors.disclosed)
     let policyErrors = aliasErrors.refusing.map(\.message) + pol.gateRefusals
     if !policyErrors.isEmpty { gateDie(policyErrors.joined(separator: "\n")) }
+    // ⟨0.28⟩ A CONFIGURED POLICY THAT YIELDED ZERO RULES (SPEC §6.2) — THE SIBLING OF THE SCAN CLI'S CHECK,
+    // and one predicate serves both (`zeroRulePolicyRefusal`, Gate.swift, where the measurement and the
+    // every-rule-vector argument are recorded). §6.2 states the defect was measured on this verb too and
+    // that "a route is not covered by its sibling": the scan CLI got the rung in `5552a36` and THIS route
+    // kept exiting 0 with `{"ok":true,"violations":[]}` over a README — measured on this engine
+    // 2026-08-11, for all three input forms (every line ignored / empty file / comments only).
+    //
+    // It matters MORE here than on the scan route. `gate --report` is the supply-chain surface: the verb an
+    // adopter points at a report someone else produced, in the CI step whose whole job is to decide whether
+    // that dependency may land. A mistyped `--policy` path there gates nothing and says `ok: true`.
+    //
+    // AN OUTRIGHT REFUSAL, not `refuseUnlessAViolationStands`'s dominance dance, because on this route no
+    // certain violation can stand beside it: the only findings this verb produces come from `evaluateGate`
+    // over `denyOnly`, which has nothing to evaluate when there are zero rules, and there is no AS-EFF-005
+    // baseline on the report wire. So this takes the posture of the two branches it sits between (an
+    // unreadable policy, an unhonourable token): exit 2 with the refusal document, before the report is
+    // even opened — nothing about the REPORT is at issue.
+    //
+    // The two rows this could have got wrong were MEASURED against a rebuild of the pre-change tree rather
+    // than assumed: an `allow`-only and a `forbid`-only policy ALREADY refuse on this route (exit 2), one
+    // branch below, for their own unrelated and specific reasons — the AS-EFF-008 surface-completeness
+    // marker does not ride the report wire, and a report carries no entry for a pure function so `forbid`
+    // cannot match on NAME. Both name their own cause in the `reason`, not this one, and they must keep
+    // doing so: reading the deny vector alone here would relabel every allowlist gate as an absent one.
+    if let zr = zeroRulePolicyRefusal(pol, at: policyPath, who: "candor-swift gate") {
+        refuseGateAndExit(zr.why, unevaluated: zr.unevaluated)
+    }
 
     // THE POLICY-LEVEL REFUSALS. Whole-policy, not per-rule: enforcing the answerable half and exiting 0
     // is gateless-green — the user believes a rule is enforced that never ran.
