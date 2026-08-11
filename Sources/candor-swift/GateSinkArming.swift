@@ -80,11 +80,13 @@ nonisolated(unsafe) var armedOutDocument: String? = nil
 /// later. Identification is by CONTENT, never by a name denylist — see the loop below for the measurement
 /// that settled it (a suffix denylist destroyed four sidecars, one of them a gate VERDICT).
 ///
-/// SIDECARS ARE NOT TOUCHED, deliberately, and now by construction rather than by a list: none of them
-/// carries a `candor` envelope beside `functions`. Whether `.callgraph`/`.hierarchy`/`.locs` MUST arm
-/// alongside their report stays an OPEN question against §2.2 ⟨0.26⟩'s own manifest rules (a sidecar's KEY
-/// SET is its manifest, a different fail-closed shape from a report's), and answering it here would put a
-/// second answer in the tree.
+/// NO SIDECAR IS EVER *ARMED* — none of them carries a `candor` envelope beside `functions`, so the
+/// identification test below cannot reach one. That is the property that stopped this armer writing a
+/// report-shaped placeholder over a gate VERDICT. ⟨0.28⟩ then settles the question that left open, and it
+/// settles it the other way round: an armed report's OWN sidecars are **DELETED** with it — see
+/// `removeArmedReportSidecars`. Arming and removing are ONE act, which is why the removal is called from
+/// inside this loop rather than beside the call site: an armed report with a live sidecar is the pair the
+/// rung exists to prevent, and a second call site is a second chance to forget.
 ///
 /// THE INPUT EXEMPTION FROM ⟨0.27⟩ (2) APPLIES TO THIS WRITER TOO. Arming happens before the run knows its
 /// answer, so a prefix whose expansion collides with something this run READS would destroy it — the same
@@ -168,10 +170,134 @@ func armOutPrefixReports(_ prefix: String, target: String?, policyFlag: String?)
             armedOutReports.append((full, prev))
             armedOutDocument = doc
         } catch {
+            // THE SIDECARS FOLLOW ONLY IF THE REPORT ACTUALLY ARMED, so this arm returns without touching
+            // them. The rule is "no live sidecar beside an ARMED report"; a write that FAILED leaves the
+            // PREVIOUS run's report at this path, and removing its callgraph there would make a
+            // stale-report/no-callgraph pair no run has ever written — strictly worse than the pre-rung
+            // state the failure left, because the half that survives is the one a `gate --report` reads
+            // while the half that made `path`/`fix` answerable is gone. A pair degrades together or not at
+            // all. (candor-rust's first version of this rung ignored its write result and deleted anyway;
+            // candor-java raised it and rust corrected in `ff8cc09`.)
             FileHandle.standardError.write(
                 ("candor-swift: could not arm the report \(full) fail-closed "
-                 + "(\(error.localizedDescription)) — if this run does not complete, that path may still "
-                 + "hold a PREVIOUS run's report\n").data(using: .utf8)!)
+                 + "(\(error.localizedDescription)) — leaving it and its §2.2 sidecars exactly as they are; "
+                 + "if this run does not complete, that path may still hold a PREVIOUS run's report\n")
+                    .data(using: .utf8)!)
+            continue
+        }
+        removeArmedReportSidecars(full, inputs: inputs!)
+    }
+}
+
+/// `(the report it belongs to, its path, the bytes that were there)` for every §2.2 sidecar this run
+/// DELETED while arming. Restored by `disarmUnwrittenOutReports` when the run turns out not to have owned
+/// that report after all — an orphan's sidecar is as much not-ours as the orphan itself.
+nonisolated(unsafe) var armedOutSidecars: [(report: String, path: String, previous: Data)] = []
+
+/// SPEC §2.2 — the reserved trailing segments that name **a report's own sidecars**: the set
+/// `removeArmedReportSidecars` deletes when it arms that report.
+///
+/// This engine writes two of them (`.callgraph.json`, `.hierarchy.json`, from the `--out` writer in
+/// `main.swift`). The other three are here because a sidecar is a sidecar whoever wrote it, and because
+/// the family's other two implementations name the same five — extending or trimming the list unilaterally
+/// is precisely the drift §2.2 ⟨0.24⟩ records ("one carving out six and another two").
+///
+/// **`gate` is excluded, and that exclusion is the whole content of this function.** The five above are
+/// DERIVED FROM the report and carry no provenance of their own, which is why §2.2 says to read them
+/// together with it and why arming the report has to take them along. A `<stem>.gate.json` is not that: it
+/// is the VERDICT SINK's document, with its own operator-named flag, its own ⟨0.27⟩ arming and its own
+/// fail-closed shape. Deleting it from the report sink is exactly the cross-sink harm §3.3.1 records as
+/// MEASURED — and it would fail OPEN in the way `armGateJsonFailClosed` refuses to, because a CI wrapper
+/// that reads a missing verdict as "nothing to report" goes green. The deletion argument for the five
+/// turns on NO consumer treating their absence as a claim; for a VERDICT, absence is precisely the claim
+/// that gets misread.
+///
+/// The `encountered-*` family is reserved by §2.2 but is not taken either: this engine does not emit it,
+/// so a file by that name under a report's stem was written by something else, and the miss direction is
+/// the cheap one here (see `removeArmedReportSidecars`).
+func reportSidecarSegments() -> [String] {
+    ["calibrated", "callgraph", "hierarchy", "layerreach", "locs"]   // sorted, so stderr is stable
+}
+
+/// SPEC §3.3.1 ⟨0.28⟩ — **THE §2.2 SIDECARS GO WITH THE ARMED REPORT, DELETED NOT EMPTIED.**
+///
+/// An armed report beside a LIVE sidecar is a PAIR THAT CONTRADICTS ITSELF, and §2.2 gives the sidecar no
+/// provenance of its own to arbitrate with. Not decorative: on this engine `path`, `tour`, `fix` and
+/// `fix-gate` all take their call graph from `<stem>.callgraph.json` (`loadFixModel` merges it), because a
+/// currently-pure function is absent from the report by §2 rule 3 and only the sidecar records it. So the
+/// half the report rung had not touched keeps answering — confidently, from the previous version of the
+/// code. Measured on candor-rust before its fix: `callers f` returned exit 0, "reached by 1 function(s)
+/// (the blast radius if it gained an effect): g", while `h` called `f` too. An agent reads that as
+/// safe-to-edit. That is the cardinal sin, arriving through the other half of the pair.
+///
+/// **Deleted rather than `{}`**, and NOT by reading the report's own anti-deletion rule across: §3.3.1
+/// forbids deleting a REPORT because a consumer that reads a missing file as "nothing to report" fails
+/// open, and no sidecar consumer has that failure mode — §2.2 makes the sidecar OPTIONAL, so every
+/// consumer was forced to define an absence arm from the start and every specified arm is safe
+/// (`loadBaselineCallgraph` says so on stderr and over-lists; `loadFixModel` falls back to the report's
+/// inline `calls`). ⟨0.24⟩ has already ruled an empty, an absent and an unparseable HIERARCHY sidecar to
+/// be the same input, and the one cell that rule does not cover — an empty-but-valid baseline CALLGRAPH —
+/// was measured four-way to answer `origin: "unknown"`. `{}` buys nothing deletion does not, and absence
+/// is the state the consumers were built for.
+///
+/// **THE GUESS RUNS THE OPPOSITE WAY FROM THE ARMER'S, on purpose.** The armer identifies POSITIVELY by
+/// content, because there a miss leaves a stale report and an over-reach destroys a file. Here a miss
+/// merely leaves a sidecar behind — the pre-rung state, caught consumer-side by ⟨0.28⟩'s pairing rule —
+/// while an over-reach would delete something that is not ours. So this goes by the §2.2 reserved segment
+/// NAMES, **scoped to this one report's stem**: on this engine a report is `<prefix>.<pkg>.Swift.json`, so
+/// the stem carries the package and the language and a prefix-level `<prefix>.locs.json` is NOT a sidecar
+/// of it and is left alone. Both directions are chosen so the WRONG guess costs the least.
+///
+/// **The input exemption applies here too**, over the same `runInputs`/`sameArtifact` the armer and the
+/// two sink guards use — one resolver, never a second copy that later disagrees. *Do not touch what this
+/// run reads* outranks the pairing invariant, so a sidecar that is also a `CANDOR_DEPS` report, a
+/// `--policy` or the discovered config is left in place and the operator is told why.
+func removeArmedReportSidecars(_ reportPath: String, inputs: [(String, String)]) {
+    let stem = (reportPath as NSString).deletingPathExtension
+    for seg in reportSidecarSegments() {
+        let side = stem + "." + seg + ".json"
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: side, isDirectory: &isDir), !isDir.boolValue else { continue }
+        if let hit = inputs.first(where: { sameArtifact(side, $0.0) }) {
+            FileHandle.standardError.write(
+                ("candor-swift: \(side) is a §2.2 sidecar of the armed report \(reportPath) AND names "
+                 + "\(hit.1) \(hit.0), which this run READS — leaving it in place. Read it together with "
+                 + "that report: an armed report makes its sidecar unanswerable, whatever the sidecar "
+                 + "says.\n").data(using: .utf8)!)
+            continue
+        }
+        // A SYMLINKED SIDECAR IS LEFT, AND SAID SO. Removing the link would take away a name the operator
+        // built deliberately, and `disarm` hands sidecars back by WRITING BYTES — which would turn the
+        // link into a regular file, a third state neither the pre-run nor the armed tree ever had. This is
+        // the direction the guess is allowed to be wrong in: a sidecar left behind is the pre-rung state,
+        // and the ⟨0.28⟩ pairing rule catches it consumer-side.
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: side),
+           (attrs[.type] as? FileAttributeType) == .typeSymbolicLink {
+            FileHandle.standardError.write(
+                ("candor-swift: \(side) is a §2.2 sidecar of the armed report \(reportPath) but it is a "
+                 + "SYMLINK — leaving it, because this run could not put the link back afterwards. It now "
+                 + "describes a PREVIOUS run; a sidecar whose report is a manifest-carrying empty is "
+                 + "unanswerable input, whatever it says.\n").data(using: .utf8)!)
+            continue
+        }
+        // Read BEFORE removing: a sidecar we cannot read is one we could not hand back with a restored
+        // orphan, and the same read is what makes the restore byte-identical.
+        guard let prev = FileManager.default.contents(atPath: side) else {
+            FileHandle.standardError.write(
+                ("candor-swift: could not read \(side), the §2.2 sidecar of the armed report "
+                 + "\(reportPath) — leaving it in place rather than deleting what this run could not hand "
+                 + "back. It now describes a PREVIOUS run.\n").data(using: .utf8)!)
+            continue
+        }
+        do {
+            try FileManager.default.removeItem(atPath: side)
+            armedOutSidecars.append((reportPath, side, prev))
+        } catch {
+            FileHandle.standardError.write(
+                ("candor-swift: could not remove \(side), the §2.2 sidecar of the armed report "
+                 + "\(reportPath) (\(error.localizedDescription)) — it now sits beside a fail-closed "
+                 + "report and describes a PREVIOUS run. Delete it, or ignore it: a sidecar whose report "
+                 + "is a manifest-carrying empty is unanswerable input.\n").data(using: .utf8)!)
         }
     }
 }
@@ -192,6 +318,12 @@ func armOutPrefixReports(_ prefix: String, target: String?, policyFlag: String?)
 ///
 /// Deleting the placeholder rather than restoring it is rejected for §3.3.1's own reason: a consumer that
 /// treats a missing file as "nothing to report" fails open by a different route.
+///
+/// ⟨0.28⟩ **AND THE ORPHAN'S §2.2 SIDECARS COME BACK WITH IT.** Handing back the report while leaving the
+/// sidecars this run deleted beside it would be a THIRD state neither the pre-run tree nor the armed tree
+/// ever had — a live report whose call graph has silently vanished — and it would degrade every
+/// `path`/`fix`/`gains` answer over that package to the absence arm with nothing saying why. "Left exactly
+/// as this run found it" has to mean the pair.
 func disarmUnwrittenOutReports() {
     guard let doc = armedOutDocument, let want = doc.data(using: .utf8) else { return }
     for (path, prev) in armedOutReports {
@@ -203,9 +335,25 @@ func disarmUnwrittenOutReports() {
                 ("candor-swift: could not restore \(path), which this run armed but did not write "
                  + "(\(error.localizedDescription)) — it is holding the fail-closed placeholder, which "
                  + "reads as `analyzed nothing`, not as a report\n").data(using: .utf8)!)
+            continue
+        }
+        for (report, side, sprev) in armedOutSidecars where report == path {
+            // Not over a file that exists: if the run wrote a real sidecar there it is this run's, and
+            // restoring the previous bytes over it would put back exactly the staleness this rung closes.
+            guard !FileManager.default.fileExists(atPath: side) else { continue }
+            do { try writeSinkAtomically(sprev, to: side) }
+            catch {
+                FileHandle.standardError.write(
+                    ("candor-swift: could not restore \(side), the §2.2 sidecar this run removed beside "
+                     + "\(path) — a report the run turned out not to own (\(error.localizedDescription)). "
+                     + "The report is back and its call graph is not, so `path`/`fix` over that package "
+                     + "will answer from the report's inline calls alone until the next clean scan.\n")
+                        .data(using: .utf8)!)
+            }
         }
     }
     armedOutReports = []
+    armedOutSidecars = []
 }
 
 /// SPEC §3.3.1 ⟨0.28⟩ — every `--gate-json` this argv names, duplicates kept.

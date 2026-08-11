@@ -9,6 +9,29 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ ⟨0.28⟩ the §2.2 sidecars go with the armed report — deleted, not emptied** (SPEC §3.3.1). Arming an
+  `--out` report left `<stem>.callgraph.json` and `<stem>.hierarchy.json` live beside it: a pair that
+  contradicts itself, with no provenance on the sidecar to arbitrate. Not decorative on this engine,
+  because `gains` takes the BASELINE call graph from the sidecar ALONE (`loadBaselineCallgraph`) — a
+  currently-pure function is absent from the report by §2 rule 3, so only the sidecar records it. Measured
+  2026-08-11: baseline `sd_f` pure reached by `sd_g`; the new version gives `sd_f` an effect and adds
+  `sd_h`; the baseline run exits 2 on an unknown flag with its report armed — and `gains --json` answered
+  exit 0 with `origin: "existing"` for `sd_f` and `sd_g` and `"new"` for `sd_h`, every label computed from
+  a run that FAILED. It now answers `origin: "unknown"` for all three, which is the arm ⟨0.24⟩ already
+  pins for an absent baseline callgraph, and a recovering run restores both sidecars byte-identically.
+  Deleted rather than `{}` because ⟨0.24⟩ has already ruled empty ≡ absent ≡ unparseable for a sidecar,
+  so `{}` is a file this family has declared meaningless. **A `<stem>.gate.json` is deliberately NOT
+  taken** — it is the verdict sink's own document, separately armed, and a consumer that reads a missing
+  verdict as "nothing to report" goes green. The guess runs OPPOSITE to the armer's: the armer identifies
+  positively by content because there an over-reach destroys a file, while here a miss merely leaves a
+  sidecar behind, so this goes by the §2.2 reserved segment NAMES **scoped to one report's stem** (a
+  prefix-level `<prefix>.locs.json` is nobody's sidecar on this engine and stays). Three further rules:
+  the input exemption covers sidecars, over the same `runInputs`/`sameArtifact`; **the sidecars follow
+  only if the report write SUCCEEDED**, since a failed arm leaves the previous run's report and taking its
+  call graph would make a stale-report/no-callgraph pair no run has ever written; and **a restored orphan
+  gets its sidecars back**, because handing back the report alone is a third state neither the pre-run nor
+  the armed tree ever had. Conformance PART 37 candor-swift (d) SKIP → PASS. 730 unit tests, smoke 137/0
+  (eight new rows, including the premise row so the block cannot pass vacuously).
 - **⟨0.28⟩ the `--out <prefix>` report SET is armed too, and what the run did not write is handed back**
   (SPEC §3.3.1 (1)). The stream half shipped first and left the FILE set one hop behind: measured
   2026-08-11, `<target> --out p --zzz-not-a-flag` exited 2 with `p.<pkg>.Swift.json` byte-identical to the
@@ -18,9 +41,10 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   know then is the one the PREVIOUS run left — and that is exactly the set at risk — so arming rewrites
   every `<prefix>.*.json` to the ⟨0.21⟩ Row-1 manifest-carrying empty, from ABOVE the flag loop, before
   its own unknown-flag exit (the exit this rung is most often reached through). The default prefix
-  (`.candor/report.*`) is armed on the same argument. §2.2 SIDECARS are deliberately untouched — whether
-  they must arm is an open question against ⟨0.26⟩'s own manifest rules and answering it here would put a
-  second answer in the tree. The ⟨0.27⟩ (2) input exemption applies to this writer: a prefix expansion
+  (`.candor/report.*`) is armed on the same argument. No §2.2 sidecar is ever ARMED — none carries a
+  `candor` envelope beside `functions`, so the identification test cannot reach one — and the question of
+  what should happen to them instead is settled by the entry below, which DELETES them with their report.
+  The ⟨0.27⟩ (2) input exemption applies to this writer: a prefix expansion
   that collides with something the run READS is left alone and named on stderr, through the same
   `runInputs`/`sameArtifact` resolver the verdict sink uses. **AND WHAT THE RUN TURNS OUT NOT TO OWN IS
   RESTORED, NOT LEFT ARMED** — the reference engine's first version kept the placeholder on every
