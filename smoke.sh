@@ -1194,24 +1194,34 @@ OA_DEF=$(cksum < "$W/oa/.candor/report.oa.Swift.json" 2>/dev/null)
 # `.encountered-hosts` and — worst — `<prefix>.gate.json`, A GATE VERDICT, each with a report-shaped
 # placeholder. Denylist-over-allowlist is a CLASSIFYING rule, where over-approximating is safe; for a WRITER
 # it inverts, because over-approximating destroys a file. So: parse it, require `candor` AND `functions`.
+#
+# The files below all sit at the PREFIX level (`p.calibrated.json`), which under ⟨0.28⟩'s stem-scoped
+# sidecar rule are NOT sidecars of `p.oa.Swift.json` at all — a report's stem here carries the package and
+# the language. `p.oa.Swift.gate.json` is the decisive one: a VERDICT at the armed report's OWN stem, which
+# the sidecar rule deliberately does not take (see `reportSidecarSegments`). The report's real sidecars —
+# `p.oa.Swift.callgraph/.hierarchy.json` — are covered by the ⟨0.28⟩ block further down, which requires the
+# opposite of this row.
 printf '{"crate":"x","calibrated":true}\n'       > "$W/oa/p.calibrated.json"
 printf '{"layers":{"a":["b"]}}\n'                > "$W/oa/p.layerreach.json"
 printf '{"hosts":["api.example.com"]}\n'         > "$W/oa/p.encountered-hosts.json"
 printf '{"totals":{"loc":42}}\n'                 > "$W/oa/p.locs.json"
 printf '{"ok":true,"violations":[],"spec":"x"}\n' > "$W/oa/p.gate.json"
+printf '{"ok":true,"violations":[],"spec":"x"}\n' > "$W/oa/p.oa.Swift.gate.json"
 "$BIN" "$W/oa" --out "$W/oa/p" >/dev/null 2>&1
-OA_RES=""; for s in calibrated layerreach encountered-hosts locs gate Fx.Swift.callgraph oa.Swift.callgraph oa.Swift.hierarchy; do
+OA_KEEP="calibrated layerreach encountered-hosts locs gate oa.Swift.gate Fx.Swift.callgraph"
+OA_RES=""; for s in $OA_KEEP; do
   [ -f "$W/oa/p.$s.json" ] && OA_RES="$OA_RES $s:$(cksum < "$W/oa/p.$s.json" | cut -d' ' -f1)"
 done
 "$BIN" "$W/oa" --out "$W/oa/p" --zzz-not-a-flag >/dev/null 2>&1; OA_RC=$?
-OA_RES2=""; for s in calibrated layerreach encountered-hosts locs gate Fx.Swift.callgraph oa.Swift.callgraph oa.Swift.hierarchy; do
+OA_RES2=""; for s in $OA_KEEP; do
   [ -f "$W/oa/p.$s.json" ] && OA_RES2="$OA_RES2 $s:$(cksum < "$W/oa/p.$s.json" | cut -d' ' -f1)"
 done
 { [ "$OA_RC" -eq 2 ] && [ "$OA_RES" = "$OA_RES2" ] && [ -n "$OA_RES" ] \
   && [ "$(python3 -c "$OA_ROW1" "$W/oa/p.oa.Swift.json")" = "ROW1" ]; } \
-  && ok "⟨0.28⟩ --out: every §2.2 reserved sidecar is byte-intact (incl. a gate VERDICT) while the report still arms" \
-  || bad "--out arming: a reserved sidecar was overwritten (exit $OA_RC)$OA_RES ->$OA_RES2"
-rm -f "$W/oa/p.calibrated.json" "$W/oa/p.layerreach.json" "$W/oa/p.encountered-hosts.json" "$W/oa/p.locs.json" "$W/oa/p.gate.json"
+  && ok "⟨0.28⟩ --out: every §2.2 reserved file that is NOT this report's sidecar is byte-intact (incl. a gate VERDICT at the report's own stem) while the report still arms" \
+  || bad "--out arming: a reserved file was overwritten (exit $OA_RC)$OA_RES ->$OA_RES2"
+rm -f "$W/oa/p.calibrated.json" "$W/oa/p.layerreach.json" "$W/oa/p.encountered-hosts.json" \
+      "$W/oa/p.locs.json" "$W/oa/p.gate.json" "$W/oa/p.oa.Swift.gate.json"
 # (C) a prefix with no previous run has nothing to arm, and must not crash on the way to its exit 2.
 "$BIN" "$W/oa" --out "$W/oa/never-run-before" --zzz-not-a-flag >/dev/null 2>&1
 [ $? -eq 2 ] && ok "⟨0.28⟩ --out: a prefix with no previous run is exit 2 with nothing to arm (no crash)" \
@@ -1250,6 +1260,105 @@ printf 'deny Exec\n' > "$W/oa/exec.policy"
 { [ "$OA_G0" -eq 0 ] && [ "$OA_G1" -eq 0 ]; } \
   && ok "⟨0.28⟩ --out: a clean rerun does not turn a gate over an untouched orphan into a stuck exit 2 ($OA_G0 -> $OA_G1)" \
   || bad "--out disarm: gate over the orphan went $OA_G0 -> $OA_G1 — a left-armed placeholder is asserting an incompleteness the run never had"
+
+# ── ⟨0.28⟩ AND THE §2.2 SIDECARS GO WITH THE ARMED REPORT — DELETED, NOT EMPTIED (SPEC §3.3.1).
+# An armed report beside a LIVE sidecar is a pair that contradicts itself, and §2.2 gives the sidecar no
+# provenance of its own to arbitrate with. Not decorative on this engine: `gains` takes the BASELINE call
+# graph from the sidecar ALONE (`loadBaselineCallgraph`), because a currently-pure function is absent from
+# the report by §2 rule 3 — so the half the report rung had not touched kept answering from the previous
+# version of the code. MEASURED here 2026-08-11, baseline `sd_f` pure reached by `sd_g`, new version gives
+# `sd_f` an effect and adds `sd_h`, the baseline run exits 2 with its report armed:
+#     gains --json  ->  exit 0, origin "existing" for sd_f and sd_g, "new" for sd_h
+# Confident, exit 0, and computed from a run that FAILED. Deleted rather than `{}` because ⟨0.24⟩ has
+# already ruled empty ≡ absent ≡ unparseable for a sidecar, so `{}` is a file this family calls meaningless.
+mkdir -p "$W/sd"
+printf 'import Foundation\nfunc sd_f() -> Int { 1 }\nfunc sd_g() -> Int { sd_f() }\n' > "$W/sd/a.swift"
+"$BIN" "$W/sd" --out "$W/sd/b" >/dev/null 2>&1
+# (S0) THE PREMISE, so nothing below can pass vacuously on an engine that emitted no sidecar at all.
+{ [ -f "$W/sd/b.sd.Swift.callgraph.json" ] && [ -f "$W/sd/b.sd.Swift.hierarchy.json" ]; } \
+  && ok "⟨0.28⟩ sidecars: the clean --out run wrote both §2.2 sidecars (the premise the rows below need)" \
+  || bad "a clean --out run wrote no sidecar — every sidecar row below would pass vacuously"
+cp "$W/sd/b.sd.Swift.callgraph.json" "$W/sd/keep.cg"
+cp "$W/sd/b.sd.Swift.hierarchy.json" "$W/sd/keep.hi"
+SD_CG=$(cksum < "$W/sd/keep.cg"); SD_HI=$(cksum < "$W/sd/keep.hi")
+# the NEW version, and a current report to diff the armed baseline against
+printf 'import Foundation\nfunc sd_f() -> String { (try? String(contentsOfFile: "/etc/hosts", encoding: .utf8)) ?? "" }\nfunc sd_g() -> String { sd_f() }\nfunc sd_h() -> String { sd_f() }\n' > "$W/sd/a.swift"
+"$BIN" "$W/sd" --out "$W/sd/c" >/dev/null 2>&1
+# (S1) the armed report's sidecars are GONE.
+"$BIN" "$W/sd" --out "$W/sd/b" --zzz-not-a-flag >/dev/null 2>&1; SD_RC=$?
+{ [ "$SD_RC" -eq 2 ] && [ ! -e "$W/sd/b.sd.Swift.callgraph.json" ] && [ ! -e "$W/sd/b.sd.Swift.hierarchy.json" ] \
+  && [ "$(python3 -c "$OA_ROW1" "$W/sd/b.sd.Swift.json")" = "ROW1" ]; } \
+  && ok "⟨0.28⟩ sidecars: arming the report REMOVES its .callgraph/.hierarchy — no live half beside a fail-closed report" \
+  || bad "--out sidecars: exit $SD_RC, a sidecar still sits beside the armed report (the pair that contradicts itself)"
+SD_ORIGINS='import json,sys
+d=json.load(sys.stdin)
+print(",".join(sorted({e.get("origin","?") for e in d.get("byFunction",[])})))'
+# (S2) …and the QUERY that read the stale half now discloses instead of answering.
+SD_O=$("$BIN" gains "$W/sd/c.sd.Swift.json" "$W/sd/b.sd.Swift.json" --json 2>/dev/null | python3 -c "$SD_ORIGINS")
+[ "$SD_O" = "unknown" ] \
+  && ok "⟨0.28⟩ sidecars: gains over an armed baseline answers origin \`unknown\` for every function, not a blast radius from the stale graph" \
+  || bad "--out sidecars: gains over an ARMED baseline still answered origins [$SD_O] — computed from a run that failed"
+# …and THE PREMISE FOR (S2): with the sidecar hand-restored beside the armed report, gains does answer
+# confidently. Without this row (S2) would pass on an engine where `gains` never consulted the sidecar.
+cp "$W/sd/keep.cg" "$W/sd/b.sd.Swift.callgraph.json"
+SD_O0=$("$BIN" gains "$W/sd/c.sd.Swift.json" "$W/sd/b.sd.Swift.json" --json 2>/dev/null | python3 -c "$SD_ORIGINS")
+case "$SD_O0" in *existing*) ok "⟨0.28⟩ sidecars: THE PREMISE — a live sidecar beside the armed report DOES answer confidently ([$SD_O0]), so (S2) is not vacuous";;
+                 *) bad "--out sidecars: a live sidecar beside an armed report answered [$SD_O0] — (S2) proves nothing on this engine";; esac
+rm -f "$W/sd/b.sd.Swift.callgraph.json"
+# (S3) THE RECOVERING RUN BRINGS THE PAIR BACK, byte for byte. Deletion that could not be cleared would be
+# the ⟨0.24⟩ "absent baseline callgraph" arm stuck on for good.
+printf 'import Foundation\nfunc sd_f() -> Int { 1 }\nfunc sd_g() -> Int { sd_f() }\n' > "$W/sd/a.swift"
+"$BIN" "$W/sd" --out "$W/sd/b" >/dev/null 2>&1; SD_RC=$?
+{ [ "$SD_RC" -eq 0 ] && [ "$(cksum < "$W/sd/b.sd.Swift.callgraph.json")" = "$SD_CG" ] \
+  && [ "$(cksum < "$W/sd/b.sd.Swift.hierarchy.json")" = "$SD_HI" ]; } \
+  && ok "⟨0.28⟩ sidecars: the next clean run restores both sidecars byte-identically (exit $SD_RC)" \
+  || bad "--out sidecars: the recovering run did not put both sidecars back to their previous bytes (exit $SD_RC)"
+# (S4) THE INPUT EXEMPTION COVERS THE SIDECARS TOO — never delete a path this run READS, whatever it is
+# named. Same `runInputs`/`sameArtifact` the armer and the two sink guards ask, never a second copy.
+SD_IN=$(cksum < "$W/sd/b.sd.Swift.callgraph.json")
+CANDOR_DEPS="$W/sd/b.sd.Swift.callgraph.json" "$BIN" "$W/sd" --out "$W/sd/b" --zzz-not-a-flag \
+  >/dev/null 2>"$W/sd/in.err"; SD_RC=$?
+{ [ "$SD_RC" -eq 2 ] && [ "$(cksum < "$W/sd/b.sd.Swift.callgraph.json")" = "$SD_IN" ] \
+  && grep -q 'is a §2.2 sidecar of the armed report' "$W/sd/in.err" && grep -q 'which this run READS' "$W/sd/in.err" \
+  && [ ! -e "$W/sd/b.sd.Swift.hierarchy.json" ]; } \
+  && ok "⟨0.28⟩ sidecars: one that is also an INPUT is left byte-intact and named on stderr (its non-input sibling still goes)" \
+  || bad "--out sidecars: the input exemption did not hold (exit $SD_RC, stderr silent or the file changed)"
+"$BIN" "$W/sd" --out "$W/sd/b" >/dev/null 2>&1
+# (S5) THE SIDECARS FOLLOW ONLY IF THE REPORT ACTUALLY ARMED. A write that FAILS leaves the PREVIOUS run's
+# report at that path; removing its call graph there makes a stale-report/no-callgraph pair no run has ever
+# written — strictly worse than the pre-rung state the failure left, because the surviving half is the one
+# a `gate --report` reads. A pair degrades together or not at all. (candor-rust ignored its write result
+# and deleted anyway; candor-java raised it, rust corrected in `ff8cc09`.)
+mkdir -p "$W/sdro"; cp "$W/sd/a.swift" "$W/sdro/a.swift"
+"$BIN" "$W/sdro" --out "$W/sdro/b" >/dev/null 2>&1
+chmod 555 "$W/sdro"
+if ( : > "$W/sdro/.probe" ) 2>/dev/null; then
+  rm -f "$W/sdro/.probe"; chmod 755 "$W/sdro"
+  echo "  skip ⟨0.28⟩ sidecars: arm-write-failure row (this user can write an unwritable directory — running as root)"
+else
+  SD_R=$(cksum < "$W/sdro/b.sdro.Swift.json"); SD_C=$(cksum < "$W/sdro/b.sdro.Swift.callgraph.json")
+  "$BIN" "$W/sdro" --out "$W/sdro/b" --zzz-not-a-flag >/dev/null 2>"$W/sd/ro.err"; SD_RC=$?
+  { [ "$SD_RC" -eq 2 ] && [ "$(cksum < "$W/sdro/b.sdro.Swift.json")" = "$SD_R" ] \
+    && [ "$(cksum < "$W/sdro/b.sdro.Swift.callgraph.json")" = "$SD_C" ] \
+    && grep -q 'leaving it and its §2.2 sidecars exactly as they are' "$W/sd/ro.err"; } \
+    && ok "⟨0.28⟩ sidecars: an arm write that FAILED leaves BOTH halves as found, and says so on stderr" \
+    || bad "--out sidecars: a failed arm write did not leave the pair intact (exit $SD_RC) — a stale report with no callgraph is worse than the pre-rung state"
+  chmod 755 "$W/sdro"
+fi
+# (S6) A RESTORED ORPHAN GETS ITS SIDECARS BACK. Handing back the report while leaving its sidecars deleted
+# is a THIRD state neither the pre-run tree nor the armed tree ever had, and it silently degrades every
+# gains/path/fix answer over that package with nothing saying why.
+printf '{"candor":{"spec":"0.27"},"package":"gone","functions":[{"fn":"orphaned"}]}\n' > "$W/sd/b.gone.Swift.json"
+printf '{"orphaned":["helper"],"helper":[]}\n' > "$W/sd/b.gone.Swift.callgraph.json"
+printf '{"Gone":[]}\n'                         > "$W/sd/b.gone.Swift.hierarchy.json"
+SD_OR=$(cksum < "$W/sd/b.gone.Swift.json"); SD_OC=$(cksum < "$W/sd/b.gone.Swift.callgraph.json")
+SD_OH=$(cksum < "$W/sd/b.gone.Swift.hierarchy.json")
+"$BIN" "$W/sd" --out "$W/sd/b" >/dev/null 2>&1; SD_RC=$?
+{ [ "$SD_RC" -eq 0 ] && [ "$(cksum < "$W/sd/b.gone.Swift.json" 2>/dev/null)" = "$SD_OR" ] \
+  && [ "$(cksum < "$W/sd/b.gone.Swift.callgraph.json" 2>/dev/null)" = "$SD_OC" ] \
+  && [ "$(cksum < "$W/sd/b.gone.Swift.hierarchy.json" 2>/dev/null)" = "$SD_OH" ]; } \
+  && ok "⟨0.28⟩ sidecars: an orphan the run did not write is handed back AS A PAIR — report and both sidecars byte-identical" \
+  || bad "--out disarm: the orphan's sidecars did not come back with it (exit $SD_RC) — a live report whose call graph silently vanished"
 
 # ── Net literal surface: ESTABLISHING forms only (family parity, 2026-07-10). A string arg at a USE
 # verb on an established channel (`Channel.writeAndFlush("x")`) is a PAYLOAD, not a destination —

@@ -29,7 +29,16 @@ git clone --depth 1 https://github.com/tombaldwin/candor-swift /tmp/candor-swift
 Writes `<dir>/.candor/report.<pkg>.Swift.json` (the spec-0.27 envelope) plus two sidecars:
 `report.<pkg>.Swift.callgraph.json` (EVERY analyzed function a key — pure ones included, SPEC §2.2)
 and `report.<pkg>.Swift.hierarchy.json` (each local type → its declared supertypes/protocols, for
-dispatch-frontier queries). Add `--policy <file>` (or `CANDOR_POLICY`, or a checked-in
+dispatch-frontier queries).
+
+**A report with `analyzed.count: 0` and a non-empty `unanalyzed` is a run that FAILED, not a clean
+package.** A scan that exits 2 leaves that fail-closed shape at every report under an explicit `--out`,
+and it DELETES that report's `.callgraph`/`.hierarchy` sidecars with it — so `gains`/`path`/`fix` over
+that prefix answer `unknown` rather than a blast radius computed from the last successful run. Read the
+two together: **a sidecar whose report is one of these empties tells you nothing, whatever it says.**
+Re-scan; conclude from neither half.
+
+Add `--policy <file>` (or `CANDOR_POLICY`, or a checked-in
 `.candor/config` with a `policy` line — discovered by walking UP from the scan TARGET, never the
 CWD) to enforce a §6.2 policy: exit 1 on violation, 2 LOUDLY on an unreadable policy. A `pure` rule
 forbids every *effect* but not the `Unknown` trust marker — `deny Unknown <scope>` is the explicit
