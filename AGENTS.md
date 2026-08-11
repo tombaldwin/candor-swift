@@ -198,6 +198,14 @@ verbatim when present (absent otherwise — a "no gains" over an uncovered dep m
 and when the baseline's uncovered NAME SET differs from the current's it also carries
 `coverageDelta: { nowUncovered: [...], noLongerUncovered: [...] }` (names only). The human
 `fn\teffect` TSV is a pinned consumer surface and is unchanged.
+⟨0.28⟩ **and the ⟨0.21⟩ manifest travels with it, on BOTH SIDES SEPARATELY** (SPEC §2, conformance
+PART 39): `incomplete: true` + `unanalyzed` for the CURRENT report, `baselineIncomplete: true` +
+`baselineUnanalyzed` for the BASELINE. Separate keys because the two failures are different — an
+incomplete current means the gained set may be SHORT (effects the reader is not being told about), an
+incomplete baseline means the comparison FLOOR is soft, so the existing-vs-new `origin` split is
+unreliable. Either side's `analyzed.count: 0` raises its flag with no manifest to name. JSON only (the
+TSV stays byte-stable), and the exit does not move: `gains` is advisory by default and `--strict` keys
+on the GAINED SET, not on the caveat.
 ⟨0.15⟩ **the privacy-manifest verify verdict is coverage-CONDITIONAL**: when the report's
 coverage ledger is non-empty (or any function carries `invisible`), the JSON gains `conditional: true`
 and `coverage: { uncovered: <n>, modules: [...] }`, and the human output appends a `⚠ verdict is

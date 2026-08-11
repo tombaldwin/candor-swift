@@ -1410,27 +1410,37 @@ private func loadCallgraphSidecars(prefix: String) -> (cg: [String: [String]], p
     return (cg, partial)
 }
 
+// The report FILES under one gains locator, by the §3.3.1 3-way rule the loaders above apply: a `prefix`
+// that is ITSELF an existing regular `.json` file IS the one report; otherwise every
+// `<prefix>.*.Swift.json` sibling in its directory, in name order.
+//
+// ONE walk for the three ENVELOPE riders — the producing version, the ⟨0.15⟩ coverage ledger and the
+// ⟨0.21⟩ completeness manifest. They had a copy each, and a rider walking a different file set than the
+// one whose delta is being printed would disclose about reports the answer did not come from (and, worse,
+// stay SILENT about one it did). The `functions` loaders keep their own walk: theirs merges and counts.
+private func gainsReportFiles(prefix: String) -> [String] {
+    let fm = FileManager.default
+    var isDir: ObjCBool = false
+    if prefix.hasSuffix(".json"), fm.fileExists(atPath: prefix, isDirectory: &isDir), !isDir.boolValue {
+        return [prefix]
+    }
+    let ns = prefix as NSString
+    let dirRaw = ns.deletingLastPathComponent
+    let dir = dirRaw.isEmpty ? "." : dirRaw
+    let base = ns.lastPathComponent
+    guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return [] }
+    return entries.sorted()
+        .filter { $0.hasPrefix(base + ".") && $0.hasSuffix(".Swift.json") }
+        .map { dir + "/" + $0 }
+}
+
 // The PRODUCING build of the report(s) at `prefix` — the §2.1 envelope `candor.version`, "" when
 // absent/unreadable (candor-ts's convention: the provenance fields are unconditional, empty = unknown;
 // a legacy bare-array report has no header). First sibling with a version wins — one prefix's siblings
 // are one scan's output. Mirrors candor-ts query-core reportVersion / candor-java reportVersion.
 private func gainsReportVersion(prefix: String) -> String {
     let fm = FileManager.default
-    var files: [String] = []
-    var isDir: ObjCBool = false
-    if prefix.hasSuffix(".json"), fm.fileExists(atPath: prefix, isDirectory: &isDir), !isDir.boolValue {
-        files = [prefix]
-    } else {
-        let ns = prefix as NSString
-        let dirRaw = ns.deletingLastPathComponent
-        let dir = dirRaw.isEmpty ? "." : dirRaw
-        let base = ns.lastPathComponent
-        guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return "" }
-        files = entries.sorted()
-            .filter { $0.hasPrefix(base + ".") && $0.hasSuffix(".Swift.json") }
-            .map { dir + "/" + $0 }
-    }
-    for f in files {
+    for f in gainsReportFiles(prefix: prefix) {
         guard let data = fm.contents(atPath: f),
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let candor = obj["candor"] as? [String: Any],
@@ -1447,22 +1457,8 @@ private func gainsReportVersion(prefix: String) -> String {
 // re-DISCLOSURE rider on gains, never a reason to refuse the delta the loud loaders already vetted.
 private func gainsCoverage(prefix: String) -> [(name: String, calls: Int)] {
     let fm = FileManager.default
-    var files: [String] = []
-    var isDir: ObjCBool = false
-    if prefix.hasSuffix(".json"), fm.fileExists(atPath: prefix, isDirectory: &isDir), !isDir.boolValue {
-        files = [prefix]
-    } else {
-        let ns = prefix as NSString
-        let dirRaw = ns.deletingLastPathComponent
-        let dir = dirRaw.isEmpty ? "." : dirRaw
-        let base = ns.lastPathComponent
-        guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return [] }
-        files = entries.sorted()
-            .filter { $0.hasPrefix(base + ".") && $0.hasSuffix(".Swift.json") }
-            .map { dir + "/" + $0 }
-    }
     var counts: [String: Int] = [:]
-    for f in files {
+    for f in gainsReportFiles(prefix: prefix) {
         guard let data = fm.contents(atPath: f),
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let cov = obj["coverage"] as? [String: Any],
@@ -1474,6 +1470,30 @@ private func gainsCoverage(prefix: String) -> [(name: String, calls: Int)] {
     }
     return counts.map { (name: $0.key, calls: $0.value) }
         .sorted { $0.calls != $1.calls ? $0.calls > $1.calls : $0.name < $1.name }
+}
+
+// ⟨0.28⟩ The ⟨0.21⟩ completeness manifest at `prefix`, for the SAME rider treatment `gainsCoverage` has
+// had since ⟨0.15⟩ — and NOT a second reading of it. The element rule stays in `mergeCompleteness`, the
+// judged-nothing rule stays in `claimsToHaveJudgedNothing`; this only says WHICH FILES to ask, which is
+// the one thing the existing prefix-keyed loaders (`loadFixModel`, `loadUnverifiedFns`) could not lend —
+// they load a whole query MODEL, on the `functions`-envelope-or-fail terms `gains` deliberately does not
+// take (it accepts the legacy bare-array form, and it has already applied its own loud net rule by the
+// time the riders run). Two copies of the manifest READING is the mistake; a third `for f in files` is not.
+//
+// A file that does not parse is skipped rather than counted: `mergeInferredReport` has already named it
+// on stderr as OMITTED-and-may-under-report, and the loud loader has already decided whether the merge
+// survives it. (The Rust reference carries an `unreadable` arm inside its struct; this engine's
+// `ReportCompleteness` has none, which is a difference in the SHARED struct — `tour`, `path`,
+// `unverified` and `fix` all inherit it — not something for `gains` to fix on its own.)
+private func gainsCompleteness(prefix: String) -> ReportCompleteness {
+    let fm = FileManager.default
+    var c = ReportCompleteness()
+    for f in gainsReportFiles(prefix: prefix) {
+        guard let data = fm.contents(atPath: f),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
+        mergeCompleteness(obj, path: f, entryCount: (obj["functions"] as? [Any])?.count ?? 0, into: &c)
+    }
+    return c
 }
 
 // Dispatched from main.swift when argv[1] is `gains`.
@@ -1583,6 +1603,40 @@ func runGainsCLI(_ args: [String]) -> Never {
         if curNames != baseNames {
             doc["coverageDelta"] = ["nowUncovered": curNames.subtracting(baseNames).sorted(),
                                     "noLongerUncovered": baseNames.subtracting(curNames).sorted()] as [String: Any]
+        }
+        // ⟨0.28⟩ §2 — AND THE ⟨0.21⟩ MANIFEST TRAVELS TOO, on exactly the terms the block above travels on.
+        // The coverage rider has been here since ⟨0.15⟩ for the reason §2 gives — *a "no gains" over an
+        // uncovered dep reads clean with false confidence* — and the SAME verb, on the SAME report, in the
+        // SAME output, dropped the STRONGER caveat: `coverage.uncovered` says "I could not see into this
+        // dependency", `unanalyzed` says "I could not read this file of YOUR OWN CODE", and
+        // `analyzed.count: 0` says "I judged nothing at all". The mechanism was here and pointed at the
+        // weaker field.
+        //
+        // BOTH SIDES, DISCLOSED SEPARATELY, because a gains answer rests on TWO reports and they fail
+        // differently. An incomplete CURRENT means the gained set may be SHORT — effects the reader is not
+        // being told about. An incomplete BASELINE means the comparison FLOOR is soft, so the
+        // existing-vs-new `origin` split this verb exists for is unreliable. One combined flag would say
+        // "something here is incomplete" and leave a supply-chain reviewer unable to act on it. The
+        // baseline half takes the `baseline`-prefixed spelling this document already uses for the other
+        // two-sided fact (`baseline_version`), rather than inventing a third shape.
+        //
+        // KEY NAMES ARE THE CROSS-ENGINE WIRE SURFACE — `incomplete`/`unanalyzed` +
+        // `baselineIncomplete`/`baselineUnanalyzed`, the candor-rust `fe5d831` set, character for
+        // character. `mustHedge` is the trigger (so a judged-nothing report raises `incomplete` with no
+        // manifest to name), and `judgedNothing` is deliberately NOT a fourth key here: the reference does
+        // not emit it on this verb, and a key one engine emits and another does not is a divergence a
+        // consumer sees. Verdict-preserving — the exit does not move; `gains` is advisory by default and
+        // `--strict` keys on the GAINED SET, which this does not touch. JSON-only, like `coverage` above:
+        // the human `fn\teffect` TSV is a pinned consumer surface.
+        let curComp = gainsCompleteness(prefix: curPre)
+        let baseComp = gainsCompleteness(prefix: basePre)
+        if curComp.mustHedge {
+            doc["incomplete"] = true
+            if !curComp.unanalyzed.isEmpty { doc["unanalyzed"] = curComp.json }
+        }
+        if baseComp.mustHedge {
+            doc["baselineIncomplete"] = true
+            if !baseComp.unanalyzed.isEmpty { doc["baselineUnanalyzed"] = baseComp.json }
         }
         emitJSON(doc)
         exit(strict && !out.isEmpty ? 1 : 0)
