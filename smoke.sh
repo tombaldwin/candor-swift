@@ -1353,5 +1353,48 @@ printf 'allow Exec git\n' > "$W/gr/pol"
 "$BIN" gate "$W/gr/r" --policy "$W/gr/pol" >/dev/null 2>"$W/gr/p.err"; RC=$?
 { [ $RC -eq 2 ] && grep -q 'unexpected argument' "$W/gr/p.err"; } && ok "gate --report: a stray positional is a usage error" || bad "gate positional: rc=$RC"
 
+# ── ⟨0.28⟩ THE ZERO-RULE REFUSAL ON THE VERB ROUTE, the sibling of the scan CLI's rows above. `5552a36`
+# closed the scan CLI and left this one open: MEASURED here 2026-08-11, `gate --report R --policy <a
+# README>` exited 0 with `{"ok":true,"violations":[]}`, and all three input forms did (every line ignored
+# / empty file / comments only). It matters more on this verb than on the scan — `gate --report` is the
+# SUPPLY-CHAIN surface, the one a consumer points at a report someone else produced.
+printf '# Project README\n\nThis is documentation, not a policy file.\n' > "$W/gr/readme.md"
+: > "$W/gr/empty.policy"
+printf '# just a comment\n\n# another\n' > "$W/gr/comments.policy"
+for form in readme.md empty.policy comments.policy; do
+  rm -f "$W/gr/zr.json"
+  "$BIN" gate --report "$W/gr/r" --policy "$W/gr/$form" --gate-json "$W/gr/zr.json" >/dev/null 2>&1
+  ZRC=$?
+  ZRD=$(python3 -c 'import json,sys
+try: d=json.load(open(sys.argv[1]))
+except Exception: print("no document"); raise SystemExit
+print("PASS" if (d.get("ok") is False and d.get("refused") is True and "violations" not in d) else "not fail-closed: "+json.dumps(d)[:160])' "$W/gr/zr.json" 2>/dev/null)
+  [ "$ZRC" -eq 2 ] && [ "$ZRD" = "PASS" ] \
+    && ok "⟨0.28⟩ gate --report: a zero-rule policy ($form) refuses: exit 2 + the fail-closed document" \
+    || bad "gate --report zero-rule $form: exit $ZRC, document $ZRD"
+done
+# THE CONTROLS on this route: a `deny` that FIRES is still 1 and one that does not is still 0, so the
+# refusal cannot have been bought by refusing more broadly.
+printf 'deny Fs\n' > "$W/gr/pol"
+"$BIN" gate --report "$W/gr/r" --policy "$W/gr/pol" >/dev/null 2>&1
+[ $? -eq 1 ] && ok "⟨0.28⟩ gate --report: a firing \`deny\` still exits 1 beside the zero-rule check" \
+             || bad "gate --report: a firing deny did not exit 1"
+printf 'deny Clipboard\n' > "$W/gr/pol"
+"$BIN" gate --report "$W/gr/r" --policy "$W/gr/pol" >/dev/null 2>&1
+[ $? -eq 0 ] && ok "⟨0.28⟩ gate --report: a non-firing \`deny\` still exits 0" \
+             || bad "gate --report: a non-firing deny did not exit 0"
+# …and the rows that catch the emptiness test narrowing to ONE rule vector. An allow-only / forbid-only
+# policy ALREADY refuses on THIS route (the two rows above) for its own unrelated reason — the AS-EFF-008
+# marker does not ride the report wire; a report carries no entry for a pure function. Measured against a
+# rebuild of the pre-change tree, so they are pre-existing and not this rung's doing. What must hold is
+# that each still names ITS OWN cause: relabelled as "no rules parsed", an ordinary allowlist gate would
+# be reported as an absent one, which is this rung's own failure shape pointed the other way.
+grep -q 'yielded NO RULES' "$W/gr/a.err" \
+  && bad "gate --report: an allow-only policy was refused as if it had NO RULES — the emptiness test reads only some rule vectors" \
+  || ok "⟨0.28⟩ gate --report: an allow-only policy still refuses for the AS-EFF-008 reason, not as a zero-rule policy"
+grep -q 'yielded NO RULES' "$W/gr/f.err" \
+  && bad "gate --report: a forbid-only policy was refused as if it had NO RULES — the emptiness test reads only some rule vectors" \
+  || ok "⟨0.28⟩ gate --report: a forbid-only policy still refuses for its own reason, not as a zero-rule policy"
+
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

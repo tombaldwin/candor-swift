@@ -25,6 +25,16 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   every rule vector the parser can produce (`deny`, which `pure` also fills, `allow`, `forbid`): the
   reference engine's first draft read one of three and would have refused every ordinary allow-only
   allowlist gate. Conformance PART 38 candor-swift: three rows SKIP → PASS, control row still green.
+  **BOTH ROUTES**, from ONE predicate (`zeroRulePolicyRefusal`). The rung landed on the scan CLI first and
+  `gate --report` kept exiting 0 over a README for a day — measured 2026-08-11, all three input forms — and
+  §6.2 says the defect was measured on that verb too, and that "a route is not covered by its sibling". It
+  is the worse of the two to leave open: `gate --report` is the SUPPLY-CHAIN surface, the verb an adopter
+  points at a report someone else produced. On the verb route the refusal is outright (no AS-EFF-005
+  baseline rides the report wire, so no certain violation can stand beside it), which is the posture of the
+  two branches it sits between. An `allow`-only or `forbid`-only policy already refused THERE for its own
+  unrelated reason (the AS-EFF-008 marker does not ride the wire; `forbid` matches on NAME and a report
+  carries no entry for a pure function) — confirmed pre-existing against a rebuild of the pre-change tree,
+  and each still names its own cause rather than this one.
 - **⟨0.28⟩ the report stream sink is fail-closed on exit-2, not empty** (SPEC §3.3.1 (4)). Measured:
   `candor-swift <target> --json --zzz-not-a-flag` exited 2 with STDOUT EMPTY — a JSON consumer keying on
   stdout throws a parse error and is thrown back to scraping stderr, the distinction that made the
