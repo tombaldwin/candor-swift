@@ -9,6 +9,47 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ ⟨0.28⟩ §3.1: a FILE locator resolves to that file — never the prefix-sibling union.**
+  `resolveReportLocator` stripped a family-shaped `<prefix>.<pkg>.Swift.json` back to `<prefix>`, so
+  `--report r.A.Swift.json` silently read `r.B.Swift.json` too: `path` traced a function that lives
+  only in the sibling, `gate --report` fired a violation from it with `analyzed.count` summed across
+  both files, and `gains` listed the sibling's effects as the named file's (all measured). Now a
+  `.json` locator is that file plus its §2.2 sidecars; a sidecar name resolves to the report it is a
+  sidecar OF; a nonexistent file path fails loud instead of widening to its directory. PREFIX (whole
+  set, unioned) and DIRECTORY (discovery) are unchanged. ⚠ only for a consumer who relied on the
+  union: name the prefix to get the set.
+- **⟨0.28⟩ §3.3.1: the scan target expands to the files the run will PARSE.** A `--gate-json` under a
+  directory target ending `.swift` named a file the walk was about to read — measured,
+  `<dir> --gate-json <dir>/extra.swift` replaced the operator's source with the armed verdict, scanned
+  the wreckage, and reported success. Refused at exit 2 having written nothing, on both sink routes;
+  a not-yet-existing `.swift` under the target is the same refusal (arming would create it and the
+  walk would parse the verdict as source). Containment alone is NOT refused — `<target>/.candor/…`
+  stays the recommended layout, pinned by a control.
+- **⟨0.28⟩ §3.3.1: a repeated `--out` is refused, with the fail-closed report at EVERY prefix named.**
+  This engine took the LAST prefix, so `--out A --out B` left A holding a previous run's whole report
+  set, readable as current — and a `gate --report A` over it answers from a scan that never ran. Now
+  every distinct prefix named is armed to the ⟨0.21⟩ fail-closed empty and the run exits 2 (a verdict
+  sink and the `--json` stream get their refusal documents too). Two spellings of one prefix are ONE
+  sink and are not refused.
+- **⟨0.28⟩ §2: `privacy-manifest` consults completeness.** The verb loaded `model.completeness` and
+  never read it — a clean "no sensors reached" shipped over a partial or corrupt-sibling report (#65;
+  the ruling pins it as the same MUST as `show`/`map`, not the same shape problem). Both machine
+  documents (generate + verify) now carry `incomplete` / `unanalyzed` / `judgedNothing` (an ARRAY of
+  report paths), each omitted when not applicable — a complete report's output is byte-identical.
+  Prose note on the family channel per mode; exit codes and `ok` untouched.
+- **⟨0.28⟩ §2: `fix-gate`/`unverified` over a zero-rule policy answer with the caveat document.** Both
+  answered `{"ok": true, "<result>": []}` over a comments-only policy — an empty result set
+  indistinguishable from "asked and everything passed". Now `ok` and the result key are WITHHELD and
+  `unevaluated` carries the gate's whole-policy entry (one predicate, three routes). Exit unchanged,
+  cell by cell: 0 (`--strict` included) over a complete report; `--strict` keeps its standing 2 only
+  over an incomplete one. The zero-rule question reads every rule vector — an allow-only policy
+  answers normally.
+- **⟨0.28⟩ §6.2: the verdict carries `ignored` — the policy lines the parse dropped.** The zero-rule
+  refusal fires only at zero survivors, so a 9-of-10-dropped policy still answered
+  `{"ok": true, "violations": []}` with nothing in the document about the nine gates never asked.
+  `ignored: [{line, text, reason}]` now rides the verdict on both routes, omitted when empty; distinct
+  from `unevaluated` (rules that parsed and could not be answered), and the ⟨0.24⟩ exit-2 policy
+  errors (a typo'd effect token) stay refusals, never `ignored` residue.
 - **⟨0.28⟩ §3.3.1: `gate --report`'s input guard covers what the locator EXPANDS TO, not the locator
   string.** A `--report` locator is a prefix (or a discovery) and the verb reads its `*.Swift.json`
   siblings, but the sink guard compared only the raw flag value — so
