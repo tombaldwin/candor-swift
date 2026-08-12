@@ -200,22 +200,53 @@ private func mergeGateReport(_ full: String, into env: inout GateReportEnvelope)
 /// compare the sink against the raw LOCATOR only, and the locator is a prefix — so a `--gate-json`
 /// naming one of the expanded siblings armed over the very report the gate was asked to judge. Quiet
 /// and side-effect free (it runs in the pre-parse, before any diagnostic is owed).
+///
+/// ⟨0.28⟩ AND THE §2.2 SIDECARS OF EACH REPORT (the same clause's second consequence: a report locator
+/// names the PAIR). The first version of this list carved the sidecars OUT — the gate opens none, so
+/// they read as not-inputs — and the family measurement the same day showed why that half matters:
+/// `gate --report r --gate-json r.<Unit>.Swift.callgraph.json` armed over the sidecar, the report then
+/// loaded FINE, and a REAL verdict landed where the graph belongs at exit 1 — a success, with the pair
+/// destroyed one half at a time. `withGateReportSidecars` appends the reserved-segment family of each
+/// report (existing files only — the guard protects data). `gate` is deliberately NOT in the walk:
+/// `<stem>.gate.json` is the verdict sink's own beside-the-report layout — the exact spelling
+/// `--gate-json` exists for — and the regression test pins that it still gates with a real verdict.
 func gateReportInputFiles(_ prefix: String?) -> [String] {
     guard let prefix else { return [] }
     let fm = FileManager.default
     var isDir: ObjCBool = false
     if prefix.hasSuffix(".json"), fm.fileExists(atPath: prefix, isDirectory: &isDir), !isDir.boolValue {
-        return [prefix]
+        return withGateReportSidecars([prefix])
     }
     let ns = prefix as NSString
     let dirRaw = ns.deletingLastPathComponent
     let dir = dirRaw.isEmpty ? "." : dirRaw
     let base = ns.lastPathComponent
     guard let names = try? fm.contentsOfDirectory(atPath: dir) else { return [] }
-    return names.sorted()
+    return withGateReportSidecars(names.sorted()
         .filter { $0.hasPrefix(base + ".") && $0.hasSuffix(".Swift.json")
                     && !$0.hasSuffix(".callgraph.json") && !$0.hasSuffix(".hierarchy.json") }
-        .map { dir + "/" + $0 }
+        .map { dir + "/" + $0 })
+}
+
+/// The §2.2 reserved-segment sidecars paired to each report path, appended to the report list — the
+/// five data segments the family writes (`callgraph`/`hierarchy` here; `locs`/`calibrated`/`layerreach`
+/// from the sibling engines, walked too because `gate --report <a foreign .json>` is supported and its
+/// pair deserves the same guard). Existing files only; see `gateReportInputFiles` for why `gate` and
+/// `encountered-*` are not in the walk.
+private func withGateReportSidecars(_ reports: [String]) -> [String] {
+    let fm = FileManager.default
+    var out: [String] = []
+    for r in reports {
+        if r.hasSuffix(".json") {
+            let stem = String(r.dropLast(".json".count))
+            for seg in ["calibrated", "callgraph", "hierarchy", "layerreach", "locs"] {
+                let side = "\(stem).\(seg).json"
+                if fm.fileExists(atPath: side) { out.append(side) }
+            }
+        }
+        out.append(r)
+    }
+    return out
 }
 
 private func loadGateReport(prefix: String) -> GateReportEnvelope? {
