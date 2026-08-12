@@ -324,12 +324,19 @@ while let a = argIter.next() {
         // Scope the scan to ONE target of a multi-target package and its in-package dependency closure.
         // Valueless or flag-shaped fails closed: a `--target` that silently became "scan everything"
         // would answer a different question than the one asked, and the answer LOOKS the same.
+        //
+        // The refusal routes through `refuseGateAndExit` like its --out/--policy/--gate-json neighbours
+        // — NOT a bare exit(2). This arm had the bare form (it wrote the report stream, then exited),
+        // and the difference is invisible until a sink is watching: measured 2026-08-12 (the P8
+        // sink-surface matrix), `--target --gate-json -` exited 2 with NOTHING on the stream, while the
+        // FILE spelling passed only because the pre-pass leaves an armed placeholder on disk. A `-`
+        // sink has no placeholder to fall back on — its refusal document exists only if this exit emits
+        // it. Same class as the bare exit(2) candor-scan repaired in 3560681, one flag over from the
+        // --policy/--out the hand sweep checked. (`refuseGateAndExit` also writes the fail-closed
+        // report stream, so the writeReportStreamFailClosed this arm used to call is covered.)
         guard let v = argIter.next(), !v.hasPrefix("-") else {
             FileHandle.standardError.write("candor-swift: --target requires a target name\n".data(using: .utf8)!)
-            // ⟨0.28⟩ the report stream on exit-2: see writeReportStreamFailClosed's doc.
-            writeReportStreamFailClosed(reasonKey: "unknown-flag",
-                                        why: "candor-swift: --target requires a target name")
-            exit(2)
+            refuseGateAndExit("candor-swift: --target requires a target name")
         }
         scopeTarget = v
     case "--workspace", "--deps":
