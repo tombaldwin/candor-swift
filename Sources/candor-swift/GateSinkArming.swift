@@ -62,7 +62,22 @@ func preScanSinkAndInputs(_ argv: [String]) -> (gate: String?, policy: String?, 
 /// exit is the exit this rung most often serves, and mirroring the full flag vocabulary here would be a
 /// second parser that drifts the first time the loop grows a flag.
 func preScanOutPrefix(_ argv: [String]) -> String? {
-    var out: String? = nil
+    allOutPrefixes(argv).last
+}
+
+/// ⟨0.28⟩ EVERY `--out` this argv names, in order, duplicates kept — the same walk as the single-prefix
+/// reader above (which is now its `.last`), because two walks with two value rules is how the repeated
+/// form and the single form come to disagree about which tokens are prefixes at all. Empty on an
+/// informational argv, and the walk still ENDS at a value-taking flag whose value the loop would refuse
+/// — everything after that point is never parsed, so a prefix named there was never accepted.
+///
+/// Exists for the repeated-`--out` refusal (SPEC §3.3.1 ⟨0.28⟩): `--out A --out B` names where the
+/// reports go twice, the two statements cannot both be honoured, and this engine took the LAST — leaving
+/// A holding a previous run's report set, readable as current, with nothing saying otherwise. Worse than
+/// the verdict-sink case it mirrors, because `--out` names a whole PREFIX of per-package reports and a
+/// `gate --report A` over the stale set answers from a scan that never ran.
+func allOutPrefixes(_ argv: [String]) -> [String] {
+    var out: [String] = []
     var i = 1
     while i < argv.count {
         switch argv[i] {
@@ -70,17 +85,28 @@ func preScanOutPrefix(_ argv: [String]) -> String? {
             // The loop's rule for these three: the next token must exist and must not be flag-shaped,
             // else `requires a value` → exit 2 right here.
             guard i + 1 < argv.count, !argv[i + 1].hasPrefix("-") else { return out }
-            if argv[i] == "--out" { out = argv[i + 1] }
+            if argv[i] == "--out" { out.append(argv[i + 1]) }
             i += 2
         case "--gate-json":
             // Same rule, except `-` (stream to stdout) is the one dash-shaped value the loop accepts.
             guard i + 1 < argv.count, argv[i + 1] == "-" || !argv[i + 1].hasPrefix("-") else { return out }
             i += 2
         case "-h", "--help", "--version", "-V", "--agents":
-            return nil
+            return []
         default:
             i += 1
         }
+    }
+    return out
+}
+
+/// Two spellings of one prefix are ONE report set (the §3.3.1 artifact rule, applied to the prefix): a
+/// prefix is not itself a file, but `sameArtifact` resolves the parent of a nonexistent path, so
+/// `p` vs `./p` from p's directory collapse. Order-preserving, first spelling kept.
+func distinctOutPrefixes(_ all: [String]) -> [String] {
+    var out: [String] = []
+    for s in all where !out.contains(where: { $0 == s || sameArtifact($0, s) }) {
+        out.append(s)
     }
     return out
 }
