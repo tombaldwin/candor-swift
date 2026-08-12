@@ -289,6 +289,77 @@ final class GateReportVerbProcessTests: XCTestCase {
                       "the dash-check must be what rejects it, not the stray-positional guard: \(r.err)")
     }
 
+    /// SPEC §3.2 ⟨0.28⟩ "given no value" MEANS the next token is flag-shaped — the gate-verb sibling of
+    /// the scan CLI's conformance §3.1 (b13) row (the row only drives the scan route; "a route is not
+    /// covered by its sibling"). Measured before the fix: the loop consumed `--gate-json` as the policy
+    /// FILENAME, so `--policy --gate-json -` was diagnosed as `unknown flag -` and the file spelling as
+    /// `unexpected argument` — the cause the spec requires was unreachable, the operator's sink token a
+    /// displaced positional. BOTH halves are asserted: the exit code alone passes against the broken
+    /// behaviour (it also exited 2), so the rows pin the CAUSE and the document at the sink.
+    func testFlagShapedPolicyValueIsRefusedAndTheSinkNamedAfterItIsStillASink() throws {
+        let root = try makeReportDir(report: envelope(fnEntry("app.Wire.send", ["Net"], netClass: ["unknown-host"]), analyzed: 1),
+                                     policy: "deny Fs\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        // The STREAM spelling: the refusal document belongs on stdout, the cause on stderr.
+        let s = try ProcessHarness.run(bin(), ["gate", "--report", root.path, "--policy", "--gate-json", "-"])
+        XCTAssertEqual(s.code, 2, "a flag-shaped --policy value is a usage error: \(s.err)")
+        XCTAssertTrue(s.err.contains("--policy was given no value") && s.err.contains("--gate-json"),
+                      "stderr names the flag given no value AND the token that is not one: \(s.err)")
+        let sd = try JSONSerialization.jsonObject(with: Data(s.out.utf8)) as? [String: Any]
+        XCTAssertEqual(sd?["ok"] as? Bool, false,
+                       "the `--gate-json -` sink named AFTER the broken flag still carries the fail-closed refusal document: \(s.out)")
+        XCTAssertEqual(sd?["refused"] as? Bool, true, s.out)
+        // The FILE spelling: a previous run's green must not survive as current.
+        let g = root.appendingPathComponent("verdict.json")
+        try "{\"ok\": true}\n".write(to: g, atomically: true, encoding: .utf8)
+        let f = try ProcessHarness.run(bin(), ["gate", "--report", root.path, "--policy", "--gate-json", g.path])
+        XCTAssertEqual(f.code, 2, f.err)
+        XCTAssertTrue(f.err.contains("--policy was given no value"),
+                      "the cause, not `unexpected argument \(g.path)`: \(f.err)")
+        let fd = try JSONSerialization.jsonObject(with: Data(contentsOf: g)) as? [String: Any]
+        XCTAssertEqual(fd?["ok"] as? Bool, false, "the stale green was replaced fail-closed: \(String(describing: fd))")
+        XCTAssertEqual(fd?["refused"] as? Bool, true, String(describing: fd))
+        // The boundaries: the same argv with the mistake repaired gates for real (`-` stays the stream
+        // form), and a normal `--policy <file>` is untouched.
+        let ok = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                                "--policy", root.appendingPathComponent("pol.txt").path,
+                                                "--gate-json", "-"])
+        XCTAssertEqual(ok.code, 0, "deny Fs over a Net-only report passes: \(ok.err)")
+        let od = try JSONSerialization.jsonObject(with: Data(ok.out.utf8)) as? [String: Any]
+        XCTAssertEqual(od?["ok"] as? Bool, true, "a real verdict, not a refusal: \(ok.out)")
+        XCTAssertNil(od?["refused"], ok.out)
+    }
+
+    /// SPEC §3.2 ⟨0.28⟩ on the QUERY verbs — every value-taking flag in the fix/tour/path/privacy
+    /// grammars. Their comment said "consume the next token unconditionally (mirrors candor-java)", and
+    /// candor-java changed under it: a written-down mirror of a sibling is not a measurement of it.
+    /// Measured before the fix: `unverified --policy --json` blamed a policy named `--json`, and
+    /// `tour`/`path`/`privacy-manifest --report --json` blamed a report named `--json` — exit 2 with the
+    /// wrong cause, the "given no value" diagnostic unreachable.
+    func testQueryVerbsRefuseAFlagShapedValueForEveryValueTakingFlag() throws {
+        let root = try makeReportDir(report: envelope(fnEntry("app.Wire.send", ["Net"], netClass: ["unknown-host"]), analyzed: 1),
+                                     policy: "deny Fs\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let rows: [(args: [String], flag: String)] = [
+            (["unverified", "--report", "--json"], "--report"),
+            (["unverified", "--report", root.path, "--policy", "--json"], "--policy"),
+            (["unverified", "--report", root.path, "--class", "--json"], "--class"),
+            (["fix-gate", "--report", "--json"], "--report"),
+            (["tour", "--report", "--json"], "--report"),
+            (["path", "f", "Net", "--report", "--json"], "--report"),
+            (["privacy-manifest", "--report", "--json"], "--report"),
+        ]
+        for row in rows {
+            let r = try ProcessHarness.run(bin(), row.args)
+            XCTAssertEqual(r.code, 2, "\(row.args) must be a usage error: \(r.err)")
+            XCTAssertTrue(r.err.contains("\(row.flag) was given no value") && r.err.contains("--json"),
+                          "\(row.args) must name \(row.flag) AND the flag-shaped token, got: \(r.err)")
+        }
+        // The boundary: the same verb with the value supplied still answers.
+        let ok = try ProcessHarness.run(bin(), ["tour", "--report", root.path])
+        XCTAssertEqual(ok.code, 0, "a value-shaped --report is unaffected: \(ok.err)")
+    }
+
     func testUnreadablePolicyAndMissingPolicyBothExit2() throws {
         let root = try makeReportDir(report: envelope(fnEntry("app.Wire.send", ["Net"], netClass: ["unknown-host"]), analyzed: 1),
                                      policy: "deny Net app\n")

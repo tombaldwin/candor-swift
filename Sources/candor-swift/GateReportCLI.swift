@@ -487,11 +487,29 @@ func runGateReportCLI(_ args: [String]) -> Never {
     while let a = it.next() {
         switch a {
         case "--json": wantJson = true
+        // SPEC §3.2 ⟨0.28⟩: "given no value" MEANS the next token is flag-shaped — consuming it as a
+        // filename made this very diagnostic unreachable (no argv could produce it) and reinterpreted
+        // the command line: `--policy --gate-json -` read *policy = the file named `--gate-json`* and
+        // diagnosed the displaced `-` as an unknown flag, the operator's sink token as an "unexpected
+        // argument". Measured on this verb 2026-08-12 (both sink spellings stayed fail-closed — the
+        // pre-pass leaves a flag-shaped token live, so the sink after the broken flag was
+        // registered/armed before this refusal — but the CAUSE was the §6.2 silent reinterpretation
+        // one position over). A bare `-` stays a value and fails loud as an unreadable file a moment
+        // later; `./--weird` spells a file genuinely named like a flag. `gateDie` routes through
+        // `refuseGateAndExit`, so the refusal document reaches every registered sink.
         case "--report":
             guard let v = it.next() else { gateDie("candor-swift: --report requires a value (\(usage))") }
+            guard v == "-" || !v.hasPrefix("-") else {
+                gateDie("candor-swift: --report was given no value — the next token `\(v)` is a flag, "
+                        + "not a locator (a path really named that is spelled ./\(v))")
+            }
             reportFlag = v
         case "--policy":
             guard let v = it.next() else { gateDie("candor-swift: --policy requires a value (\(usage))") }
+            guard v == "-" || !v.hasPrefix("-") else {
+                gateDie("candor-swift: --policy was given no value — the next token `\(v)` is a flag, "
+                        + "not a path (a file really named that is spelled ./\(v))")
+            }
             policyFlag = v
         case "--gate-json":
             // The scan path's own dash-check, so `--gate-json --policy p` cannot swallow `--policy` and
