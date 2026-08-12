@@ -128,10 +128,16 @@ private func parsePrivacyManifestArgs(_ args: [String]) -> PrivacyManifestArgs {
         case "--json": pm.json = true
         case "--xml": pm.xml = true
         case "--report":
-            // Consume the next token as the value unconditionally (mirrors the fix/tour grammar) so a
-            // value beginning `-` can be passed; only a genuinely absent value is the exit-2 error.
+            // SPEC §3.2 ⟨0.28⟩ "given no value": a flag-shaped next token is a usage error, never a
+            // locator (the fix/tour grammar's rule — see parseQueryArgs, where the measurement lives; a
+            // bare `-` stays a value and fails loud as a report that does not exist).
             guard i < rest.count else { privacyDie("candor-swift: --report requires a value") }
-            reportFlag = rest[i]; i += 1
+            let v = rest[i]
+            guard v == "-" || !v.hasPrefix("-") else {
+                privacyDie("candor-swift: --report was given no value — the next token `\(v)` is a flag, "
+                           + "not a locator (a path really named that is spelled ./\(v))")
+            }
+            reportFlag = v; i += 1
         case "--verify":
             // OPTIONAL value. `--verify <path>` verifies that plist; bare `--verify` DISCOVERS one, so
             // the documented flow is `candor privacy-manifest --verify` with nothing to look up. A

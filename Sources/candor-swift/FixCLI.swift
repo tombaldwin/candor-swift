@@ -572,18 +572,35 @@ private func parseQueryArgs(_ args: [String], expectedVerbArgs: Int) -> QueryArg
         switch a {
         case "--json": q.json = true
         case "--strict": q.strict = true
+        // SPEC §3.2 ⟨0.28⟩ (each value-taking flag below): "given no value" MEANS the next token is
+        // flag-shaped, or the clause is unimplementable. This grammar used to consume the next token
+        // UNCONDITIONALLY — "mirrors candor-java", and candor-java changed under it (ec3ffe1): a
+        // written-down mirror of a sibling is not a measurement of it. Measured here 2026-08-12:
+        // `unverified --policy --json` diagnosed *policy `--json` could not be read* — exit 2 with the
+        // wrong cause, the operator's output flag read as a filename, the §6.2 silent reinterpretation
+        // one position over. A bare `-` stays a value and fails loud downstream (an unreadable file /
+        // an unknown class token); `./--weird` spells a file genuinely named like a flag.
         case "--report":
-            // Consume the NEXT token as the value unconditionally (mirrors candor-java) so a file whose
-            // name begins with `-` (e.g. `-p.json`) can be passed. Only a genuinely absent value (the flag
-            // is the last token) is the exit-2 error — never a silent fall-back to discovery (§3.3.1).
             guard let v = it.next() else { fixDie("candor-swift: --report requires a value") }
+            guard v == "-" || !v.hasPrefix("-") else {
+                fixDie("candor-swift: --report was given no value — the next token `\(v)` is a flag, "
+                       + "not a locator (a path really named that is spelled ./\(v))")
+            }
             reportFlag = v
         case "--policy":
             guard let v = it.next() else { fixDie("candor-swift: --policy requires a value") }
+            guard v == "-" || !v.hasPrefix("-") else {
+                fixDie("candor-swift: --policy was given no value — the next token `\(v)` is a flag, "
+                       + "not a path (a file really named that is spelled ./\(v))")
+            }
             policyFlag = v
         case "--class":
             guard let v = it.next() else {
                 fixDie("candor-swift: --class requires a <class,…> value\n  accepted: \(CLASS_FILTER_TOKENS)")
+            }
+            guard v == "-" || !v.hasPrefix("-") else {
+                fixDie("candor-swift: --class was given no value — the next token `\(v)` is a flag, "
+                       + "not a <class,…> list")
             }
             // SPEC §6.2 ⟨0.24⟩: `--class` takes ONE comma-separated list and is NOT REPEATABLE — a second
             // occurrence is a usage error, not a union. Neither silent reading is safe: last-wins (what
@@ -787,7 +804,13 @@ private func parseTourArgs(_ args: [String]) -> TourArgs {
         switch a {
         case "--json": t.json = true
         case "--report":
+            // SPEC §3.2 ⟨0.28⟩ "given no value" — the parseQueryArgs rule, stated where its comment is.
+            // Measured 2026-08-12: `tour --report --json` blamed a report named `--json`.
             guard let v = it.next() else { fixDie("candor-swift: --report requires a value") }
+            guard v == "-" || !v.hasPrefix("-") else {
+                fixDie("candor-swift: --report was given no value — the next token `\(v)` is a flag, "
+                       + "not a locator (a path really named that is spelled ./\(v))")
+            }
             reportFlag = v
         default:
             if a == "--text" || a == "--human" { continue }  // candor-ts output-mode flags (#8); swift prose is the default — tolerate for cross-engine `candor <verb> --text`
@@ -1138,7 +1161,13 @@ private func parsePathArgs(_ args: [String]) -> PathArgs {
         switch a {
         case "--json": p.json = true
         case "--report":
+            // SPEC §3.2 ⟨0.28⟩ "given no value" — the parseQueryArgs rule, stated where its comment is.
+            // Measured 2026-08-12: `path f Net --report --json` blamed a report named `--json`.
             guard let v = it.next() else { fixDie("candor-swift: --report requires a value") }
+            guard v == "-" || !v.hasPrefix("-") else {
+                fixDie("candor-swift: --report was given no value — the next token `\(v)` is a flag, "
+                       + "not a locator (a path really named that is spelled ./\(v))")
+            }
             reportFlag = v
         default:
             if a == "--text" || a == "--human" { continue }  // candor-ts output-mode flags (#8); swift prose is the default — tolerate for cross-engine `candor <verb> --text`
