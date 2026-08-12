@@ -787,7 +787,10 @@ func runGateReportCLI(_ args: [String]) -> Never {
     for sink in verdictSinks {
         writeGateVerdict(violations, to: sink, spec: specVersion, analyzedCount: env.analyzedCount,
                          unanalyzed: env.unanalyzed, coverage: Array(env.coverageModules),
-                         policyVocabulary: policyVocabulary, unevaluated: refused)
+                         policyVocabulary: policyVocabulary, unevaluated: refused,
+                         // ⟨0.28⟩ §6.2 `ignored` — measured on THIS route too; a route is not covered
+                         // by its sibling.
+                         ignored: pol.ignored)
     }
     if violations.isEmpty {
         FileHandle.standardError.write("candor-swift: policy ✓\n".data(using: .utf8)!)

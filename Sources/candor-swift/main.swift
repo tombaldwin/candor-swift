@@ -1849,6 +1849,9 @@ var gateViolations: [GateViolation] = []
 /// ⟨0.24⟩ the `.candor/config` whose VOCABULARY participated in this verdict, and which aliases it
 /// supplied (SPEC §3.1) — nil unless a config `unknown-alias` was actually consumed by a policy token.
 var gatePolicyVocabulary: (config: String, aliases: [String: [String]])? = nil
+// ⟨0.28⟩ the lines the policy parse DROPPED — set beside `gatePolicyVocabulary` where the policy is
+// parsed, read by the one verdict write below (SPEC §6.2 `ignored`; see `IgnoredLine`).
+var gatePolicyIgnored: [IgnoredLine] = []
 // AS-EFF-005 baseline regression guard (SPEC §7 item 5, Baseline.swift) — checked FIRST, matching the
 // reference engine's checker order (candor-java runs checkBaseline before checkPolicy). CANDOR_BASELINE
 // env over the config `baseline` key (the same env-over-config precedence as `policy`; a relative
@@ -1983,6 +1986,8 @@ policyBlock: if let pp = policyPath {
     // Parsed ONCE and shared with the purity-hole disclosure below — two `parsePolicy` calls over the same
     // text were two chances for the ⟨0.24⟩ policy-error check to be applied to only one of them.
     let scanPolicy = parsePolicy(text, aliases: unknownAliases)
+    // ⟨0.28⟩ SPEC §6.2 — the dropped lines ride the verdict as `ignored` (stashed for the write below).
+    gatePolicyIgnored = scanPolicy.ignored
     // ⟨0.24⟩ SPEC §3.1: the config file is named in the verdict only when its vocabulary PARTICIPATED.
     // ⟨0.24⟩ …and `aliases` maps each consumed alias to the CLASSES it expanded to — see
     // `consumedAliasVocabulary`, shared with the `gate --report` route so the two cannot disagree.
@@ -2106,7 +2111,7 @@ for v in gateViolations { FileHandle.standardError.write(("[\(v.rule)] \(v.detai
 // --gate-json ⟨0.8⟩: the machine verdict, from the SAME gateViolations that set the exit code — written
 // BEFORE the exit below (ok:true,[] when no gate is configured). Unreadable policy already exited 2 above;
 // AS-EFF-005 records join the same list, so the verdict and the exit code can never disagree.
-if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVersion, analyzedCount: allFns.count, unanalyzed: unanalyzedUnits, coverage: unlisted.map(\.key), policyVocabulary: gatePolicyVocabulary, unevaluated: gateUnevaluated) }   // ⟨0.15 staged⟩ advisory, verdict-preserving; ⟨0.21⟩ analyzed + fail-closed unanalyzed; ⟨0.24⟩ the config vocabulary that participated
+if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVersion, analyzedCount: allFns.count, unanalyzed: unanalyzedUnits, coverage: unlisted.map(\.key), policyVocabulary: gatePolicyVocabulary, unevaluated: gateUnevaluated, ignored: gatePolicyIgnored) }   // ⟨0.15 staged⟩ advisory, verdict-preserving; ⟨0.21⟩ analyzed + fail-closed unanalyzed; ⟨0.24⟩ the config vocabulary that participated
 let gateConfigured = policyPath != nil || baselinePath != nil
 if gateConfigured {
     if gateViolations.isEmpty {

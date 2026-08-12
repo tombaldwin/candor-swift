@@ -66,7 +66,8 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
                       unanalyzed: [(path: String, reason: String)] = [],
                       coverage uncoveredModules: [String] = [],
                       policyVocabulary: (config: String, aliases: [String: [String]])? = nil,
-                      unevaluated: [Unevaluated] = []) {
+                      unevaluated: [Unevaluated] = [],
+                      ignored: [IgnoredLine] = []) {
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a gate over source candor could NOT analyze must NOT read green —
     // its effects are invisible, so a `deny`/`allow` that "passes" over it is a false-pure. `ok` requires
     // BOTH no violation AND a complete analysis (the caller exits 2 on this incomplete-but-clean path).
@@ -138,6 +139,14 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
     // violation it is sure of; it does not conceal the part it could not read, and it does not confine
     // that admission to stderr.
     if !unevaluated.isEmpty { dict["unevaluated"] = unevaluatedJson(unevaluated) }
+    // ⟨0.28⟩ SPEC §6.2 — THE LINES THE PARSE DROPPED, so a machine consumer can see that the gate it is
+    // reading is smaller than the gate that was written. The zero-rule refusal fires only at zero
+    // survivors; at every fraction below 100% the human channel warned per line and this document said
+    // nothing — a 90%-gateless green. Distinct from `unevaluated` (rules that PARSED and could not be
+    // answered): this is text that never became a rule at all. Omitted when nothing was dropped, so a
+    // clean policy's verdict stays byte-identical; carried on BOTH routes (this writer serves them both,
+    // and §6.2 measured the defect on `gate --report` too — a route is not covered by its sibling).
+    if !ignored.isEmpty { dict["ignored"] = ignored.map(\.json) }
     // ⟨0.27⟩ SPEC §4 `zeroMatch` — the rules whose SCOPE bound no function, verbatim: the same list the
     // stderr lines carry, in the machine channel, on BOTH routes (this writer serves them both). It was
     // stderr-only in all five engines, so a wrapper reading the document could not see that a rule bound
