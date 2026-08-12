@@ -175,6 +175,127 @@ final class PrivacyManifestTests: XCTestCase {
         XCTAssertEqual((d["underDeclared"] as? [Any])?.count, 0, "Notify must never be under-declared: \(r.out)")
     }
 
+    // ── ⟨0.28⟩ the completeness envelope (SPEC §2 — the "same MUST, not the same shape problem" cell) ──
+
+    /// A hand-built report carrying a privacy reach AND an `unanalyzed` manifest, plus a judged-nothing
+    /// report, under one scratch dir.
+    private func partialFixtures() throws -> (bin: URL, dir: URL) {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-pv028-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try """
+        {
+          "candor": {"version": "t", "toolchain": "swiftsyntax", "spec": "0.28"},
+          "functions": [
+            {"fn": "P.snap", "inferred": ["Camera"], "direct": ["Camera"], "calls": []}
+          ],
+          "analyzed": {"count": 1},
+          "unanalyzed": [{"path": "src/Broken.swift", "reason": "parse error"}]
+        }
+        """.write(to: dir.appendingPathComponent("partial.json"), atomically: true, encoding: .utf8)
+        try """
+        {
+          "candor": {"version": "t", "toolchain": "swiftsyntax", "spec": "0.28"},
+          "functions": [], "analyzed": {"count": 0}
+        }
+        """.write(to: dir.appendingPathComponent("nothing.json"), atomically: true, encoding: .utf8)
+        return (bin, dir)
+    }
+
+    /// GENERATE over a report declaring `unanalyzed` carries the pinned caveat keys IN the machine
+    /// document. Before ⟨0.28⟩ this verb loaded `model.completeness` and never read it: measured, a bare
+    /// `{reached, required}` shipped over a partial report, and `reached: []` over a corrupt sibling —
+    /// a clean "no sensors reached" about code nobody examined.
+    func testGenerateOverAPartialReportCarriesTheCompletenessCaveat() throws {
+        let (bin, dir) = try partialFixtures()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let r = try ProcessHarness.run(bin, ["privacy-manifest",
+                                             "--report", dir.appendingPathComponent("partial.json").path,
+                                             "--json"])
+        XCTAssertEqual(r.code, 0, "exit is UNTOUCHED — a disclosure, not an exit code: \(r.err)")
+        let d = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any])
+        XCTAssertEqual(d["incomplete"] as? Bool, true, r.out)
+        let un = try XCTUnwrap(d["unanalyzed"] as? [[String: Any]], r.out)
+        XCTAssertEqual(un.first?["path"] as? String, "src/Broken.swift")
+        XCTAssertEqual((d["reached"] as? [String]), ["Camera"],
+                       "the answer still ships — the caveat qualifies it rather than replacing it")
+        XCTAssertTrue(r.err.contains("⚠ INCOMPLETE"),
+                      "the prose half goes to stderr in JSON mode (stdout carries a document): \(r.err)")
+    }
+
+    /// A corrupt SIBLING raises `incomplete: true` (the `unreadable` cause — no key of its own, the file
+    /// is named in prose) — this was #65's sharpest measured form: a clean bill of health over a report
+    /// set the gate refuses.
+    func testGenerateOverACorruptSiblingHedges() throws {
+        let (bin, dir) = try partialFixtures()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try """
+        {
+          "candor": {"version": "t", "toolchain": "swiftsyntax", "spec": "0.28"},
+          "functions": [
+            {"fn": "A.ok", "inferred": ["Camera"], "direct": ["Camera"], "calls": []}
+          ],
+          "analyzed": {"count": 1}
+        }
+        """.write(to: dir.appendingPathComponent("c.A.Swift.json"), atomically: true, encoding: .utf8)
+        try #"{"candor": {"trunc"#
+            .write(to: dir.appendingPathComponent("c.B.Swift.json"), atomically: true, encoding: .utf8)
+        let r = try ProcessHarness.run(bin, ["privacy-manifest",
+                                             "--report", dir.appendingPathComponent("c").path, "--json"])
+        XCTAssertEqual(r.code, 0, r.err)
+        let d = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any])
+        XCTAssertEqual(d["incomplete"] as? Bool, true,
+                       "a sibling the gate hard-fails over cannot read as clean here: \(r.out)")
+        XCTAssertEqual((d["reached"] as? [String]), ["Camera"], "the surviving sibling still answers")
+    }
+
+    /// `judgedNothing` is the ARRAY of report paths — the pinned wire shape (a verb reading a prefix
+    /// answers over many siblings, and WHICH judged nothing is the actionable content).
+    func testJudgedNothingIsAnArrayOfReportPaths() throws {
+        let (bin, dir) = try partialFixtures()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let nothing = dir.appendingPathComponent("nothing.json").path
+        let r = try ProcessHarness.run(bin, ["privacy-manifest", "--report", nothing, "--json"])
+        XCTAssertEqual(r.code, 0, r.err)
+        let d = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any])
+        XCTAssertEqual(d["incomplete"] as? Bool, true)
+        XCTAssertEqual(d["judgedNothing"] as? [String], [nothing],
+                       "an ARRAY of report paths, never a boolean — the 3-of-4 wire shape: \(r.out)")
+    }
+
+    /// VERIFY carries the caveat in its verdict document and keeps its exit: a declared sensor over a
+    /// partial report is still `ok: true` at exit 0 — with `incomplete: true` beside it, so the CI
+    /// consumer finally receives the condition the human channel always had.
+    func testVerifyOverAPartialReportCarriesTheCaveatAndKeepsItsExit() throws {
+        let (bin, dir) = try partialFixtures()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let plist = try writePlist(["NSCameraUsageDescription"], dir)
+        let r = try ProcessHarness.run(bin, ["privacy-manifest",
+                                             "--report", dir.appendingPathComponent("partial.json").path,
+                                             "--verify", plist, "--json"])
+        XCTAssertEqual(r.code, 0, "the exit is the declared-vs-reached verdict, untouched: \(r.err)")
+        let d = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any])
+        XCTAssertEqual(d["ok"] as? Bool, true)
+        XCTAssertEqual(d["incomplete"] as? Bool, true, r.out)
+        XCTAssertNotNil(d["unanalyzed"], r.out)
+    }
+
+    /// THE CONTROL: over a complete report every caveat key is ABSENT — generate output is
+    /// byte-identical to its pre-⟨0.28⟩ form (the property every engine measured for this rung).
+    func testCompleteReportCarriesNoCaveatKeys() throws {
+        let (bin, prefix, cleanup) = try scanToReport(locationAndContacts)
+        defer { cleanup() }
+        let r = try ProcessHarness.run(bin, ["privacy-manifest", "--report", prefix, "--json"])
+        XCTAssertEqual(r.code, 0, r.err)
+        let d = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any])
+        for key in ["incomplete", "unanalyzed", "judgedNothing"] {
+            XCTAssertNil(d[key], "`\(key)` must be omitted when it does not apply — byte-identity is "
+                         + "the property this rung must not spend")
+        }
+        XCTAssertFalse(r.err.contains("INCOMPLETE"), "no prose caveat either: \(r.err)")
+    }
+
     // A binary plist parses too (NSDictionary/PropertyListSerialization handle both encodings).
     func testBinaryPlistParses() throws {
         let (bin, prefix, cleanup) = try scanToReport(locationAndContacts)
