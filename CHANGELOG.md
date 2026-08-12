@@ -9,6 +9,24 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.28⟩ `ReportCompleteness` gains the reference's `unreadable` arm — an unparseable sibling
+  report now hedges every consuming verb.** A corrupt sibling was named once on stderr as OMITTED and
+  the answer over the survivors read CLEAN: measured, `unverified --json` answered
+  `{"ok": true, "unverified": []}` over one good and one truncated report while rust (`unreadable`
+  arm), java (`bad` list) and ts (a parse throw judged nothing) each hedge the identical bytes — and
+  `gate --report` hard-fails them, so the advisory verbs answered MORE confidently than the gate on
+  identical input (the §3.2 relation, inverted). The gap was WRITTEN DOWN in a comment as a known
+  difference from the reference — the documented-limitation pattern this project has a standing rule
+  about. The arm feeds `isIncomplete`, so `unverified --strict`/`fix-gate --strict` exit 2 (matching
+  the reference's `incomplete()`); no new JSON key — `incomplete: true` is the wire for this cause,
+  the file is named in the prose note and on stderr. `tour`, `path`, `unverified`, `fix-gate` and
+  `gains` inherit it through the shared struct, and **`fix` — which the old comment CLAIMED inherited
+  the reading and did not — now actually does**: its loader threaded the struct and the verb never
+  read it, so `{"crossing": false}` shipped flat even over an `unanalyzed`-declaring report. Every
+  `fix` document now carries the disclosure keys and the ⚠ INCOMPLETE note goes to stderr (stdout
+  always holds a document on that verb), mirroring the reference's `cmd_fix`. `privacy-manifest`
+  still reads no completeness at all — left for a family decision, since its hedge would be a new
+  wire surface.
 - **⟨0.28⟩ SPEC §3.3.1 (1): the `--out` pre-pass walks argv with the flag loop's own value rules.**
   The precondition for arming is *"`--out` has been parsed and accepted"*, and the pre-pass matched
   the token wherever it stood: on `--policy --out X` the loop refuses at `--policy` (`--out` there is

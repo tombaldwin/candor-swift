@@ -93,6 +93,18 @@ struct ReportCompleteness {
     /// conclusion about any of it. Only the union of the two covers both the post-failure artifact
     /// (which carries both) and the facade/re-export report (which carries only this).
     var judgedNothing: [String] = []
+    /// ⟨0.28⟩ The report FILES under this locator that could not be read AS reports at all — the
+    /// `unreadable` arm the Rust reference has carried since ⟨0.24⟩ and this struct did not, a
+    /// difference every caller inherited. Until this arm existed, a corrupt sibling was named once on
+    /// stderr as OMITTED and the answer then read CLEAN over the survivors: measured, `unverified
+    /// --json` over one good and one truncated sibling answered `{"ok": true, "unverified": []}` while
+    /// rust, java and ts each hedge the same bytes (`unreadable` arm / `bad` list / a parse throw
+    /// counted as judged-nothing). A file the gate hard-fails over cannot read as clean here — that is
+    /// the §3.2 at-least-as-pessimistic-as-the-gate relation, and it is why this arm feeds
+    /// `isIncomplete` (the EXIT predicate) and not only `mustHedge`. No JSON key of its own: the
+    /// disclosure key set is the pinned cross-engine wire surface and the reference raises only
+    /// `incomplete: true` for this cause — the file is named in the prose note and on stderr.
+    var unreadable: [String] = []
 
     /// Is the universe this verb reasoned over known-partial? **EITHER ARM OF THIS IS AN EXIT CODE**, and
     /// that is why `judgedNothing` is deliberately NOT one of them. `unverified --strict` and
@@ -100,8 +112,10 @@ struct ReportCompleteness {
     /// ⟨0.24⟩ ruled count-0 the other way for exactly those bytes: *"A DISCLOSURE, NOT AN EXIT CODE"*,
     /// because `gate --report` exits 0 over a facade package and a verb exiting 2 there would claim it
     /// got LESS far than the gate on identical input. So the count-0 cause reaches the two DISCLOSURE
-    /// channels via `mustHedge` and stops at the exit code.
-    var isIncomplete: Bool { !unanalyzed.isEmpty }
+    /// channels via `mustHedge` and stops at the exit code. `unreadable` IS an arm: the gate refuses
+    /// over a file that does not load as a report, so the strict verbs answer 2 with it, exactly as the
+    /// reference's `incomplete()` counts its `unreadable` list.
+    var isIncomplete: Bool { !unanalyzed.isEmpty || !unreadable.isEmpty }
 
     /// ⟨0.28⟩ **Is there anything at all to disclose — the trigger for an ANSWER, where `isIncomplete` is
     /// the trigger for a VERDICT.** A descriptive verb asks THIS: its empty set is a negative finding
@@ -110,7 +124,9 @@ struct ReportCompleteness {
     /// disagree — one channel going quiet is the mutant this family has already shipped once.
     var mustHedge: Bool { isIncomplete || !judgedNothing.isEmpty }
 
-    var units: Int { unanalyzed.count }
+    /// Readable manifest entries PLUS files whose manifest could not be read at all — the reference's
+    /// `units()`, so the two engines' prose counts agree over identical bytes.
+    var units: Int { unanalyzed.count + unreadable.count }
     var json: [[String: Any]] { unanalyzed.map { ["path": $0.path, "reason": $0.reason] as [String: Any] } }
 
     /// The MACHINE half: the ⟨0.28⟩ disclosure keys, or EMPTY when there is nothing to disclose — so
@@ -158,6 +174,11 @@ struct ReportCompleteness {
         }
         var lines = ["  ⚠ INCOMPLETE — \(head)", "      so \(soWhat):"]
         for u in unanalyzed { lines.append("      \(u.path) — \(u.reason)") }
+        // The reference's line, character for character; the "(see above)" is the loader's own stderr
+        // OMITTED disclosure, which named the file before the answer was printed.
+        for p in unreadable {
+            lines.append("      \(p) — its `unanalyzed` manifest could not be read (see above)")
+        }
         for p in judgedNothing {
             lines.append("      \(p) — `analyzed.count: 0`: this report judged NOTHING, so it names no "
                        + "function at all and its silence is not a purity claim")
@@ -175,6 +196,15 @@ struct ReportCompleteness {
     func printNote(so soWhat: String, tail: String) {
         guard let n = note(so: soWhat, tail: tail) else { return }
         print(n, terminator: "")
+    }
+
+    /// `printNote` on STDERR, for a verb whose stdout carries a JSON document — the reference's
+    /// `eprint_note`, and for its reason: prose written to stdout beside a document would corrupt the
+    /// document, and dropping the note instead is one channel going quiet, the mutant this family has
+    /// already shipped once.
+    func eprintNote(so soWhat: String, tail: String) {
+        guard let n = note(so: soWhat, tail: tail) else { return }
+        FileHandle.standardError.write(Data(n.utf8))
     }
 }
 
@@ -258,7 +288,11 @@ private func mergeFixReport(_ full: String, into byName: inout [String: FixFn],
           let root = try? JSONSerialization.jsonObject(with: data),
           let obj = root as? [String: Any],
           let fns = obj["functions"] as? [[String: Any]] else {
-        FileHandle.standardError.write("candor-swift \(who): report `\(full)` could not be parsed — OMITTED.\n".data(using: .utf8)!)
+        // ⟨0.28⟩ OMITTED *and counted*: the answer over the surviving siblings is INCOMPLETE, not clean.
+        // Recording the casualty here rather than only on stderr is what lets every caller of this
+        // loader hedge — see `ReportCompleteness.unreadable`.
+        completeness.unreadable.append(full)
+        FileHandle.standardError.write("candor-swift \(who): report `\(full)` could not be parsed — OMITTED, and this answer is reported INCOMPLETE (`gate --report` refuses over these bytes).\n".data(using: .utf8)!)
         return false
     }
     // ⟨scope travels⟩ the `.entitlements` this report's `--target` resolved. COLLECTED, not decided
@@ -635,7 +669,10 @@ private func mergeUnverifiedReport(_ full: String, into out: inout [UnverifiedFn
           let root = try? JSONSerialization.jsonObject(with: data),
           let obj = root as? [String: Any],
           let fns = obj["functions"] as? [[String: Any]] else {
-        FileHandle.standardError.write("candor-swift unverified: report `\(full)` could not be parsed — OMITTED.\n".data(using: .utf8)!)
+        // ⟨0.28⟩ same as mergeFixReport's arm: the casualty is COUNTED, so `unverified` hedges (and
+        // `--strict` refuses) rather than certifying the survivors as the whole universe.
+        completeness.unreadable.append(full)
+        FileHandle.standardError.write("candor-swift unverified: report `\(full)` could not be parsed — OMITTED, and this answer is reported INCOMPLETE (`gate --report` refuses over these bytes).\n".data(using: .utf8)!)
         return false
     }
     for e in fns {
@@ -1006,6 +1043,19 @@ func runFixCLI(_ args: [String]) -> Never {
         guard let model = loadFixModel(prefix: prefix) else {
             fixDie("candor-swift fix: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
         }
+        // ⟨0.28⟩ THE COMMENT SAID `fix` INHERITED THE COMPLETENESS READING, AND IT DID NOT. The loader
+        // threads the struct into `model.completeness` and this verb never read it — measured, over a
+        // report declaring `unanalyzed`, `fix a Fs --json` answered `{"crossing": false, …}` flat on
+        // both channels. Every answer below is a claim over the report (`crossing: false` rests on an
+        // effect set a callee in an unread file contributes nothing to; a hoist plan names CALLERS, and
+        // a caller in an unread file is invisible to it), so the disclosure reaches all three documents
+        // and the note goes to STDERR — stdout always carries a document on this verb. The reference's
+        // `cmd_fix` does exactly this (`warn_unreadable("fix")` + `write_json` on each branch); the
+        // exit code stays 0, for its reason: this verb answers no `ok` for `--strict` to follow.
+        let comp = model.completeness
+        comp.eprintNote(so: "any remedy below is computed over a universe candor cannot fully see",
+                        tail: "A callee in one of those contributes no effect here, and a caller in one "
+                            + "is invisible to the hoist. \(comp.gateLine) Re-scan for a complete answer.")
         switch fix(target: target, effect: effect, byName: model.byName, cg: model.cg, deny: deny) {
         case .noSuchFn:
             fixDie("candor-swift fix: no function matching `\(target)`")
@@ -1013,6 +1063,7 @@ func runFixCLI(_ args: [String]) -> Never {
             // ⟨0.24⟩ `crossing:false` IS a claim, so the §3.2 disclosure rides it — see `CandorCore.fix`.
             var out: [String: Any] = ["fn": fn, "effect": eff, "crossing": false, "reason": reason]
             if !unanswered.isEmpty { out["unevaluated"] = unanswered.map { $0.toJSON() } }
+            for (k, v) in comp.disclosureJSON { out[k] = v }
             emitJSON(out)
             exit(0)
         case let .unanswerable(fn, eff, crossing, unanswered):
@@ -1023,12 +1074,14 @@ func runFixCLI(_ args: [String]) -> Never {
             var out: [String: Any] = ["fn": fn, "effect": eff, "reason": "unanswerable"]
             if let c = crossing { out["crossing"] = c }
             out["unevaluated"] = unanswered.map { $0.toJSON() }
+            for (k, v) in comp.disclosureJSON { out[k] = v }
             emitJSON(out)
             exit(0)
         case let .remedy(r, unanswered):
             var out = r.toJSON()
             out["crossing"] = true
             if !unanswered.isEmpty { out["unevaluated"] = unanswered.map { $0.toJSON() } }
+            for (k, v) in comp.disclosureJSON { out[k] = v }
             emitJSON(out)
             exit(0)
         }
@@ -1480,17 +1533,25 @@ private func gainsCoverage(prefix: String) -> [(name: String, calls: Int)] {
 // take (it accepts the legacy bare-array form, and it has already applied its own loud net rule by the
 // time the riders run). Two copies of the manifest READING is the mistake; a third `for f in files` is not.
 //
-// A file that does not parse is skipped rather than counted: `mergeInferredReport` has already named it
-// on stderr as OMITTED-and-may-under-report, and the loud loader has already decided whether the merge
-// survives it. (The Rust reference carries an `unreadable` arm inside its struct; this engine's
-// `ReportCompleteness` has none, which is a difference in the SHARED struct — `tour`, `path`,
-// `unverified` and `fix` all inherit it — not something for `gains` to fix on its own.)
+// ⟨0.28⟩ A file that does not parse is COUNTED, not skipped. The first version of this rider skipped it
+// on the reasoning that `mergeInferredReport` had already named it on stderr — which is true and was the
+// documented-limitation trap: the comment recorded that the SHARED struct lacked the reference's
+// `unreadable` arm and every verb inherited the lack, and writing that down is what stopped it being
+// measured. The struct now carries the arm; this rider feeds it the same way the two loud loaders do,
+// so a corrupt sibling hedges the gains answer exactly as it hedges `tour`/`path`/`unverified`/`fix`.
+// A legacy bare-ARRAY report is NOT unreadable: it parses, it has no envelope to carry a manifest, and
+// hedging over every pre-envelope report would put the caveat on ordinary input and train the reader to
+// ignore it (the reference does not hedge there either).
 private func gainsCompleteness(prefix: String) -> ReportCompleteness {
     let fm = FileManager.default
     var c = ReportCompleteness()
     for f in gainsReportFiles(prefix: prefix) {
         guard let data = fm.contents(atPath: f),
-              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
+              let root = try? JSONSerialization.jsonObject(with: data) else {
+            c.unreadable.append(f)
+            continue
+        }
+        guard let obj = root as? [String: Any] else { continue }   // legacy bare array — valid, no envelope
         mergeCompleteness(obj, path: f, entryCount: (obj["functions"] as? [Any])?.count ?? 0, into: &c)
     }
     return c

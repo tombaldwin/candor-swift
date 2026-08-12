@@ -411,6 +411,97 @@ final class CompletenessManifestTests: XCTestCase {
                        + "these very bytes, so a 2 here claims candor got less far than the gate did")
     }
 
+    /// ⟨0.28⟩ **AN UNPARSEABLE SIBLING IS THE `unreadable` ARM, AND EVERY CONSUMING VERB HEDGES.**
+    ///
+    /// Before the fix a corrupt sibling was named once on stderr as OMITTED and the answer over the
+    /// survivors read CLEAN — measured, `unverified --json` answered `{"ok": true, "unverified": []}`
+    /// over one good and one truncated report while rust (`unreadable` arm), java (`bad` list) and ts
+    /// (a parse throw judged nothing) each hedge the identical bytes. The gap was even WRITTEN DOWN, in
+    /// the `gainsCompleteness` comment, as a known difference from the reference — the
+    /// documented-limitation pattern: a limitation recorded as considered is what stops it being
+    /// measured. This engine's own parse-error cardinal sin sat behind exactly such a comment.
+    ///
+    /// The reference relation is the §3.2 one and it is asserted first: `gate --report` HARD-FAILS over
+    /// these bytes, so an advisory verb reading them as clean answered MORE confidently than the gate on
+    /// identical input. `unreadable` therefore feeds `isIncomplete` — the strict verbs exit 2 — not just
+    /// the disclosure trigger. No new JSON key: `incomplete: true` is the wire (the reference emits no
+    /// unreadable manifest either); the file is named in prose and on stderr.
+    func testAnUnparseableSiblingHedgesEveryConsumingVerb() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-unreadable-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try JSONSerialization.data(withJSONObject: [
+            "candor": ["version": "t"], "analyzed": ["count": 2],
+            "functions": [["fn": "a", "inferred": ["Fs"], "direct": ["Fs"], "loc": "main.swift:1:1"]],
+        ]).write(to: dir.appendingPathComponent("r.A.Swift.json"))
+        try #"{"candor":{"version":"t"},"functions":[{"fn":"#   // truncated mid-write
+            .write(to: dir.appendingPathComponent("r.B.Swift.json"), atomically: true, encoding: .utf8)
+        let prefix = dir.appendingPathComponent("r").path
+        let pol = dir.appendingPathComponent("pol.txt")
+        try "deny Db\n".write(to: pol, atomically: true, encoding: .utf8)
+
+        // The reference: the gate refuses these bytes, so no advisory verb may read them as clean.
+        let gate = try ProcessHarness.run(bin, ["gate", "--report", prefix, "--policy", pol.path])
+        XCTAssertEqual(gate.code, 2, "`gate --report` hard-fails over a sibling that does not load")
+
+        // The `ok`-answering verbs: `ok` withdrawn, `incomplete: true`, and `--strict` exits 2.
+        for verb in ["unverified", "fix-gate"] {
+            let r = try ProcessHarness.run(bin, [verb, "--report", prefix, "--policy", pol.path, "--json"])
+            let d = try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any]
+            XCTAssertNil(d?["ok"], "\(verb): a corrupt sibling withdraws `ok` — the survivors are not "
+                                 + "the whole universe. Got: \(r.out)")
+            XCTAssertEqual(d?["incomplete"] as? Bool, true, "\(verb): …and says so: \(r.out)")
+            XCTAssertNil(d?["unanalyzed"], "\(verb): no new JSON manifest for this cause — `incomplete` "
+                                         + "is the wire, matching the reference: \(r.out)")
+            XCTAssertTrue(r.err.contains("r.B.Swift.json") && r.err.contains("INCOMPLETE"),
+                          "\(verb): the casualty is named WITH its consequence, not just OMITTED: \(r.err)")
+            let s = try ProcessHarness.run(bin, [verb, "--report", prefix, "--policy", pol.path, "--strict"])
+            XCTAssertEqual(s.code, 2, "\(verb) --strict answers 2 — the gate refuses these bytes, so do I")
+        }
+
+        // The descriptive verbs: the machine key and the prose withdrawal, naming the file.
+        for argv in [["tour", "3"], ["path", "a", "Fs"]] {
+            let verb = argv[0]
+            let j = try ProcessHarness.run(bin, argv + ["--report", prefix, "--json"])
+            XCTAssertEqual(j.code, 0, "\(verb): a caveat is added, nothing is refused: \(j.err)")
+            let d = try JSONSerialization.jsonObject(with: Data(j.out.utf8)) as? [String: Any]
+            XCTAssertEqual(d?["incomplete"] as? Bool, true, "\(verb) --json: \(j.out)")
+            let t = try ProcessHarness.run(bin, argv + ["--report", prefix])
+            XCTAssertTrue(t.out.contains("⚠ INCOMPLETE"), "\(verb) prose: \(t.out)")
+            XCTAssertTrue(t.out.contains("r.B.Swift.json"),
+                          "\(verb) prose: the unreadable file is named in the note itself: \(t.out)")
+        }
+
+        // `fix` — the verb the old comment CLAIMED inherited this reading and did not: its loader
+        // threaded the struct and the verb never read it, so `{"crossing": false}` shipped flat even
+        // over an `unanalyzed`-declaring report. Now every fix document carries the keys and the note
+        // goes to stderr (stdout always holds a document on this verb).
+        let f = try ProcessHarness.run(bin, ["fix", "a", "Fs", "--report", prefix,
+                                             "--policy", pol.path, "--json"])
+        let fd = try JSONSerialization.jsonObject(with: Data(f.out.utf8)) as? [String: Any]
+        XCTAssertEqual(fd?["crossing"] as? Bool, false, "the answer still ships: \(f.out)")
+        XCTAssertEqual(fd?["incomplete"] as? Bool, true,
+                       "fix: `crossing: false` rests on an effect set a callee in the unread sibling "
+                       + "contributes nothing to — the claim must carry the caveat: \(f.out)")
+        XCTAssertTrue(f.err.contains("⚠ INCOMPLETE"), "fix: the prose withdrawal, on stderr: \(f.err)")
+
+        // CONTROL: delete the corrupt sibling and every hedge above disappears — otherwise "count the
+        // casualty" and "hedge always" pass these rows equally well.
+        try FileManager.default.removeItem(at: dir.appendingPathComponent("r.B.Swift.json"))
+        let c = try ProcessHarness.run(bin, ["unverified", "--report", prefix, "--policy", pol.path,
+                                             "--json", "--strict"])
+        let cd = try JSONSerialization.jsonObject(with: Data(c.out.utf8)) as? [String: Any]
+        XCTAssertEqual(cd?["ok"] as? Bool, true, "the good sibling alone is a complete universe: \(c.out)")
+        XCTAssertNil(cd?["incomplete"], c.out)
+        XCTAssertEqual(c.code, 0, "…and --strict certifies it")
+        let cf = try ProcessHarness.run(bin, ["fix", "a", "Fs", "--report", prefix,
+                                              "--policy", pol.path, "--json"])
+        let cfd = try JSONSerialization.jsonObject(with: Data(cf.out.utf8)) as? [String: Any]
+        XCTAssertNil(cfd?["incomplete"], "fix over a complete report is byte-identical: \(cf.out)")
+    }
+
     // The digest algorithm matches java's FNV-1a-64 byte-for-byte (one spec, one algorithm).
     func testFnv1aHexIsDeterministicAndWellFormed() {
         let a = fnv1aHex(["app.pure(x:)", "app.reads()"])
