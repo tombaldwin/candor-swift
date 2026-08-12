@@ -350,6 +350,30 @@ public struct PolicyError {
     }
 }
 
+/// ⟨0.28⟩ **ONE POLICY LINE THE PARSE DROPPED — text that never became a rule at all** (SPEC §6.2). The
+/// zero-rule refusal fires only at ZERO survivors, so a policy where nine of ten lines were dropped
+/// still answered `{"ok": true, "violations": []}` with the verdict document saying nothing about the
+/// nine gates that were never asked — a 90%-gateless green, arriving at every fraction below 100%. All
+/// four engines warn per ignored line on stderr, which is not the machine channel: that is the same
+/// distinction that made the incomplete-analysis defect a defect.
+///
+/// Refusal would break the forward-compatibility leniency §6.2 defends (an engine meeting a rule kind
+/// from a newer rung must not refuse the whole file), so DISCLOSURE is the remedy — the ⟨0.15⟩
+/// `coverage` move. Distinct from `unevaluated`, and the distinction is load-bearing: `unevaluated`
+/// carries rules that PARSED and could not be answered; this carries text that never became a rule. A
+/// consumer that sees neither is entitled to believe the policy on disk is the policy that ran.
+///
+/// NOT the exit-2 policy errors: a typo'd effect token (`deny Nett app`, `allow Nett …`) is a policy
+/// ERROR that refuses the gate (⟨0.24⟩), so it can never coexist with a verdict — this list carries only
+/// the residue the leniency deliberately keeps (an unknown rule kind, a malformed `forbid`, an `allow`
+/// with no values). `text` is the source line verbatim; `line` is 1-based over the §6.2 line splitting.
+public struct IgnoredLine {
+    public let line: Int
+    public let text: String
+    public let reason: String
+    public var json: [String: Any] { ["line": line, "text": text, "reason": reason] }
+}
+
 public struct DenyRule { public var effects: [String]; public var scope: String; public var unknownClasses: [String]; public var netClasses: [String]; public var raw: String }
 public struct AllowRule { public var effect: String; public var scope: String; public var values: [String]; public var raw: String }
 public struct ForbidRule { public var from: String; public var to: String; public var raw: String }
@@ -376,10 +400,13 @@ public struct ParsedPolicy {
     /// because a config exists. A config that defines ten aliases and is asked for none is not an input
     /// to this verdict and naming it would be noise.
     public var usedAliases: [String]
+    /// ⟨0.28⟩ the lines the parse DROPPED without refusing — see `IgnoredLine`. Rides the verdict
+    /// document as `ignored`, omitted when empty.
+    public var ignored: [IgnoredLine]
     public init(deny: [DenyRule], allow: [AllowRule], forbid: [ForbidRule], errors: [PolicyError] = [],
-                usedAliases: [String] = []) {
+                usedAliases: [String] = [], ignored: [IgnoredLine] = []) {
         self.deny = deny; self.allow = allow; self.forbid = forbid
-        self.errors = errors; self.usedAliases = usedAliases
+        self.errors = errors; self.usedAliases = usedAliases; self.ignored = ignored
     }
     /// ⟨0.24⟩ The refusal texts, in order — the GATE's view of `errors`. Empty means every line the
     /// engine could not honour is a report-only one, which is the ambiguous middle §6.2 leaves permissive.
@@ -493,6 +520,8 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
     var deny: [DenyRule] = [], allow: [AllowRule] = [], forbid: [ForbidRule] = []
     var errors: [PolicyError] = []
     var usedAliases = Set<String>()
+    var ignored: [IgnoredLine] = []
+    var lineNo = 0
     // Split LINES on \n / \r\n / bare \r — the three forms Java's Files.readAllLines (the reference parser)
     // breaks on. Splitting on \n ONLY let a classic-Mac (bare-\r) file collapse to ONE line: \r is also an
     // in-line ASCII-ws token separator (§6.2), so every rule after the first was glued into the first rule's
@@ -500,6 +529,13 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
     // token separators (Java's readLine does not break on them either).
     let normalized = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
     for rawLine in normalized.split(separator: "\n", omittingEmptySubsequences: false) {
+        lineNo += 1
+        // ⟨0.28⟩ record a DROPPED line for the verdict's `ignored` disclosure — only the drops the
+        // forward-compat leniency keeps (no `gateReason`); the exit-2 policy errors never reach a
+        // verdict and §6.2 classes them apart ("a policy ERROR at exit 2, not an ignored line").
+        func ignore(_ why: String) {
+            ignored.append(IgnoredLine(line: lineNo, text: String(rawLine), reason: why))
+        }
         // The §6.2 token separator is ASCII whitespace ONLY. `.whitespaces`/`Character.isWhitespace` are
         // Unicode — they'd split a NBSP/ideographic space that Java drops (a gateless-green divergence;
         // adversarial DSL review). `isASCII && isWhitespace` keeps space/tab/CR/LF/VT/FF and excludes the
@@ -599,6 +635,7 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
             guard t.count >= 3 else {
                 errors.append(warnRule("allow names no values", line, kind: "rule-form", token: t[0],
                                        accepted: ["allow <Effect> [in <scope>] <value…>"]))
+                ignore("allow names no values")
                 continue
             }
             guard ALLOW_EFFECTS.contains(t[1]) else {
@@ -624,6 +661,7 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
             if values.isEmpty {
                 errors.append(warnRule("allow names no values", line, kind: "rule-form", token: t[0],
                                        accepted: ["allow <Effect> [in <scope>] <value…>"]))
+                ignore("allow names no values")
                 continue
             }
             // Duplicate values dedup (the reference parser's TreeSet) — same PART 4 parity as deny.
@@ -634,16 +672,18 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
                 errors.append(warnRule("want `forbid <scope> -> <scope>`", line, kind: "rule-form",
                                        token: t.dropFirst().joined(separator: " "),
                                        accepted: ["forbid <scope> -> <scope>"]))
+                ignore("want `forbid <scope> -> <scope>`")
                 continue
             }
             forbid.append(ForbidRule(from: a, to: b, raw: line))
         default:
             errors.append(warnRule("unknown rule kind `\(t[0])`", line, kind: "rule-kind", token: t[0],
                                    accepted: ["deny", "pure", "allow", "forbid"]))
+            ignore("unknown rule kind `\(t[0])`")
         }
     }
     return ParsedPolicy(deny: deny, allow: allow, forbid: forbid, errors: errors,
-                        usedAliases: usedAliases.sorted())
+                        usedAliases: usedAliases.sorted(), ignored: ignored)
 }
 
 /// §6.2 scope match: segment run, last segment a prefix. Segments split on BOTH `.` and `::` (empty
