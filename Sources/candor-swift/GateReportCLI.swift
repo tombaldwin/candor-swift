@@ -194,6 +194,30 @@ private func mergeGateReport(_ full: String, into env: inout GateReportEnvelope)
 ///   • no re-classification — `hosts`/`cmds`/`paths`/`tables`/`netClass` are taken verbatim. They are
 ///     already transitive on the wire (main.swift writes the fixpointed accumulators), so no literal is
 ///     re-matched and no host is re-mapped through THIS machine's `net-partner` config.
+/// ⟨0.28⟩ The report FILES a `gate --report` locator names — the SAME three-way rule and the same
+/// sibling walk as `loadGateReport` below, kept adjacent so the guard and the loader cannot drift about
+/// what this verb reads. Exists for the input-collision guard in `runGateReportCLI`: the guard used to
+/// compare the sink against the raw LOCATOR only, and the locator is a prefix — so a `--gate-json`
+/// naming one of the expanded siblings armed over the very report the gate was asked to judge. Quiet
+/// and side-effect free (it runs in the pre-parse, before any diagnostic is owed).
+func gateReportInputFiles(_ prefix: String?) -> [String] {
+    guard let prefix else { return [] }
+    let fm = FileManager.default
+    var isDir: ObjCBool = false
+    if prefix.hasSuffix(".json"), fm.fileExists(atPath: prefix, isDirectory: &isDir), !isDir.boolValue {
+        return [prefix]
+    }
+    let ns = prefix as NSString
+    let dirRaw = ns.deletingLastPathComponent
+    let dir = dirRaw.isEmpty ? "." : dirRaw
+    let base = ns.lastPathComponent
+    guard let names = try? fm.contentsOfDirectory(atPath: dir) else { return [] }
+    return names.sorted()
+        .filter { $0.hasPrefix(base + ".") && $0.hasSuffix(".Swift.json")
+                    && !$0.hasSuffix(".callgraph.json") && !$0.hasSuffix(".hierarchy.json") }
+        .map { dir + "/" + $0 }
+}
+
 private func loadGateReport(prefix: String) -> GateReportEnvelope? {
     let fm = FileManager.default
     var env = GateReportEnvelope()
@@ -403,6 +427,20 @@ func runGateReportCLI(_ args: [String]) -> Never {
             if !args[i + 1].hasPrefix("-") { reportFlag = args[i + 1] }
         }
         refuseGateJsonOverInput(gp, reportFlag, "--report")
+        // ⟨0.28⟩ …AND THE FILES THE LOCATOR EXPANDS TO, because the raw flag value is not what this verb
+        // READS. A locator is a PREFIX (or a discovery), and the loader below walks its
+        // `<prefix>.*.Swift.json` siblings — so `--gate-json <one of those siblings>` named an input by
+        // any honest reading and the guard compared only the unexpanded string. MEASURED on this engine
+        // 2026-08-12: `gate --report r --gate-json r.B.Swift.json` armed over the operator's own report,
+        // the load then failed on the wreckage, and the refusal document was written over it AGAIN at
+        // exit 2 — the same scan-target class the ⟨0.28⟩ review caught family-wide, one verb over. The
+        // discovery case is covered too: with no `--report` at all, the reports this gate is about to
+        // read from the discovered `.candor/` are inputs just the same. Exact artifacts, enumerated by
+        // the same three-way rule the loader applies — the dep-dir precedent in `runInputs`, not a
+        // containment rule.
+        for f in gateReportInputFiles(reportFlag.map(resolveReportLocator) ?? discoverReportPrefix()) {
+            refuseGateJsonOverInput(gp, f, "a report this gate reads —")
+        }
         // The gate verb's policy fallback is CWD-anchored (CANDOR_POLICY, then the config discovered
         // from the CWD), so the config channel must be enumerated from "." — anchoring it at the REPORT
         // asked a different directory's question and left a config-declared policy unguarded.
@@ -415,6 +453,10 @@ func runGateReportCLI(_ args: [String]) -> Never {
         if namedSinks.count > 1 {
             for sNamed in namedSinks where sNamed != "-" {
                 refuseGateJsonOverInput(sNamed, reportFlag, "--report")
+                // ⟨0.28⟩ the expanded report set, exactly as the single-sink path asks it above.
+                for f in gateReportInputFiles(reportFlag.map(resolveReportLocator) ?? discoverReportPrefix()) {
+                    refuseGateJsonOverInput(sNamed, f, "a report this gate reads —")
+                }
                 refuseGateJsonOverAnyInput(sNamed, ".", pre.policy)
             }
             let list = namedSinks.joined(separator: ", ")
