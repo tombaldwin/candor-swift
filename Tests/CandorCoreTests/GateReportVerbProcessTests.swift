@@ -1163,4 +1163,40 @@ final class GateReportVerbProcessTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: reportFile, encoding: .utf8), report,
                        "the discovered report set is an input exactly as a named one is")
     }
+
+    /// ⟨0.28⟩ §3.3.1 — **AND THE §2.2 SIDECARS EXPAND TOO.** The first version of `gateReportInputFiles`
+    /// carved the sidecars OUT (the gate opens none, so they read as not-inputs), and the family
+    /// measurement showed why that half matters: `--gate-json <the report's callgraph>` armed over the
+    /// sidecar, the report then loaded FINE, and a REAL verdict landed where the graph belongs at exit 0
+    /// — a success, with the pair destroyed one half at a time. Every later `fix`/`rewire` then reads a
+    /// verdict document as a callgraph. Asserts BYTES, because the pre-fix run SUCCEEDED.
+    func testGateJsonNamingTheReportsSidecarRefusesAndAGateJsonSiblingStillGates() throws {
+        let report = envelope(fnEntry("app.Sender.send", ["Net"]), analyzed: 1)
+        let callgraph = #"{"app.Sender.send":[]}"#
+        let root = try makeReportDir(report: report, callgraph: callgraph, policy: "deny Db\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sidecar = root.appendingPathComponent(".candor/report.App.Swift.callgraph.json")
+
+        let r = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                               "--policy", root.appendingPathComponent("pol.txt").path,
+                                               "--gate-json", sidecar.path])
+        XCTAssertEqual(r.code, 2, "the pair's other half is refused like the report itself: \(r.err)")
+        XCTAssertEqual(try String(contentsOf: sidecar, encoding: .utf8), callgraph,
+                       "the callgraph is byte-for-byte untouched — the pre-fix run exited 0 with a real "
+                       + "verdict here, so neither the exit code nor the report can catch a regression")
+
+        // CONTROL, load-bearing against the plausible-but-wrong fix: `<report-stem>.gate.json` is a
+        // sibling matching `<stem>.*.json` — exactly what a guard over "everything sharing the stem"
+        // would refuse — and it is the beside-the-report verdict layout this flag exists for. It must
+        // still gate with a REAL verdict, leaving both halves of the pair untouched.
+        let sink = root.appendingPathComponent(".candor/report.App.Swift.gate.json")
+        let ok = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                                "--policy", root.appendingPathComponent("pol.txt").path,
+                                                "--gate-json", sink.path])
+        XCTAssertEqual(ok.code, 0, "deny Db over a Net-only report is a clean gate: \(ok.err)")
+        let v = try JSONSerialization.jsonObject(with: Data(contentsOf: sink)) as? [String: Any]
+        XCTAssertEqual(v?["ok"] as? Bool, true, "…with a real verdict at the sink, not the armed placeholder")
+        XCTAssertEqual(try String(contentsOf: sidecar, encoding: .utf8), callgraph,
+                       "…and the sidecar survives the control run too")
+    }
 }

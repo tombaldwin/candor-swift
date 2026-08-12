@@ -19,6 +19,15 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   is enumerated by `gateReportInputFiles`, kept adjacent to `loadGateReport` so the guard and the
   loader cannot drift about what the verb reads; the discovery route (no `--report` at all) is
   guarded identically, and a control pins that a fresh sink beside the reports still gates.
+- **⟨0.28⟩ …and the §2.2 SIDECARS expand too.** The first version of `gateReportInputFiles` carved the
+  sidecars OUT (the gate opens none, so they read as not-inputs), and the family measurement the same
+  day showed why that half matters: `gate --report r --gate-json r.<Unit>.Swift.callgraph.json` armed
+  over the sidecar, the report then loaded FINE, and a REAL verdict landed where the graph belongs at
+  exit 0 — a success, with the pair destroyed one half at a time; every later `fix`/`rewire` then reads
+  a verdict document as a callgraph. `withGateReportSidecars` appends each report's reserved-segment
+  family (existing files only). `gate` is deliberately not in the walk — `<stem>.gate.json` is the
+  verdict sink's own beside-the-report layout — and the regression test pins that it still gates with
+  a real verdict.
 - **⟨0.28⟩ `gains` carries `judgedNothing`/`baselineJudgedNothing`, as PATH LISTS — the family ruling
   that ends a three-way key split.** This engine withheld the key on the reasoning that the reference
   did not emit it on this verb and a key one engine emits and another does not is a divergence a
