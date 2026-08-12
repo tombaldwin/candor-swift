@@ -494,6 +494,68 @@ func refuseGateJsonOverAnyInput(_ gate: String, _ target: String?, _ policyFlag:
     refuseGateJsonAtConfig(gate)
 }
 
+/// SPEC §3.3.1 ⟨0.28⟩ — **THE SCAN TARGET EXPANDS TO THE FILES THE RUN WILL PARSE**, and a sink that
+/// lies UNDER the target and bears an extension this engine parses is refused: it names a file the walk
+/// is about to read, and arming would destroy the operator's SOURCE — measured live on this engine
+/// 2026-08-12, `<dir> --gate-json <dir>/extra.swift` replaced the source file with the armed verdict
+/// document, the walk then read the wreckage as an unparseable source, and the run REPORTED SUCCESS with
+/// the verdict sitting in the source tree.
+///
+/// The exact-artifact rule (`runInputs` carries the target itself) deliberately refuses only a sink that
+/// IS the target; this is its pinned residual. The check is NARROW and stated over what is knowable at
+/// parse time — the file walk has not run yet, but the engine knows its own source extension before it
+/// knows its file list:
+///   · containment alone is NOT refused — `<dir>/.candor/report.json` is under the target and is the
+///     recommended layout (the control the exact-artifact ruling records as "took 33 tests" when a
+///     blanket containment rule was tried);
+///   · the extension test is the loader's own (`.swift`, the one suffix `sourcePaths` collects), so the
+///     two cannot drift about what "a file the run will parse" means.
+///
+/// Non-exiting shape mirrors `isGateJsonAtConfig`/`refuseGateJsonAtConfig` so both the single-sink and
+/// the repeated-sink routes can ask it — a rule applied where the author is working and not to its
+/// sibling route is the measured habit this rung exists to break.
+///
+/// **SCAN ROUTE ONLY, and deliberately not inside `refuseGateJsonOverAnyInput`**: the `gate --report`
+/// verb shares that function with target "." as its config-discovery anchor, and that verb parses no
+/// sources — the clause is stated over the SCAN TARGET's expansion, so applying it where there is no
+/// scan would refuse a sink the operator legitimately named.
+func sinkIsParsedSourceUnderTarget(_ sink: String, target: String?) -> Bool {
+    guard sink != "-", sink.hasSuffix(".swift") else { return false }
+    let t = target ?? "."
+    var isDir: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: t, isDirectory: &isDir), isDir.boolValue else {
+        // A FILE target contains nothing; the exact-artifact rule already covers a sink that IS it.
+        return false
+    }
+    let targetDir = URL(fileURLWithPath: t).standardizedFileURL.resolvingSymlinksInPath().path
+    // Resolve the sink the way the sink writer will (symlink chain, then standardize); its parent is
+    // resolved when the file does not exist yet — the same shape `sameArtifact` uses.
+    let resolved = resolveSinkArtifact(sink)
+    let url = URL(fileURLWithPath: resolved).standardizedFileURL
+    let sinkPath: String
+    if FileManager.default.fileExists(atPath: url.path) {
+        sinkPath = url.resolvingSymlinksInPath().path
+    } else {
+        let parent = url.deletingLastPathComponent()
+        guard FileManager.default.fileExists(atPath: parent.path) else { return false }
+        sinkPath = parent.resolvingSymlinksInPath()
+            .appendingPathComponent(url.lastPathComponent).path
+    }
+    return sinkPath.hasPrefix(targetDir.hasSuffix("/") ? targetDir : targetDir + "/")
+}
+
+func refuseSinkUnderTargetWithParsedExtension(_ sink: String, target: String?, flag: String) {
+    guard sinkIsParsedSourceUnderTarget(sink, target: target) else { return }
+    let why = "candor-swift: \(flag) \(sink) lies under the scan target and ends `.swift` — a file this "
+        + "scan is about to PARSE — refusing (exit 2). The sink is armed before the file walk runs, so "
+        + "this would overwrite the operator's source and then scan the wreckage. Nothing was written; "
+        + "give the document its own path (the recommended layout, <target>/.candor/…, stays permitted)."
+    FileHandle.standardError.write((why + "\n").data(using: .utf8)!)
+    // ⟨0.28⟩ REPORT STREAM on exit-2 — the same obligation the input refusals one function up carry.
+    writeReportStreamFailClosed(reasonKey: "refused", why: why)
+    exit(2)
+}
+
 /// ⟨0.28⟩ Resolve a sink to the artifact it finally names, following a chain of symlinks and working for
 /// a DANGLING one (the target need not exist yet, which is why `resolvingSymlinksInPath` is not enough).
 func resolveSinkArtifact(_ p: String) -> String {

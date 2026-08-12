@@ -154,4 +154,100 @@ final class TargetInputArmingProcessTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: prev, encoding: .utf8), reportShaped,
                        "a doc lookup must not eat the previous run's report")
     }
+
+    // ── ⟨0.28⟩ THE SCAN TARGET EXPANDS TO THE FILES THE RUN WILL PARSE ────────────────────────────────
+
+    /// A sink UNDER a directory target bearing the extension this engine parses is refused: it is not
+    /// the target artifact (the exact-artifact rule cannot see it) but it IS a file the walk is about to
+    /// read. Measured before the fix: `<dir> --gate-json <dir>/extra.swift` replaced the source with the
+    /// armed verdict, scanned the wreckage as an unparseable source, and REPORTED SUCCESS (exit 0 on a
+    /// clean policy) — the verdict sitting in the source tree.
+    func testGateJsonAtASourceUnderTheDirectoryTargetRefusesWithBytesIntact() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage("""
+        import Foundation
+        func doFs() { FileManager.default.createFile(atPath: "/tmp/x", contents: nil) }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let extra = root.appendingPathComponent("Sources/App/extra.swift")
+        let source = "func pureThing() -> Int { 41 + 1 }\n"
+        try source.write(to: extra, atomically: true, encoding: .utf8)
+
+        let r = try ProcessHarness.run(bin, [root.path, "--gate-json", extra.path])
+        XCTAssertEqual(r.code, 2, "a sink at a parsed source refuses (exit 2): \(r.err)")
+        XCTAssertTrue(r.err.contains("lies under the scan target and ends `.swift`"),
+                      "the refusal names the mechanism: \(r.err)")
+        // THE LOAD-BEARING ASSERTION — the pre-fix run exited 0, but a weaker regression could refuse
+        // AFTER arming; only the bytes tell the refusal from the destruction.
+        XCTAssertEqual(try String(contentsOf: extra, encoding: .utf8), source,
+                       "the operator's source file is byte-for-byte untouched — nothing was written")
+    }
+
+    /// …and a `.swift` sink that does not exist yet is the SAME refusal: arming would CREATE it, and the
+    /// file walk that runs afterwards would then parse the verdict document as source.
+    func testGateJsonAtANotYetExistingSwiftPathUnderTheTargetRefuses() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage("""
+        import Foundation
+        func doFs() { FileManager.default.createFile(atPath: "/tmp/x", contents: nil) }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sink = root.appendingPathComponent("Sources/App/new.swift")
+
+        let r = try ProcessHarness.run(bin, [root.path, "--gate-json", sink.path])
+        XCTAssertEqual(r.code, 2, r.err)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sink.path),
+                       "nothing was written — arming a new .swift under the target would hand the walk "
+                       + "a verdict document as source")
+    }
+
+    /// The repeated-sink route applies the same rule (a rule shipped on one route and not its sibling is
+    /// the measured ⟨0.28⟩ habit): the source path takes the input exemption — bytes intact — while the
+    /// OTHER named sink still receives the refusal document.
+    func testRepeatedSinkRouteExemptsTheSourceAndRefusesTheSibling() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage("""
+        import Foundation
+        func doFs() { FileManager.default.createFile(atPath: "/tmp/x", contents: nil) }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let extra = root.appendingPathComponent("Sources/App/extra.swift")
+        let source = "func pureThing() -> Int { 41 + 1 }\n"
+        try source.write(to: extra, atomically: true, encoding: .utf8)
+        let other = root.appendingPathComponent("v.json")
+        try #"{"ok": true}"#.write(to: other, atomically: true, encoding: .utf8)
+
+        let r = try ProcessHarness.run(bin, [root.path, "--gate-json", extra.path,
+                                             "--gate-json", other.path])
+        XCTAssertEqual(r.code, 2, r.err)
+        XCTAssertEqual(try String(contentsOf: extra, encoding: .utf8), source,
+                       "the source path is exempt — nothing written there")
+        let doc = try JSONSerialization.jsonObject(with: Data(contentsOf: other)) as? [String: Any]
+        XCTAssertEqual(doc?["refused"] as? Bool, true,
+                       "the other named sink gets the refusal — its pre-seeded green must not survive")
+    }
+
+    /// THE CONTROL: `<target>/.candor/verdict.json` is under the target and is NOT a parsed source —
+    /// the recommended layout keeps working. (A blanket under-the-target rule fails this row.)
+    func testDotCandorSinkUnderTheTargetStaysPermitted() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage("""
+        import Foundation
+        func doFs() { FileManager.default.createFile(atPath: "/tmp/x", contents: nil) }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pol = root.appendingPathComponent("pol.txt")
+        try "deny Fs\n".write(to: pol, atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("out"),
+                                                withIntermediateDirectories: true)
+        let sink = root.appendingPathComponent("out/verdict.json")
+
+        let r = try ProcessHarness.run(bin, [root.path, "--policy", pol.path,
+                                             "--gate-json", sink.path])
+        XCTAssertEqual(r.code, 1, "the gate runs and fires — the sink under the target is ordinary "
+                       + "usage: \(r.err)")
+        let doc = try JSONSerialization.jsonObject(with: Data(contentsOf: sink)) as? [String: Any]
+        XCTAssertEqual(doc?["ok"] as? Bool, false)
+        XCTAssertNotNil(doc?["violations"], "a real verdict, not a refusal")
+    }
 }

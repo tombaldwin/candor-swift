@@ -233,9 +233,15 @@ if let gp = preScanned.gate {
     let namedSinks = distinctGateSinks(allGateSinks(CommandLine.arguments))
     if namedSinks.count > 1 {
         let list = namedSinks.joined(separator: ", ")
-        let offending = namedSinks.filter { gateJsonIsInput($0, preScanned.target, preScanned.policy) }
+        // ⟨0.28⟩ a sink that IS a source the walk will parse takes the input exemption too — nothing is
+        // written there, and the other named paths still get the refusal (the exemption covers the PATH,
+        // not the run). Same predicate as the single-sink route below, so the two cannot drift.
+        let offending = namedSinks.filter { gateJsonIsInput($0, preScanned.target, preScanned.policy)
+                                            || sinkIsParsedSourceUnderTarget($0, target: preScanned.target) }
         if offending.count == namedSinks.count {
             refuseGateJsonOverAnyInput(namedSinks[0], preScanned.target, preScanned.policy)
+            refuseSinkUnderTargetWithParsedExtension(namedSinks[0], target: preScanned.target,
+                                                     flag: "--gate-json")
             exit(2)
         }
         for s in offending {
@@ -253,6 +259,10 @@ if let gp = preScanned.gate {
     }
     // Exactly one sink: the ordinary guard, which exits having written nothing.
     refuseGateJsonOverAnyInput(gp, preScanned.target, preScanned.policy)
+    // ⟨0.28⟩ …and the SCAN TARGET'S EXPANSION: a sink under the target bearing the extension this
+    // engine parses names a file the walk is about to read — refused before arming, having written
+    // nothing. `<target>/.candor/…` is not a parsed source and stays permitted (the control).
+    refuseSinkUnderTargetWithParsedExtension(gp, target: preScanned.target, flag: "--gate-json")
     if gp != "-" { armGateJsonFailClosed(gp) }
     // A `-` SINK CANNOT BE PRE-ARMED — there is no file to replace, and emitting a refusal now would put
     // two documents on the same stream. Register it instead, so the exits below route their refusal to
