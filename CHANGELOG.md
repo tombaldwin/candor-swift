@@ -9,6 +9,17 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.28⟩ `gains` carries `judgedNothing`/`baselineJudgedNothing`, as PATH LISTS — the family ruling
+  that ends a three-way key split.** This engine withheld the key on the reasoning that the reference
+  did not emit it on this verb and a key one engine emits and another does not is a divergence a
+  consumer sees; the instinct was right and the premise was stale — java had already shipped it as a
+  path list and ts as a boolean, so the withholding PRODUCED the divergence it was avoiding (the
+  names appear in SPEC zero times, the root cause; the spec is being amended in parallel to pin
+  them). The ruling: the key travels, and its shape names WHICH report judged nothing — the repair
+  differs per file, and `baselineIncomplete` alone cannot say. The current side emits the unprefixed
+  key (same symmetry as `unanalyzed`/`baselineUnanalyzed`) and its keys now come from
+  `disclosureJSON`, the one place the unprefixed key set is defined. Verdict-preserving; the human
+  TSV is byte-unchanged; a complete pair emits the pre-⟨0.28⟩ document key-for-key.
 - **⟨0.28⟩ `ReportCompleteness` gains the reference's `unreadable` arm — an unparseable sibling
   report now hedges every consuming verb.** A corrupt sibling was named once on stderr as OMITTED and
   the answer over the survivors read CLEAN: measured, `unverified --json` answered

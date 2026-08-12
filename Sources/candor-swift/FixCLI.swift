@@ -1681,23 +1681,30 @@ func runGainsCLI(_ args: [String]) -> Never {
         // baseline half takes the `baseline`-prefixed spelling this document already uses for the other
         // two-sided fact (`baseline_version`), rather than inventing a third shape.
         //
-        // KEY NAMES ARE THE CROSS-ENGINE WIRE SURFACE — `incomplete`/`unanalyzed` +
-        // `baselineIncomplete`/`baselineUnanalyzed`, the candor-rust `fe5d831` set, character for
-        // character. `mustHedge` is the trigger (so a judged-nothing report raises `incomplete` with no
-        // manifest to name), and `judgedNothing` is deliberately NOT a fourth key here: the reference does
-        // not emit it on this verb, and a key one engine emits and another does not is a divergence a
-        // consumer sees. Verdict-preserving — the exit does not move; `gains` is advisory by default and
-        // `--strict` keys on the GAINED SET, which this does not touch. JSON-only, like `coverage` above:
-        // the human `fn\teffect` TSV is a pinned consumer surface.
+        // KEY NAMES ARE THE CROSS-ENGINE WIRE SURFACE — `incomplete`/`unanalyzed`/`judgedNothing` +
+        // the same three under the `baseline` prefix. `mustHedge` is the trigger, and `judgedNothing`
+        // IS carried, as a list of the report paths that judged nothing. The previous revision withheld
+        // it, reasoning that the reference did not emit it on this verb and that a key one engine emits
+        // and another does not is a divergence a consumer sees — the instinct was right and the premise
+        // was STALE: java had already shipped the key as a path list and ts as a boolean, so the
+        // withholding PRODUCED a three-way split of exactly the kind it was avoiding. The family ruling
+        // (2026-08-12, being pinned into SPEC — the names appeared there zero times, which is the root
+        // cause of the split): the key travels, its shape is the PATH LIST, because it names WHICH
+        // report judged nothing — the repair differs per file, and `baselineIncomplete` alone cannot
+        // say. The current side carries the unprefixed key for the same symmetry `unanalyzed`/
+        // `baselineUnanalyzed` already have. The current side's keys come from `disclosureJSON`, the
+        // one place the unprefixed key set is defined; the baseline side re-spells them under the
+        // prefix this document already uses for its other two-sided fact (`baseline_version`).
+        // Verdict-preserving — the exit does not move; `gains` is advisory by default and `--strict`
+        // keys on the GAINED SET, which this does not touch. JSON-only, like `coverage` above: the
+        // human `fn\teffect` TSV is a pinned consumer surface.
         let curComp = gainsCompleteness(prefix: curPre)
         let baseComp = gainsCompleteness(prefix: basePre)
-        if curComp.mustHedge {
-            doc["incomplete"] = true
-            if !curComp.unanalyzed.isEmpty { doc["unanalyzed"] = curComp.json }
-        }
+        for (k, v) in curComp.disclosureJSON { doc[k] = v }
         if baseComp.mustHedge {
             doc["baselineIncomplete"] = true
             if !baseComp.unanalyzed.isEmpty { doc["baselineUnanalyzed"] = baseComp.json }
+            if !baseComp.judgedNothing.isEmpty { doc["baselineJudgedNothing"] = baseComp.judgedNothing }
         }
         emitJSON(doc)
         exit(strict && !out.isEmpty ? 1 : 0)

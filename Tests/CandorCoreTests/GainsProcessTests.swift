@@ -365,4 +365,64 @@ final class GainsProcessTests: XCTestCase {
             XCTAssertEqual(r.code, want, "\(label): the exit keys on the gained set, not the caveat")
         }
     }
+
+    /// ⟨0.28⟩ **`judgedNothing` TRAVELS ON THIS VERB, AND ITS SHAPE IS THE PATH LIST — the family
+    /// ruling that ended a three-way split.** This engine withheld the key on the reasoning that the
+    /// reference did not emit it and a key one engine emits and another does not is a divergence a
+    /// consumer sees; the instinct was right and the premise was stale — java had already shipped it as
+    /// a path list and ts as a boolean, so the withholding PRODUCED the divergence it was avoiding (the
+    /// names appear in SPEC zero times, which is how three engines decided three ways). The ruling: the
+    /// key is carried, and it names WHICH report judged nothing, because `baselineIncomplete` alone
+    /// cannot — the repair differs per file. The current side carries the unprefixed key for the same
+    /// symmetry `unanalyzed`/`baselineUnanalyzed` already have.
+    func testJudgedNothingIsNamedAsAPathListOnBothSidesOfGains() throws {
+        let binary = try ProcessHarness.binaryURL(for: Self.self)
+        let dir = try makeDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = try write(#"{"candor":{"version":"t"},"analyzed":{"count":0},"functions":[{"fn":"a","inferred":["Fs"]}]}"#,
+                      dir, "zero.M.Swift.json")
+        _ = try write(#"{"candor":{"version":"t"},"analyzed":{"count":3},"functions":[{"fn":"a","inferred":["Fs","Net"]}]}"#,
+                      dir, "clean.M.Swift.json")
+        let zeroPre = dir.appendingPathComponent("zero").path
+        let cleanPre = dir.appendingPathComponent("clean").path
+
+        // BASELINE side: prefixed key, path-list shape. `as? [String]` is the SHAPE assertion — a
+        // boolean here (the ts drift) or an object fails this line, not just a count.
+        let a = try ProcessHarness.run(binary, ["gains", cleanPre, zeroPre, "--json"])
+        XCTAssertEqual(a.code, 0, a.err)
+        let da = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(a.out.utf8)) as? [String: Any])
+        XCTAssertEqual(da["baselineIncomplete"] as? Bool, true, a.out)
+        let bjn = try XCTUnwrap(da["baselineJudgedNothing"] as? [String],
+                                "the key is a PATH LIST, never a boolean: \(a.out)")
+        XCTAssertEqual(bjn.count, 1, a.out)
+        XCTAssertTrue(bjn[0].hasSuffix("zero.M.Swift.json"),
+                      "…naming WHICH report judged nothing: \(a.out)")
+        XCTAssertNil(da["judgedNothing"], "the two sides stay separate: \(a.out)")
+        XCTAssertNil(da["incomplete"], a.out)
+
+        // CURRENT side: the unprefixed keys, same shape.
+        let b = try ProcessHarness.run(binary, ["gains", zeroPre, cleanPre, "--json"])
+        XCTAssertEqual(b.code, 0, b.err)
+        let db = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(b.out.utf8)) as? [String: Any])
+        XCTAssertEqual(db["incomplete"] as? Bool, true, b.out)
+        let jn = try XCTUnwrap(db["judgedNothing"] as? [String], "path list on this side too: \(b.out)")
+        XCTAssertTrue(jn.count == 1 && jn[0].hasSuffix("zero.M.Swift.json"), b.out)
+        XCTAssertNil(db["baselineJudgedNothing"], b.out)
+        XCTAssertNil(db["baselineIncomplete"], b.out)
+
+        // ⟨0.28⟩ and the `unreadable` arm reaches this verb through the same struct: a corrupt sibling
+        // on the baseline side raises the flag with NO manifest to name — three engines already hedged
+        // these bytes and this one answered clean.
+        _ = try write(#"{"candor":{"version":"t"},"functions":[{"fn":"#, dir, "part.M.Swift.json")
+        _ = try write(#"{"candor":{"version":"t"},"analyzed":{"count":3},"functions":[{"fn":"a","inferred":["Fs"]}]}"#,
+                      dir, "part.N.Swift.json")
+        let r = try ProcessHarness.run(binary, ["gains", cleanPre, dir.appendingPathComponent("part").path, "--json"])
+        XCTAssertEqual(r.code, 0, r.err)
+        let dr = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any])
+        XCTAssertEqual(dr["baselineIncomplete"] as? Bool, true,
+                       "a baseline sibling that does not load is a soft floor: \(r.out)")
+        XCTAssertNil(dr["baselineUnanalyzed"], "…with no manifest key of its own — `incomplete` is the "
+                                             + "wire for this cause, matching the reference: \(r.out)")
+        XCTAssertNil(dr["baselineJudgedNothing"], r.out)
+    }
 }
