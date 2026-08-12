@@ -295,7 +295,33 @@ if let gp = preScanned.gate {
 //
 // See `armOutPrefixReports` / `disarmUnwrittenOutReports` for the rest of the shape, including why what
 // this run turns out NOT to write is handed back rather than left holding the placeholder.
-if let prePrefix = preScanOutPrefix(CommandLine.arguments) {
+//
+// ⟨0.28⟩ **AND A REPEATED `--out` IS REFUSED, WITH THE FAIL-CLOSED REPORT AT EVERY PREFIX NAMED** (SPEC
+// §3.3.1 — "a repeated --out is the same rule" as the repeated verdict sink, filed as an open question
+// by the rung that settled the verdict half, on no stated ground except which sink was in front of the
+// author). `--out A --out B` says where the reports go twice; this engine took the LAST, so A kept a
+// previous run's whole report set, readable as current — and a `gate --report A` over it answers from a
+// scan that never ran. So: every distinct prefix named is ARMED (its previous §2 reports rewritten to
+// the ⟨0.21⟩ fail-closed empty — the report-sink spelling of "every path named gets the refusal", and
+// the input exemption inside the armer still covers any file this run reads), then exit 2 through
+// `refuseGateAndExit` so a verdict sink and the `--json` stream get their refusal documents too. The
+// exit skips `disarmUnwrittenOutReports` by construction — these placeholders are the point, not a
+// leftover. Two spellings of one prefix are ONE sink (`distinctOutPrefixes`) and are not refused.
+let namedOutPrefixes = distinctOutPrefixes(allOutPrefixes(CommandLine.arguments))
+if namedOutPrefixes.count > 1 {
+    for p in namedOutPrefixes {
+        armOutPrefixReports(p, target: preScanned.target, policyFlag: preScanned.policy)
+    }
+    let list = namedOutPrefixes.joined(separator: ", ")
+    FileHandle.standardError.write(
+        ("candor-swift: --out given more than once (\(list)) — refusing (exit 2). A run writes ONE "
+         + "report set to ONE prefix. Naming two says where the reports go twice, and the reader of the "
+         + "prefix that loses cannot tell it lost — every prefix named now holds the fail-closed empty "
+         + "in place of any previous run's reports. Name one, or run the scan twice.\n").data(using: .utf8)!)
+    refuseGateAndExit("candor-swift: --out was given more than once (\(list)) — a run writes one "
+                      + "report set to one prefix")
+}
+if let prePrefix = namedOutPrefixes.first {
     armOutPrefixReports(prePrefix, target: preScanned.target, policyFlag: preScanned.policy)
 }
 var argIter = CommandLine.arguments.dropFirst().makeIterator()
