@@ -428,10 +428,68 @@ func loadFixModel(prefix: String) -> (byName: [String: FixFn], cg: [String: [Str
 }
 
 private func loadDenyOrDie(_ policyPath: String, who: String) -> [DenyRule] {
+    loadPolicyOrDie(policyPath, who: who).deny
+}
+
+/// The FULL parse, for the callers that must ask the ⟨0.28⟩ zero-rule question over EVERY rule vector —
+/// a check that reads `.deny` alone would call an allow-only or forbid-only policy "no rules at all"
+/// (the same subset mistake the reference engine's first draft made, recorded on
+/// `zeroRulePolicyRefusal`).
+private func loadPolicyOrDie(_ policyPath: String, who: String) -> ParsedPolicy {
     guard let text = try? String(contentsOfFile: policyPath, encoding: .utf8) else {
         fixDie("candor-swift \(who): policy `\(policyPath)` could not be read — no fix computed")
     }
-    return parsePolicy(text).deny
+    return parsePolicy(text)
+}
+
+/// ⟨0.28⟩ **AN ADVISORY VERB OVER A ZERO-RULE POLICY ANSWERS WITH THE CAVEAT DOCUMENT, RESULT KEYS
+/// WITHHELD, EXIT UNCHANGED** (SPEC §2). §6.2 makes a configured zero-rule policy an exit-2 refusal for
+/// the GATE, because `ok: true` is a claim about the code no such run may make. These verbs are ADVISORY
+/// — they set no verdict, so the refusal posture is the wrong import — but what they produce is an
+/// answer *relative to a policy*, and relative to no rules that answer is not a finding, it is an
+/// absence of questions. Measured on this engine 2026-08-12 over a comments-only policy:
+///
+///     unverified --json    {"ok": true, "unverified": []}      exit 0
+///     fix-gate   --json    {"ok": true, "remedies": []}        exit 0
+///
+/// — an empty result set indistinguishable from "we asked and everything passed", for the same reason
+/// ⟨0.27⟩'s refusal document must not carry `violations`. So: the result keys (`unverified`/`remedies`)
+/// and `ok` are WITHHELD, and the document carries `unevaluated` with the whole-policy entry — the
+/// gate's own shape (§3.1 pins it for a policy with no lines to name), because inventing a second
+/// spelling of "this could not be asked" is the mistake the spec has recorded four times. The ⟨0.21⟩/
+/// ⟨0.28⟩ completeness keys still ride it: an unread unit qualifies this non-answer as much as any
+/// answer.
+///
+/// THE EXIT IS UNCHANGED — a disclosure, per ⟨0.24⟩'s standing ruling that count-0 reaches both
+/// disclosure channels and STOPS at the exit code. On these bytes the verbs exited 0 (nothing to find,
+/// `--strict` included) and 2 only for `--strict` over an INCOMPLETE report (`emitAdvisoryAnswer`'s
+/// standing rule); both are preserved here rather than borrowing the gate's 2, which would claim the
+/// verb got LESS far than it did.
+///
+/// Returns normally when the policy carries at least one rule of ANY kind — the caller proceeds.
+/// `fix` is deliberately NOT routed here: SPEC names the shared-loader advisory verbs
+/// (`whatif`/`fix-gate`/`unverified` — this engine ships the latter two), and `fix <fn> <Effect>`
+/// answers a NAMED question whose document shape (`crossing`) the ruling does not touch — extending the
+/// withholding there without a spec ruling would be a one-engine guess of exactly the kind
+/// `judgedNothing`'s boolean was.
+private func answerZeroRulePolicyWithCaveat(_ pol: ParsedPolicy, at policyPath: String, who: String,
+                                            completeness c: ReportCompleteness, strict: Bool) {
+    guard let zr = zeroRulePolicyRefusal(pol, at: policyPath, who: "candor-swift \(who)") else { return }
+    FileHandle.standardError.write(
+        ("candor-swift \(who): the policy \(policyPath) yielded NO RULES — every line was ignored, the "
+         + "file is empty, or it holds only comments. This verb answers relative to a policy, and "
+         + "relative to no rules there is no question to answer: the result keys are withheld (an empty "
+         + "list here would read as \"asked and clear\"). The gate refuses these bytes at exit 2; this "
+         + "verb is advisory and its exit is unchanged. If you did not mean to gate, remove the `policy` "
+         + "setting.\n").data(using: .utf8)!)
+    var out: [String: Any] = ["unevaluated": zr.unevaluated.map {
+        ["rule": $0.rule, "why": $0.why] as [String: Any]
+    }]
+    for (k, v) in c.disclosureJSON { out[k] = v }
+    emitJSON(out)
+    // The exits this verb already had on these bytes: 0, and --strict's 2 only for the incomplete
+    // report emitAdvisoryAnswer has always refused (the gate refuses those bytes too).
+    exit(c.isIncomplete && strict ? 2 : 0)
 }
 
 // ── §3.3.1 canonical query grammar (0.10) ──────────────────────────────────────────────────────────
@@ -759,7 +817,7 @@ func runUnverifiedCLI(_ args: [String]) -> Never {
     guard let prefix = q.report else {
         fixDie("candor-swift unverified: no report — pass --report <locator> or run from a repo with a .candor/ dir (scan: candor-swift <dir>)")
     }
-    let deny = loadDenyOrDie(policy, who: "unverified")
+    let pol = loadPolicyOrDie(policy, who: "unverified")
     guard let loaded = loadUnverifiedFns(prefix: prefix) else {
         fixDie("candor-swift unverified: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
     }
@@ -771,7 +829,12 @@ func runUnverifiedCLI(_ args: [String]) -> Never {
     do { classFilter = try parseClassFilter(q.classFilter) }
     catch let e as ClassFilterUsageError { fixDie(e.message) }
     catch { fixDie("candor-swift: --class could not be parsed: \(error)") }
-    let (ok, holes, unanswered) = unverified(fns, deny, classFilter: classFilter)
+    // ⟨0.28⟩ a zero-rule policy asked nothing — the caveat document, result keys withheld, exit
+    // unchanged. AFTER the usage errors above (a bad --class refuses whatever the policy says), and a
+    // no-op when any rule of any kind parsed.
+    answerZeroRulePolicyWithCaveat(pol, at: policy, who: "unverified",
+                                   completeness: loaded.completeness, strict: q.strict)
+    let (ok, holes, unanswered) = unverified(fns, pol.deny, classFilter: classFilter)
     // ⟨0.24⟩ over a report declaring `unanalyzed`, `ok` is OMITTED — see `emitAdvisoryAnswer`. The holes
     // still ship: an unverified layer this report DID see is worth naming whether or not another file
     // went unread. Same for a rule the gate could not evaluate (§3.2): the holes ship, `unevaluated`
@@ -1123,11 +1186,15 @@ func runFixCLI(_ args: [String]) -> Never {
         guard let prefix = q.report else {
             fixDie("candor-swift fix-gate: no report — pass --report <locator> or run from a repo with a .candor/ dir (scan: candor-swift <dir>)")
         }
-        let deny = loadDenyOrDie(policy, who: "fix-gate")
+        let pol = loadPolicyOrDie(policy, who: "fix-gate")
         guard let model = loadFixModel(prefix: prefix) else {
             fixDie("candor-swift fix-gate: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
         }
-        let (ok, remedies, unanswered) = fixGate(byName: model.byName, cg: model.cg, deny: deny)
+        // ⟨0.28⟩ a zero-rule policy asked nothing — the caveat document, result keys withheld, exit
+        // unchanged. No-op when any rule of any kind parsed.
+        answerZeroRulePolicyWithCaveat(pol, at: policy, who: "fix-gate",
+                                       completeness: model.completeness, strict: q.strict)
+        let (ok, remedies, unanswered) = fixGate(byName: model.byName, cg: model.cg, deny: pol.deny)
         // Advisory by default (exit 0 — the agent fix-loop reads the remedy and edits); `--strict` makes the
         // exit follow `ok`, so CI can REQUIRE zero outstanding crossings (mirrors `unverified --strict`).
         // ⟨0.24⟩ …and over a report declaring `unanalyzed`, `ok` is OMITTED and `--strict` exits 2 — see
