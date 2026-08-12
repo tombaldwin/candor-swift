@@ -45,12 +45,42 @@ func preScanSinkAndInputs(_ argv: [String]) -> (gate: String?, policy: String?, 
 /// LAST WINS, because the flag loop's `outPrefix = v` does: on `--out a --out b` the run writes its report
 /// under `b`, so `b` is the set that would otherwise be read as current after this run fails. Arming `a`
 /// instead would arm a set nothing was going to replace and leave the real hazard untouched.
+///
+/// ⟨0.28⟩ AND IT WALKS ARGV WITH THE FLAG LOOP'S OWN VALUE RULES, because SPEC (1)'s precondition is
+/// "`--out` has been parsed and ACCEPTED" and the first version of this reader matched the token
+/// wherever it stood. On `--policy --out X` the loop refuses at `--policy` — `--out` there is the
+/// (rejected) VALUE position, never a flag — but this reader armed X anyway, and the guaranteed exit-2
+/// skips `disarmUnwrittenOutReports`, so X's previous reports became PERMANENT placeholders on an argv
+/// the parse never accepts. Measured 2026-08-12: `--policy --out X` left `X.app.Swift.json` holding the
+/// fail-closed empty. So a value-taking flag whose value the loop would refuse ENDS the walk (the loop
+/// exits there; nothing after it is ever parsed), keeping any `--out` accepted BEFORE that point — on
+/// `--out p --policy` the loop accepts p first and the failed run's placeholder is this rung working.
+/// The informational tokens (`-h`/`--help`/`-V`/`--version`/`--agents`) return nil outright: the loop
+/// exits 0 at them without scanning, so there is no failed run for staleness to survive — measured,
+/// `--out X --help` printed the help and left X's reports as permanent placeholders behind an exit-0.
+/// Unknown flags and positionals are deliberately STEPPED OVER, not refused: the loop's unknown-flag
+/// exit is the exit this rung most often serves, and mirroring the full flag vocabulary here would be a
+/// second parser that drifts the first time the loop grows a flag.
 func preScanOutPrefix(_ argv: [String]) -> String? {
     var out: String? = nil
     var i = 1
     while i < argv.count {
-        if argv[i] == "--out", i + 1 < argv.count, !argv[i + 1].hasPrefix("-") { out = argv[i + 1]; i += 2; continue }
-        i += 1
+        switch argv[i] {
+        case "--out", "--policy", "--target":
+            // The loop's rule for these three: the next token must exist and must not be flag-shaped,
+            // else `requires a value` → exit 2 right here.
+            guard i + 1 < argv.count, !argv[i + 1].hasPrefix("-") else { return out }
+            if argv[i] == "--out" { out = argv[i + 1] }
+            i += 2
+        case "--gate-json":
+            // Same rule, except `-` (stream to stdout) is the one dash-shaped value the loop accepts.
+            guard i + 1 < argv.count, argv[i + 1] == "-" || !argv[i + 1].hasPrefix("-") else { return out }
+            i += 2
+        case "-h", "--help", "--version", "-V", "--agents":
+            return nil
+        default:
+            i += 1
+        }
     }
     return out
 }

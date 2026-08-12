@@ -9,6 +9,17 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.28⟩ SPEC §3.3.1 (1): the `--out` pre-pass walks argv with the flag loop's own value rules.**
+  The precondition for arming is *"`--out` has been parsed and accepted"*, and the pre-pass matched
+  the token wherever it stood: on `--policy --out X` the loop refuses at `--policy` (`--out` there is
+  its rejected VALUE, never a flag), but the pre-pass armed X anyway — and the guaranteed exit-2
+  skips disarm, so X's previous reports became PERMANENT placeholders on an argv the parse never
+  accepts. Measured; so was `--out X --help`, which armed X behind an informational exit-0 that was
+  never going to scan. The pre-pass now ends its walk at a value-taking flag whose value the loop
+  would refuse (keeping an `--out` accepted BEFORE that point — `--out p --zzz` still arms, the
+  rung's designed outcome), and returns nothing on the informational tokens. Unknown flags stay
+  stepped over: mirroring the full vocabulary would be a second parser that drifts the first time the
+  loop grows a flag.
 - **⟨0.28⟩ SPEC §3.3.1 (3): the scan TARGET joins `runInputs` — arming can no longer destroy the
   artifact being scanned.** The spec's input list OPENS with "the target's own source tree" and this
   engine's registry carried every other channel (policy, env, deps, config) and never the target.
