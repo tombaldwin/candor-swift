@@ -647,6 +647,31 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         privacyDie("candor-swift privacy-manifest: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
     }
 
+    // ⟨0.28⟩ **THIS VERB HAS AN ENVELOPE AND NEVER CONSULTED COMPLETENESS** (SPEC §2 — the ruling names
+    // it: "the same MUST and NOT the same shape problem" as show/map). `loadFixModel` threads the ⟨0.21⟩
+    // manifest into `model.completeness` and every answer below ignored it — measured on this engine
+    // 2026-08-12: over a report declaring `unanalyzed`, generate emitted a bare `{reached, required}`;
+    // over a corrupt SIBLING, `reached: []` — a clean "no sensors reached" with nothing anywhere in the
+    // machine output saying the universe was partial. A sensor reached only from the unread unit is
+    // invisible to this verb, and an App-Store submission gate is exactly the consumer that cannot weigh
+    // a caveat it never receives.
+    //
+    // The pinned keys ride the envelope like any other verb — `incomplete` / `unanalyzed` /
+    // `judgedNothing` (an ARRAY of report paths), each omitted when not applicable, so a complete
+    // report's output stays byte-identical (measured, generate + verify, all three output modes). The
+    // prose half goes where this verb's answer is NOT: stdout above the answer in human mode
+    // (`printNote`, the family position), stderr when stdout carries a JSON document or a plist fragment
+    // (`eprintNote` — prose on those streams would corrupt the document). Exit codes are UNTOUCHED
+    // (⟨0.24⟩: a disclosure, not an exit code), and `ok` still answers the declared-vs-reached question
+    // it always answered — the caveat qualifies it rather than replacing it.
+    let comp = model.completeness
+    let compSo = "the sensor reach below covers only the code candor could see — a sensor reached in "
+               + "an unread unit is invisible to this verb"
+    let compTail = "A usage-description key required only by unread code cannot appear here, and a "
+                 + "clean verify is conditional on it. \(comp.gateLine) Re-scan for a complete answer."
+    if pm.json || pm.xml { comp.eprintNote(so: compSo, tail: compTail) }
+    else { comp.printNote(so: compSo, tail: compTail) }
+
     // The REACHED privacy effects: the union over all fns' `inferred` sets, intersected with the six
     // privacy/1 effects. For each reached effect, collect the fns whose inferred (or direct) set contains it
     // — the under-declaration detail (a few representative fn names, sorted, capped).
@@ -955,6 +980,9 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
                 // CI check is `if ok`, and it would pass a manifest that is about to be rejected.
                 verdict["ok"] = false
             }
+            // ⟨0.28⟩ the completeness caveat, in the machine document the CI consumer reads — empty on a
+            // complete report, so an ordinary verify stays byte-identical. See the load site above.
+            for (k, v) in comp.disclosureJSON { verdict[k] = v }
             emitPrivacyJSON(verdict)
             exit((ok && !entitlementUnderDeclared) ? 0 : 1)
         }
@@ -1051,7 +1079,12 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
     if pm.json {
         var required: [String: [String]] = [:]
         for eff in reached { required[eff] = privacyKeyMap[eff] ?? [] }
-        emitPrivacyJSON(["reached": reached, "required": required])
+        var doc: [String: Any] = ["reached": reached, "required": required]
+        // ⟨0.28⟩ the completeness caveat rides the generate document too: a `required` computed over a
+        // partial universe may be SHORT, which is the under-declaration this verb exists to prevent.
+        // Empty on a complete report — byte-identical output.
+        for (k, v) in comp.disclosureJSON { doc[k] = v }
+        emitPrivacyJSON(doc)
         exit(0)
     }
 
