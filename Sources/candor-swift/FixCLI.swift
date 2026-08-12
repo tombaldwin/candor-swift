@@ -451,33 +451,40 @@ private func noteDeprecated(_ what: String) {
             .data(using: .utf8)!)
 }
 
-// Resolve a `--report <locator>` value to the PREFIX the report loaders consume, by the ONE shared rule
-// (§3.3.1): a directory → `<dir>/.candor/report`; a path ending `.json` → that full report path (reduced
-// to its prefix — see below); otherwise a bare prefix. The Swift loaders index sibling reports by a
-// prefix (`<prefix>.<pkg>.Swift[.<sidecar>].json`), so a full `.json` path is normalized back to the
-// `<prefix>` by stripping the trailing `.<pkg>.Swift.json` (or `.callgraph.json`/`.hierarchy.json`).
+// Resolve a `--report <locator>` value to what the report loaders consume, by the ONE shared rule
+// (§3.1 ⟨0.28⟩ — what each locator form RESOLVES TO):
+//   · a DIRECTORY → `<dir>/.candor/report` (the discovery spelling — the reports discovered inside it);
+//   · a path ending `.json` → THAT FILE, loaded directly (plus its §2.2 sidecars, which the loaders'
+//     direct-file arms pick up by stem);
+//   · otherwise a bare PREFIX → the whole `<prefix>.*.Swift.json` sibling set, unioned by the loaders.
+//
+// ⟨0.28⟩ **A FILE LOCATOR DOES NOT UNION THE PREFIX SIBLINGS BESIDE IT.** This function used to strip a
+// family-shaped `<prefix>.<pkg>.Swift.json` back to `<prefix>`, so `--report r.A.Swift.json` silently
+// read `r.B.Swift.json` too — MEASURED 2026-08-12 on this engine: `path B.doFs Fs --report
+// r.A.Swift.json` traced a function that lives only in the sibling, and `gate --report r.A.Swift.json`
+// fired a violation from it (`analyzed.count` summed BOTH files). The operator named one artifact;
+// silently reading three makes `--report r.json` mean something different depending on what else sits in
+// the directory — the mirror of the sink-guard expansion bug. candor-java and candor-ts already resolve
+// a FILE to the file, and the spec pins that reading. A locator naming a §2.2 SIDECAR still resolves to
+// the report it is a sidecar OF (`<stem>.callgraph.json` → `<stem>.json`): the pair is read together,
+// and the sidecar itself is not a report.
 func resolveReportLocator(_ locator: String) -> String {
     var isDir: ObjCBool = false
     if FileManager.default.fileExists(atPath: locator, isDirectory: &isDir), isDir.boolValue {
         return (locator as NSString).appendingPathComponent(".candor/report")
     }
     if locator.hasSuffix(".json") {
-        // Strip a known report/sidecar suffix to recover the prefix the loaders scan for. The family
-        // filename shape is `<prefix>.<pkg>.Swift.json` (+ `.callgraph`/`.hierarchy` sidecars); drop the
-        // `.<pkg>.Swift.json` tail (three trailing dot-segments, four for a sidecar). Fall back to the
-        // raw value if it does not match the shape (a plain prefix that happens to end `.json`).
-        var s = locator as NSString
-        for sidecar in [".callgraph", ".hierarchy"] where (s as String).hasSuffix("\(sidecar).json") {
-            s = (s as String).replacingOccurrences(of: "\(sidecar).json", with: ".json") as NSString
+        // The §2.2 reserved data segments (the same five `gateReportInputFiles` walks): a sidecar name
+        // is normalized to its report FILE, never to the prefix.
+        var s = locator
+        for sidecar in ["calibrated", "callgraph", "hierarchy", "layerreach", "locs"]
+        where s.hasSuffix(".\(sidecar).json") {
+            s = String(s.dropLast(".\(sidecar).json".count)) + ".json"
         }
-        if (s as String).hasSuffix(".Swift.json") {
-            // <prefix>.<pkg>.Swift.json → drop `.<pkg>.Swift.json` = 3 path extensions.
-            var p = s.deletingPathExtension            // drop .json  → <prefix>.<pkg>.Swift
-            p = (p as NSString).deletingPathExtension   // drop .Swift → <prefix>.<pkg>
-            p = (p as NSString).deletingPathExtension   // drop .<pkg> → <prefix>
-            return p
-        }
-        return locator
+        // A `.json` path that names no existing file falls through to the loaders unchanged: their
+        // prefix walk matches `<locator>.` and finds nothing, so a typo'd file path fails LOUD rather
+        // than quietly widening to whatever siblings share its directory.
+        return s
     }
     return locator
 }
