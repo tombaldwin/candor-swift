@@ -401,6 +401,22 @@ func distinctGateSinks(_ all: [String]) -> [String] {
 /// config load and must not pre-empt its refusal.
 func runInputs(_ target: String?, _ policyFlag: String?) -> [(String, String)] {
     var out: [(String, String)] = []
+    // ⟨0.28⟩ THE TARGET ITSELF. SPEC §3.3.1 (3) OPENS its input list with "the target's own source
+    // tree", and this registry carried every channel EXCEPT that one — policy, env, deps, config, all
+    // ways of telling the run what to read ABOUT the target, and never the target. MEASURED live on
+    // this engine 2026-08-12, through both arms that consult this list: `app.swift --policy P
+    // --gate-json app.swift` replaced the operator's SOURCE FILE with the armed verdict document (the
+    // single-file route — main.swift's `sourcePaths = [target]` — so "swift targets are directories"
+    // was never a shield, only the common case), and `p.app.json --out p --zzz-not-a-flag` left a
+    // report-shaped target holding the fail-closed placeholder past the exit-2 that skips disarm.
+    //
+    // ONE EXACT ARTIFACT, NEVER A CONTAINMENT RULE. A verdict or report written INTO the scanned tree
+    // (`.candor/`, the pattern this project ships in CI) is ordinary usage; `sameArtifact` already
+    // separates "inside the target" from "IS the target", and the dep-dir expansion below stays the
+    // one place a directory's CONTENTS are enumerated — widening this entry to containment is the
+    // mistake that took 33 tests down when it was tried on the dep side. Defaults to "." exactly as
+    // the config discovery below anchors there: the tree the run reads when no positional names one.
+    out.append((target ?? ".", "the scan target"))
     let env = ProcessInfo.processInfo.environment
     if let p = policyFlag { out.append((p, "--policy")) }
     for (v, label) in [("CANDOR_POLICY", "CANDOR_POLICY"), ("CANDOR_BASELINE", "CANDOR_BASELINE"),
@@ -533,9 +549,11 @@ func sameArtifact(_ a: String?, _ b: String?) -> Bool {
 /// operator's policy.
 func refuseGateJsonOverInput(_ gate: String, _ other: String?, _ flag: String) {
     guard sameArtifact(gate, other) else { return }
+    // "that input", not "your policy": since ⟨0.28⟩ this guard also covers the scan target, and a
+    // refusal that misnames what it just protected teaches the reader the message is boilerplate.
     let why = "candor-swift: --gate-json \(gate) names the SAME FILE as \(flag) \(other ?? "") — refusing "
-        + "(exit 2). The verdict is armed before the policy is read, so this would overwrite your "
-        + "policy and then gate on the wreckage. Nothing was written; give the verdict its own path."
+        + "(exit 2). The verdict is armed before the run reads its inputs, so this would overwrite "
+        + "that input and then gate on the wreckage. Nothing was written; give the verdict its own path."
     FileHandle.standardError.write((why + "\n").data(using: .utf8)!)
     // ⟨0.28⟩ REPORT STREAM on exit-2: if `--json` (stream) was requested, write the fail-closed report as
     // stdout's only content — the report sink is one hop upstream from the verdict sink this refusal is

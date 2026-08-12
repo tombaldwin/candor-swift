@@ -9,6 +9,18 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.28⟩ SPEC §3.3.1 (3): the scan TARGET joins `runInputs` — arming can no longer destroy the
+  artifact being scanned.** The spec's input list OPENS with "the target's own source tree" and this
+  engine's registry carried every other channel (policy, env, deps, config) and never the target.
+  Measured live before the fix, through BOTH arms: `app.swift --policy P --gate-json app.swift`
+  replaced the operator's SOURCE FILE with the armed verdict document (the single-file target route —
+  "swift targets are directories" was only the common case, never a shield), and
+  `p.app.json --out p --zzz-not-a-flag` left a report-shaped target holding the fail-closed
+  placeholder past the exit-2 that skips disarm. The registration is ONE EXACT ARTIFACT, never a
+  containment rule: a verdict or report written INTO the scanned tree (`.candor/`, the shipped CI
+  pattern) stays ordinary usage — pinned by a control test. One registration covers both sinks
+  because both arms already ask the same `runInputs`/`sameArtifact` pair. Regression tests assert
+  BYTES, not exit codes (the destroying runs also exited 2).
 - **⟨0.28⟩ `gains` carries the ⟨0.21⟩ completeness manifest, on BOTH SIDES** (SPEC §2, conformance
   PART 39 (ii)). The last verb of the §2 re-disclosure MUST left open by the entry below. The coverage
   rider has ridden this verb since ⟨0.15⟩ — *a "no gains" over an uncovered dep reads clean with false
