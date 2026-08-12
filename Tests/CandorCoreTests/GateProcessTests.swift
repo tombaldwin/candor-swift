@@ -288,6 +288,39 @@ final class GateProcessTests: XCTestCase {
         XCTAssertTrue(o.err.contains("--out requires a value"), "stderr: \(o.err)")
     }
 
+    // ── G6b: a flag-shaped `--target` refuses THROUGH the verdict sink, both spellings ───────────────
+    /// SPEC §3.2 ⟨0.28⟩ "the sinks named elsewhere in that argv are still sinks" + §3.3 ⟨0.8⟩ "on exit 2
+    /// it writes a fail-closed document for EVERY cause". Measured 2026-08-12 (the P8 sink-surface
+    /// matrix): `--target --gate-json -` exited 2 with NOTHING on the stream — the arm wrote the report
+    /// stream, then took a bare exit(2) that never routed through `refuseGateAndExit`. The FILE spelling
+    /// passed the whole time, but only because the pre-pass leaves an armed placeholder on disk; a `-`
+    /// sink has no placeholder, so its refusal document exists only if the exit emits it. Exit-code
+    /// assertions are worthless here — the defect exited 2 too — so both halves pin the DOCUMENT.
+    func testFlagShapedTargetRefusesThroughTheVerdictSinkBothSpellings() throws {
+        let bin = try binaryURL()
+        let root = try makeNetFixture(qual: "Billing", urlLiteral: "https://api.stripe.com/v1/charges")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // The STREAM spelling — the one the hand sweep missed (it checked --policy/--out on this CLI).
+        let s = try run(bin, [root.path, "--target", "--gate-json", "-"])
+        XCTAssertEqual(s.code, 2, "a flag-shaped --target value is a usage error; stderr: \(s.err)")
+        XCTAssertTrue(s.err.contains("--target requires a target name"), "the cause names --target: \(s.err)")
+        let sd = try? JSONSerialization.jsonObject(with: Data(s.out.utf8)) as? [String: Any]
+        XCTAssertEqual(sd?["ok"] as? Bool, false,
+                       "the `--gate-json -` sink named after the broken --target still carries the "
+                       + "fail-closed refusal document, never an empty stream: \(s.out)")
+        XCTAssertEqual(sd?["refused"] as? Bool, true, s.out)
+
+        // The FILE spelling: a previous run's green must not survive the refusal as current.
+        let g = root.appendingPathComponent("verdict.json")
+        try "{\"ok\": true}\n".write(to: g, atomically: true, encoding: .utf8)
+        let f = try run(bin, [root.path, "--target", "--gate-json", g.path])
+        XCTAssertEqual(f.code, 2, f.err)
+        let fd = try JSONSerialization.jsonObject(with: Data(contentsOf: g)) as? [String: Any]
+        XCTAssertEqual(fd?["ok"] as? Bool, false, "the stale green was replaced fail-closed: \(String(describing: fd))")
+        XCTAssertEqual(fd?["refused"] as? Bool, true, String(describing: fd))
+    }
+
     // ── G7: `--version` / `-V` print `candor-swift <ver> (spec <X>)` and exit 0 ─────────────────────
     func testVersionFlag() throws {
         let bin = try binaryURL()
