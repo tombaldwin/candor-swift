@@ -9,6 +9,16 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.28⟩ §3.3.1: `gate --report`'s input guard covers what the locator EXPANDS TO, not the locator
+  string.** A `--report` locator is a prefix (or a discovery) and the verb reads its `*.Swift.json`
+  siblings, but the sink guard compared only the raw flag value — so
+  `gate --report r --gate-json r.B.Swift.json` armed over the operator's own report, failed the load
+  on the wreckage, and wrote the refusal document over it again (measured; exit 2 both before and
+  after, so the regression test asserts bytes). The same destroyer class as the scan-target fix, one
+  verb over — found by asking what OTHER spelling reaches the channel just closed. The expanded set
+  is enumerated by `gateReportInputFiles`, kept adjacent to `loadGateReport` so the guard and the
+  loader cannot drift about what the verb reads; the discovery route (no `--report` at all) is
+  guarded identically, and a control pins that a fresh sink beside the reports still gates.
 - **⟨0.28⟩ `gains` carries `judgedNothing`/`baselineJudgedNothing`, as PATH LISTS — the family ruling
   that ends a three-way key split.** This engine withheld the key on the reasoning that the reference
   did not emit it on this verb and a key one engine emits and another does not is a divergence a

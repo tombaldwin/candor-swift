@@ -1050,4 +1050,46 @@ final class GateReportVerbProcessTests: XCTestCase {
         XCTAssertEqual(d?["refused"] as? Bool, true)
         XCTAssertFalse(d?.keys.contains("violations") ?? true, "ABSENT, not empty: \(r.out)")
     }
+
+    /// ⟨0.28⟩ §3.3.1 — **THE INPUT GUARD COVERS WHAT THE LOCATOR EXPANDS TO, not the locator string.**
+    /// A `--report` locator is a prefix (or a discovery), and this verb reads its `*.Swift.json`
+    /// siblings — so a `--gate-json` naming ONE OF THOSE names an input by any honest reading, and the
+    /// guard compared only the raw flag value. Measured before the fix:
+    /// `gate --report <dir> --gate-json <dir>/.candor/report.App.Swift.json` armed over the operator's
+    /// own report, failed the load on the wreckage, and wrote the refusal document over it AGAIN — the
+    /// scan-target destroyer class, one verb over. Asserts BYTES: the pre-fix run also exited 2.
+    func testGateJsonNamingAnExpandedReportSiblingRefusesWithBytesIntact() throws {
+        let report = envelope(fnEntry("app.Sender.send", ["Net"]), analyzed: 1)
+        let root = try makeReportDir(report: report, policy: "deny Db\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let reportFile = root.appendingPathComponent(".candor/report.App.Swift.json")
+
+        let r = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                               "--policy", root.appendingPathComponent("pol.txt").path,
+                                               "--gate-json", reportFile.path])
+        XCTAssertEqual(r.code, 2, "a sink naming a report this gate reads refuses: \(r.err)")
+        XCTAssertTrue(r.err.contains("a report this gate reads"),
+                      "…naming the collision so the operator can re-point the sink: \(r.err)")
+        XCTAssertEqual(try String(contentsOf: reportFile, encoding: .utf8), report,
+                       "the report is byte-for-byte untouched — the pre-fix run also exited 2, so only "
+                       + "the bytes can catch a regression here")
+
+        // CONTROL: the expansion must not over-refuse — a fresh sink beside the reports still gates.
+        let verdict = root.appendingPathComponent("verdict.json")
+        let ok = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                                "--policy", root.appendingPathComponent("pol.txt").path,
+                                                "--gate-json", verdict.path])
+        XCTAssertEqual(ok.code, 0, "deny Db over a Net-only report is a clean gate: \(ok.err)")
+        let v = try JSONSerialization.jsonObject(with: Data(contentsOf: verdict)) as? [String: Any]
+        XCTAssertEqual(v?["ok"] as? Bool, true, "…with a real verdict at the sink")
+
+        // The DISCOVERY route reads the same files without any --report; it is guarded the same way.
+        let disc = try ProcessHarness.run(bin(), ["gate",
+                                                  "--policy", root.appendingPathComponent("pol.txt").path,
+                                                  "--gate-json", ".candor/report.App.Swift.json"],
+                                          cwd: root)
+        XCTAssertEqual(disc.code, 2, disc.err)
+        XCTAssertEqual(try String(contentsOf: reportFile, encoding: .utf8), report,
+                       "the discovered report set is an input exactly as a named one is")
+    }
 }
