@@ -449,9 +449,16 @@ private func mergeCallgraph(_ full: String, into cg: inout [String: [String]]) -
 // dot-segments") — so one engine can query another engine's report by its exact path, even when the filename
 // does not fit the `<prefix>.<pkg>.Swift.json` family shape. A matching `.callgraph.json` sibling (same stem)
 // is still picked up for the graph if present.
-func loadFixModel(prefix: String) -> (byName: [String: FixFn], cg: [String: [String]],
-                                      coverage: ReportCoverage, completeness: ReportCompleteness,
-                                      scopeEntitlements: String?)? {
+//
+// `who` is the CALLING VERB, and it is REQUIRED rather than defaulted. It reaches the user only inside a
+// DISCLOSURE — mergeFixReport's "report `…` could not be parsed — OMITTED, and this answer is reported
+// INCOMPLETE". fix/fix-gate/tour/path/privacy-manifest all share this loader, and it used to hardcode
+// `"fix"`, so three of those five disclosed their own incompleteness under ANOTHER VERB'S NAME: a user
+// running `privacy-manifest` over a corrupt sibling was told `candor-swift fix:` had dropped something.
+// A default value would leave that same trap armed for the next caller, which is how the three got it.
+func loadFixModel(prefix: String, who: String) -> (byName: [String: FixFn], cg: [String: [String]],
+                                                   coverage: ReportCoverage, completeness: ReportCompleteness,
+                                                   scopeEntitlements: String?)? {
     let fm = FileManager.default
     var byName: [String: FixFn] = [:]
     var cg: [String: [String]] = [:]
@@ -466,7 +473,7 @@ func loadFixModel(prefix: String) -> (byName: [String: FixFn], cg: [String: [Str
     if prefix.hasSuffix(".json"), fm.fileExists(atPath: prefix, isDirectory: &isDir), !isDir.boolValue {
         // Direct single-file load (any `.json` filename).
         foundReport = mergeFixReport(prefix, into: &byName, coverage: &coverage,
-                                     completeness: &completeness, scopeEntitlements: &scopeEnts, who: "fix")
+                                     completeness: &completeness, scopeEntitlements: &scopeEnts, who: who)
         let stem = (prefix as NSString).deletingPathExtension
         let sidecar = stem + ".callgraph.json"
         if fm.fileExists(atPath: sidecar) { mergeCallgraph(sidecar, into: &cg) }
@@ -490,7 +497,7 @@ func loadFixModel(prefix: String) -> (byName: [String: FixFn], cg: [String: [Str
             // `foundReport` flips true only after a successful parse, so a lone corrupt report leaves it
             // false → loadFixModel returns nil → exit 2.
             if mergeFixReport(full, into: &byName, coverage: &coverage,
-                              completeness: &completeness, scopeEntitlements: &scopeEnts, who: "fix") { foundReport = true }
+                              completeness: &completeness, scopeEntitlements: &scopeEnts, who: who) { foundReport = true }
         }
     }
     guard foundReport else { return nil }
@@ -1044,7 +1051,7 @@ func runTourCLI(_ args: [String]) -> Never {
         fixDie("candor-swift tour: no report — pass --report <locator> or run from a repo with a .candor/ dir (scan: candor-swift <dir>)")
     }
     // Load the report + callgraph the same way fix/fix-gate do (fail loud on a missing/typo'd report).
-    guard let model = loadFixModel(prefix: prefix) else {
+    guard let model = loadFixModel(prefix: prefix, who: "tour") else {
         fixDie("candor-swift tour: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
     }
 
@@ -1216,7 +1223,7 @@ func runFixCLI(_ args: [String]) -> Never {
         }
         let fixPol = loadPolicyOrDie(policy, who: "fix")
         let deny = fixPol.deny
-        guard let model = loadFixModel(prefix: prefix) else {
+        guard let model = loadFixModel(prefix: prefix, who: "fix") else {
             fixDie("candor-swift fix: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
         }
         // ⟨0.28⟩ THE COMMENT SAID `fix` INHERITED THE COMPLETENESS READING, AND IT DID NOT. The loader
@@ -1282,7 +1289,7 @@ func runFixCLI(_ args: [String]) -> Never {
             fixDie("candor-swift fix-gate: no report — pass --report <locator> or run from a repo with a .candor/ dir (scan: candor-swift <dir>)")
         }
         let pol = loadPolicyOrDie(policy, who: "fix-gate")
-        guard let model = loadFixModel(prefix: prefix) else {
+        guard let model = loadFixModel(prefix: prefix, who: "fix-gate") else {
             fixDie("candor-swift fix-gate: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
         }
         // ⟨0.28⟩ a zero-rule policy asked nothing — the caveat document, result keys withheld, exit
@@ -1362,7 +1369,7 @@ func runPathCLI(_ args: [String]) -> Never {
     guard let prefix = p.report else {
         fixDie("candor-swift path: no report — pass --report <locator> or run from a repo with a .candor/ dir (scan: candor-swift <dir>)")
     }
-    guard let model = loadFixModel(prefix: prefix) else {
+    guard let model = loadFixModel(prefix: prefix, who: "path") else {
         fixDie("candor-swift path: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
     }
     let byName = model.byName

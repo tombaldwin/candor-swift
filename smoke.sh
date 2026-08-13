@@ -1610,5 +1610,41 @@ grep -q 'yielded NO RULES' "$W/gr/f.err" \
   && bad "gate --report: a forbid-only policy was refused as if it had NO RULES — the emptiness test reads only some rule vectors" \
   || ok "⟨0.28⟩ gate --report: a forbid-only policy still refuses for its own reason, not as a zero-rule policy"
 
+# ── the shared report loader discloses under the CALLING verb's name ────────────────────────────────
+# `loadFixModel` is shared by fix/fix-gate/tour/path/privacy-manifest and used to hardcode `who: "fix"`,
+# so three of the five disclosed their OWN incompleteness under another verb's name — a user running
+# `privacy-manifest` over a corrupt sibling was told `candor-swift fix:` had dropped something. A
+# disclosure that misnames its verb sends the reader to the wrong command to reproduce it.
+#
+# Both directions are asserted. The positive alone would pass if every verb printed BOTH names, and the
+# negative alone would pass if a verb printed nothing at all — which is the failure that matters most
+# here, since a dropped report with no disclosure is the cardinal sin.
+mkdir -p "$W/who/src"
+printf 'import Foundation\nfunc writeIt() { try? "x".write(toFile: "/tmp/z", atomically: true, encoding: .utf8) }\n' > "$W/who/src/a.swift"
+"$BIN" "$W/who/src" --out "$W/who/r" >/dev/null 2>&1
+printf 'not json' > "$W/who/r.corrupt.Swift.json"     # a sibling the loader must OMIT and disclose
+printf 'deny Fs\n' > "$W/who/pol"
+who_case() {   # <expected-verb> <argv…>
+  local want="$1"; shift
+  "$BIN" "$@" --report "$W/who/r" >/dev/null 2>"$W/who/e"
+  if ! grep -q "could not be parsed" "$W/who/e"; then
+    bad "loader disclosure: \`$want\` dropped the corrupt sibling with NO disclosure at all"; return
+  fi
+  grep -q "candor-swift $want: report .* could not be parsed" "$W/who/e" \
+    && ok "⟨0.28⟩ loader disclosure names the calling verb: $want" \
+    || bad "loader disclosure: \`$want\` disclosed under another verb's name — $(grep -m1 'could not be parsed' "$W/who/e" | cut -c1-90)"
+  case "$want" in
+    fix|fix-gate) ;;
+    *) grep -q "candor-swift fix: report .* could not be parsed" "$W/who/e" \
+         && bad "loader disclosure: \`$want\` still emits the hardcoded \`fix\` name" \
+         || ok "⟨0.28⟩ loader disclosure: \`$want\` does not borrow \`fix\`'s name" ;;
+  esac
+}
+who_case tour             tour
+who_case path             path writeIt Fs
+who_case privacy-manifest privacy-manifest
+who_case fix              fix writeIt Fs --policy "$W/who/pol"
+who_case fix-gate         fix-gate --policy "$W/who/pol"
+
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
