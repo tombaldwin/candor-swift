@@ -1646,5 +1646,51 @@ who_case privacy-manifest privacy-manifest
 who_case fix              fix writeIt Fs --policy "$W/who/pol"
 who_case fix-gate         fix-gate --policy "$W/who/pol"
 
+# ── an INCOMPLETE surface propagates caller-ward ───────────────────────────────────────────────────
+# SPEC §2 states this over the chained-dependency join — that join "applies EVERY surface … (`hosts`/
+# `cmds`/`paths`/`tables`/`invisible`/`incomplete`), not just the effects", because "a join that carries
+# the effect and drops `incomplete` lets a benign literal in the consumer certify what the dependency
+# declared uncertifiable". The harm is not a property of the PACKAGE edge: a caller certifying what its
+# callee left undetermined is the same sentence one boundary in, and the honesty invariant the conformance
+# suite gates on says so directly — for every edge f -> g, uncertain(g) => uncertain(f).
+#
+# MEASURED on Alamofire 5.9.1 (corpus round, 2026-08-13): `WebSocketRequest.socket` called
+# `WebSocketRequest.task`, which carried `incomplete`, and `socket` carried nothing — it read CERTAIN off
+# an uncertain callee. rust was the control and NOT a vacuous one: 34 callers of an incomplete function,
+# 34 propagated, where swift managed 0 of 8. This engine emitted `incompleteDirect` where it owed the
+# transitive view. After the fix Alamofire reads 54/54.
+#
+# BOTH DIRECTIONS, because the positive alone passes on an engine that marks EVERYTHING incomplete:
+# `g`'s surface is genuinely undetermined (a non-literal write path) and must carry it; `pure` touches
+# nothing and must NOT, or the key means nothing.
+mkdir -p "$W/incprop"
+cat > "$W/incprop/a.swift" <<'SWIFT'
+import Foundation
+public func g(_ p: String) { try? "x".write(toFile: p, atomically: true, encoding: .utf8) }
+public func f(_ p: String) { g(p) }
+public func pure(_ n: Int) -> Int { n + 1 }
+SWIFT
+"$BIN" "$W/incprop" --out "$W/incprop/r" >/dev/null 2>&1
+IPJ=$(ls "$W/incprop"/r*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
+if [ -z "$IPJ" ]; then
+  bad "incomplete propagation: the fixture scan produced no report — instrument fault, not a result"
+else
+  ip() { python3 -c "
+import json,sys
+d=json.load(open('$IPJ'))
+fns={x.get('fn') or x.get('name'):x for x in d.get('functions',[])}
+e=fns.get(sys.argv[1])
+print('yes' if e and e.get('incomplete') else 'no')" "$1"; }
+  [ "$(ip g)" = "yes" ] \
+    && ok "⟨0.28⟩ an undetermined write destination marks its own surface \`incomplete\`" \
+    || bad "incomplete propagation: \`g\` does not carry \`incomplete\` — the fixture no longer creates the state, so the row below proves nothing"
+  [ "$(ip f)" = "yes" ] \
+    && ok "⟨0.28⟩ …and a CALLER of it inherits \`incomplete\` (uncertain(g) => uncertain(f))" \
+    || bad "incomplete propagation: \`f\` calls an incomplete \`g\` and reads CERTAIN — it certifies what its callee left undetermined (SPEC §2; Alamofire 2026-08-13)"
+  [ "$(ip pure)" = "no" ] \
+    && ok "⟨0.28⟩ …and a function reaching nothing undetermined stays clean" \
+    || bad "incomplete propagation: a pure function was marked \`incomplete\` — the key is being raised unconditionally, which makes the two rows above vacuous"
+fi
+
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
