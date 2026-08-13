@@ -1,20 +1,20 @@
 # candor-swift self-gate (SPEC §7.12): the analyzer reads source and writes reports — Fs/Env are its
-# job. It must never reach the network, a database, or local IPC.
+# job. It must never reach the network or a database — anywhere, ever.
 #
-# It spawns a subprocess in exactly TWO places, both in main.swift, and both are "run a tool again":
-# the `--workspace` chain spawns candor-swift itself on each workspace dependency and reads the report
-# back through a Pipe (Exec + Ipc), and the Xcode-scope resolution shells out via `/usr/bin/env` to
-# resolve a target. Those are the feature, not a hidden effect.
+# It spawns a subprocess in exactly one FILE, main.swift, and both uses are "run a tool again": the
+# `--workspace` chain spawns candor-swift itself on each workspace dependency and reads the report back
+# through a Pipe (Exec + Ipc), and Xcode-scope resolution shells out via `/usr/bin/env` to resolve a
+# target. Those are the feature, not a hidden effect.
 #
-# A prefix deny cannot say "deny Exec everywhere except main.swift", so CI proves the two halves
-# separately (candor-java and candor-ts split the same problem the same way — see
-# .github/workflows/ci.yml):
-#   (1) the analysis CORE (main.swift removed) under THIS policy — no Exec/Ipc either;
-#   (2) the WHOLE engine under `deny Net Db` — still no network, still no database.
-# Together: candor-swift reaches the network or a database nowhere, and spawns a process only in the
-# one file that says it does.
+# A prefix deny cannot say "deny Exec everywhere except main.swift", so `ci/self-gate.sh` proves the
+# two halves separately (candor-java and candor-ts split the same problem the same way):
+#   (1) the WHOLE engine under THIS policy — no Net, no Db, with no file excluded;
+#   (2) the Exec/Ipc-performing units are EXACTLY the four declared in that script — so a new
+#       subprocess anywhere in the engine fails the gate, main.swift included.
 #
-# This file is the declared boundary and CI reads it. It used to be a `printf` inside the workflow,
-# which meant the repository declared no policy at all: `candor-swift .` here applied nothing, and the
-# boundary existed only in a CI step nobody reads.
-deny Net Db Exec Ipc
+# WHY `deny Net Db` AND NOT `deny Net Db Exec Ipc`. The stricter string used to live here, and CI made
+# it pass by COPYING Sources to a temp dir and DELETING main.swift first — carving the exemption out a
+# whole FILE at a time and leaving 2158 lines where a new subprocess was caught by nothing. The weaker
+# rule over the WHOLE tree, plus a unit-level declaration, is the stronger gate. A policy is only as
+# strong as the scope it is actually evaluated over.
+deny Net Db

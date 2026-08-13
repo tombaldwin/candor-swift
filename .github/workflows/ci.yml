@@ -52,17 +52,11 @@ jobs:
         # The analyzer reads source + writes reports (Fs/Env). It must reach the network / a database NOWHERE,
         # and spawn a subprocess ONLY in main.swift (the `--workspace` chain spawns candor-swift itself on each
         # workspace dep and reads the report back through a Pipe → Exec + Ipc; Xcode-scope resolution shells out
-        # via /usr/bin/env). A prefix deny can't carve out one file, so — exactly as candor-java proves its
-        # verify-runner — we prove the two halves separately. The boundary itself now lives in .candor/policy,
-        # the conventional location, so the repository DECLARES it rather than hiding it in this step: it was a
-        # `printf` here, which meant `candor-swift .` in a checkout applied no policy at all.
-        run: |
-          # (1) the analysis CORE (main.swift — the sole Exec/Ipc surface — removed) must not Exec/Ipc/Net/Db.
-          rm -rf /tmp/core && cp -r Sources /tmp/core && rm -f /tmp/core/candor-swift/main.swift
-          .build/debug/candor-swift /tmp/core --out /tmp/self-core --policy .candor/policy
-          # (2) the WHOLE engine (chain spawner included) must still never reach the network or a database.
-          printf 'deny Net Db\n' > /tmp/gate-all.pol
-          .build/debug/candor-swift Sources --out /tmp/self-all --policy /tmp/gate-all.pol
+        # via /usr/bin/env). A prefix deny can't carve out one file, so the two halves are proved separately —
+        # the whole engine under .candor/policy, plus an assertion that the Exec/Ipc units are EXACTLY the four
+        # declared ones. This step used to make the strict policy pass by copying Sources and DELETING
+        # main.swift, which left 2158 lines where a new subprocess was caught by nothing. See ci/self-gate.sh.
+        run: bash ci/self-gate.sh
 
   # Linux is in scope (Glibc/Musl sit in PLATFORM_MODULES) and swift-corelibs-foundation DIVERGES from
   # Darwin Foundation — the URL.deletingLastPathComponent root-behaviour class (38fbc71) would have been
