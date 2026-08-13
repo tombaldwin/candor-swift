@@ -1479,9 +1479,28 @@ for qual in reportQuals.sorted() {
     if let h = hostsAcc[qual], !h.isEmpty { ef.hosts = h.sorted() }
     if let c = cmdsAcc[qual], !c.isEmpty { ef.cmds = c.sorted() }
     if let p = pathsAcc[qual], !p.isEmpty { ef.paths = p.sorted() }
-    // DIRECT, deliberately — see Effector.incomplete. This is the signal a consumer needs to tell
-    // "this function's own destination was undetermined" from "something it calls named a literal".
-    if let i = analysis.incompleteDirect[qual], !i.isEmpty { ef.incomplete = i.sorted() }
+    // TRANSITIVE, and it used to be DIRECT. The old comment here read "DIRECT, deliberately … the signal a
+    // consumer needs to tell 'this function's own destination was undetermined' from 'something it calls
+    // named a literal'." That distinction is real, but it is `incompleteDirect`'s job — which still exists,
+    // still carries it, and is still what the privacy verify reads (see Analysis.incompleteDirect). It was
+    // the wrong view for THIS field, the one a consumer branches on to decide whether to trust an effect
+    // surface at all.
+    //
+    // MEASURED on Alamofire 5.9.1 (2026-08-13 corpus round), by `conformance/check_honesty.py` run
+    // unmodified over the corpus: `WebSocketRequest.socket` calls `WebSocketRequest.task`, which carries
+    // `incomplete`, and `socket` carried nothing — so it read CERTAIN off an uncertain callee. That breaks
+    // the invariant the suite already gates on: for every call edge f -> g, uncertain(g) => uncertain(f).
+    //
+    // rust is the control, and it is not a vacuous one — the corpus gave it 34 callers OF an incomplete
+    // function and it propagated 34/34, where swift propagated 0/8. Same key, same spec, opposite answers.
+    //
+    // SPEC §2 states the rule over the chained-dependency join: it "applies EVERY surface … (`hosts`/
+    // `cmds`/`paths`/`tables`/`invisible`/`incomplete`), not just the effects — a join that carries the
+    // effect and drops `incomplete` lets a benign literal in the consumer certify what the dependency
+    // declared uncertifiable." The harm it names is not a property of the PACKAGE edge; `socket`
+    // certifying what `task` declared uncertifiable is the same sentence one boundary in. The clause is
+    // written over the instance rather than the condition, which is a SPEC repair filed separately.
+    if let i = incompleteAcc[qual], !i.isEmpty { ef.incomplete = i.sorted() }
     if let t = tablesAcc[qual], !t.isEmpty, inf.contains("Db") { ef.tables = t.sorted() }
     // SPEC §2 `fs` — gated on `inferred` carrying Fs (the spec: "applies only when `inferred` contains
     // `Fs`"), and omitted when empty. Direct-only, so a function that merely REACHES a writer carries none.
