@@ -9,6 +9,34 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.28⟩ a caller certified what its callee left undetermined — `incomplete` now propagates
+  caller-ward.** The report entry's `incomplete` was the DIRECT map (a function's own surface whose
+  locator could not be pinned) where the field a consumer branches on to decide whether to trust an
+  effect surface needs the TRANSITIVE view. MEASURED on **Alamofire 5.9.1** by
+  `conformance/check_honesty.py`, run unmodified over a corpus round: `WebSocketRequest.socket` calls
+  `WebSocketRequest.task`, which carries `incomplete`, and `socket` carried nothing — it read CERTAIN off
+  an uncertain callee, breaking the invariant the conformance suite already gates on (for every edge
+  f → g, uncertain(g) ⟹ uncertain(f)). candor-rust is the control and not a vacuous one: the same corpus
+  gave it **34 callers of an incomplete function and it propagated 34**, where this engine propagated
+  **0 of 8**. SPEC §2 states the rule over the chained-dependency join — it "applies EVERY surface …
+  (`hosts`/`cmds`/`paths`/`tables`/`invisible`/`incomplete`), not just the effects", because "a join that
+  carries the effect and drops `incomplete` lets a benign literal in the consumer certify what the
+  dependency declared uncertifiable" — and that harm is not a property of the PACKAGE edge; `socket`
+  certifying what `task` declared uncertifiable is the same sentence one boundary in. `incompleteDirect`
+  still exists and is still what the privacy verify reads: the distinction is real, it was simply the
+  wrong view for this field. Alamofire after: 66 incomplete fns, 54 callers of one, 54 propagated.
+
+- **A shared loader made three verbs disclose their own incompleteness under `fix`'s name.**
+  `loadFixModel` is used by `fix`/`fix-gate`/`tour`/`path`/`privacy-manifest` and hardcoded `who: "fix"`,
+  a name that reaches the user only inside a disclosure — *"candor-swift fix: report `…` could not be
+  parsed — OMITTED, and this answer is reported INCOMPLETE"*. So `candor-swift privacy-manifest` over a
+  corrupt sibling told the reader that `fix` had dropped something. The disclosure fired and its content
+  was correct, so this was never a silent under-report — but it named a command the reader was not
+  running, so reproducing it meant running the wrong one. `who` is now REQUIRED rather than defaulted: a
+  default would leave the trap armed for the next caller, which is exactly how three of the five existing
+  callers acquired it. The sibling loaders (`loadUnverifiedFns`, `loadGateReport`, `loadBaselineCallgraph`,
+  `loadInferredLoud`) were swept and already name their own verb.
+
 - **⟨0.28⟩ the third row is not the first row: `noManifest`** (SPEC §2, *"AND THE THIRD ROW IS NOT THE
   FIRST ROW — measured, two engines report it as one"*). §2's ⟨0.24⟩ table has THREE rows, and this
   engine filed the third under the first's name. MEASURED on the release binary before this change, over
