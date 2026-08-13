@@ -10,6 +10,13 @@ inherited transitively through any chain of calls across files*. The language-ag
 contract is [candor-spec/AGENTS.md](https://github.com/tombaldwin/candor-spec/blob/main/AGENTS.md);
 this file is the Swift-specific surface.
 
+> **If the repository is not Swift-only, start at the umbrella:**
+> [candor/AGENTS.md](https://github.com/tombaldwin/candor/blob/main/AGENTS.md). `candor` is one
+> command in front of every engine (Swift, JVM, Rust, TypeScript, agent fleets) — it picks the right
+> one per target, `candor update` installs and upgrades them, and `candor doctor` checks that every
+> installed engine agrees on a spec version. A polyglot repo scanned with this engine alone gets an
+> answer about its Swift and nothing that says so.
+
 > **This document is embedded inside the binary.** `candor-swift --agents` prints the contract
 > for the *installed* build — always prefer that over a vendored or fetched copy, which can
 > describe a different candor-swift than the one you are running.
