@@ -467,11 +467,14 @@ private func loadPolicyOrDie(_ policyPath: String, who: String) -> ParsedPolicy 
 /// verb got LESS far than it did.
 ///
 /// Returns normally when the policy carries at least one rule of ANY kind — the caller proceeds.
-/// `fix` is deliberately NOT routed here: SPEC names the shared-loader advisory verbs
-/// (`whatif`/`fix-gate`/`unverified` — this engine ships the latter two), and `fix <fn> <Effect>`
-/// answers a NAMED question whose document shape (`crossing`) the ruling does not touch — extending the
-/// withholding there without a spec ruling would be a one-engine guess of exactly the kind
-/// `judgedNothing`'s boolean was.
+///
+/// ⟨0.28⟩ Phase 1b: `fix` IS ROUTED HERE NOW. This paragraph used to say it deliberately was not,
+/// because SPEC named three verbs and `fix <fn> <Effect>` answers a NAMED question whose `crossing`
+/// shape the clause did not touch — so extending the withholding unasked would have been a one-engine
+/// guess of exactly the kind `judgedNothing`'s boolean was. That was the right call and the premise
+/// expired: SPEC §2 ⟨0.28⟩ now states the rule over the CONDITION (every verb answering relative to a
+/// CONFIGURED policy) and cites this split — rust extended the list and flagged it, this engine read it
+/// as closed and reported the cell — as having been created BY the clause, not by either engine.
 private func answerZeroRulePolicyWithCaveat(_ pol: ParsedPolicy, at policyPath: String, who: String,
                                             completeness c: ReportCompleteness, strict: Bool) {
     guard let zr = zeroRulePolicyRefusal(pol, at: policyPath, who: "candor-swift \(who)") else { return }
@@ -1132,7 +1135,8 @@ func runFixCLI(_ args: [String]) -> Never {
         guard let prefix = q.report else {
             fixDie("candor-swift fix: no report — pass --report <locator> or run from a repo with a .candor/ dir (scan: candor-swift <dir>)")
         }
-        let deny = loadDenyOrDie(policy, who: "fix")
+        let fixPol = loadPolicyOrDie(policy, who: "fix")
+        let deny = fixPol.deny
         guard let model = loadFixModel(prefix: prefix) else {
             fixDie("candor-swift fix: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
         }
@@ -1146,6 +1150,18 @@ func runFixCLI(_ args: [String]) -> Never {
         // `cmd_fix` does exactly this (`warn_unreadable("fix")` + `write_json` on each branch); the
         // exit code stays 0, for its reason: this verb answers no `ok` for `--strict` to follow.
         let comp = model.completeness
+        // ⟨0.28⟩ Phase 1b: `fix` TAKES THE ZERO-RULE WITHHOLDING TOO. The doc on
+        // `answerZeroRulePolicyWithCaveat` used to say this verb was deliberately NOT routed here,
+        // because SPEC named three verbs and extending it unasked would be "a one-engine guess of
+        // exactly the kind judgedNothing's boolean was". That reasoning was right and the premise
+        // expired: SPEC §2 ⟨0.28⟩ now states the rule over the CONDITION — every verb answering
+        // relative to a CONFIGURED policy — and records that naming three verbs instead of the
+        // condition is what split rust (which extended it) from this engine (which did not).
+        // Measured here before the change: `{"crossing": false, "reason": "not-forbidden"}` at exit 0,
+        // and not-forbidden BY A POLICY THAT FORBIDS NOTHING is vacuously true. Composed with the
+        // `crossing` ruling (§6.1: present exactly when the verb ANSWERED) the key is absent here,
+        // which the caveat document gives for free by carrying no result keys at all.
+        answerZeroRulePolicyWithCaveat(fixPol, at: policy, who: "fix", completeness: comp, strict: false)
         comp.eprintNote(so: "any remedy below is computed over a universe candor cannot fully see",
                         tail: "A callee in one of those contributes no effect here, and a caller in one "
                             + "is invisible to the hoist. \(comp.gateLine) Re-scan for a complete answer.")
