@@ -1056,6 +1056,85 @@ final class ChainingProcessTests: XCTestCase {
         XCTAssertNil(v?["coverage"], "the machine-readable verdict carries no caveat either: \(v ?? [:])")
     }
 
+    /// ⟨0.28⟩ **THE TRAP THE ROW-3 SPLIT SETS, PINNED ON THE COVERAGE SIDE.** SPEC §2's row 3 — a report
+    /// with NO `analyzed` key at all and no entries — now gets its own DISCLOSURE key (`noManifest`)
+    /// instead of being filed under `judgedNothing`, which is pinned to *reports declaring
+    /// `analyzed.count: 0`*. The tempting way to fix that false label is to make
+    /// `claimsToHaveJudgedNothing` answer `false` for a manifest-less report — and that predicate is ALSO
+    /// what this join reads to decide COVERAGE. Flipping it would turn every pre-⟨0.21⟩ report into a
+    /// COVERED one: absence from `functions` would license a ⟨0.21⟩ purity claim on the authority of a
+    /// report that never said what it judged. A silent under-report introduced by a disclosure fix, which
+    /// this project has measured four times.
+    ///
+    /// So the coverage reading is asserted UNMOVED here, by the same arm-for-arm rule as the count-0
+    /// floor below: row 3 grants no coverage, and the consumer carries exactly the disclosure it would
+    /// carry unchained.
+    func testADepReportWithNoAnalyzedManifestGrantsNoCoverageEither() throws {
+        let bin = try binaryURL()
+        let (root, dep, app) = try makeChainFixture(extraApp: """
+        public func goUnlisted() {
+            brandNewApi()
+        }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let depReport = try scanDep(bin, dep, root: root)
+        // ROW 3: emptied AND the manifest REMOVED — a pre-⟨0.21⟩ producer, which declares nothing.
+        let noManifest = root.appendingPathComponent("dep-nomanifest.json")
+        try doctor(depReport, to: noManifest) { d in
+            d["functions"] = [Any]()
+            d.removeValue(forKey: "analyzed")
+        }
+        XCTAssertNil((try JSONSerialization.jsonObject(with: Data(contentsOf: noManifest))
+                        as? [String: Any])?["analyzed"],
+                     "the arm is only row 3 if the manifest really is ABSENT")
+        let policy = root.appendingPathComponent("deny-net.policy")
+        try "deny Net\n".write(to: policy, atomically: true, encoding: .utf8)
+
+        let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-nm").path,
+                              "--policy", policy.path],
+                        env: ["CANDOR_DEPS": noManifest.path])
+        XCTAssertEqual(r.code, 0, r.err)
+        let by = try fns(ofReport: root.appendingPathComponent("app-nm.App.Swift.json"))
+        for fn in ["go", "goMember", "goUnlisted"] {
+            XCTAssertEqual(by[fn]?["invisible"] as? [String], ["RatesDep"],
+                           "\(fn): row 3 is `no manifest, no claim` — an absent manifest must go on "
+                           + "granting NO coverage, or the row-3 disclosure fix has planted the cardinal "
+                           + "sin it was written to describe")
+        }
+        let env = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: root.appendingPathComponent("app-nm.App.Swift.json"))) as? [String: Any]
+        XCTAssertEqual(((env?["coverage"] as? [String: Any])?["uncovered"] as? [[String: Any]])?
+                        .map { $0["name"] as? String }, ["RatesDep"],
+                       "…and the κ ledger names the package nobody judged, exactly as if unchained")
+
+        // Arm for arm against the UNCHAINED run, because "exactly as if not chained" is the rule §2 states.
+        let u = try run(bin, [app.path, "--out", root.appendingPathComponent("app-nmu").path,
+                              "--policy", policy.path])
+        XCTAssertEqual(u.code, 0, u.err)
+        let unchained = try fns(ofReport: root.appendingPathComponent("app-nmu.App.Swift.json"))
+        XCTAssertEqual(Set(by.keys), Set(unchained.keys))
+        for fn in unchained.keys {
+            XCTAssertEqual(by[fn]?["invisible"] as? [String], unchained[fn]?["invisible"] as? [String],
+                           "\(fn): the same disclosure, arm for arm")
+            XCTAssertEqual(by[fn]?["inferred"] as? [String], unchained[fn]?["inferred"] as? [String],
+                           "\(fn): …and no effect invented or lost on the way")
+        }
+
+        // CONTROL: the SAME manifest-less report with its functions LEFT IN. It judged something and said
+        // so the only way a pre-⟨0.21⟩ producer could, so it keeps the coverage it always had — hedging
+        // this arm too would withdraw every pre-manifest report instead of splitting a label.
+        let withFns = root.appendingPathComponent("dep-nomanifest-fns.json")
+        try doctor(depReport, to: withFns) { d in d.removeValue(forKey: "analyzed") }
+        let c = try run(bin, [app.path, "--out", root.appendingPathComponent("app-nmf").path,
+                              "--policy", policy.path],
+                        env: ["CANDOR_DEPS": withFns.path])
+        let cby = try fns(ofReport: root.appendingPathComponent("app-nmf.App.Swift.json"))
+        XCTAssertFalse(c.err.contains("judged NOTHING"),
+                       "a manifest-less report that LISTS entries is not judged-nothing: \(c.err)")
+        XCTAssertNil(cby["goUnlisted"]?["invisible"],
+                     "…and the package it covers is not marked invisible: \(cby["goUnlisted"] ?? [:])")
+    }
+
     /// THE FLOOR ARM. `analyzed.count: 0` means the producer judged nothing, so its silence licenses
     /// nothing: the package is NOT COVERED and the consumer must carry exactly the disclosure it would
     /// carry with no dep report at all — per-fn `invisible`, the `coverage.uncovered` envelope, the κ

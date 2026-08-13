@@ -9,6 +9,49 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.28⟩ the third row is not the first row: `noManifest`** (SPEC §2, *"AND THE THIRD ROW IS NOT THE
+  FIRST ROW — measured, two engines report it as one"*). §2's ⟨0.24⟩ table has THREE rows, and this
+  engine filed the third under the first's name. MEASURED on the release binary before this change, over
+  `{"candor":…,"functions":[]}` with **no `analyzed` key at all** (a pre-⟨0.21⟩ producer): `tour`,
+  `unverified`, `fix`, `fix-gate`, `privacy-manifest` and `gains` all emitted
+  `judgedNothing: ["<path>"]`, and the note said the report *"say[s] they JUDGED NOTHING
+  (`analyzed.count: 0`)"*. **The report declares nothing.** The hedge is the right DIRECTION — row 3's
+  own instruction is *no manifest, no claim* — but the disclosure was false, and this family rates a
+  false disclosure worse than a missing one (§3.4's `net-partner` finding: an engine reported "ignoring
+  unknown config key" *while honouring it*). It was also a hole in ⟨0.28⟩'s own pin, which defines
+  `judgedNothing` as *reports declaring `analyzed.count: 0`*: filing row 3 there made one key mean two
+  things and lost the distinction the table exists to draw.
+
+  Row 3 now carries its own SPEC-pinned key, `noManifest: ["<report path>", …]`. It is added to
+  `ReportCompleteness` beside `judgedNothing`/`unanalyzed`/`unreadable`, so it reaches every consumer
+  through the one key set (`disclosureJSON` — the advisory verbs, `privacy-manifest` generate + verify,
+  `gains` on both sides as `noManifest`/`baselineNoManifest`) plus `tour`'s hand-built JSON, where it
+  takes the sorted-map position (`judgedNothing` < `noManifest` < `reaches`) the reference emits. It has
+  its own clause in the `⚠ INCOMPLETE` banner, its own per-report line, and its own `gateLine` variant
+  so a row-3-only hedge stops calling the report *judged-nothing* in prose. It raises `incomplete` like
+  its siblings, is omitted when empty, and — like `judgedNothing` — reaches `mustHedge` and **not**
+  `isIncomplete`, so no exit code moves.
+
+  **THE SPLIT ADDS A PREDICATE, IT DOES NOT INVERT ONE.** `claimsToHaveJudgedNothing` is not only a
+  disclosure predicate: the chained dep-join reads it to decide COVERAGE (`coveredPkgs` vs
+  `unjudgedPkgs`, the set that silences the κ ledger and the per-fn `invisible`) and `gate --report`
+  reads it for its verdict note. An absent manifest must keep granting NONE — that is row 3's own
+  instruction — so making it answer `false` for a manifest-less report to fix the LABEL would have
+  turned every pre-⟨0.21⟩ report into a covered one: a silent under-report introduced by a disclosure
+  fix. A second, disclosure-only `hasNoManifest` chooses the KEY for a hedge that was already happening,
+  and two tests pin the coverage reading unmoved — the chained-join arm (arm-for-arm against the
+  UNCHAINED run) and the gate-route note. The gate's own note is untouched: it already named the
+  condition honestly (*"`analyzed.count` is 0, absent with no entries, or unreadable"*).
+
+  **BOTH CONTROLS ARE ASSERTED.** Row 1 (`analyzed.count: 0`) keeps `judgedNothing` and never becomes
+  `noManifest` — the split goes both ways or it is a rename. Row 2 (`count: 7`, `functions: []`) is a
+  legitimate all-pure claim §2 rule 3 requires a consumer to BELIEVE and MUST NOT hedge; a fix that
+  hedges all three has disabled the feature rather than implemented the rule. A manifest-less report
+  that LISTS functions keeps its standing on both the disclosure and the coverage side, and a JSON
+  `null` manifest stays row 1's fail-closed business (present-but-unreadable is not absent). Measured
+  before/after across ten verb invocations per row: the row-1, row-2, manifest-less-with-entries and
+  intact-report output is **byte-identical**, only the row-3 block changed.
+
 - **⚠ ⟨0.28⟩ §3.1: a FILE locator resolves to that file — never the prefix-sibling union.**
   `resolveReportLocator` stripped a family-shaped `<prefix>.<pkg>.Swift.json` back to `<prefix>`, so
   `--report r.A.Swift.json` silently read `r.B.Swift.json` too: `path` traced a function that lives

@@ -502,6 +502,176 @@ final class CompletenessManifestTests: XCTestCase {
         XCTAssertNil(cfd?["incomplete"], "fix over a complete report is byte-identical: \(cf.out)")
     }
 
+    // ── ⟨0.28⟩ THE THIRD ROW IS NOT THE FIRST ROW — `noManifest` (SPEC §2) ─────────────────────────────
+
+    /// A report carrying NO `analyzed` key — SPEC §2's row 3, a pre-⟨0.21⟩ producer — hedges under the
+    /// pinned `noManifest` key, NOT under `judgedNothing`.
+    ///
+    /// MEASURED on the binary built before this split, over `{"candor":…,"functions":[]}` with no
+    /// `analyzed` key: `tour`, `unverified`, `fix`, `fix-gate`, `privacy-manifest` and `gains` all emitted
+    /// `judgedNothing: ["<path>"]` and the note said the report *"say[s] they JUDGED NOTHING
+    /// (`analyzed.count: 0`)"*. **The report declares nothing.** The hedge is the right DIRECTION — row
+    /// 3's own instruction is *no manifest, no claim* — but ⟨0.28⟩ pins `judgedNothing` to *reports
+    /// declaring `analyzed.count: 0`*, so filing row 3 there makes one key mean two things and loses the
+    /// distinction §2's table exists to draw. The repairs differ: row 1 wants a scan that reaches a
+    /// conclusion, row 3 wants a producer that emits a manifest at all.
+    func testAReportWithNoAnalyzedManifestIsRowThreeNotRowOne() throws {
+        let bin = try ProcessHarness.binaryURL(for: type(of: self))
+        // ROW 3: no `analyzed` key at all, and nothing listed.
+        let row3 = try reportFixture("row3", [
+            "candor": ["version": "t", "toolchain": "swiftsyntax", "spec": "0.20"],
+            "package": "legacy", "functions": [],
+        ])
+        // ROW 1: `analyzed.count: 0` — the report DECLARES that it judged nothing.
+        let row1 = try reportFixture("row1", [
+            "candor": ["version": "t", "toolchain": "swiftsyntax", "spec": "0.28"],
+            "package": "facade", "functions": [], "analyzed": ["count": 0],
+        ])
+        // ROW 2, THE CONTROL: `count: 7` with `functions: []` — a legitimate all-pure claim §2 rule 3
+        // requires a consumer to BELIEVE. A fix that hedges all three rows has disabled the feature.
+        let row2 = try reportFixture("row2", [
+            "candor": ["version": "t", "toolchain": "swiftsyntax", "spec": "0.28"],
+            "package": "pure", "functions": [], "analyzed": ["count": 7],
+        ])
+        // THE OTHER ROW-3 CONTROL: manifest-less but it LISTS a function — it judged something and said
+        // so the only way a pre-⟨0.21⟩ producer could, so it keeps the standing §2's row 3 gives it.
+        let row3full = try reportFixture("row3full", [
+            "candor": ["version": "t", "toolchain": "swiftsyntax", "spec": "0.20"],
+            "package": "legacy", "functions": [effectfulFn],
+        ])
+        let dir = (row3 as NSString).deletingLastPathComponent
+        let pol = dir + "/deny.policy"
+        try "deny Fs app\n".write(toFile: pol, atomically: true, encoding: .utf8)
+
+        for argv in [["tour", "3"], ["unverified", "--policy", pol], ["fix-gate", "--policy", pol],
+                     ["privacy-manifest"]] {
+            let verb = argv[0]
+            let j = try ProcessHarness.run(bin, argv + ["--report", row3, "--json"])
+            XCTAssertEqual(j.code, 0,
+                           "\(verb): row 3 is a DISCLOSURE, not an exit code — the gate exits 0 too: \(j.err)")
+            let d = try JSONSerialization.jsonObject(with: Data(j.out.utf8)) as? [String: Any]
+            XCTAssertEqual(d?["incomplete"] as? Bool, true,
+                           "\(verb): row 3's own instruction is `no manifest, no claim`: \(j.out)")
+            XCTAssertEqual(d?["noManifest"] as? [String], [row3],
+                           "\(verb): SPEC §2 pins `noManifest: [\"<report path>\", …]` verbatim, and this "
+                           + "document does not carry it: \(j.out)")
+            XCTAssertNil(d?["judgedNothing"],
+                         "\(verb): the report DECLARES nothing — filing it under `judgedNothing` asserts "
+                         + "an `analyzed.count: 0` that is not on the wire, and makes one key mean two "
+                         + "things: \(j.out)")
+
+            // CONTROL, ROW 1 — the split goes both ways or it is a rename.
+            let j1 = try ProcessHarness.run(bin, argv + ["--report", row1, "--json"])
+            let d1 = try JSONSerialization.jsonObject(with: Data(j1.out.utf8)) as? [String: Any]
+            XCTAssertEqual(d1?["judgedNothing"] as? [String], [row1],
+                           "\(verb): row 1 keeps `judgedNothing`: \(j1.out)")
+            XCTAssertNil(d1?["noManifest"], "\(verb): row 1 HAS a manifest; it declares 0: \(j1.out)")
+
+            // CONTROL, ROW 2 — no hedge at all, on either key.
+            let j2 = try ProcessHarness.run(bin, argv + ["--report", row2, "--json"])
+            let d2 = try JSONSerialization.jsonObject(with: Data(j2.out.utf8)) as? [String: Any]
+            XCTAssertNil(d2?["incomplete"],
+                         "\(verb): row 2 MUST NOT hedge — over 1997 JVM dependency jars a predicate keyed "
+                         + "on `functions` being empty withdraws 104 real claims to catch 6: \(j2.out)")
+            XCTAssertNil(d2?["noManifest"], "\(verb): \(j2.out)")
+            XCTAssertNil(d2?["judgedNothing"], "\(verb): \(j2.out)")
+
+            // CONTROL, manifest-less WITH entries — not hedging at all.
+            let j3 = try ProcessHarness.run(bin, argv + ["--report", row3full, "--json"])
+            let d3 = try JSONSerialization.jsonObject(with: Data(j3.out.utf8)) as? [String: Any]
+            XCTAssertNil(d3?["incomplete"],
+                         "\(verb): a manifest-less report that LISTS entries judged something and said so "
+                         + "the only way it could: \(j3.out)")
+        }
+
+        // The PROSE half moves with the wire, or the mutant that deletes one channel survives — and it
+        // must stop asserting row 1's claim about a report that declares nothing.
+        let t = try ProcessHarness.run(bin, ["tour", "3", "--report", row3])
+        XCTAssertTrue(t.out.contains("NO `analyzed` manifest at all"),
+                      "the note must name the real cause: \(t.out)")
+        XCTAssertFalse(t.out.contains("judged NOTHING") || t.out.contains("`analyzed.count: 0`"),
+                       "…and must not re-assert row 1's claim in prose after removing it from the wire, "
+                       + "which sends the reader to the wrong repair: \(t.out)")
+        let t1 = try ProcessHarness.run(bin, ["tour", "3", "--report", row1])
+        XCTAssertTrue(t1.out.contains("`analyzed.count: 0`"),
+                      "…while row 1's prose says exactly what row 1 declares: \(t1.out)")
+
+        // `gains` rests on TWO reports and discloses each side separately, `baseline`-prefixed (SPEC §2).
+        let g = try ProcessHarness.run(bin, ["gains", row3, row1, "--json"])
+        let gd = try JSONSerialization.jsonObject(with: Data(g.out.utf8)) as? [String: Any]
+        XCTAssertEqual(gd?["noManifest"] as? [String], [row3], g.out)
+        XCTAssertEqual(gd?["baselineJudgedNothing"] as? [String], [row1], g.out)
+        XCTAssertNil(gd?["judgedNothing"], g.out)
+        XCTAssertNil(gd?["baselineNoManifest"], g.out)
+        let g2 = try ProcessHarness.run(bin, ["gains", row1, row3, "--json"])
+        let gd2 = try JSONSerialization.jsonObject(with: Data(g2.out.utf8)) as? [String: Any]
+        XCTAssertEqual(gd2?["judgedNothing"] as? [String], [row1], g2.out)
+        XCTAssertEqual(gd2?["baselineNoManifest"] as? [String], [row3], g2.out)
+    }
+
+    /// A locator naming ONE OF EACH discloses them under SEPARATE keys — one key meaning two things is
+    /// exactly what loses the distinction the three-row table exists to draw.
+    func testALocatorNamingBothRowsDisclosesThemSeparately() throws {
+        let bin = try ProcessHarness.binaryURL(for: type(of: self))
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-nomanifest-both-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: [
+            "candor": ["version": "t", "toolchain": "swiftsyntax", "spec": "0.28"],
+            "package": "facade", "functions": [], "analyzed": ["count": 0],
+        ]).write(to: dir.appendingPathComponent("r.A.Swift.json"))
+        try JSONSerialization.data(withJSONObject: [
+            "candor": ["version": "t", "toolchain": "swiftsyntax", "spec": "0.20"],
+            "package": "legacy", "functions": [],
+        ]).write(to: dir.appendingPathComponent("r.B.Swift.json"))
+        let prefix = dir.appendingPathComponent("r").path
+        let j = try ProcessHarness.run(bin, ["tour", "3", "--report", prefix, "--json"])
+        let d = try JSONSerialization.jsonObject(with: Data(j.out.utf8)) as? [String: Any]
+        XCTAssertEqual((d?["judgedNothing"] as? [String])?.count, 1, j.out)
+        XCTAssertEqual((d?["noManifest"] as? [String])?.count, 1, j.out)
+        XCTAssertTrue((d?["judgedNothing"] as? [String])?.first?.hasSuffix("r.A.Swift.json") ?? false, j.out)
+        XCTAssertTrue((d?["noManifest"] as? [String])?.first?.hasSuffix("r.B.Swift.json") ?? false, j.out)
+    }
+
+    /// ⟨0.28⟩ **THE TRAP THE ROW-3 SPLIT SETS, HALF OF IT PINNED HERE.** `claimsToHaveJudgedNothing` is
+    /// not only a disclosure predicate — the chained dep-join reads it to decide COVERAGE (`coveredPkgs`
+    /// vs `unjudgedPkgs`, asserted end-to-end by `ChainingProcessTests`) and `gate --report` reads it for
+    /// its verdict note. Row 3's own instruction is *no manifest, no claim*, so an absent manifest must
+    /// keep granting NONE, and this is the gate-route half: the note over a manifest-less report is
+    /// UNCHANGED by the split, still naming the condition and still leaving the verdict alone.
+    ///
+    /// The tempting fix for the false LABEL — make that predicate answer `false` for a manifest-less
+    /// report — would turn every pre-⟨0.21⟩ report into a covered one, a silent under-report introduced
+    /// by a disclosure fix. It fails here, and in `ChainingProcessTests.testADepReportWithNoManifest…`.
+    func testTheRowThreeSplitDoesNotMoveTheGatesReading() throws {
+        let bin = try ProcessHarness.binaryURL(for: type(of: self))
+        let row3 = try reportFixture("row3-gate", [
+            "candor": ["version": "t", "toolchain": "swiftsyntax", "spec": "0.20"],
+            "package": "legacy", "functions": [],
+        ])
+        let dir = (row3 as NSString).deletingLastPathComponent
+        let pol = dir + "/deny.policy"
+        try "deny Fs app\n".write(toFile: pol, atomically: true, encoding: .utf8)
+        let g = try ProcessHarness.run(bin, ["gate", "--report", row3, "--policy", pol])
+        XCTAssertEqual(g.code, 0, "⟨0.24⟩: a disclosure, not an exit code — the verdict is untouched")
+        XCTAssertTrue(g.err.contains("judged NOTHING"),
+                      "the gate's reading is UNMOVED: an absent manifest still licenses no purity claim, "
+                      + "and its note already named the condition honestly (`absent with no entries`). "
+                      + "Flipping the shared predicate to fix the QUERY route's label would make every "
+                      + "pre-⟨0.21⟩ report read as covered here: \(g.err)")
+
+        // …and the manifest-less report that LISTS a function is not judged-nothing on this route either:
+        // the disclosure ANDs the two predicates, and so does the coverage reading behind this note.
+        let row3full = try reportFixture("row3full-gate", [
+            "candor": ["version": "t", "toolchain": "swiftsyntax", "spec": "0.20"],
+            "package": "legacy", "functions": [effectfulFn],
+        ])
+        let g2 = try ProcessHarness.run(bin, ["gate", "--report", row3full, "--policy", pol])
+        XCTAssertFalse(g2.err.contains("judged NOTHING"),
+                       "a pre-⟨0.21⟩ report that LISTS entries judged something and keeps the standing "
+                       + "§2's manifest-absent row gives it: \(g2.err)")
+    }
+
     // The digest algorithm matches java's FNV-1a-64 byte-for-byte (one spec, one algorithm).
     func testFnv1aHexIsDeterministicAndWellFormed() {
         let a = fnv1aHex(["app.pure(x:)", "app.reads()"])

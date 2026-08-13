@@ -93,6 +93,23 @@ struct ReportCompleteness {
     /// conclusion about any of it. Only the union of the two covers both the post-failure artifact
     /// (which carries both) and the facade/re-export report (which carries only this).
     var judgedNothing: [String] = []
+    /// ⟨0.28⟩ SPEC §2 — **THE THIRD ROW IS NOT THE FIRST ROW.** The report FILES under this locator
+    /// carrying NO `analyzed` key at all — §2's row 3, a pre-⟨0.21⟩ producer.
+    ///
+    /// MEASURED on this engine over `{"candor":…,"functions":[]}` with no `analyzed` key: `tour`,
+    /// `unverified`, `fix`, `fix-gate`, `privacy-manifest` and `gains` all listed the file under
+    /// `judgedNothing`, and the note said it *"say[s] they JUDGED NOTHING (`analyzed.count: 0`)"*. **The
+    /// report declares nothing.** The HEDGE is the right direction — row 3's own instruction is *no
+    /// manifest, no claim* — but the disclosure is FALSE, and this family rates a false disclosure worse
+    /// than a missing one (§3.4's `net-partner` finding: an engine reported "ignoring unknown config
+    /// key" *while honouring it*).
+    ///
+    /// A SEPARATE FIELD, NOT A RE-LABEL: ⟨0.28⟩ pins `judgedNothing` to *"reports declaring
+    /// `analyzed.count: 0`"*, so putting row 3 there makes one key mean two things and loses the
+    /// distinction the table exists to draw. The REPAIRS differ too — row 1 wants a scan that reaches a
+    /// conclusion, row 3 wants a producer that emits a manifest at all. It raises `mustHedge` exactly as
+    /// `judgedNothing` does and, like it, stops at the exit code: `isIncomplete` does not read it.
+    var noManifest: [String] = []
     /// ⟨0.28⟩ The report FILES under this locator that could not be read AS reports at all — the
     /// `unreadable` arm the Rust reference has carried since ⟨0.24⟩ and this struct did not, a
     /// difference every caller inherited. Until this arm existed, a corrupt sibling was named once on
@@ -122,7 +139,12 @@ struct ReportCompleteness {
     /// under both causes, and it has no exit code for the distinction above to matter to. Both channels
     /// are keyed on it, so a caller cannot get the JSON half's trigger and the prose half's trigger to
     /// disagree — one channel going quiet is the mutant this family has already shipped once.
-    var mustHedge: Bool { isIncomplete || !judgedNothing.isEmpty }
+    /// ⟨0.28⟩ `noManifest` (SPEC §2 row 3) is an arm of THIS and not of `isIncomplete`, for the identical
+    /// reason `judgedNothing` is: the gate exits 0 over a manifest-less report too (its own note names
+    /// the condition — *"`analyzed.count` is 0, absent with no entries, or unreadable"*), so a verb
+    /// exiting 2 there would claim it got LESS far than the gate on the same bytes. The row-3 split
+    /// re-routes a hedge that was already happening; it must not also move an exit code.
+    var mustHedge: Bool { isIncomplete || !judgedNothing.isEmpty || !noManifest.isEmpty }
 
     /// Readable manifest entries PLUS files whose manifest could not be read at all — the reference's
     /// `units()`, so the two engines' prose counts agree over identical bytes.
@@ -139,6 +161,13 @@ struct ReportCompleteness {
         var d: [String: Any] = ["incomplete": true]
         if !unanalyzed.isEmpty { d["unanalyzed"] = json }
         if !judgedNothing.isEmpty { d["judgedNothing"] = judgedNothing }
+        // ⟨0.28⟩ SPEC §2 row 3, pinned verbatim in the rung that introduced it:
+        //     "noManifest": [ "<report path>", … ]   // consulted reports carrying no `analyzed` key
+        // Its own key rather than a third member of `judgedNothing`, because that key is defined as
+        // "reports declaring `analyzed.count: 0`" and a row-3 report declares nothing. Omitted when empty
+        // like its siblings, so a document raised by either of them alone is byte-identical to its
+        // pre-row-3 form.
+        if !noManifest.isEmpty { d["noManifest"] = noManifest }
         return d
     }
 
@@ -148,11 +177,20 @@ struct ReportCompleteness {
     /// (§3.3 makes an incomplete analysis of the target's own code an exit-2 cause) and FALSE of
     /// `analyzed.count: 0` (⟨0.24⟩: a disclosure, not an exit code). A note that sends the reader to a CI
     /// job which then passes teaches them the note is noise — the disclosure discrediting itself.
+    ///
+    /// ⟨0.28⟩ **AND A ROW-3-ONLY HEDGE GETS THE SAME EXIT REPORTED WITHOUT THE WRONG NOUN.** The gate
+    /// exits 0 over a manifest-less report too, so the urgency is identical; but calling the report
+    /// *judged-nothing* in a sentence printed under the row-3 disclosure would re-assert, in prose, the
+    /// exact claim the split was made to stop making.
     var gateLine: String {
-        isIncomplete
-            ? "`gate --report` exits 2 over these bytes."
-            : "NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU — `gate --report` exits 0 over a judged-nothing "
-              + "report (⟨0.24⟩: a disclosure, not an exit code), so this note is the whole of the warning."
+        if isIncomplete { return "`gate --report` exits 2 over these bytes." }
+        if judgedNothing.isEmpty {
+            return "NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU — `gate --report` exits 0 over a report "
+                 + "carrying no `analyzed` manifest (⟨0.24⟩: a disclosure, not an exit code), so this "
+                 + "note is the whole of the warning."
+        }
+        return "NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU — `gate --report` exits 0 over a judged-nothing "
+             + "report (⟨0.24⟩: a disclosure, not an exit code), so this note is the whole of the warning."
     }
 
     /// The HUMAN half — nil on a complete report, so an ordinary run stays byte-identical. ONE prose
@@ -162,15 +200,36 @@ struct ReportCompleteness {
         guard mustHedge else { return nil }
         // The unanalyzed-ONLY sentence is unchanged from the reference's pre-⟨0.28⟩ one: that is the case
         // every existing caller was measured on, and the count-0 arm is additive.
-        let head: String
+        //
+        // ⟨0.28⟩ …and SPEC §2's THIRD ROW gets its OWN clause, appended, for the same reason: the
+        // sentence above was FALSE of it. A manifest-less report does not "say it judged nothing" — it
+        // says nothing, and a reader sent to re-run a scan that already reached a conclusion goes to the
+        // wrong repair. Appended rather than folded into the arms so the measured wordings stay
+        // character-for-character what they were when no row-3 report is present.
+        var head: String
         switch (isIncomplete, judgedNothing.count) {
         case (true, 0):
             head = "the report(s) under this locator declare \(units) unit(s) candor could not analyze,"
         case (true, let n):
             head = "the report(s) under this locator declare \(units) unit(s) candor could not analyze, "
                  + "and \(n) report(s) that judged nothing at all,"
+        // Reachable only with a row-3 report in hand: `mustHedge` gated the early return above, and with
+        // no unanalyzed unit, no unreadable file and no count-0 report, `noManifest` is the only arm left
+        // that could have raised it.
+        case (false, 0):
+            head = ""
         case (false, let n):
             head = "\(n) report(s) under this locator say they JUDGED NOTHING (`analyzed.count: 0`),"
+        }
+        if !noManifest.isEmpty {
+            let n = noManifest.count
+            if head.isEmpty {
+                head = "\(n) report(s) under this locator carry NO `analyzed` manifest at all "
+                     + "(SPEC §2 row 3, a pre-⟨0.21⟩ producer),"
+            } else {
+                head.removeLast()   // the clause comma, so the joined sentence reads `…, and N report(s) …,`
+                head += ", and \(n) report(s) carrying NO `analyzed` manifest at all,"
+            }
         }
         var lines = ["  ⚠ INCOMPLETE — \(head)", "      so \(soWhat):"]
         for u in unanalyzed { lines.append("      \(u.path) — \(u.reason)") }
@@ -182,6 +241,12 @@ struct ReportCompleteness {
         for p in judgedNothing {
             lines.append("      \(p) — `analyzed.count: 0`: this report judged NOTHING, so it names no "
                        + "function at all and its silence is not a purity claim")
+        }
+        for p in noManifest {
+            lines.append("      \(p) — NO `analyzed` manifest at all (SPEC §2 row 3, a pre-⟨0.21⟩ "
+                       + "producer): it DECLARES nothing about what was judged, so its silence licenses "
+                       + "no purity claim either. Re-scan with a current engine so the report carries "
+                       + "its manifest")
         }
         lines.append("      \(tail)")
         return lines.joined(separator: "\n") + "\n"
@@ -225,8 +290,16 @@ private func mergeCompleteness(_ obj: [String: Any], path: String, entryCount: I
         guard let p = m["path"] as? String else { continue }
         c.unanalyzed.append((path: p, reason: m["reason"] as? String ?? ""))
     }
+    // ⟨0.28⟩ …AND THEN SPLIT BY WHICH ROW OF SPEC §2's TABLE IT IS, which is a SECOND question asked of
+    // the same envelope, never an edit to the answer above. `claimsToHaveJudgedNothing` decides COVERAGE
+    // on two other routes (the chained dep-join's `coveredPkgs`, `gate --report`), where a manifest-less
+    // report must keep granting none — row 3's own instruction is *no manifest, no claim*. Flipping it
+    // here to correct a LABEL would make every pre-⟨0.21⟩ report read as covered: a silent under-report
+    // introduced by a disclosure fix. So the hedge stands and only its KEY is chosen, by the
+    // disclosure-only `hasNoManifest`.
     if claimsToHaveJudgedNothing(analyzed: obj["analyzed"], entryCount: entryCount) {
-        c.judgedNothing.append(path)
+        if hasNoManifest(analyzed: obj["analyzed"]) { c.noManifest.append(path) }
+        else { c.judgedNothing.append(path) }
     }
 }
 
@@ -1107,6 +1180,12 @@ private func emitTourJSON(_ reaches: [[String: Any]], unknown: (count: Int, tota
         if !comp.judgedNothing.isEmpty {
             head += "\"judgedNothing\":[" + comp.judgedNothing.map(jstr).joined(separator: ",") + "],"
         }
+        // ⟨0.28⟩ SPEC §2 row 3. `noManifest` also sorts BEFORE `reaches` (n < r), between `judgedNothing`
+        // and it (j < n), which is where the reference's sorted-map serialiser puts it — this file
+        // hand-builds its JSON precisely because that order is the pinned four-way contract.
+        if !comp.noManifest.isEmpty {
+            head += "\"noManifest\":[" + comp.noManifest.map(jstr).joined(separator: ",") + "],"
+        }
         if !comp.unanalyzed.isEmpty {
             unanalyzedPart = ",\"unanalyzed\":["
                 + comp.unanalyzed.map { "{\"path\":\(jstr($0.path)),\"reason\":\(jstr($0.reason))}" }
@@ -1824,6 +1903,12 @@ func runGainsCLI(_ args: [String]) -> Never {
             doc["baselineIncomplete"] = true
             if !baseComp.unanalyzed.isEmpty { doc["baselineUnanalyzed"] = baseComp.json }
             if !baseComp.judgedNothing.isEmpty { doc["baselineJudgedNothing"] = baseComp.judgedNothing }
+            // ⟨0.28⟩ SPEC §2 row 3 on the baseline side too, under the same prefix rule — the reference
+            // derives `baselineNoManifest` mechanically from the one key set. Separate from the key above
+            // for the reason the whole split exists: a supply-chain reviewer deciding whether to trust
+            // the comparison floor needs "this report reached no conclusion" apart from "this report came
+            // from a producer that emits no manifest".
+            if !baseComp.noManifest.isEmpty { doc["baselineNoManifest"] = baseComp.noManifest }
         }
         emitJSON(doc)
         exit(strict && !out.isEmpty ? 1 : 0)

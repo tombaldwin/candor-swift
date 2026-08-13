@@ -308,6 +308,31 @@ func claimsToHaveJudgedNothing(analyzed: Any?, entryCount: Int) -> Bool {
     return c == 0
 }
 
+/// ⟨0.28⟩ SPEC §2 — **THE THIRD ROW IS NOT THE FIRST ROW.** Does this report carry NO `analyzed`
+/// manifest at all?
+///
+/// **A SECOND, DISCLOSURE-ONLY PREDICATE, AND IT IS NOT AN INVERSION OF THE ONE ABOVE.** §2's table has
+/// THREE rows and `claimsToHaveJudgedNothing` correctly answers `true` for two of them: row 1
+/// (`analyzed.count: 0` — a claim the report MAKES) and row 3 (`analyzed` ABSENT with no entries — a
+/// pre-⟨0.21⟩ producer, which makes no claim at all). Both must keep hedging, and that predicate must
+/// keep saying so, because it is what the chained dep-join reads to decide COVERAGE (`register` →
+/// `coveredPkgs` vs `unjudgedPkgs`, below) and what `gate --report` reads for its verdict note. Row 3's
+/// own instruction is *no manifest, no claim*, so an absent manifest must go on granting NONE: making
+/// that predicate answer `false` here to fix a LABEL would turn every pre-⟨0.21⟩ report into a COVERED
+/// one — a silent under-report introduced by a disclosure fix.
+///
+/// So this asks a DIFFERENT question — *is there a manifest?* — and only the DISCLOSURE path
+/// (`ReportCompleteness`) consults it, to route a hedge that is already happening to the right key.
+/// `judgedNothing` is PINNED to *"reports declaring `analyzed.count: 0`"*, which a row-3 report is not,
+/// and the two want different repairs: row 1 wants a scan that reaches a conclusion, row 3 wants a
+/// producer that emits a manifest at all.
+///
+/// The argument is the RAW wire value, so `nil` means the key was ABSENT — a JSON `null` bridges to
+/// `NSNull`, which is a manifest that is PRESENT and garbled and stays row 1's fail-closed business.
+/// Every caller ANDs this with `claimsToHaveJudgedNothing`, so a manifest-less report that LISTS
+/// functions is not hedged at all: it judged something and said so the only way it could.
+func hasNoManifest(analyzed: Any?) -> Bool { analyzed == nil }
+
 /// `analyzed.count` as a READABLE non-negative integer, or `nil` when the manifest is absent, garbled
 /// (`"oops"` / `null` / a list / no `count`) or carries a `count` that is not a non-negative integer —
 /// **boolean, fractional, negative, non-finite or non-numeric**. See `claimsToHaveJudgedNothing` for the
