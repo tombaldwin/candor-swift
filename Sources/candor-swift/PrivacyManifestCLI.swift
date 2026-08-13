@@ -643,7 +643,7 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
     }
     // Load the report the same way tour/path/fix do — a missing/corrupt report fails loud (exit 2), never a
     // silently-empty surface that would print a false "no sensors reached" clean bill of health (§4).
-    guard let model = loadFixModel(prefix: prefix) else {
+    guard let model = loadFixModel(prefix: prefix, who: "privacy-manifest") else {
         privacyDie("candor-swift privacy-manifest: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
     }
 
