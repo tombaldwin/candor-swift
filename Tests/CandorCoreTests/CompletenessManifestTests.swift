@@ -270,10 +270,26 @@ final class CompletenessManifestTests: XCTestCase {
     /// One hand-built §2 report at `<dir>/rep.fixture.Swift.json`, so a test can produce any row of the
     /// artifact-state table verbatim — including rows a SCAN cannot be made to emit on demand (a report
     /// that judged nothing while still naming functions is the ⟨0.24⟩ contradictory row).
+    /// Directories minted by `reportFixture`, removed in `tearDown`.
+    ///
+    /// Every other fixture in this file cleans up with a `defer` at its call site. This one could not:
+    /// it returns the FILE path, so the caller never sees the directory and has nothing to defer on —
+    /// and its 11 call sites therefore left a tree behind on every run. Measured 2026-08-14: 142 of them
+    /// in $TMPDIR. Small on its own; the same shape in candor-ts's `project()` had reached 45,280, and a
+    /// listing of $TMPDIR is what once made a single `privacy-manifest --verify` take 72 seconds.
+    private var fixtureDirs: [URL] = []
+
+    override func tearDown() {
+        for d in fixtureDirs { try? FileManager.default.removeItem(at: d) }
+        fixtureDirs.removeAll()
+        super.tearDown()
+    }
+
     private func reportFixture(_ name: String, _ envelope: [String: Any]) throws -> String {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("candor-swift-comp028-\(name)-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        fixtureDirs.append(dir)
         let f = dir.appendingPathComponent("rep.fixture.Swift.json")
         try JSONSerialization.data(withJSONObject: envelope).write(to: f)
         return f.path
