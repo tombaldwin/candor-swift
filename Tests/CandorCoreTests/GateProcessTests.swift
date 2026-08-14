@@ -8,6 +8,21 @@ import Foundation
 /// function boundary the code review named — and gated by `swift test` (offline, no network).
 final class GateProcessTests: XCTestCase {
 
+    /// The spec floor the BINARY declares, DERIVED from `--version` rather than written as a literal.
+    ///
+    /// This assertion read `"0.27"` and so tested one literal against another: it could only ever fail
+    /// on a floor bump, which is exactly when it is least informative and most annoying. Deriving it
+    /// makes it assert the property that matters — a verdict's `spec` equals what the engine says it
+    /// speaks — and takes this file out of the edit list for every future rung. AgentsDocDriftTests has
+    /// the same helper against the source constant; this one goes through the binary, which is the
+    /// stronger end of the same claim.
+    private func declaredSpec(_ bin: URL) throws -> String {
+        let out = try run(bin, ["--version"]).out
+        let m = try XCTUnwrap(out.firstMatch(of: /\(spec ([0-9]+\.[0-9]+)\)/),
+                              "`--version` did not print `(spec X.Y)`: \(out)")
+        return String(m.1)
+    }
+
     /// The debug binary `swift build` produced. Delegates to ProcessHarness: this was a private COPY of
     /// the resolver, and the copies all resolved to the wrong directory on Linux — skipping every process
     /// suite on that leg. One resolver, one place to be right.
@@ -487,7 +502,7 @@ final class GateProcessTests: XCTestCase {
 
         let data = try Data(contentsOf: gate)
         let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        XCTAssertEqual(obj?["spec"] as? String, "0.27", "verdict declares the spec version")
+        XCTAssertEqual(obj?["spec"] as? String, try declaredSpec(bin), "verdict declares the spec version")
         XCTAssertEqual(obj?["ok"] as? Bool, false, "ok:false on a failing gate")
         let viols = obj?["violations"] as? [[String: Any]] ?? []
         // The fixture calls `Billing().charge("x")` at the top level, so `deny Net` catches BOTH the
