@@ -9,6 +9,21 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.28.0] — 2026-08-14
+
+- **Self-gate: the declared boundary is a tracked file, and the four subprocess UNITS are declared rather
+  than the file they live in.** The boundary used to be a `printf` inside `ci.yml`, so the repository
+  declared no policy at all and `candor-swift .` in a checkout applied nothing. Worse, half (1) proved the
+  core clean by DELETING `main.swift` before the scan — 2158 lines in which a new subprocess was caught by
+  nothing. Now `.candor/policy` (`deny Net Db`) over the whole engine with no file excluded, plus an
+  assertion that the Exec/Ipc units are exactly the four in `main.swift`. MEASURED strictly stronger: an
+  unexplained `Process()` appended to `main.swift` reddens the new gate and passes BOTH halves of the old.
+- **`CompletenessManifestTests` cleans up after itself.** `reportFixture` was the one helper in that file
+  without a `defer` — it returns the FILE path, so the caller never sees the directory and has nothing to
+  defer on. 11 call sites, 142 trees accumulated. A/B'd: 10 leaked per run before, 0 after, 781 tests
+  passing either way.
+- **AGENTS.md points at the umbrella**, with the embedded `AgentsDoc.swift` regenerated in the same commit.
+
 - **⟨0.28⟩ a caller certified what its callee left undetermined — `incomplete` now propagates
   caller-ward.** The report entry's `incomplete` was the DIRECT map (a function's own surface whose
   locator could not be pinned) where the field a consumer branches on to decide whether to trust an
