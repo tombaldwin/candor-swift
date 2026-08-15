@@ -16,8 +16,17 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   declared no policy at all and `candor-swift .` in a checkout applied nothing. Worse, half (1) proved the
   core clean by DELETING `main.swift` before the scan — 2158 lines in which a new subprocess was caught by
   nothing. Now `.candor/policy` (`deny Net Db`) over the whole engine with no file excluded, plus an
-  assertion that the Exec/Ipc units are exactly the four in `main.swift`. MEASURED strictly stronger: an
-  unexplained `Process()` appended to `main.swift` reddens the new gate and passes BOTH halves of the old.
+  assertion that the Exec/Ipc units are exactly the four in `main.swift`. An unexplained `Process()`
+  appended to `main.swift` reddens the new gate and passes BOTH halves of the old.
+
+  **CORRECTION (same day, from review).** That claim was overstated as first written: the unit check
+  fails on an Exec added anywhere in main.swift *that binds a unit*. A spawn in BARE TOP-LEVEL code does
+  not — the engine folds every file-scope statement into one synthetic `<main>`, which is declared, so
+  ~1.8k of main.swift's 2159 lines were exempt. The demonstration that convinced me otherwise used a
+  named `func`, which binds its own unit and IS caught. Judging `<main>` on its `direct` set instead
+  does not work either: it carries Exec/Ipc there on a clean tree, because declarations fold in too.
+  A SOURCE RATCHET now covers the gap — the subprocess call-site inventory, by file, comments excluded —
+  and it is falsified against exactly the case the unit check misses.
 - **`CompletenessManifestTests` cleans up after itself.** `reportFixture` was the one helper in that file
   without a `defer` — it returns the FILE path, so the caller never sees the directory and has nothing to
   defer on. 11 call sites, 142 trees accumulated. A/B'd: 10 leaked per run before, 0 after, 781 tests
