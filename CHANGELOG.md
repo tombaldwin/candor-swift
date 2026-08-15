@@ -9,18 +9,14 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
-## [0.28.0] — 2026-08-14
+## [0.28.1] — 2026-08-15
 
-- **Self-gate: the declared boundary is a tracked file, and the four subprocess UNITS are declared rather
-  than the file they live in.** The boundary used to be a `printf` inside `ci.yml`, so the repository
-  declared no policy at all and `candor-swift .` in a checkout applied nothing. Worse, half (1) proved the
-  core clean by DELETING `main.swift` before the scan — 2158 lines in which a new subprocess was caught by
-  nothing. Now `.candor/policy` (`deny Net Db`) over the whole engine with no file excluded, plus an
-  assertion that the Exec/Ipc units are exactly the four in `main.swift`. An unexplained `Process()`
-  appended to `main.swift` reddens the new gate and passes BOTH halves of the old.
+_Post-release review fixes. 0.28.0 shipped, then a high-effort review of that work found
+defects in it — three of them a defect of the same class as the fix that introduced them. The
+spec floor is UNCHANGED at 0.28: no contract moved, so this is a build-version patch._
 
-  **CORRECTION (same day, from review).** That claim was overstated as first written: the unit check
-  fails on an Exec added anywhere in main.swift *that binds a unit*. A spawn in BARE TOP-LEVEL code does
+- **The self-gate's `<main>` hole.** 0.28.0's claim that the gate "fails on an Exec added anywhere in
+  main.swift" was overstated: it holds only for code that BINDS a unit. A spawn in BARE TOP-LEVEL code does
   not — the engine folds every file-scope statement into one synthetic `<main>`, which is declared, so
   ~1.8k of main.swift's 2159 lines were exempt. The demonstration that convinced me otherwise used a
   named `func`, which binds its own unit and IS caught. Judging `<main>` on its `direct` set instead
@@ -32,6 +28,26 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   defer on. 11 call sites, 142 trees accumulated. A/B'd: 10 leaked per run before, 0 after, 781 tests
   passing either way.
 - **AGENTS.md points at the umbrella**, with the embedded `AgentsDoc.swift` regenerated in the same commit.
+
+- **`GateProcessTests`' spec assertion compared a value to itself** — it derives from `--version`,
+  which prints the same constant the verdict writer uses, and after it landed there was no in-tree
+  pin of the floor at all: `specVersion = "0.29"` passed every test and both drift gates. A literal
+  canary is restored in `AgentsDocDriftTests`, the same fixture candor-report keeps in the rust arm.
+
+- **exit 2 is "could not evaluate", not a violation** — the self-gate reported the ⟨0.21⟩ fail-closed
+  verdict as a red boundary and collapsed it to exit 1. Found by review in the java arm; all three
+  self-gates were written with the same collapse.
+
+## [0.28.0] — 2026-08-14
+
+- **Self-gate: the declared boundary is a tracked file, and the four subprocess UNITS are declared rather
+  than the file they live in.** The boundary used to be a `printf` inside `ci.yml`, so the repository
+  declared no policy at all and `candor-swift .` in a checkout applied nothing. Worse, half (1) proved the
+  core clean by DELETING `main.swift` before the scan — 2158 lines in which a new subprocess was caught by
+  nothing. Now `.candor/policy` (`deny Net Db`) over the whole engine with no file excluded, plus an
+  assertion that the Exec/Ipc units are exactly the four in `main.swift`. An unexplained `Process()`
+  appended to `main.swift` reddens the new gate and passes BOTH halves of the old.
+
 
 - **⟨0.28⟩ a caller certified what its callee left undetermined — `incomplete` now propagates
   caller-ward.** The report entry's `incomplete` was the DIRECT map (a function's own surface whose
