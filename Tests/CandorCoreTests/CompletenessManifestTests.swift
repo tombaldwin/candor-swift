@@ -285,6 +285,8 @@ final class CompletenessManifestTests: XCTestCase {
         super.tearDown()
     }
 
+    /// One hand-built §2 report at `<dir>/rep.fixture.Swift.json`, so a test can produce any row of the
+    /// artifact-state table verbatim. The directory is registered above and removed in `tearDown`.
     private func reportFixture(_ name: String, _ envelope: [String: Any]) throws -> String {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("candor-swift-comp028-\(name)-\(UUID().uuidString)")

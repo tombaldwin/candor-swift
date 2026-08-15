@@ -37,6 +37,19 @@ final class AgentsDocDriftTests: XCTestCase {
         return String(m.1)
     }
 
+    /// THE FLOOR, as a LITERAL, and deliberately so.
+    ///
+    /// Everything else in this repo derives the spec from `specVersion` — the drift gates, smoke.sh's
+    /// `BSPEC`, and `GateProcessTests`' verdict assertion — which is right for checking AGREEMENT and
+    /// useless for checking the VALUE. After those derivations landed there was no in-tree pin at all:
+    /// setting `specVersion = "0.29"` passed every candor-swift test and both drift gates. This is the
+    /// canary that notices the constant moved, so it must stay a literal; deriving it makes it vacuous.
+    /// candor-report's `assert_eq!(SPEC_VERSION, "0.28")` is the same fixture in the rust arm.
+    func testTheDeclaredFloorIsThePinnedOne() throws {
+        XCTAssertEqual(try declaredSpec(), "0.28",
+                       "the spec floor moved — bump this pin with it, deliberately, as part of the rung")
+    }
+
     // ── 1. the two copies are the SAME DOCUMENT ─────────────────────────────────────────────────────
 
     /// Asserts the SHARED CONTENT, not just the spec string. The spec string is one symptom; the defect
