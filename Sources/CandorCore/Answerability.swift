@@ -66,6 +66,13 @@ public struct UnansweredRule {
     /// `Net` or `Unknown`.
     public let effect: String
     public func toJSON() -> [String: Any] { ["rule": rule, "why": why] }
+    /// ⟨0.29⟩ PUBLIC so a report route can add the two WHOLE-POLICY unanswerable kinds (`forbid`,
+    /// `allow`) to this list. Those are unanswerable over the whole report rather than at a function, so
+    /// `fn` and `effect` are empty — and the renderers partition on `fn.isEmpty` rather than printing a
+    /// blank name, because a refusal rendered as an empty identifier reads as a bug in the tool.
+    public init(rule: String, why: String, fn: String, effect: String) {
+        self.rule = rule; self.why = why; self.fn = fn; self.effect = effect
+    }
 }
 
 /// EVERY (rule, function) pair this report cannot decide, in the gate's own iteration order: rule outer,
