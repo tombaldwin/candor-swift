@@ -447,18 +447,27 @@ private func unanswerableScopedFilters(_ deny: [DenyRule], _ gi: GateInput) -> [
 func wholePolicyRefusals(_ pol: ParsedPolicy, _ policyPath: String) -> [Unevaluated] {
     var policyRefusals: [Unevaluated] = []
     for r in pol.forbid {
+        // ⟨0.29⟩ NAME THE RULE, not a count of its kind. MEASURED across the family on one fixture: rust
+        // and java open with the rule text, and candor-ts opens with it too — this engine was the ONLY
+        // one that did not, printing "this policy has 1 `forbid` rule(s)" instead. An operator handed a
+        // COUNT has to go and diff the policy to learn which line stopped their gate, and with two rules
+        // every entry said "this policy has 2 rule(s)" — a fact about the file, attached to a row that
+        // is about one line of it. The `rule` field always carried the text for a MACHINE; the human
+        // channel was the half answering a different question.
         policyRefusals.append(Unevaluated(rule: r.raw, why:
-            "this policy has \(pol.forbid.count) `forbid` rule(s), which "
+            "`\(r.raw.trimmingCharacters(in: .whitespaces))` is a `forbid` rule, which "
                    + "`gate --report` cannot evaluate — a report carries an entry only for a function with an "
                    + "EFFECT, so a wholly pure unit has no entry and no edges at all, while `forbid` matches "
                    + "on NAME. The rule would read green over a crossing a scan fails on. Gate layering at "
                    + "scan time: candor-swift <dir> --policy \(policyPath)"))
     }
     if !pol.allow.isEmpty {
-        let effects = Set(pol.allow.map { $0.effect }).sorted()
         for r in pol.allow {
+            // …AND ITS SIBLING, in the same change. `allow` is the kind no conformance row anywhere
+            // writes into a `.pol` file, so it had nothing watching it at all — closing one spelling of
+            // a channel while its sibling stays open is how the defects in this file got in.
             policyRefusals.append(Unevaluated(rule: r.raw, why:
-                "this policy has `allow \(effects.joined(separator: "`/`"))` rule(s), "
+                "`\(r.raw.trimmingCharacters(in: .whitespaces))` is an `allow` rule, "
                    + "which `gate --report` cannot evaluate — the AS-EFF-008 surface-completeness marker does "
                    + "not ride the report wire, so a benign visible literal beside a runtime-computed endpoint "
                    + "would be CERTIFIED here and flagged by a scan. (`netClass: unknown-host` is NOT that "
