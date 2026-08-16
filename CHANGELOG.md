@@ -9,6 +9,13 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.29⟩ A refusal NAMES THE RULE, not a count of its kind.** `gate --report` over a `forbid`/`allow`
+  policy said *"this policy has 1 `forbid` rule(s)"* — a fact about the FILE handed to a reader asking
+  which LINE stopped their gate, and with two rules every row said "2". Measured family-wide on one
+  fixture: rust, java and candor-ts all printed the rule text; **this engine was the only one that did
+  not.** Both kinds fixed together — `allow` is the sibling no conformance row anywhere writes into a
+  `.pol` file, so nothing was watching it at all. The rule now rides `why` itself rather than a caller's
+  prefix, so a channel added later cannot lose it. Pinned by the strengthened PART 47 row.
 - **⟨0.29⟩ ⚠ The report declares what the scan chose not to open, and READS it.** `analyzed.count` is
   a NUMERATOR; the file selection that produced it appeared nowhere, so a consumer could not tell
   whether the answer was to the question they asked. Measured on this engine 2026-08-15: `deny Exec`
