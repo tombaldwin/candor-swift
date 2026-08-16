@@ -917,7 +917,16 @@ func runUnverifiedCLI(_ args: [String]) -> Never {
     // no-op when any rule of any kind parsed.
     answerZeroRulePolicyWithCaveat(pol, at: policy, who: "unverified",
                                    completeness: loaded.completeness, strict: q.strict)
-    let (ok, holes, unanswered) = unverified(fns, pol.deny, classFilter: classFilter)
+    let (ok, holes, unansweredCore) = unverified(fns, pol.deny, classFilter: classFilter)
+    // ⟨0.29⟩ …AND THE TWO WHOLE-POLICY KINDS, which this verb dropped at the call boundary: it hands
+    // `pol.deny` to the core and `forbid`/`allow` never travelled. So a `forbid`-only policy produced
+    // an EMPTY refusal set and the verb answered `{"ok": true, …}` at exit 0 — measured — over a
+    // policy whose only rule nothing had evaluated. `gate --report` refused the same policy
+    // correctly; the rule lived inline in the gate and its advisory siblings never saw it.
+    // `fn: ""` because the kind is unanswerable over the whole report, not at one function.
+    let unanswered = unansweredCore + wholePolicyRefusals(pol, policy)
+        .map { UnansweredRule(rule: $0.rule, why: $0.why, fn: "", effect: "") }
+
     // ⟨0.24⟩ over a report declaring `unanalyzed`, `ok` is OMITTED — see `emitAdvisoryAnswer`. The holes
     // still ship: an unverified layer this report DID see is worth naming whether or not another file
     // went unread. Same for a rule the gate could not evaluate (§3.2): the holes ship, `unevaluated`
@@ -1296,7 +1305,16 @@ func runFixCLI(_ args: [String]) -> Never {
         // unchanged. No-op when any rule of any kind parsed.
         answerZeroRulePolicyWithCaveat(pol, at: policy, who: "fix-gate",
                                        completeness: model.completeness, strict: q.strict)
-        let (ok, remedies, unanswered) = fixGate(byName: model.byName, cg: model.cg, deny: pol.deny)
+        let (ok, remedies, unansweredCore) = fixGate(byName: model.byName, cg: model.cg, deny: pol.deny)
+        // ⟨0.29⟩ …AND THE TWO WHOLE-POLICY KINDS, which this verb dropped at the call boundary: it hands
+        // `pol.deny` to the core and `forbid`/`allow` never travelled. So a `forbid`-only policy produced
+        // an EMPTY refusal set and the verb answered `{"ok": true, …}` at exit 0 — measured — over a
+        // policy whose only rule nothing had evaluated. `gate --report` refused the same policy
+        // correctly; the rule lived inline in the gate and its advisory siblings never saw it.
+        // `fn: ""` because the kind is unanswerable over the whole report, not at one function.
+        let unanswered = unansweredCore + wholePolicyRefusals(pol, policy)
+            .map { UnansweredRule(rule: $0.rule, why: $0.why, fn: "", effect: "") }
+
         // Advisory by default (exit 0 — the agent fix-loop reads the remedy and edits); `--strict` makes the
         // exit follow `ok`, so CI can REQUIRE zero outstanding crossings (mirrors `unverified --strict`).
         // ⟨0.24⟩ …and over a report declaring `unanalyzed`, `ok` is OMITTED and `--strict` exits 2 — see

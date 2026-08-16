@@ -9,6 +9,19 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.29⟩ `unverified` and `fix-gate` certified over a policy the gate had refused.** Both hand
+  `pol.deny` to the core, so `forbid`/`allow` were dropped at the call boundary and a `forbid`-only
+  policy produced `{"ok": true, …}` at exit 0 — a certification relative to a gate that evaluated
+  nothing. SPEC §3.1's answerability MUST binds every verb reading a §2 report, not the gate alone.
+  Measured four-way: candor-java disclosed and withheld `ok`; rust, ts and swift did not. The gate's
+  inline refusal block is now `wholePolicyRefusals()` and shared. `--strict` reaches exit 2 on all four.
+  Pinned by conformance PART 47.
+- **A test was pinning this engine's divergence from the reference.**
+  `testAnAllowOnlyPolicyIsNotZeroRule` asserted `ok` was PRESENT for an `allow`-only policy — but §3.1
+  names `allow` unanswerable from a report, and candor-java has always withheld `ok` there. The row's
+  original point (an `allow`-only policy is not the zero-rule case) is kept; what it asserts about the
+  answer has moved to the correct one.
+
 ## [0.28.2] — 2026-08-15
 
 _A cardinal-sin fix. 0.28.1's body-less-declaration pass reopened, in two shapes, the hole it was

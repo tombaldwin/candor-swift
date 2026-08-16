@@ -109,13 +109,28 @@ final class ZeroRuleAdvisoryProcessTests: XCTestCase {
 
     /// THE RULE-VECTOR CONTROL: an allow-only policy is NOT zero-rule — the check reads every vector,
     /// not `.deny` alone (the reference engine's first-draft mistake, recorded on the shared predicate).
+    /// ⟨0.29⟩ REWRITTEN, and the reason matters more than the row. This asserted `ok` was PRESENT for an
+    /// `allow`-only policy — "a policy with a rule answers normally". But SPEC §3.1's ⟨0.24⟩ answerability
+    /// rule names `allow` as unanswerable from a report (the AS-EFF-008 surface-completeness marker does
+    /// not ride the wire), so `ok` was a certification relative to a policy this route never applied.
+    /// candor-java, the reference engine, has ALWAYS withheld `ok` here and exited 2 under `--strict`;
+    /// this test was pinning candor-swift's divergence from it, which is how the divergence survived.
+    ///
+    /// The row's ORIGINAL point is kept and is still the thing being tested: an `allow`-only policy is
+    /// NOT the zero-rule case. It asked a real question — the answer is that this route cannot answer it,
+    /// which is a different document from "you configured a policy that asks nothing".
     func testAnAllowOnlyPolicyIsNotZeroRule() throws {
         let r = try ProcessHarness.run(bin, ["unverified", "--report", p("r.json"),
                                              "--policy", p("allow.policy"), "--json"])
         XCTAssertEqual(r.code, 0, r.err)
         let d = try doc(r.out)
-        XCTAssertNotNil(d["ok"], "a policy with a rule answers normally: \(r.out)")
+        XCTAssertNil(d["ok"], "`allow` is unanswerable from a report — `ok` must be WITHHELD: \(r.out)")
+        XCTAssertEqual((d["unevaluated"] as? [Any])?.count, 1,
+                       "…and the rule disclosed, one entry, naming it: \(r.out)")
         XCTAssertNotNil(d["unverified"], r.out)
+        // NOT the zero-rule caveat: that document says the policy asked nothing, and this one asked
+        // something the route cannot answer. Conflating them would lose the distinction this row is for.
+        XCTAssertNil(d["zeroRule"], "an allow-only policy is not the zero-rule case: \(r.out)")
     }
 
     /// THE INTACT CONTROL: a one-rule policy's answer keeps its pre-⟨0.28⟩ shape exactly — `ok` and the

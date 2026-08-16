@@ -436,6 +436,39 @@ private func unanswerableScopedFilters(_ deny: [DenyRule], _ gi: GateInput) -> [
 /// `--json` IS `--gate-json -`, deliberately: on a scan `--json` emits the REPORT, and there is no report
 /// to emit here, so the verb's machine output is the verdict. A second meaning for `--json` would be the
 /// one place a consumer could tell the two routes apart.
+/// ⟨0.29⟩ THE TWO WHOLE-POLICY UNANSWERABLE KINDS, as a function so every report route shares one.
+///
+/// `forbid` and `allow` cannot be answered from a §2 report (SPEC §3.1 ⟨0.24⟩ ANSWERABILITY). This lived
+/// INLINE in `gate --report` and only there, so the advisory verbs reading the same report never saw it:
+/// MEASURED, `unverified` and `fix-gate` over a `forbid`-only policy both emitted `{"ok": true, …}` at
+/// exit 0 — a certification relative to a gate that never evaluated the policy's only rule. candor-java,
+/// the reference engine, disclosed and withheld `ok` on both; rust, ts and swift did not. Extracted
+/// rather than copied, because copying is how the gate and its siblings diverged in the first place.
+func wholePolicyRefusals(_ pol: ParsedPolicy, _ policyPath: String) -> [Unevaluated] {
+    var policyRefusals: [Unevaluated] = []
+    for r in pol.forbid {
+        policyRefusals.append(Unevaluated(rule: r.raw, why:
+            "this policy has \(pol.forbid.count) `forbid` rule(s), which "
+                   + "`gate --report` cannot evaluate — a report carries an entry only for a function with an "
+                   + "EFFECT, so a wholly pure unit has no entry and no edges at all, while `forbid` matches "
+                   + "on NAME. The rule would read green over a crossing a scan fails on. Gate layering at "
+                   + "scan time: candor-swift <dir> --policy \(policyPath)"))
+    }
+    if !pol.allow.isEmpty {
+        let effects = Set(pol.allow.map { $0.effect }).sorted()
+        for r in pol.allow {
+            policyRefusals.append(Unevaluated(rule: r.raw, why:
+                "this policy has `allow \(effects.joined(separator: "`/`"))` rule(s), "
+                   + "which `gate --report` cannot evaluate — the AS-EFF-008 surface-completeness marker does "
+                   + "not ride the report wire, so a benign visible literal beside a runtime-computed endpoint "
+                   + "would be CERTIFIED here and flagged by a scan. (`netClass: unknown-host` is NOT that "
+                   + "marker — it also names a merely unrecognised host.) Gate allowlists at scan time: "
+                   + "candor-swift <dir> --policy \(policyPath)"))
+        }
+    }
+    return policyRefusals
+}
+
 func runGateReportCLI(_ args: [String]) -> Never {
     let usage = "usage: candor-swift gate --report <locator> --policy <file> [--json] [--gate-json <file>]"
     // ── SPEC §3.3.1 ⟨0.27⟩ ARM FIRST, AND NEVER OVER AN INPUT.
@@ -649,27 +682,7 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // DISCLOSURE is per rule, because the operator's question is *which* and an aggregate answers *how
     // many*. candor-java emits `"forbid (× 2)"` and loses which two; that satisfies a naive reading of
     // "disclose which rules" while answering the other one.
-    var policyRefusals: [Unevaluated] = []
-    for r in pol.forbid {
-        policyRefusals.append(Unevaluated(rule: r.raw, why:
-            "this policy has \(pol.forbid.count) `forbid` rule(s), which "
-                   + "`gate --report` cannot evaluate — a report carries an entry only for a function with an "
-                   + "EFFECT, so a wholly pure unit has no entry and no edges at all, while `forbid` matches "
-                   + "on NAME. The rule would read green over a crossing a scan fails on. Gate layering at "
-                   + "scan time: candor-swift <dir> --policy \(policyPath)"))
-    }
-    if !pol.allow.isEmpty {
-        let effects = Set(pol.allow.map { $0.effect }).sorted()
-        for r in pol.allow {
-            policyRefusals.append(Unevaluated(rule: r.raw, why:
-                "this policy has `allow \(effects.joined(separator: "`/`"))` rule(s), "
-                   + "which `gate --report` cannot evaluate — the AS-EFF-008 surface-completeness marker does "
-                   + "not ride the report wire, so a benign visible literal beside a runtime-computed endpoint "
-                   + "would be CERTIFIED here and flagged by a scan. (`netClass: unknown-host` is NOT that "
-                   + "marker — it also names a merely unrecognised host.) Gate allowlists at scan time: "
-                   + "candor-swift <dir> --policy \(policyPath)"))
-        }
-    }
+    let policyRefusals = wholePolicyRefusals(pol, policyPath)
     let denyOnly = ParsedPolicy(deny: pol.deny, allow: [], forbid: [])
 
     let locator = reportFlag.map(resolveReportLocator) ?? discoverReportPrefix()
