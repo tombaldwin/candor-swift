@@ -317,7 +317,10 @@ func failClosedReportDocument(reason: String) -> String? {
 /// to `deny` alone without the other noticing, so there is exactly one and both routes call it.
 func zeroRulePolicyRefusal(_ pol: ParsedPolicy, at path: String,
                            who: String) -> (why: String, unevaluated: [Unevaluated])? {
-    guard pol.deny.isEmpty, pol.allow.isEmpty, pol.forbid.isEmpty else { return nil }
+    // ⟨0.29⟩ …and `only`. This function's own doc comment says a zero-rule check reading a SUBSET of the
+    // rule kinds is the false-answer shape the rung exists to close — so the kind added by a later rung
+    // has to arrive here, or an `only`-only policy (a LIVE gate) is refused as an empty file.
+    guard pol.deny.isEmpty, pol.allow.isEmpty, pol.forbid.isEmpty, pol.only.isEmpty else { return nil }
     let why = "\(who): the policy \(path) yielded NO RULES — refusing (exit 2, gate NOT enforced). "
         + "Every line was ignored (see the `ignoring policy rule` warnings above), the file is empty, "
         + "or it holds only comments. A gate with no rules cannot have caught anything, and reporting "
@@ -481,11 +484,19 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
         var scopeMatchCount: [String: Int] = [:]
         for r in pol.deny where !r.scope.isEmpty { scopeMatchCount[r.raw] = 0 }
         for r in pol.forbid { scopeMatchCount[r.raw] = 0 }
+        for r in pol.only { scopeMatchCount[r.raw] = 0 }
         for qual in inferred.keys {
             for r in pol.deny where !r.scope.isEmpty && scopeMatches(qual, r.scope) {
                 scopeMatchCount[r.raw, default: 0] += 1
             }
             for r in pol.forbid where scopeMatches(qual, r.from) || scopeMatches(qual, r.to) {
+                scopeMatchCount[r.raw, default: 0] += 1
+            }
+            // ⟨0.29⟩ ON `from` ONLY, deliberately not either endpoint the way a `forbid` counts. A
+            // forbid's subject is the pair; an `only`'s subject is the scope it makes a PROMISE about, so
+            // a rule whose destinations all resolve while its `from` names nothing has bound nothing —
+            // exactly the typo that leaves an operator believing a leaf is protected.
+            for r in pol.only where scopeMatches(qual, r.from) {
                 scopeMatchCount[r.raw, default: 0] += 1
             }
         }
@@ -605,6 +616,30 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
                     if scopeMatches(cur, r.to) {
                         gateViolations.append((rule: "AS-EFF-009", fn: fn, effects: [],
                             detail: "`\(fn)` (scope `\(r.from)`) transitively reaches `\(cur)` in forbidden scope `\(r.to)`: `\(r.raw)`",
+                            reasonClass: [], netClass: []))
+                        break
+                    }
+                    stack.append(contentsOf: cg[cur] ?? [])
+                }
+            }
+        }
+        // ⟨0.29⟩ AS-EFF-009 — `only A -> B …`: a fn in A may reach A and the listed scopes, NOTHING else.
+        // The same walk as `forbid` above with the test INVERTED, and the inversion is the point rather
+        // than the code: `forbid` fails OPEN, so a leaf can only be protected by enumerating what it must
+        // not reach — a list that does not cover a package added tomorrow. `only` fails SAFE.
+        //
+        // THE WALK STOPS AT A PERMITTED SCOPE. A permitted callee's own dependencies are governed by the
+        // rules about IT; descending past it would make `only` demand the transitive closure of everything
+        // you permit, which is the same enumeration-that-rots one level down. `from` IS descended through.
+        for r in pol.only {
+            for fn in cg.keys.sorted() where scopeMatches(fn, r.from) {
+                var seen: Set<String> = [fn], stack = cg[fn] ?? []
+                while let cur = stack.popLast() {
+                    if !seen.insert(cur).inserted { continue }
+                    if r.to.contains(where: { scopeMatches(cur, $0) }) { continue }  // permitted; not ours
+                    if !scopeMatches(cur, r.from) {
+                        gateViolations.append((rule: "AS-EFF-009", fn: fn, effects: [],
+                            detail: "`\(fn)` reaches `\(cur)`, which this permission rule does not permit: `\(r.raw)`",
                             reasonClass: [], netClass: []))
                         break
                     }

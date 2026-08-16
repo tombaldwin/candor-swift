@@ -374,6 +374,22 @@ public struct IgnoredLine {
     public var json: [String: Any] { ["line": line, "text": text, "reason": reason] }
 }
 
+/// ⟨0.29⟩ One `only <A> -> <B> [<C> …]` PERMISSION rule (AS-EFF-009): a function in scope `from` may
+/// reach `from` itself and the scopes in `to`, and NOTHING else.
+///
+/// **`ForbidRule` FAILS OPEN; this FAILS SAFE, and that is the whole reason it exists.** A dependency you
+/// forgot to prohibit is silently permitted, so "this package is a leaf" can only be spelled by
+/// enumerating what it must not reach — a list that does not cover a package added tomorrow, and nothing
+/// says so. That is the allowlist hazard candor refuses everywhere in the analysis, living in the POLICY
+/// LANGUAGE instead.
+public struct OnlyRule {
+    public var from: String
+    /// At least one. `only A ->` with nothing after the arrow is DROPPED as malformed.
+    public var to: [String]
+    public var raw: String
+    public init(from: String, to: [String], raw: String) { self.from = from; self.to = to; self.raw = raw }
+}
+
 public struct DenyRule { public var effects: [String]; public var scope: String; public var unknownClasses: [String]; public var netClasses: [String]; public var raw: String }
 public struct AllowRule { public var effect: String; public var scope: String; public var values: [String]; public var raw: String }
 public struct ForbidRule { public var from: String; public var to: String; public var raw: String }
@@ -390,6 +406,11 @@ public struct ParsedPolicy {
     public var deny: [DenyRule]
     public var allow: [AllowRule]
     public var forbid: [ForbidRule]
+    /// ⟨0.29⟩ the `only <A> -> <B> …` PERMISSION rules — see `OnlyRule`. Their own list, not folded into
+    /// `forbid`, because the two read OPPOSITE ways: a `forbid` names what must not happen, an `only`
+    /// names the complete set of what may, so a route handling one as the other INVERTS the verdict
+    /// rather than approximating it.
+    public var only: [OnlyRule]
     /// ⟨0.24⟩ EVERY LINE THE ENGINE DID NOT HONOUR AS WRITTEN — unrecognised tokens AND dropped rules
     /// (SPEC §3.1, candor-spec `195d45a`). A subset of these also make the GATE refuse (`gateReason`);
     /// the rest are reported by the witness and stay permissive. See `PolicyError`.
@@ -403,9 +424,10 @@ public struct ParsedPolicy {
     /// ⟨0.28⟩ the lines the parse DROPPED without refusing — see `IgnoredLine`. Rides the verdict
     /// document as `ignored`, omitted when empty.
     public var ignored: [IgnoredLine]
-    public init(deny: [DenyRule], allow: [AllowRule], forbid: [ForbidRule], errors: [PolicyError] = [],
+    public init(deny: [DenyRule], allow: [AllowRule], forbid: [ForbidRule], only: [OnlyRule] = [],
+                errors: [PolicyError] = [],
                 usedAliases: [String] = [], ignored: [IgnoredLine] = []) {
-        self.deny = deny; self.allow = allow; self.forbid = forbid
+        self.deny = deny; self.allow = allow; self.forbid = forbid; self.only = only
         self.errors = errors; self.usedAliases = usedAliases; self.ignored = ignored
     }
     /// ⟨0.24⟩ The refusal texts, in order — the GATE's view of `errors`. Empty means every line the
@@ -517,7 +539,7 @@ func policyDestClassPolicyError(_ token: String, _ line: String) -> PolicyError 
 }
 
 public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) -> ParsedPolicy {
-    var deny: [DenyRule] = [], allow: [AllowRule] = [], forbid: [ForbidRule] = []
+    var deny: [DenyRule] = [], allow: [AllowRule] = [], forbid: [ForbidRule] = [], only: [OnlyRule] = []
     var errors: [PolicyError] = []
     var usedAliases = Set<String>()
     var ignored: [IgnoredLine] = []
@@ -676,13 +698,28 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
                 continue
             }
             forbid.append(ForbidRule(from: a, to: b, raw: line))
+        // ⟨0.29⟩ THE PERMISSION FORM. Token-wise like its `forbid` sibling — the arrow is its own token —
+        // but everything AFTER the arrow is a permitted scope, so this takes a LIST where `forbid` takes
+        // one destination. An EMPTY tail is dropped rather than read as "A may reach nothing at all":
+        // that is a different rule, and one far likelier typed by accident than meant.
+        case "only":
+            let from = t.count > 1 ? t[1] : "", arrow = t.count > 2 ? t[2] : ""
+            let to = t.count > 3 ? Array(t[3...]) : []
+            if from.isEmpty || arrow != "->" || to.isEmpty {
+                errors.append(warnRule("want `only <scope> -> <scope> [<scope> …]`", line,
+                                       kind: "rule-form", token: t.dropFirst().joined(separator: " "),
+                                       accepted: ["only <scope> -> <scope> [<scope> …]"]))
+                ignore("want `only <scope> -> <scope> [<scope> …]`")
+                continue
+            }
+            only.append(OnlyRule(from: from, to: to, raw: line))
         default:
             errors.append(warnRule("unknown rule kind `\(t[0])`", line, kind: "rule-kind", token: t[0],
-                                   accepted: ["deny", "pure", "allow", "forbid"]))
+                                   accepted: ["deny", "pure", "allow", "forbid", "only"]))
             ignore("unknown rule kind `\(t[0])`")
         }
     }
-    return ParsedPolicy(deny: deny, allow: allow, forbid: forbid, errors: errors,
+    return ParsedPolicy(deny: deny, allow: allow, forbid: forbid, only: only, errors: errors,
                         usedAliases: usedAliases.sorted(), ignored: ignored)
 }
 
