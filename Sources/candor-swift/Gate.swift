@@ -623,7 +623,7 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
                 }
             }
         }
-        // ⟨0.29⟩ AS-EFF-009 — `only A -> B …`: a fn in A may reach A and the listed scopes, NOTHING else.
+        // ⟨0.29⟩ AS-EFF-011 — `only A -> B …`: a fn in A may reach A and the listed scopes, NOTHING else.
         // The same walk as `forbid` above with the test INVERTED, and the inversion is the point rather
         // than the code: `forbid` fails OPEN, so a leaf can only be protected by enumerating what it must
         // not reach — a list that does not cover a package added tomorrow. `only` fails SAFE.
@@ -639,7 +639,10 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
                     // ⟨0.29⟩ EXACT segment match — the shared prefix matcher is fail-OPEN here.
                     if r.to.contains(where: { scopeMatchesPermitted(cur, $0) }) { continue }
                     if !scopeMatches(cur, r.from) {
-                        gateViolations.append((rule: "AS-EFF-009", fn: fn, effects: [],
+                        // ⟨0.29⟩ ITS OWN CODE, not `forbid`'s — a rule code is what a CI suppression
+                        // keys on, and these two are opposite constructs. Sharing 009 would make an
+                        // existing `forbid` suppression silently mute `only` violations nobody accepted.
+                        gateViolations.append((rule: "AS-EFF-011", fn: fn, effects: [],
                             detail: "`\(fn)` reaches `\(cur)`, which this permission rule does not permit: `\(r.raw)`",
                             reasonClass: [], netClass: []))
                         break

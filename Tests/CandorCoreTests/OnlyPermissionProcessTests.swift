@@ -1,7 +1,7 @@
 import XCTest
 import Foundation
 
-/// ⟨0.29⟩ THE `only <A> -> <B> [<C> …]` PERMISSION FORM (SPEC §6.2, AS-EFF-009).
+/// ⟨0.29⟩ THE `only <A> -> <B> [<C> …]` PERMISSION FORM (SPEC §6.2, AS-EFF-011).
 ///
 /// **`forbid` FAILS OPEN; `only` FAILS SAFE.** A dependency you forgot to prohibit is silently permitted,
 /// so "this package is a leaf" could only be spelled by enumerating what it must not reach — an ALLOWLIST
@@ -56,7 +56,11 @@ final class OnlyPermissionProcessTests: XCTestCase {
     func testWhatThePermissionListOmitsIsAViolation() throws {
         let bad = try ProcessHarness.run(bin, [dir.path, "--out", p("r"), "--policy", p("short.policy")])
         XCTAssertEqual(bad.code, 1, bad.out + bad.err)
-        XCTAssertTrue((bad.out + bad.err).contains("AS-EFF-009"), bad.out + bad.err)
+        // ⟨0.29⟩ ITS OWN CODE, both halves: 011 present AND 009 absent — a suppression written for a
+        // `forbid` crossing must not silently mute this.
+        XCTAssertTrue((bad.out + bad.err).contains("AS-EFF-011"), bad.out + bad.err)
+        XCTAssertFalse((bad.out + bad.err).contains("AS-EFF-009"),
+                       "an `only` violation must not also carry `forbid`'s code: \(bad.out)\(bad.err)")
         XCTAssertTrue((bad.out + bad.err).contains("infra.dbRead"),
                       "the message must name what was reached: \(bad.out)\(bad.err)")
         XCTAssertTrue((bad.out + bad.err).contains("only model -> util"),
@@ -116,7 +120,7 @@ final class OnlyPermissionProcessTests: XCTestCase {
         let g = try ProcessHarness.run(bin, ["gate", "--report", p(report), "--policy", p("short.policy")])
         XCTAssertEqual(g.code, 2, "an unanswerable rule is refused, never evaluated: \(g.err)")
         XCTAssertTrue((g.out + g.err).contains("only model -> util"), g.out + g.err)
-        XCTAssertFalse((g.out + g.err).contains("AS-EFF-009"),
+        XCTAssertFalse((g.out + g.err).contains("AS-EFF-011"),
                        "no violation may be drawn from a report for this kind: \(g.out)\(g.err)")
 
         for verb in ["unverified", "fix-gate"] {

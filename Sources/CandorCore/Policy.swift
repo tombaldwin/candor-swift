@@ -374,7 +374,7 @@ public struct IgnoredLine {
     public var json: [String: Any] { ["line": line, "text": text, "reason": reason] }
 }
 
-/// ⟨0.29⟩ One `only <A> -> <B> [<C> …]` PERMISSION rule (AS-EFF-009): a function in scope `from` may
+/// ⟨0.29⟩ One `only <A> -> <B> [<C> …]` PERMISSION rule (AS-EFF-011): a function in scope `from` may
 /// reach `from` itself and the scopes in `to`, and NOTHING else.
 ///
 /// **`ForbidRule` FAILS OPEN; this FAILS SAFE, and that is the whole reason it exists.** A dependency you
