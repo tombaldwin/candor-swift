@@ -159,6 +159,12 @@ var policyPath: String? = ProcessInfo.processInfo.environment["CANDOR_POLICY"]
 var gateJsonPath: String? = nil
 var wantWorkspace = false
 var scopeTarget: String? = nil
+// ⟨0.29⟩ THE PEEK, CHILD SIDE — an INTERNAL flag, set only by this binary on itself. It names a file of
+// newline-separated absolute paths, and a run given it analyses EXACTLY those and skips the walk. It is
+// deliberately absent from `--help`: it is not a way to scan a file list (a positional path already is),
+// it is the process-boundary spelling of candor-rust's `ScanOpts.peek_excluded`, which that engine can
+// hold in a struct because its scan is a callable function and this engine's is top-level code.
+var peekListPath: String? = nil
 // ⟨scope travels⟩ what the `.xcodeproj` resolver learned, for the report envelope. See
 // `ReportModel.scope`: the verify that reads this report later has only a report and a plist, so
 // anything the scan knew about WHICH binary this is must be in the artifact or it is lost.
@@ -375,6 +381,15 @@ while let a = argIter.next() {
             refuseGateAndExit("candor-swift: --target requires a target name")
         }
         scopeTarget = v
+    case "--peek-excluded":
+        // ⟨0.29⟩ INTERNAL (see `peekListPath`). Valueless fails closed like its neighbours — a peek that
+        // silently became a whole-tree scan would report the project's own effects as out-of-scope
+        // findings, which is a false statement about which files the gate judged.
+        guard let v = argIter.next(), !v.hasPrefix("-") else {
+            FileHandle.standardError.write("candor-swift: --peek-excluded requires a value\n".data(using: .utf8)!)
+            refuseGateAndExit("candor-swift: --peek-excluded requires a value")
+        }
+        peekListPath = v
     case "--workspace", "--deps":
         // Auto-discover the target's LOCAL PATH dependencies (`.package(path:)` in Package.swift), scan
         // each into .candor/deps/ with protocol-CHA union entries, and chain them — so a cross-package
@@ -548,6 +563,12 @@ let candorConfig = loadCandorConfig(targetPath: target)
 // The --policy flag / CANDOR_POLICY env already populated policyPath; the config is the floor. A bare
 // `policy` line ("" value) means configured-with-empty → the unreadable-policy path fails loud.
 if policyPath == nil, let p = candorConfig["policy"] { policyPath = p }
+// ⟨0.29⟩ A PEEK NEVER PEEKS, AND NEVER GATES. The child is spawned with no `--policy`, but a policy also
+// arrives from `CANDOR_POLICY` (inherited) and from `.candor/config` (rediscovered from the same target),
+// so refusing the flag alone would leave two doors open — and either one would make the child gate a file
+// set the gate never judged, then spawn a peek of its own. Cleared HERE, where every source has already
+// been applied, rather than at each source: that is the one place the answer cannot be routed around.
+if peekListPath != nil { policyPath = nil }
 
 let fm = FileManager.default
 var isDir: ObjCBool = false
@@ -564,15 +585,45 @@ guard fm.fileExists(atPath: target, isDirectory: &isDir) else {
 let rootDir = isDir.boolValue ? target : (target as NSString).deletingLastPathComponent
 
 var sourcePaths: [String] = []
-if isDir.boolValue {
+// ⟨0.29⟩ THE SCOPE (candor-spec/FILE-SET-DESIGN.md §5): every file this walk skips, and WHY. Recorded
+// AT THE SKIP rather than derived afterwards — a second walk could disagree with this one, and the
+// disclosure would then describe an exclusion that did not happen, which is a different and worse kind
+// of wrong than saying nothing. `.build/` is separated from the rest because it is UNBOUNDED and is the
+// one class the peek must not read: a checkout tree holds other people's tests, and the noise floor
+// "everything you vendored" is how a warning becomes something people scroll past.
+var excludedFiles: [(path: String, cls: String)] = []
+if let listFile = peekListPath {
+    // ⟨0.29⟩ THE PEEK, CHILD SIDE. The parent hands us the EXACT set it disclosed as excluded, and we
+    // analyse that and nothing else — same binary, same walk-free entry into `analyze`, same classifier.
+    // See the parent half below for why this is a child process at all: candor-rust recurses into
+    // `scan_one`, and this engine's scan is top-level code rather than a callable function, so the same
+    // "one classifier, two file sets" guarantee has to come from the same BINARY.
+    //
+    // The list is the parent's, not a re-derivation: `--target` prunes sources far below this point, so a
+    // child re-running the exclusion rules would peek at a different set from the one the report declares.
+    guard let text = try? String(contentsOfFile: listFile, encoding: .utf8) else {
+        FileHandle.standardError.write("candor-swift: --peek-excluded: cannot read \(listFile)\n".data(using: .utf8)!)
+        exit(2)
+    }
+    sourcePaths = text.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+} else if isDir.boolValue {
     if let en = fm.enumerator(atPath: target) {
         for case let rel as String in en {
-            guard rel.hasSuffix(".swift"), !isHarnessPath(rel) else { continue }
+            guard rel.hasSuffix(".swift") else { continue }
+            if isHarnessPath(rel) {
+                excludedFiles.append((rel, rel.split(separator: "/").contains(".build") ? "build-output"
+                                         : (rel as NSString).lastPathComponent == "Package.swift" ? "manifest"
+                                         : "harness-target"))
+                continue
+            }
             let abs = (target as NSString).appendingPathComponent(rel)
             // …and a file that IMPORTS XCTest is a test wherever it sits. See `isTestSource`: an app
             // whose tests live beside their sources had them analysed as production, and a capture in a
             // test `setUp()` became the evidence that a shipping app's manifest was wrong.
-            if let text = try? String(contentsOfFile: abs, encoding: .utf8), isTestSource(text) { continue }
+            if let text = try? String(contentsOfFile: abs, encoding: .utf8), isTestSource(text) {
+                excludedFiles.append((rel, "test-source"))
+                continue
+            }
             sourcePaths.append(abs)
         }
     }
@@ -937,6 +988,12 @@ func rel(_ path: String, to root: String) -> String {
     return p.hasPrefix(r + "/") ? String(p.dropFirst(r.count + 1)) : p
 }
 
+// ⟨0.29⟩ The `--target` prune below removes files from `sourcePaths`, and those are excluded exactly like
+// the walk's skips: same-language source under the scan root that this run did not judge. Captured as a
+// DIFF of the selector's own two states rather than by re-deriving the closure — a second derivation could
+// disagree with the one that actually ran, and the disclosure would then describe a prune that did not
+// happen. Empty when `--target` is absent, since nothing is removed.
+let sourcePathsBeforeScoping = sourcePaths
 if let want = scopeTarget {
     let manifestPath = (rootDir as NSString).appendingPathComponent("Package.swift")
     // A repo with BOTH a Package.swift and an .xcodeproj resolves via SwiftPM, unchanged — the Xcode
@@ -1062,6 +1119,15 @@ if let want = scopeTarget {
                 + "they import. Scan with `--target <name>` to see why one of them refuses.\n")
                 .data(using: .utf8)!)
         }
+    }
+}
+// ⟨0.29⟩ …and the prune's own record. `--target` is the sharpest of this engine's exclusions: the files it
+// removes are production source, in the scanned tree, that a whole-repo scan WOULD have judged — so a
+// verdict read without knowing the prune happened is a verdict about a different question.
+if scopeTarget != nil, sourcePaths.count < sourcePathsBeforeScoping.count {
+    let kept = Set(sourcePaths)
+    for p in sourcePathsBeforeScoping where !kept.contains(p) {
+        excludedFiles.append((rel(p, to: rootDir), "outside-the-target-closure"))
     }
 }
 
@@ -1655,6 +1721,139 @@ if !analysis.typeSurfaceReturns.isEmpty {
     var ts: [String: String] = [:]
     for (fn, ty) in analysis.typeSurfaceReturns { ts["\(pkgName)#\(fn)"] = "\(pkgName)#\(ty)" }
     report.typeSurfaceReturns = ts
+}
+// ── ⟨0.29⟩ THE SCOPE, AND THE PEEK ────────────────────────────────────────────────────────────────
+// The reason strings say WHY and what the exclusion COSTS, because a consumer reads them to decide
+// whether the exclusion matches the question they are asking. Paraphrasing the engine's own rationale
+// into something vaguer would defeat the block — conformance asserts on this VALUE, not on the key.
+let EXCLUDED_REASON: [String: String] = [
+    "manifest": "Package.swift is BUILD CONFIGURATION — SwiftPM compiles and runs it to describe the "
+        + "package, so it does not run when your library is called and this scan did not judge it. It "
+        + "DOES run on every `swift build` (the `build.rs` analog).",
+    "harness-target": "SPM's Tests/Plugins/Benchmarks/Examples/Snippets directories describe what the "
+        + "HARNESS does, not what the package does — but they still run in CI.",
+    "test-source": "a file importing XCTest or Testing is test code wherever it sits, so its effects are "
+        + "the harness's rather than the package's.",
+    "outside-the-target-closure": "`--target` was given, so this verdict covers that target's closure "
+        + "ONLY — these are production sources in the scanned tree that an unscoped scan WOULD have judged.",
+    "build-output": "`.build/` holds the toolchain's artifacts and checked-out dependency sources, not "
+        + "this package's own code. Counted, and deliberately NOT read by the peek: a checkout tree is "
+        + "unbounded, and other people's tests are not a finding about your project.",
+]
+var excludedByClass: [String: Int] = [:]
+for e in excludedFiles { excludedByClass[e.cls, default: 0] += 1 }
+report.excluded = excludedByClass.keys.sorted().map {
+    (cls: $0, count: excludedByClass[$0]!, reason: EXCLUDED_REASON[$0] ?? "excluded (\($0))")
+}
+// THE PEEK. Read the files this scan deliberately did NOT judge, and say so when they hold an effect the
+// policy DENIES. The verdict does not move — `outOfScope` is its own kind, never a violation — because a
+// file the gate declined to judge must not decide an exit code.
+//
+// A CHILD `candor-swift`, not a second analysis path. candor-rust buys the same guarantee by recursing
+// into `scan_one`; this engine's scan is TOP-LEVEL CODE rather than a callable function, so "same
+// classifier, different file set" has to come from the same BINARY. That identity is the design
+// constraint and not an implementation convenience: a bespoke pass over Tests/ would be a SECOND OPINION,
+// and a drifted second opinion reported as a warning is worse than no warning, because the reader cannot
+// tell a real finding from two code paths disagreeing.
+//
+// PLACED ABOVE the envelope serialization on purpose. The gate runs after the report is written, so
+// computing this there would put the finding on stderr and leave it out of the artifact — the split
+// ⟨0.26⟩ calls worse than saying nothing.
+//
+// POLICY-SCOPED AND POLICY-BOUNDED, which is the whole reason it stays quiet. No policy ⇒ the key is
+// ABSENT, because nothing was asked and `[]` would be a claim. With a policy, only effects that policy
+// DENIES are reported — otherwise the noise floor is "everything you excluded".
+if peekListPath == nil, let pp = policyPath {
+    let denied = Set(((try? String(contentsOfFile: pp, encoding: .utf8))
+        .map { parsePolicy($0, aliases: [:]) }?.deny ?? []).flatMap { $0.effects })
+    // `.build/` is excluded from the peek, not just from the scan — see its reason above.
+    let peekable = excludedFiles.filter { $0.cls != "build-output" }
+    if !denied.isEmpty && !peekable.isEmpty {
+        // A policy WAS configured, so the key is now a real answer: `[]` says "we looked and found
+        // nothing", which is what ⟨0.27⟩ asks a zero-match to say out loud.
+        var found: [OutOfScopeFinding] = []
+        let peekDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-peek-\(ProcessInfo.processInfo.processIdentifier)")
+        defer { try? fm.removeItem(at: peekDir) }
+        try? fm.createDirectory(at: peekDir, withIntermediateDirectories: true)
+        let listURL = peekDir.appendingPathComponent("files.txt")
+        let absOf: (String) -> String = { (rootDir as NSString).appendingPathComponent($0) }
+        do {
+            try peekable.map { absOf($0.path) }.joined(separator: "\n")
+                .write(to: listURL, atomically: true, encoding: .utf8)
+            let child = Process()
+            // `Bundle.main.executablePath` FIRST, argv[0] only as the fallback. argv[0] is what the
+            // `--workspace` spawn beside this uses, and it is a relative name (`candor-swift`, no slash)
+            // for every PATH-invoked run — which is how the tool is actually installed. That spawn fails
+            // loudly per dep; a peek failing there would go quiet, so it takes the absolute answer where
+            // one exists.
+            child.executableURL = URL(fileURLWithPath: Bundle.main.executablePath ?? CommandLine.arguments[0])
+            child.arguments = [target, "--peek-excluded", listURL.path, "--json"]
+            let pipe = Pipe()
+            child.standardOutput = pipe
+            // The child's own stderr is DISCARDED. It is a second scan of the same tree and its
+            // κ/coverage notes are about a file set the operator never asked about — printing them
+            // twice, once per set, is how an advisory becomes noise.
+            child.standardError = FileHandle.nullDevice
+            child.standardInput = FileHandle.nullDevice
+            // NOT `waitUntilExit()` — on swift-corelibs-foundation it blocks FOREVER once the child has
+            // already finished, which is exactly the state draining to EOF guarantees. See the
+            // `--workspace` spawn above for the 10-of-10 measurement; this is the same primitive and the
+            // same fix, and using the broken one here would hang every Linux scan that has a policy.
+            let exited = DispatchSemaphore(value: 0)
+            child.terminationHandler = { _ in exited.signal() }
+            try child.run()
+            // Drain BEFORE waiting: a report larger than the pipe buffer blocks the child on write while
+            // the parent blocks on exit, and the two wait for each other forever.
+            let out = pipe.fileHandleForReading.readDataToEndOfFile()
+            try? pipe.fileHandleForReading.close()
+            exited.wait()
+            let doc = (try? JSONSerialization.jsonObject(with: out)) as? [String: Any] ?? [:]
+            for f in (doc["functions"] as? [[String: Any]] ?? []) {
+                let hits = (f["inferred"] as? [String] ?? []).filter { denied.contains($0) }
+                if hits.isEmpty { continue }
+                // NAME THE FILE FROM THE PARENT'S OWN LIST. The child's `loc:` is written from the
+                // absolute path it was handed, and the path the operator can act on is the one this run
+                // already disclosed as excluded — so the finding and the `excluded` entry it belongs to
+                // are spelled the same way, and its class comes from the same record rather than a
+                // second classification of the path.
+                // Both sides normalized to an ABSOLUTE path before comparing. The child writes `loc:`
+                // relative to the root it was handed — the same root as this run's — so a match on the
+                // raw strings compared a relative path against the absolute one from the list and MISSED
+                // every time, silently falling back to the class `excluded`: the finding survived and the
+                // reason string that explains it went generic. A join through `candorAbsolutePath` is the
+                // only spelling right for both an absolute and a relative scan root.
+                let childLoc = String((f["loc"] as? String ?? "").split(separator: ":").first ?? "")
+                let childAbs = candorAbsolutePath(childLoc.hasPrefix("/") ? childLoc
+                                                  : (rootDir as NSString).appendingPathComponent(childLoc))
+                let hit = peekable.first { candorAbsolutePath(absOf($0.path)) == childAbs }
+                let cls = hit?.cls ?? "excluded"
+                found.append(OutOfScopeFinding(
+                    fn: f["fn"] as? String ?? "", path: hit?.path ?? childLoc,
+                    effects: hits.sorted(), cls: cls,
+                    reason: "OUTSIDE this scan's scope (\(cls)) — the gate did NOT judge it. "
+                          + "The effect is real; the verdict does not account for it."))
+            }
+            found.sort { ($0.path, $0.fn) < ($1.path, $1.fn) }
+        } catch {
+            // A PEEK THAT CANNOT RUN MUST NOT FAIL THE GATE. It is advisory by construction, and turning
+            // a child-process failure into a red gate would make adding a policy — the safest thing an
+            // operator can do — the thing that breaks their build. `found` stays as far as it got.
+        }
+        report.outOfScope = found
+        // SAY IT ON STDERR TOO, and above the verdict. The report block is for machines; an operator
+        // reading `policy ✓` needs to know in the same breath that a file this scan did not judge holds
+        // the effect they denied. A caveat printed below a green tick is a caveat nobody reaches.
+        for f in found {
+            FileHandle.standardError.write(("candor-swift: ⚠ \(f.fn) performs \(f.effects.joined(separator: "+"))"
+                + " — OUTSIDE this scan's scope (\(f.cls)), so the gate did NOT judge it.\n"
+                + "             \(f.path)\n").data(using: .utf8)!)
+        }
+        if !found.isEmpty {
+            FileHandle.standardError.write(("             The verdict does not account for "
+                + (found.count == 1 ? "it." : "these \(found.count).") + "\n").data(using: .utf8)!)
+        }
+    }
 }
 let envelope: [String: Any] = report.toJSON()
 var cg: [String: [String]] = [:]

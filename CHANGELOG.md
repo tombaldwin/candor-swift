@@ -9,6 +9,31 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.29⟩ ⚠ The report declares what the scan chose not to open, and READS it.** `analyzed.count` is
+  a NUMERATOR; the file selection that produced it appeared nowhere, so a consumer could not tell
+  whether the answer was to the question they asked. Measured on this engine 2026-08-15: `deny Exec`
+  over a package whose `Tests/Helper.swift` runs `Process().run()` answered `policy ✓`, exit 0, with
+  nothing on stderr and no key in the report. Two halves, per candor-spec/FILE-SET-DESIGN.md §5.2:
+  - `excluded` — one entry per class (`manifest`, `harness-target`, `test-source`,
+    `outside-the-target-closure`, `build-output`) with a count and the engine's own reason. Classes
+    with counts, never file lists: `.build/` is unbounded, and a gate that prints thousands of paths is
+    one people scroll past. ALWAYS emitted, `[]` included — ⟨0.27⟩ makes a zero-match a positive
+    statement, and ⟨0.26⟩ makes an absent key mean "this producer cannot answer".
+  - `outOfScope` — THE PEEK. The excluded files are read, and an effect the policy DENIES in one of
+    them is reported as its own kind. The verdict does not move: exit unchanged, `violations`
+    untouched, the function absent from `functions`. A file the gate declined to judge must not decide
+    an exit code. Policy-SCOPED (no policy ⇒ the key is absent, because nothing was asked) and BOUNDED
+    by the policy (`deny Net` says nothing about an `Exec` in your test tree) — which is what keeps it
+    quiet enough to be worth reading.
+
+  A CHILD `candor-swift` over the parent's own excluded list, not a second analysis path. candor-rust
+  recurses into `scan_one`; this engine's scan is top-level code rather than a callable function, so
+  "same classifier, different file set" comes from the same BINARY. A bespoke pass would be a second
+  opinion, and a drifted second opinion reported as a warning is worse than no warning. The child is
+  handed the parent's list rather than re-deriving it (`--target` prunes far below the walk), gets no
+  policy from flag, env or config, and a peek that cannot run leaves `[]` rather than failing the gate.
+  `.build/` is counted and deliberately NOT peeked: other people's tests are not a finding about your
+  project. The self-gate's subprocess inventory moves 2 → 3, with the justification recorded in it.
 - **⟨0.29⟩ `unverified` and `fix-gate` certified over a policy the gate had refused.** Both hand
   `pol.deny` to the core, so `forbid`/`allow` were dropped at the call boundary and a `forbid`-only
   policy produced `{"ok": true, …}` at exit 0 — a certification relative to a gate that evaluated
