@@ -34,7 +34,12 @@ final class EnvelopeShapeProcessTests: XCTestCase {
         // A new key here is a WIRE CHANGE. Updating this pin is the moment to also update SPEC §2 — the
         // point of an exact set is that the two move together rather than a field arriving in a diff
         // nobody reads.
-        XCTAssertEqual(Set(env.keys), ["candor", "package", "functions", "analyzed", "resolves"],
+        // ⟨0.29⟩ `excluded` joined the set, and it belongs with the ALWAYS-emitted keys rather than the
+        // optional ones: `[]` is the positive statement "I looked and excluded nothing", and an absent key
+        // would mean "this producer cannot answer" (⟨0.26⟩). This pin firing on the rung's first build is
+        // the row doing its job. `outOfScope` is NOT here — this scan configures no policy, so nothing was
+        // asked and the key is correctly absent.
+        XCTAssertEqual(Set(env.keys), ["candor", "package", "functions", "analyzed", "resolves", "excluded"],
                        "envelope top level drifted — update SPEC §2 and this pin TOGETHER, never silently")
 
         let hdr = try XCTUnwrap(env["candor"] as? [String: Any], "the provenance header must be an object")

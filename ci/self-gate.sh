@@ -86,7 +86,13 @@ spawn_rc=$?
 # sites directly. A new `Process()` anywhere — including inside a top-level `if` — moves a count and
 # fails, and so does one REMOVED, because a ratchet that only tightens stops describing the code.
 # Deliberately crude: it does not know reachability. It knows how many places can start a process.
-EXPECTED_SPAWN_SITES="Sources/candor-swift/main.swift:2"
+# ⟨0.29⟩ 2 → 3: THE PEEK spawns this same binary over the file set the scan excluded (main.swift, above
+# the envelope write). Justified, and the justification is the rung's own design constraint — the peek
+# must reach an effect through the SAME classifier as the gate, and this engine's scan is top-level code
+# rather than a callable function, so the only way to reuse it is to reuse the BINARY. A hand-written
+# second pass over Tests/ would need no spawn at all and would be a second opinion, which is exactly what
+# rung 2 forbids. This ratchet is the reason that trade got stated instead of assumed.
+EXPECTED_SPAWN_SITES="Sources/candor-swift/main.swift:3"
 # Comment TAILS, not just comment lines: `case "Exec": … // path arg (Process() ctor` in Classifier.swift
 # is a documentation reference on a code line, and a leading-`//` filter counted it as a spawn site.
 actual_sites="$(grep -rn 'Process()' "$ROOT/Sources" 2>/dev/null \

@@ -101,6 +101,24 @@ struct Report {
     // lookup. OMITTED when empty, so a report with nothing to say is byte-identical to a pre-rung one and
     // a 0.22 consumer is unaffected. Set in main.swift from `analysis.typeSurfaceReturns`.
     var typeSurfaceReturns: [String: String] = [:]
+    // ⟨0.29⟩ THE SCOPE — what this scan chose NOT to open, by class (candor-spec/FILE-SET-DESIGN.md).
+    // `analyzed.count` is a NUMERATOR; the file selection that produced it appeared nowhere, so a consumer
+    // could not tell whether the answer was to the question they asked. Every exclusion this engine makes
+    // is deliberate (`isHarnessPath`, `isTestSource`, a `--target` closure) — and being deliberate is
+    // precisely why none of them was measured: a limitation written as a comment reads as CONSIDERED.
+    //
+    // CLASSES WITH COUNTS, never file lists: `.build/` is unbounded, and a gate that prints thousands of
+    // paths is one people scroll past. ALWAYS emitted, `[]` included — ⟨0.27⟩ makes a zero-match a positive
+    // statement, and ⟨0.26⟩ makes an ABSENT key mean "this producer cannot answer", which is a different
+    // claim from "nothing was excluded". Set in main.swift from the walk itself.
+    var excluded: [(cls: String, count: Int, reason: String)] = []
+    // ⟨0.29⟩ what the PEEK found in those files: an effect the policy DENIES, in a file the gate did not
+    // judge. NIL (key omitted) when no policy was configured — nothing was asked, so `[]` would be a claim.
+    // EMPTY when a policy was configured and the excluded files were clean under it.
+    //
+    // NEVER A `violation`. Folding these into the gate would move verdicts and make an exit code depend on
+    // a file the gate declined to judge — the opposite of what this rung promises.
+    var outOfScope: [OutOfScopeFinding]? = nil
     // ⟨scope travels⟩ What `--target` resolved, when it resolved against an `.xcodeproj`. The report is
     // read LATER by `privacy-manifest --verify`, which has only a report and a plist — so everything the
     // scan learned about which binary this is has to be IN the artifact or it is lost. Today the verify
@@ -157,7 +175,23 @@ struct Report {
         }
         // ⟨0.23⟩ the factory-bound receiver's type surface — omitted when empty (see above).
         if !typeSurfaceReturns.isEmpty { env["typeSurface"] = ["returns": typeSurfaceReturns] }
+        // ⟨0.29⟩ THE SCOPE — ALWAYS emitted, `[]` included (see `excluded`). The one field in this
+        // envelope whose EMPTY form is load-bearing: it says "I looked, and excluded nothing".
+        env["excluded"] = excluded.map { ["class": $0.cls, "count": $0.count, "reason": $0.reason] as [String: Any] }
+        // ⟨0.29⟩ …and what the peek found in them. Omitted when nil — no policy, so no question was asked.
+        if let oos = outOfScope { env["outOfScope"] = oos.map { $0.toJSON() } }
         return env
+    }
+}
+// ⟨0.29⟩ AN EFFECT FOUND IN A FILE THE GATE DID NOT JUDGE (candor-spec/FILE-SET-DESIGN.md §5.2).
+//
+// Its own kind, beside `functions` and never inside it: the verdict does not move, so a reader can tell a
+// warning about unjudged code from a violation in judged code. `class` is the exclusion class it came from
+// (`harness-target`, `manifest`, …) so the reason for the exclusion and the finding travel together.
+struct OutOfScopeFinding {
+    let fn: String, path: String, effects: [String], cls: String, reason: String
+    func toJSON() -> [String: Any] {
+        ["fn": fn, "path": path, "effects": effects, "class": cls, "reason": reason]
     }
 }
 // The `privacy/1` effects as `Effect` values — for the disjoint-set membership test in `privacyActive`
