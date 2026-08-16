@@ -9,6 +9,15 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.29⟩ `only <A> -> <B> [<C> …]` — the PERMISSION form (SPEC §6.2, AS-EFF-009).** `A` may reach `A`
+  itself and the listed scopes, nothing else. **`forbid` FAILS OPEN — the dependency you forgot to
+  prohibit is silently permitted — so a leaf package could only be protected by an enumeration that does
+  not cover a package added tomorrow.** `only` fails SAFE. The walk STOPS at a permitted scope, `A -> A`
+  is implicit, zero-match is measured on `from`, the ⟨0.28⟩ zero-rule guard counts the new kind (its own
+  doc comment says a check reading a SUBSET of the kinds is the false-answer shape it exists to close),
+  and a report route REFUSES it (exit 2) for a stricter reason than `forbid`'s: `only` asks whether
+  EVERYTHING reached is on a list, so a report that omits a crossing turns a green into a claim of
+  COMPLETENESS.
 - **⟨0.29⟩ A refusal NAMES THE RULE, not a count of its kind.** `gate --report` over a `forbid`/`allow`
   policy said *"this policy has 1 `forbid` rule(s)"* — a fact about the FILE handed to a reader asking
   which LINE stopped their gate, and with two rules every row said "2". Measured family-wide on one

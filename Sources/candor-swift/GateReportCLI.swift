@@ -461,6 +461,19 @@ func wholePolicyRefusals(_ pol: ParsedPolicy, _ policyPath: String) -> [Unevalua
                    + "on NAME. The rule would read green over a crossing a scan fails on. Gate layering at "
                    + "scan time: candor-swift <dir> --policy \(policyPath)"))
     }
+    // ⟨0.29⟩ `only` IS AS UNANSWERABLE AS `forbid`, and for a STRICTER reason. Both match on NAME, which a
+    // report's effect-relevant wire cannot settle — but `forbid` asks whether ONE named crossing is
+    // present, while `only` asks whether EVERYTHING reached is on a list. A report that omits a crossing
+    // makes `forbid` read green; it makes `only` read green as a claim of COMPLETENESS.
+    for r in pol.only {
+        policyRefusals.append(Unevaluated(rule: r.raw, why:
+            "`\(r.raw.trimmingCharacters(in: .whitespaces))` is an `only` rule, which `gate --report` "
+               + "cannot evaluate — it asks whether EVERYTHING a scope reaches is on a list, and a report "
+               + "carries an effect-relevant call surface rather than the complete dependency graph a "
+               + "NAME-matching rule needs. Answering it here would certify completeness from evidence "
+               + "that is not complete. Gate permissions at scan time: candor-swift <dir> --policy "
+               + "\(policyPath)"))
+    }
     if !pol.allow.isEmpty {
         for r in pol.allow {
             // …AND ITS SIBLING, in the same change. `allow` is the kind no conformance row anywhere
@@ -692,7 +705,12 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // many*. candor-java emits `"forbid (× 2)"` and loses which two; that satisfies a naive reading of
     // "disclose which rules" while answering the other one.
     let policyRefusals = wholePolicyRefusals(pol, policyPath)
-    let denyOnly = ParsedPolicy(deny: pol.deny, allow: [], forbid: [])
+    // ⟨0.29⟩ `only: []` STATED, not left to the default. The refused kinds are REMOVED here, not merely
+    // disclosed beside the verdict — a kind left in the object is a kind the evaluator walks, and the
+    // disclosure would then stand next to the very evaluation it says did not happen. The java arm of
+    // this port shipped exactly that defect for one build because its removal site was fifty lines from
+    // where the kind was added; relying on a default parameter to be right is the same bet.
+    let denyOnly = ParsedPolicy(deny: pol.deny, allow: [], forbid: [], only: [])
 
     let locator = reportFlag.map(resolveReportLocator) ?? discoverReportPrefix()
     guard let prefix = locator else {
