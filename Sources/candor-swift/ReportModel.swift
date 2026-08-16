@@ -155,7 +155,9 @@ struct Report {
         // an absent `fs` is overloaded between "does not compute kinds" and "computed and could not
         // determine one", and a consumer cannot read the omission. A producer MUST NOT list a surface it
         // does not compute — that turns "unimplemented" into a false "undetermined".
-        env["resolves"] = ["fs"]
+        // ⟨0.29⟩ `incomplete` joins the list — an optional per-function refinement surface whose absence
+        // is overloaded exactly the way `fs`'s was. This engine computes it, so it declares it.
+        env["resolves"] = ["fs", "incomplete"]
         // ⟨scope travels⟩ see `scope` above. `entitlements` is present only when the target's
         // `CODE_SIGN_ENTITLEMENTS` named a file that EXISTS — absent means "not determined", never
         // "this target has none", which is the distinction a consumer has to be able to make.
