@@ -77,7 +77,12 @@ final class FileSetScopeProcessTests: XCTestCase {
         XCTAssertTrue(why.contains("HARNESS") && why.contains("CI"),
                       "the reason must say WHY and what it costs, not just name the class: \(why)")
 
-        XCTAssertEqual(harness["peeked"] as? Bool, true, "the peek reads Tests/, and the block must say so")
+        // ⟨0.29⟩ `peeked` IS AN OUTCOME, and this scan configures NO POLICY — no peek ran, nothing was
+        // read, so `false` is the honest answer even for a class the peek is willing to read. This row
+        // asserted `true` while the flag was a per-class constant, which is the overclaim the flag exists
+        // to prevent. The TRUE case is asserted in the peek row, where a read actually happens.
+        XCTAssertEqual(harness["peeked"] as? Bool, false,
+                       "no policy ⇒ no peek ⇒ no class may claim to have been read: \(harness)")
 
         let manifest = try XCTUnwrap(find("manifest"), "Package.swift must be declared as excluded: \(ex)")
         XCTAssertEqual(manifest["count"] as? Int, 1)
@@ -113,6 +118,11 @@ final class FileSetScopeProcessTests: XCTestCase {
                        "named from the PROJECT-relative path the `excluded` block already disclosed")
         XCTAssertTrue((oos[0]["reason"] as? String ?? "").contains("did NOT judge"),
                       "the reason must say the gate did not judge it: \(oos[0])")
+        // ⟨0.29⟩ …and NOW the class may say it was read, because on this run it was.
+        let exRead = try XCTUnwrap(d["excluded"] as? [[String: Any]], r.out)
+        let harnessRead = try XCTUnwrap(exRead.first { $0["class"] as? String == "harness-target" }, "\(exRead)")
+        XCTAssertEqual(harnessRead["peeked"] as? Bool, true,
+                       "the peek READ this class on this run, so the flag must say so: \(harnessRead)")
         // THE VERDICT DOES NOT MOVE. This is the promise of the chosen rung: a file the gate declined to
         // judge must not decide an exit code, and must not appear among the judged functions.
         XCTAssertEqual(r.code, 0, "an out-of-scope finding must not change the exit code: \(r.err)")

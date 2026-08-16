@@ -136,7 +136,11 @@ final class ParsePolicyErrorsProcessTests: XCTestCase {
         XCTAssertEqual(p.code, 0)
         XCTAssertFalse(p.obj.keys.contains("errors"),
                        "a clean parse must stay byte-identical to pre-feature: \(p.obj)")
-        XCTAssertEqual(Set(p.obj.keys), ["deny", "allow", "forbid"], "\(p.obj)")
+        // ⟨0.29⟩ `only` joined the witness. This row PINNED THE OMISSION in place: it asserted the exact
+        // three-key set, so the rung that added a fourth rule kind would have had to change this line to
+        // publish it — and instead the kind was left out of the witness entirely and this row passed,
+        // agreeing with itself about a document that had stopped describing the grammar.
+        XCTAssertEqual(Set(p.obj.keys), ["deny", "allow", "forbid", "only"], "\(p.obj)")
     }
 
     /// **THE WITNESS MUST NOT DELETE ITSELF.** `parsepolicy` MUST NOT REFUSE a policy it can READ and

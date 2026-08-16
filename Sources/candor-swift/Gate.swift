@@ -636,7 +636,8 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
                 var seen: Set<String> = [fn], stack = cg[fn] ?? []
                 while let cur = stack.popLast() {
                     if !seen.insert(cur).inserted { continue }
-                    if r.to.contains(where: { scopeMatches(cur, $0) }) { continue }  // permitted; not ours
+                    // ⟨0.29⟩ EXACT segment match — the shared prefix matcher is fail-OPEN here.
+                    if r.to.contains(where: { scopeMatchesPermitted(cur, $0) }) { continue }
                     if !scopeMatches(cur, r.from) {
                         gateViolations.append((rule: "AS-EFF-009", fn: fn, effects: [],
                             detail: "`\(fn)` reaches `\(cur)`, which this permission rule does not permit: `\(r.raw)`",

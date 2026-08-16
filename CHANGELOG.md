@@ -9,6 +9,24 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ ⟨0.29⟩ THE PEEK CHILD INHERITED THE BASELINE.** The policy was cleared from all three of its
+  sources; `baselinePath` arrives by the IDENTICAL env-over-config ladder (`CANDOR_BASELINE`, then the
+  config's `baseline` key) and nothing cleared it — so a peek child on any baselined project ran the
+  AS-EFF-005 ratchet independently over an arbitrary excluded-file subset. REPRODUCED on the exact argv
+  the parent hands the child: exit 1, `[AS-EFF-005] helper gained effect { Exec } not present in the
+  baseline`. Silent only because the parent never inspected the child's exit status — so the obvious
+  hardening would have started silently losing every peek finding on a baselined project. The comment
+  arguing that clearing at the merge point is "the one place the answer cannot be routed around" was
+  right about policy's three routes and never asked whether policy was the only GATE.
+- **⚠ ⟨0.29⟩ `excluded[].peeked` came from a static class table**, so a child that crashed or returned
+  nothing still published it beside `outOfScope: []`. An outcome now, and the scope block is assembled
+  after the peek rather than before it.
+- **⟨0.29⟩ `only`'s permitted scopes match by exact segment run** — the shared prefix matcher is
+  fail-CLOSED for deny/forbid and fail-OPEN for a permission. Found by review, four-way.
+- **⟨0.29⟩ A 120s deadline on the peek child**, which re-parses exactly the files this engine has never
+  parsed; an unbounded wait turned one pathological input into a hung scan and a hung CI job. Also:
+  `parsepolicy` publishes `only` (a test pinned the three-key set and so pinned the omission in place),
+  and `--peek-excluded` with no value no longer prints its refusal twice.
 - **⟨0.29⟩ `resolves` now declares `incomplete`** (SPEC §2.1). An absent `incomplete` is overloaded
   between "this producer does not compute undetermined locators" and "it computed them and found none" —
   exactly the ambiguity `resolves` was built for, one field over from the `fs` case that motivated it. A

@@ -76,6 +76,10 @@ if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "parsepolicy" {
         }),
         "allow": sortedByJson(pol.allow.map { ["effect": $0.effect, "scope": $0.scope, "values": $0.values] }),
         "forbid": sortedByJson(pol.forbid.map { ["from": $0.from, "to": $0.to] }),
+        // ⟨0.29⟩ the PERMISSION form rides the witness too — this verb exists so the conformance suite can
+        // diff what each engine made of one policy, so a rule kind missing here is a kind the differential
+        // cannot see. It was omitted while candor-java emitted it, and PART 4 read three keys and stopped.
+        "only": sortedByJson(pol.only.map { ["from": $0.from, "to": $0.to] }),
     ]
     // ⟨0.24⟩ `errors` — EVERY LINE THE ENGINE DID NOT HONOUR AS WRITTEN (SPEC §3.1, candor-spec
     // `195d45a` + `901f14d`). MEASURED 2026-07-28 on the conformance battery: java 10, ts 2, rust 0,
@@ -386,7 +390,8 @@ while let a = argIter.next() {
         // silently became a whole-tree scan would report the project's own effects as out-of-scope
         // findings, which is a false statement about which files the gate judged.
         guard let v = argIter.next(), !v.hasPrefix("-") else {
-            FileHandle.standardError.write("candor-swift: --peek-excluded requires a value\n".data(using: .utf8)!)
+            // `refuseGateAndExit` writes `reason` to stderr as its first action, so the manual write this
+            // arm used to do printed the identical line twice. Every neighbouring flag calls it alone.
             refuseGateAndExit("candor-swift: --peek-excluded requires a value")
         }
         peekListPath = v
@@ -1744,16 +1749,10 @@ let EXCLUDED_REASON: [String: String] = [
 // `.build/` is the one this engine holds back: a checkout tree is unbounded, and other people's tests are
 // not a finding about your project. The report says so per class rather than leaving `outOfScope: []` to
 // be read as "and I checked those too".
+/// ⟨0.29⟩ thrown when the peek child misses its deadline — caught by the peek's own catch,
+/// which leaves the findings as far as they got and the classes marked unpeeked.
+struct PeekTimedOut: Error {}
 let PEEKED_CLASSES: Set<String> = ["manifest", "harness-target", "test-source", "outside-the-target-closure"]
-var excludedByClass: [String: Int] = [:]
-for e in excludedFiles { excludedByClass[e.cls, default: 0] += 1 }
-report.excluded = excludedByClass.keys.sorted().map {
-    // ONE SOURCE FOR "does the peek read this class" — the same `PEEKED` set the peek filters on below,
-    // so the block cannot say a class was read while the peek skips it. Stating it twice is how a
-    // disclosure ends up describing behaviour the code no longer has.
-    (cls: $0, count: excludedByClass[$0]!, peeked: PEEKED_CLASSES.contains($0),
-     reason: EXCLUDED_REASON[$0] ?? "excluded (\($0))")
-}
 // THE PEEK. Read the files this scan deliberately did NOT judge, and say so when they hold an effect the
 // policy DENIES. The verdict does not move — `outOfScope` is its own kind, never a violation — because a
 // file the gate declined to judge must not decide an exit code.
@@ -1772,6 +1771,9 @@ report.excluded = excludedByClass.keys.sorted().map {
 // POLICY-SCOPED AND POLICY-BOUNDED, which is the whole reason it stays quiet. No policy ⇒ the key is
 // ABSENT, because nothing was asked and `[]` would be a claim. With a policy, only effects that policy
 // DENIES are reported — otherwise the noise floor is "everything you excluded".
+// ⟨0.29⟩ see `peekRead` at the assignment below: `excluded[].peeked` is an OUTCOME, so the scope block
+// cannot be built until the peek has run — it is assembled after this block, not before it.
+var peekRead = false
 if peekListPath == nil, let pp = policyPath {
     let denied = Set(((try? String(contentsOfFile: pp, encoding: .utf8))
         .map { parsePolicy($0, aliases: [:]) }?.deny ?? []).flatMap { $0.effects })
@@ -1817,8 +1819,26 @@ if peekListPath == nil, let pp = policyPath {
             // the parent blocks on exit, and the two wait for each other forever.
             let out = pipe.fileHandleForReading.readDataToEndOfFile()
             try? pipe.fileHandleForReading.close()
-            exited.wait()
+            // ⟨0.29⟩ A DEADLINE, because the peek re-parses exactly the files this engine has never
+            // parsed — vendored trees, generated code, a manifest nobody analyses — i.e. the inputs least
+            // likely to have been exercised. An unbounded wait turns a parser that hangs on one of them
+            // into a hung SCAN and a hung CI job, which contradicts this feature's own stated rule that a
+            // peek that cannot run must not fail the gate: hanging is the one failure that stops the gate
+            // completing at all. On timeout the child is killed and the peek reports nothing, which the
+            // `peeked: false` below then states plainly.
+            if exited.wait(timeout: .now() + 120) == .timedOut {
+                child.terminate()
+                FileHandle.standardError.write(("candor-swift: the peek did not finish within 120s and was "
+                    + "stopped — `excluded` marks its classes NOT peeked, so nothing here claims they were "
+                    + "read. The gate below is unaffected.\n").data(using: .utf8)!)
+                throw PeekTimedOut()
+            }
             let doc = (try? JSONSerialization.jsonObject(with: out)) as? [String: Any] ?? [:]
+            // ⟨0.29⟩ THE PEEK READ SOMETHING. `peeked` was a constant of the exclusion CLASS, so a child
+            // that crashed, could not be spawned, or returned nothing still published `peeked: true`
+            // beside `outOfScope: []` — byte-identical to a clean peek, and the ⟨0.26⟩ partial-manifest
+            // failure inside the rung built to prevent it. Set only where a report actually parsed.
+            peekRead = !doc.isEmpty
             for f in (doc["functions"] as? [[String: Any]] ?? []) {
                 let hits = (f["inferred"] as? [String] ?? []).filter { denied.contains($0) }
                 if hits.isEmpty { continue }
@@ -1864,6 +1884,16 @@ if peekListPath == nil, let pp = policyPath {
                 + (found.count == 1 ? "it." : "these \(found.count).") + "\n").data(using: .utf8)!)
         }
     }
+}
+// ⟨0.29⟩ THE SCOPE, BUILT AFTER THE PEEK. `peeked` is an outcome, so this cannot be assembled before the
+// peek runs — it was, and read a flag nothing had set yet: a field whose whole job is to say whether a
+// read happened, computed before the read. `PEEKED_CLASSES` still decides which classes the peek is
+// WILLING to read; `peekRead` decides whether it actually did.
+var excludedByClass: [String: Int] = [:]
+for e in excludedFiles { excludedByClass[e.cls, default: 0] += 1 }
+report.excluded = excludedByClass.keys.sorted().map {
+    (cls: $0, count: excludedByClass[$0]!, peeked: peekRead && PEEKED_CLASSES.contains($0),
+     reason: EXCLUDED_REASON[$0] ?? "excluded (\($0))")
 }
 let envelope: [String: Any] = report.toJSON()
 var cg: [String: [String]] = [:]
@@ -2092,6 +2122,17 @@ var baselinePath: String? = ProcessInfo.processInfo.environment["CANDOR_BASELINE
 // deleted or never committed — and passing green over it is a gate that silently stopped gating.
 var baselineFromConfig = false
 if baselinePath == nil, let b = candorConfig["baseline"] { baselinePath = b; baselineFromConfig = true }
+// ⟨0.29⟩ A PEEK RUNS NO GATE OF ANY KIND, AND THE POLICY CLEAR ABOVE WAS ONLY HALF OF THAT. `baselinePath`
+// arrives by the IDENTICAL env-over-config ladder (`CANDOR_BASELINE`, inherited by the child, then the
+// config's `baseline` key, rediscovered from the same target), and nothing cleared it — so a peek child on
+// any baselined project ran the AS-EFF-005 ratchet independently over an arbitrary excluded-file subset.
+// REPRODUCED on the exact argv the parent hands the child: exit 1, `[AS-EFF-005] helper gained effect
+// { Exec } not present in the baseline`, a comparison meaningless over that scope that can legitimately
+// fire. Silent only because the parent never inspected the child's exit status — so the obvious hardening
+// (which the `--workspace` sibling already models) would have started losing every peek finding on a
+// baselined project. Cleared HERE for the same reason policy is cleared where it is: after every source
+// has been applied is the one place the answer cannot be routed around.
+if peekListPath != nil { baselinePath = nil }
 // ⟨unknown-ratchet⟩ OPT-IN (default OFF): env CANDOR_UNKNOWN_RATCHET over config `unknown-ratchet`, the
 // same env-over-config precedence + truthiness as candor-java's Config.flag — env PRESENT (any value,
 // even empty) is true; else the config key present with an empty / true / 1 / yes value. When ON an
