@@ -9,6 +9,12 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.29⟩ `resolves` now declares `incomplete`** (SPEC §2.1). An absent `incomplete` is overloaded
+  between "this producer does not compute undetermined locators" and "it computed them and found none" —
+  exactly the ambiguity `resolves` was built for, one field over from the `fs` case that motivated it. A
+  producer that computes the surface declares it; one that does not MUST NOT, since listing it would turn
+  "unimplemented" into a false "nothing undetermined". Pinned by conformance PART 50, which checks the
+  declaration BEFORE reading any absence as meaningful.
 - **⟨0.29⟩ `only <A> -> <B> [<C> …]` — the PERMISSION form (SPEC §6.2, AS-EFF-009).** `A` may reach `A`
   itself and the listed scopes, nothing else. **`forbid` FAILS OPEN — the dependency you forgot to
   prohibit is silently permitted — so a leaf package could only be protected by an enumeration that does

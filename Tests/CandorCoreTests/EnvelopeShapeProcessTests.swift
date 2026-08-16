@@ -49,7 +49,9 @@ final class EnvelopeShapeProcessTests: XCTestCase {
         // ⟨0.27⟩ the declaration must be PRESENT and must name what this engine actually computes. Listing
         // a surface it does not compute would turn "unimplemented" into a false "undetermined", which is
         // the inversion the field exists to prevent.
-        XCTAssertEqual(env["resolves"] as? [String], ["fs"],
-                       "the engine resolves `fs` kinds and must say so (SPEC §2.1)")
+        // ⟨0.29⟩ `incomplete` joined the declaration: its absence is overloaded the same way `fs`'s was
+        // — "does not compute undetermined locators" vs "computed them and found none".
+        XCTAssertEqual(env["resolves"] as? [String], ["fs", "incomplete"],
+                       "the engine resolves `fs` kinds and undetermined locators, and must say so (§2.1)")
     }
 }
