@@ -111,7 +111,13 @@ struct Report {
     // paths is one people scroll past. ALWAYS emitted, `[]` included — ⟨0.27⟩ makes a zero-match a positive
     // statement, and ⟨0.26⟩ makes an ABSENT key mean "this producer cannot answer", which is a different
     // claim from "nothing was excluded". Set in main.swift from the walk itself.
-    var excluded: [(cls: String, count: Int, reason: String)] = []
+    //
+    // `peeked` is the load-bearing half of the pair with `outOfScope`. An empty `outOfScope` says "I read
+    // the excluded files and none held an effect this policy denies" — a claim it may make only about the
+    // classes it actually read. This engine does NOT read `.build/`, and candor-java cannot read a `.java`
+    // that was never compiled; without the flag both would be certifying files nobody opened, which is the
+    // ⟨0.26⟩ partial-manifest failure exactly — a partial answer worse than an absent one.
+    var excluded: [(cls: String, count: Int, peeked: Bool, reason: String)] = []
     // ⟨0.29⟩ what the PEEK found in those files: an effect the policy DENIES, in a file the gate did not
     // judge. NIL (key omitted) when no policy was configured — nothing was asked, so `[]` would be a claim.
     // EMPTY when a policy was configured and the excluded files were clean under it.
@@ -177,7 +183,9 @@ struct Report {
         if !typeSurfaceReturns.isEmpty { env["typeSurface"] = ["returns": typeSurfaceReturns] }
         // ⟨0.29⟩ THE SCOPE — ALWAYS emitted, `[]` included (see `excluded`). The one field in this
         // envelope whose EMPTY form is load-bearing: it says "I looked, and excluded nothing".
-        env["excluded"] = excluded.map { ["class": $0.cls, "count": $0.count, "reason": $0.reason] as [String: Any] }
+        env["excluded"] = excluded.map {
+            ["class": $0.cls, "count": $0.count, "peeked": $0.peeked, "reason": $0.reason] as [String: Any]
+        }
         // ⟨0.29⟩ …and what the peek found in them. Omitted when nil — no policy, so no question was asked.
         if let oos = outOfScope { env["outOfScope"] = oos.map { $0.toJSON() } }
         return env
