@@ -1774,6 +1774,10 @@ let PEEKED_CLASSES: Set<String> = ["manifest", "harness-target", "test-source", 
 // ⟨0.29⟩ see `peekRead` at the assignment below: `excluded[].peeked` is an OUTCOME, so the scope block
 // cannot be built until the peek has run — it is assembled after this block, not before it.
 var peekRead = false
+// ⟨0.29⟩ the classes the peek RAN over and could not read — see the `unanalyzed` loop below. Parse
+// failures are per file, so the completeness claim is withdrawn per class rather than wholesale.
+var peekUnread: Set<String> = []
+var peekUnattributed = false
 if peekListPath == nil, let pp = policyPath {
     let denied = Set(((try? String(contentsOfFile: pp, encoding: .utf8))
         .map { parsePolicy($0, aliases: [:]) }?.deny ?? []).flatMap { $0.effects })
@@ -1839,6 +1843,27 @@ if peekListPath == nil, let pp = policyPath {
             // beside `outOfScope: []` — byte-identical to a clean peek, and the ⟨0.26⟩ partial-manifest
             // failure inside the rung built to prevent it. Set only where a report actually parsed.
             peekRead = !doc.isEmpty
+            // ⟨0.29⟩ …AND DID IT READ THEM ALL? A child report the parent could PARSE is a different fact
+            // from every peeked file having been opened. The child publishes its own ⟨0.21⟩ `unanalyzed`
+            // manifest and this code read only `functions`, so a peeked file that FAILED TO PARSE inside
+            // the child produced `peeked: true` beside `outOfScope: []` — the same overclaim one comment
+            // up, one level down. `peeked` is per CLASS, so the answer is too: a class is peeked only when
+            // no file of that class went unread. The join goes through `candorAbsolutePath` for the same
+            // reason the `functions` loop below does — a raw string compare misses every time.
+            for u in (doc["unanalyzed"] as? [[String: Any]] ?? []) {
+                let unreadPath = u["path"] as? String ?? ""
+                if unreadPath.isEmpty { peekUnattributed = true; continue }
+                let abs = candorAbsolutePath(unreadPath.hasPrefix("/") ? unreadPath
+                                             : (rootDir as NSString).appendingPathComponent(unreadPath))
+                // The child walks ONLY the list it was handed, so an unread path matching nothing on that
+                // list is one this code cannot attribute — fail closed across every class rather than let
+                // one unattributable file leave all of them claiming completeness.
+                if let hit = peekable.first(where: { candorAbsolutePath(absOf($0.path)) == abs }) {
+                    peekUnread.insert(hit.cls)
+                } else {
+                    peekUnattributed = true
+                }
+            }
             for f in (doc["functions"] as? [[String: Any]] ?? []) {
                 let hits = (f["inferred"] as? [String] ?? []).filter { denied.contains($0) }
                 if hits.isEmpty { continue }
@@ -1892,7 +1917,8 @@ if peekListPath == nil, let pp = policyPath {
 var excludedByClass: [String: Int] = [:]
 for e in excludedFiles { excludedByClass[e.cls, default: 0] += 1 }
 report.excluded = excludedByClass.keys.sorted().map {
-    (cls: $0, count: excludedByClass[$0]!, peeked: peekRead && PEEKED_CLASSES.contains($0),
+    (cls: $0, count: excludedByClass[$0]!,
+     peeked: peekRead && PEEKED_CLASSES.contains($0) && !peekUnattributed && !peekUnread.contains($0),
      reason: EXCLUDED_REASON[$0] ?? "excluded (\($0))")
 }
 let envelope: [String: Any] = report.toJSON()
