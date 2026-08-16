@@ -1779,8 +1779,16 @@ var peekRead = false
 var peekUnread: Set<String> = []
 var peekUnattributed = false
 if peekListPath == nil, let pp = policyPath {
-    let denied = Set(((try? String(contentsOfFile: pp, encoding: .utf8))
-        .map { parsePolicy($0, aliases: [:]) }?.deny ?? []).flatMap { $0.effects })
+    // ⟨0.29⟩ A REFUSED POLICY LEAVES THE KEY ABSENT (SPEC §2). The peek is a producer reading the policy,
+    // so §3.1 binds it exactly as it binds the gate: over a policy no route will honour, `outOfScope: []`
+    // claims a look taken against rules that never stood — and the `denied` set it would look for is the
+    // parser's SALVAGE of an unhonourable file, which is the rewriting `gateRefusals` exists to refuse.
+    // candor-java already withheld here; this engine, candor-rust and candor-ts did not.
+    let parsedForPeek = (try? String(contentsOfFile: pp, encoding: .utf8))
+        .map { parsePolicy($0, aliases: [:]) }
+    let denied = (parsedForPeek?.gateRefusals.isEmpty ?? false)
+        ? Set((parsedForPeek?.deny ?? []).flatMap { $0.effects })
+        : Set<String>()
     // `.build/` is held out of the peek, not just out of the scan — see `PEEKED_CLASSES`, which the
     // `excluded` block above reads too, so the disclosure and this filter cannot disagree.
     let peekable = excludedFiles.filter { PEEKED_CLASSES.contains($0.cls) }
