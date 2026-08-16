@@ -138,7 +138,9 @@ through the classifier. Exit codes and verdict shape are exactly `--policy`'s on
 verdict, not a report. It reads the report file(s) and NOTHING else: no callgraph sidecar, no chained
 dep, no re-classification, so an entry ABSENT from the report is absent (the ⟨0.21⟩ purity claim) and
 is never back-filled. Two rule kinds are REFUSED (exit 2, whole-policy) because the wire does not carry
-their evidence and approximating them fails OPEN: **`forbid A -> B`** (a report has an entry only for a
+their evidence and approximating them fails OPEN: **`only A -> B …`** (it asks whether EVERYTHING a scope
+reaches is on a list, so an omitted crossing turns a green into a claim of COMPLETENESS),
+**`forbid A -> B`** (a report has an entry only for a
 function with an EFFECT, so a wholly pure unit is invisible while `forbid` matches on NAME) and
 **`allow <E> …`** (the AS-EFF-008 surface-completeness marker does not ride the wire; `netClass:
 unknown-host` is NOT that marker — it also names a merely unrecognised host). A third refusal is

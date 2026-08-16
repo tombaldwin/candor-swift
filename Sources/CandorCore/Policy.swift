@@ -727,6 +727,27 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
 /// parts filtered), mirroring Rust/Java's `name_segments` — so a shared `::`-scoped policy (Rust/Swift
 /// path syntax) matches Swift names too, not just dotted ones. Splitting on `:` is safe: a `:` only ever
 /// appears in a `::` separator in these names, so it never over-segments (no spurious match).
+/// ⟨0.29⟩ SCOPE MATCHING FOR A PERMISSION, where the prefix rule below is FAIL-OPEN.
+///
+/// `scopeMatches`'s last segment is a PREFIX of its name-segment, so `util` matches `utilities`. For
+/// deny/pure/forbid that widening is FAIL-CLOSED — a scope matching more forbids more. For the `to` list
+/// of an `only` rule it is the exact inverse: a permitted scope matching more PERMITS more, so the
+/// matcher that keeps every other rule kind safe silently widens the one form whose entire purpose is to
+/// fail safe. MEASURED on the shipped ⟨0.29⟩ implementation: `only model -> util` let `model.go` reach
+/// `utilities_untrusted.exfil` at `policy ✓` while `forbid model -> util` charged AS-EFF-009 on the same
+/// reach. The `from` side keeps the prefix rule — it selects what the rule BINDS, so more is safer.
+public func scopeMatchesPermitted(_ name: String, _ scope: String) -> Bool {
+    if scope.isEmpty { return false }   // an empty permitted scope permits nothing, never everything
+    let segs = name.split(whereSeparator: { $0 == "." || $0 == ":" }).map(String.init)
+    let parts = scope.split(whereSeparator: { $0 == "." || $0 == ":" }).map(String.init)
+    if parts.isEmpty || parts.count > segs.count { return false }
+    outer: for i in 0...(segs.count - parts.count) {
+        for (k, p) in parts.enumerated() where segs[i + k] != p { continue outer }
+        return true
+    }
+    return false
+}
+
 public func scopeMatches(_ name: String, _ scope: String) -> Bool {
     if scope.isEmpty { return true }
     let segs = name.split(whereSeparator: { $0 == "." || $0 == ":" }).map(String.init)
