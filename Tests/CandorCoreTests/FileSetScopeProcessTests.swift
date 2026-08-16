@@ -77,6 +77,8 @@ final class FileSetScopeProcessTests: XCTestCase {
         XCTAssertTrue(why.contains("HARNESS") && why.contains("CI"),
                       "the reason must say WHY and what it costs, not just name the class: \(why)")
 
+        XCTAssertEqual(harness["peeked"] as? Bool, true, "the peek reads Tests/, and the block must say so")
+
         let manifest = try XCTUnwrap(find("manifest"), "Package.swift must be declared as excluded: \(ex)")
         XCTAssertEqual(manifest["count"] as? Int, 1)
         XCTAssertTrue((manifest["reason"] as? String ?? "").contains("swift build"),
@@ -151,6 +153,36 @@ final class FileSetScopeProcessTests: XCTestCase {
         let ex = try XCTUnwrap(try doc(r.out)["excluded"] as? [[String: Any]],
                                "the key must be emitted even with nothing to say: \(r.out)")
         XCTAssertTrue(ex.isEmpty, "nothing was excluded, so the list must be empty: \(ex)")
+    }
+
+    /// THE CLASS THE PEEK DOES NOT READ SAYS SO — and this is the row that makes `peeked` more than
+    /// decoration. `.build/` holds checked-out dependency sources: unbounded, and other people's tests are
+    /// not a finding about your project, so the peek is held out of it deliberately. An empty
+    /// `outOfScope` beside a silently-unread class would be certifying files nobody opened, which is
+    /// ⟨0.26⟩'s partial-manifest failure — a partial answer worse than an absent one.
+    func testTheClassThePeekWillNotReadIsDeclaredUnpeeked() throws {
+        let build = dir.appendingPathComponent(".build/checkouts/Dep/Sources")
+        try FileManager.default.createDirectory(at: build, withIntermediateDirectories: true)
+        try """
+        import Foundation
+        public func vendored() { let p = Process(); p.launchPath = "/bin/ls"; try? p.run() }
+        """.write(to: build.appendingPathComponent("Dep.swift"), atomically: true, encoding: .utf8)
+
+        let r = try ProcessHarness.run(bin, [dir.path, "--json", "--policy", p("exec.policy")])
+        let d = try doc(r.out)
+        let ex = try XCTUnwrap(d["excluded"] as? [[String: Any]], r.out)
+        let bo = try XCTUnwrap(ex.first { $0["class"] as? String == "build-output" },
+                               "`.build/` must be declared as excluded: \(ex)")
+        XCTAssertEqual(bo["peeked"] as? Bool, false,
+                       "…and declared UNPEEKED, or `outOfScope: []` would be a claim about it: \(bo)")
+        XCTAssertTrue((bo["reason"] as? String ?? "").contains("NOT read by the peek"),
+                      "the reason must say the peek skips it: \(bo)")
+        // …and the vendored Exec is genuinely absent from the findings, so the flag describes what
+        // happened rather than what was intended.
+        let oos = try XCTUnwrap(d["outOfScope"] as? [[String: Any]], r.out)
+        XCTAssertFalse(oos.contains { ($0["path"] as? String ?? "").contains(".build") },
+                       "the peek must not have read `.build/` after all: \(oos)")
+        XCTAssertEqual(r.code, 0, r.err)
     }
 
     /// ⟨0.21⟩'S HALF STAYS ⟨0.21⟩'S. A file the selector DID reach and could not parse belongs in

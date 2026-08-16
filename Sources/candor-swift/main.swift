@@ -1740,10 +1740,19 @@ let EXCLUDED_REASON: [String: String] = [
         + "this package's own code. Counted, and deliberately NOT read by the peek: a checkout tree is "
         + "unbounded, and other people's tests are not a finding about your project.",
 ]
+// WHICH CLASSES THE PEEK READS — declared once, read by both the disclosure and the peek's own filter.
+// `.build/` is the one this engine holds back: a checkout tree is unbounded, and other people's tests are
+// not a finding about your project. The report says so per class rather than leaving `outOfScope: []` to
+// be read as "and I checked those too".
+let PEEKED_CLASSES: Set<String> = ["manifest", "harness-target", "test-source", "outside-the-target-closure"]
 var excludedByClass: [String: Int] = [:]
 for e in excludedFiles { excludedByClass[e.cls, default: 0] += 1 }
 report.excluded = excludedByClass.keys.sorted().map {
-    (cls: $0, count: excludedByClass[$0]!, reason: EXCLUDED_REASON[$0] ?? "excluded (\($0))")
+    // ONE SOURCE FOR "does the peek read this class" — the same `PEEKED` set the peek filters on below,
+    // so the block cannot say a class was read while the peek skips it. Stating it twice is how a
+    // disclosure ends up describing behaviour the code no longer has.
+    (cls: $0, count: excludedByClass[$0]!, peeked: PEEKED_CLASSES.contains($0),
+     reason: EXCLUDED_REASON[$0] ?? "excluded (\($0))")
 }
 // THE PEEK. Read the files this scan deliberately did NOT judge, and say so when they hold an effect the
 // policy DENIES. The verdict does not move — `outOfScope` is its own kind, never a violation — because a
@@ -1766,8 +1775,9 @@ report.excluded = excludedByClass.keys.sorted().map {
 if peekListPath == nil, let pp = policyPath {
     let denied = Set(((try? String(contentsOfFile: pp, encoding: .utf8))
         .map { parsePolicy($0, aliases: [:]) }?.deny ?? []).flatMap { $0.effects })
-    // `.build/` is excluded from the peek, not just from the scan — see its reason above.
-    let peekable = excludedFiles.filter { $0.cls != "build-output" }
+    // `.build/` is held out of the peek, not just out of the scan — see `PEEKED_CLASSES`, which the
+    // `excluded` block above reads too, so the disclosure and this filter cannot disagree.
+    let peekable = excludedFiles.filter { PEEKED_CLASSES.contains($0.cls) }
     if !denied.isEmpty && !peekable.isEmpty {
         // A policy WAS configured, so the key is now a real answer: `[]` says "we looked and found
         // nothing", which is what ⟨0.27⟩ asks a zero-match to say out loud.
