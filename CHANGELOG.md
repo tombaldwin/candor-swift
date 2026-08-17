@@ -9,6 +9,18 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.29⟩ `String/Data(contentsOf: URL(string: "…")!)` proved a remote endpoint and captured no host.**
+  The idiomatic Foundation one-line GET produced an EMPTY `Net` surface while
+  `URLSession.shared.dataTask(with:)` on the same URL captured the host — so `allow Net <host>` could not
+  be used for this shape at all and `deny Net[unknown-host]` fired on a host the classifier can plainly
+  read. It failed CLOSED, so nothing was certified wrongly; the cost was the whole surface. Routed
+  through `recordSurfaces` so the host, the ⟨0.13⟩ model-host refinement and the destination class all
+  behave as on every other Net call — a model URL reached this way now refines to `Llm`, which was
+  impossible while no host was captured. The scheme test also now reads the `contentsOf:` ARGUMENT rather
+  than the whole argument list: a text search over every argument is the "literal anywhere" hazard this
+  rung removed from `Fs`/`Net`/`Db`/`Exec`, and it could have let a scheme in a trailing argument decide
+  the category of a URL it is not. A file URL still classifies `Fs`, and an indeterminate scheme still
+  yields `Unknown`.
 - **⟨0.29⟩ `gate --report`'s `allow` refusal stated a premise this rung made false.** The message said the
   AS-EFF-008 surface-completeness marker *"does not ride the report wire"*. It rides now: `incomplete` is
   published per function and declared in `resolves`. MEASURED — reports carry
