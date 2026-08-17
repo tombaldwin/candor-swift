@@ -9,6 +9,15 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.29⟩ a malformed `net-partner` line was kept as a junk host instead of being disclosed.** The
+  grammar is `net-partner <host>`; the `=` spelling an operator reaches for by habit
+  (`net-partner = partner.example`) parsed as the HOST `"= partner.example"`, entered the partner set, and
+  matched nothing for the rest of the run. **The direction is SAFE** — the gate stays armed, so nothing is
+  certified that should not be — which is exactly why it sat unnoticed in ALL FOUR engines: the operator
+  believes a partner is declared, the verdict disagrees, and no line connects the two. ⟨0.28⟩ gave POLICY
+  files an `ignored` block for this shape; config files had no equivalent anywhere. Now warns and skips,
+  which is the contract candor-java's own config doc already claimed for *"every other malformed line in
+  this file"*. A well-formed line stays silent.
 - **⟨0.29⟩ `String/Data(contentsOf: URL(string: "…")!)` proved a remote endpoint and captured no host.**
   The idiomatic Foundation one-line GET produced an EMPTY `Net` surface while
   `URLSession.shared.dataTask(with:)` on the same URL captured the host — so `allow Net <host>` could not
