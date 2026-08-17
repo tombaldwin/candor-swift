@@ -1613,7 +1613,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // rides the report's `unanalyzed` + the gate verdict (built in main.swift from this array).
     if !unanalyzed.isEmpty {
         FileHandle.standardError.write(
-            "candor-swift: \(unanalyzed.count) source file(s) could not be read — NOT analyzed (their effects are unseen, not pure); see `unanalyzed` in the report\n"
+            // "read OR PARSED": the set is not only unreadable files. A file that reads fine and fails to
+            // parse (measured: 2000-deep parens — "parsing has exceeded the maximum nesting level") lands
+            // here too, and "could not be read" sends the reader to check permissions on a file whose
+            // permissions are fine. The per-entry `reason` in the report already carries the true cause;
+            // this line is the one a human actually sees, so it must not narrow the cause the report widens.
+            "candor-swift: \(unanalyzed.count) source file(s) could not be read or parsed — NOT analyzed (their effects are unseen, not pure); see `unanalyzed` in the report for the reason on each\n"
                 .data(using: .utf8)!)
     }
     return Analysis(
