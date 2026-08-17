@@ -63,6 +63,47 @@ final class NetLocatorProvenanceProcessTests: XCTestCase {
 
     /// THE MIRROR, WRITTEN FIRST. A URL built from a PARAMETER is not recoverable: the entry keeps Net,
     /// keeps `unknown-host`, and gains NO host. This is the case the mechanism must not reach.
+    /// ⟨0.29⟩ `String/Data(contentsOf: URL(string: "…")!)` — the idiomatic Foundation one-line GET —
+    /// CAPTURES ITS HOST, and captures nothing when the URL is not a literal.
+    ///
+    /// This fix converts a FAIL-CLOSED case into a CERTIFYING one, which is the direction this project has
+    /// measured produces a defect roughly four times in five, and it shipped with no test — caught by a
+    /// release panel on exactly that ground. The backlog entry that requested it said so in its own words:
+    /// *"any fix converts a fail-closed case into a CERTIFYING one, so it needs its over-charge control
+    /// written first."* The control is the second half of this row, and it is the half that matters.
+    ///
+    /// Before the fix the surface was EMPTY for this shape while `URLSession.dataTask(with:)` on the same
+    /// URL captured the host — so `allow Net <host>` was unusable for the commonest spelling, and
+    /// `deny Net[unknown-host]` fired on a host the classifier can plainly read.
+    func testContentsOfCapturesItsHostAndFabricatesNothingWhenItCannot() throws {
+        let by = try scan("""
+        import Foundation
+        func literalGet() { _ = try? String(contentsOf: URL(string: "https://ok.example/a")!, encoding: .utf8) }
+        func runtimeGet(_ u: String) { _ = try? String(contentsOf: URL(string: u)!, encoding: .utf8) }
+        func schemePrefixOnly(_ h: String) { _ = try? String(contentsOf: URL(string: "https://" + h)!, encoding: .utf8) }
+        func fileRead() { _ = try? String(contentsOf: URL(fileURLWithPath: "/tmp/x"), encoding: .utf8) }
+        func modelGet() { _ = try? String(contentsOf: URL(string: "https://api.openai.com/v1/chat")!, encoding: .utf8) }
+        """)
+        XCTAssertEqual(hosts(by, "literalGet"), ["ok.example"],
+                       "the literal endpoint of the idiomatic Foundation GET must reach the surface")
+
+        // THE OVER-CHARGE CONTROLS — the half the shipped commit lacked. Each is a shape where a host
+        // MUST NOT appear, and each is a way this fix could have become the literal-anywhere hazard that
+        // three sibling commits spent the same morning deleting from `Fs`/`Net`/`Db`/`Exec`.
+        XCTAssertEqual(hosts(by, "runtimeGet"), [],
+                       "a runtime URL fabricates no host")
+        XCTAssertEqual(hosts(by, "schemePrefixOnly"), [],
+                       "a literal SCHEME with a runtime host names no destination")
+        XCTAssertEqual(hosts(by, "fileRead"), [],
+                       "a file URL is Fs, not Net — it must contribute no host at all")
+
+        // …and the refinement the capture unlocks: a model host reached this way could never be
+        // recognised while the surface was empty, so `deny Llm` silently missed it.
+        XCTAssertEqual(hosts(by, "modelGet"), ["api.openai.com"])
+        XCTAssertTrue((by["modelGet"]?["inferred"] as? [String] ?? []).contains("Llm"),
+                      "a model host reached via `contentsOf:` refines to Llm once its host is visible")
+    }
+
     func testFailClosedComputedURLKeepsUnknownHost() throws {
         let by = try scan("""
         import Foundation
