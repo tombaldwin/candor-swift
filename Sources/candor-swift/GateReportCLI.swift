@@ -481,10 +481,13 @@ func wholePolicyRefusals(_ pol: ParsedPolicy, _ policyPath: String) -> [Unevalua
             // a channel while its sibling stays open is how the defects in this file got in.
             policyRefusals.append(Unevaluated(rule: r.raw, why:
                 "`\(r.raw.trimmingCharacters(in: .whitespaces))` is an `allow` rule, "
-                   + "which `gate --report` cannot evaluate — the AS-EFF-008 surface-completeness marker does "
-                   + "not ride the report wire, so a benign visible literal beside a runtime-computed endpoint "
-                   + "would be CERTIFIED here and flagged by a scan. (`netClass: unknown-host` is NOT that "
-                   + "marker — it also names a merely unrecognised host.) Gate allowlists at scan time: "
+                   + "which `gate --report` cannot evaluate — the AS-EFF-008 surface-completeness marker WAS said "
+                   + "not to ride the report wire; ⟨0.29⟩ made it ride, but only when the producing "
+                   + "report declares `incomplete` in `resolves`. This verb refuses UNIFORMLY rather "
+                   + "than answering per-report, because an engine that evaluated where its siblings "
+                   + "refuse would SPLIT THE VERB — a benign visible literal beside a runtime-computed "
+                   + "endpoint would be CERTIFIED here and flagged by a scan. (`netClass: unknown-host` "
+                   + "is NOT that marker — it also names a merely unrecognised host.) Gate allowlists at scan time: "
                    + "candor-swift <dir> --policy \(policyPath)"))
         }
     }
