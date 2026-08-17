@@ -220,7 +220,21 @@ public func parseNetPartners(_ configText: String?) -> Set<String> {
         let parts = line.split(maxSplits: 1, whereSeparator: { $0 == " " || $0 == "\t" })
         guard parts.first?.lowercased() == "net-partner", parts.count > 1 else { continue }
         let val = parts[1].trimmingCharacters(in: .whitespaces)
-        if !val.isEmpty { out.insert(hostPart(val).lowercased()) }
+        if val.isEmpty { continue }
+        // ⟨0.29⟩ A MALFORMED VALUE IS DISCLOSED, NOT KEPT AS JUNK. The grammar is `net-partner <host>`;
+        // the `=` spelling an operator reaches for by habit (`net-partner = partner.example`) parsed as
+        // the HOST "= partner.example", entered the set, and matched nothing for the rest of the run. The
+        // direction is SAFE — the gate stays armed, so nothing is certified that should not be — which is
+        // exactly why it sat unnoticed: the operator believes a partner is declared, the verdict
+        // disagrees, and no line connects the two. ⟨0.28⟩ gave POLICY files an `ignored` block for this
+        // shape; config files had no equivalent in any engine.
+        if val.contains(where: { $0 == " " || $0 == "\t" }) || val.hasPrefix("=") {
+            FileHandle.standardError.write(("candor-swift: net-partner takes a bare host — "
+                + "`net-partner <host>`, one per line; '\(val)' is not one and was IGNORED (an '=' or "
+                + "extra words is the usual cause)\n").data(using: .utf8)!)
+            continue
+        }
+        out.insert(hostPart(val).lowercased())
     }
     return out
 }
