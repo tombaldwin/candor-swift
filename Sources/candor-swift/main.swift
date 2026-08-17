@@ -2354,6 +2354,30 @@ policyBlock: if let pp = policyPath {
     let scanGateResult = evaluateGate(scanPolicy, scanGateInput)
     gateViolations += scanGateResult.violations
     let gateZeroMatchRules = scanGateResult.zeroMatch
+    // ⟨0.29⟩ THE NAME RULES STOP AT THE SCAN BOUNDARY, AND NOW SAY SO. `forbid A -> B` and
+    // `only A -> B …` match over the call graph; a chained dependency contributes EFFECTS, not EDGES, so a
+    // function calling into a dep has an EMPTY adjacency and the crossing is invisible to them. MEASURED
+    // in candor-ts and candor-rust with a dep chained: `only model -> util` answered `policy ✓` over a call
+    // into the dependency while a LOCAL unpermitted scope in the same run fired AS-EFF-011 — the rule was
+    // armed; the boundary was the gap.
+    //
+    // WORSE FOR `only`: `forbid` asks whether ONE named crossing is present, so a missed dep crossing
+    // under-reports one prohibition; `only` asserts A reaches the listed scopes AND NOTHING ELSE — a
+    // COMPLETENESS claim — and exists because `forbid` fails open. A package that calls a third-party
+    // library is not a leaf, and without this the gate called it one.
+    //
+    // DISCLOSURE, NOT A VERDICT CHANGE — the ⟨0.29⟩ `outOfScope` posture: say what was not judged, leave
+    // the exit code alone. Keyed on a report having been READ, not on an entry being joined: a dependency
+    // whose reached function is PURE yields no entry at all, and that is the fixture that caught this.
+    let namedRuleCount = scanPolicy.forbid.count + scanPolicy.only.count
+    if namedRuleCount > 0 && !depsIndex.byKey.isEmpty {
+        FileHandle.standardError.write(
+            ("candor-swift: ⚠ \(namedRuleCount) name-matching rule(s) (`forbid`/`only`) were matched over "
+             + "THIS scan's call graph only — a chained dependency contributes effects, not call edges, so "
+             + "a crossing INTO a dependency is invisible to them. `deny`/`allow` still cross (effects "
+             + "propagate); an `only` rule cannot certify that a package is a leaf when it calls into one "
+             + "of its dependencies.\n").data(using: .utf8)!)
+    }
     // ⟨0.24⟩ §3.1 — see GateReportCLI. A rule that bound nothing is disclosed, never scored as satisfied.
     for raw in gateZeroMatchRules {
         FileHandle.standardError.write(
