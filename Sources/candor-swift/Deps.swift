@@ -122,6 +122,12 @@ struct DepIndex {
     /// Packages whose silence is a PURITY CLAIM (§2 rule 3) — a package covered by a report this engine
     /// TRUSTS. Consulted by the κ ledger and the per-fn `invisible` disclosure, which are exactly the
     /// hedges coverage is allowed to delete. Never consulted to decide whether to LOOK UP a key.
+    /// ⟨0.29⟩ How many CANDOR_DEPS reports this run actually READ — independent of what they contained.
+    /// `byKey` counts entries JOINED and the package sets count packages a report NAMED; an ALL-PURE
+    /// dependency has neither, so both leave the ⟨0.29⟩ `forbid`/`only` boundary disclosure silent in
+    /// exactly the case it exists for. The operator chained a dep either way. Found in review, together
+    /// with a comment at the disclosure site that asserted this signal while the code used `byKey`.
+    var reportsRead: Int = 0
     var coveredPkgs: Set<String> = []
     /// Packages whose only chained report failed the §2.1 version check. Chained (so rule 2's `Unknown`
     /// downgrade fires on the keys the report does carry) but NOT covered (so a key it does not carry
@@ -445,6 +451,7 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
         }
         // v0.2+ envelope `{candor, package, functions}` or the legacy bare array (no version → stale).
         let obj = root as? [String: Any]
+        idx.reportsRead += 1   // ⟨0.29⟩ see `reportsRead` — a report was READ, whatever it holds
         let fns = (obj?["functions"] as? [Any]) ?? (root as? [Any]) ?? []
         // §2.1 at the join: a MISSING producing version is as unverifiable as a mismatched one (the
         // family condition — candor-ts: `d.candor?.version !== ENGINE_VERSION`).

@@ -2367,10 +2367,13 @@ policyBlock: if let pp = policyPath {
     // library is not a leaf, and without this the gate called it one.
     //
     // DISCLOSURE, NOT A VERDICT CHANGE — the ⟨0.29⟩ `outOfScope` posture: say what was not judged, leave
-    // the exit code alone. Keyed on a report having been READ, not on an entry being joined: a dependency
-    // whose reached function is PURE yields no entry at all, and that is the fixture that caught this.
+    // the exit code alone. Keyed on a report having been READ (`reportsRead`), not on an entry being
+    // JOINED (`byKey`): a dependency whose reached function is PURE yields no entry at all. This comment
+    // said exactly that while the code beside it read `byKey` — the claim was true of the design and
+    // false of the line under it, which is the stale-comment class this rung has now hit three times.
+    // Found in review, MEASURED: with an all-pure dep, rust and ts warned and java and swift did not.
     let namedRuleCount = scanPolicy.forbid.count + scanPolicy.only.count
-    if namedRuleCount > 0 && !depsIndex.byKey.isEmpty {
+    if namedRuleCount > 0 && depsIndex.reportsRead > 0 {
         FileHandle.standardError.write(
             ("candor-swift: ⚠ \(namedRuleCount) name-matching rule(s) (`forbid`/`only`) were matched over "
              + "THIS scan's call graph only — a chained dependency contributes effects, not call edges, so "

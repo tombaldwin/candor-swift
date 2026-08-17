@@ -9,6 +9,13 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.29⟩ REVIEW FIX — the `forbid`/`only` boundary disclosure was silent for an ALL-PURE dependency,
+  and its comment said otherwise.** The check read `depsIndex.byKey` (entries JOINED) while the comment
+  directly above it asserted "keyed on a report having been READ, not on an entry being joined" — true of
+  the design, false of the line under it. A dependency whose reached functions are pure contributes no
+  entry, so the disclosure was silent in exactly the case it exists for. `reportsRead` now carries the
+  fact. MEASURED four-way: rust and ts warned, java and swift did not. Third stale-comment finding of this
+  rung, and the first where the comment described the intended code rather than the shipped code.
 - **⟨0.29⟩ `forbid`/`only` stop at the SCAN BOUNDARY, and now say so.** Both are matched over the call
   graph; a chained dependency contributes EFFECTS, not EDGES, so a function calling into a dep has an
   empty adjacency and the crossing is invisible to them. MEASURED with a dep chained:
