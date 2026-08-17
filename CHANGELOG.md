@@ -9,6 +9,16 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.29.0] — 2026-08-17
+
+- **The `unanalyzed` summary line names the cause the report already named.** A file that reads fine and
+  fails to PARSE lands in `unanalyzed` too — measured with 2000-deep parens: `source failed to parse:
+  parsing has exceeded the maximum nesting level`. The stderr summary said only "could not be read",
+  sending a reader to check permissions on a file whose permissions are fine. The per-entry `reason` in
+  the report was right all along; this is the line a human actually sees, so it must not narrow the cause
+  the report widens. Gate behaviour is unchanged and was already correct — *a gate cannot be green over
+  unanalyzed code* (exit 2), against exit 0 for the shallow control.
+
 - **⟨0.29⟩ REVIEW FIX — the `forbid`/`only` boundary disclosure was silent for an ALL-PURE dependency,
   and its comment said otherwise.** The check read `depsIndex.byKey` (entries JOINED) while the comment
   directly above it asserted "keyed on a report having been READ, not on an entry being joined" — true of
