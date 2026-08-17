@@ -9,6 +9,20 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.29⟩ ⚠ `privacy-manifest --verify` verified GREEN over an EventKit under-declaration.** A plist
+  declaring only `NSCalendarsWriteOnlyAccessUsageDescription` passed against code calling
+  `EKEventStore().calendars(for: .event)` — a READ, which Apple requires full access for. `privacyKind`
+  already classifies EventKit's verbs and `PRIVACY_DIRECTION_KEYS` already splits Calendar's keys
+  read-vs-write, but the ONLY caller of `privacyKind` was the general `kappaMember` branch, and an EventKit
+  store call is handled by its own earlier branch (the one discriminating Calendar from Reminders by entity
+  type). `privacy` therefore came back ABSENT and the no-direction fallback treated every key in the family
+  as an acceptable alternative. Probed all three families Apple splits: Health (write over Share-only) and
+  Photos (read over Add-only) correctly exit 1; Calendar was the one whose direction never arrived.
+
+  **A code comment two hundred lines away still claimed NONE of the three were covered** — written before
+  `privacy/2` shipped the direction half and never updated. It is the reason nobody re-measured: a
+  limitation stated as prose reads as considered. Two comments in one file contradicted each other and
+  nothing failed. The paragraph now records what was measured, family by family.
 - **⟨0.29⟩ ⚠ `excluded[].peeked` claimed a read the peek had not finished.** The rung already made
   the flag an OUTCOME rather than a lookup on the exclusion class, and stopped one level short. The peek
   reuses this engine's own entry point, so it produces its own ⟨0.21⟩ `unanalyzed` manifest — and

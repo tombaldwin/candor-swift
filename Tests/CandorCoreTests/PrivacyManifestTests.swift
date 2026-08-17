@@ -114,6 +114,61 @@ final class PrivacyManifestTests: XCTestCase {
         XCTAssertTrue(h.out.contains("✗") && h.out.contains("Contacts") && h.out.contains("NSContactsUsageDescription"), h.out)
     }
 
+    /// ⟨0.29⟩ EVENTKIT'S DIRECTION REACHES THE REPORT — the third family of three, and the one that never
+    /// arrived. Apple splits Calendars into full-access (read) and write-only, `privacyKind` already
+    /// classifies EventKit's verbs, and `PRIVACY_DIRECTION_KEYS` already splits the keys — but the ONLY
+    /// caller of `privacyKind` was the general `kappaMember` branch, and an EventKit store call is handled
+    /// by its own earlier branch (the one that discriminates Calendar from Reminders by entity type). So
+    /// `privacy` came back ABSENT for Calendar and Reminders, the no-direction-proved fallback applied, and
+    /// every key in the family counted as an acceptable alternative.
+    ///
+    /// MEASURED before the fix: a plist declaring ONLY `NSCalendarsWriteOnlyAccessUsageDescription`
+    /// verified GREEN over `EKEventStore().calendars(for: .event)` — a READ. Apple rejects that app. The
+    /// same probe against Health (write over Share-only) and Photos (read over Add-only) exits 1, so this
+    /// was the one family whose direction was silently missing while a code comment two hundred lines away
+    /// still claimed NONE of the three were covered.
+    ///
+    /// THE SHAPE, for the third time in this rung: a refinement the general path performs and a carved-out
+    /// special case does not (`FS_USE_VERBS` missed readv/writev; `EXEC_USE_VERBS` missed the cmds branch).
+    /// When a special case is added, re-check every refinement the branch it bypasses was doing.
+    func testEventKitReadDirectionIsNotSatisfiedByTheWriteOnlyKey() throws {
+        let (bin, prefix, cleanup) = try scanToReport("""
+        import Foundation
+        import EventKit
+        public func readCal() { _ = EKEventStore().calendars(for: .event) }
+        """)
+        defer { cleanup() }
+        let dir = URL(fileURLWithPath: prefix).deletingLastPathComponent()
+
+        // THE DEFECT: write-only is not an acceptable alternative for a READ.
+        let writeOnly = try writePlist(["NSCalendarsWriteOnlyAccessUsageDescription",
+                                        "NSRemindersUsageDescription"], dir)
+        let bad = try ProcessHarness.run(bin, ["privacy-manifest", "--report", prefix,
+                                               "--verify", writeOnly])
+        XCTAssertEqual(bad.code, 1, "a write-only key over READING code must exit 1: \(bad.out)\(bad.err)")
+        XCTAssertTrue(bad.out.contains("✗") && bad.out.contains("Calendar"),
+                      "the divergence must name the family: \(bad.out)")
+
+        // CONTROL: a read-capable key present ⇒ clean. Without this the row is satisfied by an engine that
+        // rejects every Calendar plist, which fails the assertion above for free and makes the verb useless.
+        let full = try writePlist(["NSCalendarsFullAccessUsageDescription",
+                                   "NSCalendarsWriteOnlyAccessUsageDescription",
+                                   "NSRemindersUsageDescription"], dir)
+        let ok = try ProcessHarness.run(bin, ["privacy-manifest", "--report", prefix, "--verify", full])
+        XCTAssertEqual(ok.code, 0, "a full-access declaration satisfies a read: \(ok.out)\(ok.err)")
+
+        // …and the DIRECTION is in the report itself, which is what the verify reads.
+        let rep = try XCTUnwrap((try? FileManager.default.contentsOfDirectory(
+            atPath: dir.path))?.first { $0.hasSuffix(".Swift.json")
+                && !$0.contains("callgraph") && !$0.contains("hierarchy") && !$0.contains("locs") })
+        let doc = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(contentsOf: dir.appendingPathComponent(rep))) as? [String: Any])
+        let fns = try XCTUnwrap(doc["functions"] as? [[String: Any]])
+        let read = fns.first { ($0["fn"] as? String) == "readCal" }
+        XCTAssertEqual((read?["privacy"] as? [String: [String]])?["Calendar"], ["read"],
+                       "the report must carry the proved direction, not just the effect: \(fns)")
+    }
+
     // ── (d) VERIFY against a plist ALSO declaring NSCameraUsageDescription → overDeclared, ok:true, exit 0 ─
     func testOverDeclarationAloneIsExitZero() throws {
         let (bin, prefix, cleanup) = try scanToReport(locationAndContacts)

@@ -2613,7 +2613,27 @@ final class CallCollector: SyntaxVisitor {
                 // argument when it is statically visible, and over-disclose both when it is not. The
                 // `!declaredTypes` guard is the same anti-fabrication fence as the capture arm: a project's
                 // own `EKEventStore` is not EventKit's.
-                for e in privacyEventKitEffects(entityType: entityTypeArg(node.arguments)) { directEffects.insert(e) }
+                for e in privacyEventKitEffects(entityType: entityTypeArg(node.arguments)) {
+                    directEffects.insert(e)
+                    // ⟨0.29⟩ …AND ITS DIRECTION, which this branch did not record. `privacyKind` already
+                    // classifies EventKit's verbs (`calendars`/`events` read, `save`/`removeEvent` write)
+                    // and `PRIVACY_DIRECTION_KEYS` already splits Calendar's keys read-vs-write — but the
+                    // only caller of `privacyKind` was the GENERAL `kappaMember` branch below, and an
+                    // EventKit store call never reaches it. So `privacy` was absent for Calendar and
+                    // Reminders, the "no direction proved" fallback applied, and every key in the family
+                    // counted as an acceptable alternative.
+                    //
+                    // MEASURED: a plist declaring ONLY `NSCalendarsWriteOnlyAccessUsageDescription`
+                    // verified GREEN (exit 0) over code calling `EKEventStore().calendars(for: .event)` —
+                    // a READ. Apple rejects that app. The same probe against Health (write over
+                    // Share-only) and Photos (read over Add-only) correctly exits 1, so this was the one
+                    // family of the three whose direction never arrived.
+                    //
+                    // The third time this rung: a rule honoured by one branch and not by its sibling
+                    // (`FS_USE_VERBS` missed readv/writev, `EXEC_USE_VERBS` missed the cmds branch). When
+                    // a special case is carved out, re-check every refinement the general path performed.
+                    for k in privacyKind(root: rt, member: member) { privacyKinds[e, default: []].insert(k) }
+                }
             } else if let rt = base.root, let eff = kappaMember(root: rt, member: member) {
                 directEffects.insert(eff)
                 // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. A verb that
