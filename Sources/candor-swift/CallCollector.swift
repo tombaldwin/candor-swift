@@ -2313,12 +2313,26 @@ final class CallCollector: SyntaxVisitor {
                 // on SwiftFormat's config reads, where the URL is a fileURLWithPath from a helper).
                 // Resolve the scheme when it's statically provable; otherwise it's an indeterminate
                 // effect we can't categorise → honest `Unknown`, never a guess.
-                let argText = node.arguments.description
-                if argText.contains("fileURLWithPath") || argText.contains("filePath:") {
+                // ⟨0.29⟩ THE `contentsOf:` ARGUMENT, not the whole argument list. `node.arguments
+                // .description` is a text search over EVERY argument, which is the "literal anywhere"
+                // hazard this rung removed from `Fs`/`Net`/`Db`/`Exec` wearing different clothes: a
+                // scheme in a trailing argument would decide the category of a URL it is not.
+                let urlArgText = node.arguments.first?.expression.description ?? ""
+                if urlArgText.contains("fileURLWithPath") || urlArgText.contains("filePath:") {
                     directEffects.insert("Fs") // a provably-FILE URL
-                } else if argText.contains("\"http://") || argText.contains("\"https://")
-                            || argText.contains("\"ftp://") {
+                } else if urlArgText.contains("\"http://") || urlArgText.contains("\"https://")
+                            || urlArgText.contains("\"ftp://") {
                     directEffects.insert("Net") // a literal remote URL
+                    // ⟨0.29⟩ …AND CAPTURE ITS HOST. This branch proved a remote endpoint and recorded no
+                    // `hosts`, so `String(contentsOf: URL(string: "https://sentry.io/api")!)` — the
+                    // idiomatic Foundation one-line GET — came back with an EMPTY Net surface while
+                    // `URLSession.shared.dataTask(with:)` on the same URL captured `sentry.io`. The gate
+                    // failed CLOSED (AS-EFF-008, "no visible literal"), so nothing was ever certified
+                    // wrongly; the cost was that `allow Net` could not be used for this shape at all, and
+                    // a `deny Net[unknown-host]` fired on a host the classifier can plainly read.
+                    // Routed through `recordSurfaces` so the host, the ⟨0.13⟩ model-host refinement and
+                    // the destination-class derivation all behave exactly as on every other Net call.
+                    recordSurfaces(effect: "Net", lit: lit)
                 } else {
                     unresolved = true // indeterminate scheme: I/O happens, category unprovable
                     why.insert("contentsOf:indeterminate-url-scheme")
