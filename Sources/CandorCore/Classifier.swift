@@ -998,11 +998,30 @@ public let privacyKeyMap: [String: [String]] = [
     // established semantic (Location has four), and it is what keeps a verify from inventing an
     // under-declaration it cannot substantiate.
     //
-    // The limit that buys, stated rather than buried: HealthKit's two keys are not alternatives in Apple's
-    // model — Share gates READING and Update gates WRITING — and this engine does not discriminate read
+    // ⟨0.29⟩ THIS PARAGRAPH USED TO DESCRIBE A LIMITATION THAT HAD ALREADY BEEN HALF-CLOSED, and the
+    // stale half hid a live false all-clear for weeks. It read: *"this engine does not discriminate read
     // from write at the call site, so an app that only declares Share and also writes samples passes here
-    // and is rejected by Apple. Same for the EventKit pairs. Narrowing that needs per-call direction
-    // analysis; until then the verify is sound on PRESENCE and silent on DIRECTION, and says so.
+    // and is rejected by Apple. Same for the EventKit pairs … the verify is sound on PRESENCE and silent
+    // on DIRECTION."* `privacy/2` added the direction half (see `privacyKind` and
+    // `PRIVACY_DIRECTION_KEYS`), so by then the claim was false for HealthKit — while remaining true for
+    // EventKit, for a reason nobody looked for because the comment said the whole thing was out of scope.
+    //
+    // MEASURED, all three families Apple splits, one probe each:
+    //     Health   write over Share-only     → exit 1   ✓ direction enforced
+    //     Photos   read  over Add-only       → exit 1   ✓ direction enforced
+    //     Calendar read  over WriteOnly-only → exit 0   ✗ GREEN, and Apple rejects that app
+    // The EventKit store call takes its own earlier branch in `CallCollector` (the one discriminating
+    // Calendar from Reminders by entity type) and that branch never called `privacyKind`, so `privacy` was
+    // absent and the no-direction fallback treated every key in the family as an alternative. Fixed there;
+    // pinned by `testEventKitReadDirectionIsNotSatisfiedByTheWriteOnlyKey`.
+    //
+    // WHAT REMAINS TRUE, and it is the empty case only: a verb `privacyKind` does not recognise proves no
+    // direction, and the family's keys stay interchangeable for that call. That is the deliberate
+    // discipline stated below — it can only ever ADD a requirement where direction was proved.
+    //
+    // The lesson is the comment, not the code: **a limitation written as prose reads as CONSIDERED, and
+    // that is exactly what stops it being re-measured after the code moves underneath it.** Two comments
+    // in this file contradicted each other for weeks and nothing failed.
     "Health": ["NSHealthShareUsageDescription", "NSHealthUpdateUsageDescription"],
     "Motion": ["NSMotionUsageDescription"],
     // No key: Apple's NSMotionUsageDescription page does not list CMMotionManager, and its own page
