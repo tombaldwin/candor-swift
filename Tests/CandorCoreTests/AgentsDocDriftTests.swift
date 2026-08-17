@@ -44,9 +44,9 @@ final class AgentsDocDriftTests: XCTestCase {
     /// useless for checking the VALUE. After those derivations landed there was no in-tree pin at all:
     /// setting `specVersion = "0.29"` passed every candor-swift test and both drift gates. This is the
     /// canary that notices the constant moved, so it must stay a literal; deriving it makes it vacuous.
-    /// candor-report's `assert_eq!(SPEC_VERSION, "0.28")` is the same fixture in the rust arm.
+    /// candor-report's `assert_eq!(SPEC_VERSION, "0.29")` is the same fixture in the rust arm.
     func testTheDeclaredFloorIsThePinnedOne() throws {
-        XCTAssertEqual(try declaredSpec(), "0.28",
+        XCTAssertEqual(try declaredSpec(), "0.29",
                        "the spec floor moved — bump this pin with it, deliberately, as part of the rung")
     }
 
