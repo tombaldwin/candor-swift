@@ -9,6 +9,16 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.29⟩ the SPEC §2 `fs` read/write direction was missing from the two Foundation file idioms.**
+  `d.write(to: url)` and `s.write(toFile:)` published `fs: None`, and `Data(contentsOfFile:)` /
+  `String(contentsOfFile:)` the same — while `FileManager.createFile`/`contents(atPath:)` on the same tree
+  published `fs: ["write"]` / `["read"]`. Both gaps sit in carved-out branches of the collector that
+  bypass the general `kappaMember` path, which has always called `fsKind`; and in both cases the
+  direction is proved by the very condition that selected the branch (`isFileWrite` for the write,
+  *"UNCONDITIONALLY a file read"* for the read, in that comment's own words). §2.1 `resolves` declares
+  this producer computes `fs`, so a per-call gap reintroduces per-unit the absent-vs-undetermined overload
+  that declaration exists to remove. candor-rust, candor-ts and candor-java were complete here, two-path
+  `copy → ["read","write"]` included. No gate filters on `fs`, so no verdict moves.
 - **⟨0.29⟩ ⚠ `privacy-manifest --verify` verified GREEN over an EventKit under-declaration.** A plist
   declaring only `NSCalendarsWriteOnlyAccessUsageDescription` passed against code calling
   `EKEventStore().calendars(for: .event)` — a READ, which Apple requires full access for. `privacyKind`

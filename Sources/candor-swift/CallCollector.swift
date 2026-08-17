@@ -2288,6 +2288,9 @@ final class CallCollector: SyntaxVisitor {
                 // (The `contentsOf:` scheme-resolution path below would have let it fall through to
                 // pure — the 1725d0a guard keyed on `contentsOf` only — the review's under-report find.)
                 directEffects.insert("Fs")
+                // ⟨0.29⟩ …AND ITS DIRECTION, which the comment above already proves: "UNCONDITIONALLY a
+                // file read". See the write site below for the measurement and why this matters.
+                fsKinds.insert("read")
                 recordSurfaces(effect: "Fs", lit: lit)
                 if lit == nil {
                     // CONSTANT PROVENANCE rung 4 — the literal was unreadable, but a HOME-ANCHORED
@@ -2515,6 +2518,21 @@ final class CallCollector: SyntaxVisitor {
                 // Data/String file write (`d.write(to: url)`) → Fs; the pure in-memory/TextOutputStream
                 // overloads are excluded by isFileWrite's inout/label guard (never fabricate).
                 directEffects.insert("Fs")
+                // ⟨0.29⟩ …AND ITS DIRECTION. This branch is GATED ON `isFileWrite`, so the direction is
+                // proved by the very condition that selected it — and it was never recorded, while the
+                // general `kappaMember` branch has always called `fsKind`. MEASURED: `d.write(to: url)`
+                // and `s.write(toFile:)` published `fs: None` where `FileManager.createFile` publishes
+                // `fs: ["write"]` on the same tree; `Data(contentsOfFile:)` above had the same gap for
+                // reads. §2.1 `resolves` declares this producer COMPUTES `fs`, so a per-call gap
+                // reintroduces per-unit the absent-vs-undetermined overload that declaration exists to
+                // remove — PART 21's three-row rule, one level in.
+                //
+                // Found by the question that has now paid three times: enumerate every refinement the
+                // GENERAL path performs, then check each carved-out special case against that list
+                // (EventKit missed `privacyKind`; `FS_USE_VERBS`/`EXEC_USE_VERBS` missed one branch each).
+                // No gate filters on `fs`, so this moves no verdict — it makes the report say what the
+                // selecting condition already proved.
+                fsKinds.insert("write")
                 recordSurfaces(effect: "Fs", lit: lit)
                 if lit == nil {
                     // CONSTANT PROVENANCE rung 4 — the literal was unreadable, but a HOME-ANCHORED
