@@ -9,6 +9,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.29.1] — 2026-08-18
+
 - **Family build bump only — no engine changes in this repo.** 0.29.1 is a WITHIN-SPEC patch cut across
   the family; the floor is unchanged at 0.29 and this engine's behaviour is identical to 0.29.0. The
   patch carries fixes in candor-ts, candor-java and candor-rust (see their changelogs) plus the Claude
