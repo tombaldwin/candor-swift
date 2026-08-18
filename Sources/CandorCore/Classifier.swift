@@ -1348,6 +1348,15 @@ public func kappaPropertyRead(root: String, path: [String]) -> String? {
     if root == "ProcessInfo" && path.contains("environment") { return "Env" }
     if root == "ProcessInfo" && path.contains("systemUptime") { return "Clock" } // monotonic clock read
     if root == "ProcessInfo" && path.contains("hostName") { return "Env" }       // machine-identity read
+    // `CommandLine.arguments` / `.argc` / `.unsafeArgv` — the same channel as `environment`. §1 defines
+    // Env as "reading environment variables / THE PROCESS ENVIRONMENT", and argv is process-startup state
+    // delivered by the same `exec` that delivers envp; secrets arrive through it (`--token=…`) exactly as
+    // they do through a variable. candor-rust has always charged `std::env::args()` as Env while this
+    // engine and candor-ts read it as PURE — one question, answered two ways across the family, with no
+    // conformance row to catch it (a cross-engine parity sweep found it, 2026-08-18). Conformance to §1's
+    // existing wording, not a new clause.
+    if root == "CommandLine" && (path.contains("arguments") || path.contains("argc")
+                                 || path.contains("unsafeArgv")) { return "Env" }
     if root == "Date" && path.contains("now") { return "Clock" }
     // ContinuousClock/SuspendingClock `.now` — the idiomatic Swift 5.7+ monotonic-clock read is the
     // PROPERTY form (`ContinuousClock().now`, `clock.now`, `ContinuousClock.now`), not a `.now()` call.
