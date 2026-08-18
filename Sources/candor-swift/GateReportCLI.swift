@@ -48,6 +48,9 @@ private struct GateReportEntry {
 private struct GateReportEnvelope {
     var analyzedCount = 0
     var unanalyzed: [(path: String, reason: String)] = []
+    /// ⟨0.30⟩ the peek's findings, carried BY the report — this route cannot peek (it has no target, only
+    /// a document), which is exactly why the field rides the report and why §3.1 byte-equality holds here.
+    var outOfScope: [OutOfScopeFinding] = []
     var coverageModules: Set<String> = []
     var entries: [GateReportEntry] = []
     /// ⟨0.24⟩ Does every report at this locator say it JUDGED NOTHING? (SPEC §2's three-row table, bound
@@ -158,6 +161,25 @@ private func mergeGateReport(_ full: String, into env: inout GateReportEnvelope)
                                + "an empty list is how `NOT certified` becomes `policy ✓`")
             }
             env.unanalyzed.append((path: p, reason: m["reason"] as? String ?? ""))
+        }
+    }
+    // ⟨0.30⟩ THE PEEK'S FINDINGS, read as strictly as `unanalyzed` above and for the identical reason:
+    // non-emptiness IS a fail-closed trigger, so a present-but-garbled key read as an empty list becomes
+    // the claim "I looked and nothing was there" — the safe-LOOKING value. ABSENT STAYS ABSENT (⟨0.26⟩
+    // cannot-answer): a report produced with no policy was never asked, so it must not exit 2 on contact.
+    if let rawO = obj["outOfScope"] {
+        guard let arr = rawO as? [Any] else { return corrupt("`outOfScope` is present and is not a list") }
+        for f in arr {
+            guard let m = f as? [String: Any], let fn = m["fn"] as? String else {
+                return corrupt("an `outOfScope` member is not a `{fn, path, effects, class, reason}` object "
+                               + "— reading it as an empty list is how `NOT certified` becomes `policy ✓`")
+            }
+            env.outOfScope.append(OutOfScopeFinding(
+                fn: fn,
+                path: m["path"] as? String ?? "",
+                effects: m["effects"] as? [String] ?? [],
+                cls: m["class"] as? String ?? "",
+                reason: m["reason"] as? String ?? ""))
         }
     }
     // ⟨0.15⟩ the κ ledger. Same rule: it rides the verdict as `coverage.modules`, so a present-but-garbled
@@ -833,7 +855,10 @@ func runGateReportCLI(_ args: [String]) -> Never {
                          policyVocabulary: policyVocabulary, unevaluated: refused,
                          // ⟨0.28⟩ §6.2 `ignored` — measured on THIS route too; a route is not covered
                          // by its sibling.
-                         ignored: pol.ignored)
+                         ignored: pol.ignored,
+                         // ⟨0.30⟩ the peek's findings, off the REPORT — same bytes as the scan route's,
+                         // which is what makes §3.1 byte-equality hold on a route that cannot peek.
+                         outOfScope: env.outOfScope)
     }
     if violations.isEmpty {
         FileHandle.standardError.write("candor-swift: policy ✓\n".data(using: .utf8)!)
@@ -849,6 +874,16 @@ func runGateReportCLI(_ args: [String]) -> Never {
         FileHandle.standardError.write(
             ("candor-swift gate: NOT certified — the report declares \(env.unanalyzed.count) unit(s) candor "
              + "could not analyze; a gate cannot be green over unanalyzed code\n").data(using: .utf8)!)
+        exit(2)
+    }
+    // ⟨0.30⟩ the SCOPE half of the same posture, and the same exit. Named separately from the `unanalyzed`
+    // arm because the repairs differ: that one wants a scan that can read a file, this one wants a scan
+    // whose selector reaches the code the policy is about.
+    if !env.outOfScope.isEmpty {
+        FileHandle.standardError.write(
+            ("candor-swift gate: NOT certified — the report names \(env.outOfScope.count) function(s) OUTSIDE "
+             + "the scan's scope performing an effect this policy denies; the gate did not judge them, so "
+             + "the verdict is incomplete rather than a pass\n").data(using: .utf8)!)
         exit(2)
     }
     exit(0)

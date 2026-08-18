@@ -106,7 +106,7 @@ final class FileSetScopeProcessTests: XCTestCase {
     /// this one first used a `curl http://…` spelling, which the classifier reads as Net AS WELL AS Exec
     /// — so the `deny Net` row matched legitimately and read as a broken bound. The fixture could not
     /// test the thing it claimed to. An argument-free `/bin/ls` isolates Exec.
-    func testThePeekReportsADeniedEffectOutsideTheScopeWithoutMovingTheVerdict() throws {
+    func testThePeekReportsADeniedEffectOutsideTheScopeAndTheVerdictGoesIncomplete() throws {
         let r = try ProcessHarness.run(bin, [dir.path, "--json", "--policy", p("exec.policy")])
         let d = try doc(r.out)
         let oos = try XCTUnwrap(d["outOfScope"] as? [[String: Any]],
@@ -123,9 +123,12 @@ final class FileSetScopeProcessTests: XCTestCase {
         let harnessRead = try XCTUnwrap(exRead.first { $0["class"] as? String == "harness-target" }, "\(exRead)")
         XCTAssertEqual(harnessRead["peeked"] as? Bool, true,
                        "the peek READ this class on this run, so the flag must say so: \(harnessRead)")
-        // THE VERDICT DOES NOT MOVE. This is the promise of the chosen rung: a file the gate declined to
-        // judge must not decide an exit code, and must not appear among the judged functions.
-        XCTAssertEqual(r.code, 0, "an out-of-scope finding must not change the exit code: \(r.err)")
+        // ⟨0.30⟩ THE VERDICT IS INCOMPLETE. ⟨0.29⟩ asserted the opposite here — "a file the gate declined
+        // to judge must not decide an exit code" — and ⟨0.30⟩ reverses that half on the measurement that
+        // the peek resolves a CONCRETE denied effect rather than uncertainty. The membership assertion
+        // below is UNCHANGED, and is why the code is 2 and not 1: the gate did not judge this unit, so
+        // claiming a violation over it would be false in the other direction.
+        XCTAssertEqual(r.code, 2, "a peeked fn performing the denied effect makes the verdict incomplete: \(r.err)")
         let fns = (d["functions"] as? [[String: Any]] ?? []).compactMap { $0["fn"] as? String }
         XCTAssertFalse(fns.contains("helper"),
                        "the out-of-scope function must NOT be folded into the report's functions: \(fns)")
@@ -192,7 +195,11 @@ final class FileSetScopeProcessTests: XCTestCase {
         let oos = try XCTUnwrap(d["outOfScope"] as? [[String: Any]], r.out)
         XCTAssertFalse(oos.contains { ($0["path"] as? String ?? "").contains(".build") },
                        "the peek must not have read `.build/` after all: \(oos)")
-        XCTAssertEqual(r.code, 0, r.err)
+        // ⟨0.30⟩ INCIDENTAL, and worth naming so the next reader does not take it for this test's claim:
+        // this fixture ALSO has a harness-target performing Exec, which the peek does read, so the verdict
+        // is now incomplete. What this test asserts — that `.build/` is excluded, unpeeked, and absent from
+        // the findings — is untouched; only the exit moved, and it moved for the harness file.
+        XCTAssertEqual(r.code, 2, r.err)
     }
 
     /// ⟨0.21⟩'S HALF STAYS ⟨0.21⟩'S. A file the selector DID reach and could not parse belongs in
