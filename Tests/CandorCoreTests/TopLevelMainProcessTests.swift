@@ -87,7 +87,12 @@ final class TopLevelMainProcessTests: XCTestCase {
     func testBindingInsideTopLevelBlockIsNotAGlobal() throws {
         let by = try scan("""
         import Foundation
-        if CommandLine.arguments.count > 1 {
+        // The condition is deliberately EFFECT-FREE. It used to read `CommandLine.arguments.count`, which
+        // became an Env read when argv was ruled part of "the process environment" (2026-08-18) — and this
+        // row then failed on an expectation that has nothing to do with its subject. A fixture's scaffolding
+        // must not couple a test to rulings it is not about; argv's own coverage lives in the conformance
+        // differential's `argv` case.
+        if 1 > 0 {
             let handle = try? String(contentsOfFile: "/etc/t")
             print(handle ?? "")
         }
