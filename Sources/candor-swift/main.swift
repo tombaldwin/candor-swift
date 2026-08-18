@@ -2441,7 +2441,7 @@ for v in gateViolations { FileHandle.standardError.write(("[\(v.rule)] \(v.detai
 // --gate-json ⟨0.8⟩: the machine verdict, from the SAME gateViolations that set the exit code — written
 // BEFORE the exit below (ok:true,[] when no gate is configured). Unreadable policy already exited 2 above;
 // AS-EFF-005 records join the same list, so the verdict and the exit code can never disagree.
-if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVersion, analyzedCount: allFns.count, unanalyzed: unanalyzedUnits, coverage: unlisted.map(\.key), policyVocabulary: gatePolicyVocabulary, unevaluated: gateUnevaluated, ignored: gatePolicyIgnored) }   // ⟨0.15 staged⟩ advisory, verdict-preserving; ⟨0.21⟩ analyzed + fail-closed unanalyzed; ⟨0.24⟩ the config vocabulary that participated
+if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVersion, analyzedCount: allFns.count, unanalyzed: unanalyzedUnits, coverage: unlisted.map(\.key), policyVocabulary: gatePolicyVocabulary, unevaluated: gateUnevaluated, ignored: gatePolicyIgnored, outOfScope: report.outOfScope ?? []) }   // ⟨0.15 staged⟩ advisory, verdict-preserving; ⟨0.21⟩ analyzed + fail-closed unanalyzed; ⟨0.24⟩ the config vocabulary that participated
 let gateConfigured = policyPath != nil || baselinePath != nil
 if gateConfigured {
     if gateViolations.isEmpty {
@@ -2465,5 +2465,15 @@ if gateConfigured && !unanalyzedUnits.isEmpty {
     FileHandle.standardError.write(
         "candor-swift: gate NOT certified — \(unanalyzedUnits.count) source file(s) could not be analyzed (see above); a gate cannot be green over unanalyzed code\n"
             .data(using: .utf8)!)
+    exit(2)
+}
+// ⟨0.30⟩ THE SCOPE HALF OF THE SAME POSTURE, and the same exit. EXIT 2, NOT 1: these functions are not in
+// `violations` and not in `functions`, because the gate did not judge them — exit 1 would claim "I judged
+// your code and it breaks the policy", false in the other direction. The violation exit above dominates.
+if gateConfigured, let oos = report.outOfScope, !oos.isEmpty {
+    FileHandle.standardError.write(
+        ("candor-swift: gate NOT certified — \(oos.count) function(s) OUTSIDE this scan's scope perform an "
+         + "effect this policy denies (named above); the gate did not judge them, so the verdict is "
+         + "incomplete rather than a pass\n").data(using: .utf8)!)
     exit(2)
 }

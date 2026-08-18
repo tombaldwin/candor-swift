@@ -67,11 +67,17 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
                       coverage uncoveredModules: [String] = [],
                       policyVocabulary: (config: String, aliases: [String: [String]])? = nil,
                       unevaluated: [Unevaluated] = [],
-                      ignored: [IgnoredLine] = []) {
+                      ignored: [IgnoredLine] = [],
+                      outOfScope: [OutOfScopeFinding] = []) {
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a gate over source candor could NOT analyze must NOT read green —
     // its effects are invisible, so a `deny`/`allow` that "passes" over it is a false-pure. `ok` requires
     // BOTH no violation AND a complete analysis (the caller exits 2 on this incomplete-but-clean path).
-    let incomplete = !unanalyzed.isEmpty
+    // ⟨0.30⟩ THE SECOND CAUSE. `unanalyzed` is "I opened this file and could not read it"; `outOfScope` is
+    // "I never opened it, and when the peek looked afterwards it performed the effect this policy denies".
+    // Both mean the gate could not see enough of the tree to certify it, so both suppress `ok`. Reverses
+    // ⟨0.29⟩'s "the verdict does not move" on the measurement that the peek resolves a CONCRETE denied
+    // effect rather than uncertainty.
+    let incomplete = !unanalyzed.isEmpty || !outOfScope.isEmpty
     var dict: [String: Any] = [
         "spec": spec,
         "ok": violations.isEmpty && !incomplete,
@@ -90,8 +96,14 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
     // this from a machine). `incomplete:true` + the list; the caller exits 2 (could-not-fully-evaluate).
     if incomplete {
         dict["incomplete"] = true
-        dict["unanalyzed"] = unanalyzed.map { ["path": $0.path, "reason": $0.reason] as [String: Any] }
+        if !unanalyzed.isEmpty {
+            dict["unanalyzed"] = unanalyzed.map { ["path": $0.path, "reason": $0.reason] as [String: Any] }
+        }
     }
+    // ⟨0.30⟩ …and WHICH functions made it incomplete, in the machine channel — the same entries the report
+    // carries, so `gate --report` re-emits them from the report and §3.1's byte-equality holds by
+    // construction. Omitted when empty, so a clean verdict stays byte-identical to a ⟨0.29⟩ one.
+    if !outOfScope.isEmpty { dict["outOfScope"] = outOfScope.map { $0.toJSON() } }
     // ⟨0.15 staged⟩ advisory coverage note (SPEC §2 `coverage` re-disclosure): when the scan's κ ledger
     // is non-empty, the verdict names the uncovered modules — VERDICT-PRESERVING (the ⟨0.9⟩ provable-purity
     // auto-disclosure precedent): ok/violations/exit are computed exactly as before, this field only ADDS.
