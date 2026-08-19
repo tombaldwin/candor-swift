@@ -123,6 +123,9 @@ struct ReportCompleteness {
     /// `incomplete: true` for this cause — the file is named in the prose note and on stderr.
     var unreadable: [String] = []
 
+    /// ⟨0.30⟩ the peek's findings across the reports under this locator — see `isIncomplete`.
+    var outOfScope: [[String: Any]] = []
+
     /// Is the universe this verb reasoned over known-partial? **EITHER ARM OF THIS IS AN EXIT CODE**, and
     /// that is why `judgedNothing` is deliberately NOT one of them. `unverified --strict` and
     /// `fix-gate --strict` answer 2 off this — *"the gate refuses over these bytes, so do I"* — but
@@ -132,7 +135,12 @@ struct ReportCompleteness {
     /// channels via `mustHedge` and stops at the exit code. `unreadable` IS an arm: the gate refuses
     /// over a file that does not load as a report, so the strict verbs answer 2 with it, exactly as the
     /// reference's `incomplete()` counts its `unreadable` list.
-    var isIncomplete: Bool { !unanalyzed.isEmpty || !unreadable.isEmpty }
+    /// ⟨0.30⟩ `outOfScope` IS AN ARM, for the reason the ⟨0.24⟩ rule states: an advisory verb must never
+    /// be LESS sensitive to incompleteness than the gate over the same bytes, and that rule names
+    /// `unverified`, `fix-gate` "and any later sibling". ⟨0.30⟩ made the gate exit 2 when the peek
+    /// resolved a denied effect and left these verbs certifying — MEASURED on candor-rust and candor-ts,
+    /// where the gate exited 2 and `--strict` answered clean at 0 over the identical report.
+    var isIncomplete: Bool { !unanalyzed.isEmpty || !unreadable.isEmpty || !outOfScope.isEmpty }
 
     /// ⟨0.28⟩ **Is there anything at all to disclose — the trigger for an ANSWER, where `isIncomplete` is
     /// the trigger for a VERDICT.** A descriptive verb asks THIS: its empty set is a negative finding
@@ -300,6 +308,10 @@ private func mergeCompleteness(_ obj: [String: Any], path: String, entryCount: I
     if claimsToHaveJudgedNothing(analyzed: obj["analyzed"], entryCount: entryCount) {
         if hasNoManifest(analyzed: obj["analyzed"]) { c.noManifest.append(path) }
         else { c.judgedNothing.append(path) }
+    }
+    // ⟨0.30⟩ the peek's findings, so `--strict` is at least as pessimistic as the gate (the ⟨0.24⟩ MUST).
+    if let oos = obj["outOfScope"] as? [Any] {
+        c.outOfScope.append(contentsOf: oos.compactMap { $0 as? [String: Any] })
     }
 }
 
