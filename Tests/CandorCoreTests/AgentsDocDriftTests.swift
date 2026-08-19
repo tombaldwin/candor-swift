@@ -46,7 +46,7 @@ final class AgentsDocDriftTests: XCTestCase {
     /// canary that notices the constant moved, so it must stay a literal; deriving it makes it vacuous.
     /// candor-report's `assert_eq!(SPEC_VERSION, "0.29")` is the same fixture in the rust arm.
     func testTheDeclaredFloorIsThePinnedOne() throws {
-        XCTAssertEqual(try declaredSpec(), "0.29",
+        XCTAssertEqual(try declaredSpec(), "0.30",
                        "the spec floor moved — bump this pin with it, deliberately, as part of the rung")
     }
 
