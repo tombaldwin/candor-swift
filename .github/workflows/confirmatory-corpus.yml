@@ -22,6 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Harness deps (minimal image needs python3 + strace)
+        timeout-minutes: 5  # a network install; a hung mirror must not spend the job's budget
         run: apt-get update -qq && apt-get install -y -qq python3 strace >/dev/null
       - name: Frozen confirmatory run (held-out packages; candor-swift vs kernel)
         run: bash soundness/confirmatory/run_frozen.sh
