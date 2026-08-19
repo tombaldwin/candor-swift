@@ -310,8 +310,25 @@ private func mergeCompleteness(_ obj: [String: Any], path: String, entryCount: I
         else { c.judgedNothing.append(path) }
     }
     // ⟨0.30⟩ the peek's findings, so `--strict` is at least as pessimistic as the gate (the ⟨0.24⟩ MUST).
-    if let oos = obj["outOfScope"] as? [Any] {
-        c.outOfScope.append(contentsOf: oos.compactMap { $0 as? [String: Any] })
+    //
+    // PRESENT-BUT-NOT-A-LIST IS CORRUPT, and it must reach the ADVISORY verbs too. The `as? [Any]` cast
+    // failed silently on a garbled key, so the findings vanished and `--strict` certified a report
+    // `gate --report` refuses at exit 2 — the ⟨0.24⟩ relation broken one shape over from where it was
+    // closed. A corrupt key rides `unreadable`, which is ALREADY an arm of `isIncomplete`, so this uses
+    // the fail-closed path that rule established rather than adding one beside it. Same for a non-object
+    // MEMBER: `compactMap` dropped it, which is the identical coercion one level in.
+    if obj["outOfScope"] != nil {
+        guard let oos = obj["outOfScope"] as? [Any] else {
+            c.unreadable.append(path)
+            return
+        }
+        for e in oos {
+            guard let m = e as? [String: Any] else {
+                c.unreadable.append(path)
+                return
+            }
+            c.outOfScope.append(m)
+        }
     }
 }
 
