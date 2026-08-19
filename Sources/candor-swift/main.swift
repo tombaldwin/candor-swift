@@ -1754,7 +1754,8 @@ let EXCLUDED_REASON: [String: String] = [
 struct PeekTimedOut: Error {}
 let PEEKED_CLASSES: Set<String> = ["manifest", "harness-target", "test-source", "outside-the-target-closure"]
 // THE PEEK. Read the files this scan deliberately did NOT judge, and say so when they hold an effect the
-// policy DENIES. The verdict does not move — `outOfScope` is its own kind, never a violation — because a
+// policy DENIES. ⟨0.30⟩ THE VERDICT DOES MOVE (a non-empty block is `ok:false, incomplete:true`, exit 2);
+// `outOfScope` is still its own kind, never a violation, because a
 // file the gate declined to judge must not decide an exit code.
 //
 // A CHILD `candor-swift`, not a second analysis path. candor-rust buys the same guarantee by recursing
@@ -1887,10 +1888,30 @@ if peekListPath == nil, let pp = policyPath {
                 // means every effect except Unknown and a named rule means the intersection.
                 let inf = f["inferred"] as? [String] ?? []
                 let qual = f["fn"] as? String ?? ""
+                // ⟨0.30⟩ …AND THE RULE'S CLASS FILTERS, exactly as Gate.swift applies them. Without these
+                // the peek charged `Net` for a rule that denies only ONE destination class: MEASURED,
+                // `deny Net[unknown-host]` reddened a DECLARED partner, and `deny Net[known-partner]`
+                // reddened with no partners configured at all — while the identical code IN SCOPE passed
+                // both. This is the over-charge the review round before last closed in ts and rust; the
+                // hand-port missed it here, which is what the generated policy matrix now exists to catch.
+                //
+                // The child report carries `netClass`/`unknownWhy` per entry, which is the same derived
+                // set the gate reads off the wire on its `gate --report` route.
+                let fnNet = f["netClass"] as? [String] ?? []
+                let fnWhy = f["unknownWhy"] as? [String] ?? []
                 var hitSet = Set<String>()
                 for r in peekRules where scopeMatches(qual, r.scope) {
-                    hitSet.formUnion(r.effects.isEmpty ? inf.filter { $0 != "Unknown" }
-                                                       : inf.filter { r.effects.contains($0) })
+                    var h = Set(r.effects.isEmpty ? inf.filter { $0 != "Unknown" }
+                                                  : inf.filter { r.effects.contains($0) })
+                    if h.contains("Unknown"), !r.unknownClasses.isEmpty,
+                       !fnWhy.contains(where: { r.unknownClasses.contains($0) }) {
+                        h.remove("Unknown")
+                    }
+                    if h.contains("Net"), !r.netClasses.isEmpty,
+                       !fnNet.contains(where: { r.netClasses.contains($0) }) {
+                        h.remove("Net")
+                    }
+                    hitSet.formUnion(h)
                 }
                 let hits = hitSet.sorted()
                 if hits.isEmpty { continue }
