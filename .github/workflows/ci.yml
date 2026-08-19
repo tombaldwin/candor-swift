@@ -71,6 +71,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Harness deps (the swift image is minimal — smoke/fuzz/probe need python3, the TTY wrapper `script` is util-linux, the dynamic oracle needs strace)
+        timeout-minutes: 5  # a network install; a hung mirror must not spend the job's budget
         run: apt-get update -qq && apt-get install -y -qq python3 util-linux strace >/dev/null
       - name: Build
         run: swift build
