@@ -1935,8 +1935,9 @@ if peekListPath == nil, let pp = policyPath {
                     fn: f["fn"] as? String ?? "", path: hit?.path ?? childLoc,
                     effects: hits.sorted(), cls: cls,
                     reason: "OUTSIDE this scan's scope (\(cls)) — the gate did NOT judge it. "
-                          + "The effect is real, and the verdict is INCOMPLETE because of it — the "
-                          + "gate did not judge this unit, so it cannot certify the tree."))
+                          + "candor's ANALYSIS of that file reaches this effect; the gate did not "
+                          + "judge it, so the verdict is INCOMPLETE rather than a pass. (An analysis "
+                          + "result, not a claim about what the code does at runtime.)"))
             }
             found.sort { ($0.path, $0.fn) < ($1.path, $1.fn) }
         } catch {
