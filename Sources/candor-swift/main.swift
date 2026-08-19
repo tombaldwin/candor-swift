@@ -1786,13 +1786,23 @@ if peekListPath == nil, let pp = policyPath {
     // candor-java already withheld here; this engine, candor-rust and candor-ts did not.
     let parsedForPeek = (try? String(contentsOfFile: pp, encoding: .utf8))
         .map { parsePolicy($0, aliases: [:]) }
-    let denied = (parsedForPeek?.gateRefusals.isEmpty ?? false)
-        ? Set((parsedForPeek?.deny ?? []).flatMap { $0.effects })
-        : Set<String>()
+    // ⟨0.30⟩ THE RULES, not a flat set of effect NAMES. §6.2 already requires the gate and the disclosure
+    // to apply the SAME rule, and the name set was wrong in BOTH directions once ⟨0.30⟩ made this block
+    // verdict-bearing — both MEASURED four-way in review:
+    //
+    //   UNDER-REPORT: `pure` is a deny rule with an EMPTY effect list meaning "every effect except
+    //   Unknown" (see Gate.swift's AS-EFF-006 loop). Flattened it contributed NOTHING, so the set was
+    //   empty, the peek never ran, and the STRICTEST policy passed at exit 0 while the weaker
+    //   `deny Exec` exited 2 on the identical tree. A four-way false all-clear.
+    //
+    //   OVER-CHARGE: `deny Net[known-partner]` denies one destination class; the name set held bare
+    //   `Net`, so a peeked fn reaching an unknown host — which that rule does not deny — turned the
+    //   verdict red while the same code in scope passed. Rule SCOPES were dropped identically.
+    let peekRules = (parsedForPeek?.gateRefusals.isEmpty ?? false) ? (parsedForPeek?.deny ?? []) : []
     // `.build/` is held out of the peek, not just out of the scan — see `PEEKED_CLASSES`, which the
     // `excluded` block above reads too, so the disclosure and this filter cannot disagree.
     let peekable = excludedFiles.filter { PEEKED_CLASSES.contains($0.cls) }
-    if !denied.isEmpty && !peekable.isEmpty {
+    if !peekRules.isEmpty && !peekable.isEmpty {
         // A policy WAS configured, so the key is now a real answer: `[]` says "we looked and found
         // nothing", which is what ⟨0.27⟩ asks a zero-match to say out loud.
         var found: [OutOfScopeFinding] = []
@@ -1873,7 +1883,16 @@ if peekListPath == nil, let pp = policyPath {
                 }
             }
             for f in (doc["functions"] as? [[String: Any]] ?? []) {
-                let hits = (f["inferred"] as? [String] ?? []).filter { denied.contains($0) }
+                // ⟨0.30⟩ the gate's own firing decision, per (rule, function): scope test, then `pure`
+                // means every effect except Unknown and a named rule means the intersection.
+                let inf = f["inferred"] as? [String] ?? []
+                let qual = f["fn"] as? String ?? ""
+                var hitSet = Set<String>()
+                for r in peekRules where scopeMatches(qual, r.scope) {
+                    hitSet.formUnion(r.effects.isEmpty ? inf.filter { $0 != "Unknown" }
+                                                       : inf.filter { r.effects.contains($0) })
+                }
+                let hits = hitSet.sorted()
                 if hits.isEmpty { continue }
                 // NAME THE FILE FROM THE PARENT'S OWN LIST. The child's `loc:` is written from the
                 // absolute path it was handed, and the path the operator can act on is the one this run
