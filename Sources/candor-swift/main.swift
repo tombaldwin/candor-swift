@@ -1914,7 +1914,8 @@ if peekListPath == nil, let pp = policyPath {
                     fn: f["fn"] as? String ?? "", path: hit?.path ?? childLoc,
                     effects: hits.sorted(), cls: cls,
                     reason: "OUTSIDE this scan's scope (\(cls)) — the gate did NOT judge it. "
-                          + "The effect is real; the verdict does not account for it."))
+                          + "The effect is real, and the verdict is INCOMPLETE because of it — the "
+                          + "gate did not judge this unit, so it cannot certify the tree."))
             }
             found.sort { ($0.path, $0.fn) < ($1.path, $1.fn) }
         } catch {
@@ -1932,7 +1933,7 @@ if peekListPath == nil, let pp = policyPath {
                 + "             \(f.path)\n").data(using: .utf8)!)
         }
         if !found.isEmpty {
-            FileHandle.standardError.write(("             The verdict does not account for "
+            FileHandle.standardError.write(("             The verdict below is INCOMPLETE because of "
                 + (found.count == 1 ? "it." : "these \(found.count).") + "\n").data(using: .utf8)!)
         }
     }
