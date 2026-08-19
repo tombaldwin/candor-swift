@@ -2487,9 +2487,13 @@ if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVe
 let gateConfigured = policyPath != nil || baselinePath != nil
 if gateConfigured {
     if gateViolations.isEmpty {
-        if policyPath != nil {
-            FileHandle.standardError.write("candor-swift: policy ✓\n".data(using: .utf8)!)
-        }
+        // THE GREEN LINE IS PRINTED BELOW, AFTER THE EXIT-2 ARMS — not here. Measured 2026-08-19: this
+        // wrote `candor-swift: policy ✓` and the very next line was `gate NOT certified … incomplete
+        // rather than a pass`, exit 2. The exit code and the verdict document were right; the human
+        // channel said pass. An operator or a log grep keyed on ✓ reads a NOT-certified run as green,
+        // which is the cardinal sin in the one channel people actually read. rust and ts reach their
+        // ✓ only after the same two arms have returned, so this was also a four-way divergence.
+        // Both exit-2 causes, not just ⟨0.30⟩'s: the ⟨0.21⟩ unanalyzed arm had the same shape.
     } else {
         FileHandle.standardError.write("candor-swift: \(gateViolations.count) policy violation(s)\n".data(using: .utf8)!)
         // Remedy pointer (FAILURE path only — a clean gate stays byte-identical): the engine carries its
@@ -2519,3 +2523,9 @@ if gateConfigured, let oos = report.outOfScope, !oos.isEmpty {
          + "incomplete rather than a pass\n").data(using: .utf8)!)
     exit(2)
 }
+// …and only NOW is the gate green: every exit-2 arm above has been passed, so `policy ✓` is a claim the
+// run can support. See the note at the violation branch for what printing it earlier said.
+if gateConfigured && gateViolations.isEmpty && policyPath != nil {
+    FileHandle.standardError.write("candor-swift: policy ✓\n".data(using: .utf8)!)
+}
+
