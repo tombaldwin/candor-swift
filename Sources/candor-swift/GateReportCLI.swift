@@ -51,6 +51,10 @@ private struct GateReportEnvelope {
     /// ⟨0.30⟩ the peek's findings, carried BY the report — this route cannot peek (it has no target, only
     /// a document), which is exactly why the field rides the report and why §3.1 byte-equality holds here.
     var outOfScope: [OutOfScopeFinding] = []
+    // ⟨0.31⟩ the PRODUCER's ambient-partner provenance, read verbatim. This route has no target to anchor
+    // `net-partner` at, and re-classifying through the consumer's own config is the re-derivation ⟨0.24⟩
+    // forbids — it would make the verdict depend on the reader's working directory.
+    var netPartners: [(config: String, hosts: [String])] = []
     var coverageModules: Set<String> = []
     var entries: [GateReportEntry] = []
     /// ⟨0.24⟩ Does every report at this locator say it JUDGED NOTHING? (SPEC §2's three-row table, bound
@@ -167,6 +171,17 @@ private func mergeGateReport(_ full: String, into env: inout GateReportEnvelope)
     // non-emptiness IS a fail-closed trigger, so a present-but-garbled key read as an empty list becomes
     // the claim "I looked and nothing was there" — the safe-LOOKING value. ABSENT STAYS ABSENT (⟨0.26⟩
     // cannot-answer): a report produced with no policy was never asked, so it must not exit 2 on contact.
+    // ⟨0.31⟩ `netPartners` — read as written and shape-checked like every other §2 key: a present key
+    // that cannot be read impeaches the document rather than being quietly dropped.
+    if let rawNP = obj["netPartners"] {
+        guard let m = rawNP as? [String: Any],
+              let cfg = m["config"] as? String,
+              let hosts = m["hosts"] as? [String] else {
+            return corrupt("`netPartners` is present and is not a `{config, hosts}` object — a SIGNATURE "
+                           + "key that cannot be read impeaches the whole document (§2)")
+        }
+        env.netPartners.append((config: cfg, hosts: hosts))
+    }
     if let rawO = obj["outOfScope"] {
         guard let arr = rawO as? [Any] else { return corrupt("`outOfScope` is present and is not a list") }
         for f in arr {
@@ -852,7 +867,8 @@ func runGateReportCLI(_ args: [String]) -> Never {
     for sink in verdictSinks {
         writeGateVerdict(violations, to: sink, spec: specVersion, analyzedCount: env.analyzedCount,
                          unanalyzed: env.unanalyzed, coverage: Array(env.coverageModules),
-                         policyVocabulary: policyVocabulary, unevaluated: refused,
+                         policyVocabulary: policyVocabulary, netPartners: env.netPartners,
+                         unevaluated: refused,
                          // ⟨0.28⟩ §6.2 `ignored` — measured on THIS route too; a route is not covered
                          // by its sibling.
                          ignored: pol.ignored,
