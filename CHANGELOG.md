@@ -9,6 +9,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.31.0] — 2026-08-20
+
 - **⟨0.31⟩ `netPartners` — the ambient config that moved a verdict is named in it.** Under
   `deny Net[unknown-host]`, a call to `partner.example` exits 1; adding `net-partner partner.example` to an
   ambient `.candor/config` exits 0, and nothing named the file, its path, or the host. The report envelope
