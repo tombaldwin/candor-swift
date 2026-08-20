@@ -653,7 +653,13 @@ if noSources && !(policyPath != nil && !excludedFiles.isEmpty) {
     // stream after it must not get nothing. Easy to hit in CI when a path moves, and the last cause in
     // this engine still exiting raw — found by probing causes a user can trigger rather than by reading
     // exit sites.
-    refuseGateAndExit("candor-swift: no Swift sources under \(target)")
+    // §3.3(d) MUST — the refusal names what a target of this engine's kind looks like. Carried INSIDE
+    // the refusal string rather than printed beside it, so the `--gate-json` document's `reason` gets
+    // the remedy too: a machine consumer reading only that document is exactly the reader who cannot
+    // go and look at stderr. candor-rust's reads the same way.
+    refuseGateAndExit("candor-swift: no Swift sources under \(target) — candor-swift reads `.swift` "
+        + "files; point it at a SwiftPM package, an .xcodeproj, or a directory containing them. "
+        + "Exit 2 (unevaluable): a target this engine cannot read is not a clean scan.")
 }
 if noSources {
     FileHandle.standardError.write(
