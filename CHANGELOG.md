@@ -9,6 +9,22 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.31⟩ `netPartners` — the ambient config that moved a verdict is named in it.** Under
+  `deny Net[unknown-host]`, a call to `partner.example` exits 1; adding `net-partner partner.example` to an
+  ambient `.candor/config` exits 0, and nothing named the file, its path, or the host. The report envelope
+  now carries `netPartners: { config, hosts }` — which config declared partners and which of them
+  **participated** — and both `scan --policy` and `gate --report` put the list of those records in the
+  verdict. Verified byte-equal. Additive: no declaration, or one that never matched, carries the key
+  nowhere.
+
+  `partnerFor` is extracted as the single matcher and `netDestClass` calls it, so the disclosure asks the
+  same function the decision asks. The path comes from the same discovery walk the partners were read
+  through. `gate --report` **copies** the producer's record rather than recomputing it — that route has no
+  target to anchor `net-partner` at, and re-classifying through the consumer's own config would make a
+  verdict depend on the reader's working directory.
+
+## Unreleased
+
 - **A refusal produces no report** — same defect and same fix as candor-ts (see its changelog). The clean
   case exited 2 while `--gate-json` said `ok: true`; the refusal now happens straight after the peek,
   before any envelope exists, because §3.1 binds any report a scan produced. Pinned by PART 56.

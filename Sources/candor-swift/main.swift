@@ -1523,6 +1523,8 @@ let unanalyzedUnits = analysis.unanalyzed
 enforceEnginePin(targetPath: target, running: releaseVersion)
 
 let netPartners = parseNetPartners(discoverConfigText(targetPath: target))
+// ⟨0.31⟩ the declared partners that actually MOVED a classification in this run — see the envelope key.
+var netPartnersUsed: Set<String> = []
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // Report (§2 envelope, spec 0.5) + sidecar (§2.2) + receipt + κ ledger (§7.14)
@@ -1604,6 +1606,12 @@ for qual in reportQuals.sorted() {
     // ⟨0.20⟩ Net destination-class: the classes in this fn's transitive Net surface — exact host-literal
     // match, fail-closed unknown-host on a masked surface (incompleteAcc has Net) OR a Net with no visible host.
     if inf.contains("Net") {
+        // ⟨0.31⟩ record WHICH declared partner participated, at the point the class is decided.
+        // `partnerFor` is the function `netDestClass` itself asks, so the disclosure and the decision
+        // cannot use different rules — the reverted first attempt re-matched and came back silently empty.
+        for h in hostsAcc[qual] ?? [] {
+            if let pm = partnerFor(h, netPartners) { netPartnersUsed.insert(pm) }
+        }
         ef.netClass = netClassesOf(Array(hostsAcc[qual] ?? []),
                                    netIncomplete: incompleteAcc[qual]?.contains("Net") ?? false,
                                    partners: netPartners)
@@ -1735,6 +1743,12 @@ report.coverage = unlisted.map { (name: $0.key, calls: $0.value) }   // ⟨0.15 
 // count; digest = FNV-1a-64 over the SORTED analyzed quals (same-input re-scan agreement).
 let analyzedQuals = allFns.map { $0.qual }.sorted()
 report.analyzed = (count: allFns.count, digest: fnv1aHex(analyzedQuals))
+// ⟨0.31⟩ the ambient `net-partner` provenance, from the SAME discovery walk the partners were read
+// through — so the disclosure cannot name a different file from the one that supplied the vocabulary.
+// Omitted when nothing participated: a declaration that changed nothing is not provenance.
+if !netPartnersUsed.isEmpty, let cfg = discoverConfig(targetPath: target)?.path {
+    report.netPartners = (config: cfg, hosts: netPartnersUsed.sorted())
+}
 report.unanalyzed = unanalyzedUnits   // ⟨0.21⟩ (Gap 2) omitted when empty by toJSON()
 report.scope = resolvedXcodeScope     // ⟨scope travels⟩ omitted when nil by toJSON()
 // ⟨0.23⟩ `typeSurface.returns` — PREFIXED here with this report's package, so both ends land in the same
@@ -2517,7 +2531,7 @@ for v in gateViolations { FileHandle.standardError.write(("[\(v.rule)] \(v.detai
 // --gate-json ⟨0.8⟩: the machine verdict, from the SAME gateViolations that set the exit code — written
 // BEFORE the exit below (ok:true,[] when no gate is configured). Unreadable policy already exited 2 above;
 // AS-EFF-005 records join the same list, so the verdict and the exit code can never disagree.
-if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVersion, analyzedCount: allFns.count, unanalyzed: unanalyzedUnits, coverage: unlisted.map(\.key), policyVocabulary: gatePolicyVocabulary, unevaluated: gateUnevaluated, ignored: gatePolicyIgnored, outOfScope: report.outOfScope ?? []) }   // ⟨0.15 staged⟩ advisory, verdict-preserving; ⟨0.21⟩ analyzed + fail-closed unanalyzed; ⟨0.24⟩ the config vocabulary that participated
+if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVersion, analyzedCount: allFns.count, unanalyzed: unanalyzedUnits, coverage: unlisted.map(\.key), policyVocabulary: gatePolicyVocabulary, netPartners: report.netPartners.map { [$0] } ?? [], unevaluated: gateUnevaluated, ignored: gatePolicyIgnored, outOfScope: report.outOfScope ?? []) }   // ⟨0.15 staged⟩ advisory, verdict-preserving; ⟨0.21⟩ analyzed + fail-closed unanalyzed; ⟨0.24⟩ the config vocabulary that participated
 let gateConfigured = policyPath != nil || baselinePath != nil
 if gateConfigured {
     if gateViolations.isEmpty {

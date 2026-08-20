@@ -327,8 +327,23 @@ public func isTelemetryHost(_ hostLiteral: String) -> Bool { hostInSet(hostLiter
 /// Mirrors candor-java's `Literals.netDestClass`.
 public func netDestClass(_ hostLiteral: String, _ partners: Set<String>) -> String {
     if isTelemetryHost(hostLiteral) { return "known-telemetry" }
-    if hostInSet(hostLiteral, partners) || isModelHost(hostLiteral) { return "known-partner" }
+    if partnerFor(hostLiteral, partners) != nil || isModelHost(hostLiteral) { return "known-partner" }
     return "unknown-host"
+}
+
+/// ⟨0.31⟩ WHICH declared partner a host matched, or nil — the SAME match `netDestClass` decides on,
+/// extracted so the DISCLOSURE and the DECISION cannot use different rules.
+///
+/// Not a stylistic preference. The reverted first attempt at the `net-partner` disclosure re-implemented
+/// this match against a normalisation that KEEPS the port, so an observed `partner.example:443` never
+/// equalled a declared `partner.example` and the disclosure came back SILENTLY EMPTY on every real run —
+/// while the verdicts it reported on had flipped. A disclosure normalised differently from the decision it
+/// reports can only be wrong; one function with two callers is what makes writing one impossible.
+public func partnerFor(_ hostLiteral: String, _ partners: Set<String>) -> String? {
+    if partners.isEmpty { return nil }
+    let host = hostPart(hostLiteral).lowercased()
+    if partners.contains(host) { return host }
+    return partners.first { host.hasSuffix("." + $0) }
 }
 
 /// ⟨0.20⟩ The closed `Net` destination-class vocabulary, for the `deny Net[<dest…>]` policy filter.

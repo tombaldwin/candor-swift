@@ -125,6 +125,15 @@ struct Report {
     // NEVER A `violation`. Folding these into the gate would move verdicts and make an exit code depend on
     // a file the gate declined to judge — the opposite of what this rung promises.
     var outOfScope: [OutOfScopeFinding]? = nil
+    // ⟨0.31⟩ the ambient `net-partner` declaration that MOVED a `netClass` — the config file that declared
+    // it, and the declared hosts that actually PARTICIPATED. `hosts` is what participated, not what was
+    // declared: a config listing twenty partners of which one matched discloses the one, because a list of
+    // everything written down buries the line that moved the verdict. NIL (key omitted) when nothing
+    // participated, so a project declaring no partners — or declaring some that never matched — is
+    // byte-identical to a pre-rung report. Recorded by the PRODUCER because `gate --report` has no target
+    // to anchor `net-partner` at, and re-classifying through the consumer's own config is the
+    // re-derivation ⟨0.24⟩ forbids; both routes copy this one record.
+    var netPartners: (config: String, hosts: [String])? = nil
     // ⟨scope travels⟩ What `--target` resolved, when it resolved against an `.xcodeproj`. The report is
     // read LATER by `privacy-manifest --verify`, which has only a report and a plist — so everything the
     // scan learned about which binary this is has to be IN the artifact or it is lost. Today the verify
@@ -190,6 +199,9 @@ struct Report {
         }
         // ⟨0.29⟩ …and what the peek found in them. Omitted when nil — no policy, so no question was asked.
         if let oos = outOfScope { env["outOfScope"] = oos.map { $0.toJSON() } }
+        // ⟨0.31⟩ after `outOfScope`, before `functions` — the position ts, rust and java also use, so key
+        // order does not depend on which engine produced the report.
+        if let np = netPartners { env["netPartners"] = ["config": np.config, "hosts": np.hosts] }
         return env
     }
 }

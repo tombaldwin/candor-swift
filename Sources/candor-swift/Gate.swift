@@ -66,6 +66,10 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
                       unanalyzed: [(path: String, reason: String)] = [],
                       coverage uncoveredModules: [String] = [],
                       policyVocabulary: (config: String, aliases: [String: [String]])? = nil,
+                      // ⟨0.31⟩ the ambient `net-partner` records that MOVED a classification — a LIST,
+                      // because a `--report` prefix can match several reports each anchoring its own
+                      // config, while one report carries one record. Copied, never recomputed.
+                      netPartners: [(config: String, hosts: [String])] = [],
                       unevaluated: [Unevaluated] = [],
                       ignored: [IgnoredLine] = [],
                       outOfScope: [OutOfScopeFinding] = []) {
@@ -143,6 +147,12 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
     // `corp = reflect,native` gate DIFFERENTLY under one unchanged policy line, so a reader handed only the
     // NAME cannot tell which gate ran. The object is a strict superset: a consumer that wanted the array
     // still has it as the key set. Classes sorted, as the alias names already were, for byte-stability.
+    // ⟨0.31⟩ same position on both routes, because §3.1 makes byte-equality between the scan verdict and
+    // the `gate --report` verdict the acceptance test. Omitted when empty, so every verdict without
+    // ambient partner vocabulary stays byte-identical.
+    if !netPartners.isEmpty {
+        dict["netPartners"] = netPartners.map { ["config": $0.config, "hosts": $0.hosts] }
+    }
     if let pv = policyVocabulary, !pv.aliases.isEmpty {
         dict["policyVocabulary"] = ["config": pv.config,
                                     "aliases": pv.aliases.mapValues { $0.sorted() }] as [String: Any]
