@@ -9,6 +9,11 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **The unevaluable-target refusal now names a remedy.** §3.3(d) makes it a MUST, and this engine printed
+  only `no Swift sources under <path>` — accurate, and silent about what to do. The remedy travels inside
+  the refusal string so the `--gate-json` document carries it too: whoever reads that document is exactly
+  whoever cannot go and look at stderr.
+
 ## [0.31.0] — 2026-08-20
 
 - **⟨0.31⟩ `netPartners` — the ambient config that moved a verdict is named in it.** Under
