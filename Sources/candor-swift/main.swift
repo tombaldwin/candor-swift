@@ -636,12 +636,29 @@ if let listFile = peekListPath {
     sourcePaths = [target]
 }
 sourcePaths.sort()
-if sourcePaths.isEmpty {
+// ⟨0.30⟩ NO ANALYZABLE SOURCE IS STILL A REASON TO LOOK AT WHAT WAS EXCLUDED. Measured 2026-08-20 on
+// published 0.30.0, in candor-ts first and then here: a package whose only Swift lives in a TEST target
+// answered "no Swift sources", exit 2, and named nothing — while candor-rust, over the analogous shape
+// (no `.rs` sources, a `build.rs` running `curl`), reached its peek and named `build::main performs
+// Exec`. All three fail closed, so no gate goes green; but naming the function IS this rung's premise.
+//
+// When a policy is configured and there IS something excluded to read, the run continues to the peek.
+// The refusal does not move — it becomes the NO_SOURCES arm beside the other exit-2 causes at the end.
+// THAT BACKSTOP IS THE CARE POINT: in candor-ts the same change WITHOUT it made a clean-sibling tree —
+// zero files analyzed, nothing wrong in the excluded sources — answer `policy ✓` at EXIT 0. A green over
+// a tree the engine never read is the cardinal sin, arriving inside a disclosure fix.
+let noSources = sourcePaths.isEmpty
+if noSources && !(policyPath != nil && !excludedFiles.isEmpty) {
     // An EMPTY SCAN is an exit-2 cause like any other, and §3.1 exempts none: a consumer reading the
     // stream after it must not get nothing. Easy to hit in CI when a path moves, and the last cause in
     // this engine still exiting raw — found by probing causes a user can trigger rather than by reading
     // exit sites.
     refuseGateAndExit("candor-swift: no Swift sources under \(target)")
+}
+if noSources {
+    FileHandle.standardError.write(
+        ("candor-swift: no Swift sources under \(target) — reading what this scan excluded, because a "
+         + "policy is configured and there are excluded files to look at\n").data(using: .utf8)!)
 }
 
 // ⟨--target⟩ RESTRICT the scan to one shipped binary. A package with several products sharing a core
@@ -2521,6 +2538,16 @@ if gateConfigured, let oos = report.outOfScope, !oos.isEmpty {
         ("candor-swift: gate NOT certified — \(oos.count) function(s) OUTSIDE this scan's scope perform an "
          + "effect this policy denies (named above); the gate did not judge them, so the verdict is "
          + "incomplete rather than a pass\n").data(using: .utf8)!)
+    exit(2)
+}
+// ⟨0.30⟩ THE THIRD EXIT-2 CAUSE: nothing analyzable was read at all. Reached only when the refusal near
+// the top deliberately fell through to run the peek, so any findings are named ABOVE this line and this
+// keeps the verdict where it already was. Ordered after the two arms above so their more specific
+// messages win, and after the violation exit so a certain violation still dominates.
+if noSources {
+    FileHandle.standardError.write(
+        ("candor-swift: gate NOT certified — no analyzable Swift source under \(target); a gate cannot "
+         + "be green over a tree it did not read\n").data(using: .utf8)!)
     exit(2)
 }
 // …and only NOW is the gate green: every exit-2 arm above has been passed, so `policy ✓` is a claim the
