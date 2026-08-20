@@ -9,6 +9,15 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ A target with no analyzable sources now still reads what it excluded.** A package whose only Swift
+  lives in a TEST target answered `no Swift sources`, exit 2, and named nothing — while candor-rust, over
+  the analogous shape, reached its peek and named the function. Found in candor-ts first, on the published
+  artifact, and present here identically. When a policy is configured and there are excluded files to
+  read, the run continues to the peek; **the refusal does not move**, it becomes a third exit-2 arm beside
+  the ⟨0.21⟩ unanalyzed and ⟨0.30⟩ out-of-scope causes. Verdicts unchanged — exit 2 before, exit 2 after.
+  candor-java's empty-class-directory case is not analogous (a class directory has nothing to peek, which
+  is why java flipped 0 of 14 packages at ⟨0.30⟩).
+
 ## [0.30.0] — 2026-08-19
 
 - **Spec floor 0.30.** The declaration this build emits as `candor.spec` moves with the family; see
