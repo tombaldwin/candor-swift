@@ -1963,6 +1963,23 @@ if peekListPath == nil, let pp = policyPath {
             // operator can do — the thing that breaks their build. `found` stays as far as it got.
         }
         report.outOfScope = found
+        // ⟨0.30⟩ NOTHING ANALYZABLE, AND THE PEEK FOUND NOTHING EITHER: REFUSE — AND REFUSE BEFORE AN
+        // ENVELOPE EXISTS. The peek is the whole reason this run got past the early refusal; if it named
+        // something, the ⟨0.30⟩ arm at the end reports it and exits 2 with `outOfScope` IN the report, so
+        // `gate --report` over that report reaches the same 2 and §3.1 holds. If it named nothing, there
+        // is nothing to report and the run must go back to being a refusal.
+        //
+        // WHY HERE AND NOT AT THE END, measured: the first version let the clean case fall through to a
+        // normal ending and exit 2 from an arm after the verdict was written — the process exited 2 while
+        // `--gate-json` said `ok: true`. The exit code was right and the DOCUMENT was green, and a machine
+        // consumer reads the document. §3.1's byte-equality is quantified over "any report a scan
+        // produced", so the only safe refusal is one that produces no report: once an envelope exists, the
+        // scan route owns the gate route's answer.
+        if noSources && found.isEmpty {
+            refuseGateAndExit("candor-swift: gate NOT certified — no analyzable Swift source under "
+                + "\(target), and the files this scan excluded perform no effect this policy denies; "
+                + "a gate cannot be green over a tree it did not read")
+        }
         // SAY IT ON STDERR TOO, and above the verdict. The report block is for machines; an operator
         // reading `policy ✓` needs to know in the same breath that a file this scan did not judge holds
         // the effect they denied. A caveat printed below a green tick is a caveat nobody reaches.
@@ -2538,16 +2555,6 @@ if gateConfigured, let oos = report.outOfScope, !oos.isEmpty {
         ("candor-swift: gate NOT certified — \(oos.count) function(s) OUTSIDE this scan's scope perform an "
          + "effect this policy denies (named above); the gate did not judge them, so the verdict is "
          + "incomplete rather than a pass\n").data(using: .utf8)!)
-    exit(2)
-}
-// ⟨0.30⟩ THE THIRD EXIT-2 CAUSE: nothing analyzable was read at all. Reached only when the refusal near
-// the top deliberately fell through to run the peek, so any findings are named ABOVE this line and this
-// keeps the verdict where it already was. Ordered after the two arms above so their more specific
-// messages win, and after the violation exit so a certain violation still dominates.
-if noSources {
-    FileHandle.standardError.write(
-        ("candor-swift: gate NOT certified — no analyzable Swift source under \(target); a gate cannot "
-         + "be green over a tree it did not read\n").data(using: .utf8)!)
     exit(2)
 }
 // …and only NOW is the gate green: every exit-2 arm above has been passed, so `policy ✓` is a claim the

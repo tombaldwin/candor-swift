@@ -9,6 +9,10 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **A refusal produces no report** — same defect and same fix as candor-ts (see its changelog). The clean
+  case exited 2 while `--gate-json` said `ok: true`; the refusal now happens straight after the peek,
+  before any envelope exists, because §3.1 binds any report a scan produced. Pinned by PART 56.
+
 - **⚠ A target with no analyzable sources now still reads what it excluded.** A package whose only Swift
   lives in a TEST target answered `no Swift sources`, exit 2, and named nothing — while candor-rust, over
   the analogous shape, reached its peek and named the function. Found in candor-ts first, on the published
