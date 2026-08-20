@@ -23,8 +23,6 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   target to anchor `net-partner` at, and re-classifying through the consumer's own config would make a
   verdict depend on the reader's working directory.
 
-## Unreleased
-
 - **A refusal produces no report** — same defect and same fix as candor-ts (see its changelog). The clean
   case exited 2 while `--gate-json` said `ok: true`; the refusal now happens straight after the peek,
   before any envelope exists, because §3.1 binds any report a scan produced. Pinned by PART 56.
