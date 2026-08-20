@@ -330,7 +330,7 @@ removes, so saying which file was read is part of the answer.
 An engine that classifies any `privacy/1` effect MUST disclose the extension in the report envelope:
 
 ```json
-{ "candor": { "version": "…", "toolchain": "swiftsyntax", "spec": "0.30" },
+{ "candor": { "version": "…", "toolchain": "swiftsyntax", "spec": "0.31" },
   "extensions": ["privacy/2"],
   "functions": [ … ] }
 ```
