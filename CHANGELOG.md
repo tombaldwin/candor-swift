@@ -9,6 +9,21 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.32⟩ A refusal records itself beside the reports it would have written.** Measured in this engine
+  before the fix: scan green, add a denied effect, refuse with an unknown flag, and
+  `candor-swift gate --report .` answered **exit 0** over the previous run's bytes. The refusal now writes
+  `<prefix>.refused.json`, which overwrites nothing — the report is byte-untouched across it — and the
+  gate declines to certify until a completing run clears it.
+
+  Arming that prefix is not the fix, and this engine's own armer says why: its first version overwrote a
+  `.candor/report.<pkg>.Swift.json` with a placeholder, and committed reports are a pattern this project
+  recommends.
+
+  **The refusal funnel is guarded here, which the port had to discover.** `refuseGateAndExit` is only
+  called on the unknown-flag path when a verdict sink already exists, so the commonest shape of all — an
+  unknown flag with no `--gate-json` — exits elsewhere. Writing the marker only in the funnel produced
+  none for exactly the case the rung exists for.
+
 ## [0.31.0] — 2026-08-20
 
 - **The unevaluable-target refusal now names a remedy.** §3.3(d) makes it a MUST, and this engine printed
