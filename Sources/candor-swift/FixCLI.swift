@@ -1419,6 +1419,21 @@ func runPathCLI(_ args: [String]) -> Never {
     guard let model = loadFixModel(prefix: prefix, who: "path") else {
         fixDie("candor-swift path: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
     }
+    // A TYPO'D EFFECT NAME IS A LOUD ERROR. Before this, `path caller Fsz` printed
+    // "caller does not perform Fsz  (inferred: [\"Fs\"])" and exited 0 — a typo scored as a confident
+    // NEGATIVE, in the verb people reach for to check one specific claim. The other engines grew this
+    // guard on `where` after the corpus audit and never grew it on `path`; this engine ships no `where`
+    // at all, so `path` is the only place it can live here.
+    //
+    // A KNOWN effect that is simply absent stays a legitimate negative answer, and an unknown name that
+    // is PRESENT in the report (a spec extension effect from another engine) is allowed — error only
+    // when the name is NEITHER known NOR present.
+    let knownEffects = ["Net", "Fs", "Db", "Llm", "Exec", "Env", "Clock", "Ipc", "Log", "Rand",
+                        "Clipboard", "Unknown"]
+    if !knownEffects.contains(effect)
+        && !model.byName.values.contains(where: { $0.inferred.contains(effect) }) {
+        fixDie("candor-swift path: unknown effect `\(effect)` (known: \(knownEffects.joined(separator: ", ")))")
+    }
     let byName = model.byName
     let cg = model.cg
 
