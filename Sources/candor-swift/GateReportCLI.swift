@@ -215,6 +215,38 @@ private func mergeGateReport(_ full: String, into env: inout GateReportEnvelope)
     return true
 }
 
+/// ⟨0.32⟩ The refusal marker for a locator, if one is present — SPEC §3.3.1 ⟨0.32⟩.
+///
+/// All three locator forms. The DIRECT-FILE case is why the marker carries its own `prefix`: that form
+/// accepts any `.json` name whatever its dot-segments, so the prefix cannot come from the filename — the
+/// marker is found by scanning the file's directory and asking which recorded prefix covers it.
+struct RefusalMarker { let prefix: String; let target: String; let reason: String }
+
+func refusalMarkerFor(_ locator: String) -> RefusalMarker? {
+    func read(_ path: String) -> RefusalMarker? {
+        guard let d = FileManager.default.contents(atPath: path),
+              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+              o["refused"] as? Bool == true,
+              let pfx = o["prefix"] as? String else { return nil }
+        return RefusalMarker(prefix: pfx,
+                             target: o["target"] as? String ?? "",
+                             reason: o["reason"] as? String ?? "")
+    }
+    var isDir: ObjCBool = false
+    if locator.hasSuffix(".json"),
+       FileManager.default.fileExists(atPath: locator, isDirectory: &isDir), !isDir.boolValue {
+        let dir = (locator as NSString).deletingLastPathComponent
+        let me = URL(fileURLWithPath: locator).standardizedFileURL.path
+        for n in (try? FileManager.default.contentsOfDirectory(atPath: dir.isEmpty ? "." : dir)) ?? [] {
+            guard n.hasSuffix(".refused.json") else { continue }
+            if let m = read((dir.isEmpty ? "." : dir) + "/" + n),
+               me.hasPrefix(URL(fileURLWithPath: m.prefix).standardizedFileURL.path) { return m }
+        }
+        return nil
+    }
+    return read(locator + ".refused.json")
+}
+
 /// Load the report(s) at `prefix` and NOTHING ELSE. Returns nil when no report is found or one is
 /// corrupt (the caller exits 2 — never a silently-empty "no violations").
 ///
@@ -756,6 +788,17 @@ func runGateReportCLI(_ args: [String]) -> Never {
     guard let prefix = locator else {
         gateDie("candor-swift gate: no report — pass --report <locator> or run from a repo with a .candor/ "
                 + "dir (scan: candor-swift <dir>)")
+    }
+    // ⟨0.32⟩ SPEC §3.3.1 — did the most recent attempt over these reports REFUSE?
+    //
+    // Checked BEFORE they are read, because the answer does not depend on them: they may parse perfectly
+    // and describe real code, and still be the output of a scan whose successor refused. This verb cannot
+    // compute that — the hazard is an EVENT witnessed only by the refusing run — so the refusing run
+    // writes it down and this reads it.
+    if let m = refusalMarkerFor(prefix) {
+        gateDie("candor-swift gate: the most recent scan over `\(m.prefix)` REFUSED — these reports are "
+                + "from an earlier run and this verb will not certify them. Cause: \(m.reason). "
+                + "Re-scan \(m.target.isEmpty ? "the target" : m.target); a completing run clears the marker.")
     }
     guard let env = loadGateReport(prefix: prefix) else {
         gateDie("candor-swift gate: no readable report at `\(prefix)` — nothing to gate (scan: candor-swift <dir>)")

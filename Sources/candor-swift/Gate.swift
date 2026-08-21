@@ -359,7 +359,62 @@ func zeroRulePolicyRefusal(_ pol: ParsedPolicy, at path: String,
 /// Print the reason, write the refusal document to every requested sink, exit 2.
 /// ⟨0.24⟩ `unevaluated` travels with it when the refusal IS a set of undecidable rules (SPEC §3.1) — the
 /// machine channel for the same disclosure the `reason` string carries for the human.
+// ⟨0.32⟩ THE REFUSAL MARKER — SPEC §3.3.1 ⟨0.32⟩.
+//
+// A run given no `--out` still writes reports, to its default prefix, and a refusal leaves whatever the
+// last successful run put there readable as current. MEASURED in this engine: scan green, add a denied
+// effect, refuse with an unknown flag, and `candor-swift gate --report .` answers exit 0 over the
+// previous run's bytes.
+//
+// Arming that prefix is NOT the answer, and the comment at this engine's own armer says why — the first
+// version of it overwrote a `.candor/report.<pkg>.Swift.json` with a placeholder, and committed reports
+// are a pattern this project recommends. Naming a prefix is a declaration; a default is a convention.
+//
+// So the refusal is recorded BESIDE the reports and overwrites nothing. Because it destroys nothing it
+// is written at the EARLIEST moment the prefix is known — during argument parsing — which is what lets
+// it cover the argv-death case arming structurally cannot reach.
+// `nonisolated(unsafe)`, matching `gateVerdictSinks` above and for the same stated reason: this is a
+// single-threaded CLI process and each value is written once, during argument parsing, before anything
+// reads it.
+nonisolated(unsafe) var refusalPrefix: String? = nil
+nonisolated(unsafe) var refusalTarget: String? = nil
+
+func noteRefusalPrefix(_ p: String) { if refusalPrefix == nil { refusalPrefix = p } }
+func noteRefusalTarget(_ t: String) { if refusalTarget == nil { refusalTarget = t } }
+
+func writeRefusalMarker(_ why: String) {
+    guard let pfx = refusalPrefix else { return }
+    let doc: [String: Any] = [
+        "candor": ["spec": specVersion],
+        "refused": true,
+        "prefix": pfx,
+        "target": refusalTarget ?? ".",
+        // The marker carries its own `prefix` because §3.3.1's DIRECT-FILE locator accepts any `.json`
+        // name whatever its dot-segments: a consumer handed one file cannot recover the prefix from the
+        // filename and reads it out of the marker instead.
+        "reason": why,
+    ]
+    let dir = (pfx as NSString).deletingLastPathComponent
+    if !dir.isEmpty {
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    }
+    if let data = try? JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted, .sortedKeys]) {
+        // A marker that cannot be written fails OPEN — the status quo, never worse than before the rung.
+        try? data.write(to: URL(fileURLWithPath: pfx + ".refused.json"))
+    }
+}
+
+/// ⟨0.32⟩ …and a run that COMPLETES its write phase removes it, so the marker's presence means exactly
+/// "the most recent attempt over this prefix refused". A marker left behind makes every later gate refuse
+/// for ever — the permanent-red mirror of the permanent-green this closes.
+func clearRefusalMarker(_ resolved: String? = nil) {
+    for pfx in [refusalPrefix, resolved].compactMap({ $0 }) {
+        try? FileManager.default.removeItem(atPath: pfx + ".refused.json")
+    }
+}
+
 func refuseGateAndExit(_ reason: String, unevaluated: [Unevaluated] = []) -> Never {
+    writeRefusalMarker(reason)   // ⟨0.32⟩ over the RUN, not over the fourteen call sites
     FileHandle.standardError.write((reason + "\n").data(using: .utf8)!)
     // DEDUPE AT THE WRITE, not at each append. Two code paths register the stream sink — the gate verb's
     // pre-pass (so a refusal during ARGUMENT PARSING still reaches stdout) and the flag loop that learns

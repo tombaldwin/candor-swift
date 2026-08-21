@@ -346,6 +346,7 @@ while let a = argIter.next() {
             refuseGateAndExit("candor-swift: --out requires a value")
         }
         outPrefix = v
+        noteRefusalPrefix(v)   // ⟨0.32⟩
     case "--json":
         // Print the §2 envelope to STDOUT instead of writing the report file(s)/sidecars (matching the
         // candor-scan reference). The §6.2 policy gate below STILL runs and keeps its exit codes —
@@ -523,6 +524,12 @@ while let a = argIter.next() {
             // ⟨0.28⟩ …and the REPORT stream on exit-2 for the `--json` case with no verdict sink at all
             // (the trigger PART 37 (b) probes: `--json --zzz-not-a-flag`). Empty on other runs.
             writeReportStreamFailClosed(reasonKey: "unknown-flag", why: "candor-swift: unknown flag \(a)")
+            // ⟨0.32⟩ …and the REFUSAL MARKER, which this path needs precisely BECAUSE it does not go
+            // through `refuseGateAndExit`: that call above is guarded on a verdict sink existing, so the
+            // commonest shape of all — an unknown flag with no `--gate-json` — exits here. Measured: the
+            // first version of this port wrote the marker only in the funnel and produced none for
+            // `candor-swift . --policy p --zzz-not-a-flag`, the exact case the rung exists for.
+            writeRefusalMarker("candor-swift: unknown flag \(a)")
             exit(2)
         }
         // A SECOND POSITIONAL IS A USAGE ERROR, NOT A SILENT REPLACEMENT. `candor-swift a b` scanned `b`
@@ -548,6 +555,12 @@ while let a = argIter.next() {
         }
         sawPositional = true
         target = a
+        // ⟨0.32⟩ LATCH THE DEFAULT PREFIX DURING PARSING, not where `prefix` is finally resolved.
+        // A refusal DURING parsing (an unknown flag is the everyday case) never reaches that
+        // resolution, so latching later leaves the marker absent on exactly the case it exists for —
+        // measured in candor-rust and candor-ts, both of which made that mistake first.
+        noteRefusalTarget(a)
+        noteRefusalPrefix(a + "/.candor/report")
     }
 }
 
@@ -2070,6 +2083,10 @@ if wantJson {
     // Create `.candor/` (or the --out parent) only on the file-writing path — --json is documented as
     // writing NO files, so it must not leave an empty directory behind as a side effect.
     try? fm.createDirectory(atPath: (prefix as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+    // ⟨0.32⟩ the write phase finished, so the marker's claim is no longer true. Cleared against the
+    // RESOLVED prefix as well as the latched one: the latch is made from the raw target during parsing
+    // and `prefix` may differ once resolved.
+    clearRefusalMarker(prefix)
     writeJson(envelope, reportPath)
     writeJson(cg, "\(prefix).\(fileSafePkg).Swift.callgraph.json")
     // Type-hierarchy sidecar (SPEC §4 / 0.7): each local type -> its declared supertypes/protocols, by
