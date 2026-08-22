@@ -117,7 +117,14 @@ struct Report {
     // classes it actually read. This engine does NOT read `.build/`, and candor-java cannot read a `.java`
     // that was never compiled; without the flag both would be certifying files nobody opened, which is the
     // ⟨0.26⟩ partial-manifest failure exactly — a partial answer worse than an absent one.
-    var excluded: [(cls: String, count: Int, peeked: Bool, reason: String)] = []
+    // ⟨0.33⟩ `judgedElsewhere` — the files of this class are COPIES of code this same scan already
+    // judged, so the class hides nothing and does not make the verdict INCOMPLETE. `build-output` is
+    // the case that forces it here: `.build/` is held out of the PEEK as well as the scan
+    // (`PEEKED_CLASSES`), so without this flag every SPM project with a build directory would refuse
+    // on contact. Producer-set on purpose — a consumer cannot infer it from the class token, which is
+    // engine-chosen (the same concept is `build-output-archive` in candor-java), and the distinction
+    // is not cosmetic: rust's `build-script` is code that RUNS and must fail closed.
+    var excluded: [(cls: String, count: Int, peeked: Bool, judgedElsewhere: Bool, reason: String)] = []
     // ⟨0.29⟩ what the PEEK found in those files: an effect the policy DENIES, in a file the gate did not
     // judge. NIL (key omitted) when no policy was configured — nothing was asked, so `[]` would be a claim.
     // EMPTY when a policy was configured and the excluded files were clean under it.
@@ -195,7 +202,14 @@ struct Report {
         // ⟨0.29⟩ THE SCOPE — ALWAYS emitted, `[]` included (see `excluded`). The one field in this
         // envelope whose EMPTY form is load-bearing: it says "I looked, and excluded nothing".
         env["excluded"] = excluded.map {
-            ["class": $0.cls, "count": $0.count, "peeked": $0.peeked, "reason": $0.reason] as [String: Any]
+            {
+                var m: [String: Any] = ["class": $0.cls, "count": $0.count, "peeked": $0.peeked,
+                                        "reason": $0.reason]
+                // Emitted only when TRUE: false is the default, and an always-present key would make
+                // every pre-rung report differ over a fact that changes nothing.
+                if $0.judgedElsewhere { m["judgedElsewhere"] = true }
+                return m
+            }($0) as [String: Any]
         }
         // ⟨0.29⟩ …and what the peek found in them. Omitted when nil — no policy, so no question was asked.
         if let oos = outOfScope { env["outOfScope"] = oos.map { $0.toJSON() } }
