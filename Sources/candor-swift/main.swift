@@ -1803,6 +1803,11 @@ let EXCLUDED_REASON: [String: String] = [
 /// which leaves the findings as far as they got and the classes marked unpeeked.
 struct PeekTimedOut: Error {}
 let PEEKED_CLASSES: Set<String> = ["manifest", "harness-target", "test-source", "outside-the-target-closure"]
+
+/// ⟨0.33⟩ The exclusion classes that do NOT hide unjudged code — a DENYLIST, so a class nobody has
+/// thought about fails CLOSED and someone has to argue it onto this list. `.build/` is a derived copy
+/// of sources the scan already read; nothing else here is.
+let DERIVED_EXCLUSIONS: Set<String> = ["build-output"]
 // THE PEEK. Read the files this scan deliberately did NOT judge, and say so when they hold an effect the
 // policy DENIES. ⟨0.30⟩ THE VERDICT DOES MOVE (a non-empty block is `ok:false, incomplete:true`, exit 2);
 // `outOfScope` is still its own kind, never a violation, because a
@@ -2036,6 +2041,8 @@ for e in excludedFiles { excludedByClass[e.cls, default: 0] += 1 }
 report.excluded = excludedByClass.keys.sorted().map {
     (cls: $0, count: excludedByClass[$0]!,
      peeked: peekRead && PEEKED_CLASSES.contains($0) && !peekUnattributed && !peekUnread.contains($0),
+     // ⟨0.33⟩ `.build/` is DERIVED — a copy of sources this scan already read — so it hides nothing.
+     judgedElsewhere: DERIVED_EXCLUSIONS.contains($0),
      reason: EXCLUDED_REASON[$0] ?? "excluded (\($0))")
 }
 let envelope: [String: Any] = report.toJSON()
