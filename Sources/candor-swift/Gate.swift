@@ -72,7 +72,11 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
                       netPartners: [(config: String, hosts: [String])] = [],
                       unevaluated: [Unevaluated] = [],
                       ignored: [IgnoredLine] = [],
-                      outOfScope: [OutOfScopeFinding] = []) {
+                      outOfScope: [OutOfScopeFinding] = [],
+                      // ⟨0.33⟩ exclusion classes this scan did NOT READ — `excluded[].peeked == false`
+                      // without `judgedElsewhere`. Defaulted so every existing caller keeps compiling and
+                      // keeps its current verdict; the routes that can supply it pass it explicitly.
+                      unpeeked: [String] = []) {
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a gate over source candor could NOT analyze must NOT read green —
     // its effects are invisible, so a `deny`/`allow` that "passes" over it is a false-pure. `ok` requires
     // BOTH no violation AND a complete analysis (the caller exits 2 on this incomplete-but-clean path).
@@ -81,7 +85,12 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
     // Both mean the gate could not see enough of the tree to certify it, so both suppress `ok`. Reverses
     // ⟨0.29⟩'s "the verdict does not move" on the measurement that the peek resolves a CONCRETE denied
     // effect rather than uncertainty.
-    let incomplete = !unanalyzed.isEmpty || !outOfScope.isEmpty
+    // ⟨0.33⟩ THE THIRD CAUSE — code this scan admits it never READ. ⟨0.30⟩ keys on what the peek FOUND,
+    // and a peek that could not open a file finds nothing, which is byte-identical to finding it clean.
+    // MEASURED on candor-java before the rung: `deny Exec` passed green over a tree holding an
+    // uncompiled source calling `Runtime.exec("curl … | sh")`, with `excluded` saying `peeked: false`
+    // beside it and that flag moving no verdict at all.
+    let incomplete = !unanalyzed.isEmpty || !outOfScope.isEmpty || !unpeeked.isEmpty
     var dict: [String: Any] = [
         "spec": spec,
         "ok": violations.isEmpty && !incomplete,
