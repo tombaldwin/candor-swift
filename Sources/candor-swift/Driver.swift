@@ -543,7 +543,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var unanalyzed: [(path: String, reason: String)] = []
     for p in sourcePaths {
         guard let src = try? String(contentsOfFile: p, encoding: .utf8) else {
-            unanalyzed.append((path: p, reason: "source failed to read"))
+            // RELATIVE, like every other path this report carries — the line just below computes one
+            // for the readable case, and this branch was the only one emitting an absolute. An absolute
+            // path records where the CI runner's checkout was, and makes the SAME defect produce
+            // DIFFERENT BYTES on two machines, which a report-diffing consumer reads as a change.
+            unanalyzed.append((path: rel(p, to: rootDir), reason: "source failed to read"))
             continue
         }
         let tree = Parser.parse(source: src)
