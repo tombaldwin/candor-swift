@@ -1808,6 +1808,18 @@ let PEEKED_CLASSES: Set<String> = ["manifest", "harness-target", "test-source", 
 /// thought about fails CLOSED and someone has to argue it onto this list. `.build/` is a derived copy
 /// of sources the scan already read; nothing else here is.
 let DERIVED_EXCLUSIONS: Set<String> = ["build-output"]
+
+/// ⟨0.33⟩ The exclusion classes this scan did NOT read — the third cause of an INCOMPLETE verdict.
+///
+/// Two conditions, and both matter. `judgedElsewhere` is the producer's carve-out for a DERIVED copy of
+/// code already judged (`.build/`), which hides nothing. And the whole rule is gated on the peek having
+/// RUN at all: `peeked: false` also means no policy was configured and nothing was asked, which records
+/// an absence of QUESTION rather than an absence of evidence — without that gate every report written
+/// without a peek fails closed on contact, which is what it did in candor-java before the same fix.
+func unreadExclusions(_ report: Report) -> [String] {
+    guard report.outOfScope != nil else { return [] }   // nothing was asked of the peek
+    return report.excluded.filter { !$0.peeked && !$0.judgedElsewhere }.map(\.cls)
+}
 // THE PEEK. Read the files this scan deliberately did NOT judge, and say so when they hold an effect the
 // policy DENIES. ⟨0.30⟩ THE VERDICT DOES MOVE (a non-empty block is `ok:false, incomplete:true`, exit 2);
 // `outOfScope` is still its own kind, never a violation, because a
@@ -2561,7 +2573,7 @@ for v in gateViolations { FileHandle.standardError.write(("[\(v.rule)] \(v.detai
 // --gate-json ⟨0.8⟩: the machine verdict, from the SAME gateViolations that set the exit code — written
 // BEFORE the exit below (ok:true,[] when no gate is configured). Unreadable policy already exited 2 above;
 // AS-EFF-005 records join the same list, so the verdict and the exit code can never disagree.
-if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVersion, analyzedCount: allFns.count, unanalyzed: unanalyzedUnits, coverage: unlisted.map(\.key), policyVocabulary: gatePolicyVocabulary, netPartners: report.netPartners.map { [$0] } ?? [], unevaluated: gateUnevaluated, ignored: gatePolicyIgnored, outOfScope: report.outOfScope ?? []) }   // ⟨0.15 staged⟩ advisory, verdict-preserving; ⟨0.21⟩ analyzed + fail-closed unanalyzed; ⟨0.24⟩ the config vocabulary that participated
+if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVersion, analyzedCount: allFns.count, unanalyzed: unanalyzedUnits, coverage: unlisted.map(\.key), policyVocabulary: gatePolicyVocabulary, netPartners: report.netPartners.map { [$0] } ?? [], unevaluated: gateUnevaluated, ignored: gatePolicyIgnored, outOfScope: report.outOfScope ?? [], unpeeked: unreadExclusions(report)) }   // ⟨0.15 staged⟩ advisory, verdict-preserving; ⟨0.21⟩ analyzed + fail-closed unanalyzed; ⟨0.24⟩ the config vocabulary that participated
 let gateConfigured = policyPath != nil || baselinePath != nil
 if gateConfigured {
     if gateViolations.isEmpty {
@@ -2600,6 +2612,22 @@ if gateConfigured, let oos = report.outOfScope, !oos.isEmpty {
          + "effect this policy denies (named above); the gate did not judge them, so the verdict is "
          + "incomplete rather than a pass\n").data(using: .utf8)!)
     exit(2)
+}
+// ⟨0.33⟩ THE THIRD CAUSE — a class this scan did not READ. The ⟨0.30⟩ arm above keys on what the peek
+// FOUND, and a peek that could not open a file finds nothing, which is byte-identical to finding it
+// clean. `unreadExclusions` applies the producer's `judgedElsewhere` carve-out (a `.build/` copy of
+// code already judged hides nothing) and fires only when the peek RAN, so a scan nobody asked a policy
+// of is untouched. AFTER the two arms above, deliberately: a CONCRETE denied effect outside the scan is
+// a better message than "something went unread", and a real violation dominates both.
+if gateConfigured {
+    let unread = unreadExclusions(report)
+    if !unread.isEmpty {
+        FileHandle.standardError.write(
+            ("candor-swift: gate NOT certified — this scan did not READ \(unread.joined(separator: ", ")). "
+             + "Their effects are absent because nothing looked, not because there are none, so the verdict "
+             + "is INCOMPLETE rather than a pass.\n").data(using: .utf8)!)
+        exit(2)
+    }
 }
 // …and only NOW is the gate green: every exit-2 arm above has been passed, so `policy ✓` is a claim the
 // run can support. See the note at the violation branch for what printing it earlier said.
