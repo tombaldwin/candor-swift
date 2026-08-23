@@ -1804,12 +1804,12 @@ let EXCLUDED_REASON: [String: String] = [
 struct PeekTimedOut: Error {}
 let PEEKED_CLASSES: Set<String> = ["manifest", "harness-target", "test-source", "outside-the-target-closure"]
 
-/// ⟨0.33⟩ The exclusion classes that do NOT hide unjudged code — a DENYLIST, so a class nobody has
+/// ⟨0.32⟩ The exclusion classes that do NOT hide unjudged code — a DENYLIST, so a class nobody has
 /// thought about fails CLOSED and someone has to argue it onto this list. `.build/` is a derived copy
 /// of sources the scan already read; nothing else here is.
 let DERIVED_EXCLUSIONS: Set<String> = ["build-output"]
 
-/// ⟨0.33⟩ The exclusion classes this scan did NOT read — the third cause of an INCOMPLETE verdict.
+/// ⟨0.32⟩ The exclusion classes this scan did NOT read — the third cause of an INCOMPLETE verdict.
 ///
 /// Two conditions, and both matter. `judgedElsewhere` is the producer's carve-out for a DERIVED copy of
 /// code already judged (`.build/`), which hides nothing. And the whole rule is gated on the peek having
@@ -2053,7 +2053,7 @@ for e in excludedFiles { excludedByClass[e.cls, default: 0] += 1 }
 report.excluded = excludedByClass.keys.sorted().map {
     (cls: $0, count: excludedByClass[$0]!,
      peeked: peekRead && PEEKED_CLASSES.contains($0) && !peekUnattributed && !peekUnread.contains($0),
-     // ⟨0.33⟩ `.build/` is DERIVED — a copy of sources this scan already read — so it hides nothing.
+     // ⟨0.32⟩ `.build/` is DERIVED — a copy of sources this scan already read — so it hides nothing.
      judgedElsewhere: DERIVED_EXCLUSIONS.contains($0),
      reason: EXCLUDED_REASON[$0] ?? "excluded (\($0))")
 }
@@ -2613,7 +2613,7 @@ if gateConfigured, let oos = report.outOfScope, !oos.isEmpty {
          + "incomplete rather than a pass\n").data(using: .utf8)!)
     exit(2)
 }
-// ⟨0.33⟩ THE THIRD CAUSE — a class this scan did not READ. The ⟨0.30⟩ arm above keys on what the peek
+// ⟨0.32⟩ THE THIRD CAUSE — a class this scan did not READ. The ⟨0.30⟩ arm above keys on what the peek
 // FOUND, and a peek that could not open a file finds nothing, which is byte-identical to finding it
 // clean. `unreadExclusions` applies the producer's `judgedElsewhere` carve-out (a `.build/` copy of
 // code already judged hides nothing) and fires only when the peek RAN, so a scan nobody asked a policy
