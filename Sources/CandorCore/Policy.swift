@@ -762,15 +762,29 @@ public func scopeMatchesPermitted(_ name: String, _ scope: String) -> Bool {
     return false
 }
 
+/// A TRAILING SEPARATOR MEANS EXACT SEGMENT — `app::` matches the segment `app` and nothing else,
+/// while bare `app` keeps the documented prefix behaviour and still matches `application_name`.
+///
+/// REPORTED FROM THE FIELD (2026-08-23) and reproduced four-way: `forbid aws -> app` fired 14 times on
+/// honest AWS SDK calls, and writing `app::` did not help — `split(whereSeparator:)` drops empty
+/// subsequences, so `app::` became exactly `["app"]` and the separator never survived to mean anything.
+/// The reporter deleted the rule, which is the real cost: the genuine violation it existed to catch
+/// will now never fire, and NOTHING in the policy file records that a boundary stopped being checked.
+///
+/// ADDITIVE: bare `app` is unchanged, so no existing verdict moves. Only `app::` — which today silently
+/// behaves as `app` — starts meaning what everyone who writes it intends.
 public func scopeMatches(_ name: String, _ scope: String) -> Bool {
     if scope.isEmpty { return true }
+    let trimmed = scope.trimmingCharacters(in: .whitespaces)
+    let exact = trimmed.hasSuffix("::") || trimmed.hasSuffix(".")
     let segs = name.split(whereSeparator: { $0 == "." || $0 == ":" }).map(String.init)
     let parts = scope.split(whereSeparator: { $0 == "." || $0 == ":" }).map(String.init)
     if parts.isEmpty || parts.count > segs.count { return false }
     let last = parts[parts.count - 1], initParts = parts.dropLast()
     outer: for i in 0...(segs.count - parts.count) {
         for (k, ip) in initParts.enumerated() where segs[i + k] != ip { continue outer }
-        if segs[i + parts.count - 1].hasPrefix(last) { return true }
+        let tail = segs[i + parts.count - 1]
+        if exact ? tail == last : tail.hasPrefix(last) { return true }
     }
     return false
 }
