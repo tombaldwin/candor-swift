@@ -9,6 +9,13 @@ import Foundation
 
 // A per-function record the cut needs (from the §2 report envelope).
 public struct FixFn {
+    /// ⟨0.32⟩ the DISTINCT §2.2 join keys seen under this NAME across the loaded report set. More than
+    /// one means two different units declare it, and this model — which is addressed by NAME, because
+    /// `candor fix <fn> <Effect>` is what a person types — cannot tell them apart. It does not GUESS:
+    /// `fixGate` plans no remedy for such a name and discloses it instead. Planning an edit against the
+    /// wrong function is the failure this exists to prevent, and the loader used to make it silently by
+    /// letting the last report read win the key outright.
+    public var joinKeys: Set<String> = []
     public let inferred: Set<String>
     public let direct: Set<String>
     public let calls: [String]
@@ -307,8 +314,24 @@ public func fixGate(byName: [String: FixFn], cg: [String: [String]], deny: [Deny
                                   netClasses: netClasses, deny: deny)
     let unadjudicable = unanswerablePairs(cells)
     var plans: [String: Remedy] = [:]
+    // ⟨0.32⟩ names two units declare — no plan, a disclosure. SPEC §3.2 makes this verb's confidence a
+    // COMPARISON against the gate, and the gate keys by `hash`, so it holds the two apart and answers
+    // about each. This model cannot; the honest answer is therefore "I cannot say which", never a
+    // remedy computed against whichever report happened to be read last.
+    var ambiguousNames: [UnansweredRule] = []
+    for fn in byName.keys.sorted() where (byName[fn]?.joinKeys.count ?? 0) > 1 {
+        let keys = (byName[fn]?.joinKeys ?? []).sorted().joined(separator: ", ")
+        ambiguousNames.append(UnansweredRule(
+            rule: "fix-gate",
+            why: "`\(fn)` is declared by more than one unit in this report set (\(keys)) and this verb is "
+               + "addressed by NAME, so it cannot tell which one a remedy would edit. `gate --report` "
+               + "keys by `hash` and judges them separately — gate there, or narrow the report set to "
+               + "one unit.",
+            fn: fn, effect: ""))
+    }
     for fn in byName.keys.sorted() {
         guard let fe = byName[fn] else { continue }
+        guard fe.joinKeys.count <= 1 else { continue }
         for effect in fe.inferred.sorted() {
             guard let layer = deniedLayer(fn, effect, deny, classes, netClasses) else { continue }
             let p = computeRemedy(start: fn, effect: effect, layer: layer, byName: byName, cg: cg, rev: rev,
@@ -319,7 +342,13 @@ public func fixGate(byName: [String: FixFn], cg: [String: [String]], deny: [Deny
         }
     }
     let remedies = plans.keys.sorted().map { plans[$0]! }
-    return (remedies.isEmpty, remedies, unansweredDisclosure(cells))
+    // ⟨0.32⟩ `ok` is FALSE when a name went unplanned for ambiguity — `ok: true` beside an empty remedy
+    // list is this verb saying "nothing to do", and there is something to do: disambiguate. The
+    // disclosure rides the same channel as the unanswerable filters because it is the same kind of fact
+    // — a question this run could not answer — and a consumer already reads that channel.
+    return (remedies.isEmpty && ambiguousNames.isEmpty,
+            remedies,
+            unansweredDisclosure(cells) + ambiguousNames)
 }
 
 /// Does this plan assert a layer status the gate declined to decide? KEYED ON THE PLAN'S OWN EFFECT, not

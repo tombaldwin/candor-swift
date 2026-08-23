@@ -433,7 +433,19 @@ private func mergeFixReport(_ full: String, into byName: inout [String: FixFn],
             for (eff, v) in pk { m[eff] = (v as? [Any])?.compactMap { $0 as? String } ?? [] }
             rec.privacyKinds = m
         }
-        byName[fn] = rec
+        // ⟨0.32⟩ RECORD THE JOIN KEY, and NEVER let a second report silently take the name. This line
+        // used to be a bare overwrite: two units declaring `A.run` left whichever report was read LAST,
+        // so a remedy could be computed against a function the operator never asked about — and nothing
+        // said so. The first record stands and the collision is MARKED; `fixGate` refuses to plan on a
+        // marked name (SPEC §3.2 — this verb's answer is a comparison against a gate that keys by hash).
+        let jk = (e["hash"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? fn
+        if var existing = byName[fn] {
+            existing.joinKeys.insert(jk)
+            byName[fn] = existing
+        } else {
+            rec.joinKeys = [jk]
+            byName[fn] = rec
+        }
         for case let m as String in (e["invisible"] as? [Any]) ?? [] { coverage.invisibleModules.insert(m) }
     }
     // ⟨0.15 staged⟩ envelope `coverage` ledger (absent on a fully-covered or pre-⟨0.15⟩ report).
