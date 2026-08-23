@@ -32,7 +32,18 @@ func loadBaseline(_ path: String) -> [String: Set<String>]? {
         guard let fn = e["fn"] as? String, !fn.isEmpty else { continue }
         var effs: Set<String> = []
         for case let name as String in (e["inferred"] as? [Any]) ?? [] { effs.insert(name) }
-        m[fn] = effs
+        // ⟨0.32⟩ INTERSECT a repeated `fn`, never overwrite — and note this is the OPPOSITE direction to
+        // the gate's merge, deliberately. There, two entries under one key union their effects, because
+        // more effects can only mean more violations. Here the map is a PRIOR: the guard fires on what a
+        // function GAINED against it, so a WIDER prior means FEWER alarms. Overwriting let the last entry
+        // read win outright, which on a baseline holding a pure `A.run` and an effectful one from another
+        // module recorded the effectful set as the prior for both — and the pure one could then acquire
+        // that effect with no alarm at all. Intersection keeps the smallest prior any entry claims, so a
+        // collision costs sensitivity nowhere and buys silence nowhere.
+        //
+        // A single report cannot normally produce a duplicate `fn`; a hand-merged or multi-module
+        // baseline can, and a baseline is a file people edit and check in.
+        m[fn] = m[fn].map { $0.intersection(effs) } ?? effs
     }
     return m
 }
