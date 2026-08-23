@@ -496,6 +496,12 @@ struct GateInput {
     let surfaceIncomplete: [String: Set<String>]
     /// the call graph AS-EFF-009 walks.
     let edges: [String: [String]]
+    /// ⟨0.32⟩ KEY → the function's NAME. Every map above is keyed by the report's `hash` when it carries
+    /// one (SPEC §2.2: join by `hash`, never by bare `fn`), and a hash matches no policy scope and reads
+    /// as nothing in a message — so a rule keyed against the raw key would bind NOTHING and pass, which
+    /// is the silent direction. EMPTY on the scan route, where the key IS the name: `nameOf` falls back
+    /// to the key, so that route is byte-identically unchanged.
+    var display: [String: String] = [:]
 }
 
 /// The SCAN route into the gate: the classifier's live maps, plus the two derivations the gate used to
@@ -558,6 +564,13 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
     let inferred = gi.inferred
     let hostsAcc = gi.hosts, cmdsAcc = gi.cmds, pathsAcc = gi.paths, tablesAcc = gi.tables
     let incompleteAcc = gi.surfaceIncomplete, cg = gi.edges, reasonClassAcc = gi.reasonClasses
+    // ⟨0.32⟩ THE KEY IS NOT THE NAME on the report route. Every accumulator above is keyed by the §2.2
+    // join key (`hash` when the report carries one); a POLICY SCOPE and every human-readable message are
+    // about the NAME. Matching a scope against a raw key does not error — it simply matches nothing, so
+    // the rule binds nothing and the gate goes green: the silent direction, and the reason this is a
+    // helper used at EVERY name-consuming site rather than a substitution at the few that looked wrong.
+    // The scan route leaves `display` empty and the key IS the name, so it is the identity there.
+    func nameOf(_ k: String) -> String { gi.display[k] ?? k }
     var gateViolations: [GateViolation] = []
         // ZERO-MATCH DISCLOSURE. A rule whose SCOPE binds no function is scored as satisfied — so a
         // one-character typo in a layer name (`deny Net ordrs`) turns a failing gate green and
@@ -572,17 +585,17 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
         for r in pol.forbid { scopeMatchCount[r.raw] = 0 }
         for r in pol.only { scopeMatchCount[r.raw] = 0 }
         for qual in inferred.keys {
-            for r in pol.deny where !r.scope.isEmpty && scopeMatches(qual, r.scope) {
+            for r in pol.deny where !r.scope.isEmpty && scopeMatches(nameOf(qual), r.scope) {
                 scopeMatchCount[r.raw, default: 0] += 1
             }
-            for r in pol.forbid where scopeMatches(qual, r.from) || scopeMatches(qual, r.to) {
+            for r in pol.forbid where scopeMatches(nameOf(qual), r.from) || scopeMatches(nameOf(qual), r.to) {
                 scopeMatchCount[r.raw, default: 0] += 1
             }
             // ⟨0.29⟩ ON `from` ONLY, deliberately not either endpoint the way a `forbid` counts. A
             // forbid's subject is the pair; an `only`'s subject is the scope it makes a PROMISE about, so
             // a rule whose destinations all resolve while its `from` names nothing has bound nothing —
             // exactly the typo that leaves an operator believing a leaf is protected.
-            for r in pol.only where scopeMatches(qual, r.from) {
+            for r in pol.only where scopeMatches(nameOf(qual), r.from) {
                 scopeMatchCount[r.raw, default: 0] += 1
             }
         }
@@ -602,7 +615,7 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
         for qual in inferred.keys.sorted() {
             let inf = inferred[qual] ?? []
             if inf.isEmpty { continue }
-            for r in pol.deny where scopeMatches(qual, r.scope) {
+            for r in pol.deny where scopeMatches(nameOf(qual), r.scope) {
                 // `pure` (empty forbidden set) forbids every EFFECT — not `Unknown`, the §4 trust
                 // marker (AS-EFF-003's concern; `deny Unknown <scope>` is the explicit knob). The
                 // reference engine, the rust engines and candor-ts exclude it identically; this
@@ -654,12 +667,12 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
                     let rc = hits.contains("Unknown") ? (reasonClassAcc[qual].map { $0.sorted() } ?? []) : []
                     // ⟨0.20⟩ when Net is denied, report ALL of the fn's destination classes (transitive).
                     let nc = hits.contains("Net") ? (gi.netClasses[qual] ?? []) : []
-                    gateViolations.append((rule: "AS-EFF-006", fn: qual, effects: hits,
-                        detail: "`\(qual)` performs { \(hits.joined(separator: ", ")) }, forbidden by policy: `\(r.raw)`",
+                    gateViolations.append((rule: "AS-EFF-006", fn: nameOf(qual), effects: hits,
+                        detail: "`\(nameOf(qual))` performs { \(hits.joined(separator: ", ")) }, forbidden by policy: `\(r.raw)`",
                         reasonClass: rc, netClass: nc))
                 }
             }
-            for r in pol.allow where scopeMatches(qual, r.scope) && inf.contains(r.effect) {
+            for r in pol.allow where scopeMatches(nameOf(qual), r.scope) && inf.contains(r.effect) {
                 let surface: Set<String>
                 switch r.effect {
                 // `Llm` ⟨0.13⟩ rides Net's host literal (SPEC §1) — `allow Llm <host…>` restricts which MODEL
@@ -684,24 +697,24 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
                     let why = surface.isEmpty
                         ? "performs \(r.effect) with no visible literal — the surface cannot be certified"
                         : "reaches a structurally-invisible \(r.effect) endpoint a visible literal cannot mask"
-                    gateViolations.append((rule: "AS-EFF-008", fn: qual, effects: [r.effect], detail: "`\(qual)` \(why): `\(r.raw)`", reasonClass: [], netClass: []))
+                    gateViolations.append((rule: "AS-EFF-008", fn: nameOf(qual), effects: [r.effect], detail: "`\(nameOf(qual))` \(why): `\(r.raw)`", reasonClass: [], netClass: []))
                 } else {
                     let bad = surface.filter { !literalAllowed(r.effect, $0, r.values) }.sorted()
                     if !bad.isEmpty {
-                        gateViolations.append((rule: "AS-EFF-008", fn: qual, effects: [r.effect],
-                            detail: "`\(qual)` reaches { \(bad.joined(separator: ", ")) } outside the allowlist: `\(r.raw)`", reasonClass: [], netClass: []))
+                        gateViolations.append((rule: "AS-EFF-008", fn: nameOf(qual), effects: [r.effect],
+                            detail: "`\(nameOf(qual))` reaches { \(bad.joined(separator: ", ")) } outside the allowlist: `\(r.raw)`", reasonClass: [], netClass: []))
                     }
                 }
             }
         }
         for r in pol.forbid {
-            for fn in cg.keys.sorted() where scopeMatches(fn, r.from) {
+            for fn in cg.keys.sorted() where scopeMatches(nameOf(fn), r.from) {
                 var seen: Set<String> = [fn], stack = cg[fn] ?? []
                 while let cur = stack.popLast() {
                     if !seen.insert(cur).inserted { continue }
-                    if scopeMatches(cur, r.to) {
-                        gateViolations.append((rule: "AS-EFF-009", fn: fn, effects: [],
-                            detail: "`\(fn)` (scope `\(r.from)`) transitively reaches `\(cur)` in forbidden scope `\(r.to)`: `\(r.raw)`",
+                    if scopeMatches(nameOf(cur), r.to) {
+                        gateViolations.append((rule: "AS-EFF-009", fn: nameOf(fn), effects: [],
+                            detail: "`\(nameOf(fn))` (scope `\(r.from)`) transitively reaches `\(nameOf(cur))` in forbidden scope `\(r.to)`: `\(r.raw)`",
                             reasonClass: [], netClass: []))
                         break
                     }
@@ -718,18 +731,18 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
         // rules about IT; descending past it would make `only` demand the transitive closure of everything
         // you permit, which is the same enumeration-that-rots one level down. `from` IS descended through.
         for r in pol.only {
-            for fn in cg.keys.sorted() where scopeMatches(fn, r.from) {
+            for fn in cg.keys.sorted() where scopeMatches(nameOf(fn), r.from) {
                 var seen: Set<String> = [fn], stack = cg[fn] ?? []
                 while let cur = stack.popLast() {
                     if !seen.insert(cur).inserted { continue }
                     // ⟨0.29⟩ EXACT segment match — the shared prefix matcher is fail-OPEN here.
-                    if r.to.contains(where: { scopeMatchesPermitted(cur, $0) }) { continue }
-                    if !scopeMatches(cur, r.from) {
+                    if r.to.contains(where: { scopeMatchesPermitted(nameOf(cur), $0) }) { continue }
+                    if !scopeMatches(nameOf(cur), r.from) {
                         // ⟨0.29⟩ ITS OWN CODE, not `forbid`'s — a rule code is what a CI suppression
                         // keys on, and these two are opposite constructs. Sharing 009 would make an
                         // existing `forbid` suppression silently mute `only` violations nobody accepted.
-                        gateViolations.append((rule: "AS-EFF-011", fn: fn, effects: [],
-                            detail: "`\(fn)` reaches `\(cur)`, which this permission rule does not permit: `\(r.raw)`",
+                        gateViolations.append((rule: "AS-EFF-011", fn: nameOf(fn), effects: [],
+                            detail: "`\(nameOf(fn))` reaches `\(nameOf(cur))`, which this permission rule does not permit: `\(r.raw)`",
                             reasonClass: [], netClass: []))
                         break
                     }

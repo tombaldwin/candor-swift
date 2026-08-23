@@ -85,26 +85,34 @@ public struct UnansweredRule {
 public func unanswerableCells(inferred: [String: Set<String>],
                               reasonClasses: [String: Set<String>],
                               netClasses: [String: Set<String>],
-                              deny: [DenyRule]) -> [UnansweredCell] {
+                              deny: [DenyRule],
+                              // ⟨0.32⟩ KEY → NAME, for a caller whose maps are keyed by the §2.2 join key
+                              // rather than by the function name (`gate --report`). EMPTY means the key IS
+                              // the name, which is the scan route and every pre-⟨0.32⟩ caller, so those are
+                              // byte-identically unchanged. Both uses below are NAME uses: a policy scope
+                              // matches a name, and the `why` prose is read by a person — a hash in either
+                              // position is not a smaller message, it is a rule that binds nothing.
+                              display: [String: String] = [:]) -> [UnansweredCell] {
     // Nothing narrows ⇒ nothing can be unanswerable, and the maps are never consulted. Stated first so
     // the ordinary policy pays nothing for this file existing.
     guard deny.contains(where: { !$0.netClasses.isEmpty || !$0.unknownClasses.isEmpty }) else { return [] }
     var out: [UnansweredCell] = []
     for r in deny {
         guard !r.netClasses.isEmpty || !r.unknownClasses.isEmpty else { continue }
-        for fn in inferred.keys.sorted() where scopeMatches(fn, r.scope) {
+        for fn in inferred.keys.sorted() where scopeMatches(display[fn] ?? fn, r.scope) {
             let inf = inferred[fn] ?? []
+            let shown = display[fn] ?? fn
             if !r.netClasses.isEmpty, inf.contains("Net"), (netClasses[fn] ?? []).isEmpty {
-                out.append(UnansweredCell(fn: fn, effect: "Net", rule: r, why:
-                    "`\(r.raw)` narrows on the Net DESTINATION CLASS, but `\(fn)` carries Net with no "
+                out.append(UnansweredCell(fn: shown, effect: "Net", rule: r, why:
+                    "`\(r.raw)` narrows on the Net DESTINATION CLASS, but `\(shown)` carries Net with no "
                     + "`netClass` in this report — the field the filter reads is absent, so the narrowing "
                     + "would succeed for lack of evidence and drop a Net the bare `deny Net` catches. "
                     + "Refusing (exit 2) rather than passing: an absent optional field must not relax a "
                     + "fail-closed gate. Use the bare `deny Net`, or gate at scan time."))
             }
             if !r.unknownClasses.isEmpty, inf.contains("Unknown"), (reasonClasses[fn] ?? []).isEmpty {
-                out.append(UnansweredCell(fn: fn, effect: "Unknown", rule: r, why:
-                    "`\(r.raw)` narrows on the Unknown REASON CLASS, but `\(fn)` carries Unknown with no "
+                out.append(UnansweredCell(fn: shown, effect: "Unknown", rule: r, why:
+                    "`\(r.raw)` narrows on the Unknown REASON CLASS, but `\(shown)` carries Unknown with no "
                     + "reason reachable in this report — neither its own `unknownWhy` nor a `calls` edge to "
                     + "one. §6.2 resolves the class set TRANSITIVELY over the gate's reach; with the channel "
                     + "missing, every narrowed filter silently tolerates while only the bare `deny Unknown` "
