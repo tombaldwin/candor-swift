@@ -117,7 +117,7 @@ struct Report {
     // classes it actually read. This engine does NOT read `.build/`, and candor-java cannot read a `.java`
     // that was never compiled; without the flag both would be certifying files nobody opened, which is the
     // ⟨0.26⟩ partial-manifest failure exactly — a partial answer worse than an absent one.
-    // ⟨0.33⟩ `judgedElsewhere` — the files of this class are COPIES of code this same scan already
+    // ⟨0.32⟩ `judgedElsewhere` — the files of this class are COPIES of code this same scan already
     // judged, so the class hides nothing and does not make the verdict INCOMPLETE. `build-output` is
     // the case that forces it here: `.build/` is held out of the PEEK as well as the scan
     // (`PEEKED_CLASSES`), so without this flag every SPM project with a build directory would refuse
