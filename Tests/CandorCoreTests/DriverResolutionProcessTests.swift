@@ -690,4 +690,133 @@ final class DriverResolutionProcessTests: XCTestCase {
                       "the disclosure must name a STABLE supertype — the alphabetically-first — so the "
                       + "report is byte-reproducible run to run; got \(why)")
     }
+
+    // ── PROTOCOL-TYPED RECEIVERS: ONE MEMBER SPACE, NOT TWO HALVES ────────────────────────────────
+    // A protocol's members come in two kinds — REQUIREMENTS (the witness that runs belongs to a
+    // conformer) and EXTENSION-PROVIDED (`extension P { func provided() {…} }`, a real `P.provided`
+    // body). Two lookup paths used to cover one kind each, and WHICH path a call took was decided by
+    // something orthogonal to the question: `visit(ExtensionDeclSyntax)` calls `pushType` on whatever
+    // it extends, so declaring ANY extension on `P` put `P` into `localTypes`, and a `P`-typed
+    // field/local then resolved through the concrete-type path — which answers extension-provided
+    // members and DROPS requirements, because a requirement has no body to name. A parameter receiver
+    // took the CHA path, which is the mirror image: requirements resolve, extension-provided members
+    // were dropped by a requirement-only gate.
+    //
+    // So a DI seam — `protocol Deployer`, `final class LiveDeployer` running `Process()`, a service
+    // holding `let deployer: Deployer` — certified `service.deploy(tag)` PURE, and a `deny Exec` gate
+    // scoped at that service exited 0. The whole point of a protocol is that the receiver is typed as
+    // the protocol; every protocol-extension fixture in this suite typed its receiver as the CONCRETE
+    // conforming type, which is why the suite was green over it.
+    //
+    // Both halves are answered from one member space now. The controls are the load-bearing half of
+    // this test: widening CHA is exactly where fabrication gets introduced.
+    func testProtocolTypedReceiverAnswersRequirementsAndExtensionProvidedMembersAlike() throws {
+        let by = try scan("""
+        import Foundation
+        func shell(_ c: String) { let p = Process(); p.executableURL = URL(fileURLWithPath: c); try? p.run() }
+        protocol Deployer { func deploy(_ tag: String) }
+        extension Deployer { func deployLatest() { deploy("latest") } }
+        struct LiveDeployer: Deployer { func deploy(_ tag: String) { shell("/usr/bin/env") } }   // Exec
+        struct DryRunDeployer: Deployer { func deploy(_ tag: String) { _ = tag } }               // pure
+        func viaParamRequirement(_ d: Deployer) { d.deploy("v1") }
+        func viaParamProvided(_ d: Deployer) { d.deployLatest() }
+        final class ReleaseService {
+            let deployer: Deployer
+            init(deployer: Deployer) { self.deployer = deployer }
+            func run() { deployer.deploy("v2") }              // FIELD receiver, REQUIREMENT
+            func runProvided() { deployer.deployLatest() }    // FIELD receiver, extension-PROVIDED
+        }
+        func viaLocal() { let d: Deployer = LiveDeployer(); d.deploy("v3") }
+        func viaConcrete(_ d: LiveDeployer) { d.deployLatest() }
+        // OVER-CHARGE CONTROL 1 — an ALL-PURE protocol family, extension present, must stay pure.
+        protocol Fmt2 { func fmt(_ s: String) -> String }
+        extension Fmt2 { func fmtAll(_ xs: [String]) -> [String] { xs.map { fmt($0) } } }
+        struct Upper: Fmt2 { func fmt(_ s: String) -> String { s.uppercased() } }
+        struct Lower: Fmt2 { func fmt(_ s: String) -> String { s.lowercased() } }
+        final class Fmt { let f: Fmt2; init(f: Fmt2) { self.f = f }
+                          func one(_ s: String) -> String { f.fmt(s) } }
+        // OVER-CHARGE CONTROL 2 — a SAME-NAMED member on an UNRELATED protocol must not cross over.
+        protocol Cache { func flush() }
+        extension Cache { func flushAll() { flush() } }
+        struct MemCache: Cache { func flush() {} }
+        protocol Disk { func flush() }
+        struct DiskStore: Disk { func flush() { shell("/bin/sync") } }
+        func viaCache(_ c: Cache) { c.flush() }
+        func viaCacheProvided(_ c: Cache) { c.flushAll() }
+        """)
+        for fn in ["viaParamRequirement", "viaParamProvided", "ReleaseService.run",
+                   "ReleaseService.runProvided", "viaLocal", "viaConcrete"] {
+            XCTAssertEqual(ProcessHarness.inferred(by, fn), ["Exec"],
+                           "\(fn) reaches LiveDeployer.deploy through a Deployer seam — a protocol-typed "
+                           + "receiver must answer BOTH member kinds, whatever binder the receiver came from")
+        }
+        XCTAssertNil(by["Fmt.one"],
+                     "an all-pure protocol family must stay pure — the CHA must not fabricate")
+        XCTAssertNil(by["viaCache"],
+                     "a same-named requirement on an UNRELATED protocol must not inherit DiskStore's Exec")
+        XCTAssertNil(by["viaCacheProvided"],
+                     "…and neither must its extension-provided member")
+    }
+
+    // The corpus A/B caught this and nothing else did: the typed-call path routes an OVERLOADED base
+    // through `matchOverloads`, and the first version of the fix above answered the extension-provided
+    // half with a bare `resolveQual`, which cannot name an overloaded base. Every sibling-overload edge
+    // at such a site was dropped — swift-syntax's `TokenConsumer.consume(_)` lost 5 edges, swift-protobuf's
+    // `Message.init(String,ExtensionMap)` lost 10. A fabrication fix producing a silent under-report is the
+    // documented failure mode of fabrication fixes; this pins the direction it failed in.
+    func testOverloadedExtensionProvidedMemberStillResolvesThroughAProtocolReceiver() throws {
+        let by = try scan("""
+        import Foundation
+        func shell(_ c: String) { let p = Process(); p.executableURL = URL(fileURLWithPath: c); try? p.run() }
+        protocol Emit { func mark() }
+        extension Emit {
+            func send(_ s: String) { shell("/bin/echo") }      // Exec — the overload the call selects
+            func send(_ n: Int) { _ = n }                      // pure sibling overload
+            func relay(_ s: String) { send(s) }
+        }
+        struct E: Emit { func mark() {} }
+        func viaProtoReceiver(_ e: Emit) { e.send("x") }
+        func viaProtoField() { let e: Emit = E(); e.relay("x") }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaProtoReceiver"), ["Exec"],
+                       "an OVERLOADED extension-provided member must resolve through a protocol-typed "
+                       + "receiver exactly as it does through a concrete one — never dropped for being overloaded")
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaProtoField"), ["Exec"],
+                       "…including one reached through a chain of provided members")
+    }
+
+    // A BASE-CLASS receiver dispatches over subclass OVERRIDES. The hierarchy is recorded (`conformers`
+    // holds class inheritance beside protocol conformance, and the `.hierarchy.json` sidecar publishes
+    // it) but the typed-call site never consulted it, so `a.run()` on an `ABase`-typed receiver charged
+    // only `ABase.run` and an effectful `override func run()` read silent-pure. No protocol and no
+    // extension needed — and AGENTS.md states the bounded-CHA contract for PROTOCOLS only, which is what
+    // made the class half easy to miss. The imported-owner arm already did exactly this query for a base
+    // declared in a DEPENDENCY; this is the same question for a base declared here.
+    func testBaseClassReceiverUnionsSubclassOverrides() throws {
+        let by = try scan("""
+        import Foundation
+        func shell(_ c: String) { let p = Process(); p.executableURL = URL(fileURLWithPath: c); try? p.run() }
+        class ABase { func run() {} }
+        final class AImpl: ABase { override func run() { shell("/bin/ls") } }    // Exec
+        final class APure: ABase { override func run() {} }
+        func viaBase(_ a: ABase) { a.run() }
+        // OVER-CHARGE CONTROL — a SIBLING's effect must not attach to another leaf's static type,
+        // and a type with no subtypes at all must gain nothing.
+        func viaPureLeaf(_ a: APure) { a.run() }
+        final class Solo { func tick() {} }
+        func viaSolo(_ s: Solo) { s.tick() }
+        // OVER-CHARGE CONTROL — a RAW-VALUE enum records `String` as a supertype; a String-typed
+        // receiver must never dispatch into it.
+        enum Suit: String { case hearts; func uppercased() { shell("/bin/echo") } }
+        func viaString(_ s: String) -> String { s.uppercased() }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "viaBase"), ["Exec"],
+                       "a base-class-typed receiver must union the subclass overrides — the override is "
+                       + "what runs, and the hierarchy that names it is already recorded")
+        XCTAssertNil(by["viaPureLeaf"],
+                     "a sibling subclass's effect must not attach to another leaf's static type")
+        XCTAssertNil(by["viaSolo"], "a type with no subtypes must gain nothing")
+        XCTAssertNil(by["viaString"],
+                     "a raw-value enum must not make a String-typed receiver dispatch into it")
+    }
 }

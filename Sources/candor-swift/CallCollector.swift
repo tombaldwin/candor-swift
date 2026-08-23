@@ -287,7 +287,19 @@ final class CallCollector: SyntaxVisitor {
     /// immediately after, so a resolved path is not then marked undetermined. Marking a determined
     /// folder incomplete would be the ⊤-count inflation reintroduced one layer down.
     var lastResolvedHomePath = false
-    var protoDispatches: [(proto: String, member: String)] = []
+    /// A protocol-typed dispatch site. The ARGUMENT SHAPE travels with it: the Driver resolves the
+    /// extension-PROVIDED half of the member space through the same overload machinery the typed-call path
+    /// uses, and without argc/argTypes an overloaded provided member (`extension TokenConsumer { func
+    /// at(_: TokenSpec); func at(_: SyntaxText) }`) could only be unioned or dropped. MEASURED on
+    /// swift-syntax/swift-protobuf/firebase: dropping it lost 19 units' worth of sibling-overload edges.
+    /// `argc < 0` means the site carries no argument shape (an operator witness) — union every overload.
+    struct ProtoDispatch {
+        let proto: String, member: String
+        var argc: Int = -1
+        var argTypes: [String?] = []
+        var args: [ArgKind] = []
+    }
+    var protoDispatches: [ProtoDispatch] = []
     var protoPropReads: [(proto: String, member: String)] = []  // protocol PROPERTY/subscript reads — CHA
     // IMPLICIT-STRINGIFICATION dispatch: a PROTOCOL-typed (existential / generic-bound) operand of an
     // interpolation / `String(describing:)` / `print` — the `description`/`debugDescription` witness that
@@ -2467,7 +2479,8 @@ final class CallCollector: SyntaxVisitor {
                 // CHA resolves it ONLY when `name` is a real requirement of P (`protocolMethods` guard), so
                 // a bare free-fn/sibling call is filtered there and resolved by the plain Call below instead.
                 if let et = enclosingType, localProtocols.contains(et) {
-                    protoDispatches.append((et, name))
+                    protoDispatches.append(ProtoDispatch(proto: et, member: name, argc: node.arguments.count,
+                                                         argTypes: argTypesOf(node), args: argKinds(node)))
                 }
                 calls.append(Call(path: name, leaf: name, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), unqualified: true))
             }
@@ -2487,7 +2500,8 @@ final class CallCollector: SyntaxVisitor {
                 }
             } else if let pr = ma.base?.as(DeclReferenceExprSyntax.self), protoTyped[pr.baseName.text] != nil {
                 // dispatch through a LOCAL protocol-typed param — bounded CHA or honest Unknown
-                protoDispatches.append((protoTyped[pr.baseName.text]!, member))
+                protoDispatches.append(ProtoDispatch(proto: protoTyped[pr.baseName.text]!, member: member,
+                                                     argc: node.arguments.count, argTypes: argTypesOf(node), args: argKinds(node)))
             } else if let baseDR = ma.base?.as(DeclReferenceExprSyntax.self),
                       arrayElem[baseDR.baseName.text] != nil, localTypes.contains("Array") {
                 // an ARRAY receiver (`xs: [Item]`) calling a method a local `extension Array` provides —
@@ -2496,6 +2510,20 @@ final class CallCollector: SyntaxVisitor {
                 // `Array.forEach` unit) drops SILENTLY — no spurious Unknown, no fabrication.
                 propertyEdges.insert("Array.\(member)")
             } else if let rt = base.root, localTypes.contains(rt),
+                      // A LOCAL PROTOCOL IS NOT A CONCRETE TYPE, even though `localTypes` holds its name.
+                      // `visit(ExtensionDeclSyntax)` calls `pushType` on whatever it extends, so `extension
+                      // Sink {…}` puts `Sink` in `localTypes` — and this branch then answered every call on
+                      // a `Sink`-typed field/local with the single unit `Sink.<member>`. For an
+                      // extension-PROVIDED member that unit exists and the answer looked right; for a
+                      // REQUIREMENT there is no body to name, `resolveQual` found nothing, and the call was
+                      // DROPPED SILENTLY — so `service.deploy(tag)` through a `Deployer` seam certified pure
+                      // while `LiveDeployer.deploy` shells out. The protocol having ANY extension anywhere in
+                      // the package was the whole trigger: with no extension the name never entered
+                      // `localTypes`, this branch missed, and the CHA branch below answered correctly.
+                      // Sending every protocol-typed receiver to that one branch makes BOTH member kinds
+                      // resolve out of ONE member space (the Driver unions the extension default with the
+                      // conformers' witnesses), instead of each lookup path covering one half.
+                      !localProtocols.contains(rt),
                       // An extension-ONLY κ-platform type does NOT shadow: `self.launch()` inside
                       // `extension Process` is a real Exec, not a project method (the ShellOut cardinal-sin —
                       // it read silent-pure). Only a DECLARED type (or a κ-unknown extension target) takes
@@ -2517,7 +2545,8 @@ final class CallCollector: SyntaxVisitor {
                 // ENTIRELY (not even Unknown — the density review's lever #1 turned out to be a
                 // soundness hole). Same bounded CHA / honest-Unknown as protocol params. Also before
                 // κ: a local protocol shadows the platform table.
-                protoDispatches.append((rt, member))
+                protoDispatches.append(ProtoDispatch(proto: rt, member: member, argc: node.arguments.count,
+                                                     argTypes: argTypesOf(node), args: argKinds(node)))
             } else if ((base.root == "Data" || base.root == "String")
                        // a STRING-LITERAL receiver IS a String (`"data".write(toFile:…)`): rootOf can't type a
                        // literal (no var/decl), so the `Data`/`String` branch missed it and the file write read
@@ -2822,7 +2851,13 @@ final class CallCollector: SyntaxVisitor {
                 // silent-pure (precise resolution is intractable; deferred-to-Unknown per the brief).
                 unresolved = true
                 why.insert("dynamicMemberLookup:\(root).\(prop)")
-            } else if let root = recvRoot, localTypes.contains(root) {
+            } else if let root = recvRoot, localTypes.contains(root), !localProtocols.contains(root) {
+                // …and NOT a local protocol: `extension P {…}` puts `P` in `localTypes`, so a read through a
+                // `P`-typed field took this branch and edged the single soft key `P.<prop>`. An
+                // extension-provided computed property resolved; a property REQUIREMENT has no body, so the
+                // soft edge dropped and the read certified pure — the property sibling of the method-dispatch
+                // hole above, with the same trigger (the protocol having any extension). Fall through to the
+                // CHA branch, which now unions the extension default with the conformers' accessor units.
                 // A PROPERTY-WRAPPED stored property (`@Logged var count`): `s.count` (read OR write)
                 // desugars to `s._count.wrappedValue` — edge to the wrapper's wrappedValue accessor unit
                 // so its I/O isn't silently pure. Gated on the attribute being a real `@propertyWrapper`
@@ -2977,7 +3012,7 @@ final class CallCollector: SyntaxVisitor {
                 for operandExpr in [elems[i], (i + 2 < elems.count ? elems[i + 2] : nil)].compactMap({ $0 }) {
                     if let dr = Self.peel(operandExpr).as(DeclReferenceExprSyntax.self),
                        let proto = protoTyped[dr.baseName.text] {
-                        protoDispatches.append((proto, opName))
+                        protoDispatches.append(ProtoDispatch(proto: proto, member: opName))
                     }
                 }
             }
@@ -3012,7 +3047,10 @@ final class CallCollector: SyntaxVisitor {
     // direction). A protocol-typed or untyped base is left to the existing postures (no fabrication).
     override func visit(_ node: SubscriptCallExprSyntax) -> SyntaxVisitorContinueKind {
         let base = rootOf(node.calledExpression)
-        if let rt = base.root, localTypes.contains(rt) {
+        // `!localProtocols` for the same reason as the method/property paths: an `extension P` puts `P` in
+        // `localTypes`, and a subscript REQUIREMENT has no `P.subscript` unit to soft-edge to, so the access
+        // dropped silently instead of dispatching over the conformers' subscript units.
+        if let rt = base.root, localTypes.contains(rt), !localProtocols.contains(rt) {
             propertyEdges.insert("\(rt).subscript")
         } else if let rt = base.root, localProtocols.contains(rt) {
             protoPropReads.append((rt, "subscript"))

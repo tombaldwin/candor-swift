@@ -2310,8 +2310,11 @@ let unknownRatchet: Bool = {
     return v.isEmpty || lc == "true" || v == "1" || lc == "yes"
 }()
 if let bp = baselinePath {
+    // `pkgName` is the §2 hash prefix this run publishes (`"<pkg>#<qualified>"`, line ~1582) — the guard
+    // needs it to join on identity rather than on a bare name that any package can also spell.
     gateViolations += checkBaseline(inferred: inferred, path: bp, engineVersion: engineVersion,
-                                    unknownRatchet: unknownRatchet, declaredInConfig: baselineFromConfig)
+                                    package: pkgName, unknownRatchet: unknownRatchet,
+                                    declaredInConfig: baselineFromConfig)
 }
 // ⟨0.24⟩ **PRECEDENCE BINDS THE VERDICT, NOT THE POLICY GATE** (SPEC §3.1, candor-spec `4c79958`).
 //

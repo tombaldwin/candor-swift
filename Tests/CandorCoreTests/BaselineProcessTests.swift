@@ -419,4 +419,58 @@ final class BaselineProcessTests: XCTestCase {
         XCTAssertEqual(viols.first?["fn"] as? String, "beta", "the sole regression is `beta`")
         XCTAssertEqual(viols.first?["effects"] as? [String], ["Unknown"], "the reported effect is the new Unknown")
     }
+
+    // ── A BASELINE FROM ANOTHER PACKAGE MUST NOT ANSWER FOR THIS ONE ──────────────────────────────
+    // The guard joined priors on the report's bare `fn` (`Billing.charge`) and never on `hash` — the §2
+    // chainable key, `<package>#<qualified>` — nor compared the packages at all. `fn` alone is not an
+    // identity: `Logger.log`, `Client.send`, `Store.save` are names every Swift package spells, and
+    // where one coincided, an unrelated package's baseline supplied the prior and SUPPRESSED the
+    // regression. MEASURED before the fix: `Billing.charge` gaining Fs exited 1 against its own baseline
+    // and exited 0, with no note at all, against another package's — a ratchet that silently stopped
+    // ratcheting, which is the gateless-green class. The join keys on `<package>#<fn>` now, so a foreign
+    // entry supplies nothing; a stderr note names the mismatch, because a wave of AS-EFF-005 on a
+    // mispointed baseline should say why.
+    //
+    // Recorded with `--out` (the sidecar form) on purpose: existence is keyed on the baseline callgraph,
+    // and it is the sidecar that makes "this function had no prior here" a GAIN rather than new code.
+    func testForeignPackageBaselineDoesNotSuppressAsEff005() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-fk-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // An UNRELATED package that already performs Fs under the very same qualified name.
+        let other = try ProcessHarness.makePackage(Self.gainedSrc, name: "Other")
+        defer { try? FileManager.default.removeItem(at: other) }
+        let prefix = dir.appendingPathComponent("base")
+        let rec = try ProcessHarness.run(bin, [other.path, "--out", prefix.path])
+        XCTAssertEqual(rec.code, 0, "recording the foreign baseline must be clean — stderr: \(rec.err)")
+        let base = dir.appendingPathComponent("base.Other.Swift.json")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: base.path),
+                      "the --out recording must have produced the baseline report it names")
+
+        let root = try ProcessHarness.makePackage(Self.gainedSrc, name: "App")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try ProcessHarness.run(bin, [root.path, "--json"], env: ["CANDOR_BASELINE": base.path])
+        XCTAssertEqual(r.code, 1, "a foreign package's prior must not suppress the gain — stderr: \(r.err)")
+        XCTAssertTrue(r.err.contains("[AS-EFF-005]"),
+                      "`Billing.charge` has NO prior in package `App`, so its Fs is a gain: \(r.err)")
+        XCTAssertTrue(r.err.contains("but this scan is package `App`"),
+                      "the note must name both packages, so the wave is self-explaining: \(r.err)")
+
+        // The direction that matters just as much: this package's OWN baseline still evaluates, still
+        // catches the gain, and still passes a clean run.
+        let ownPrefix = dir.appendingPathComponent("own")
+        let ownRoot = try ProcessHarness.makePackage(Self.beforeSrc, name: "App")
+        defer { try? FileManager.default.removeItem(at: ownRoot) }
+        _ = try ProcessHarness.run(bin, [ownRoot.path, "--out", ownPrefix.path])
+        let ownBase = dir.appendingPathComponent("own.App.Swift.json")
+        let r2 = try ProcessHarness.run(bin, [root.path, "--json"], env: ["CANDOR_BASELINE": ownBase.path])
+        XCTAssertEqual(r2.code, 1, "this package's own baseline must still catch the gain — stderr: \(r2.err)")
+        XCTAssertTrue(r2.err.contains("[AS-EFF-005]"), "…as AS-EFF-005: \(r2.err)")
+        XCTAssertFalse(r2.err.contains("but this scan is package"),
+                       "…and must NOT be reported as a package mismatch: \(r2.err)")
+        let r3 = try ProcessHarness.run(bin, [ownRoot.path, "--json"], env: ["CANDOR_BASELINE": ownBase.path])
+        XCTAssertEqual(r3.code, 0, "an unchanged package against its own baseline stays green — stderr: \(r3.err)")
+    }
 }
