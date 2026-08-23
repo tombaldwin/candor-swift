@@ -1239,6 +1239,33 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         }
                     }
                 }
+                // CHA OVER LOCAL SUBTYPES OF A TYPED RECEIVER. `a.run()` where `a: ABase` runs `ABase.run`
+                // OR any subclass's `override func run()`, and only the first was edged: the hierarchy is
+                // recorded (`conformers`/`subtypesOf` hold `AImpl -> ABase` — `pushType` puts class
+                // inheritance in the same index as protocol conformance, and the `.hierarchy.json` sidecar
+                // publishes it) but this dispatch site never consulted it, so an effectful override reached
+                // through a base-class-typed receiver read silent-pure. No protocol and no extension needed;
+                // AGENTS.md states the bounded-CHA contract for protocols only, which is what made the class
+                // half easy to miss. The IMPORTED-owner arm below (`subtypesOf[owner]`, ~60 lines down)
+                // already does exactly this when the base is a DEPENDENCY's type — this is the same query
+                // for a base declared HERE.
+                //
+                // PRECISE-OR-NOTHING and ADDITIVE, copied from that arm: only real `<sub>.<member>` units
+                // are edged (a member no subclass overrides contributes nothing — no Unknown flood), and
+                // `resolved` is untouched so the external-supertype disclosure above and the §2 dep join
+                // below still see the call exactly as they did. Both of that arm's fabrication carve-outs
+                // apply for the same reasons: STD_PURE_PROTOCOLS because nearly every type conforms to
+                // them, and RAW_VALUE_BASE_TYPES because `enum Suit: String` records `String` as a
+                // supertype, so a String-typed receiver would otherwise dispatch into raw-value enums.
+                if let dot = call.path.lastIndex(of: ".") {
+                    let owner = String(call.path[..<dot])
+                    let member = String(call.path[call.path.index(after: dot)...])
+                    if !STD_PURE_PROTOCOLS.contains(owner), !RAW_VALUE_BASE_TYPES.contains(owner) {
+                        for sub in (subtypesOf[owner] ?? []).sorted() where sub != owner {
+                            if let t = resolveQual("\(sub).\(member)") { edges[f.qual, default: []].insert(t) }
+                        }
+                    }
+                }
             } else if call.unqualified {
                 // an UNQUALIFIED `name(…)` call: a free function, a constructor, or a self-sibling method. A
                 // `recv.member(…)` whose receiver type couldn't be resolved is NOT here — it must never be
@@ -1459,10 +1486,66 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // Bounded CHA over local protocols (SPEC §4, 0.5): the protocol is local and declares the
         // method; resolve ≤12 conformers, otherwise honest Unknown.
         for d in cc.protoDispatches {
+            // THE MEMBER SPACE OF A PROTOCOL HAS TWO HALVES and a dispatch must consult BOTH. A member is
+            // either a REQUIREMENT (no body — the witness that runs belongs to a conformer, resolved by the
+            // CHA below) or EXTENSION-PROVIDED (`extension P { func provided() {…} }` — a real `P.provided`
+            // unit whose body runs, and which the CHA below can never find because no conformer declares it).
+            // This loop used to `continue` on anything that was not a requirement, so the extension half was
+            // dropped outright; the other lookup path (CallCollector's `localTypes` branch, which an
+            // `extension P` silently opted the protocol into) covered the extension half and dropped the
+            // requirement half. Each path answered one half and certified the other pure. Both halves are
+            // answered HERE now, and the receiver kind — parameter, field, local — no longer selects which.
+            //
+            // UNION, not either/or: a requirement WITH a default has both a `P.member` body and per-conformer
+            // overrides, and a syntactic scan cannot say which one a given receiver runs.
+            // OVERLOADS RESOLVE HERE EXACTLY AS THEY DO ON THE TYPED-CALL PATH, and that is not a detail.
+            // The typed path routes an overloaded base through `matchOverloads`; answering it with a bare
+            // `resolveQual` (which cannot name an overloaded base) DROPPED every sibling-overload edge at
+            // such a site. MEASURED by the corpus A/B — swift-syntax `TokenConsumer.consume(_)` lost 5
+            // edges, swift-protobuf `Message.init(String,ExtensionMap)` lost 10, firebase `Storage.bucket`
+            // lost its only one — and by nothing else, because no fixture had an overloaded provided
+            // member. `callsiteArgs` is recorded for the same reason the typed path records it: it is what
+            // callback-flow resolves fn-typed parameters against.
+            var providedEdged = false
+            var frontier = [d.proto], seenProto = Set<String>()
+            while let cur = frontier.popLast() {
+                guard seenProto.insert(cur).inserted else { continue }
+                // a SUPER-protocol's extension provides the member too (`protocol Sub: Sup`, `extension Sup`)
+                let base = "\(cur).\(d.member)"
+                if overloadedBases.contains(base) {
+                    // `argc < 0` — an operator witness, which records no argument shape: union every
+                    // overload rather than drop them all (the same sound over-approximation matchOverloads
+                    // itself falls back to when the argument types cannot discriminate).
+                    let targets = d.argc >= 0
+                        ? matchOverloads(base, d.argc, d.argTypes, swiftModuleOf(f.loc))
+                        : (overloads[base] ?? []).map(\.qual)
+                    for t in targets {
+                        edges[f.qual, default: []].insert(t)
+                        callsiteArgs[t, default: []].append(d.args)
+                        providedEdged = true
+                    }
+                } else if let t = resolveQual(base) {
+                    edges[f.qual, default: []].insert(t)
+                    callsiteArgs[t, default: []].append(d.args)
+                    providedEdged = true
+                }
+                frontier.append(contentsOf: protocolSupers[cur] ?? [])
+            }
+            // Not a requirement: the extension body edged above IS the answer. If neither half knows the
+            // member it stays a silent drop, exactly as before (an inherited external member, a κ call on a
+            // protocol-named receiver) — never a guess, never a new Unknown flood.
             guard protoOrSuperDeclares(d.proto, d.member) else { continue }
             let conf = conformers[d.proto] ?? []
             let impls = conf.compactMap { resolveQual("\($0).\(d.member)") }
-            if !impls.isEmpty && impls.count <= 12 && impls.count == conf.count {
+            // A conformer that does NOT declare the member runs the extension DEFAULT, which is already
+            // edged above — so it IS accounted for, and `impls.count == conf.count` is the wrong
+            // completeness test whenever a default exists. Without this conjunct, routing field/local
+            // receivers through here would have turned the commonest Swift idiom of all (a requirement with
+            // a default that most conformers do not override) from a precise answer into an `Unknown` at
+            // every such call site. With `providedEdged` false the condition is byte-equivalent to the one
+            // it replaces: `impls.count == conf.count` with `conf` non-empty forces `impls` non-empty, and
+            // then `conf.count <= 12` and `impls.count <= 12` are the same test.
+            if !conf.isEmpty, conf.count <= 12, impls.count == conf.count || providedEdged {
                 for t in impls { edges[f.qual, default: []].insert(t) }
             } else {
                 direct[f.qual, default: []].insert("Unknown")
@@ -1476,6 +1559,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // stored. Instead require every conformer to be a KNOWN local type and edge to whichever accessor
         // units exist; an unresolvable/unbounded conformer set is honest Unknown.
         for d in cc.protoPropReads {
+            // Same two-halved member space as the method loop above: an extension-provided COMPUTED property
+            // (or `subscript`) is a real `P.<member>` accessor unit whose body runs, and no conformer
+            // declares it, so the conformer CHA below can never find it. Edged first, on the protocol and on
+            // its transitive supers, and a member that is not also a requirement stops there.
+            var frontier = [d.proto], seenProto = Set<String>()
+            while let cur = frontier.popLast() {
+                guard seenProto.insert(cur).inserted else { continue }
+                if let t = resolveQual("\(cur).\(d.member)") { edges[f.qual, default: []].insert(t) }
+                frontier.append(contentsOf: protocolSupers[cur] ?? [])
+            }
             guard protoOrSuperDeclares(d.proto, d.member) else { continue }
             let conf = conformers[d.proto] ?? []
             if conf.isEmpty || conf.count > 12 {

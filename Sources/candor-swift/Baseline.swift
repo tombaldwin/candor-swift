@@ -20,14 +20,32 @@ import Foundation
 /// The baseline report's per-fn inferred sets — accepts BOTH the §2 envelope `{candor, functions}`
 /// and the legacy v0.1 bare array (readers MUST accept both, SPEC §2). nil = unreadable/unparseable;
 /// the caller distinguishes ABSENT via fileExists (mirroring candor-java Policy.loadBaseline).
-func loadBaseline(_ path: String) -> [String: Set<String>]? {
+///
+/// KEYED BOTH WAYS, because `fn` ALONE IS NOT AN IDENTITY. `fn` is a bare qualified name (`Svc.kick`);
+/// `hash` is the §2 chainable key, `<package>#<qualified>` — and the guard used to join on `fn` and
+/// never look at `hash` or at the package at all. So a baseline recorded from an UNRELATED package
+/// answered for this one wherever a type/method name happened to coincide (`Logger.log`, `Client.send`,
+/// `Store.save` — the names that collide are exactly the ones every Swift package has), and the prior it
+/// supplied SUPPRESSED the regression: MEASURED, a `Svc.kick` that gained Exec went from `[AS-EFF-005]`
+/// exit 1 against its own baseline to exit 0 with no note at all against another package's. A ratchet
+/// that silently stops ratcheting is the gateless-green class. `byHash` is the join key whenever the
+/// baseline entry carries one; `byFnOnly` holds the hash-less entries a legacy report can still contain,
+/// so nothing that used to be comparable stops being comparable.
+struct BaselinePriors {
+    var byHash: [String: Set<String>] = [:]     // `<pkg>#<qual>` -> prior effects
+    var byFnOnly: [String: Set<String>] = [:]   // bare `fn` -> prior effects, for entries carrying NO hash
+    var packages: Set<String> = []              // every package prefix the baseline's hashes name
+    var fnsUnderOtherPackages: Set<String> = [] // bare `fn`s the baseline holds ONLY under some other package
+}
+
+func loadBaseline(_ path: String) -> BaselinePriors? {
     guard let data = FileManager.default.contents(atPath: path),
           let root = try? JSONSerialization.jsonObject(with: data) else { return nil }
     let arr: [Any]?
     if let obj = root as? [String: Any] { arr = obj["functions"] as? [Any] }
     else { arr = root as? [Any] }
     guard let arr else { return nil }
-    var m: [String: Set<String>] = [:]
+    var out = BaselinePriors()
     for case let e as [String: Any] in arr {
         guard let fn = e["fn"] as? String, !fn.isEmpty else { continue }
         var effs: Set<String> = []
@@ -43,9 +61,15 @@ func loadBaseline(_ path: String) -> [String: Set<String>]? {
         //
         // A single report cannot normally produce a duplicate `fn`; a hand-merged or multi-module
         // baseline can, and a baseline is a file people edit and check in.
-        m[fn] = m[fn].map { $0.intersection(effs) } ?? effs
+        if let hash = e["hash"] as? String, let hashIdx = hash.firstIndex(of: "#") {
+            out.byHash[hash] = out.byHash[hash].map { $0.intersection(effs) } ?? effs
+            out.packages.insert(String(hash[..<hashIdx]))
+            out.fnsUnderOtherPackages.insert(fn)   // filtered against OUR package by the caller
+        } else {
+            out.byFnOnly[fn] = out.byFnOnly[fn].map { $0.intersection(effs) } ?? effs
+        }
     }
-    return m
+    return out
 }
 
 /// The baseline's PRODUCING engine build (the §2.1 envelope `candor.version`) — nil for the legacy
@@ -122,7 +146,8 @@ func loadBaselineCallgraph(reportPath: String) -> BaselineSidecar {
 /// Unknown (a blind spot the baseline lacked) fails, so the strict gate ratchets the Unknown surface
 /// DOWN rather than failing everywhere on day one. Grandfather one by regenerating the baseline.
 func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion: String,
-                   unknownRatchet: Bool = false, declaredInConfig: Bool = false) -> [GateViolation] {
+                   package: String = "", unknownRatchet: Bool = false,
+                   declaredInConfig: Bool = false) -> [GateViolation] {
     // A configured-but-EMPTY value (bare `baseline` config line, CANDOR_BASELINE="") is invalid gate
     // input, not an un-adopted guard: the user declared a ratchet and named no file. java/scan/ts all
     // exit 2 here (verified 2026-07-10); swift briefly took the absent-file note path — family-aligned.
@@ -188,16 +213,47 @@ func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion:
         sidecarNodes = []
     }
 
+    // A BASELINE WHOSE PACKAGES DO NOT INCLUDE OURS IS DISCLOSED, NOT REFUSED — and the refusal was
+    // written first, so here is why it came back out. `pkgName` is the MANIFEST name when the target has
+    // a `Package.swift` and the target's own PATH COMPONENT otherwise, which means two legitimate scans
+    // of the same code can publish different prefixes: recording the baseline from a single file and
+    // gating a directory is exactly what this project's own smoke suite does, and exit 2 there is a
+    // refusal invented out of a path spelling, not out of evidence about the code. The MEASURED hole —
+    // a foreign prior standing in for a real one and suppressing the gain — is closed by the join below
+    // keying on `<package>#<fn>`, with no help from this check. All this adds is the sentence that makes
+    // an otherwise baffling wave of AS-EFF-005 self-explaining. Root segment only, so a `--only <scope>`
+    // run (prefix `<pkg>/<scope>`) still reads as its own package.
+    let ourPkg = String(package.split(separator: "/").first ?? "")
+    let basePkgRoots = Set(base.packages.map { String($0.split(separator: "/").first ?? "") })
+    if !ourPkg.isEmpty, !basePkgRoots.isEmpty, !basePkgRoots.contains(ourPkg) {
+        FileHandle.standardError.write(("candor-swift: note — the baseline \(path) holds entries for "
+            + "package(s) \(basePkgRoots.sorted().joined(separator: ", ")) but this scan is package "
+            + "`\(ourPkg)`. The AS-EFF-005 guard joins on the §2 `<package>#<fn>` key, so NONE of those "
+            + "entries supplies a prior here — every effectful function that the baseline's callgraph "
+            + "sidecar knows will read as a gain, and one recorded WITHOUT a sidecar leaves the guard "
+            + "with nothing to compare at all. Point CANDOR_BASELINE at this package's own report: "
+            + "candor-swift <target> --out <prefix>\n").data(using: .utf8)!)
+    }
     var violations: [GateViolation] = []
     var unknownOnly: [String] = []   // ⟨0.16⟩ advisory: fns that gained ONLY Unknown, no real effect
+    var foreignPriorsIgnored: [String] = []   // names the baseline holds ONLY under another package
     for qual in inferred.keys.sorted() {
         // ⟨0.16⟩ The baseline effect set: the report entry when present, else ∅ for a fn that is a
         // baseline callgraph node (it existed and was PURE — reports omit pure fns). A fn in NEITHER is
         // genuinely new code (an added function), still exempt.
+        //
+        // ⟨0.32⟩ Keyed on the §2 `<package>#<fn>` hash first — see BaselinePriors. A bare-`fn` prior is
+        // used ONLY for an entry that carries no hash at all (a legacy report), never for one whose hash
+        // names a DIFFERENT package: that entry describes another package's function that merely shares a
+        // name, and letting it stand as the prior is what silently suppressed the regression.
         let prior: Set<String>
-        if let reported = base[qual] { prior = reported }
+        if let reported = base.byHash["\(package)#\(qual)"] { prior = reported }
+        else if let reported = base.byFnOnly[qual] { prior = reported }
         else if sidecarNodes.contains(qual) { prior = [] }   // existed at baseline, and was pure
         else { continue }                                    // new function — new code, not a regression
+        if base.byHash["\(package)#\(qual)"] == nil, base.fnsUnderOtherPackages.contains(qual) {
+            foreignPriorsIgnored.append(qual)
+        }
         let gained = (inferred[qual] ?? []).subtracting(prior).sorted()
         if gained.isEmpty { continue }
         // ⟨0.16⟩ The ratchet fires only on gaining a REAL boundary effect. An Unknown-ONLY gain is
@@ -223,6 +279,14 @@ func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion:
         }
         violations.append((rule: "AS-EFF-005", fn: qual, effects: real,
             detail: "`\(qual)` gained effect { \(real.joined(separator: ", ")) } not present in the baseline", reasonClass: [], netClass: []))
+    }
+    if !foreignPriorsIgnored.isEmpty {
+        let shown = foreignPriorsIgnored.prefix(3).joined(separator: ", ")
+        let more = foreignPriorsIgnored.count > 3 ? " (+\(foreignPriorsIgnored.count - 3) more)" : ""
+        FileHandle.standardError.write(("candor-swift: note — \(foreignPriorsIgnored.count) function name(s) "
+            + "appear in the baseline ONLY under a different package, so their effect sets were NOT used as "
+            + "a prior here (the guard joins on the §2 `<package>#<fn>` key, not on the bare name): "
+            + "\(shown)\(more)\n").data(using: .utf8)!)
     }
     if !unknownOnly.isEmpty {
         let shown = unknownOnly.prefix(3).joined(separator: ", ")

@@ -9,6 +9,51 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ ⟨0.32⟩ A protocol-typed receiver silently answered half a protocol's member space.** A protocol has
+  two kinds of member — REQUIREMENTS, whose witness belongs to a conformer, and EXTENSION-PROVIDED
+  members, which have a body of their own — and two lookup paths each covered one kind. Which path a call
+  took was decided by something orthogonal to the question: `visit(ExtensionDeclSyntax)` calls `pushType`
+  on whatever it extends, so declaring ANY `extension P` put `P` into the CONCRETE-type index, and a
+  `P`-typed field or local then resolved through the concrete path — which answers provided members and
+  drops requirements, because a requirement has no body to name. A parameter receiver took the CHA path,
+  the mirror image: requirements resolved, provided members were dropped by a requirement-only gate.
+
+  So the dependency-injection seam that is the whole reason protocols exist read PURE. Measured on a
+  `protocol Deployer` / `LiveDeployer` running `Process()`: `service.deploy(tag)` through a
+  `let deployer: Deployer` field certified pure, and a `deny Exec` gate scoped at that service exited 0.
+  Every protocol-extension fixture in the suite typed its receiver as the CONCRETE conforming type, which
+  is why 794 tests were green over it. Both halves now resolve from one member space, whatever binder the
+  receiver came from and whether or not the protocol has an extension.
+
+  Measured on real Swift (firebase-ios-sdk, swift-syntax, swift-protobuf, a 99-file first-party app,
+  ~22 000 units): 14 units gained a true `Fs` — firebase's `HeartbeatStorage` reaches disk through a
+  `private let storage: any Storage` seam whose `FileStorage.read` is `Data(contentsOf:)` — and 3 gained
+  a true `Env` through swift-syntax's `PluginProvider` seam. 440 units gained a disclosed `Unknown`,
+  every one of them a dispatch whose conformer set is genuinely past the ≤12 bound (301 are
+  `SyntaxProtocol._syntaxNode`, 145 conformers); those sites previously answered with silence.
+
+- **⚠ ⟨0.32⟩ A base-class receiver never unioned the subclass overrides.** `a.run()` where `a: ABase`
+  runs `ABase.run` OR any subclass's `override func run()`, and only the first was edged — so an
+  effectful override reached through a base-typed receiver read silent-pure. The hierarchy that names the
+  overrides was already recorded and already published in the `.hierarchy.json` sidecar; the dispatch
+  site simply never consulted it, and the arm that does exactly this query for a base declared in a
+  chained DEPENDENCY had no counterpart for a base declared here. Precise-or-nothing and additive: only
+  real `<subclass>.<member>` units are edged, so a member no subclass overrides contributes nothing, and
+  the `STD_PURE_PROTOCOLS` / raw-value-enum carve-outs that keep `Codable`- and `String`-typed receivers
+  out of CHA apply unchanged.
+
+- **⚠ ⟨0.32⟩ The AS-EFF-005 baseline guard joined priors on the bare `fn`, never on `hash`.** `fn` is a
+  qualified name; `hash` is the §2 `<package>#<qualified>` key. The guard used neither the hash nor the
+  package, so a baseline recorded from an UNRELATED package answered for this one wherever a name
+  coincided — and `Logger.log`, `Client.send`, `Store.save` are names every Swift package spells.
+  Measured: a `Svc.kick` that gained `Exec` exited 1 against its own baseline and exited 0, with no note
+  at all, against another package's. A ratchet that silently stops ratcheting is the gateless-green
+  class. The join keys on `<package>#<fn>` now; a stderr note names a package mismatch so a wave of
+  AS-EFF-005 on a mispointed baseline explains itself. Deliberately a disclosure and not an exit-2
+  refusal: for a target with no `Package.swift` the package name is the target's last path component, so
+  a refusal there would be invented out of a path spelling rather than out of evidence about the code.
+
+
 - **⟨0.32⟩ A refusal records itself beside the reports it would have written.** Measured in this engine
   before the fix: scan green, add a denied effect, refuse with an unknown flag, and
   `candor-swift gate --report .` answered **exit 0** over the previous run's bytes. The refusal now writes

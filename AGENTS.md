@@ -254,8 +254,15 @@ over-approximation of the blind set (disclosed, never a silent-pure); a MODULE-Q
 - **Closures attribute lexically**: a `DispatchQueue.global().async { … }` body charges the
   scheduling function (the family's closure-attribution rule); nested named functions likewise
   attribute to their enclosing unit (a documented over-approximation, the sound direction).
-- **Protocol dispatch is bounded CHA** (≤12 local conformers, the family bound) — `store.save()`
-  on an injected local protocol resolves to the conformers, or reads disclosed `Unknown`.
+- **Dispatch over a supertype-typed receiver is bounded CHA**, and the supertype can be a PROTOCOL or a
+  CLASS. `store.save()` on an injected local protocol resolves to the conformers (≤12 local ones, the
+  family bound) or reads disclosed `Unknown`; `a.run()` on a base-class-typed receiver unions the
+  subclass `override`s alongside the base's own body. It holds however the receiver was bound —
+  parameter, stored property, local `let` — and for BOTH kinds of protocol member: a REQUIREMENT (the
+  conformers' witnesses) and an EXTENSION-PROVIDED member (`extension P { func provided() {…} }`, whose
+  body runs). This paragraph used to say "protocol", and only "protocol", which is a fair description of
+  what the engine did: a class hierarchy dispatched to the base alone, and which half of a protocol's
+  member space resolved depended on how the receiver was bound.
 - **Constructors are edges**: `_ = C()` reaches `C.init` (the fuzzer's first catch — effects wired
   in an initializer were silently pure for one build).
 - The §7.13 soundness harness is `fuzz.py` (9 forms, deterministic seeds); run it after touching

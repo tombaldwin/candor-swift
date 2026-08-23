@@ -1417,17 +1417,24 @@ PY
 
 # ── AS-EFF-005 baseline guard (SPEC §7 item 5; candor-java's checkBaseline semantics, Baseline.swift):
 # gain→1, clean→0, absent→0+note, cross-build→2 WITHOUT evaluating, unparseable→2.
-mkdir -p "$W/bl/afterd"
-printf 'import Foundation\nstruct Billing { func charge() { _ = Date() } }\n' > "$W/bl/before.swift"
-printf 'import Foundation\nstruct Billing { func charge() { _ = Date(); try? FileManager.default.removeItem(atPath: "/x") } }\n' > "$W/bl/afterd/m.swift"
-"$BIN" "$W/bl/before.swift" --json > "$W/bl/base.json" 2>/dev/null
-CANDOR_BASELINE="$W/bl/base.json" "$BIN" "$W/bl/afterd" --json > /dev/null 2>"$W/bl/gain.err"; RC=$?
+# THE BASELINE AND THE GATE MUST NAME THE SAME PACKAGE. The AS-EFF-005 join keys on the §2
+# `<package>#<fn>` hash, not on the bare `fn` — an unrelated package's entry must never stand in as a
+# prior — and for a target with no `Package.swift` the package name IS the target's last path component.
+# The two states of the source have to live at different paths (a fixture cannot edit in time), so they
+# are given the same BASENAME under different parents, which is what a real adoption does implicitly:
+# you record on one checkout of `Sources/` and gate another. Recorded as `.../before/pkg` vs
+# `.../afterd/pkg` these rows compared two packages and the guard correctly declined to answer.
+mkdir -p "$W/bl/befored/pkg" "$W/bl/afterd/pkg"
+printf 'import Foundation\nstruct Billing { func charge() { _ = Date() } }\n' > "$W/bl/befored/pkg/m.swift"
+printf 'import Foundation\nstruct Billing { func charge() { _ = Date(); try? FileManager.default.removeItem(atPath: "/x") } }\n' > "$W/bl/afterd/pkg/m.swift"
+"$BIN" "$W/bl/befored/pkg" --json > "$W/bl/base.json" 2>/dev/null
+CANDOR_BASELINE="$W/bl/base.json" "$BIN" "$W/bl/afterd/pkg" --json > /dev/null 2>"$W/bl/gain.err"; RC=$?
 { [ $RC -eq 1 ] && grep -q 'AS-EFF-005.*Billing.charge.*gained effect { Fs }' "$W/bl/gain.err"; } \
   && ok "baseline guard: an existing fn gaining an effect -> AS-EFF-005 + exit 1" \
   || bad "baseline gain: rc=$RC $(cat "$W/bl/gain.err")"
-CANDOR_BASELINE="$W/bl/base.json" "$BIN" "$W/bl/before.swift" --json > /dev/null 2>&1
+CANDOR_BASELINE="$W/bl/base.json" "$BIN" "$W/bl/befored/pkg" --json > /dev/null 2>&1
 [ $? -eq 0 ] && ok "baseline guard: no gain vs the saved baseline -> exit 0" || bad "baseline clean run failed"
-CANDOR_BASELINE="$W/bl/nope.json" "$BIN" "$W/bl/afterd" --json > /dev/null 2>"$W/bl/abs.err"; RC=$?
+CANDOR_BASELINE="$W/bl/nope.json" "$BIN" "$W/bl/afterd/pkg" --json > /dev/null 2>"$W/bl/abs.err"; RC=$?
 { [ $RC -eq 0 ] && grep -q 'regression guard is not active' "$W/bl/abs.err"; } \
   && ok "baseline guard: absent baseline file -> note + exit 0 (guard inactive)" || bad "baseline absent: rc=$RC"
 python3 - "$W/bl/base.json" "$W/bl/doct.json" <<'PY'
@@ -1435,18 +1442,18 @@ import json, sys
 d = json.load(open(sys.argv[1])); d["candor"]["version"] = "candor-doctored-0.0.0"
 json.dump(d, open(sys.argv[2], "w"))
 PY
-CANDOR_BASELINE="$W/bl/doct.json" "$BIN" "$W/bl/afterd" --json > /dev/null 2>"$W/bl/doct.err"; RC=$?
+CANDOR_BASELINE="$W/bl/doct.json" "$BIN" "$W/bl/afterd/pkg" --json > /dev/null 2>"$W/bl/doct.err"; RC=$?
 { [ $RC -eq 2 ] && grep -q 'produced by engine build candor-doctored' "$W/bl/doct.err" \
   && ! grep -q '\[AS-EFF-005\]' "$W/bl/doct.err"; } \
   && ok "baseline guard: a cross-build baseline refuses to evaluate (exit 2, no AS-EFF-005 wave)" \
   || bad "baseline doctored: rc=$RC $(cat "$W/bl/doct.err")"
 echo '{not json' > "$W/bl/garb.json"
-CANDOR_BASELINE="$W/bl/garb.json" "$BIN" "$W/bl/afterd" --json > /dev/null 2>&1
+CANDOR_BASELINE="$W/bl/garb.json" "$BIN" "$W/bl/afterd/pkg" --json > /dev/null 2>&1
 [ $? -eq 2 ] && ok "baseline guard: an unparseable baseline fails closed (exit 2)" || bad "baseline garbage did not exit 2"
 # configured-but-EMPTY value = invalid gate input, exit 2 (family ruling 2026-07-10: java/scan/ts all
 # exit 2; swift briefly took the absent-file note path — a declared ratchet naming no file is a broken
 # gate, never an inactive one). Covers both the env form and a bare `baseline` config line.
-CANDOR_BASELINE= "$BIN" "$W/bl/afterd" --json > /dev/null 2>"$W/bl/empty.err"; RC=$?
+CANDOR_BASELINE= "$BIN" "$W/bl/afterd/pkg" --json > /dev/null 2>"$W/bl/empty.err"; RC=$?
 { [ $RC -eq 2 ] && grep -q 'configured but EMPTY' "$W/bl/empty.err"; } \
   && ok "baseline guard: a configured-but-empty value fails closed (exit 2)" || bad "baseline empty: rc=$RC"
 
@@ -1454,10 +1461,11 @@ CANDOR_BASELINE= "$BIN" "$W/bl/afterd" --json > /dev/null 2>"$W/bl/empty.err"; R
 # callgraph-sidecar node) turning effectful is a GAIN, not exempt "new code" (SPEC §7 item 5, the
 # ⟨0.16⟩ paragraph — the `gains` origin rule applied to the scan-time ratchet). Record the baseline
 # with --out (writes the .callgraph.json sidecar). fmt is pure at baseline, not reached by fetchIt.
-mkdir -p "$W/cg/before" "$W/cg/after"
-printf 'import Foundation\nfunc fmt(_ s: String) -> String { s.uppercased() }\nfunc fetchIt() { _ = URLSession.shared.dataTask(with: URL(string: "https://x.example.com/")!) { _,_,_ in } }\nfetchIt()\n' > "$W/cg/before/m.swift"
-printf 'import Foundation\nfunc fmt(_ s: String) -> String { _ = try? String(contentsOfFile: "/etc/hosts"); return s.uppercased() }\nfunc fetchIt() { _ = URLSession.shared.dataTask(with: URL(string: "https://x.example.com/")!) { _,_,_ in } }\nfetchIt()\n' > "$W/cg/after/m.swift"
-"$BIN" "$W/cg/before" --out "$W/cg/base" >/dev/null 2>&1
+# Same package-identity requirement as the block above: same BASENAME, different parents.
+mkdir -p "$W/cg/b0/pkg" "$W/cg/a0/pkg"
+printf 'import Foundation\nfunc fmt(_ s: String) -> String { s.uppercased() }\nfunc fetchIt() { _ = URLSession.shared.dataTask(with: URL(string: "https://x.example.com/")!) { _,_,_ in } }\nfetchIt()\n' > "$W/cg/b0/pkg/m.swift"
+printf 'import Foundation\nfunc fmt(_ s: String) -> String { _ = try? String(contentsOfFile: "/etc/hosts"); return s.uppercased() }\nfunc fetchIt() { _ = URLSession.shared.dataTask(with: URL(string: "https://x.example.com/")!) { _,_,_ in } }\nfetchIt()\n' > "$W/cg/a0/pkg/m.swift"
+"$BIN" "$W/cg/b0/pkg" --out "$W/cg/base" >/dev/null 2>&1
 CGREP=$(ls "$W/cg/base".*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
 CGSIDE="${CGREP%.json}.callgraph.json"
 # fmt must be ABSENT from the report (pure) but PRESENT in the sidecar — the premise of the fix.
@@ -1465,20 +1473,20 @@ CGSIDE="${CGREP%.json}.callgraph.json"
   && ok "baseline ⟨0.16⟩: a pure fn is omitted from the report but recorded in the callgraph sidecar" \
   || bad "baseline ⟨0.16⟩ premise: fmt report/sidecar presence wrong"
 # (1) sidecar PRESENT: fmt pure→effectful -> exit 1, fmt flagged.
-CANDOR_BASELINE="$CGREP" "$BIN" "$W/cg/after" --json >/dev/null 2>"$W/cg/g1.err"; RC=$?
+CANDOR_BASELINE="$CGREP" "$BIN" "$W/cg/a0/pkg" --json >/dev/null 2>"$W/cg/g1.err"; RC=$?
 { [ $RC -eq 1 ] && grep -q 'AS-EFF-005.*`fmt` gained effect { Fs }' "$W/cg/g1.err"; } \
   && ok "baseline ⟨0.16⟩: sidecar present, a formerly-pure fn turning effectful -> AS-EFF-005 + exit 1" \
   || bad "baseline ⟨0.16⟩ pure→effectful: rc=$RC $(cat "$W/cg/g1.err")"
 # (2) sidecar ABSENT: degrade to report-only (fmt reads as new) -> exit 0 + note.
 cp "$CGSIDE" "$W/cg/saved.callgraph.json"; rm "$CGSIDE"
-CANDOR_BASELINE="$CGREP" "$BIN" "$W/cg/after" --json >/dev/null 2>"$W/cg/g2.err"; RC=$?
+CANDOR_BASELINE="$CGREP" "$BIN" "$W/cg/a0/pkg" --json >/dev/null 2>"$W/cg/g2.err"; RC=$?
 { [ $RC -eq 0 ] && grep -q 'no baseline callgraph sidecar' "$W/cg/g2.err" && ! grep -q '\[AS-EFF-005\]' "$W/cg/g2.err"; } \
   && ok "baseline ⟨0.16⟩: sidecar absent -> degrade to report-only existence + stderr note (exit 0)" \
   || bad "baseline ⟨0.16⟩ degrade: rc=$RC $(cat "$W/cg/g2.err")"
 # (3) sidecar PRESENT-but-corrupt: fail closed (exit 2), no AS-EFF-005 wave.
 cp "$W/cg/saved.callgraph.json" "$CGSIDE"   # restore the sidecar removed by (2)
 printf '{ "fmt": [' > "$CGSIDE"
-CANDOR_BASELINE="$CGREP" "$BIN" "$W/cg/after" --json >/dev/null 2>"$W/cg/g3.err"; RC=$?
+CANDOR_BASELINE="$CGREP" "$BIN" "$W/cg/a0/pkg" --json >/dev/null 2>"$W/cg/g3.err"; RC=$?
 { [ $RC -eq 2 ] && grep -q 'callgraph sidecar.*could not be parsed' "$W/cg/g3.err" && ! grep -q '\[AS-EFF-005\]' "$W/cg/g3.err"; } \
   && ok "baseline ⟨0.16⟩: a corrupt callgraph sidecar fails closed (exit 2)" \
   || bad "baseline ⟨0.16⟩ corrupt sidecar: rc=$RC $(cat "$W/cg/g3.err")"
@@ -1486,9 +1494,9 @@ CANDOR_BASELINE="$CGREP" "$BIN" "$W/cg/after" --json >/dev/null 2>"$W/cg/g3.err"
 # NOT a real effect) is ADVISORY, never a CI-breaking regression — Unknown is the §4 trust marker
 # (`pure` excludes it), dominated by resolution noise on version bumps. exit 0 + a note, NO [AS-EFF-005].
 cp "$W/cg/saved.callgraph.json" "$CGSIDE"   # restore the sidecar corrupted by (3)
-mkdir -p "$W/cg/afterU"
-printf 'import Foundation\nfunc fmt(_ s: String, _ opaque: () -> Void) -> String { opaque(); return s.uppercased() }\nfunc fetchIt() { _ = URLSession.shared.dataTask(with: URL(string: "https://x.example.com/")!) { _,_,_ in } }\nfetchIt()\n' > "$W/cg/afterU/m.swift"
-CANDOR_BASELINE="$CGREP" "$BIN" "$W/cg/afterU" --json --gate-json "$W/cg/u.verdict" >/dev/null 2>"$W/cg/g4.err"; RC=$?
+mkdir -p "$W/cg/aU/pkg"
+printf 'import Foundation\nfunc fmt(_ s: String, _ opaque: () -> Void) -> String { opaque(); return s.uppercased() }\nfunc fetchIt() { _ = URLSession.shared.dataTask(with: URL(string: "https://x.example.com/")!) { _,_,_ in } }\nfetchIt()\n' > "$W/cg/aU/pkg/m.swift"
+CANDOR_BASELINE="$CGREP" "$BIN" "$W/cg/aU/pkg" --json --gate-json "$W/cg/u.verdict" >/dev/null 2>"$W/cg/g4.err"; RC=$?
 UOK=$(python3 -c "import json; print(json.load(open('$W/cg/u.verdict'))['ok'])" 2>/dev/null)
 { [ $RC -eq 0 ] && grep -q 'gained an unresolved call (Unknown)' "$W/cg/g4.err" \
   && grep -q 'advisory, NOT a regression' "$W/cg/g4.err" && ! grep -q '\[AS-EFF-005\]' "$W/cg/g4.err" \
