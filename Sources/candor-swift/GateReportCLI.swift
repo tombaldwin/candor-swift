@@ -30,6 +30,10 @@ private func gateDie(_ msg: String) -> Never { refuseGateAndExit(msg) }
 /// wire: this is `S` and `D` as the producer wrote them, not a re-derivation.
 private struct GateReportEntry {
     let fn: String
+    /// ⟨0.32⟩ the §2.2 JOIN KEY. Empty when the report carries none — a hand-authored report, or one from
+    /// a producer older than the key — in which case the name is all there is and `entryKey` falls back
+    /// to it. Absence is the pre-⟨0.32⟩ behaviour, not a new hazard; PRESENCE is what fixes it.
+    let hash: String
     let inferred: Set<String>
     /// ⟨0.24⟩ The §2 `direct` set — the effects raised in this function's OWN body, as distinct from the
     /// transitive `inferred`. Read for exactly one purpose: to tell a DIRECT `Unknown` the entry named no
@@ -133,6 +137,7 @@ private func mergeGateReport(_ full: String, into env: inout GateReportEnvelope)
         }
         env.entries.append(GateReportEntry(
             fn: fn,
+            hash: e["hash"] as? String ?? "",
             inferred: Set(inferred),
             direct: Set(direct),
             calls: calls,
@@ -366,19 +371,57 @@ private func gateInputFromReport(_ env: GateReportEnvelope) -> GateInput {
     var netClasses: [String: [String]] = [:]
     var hosts: [String: Set<String>] = [:], cmds: [String: Set<String>] = [:]
     var paths: [String: Set<String>] = [:], tables: [String: Set<String>] = [:]
+    // ⟨0.32⟩ KEY BY `hash`, NEVER BY BARE `fn` — SPEC §2.2, and the reason it is a MUST. MEASURED on the
+    // family's other engines: `gate --report` over one member REFUSED a scoped rule at exit 2, and the
+    // SAME member gated beside an unrelated sibling exited 0 with `policy ✓`. Adding a report — strictly
+    // more information — turned a red verdict green, because two same-named functions in different
+    // packages merged into one node.
+    //
+    // WHY UNION IS NOT THE SAFE DIRECTION HERE. Union is safe for EFFECTS: adding effects only adds
+    // violations. It is NOT safe for REASON CLASSES, because a reason set is what makes an `Unknown`
+    // ANSWERABLE — an `Unknown` with no reachable reason is unanswerable and the gate REFUSES, so
+    // borrowing a reason from an unrelated same-named function converts that refusal into an answer.
+    // Union turns "I cannot say" into "I checked, it's fine".
+    var display: [String: String] = [:]
+    // THE EDGES NEED RESOLVING TOO, which is what makes this more than a key swap: `calls` names callees
+    // by BARE `fn`, so hash-keying the NODES alone leaves the call graph joining by name one layer down —
+    // the same defect, harder to see because the node table looks right. A callee resolves only when
+    // exactly ONE unit in the set declares that name; an ambiguous one contributes NO EDGE and instead
+    // CONTRIBUTES `dispatch`, because dropping it silently is how the caller keeps a reason of its own,
+    // stays answerable, and passes.
+    var byName: [String: Set<String>] = [:]
+    for e in env.entries { byName[e.fn, default: []].insert(entryKey(e)) }
+
     for e in env.entries {
-        // UNION on a repeated `fn` rather than overwrite: a duplicate key is malformed input, and the
-        // union is the direction that cannot turn a violation into a pass.
-        inferred[e.fn, default: []].formUnion(e.inferred)
-        edgeSets[e.fn, default: []].formUnion(e.calls)
-        if !e.hosts.isEmpty { hosts[e.fn, default: []].formUnion(e.hosts) }
-        if !e.cmds.isEmpty { cmds[e.fn, default: []].formUnion(e.cmds) }
-        if !e.paths.isEmpty { paths[e.fn, default: []].formUnion(e.paths) }
-        if !e.tables.isEmpty { tables[e.fn, default: []].formUnion(e.tables) }
-        if !e.netClass.isEmpty {
-            netClasses[e.fn] = Array(Set(netClasses[e.fn] ?? []).union(e.netClass)).sorted()
+        let k = entryKey(e)
+        // The KEY is what every accumulator is keyed by; the NAME is what a policy scope matches and what
+        // the verdict prints. Keeping both is the whole point — see GateInput.display.
+        display[k] = e.fn
+        // UNION on a repeated KEY: two entries sharing a hash are ONE unit by construction, so here the
+        // union is this engine's own unit semantics rather than a guess about two functions.
+        inferred[k, default: []].formUnion(e.inferred)
+        var ambiguous = false
+        for c in e.calls {
+            guard let cands = byName[c] else { continue }
+            if cands.count == 1 { edgeSets[k, default: []].insert(cands.first!) }
+            else { ambiguous = true }
         }
-        for why in e.unknownWhy { whyDirect[e.fn, default: []].insert(reasonClass(why)) }
+        // …the ambiguity CONTRIBUTED as evidence at this entry, before the fixpoint. `dispatch` is the
+        // right class by the vocabulary's own definition ("unresolved virtual/dynamic dispatch, SAME-NAME
+        // AMBIGUITY"), and it is evidence the MERGE holds — it saw two declarers — never a class borrowed
+        // from another function's body, so it cannot make some other fn's `Unknown` answerable.
+        if ambiguous {
+            inferred[k, default: []].insert("Unknown")
+            whyDirect[k, default: []].insert("dispatch")
+        }
+        if !e.hosts.isEmpty { hosts[k, default: []].formUnion(e.hosts) }
+        if !e.cmds.isEmpty { cmds[k, default: []].formUnion(e.cmds) }
+        if !e.paths.isEmpty { paths[k, default: []].formUnion(e.paths) }
+        if !e.tables.isEmpty { tables[k, default: []].formUnion(e.tables) }
+        if !e.netClass.isEmpty {
+            netClasses[k] = Array(Set(netClasses[k] ?? []).union(e.netClass)).sorted()
+        }
+        for why in e.unknownWhy { whyDirect[k, default: []].insert(reasonClass(why)) }
         // ⟨0.24⟩ SPEC §6.2's CONTRIBUTION, on the one route where the producer-side repair cannot reach.
         // A report is DATA: this engine's scan already records an `unknownWhy` beside every `Unknown` it
         // raises (the §4 invariant, pinned by UnknownMarkerInvariantProcessTests), but that says nothing
@@ -397,7 +440,7 @@ private func gateInputFromReport(_ env: GateReportEnvelope) -> GateInput {
         // and contributes NOTHING: that is a report which did not carry the channel, not a claim of a
         // direct `Unknown`. Same shape as candor-rust `gate.rs` and candor-java `Loader`.
         if e.direct.contains("Unknown"), e.unknownWhy.isEmpty {
-            whyDirect[e.fn, default: []].insert("unresolved")
+            whyDirect[k, default: []].insert("unresolved")
         }
     }
     for (fn, cs) in edgeSets { edges[fn] = cs.sorted() }
@@ -406,7 +449,8 @@ private func gateInputFromReport(_ env: GateReportEnvelope) -> GateInput {
                      netClasses: netClasses,
                      hosts: hosts, cmds: cmds, paths: paths, tables: tables,
                      surfaceIncomplete: [:],
-                     edges: edges)
+                     edges: edges,
+                     display: display)
 }
 
 // ── answerability (SPEC §3.1 ⟨0.24⟩) ────────────────────────────────────────────────────────────────
@@ -488,7 +532,8 @@ private func unanswerableScopedFilters(_ deny: [DenyRule], _ gi: GateInput) -> [
     let cells = unanswerableCells(inferred: gi.inferred,
                                   reasonClasses: gi.reasonClasses,
                                   netClasses: gi.netClasses.mapValues(Set.init),
-                                  deny: deny)
+                                  deny: deny,
+                                  display: gi.display)
     return unansweredDisclosure(cells).map { Unevaluated(rule: $0.rule, why: $0.why) }
 }
 
@@ -947,3 +992,8 @@ func runGateReportCLI(_ args: [String]) -> Never {
     }
     exit(0)
 }
+
+/// ⟨0.32⟩ SPEC §2.2's join key: the report's `hash` when it carries one, the bare name when it does not.
+/// A name-keyed lookup into a hash-keyed map does not error — it returns nil, and nil reads as "nothing
+/// to report" rather than as a break — so every consumer of these accumulators must key the same way.
+private func entryKey(_ e: GateReportEntry) -> String { e.hash.isEmpty ? e.fn : e.hash }
