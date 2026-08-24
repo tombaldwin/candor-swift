@@ -9,6 +9,28 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ ⟨0.32⟩ One `extension Process` anywhere in a package zeroed the `Process()` CONSTRUCTOR,
+  package-wide.** The free-call κ ctor arms fenced on `localTypes`, which is filled from EXTENSIONS as
+  well as declarations, so extending a platform type made its constructor read as project code
+  everywhere. The member-call path has fenced on `declaredTypes` since the ShellOut cardinal-sin, so the
+  two paths answered the same question differently — the sibling-route shape. Measured on real code:
+  firebase-ios-sdk has four `extension Date` blocks and reported NO `Clock` anywhere in the package —
+  38 units, each with a plain `Date()` in its body; swift-protobuf has one `extension FileHandle`, and
+  `FileHandle(forWritingAtPath:)` — a real file OPEN for writing — read pure in three units. All four
+  ctor families (κ, capture, bonjour, EventKit) now take the `declaredTypes` fence.
+
+  **The obvious fix is a regression and ⟨0.32⟩ measured that too**: swapping the fence drops the local
+  call edge an extension `convenience init` needs, and 91 firebase units LOST a true `Env` through it.
+  This charges κ *and* keeps the edge, by emitting the same `Call` the fall-through arm would have
+  emitted for exactly the set it used to serve — so the delta is ADDITIVE BY CONSTRUCTION, not by hope.
+  The convenience-init case is a control row, not an afterthought.
+
+  **A/B over ~23 900 units × `deny Exec`/`deny Net`/`deny Fs`**: zero verdict flips, **zero effects
+  lost**, 41 units newly charged — 38 `Clock` (firebase) and 3 `Fs` (swift-protobuf), every one
+  hand-traced to a real receiver, and 5 of them newly PRESENT in the report at all. swift-syntax's
+  `ProcessRunner.init` does not move: ⟨0.32⟩ already charged it `Exec` through the configuration half,
+  so the construction charge lands inside an effect set it already had — the null explained, not assumed.
+
 - **⚠ ⟨0.32⟩ A module-qualified `Data`/`String` content read was silent — the one free-name family the
   spelling rule did not reach.** ⟨0.32⟩ made a module qualifier a SPELLING for the κ table and the three
   privacy ctor families, but the `Data`/`String(contentsOf:|contentsOfFile:)` arm was keyed on the callee
