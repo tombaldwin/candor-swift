@@ -163,7 +163,13 @@ final class CoverageProcessTests: XCTestCase {
         XCTAssertNil(d["conditional"], "fully covered → `conditional` ABSENT (pre-⟨0.15⟩ shape): \(r.out)")
         XCTAssertNil(d["coverage"], r.out)
         let h = try ProcessHarness.run(bin, ["privacy-manifest", "--report", prefix, "--verify", plist.path])
-        XCTAssertFalse(h.out.contains("conditional"), h.out)
+        // ⟨0.32⟩ ASSERT THE LINE, NOT THE WORD. This read `!h.out.contains("conditional")` and began
+        // failing the moment the ⟨0.32⟩ descriptive hedge reached this verb — because the completeness
+        // note's own tail says *"a clean verify is conditional on it"*. A bare-substring absence-assert
+        // over a stream carrying two disclosures cannot say which one it caught; the COVERAGE line is
+        // the one this row is about, and `testVerifyConditionalOnUncoveredModule` asserts its presence
+        // in exactly these words.
+        XCTAssertFalse(h.out.contains("⚠ verdict is conditional on"), h.out)
     }
 
     // ── (c) --gate-json advisory coverage note, verdict-preserving ───────────────────────────────────

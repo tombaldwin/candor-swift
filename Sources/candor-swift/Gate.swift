@@ -21,7 +21,23 @@ import CandorCore
 // present (transitively) on the fn — every reason the strict gate bit (SPEC §6.2). Empty otherwise.
 // ⟨0.20⟩ `netClass`: on an AS-EFF-006 violation whose `effects` include `Net`, all destination classes
 // present (transitively) on the fn — which class the security gate bit (NET-DESTINATION-CLASS-DESIGN.md).
-typealias GateViolation = (rule: String, fn: String, effects: [String], detail: String, reasonClass: [String], netClass: [String])
+// ⟨0.32⟩ `hash`: **THE UNIT THIS ROW IS ABOUT** — §2.2's join key, `<package>#<qual>`. SPEC §2: *"a
+// verdict row MUST carry enough identity for a consumer to tell two units apart… the sort key MUST
+// include that identity."* MEASURED on this engine 2026-08-24, `gate --report` over two reports whose
+// members both define `go` and both violate `deny Exec`: two BYTE-IDENTICAL rows, `{rule, fn, effects,
+// detail}`, with nothing attributing either to a package. A reader cannot tell two broken members from
+// one listed twice, and a consumer that fingerprints on name alone — candor's own SARIF action did —
+// hides one finding behind the other. Names are not unique even WITHIN one report: this engine's `#1`
+// overload disambiguator (Driver.swift) exists because two `go()` declarations collapse otherwise.
+//
+// `hash` AND NOT `package`/`loc`, because §2.2 already binds a consumer to join a verdict row back to
+// its report entry BY HASH; a row that omits it forces exactly the name join that clause forbids.
+// BESIDE `fn`, NEVER INSTEAD OF IT: the NAME is what a policy scope matches (`nameOf`) and what a human
+// reads, so substituting the qualified form would silently stop every scoped rule matching — a false
+// green introduced by fixing a false green. Empty when the producer has none to give (a hand-authored
+// report with no `hash`, which §3.1 says `gate --report` serves), and empty is OMITTED from the wire:
+// ⟨0.26⟩'s *this producer cannot answer* beats a fabricated id.
+typealias GateViolation = (rule: String, fn: String, hash: String, effects: [String], detail: String, reasonClass: [String], netClass: [String])
 
 /// ⟨0.24⟩ ONE POLICY RULE THIS RUN COULD NOT DECIDE (SPEC §3.1, candor-spec `fc4b5f6`).
 ///
@@ -97,8 +113,21 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
         // ⟨0.21⟩ (Gap 1) the analyzed-universe count, so a --gate-json consumer sees the scan's scope from the
         // verdict alone (mirrors the report envelope's `analyzed`). ALWAYS present.
         "analyzed": ["count": analyzedCount] as [String: Any],
-        "violations": violations.map { v -> [String: Any] in
+        // ⟨0.32⟩ SORTED HERE, IN THE ONE WRITER BOTH ROUTES CALL — SPEC §2: *"the sort key MUST include
+        // that identity"*, which is the other half of the identity clause and is stated separately
+        // because a row carrying `hash` without a KEY that uses it is half a fix. `(rule, detail)` TIES
+        // on two units sharing a name (`detail` is built from the NAME), so the pair's order was
+        // whatever the accumulation happened to be, and §3.3.1 makes the document's ORDER part of the
+        // byte-equality between `scan --policy` and `gate --report` — routes that accumulate
+        // differently (the scan prepends its AS-EFF-005 rows; the report route has none). This engine
+        // had NO sort on either route at all; order came from `keys.sorted()` inside each rule loop
+        // crossed with policy-DECLARATION order. Compared with `<` on tuples, never `localeCompare`-like
+        // collation: ⟨0.24⟩ §3.3.1 requires every ordering to be locale-INDEPENDENT.
+        "violations": violations.sorted {
+            ($0.rule, $0.detail, $0.hash) < ($1.rule, $1.detail, $1.hash)
+        }.map { v -> [String: Any] in
             var m: [String: Any] = ["rule": v.rule, "fn": v.fn, "effects": v.effects, "detail": v.detail]
+            if !v.hash.isEmpty { m["hash"] = v.hash }        // ⟨0.32⟩ omitted when the producer has none
             if !v.reasonClass.isEmpty { m["reasonClass"] = v.reasonClass }  // omitted when empty (byte-compat)
             if !v.netClass.isEmpty { m["netClass"] = v.netClass }           // ⟨0.20⟩ omitted when empty
             return m
@@ -502,6 +531,12 @@ struct GateInput {
     /// is the silent direction. EMPTY on the scan route, where the key IS the name: `nameOf` falls back
     /// to the key, so that route is byte-identically unchanged.
     var display: [String: String] = [:]
+    /// ⟨0.32⟩ KEY → the §2.2 UNIT IDENTITY (`<package>#<qual>`) a verdict row carries — see
+    /// `GateViolation` and `evaluateGate`'s `unitOf`. A map of its own rather than a second reading of
+    /// the key, because the two routes disagree about what the key IS: `gate --report` keys by `hash`
+    /// already, the scan route keys by the qualified NAME and must qualify it with the package. Missing
+    /// means this caller has no identity to give, and the row then OMITS the field.
+    var hash: [String: String] = [:]
 }
 
 /// The SCAN route into the gate: the classifier's live maps, plus the two derivations the gate used to
@@ -514,7 +549,13 @@ func gateInputFromScan(inferred: [String: Set<String>],
                        hostsAcc: [String: Set<String>], cmdsAcc: [String: Set<String>],
                        pathsAcc: [String: Set<String>], tablesAcc: [String: Set<String>],
                        incompleteAcc: [String: Set<String>],
-                       netPartners: Set<String>) -> GateInput {
+                       netPartners: Set<String>,
+                       // ⟨0.32⟩ The PACKAGE this signature belongs to, so a verdict row can carry the
+                       // §2.2 unit identity (`<package>#<qual>`) — the SAME string the report writer puts
+                       // in each entry's `hash`. Taken as a name and joined here rather than as a
+                       // prebuilt map, because on this route the keys ARE the quals. Empty package =>
+                       // no identity to give, and the row omits the field rather than emitting `#go`.
+                       package: String = "") -> GateInput {
     // Reason-scoped Unknown (REASON-SCOPED-UNKNOWN-DESIGN.md): the Unknown reason CLASS must travel the
     // call graph the same way the Unknown EFFECT does (whyMap is direct-only). Classify each fn's direct
     // reasons to class tokens, then propagate transitively — so `deny E Unknown[reflect]` at a caller
@@ -547,11 +588,17 @@ func gateInputFromScan(inferred: [String: Set<String>],
                                         netIncomplete: incompleteAcc[qual]?.contains("Net") ?? false,
                                         partners: netPartners)
     }
+    // ⟨0.32⟩ THE §2 IDENTITY EACH VERDICT ROW CARRIES — `<package>#<qual>`, exactly what the report
+    // writer puts in the entry's `hash`, so `gate --report` (which copies the producer's value verbatim)
+    // and this route emit the same string for one unit. §3.1 makes those two documents byte-equal.
+    var hash: [String: String] = [:]
+    if !package.isEmpty { for qual in inferred.keys { hash[qual] = "\(package)#\(qual)" } }
     return GateInput(inferred: inferred,
                      reasonClasses: propagate(reasonClassDirect, over: edges),
                      netClasses: netClasses,
                      hosts: hostsAcc, cmds: cmdsAcc, paths: pathsAcc, tables: tablesAcc,
-                     surfaceIncomplete: incompleteAcc, edges: cg)
+                     surfaceIncomplete: incompleteAcc, edges: cg,
+                     hash: hash)
 }
 
 /// Evaluate a parsed §6.2 policy against an ALREADY-ACCUMULATED signature — the SAME violation list
@@ -571,6 +618,13 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
     // helper used at EVERY name-consuming site rather than a substitution at the few that looked wrong.
     // The scan route leaves `display` empty and the key IS the name, so it is the identity there.
     func nameOf(_ k: String) -> String { gi.display[k] ?? k }
+    // ⟨0.32⟩ THE UNIT THE ROW IS ABOUT (SPEC §2) — see `GateViolation`. A SEPARATE map from `display`
+    // rather than a second reading of the key, because the two routes disagree about what the key IS:
+    // `gate --report` keys by `hash` already, the scan route keys by the qualified NAME and has to
+    // qualify it with the package. Reading identity off the key would make the two routes emit different
+    // `hash` values for one unit — a §3.1 byte-equality break no single-route test could see. `""` when
+    // the caller has none, and `""` is omitted from the wire.
+    func unitOf(_ k: String) -> String { gi.hash[k] ?? "" }
     var gateViolations: [GateViolation] = []
         // ZERO-MATCH DISCLOSURE. A rule whose SCOPE binds no function is scored as satisfied — so a
         // one-character typo in a layer name (`deny Net ordrs`) turns a failing gate green and
@@ -667,7 +721,7 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
                     let rc = hits.contains("Unknown") ? (reasonClassAcc[qual].map { $0.sorted() } ?? []) : []
                     // ⟨0.20⟩ when Net is denied, report ALL of the fn's destination classes (transitive).
                     let nc = hits.contains("Net") ? (gi.netClasses[qual] ?? []) : []
-                    gateViolations.append((rule: "AS-EFF-006", fn: nameOf(qual), effects: hits,
+                    gateViolations.append((rule: "AS-EFF-006", fn: nameOf(qual), hash: unitOf(qual), effects: hits,
                         detail: "`\(nameOf(qual))` performs { \(hits.joined(separator: ", ")) }, forbidden by policy: `\(r.raw)`",
                         reasonClass: rc, netClass: nc))
                 }
@@ -697,11 +751,11 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
                     let why = surface.isEmpty
                         ? "performs \(r.effect) with no visible literal — the surface cannot be certified"
                         : "reaches a structurally-invisible \(r.effect) endpoint a visible literal cannot mask"
-                    gateViolations.append((rule: "AS-EFF-008", fn: nameOf(qual), effects: [r.effect], detail: "`\(nameOf(qual))` \(why): `\(r.raw)`", reasonClass: [], netClass: []))
+                    gateViolations.append((rule: "AS-EFF-008", fn: nameOf(qual), hash: unitOf(qual), effects: [r.effect], detail: "`\(nameOf(qual))` \(why): `\(r.raw)`", reasonClass: [], netClass: []))
                 } else {
                     let bad = surface.filter { !literalAllowed(r.effect, $0, r.values) }.sorted()
                     if !bad.isEmpty {
-                        gateViolations.append((rule: "AS-EFF-008", fn: nameOf(qual), effects: [r.effect],
+                        gateViolations.append((rule: "AS-EFF-008", fn: nameOf(qual), hash: unitOf(qual), effects: [r.effect],
                             detail: "`\(nameOf(qual))` reaches { \(bad.joined(separator: ", ")) } outside the allowlist: `\(r.raw)`", reasonClass: [], netClass: []))
                     }
                 }
@@ -713,7 +767,7 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
                 while let cur = stack.popLast() {
                     if !seen.insert(cur).inserted { continue }
                     if scopeMatches(nameOf(cur), r.to) {
-                        gateViolations.append((rule: "AS-EFF-009", fn: nameOf(fn), effects: [],
+                        gateViolations.append((rule: "AS-EFF-009", fn: nameOf(fn), hash: unitOf(fn), effects: [],
                             detail: "`\(nameOf(fn))` (scope `\(r.from)`) transitively reaches `\(nameOf(cur))` in forbidden scope `\(r.to)`: `\(r.raw)`",
                             reasonClass: [], netClass: []))
                         break
@@ -741,7 +795,7 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
                         // ⟨0.29⟩ ITS OWN CODE, not `forbid`'s — a rule code is what a CI suppression
                         // keys on, and these two are opposite constructs. Sharing 009 would make an
                         // existing `forbid` suppression silently mute `only` violations nobody accepted.
-                        gateViolations.append((rule: "AS-EFF-011", fn: nameOf(fn), effects: [],
+                        gateViolations.append((rule: "AS-EFF-011", fn: nameOf(fn), hash: unitOf(fn), effects: [],
                             detail: "`\(nameOf(fn))` reaches `\(nameOf(cur))`, which this permission rule does not permit: `\(r.raw)`",
                             reasonClass: [], netClass: []))
                         break

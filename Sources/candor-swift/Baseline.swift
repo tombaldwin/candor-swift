@@ -269,7 +269,10 @@ func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion:
             // already Unknown in the baseline shows no gain, so it is never reached here) and only a blind
             // spot the baseline lacked is flagged. Regenerate the baseline to grandfather one.
             if unknownRatchet {
-                violations.append((rule: "AS-EFF-005", fn: qual, effects: ["Unknown"],
+                // ⟨0.32⟩ `hash` — SPEC §2, every verdict row carries the unit it is about. Built from
+                // the SAME `<package>#<qual>` key this guard already joins the baseline on (above), so
+                // the row's identity and the join key cannot spell the unit two ways.
+                violations.append((rule: "AS-EFF-005", fn: qual, hash: "\(package)#\(qual)", effects: ["Unknown"],
                     detail: "`\(qual)` gained an unresolved call (Unknown) not in the baseline — a NEW blind spot "
                         + "(unknown-ratchet); resolve it, or regenerate the baseline to grandfather it", reasonClass: [], netClass: []))
                 continue
@@ -277,7 +280,7 @@ func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion:
             unknownOnly.append(qual)
             continue
         }
-        violations.append((rule: "AS-EFF-005", fn: qual, effects: real,
+        violations.append((rule: "AS-EFF-005", fn: qual, hash: "\(package)#\(qual)", effects: real,
             detail: "`\(qual)` gained effect { \(real.joined(separator: ", ")) } not present in the baseline", reasonClass: [], netClass: []))
     }
     if !foreignPriorsIgnored.isEmpty {

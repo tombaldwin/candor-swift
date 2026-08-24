@@ -9,6 +9,66 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **A verdict row could not say WHICH unit it was about — the ⟨0.32⟩ identity clause, closed.**
+  SPEC §2: *"a verdict row MUST carry enough identity for a consumer to tell two units apart… the sort
+  key MUST include that identity."* MEASURED, `gate --report` over two reports whose members both define
+  `go` and both violate `deny Exec` — two BYTE-IDENTICAL rows, `{rule, fn, effects, detail}`, with
+  nothing attributing either to a package. A reader cannot tell two broken members from one listed
+  twice, and a consumer that fingerprints on name alone — candor's own SARIF action did — hides one
+  finding behind the other. Names are not unique even WITHIN one report: this engine's own `#1` overload
+  disambiguator exists because two `go()` declarations collapse otherwise.
+
+  `GateViolation` gains `hash` — §2.2's join key, `<package>#<qual>` — **BESIDE `fn`, never instead of
+  it**: the NAME is what a policy scope matches (`nameOf`) and what a human reads, so substituting the
+  qualified form would silently stop every scoped rule matching. `GateInput` gains a `hash` map beside
+  `display` rather than the row reading identity off the KEY, because the two routes disagree about what
+  the key IS: `gate --report` keys by `hash` already, the scan route keys by the qualified NAME and
+  qualifies it with the package it is scanning — the SAME string the report writer puts in each entry.
+
+  **AND THE SORT KEY IS HALF THE CLAUSE.** `(rule, detail)` ties on the twins (`detail` is rendered from
+  the NAME), and §3.3.1 makes the document's ORDER part of the byte-equality between the two routes.
+  This engine had **no sort at all**: order came from `keys.sorted()` inside each rule loop crossed with
+  policy-DECLARATION order. `writeGateVerdict` — the one writer both routes call — now sorts
+  `(rule, detail, hash)`.
+
+  **NOT ADDITIVE, stated plainly:** a new key on the violation record means a verdict document is no
+  longer byte-identical to a pre-⟨0.32⟩ one. Unavoidable — the MUST is that the row carry identity, and
+  no arrangement of the four existing keys does. Everything that can be additive is: every pre-existing
+  key keeps its name and value, and `hash` is OMITTED when the producer has none to give (a
+  hand-authored report, which §3.1 says this verb serves) — ⟨0.26⟩'s *cannot answer*, never a fabricated
+  id. Route byte-equality re-measured on a real scan-then-gate pipeline: identical. Conformance PART 68
+  pins it four-way; its `rev` control re-lays the same two reports under swapped file stems, so an
+  engine ordering by the discovery walk fails where one ordering by identity passes.
+
+- **`tour` said "nothing hidden" over a class the scan never opened — the ⟨0.32⟩ descriptive hedge,
+  ruled and closed four-way.** Over a report whose `excluded` names a class with `peeked: false`, this
+  engine, candor-rust and candor-ts printed *"candor: nothing hidden — every effect sits where its name
+  says it should"* at exit 0, while candor-java hedged and named the class. **candor-java was right, and
+  the ruling is now in a comment in all four engines so it is not re-litigated.**
+
+  **IT IS A DISCLOSURE, NOT A VERDICT** — `tour` answers no `ok` and has no exit-code obligation, so
+  ⟨0.24⟩'s advisory pessimism MUST does not reach it and the exit code is unchanged; the arm is on
+  `mustHedge` and NOT on `isIncomplete`. What reaches it is §2 ⟨0.28⟩ (*"any verb whose output could be
+  read as a negative finding about the code — a verdict, an empty result set, or a zero count"*) and
+  §3.1 ⟨0.18⟩, which already forbids **that exact sentence** over a ≥⅓-Unknown graph. An unread
+  exclusion class is the same ignorance by another route, and the ⅓ threshold structurally cannot see
+  it: an unread unit contributes no entry, so it moves neither the numerator nor the denominator. The
+  argument this file used to carry — *"they take no `--policy`, so there is no question whose answer
+  could depend on the unread code"* — was the wrong way round: a verb with no policy is asking the
+  WIDEST question there is, the whole effect surface.
+
+  **AND WIRING IT SURFACED A REAL ONE IN THE ARMING.** `armingUnread` only SET a flag where candor-rust
+  CLEARS the list, so the moment `mustHedge` read `unread` directly a `forbid`-only run began answering
+  `incomplete: true` on `fix-gate`/`unverified` — hedging exactly the allowlist run that function exists
+  to leave alone. Caught by `UnreadExclusionAdvisorySiblingTests`' own no-deny-rule control; the list is
+  now cleared, not merely left unarmed. Two prose defects fell out with it: the note's head clause was
+  built from the three MANIFEST rows alone, so a report whose ONLY cause was `outOfScope` or an unread
+  class produced *"declare 0 unit(s) candor could not analyze"* — a hedge naming a cause it does not
+  have, which this family rates worse than a missing one — and the tail would have claimed
+  `gate --report` exits 2 with no policy in force to say it under. Both now have their own sentence.
+  `privacy-manifest`'s "complete report" control was never complete in the ⟨0.32⟩ sense (an SPM tree
+  always excludes `Package.swift`); its fixture now says so, and gains the opposite arm.
+
 - **CI was green against the WRONG CONTRACT: the candor-spec pin was 797 commits stale.** Both workflows
   clone candor-spec and check out a fixed commit — `ci.yml`'s `CANDOR_SPEC_PIN` and a LITERAL in
   `release.yml` — and both sat at `eccfac71`, which predates every ⟨0.32⟩ commit. `smoke.sh` reads its

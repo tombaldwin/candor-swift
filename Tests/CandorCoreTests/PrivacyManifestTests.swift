@@ -338,9 +338,20 @@ final class PrivacyManifestTests: XCTestCase {
 
     /// THE CONTROL: over a complete report every caveat key is ABSENT — generate output is
     /// byte-identical to its pre-⟨0.28⟩ form (the property every engine measured for this rung).
+    ///
+    /// ⟨0.32⟩ **AND "COMPLETE" NOW HAS TO INCLUDE THE FILE SET, WHICH IS WHY THE FIXTURE IS REWRITTEN
+    /// BEFORE IT IS ASKED.** A bare `candor-swift <dir> --out r` publishes `excluded` entries with
+    /// `peeked: false` — an SPM tree always has at least `manifest` (`Package.swift`, which every
+    /// `swift build` runs) — and the 2026-08-24 four-way ruling makes a class the scan never opened
+    /// hedge a descriptive ANSWER (see `ReportCompleteness.mustHedge`). So this fixture was never
+    /// complete in the ⟨0.32⟩ sense; it passed because nothing asked. Flipping `peeked` to true is the
+    /// producer's own statement that the peek READ those files, which is exactly the condition the
+    /// unhedged answer is licensed by — and rewriting the document is how the same control is written
+    /// four-way in conformance PART 62.
     func testCompleteReportCarriesNoCaveatKeys() throws {
         let (bin, prefix, cleanup) = try scanToReport(locationAndContacts)
         defer { cleanup() }
+        try markEveryExcludedClassPeeked(prefix: prefix)
         let r = try ProcessHarness.run(bin, ["privacy-manifest", "--report", prefix, "--json"])
         XCTAssertEqual(r.code, 0, r.err)
         let d = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any])
@@ -349,6 +360,52 @@ final class PrivacyManifestTests: XCTestCase {
                          + "the property this rung must not spend")
         }
         XCTAssertFalse(r.err.contains("INCOMPLETE"), "no prose caveat either: \(r.err)")
+    }
+
+    /// ⟨0.32⟩ **THE OTHER DIRECTION, WHICH IS THE ONE THE RULING IS ABOUT.** The control above passes
+    /// for an engine that has simply deleted the hedge, so it is only half a row: over the SAME tree
+    /// with the classes left as the scan wrote them — `peeked: false`, nothing opened them — this verb
+    /// MUST say so on both channels, and MUST NOT move its exit code (⟨0.24⟩: a disclosure, not an exit
+    /// code). `ok` still answers the declared-vs-reached question; the caveat qualifies it.
+    func testAnUnreadExclusionClassHedgesWithoutMovingTheExit() throws {
+        let (bin, prefix, cleanup) = try scanToReport(locationAndContacts)
+        defer { cleanup() }
+        // THE PREMISE, asserted so a broken fixture cannot pass as a green: some report under this
+        // prefix really does publish a class nothing opened. Found by looking for the KEY rather than by
+        // guessing a filename — the sidecar sits in the same directory and parses as JSON too.
+        let dir = URL(fileURLWithPath: prefix).deletingLastPathComponent()
+        var excluded: [[String: Any]] = []
+        for name in try FileManager.default.contentsOfDirectory(atPath: dir.path) where name.hasSuffix(".json") {
+            guard let d = try? JSONSerialization.jsonObject(
+                    with: Data(contentsOf: dir.appendingPathComponent(name))) as? [String: Any],
+                  let ex = d["excluded"] as? [[String: Any]] else { continue }
+            excluded += ex
+        }
+        XCTAssertTrue(excluded.contains { $0["peeked"] as? Bool == false && $0["judgedElsewhere"] == nil },
+                      "the fixture must publish an UNREAD class: \(excluded)")
+
+        let r = try ProcessHarness.run(bin, ["privacy-manifest", "--report", prefix, "--json"])
+        XCTAssertEqual(r.code, 0, "a disclosure, not an exit code: \(r.err)")
+        let d = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any])
+        XCTAssertEqual(d["incomplete"] as? Bool, true, "the DOCUMENT must say so: \(r.out)")
+        XCTAssertNil(d["unread"], "…and it mints no wire key of its own — the flag IS the surface: \(r.out)")
+        XCTAssertTrue(r.err.contains("exclusion class(es) the scan did NOT READ"),
+                      "the prose channel must name the CAUSE, not just wave: \(r.err)")
+    }
+
+    /// Rewrite every `excluded` member of every report under `prefix` to `peeked: true` — the
+    /// producer's own statement that the peek read those files. See the control above for why.
+    private func markEveryExcludedClassPeeked(prefix: String) throws {
+        let dir = URL(fileURLWithPath: prefix).deletingLastPathComponent()
+        for name in try FileManager.default.contentsOfDirectory(atPath: dir.path)
+        where name.hasSuffix(".json") && !name.hasSuffix(".callgraph.json") {
+            let u = dir.appendingPathComponent(name)
+            guard var d = try JSONSerialization.jsonObject(with: Data(contentsOf: u))
+                    as? [String: Any],
+                  let ex = d["excluded"] as? [[String: Any]] else { continue }
+            d["excluded"] = ex.map { m -> [String: Any] in var m = m; m["peeked"] = true; return m }
+            try JSONSerialization.data(withJSONObject: d).write(to: u)
+        }
     }
 
     // A binary plist parses too (NSDictionary/PropertyListSerialization handle both encodings).
