@@ -9,6 +9,20 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **CI was green against the WRONG CONTRACT: the candor-spec pin was 797 commits stale.** Both workflows
+  clone candor-spec and check out a fixed commit — `ci.yml`'s `CANDOR_SPEC_PIN` and a LITERAL in
+  `release.yml` — and both sat at `eccfac71`, which predates every ⟨0.32⟩ commit. `smoke.sh` reads its
+  oracle out of that sibling checkout, so every push and every PR went green while asking the ⟨0.29⟩-era
+  questions, and the rung's own rows were never run. A stale pin is not a conservative default: it is a
+  check that reports on a contract nobody is shipping. Both moved to `3c643e5` (the ⟨0.32⟩ carve-out
+  commit, spec HEAD), and `smoke.sh` was run against it here first — 148 passed, 0 failed.
+
+  The two spellings are the reason it drifted: a workflow-level `env:` in `ci.yml` does not reach
+  `release.yml`, so the release lane could certify against an older contract than the PR lane that
+  approved the change. Both now carry a comment saying they move together, and the weekly `spec-head`
+  lane stays what it always was — the early warning that HEAD has moved past the pin, which only works if
+  someone reads it. The pin is what the gate enforces.
+
 - **⚠ ⟨0.32⟩ `gate --report` CERTIFIED CODE NOBODY HAD READ — the unread-class rule was keyed on the
   PRODUCER'S HISTORY instead of the question being asked.** The ⟨0.32⟩ rule ("a class this scan did not
   READ makes the verdict INCOMPLETE") carved out the no-peek case by requiring `outOfScope` to be
