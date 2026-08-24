@@ -9,6 +9,36 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ ⟨0.32⟩ `gate --report` certified CLEAN where the scan REFUSED — a §3.1 route-equality violation,
+  fail-OPEN.** The ⟨0.32⟩ unread-exclusion rule ("code this scan did not READ makes the verdict
+  INCOMPLETE") landed on the scan route only: `writeGateVerdict`'s `unpeeked` parameter is defaulted, the
+  scan route passed it and `gate --report` silently took the default. The evidence was already on the
+  wire the whole time — `excluded[].peeked == false` rides the report both routes read. **Measured on
+  swift-syntax under `deny Net`: scan exit 2 `{"ok":false,"incomplete":true}` against gate exit 0
+  `{"ok":true}`** — and the gate route is the one a CI runs against a published report. The rung shipped
+  with no test on either route, so nothing in the suite could see it.
+
+  `gate --report` now reads `excluded` off the document and applies the SAME two conjuncts the producer
+  applies: the producer's `judgedElsewhere` carve-out for a derived copy of already-judged code, and —
+  the subtle one — the rule fires only if the peek RAN. `peeked: false` has two causes and only one
+  licenses a refusal: "opened those files and could not read them", versus "no peek ran, because no
+  policy was configured". ⟨0.29⟩ already separates them in the `outOfScope` key (OMITTED when nothing was
+  asked, present-and-empty when the peek came back clean), which is the same conjunct candor-java
+  (`scanWasAsked`) and candor-rust (`KeyRead::Present`) apply on their report routes. Without it every
+  no-policy and every pre-⟨0.30⟩ report would exit 2 on contact. Four of the nine new rows are
+  over-charge controls for exactly that.
+
+  **A/B over 7 real packages × `deny Exec`/`deny Net`/`deny Fs` × both routes (42 cells):** route-equality
+  violations 2 → 0, verdict documents byte-equal 19/21 → **21/21**, and not one scan-route cell moved.
+  The second of the two was invisible to an exit-code comparison — swift-syntax under `deny Exec` agreed
+  at exit 1 while the gate route's document omitted `incomplete` — which is why §3.1 makes BYTE-equality
+  the acceptance test and this fix is measured against it.
+
+  Also on this route: `candor-swift: policy ✓` was printed ABOVE the exit-2 arms, so every incomplete
+  verdict led with a green tick and contradicted itself one line later. The scan route moved its own tick
+  below its arms at ⟨0.30⟩; this one had kept the old position. Pinned on all three causes, with a
+  clean-gate control.
+
 - **⚠ ⟨0.32⟩ One `extension Process` anywhere in a package zeroed the `Process()` CONSTRUCTOR,
   package-wide.** The free-call κ ctor arms fenced on `localTypes`, which is filled from EXTENSIONS as
   well as declarations, so extending a platform type made its constructor read as project code
