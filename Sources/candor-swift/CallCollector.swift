@@ -1132,6 +1132,45 @@ final class CallCollector: SyntaxVisitor {
         return kappaMember(root: root, member: member)
     }
 
+    /// **AN EXTENSION IS NOT A DECLARATION — AND THE EDGE IT MIGHT NEED IS KEPT ANYWAY.**
+    ///
+    /// The four κ free-call ctor arms in `visit(FunctionCallExprSyntax)` fence on `declaredTypes`, not
+    /// `localTypes`, because `extension Process { var tag: String … }` says the project EXTENDS
+    /// Foundation's type: the constructor it calls is still Foundation's, and `Process()` is still the
+    /// subprocess capability. Fenced on `localTypes` — which `pushType` fills from extensions too — ONE
+    /// extension anywhere in the scan zeroed the constructor PACKAGE-WIDE (the scan's name sets are
+    /// per-package, so that is the blast radius). MEASURED, not hypothesised: swift-syntax has a
+    /// single `extension Process` (Logger.swift) and its `ProcessRunner.init` — `process = Process()`
+    /// plus three configuring writes — reported `Env` alone. A class whose only subprocess contact is
+    /// construction read pure across the whole package. The member-call path has always reasoned this
+    /// way (`declaredTypes`, the ShellOut cardinal-sin fix); the free-call path did not. The sibling
+    /// route, one more time.
+    ///
+    /// **THE OBVIOUS FIX — SWAP THE FENCE — WAS A/B'd AND REVERTED, AND THIS FUNCTION IS WHY.** An
+    /// extension may supply a `convenience init`, and when it does, the call resolves to a REAL LOCAL
+    /// UNIT. The fall-through arm at the end of this chain was what emitted that edge; the swapped fence
+    /// preempts the arm, so the edge disappeared with it. Measured then: 91 firebase-ios-sdk units
+    /// changed and the majority LOST a true `Env`. Killing a silent under-report is exactly where the
+    /// next one gets introduced.
+    ///
+    /// So the fix charges κ *and* keeps the edge, and it keeps it by emitting the SAME `Call` the
+    /// fall-through arm would have emitted — same path, same literal, same arg kinds — for exactly the
+    /// set that arm used to serve (`localTypes` minus `declaredTypes`: extension-only). The delta over
+    /// the previous behaviour is therefore ADDITIVE BY CONSTRUCTION: every edge that existed still
+    /// exists, and a κ effect is added beside it. That is a property of the code, not a hope about the
+    /// corpus, and the corpus A/B agrees (zero effects lost).
+    ///
+    /// Consulting what the extension DECLARES — shadowing only when it offers an `init` — was considered
+    /// and is strictly weaker: it leaves `Process()` silent in every target whose extension happens to
+    /// declare one, which is the same defect with a smaller trigger. The union needs no such reading,
+    /// and if the call really does resolve to a convenience init, that init still constructs the
+    /// platform type, so the κ effect is true of it as well.
+    private func keepExtensionCtorEdge(_ name: String, _ node: FunctionCallExprSyntax, lit: String?) {
+        guard localTypes.contains(name), !declaredTypes.contains(name) else { return }
+        calls.append(Call(path: name, leaf: name, strArg: lit, typed: false,
+                          args: argKinds(node), argTypes: argTypesOf(node), unqualified: true))
+    }
+
     /// **THE `Data`/`NSData`/`String` CONTENT-READ CONSTRUCTOR — ONE FUNCTION, BOTH SPELLINGS.**
     /// `Data(contentsOfFile:)` / `Data(contentsOf:)` and their `Foundation.`-qualified twins. Returns
     /// true when it classified, false when the name/label pair is not this ctor (or a local declaration
@@ -2630,8 +2669,9 @@ final class CallCollector: SyntaxVisitor {
                 if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK call IS network I/O
                 recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
                 if lit == nil, est, !(eff == "Fs" && lastResolvedHomePath) { incompleteSurfaces.insert(eff) }
-            } else if !localTypes.contains(name), !localFreeFns.contains(name),
+            } else if !declaredTypes.contains(name), !localFreeFns.contains(name),
                       PRIVACY_CAPTURE_TYPES.contains(dealias(name)) {
+                keepExtensionCtorEdge(name, node, lit: lit)
                 // `privacy/1` finding 5 — an AVFoundation capture-type CONSTRUCTOR (`AVCaptureSession()`).
                 // A ctor carries no media-type arg → the capture is ambiguous → over-disclose BOTH Camera
                 // AND Mic (privacy: never under-declare a real sensor). A local type of the same name
@@ -2656,8 +2696,9 @@ final class CallCollector: SyntaxVisitor {
                 case .absent:
                     ambiguousCapture = true
                 }
-            } else if !localTypes.contains(name), !localFreeFns.contains(name),
+            } else if !declaredTypes.contains(name), !localFreeFns.contains(name),
                       dealias(name) == "NWBrowser" || dealias(name) == "NetServiceBrowser" {
+                keepExtensionCtorEdge(name, node, lit: lit)
                 // A BONJOUR BROWSER CONSTRUCTOR — `NWBrowser(for: .bonjour(…), using:)`, which is the
                 // spelling real code uses; the member arm below only sees `browser.start()`. `.bonjour` is
                 // mDNS by definition, so the descriptor decides the key with no over-disclosure rule
@@ -2667,21 +2708,23 @@ final class CallCollector: SyntaxVisitor {
                 if let eff = kappaFree(name: dealias(name), argCount: node.arguments.count) {
                     directEffects.insert(eff)
                 }
-            } else if !localTypes.contains(name), !localFreeFns.contains(name),
+            } else if !declaredTypes.contains(name), !localFreeFns.contains(name),
                       PRIVACY_EVENTKIT_TYPES.contains(dealias(name)) {
+                keepExtensionCtorEdge(name, node, lit: lit)
                 // `privacy/2` — an EventKit store CONSTRUCTOR (`EKEventStore()`). Carries no entity type,
                 // so the store is ambiguous → over-disclose BOTH Calendar and Reminders, on the same
                 // reasoning as the capture ctor directly above.
                 for e in privacyEventKitEffects(entityType: entityTypeArg(node.arguments)) { directEffects.insert(e) }
-            } else if !localTypes.contains(name), !localFreeFns.contains(name),
+            } else if !declaredTypes.contains(name), !localFreeFns.contains(name),
                       let eff = kappaFree(name: dealias(name), argCount: node.arguments.count) {
-                // A LOCALLY-declared type ctor (`Pipe()` where `class Pipe`) or free fn (`NSLog(...)` where
+                // A LOCALLY-DECLARED type ctor (`Pipe()` where `class Pipe`) or free fn (`NSLog(...)` where
                 // `func NSLog`) ALWAYS shadows the platform free-call table — else a project's own
                 // `Pipe`/`NSDate`/`NSLog`/`CACurrentMediaTime` fabricates Ipc/Clock/Log (the precision failure;
-                // the same shadow discipline the member-call path applies via `localTypes`). When shadowed
+                // the same shadow discipline the member-call path applies via `declaredTypes`). When shadowed
                 // it falls through to the unqualified Call below, which resolves to the local def.
                 // `dealias(name)` resolves a typealias-named ctor (`Proc()`→`Process`→Exec) before κ; a
                 // local type/free fn already short-circuited above, so an alias never overrides the project.
+                keepExtensionCtorEdge(name, node, lit: lit)
                 let aliasName = dealias(name)
                 let est = isEstablishingFree(effect: eff, name: aliasName)
                 directEffects.insert(eff)

@@ -36,10 +36,14 @@ import Foundation
 ///     units are omitted from a report, so "absent" would pass a control that asked nothing (PART 37 (e)).
 ///
 /// TWO ROWS AT THE END WERE EXPECTED-FAILURE RATCHETS, not omissions: residuals ⟨0.32⟩ MEASURED and
-/// deliberately did not fix, each with the reason its obvious fix is worse. They fail if the defect is
-/// ever closed, so they cannot outlive it — and the SPELLING one no longer does. It is now a positive
-/// parity assertion (`testAQualifiedSpellingReachesTheDeclReferenceKeyedCtorArms`), with the loop form
-/// in `ModuleQualifierSpellingProcessTests`. The `extension Process` shadow below is still open.
+/// deliberately did not fix, each with the reason its obvious fix is worse. A ratchet FAILS once its
+/// defect is closed, so it cannot outlive it — and both have now been closed and converted to positive
+/// assertions. The spelling one is a parity row
+/// (`testAQualifiedSpellingReachesTheDeclReferenceKeyedCtorArms`), with the loop form in
+/// `ModuleQualifierSpellingProcessTests`; the `extension Process` shadow is
+/// `testAnExtensionOnlyLocalTypeNoLongerShadowsTheConstructor`, with its controls (the convenience-init
+/// edge the reverted fix broke, the lookalike, the local free fn) in
+/// `ExtensionShadowConstructorProcessTests`.
 final class ExecCapabilityProcessTests: XCTestCase {
 
     private func scan(_ src: String, name: String, policy: String? = nil)
@@ -228,49 +232,37 @@ final class ExecCapabilityProcessTests: XCTestCase {
         XCTAssertEqual(r.code, 1, "a tree that arms subprocesses must FAIL `deny Exec`: \(r.out)")
     }
 
-    /// `XCTExpectFailure` is Darwin-XCTest only; swift-corelibs-xctest (Linux) does not ship it, and a
-    /// bare call is a COMPILE error there rather than a runtime skip. Same shape as
-    /// `NetLocatorProvenanceProcessTests.expectKnownFailure`, for the same reason.
-    private func expectKnownFailure(_ reason: String) throws {
-        #if canImport(Darwin)
-        XCTExpectFailure(reason)
-        #else
-        throw XCTSkip("\(reason) — ratchet held on the macOS leg; XCTExpectFailure is unavailable in swift-corelibs-xctest")
-        #endif
-    }
-
-    /// **A MEASURED, UNFIXED RESIDUAL, FOUND BY THIS CHANGE'S CORPUS A/B — filed here so it is tracked
-    /// rather than remembered.** An `extension Process` ANYWHERE in the scanned target puts `Process`
-    /// into `localTypes`, and the free-call κ path shadows on `localTypes` — so the CONSTRUCTOR
-    /// `Process()` reads pure across the whole target. The member-call path already reasons correctly
-    /// about this (it shadows on `declaredTypes`, because an extension of a platform type is not a
-    /// project type), so the two paths answer the same question differently: the sibling-route shape.
+    /// **THE FIRST RESIDUAL — RATCHET CLOSED.** An `extension Process` ANYWHERE in the scanned package
+    /// put `Process` into `localTypes`, and the free-call κ path fenced on `localTypes` — so the
+    /// CONSTRUCTOR `Process()` read pure package-wide. The member-call path already fenced on
+    /// `declaredTypes` (an extension of a platform type is not a project type), so the two paths
+    /// answered the same question differently: the sibling-route shape.
     ///
     /// MEASURED ON REAL CODE, not hypothetically: swift-syntax has one `extension Process` (in
-    /// `Logger.swift`) and its `ProcessRunner.init` — `process = Process()` followed by three
-    /// configuring writes — reported `Env` alone before this change. It reports `Exec` now only because
-    /// the CONFIGURATION half is charged; the construction is still invisible, and a class that ONLY
-    /// constructs would still read pure.
+    /// `Logger.swift`), and firebase-ios-sdk has four `extension Date` blocks that had zeroed `Date()`
+    /// across 38 units of the package.
     ///
-    /// **NOT FIXED HERE BECAUSE THE OBVIOUS FIX IS A REGRESSION, AND THAT WAS MEASURED TOO.** Swapping
-    /// the guard to `declaredTypes` makes κ answer — and DROPS the local call edge the fall-through arm
-    /// was providing, because an extension may supply a `convenience init`. A/B'd over the same corpus:
-    /// 91 firebase-ios-sdk units changed, and the majority LOST a true `Env` that had been arriving
-    /// through that edge. Killing a silent under-report is exactly where a silent under-report gets
-    /// introduced. The real fix charges κ *and* keeps a soft edge to `<Type>.init`, and it needs its own
-    /// A/B — it moves every κ ctor in every target that extends a platform type, not just `Process`.
-    func testExtensionOnlyLocalTypeStillShadowsTheConstructor() throws {
-        try expectKnownFailure("an `extension Process` zeroes `Process()` target-wide — free-call κ "
-                               + "shadows on localTypes where the member path shadows on declaredTypes")
+    /// **THE OBVIOUS FIX WAS A REGRESSION AND THAT WAS MEASURED TOO** — ⟨0.32⟩ A/B'd the bare fence swap
+    /// and reverted it: it DROPS the local call edge the fall-through arm was providing, because an
+    /// extension may supply a `convenience init`, and 91 firebase-ios-sdk units LOST a true `Env`
+    /// through it. The fix taken here charges κ *and* keeps that edge, by emitting the same `Call` the
+    /// fall-through arm would have emitted for exactly the set it used to serve
+    /// (`keepExtensionCtorEdge`). The convenience-init control, the lookalike, the local-free-fn shadow
+    /// and the corpus A/B live in `ExtensionShadowConstructorProcessTests`; this row is the ratchet it
+    /// replaces, kept where it was filed.
+    func testAnExtensionOnlyLocalTypeNoLongerShadowsTheConstructor() throws {
         let src = """
         import Foundation
         extension Process { var tag: String { "t" } }
         func makesOnly() -> Process { _ = Date(); return Process() }
         """
-        let r = try scan(src, name: "Ext")
+        let r = try scan(src, name: "Ext", policy: "deny Exec\n")
         XCTAssertEqual(r.fns["makesOnly"], ["Clock", "Exec"],
                        "constructing a subprocess handle is `Exec` whether or not the project happens to "
                        + "extend the type")
+        XCTAssertEqual(r.code, 1,
+                       "…and the verdict follows: a tree whose only subprocess contact is construction "
+                       + "must FAIL `deny Exec`: \(r.out)")
     }
 
     /// **THE SECOND RESIDUAL OF THE SPELLING RULE — RATCHET CLOSED.** ⟨0.32⟩'s spelling rule reached the
@@ -289,12 +281,10 @@ final class ExecCapabilityProcessTests: XCTestCase {
     /// reason about local bindings and would drop that join. `chargeModuleQualifiedSpelling` IS the
     /// normalisation point; what changed is that every family it runs is now a shared function.
     ///
-    /// THE ANSWER ASSERTED HERE IS NOT THE ONE THIS ROW ORIGINALLY EXPECTED, and that is the second
-    /// finding. It said `Fs, Net` — written from the defect rather than from the classifier — so the
-    /// row would have gone on "passing" as a ratchet long after the defect was closed, because the
-    /// wrong expectation kept failing. An unresolvable URL is EITHER a file or a remote endpoint, and
-    /// claiming both fabricates one of them, so the bare spelling discloses `Unknown`. PARITY with the
-    /// bare spelling, whatever it says, is the invariant; the loop form of it lives in
+    /// THE ANSWER ASSERTED HERE IS NOT THE ONE THIS ROW ORIGINALLY EXPECTED. It said `Fs, Net` — written
+    /// from the defect rather than from the classifier. An unresolvable URL is EITHER a file or a remote
+    /// endpoint, and claiming both fabricates one of them, so the bare spelling discloses `Unknown`.
+    /// PARITY with the bare spelling, whatever it says, is the invariant; the loop form of it lives in
     /// `ModuleQualifierSpellingProcessTests`.
     func testAQualifiedSpellingReachesTheDeclReferenceKeyedCtorArms() throws {
         let src = """
