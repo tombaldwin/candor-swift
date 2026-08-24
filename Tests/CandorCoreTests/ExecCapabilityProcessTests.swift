@@ -35,9 +35,11 @@ import Foundation
 ///   · every control carries a CLOCK MARKER and is asserted PRESENT with a non-empty effect set — pure
 ///     units are omitted from a report, so "absent" would pass a control that asked nothing (PART 37 (e)).
 ///
-/// TWO ROWS AT THE END ARE EXPECTED-FAILURE RATCHETS, not omissions: residuals this change MEASURED and
+/// TWO ROWS AT THE END WERE EXPECTED-FAILURE RATCHETS, not omissions: residuals ⟨0.32⟩ MEASURED and
 /// deliberately did not fix, each with the reason its obvious fix is worse. They fail if the defect is
-/// ever closed, so they cannot outlive it.
+/// ever closed, so they cannot outlive it — and the SPELLING one no longer does. It is now a positive
+/// parity assertion (`testAQualifiedSpellingReachesTheDeclReferenceKeyedCtorArms`), with the loop form
+/// in `ModuleQualifierSpellingProcessTests`. The `extension Process` shadow below is still open.
 final class ExecCapabilityProcessTests: XCTestCase {
 
     private func scan(_ src: String, name: String, policy: String? = nil)
@@ -271,29 +273,44 @@ final class ExecCapabilityProcessTests: XCTestCase {
                        + "extend the type")
     }
 
-    /// **THE SECOND MEASURED RESIDUAL OF THE SPELLING RULE, filed rather than half-fixed.** The
-    /// module-qualified spelling now reaches the κ FREE-CALL table (`kappaFree` and the three
-    /// privacy/bonjour ctor families), which is where `Process` lives. It does NOT reach the ctor arms
-    /// that are keyed directly on a `DeclReferenceExpr` callee earlier in the same visitor — the
-    /// `Data`/`String(contentsOf:)` file-or-network read is the one that matters — so
-    /// `Foundation.Data(contentsOf: url)` is still silent where `Data(contentsOf: url)` is `Fs`.
+    /// **THE SECOND RESIDUAL OF THE SPELLING RULE — RATCHET CLOSED.** ⟨0.32⟩'s spelling rule reached the
+    /// κ FREE-CALL table (`kappaFree` and the three privacy/bonjour ctor families), which is where
+    /// `Process` lives, but NOT the ctor arm keyed directly on a `DeclReferenceExpr` callee earlier in
+    /// the same visitor — so `Foundation.Data(contentsOf: url)` read `Clock` alone where
+    /// `Data(contentsOf: url)` disclosed `Unknown`, and the https form lost `Net` outright.
     ///
-    /// The RIGHT fix is one level up: normalise the callee to its bare name ONCE, at the top of the
-    /// call visitor, so every arm keyed on that name sees both spellings. That is a structural change to
-    /// a branch whose arms also decide LOCAL resolution and dependency joins, so it is not something to
-    /// bolt on beside a `Process` fix — and re-implementing the `contentsOf:` arm's scheme resolution
-    /// inside the module-qualified path would be the sibling route this file exists to close.
-    func testAQualifiedSpellingStillMissesTheDeclReferenceKeyedCtorArms() throws {
-        try expectKnownFailure("the module-qualified spelling reaches the κ free-call table but not the "
-                               + "ctor arms keyed directly on a DeclReferenceExpr callee")
+    /// The fix is the one this ratchet named, at the level it named: the content-read arm is now a
+    /// FUNCTION (`chargeContentsCtor`) that BOTH spellings call, so the two cannot answer differently
+    /// about the same program. It is NOT the literal "normalise the callee at the top of the visitor",
+    /// and the reason is structural rather than aesthetic: that visitor's `DeclReferenceExpr` branch
+    /// also holds the LOCAL-NAME arms (a fn-typed param, a stored closure property, a `callAsFunction`
+    /// value), and its member-access sibling is what carries `extOwner` into the §2 dependency join —
+    /// routing a qualified callee through the bare branch would hand `DepModule.factory()` to arms that
+    /// reason about local bindings and would drop that join. `chargeModuleQualifiedSpelling` IS the
+    /// normalisation point; what changed is that every family it runs is now a shared function.
+    ///
+    /// THE ANSWER ASSERTED HERE IS NOT THE ONE THIS ROW ORIGINALLY EXPECTED, and that is the second
+    /// finding. It said `Fs, Net` — written from the defect rather than from the classifier — so the
+    /// row would have gone on "passing" as a ratchet long after the defect was closed, because the
+    /// wrong expectation kept failing. An unresolvable URL is EITHER a file or a remote endpoint, and
+    /// claiming both fabricates one of them, so the bare spelling discloses `Unknown`. PARITY with the
+    /// bare spelling, whatever it says, is the invariant; the loop form of it lives in
+    /// `ModuleQualifierSpellingProcessTests`.
+    func testAQualifiedSpellingReachesTheDeclReferenceKeyedCtorArms() throws {
         let src = """
         import Foundation
+        func readsBare(_ u: URL) throws -> Data { _ = Date(); return try Data(contentsOf: u) }
         func readsQualified(_ u: URL) throws -> Data { _ = Date(); return try Foundation.Data(contentsOf: u) }
+        func readsQualifiedFile(_ p: String) throws -> String { _ = Date(); return try Foundation.String(contentsOfFile: p) }
         """
         let r = try scan(src, name: "Q")
-        XCTAssertEqual(r.fns["readsQualified"], ["Clock", "Fs", "Net"],
+        XCTAssertEqual(r.fns["readsQualified"], r.fns["readsBare"],
                        "`Foundation.Data(contentsOf:)` reads a file or a URL exactly as `Data(contentsOf:)` "
                        + "does — the qualifier is a spelling")
+        XCTAssertEqual(r.fns["readsQualified"], ["Clock", "Unknown"],
+                       "…and the shared answer is the honest one: I/O happens and its category is unprovable")
+        XCTAssertEqual(r.fns["readsQualifiedFile"], ["Clock", "Fs"],
+                       "a PATH read has no scheme to resolve — unconditionally `Fs`, in either spelling")
     }
 
     /// The gate-level form of S1 ALONE — the configuring function with no construction and no launch

@@ -9,6 +9,31 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ ⟨0.32⟩ A module-qualified `Data`/`String` content read was silent — the one free-name family the
+  spelling rule did not reach.** ⟨0.32⟩ made a module qualifier a SPELLING for the κ table and the three
+  privacy ctor families, but the `Data`/`String(contentsOf:|contentsOfFile:)` arm was keyed on the callee
+  NODE rather than on a name, so it kept answering one spelling: `Foundation.Data(contentsOf: u)` reported
+  `Clock` alone where `Data(contentsOf: u)` disclosed `Unknown`, `Foundation.String(contentsOfFile: p)`
+  lost `Fs` — and with it a `deny Fs` verdict, which passed at exit 0 over a module-qualified config read
+  — and `Foundation.Data(contentsOf: URL(string: "https://…")!)` lost `Net`. The arm is now a FUNCTION
+  both spellings call, so the two cannot answer differently about the same program, and the parity is
+  gated as a LOOP over every classified ctor spelling rather than as one row.
+
+  Extracting it surfaced a FABRICATION in the same arm, closed here: it was the only free-name family
+  applying no local-shadow guard at all, so a project's own `struct Data { init(contentsOfFile:) }` was
+  charged `Fs` and its `init(contentsOf:)` acquired an `Unknown`. It now takes the `declaredTypes` fence
+  every κ family uses — an extension of Foundation's `Data` still does NOT shadow — and the qualified
+  spelling is the escape hatch a package that declares its own `Data` uses to reach Foundation's.
+
+  **A/B over ~23 900 units × `deny Exec`/`deny Net`/`deny Fs`** (firebase-ios-sdk, swift-syntax,
+  swift-protobuf, pollen, promises, 22 flutterfire plugin targets, this engine's own Sources): zero
+  verdict flips, zero effects lost, zero gained — the corpus holds 109 bare content reads and NOT ONE
+  module-qualified one, so it measures the absence of a regression, not the value of the fix, and is
+  reported that way. Filed residual: `declaredTypes` is keyed on the simple name and is package-wide, so
+  a NESTED or `fileprivate` declaration shadows further than Swift's own resolution (swift-syntax has a
+  `fileprivate enum Data`). Measured at ⟨0.32⟩ HEAD, a nested `fileprivate enum Pipe` already silenced
+  `Pipe()` the same way — this arm joins the existing fence rather than inventing one.
+
 - **⚠ ⟨0.32⟩ `Exec` charged construction and an enumerated list of launch verbs — everything between
   them read pure.** Two silent under-reports on the subprocess surface, both required by SPEC §1 ⟨0.32⟩
   and pinned by conformance PART 66, whose swift `configured` cell was measured-absent for exactly this:
