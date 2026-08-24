@@ -1852,8 +1852,29 @@ if peekListPath == nil, let pp = policyPath {
     // claims a look taken against rules that never stood — and the `denied` set it would look for is the
     // parser's SALVAGE of an unhonourable file, which is the rewriting `gateRefusals` exists to refuse.
     // candor-java already withheld here; this engine, candor-rust and candor-ts did not.
+    // ⟨0.32⟩ …AND PARSED WITH THE POLICY'S OWN VOCABULARY, which this read used to drop (`aliases: [:]`).
+    //
+    // A VERIFIED FAIL-OPEN, and its shape is that a STRICTLY STRONGER POLICY ANSWERED WEAKER. Measured
+    // 2026-08-24 on an SPM tree whose test helper spawns `/bin/sh`, with `unknown-alias corp = reflect`
+    // filed beside the policy:
+    //
+    //     deny Exec                          exit 2   names the helper; excluded classes peeked: true
+    //     deny Exec + deny Unknown[corp]     exit 0   NOTHING said; excluded classes peeked: false
+    //
+    // MECHANISM: with no aliases, `corp` is an unrecognised class token — a ⟨0.24⟩ `gateRefusals` error —
+    // and `peekRules` below drops the ENTIRE rule set on any such error, so THE PEEK NEVER RAN. The gate
+    // itself was unaffected (`scanPolicy` is parsed WITH the vocabulary and expands `corp` correctly), so
+    // adding a rule silently deleted the disclosure belonging to a DIFFERENT rule that was never in
+    // doubt. Nothing read the resulting `peeked: false` at the time, which is why it stayed quiet.
+    //
+    // ANCHORED AT THE POLICY, exactly as the ⟨0.24⟩ ruling anchors the gate's own vocabulary
+    // (`vocabConfig`, further down this file): the vocabulary travels with the POLICY that uses it, so
+    // the two readers of one file expand one rule the same way. §6.2's requirement that the gate and the
+    // disclosure apply the SAME rule is the clause the ⟨0.30⟩ note below cites — it was being honoured on
+    // the rule's SHAPE and missed on the rule's WORDS.
+    let peekAliases = parseUnknownAliases(discoverConfig(targetPath: pp)?.text).aliases
     let parsedForPeek = (try? String(contentsOfFile: pp, encoding: .utf8))
-        .map { parsePolicy($0, aliases: [:]) }
+        .map { parsePolicy($0, aliases: peekAliases) }
     // ⟨0.30⟩ THE RULES, not a flat set of effect NAMES. §6.2 already requires the gate and the disclosure
     // to apply the SAME rule, and the name set was wrong in BOTH directions once ⟨0.30⟩ made this block
     // verdict-bearing — both MEASURED four-way in review:

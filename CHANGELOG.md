@@ -9,6 +9,23 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ ⟨0.30⟩ AN ALIAS IN ONE POLICY RULE SWITCHED OFF THE DISCLOSURE FOR EVERY OTHER RULE — a strictly
+  STRONGER policy answered WEAKER.** The ⟨0.30⟩ peek re-parses the policy file for itself and did so with
+  no alias vocabulary, so a `deny Unknown[corp]` line written against a `.candor/config` `unknown-alias`
+  was an unrecognised class token to that read — a ⟨0.24⟩ policy error — and the peek drops its ENTIRE
+  rule set on any such error (⟨0.29⟩: a refused policy must not claim a look taken against rules that
+  never stood). **MEASURED on an SPM tree whose test helper spawns `/bin/sh`: `deny Exec` exits 2 naming
+  the helper; `deny Exec` + `deny Unknown[corp]` exits 0 saying nothing, with every excluded class left
+  `peeked: false`.** Every rule of the second policy is a rule of the first, so `Reject` being
+  upward-closed (PAPER3 Lemma 2) makes exit 0 there a contradiction rather than a judgement call.
+
+  It stayed quiet because the GATE was never wrong — the gate's own parse carries the vocabulary and
+  expanded `corp` correctly — so adding a rule deleted the disclosure belonging to a DIFFERENT rule that
+  was never in doubt, and nothing read the `peeked: false` it left behind. The vocabulary now travels
+  with the POLICY that uses it on both reads (the ⟨0.24⟩ anchoring ruling), so the gate and the
+  disclosure apply one rule the same way — §6.2's requirement, which was being honoured on the rule's
+  SHAPE since ⟨0.30⟩ and missed on its WORDS.
+
 - **⚠ ⟨0.32⟩ SILENT UNDER-REPORT: six capabilities were charged at one spelling and PURE at their twin.**
   Foundation ships most process/filesystem/clock capabilities twice — a receiver-rooted spelling and a
   C-era FREE FUNCTION doing exactly the same thing — and this engine modelled the two in SEPARATE tables
