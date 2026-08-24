@@ -33,9 +33,13 @@ jobs:
         # `script` gives swift test a TTY → line-buffered output, so a hang names the last test started.
         run: script -q /dev/null swift test
       - name: Smoke (oracle needs the spec as a sibling — same pin as ci.yml)
+        # LITERAL, and it must be moved BY HAND alongside ci.yml's `CANDOR_SPEC_PIN`. A workflow-level
+        # `env:` does not reach here from the other file, so the two drift silently and the release lane
+        # can certify against an older contract than the PR lane that approved the change. Kept as
+        # `3c643e5` (the ⟨0.32⟩ carve-out commit) to match ci.yml.
         run: |
           git clone https://github.com/tombaldwin/candor-spec ../candor-spec
-          git -C ../candor-spec checkout --quiet eccfac71a9dc00bfa7e29d648c7d761d77d91b9a
+          git -C ../candor-spec checkout --quiet 3c643e54c22b5f4352ea944800b55fba72dc211b
           bash smoke.sh
       - name: Create the GitHub release (idempotent)
         env:

@@ -16,8 +16,16 @@ on:
 
 # The spec commit the push/PR gates run against. Bump deliberately when adopting a floor rise; the
 # weekly spec-head job is the early-warning that HEAD has moved past this pin.
+#
+# A STALE PIN IS NOT A CONSERVATIVE DEFAULT — IT IS A GREEN CHECK OVER THE WRONG CONTRACT. This sat at
+# `eccfac71` for the whole ⟨0.32⟩ rung: 797 commits behind spec HEAD and older than every commit that
+# wrote the rung's fixtures, so every push went green while the oracle asked the ⟨0.29⟩-era questions.
+# The weekly spec-head lane is the early warning ONLY if someone reads it; the pin is what the gate
+# actually enforces, so it moves WITH the floor and in the same commit as the engine's rung work.
+# Bumped to `3c643e5` (2026-08-24) — the ⟨0.32⟩ carve-out commit, which is the contract this engine now
+# implements. Keep this and release.yml's literal in step.
 env:
-  CANDOR_SPEC_PIN: eccfac71a9dc00bfa7e29d648c7d761d77d91b9a
+  CANDOR_SPEC_PIN: 3c643e54c22b5f4352ea944800b55fba72dc211b
 
 jobs:
   test:
