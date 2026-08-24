@@ -479,6 +479,11 @@ private func gateInputFromReport(_ env: GateReportEnvelope) -> GateInput {
     // borrowing a reason from an unrelated same-named function converts that refusal into an answer.
     // Union turns "I cannot say" into "I checked, it's fine".
     var display: [String: String] = [:]
+    // ⟨0.32⟩ KEY -> the producer's OWN `hash`, VERBATIM off the wire, for the verdict row's §2 identity.
+    // Never re-derived here from `package` + `fn`: the scan route builds its copy from the package it
+    // scanned, and §3.1 makes the two documents byte-equal — two derivations of one string is how they
+    // would drift. An entry carrying no `hash` contributes no mapping, and its row omits the field.
+    var hash: [String: String] = [:]
     // THE EDGES NEED RESOLVING TOO, which is what makes this more than a key swap: `calls` names callees
     // by BARE `fn`, so hash-keying the NODES alone leaves the call graph joining by name one layer down —
     // the same defect, harder to see because the node table looks right. A callee resolves only when
@@ -493,6 +498,7 @@ private func gateInputFromReport(_ env: GateReportEnvelope) -> GateInput {
         // The KEY is what every accumulator is keyed by; the NAME is what a policy scope matches and what
         // the verdict prints. Keeping both is the whole point — see GateInput.display.
         display[k] = e.fn
+        if !e.hash.isEmpty { hash[k] = e.hash }
         // UNION on a repeated KEY: two entries sharing a hash are ONE unit by construction, so here the
         // union is this engine's own unit semantics rather than a guess about two functions.
         inferred[k, default: []].formUnion(e.inferred)
@@ -546,7 +552,8 @@ private func gateInputFromReport(_ env: GateReportEnvelope) -> GateInput {
                      hosts: hosts, cmds: cmds, paths: paths, tables: tables,
                      surfaceIncomplete: [:],
                      edges: edges,
-                     display: display)
+                     display: display,
+                     hash: hash)
 }
 
 // ── answerability (SPEC §3.1 ⟨0.24⟩) ────────────────────────────────────────────────────────────────

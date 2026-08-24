@@ -129,16 +129,17 @@ struct ReportCompleteness {
     /// ⟨0.32⟩ the exclusion CLASSES the producing scan never opened (`excluded[].peeked == false` with no
     /// `judgedElsewhere`) — the sibling of `outOfScope` and the other half of one rung.
     ///
-    /// **COLLECTED HERE, ARMED BY THE CALLER**, because the condition is the policy in force NOW — only a
-    /// `deny`/`pure` rule's answer depends on code outside the scan's scope — and this loader holds no
-    /// policy. So `isIncomplete` reads `unreadArmed`, never this list directly: an unread class rides
-    /// almost every no-policy report, and a verb that hedged on every run would teach its reader to skip
-    /// the hedge.
+    /// **COLLECTED HERE, ARMED BY THE CALLER *FOR THE EXIT CODE ONLY***, because the condition is the
+    /// policy in force NOW — only a `deny`/`pure` rule's answer depends on code outside the scan's scope
+    /// — and this loader holds no policy. So `isIncomplete` reads `unreadArmed`, never this list
+    /// directly: an unread class rides almost every no-policy report, and a `--strict` verb exiting 2 on
+    /// every one of them would be MORE pessimistic than the gate, which ⟨0.24⟩ forbids in the same
+    /// breath as the under-claim.
     ///
-    /// SO `tour` AND `path` NEVER ARM IT, and that is a ruling rather than an omission: they take no
-    /// `--policy`, so there is no question whose answer could depend on the unread code, and a hedge
-    /// with no policy behind it is the every-run hedge above. Their `outOfScope`/`unanalyzed` arms are
-    /// unaffected — those are facts about the report, not about a rule.
+    /// ⟨0.32⟩ **THE *DISCLOSURE* READS THIS LIST DIRECTLY — see `mustHedge`, which carries the ruling.**
+    /// This comment used to end *"`tour` and `path` NEVER ARM IT … they take no `--policy`, so there is
+    /// no question whose answer could depend on the unread code"*, and that was overturned four-way on
+    /// 2026-08-24.
     var unread: [String] = []
     /// ⟨0.32⟩ Has the calling verb decided that THIS run's policy makes `unread` matter? Held apart from
     /// `unread` being non-empty so that "no policy was given" and "this policy denies nothing" cannot be
@@ -179,7 +180,45 @@ struct ReportCompleteness {
     /// the condition — *"`analyzed.count` is 0, absent with no entries, or unreadable"*), so a verb
     /// exiting 2 there would claim it got LESS far than the gate on the same bytes. The row-3 split
     /// re-routes a hedge that was already happening; it must not also move an exit code.
-    var mustHedge: Bool { isIncomplete || !judgedNothing.isEmpty || !noManifest.isEmpty }
+    ///
+    /// ⟨0.32⟩ **AND `unread` IS AN ARM OF THIS, *UNARMED* — RULED 2026-08-24 AFTER A FOUR-WAY
+    /// DIVERGENCE. DO NOT RE-LITIGATE IT HERE.** Over a report whose `excluded` names a class the scan
+    /// never opened, `tour` printed the bare *"nothing hidden — every effect sits where its name says it
+    /// should"* at exit 0 in this engine, candor-rust and candor-ts, while candor-java hedged and named
+    /// the class. **candor-java was right.**
+    ///
+    /// **IT IS A DISCLOSURE, NOT A VERDICT, AND IT MUST NOT MOVE AN EXIT CODE** — which is why the arm
+    /// is here and NOT on `isIncomplete`. ⟨0.24⟩'s advisory-verb pessimism MUST binds verbs that answer
+    /// `ok`; `tour` answers none and has no exit-code obligation, so that clause does not reach it. What
+    /// reaches it is SPEC §2 ⟨0.28⟩, which widens the re-disclosure MUST to *"any verb whose output
+    /// could be read as a negative finding about the code — a verdict, an empty result set, or a zero
+    /// count"*, and SPEC §3.1 ⟨0.18⟩, which already forbids THIS EXACT SENTENCE over a ≥⅓-Unknown graph.
+    /// An unread exclusion class is the same ignorance arriving by a different route, and the ⅓
+    /// threshold structurally CANNOT see it: an unread unit contributes no entry, so it moves neither
+    /// the numerator nor the denominator.
+    ///
+    /// **AND THE ARGUMENT THAT KEPT IT OUT WAS THE WRONG WAY ROUND.** Three engines reasoned *"these
+    /// verbs take no `--policy`, so there is no question whose answer could depend on the unread code"*.
+    /// The condition ⟨0.32⟩ states is the QUESTION IN FORCE, and a verb with no policy is not asking a
+    /// NARROWER question than `deny Exec` — it is asking the widest one there is, the whole effect
+    /// surface. A `deny`/`pure` rule's answer can depend on unread code; an `allow`/`forbid`/`only`/
+    /// `layer` policy's answer cannot; a descriptive verb's answer always can.
+    ///
+    /// **THE TRIGGER IS THE GATE'S, MINUS THE POLICY CONDITION**: `peeked == false` with no
+    /// `judgedElsewhere`, off the same key through the same reader, `count` IGNORED — measured
+    /// 2026-08-24, all four gates refuse over a `count: 0` unread class and certify over a
+    /// `judgedElsewhere: true` one. One matcher, so a report that earns an unhedged `tour` is exactly a
+    /// report `gate --report` can certify. The NOISE objection — this fires on nearly every no-policy
+    /// report — is real, and it is answered by the REMEDY rather than by silence: scan with the policy,
+    /// the peek reads the class, `peeked` turns true and the hedge goes away.
+    ///
+    /// **KNOWN RESIDUAL, stated rather than asserted away:** `peeked: true` means the class was READ,
+    /// not ANALYZED — the peek looks only for effects the PRODUCER's policy denied — so an undenied
+    /// effect inside a peeked class is still outside `tour`'s graph and outside this hedge. That is the
+    /// gate's residual too (SPEC §2 ⟨0.32⟩ files it), and closing it is a rung, not a fix.
+    var mustHedge: Bool {
+        isIncomplete || !judgedNothing.isEmpty || !noManifest.isEmpty || !unread.isEmpty
+    }
 
     /// Readable manifest entries PLUS files whose manifest could not be read at all — the reference's
     /// `units()`, so the two engines' prose counts agree over identical bytes.
@@ -219,6 +258,18 @@ struct ReportCompleteness {
     /// exact claim the split was made to stop making.
     var gateLine: String {
         if isIncomplete { return "`gate --report` exits 2 over these bytes." }
+        // ⟨0.32⟩ THE UNARMED UNREAD CAUSE GETS ITS OWN SENTENCE, because both of the ones below are FALSE
+        // of it in opposite directions: "exits 2 over these bytes" is unqualified and this verb holds no
+        // policy to say it under, while "exits 0 over a judged-nothing report" names a cause that is not
+        // present and sends the reader to a CI job that will pass. `gate --report` can only ever evaluate
+        // a deny-family rule — measured 2026-08-24, all four engines refuse an `allow`-only policy as NO
+        // RULES and a `forbid` rule as unevaluable on that route — so the exit is a certainty once a
+        // policy exists, and the gap is only that none does here.
+        if !unread.isEmpty {
+            return "`gate --report` exits 2 over these bytes under any policy it can evaluate (they are "
+                 + "all `deny`/`pure`), and this verb holds none — so NOTHING DOWNSTREAM IS FAILING "
+                 + "CLOSED ON IT HERE and this note is the whole of the warning."
+        }
         if judgedNothing.isEmpty {
             return "NOTHING DOWNSTREAM WILL CATCH THIS FOR YOU — `gate --report` exits 0 over a report "
                  + "carrying no `analyzed` manifest (⟨0.24⟩: a disclosure, not an exit code), so this "
@@ -241,8 +292,17 @@ struct ReportCompleteness {
         // says nothing, and a reader sent to re-run a scan that already reached a conclusion goes to the
         // wrong repair. Appended rather than folded into the arms so the measured wordings stay
         // character-for-character what they were when no row-3 report is present.
+        //
+        // ⟨0.32⟩ **AND THE FIRST ARM ASKS `units`, NOT `isIncomplete`.** Those are different questions
+        // and the gap between them is a sentence that says nothing: `isIncomplete` has counted the two
+        // SCOPE causes since ⟨0.30⟩ while this head was built from the MANIFEST rows alone, so a note
+        // whose ONLY cause is out-of-scope or unread code came out as *"declare 0 unit(s) candor could
+        // not analyze"* — a hedge that names a cause it does not have, which is the false disclosure this
+        // family rates worse than a missing one. candor-rust and candor-java each measured the same line
+        // on the same rung; here it was unreachable while the unread cause stayed out of `mustHedge`, and
+        // reachable on nearly every no-policy report the moment it was not.
         var head: String
-        switch (isIncomplete, judgedNothing.count) {
+        switch (units > 0, judgedNothing.count) {
         case (true, 0):
             head = "the report(s) under this locator declare \(units) unit(s) candor could not analyze,"
         case (true, let n):
@@ -256,15 +316,30 @@ struct ReportCompleteness {
         case (false, let n):
             head = "\(n) report(s) under this locator say they JUDGED NOTHING (`analyzed.count: 0`),"
         }
+        // ONE JOINER FOR EVERY LATER CLAUSE — `first` opens the sentence when nothing has yet, otherwise
+        // the clause comma is swapped for `, and …`. Three copies of that comma dance is how the head
+        // above acquired a branch per cause.
+        func append(_ first: String, _ more: String) {
+            if head.isEmpty { head = first } else { head.removeLast(); head += more }
+        }
         if !noManifest.isEmpty {
             let n = noManifest.count
-            if head.isEmpty {
-                head = "\(n) report(s) under this locator carry NO `analyzed` manifest at all "
-                     + "(SPEC §2 row 3, a pre-⟨0.21⟩ producer),"
-            } else {
-                head.removeLast()   // the clause comma, so the joined sentence reads `…, and N report(s) …,`
-                head += ", and \(n) report(s) carrying NO `analyzed` manifest at all,"
-            }
+            append("\(n) report(s) under this locator carry NO `analyzed` manifest at all "
+                 + "(SPEC §2 row 3, a pre-⟨0.21⟩ producer),",
+                   ", and \(n) report(s) carrying NO `analyzed` manifest at all,")
+        }
+        // ⟨0.30⟩/⟨0.32⟩ THE TWO SCOPE CAUSES, which the head never named — see the note on the switch.
+        if !outOfScope.isEmpty {
+            let n = outOfScope.count
+            append("the report(s) under this locator name \(n) function(s) OUTSIDE the scan's scope "
+                 + "performing an effect the producing scan's policy DENIED,",
+                   ", and \(n) function(s) OUTSIDE the scan's scope performing a DENIED effect,")
+        }
+        if !unread.isEmpty {
+            let n = unread.count
+            append("the report(s) under this locator declare \(n) exclusion class(es) the scan did NOT "
+                 + "READ (`excluded[].peeked: false`),",
+                   ", and \(n) exclusion class(es) the scan did NOT READ,")
         }
         var lines = ["  ⚠ INCOMPLETE — \(head)", "      so \(soWhat):"]
         for u in unanalyzed { lines.append("      \(u.path) — \(u.reason)") }
@@ -282,6 +357,24 @@ struct ReportCompleteness {
                        + "producer): it DECLARES nothing about what was judged, so its silence licenses "
                        + "no purity claim either. Re-scan with a current engine so the report carries "
                        + "its manifest")
+        }
+        for o in outOfScope {
+            let fn = (o["fn"] as? String) ?? "(unnamed)"
+            let effs = ((o["effects"] as? [String]) ?? []).joined(separator: ", ")
+            lines.append("      \(fn) — OUTSIDE the producing scan's scope: it performs \(effs), and the "
+                       + "gate did not judge it")
+        }
+        // ONE FACT SENTENCE, TWO REMEDIES. The fact is the same on both routes; the REPAIR is not — an
+        // ARMED run already holds the policy to re-scan with, and a descriptive verb holds none, so
+        // telling it to re-run "WITH this policy" names a thing the reader does not have.
+        for c in unread {
+            let remedy = unreadArmed
+                ? "Re-run the producing scan WITH this policy (candor-swift <dir> --policy <p>)"
+                : "Re-run the producing scan WITH a `deny`/`pure` policy so the peek reads it "
+                  + "(candor-swift <dir> --policy <p>)"
+            lines.append("      \(c) — this exclusion class went UNREAD (`excluded[].peeked: false`): "
+                       + "its effects are absent because nothing looked, not because there are none. "
+                       + remedy)
         }
         lines.append("      \(tail)")
         return lines.joined(separator: "\n") + "\n"
@@ -603,9 +696,18 @@ func loadFixModel(prefix: String, who: String) -> (byName: [String: FixFn], cg: 
 /// outside the scan's scope. `pol.deny` is the right list and `pure` is IN it — the parser appends a
 /// `pure` line as a DenyRule with an empty effect list — so reading the question off a flattened set of
 /// effect NAMES would silently disarm the strictest policy the grammar has.
+///
+/// ⟨0.32⟩ **AND A POLICY THAT ASKS NOTHING *CLEARS* THE LIST, IT DOES NOT MERELY LEAVE IT UNARMED** —
+/// the candor-rust reference does it this way and the reason showed up the moment `mustHedge` started
+/// reading `unread` directly (the 2026-08-24 descriptive ruling): with the list left in place, a
+/// `forbid`-only run began emitting `incomplete: true` on `fix-gate`/`unverified`, hedging exactly the
+/// allowlist run this function exists to leave alone. `UnreadExclusionAdvisorySiblingTests`'
+/// no-deny-rule CONTROL caught it. Nothing downstream may read a list this run has decided is not a
+/// question.
 private func armingUnread(_ c: ReportCompleteness, under pol: ParsedPolicy) -> ReportCompleteness {
-    guard !pol.deny.isEmpty, !c.unread.isEmpty else { return c }
+    guard !c.unread.isEmpty else { return c }
     var out = c
+    if pol.deny.isEmpty { out.unread = []; return out }
     out.unreadArmed = true
     return out
 }

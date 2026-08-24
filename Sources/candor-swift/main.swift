@@ -2520,7 +2520,11 @@ policyBlock: if let pp = policyPath {
     let scanGateInput = gateInputFromScan(inferred: inferred, whyMap: whyMap, direct: direct, edges: edges, cg: cg,
                                           hostsAcc: hostsAcc, cmdsAcc: cmdsAcc,
                                           pathsAcc: pathsAcc, tablesAcc: tablesAcc,
-                                          incompleteAcc: incompleteAcc, netPartners: netPartners)
+                                          incompleteAcc: incompleteAcc, netPartners: netPartners,
+                                          // ⟨0.32⟩ SPEC §2 — the package that qualifies each verdict
+                                          // row's unit identity; the same `pkgName` the report entries'
+                                          // `hash` is built from, so the two routes agree by construction.
+                                          package: pkgName)
     let scanGateResult = evaluateGate(scanPolicy, scanGateInput)
     gateViolations += scanGateResult.violations
     let gateZeroMatchRules = scanGateResult.zeroMatch

@@ -112,6 +112,91 @@ final class GateReportVerbProcessTests: XCTestCase {
         XCTAssertTrue(r.err.contains("AS-EFF-006"), "and name the rule: \(r.err)")
     }
 
+    // ── ⟨0.32⟩ THE VERDICT-ROW IDENTITY CLAUSE (SPEC §2) ────────────────────────────────────────────
+
+    /// SPEC §2 ⟨0.32⟩: *"a verdict row MUST carry enough identity for a consumer to tell two units
+    /// apart… the sort key MUST include that identity."*
+    ///
+    /// **THE DEFECT, MEASURED on this engine 2026-08-24.** Two reports whose members both define `go`
+    /// and both violate `deny Exec` produced two BYTE-IDENTICAL rows: `{rule, fn, effects, detail}`, with
+    /// nothing attributing either to a package. A reader cannot tell two broken members from one listed
+    /// twice, and a consumer that fingerprints on name alone — candor's own SARIF action did — hides one
+    /// finding behind the other.
+    ///
+    /// BOTH HALVES ARE ASSERTED, because identity in the ROW without identity in the KEY is half a fix:
+    /// §3.3.1 makes the document's ORDER part of the byte-equality between the two routes, and
+    /// `(rule, detail)` ties on the twins — `detail` is built from the NAME.
+    func testAVerdictRowCarriesTheUnitItIsAbout() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-rowid-\(UUID().uuidString)")
+        let candor = root.appendingPathComponent(".candor")
+        try FileManager.default.createDirectory(at: candor, withIntermediateDirectories: true)
+        // TWO members, ONE name. Written in b-then-a file order so a passing sort cannot be arrival order.
+        for pkg in ["b", "a"] {
+            let doc = """
+            {"candor":{"spec":"0.32","toolchain":"swiftsyntax","version":"t"},
+             "package":"\(pkg)","analyzed":{"count":1,"digest":"1111111111111111"},"excluded":[],
+             "functions":[{"fn":"go","loc":"a.swift:1:1","inferred":["Exec"],"direct":["Exec"],
+                           "hash":"\(pkg)#go","calls":[]}]}
+            """
+            try doc.write(to: candor.appendingPathComponent("report.\(pkg).Swift.json"),
+                          atomically: true, encoding: .utf8)
+        }
+        let pol = root.appendingPathComponent("pol.txt")
+        try "deny Exec\n".write(to: pol, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let out = root.appendingPathComponent("v.json")
+        let r = try ProcessHarness.run(bin(), ["gate", "--report", root.path, "--policy", pol.path,
+                                               "--gate-json", out.path])
+        XCTAssertEqual(r.code, 1, "both members violate: \(r.err)")
+        let d = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: out)) as? [String: Any])
+        let vs = try XCTUnwrap(d["violations"] as? [[String: Any]], "\(d)")
+        XCTAssertEqual(vs.count, 2, "\(vs)")
+        XCTAssertEqual(vs.map { $0["hash"] as? String ?? "" }, ["a#go", "b#go"],
+                       "the SORT KEY breaks the tie `(rule, detail)` leaves — and the fixture is written b-first")
+        XCTAssertEqual(vs.map { $0["fn"] as? String ?? "" }, ["go", "go"],
+                       "`fn` stays the NAME on both rows: identity is ADDED, never substituted")
+        XCTAssertNotEqual(NSDictionary(dictionary: vs[0]), NSDictionary(dictionary: vs[1]),
+                          "THE DEFECT: two rows a reader could not tell apart")
+    }
+
+    /// THE OVER-CHARGE CONTROLS, and they are what stop the row above passing for an engine that simply
+    /// bolts something onto every row. (a) A SINGLE-member verdict's row key set is pinned EXACTLY, so a
+    /// later rung that quietly grows a field fails here rather than passing an assertion that reads only
+    /// the keys it knows about. (b) A producer with NO `hash` to give OMITS the field — ⟨0.26⟩'s *this
+    /// producer cannot answer*, never a fabricated id, and §3.1 says this verb serves such a report.
+    func testASingleMemberVerdictKeepsItsShapeAndAHashlessProducerOmitsTheField() throws {
+        let root = try makeReportDir(report: envelope(fnEntry("app.Wire.send", ["Exec"]), analyzed: 1),
+                                     policy: "deny Exec\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let out = root.appendingPathComponent("v.json")
+        let r = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                               "--policy", root.appendingPathComponent("pol.txt").path,
+                                               "--gate-json", out.path])
+        XCTAssertEqual(r.code, 1, r.err)
+        let d = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: out)) as? [String: Any])
+        let v = try XCTUnwrap((d["violations"] as? [[String: Any]])?.first, "\(d)")
+        XCTAssertEqual(v.keys.sorted(), ["detail", "effects", "fn", "hash", "rule"], "\(v)")
+        XCTAssertEqual(v["hash"] as? String, "App#app.Wire.send", "\(v)")
+
+        // (b) the same report with the `hash` key stripped from its one entry.
+        let bare = try makeReportDir(
+            report: envelope(fnEntry("app.Wire.send", ["Exec"]), analyzed: 1)
+                .replacingOccurrences(of: "\"hash\":\"App#app.Wire.send\",", with: ""),
+            policy: "deny Exec\n")
+        defer { try? FileManager.default.removeItem(at: bare) }
+        let out2 = bare.appendingPathComponent("v.json")
+        let r2 = try ProcessHarness.run(bin(), ["gate", "--report", bare.path,
+                                                "--policy", bare.appendingPathComponent("pol.txt").path,
+                                                "--gate-json", out2.path])
+        XCTAssertEqual(r2.code, 1, r2.err)
+        let d2 = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: out2)) as? [String: Any])
+        let v2 = try XCTUnwrap((d2["violations"] as? [[String: Any]])?.first, "\(d2)")
+        XCTAssertNil(v2["hash"], "absent beats a fabricated id (⟨0.26⟩): \(v2)")
+        XCTAssertEqual(v2.keys.sorted(), ["detail", "effects", "fn", "rule"], "\(v2)")
+    }
+
     // ── ANSWERABILITY: three refusals, each measured as fail-OPEN if approximated ───────────────────
 
     func testForbidIsRefusedWholePolicy() throws {
