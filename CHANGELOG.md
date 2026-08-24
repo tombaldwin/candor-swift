@@ -9,6 +9,51 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ ⟨0.32⟩ `Exec` charged construction and an enumerated list of launch verbs — everything between
+  them read pure.** Two silent under-reports on the subprocess surface, both required by SPEC §1 ⟨0.32⟩
+  and pinned by conformance PART 66, whose swift `configured` cell was measured-absent for exactly this:
+
+  **CONFIGURING a received invocation was charged nowhere.** `func arm(_ t: Process, _ argv: [String])
+  { t.arguments = argv }` reported NO effect at all — absent from `functions`, which under ⟨0.21⟩ is a
+  positive purity claim — and a tree whose only subprocess contact was that one property write passed
+  `deny Exec` at **exit 0**. An invocation object carries its own payload and travels fully armed, so
+  splitting build from launch across two functions must not make the builder invisible. This is
+  candor-java's PART 66 finding from the opposite end and it has the same cause: an allowlist
+  under-reports every verb nobody enumerated. Now stated as the DENYLIST the clause requires — a proven
+  `Process` handle is `Exec` for every member and every property WRITE, with the Object protocol carved
+  out by name, `environment` REDIRECTED to `Env` (java's ruling on `ProcessBuilder.environment()`), and
+  the read-back carve-out expressed as the ACCESS DIRECTION, which is Swift's equivalent of java's
+  descriptor key: a property get and its setter share one name, so `let a = t.arguments` arms nothing
+  and is not charged. `suspend`/`resume` — live-child control verbs simply missing from the old list —
+  come with it.
+
+  **A QUALIFIED SPELLING of the same constructor was invisible.** `Foundation.Process()` reported
+  nothing where the bare `Process()` reported `Exec`, and the loss compounded: the unclassified ctor
+  left `let t = Foundation.Process()` untyped, so the `try t.run()` beneath it was silent too. A module
+  qualifier is a SPELLING, so it now resolves to the bare name for every κ constructor (asserted on
+  `Process`, `Date`, `UUID`, `FileHandle`, and on a ctor κ does not know, which stays pure), gated on
+  the qualifier being a module THIS FILE imports that the project does not itself define — under
+  `@testable import App`, `App.Process()` is the project's type, not Foundation's.
+
+  Over-charge controls written FIRST and green before AND after: a project-local `class Process` gains
+  nothing (effects and verdict), a read-back-only function stays `Clock`, `URLRequest`'s property
+  writes stay pure (an option builder's resource arrives at the terminal verb, the boundary §1 ⟨0.32⟩
+  draws), and every control carries a clock marker so "absent" cannot pass a control that asked
+  nothing. **A/B over ~23 200 units of real Swift** (firebase-ios-sdk, swift-syntax, swift-protobuf,
+  pollen, promises, flutterfire, GoogleDataTransport) **× `deny Exec` / `deny Net` / `deny Fs`: zero
+  verdict flips, zero effects lost, ONE unit newly charged** — swift-syntax's `ProcessRunner.init`,
+  which assembles an executable URL, argv and environment for its class to launch later, and is exactly
+  the shape the rung exists for. The null is explained rather than assumed: in this corpus every other
+  function that configures a `Process` also constructs or launches one in the same body.
+
+  RESIDUALS, measured and filed rather than left implicit. An arming-only function reports `Exec` with
+  no `cmds`, so `allow Exec <list>` fails CLOSED on it (the surface is recorded at the launching verb).
+  And the A/B surfaced a separate, older hole, now pinned as an expected-failure ratchet: an `extension
+  Process` anywhere in the target zeroes the `Process()` CONSTRUCTOR target-wide, because the free-call
+  κ path shadows on `localTypes` where the member path shadows on `declaredTypes`. Its obvious fix was
+  A/B'd and REVERTED — it drops the local call edge an extension `convenience init` needs, and 91
+  firebase units lost a true `Env` through it.
+
 - **⚠ ⟨0.32⟩ A protocol-typed receiver silently answered half a protocol's member space.** A protocol has
   two kinds of member — REQUIREMENTS, whose witness belongs to a conformer, and EXTENSION-PROVIDED
   members, which have a body of their own — and two lookup paths each covered one kind. Which path a call

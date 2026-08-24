@@ -191,8 +191,58 @@ public let FILES_MEMBERS: Set<String> = ["read", "readAsString", "readAsInt", "r
 public let LOG_MEMBERS: Set<String> = ["trace", "debug", "info", "notice", "warning", "error", "critical", "fault", "log"]
 public let RAND_ROOTS: Set<String> = ["Int", "UInt", "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16",
     "UInt32", "UInt64", "Double", "Float", "Bool", "CGFloat"]
+// The `Process` verbs recognised on a receiver this engine could NOT prove is a subprocess handle — an
+// `extension Process`'s implicit `self`, or a member chain whose root is a stale `Process` two hops up.
+// It is a FLOOR, not the rule: a PROVEN handle is answered by `processCapabilityEffect` below, which is
+// the DENYLIST SPEC §1 ⟨0.32⟩ requires. Kept because removing it could only lose charges this engine
+// already made, and extended with `suspend`/`resume` — the two live-child control verbs nobody had
+// enumerated, which is precisely the failure mode an allowlist has.
 public let PROCESS_MEMBERS: Set<String> = ["run", "launch", "waitUntilExit", "terminate", "interrupt",
+                                           "suspend", "resume",
                                            "launchedProcess", "launchedTaskWithExecutableURL"]
+/// SPEC §1 ⟨0.32⟩ — the members of a `Process` handle that arm, launch or control NOTHING, stated as the
+/// DENYLIST the clause requires. Everything else on the type is `Exec`.
+///
+/// An invocation object carries its own payload and travels fully armed, so the capability belongs to the
+/// TYPE, not to a list of verbs: `t.arguments = argv` on a handle this function received hands its caller
+/// a loaded subprocess exactly as `t.run()` fires one. MEASURED here before the fix — `func arm(_ t:
+/// Process, _ a: [String]) { t.arguments = a }` reported NO effect at all and passed `deny Exec` at exit
+/// 0, the same silent shape candor-java's `new ProcessBuilder(argv)` had from the other end.
+///
+/// WHAT IS IN THE LIST: only the Object/NSObject protocol every Foundation class carries — identity,
+/// hashing, description. None of them can reach a child. `perform`, `setValue(forKey:)` and the KVC
+/// spellings are POINTEDLY ABSENT: a selector or a key path sets `launchPath` as well as an assignment
+/// does, and a denylist earns its safety by carving out only what is PROVEN inert.
+///
+/// WHAT THE READ-BACK CARVE-OUT IS, IN SWIFT. Java keys it on the DESCRIPTOR, because `command()` names
+/// both the setter and its no-arg read-back. Swift spells a property's get and set with one name too — so
+/// the equivalent carve-out is the ACCESS DIRECTION: a property WRITE is charged (`kappaPropertyWrite`),
+/// a property READ is not (`kappaPropertyRead` has no `Process` entry, and gains none). `let a =
+/// t.arguments` arms nothing, and neither does `t.isRunning`.
+public let PROCESS_PURE_MEMBERS: Set<String> = [
+    "isEqual", "isKind", "isMember", "conforms", "responds", "copy", "mutableCopy",
+    "hash", "hashValue", "description", "debugDescription",
+]
+/// The one carve-out that REDIRECTS rather than drops: arming a child's environment is `Env`, matching
+/// candor-java's ruling that `ProcessBuilder.environment()` stays `Env` rather than becoming `Exec`. A
+/// carve-out that DROPPED the effect instead of moving it would be the cardinal sin in a carve-out's
+/// clothes, which is why this is spelled here and not in `PROCESS_PURE_MEMBERS`.
+public let PROCESS_ENV_MEMBERS: Set<String> = ["environment"]
+/// The whole-type answer for a receiver PROVEN to be a `Process` handle (a bare local/param binding, a
+/// stored property, or a constructor result — see `CallCollector.isInvocationValue`). Construction,
+/// configuration, launch and live-child control are ONE capability; §1 ⟨0.32⟩ forbids splitting them into
+/// an allowlist of verbs.
+public func processCapabilityEffect(member: String) -> String? {
+    if PROCESS_PURE_MEMBERS.contains(member) { return nil }
+    return PROCESS_ENV_MEMBERS.contains(member) ? "Env" : "Exec"
+}
+/// Property WRITES that are effects — the write half of `kappaPropertyRead`, and the whole reason it is a
+/// separate entry point: on an invocation object the two directions answer DIFFERENTLY (a write arms the
+/// child, a read hands back what was already there) while Swift gives them one name.
+public func kappaPropertyWrite(root: String, member: String) -> String? {
+    guard root == "Process" else { return nil }
+    return processCapabilityEffect(member: member)
+}
 public let DB_FREE_PREFIX = "sqlite3_"
 // sqlite3_* C functions that READ RESIDENT handle/statement state — they touch no database, issue no
 // query, advance no row: statement/column/param METADATA, change/rowid counters, error + version state,

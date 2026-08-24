@@ -999,6 +999,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         return out
     }
     var membersVisibleCache: [String: Set<String>] = [:]
+    // The module names the SCANNED PROJECT itself defines (`Sources/<Module>/…`, `Tests/<Module>/…`).
+    // A dotted callee whose base is one of these is NOT a platform spelling — under `@testable import
+    // App`, `App.Process()` names the project's own type — so `isModuleQualifier` refuses it. See
+    // `CallCollector.importedModules`.
+    let projectModules = Set(allFns.map { swiftModuleOf($0.loc) }).subtracting([""])
     for f in allFns {
         locOf[f.qual] = f.loc
         if f.isMain { entryPoints.insert(f.qual) }
@@ -1018,7 +1023,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                    }()
                                } ?? [],
                                opaqueSeqBuilders: opaqueSeqBuilders, seqBuilderConcrete: seqBuilderConcrete,
-                               closureFields: closureFields, moduleConstStrings: globalConstStrings)
+                               closureFields: closureFields, moduleConstStrings: globalConstStrings,
+                               importedModules: Set(fileImports[String(f.loc.prefix { $0 != ":" })] ?? []),
+                               projectModules: projectModules)
         // The locator-move set is flow-INSENSITIVE and must be complete before the first call is collected
         // (a rebind later in the text, or earlier in time inside a loop, still invalidates the claim). The
         // parameter names go with it: a body binder that SHADOWS a parameter is the same hazard, and the
