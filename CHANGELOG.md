@@ -38,6 +38,15 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   same bridge (`analyzed: {count: true}` reading as JUDGED). A present-but-unreadable flag is now a
   refusal NAMING the key; an ABSENT `excluded` (a pre-⟨0.29⟩ producer) still certifies.
 
+- **⚠ ⟨0.32⟩ …AND THE ADVISORY SIBLINGS STILL CERTIFIED (SPEC §3.2).** With the gate fixed,
+  `fix-gate --strict` and `unverified --strict` answered exit 0 `{"ok": true}` over the very report
+  `gate --report` refuses at exit 2 — and those documents are the agent-facing half of this tool. §3.2
+  allows an advisory verb to be LESS certain than the gate, never MORE. ⟨0.30⟩'s half of the same rung
+  already reached these verbs; closing a cause on the gate and not on its siblings is how that half
+  drifted first. The condition is applied in ONE place against the run's own policy, and an unread class
+  is deliberately not an unconditional arm: it rides almost every no-policy report, and a verb that
+  hedged on every run would teach its reader to skip the hedge.
+
 - **⚠ ⟨0.30⟩ AN ALIAS IN ONE POLICY RULE SWITCHED OFF THE DISCLOSURE FOR EVERY OTHER RULE — a strictly
   STRONGER policy answered WEAKER.** The ⟨0.30⟩ peek re-parses the policy file for itself and did so with
   no alias vocabulary, so a `deny Unknown[corp]` line written against a `.candor/config` `unknown-alias`
