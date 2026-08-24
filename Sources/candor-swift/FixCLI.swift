@@ -126,6 +126,25 @@ struct ReportCompleteness {
     /// ⟨0.30⟩ the peek's findings across the reports under this locator — see `isIncomplete`.
     var outOfScope: [[String: Any]] = []
 
+    /// ⟨0.32⟩ the exclusion CLASSES the producing scan never opened (`excluded[].peeked == false` with no
+    /// `judgedElsewhere`) — the sibling of `outOfScope` and the other half of one rung.
+    ///
+    /// **COLLECTED HERE, ARMED BY THE CALLER**, because the condition is the policy in force NOW — only a
+    /// `deny`/`pure` rule's answer depends on code outside the scan's scope — and this loader holds no
+    /// policy. So `isIncomplete` reads `unreadArmed`, never this list directly: an unread class rides
+    /// almost every no-policy report, and a verb that hedged on every run would teach its reader to skip
+    /// the hedge.
+    ///
+    /// SO `tour` AND `path` NEVER ARM IT, and that is a ruling rather than an omission: they take no
+    /// `--policy`, so there is no question whose answer could depend on the unread code, and a hedge
+    /// with no policy behind it is the every-run hedge above. Their `outOfScope`/`unanalyzed` arms are
+    /// unaffected — those are facts about the report, not about a rule.
+    var unread: [String] = []
+    /// ⟨0.32⟩ Has the calling verb decided that THIS run's policy makes `unread` matter? Held apart from
+    /// `unread` being non-empty so that "no policy was given" and "this policy denies nothing" cannot be
+    /// confused with "the producer read everything".
+    var unreadArmed = false
+
     /// Is the universe this verb reasoned over known-partial? **EITHER ARM OF THIS IS AN EXIT CODE**, and
     /// that is why `judgedNothing` is deliberately NOT one of them. `unverified --strict` and
     /// `fix-gate --strict` answer 2 off this — *"the gate refuses over these bytes, so do I"* — but
@@ -140,7 +159,15 @@ struct ReportCompleteness {
     /// `unverified`, `fix-gate` "and any later sibling". ⟨0.30⟩ made the gate exit 2 when the peek
     /// resolved a denied effect and left these verbs certifying — MEASURED on candor-rust and candor-ts,
     /// where the gate exited 2 and `--strict` answered clean at 0 over the identical report.
-    var isIncomplete: Bool { !unanalyzed.isEmpty || !unreadable.isEmpty || !outOfScope.isEmpty }
+    /// ⟨0.32⟩ `unreadArmed` IS AN ARM, and it is the same MUST arriving one shape over: the gate refuses
+    /// over a class the producing scan never opened, so a `--strict` verb over those bytes must not
+    /// certify. MEASURED on this engine the moment the gate route gained the rule — `gate --report` exit
+    /// 2 `ok:false` beside `fix-gate --strict` and `unverified --strict` at exit 0 `{"ok": true}`, over
+    /// one no-policy report. Closing a cause on the gate and not on its siblings is how this rung's
+    /// ⟨0.30⟩ half drifted first.
+    var isIncomplete: Bool {
+        !unanalyzed.isEmpty || !unreadable.isEmpty || !outOfScope.isEmpty || unreadArmed
+    }
 
     /// ⟨0.28⟩ **Is there anything at all to disclose — the trigger for an ANSWER, where `isIncomplete` is
     /// the trigger for a VERDICT.** A descriptive verb asks THIS: its empty set is a negative finding
@@ -328,6 +355,26 @@ private func mergeCompleteness(_ obj: [String: Any], path: String, entryCount: I
                 return
             }
             c.outOfScope.append(m)
+        }
+    }
+    // ⟨0.32⟩ THE OTHER HALF OF THE SAME RUNG — the classes the producing scan never opened. Read here
+    // UNCONDITIONALLY and off the same key `gate --report` reads (`readableFlag` is that route's own
+    // reader, shared rather than re-spelled: two readings of one flag is how the two arms of ⟨0.30⟩
+    // drifted). Whether it MATTERS is the caller's decision, because it turns on the policy in force.
+    //
+    // CORRUPT RIDES `unreadable`, exactly as the `outOfScope` block above does it: a garbled `excluded`
+    // read as "this scan excluded nothing" is the safe-LOOKING value, and here it would silently delete
+    // an arm rather than raise one.
+    if let rawX = obj["excluded"] {
+        guard let arr = rawX as? [Any] else { c.unreadable.append(path); return }
+        for x in arr {
+            guard let m = x as? [String: Any], let cls = m["class"] as? String, !cls.isEmpty,
+                  let peeked = readableFlag(m["peeked"]),
+                  let judgedElsewhere = readableFlag(m["judgedElsewhere"]) else {
+                c.unreadable.append(path)
+                return
+            }
+            if !peeked && !judgedElsewhere { c.unread.append(cls) }
         }
     }
 }
@@ -546,6 +593,21 @@ func loadFixModel(prefix: String, who: String) -> (byName: [String: FixFn], cg: 
     // back to the report's own inline `calls` so a prefix that has only the envelope still answers.
     if cg.isEmpty { for (fn, f) in byName { cg[fn] = f.calls } }
     return (byName, cg, coverage, completeness, Set(scopeEnts).count == 1 ? scopeEnts[0] : nil)
+}
+
+/// ⟨0.32⟩ ARM THE UNREAD-CLASS CAUSE FOR THIS RUN'S POLICY — the one place the condition is applied, so
+/// the three advisory verbs cannot answer it three ways.
+///
+/// The condition is the same one `gate --report` applies to its own `unpeeked` value, and it is about
+/// the QUESTION rather than about the producer: only a `deny`/`pure` rule's answer depends on code
+/// outside the scan's scope. `pol.deny` is the right list and `pure` is IN it — the parser appends a
+/// `pure` line as a DenyRule with an empty effect list — so reading the question off a flattened set of
+/// effect NAMES would silently disarm the strictest policy the grammar has.
+private func armingUnread(_ c: ReportCompleteness, under pol: ParsedPolicy) -> ReportCompleteness {
+    guard !pol.deny.isEmpty, !c.unread.isEmpty else { return c }
+    var out = c
+    out.unreadArmed = true
+    return out
 }
 
 private func loadDenyOrDie(_ policyPath: String, who: String) -> [DenyRule] {
@@ -956,8 +1018,11 @@ func runUnverifiedCLI(_ args: [String]) -> Never {
     // ⟨0.28⟩ a zero-rule policy asked nothing — the caveat document, result keys withheld, exit
     // unchanged. AFTER the usage errors above (a bad --class refuses whatever the policy says), and a
     // no-op when any rule of any kind parsed.
+    // ⟨0.32⟩ the unread-class cause, armed against THIS run's policy — see `armingUnread`. Computed
+    // once and used by every channel below, so the document and the exit cannot disagree.
+    let uvComp = armingUnread(loaded.completeness, under: pol)
     answerZeroRulePolicyWithCaveat(pol, at: policy, who: "unverified",
-                                   completeness: loaded.completeness, strict: q.strict)
+                                   completeness: uvComp, strict: q.strict)
     let (ok, holes, unansweredCore) = unverified(fns, pol.deny, classFilter: classFilter)
     // ⟨0.29⟩ …AND THE TWO WHOLE-POLICY KINDS, which this verb dropped at the call boundary: it hands
     // `pol.deny` to the core and `forbid`/`allow` never travelled. So a `forbid`-only policy produced
@@ -973,7 +1038,7 @@ func runUnverifiedCLI(_ args: [String]) -> Never {
     // went unread. Same for a rule the gate could not evaluate (§3.2): the holes ship, `unevaluated`
     // rides beside them, and `--strict` matches the gate's exit 2.
     emitAdvisoryAnswer(["unverified": holes.map { $0.toJSON() }],
-                       ok: ok, completeness: loaded.completeness, strict: q.strict,
+                       ok: ok, completeness: uvComp, strict: q.strict,
                        unevaluated: unanswered)
 }
 
@@ -1285,7 +1350,8 @@ func runFixCLI(_ args: [String]) -> Never {
         // and the note goes to STDERR — stdout always carries a document on this verb. The reference's
         // `cmd_fix` does exactly this (`warn_unreadable("fix")` + `write_json` on each branch); the
         // exit code stays 0, for its reason: this verb answers no `ok` for `--strict` to follow.
-        let comp = model.completeness
+        // ⟨0.32⟩ …and the unread-class cause, armed against this verb's own policy (`armingUnread`).
+        let comp = armingUnread(model.completeness, under: fixPol)
         // ⟨0.28⟩ Phase 1b: `fix` TAKES THE ZERO-RULE WITHHOLDING TOO. The doc on
         // `answerZeroRulePolicyWithCaveat` used to say this verb was deliberately NOT routed here,
         // because SPEC named three verbs and extending it unasked would be "a one-engine guess of
@@ -1344,8 +1410,11 @@ func runFixCLI(_ args: [String]) -> Never {
         }
         // ⟨0.28⟩ a zero-rule policy asked nothing — the caveat document, result keys withheld, exit
         // unchanged. No-op when any rule of any kind parsed.
+        // ⟨0.32⟩ the unread-class cause, armed against THIS run's policy — see `armingUnread`. One
+        // value for the caveat, the document and the exit, so the three cannot disagree about a run.
+        let fgComp = armingUnread(model.completeness, under: pol)
         answerZeroRulePolicyWithCaveat(pol, at: policy, who: "fix-gate",
-                                       completeness: model.completeness, strict: q.strict)
+                                       completeness: fgComp, strict: q.strict)
         let (ok, remedies, unansweredCore) = fixGate(byName: model.byName, cg: model.cg, deny: pol.deny)
         // ⟨0.29⟩ …AND THE TWO WHOLE-POLICY KINDS, which this verb dropped at the call boundary: it hands
         // `pol.deny` to the core and `forbid`/`allow` never travelled. So a `forbid`-only policy produced
@@ -1362,7 +1431,7 @@ func runFixCLI(_ args: [String]) -> Never {
         // `emitAdvisoryAnswer`. The remedies still ship: a crossing this report DID see needs the same
         // hoist whether or not another file went unread.
         emitAdvisoryAnswer(["remedies": remedies.map { $0.toJSON() }],
-                           ok: ok, completeness: model.completeness, strict: q.strict,
+                           ok: ok, completeness: fgComp, strict: q.strict,
                            unevaluated: unanswered)
     }
 }

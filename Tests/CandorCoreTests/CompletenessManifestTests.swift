@@ -212,8 +212,15 @@ final class CompletenessManifestTests: XCTestCase {
         try "deny Db\n".write(to: pol, atomically: true, encoding: .utf8)
 
         // ── CONTROL FIRST: the report is COMPLETE, so `ok` is present and the verbs are unchanged. ──
+        //
+        // THE PRODUCING SCAN CARRIES THE POLICY, and since ⟨0.32⟩ that is part of what COMPLETE means: a
+        // bare scan never opens `Package.swift` (the `manifest` class) and publishes `peeked: false`
+        // saying so, which is not a complete universe — `gate --report` exits 2 over exactly those bytes,
+        // so §3.2 requires these two verbs to as well. This row is about `ok` SURVIVING on a complete
+        // report, so its fixture has to produce one. `deny Db` still finds nothing, which is what keeps
+        // the green here about completeness rather than about a policy that fired.
         let rep = root.appendingPathComponent("r")
-        let cleanScan = try ProcessHarness.run(bin, [root.path, "--out", rep.path])
+        let cleanScan = try ProcessHarness.run(bin, [root.path, "--out", rep.path, "--policy", pol.path])
         XCTAssertEqual(cleanScan.code, 0, cleanScan.err)
         for verb in ["unverified", "fix-gate"] {
             let r = try ProcessHarness.run(bin, [verb, "--report", rep.path, "--policy", pol.path,
