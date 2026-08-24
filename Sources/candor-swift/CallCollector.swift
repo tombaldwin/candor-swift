@@ -1132,16 +1132,122 @@ final class CallCollector: SyntaxVisitor {
         return kappaMember(root: root, member: member)
     }
 
+    /// **THE `Data`/`NSData`/`String` CONTENT-READ CONSTRUCTOR — ONE FUNCTION, BOTH SPELLINGS.**
+    /// `Data(contentsOfFile:)` / `Data(contentsOf:)` and their `Foundation.`-qualified twins. Returns
+    /// true when it classified, false when the name/label pair is not this ctor (or a local declaration
+    /// shadows it), so the caller falls through to the arms it always reached.
+    ///
+    /// It exists as a function, rather than as an arm of the free-call chain, because it was the last
+    /// free-name family keyed on the CALLEE NODE instead of on a name: ⟨0.32⟩ made a module qualifier a
+    /// spelling for the κ table and the three privacy ctor families, and this arm — the only one that
+    /// reads a FILE — kept answering one spelling. Measured: `Foundation.Data(contentsOf: u)` reported
+    /// `Clock` alone where `Data(contentsOf: u)` reported `Clock, Unknown`, and
+    /// `Foundation.Data(contentsOf: URL(string: "https://…")!)` reported no `Net` at all.
+    ///
+    /// `shadowable` IS THE ONE THING THE TWO CALL SITES DISAGREE ABOUT, and it is the same disagreement
+    /// every other family has: the BARE spelling is shadowed by a local declaration of the name, the
+    /// QUALIFIED one is not — naming the module is precisely how Swift code reaches Foundation's `Data`
+    /// from a file that declares its own. The bare guard is `declaredTypes`/`localFreeFns`, the fence
+    /// every κ path uses, and it CLOSES A MEASURED FABRICATION this extraction surfaced: a project's own
+    /// `struct Data { init(contentsOfFile:) }` was charged `Fs`, and its `init(contentsOf:)` acquired an
+    /// `Unknown`, because this arm — alone among the free-name families — applied no shadow guard at all.
+    /// An extension-only `extension Data {…}` does NOT shadow (`declaredTypes`, not `localTypes`): a
+    /// project that extends Foundation's `Data` is still calling Foundation's ctor.
+    ///
+    /// RESIDUAL, MEASURED AND FILED RATHER THAN LEFT TO BE DISCOVERED: `declaredTypes` is keyed on the
+    /// SIMPLE NAME and is PACKAGE-WIDE, so a NESTED or `fileprivate` declaration shadows further than
+    /// Swift's own resolution does — swift-syntax has a `fileprivate enum Data` nested in `Node`, and in
+    /// a single-package scan that silences a real `Data(contentsOfFile:)` in another file. That
+    /// imprecision is NOT introduced here: measured at ⟨0.32⟩ HEAD, a nested `fileprivate enum Pipe`
+    /// already silences `Pipe()` package-wide, so this arm now shares the fence every κ family has
+    /// rather than inventing one. (It cost nothing on the corpus A/B: swift-syntax keeps its nested
+    /// `Data` and its content reads in DIFFERENT packages, so no unit moved.) The escape hatch is the
+    /// spelling rule directly above — `Foundation.Data(contentsOfFile:)` is charged whatever the package
+    /// declares, which is measured in `ModuleQualifierSpellingProcessTests`.
+    private func chargeContentsCtor(_ name: String, _ node: FunctionCallExprSyntax, lit: String?,
+                                    shadowable: Bool) -> Bool {
+        guard ["Data", "NSData", "String"].contains(name) else { return false }
+        if shadowable, declaredTypes.contains(name) || localFreeFns.contains(name) { return false }
+        let label = node.arguments.first?.label?.text
+        if label == "contentsOfFile" {
+            // `String(contentsOfFile: path, …)` / `Data(contentsOfFile:)` take a FILE PATH, not a
+            // URL — there is no scheme to resolve, so this is UNCONDITIONALLY a file read → Fs.
+            // (The `contentsOf:` scheme-resolution path below would have let it fall through to
+            // pure — the 1725d0a guard keyed on `contentsOf` only — the review's under-report find.)
+            directEffects.insert("Fs")
+            // ⟨0.29⟩ …AND ITS DIRECTION, which the comment above already proves: "UNCONDITIONALLY a
+            // file read". See the write site below for the measurement and why this matters.
+            fsKinds.insert("read")
+            recordSurfaces(effect: "Fs", lit: lit)
+            if lit == nil {
+                // CONSTANT PROVENANCE rung 4 — the literal was unreadable, but a HOME-ANCHORED
+                // expression still names a protected folder: `NSHomeDirectory() + "/Desktop/x"` is
+                // the spelling real code uses, and the class is decided by the proved prefix. Only
+                // when that also fails is the destination genuinely undetermined.
+                let resolved = node.arguments.lazy.compactMap { self.homeAnchoredPath($0.expression) }.first
+                if let r = resolved, !pathClasses(r).isEmpty {
+                    for c in pathClasses(r) { directEffects.insert(c) }
+                } else {
+                    incompleteSurfaces.insert("Fs")
+                }
+            }
+            return true
+        }
+        if label == "contentsOf" {
+            // `Data/String(contentsOf: url)` reads from a URL that is EITHER a file (Fs) or a
+            // remote endpoint (Net) — exactly one is true, but which depends on the URL's scheme.
+            // Asserting BOTH (the old behaviour) always FABRICATES the wrong one — a file read
+            // reported Net, a network read reported Fs (a fabrication — the precision failure; caught fabricating Net
+            // on SwiftFormat's config reads, where the URL is a fileURLWithPath from a helper).
+            // Resolve the scheme when it's statically provable; otherwise it's an indeterminate
+            // effect we can't categorise → honest `Unknown`, never a guess.
+            // ⟨0.29⟩ THE `contentsOf:` ARGUMENT, not the whole argument list. `node.arguments
+            // .description` is a text search over EVERY argument, which is the "literal anywhere"
+            // hazard this rung removed from `Fs`/`Net`/`Db`/`Exec` wearing different clothes: a
+            // scheme in a trailing argument would decide the category of a URL it is not.
+            let urlArgText = node.arguments.first?.expression.description ?? ""
+            if urlArgText.contains("fileURLWithPath") || urlArgText.contains("filePath:") {
+                directEffects.insert("Fs") // a provably-FILE URL
+            } else if urlArgText.contains("\"http://") || urlArgText.contains("\"https://")
+                        || urlArgText.contains("\"ftp://") {
+                directEffects.insert("Net") // a literal remote URL
+                // ⟨0.29⟩ …AND CAPTURE ITS HOST. This branch proved a remote endpoint and recorded no
+                // `hosts`, so `String(contentsOf: URL(string: "https://sentry.io/api")!)` — the
+                // idiomatic Foundation one-line GET — came back with an EMPTY Net surface while
+                // `URLSession.shared.dataTask(with:)` on the same URL captured `sentry.io`. The gate
+                // failed CLOSED (AS-EFF-008, "no visible literal"), so nothing was ever certified
+                // wrongly; the cost was that `allow Net` could not be used for this shape at all, and
+                // a `deny Net[unknown-host]` fired on a host the classifier can plainly read.
+                // Routed through `recordSurfaces` so the host, the ⟨0.13⟩ model-host refinement and
+                // the destination-class derivation all behave exactly as on every other Net call.
+                recordSurfaces(effect: "Net", lit: lit)
+            } else {
+                unresolved = true // indeterminate scheme: I/O happens, category unprovable
+                why.insert("contentsOf:indeterminate-url-scheme")
+            }
+            return true
+        }
+        return false
+    }
+
     /// Charge `Module.Name(…)` exactly as the BARE `Name(…)` free-call path charges it, and report
     /// whether anything was charged. Returns false — leaving the call to the arms it always reached —
     /// when the bare spelling would classify nothing, so this can only ADD the spellings that were
     /// invisible.
     ///
-    /// The four families are the four the free-call path runs, in ITS order, and each one delegates to
-    /// the same function that path delegates to (`privacyCaptureEffects`, `bonjourDescriptorArg`,
-    /// `privacyEventKitEffects`, `kappaFree`) so the two spellings cannot answer differently about what
-    /// an effect IS. `ExecCapabilityProcessTests` asserts the parity on a Process, a Date, a URL and a
-    /// UUID — the invariant, not the one row that was found broken.
+    /// The FIVE families are the five the free-call path runs, in ITS order, and each one delegates to
+    /// the same function that path delegates to (`chargeContentsCtor`, `privacyCaptureEffects`,
+    /// `bonjourDescriptorArg`, `privacyEventKitEffects`, `kappaFree`) so the two spellings cannot answer
+    /// differently about what an effect IS. `ExecCapabilityProcessTests` asserts the parity on a Process,
+    /// a Date, a URL and a UUID; `ModuleQualifierSpellingProcessTests` asserts it as a LOOP over every
+    /// classified ctor spelling — the invariant, not the one row that was found broken.
+    ///
+    /// `chargeContentsCtor` is FIRST because it is first in the bare chain, and it is a shared function
+    /// rather than a re-implementation for the reason this whole helper exists: the `Data`/`String`
+    /// content-read arm was the ONE free-name family that stayed keyed on a `DeclReferenceExpr` callee
+    /// when ⟨0.32⟩ made the qualifier a spelling, so `Foundation.Data(contentsOf: url)` read pure while
+    /// `Data(contentsOf: url)` did not. A family that lives in a function BOTH call sites invoke cannot
+    /// drift again; one that is spelled out twice already has.
     ///
     /// The local-shadow guards the bare path applies (`localTypes`/`localFreeFns`) are DELIBERATELY NOT
     /// applied here: a module qualifier exists precisely to name the module's version when a local
@@ -1150,6 +1256,9 @@ final class CallCollector: SyntaxVisitor {
     /// project's OWN module (`@testable import App` — `App.Process()` is the project's type).
     private func chargeModuleQualifiedSpelling(_ name: String, _ node: FunctionCallExprSyntax,
                                                lit: String?) -> Bool {
+        // The `Data`/`String` content-read ctor, on the UN-dealiased name — the bare chain keys that arm
+        // on the written name too, and parity with the bare spelling is the invariant here.
+        if chargeContentsCtor(name, node, lit: lit, shadowable: false) { return true }
         let alias = dealias(name)
         if PRIVACY_CAPTURE_TYPES.contains(alias) {
             switch mediaTypeArgKind(node.arguments) {
@@ -2458,62 +2567,9 @@ final class CallCollector: SyntaxVisitor {
         let lit = firstStringLiteral(node.arguments)
         if let dr = node.calledExpression.as(DeclReferenceExprSyntax.self) {
             let name = dr.baseName.text
-            if ["Data", "NSData", "String"].contains(name),
-               node.arguments.first?.label?.text == "contentsOfFile" {
-                // `String(contentsOfFile: path, …)` / `Data(contentsOfFile:)` take a FILE PATH, not a
-                // URL — there is no scheme to resolve, so this is UNCONDITIONALLY a file read → Fs.
-                // (The `contentsOf:` scheme-resolution path below would have let it fall through to
-                // pure — the 1725d0a guard keyed on `contentsOf` only — the review's under-report find.)
-                directEffects.insert("Fs")
-                // ⟨0.29⟩ …AND ITS DIRECTION, which the comment above already proves: "UNCONDITIONALLY a
-                // file read". See the write site below for the measurement and why this matters.
-                fsKinds.insert("read")
-                recordSurfaces(effect: "Fs", lit: lit)
-                if lit == nil {
-                    // CONSTANT PROVENANCE rung 4 — the literal was unreadable, but a HOME-ANCHORED
-                    // expression still names a protected folder: `NSHomeDirectory() + "/Desktop/x"` is
-                    // the spelling real code uses, and the class is decided by the proved prefix. Only
-                    // when that also fails is the destination genuinely undetermined.
-                    let resolved = node.arguments.lazy.compactMap { self.homeAnchoredPath($0.expression) }.first
-                    if let r = resolved, !pathClasses(r).isEmpty {
-                        for c in pathClasses(r) { directEffects.insert(c) }
-                    } else {
-                        incompleteSurfaces.insert("Fs")
-                    }
-                }
-            } else if ["Data", "NSData", "String"].contains(name),
-               node.arguments.first?.label?.text == "contentsOf" {
-                // `Data/String(contentsOf: url)` reads from a URL that is EITHER a file (Fs) or a
-                // remote endpoint (Net) — exactly one is true, but which depends on the URL's scheme.
-                // Asserting BOTH (the old behaviour) always FABRICATES the wrong one — a file read
-                // reported Net, a network read reported Fs (a fabrication — the precision failure; caught fabricating Net
-                // on SwiftFormat's config reads, where the URL is a fileURLWithPath from a helper).
-                // Resolve the scheme when it's statically provable; otherwise it's an indeterminate
-                // effect we can't categorise → honest `Unknown`, never a guess.
-                // ⟨0.29⟩ THE `contentsOf:` ARGUMENT, not the whole argument list. `node.arguments
-                // .description` is a text search over EVERY argument, which is the "literal anywhere"
-                // hazard this rung removed from `Fs`/`Net`/`Db`/`Exec` wearing different clothes: a
-                // scheme in a trailing argument would decide the category of a URL it is not.
-                let urlArgText = node.arguments.first?.expression.description ?? ""
-                if urlArgText.contains("fileURLWithPath") || urlArgText.contains("filePath:") {
-                    directEffects.insert("Fs") // a provably-FILE URL
-                } else if urlArgText.contains("\"http://") || urlArgText.contains("\"https://")
-                            || urlArgText.contains("\"ftp://") {
-                    directEffects.insert("Net") // a literal remote URL
-                    // ⟨0.29⟩ …AND CAPTURE ITS HOST. This branch proved a remote endpoint and recorded no
-                    // `hosts`, so `String(contentsOf: URL(string: "https://sentry.io/api")!)` — the
-                    // idiomatic Foundation one-line GET — came back with an EMPTY Net surface while
-                    // `URLSession.shared.dataTask(with:)` on the same URL captured `sentry.io`. The gate
-                    // failed CLOSED (AS-EFF-008, "no visible literal"), so nothing was ever certified
-                    // wrongly; the cost was that `allow Net` could not be used for this shape at all, and
-                    // a `deny Net[unknown-host]` fired on a host the classifier can plainly read.
-                    // Routed through `recordSurfaces` so the host, the ⟨0.13⟩ model-host refinement and
-                    // the destination-class derivation all behave exactly as on every other Net call.
-                    recordSurfaces(effect: "Net", lit: lit)
-                } else {
-                    unresolved = true // indeterminate scheme: I/O happens, category unprovable
-                    why.insert("contentsOf:indeterminate-url-scheme")
-                }
+            if chargeContentsCtor(name, node, lit: lit, shadowable: true) {
+                // `Data`/`String(contentsOfFile:|contentsOf:)` — classified by the SHARED family function
+                // so the module-qualified spelling of the same ctor answers identically (see it).
             } else if let target = fnValueAlias[name] {
                 // an INFERRED-type fn-value local invoked (`let g = eff; g()`): edge to the aliased local
                 // fn (the real unit). Emit as an unqualified free-call so the fixpoint resolver links it to
