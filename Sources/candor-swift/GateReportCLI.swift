@@ -59,6 +59,17 @@ private struct GateReportEnvelope {
     // `net-partner` at, and re-classifying through the consumer's own config is the re-derivation ⟨0.24⟩
     // forbids — it would make the verdict depend on the reader's working directory.
     var netPartners: [(config: String, hosts: [String])] = []
+    /// ⟨0.32⟩ THE EXCLUSION CLASSES THE PRODUCING SCAN DID NOT READ — the third cause of an INCOMPLETE
+    /// verdict, read OFF THE DOCUMENT. `excluded[].peeked == false` without `judgedElsewhere` is the
+    /// producer stating it never opened those files: their effects are absent because nothing looked, not
+    /// because there are none, and the ⟨0.30⟩ `outOfScope` arm cannot see it (a peek that could not open a
+    /// file FINDS nothing, which is byte-identical to finding it clean).
+    ///
+    /// Reachable identically on both routes precisely because `excluded` rides the REPORT: this route
+    /// needs no target to re-derive anything from, which is what defeated the ⟨0.31⟩ `net-partner`
+    /// disclosure and broke §3.1 route-equality there. Populated per FILE (see `mergeGateReport`), so a
+    /// multi-report locator unions its members' unread classes the way it unions their manifests.
+    var unpeeked: [String] = []
     var coverageModules: Set<String> = []
     var entries: [GateReportEntry] = []
     /// ⟨0.24⟩ Does every report at this locator say it JUDGED NOTHING? (SPEC §2's three-row table, bound
@@ -200,6 +211,48 @@ private func mergeGateReport(_ full: String, into env: inout GateReportEnvelope)
                 effects: m["effects"] as? [String] ?? [],
                 cls: m["class"] as? String ?? "",
                 reason: m["reason"] as? String ?? ""))
+        }
+    }
+    // ⟨0.32⟩ THE THIRD CAUSE OF AN INCOMPLETE VERDICT — the exclusion classes this scan did NOT READ.
+    //
+    // **ONLY WHEN THE PRODUCING SCAN WAS ASKED, and that conjunct is the whole subtlety.** `peeked: false`
+    // has two causes and they are not the same claim: the peek OPENED those files and could not read them
+    // (unread code — what this rule is for), or NO PEEK RAN AT ALL because no policy was configured, in
+    // which case nothing was asked and the flag records an absence of QUESTION rather than an absence of
+    // evidence. ⟨0.29⟩ already separates them in `outOfScope`: OMITTED when no policy was configured,
+    // present-and-empty when one was and the peek came back clean. Keying on that ABSENCE is the ⟨0.26⟩
+    // absent-vs-empty rule the rest of this format runs on, and it is the same conjunct candor-java
+    // (`scanWasAsked`) and candor-rust (`KeyRead::Present(_)`) apply on their own report routes. Without
+    // it, EVERY report written with no policy — and every pre-⟨0.30⟩ report, which carries neither key —
+    // exits 2 the moment a policy touches it.
+    //
+    // Read BEFORE `outOfScope` is consumed below only because the presence test is on the raw key; the
+    // two are one decision. The mirror on the scan route is `unreadExclusions` in main.swift, whose guard
+    // is the same fact spelled locally (`report.outOfScope != nil`).
+    if obj["outOfScope"] != nil {
+        // Strict for the same reason `unanalyzed` and `outOfScope` are: non-emptiness is a FAIL-CLOSED
+        // trigger, so a present-but-garbled key coerced to `[]` becomes the claim "nothing went unread" —
+        // the safe-LOOKING value, which is how `NOT certified` becomes `policy ✓`.
+        if let rawX = obj["excluded"] {
+            guard let arr = rawX as? [Any] else { return corrupt("`excluded` is present and is not a list") }
+            for x in arr {
+                guard let m = x as? [String: Any], let cls = m["class"] as? String, !cls.isEmpty else {
+                    return corrupt("an `excluded` member is not a `{class, count, peeked, reason}` object "
+                                   + "with a readable `class` — an exclusion class that cannot be NAMED "
+                                   + "cannot be reported, and dropping it would read as `peeked`")
+                }
+                // ABSENT `peeked` counts as NOT peeked. A producer that does not carry the key cannot be
+                // read as having opened the files: that is the fail-OPEN reading of a missing disclosure,
+                // which is the failure this key exists to prevent.
+                let peeked = m["peeked"] as? Bool ?? false
+                // ⟨0.32⟩ the PRODUCER's own carve-out for a DERIVED copy of code the same scan already
+                // judged (`.build/`). Read off the FLAG, never off the class token: the same concept is
+                // `build-output-archive` in candor-java and `build-script` in candor-rust, and rust's is
+                // code that RUNS and must fail closed — keying on the name would gate another engine's
+                // report differently from the engine that wrote it.
+                let judgedElsewhere = m["judgedElsewhere"] as? Bool ?? false
+                if !peeked && !judgedElsewhere { env.unpeeked.append(cls) }
+            }
         }
     }
     // ⟨0.15⟩ the κ ledger. Same rule: it rides the verdict as `coverage.modules`, so a present-but-garbled
@@ -949,6 +1002,21 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // round-2 dedupe went into `refuseGateAndExit` and covered only the REFUSAL; these verdict writes
     // kept their per-flag shape, so exit 0 and exit 1 still double-wrote while exit 2 was clean. That
     // asymmetry is why PART 36 (b6) passed: it poses the refusal path only.
+    // ⟨0.32⟩ THE UNREAD CLASSES, DECIDED ONCE — the verdict document below and the exit arm at the bottom
+    // read this SAME value, so they cannot disagree about a run. That split is not hypothetical: the
+    // sibling port measured a document saying `ok: false` while the process exited 0, and the ⟨0.28⟩
+    // REPORT-sink rung shipped its own version of it.
+    //
+    // GATED ON THIS POLICY HAVING A DENY RULE, the second half of the conjunct `mergeGateReport` starts
+    // (the first is "the producing scan was asked at all"). The producer's peek short-circuits on exactly
+    // this — `peekRules` is its DENY list — so keying on it here is what makes the two routes answer the
+    // same way. MEASURED AS DEFENSIVE rather than load-bearing on this engine, 2026-08-24: a policy with
+    // no deny rule cannot reach this line today, because every shape that produces one exits 2 earlier
+    // and for an unrelated reason (an empty/comment-only file, a `forbid`/`only` line and a valueless
+    // `allow` all trip the yielded-NO-RULES refusal; a well-formed `allow` trips this verb's uniform
+    // allow-refusal). Written out anyway, because a guard that states its own condition survives the
+    // removal of a refusal three screens up that exists for something else.
+    let unpeeked = pol.deny.isEmpty ? [] : env.unpeeked
     var verdictSinks: [String] = []
     if wantJson { verdictSinks.append("-") }
     if let gp = gateJsonPath, !verdictSinks.contains(gp) { verdictSinks.append(gp) }
@@ -962,15 +1030,23 @@ func runGateReportCLI(_ args: [String]) -> Never {
                          ignored: pol.ignored,
                          // ⟨0.30⟩ the peek's findings, off the REPORT — same bytes as the scan route's,
                          // which is what makes §3.1 byte-equality hold on a route that cannot peek.
-                         outOfScope: env.outOfScope)
+                         outOfScope: env.outOfScope,
+                         // ⟨0.32⟩ …and the classes it could not READ, off the same document and for the
+                         // same reason. Omitting it here is what made this route certify `ok: true` where
+                         // `scan --policy` wrote `ok: false, incomplete: true` over one report.
+                         unpeeked: unpeeked)
     }
-    if violations.isEmpty {
-        FileHandle.standardError.write("candor-swift: policy ✓\n".data(using: .utf8)!)
-    } else {
+    if !violations.isEmpty {
         FileHandle.standardError.write("candor-swift: \(violations.count) policy violation(s)\n".data(using: .utf8)!)
         FileHandle.standardError.write("→ candor-swift fix-gate names the remedy for each\n".data(using: .utf8)!)
         exit(1)   // a real violation dominates
     }
+    // `policy ✓` USED TO BE PRINTED HERE, above the three exit-2 arms below, so every incomplete verdict
+    // on this route led with a green tick and then contradicted itself one line later — an operator
+    // scanning CI output reads the tick and stops. The scan route moved its own tick below its arms when
+    // ⟨0.30⟩ landed ("only NOW is the gate green"); this route kept the old position, and adding the
+    // ⟨0.32⟩ arm below would have put a third cause under it. The tick is now the LAST thing this verb
+    // can say, and it says it only when every arm has been passed.
     // ⟨0.21⟩ COMPLETENESS MANIFEST: a gate cannot be green over code candor never analyzed. The scan path
     // exits 2 on its own `unanalyzed`; here the same manifest travels ON the report, so the same verdict
     // follows from it. A real violation (exit 1, above) dominates, as it does there.
@@ -990,6 +1066,22 @@ func runGateReportCLI(_ args: [String]) -> Never {
              + "the verdict is incomplete rather than a pass\n").data(using: .utf8)!)
         exit(2)
     }
+    // ⟨0.32⟩ THE THIRD CAUSE, on this route, from the DOCUMENT. `excluded[].peeked == false` is the
+    // producing scan stating it never opened those files. AFTER the two arms above and in the SAME ORDER
+    // the scan route uses, so a target tripping more than one cause reports the same one on both routes:
+    // a CONCRETE denied effect outside the scan is a better message than "something went unread", and a
+    // real violation dominates both.
+    if !unpeeked.isEmpty {
+        FileHandle.standardError.write(
+            ("candor-swift gate: NOT certified — the report says the scan did not READ "
+             + "\(unpeeked.joined(separator: ", ")). Their effects are absent because nothing looked, not "
+             + "because there are none, so the verdict is INCOMPLETE rather than a pass.\n")
+                .data(using: .utf8)!)
+        exit(2)
+    }
+    // …and only NOW is the gate green: every exit-2 arm above has been passed, so `policy ✓` is a claim
+    // this run can support. See the note at the violation branch for what printing it earlier said.
+    FileHandle.standardError.write("candor-swift: policy ✓\n".data(using: .utf8)!)
     exit(0)
 }
 
