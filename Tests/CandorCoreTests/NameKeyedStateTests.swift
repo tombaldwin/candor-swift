@@ -191,6 +191,11 @@ final class NameKeyedStateTests: XCTestCase {
         "wrappedProps": .immutableIndex, "typeAliases": .immutableIndex,
         "opaqueSeqBuilders": .immutableIndex, "seqBuilderConcrete": .immutableIndex,
         "closureFields": .immutableIndex, "returnedNames": .immutableIndex,
+        // MODULE names — this file's imports, and the modules the project itself defines. Keyed by a
+        // MODULE, never by a binding: a local `let Foundation = …` does not make the qualifier a value,
+        // and `isModuleQualifier` asks `vars`/`fields`/`localTypes` about exactly that at the use site
+        // rather than mutating these.
+        "importedModules": .immutableIndex, "projectModules": .immutableIndex,
         // ── outputs, accumulators and scope bookkeeping
         "enclosingType": .notPerBinding, "selfElementType": .notPerBinding,
         "calls": .notPerBinding, "directEffects": .notPerBinding, "unresolved": .notPerBinding,

@@ -148,6 +148,16 @@ final class CallCollector: SyntaxVisitor {
     let fieldDictValue: [String: [String: String]]  // Type -> field -> [K: V] value
     let opaqueFields: [String: Set<String>]         // Type -> fields whose type is monomorphized
     let localTypes: Set<String>
+    /// The modules THIS FILE imports, and the modules the SCANNED PROJECT itself defines. Together they
+    /// decide whether a dotted callee (`Foundation.Process()`) is a MODULE-QUALIFIED SPELLING of a free
+    /// name or an ordinary member access on a value. MEASURED before this was plumbed:
+    /// `Foundation.Process()` reported NOTHING where the bare `Process()` reported `Exec` — one spelling
+    /// of one constructor visible and its sibling not — and it cost the receiver as well, because the
+    /// unclassified ctor left `let t = Foundation.Process()` untyped and the `t.run()` below it silent.
+    /// `projectModules` is the anti-fabrication half: under `@testable import App`, `App.Process()` names
+    /// the PROJECT's own type, not Foundation's, so the κ table must not answer for it.
+    let importedModules: Set<String>
+    let projectModules: Set<String>
     let declaredTypes: Set<String>  // types with a REAL local definition (NOT extension-only) — the shadow
                                     // discipline keys on this so a member call on an extension-only κ-platform
                                     // type (`self.launch()` in `extension Process`) reaches the κ table.
@@ -385,7 +395,10 @@ final class CallCollector: SyntaxVisitor {
          localFreeFns: Set<String>, typeAliases: [String: String],
          enclosingMembers: Set<String> = [],
          opaqueSeqBuilders: Set<String>, seqBuilderConcrete: [String: String],
-         closureFields: [String: Set<String>], moduleConstStrings: [String: String] = [:]) {
+         closureFields: [String: Set<String>], moduleConstStrings: [String: String] = [:],
+         importedModules: Set<String> = [], projectModules: Set<String> = []) {
+        self.importedModules = importedModules
+        self.projectModules = projectModules
         self.moduleConstStrings = moduleConstStrings
         self.opaqueSeqBuilders = opaqueSeqBuilders
         self.seqBuilderConcrete = seqBuilderConcrete
@@ -553,6 +566,17 @@ final class CallCollector: SyntaxVisitor {
             if let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
                let dotted = dottedTypePath(Syntax(ma)), localTypes.contains(dealias(dotted)) {
                 return (dealias(dotted), true, [ma.declName.baseName.text], false)
+            }
+            // `Foundation.Process()` — a MODULE-QUALIFIED constructor. The qualifier is a SPELLING of the
+            // bare name, so the value carries the same type the bare `Process()` gives it. Without this
+            // the binding typed as NOTHING and every member call on it went silent: the classification of
+            // the ctor itself (charged in the member-call path) is only half of what a missing spelling
+            // costs — `let t = Foundation.Process(); try t.run()` lost the LAUNCH as well.
+            if let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
+               let mod = ma.base?.as(DeclReferenceExprSyntax.self)?.baseName.text, isModuleQualifier(mod),
+               ma.declName.baseName.text.first?.isUppercase == true {
+                let n = ma.declName.baseName.text
+                return (dealias(n), true, [n], false)
             }
             if let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
                let rt = returns[ma.declName.baseName.text] {
@@ -1015,6 +1039,147 @@ final class CallCollector: SyntaxVisitor {
                 execLocatorInvisible.insert(name)
             }
         }
+    }
+
+    /// SPEC §1 ⟨0.32⟩ — **CONFIGURING an invocation is the capability, exactly as constructing and
+    /// launching one are.** `t.arguments = argv` / `t.executableURL = u` on a `Process` this function
+    /// RECEIVED hands its caller back a fully-armed child, and this engine charged NOTHING for it: the
+    /// unit was absent from `functions` (a purity claim, ⟨0.21⟩) and the tree passed `deny Exec` at exit
+    /// 0. Splitting build from launch across two functions must not make the builder invisible.
+    ///
+    /// Every write on a proven handle is charged; `environment` is REDIRECTED to `Env` (java's ruling on
+    /// `ProcessBuilder.environment()`), and the READ direction is the carve-out — `let a = t.arguments`
+    /// arms nothing and reaches no code here, because a read is not an assignment.
+    ///
+    /// Compound assignment counts. `t.arguments += ["-x"]` is a read-modify-WRITE that leaves the child
+    /// armed exactly as `=` does; SwiftParser spells it as a `BinaryOperatorExpr` rather than an
+    /// `AssignmentExpr`, which is the sort of second spelling this project keeps finding on the wrong
+    /// side of a fix. The comparison operators that merely END in `=` are excluded by name.
+    private func recordInvocationConfigWrite(_ elems: [ExprSyntax]) {
+        for i in 1..<max(elems.count, 1) where Self.isAssignment(elems[i]) {
+            guard let ma = Self.peel(elems[i - 1]).as(MemberAccessExprSyntax.self),
+                  let base = ma.base, isInvocationValue(base),
+                  let eff = kappaPropertyWrite(root: "Process", member: ma.declName.baseName.text)
+            else { continue }
+            directEffects.insert(eff)
+        }
+    }
+
+    /// `=` or a compound assignment (`+=`, `*=`, …) — NOT a comparison that happens to end in `=`.
+    private static func isAssignment(_ e: ExprSyntax) -> Bool {
+        if e.is(AssignmentExprSyntax.self) { return true }
+        guard let op = e.as(BinaryOperatorExprSyntax.self)?.operator.text else { return false }
+        // `~=` is Swift's PATTERN-MATCH operator, not an assignment — it ends in `=` like the comparisons.
+        return op.hasSuffix("=") && !["==", "!=", "<=", ">=", "===", "!==", "~="].contains(op)
+    }
+
+    /// **True when `expr` IS a `Process` handle — not merely a chain whose root typed as one.**
+    ///
+    /// The whole-type rule of §1 ⟨0.32⟩ is charged only through this predicate, and the reason is a real
+    /// over-charge it would otherwise make: `rootOf` walks a member chain and KEEPS the root it started
+    /// with, so `t.arguments.joined()` answers root `Process`, member `joined` — a read-back of argv that
+    /// a blanket whole-type rule would charge `Exec`. The question the rule needs answered is about the
+    /// RECEIVER, so it is asked of the receiver EXPRESSION: a bound name, a stored property, `self` in
+    /// the type's own extension, or a constructor result. Anything else falls through to the verb floor
+    /// (`PROCESS_MEMBERS`), which under-reports rather than fabricates.
+    ///
+    /// A locally DECLARED `Process` always shadows — `declaredTypes` is the same fence every κ path uses,
+    /// and it is what keeps a project's own `class Process` (the lookalike control) pure.
+    private func isInvocationValue(_ raw: ExprSyntax) -> Bool {
+        guard !declaredTypes.contains("Process") else { return false }
+        let expr = Self.peel(raw)
+        if let dr = expr.as(DeclReferenceExprSyntax.self) {
+            let n = dr.baseName.text
+            if let t = vars[n] { return dealias(t) == "Process" }
+            if let et = enclosingType, let f = fields[et]?[n], let ft = f.name { return dealias(ft) == "Process" }
+            return false
+        }
+        if let ma = expr.as(MemberAccessExprSyntax.self), let base = ma.base {
+            // `self.child` / `outer.inner.child` — a STORED PROPERTY typed `Process`.
+            let inner = rootOf(base)
+            if let rt = inner.root, let f = fields[rt]?[ma.declName.baseName.text], let ft = f.name,
+               !f.isFunction { return dealias(ft) == "Process" }
+            return false
+        }
+        // `Process().run()` / `Foundation.Process().run()` — the ctor result IS the handle.
+        if let call = expr.as(FunctionCallExprSyntax.self) {
+            if let dr = call.calledExpression.as(DeclReferenceExprSyntax.self) {
+                return dealias(dr.baseName.text) == "Process"
+            }
+            if let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
+               let mod = ma.base?.as(DeclReferenceExprSyntax.self)?.baseName.text,
+               isModuleQualifier(mod) { return dealias(ma.declName.baseName.text) == "Process" }
+        }
+        return false
+    }
+
+    /// True when a dotted callee's base names an imported MODULE rather than a value or a local type —
+    /// `Foundation.Process()`, `AVFoundation.AVCaptureSession()`. See `importedModules`.
+    private func isModuleQualifier(_ name: String) -> Bool {
+        guard importedModules.contains(name), !projectModules.contains(name) else { return false }
+        if vars[name] != nil || localTypes.contains(name) { return false }
+        if let et = enclosingType, fields[et]?[name] != nil { return false }
+        return true
+    }
+
+    /// The member-call κ answer, with SPEC §1 ⟨0.32⟩'s whole-type rule applied to a receiver PROVEN to be
+    /// a subprocess handle. `kappaMember`'s `Process` entry stays the verb FLOOR for every other receiver
+    /// (an `extension Process`'s implicit self, a stale chain root) — see `PROCESS_MEMBERS`.
+    private func memberEffect(root: String, member: String, receiver: ExprSyntax?) -> String? {
+        if root == "Process", let r = receiver, isInvocationValue(r) {
+            return processCapabilityEffect(member: member)
+        }
+        return kappaMember(root: root, member: member)
+    }
+
+    /// Charge `Module.Name(…)` exactly as the BARE `Name(…)` free-call path charges it, and report
+    /// whether anything was charged. Returns false — leaving the call to the arms it always reached —
+    /// when the bare spelling would classify nothing, so this can only ADD the spellings that were
+    /// invisible.
+    ///
+    /// The four families are the four the free-call path runs, in ITS order, and each one delegates to
+    /// the same function that path delegates to (`privacyCaptureEffects`, `bonjourDescriptorArg`,
+    /// `privacyEventKitEffects`, `kappaFree`) so the two spellings cannot answer differently about what
+    /// an effect IS. `ExecCapabilityProcessTests` asserts the parity on a Process, a Date, a URL and a
+    /// UUID — the invariant, not the one row that was found broken.
+    ///
+    /// The local-shadow guards the bare path applies (`localTypes`/`localFreeFns`) are DELIBERATELY NOT
+    /// applied here: a module qualifier exists precisely to name the module's version when a local
+    /// declaration would otherwise shadow it, so `Foundation.Process()` in a file that also declares its
+    /// own `Process` is Foundation's. `isModuleQualifier` already refuses when the qualifier is the
+    /// project's OWN module (`@testable import App` — `App.Process()` is the project's type).
+    private func chargeModuleQualifiedSpelling(_ name: String, _ node: FunctionCallExprSyntax,
+                                               lit: String?) -> Bool {
+        let alias = dealias(name)
+        if PRIVACY_CAPTURE_TYPES.contains(alias) {
+            switch mediaTypeArgKind(node.arguments) {
+            case .determined(let mt):
+                for e in privacyCaptureEffects(mediaType: mt) { directEffects.insert(e); determinateCapture.insert(e) }
+            case .undetermined:
+                directEffects.insert("Camera"); directEffects.insert("Mic")
+            case .absent:
+                ambiguousCapture = true
+            }
+            return true
+        }
+        if alias == "NWBrowser" || alias == "NetServiceBrowser" {
+            if bonjourDescriptorArg(node.arguments) { directEffects.insert("LocalNetwork") }
+            if let eff = kappaFree(name: alias, argCount: node.arguments.count) { directEffects.insert(eff) }
+            return true
+        }
+        if PRIVACY_EVENTKIT_TYPES.contains(alias) {
+            for e in privacyEventKitEffects(entityType: entityTypeArg(node.arguments)) { directEffects.insert(e) }
+            return true
+        }
+        guard let eff = kappaFree(name: alias, argCount: node.arguments.count) else { return false }
+        let est = isEstablishingFree(effect: eff, name: alias)
+        directEffects.insert(eff)
+        if eff == "Fs" { let ks = fsKind(root: alias, member: "<init>")
+                          if ks.isEmpty { fsKinds.insert("?") } else { for k in ks { fsKinds.insert(k) } } }
+        if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK ctor/call IS network I/O
+        recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
+        if lit == nil, est, !(eff == "Fs" && lastResolvedHomePath) { incompleteSurfaces.insert(eff) }
+        return true
     }
 
     /// The launching verb on a `Process` LOCAL. Either the program is statically known — in which case the
@@ -2695,7 +2860,31 @@ final class CallCollector: SyntaxVisitor {
                     // a special case is carved out, re-check every refinement the general path performed.
                     for k in privacyKind(root: rt, member: member) { privacyKinds[e, default: []].insert(k) }
                 }
-            } else if let rt = base.root, let eff = kappaMember(root: rt, member: member) {
+            } else if let mod = ma.base?.as(DeclReferenceExprSyntax.self)?.baseName.text,
+                      isModuleQualifier(mod),
+                      chargeModuleQualifiedSpelling(member, node, lit: lit) {
+                // A MODULE-QUALIFIED SPELLING OF A FREE NAME — `Foundation.Process()`, and not a member
+                // call on a value at all. MEASURED: it reported NOTHING where the bare `Process()`
+                // reported `Exec`, and the loss compounded — `let t = Foundation.Process()` left `t`
+                // untyped, so the `try t.run()` beneath it was silent too. One spelling of one
+                // constructor visible and its sibling not is the defect class this project has recorded
+                // more often than any other; the fix is the general rule (a module qualifier is a
+                // SPELLING) rather than an entry for this one type.
+                //
+                // The predicate is `isModuleQualifier` — an IMPORTED module of this file that the
+                // project does not itself define — and `chargeModuleQualifiedSpelling` answers only when
+                // the BARE spelling would classify, so every callee κ does not know keeps the behaviour
+                // it had (the dep-join and local-resolution arms below are untouched).
+                //
+                // TWO CONSEQUENCES, stated because they are the price of matching the bare spelling
+                // rather than accidents. (1) When κ answers, the `extOwner` dep-join this arm preempts
+                // does not run — the same trade the bare spelling has always made, since κ answers there
+                // first too. (2) A dependency module that exports a type sharing a κ name is charged the
+                // κ effect; that exposure is IDENTICAL to the bare spelling's and is not created here.
+                // What is NOT covered: the ctor arms keyed directly on a `DeclReferenceExpr` callee
+                // earlier in this visitor (`Data`/`String(contentsOf:)`). Pinned as an expected-failure
+                // ratchet in `ExecCapabilityProcessTests`, with the reason the fix belongs one level up.
+            } else if let rt = base.root, let eff = memberEffect(root: rt, member: member, receiver: ma.base) {
                 directEffects.insert(eff)
                 // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. A verb that
                 // does not say contributes nothing, so the field stays absent rather than half-claimed.
@@ -2714,8 +2903,15 @@ final class CallCollector: SyntaxVisitor {
                 } else if rt == "Process", ["run", "launch"].contains(member) {
                     // The LAUNCHING verb on a Process handle. Its command was fixed by an earlier property
                     // write, not by an argument here, so the locator comes from `execLocatorWrites` —
-                    // or the surface is marked incomplete. The other PROCESS_MEMBERS (waitUntilExit,
-                    // terminate, interrupt) are teardown/wait: they name no program and are left alone.
+                    // or the surface is marked incomplete. Every other member (waitUntilExit, terminate,
+                    // interrupt, suspend, resume, and the whole-type ⟨0.32⟩ tail) is teardown, wait or
+                    // configuration: it names no program, so no command surface is claimed for it.
+                    // CONSEQUENCE, stated rather than left to be discovered: a function that ARMS a
+                    // handle and hands it on carries `Exec` with an EMPTY `cmds`, which `allow Exec
+                    // <list>` reads as uncertifiable — fail-CLOSED. The literal is recorded at the
+                    // launch because that is the point at which the dominance analysis knows which
+                    // write survives; claiming it at the write would claim a program for an execution
+                    // that may never happen with that value.
                     recordProcessRun(receiver: ma.base)
                 } else {
                     let est = isEstablishingMember(effect: eff, root: rt, member: member)
@@ -2975,6 +3171,7 @@ final class CallCollector: SyntaxVisitor {
     override func visit(_ node: SequenceExprSyntax) -> SyntaxVisitorContinueKind {
         let elems = Array(node.elements)
         recordProcessLocatorWrite(elems)
+        recordInvocationConfigWrite(elems)   // SPEC §1 ⟨0.32⟩ — configuring an invocation IS the capability
         var i = 0
         while i + 2 < elems.count + 1 && i + 1 < elems.count {
             guard let op = elems[i + 1].as(BinaryOperatorExprSyntax.self) else { i += 1; continue }
