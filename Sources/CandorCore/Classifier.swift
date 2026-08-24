@@ -1331,6 +1331,168 @@ public func isEstablishingFree(effect: String, name: String) -> Bool {
     }
 }
 
+// ── ⟨0.32⟩ ONE CAPABILITY, EVERY SPELLING ─────────────────────────────────────────────────────────
+//
+// **THE VEIN.** Foundation ships most process/filesystem/clock capabilities in TWO spellings: a
+// receiver-rooted one (`FileManager.default.temporaryDirectory`) and a C-era FREE FUNCTION doing exactly
+// the same thing (`NSTemporaryDirectory()`). This engine modelled them in two SEPARATE tables —
+// `kappaMember`/`kappaPropertyRead` keyed on a receiver root, `kappaFree` keyed on a bare name — and
+// nothing made the two agree. So a capability could be, and repeatedly was, charged at one spelling and
+// SILENT at its twin: the caller of the silent one certified PURE, which is the cardinal sin.
+//
+// MEASURED before this table existed, one fixture per pair (`ABSENT` = the ⟨0.21⟩ purity claim):
+//
+//     ProcessInfo.processInfo.arguments          ABSENT   CommandLine.arguments               Env
+//     NSHomeDirectory()                          ABSENT   FileManager…homeDirectoryForCurrentUser  Fs
+//     NSHomeDirectoryForUser(_:)                 ABSENT   (same)                              Fs
+//     NSTemporaryDirectory()                     ABSENT   FileManager…temporaryDirectory      Fs
+//     NSSearchPathForDirectoriesInDomains(…)     ABSENT   FileManager…urls(for:in:)           Fs
+//     NSUserName() / NSFullUserName()            ABSENT   ProcessInfo…hostName                Env
+//     CFAbsoluteTimeGetCurrent()                 ABSENT   Date()                              Clock
+//     gettimeofday(…) / clock_gettime(…)         ABSENT   ProcessInfo…systemUptime            Clock
+//
+// The argv row is the one that names the vein rather than an instance: `f419648` closed the argv
+// divergence with a commit message reading "argv is Env — the divergence is closed four-way", and closed
+// it for `CommandLine.arguments` ONLY, leaving `ProcessInfo.processInfo.arguments` — the same value, the
+// same channel, one table over — reading pure. Live in firebase-ios-sdk, where
+// `AILog.additionalLoggingEnabled()` reads argv through it and is absent from the report entirely.
+//
+// **HOW A SIXTH GETS CAUGHT.** A capability now has ONE ROW carrying every spelling of it, and both
+// classifiers read that row: `kappaFree` takes `freeCalls` and `kappaPropertyRead` takes `propertyReads`,
+// so there is no longer anywhere to add a twin-family spelling to ONE of them. `witnesses` is every
+// spelling as a Swift expression, and `CapabilitySpellingParityProcessTests` scans a fixture built from
+// it — one function per witness — asserting they ALL report the row's effect. So: a row added with an
+// empty column fails the moment its witnesses disagree, a spelling added to one classifier has to be
+// added to the row (there is no other door), and a spelling whose support silently regresses fails on the
+// next run. What this does NOT catch, said plainly rather than left to be assumed: a capability nobody
+// has modelled in EITHER spelling. That is the κ coverage ledger's job, not this table's, and the ledger
+// discloses it rather than certifying it pure.
+//
+// THE DENYLIST DISCIPLINE STILL APPLIES to the free column (see `kappaFree`'s NOTE on collision-prone
+// names). Deliberately ABSENT, each for a stated reason rather than by omission:
+//   * `time`, `clock`, `random`, `rand` — ultra-common words; a project free function of that name is
+//     likelier than the C call, and the call site's `localFreeFns` guard only covers spellings this
+//     package declares itself.
+//   * `getpid`, `getuid`, `geteuid` — process/user IDs. NO member spelling in this engine's tables
+//     charges that family, so the parity rule does not reach them, and adding them would be a NEW
+//     capability decided by one engine alone — which is exactly how the argv divergence started.
+//   * `gethostname`, `getcwd` — MEASURED as already disclosed `Unknown` (their `inout` buffer defeats
+//     the resolver), so they are not silent under-reports. Refining a disclosed Unknown is a precision
+//     question and belongs to a different rung.
+//   * `NSOpenStepRootDirectory()` — returns a constant path, touching no filesystem.
+public struct CapabilitySpelling: Sendable {
+    /// One free-function spelling and the arity its C/Foundation signature fixes (`nil` = any arity).
+    public struct FreeSpelling: Sendable {
+        public let name: String
+        public let arity: Int?
+        public init(_ name: String, _ arity: Int? = nil) { self.name = name; self.arity = arity }
+    }
+    /// What this capability IS, in one phrase — the thing every spelling below does. Written for the
+    /// reader deciding whether a new spelling belongs on this row or on a new one.
+    public let capability: String
+    public let effect: String
+    /// PROPERTY/MEMBER spellings THIS TABLE SERVES: receiver root -> property names. Read live by
+    /// `kappaPropertyRead`. A family another table already serves (FileManager's `FS_MEMBERS`, which
+    /// covers both the property and the method forms) leaves this empty and appears only in `witnesses`.
+    public let propertyReads: [String: [String]]
+    /// FREE-function spellings, with the arity the C/Foundation signature fixes — `nil` for any arity.
+    /// The arity gate is the anti-fabrication half for the names that are also ordinary constructors:
+    /// `Date()` reads the clock, `Date(timeInterval:since:)` is arithmetic.
+    public let freeCalls: [FreeSpelling]
+    /// EVERY spelling as a Swift EXPRESSION — the parity battery's fixture source, including spellings
+    /// another table serves, so one row is the WHOLE capability and not just this table's share of it.
+    public let witnesses: [String]
+}
+
+public let CAPABILITY_SPELLINGS: [CapabilitySpelling] = [
+    // §1 defines Env as "reading environment variables / THE PROCESS ENVIRONMENT", and argv is
+    // process-startup state delivered by the same `exec` that delivers envp; secrets arrive through it
+    // (`--token=…`) exactly as they do through a variable. candor-rust has always charged
+    // `std::env::args()` as Env while this engine and candor-ts read it as PURE — one question, answered
+    // two ways across the family, with no conformance row to catch it (cross-engine parity sweep,
+    // 2026-08-18).
+    //
+    // `processName` rides this row because Foundation DEFINES its default as argv[0]'s last path
+    // component — the same startup state through a third door. It is also SETTABLE, so a program that
+    // overwrote it reads back its own in-process value and the charge is an over-approximation there; a
+    // reader cannot tell the two apart, and charging is the fail-closed side of that, on the same footing
+    // as the rest of κ. MEASURED across the seven-package corpus: not one call site, so the row costs
+    // nothing in noise today and is here to keep the capability whole rather than to catch something.
+    CapabilitySpelling(
+        capability: "the process ARGUMENT VECTOR — argv, as delivered by exec", effect: "Env",
+        propertyReads: ["ProcessInfo": ["arguments", "processName"],
+                        "CommandLine": ["arguments", "argc", "unsafeArgv"]],
+        freeCalls: [],
+        witnesses: ["ProcessInfo.processInfo.arguments", "ProcessInfo.processInfo.processName",
+                    "CommandLine.arguments", "CommandLine.argc", "CommandLine.unsafeArgv"]),
+    CapabilitySpelling(
+        capability: "the ENVIRONMENT BLOCK — envp", effect: "Env",
+        propertyReads: ["ProcessInfo": ["environment"]],
+        freeCalls: [.init("getenv"), .init("setenv"), .init("unsetenv")],
+        witnesses: ["ProcessInfo.processInfo.environment", #"getenv("HOME")"#,
+                    #"setenv("A", "b", 1)"#, #"unsetenv("A")"#]),
+    // MACHINE AND USER IDENTITY. `hostName` was already charged here; its free twins were not, and they
+    // are the spelling a shell-era codebase actually uses.
+    CapabilitySpelling(
+        capability: "the MACHINE AND USER IDENTITY of the host this process runs on", effect: "Env",
+        propertyReads: ["ProcessInfo": ["hostName", "userName", "fullUserName"]],
+        freeCalls: [.init("NSUserName"), .init("NSFullUserName")],
+        witnesses: ["ProcessInfo.processInfo.hostName", "ProcessInfo.processInfo.userName",
+                    "ProcessInfo.processInfo.fullUserName", "NSUserName()", "NSFullUserName()"]),
+    // THE CLOCK. `Date()`/`NSDate()` keep their arity gate — the no-arg form reads the clock, the
+    // `Date(timeInterval:since:)` form is arithmetic on a value you already had. ContinuousClock and
+    // SuspendingClock appear as PROPERTIES because the idiomatic Swift 5.7+ monotonic read is
+    // `ContinuousClock().now` / `clock.now` / `ContinuousClock.now` — never a `.now()` call.
+    CapabilitySpelling(
+        capability: "a READ OF THE CURRENT TIME — wall clock or monotonic", effect: "Clock",
+        propertyReads: ["ProcessInfo": ["systemUptime"], "Date": ["now"],
+                        "ContinuousClock": ["now"], "SuspendingClock": ["now"]],
+        freeCalls: [.init("Date", 0), .init("NSDate", 0), .init("CACurrentMediaTime"), .init("mach_absolute_time"),
+                    .init("CFAbsoluteTimeGetCurrent"), .init("gettimeofday"), .init("clock_gettime")],
+        witnesses: ["ProcessInfo.processInfo.systemUptime", "Date.now", "Date()", "NSDate()",
+                    "ContinuousClock().now", "CACurrentMediaTime()", "mach_absolute_time()",
+                    "CFAbsoluteTimeGetCurrent()"]),
+    // WELL-KNOWN DIRECTORIES. The member column is served by `FS_MEMBERS` (which covers the property AND
+    // the method form in one set), so `propertyReads` stays empty here and the row's member spellings
+    // live in `witnesses` — where the parity battery still holds them to the same effect.
+    CapabilitySpelling(
+        capability: "a WELL-KNOWN DIRECTORY location resolved against the live filesystem", effect: "Fs",
+        propertyReads: [:],
+        freeCalls: [.init("NSHomeDirectory"), .init("NSHomeDirectoryForUser"),
+                    .init("NSTemporaryDirectory"), .init("NSSearchPathForDirectoriesInDomains")],
+        witnesses: ["FileManager.default.homeDirectoryForCurrentUser",
+                    "FileManager.default.temporaryDirectory",
+                    "FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)",
+                    "NSHomeDirectory()", #"NSHomeDirectoryForUser("root")"#, "NSTemporaryDirectory()",
+                    "NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true)"]),
+]
+
+/// A hit in `CAPABILITY_FREE_EFFECT`: the row's effect, and the arity its signature fixes.
+public struct CapabilityFreeHit: Sendable {
+    public let effect: String
+    public let arity: Int?
+}
+
+/// `CAPABILITY_SPELLINGS`' property column, flattened for lookup: root -> member -> effect.
+public let CAPABILITY_PROPERTY_EFFECT: [String: [String: String]] = {
+    var out: [String: [String: String]] = [:]
+    for row in CAPABILITY_SPELLINGS {
+        for (root, names) in row.propertyReads {
+            for n in names { out[root, default: [:]][n] = row.effect }
+        }
+    }
+    return out
+}()
+
+/// …and its free column: name -> (effect, the arity the signature fixes, or nil for any).
+public let CAPABILITY_FREE_EFFECT: [String: CapabilityFreeHit] = {
+    var out: [String: CapabilityFreeHit] = [:]
+    for row in CAPABILITY_SPELLINGS {
+        for f in row.freeCalls { out[f.name] = CapabilityFreeHit(effect: row.effect, arity: f.arity) }
+    }
+    return out
+}()
+
 /// Classify a free-function or constructor call by name.
 public func kappaFree(name: String, argCount: Int) -> String? {
     // §1 ⟨0.13⟩ model-SDK surface: constructing a curated model-provider client (`OpenAI(apiToken:)`,
@@ -1341,10 +1503,14 @@ public func kappaFree(name: String, argCount: Int) -> String? {
     // `CNContactStore()`) is the sensor-access entry → that sensor effect. A local type of the same name
     // shadows this at the call site (localTypes/localFreeFns), like the model-SDK types (anti-fabrication).
     if let priv = PRIVACY_SDK_TYPES[name] { return priv }
+    // ⟨0.32⟩ THE FREE TWINS OF MEMBER SPELLINGS THIS ENGINE ALREADY CHARGES — one row per capability,
+    // read live from `CAPABILITY_SPELLINGS`. This arm replaced hand-written `case`s for `Date`/`NSDate`/
+    // `CACurrentMediaTime`/`mach_absolute_time`/`getenv`/`setenv`/`unsetenv`, which are now rows there
+    // beside the member spellings they twin; the arity gate travels with the row (`Date()` reads the
+    // clock, `Date(timeInterval:since:)` is arithmetic). See that table for the five twins that were
+    // SILENT and for what a sixth would do.
+    if let t = CAPABILITY_FREE_EFFECT[name] { return (t.arity == nil || t.arity == argCount) ? t.effect : nil }
     switch name {
-    case "Date": return argCount == 0 ? "Clock" : nil // Date() reads the clock; Date(timeInterval…) is arithmetic
-    case "NSDate": return argCount == 0 ? "Clock" : nil // the legacy twin of Date() (no-arg = current time)
-    case "CACurrentMediaTime", "mach_absolute_time": return "Clock" // monotonic clock reads (QuartzCore / mach)
     case "NSLog": return "Log"  // Foundation structured logging to the unified log/ASL (not plain stdout)
     case "Pipe": return "Ipc"   // constructs an OS pipe for inter-process stdio wiring (the IPC intent)
     case "UUID": return argCount == 0 ? "Rand" : nil  // UUID() draws v4 entropy; UUID(uuidString:) is a pure parse
@@ -1371,7 +1537,6 @@ public func kappaFree(name: String, argCount: Int) -> String? {
     case "NWBrowser", "NetService", "NetServiceBrowser": return "Net"   // bonjour/mDNS discovery
     case "SystemRandomNumberGenerator": return "Rand"
     case "arc4random", "arc4random_uniform", "getentropy": return "Rand"
-    case "getenv", "setenv", "unsetenv": return "Env"
     // The Keychain C surface (`import Security` — a PLATFORM module, so unmodeled calls read silent-pure,
     // the covered-module cardinal-sin shape). The four CRUD entry points → Fs (system secure store; NOT
     // Db — the family reserves Db for query-capable datastores). Distinctive PascalCase C names; a local
@@ -1410,22 +1575,12 @@ public func kappaFree(name: String, argCount: Int) -> String? {
 /// Property READS that are effects (no call expression): `ProcessInfo…environment`, `Date.now`,
 /// pasteboard accessors. Checked on member-access chains outside call position.
 public func kappaPropertyRead(root: String, path: [String]) -> String? {
-    if root == "ProcessInfo" && path.contains("environment") { return "Env" }
-    if root == "ProcessInfo" && path.contains("systemUptime") { return "Clock" } // monotonic clock read
-    if root == "ProcessInfo" && path.contains("hostName") { return "Env" }       // machine-identity read
-    // `CommandLine.arguments` / `.argc` / `.unsafeArgv` — the same channel as `environment`. §1 defines
-    // Env as "reading environment variables / THE PROCESS ENVIRONMENT", and argv is process-startup state
-    // delivered by the same `exec` that delivers envp; secrets arrive through it (`--token=…`) exactly as
-    // they do through a variable. candor-rust has always charged `std::env::args()` as Env while this
-    // engine and candor-ts read it as PURE — one question, answered two ways across the family, with no
-    // conformance row to catch it (a cross-engine parity sweep found it, 2026-08-18). Conformance to §1's
-    // existing wording, not a new clause.
-    if root == "CommandLine" && (path.contains("arguments") || path.contains("argc")
-                                 || path.contains("unsafeArgv")) { return "Env" }
-    if root == "Date" && path.contains("now") { return "Clock" }
-    // ContinuousClock/SuspendingClock `.now` — the idiomatic Swift 5.7+ monotonic-clock read is the
-    // PROPERTY form (`ContinuousClock().now`, `clock.now`, `ContinuousClock.now`), not a `.now()` call.
-    if (root == "ContinuousClock" || root == "SuspendingClock") && path.contains("now") { return "Clock" }
+    // ⟨0.32⟩ THE TWIN FAMILIES COME FROM `CAPABILITY_SPELLINGS`, not from a row written here — see that
+    // table for why. Adding a ProcessInfo/CommandLine/Date/Clock property to this function instead of to
+    // the table is the mistake the table exists to make impossible: there is nowhere here to put one.
+    if let e = CAPABILITY_PROPERTY_EFFECT[root], let hit = path.last(where: { e.keys.contains($0) }) {
+        return e[hit]
+    }
     if (root == "NSPasteboard" || root == "UIPasteboard") && path.contains("general") { return "Clipboard" }
     // FileManager property-form FS reads (`currentDirectoryPath`, `temporaryDirectory`,
     // `homeDirectoryForCurrentUser`): these are PROPERTIES, not calls, so they never reach the

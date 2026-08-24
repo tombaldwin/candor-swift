@@ -9,6 +9,47 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ ⟨0.32⟩ SILENT UNDER-REPORT: six capabilities were charged at one spelling and PURE at their twin.**
+  Foundation ships most process/filesystem/clock capabilities twice — a receiver-rooted spelling and a
+  C-era FREE FUNCTION doing exactly the same thing — and this engine modelled the two in SEPARATE tables
+  (`kappaMember`/`kappaPropertyRead` keyed on a receiver root, `kappaFree` keyed on a bare name) with
+  nothing making them agree. Measured, one fixture per pair, `ABSENT` being the ⟨0.21⟩ purity claim:
+
+  | free spelling | | member twin | |
+  |---|---|---|---|
+  | `ProcessInfo.processInfo.arguments` | ABSENT | `CommandLine.arguments` | `Env` |
+  | `NSHomeDirectory()` / `NSHomeDirectoryForUser(_:)` | ABSENT | `FileManager…homeDirectoryForCurrentUser` | `Fs` |
+  | `NSTemporaryDirectory()` | ABSENT | `FileManager…temporaryDirectory` | `Fs` |
+  | `NSSearchPathForDirectoriesInDomains(…)` | ABSENT | `FileManager…urls(for:in:)` | `Fs` |
+  | `NSUserName()` / `NSFullUserName()` | ABSENT | `ProcessInfo…hostName` | `Env` |
+  | `CFAbsoluteTimeGetCurrent()` | ABSENT | `Date()` | `Clock` |
+  | `gettimeofday(…)` / `clock_gettime(…)` | ABSENT | `ProcessInfo…systemUptime` | `Clock` |
+
+  `pure <fn>` exited 0 over a function that reads argv. LIVE in firebase-ios-sdk:
+  `AILog.additionalLoggingEnabled()` is `ProcessInfo.processInfo.arguments.contains(…)` and was absent
+  from the report entirely.
+
+  **THE FIX IS A TABLE, NOT SIX NAMES.** `CAPABILITY_SPELLINGS` holds one row per capability carrying
+  every spelling of it, and both classifiers read that row — so a twin-family spelling has nowhere to be
+  added to one of them. The hand-written cases for `Date`/`NSDate`/`CACurrentMediaTime`/
+  `mach_absolute_time`/`getenv`/`setenv`/`unsetenv` moved onto the rows they twin, arity gate and all.
+  Each row also carries `witnesses` — every spelling as an expression — which a standing battery scans as
+  a generated fixture, asserting they all report the row's effect; the battery is CALIBRATED (a
+  deliberately bogus row makes it fail and name the spelling). What it cannot catch is stated in the
+  table: a capability nobody modelled in EITHER spelling, which is the coverage ledger's job.
+
+  This is the THIRD instance of the shape in a week — `f419648` closed the argv divergence for
+  `CommandLine.arguments` only, and `1f8ecd3` is "one spelling of a file read was classified, its twin
+  was not".
+
+  **A/B over 7 packages / 23 567 units, plus 42 gate cells:** **zero effects lost**, 44 units newly
+  charged (43 `Env`, 1 `Fs`) from just **5 direct sources**, every one hand-traced to a real read —
+  swift-syntax's `Reduce.runVerifyRoundTripInSeparateProcess` (`arguments[0]`), pollen's
+  `importPatientDetailsFromHealthKit` (`NSFullUserName()`), firebase's `AILog.additionalLoggingEnabled`
+  and `DevEventConsoleLogger.logEvent` (both `arguments.contains`), and firebase's
+  `FileManager.temporaryDirectory(withName:)` (`NSTemporaryDirectory()`). One verdict cell moved:
+  firebase `deny Fs` 391 → 392 violations, on both routes together. No exit code flipped.
+
 - **⚠ ⟨0.32⟩ `gate --report` certified CLEAN where the scan REFUSED — a §3.1 route-equality violation,
   fail-OPEN.** The ⟨0.32⟩ unread-exclusion rule ("code this scan did not READ makes the verdict
   INCOMPLETE") landed on the scan route only: `writeGateVerdict`'s `unpeeked` parameter is defaulted, the
