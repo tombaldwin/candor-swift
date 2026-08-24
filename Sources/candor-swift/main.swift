@@ -1812,12 +1812,20 @@ let DERIVED_EXCLUSIONS: Set<String> = ["build-output"]
 /// ⟨0.32⟩ The exclusion classes this scan did NOT read — the third cause of an INCOMPLETE verdict.
 ///
 /// Two conditions, and both matter. `judgedElsewhere` is the producer's carve-out for a DERIVED copy of
-/// code already judged (`.build/`), which hides nothing. And the whole rule is gated on the peek having
-/// RUN at all: `peeked: false` also means no policy was configured and nothing was asked, which records
-/// an absence of QUESTION rather than an absence of evidence — without that gate every report written
-/// without a peek fails closed on contact, which is what it did in candor-java before the same fix.
-func unreadExclusions(_ report: Report) -> [String] {
-    guard report.outOfScope != nil else { return [] }   // nothing was asked of the peek
+/// code already judged (`.build/`), which hides nothing. And the rule is about the QUESTION BEING ASKED:
+/// only a `deny`/`pure` rule's answer depends on code outside the scan's scope, which is exactly the
+/// short-circuit `peekRules` applies below — so an allowlist gate is not charged for a peek nobody
+/// needed. On THIS route the question and the producer are one run, so the two are the same fact; on
+/// `gate --report` the condition is the CONSUMER's `pol.deny`, applied once to the value.
+///
+/// `policyDenies` REPLACED `report.outOfScope != nil`, which spelled the same fact BY ACCIDENT. That key
+/// is absent whenever the peek did not run — including when the policy had deny rules but no PEEKABLE
+/// class to run over — so the two agreed only because every class this engine excludes happens to be
+/// either peekable or `judgedElsewhere`. A sixth class that was neither would have made this route
+/// certify what `gate --report` refuses, in the fail-OPEN direction. The equality between the routes is
+/// now by construction rather than by coincidence.
+func unreadExclusions(_ report: Report, policyDenies: Bool) -> [String] {
+    guard policyDenies else { return [] }   // this policy's answer does not depend on unscanned code
     return report.excluded.filter { !$0.peeked && !$0.judgedElsewhere }.map(\.cls)
 }
 // THE PEEK. Read the files this scan deliberately did NOT judge, and say so when they hold an effect the
@@ -1842,6 +1850,11 @@ func unreadExclusions(_ report: Report) -> [String] {
 // ⟨0.29⟩ see `peekRead` at the assignment below: `excluded[].peeked` is an OUTCOME, so the scope block
 // cannot be built until the peek has run — it is assembled after this block, not before it.
 var peekRead = false
+/// ⟨0.32⟩ DOES THE POLICY THIS RUN CARRIES DENY ANYTHING? — the condition `unreadExclusions` is about,
+/// hoisted out of the peek block so the arm at the end of this file reads the SAME fact the peek
+/// short-circuits on rather than a proxy for it. `pure` is a DenyRule with an empty effect list, so it
+/// counts (see `peekRules` below, and the ⟨0.30⟩ note there for what flattening it away cost once).
+var peekPolicyDenies = false
 // ⟨0.29⟩ the classes the peek RAN over and could not read — see the `unanalyzed` loop below. Parse
 // failures are per file, so the completeness claim is withdrawn per class rather than wholesale.
 var peekUnread: Set<String> = []
@@ -1888,6 +1901,7 @@ if peekListPath == nil, let pp = policyPath {
     //   `Net`, so a peeked fn reaching an unknown host — which that rule does not deny — turned the
     //   verdict red while the same code in scope passed. Rule SCOPES were dropped identically.
     let peekRules = (parsedForPeek?.gateRefusals.isEmpty ?? false) ? (parsedForPeek?.deny ?? []) : []
+    peekPolicyDenies = !peekRules.isEmpty
     // `.build/` is held out of the peek, not just out of the scan — see `PEEKED_CLASSES`, which the
     // `excluded` block above reads too, so the disclosure and this filter cannot disagree.
     let peekable = excludedFiles.filter { PEEKED_CLASSES.contains($0.cls) }
@@ -2597,7 +2611,7 @@ for v in gateViolations { FileHandle.standardError.write(("[\(v.rule)] \(v.detai
 // --gate-json ⟨0.8⟩: the machine verdict, from the SAME gateViolations that set the exit code — written
 // BEFORE the exit below (ok:true,[] when no gate is configured). Unreadable policy already exited 2 above;
 // AS-EFF-005 records join the same list, so the verdict and the exit code can never disagree.
-if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVersion, analyzedCount: allFns.count, unanalyzed: unanalyzedUnits, coverage: unlisted.map(\.key), policyVocabulary: gatePolicyVocabulary, netPartners: report.netPartners.map { [$0] } ?? [], unevaluated: gateUnevaluated, ignored: gatePolicyIgnored, outOfScope: report.outOfScope ?? [], unpeeked: unreadExclusions(report)) }   // ⟨0.15 staged⟩ advisory, verdict-preserving; ⟨0.21⟩ analyzed + fail-closed unanalyzed; ⟨0.24⟩ the config vocabulary that participated
+if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVersion, analyzedCount: allFns.count, unanalyzed: unanalyzedUnits, coverage: unlisted.map(\.key), policyVocabulary: gatePolicyVocabulary, netPartners: report.netPartners.map { [$0] } ?? [], unevaluated: gateUnevaluated, ignored: gatePolicyIgnored, outOfScope: report.outOfScope ?? [], unpeeked: unreadExclusions(report, policyDenies: peekPolicyDenies)) }   // ⟨0.15 staged⟩ advisory, verdict-preserving; ⟨0.21⟩ analyzed + fail-closed unanalyzed; ⟨0.24⟩ the config vocabulary that participated
 let gateConfigured = policyPath != nil || baselinePath != nil
 if gateConfigured {
     if gateViolations.isEmpty {
@@ -2644,7 +2658,7 @@ if gateConfigured, let oos = report.outOfScope, !oos.isEmpty {
 // of is untouched. AFTER the two arms above, deliberately: a CONCRETE denied effect outside the scan is
 // a better message than "something went unread", and a real violation dominates both.
 if gateConfigured {
-    let unread = unreadExclusions(report)
+    let unread = unreadExclusions(report, policyDenies: peekPolicyDenies)
     if !unread.isEmpty {
         FileHandle.standardError.write(
             ("candor-swift: gate NOT certified — this scan did not READ \(unread.joined(separator: ", ")). "

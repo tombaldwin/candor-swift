@@ -9,6 +9,35 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ ⟨0.32⟩ `gate --report` CERTIFIED CODE NOBODY HAD READ — the unread-class rule was keyed on the
+  PRODUCER'S HISTORY instead of the question being asked.** The ⟨0.32⟩ rule ("a class this scan did not
+  READ makes the verdict INCOMPLETE") carved out the no-peek case by requiring `outOfScope` to be
+  PRESENT on the report. ⟨0.29⟩ omits that key when the producing scan carried no policy — which is
+  exactly the report a CI publishes when it scans in one job and gates the artifact in another — so the
+  whole rule was skipped in the case it exists for. **MEASURED on an ordinary SPM tree whose test helper
+  spawns `/bin/sh`: `candor-swift <dir> --policy 'deny Exec'` exits 2 naming the helper, while
+  `candor-swift gate --report N --policy 'deny Exec'` over a bare `--out N` of the same tree answered
+  exit 0, `{"ok": true}`, `policy ✓`.**
+
+  The carve-out is now the one the rule is about: **whether the hole matters is decided by the policy in
+  force NOW, not by the producer's history.** From a report the two causes of `peeked: false` — "opened
+  it and could not read it" and "never asked" — are indistinguishable, because they leave the identical
+  hole, and ⟨0.21⟩ licenses a purity claim only over units the scan JUDGED. `excluded` is mandatory from
+  ⟨0.29⟩ (SPEC §2.2), so a no-policy report is a current producer stating it never opened those files.
+  What survives is the condition on the QUESTION — only a `deny`/`pure` rule's answer depends on code
+  outside the scan's scope — applied ONCE to the value, because that same list feeds both `incomplete`/
+  `ok` in the verdict document and the exit code. `pure` counts: it is a deny rule with an EMPTY effect
+  list, so an implementation flattening rules into effect NAMES would silently disarm the strictest
+  policy the grammar has. Matches candor-rust `ab505c0` and candor-ts `9f22581`; conformance PART 62's
+  swift row now MATCHes four-way.
+
+  `excluded` also joins the strictly-read §2 keys, and its two flags are read on the NUMBER'S OWN TYPE
+  TAG rather than through `as? Bool`: Foundation bridges the integer `1` to a number that cast accepts,
+  so `"peeked": 1` would have read as "opened" and `"judgedElsewhere": 1` would have granted the
+  carve-out that suppresses the refusal. This engine has already shipped one live defect through that
+  same bridge (`analyzed: {count: true}` reading as JUDGED). A present-but-unreadable flag is now a
+  refusal NAMING the key; an ABSENT `excluded` (a pre-⟨0.29⟩ producer) still certifies.
+
 - **⚠ ⟨0.30⟩ AN ALIAS IN ONE POLICY RULE SWITCHED OFF THE DISCLOSURE FOR EVERY OTHER RULE — a strictly
   STRONGER policy answered WEAKER.** The ⟨0.30⟩ peek re-parses the policy file for itself and did so with
   no alias vocabulary, so a `deny Unknown[corp]` line written against a `.candor/config` `unknown-alias`
