@@ -99,6 +99,34 @@ private struct GateReportEnvelope {
 /// PRESENT must be a list OF STRINGS, and the envelope's `unanalyzed`/`coverage` must parse — each a
 /// refusal naming the key, never a drop. An ABSENT key still takes its documented default: that is the
 /// distinction the rule turns on, and conflating the two would refuse every legitimate report.
+/// A §2 boolean flag as an ANSWER: `false` for an ABSENT key (the documented, fail-closed default),
+/// the value for a real boolean, and `nil` for present-but-not-a-boolean, which the caller refuses.
+///
+/// **`as? Bool` IS NOT THAT TEST, and this engine has already shipped one live defect through the same
+/// bridge.** Foundation bridges a JSON `true` to `__NSCFBoolean`, and `NSNumber(1) as? Bool` SUCCEEDS
+/// with `true` — so `"peeked": 1` would read as "the peek opened those files" and `"judgedElsewhere": 1`
+/// would grant the carve-out that suppresses the refusal, both from a value no producer in this family
+/// writes. The identical bridge made `analyzed: {count: true}` read as JUDGED (see
+/// `readableAnalyzedCount` in Deps.swift, which rejects on the number's own type tag for the same
+/// reason and in the same words).
+///
+/// The tag test, not a value test: `objCType` is `"c"` for a boolean on Darwin Foundation AND on
+/// swift-corelibs-foundation (`Bool` is stored as `kCFNumberCharType`), while a JSON integer is
+/// `"q"`/`"l"`/`"i"` and a JSON float `"d"`. `true` and `1` are the same NUMBER, so only the tag can
+/// separate them.
+func readableFlag(_ v: Any?) -> Bool? {
+    guard let v else { return false }                        // ABSENT → the documented default
+    // A JSON `null` is a PRESENT key, so it is corrupt rather than absent — the ⟨0.26⟩ distinction, and
+    // the reading candor-ts takes (`"k" in e && typeof e.k !== "boolean"`) and candor-rust gets from
+    // serde (which rejects `null` for a `bool` even under `#[serde(default)]`). Both readings fail
+    // CLOSED here, so this is about the family answering one wire the same way, not about soundness.
+    guard !(v is NSNull) else { return nil }
+    guard let n = v as? NSNumber else { return nil }         // a string, a list, an object
+    let tag = String(cString: n.objCType)
+    guard tag == "c" || tag == "C" || tag == "B" else { return nil }   // a NUMBER is not a flag
+    return n.boolValue
+}
+
 private func mergeGateReport(_ full: String, into env: inout GateReportEnvelope) -> Bool {
     func corrupt(_ what: String) -> Bool {
         FileHandle.standardError.write(
@@ -215,44 +243,59 @@ private func mergeGateReport(_ full: String, into env: inout GateReportEnvelope)
     }
     // ⟨0.32⟩ THE THIRD CAUSE OF AN INCOMPLETE VERDICT — the exclusion classes this scan did NOT READ.
     //
-    // **ONLY WHEN THE PRODUCING SCAN WAS ASKED, and that conjunct is the whole subtlety.** `peeked: false`
-    // has two causes and they are not the same claim: the peek OPENED those files and could not read them
-    // (unread code — what this rule is for), or NO PEEK RAN AT ALL because no policy was configured, in
-    // which case nothing was asked and the flag records an absence of QUESTION rather than an absence of
-    // evidence. ⟨0.29⟩ already separates them in `outOfScope`: OMITTED when no policy was configured,
-    // present-and-empty when one was and the peek came back clean. Keying on that ABSENCE is the ⟨0.26⟩
-    // absent-vs-empty rule the rest of this format runs on, and it is the same conjunct candor-java
-    // (`scanWasAsked`) and candor-rust (`KeyRead::Present(_)`) apply on their own report routes. Without
-    // it, EVERY report written with no policy — and every pre-⟨0.30⟩ report, which carries neither key —
-    // exits 2 the moment a policy touches it.
+    // **THE RULE, stated once and applied on both routes: a class the producing scan did not READ
+    // licenses nothing, and whether that matters is decided by the policy in force NOW — not by the
+    // producer's history.** The condition on THIS run's policy is applied once, to the value, in
+    // `runGateReportCLI`; the read here is unconditional.
     //
-    // Read BEFORE `outOfScope` is consumed below only because the presence test is on the raw key; the
-    // two are one decision. The mirror on the scan route is `unreadExclusions` in main.swift, whose guard
-    // is the same fact spelled locally (`report.outOfScope != nil`).
-    if obj["outOfScope"] != nil {
-        // Strict for the same reason `unanalyzed` and `outOfScope` are: non-emptiness is a FAIL-CLOSED
-        // trigger, so a present-but-garbled key coerced to `[]` becomes the claim "nothing went unread" —
-        // the safe-LOOKING value, which is how `NOT certified` becomes `policy ✓`.
-        if let rawX = obj["excluded"] {
-            guard let arr = rawX as? [Any] else { return corrupt("`excluded` is present and is not a list") }
-            for x in arr {
-                guard let m = x as? [String: Any], let cls = m["class"] as? String, !cls.isEmpty else {
-                    return corrupt("an `excluded` member is not a `{class, count, peeked, reason}` object "
-                                   + "with a readable `class` — an exclusion class that cannot be NAMED "
-                                   + "cannot be reported, and dropping it would read as `peeked`")
-                }
-                // ABSENT `peeked` counts as NOT peeked. A producer that does not carry the key cannot be
-                // read as having opened the files: that is the fail-OPEN reading of a missing disclosure,
-                // which is the failure this key exists to prevent.
-                let peeked = m["peeked"] as? Bool ?? false
-                // ⟨0.32⟩ the PRODUCER's own carve-out for a DERIVED copy of code the same scan already
-                // judged (`.build/`). Read off the FLAG, never off the class token: the same concept is
-                // `build-output-archive` in candor-java and `build-script` in candor-rust, and rust's is
-                // code that RUNS and must fail closed — keying on the name would gate another engine's
-                // report differently from the engine that wrote it.
-                let judgedElsewhere = m["judgedElsewhere"] as? Bool ?? false
-                if !peeked && !judgedElsewhere { env.unpeeked.append(cls) }
+    // THIS BLOCK'S FIRST VERSION ALSO REQUIRED `outOfScope` TO BE PRESENT, and that was a VERIFIED
+    // FAIL-OPEN (measured 2026-08-24 on an ordinary SPM tree whose test helper spawns `/bin/sh`).
+    // ⟨0.29⟩ omits `outOfScope` when the producing scan carried no policy, so a report written by a bare
+    // `candor-swift <dir> --out N` — which marks every class `peeked: false`, nothing having been asked —
+    // skipped this whole rule and gated `deny Exec` at exit 0, `ok: true`, `policy ✓`, while
+    // `candor-swift <dir> --policy 'deny Exec'` over the SAME tree exited 2 naming the helper. The
+    // producer's silence about the QUESTION was being read as an answer about the CODE.
+    //
+    // `peeked: false` does have two causes — the peek OPENED those files and could not read them, or no
+    // peek ran at all — but FROM A REPORT they are indistinguishable, because they leave the identical
+    // hole: that code's effects are absent from `functions` because nothing looked, and ⟨0.21⟩ licenses a
+    // purity claim only over units the scan JUDGED. `excluded` is MANDATORY from ⟨0.29⟩ (SPEC §2.2), so a
+    // ⟨0.29⟩-era no-policy report over a tree with exclusions is a current producer stating it never
+    // opened those files — not an old format that cannot answer. The ⟨0.26⟩ absent-vs-empty rule still
+    // does its work one level down: an ABSENT `excluded` (a pre-⟨0.29⟩ producer) names nothing and
+    // refuses nothing.
+    //
+    // Strict for the same reason `unanalyzed` and `outOfScope` are: non-emptiness is a FAIL-CLOSED
+    // trigger, so a present-but-garbled key coerced to `[]` becomes the claim "nothing went unread" —
+    // the safe-LOOKING value, which is how `NOT certified` becomes `policy ✓`.
+    if let rawX = obj["excluded"] {
+        guard let arr = rawX as? [Any] else { return corrupt("`excluded` is present and is not a list") }
+        for x in arr {
+            guard let m = x as? [String: Any], let cls = m["class"] as? String, !cls.isEmpty else {
+                return corrupt("an `excluded` member is not a `{class, count, peeked, reason}` object "
+                               + "with a readable `class` — an exclusion class that cannot be NAMED "
+                               + "cannot be reported, and dropping it would read as `peeked`")
             }
+            // ABSENT `peeked` counts as NOT peeked. A producer that does not carry the key cannot be
+            // read as having opened the files: that is the fail-OPEN reading of a missing disclosure,
+            // which is the failure this key exists to prevent. PRESENT-AND-NOT-A-BOOLEAN is neither —
+            // it is corrupt input, and `readableFlag` is why it cannot be quietly read as `true`.
+            guard let peeked = readableFlag(m["peeked"]) else {
+                return corrupt("an `excluded` member's `peeked` is present and is not a boolean — a flag "
+                               + "that cannot be READ is not a flag that says `false`, and `\(cls)` would "
+                               + "then read as opened")
+            }
+            // ⟨0.32⟩ the PRODUCER's own carve-out for a DERIVED copy of code the same scan already
+            // judged (`.build/`). Read off the FLAG, never off the class token: the same concept is
+            // `build-output-archive` in candor-java and `build-script` in candor-rust, and rust's is
+            // code that RUNS and must fail closed — keying on the name would gate another engine's
+            // report differently from the engine that wrote it.
+            guard let judgedElsewhere = readableFlag(m["judgedElsewhere"]) else {
+                return corrupt("an `excluded` member's `judgedElsewhere` is present and is not a boolean "
+                               + "— this is the flag that SUPPRESSES the unread-class refusal, so a "
+                               + "value nobody can read must never be honoured as the carve-out")
+            }
+            if !peeked && !judgedElsewhere { env.unpeeked.append(cls) }
         }
     }
     // ⟨0.15⟩ the κ ledger. Same rule: it rides the verdict as `coverage.modules`, so a present-but-garbled
@@ -1007,15 +1050,33 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // sibling port measured a document saying `ok: false` while the process exited 0, and the ⟨0.28⟩
     // REPORT-sink rung shipped its own version of it.
     //
-    // GATED ON THIS POLICY HAVING A DENY RULE, the second half of the conjunct `mergeGateReport` starts
-    // (the first is "the producing scan was asked at all"). The producer's peek short-circuits on exactly
-    // this — `peekRules` is its DENY list — so keying on it here is what makes the two routes answer the
-    // same way. MEASURED AS DEFENSIVE rather than load-bearing on this engine, 2026-08-24: a policy with
-    // no deny rule cannot reach this line today, because every shape that produces one exits 2 earlier
-    // and for an unrelated reason (an empty/comment-only file, a `forbid`/`only` line and a valueless
-    // `allow` all trip the yielded-NO-RULES refusal; a well-formed `allow` trips this verb's uniform
-    // allow-refusal). Written out anyway, because a guard that states its own condition survives the
-    // removal of a refusal three screens up that exists for something else.
+    // **DOES THIS POLICY'S ANSWER DEPEND ON THE CODE THE PRODUCER LEFT UNREAD?** — the ONE place that
+    // question is asked on this route, and now the ONLY carve-out the rule has. `mergeGateReport` used to
+    // start a second one off the producer's history (`outOfScope` present ⇒ that scan was asked), and
+    // that was the verified fail-open: see the note there. What survives is the condition about the
+    // QUESTION rather than about the producer — only a `deny`/`pure` rule's answer depends on code
+    // outside the scan's scope, which is the same short-circuit the producer's own peek applies
+    // (`peekRules` in main.swift is its DENY list), so keying on it here is what makes the two routes
+    // answer the same way.
+    //
+    // `pol.deny` IS THE RIGHT LIST AND `pure` IS IN IT — the parser appends a `pure` line as a DenyRule
+    // with an EMPTY effect list (Policy.swift), so the strictest policy the grammar has arms this rule
+    // like any other. Reading the question off a flattened set of effect NAMES instead would find `pure`
+    // contributing nothing and silently disarm it; that is not hypothetical, it is what this engine's own
+    // peek did until ⟨0.30⟩ measured `pure` passing where `deny Exec` exited 2 on the same tree.
+    //
+    // MEASURED AS DEFENSIVE rather than load-bearing on this engine, 2026-08-24: a policy with no deny
+    // rule cannot reach this line today, because every shape that produces one exits 2 earlier and for an
+    // unrelated reason (an empty/comment-only file, a `forbid`/`only` line and a valueless `allow` all
+    // trip the yielded-NO-RULES refusal; a well-formed `allow` trips this verb's uniform allow-refusal).
+    // Written out anyway, because a guard that states its own condition survives the removal of a refusal
+    // three screens up that exists for something else.
+    //
+    // APPLIED TO THE VALUE, ONCE, and never repeated at the exit arm: `unpeeked` feeds BOTH the verdict
+    // DOCUMENT written below and the exit arm at the bottom, so a condition stated at only one of them
+    // lets the two disagree about a run — a document reading `ok: false, incomplete: true` beside exit 0.
+    // candor-rust had exactly that drift on its scan route, and the ⟨0.28⟩ REPORT-sink rung shipped its
+    // own version of it.
     let unpeeked = pol.deny.isEmpty ? [] : env.unpeeked
     var verdictSinks: [String] = []
     if wantJson { verdictSinks.append("-") }
@@ -1071,11 +1132,17 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // the scan route uses, so a target tripping more than one cause reports the same one on both routes:
     // a CONCRETE denied effect outside the scan is a better message than "something went unread", and a
     // real violation dominates both.
+    //
+    // AND IT NAMES THE REPAIR, because the common cause of this arm is now a report whose producer was
+    // never ASKED — the shape a CI produces when it scans in one job and gates the artifact in another.
+    // "Something went unread" with no next step is a dead end, and the next step is one flag.
     if !unpeeked.isEmpty {
         FileHandle.standardError.write(
             ("candor-swift gate: NOT certified — the report says the scan did not READ "
              + "\(unpeeked.joined(separator: ", ")). Their effects are absent because nothing looked, not "
-             + "because there are none, so the verdict is INCOMPLETE rather than a pass.\n")
+             + "because there are none, so the verdict is INCOMPLETE rather than a pass.\n"
+             + "→ re-scan the sources WITH this policy (candor-swift <dir> --policy <p> --out <locator>): "
+             + "a scan that was never asked cannot certify what it never opened.\n")
                 .data(using: .utf8)!)
         exit(2)
     }

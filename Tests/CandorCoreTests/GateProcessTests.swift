@@ -690,11 +690,18 @@ final class GateProcessTests: XCTestCase {
         }
         """, name: "App")
         defer { try? FileManager.default.removeItem(at: root) }
-        _ = try ProcessHarness.run(bin, [root.path], cwd: root)
-
-        // the real layer still fails, or the disclosure would be masking a broken gate
         let real = root.appendingPathComponent("real.policy")
         try "deny Contacts Orders\n".write(to: real, atomically: true, encoding: .utf8)
+        // THE PRODUCING SCAN CARRIES THE POLICY, and since ⟨0.32⟩ that is load-bearing rather than
+        // incidental: a bare scan leaves `Package.swift` (the `manifest` class) unpeeked, and gating that
+        // report under a deny rule is INCOMPLETE (exit 2) whatever the rules bind. This row is about a
+        // zero-MATCH rule being disclosed rather than refused, so its fixture has to reach that arm — the
+        // producing scan is asked the question, the peek reads the manifest, and the exit code below is
+        // then the one this row is actually about. Exit 1 is expected here (the in-scope violation) and
+        // discarded; what matters is the report it leaves behind.
+        _ = try ProcessHarness.run(bin, [root.path, "--policy", real.path], cwd: root)
+
+        // the real layer still fails, or the disclosure would be masking a broken gate
         let r1 = try ProcessHarness.run(bin, ["gate", "--report", ".candor/report", "--policy", real.path], cwd: root)
         XCTAssertEqual(r1.code, 1, "the control must still catch the violation: \(r1.out)\(r1.err)")
 
