@@ -9,6 +9,17 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.32.1] — 2026-08-25
+
+- **Family build bump — this engine is unchanged, and the ⚠ convention deserves a word.** No report byte
+  and no verdict moves across 0.32.1; the floor stays 0.32. The AS-EFF-005 guard will still refuse a
+  0.32.0 baseline against a 0.32.1 binary, because it keys on the engine-prefixed build string rather
+  than on whether behaviour happened to move — so regenerate as you would across any bump, and expect
+  the regenerated baseline to be identical. The patch exists for candor-java: `native.yml`'s parity gate
+  withheld the v0.32.0 native binaries after the image reported `0 functions` over a tree the jar found
+  210 in, and the fixed binaries are only reachable once `ENGINE_PIN` moves — one value for the whole
+  family, this engine's release tag among them.
+
 ## [0.32.0] — 2026-08-25
 
 - **The embedded AGENTS contract drifted from `AGENTS.md` on the ⟨0.32⟩ bump.** The pass rewrote three
