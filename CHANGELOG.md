@@ -9,6 +9,14 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **`AgentsDocDriftTests` now sees its own README's headline claim.** README.md line 3 reads
+  `**The Swift implementation of [candor-spec](…) 0.32**`, and the `) ` between the word and the version
+  put it outside the gate's `spec` + one-to-four-of-`[-: "]` grammar. This gate is the one the other four
+  engines ported at ⟨0.32⟩ *because* it was clean through that bump — and it was clean over a claim in
+  its own repo that it could not read. The grammar is now one to EIGHT of `[-: "*)\]]`, which also
+  covers the ALIGNED `"spec":    "0.32"` column, and the discrimination test carries both. Falsified:
+  setting README line 3 to 0.31 now fails the test naming the file and the exact text.
+
 - **The release-configuration build now happens on `main`, not for the first time on a pushed tag.**
   Every `swift build` in `ci.yml` was a *debug* build; nothing compiled `-c release` until `release.yml`
   did, on `push: tags: ['v*']`. So `candor-swift-macos-arm64` — the artifact a user downloads, and the
