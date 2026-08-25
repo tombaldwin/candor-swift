@@ -11,6 +11,21 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [0.32.0] — 2026-08-25
 
+- **The embedded AGENTS contract drifted from `AGENTS.md` on the ⟨0.32⟩ bump.** The pass rewrote three
+  spellings of the spec string in the doc and two in the embedded copy: it caught `spec-0.31` and
+  `"spec": "0.31"` — the two that look like declarations — and missed `(spec 0.31)` inside a quoted
+  example sentence, which looks like prose. Regenerated with `gen-agents-doc.py` rather than hand-patched,
+  so the one-line diff is itself the proof nothing else had drifted. The example's halves are coherent
+  again too: it read `candor-swift 0.31.0 (spec 0.32)`, a pair that has never existed.
+
+- **`fabrication_probe.py` still asserted the pre-⟨0.32⟩ ruling on argv.** ⟨0.32⟩ deliberately charges
+  `ProcessInfo.arguments`/`processName` as `Env` — argv is startup state from the same `exec` as envp, and
+  candor-rust has always charged `std::env::args()` that way — but the probe's PURE list was never updated.
+  It was invisible because the unit-test step failed first and every later step was skipped. The two names
+  moved to the probe's CONTROL list rather than being deleted, so the row keeps teeth in the direction that
+  now matters; `processIdentifier`, charged nowhere, remains the pure fixture.
+
+
 - **`callers`, `impact` and `path` had NO completeness reader in the other three engines — measured
   here, and this engine's `path` already hedges.** ⟨0.28⟩ widened SPEC §2's re-disclosure MUST to *"any
   verb whose output could be read as a NEGATIVE FINDING about the code — a verdict, an empty result set,
