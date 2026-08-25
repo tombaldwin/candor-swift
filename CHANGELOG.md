@@ -9,6 +9,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.32.0] — 2026-08-25
+
 - **`callers`, `impact` and `path` had NO completeness reader in the other three engines — measured
   here, and this engine's `path` already hedges.** ⟨0.28⟩ widened SPEC §2's re-disclosure MUST to *"any
   verb whose output could be read as a NEGATIVE FINDING about the code — a verdict, an empty result set,
