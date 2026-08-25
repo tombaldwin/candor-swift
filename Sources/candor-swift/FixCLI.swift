@@ -216,6 +216,28 @@ struct ReportCompleteness {
     /// not ANALYZED — the peek looks only for effects the PRODUCER's policy denied — so an undenied
     /// effect inside a peeked class is still outside `tour`'s graph and outside this hedge. That is the
     /// gate's residual too (SPEC §2 ⟨0.32⟩ files it), and closing it is a rung, not a fix.
+    ///
+    /// ⟨0.32⟩ **AND THE BOUNDARY THIS PREDICATE DRAWS WAS RULED AGAIN ON 2026-08-25, ON THE OTHER SIDE:
+    /// A VERB THAT HEDGES RETURNS ITS DATA *AND* THE WARNING — IT NEVER RETURNS THE WARNING INSTEAD OF
+    /// THE DATA.** ⟨0.28⟩ Rung A tells a verb *whose pinned shape cannot carry the caveat* to emit the
+    /// CAVEAT DOCUMENT INSTEAD of its result, and the arm above then armed that substitution on nearly
+    /// every no-policy report. Measured four-way: in the three engines that ship them, `show <fn> --json`
+    /// and `map --json` answered `{"incomplete": true}` with the result GONE, including through
+    /// candor-ts's MCP tools, which is the edit-time agent channel.
+    ///
+    /// **THE TEST IS WHETHER THE VERB ANSWERS `ok`.** `path`, `tour`, `show`, `map` and the rest of the
+    /// descriptive surface certify NOTHING — no `ok`, no verdict, no exit-code obligation — so there is
+    /// no claim for a pessimism rule to protect and withholding the answer buys no soundness; they take
+    /// `mustHedge` and keep their result. `gate`, and `fix-gate`/`unverified`/`fix` under `--strict`, DO
+    /// answer `ok`: they take `isIncomplete`, they refuse over these same bytes, and this ruling does not
+    /// touch them (⟨0.24⟩'s "never LESS sensitive than the gate"; conformance PARTs 62 and 67 pin it).
+    /// Getting that direction wrong re-opens the cardinal sin.
+    ///
+    /// **THIS ENGINE SHIPS NEITHER `show` NOR `map`** (surface: `path tour gains fix fix-gate unverified
+    /// privacy-manifest gate parsepolicy`), so Rung A's substitution has no site here and nothing changed
+    /// for the ruling — `path` and `tour` already merge `disclosureJSON` into their own document. Pinned
+    /// by `UnreadExclusionAdvisorySiblingTests.testTheDescriptiveVerbsKeepTheirResultBesideTheHedge`,
+    /// which also asserts the two verbs are still absent so a later port cannot arrive on the old shape.
     var mustHedge: Bool {
         isIncomplete || !judgedNothing.isEmpty || !noManifest.isEmpty || !unread.isEmpty
     }
