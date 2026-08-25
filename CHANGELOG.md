@@ -11,6 +11,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [0.32.1] — 2026-08-25
 
+- Build version → 0.32.1 (`engineVersion`); no analyzer change.
+
 - **Family build bump — this engine is unchanged, and the ⚠ convention deserves a word.** No report byte
   and no verdict moves across 0.32.1; the floor stays 0.32. The AS-EFF-005 guard will still refuse a
   0.32.0 baseline against a 0.32.1 binary, because it keys on the engine-prefixed build string rather
