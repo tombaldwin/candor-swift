@@ -9,6 +9,18 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **The release-configuration build now happens on `main`, not for the first time on a pushed tag.**
+  Every `swift build` in `ci.yml` was a *debug* build; nothing compiled `-c release` until `release.yml`
+  did, on `push: tags: ['v*']`. So `candor-swift-macos-arm64` — the artifact a user downloads, and the
+  only install route that does not need a Swift toolchain — was first compiled *after* the tag existed.
+  `-c release` is a different compile (whole-module optimisation, a different warning set, its own link
+  step), so a failure there was discoverable only by cutting. A new `release-build` job does the release
+  compile and asserts the binary's own `--version` names `main.swift`'s declared `engineVersion` —
+  `release.yml`'s artifact-level assertion, one step earlier, against the constant instead of the tag
+  (which is what the tag is itself checked against). It is a separate job so it cannot spend `test`'s
+  20-minute hang-detector budget, and it uploads the binary. `release.yml` is unchanged and still runs
+  its own tag-anchored checks.
+
 ## [0.32.1] — 2026-08-25
 
 - Build version → 0.32.1 (`engineVersion`); no analyzer change.

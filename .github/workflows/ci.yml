@@ -66,6 +66,57 @@ jobs:
         # main.swift, which left 2158 lines where a new subprocess was caught by nothing. See ci/self-gate.sh.
         run: bash ci/self-gate.sh
 
+  # THE RELEASE-CONFIGURATION BUILD, ON `main`, NOT ON A TAG. Every `swift build` in this file is a DEBUG
+  # build. Until 2026-08-25 nothing in this repo compiled `-c release` until `release.yml` did, on a pushed
+  # `v*` tag — so `candor-swift-macos-arm64`, the artifact a user downloads and the only install route that
+  # does not need a Swift toolchain, was compiled for the FIRST TIME after the tag existed and the release
+  # had been cut. `-c release` is a genuinely different compile: whole-module optimisation, a different set
+  # of warnings, its own link step. A gate positioned after the irreversible step grades the release; it
+  # does not guard it — the same lesson, the same week, as candor-java's native parity gate catching an
+  # empty scan only once v0.32.0 was public.
+  #
+  # `release.yml` still does this, and must: it compares the binary against the TAG, which does not exist
+  # yet here. What changes is that a release build which cannot COMPILE, or a binary that misreports
+  # itself, is now discovered on the push that caused it rather than on the cut.
+  #
+  # ITS OWN JOB, not a step in `test`. `test`'s 20-minute budget is a HANG DETECTOR calibrated against a
+  # ~3-minute healthy run (see its comment); hanging a whole second compile off it would make that budget
+  # meaningless and a genuine hang indistinguishable from a slow optimiser. A separate job also runs in
+  # parallel, so it adds no wall clock to CI, and macos-15 runners are free on a public repo.
+  release-build:
+    if: github.event_name != 'schedule'
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Release build + the binary names the declared engineVersion
+        run: |
+          set -euo pipefail
+          swift build -c release
+          BIN=.build/release/candor-swift
+          test -x "$BIN" || { echo "::error::no release binary at $BIN"; exit 1; }
+          # release.yml asserts the binary's --version names the TAG. There is no tag here, so assert it
+          # against what the tag is itself checked against — main.swift's engineVersion constant. Same
+          # assertion on the same artifact, one step earlier, needing no release to exist.
+          DECL="$(sed -n 's/^let engineVersion = "candor-swift-\(.*\)"$/\1/p' Sources/candor-swift/main.swift)"
+          # AND IT MUST NOT BE EMPTY. `case "$got" in *""*)` matches EVERYTHING — a rename or a reformat of
+          # that line would leave DECL empty and this gate would then pass on any binary whatsoever. That
+          # is the vacuous-gate shape candor-java's parity check grew its own non-vacuousness control for:
+          # a comparison whose reference value went missing does not fail, it stops asking anything.
+          [ -n "$DECL" ] || { echo "::error::could not read engineVersion from Sources/candor-swift/main.swift — this gate would be vacuous"; grep -n 'let engineVersion' Sources/candor-swift/main.swift; exit 1; }
+          got="$("$BIN" --version | head -1)"
+          case "$got" in
+            *"$DECL"*) echo "release binary reports '$got', which names the declared engineVersion $DECL";;
+            *) echo "::error::release binary reports '$got', which does not name the declared engineVersion $DECL"; exit 1;;
+          esac
+      # Keep it. A `main` build whose binary a later tag merely re-cuts is worth having downloadable,
+      # and it makes the artifact this job proved something you can actually go and look at.
+      - name: Upload the release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: candor-swift-macos-arm64
+          path: .build/release/candor-swift
+
   # Linux is in scope (Glibc/Musl sit in PLATFORM_MODULES) and swift-corelibs-foundation DIVERGES from
   # Darwin Foundation — the URL.deletingLastPathComponent root-behaviour class (38fbc71) would have been
   # caught here, not on a hung macOS runner.
