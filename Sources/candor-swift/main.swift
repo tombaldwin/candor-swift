@@ -2048,6 +2048,11 @@ if peekListPath == nil, let pp = policyPath {
             // operator can do — the thing that breaks their build. `found` stays as far as it got.
         }
         report.outOfScope = found
+        // ⟨0.33⟩ …and the QUESTION it was put — the SAME emission rule as `outOfScope` (this block runs
+        // only when a policy was configured and its rules were honoured), from the very rule list this
+        // peek matched with (`peekRules`), canonical-expanded so a `gate --report` consumer can compare
+        // its own rules against it verbatim (SPEC §2 ⟨0.33⟩, CandorCore.canonicalDenySet).
+        report.scannedUnder = canonicalDenySet(peekRules)
         // ⟨0.30⟩ NOTHING ANALYZABLE, AND THE PEEK FOUND NOTHING EITHER: REFUSE — AND REFUSE BEFORE AN
         // ENVELOPE EXISTS. The peek is the whole reason this run got past the early refusal; if it named
         // something, the ⟨0.30⟩ arm at the end reports it and exits 2 with `outOfScope` IN the report, so

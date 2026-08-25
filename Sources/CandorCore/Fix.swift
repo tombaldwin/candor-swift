@@ -451,23 +451,26 @@ public struct UnverifiedHole {
 // nothing about it argues for changing where their Net may go. Byte-identical to the rust reference's
 // `rule_and_upgrade` (conformance PART 12d pins the two against each other), and it subsumes the earlier
 // raw-line special case: the tokens are sorted at parse, so the reconstruction IS the canonical spelling.
+// ⟨0.33⟩ The source-form half is now `canonicalDenyRule` (CandorCore/Policy.swift) — the ONE renderer,
+// shared with the SPEC §2 ⟨0.33⟩ `scannedUnder` key, so the string an operator is quoted here and the
+// string a gate compares there cannot become two spellings of one rule.
 public func ruleUpgrade(_ r: DenyRule) -> (rule: String, upgrade: String) {
     let suffix = r.scope.isEmpty ? "" : " \(r.scope)"
     if r.effects.isEmpty {
-        return ("pure\(suffix)", "deny Unknown\(suffix)")
+        return (canonicalDenyRule(r), "deny Unknown\(suffix)")
     }
     func term(_ e: String) -> String {
         if e == "Unknown", !r.unknownClasses.isEmpty { return "Unknown[\(r.unknownClasses.joined(separator: ","))]" }
         if e == "Net", !r.netClasses.isEmpty { return "Net[\(r.netClasses.joined(separator: ","))]" }
         return e
     }
-    let effs = r.effects.sorted().map(term).joined(separator: " ")
     if r.effects.contains("Unknown") {
         // Already denies `Unknown`, so the edit is to UNNARROW that term — not to append a second one.
         let widened = r.effects.sorted().map { $0 == "Unknown" ? "Unknown" : term($0) }.joined(separator: " ")
-        return ("deny \(effs)\(suffix)", "deny \(widened)\(suffix)")
+        return (canonicalDenyRule(r), "deny \(widened)\(suffix)")
     }
-    return ("deny \(effs)\(suffix)", "deny \(effs) Unknown\(suffix)")
+    let effs = r.effects.sorted().map(term).joined(separator: " ")
+    return (canonicalDenyRule(r), "deny \(effs) Unknown\(suffix)")
 }
 
 // The single predicate for a provable-purity hole (eval/fixloop/DISPATCH-NOTE.md): a function that is

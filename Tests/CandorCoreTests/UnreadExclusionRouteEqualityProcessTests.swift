@@ -51,10 +51,16 @@ final class UnreadExclusionRouteEqualityProcessTests: XCTestCase {
     /// The §2 envelope, with the two keys this rung turns on supplied per row. `excluded` and
     /// `outOfScope` are spelled by the CALLER, including their ABSENCE — `nil` omits the key, which is
     /// the ⟨0.26⟩ cannot-answer form and a different claim from `[]`.
-    private func envelope(excluded: String?, outOfScope: String?) -> String {
+    ///
+    /// ⟨0.33⟩ …and a THIRD key, `scannedUnder` — the deny set the producing scan's peek was BOUNDED BY
+    /// (SPEC §2 ⟨0.33⟩), raw JSON exactly like its siblings. `nil` omits it, which after this rung is a
+    /// DIFFERENT claim from an empty `excluded[].peeked` history: an `excluded` entry with `peeked: true`
+    /// beside an ABSENT `scannedUnder` is the pre-⟨0.33⟩ producer shape and fails closed on its own.
+    private func envelope(excluded: String?, outOfScope: String?, scannedUnder: String? = nil) -> String {
         var extra = ""
         if let excluded { extra += ",\"excluded\":\(excluded)" }
         if let outOfScope { extra += ",\"outOfScope\":\(outOfScope)" }
+        if let scannedUnder { extra += ",\"scannedUnder\":\(scannedUnder)" }
         return """
         {"candor":{"spec":"0.32","toolchain":"swiftsyntax","version":"candor-swift-0.32.0"},
          "package":"App","analyzed":{"count":2,"digest":"1111111111111111"}\(extra),
@@ -84,19 +90,115 @@ final class UnreadExclusionRouteEqualityProcessTests: XCTestCase {
     /// CONTROL 1 — A FULLY-PEEKED REPORT STILL GATES GREEN. The refusal keys on `peeked: false`, so the
     /// cheapest way to "fix" the fail-open is to refuse over every report that declares an exclusion at
     /// all. That value passes the defect row below while deleting the verb.
+    ///
+    /// ⟨0.33⟩ …AND "ASKED" IS NOW PART OF THE FIXTURE RATHER THAN AN ASSUMPTION. `peeked: true` is true
+    /// only relative to the deny set the producer HELD (SPEC §2 ⟨0.33⟩), so this control only says what
+    /// it claims when the producer's `scannedUnder` covers the rule being gated. Before that key existed
+    /// the fixture could not express the difference; `testAPeekedReportWithoutScannedUnderRefuses` below
+    /// drives the identical bytes WITHOUT it and requires exit 2.
     func testAFullyPeekedReportStillGatesGreen() throws {
         let root = try makeReportDir(
             envelope: envelope(excluded: #"[{"class":"harness-target","count":2,"peeked":true,"reason":"tests"}]"#,
-                               outOfScope: "[]"),
+                               outOfScope: "[]", scannedUnder: #"{"deny":["deny Net"]}"#),
             policy: "deny Net\n")
         defer { try? FileManager.default.removeItem(at: root) }
         let v = root.appendingPathComponent("verdict.json")
         let r = try gate(root, verdict: v)
-        XCTAssertEqual(r.code, 0, "the peek read every excluded class and found nothing — nothing is "
-                       + "unread, so there is nothing to refuse over: \(r.err)")
+        XCTAssertEqual(r.code, 0, "a class the producer READ, under THIS question, hides nothing: \(r.err)")
         let d = try doc(try String(contentsOf: v, encoding: .utf8))
         XCTAssertEqual(d["ok"] as? Bool, true, "…and the DOCUMENT must say so too: \(d)")
         XCTAssertNil(d["incomplete"], "a complete verdict carries no `incomplete` key: \(d)")
+    }
+
+    /// ⟨0.33⟩ THE HOLE THE `scannedUnder` KEY EXISTS FOR — a class the producer READ, but read while
+    /// holding a deny set that does not cover THIS gate's rule. MEASURED on candor-java 0.32.1 over a
+    /// real tree whose excluded source runs `Runtime.exec("id")`:
+    ///
+    ///     candor <tree> --policy 'deny Net'  --json A   -> exit 0, `peeked: true`, `outOfScope: []`
+    ///     candor <tree> --policy 'deny Exec'            -> exit 2  (there IS an Exec out there)
+    ///     candor gate --report A --policy 'deny Exec'   -> exit 0, `no violations`   <- the fail-open
+    ///
+    /// ⟨0.32⟩'s unread-class rule correctly does not fire here — the class really was read — and the
+    /// ⟨0.29⟩ bound had filtered what the peek LOOKED FOR to the producer's denied effects, so the `Exec`
+    /// was seen and discarded as out of that question.
+    func testAPeekedReportUnderADifferentDenySetRefuses() throws {
+        let root = try makeReportDir(
+            envelope: envelope(excluded: #"[{"class":"harness-target","count":2,"peeked":true,"reason":"tests"}]"#,
+                               outOfScope: "[]", scannedUnder: #"{"deny":["deny Net"]}"#),
+            policy: "deny Exec\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try gate(root)
+        XCTAssertEqual(r.code, 2, "the peek was bounded by `deny Net`, so its empty finding answers "
+                       + "nothing about `deny Exec`: \(r.err)")
+        XCTAssertTrue(r.err.contains("deny Exec"),
+                      "…and the refusal must NAME the rule that went unasked: \(r.err)")
+        XCTAssertTrue(r.err.contains("THE SAME policy"),
+                      "…and the remedy must say THE SAME policy, not merely A policy — the loose reading "
+                      + "is what PRODUCES this hole, because the operator DID scan with a policy: \(r.err)")
+    }
+
+    /// ⟨0.33⟩ AN ABSENT `scannedUnder` IS THE EMPTY SET, so a pre-⟨0.33⟩ report carrying `peeked: true`
+    /// fails closed — the same shape ⟨0.32⟩ took over a ⟨0.29⟩-era no-policy report. Under the ⟨0.29⟩
+    /// bound a class reaches `peeked: true` only when the producing scan HELD a deny rule, so the
+    /// absence identifies a pre-rung producer precisely and the remedy is exact: re-scan with a current
+    /// engine under this gate's own policy.
+    func testAPeekedReportWithoutScannedUnderRefuses() throws {
+        let root = try makeReportDir(
+            envelope: envelope(excluded: #"[{"class":"harness-target","count":2,"peeked":true,"reason":"tests"}]"#,
+                               outOfScope: "[]"),
+            policy: "deny Exec\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try gate(root)
+        XCTAssertEqual(r.code, 2, "a producer that does not say what it was asked cannot be read as "
+                       + "having been asked THIS: \(r.err)")
+    }
+
+    /// ⟨0.33⟩ THE COVERAGE CONTROL, and it is why the key is the RULE SET rather than a digest: a
+    /// producer that held `deny Net` AND `deny Exec` fully answers a consumer asking only one of them. A
+    /// digest could decide only equality and would refuse this — same implementation cost, strictly
+    /// worse answer.
+    func testASupersetProducerStillCertifies() throws {
+        let root = try makeReportDir(
+            envelope: envelope(excluded: #"[{"class":"harness-target","count":2,"peeked":true,"reason":"tests"}]"#,
+                               outOfScope: "[]", scannedUnder: #"{"deny":["deny Exec","deny Net"]}"#),
+            policy: "deny Exec\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try gate(root)
+        XCTAssertEqual(r.code, 0, "`deny Exec` is covered by the producer's set, so refusing it is a "
+                       + "pure over-charge: \(r.err)")
+    }
+
+    /// ⟨0.33⟩ THE OVER-CHARGE CONTROL THE DESIGN NAMES FIRST, because a careless implementation gets it
+    /// wrong in the LOUD direction: with NO class peeked, differing policies must still certify. The
+    /// effect sets of ANALYZED code are policy-independent — only the PEEK was ever bounded by a deny
+    /// set — so refusing here would redden every scan-then-gate pipeline in the family for a difference
+    /// that changed no evidence.
+    func testDifferingPoliciesOverAnUnpeekedNothingStillCertify() throws {
+        let root = try makeReportDir(envelope: envelope(excluded: "[]", outOfScope: nil,
+                                                        scannedUnder: #"{"deny":["deny Net"]}"#),
+                                     policy: "deny Exec\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try gate(root)
+        XCTAssertEqual(r.code, 0, "nothing was peeked, so no answer here was bounded by the producer's "
+                       + "deny set: \(r.err)")
+    }
+
+    /// ⟨0.33⟩ A GARBLED `scannedUnder` MUST NOT MANUFACTURE COVERAGE. The fail-open direction here is the
+    /// MIRROR of `peeked`'s: there the safe-looking value was "no exclusions", here it would be "the
+    /// producer held these rules".
+    func testAGarbledScannedUnderCannotCertify() throws {
+        let shapes = [#""deny Exec""#, "7", "true", "null", "{}", #"{"deny":"deny Exec"}"#,
+                      #"{"deny":7}"#, #"{"deny":["deny Exec",7]}"#]
+        for shape in shapes {
+            let root = try makeReportDir(
+                envelope: envelope(excluded: #"[{"class":"harness-target","count":2,"peeked":true,"reason":"tests"}]"#,
+                                   outOfScope: "[]", scannedUnder: shape),
+                policy: "deny Exec\n")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let r = try gate(root)
+            XCTAssertEqual(r.code, 2, "`scannedUnder`: \(shape) is not the §2 shape, and reading it as "
+                           + "coverage certifies a question the producer was never put: \(r.err)")
+        }
     }
 
     /// CONTROL 2 — AN ABSENT `excluded` STILL GATES GREEN. `excluded` became mandatory at ⟨0.29⟩; a
@@ -270,7 +372,11 @@ final class UnreadExclusionRouteEqualityProcessTests: XCTestCase {
             ("excluded []",   "[]", 0, "policy ✓"),
         ]
         for (name, exc, want, marker) in rows {
-            let root = try makeReportDir(envelope: envelope(excluded: exc, outOfScope: nil),
+            // ⟨0.33⟩ EVERY ROW CARRIES A `scannedUnder` COVERING `deny Net` — this table is about the
+            // `peeked`/`judgedElsewhere` FLAGS, and without it the "peeked true" row would test the
+            // ⟨0.33⟩ cause (an absent `scannedUnder`) instead of the flag shape it names.
+            let root = try makeReportDir(envelope: envelope(excluded: exc, outOfScope: nil,
+                                                            scannedUnder: #"{"deny":["deny Net"]}"#),
                                          policy: "deny Net\n")
             defer { try? FileManager.default.removeItem(at: root) }
             let r = try gate(root)

@@ -132,6 +132,19 @@ struct Report {
     // NEVER A `violation`. Folding these into the gate would move verdicts and make an exit code depend on
     // a file the gate declined to judge — the opposite of what this rung promises.
     var outOfScope: [OutOfScopeFinding]? = nil
+    // ⟨0.33⟩ THE QUESTION THE PEEK WAS PUT — the deny rules this scan held, in the CANONICAL EXPANDED
+    // form the matcher used (`CandorCore.canonicalDenySet`). `peeked: true` on an `excluded` entry is
+    // true only RELATIVE to this set: the ⟨0.29⟩ bound above filters the peek to effects the policy
+    // DENIES, so a class read under `deny Net` says nothing about `Exec` in those same files. Without
+    // this key a consumer gating with a DIFFERENT deny set gets a definite answer to a question nobody
+    // asked, and it fails OPEN on `gate --report` — past every ⟨0.32⟩ control, because the class really
+    // WAS read (candor-spec SPEC.md §2 ⟨0.33⟩).
+    //
+    // NIL (key omitted) under exactly `outOfScope`'s OWN emission rule in this engine: set at the same
+    // site `outOfScope` is set (main.swift), so an absent `outOfScope` and an absent `scannedUnder` are
+    // always the same run here. Present-and-EMPTY is a different claim from ABSENT (a policy stood and
+    // denied nothing, vs nothing was asked / a refused policy), and the two states must not collapse.
+    var scannedUnder: [String]? = nil
     // ⟨0.31⟩ the ambient `net-partner` declaration that MOVED a `netClass` — the config file that declared
     // it, and the declared hosts that actually PARTICIPATED. `hosts` is what participated, not what was
     // declared: a config listing twenty partners of which one matched discloses the one, because a list of
@@ -213,6 +226,10 @@ struct Report {
         }
         // ⟨0.29⟩ …and what the peek found in them. Omitted when nil — no policy, so no question was asked.
         if let oos = outOfScope { env["outOfScope"] = oos.map { $0.toJSON() } }
+        // ⟨0.33⟩ …and THE QUESTION the peek was put — immediately after the answer it qualifies, so a
+        // reader meets the two together, and after `outOfScope`/before `netPartners`: the position
+        // candor-java uses, so key order does not depend on which engine produced the report.
+        if let su = scannedUnder { env["scannedUnder"] = ["deny": su] }
         // ⟨0.31⟩ after `outOfScope`, before `functions` — the position ts, rust and java also use, so key
         // order does not depend on which engine produced the report.
         if let np = netPartners { env["netPartners"] = ["config": np.config, "hosts": np.hosts] }

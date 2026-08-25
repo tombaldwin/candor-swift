@@ -70,6 +70,15 @@ private struct GateReportEnvelope {
     /// disclosure and broke §3.1 route-equality there. Populated per FILE (see `mergeGateReport`), so a
     /// multi-report locator unions its members' unread classes the way it unions their manifests.
     var unpeeked: [String] = []
+    /// ⟨0.33⟩ THE QUESTION EACH PEEKING REPORT'S PRODUCER WAS PUT (SPEC §2 ⟨0.33⟩) — one element per
+    /// REPORT FILE that carries at least one `excluded` entry with `peeked: true` and no
+    /// `judgedElsewhere`, never a union across files (`scannedUnder` is a fact about ONE producing scan).
+    /// A file peeking nothing contributes no element: analysed code's effect sets are policy-independent,
+    /// so only the peek was ever bounded, and refusing over a report that excluded nothing peeked would be
+    /// a pure over-charge. The element is the EMPTY SET when the file peeked something but carries no
+    /// `scannedUnder` (a pre-⟨0.33⟩ producer, which fails closed) or an explicit empty deny set (a policy
+    /// that stood and denied nothing).
+    var scannedUnderOfPeeked: [Set<String>] = []
     var coverageModules: Set<String> = []
     var entries: [GateReportEntry] = []
     /// ⟨0.24⟩ Does every report at this locator say it JUDGED NOTHING? (SPEC §2's three-row table, bound
@@ -268,6 +277,9 @@ private func mergeGateReport(_ full: String, into env: inout GateReportEnvelope)
     // Strict for the same reason `unanalyzed` and `outOfScope` are: non-emptiness is a FAIL-CLOSED
     // trigger, so a present-but-garbled key coerced to `[]` becomes the claim "nothing went unread" —
     // the safe-LOOKING value, which is how `NOT certified` becomes `policy ✓`.
+    // ⟨0.33⟩ does THIS FILE carry any `excluded` entry that was peeked (and not `judgedElsewhere`)? THE
+    // PRECONDITION of the cross-policy refusal below — see `scannedUnderOfPeeked`.
+    var filePeekedAny = false
     if let rawX = obj["excluded"] {
         guard let arr = rawX as? [Any] else { return corrupt("`excluded` is present and is not a list") }
         for x in arr {
@@ -296,8 +308,32 @@ private func mergeGateReport(_ full: String, into env: inout GateReportEnvelope)
                                + "value nobody can read must never be honoured as the carve-out")
             }
             if !peeked && !judgedElsewhere { env.unpeeked.append(cls) }
+            if peeked && !judgedElsewhere { filePeekedAny = true }
         }
     }
+    // ⟨0.33⟩ THE QUESTION THIS FILE'S PEEK WAS PUT (SPEC §2 ⟨0.33⟩) — read as STRICTLY as `outOfScope`
+    // above and for the identical reason: the fail-open direction here is the MIRROR of `peeked`'s. There
+    // the safe-looking coercion was "no exclusions"; here it would be "the producer held these rules" —
+    // reading a garbled value that way would MANUFACTURE coverage the producer never claimed.
+    var scannedUnderThisFile: Set<String>? = nil
+    if let rawSU = obj["scannedUnder"] {
+        guard let m = rawSU as? [String: Any], let denyRaw = m["deny"] as? [Any] else {
+            return corrupt("`scannedUnder` is present and is not a `{deny: [string, …]}` object — it names "
+                           + "the deny set this report's peek was bounded by, and a gate cannot tell what "
+                           + "went unasked without it (§2)")
+        }
+        let denyStrs = denyRaw.compactMap { $0 as? String }
+        guard denyStrs.count == denyRaw.count else {
+            return corrupt("`scannedUnder.deny` is present and contains a non-string member")
+        }
+        scannedUnderThisFile = Set(denyStrs)
+    }
+    // ⟨0.33⟩ ONLY WHEN THIS FILE PEEKED SOMETHING does its `scannedUnder` become a fact worth comparing —
+    // the over-charge control this rung's design names first (analysed code's effect sets are
+    // policy-independent, so a report peeking nothing contributes no element here). An ABSENT
+    // `scannedUnder` beside a peeked class is the EMPTY SET for the subset test (SPEC §2 ⟨0.33⟩), never a
+    // licence — a pre-⟨0.33⟩ producer fails closed exactly as ⟨0.32⟩'s absent `outOfScope` case does.
+    if filePeekedAny { env.scannedUnderOfPeeked.append(scannedUnderThisFile ?? []) }
     // ⟨0.15⟩ the κ ledger. Same rule: it rides the verdict as `coverage.modules`, so a present-but-garbled
     // `coverage` silently deletes the one channel that tells a MACHINE consumer of a green gate which
     // packages were never judged.
@@ -1085,6 +1121,13 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // candor-rust had exactly that drift on its scan route, and the ⟨0.28⟩ REPORT-sink rung shipped its
     // own version of it.
     let unpeeked = pol.deny.isEmpty ? [] : env.unpeeked
+    // ⟨0.33⟩ THE FOURTH CAUSE, computed ONCE through the SAME helper `ReportCompleteness` arms for
+    // `unverified`/`fix-gate` (`CandorCore.unaskedCrossPolicyRules`, FixCLI.swift's `armingUnread`), so
+    // this route and its advisory siblings cannot drift into two readings of the condition (⟨0.24⟩; PART
+    // 67 is the standing example of what a second computation costs). Fed to BOTH the exit arm below and
+    // the verdict document, so the two cannot disagree about a run — the same discipline `unpeeked` above
+    // states in its own comment.
+    let crossPolicy = unaskedCrossPolicyRules(pol.deny, against: env.scannedUnderOfPeeked)
     var verdictSinks: [String] = []
     if wantJson { verdictSinks.append("-") }
     if let gp = gateJsonPath, !verdictSinks.contains(gp) { verdictSinks.append(gp) }
@@ -1102,7 +1145,11 @@ func runGateReportCLI(_ args: [String]) -> Never {
                          // ⟨0.32⟩ …and the classes it could not READ, off the same document and for the
                          // same reason. Omitting it here is what made this route certify `ok: true` where
                          // `scan --policy` wrote `ok: false, incomplete: true` over one report.
-                         unpeeked: unpeeked)
+                         unpeeked: unpeeked,
+                         // ⟨0.33⟩ …and the rules a peeked report's producer was never asked about. `[]`
+                         // on `scan --policy` by construction (P ⊆ P); this route is the one that can be
+                         // non-empty, and it is the whole reason the key exists.
+                         crossPolicy: crossPolicy)
     }
     if !violations.isEmpty {
         FileHandle.standardError.write("candor-swift: \(violations.count) policy violation(s)\n".data(using: .utf8)!)
@@ -1150,6 +1197,29 @@ func runGateReportCLI(_ args: [String]) -> Never {
              + "because there are none, so the verdict is INCOMPLETE rather than a pass.\n"
              + "→ re-scan the sources WITH this policy (candor-swift <dir> --policy <p> --out <locator>): "
              + "a scan that was never asked cannot certify what it never opened.\n")
+                .data(using: .utf8)!)
+        exit(2)
+    }
+    // ⟨0.33⟩ THE FOURTH CAUSE — THE REPORT'S PEEK ANSWERED A DIFFERENT QUESTION. The arm above is about
+    // classes the producer never OPENED; this one is about classes it opened and read WITH A DIFFERENT
+    // DENY SET IN HAND. ⟨0.29⟩ bounds the peek to effects the producer's policy denies, so a class read
+    // under `deny Net` says nothing about `Exec` in those same files — and the document said nothing
+    // about the difference until `scannedUnder` existed to record it (SPEC §2 ⟨0.33⟩).
+    //
+    // LAST of the four, deliberately: `unanalyzed`, `outOfScope` and `unpeeked` each name a MORE concrete
+    // gap, and an operator reading one sentence should get the most specific one their report supports.
+    if !crossPolicy.isEmpty {
+        FileHandle.standardError.write(
+            ("candor-swift gate: NOT certified — this report's peek was bounded by the deny set its "
+             + "producing scan held, and that set does not cover \(crossPolicy.count) rule(s) of this "
+             + "policy: \(crossPolicy.joined(separator: ", ")). The excluded files it reports as read were "
+             + "searched for OTHER effects, so an empty finding there is not an answer to this question, "
+             + "and the verdict is INCOMPLETE rather than a pass.\n"
+             // THE REMEDY SAYS **THE SAME** POLICY, NOT *A* POLICY, and that wording is part of the rung
+             // rather than prose (SPEC §2 ⟨0.33⟩): the operator DID scan with a policy, and got a report
+             // whose peek answered a different question — the loose reading is what PRODUCES this hole.
+             + "→ re-run the producing scan under THE SAME policy this gate is applying "
+             + "(candor-swift <dir> --policy <file> --json <report>) — not merely under a policy.\n")
                 .data(using: .utf8)!)
         exit(2)
     }

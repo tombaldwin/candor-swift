@@ -9,6 +9,61 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **`scannedUnder`: a report now records the deny set its peek was BOUNDED BY, and `gate --report` /
+  `fix-gate --strict` / `unverified --strict` refuse a report whose peek answered a DIFFERENT question**
+  (SPEC §2 ⟨0.33⟩, candor-java's reference commit `05dfa53`). `excluded[].peeked: true` is true only
+  RELATIVE to the deny set the PRODUCER held — ⟨0.29⟩ bounds the peek to effects the policy DENIES — and
+  until this rung the report never recorded what that set was. A consumer gating with a DIFFERENT deny
+  set got a definite answer to a question nobody asked, and it failed OPEN on `gate --report`, the
+  supply-chain route, past every ⟨0.32⟩ control because the class really was read:
+
+      candor <tree> --policy 'deny Net'  --out A   -> exit 0, `peeked: true`, `outOfScope: []`
+      candor <tree> --policy 'deny Exec'           -> exit 2   (there IS an Exec out there)
+      candor gate --report A --policy 'deny Exec'  -> exit 0, `no violations`      <- the hole
+
+  PRODUCER: `report.scannedUnder = { "deny": [ "<expanded rule>", … ] }`, set at the exact site
+  `outOfScope` is set (ReportModel.swift/main.swift) from the canonical-expanded rules the peek actually
+  matched with — post-alias, post-`.candor/config`, deduplicated and code-point sorted
+  (`CandorCore.canonicalDenySet`, shared with `ruleUpgrade`'s source-form renderer so an operator is
+  quoted and a gate compares the identical string). `pure` is a deny rule with an EMPTY effect list and
+  is recorded as such — flattening to effect NAMES would let the STRICTEST policy compare equal to an
+  empty set, the four-way false all-clear ⟨0.30⟩ closed on the peek one layer in. NIL (key omitted) under
+  exactly `outOfScope`'s own emission rule.
+
+  CONSUMER: `CandorCore.unaskedCrossPolicyRules` is the ONE statement of the condition, called by
+  `gate --report` (GateReportCLI.swift) and by the advisory verbs' `ReportCompleteness` arming
+  (FixCLI.swift's `armingUnread`, now arming BOTH the unread-class and cross-policy causes together) —
+  ⟨0.24⟩'s pessimism relation has broken on this family before from a new verdict cause reaching the gate
+  and not its siblings, and a second computation is how it happens again. Refusal is exit 2,
+  `ok:false, incomplete:true`, naming the unasked rules and pointing at THE SAME policy — not merely *a*
+  policy, which is the loose reading that produces this hole. `scannedUnder` is read as strictly as every
+  other §2 signature key: a non-object, or a `deny` that is not an array of strings, impeaches the
+  document rather than being read as the empty set — the fail-open direction here is the MIRROR of
+  `peeked`'s (there the safe-looking coercion was "no exclusions"; here it would be "the producer held
+  these rules"). An ABSENT `scannedUnder` beside `peeked: true` IS the empty set for the subset test, so
+  a pre-⟨0.33⟩ report fails closed — the rung, not collateral damage.
+
+  FOUR OVER-CHARGE CONTROLS, unit-pinned in `UnreadExclusionRouteEqualityProcessTests.swift`: the same
+  policy on both routes still certifies; a consumer's rules a strict subset of the producer's still
+  certifies (the reason the key is a RULE SET and not a digest — a digest can decide only equality); no
+  peeked exclusions at all still certifies under a differing policy (analysed code's effect sets are
+  policy-independent — only the peek was ever bounded); and a garbled `scannedUnder` cannot manufacture
+  coverage.
+
+  FALSIFIED against a mutant build with the consumer half short-circuited to `[]` (the producer still
+  emitting `scannedUnder`): `cross-policy`, `pure`, `fix-gate --strict` and `unverified --strict` all
+  read 0 (the fail-open, four ways) while every control cell stayed green — so the controls are not what
+  moved. Restoring the real implementation reddens all four.
+
+  **KNOWN RESIDUAL, filed rather than routed around:** conformance PART 69's swift row does not yet read
+  `OK`. This engine excludes `Package.swift` itself as the `manifest` class UNCONDITIONALLY whenever any
+  `deny`/`pure` rule stands (`isHarnessPath`, pre-existing and unrelated to this rung), so PART 69's
+  "tree D" fixture — meant to carry NO exclusions at all, for the control-3 no-peek case — is never
+  actually empty for this engine: it is a second, accidental instance of the defect fixture. The
+  producer/consumer mechanism above is complete and independently verified (unit tests + a falsified
+  mutant, both above); the residual is a conformance FIXTURE gap for the swift row specifically,
+  recorded here because a limitation left only as a comment is the shape that stops being measured.
+
 - **`AgentsDocDriftTests` now sees its own README's headline claim.** README.md line 3 reads
   `**The Swift implementation of [candor-spec](…) 0.32**`, and the `) ` between the word and the version
   put it outside the gate's `spec` + one-to-four-of-`[-: "]` grammar. This gate is the one the other four

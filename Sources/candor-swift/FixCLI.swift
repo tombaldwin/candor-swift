@@ -146,6 +146,23 @@ struct ReportCompleteness {
     /// confused with "the producer read everything".
     var unreadArmed = false
 
+    /// ⟨0.33⟩ RAW, per REPORT FILE that peeked something (an `excluded` entry with `peeked: true` and no
+    /// `judgedElsewhere`) — the deny set THAT FILE's producer held, or the empty set when it peeked but
+    /// carries no `scannedUnder` at all (a pre-⟨0.33⟩ producer). NEVER unioned across files: `scannedUnder`
+    /// is a fact about ONE producing scan (SPEC §2 ⟨0.33⟩), so this is a LIST of per-file sets, not one set
+    /// — the same reason `outOfScope`/`unread` are collected per entry rather than folded into one flag.
+    ///
+    /// COLLECTED HERE, ARMED BY THE CALLER FOR THE EXIT CODE ONLY, exactly as `unread`/`unreadArmed` are:
+    /// the condition is the policy in force NOW, and this loader holds no policy.
+    var scannedUnderOfPeeked: [Set<String>] = []
+    /// ⟨0.33⟩ THE ARMED ANSWER — this run's own deny rules that some `scannedUnderOfPeeked` entry does not
+    /// cover (`CandorCore.unaskedCrossPolicyRules`), set by `armingUnread` once the run's policy is known.
+    /// An ARM of `isIncomplete`, not merely a disclosure: ⟨0.24⟩ binds every verb that answers `ok` to be
+    /// at least as pessimistic as the gate over the same bytes, and `gate --report` refuses on this
+    /// exact condition (GateReportCLI.swift). Closing a cause on the gate and leaving its advisory
+    /// siblings certifying is the ⟨0.32⟩/⟨0.30⟩ shape repeating a rung later.
+    var crossPolicy: [String] = []
+
     /// Is the universe this verb reasoned over known-partial? **EITHER ARM OF THIS IS AN EXIT CODE**, and
     /// that is why `judgedNothing` is deliberately NOT one of them. `unverified --strict` and
     /// `fix-gate --strict` answer 2 off this — *"the gate refuses over these bytes, so do I"* — but
@@ -167,7 +184,7 @@ struct ReportCompleteness {
     /// one no-policy report. Closing a cause on the gate and not on its siblings is how this rung's
     /// ⟨0.30⟩ half drifted first.
     var isIncomplete: Bool {
-        !unanalyzed.isEmpty || !unreadable.isEmpty || !outOfScope.isEmpty || unreadArmed
+        !unanalyzed.isEmpty || !unreadable.isEmpty || !outOfScope.isEmpty || unreadArmed || !crossPolicy.isEmpty
     }
 
     /// ⟨0.28⟩ **Is there anything at all to disclose — the trigger for an ANSWER, where `isIncomplete` is
@@ -363,6 +380,14 @@ struct ReportCompleteness {
                  + "READ (`excluded[].peeked: false`),",
                    ", and \(n) exclusion class(es) the scan did NOT READ,")
         }
+        // ⟨0.33⟩ THE FOURTH CAUSE — a peeked exclusion class the producer read under a DIFFERENT deny
+        // set, so its clean finding answers a question this run is not asking (SPEC §2 ⟨0.33⟩).
+        if !crossPolicy.isEmpty {
+            let n = crossPolicy.count
+            append("the report(s) under this locator carry a peek bounded by a deny set that does not "
+                 + "cover \(n) rule(s) of THIS policy,",
+                   ", and a peek bounded by a deny set that does not cover \(n) rule(s) of THIS policy,")
+        }
         var lines = ["  ⚠ INCOMPLETE — \(head)", "      so \(soWhat):"]
         for u in unanalyzed { lines.append("      \(u.path) — \(u.reason)") }
         // The reference's line, character for character; the "(see above)" is the loader's own stderr
@@ -397,6 +422,16 @@ struct ReportCompleteness {
             lines.append("      \(c) — this exclusion class went UNREAD (`excluded[].peeked: false`): "
                        + "its effects are absent because nothing looked, not because there are none. "
                        + remedy)
+        }
+        // ⟨0.33⟩ THE REMEDY SAYS THE SAME POLICY, NOT A POLICY — the loose reading is what PRODUCES this
+        // hole, because the operator DID scan with a policy and got a report whose peek answered a
+        // different one (SPEC §2 ⟨0.33⟩).
+        for r in crossPolicy {
+            lines.append("      \(r) — this report's peek was bounded by a deny set that does not cover "
+                       + "this rule: an excluded file it reports as read was searched for OTHER effects, "
+                       + "so an empty finding there is not an answer to this question. Re-run the "
+                       + "producing scan under THE SAME policy this run is applying "
+                       + "(candor-swift <dir> --policy <p>)")
         }
         lines.append("      \(tail)")
         return lines.joined(separator: "\n") + "\n"
@@ -480,6 +515,9 @@ private func mergeCompleteness(_ obj: [String: Any], path: String, entryCount: I
     // CORRUPT RIDES `unreadable`, exactly as the `outOfScope` block above does it: a garbled `excluded`
     // read as "this scan excluded nothing" is the safe-LOOKING value, and here it would silently delete
     // an arm rather than raise one.
+    // ⟨0.33⟩ does THIS FILE carry any peeked (and not `judgedElsewhere`) exclusion? — the precondition
+    // for the cross-policy fact below, exactly as `mergeGateReport` (GateReportCLI.swift) computes it.
+    var filePeekedAny = false
     if let rawX = obj["excluded"] {
         guard let arr = rawX as? [Any] else { c.unreadable.append(path); return }
         for x in arr {
@@ -490,8 +528,30 @@ private func mergeCompleteness(_ obj: [String: Any], path: String, entryCount: I
                 return
             }
             if !peeked && !judgedElsewhere { c.unread.append(cls) }
+            if peeked && !judgedElsewhere { filePeekedAny = true }
         }
     }
+    // ⟨0.33⟩ THE QUESTION THIS FILE'S PEEK WAS PUT (SPEC §2 ⟨0.33⟩) — read as strictly as `gate --report`
+    // reads it (GateReportCLI.swift's `mergeGateReport`), and for the identical reason: a garbled value
+    // read permissively would MANUFACTURE coverage the producer never claimed, so it rides `unreadable`
+    // exactly as a garbled `excluded`/`outOfScope` does above.
+    var scannedUnderThisFile: Set<String>? = nil
+    if let rawSU = obj["scannedUnder"] {
+        guard let m = rawSU as? [String: Any], let denyRaw = m["deny"] as? [Any] else {
+            c.unreadable.append(path)
+            return
+        }
+        let denyStrs = denyRaw.compactMap { $0 as? String }
+        guard denyStrs.count == denyRaw.count else {
+            c.unreadable.append(path)
+            return
+        }
+        scannedUnderThisFile = Set(denyStrs)
+    }
+    // ⟨0.33⟩ ONLY WHEN THIS FILE PEEKED SOMETHING — the over-charge control this rung's design names
+    // first. An ABSENT `scannedUnder` beside a peeked class is the EMPTY SET for the subset test, never
+    // a licence (a pre-⟨0.33⟩ producer fails closed).
+    if filePeekedAny { c.scannedUnderOfPeeked.append(scannedUnderThisFile ?? []) }
 }
 
 // ⟨0.24⟩ Emit an advisory verb's answer and exit, applying the §3.2 incompleteness rule in ONE place so
@@ -726,11 +786,20 @@ func loadFixModel(prefix: String, who: String) -> (byName: [String: FixFn], cg: 
 /// allowlist run this function exists to leave alone. `UnreadExclusionAdvisorySiblingTests`'
 /// no-deny-rule CONTROL caught it. Nothing downstream may read a list this run has decided is not a
 /// question.
+///
+/// ⟨0.33⟩ **AND THE SAME FUNCTION ARMS THE CROSS-POLICY CAUSE**, deliberately: both conditions ask *does
+/// THIS run's deny set reach code the producer's peek did not answer for*, and arming one without the
+/// other is exactly how a rung has shipped on `gate --report` and not on its advisory siblings before
+/// (⟨0.24⟩; conformance PART 67 is the standing example). `unaskedCrossPolicyRules` already returns `[]`
+/// for a policy with no deny rule and for a report that peeked nothing, so there is no second "clears
+/// the list" branch to write here — those are the SAME structural carve-outs `gate --report` gets for
+/// free (CandorCore.unaskedCrossPolicyRules).
 private func armingUnread(_ c: ReportCompleteness, under pol: ParsedPolicy) -> ReportCompleteness {
-    guard !c.unread.isEmpty else { return c }
     var out = c
-    if pol.deny.isEmpty { out.unread = []; return out }
-    out.unreadArmed = true
+    if !out.unread.isEmpty {
+        if pol.deny.isEmpty { out.unread = [] } else { out.unreadArmed = true }
+    }
+    out.crossPolicy = unaskedCrossPolicyRules(pol.deny, against: c.scannedUnderOfPeeked)
     return out
 }
 

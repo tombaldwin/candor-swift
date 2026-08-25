@@ -692,6 +692,16 @@ final class GateProcessTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let real = root.appendingPathComponent("real.policy")
         try "deny Contacts Orders\n".write(to: real, atomically: true, encoding: .utf8)
+        // ⟨0.33⟩ THE PRODUCING SCAN CARRIES BOTH RULES, not just `real.policy`'s one. `Package.swift` (the
+        // `manifest` class) is peeked whenever ANY deny rule stands, and the peek's `scannedUnder` now
+        // records the EXACT deny set it was asked about (SPEC §2 ⟨0.33⟩) — so a LATER `gate --report`
+        // asking about a rule this scan never held (`deny Contacts Ordrs`, the typo below) would itself be
+        // an unasked-question refusal, which is a different row than the zero-MATCH one this test is
+        // about. Scanning under the union of both rules means BOTH `real.policy`'s subset (r1) and
+        // `typo.policy`'s subset (r2) are covered by `scannedUnder`, so neither gate call below trips the
+        // ⟨0.33⟩ cause and the zero-match disclosure this test targets is the only thing moving.
+        let scanPolicy = root.appendingPathComponent("scan.policy")
+        try "deny Contacts Orders\ndeny Contacts Ordrs\n".write(to: scanPolicy, atomically: true, encoding: .utf8)
         // THE PRODUCING SCAN CARRIES THE POLICY, and since ⟨0.32⟩ that is load-bearing rather than
         // incidental: a bare scan leaves `Package.swift` (the `manifest` class) unpeeked, and gating that
         // report under a deny rule is INCOMPLETE (exit 2) whatever the rules bind. This row is about a
@@ -699,7 +709,7 @@ final class GateProcessTests: XCTestCase {
         // producing scan is asked the question, the peek reads the manifest, and the exit code below is
         // then the one this row is actually about. Exit 1 is expected here (the in-scope violation) and
         // discarded; what matters is the report it leaves behind.
-        _ = try ProcessHarness.run(bin, [root.path, "--policy", real.path], cwd: root)
+        _ = try ProcessHarness.run(bin, [root.path, "--policy", scanPolicy.path], cwd: root)
 
         // the real layer still fails, or the disclosure would be masking a broken gate
         let r1 = try ProcessHarness.run(bin, ["gate", "--report", ".candor/report", "--policy", real.path], cwd: root)
