@@ -105,6 +105,80 @@ final class UnreadExclusionAdvisorySiblingTests: XCTestCase {
         }
     }
 
+    /// **⟨0.32⟩ THE OTHER SIDE OF THE SAME BOUNDARY: A DESCRIPTIVE VERB RETURNS ITS DATA *AND* THE
+    /// WARNING — IT DOES NOT REPLACE THE DATA WITH THE WARNING.**
+    ///
+    /// RULED 2026-08-25, four-way. ⟨0.28⟩ Rung A tells a verb *whose pinned shape cannot carry the
+    /// caveat* to emit the CAVEAT DOCUMENT INSTEAD of its result, and the ⟨0.32⟩ unread-class cause then
+    /// armed that substitution on nearly every no-policy report — so in the three engines that ship
+    /// `show`/`map`, `show <fn> --json` and `map --json` answered `{"incomplete": true}` and the result
+    /// was GONE. `show` and `map` CERTIFY NOTHING, so there is no claim for a pessimism rule to protect;
+    /// the remedy is the one `gains --json` already applies (its data, plus `incomplete: true` beside it).
+    ///
+    /// **THIS ENGINE SHIPS NEITHER VERB** (its surface is `path tour gains fix fix-gate unverified
+    /// privacy-manifest gate parsepolicy`), so the substitution has no site here and nothing changed. What
+    /// it DOES ship on the descriptive side is `path` and `tour`, and this row pins them on the ruled
+    /// behaviour so a later `show`/`map` port cannot arrive with the shape the ruling rejects.
+    ///
+    /// The CERTIFYING half is `testTheStrictAdvisoryVerbsDoNotCertifyOverAnUnreadClass` above and it must
+    /// NOT move: those verbs answer `ok`, and conformance PARTs 62 and 67 pin their refusal.
+    func testTheDescriptiveVerbsKeepTheirResultBesideTheHedge() throws {
+        // ITS OWN TREE, because the shared one's library target is deliberately PURE — `path`/`tour` over
+        // an empty `functions` would assert nothing, and an empty result is exactly the answer this row is
+        // supposed to be able to tell apart from a withheld one.
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-descriptive-unread-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fm = FileManager.default
+        try fm.createDirectory(at: root.appendingPathComponent("Sources/App"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: root.appendingPathComponent("Tests/AppTests"), withIntermediateDirectories: true)
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "App", targets: [.target(name: "App"),
+                                                     .testTarget(name: "AppTests", dependencies: ["App"])])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try """
+        import Foundation
+        public func readIt(_ p: String) -> String { (try? String(contentsOfFile: p, encoding: .utf8)) ?? "" }
+        public func wrapper(_ p: String) -> Int { readIt(p).count }
+        """.write(to: root.appendingPathComponent("Sources/App/Lib.swift"), atomically: true, encoding: .utf8)
+        try "import XCTest\nfinal class T: XCTestCase { func testX() {} }\n"
+            .write(to: root.appendingPathComponent("Tests/AppTests/T.swift"), atomically: true, encoding: .utf8)
+        let rep = root.appendingPathComponent("N").path
+        _ = try ProcessHarness.run(try bin(), [root.path, "--out", rep], cwd: root)
+        // THE PREMISE, asserted so a broken fixture cannot pass as a green.
+        let env = try doc(try String(contentsOf: root.appendingPathComponent("N.App.Swift.json"),
+                                     encoding: .utf8))
+        let ex = try XCTUnwrap(env["excluded"] as? [[String: Any]], "\(env)")
+        XCTAssertTrue(ex.contains { $0["peeked"] as? Bool == false },
+                      "the fixture must publish an UNREAD class: \(ex)")
+
+        let tour = try ProcessHarness.run(try bin(), ["tour", "--report", rep, "--json"], cwd: root)
+        XCTAssertEqual(tour.code, 0, "a descriptive hedge is a DISCLOSURE, not an exit code: \(tour.err)")
+        let td = try doc(tour.out)
+        XCTAssertEqual(td["incomplete"] as? Bool, true, "the warning travels: \(td)")
+        XCTAssertFalse((td["reaches"] as? [Any] ?? []).isEmpty,
+                       "…BESIDE the result, never instead of it: \(td)")
+
+        let path = try ProcessHarness.run(try bin(), ["path", "wrapper", "Fs", "--report", rep, "--json"],
+                                          cwd: root)
+        XCTAssertEqual(path.code, 0, "\(path.err)")
+        let pd = try doc(path.out)
+        XCTAssertEqual(pd["incomplete"] as? Bool, true, "the warning travels: \(pd)")
+        XCTAssertFalse((pd["path"] as? [Any] ?? []).isEmpty,
+                       "…BESIDE the result, never instead of it: \(pd)")
+
+        // …AND THE SURFACE DECLARATION IS ASSERTED, not assumed. If `show`/`map` are ever ported here they
+        // must arrive on the ruled shape, and this row failing is the reminder to write that assertion.
+        for verb in ["show", "map"] {
+            let r = try ProcessHarness.run(try bin(), [verb, "--report", rep, "--json"], cwd: root)
+            XCTAssertNotEqual(r.code, 0,
+                              "\(verb) is not on this engine's verb surface — if it has been ported, pin "
+                              + "it on data-beside-the-hedge here (⟨0.32⟩ ruling): \(r.out)")
+        }
+    }
+
     /// CONTROL — A POLICY WITH NO DENY RULE IS NOT CHARGED FOR THE PEEK. A `forbid`-only policy is
     /// refused on this route for the `forbid` rule's OWN unanswerability, and the row asserts WHICH: an
     /// exit code alone would pass a build that had started hedging every allowlist run.
