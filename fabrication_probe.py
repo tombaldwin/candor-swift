@@ -53,11 +53,22 @@ CASES = [
     ("filemanager", "_ fm: FileManager",
      ["fm.delegate"],
      ['fm.removeItem(atPath: "/x")'], "Fs"),
-    # ProcessInfo — the Env handle. processName/processIdentifier/hostName-less metadata are pure; the
-    # environment subscript reads the OS environment.
+    # ProcessInfo — the Env handle. `processIdentifier` is in-process metadata this engine charges
+    # nowhere, so it is the pure row; the environment subscript reads the OS environment.
+    #
+    # `arguments` and `processName` MOVED from pure to control at ⟨0.32⟩ (258794a), and the move is a
+    # RULING, not a regression: §1 defines Env as reading the process environment, argv is startup state
+    # delivered by the same `exec` that delivers envp, and a secret arrives through `--token=…` exactly as
+    # it does through a variable. candor-rust had always charged `std::env::args()` as Env while this
+    # engine read it pure — one question answered two ways across the family. `processName` rides the same
+    # row because Foundation defines its default as argv[0]'s last path component.
+    #
+    # They are asserted as CONTROLS rather than deleted: a row deleted from this probe guards nothing, and
+    # the direction that needs guarding now is the under-report — a later refactor that dropped the κ row
+    # would put the family back out of parity in silence, which is the defect 258794a measured and closed.
     ("processinfo", "_ pi: ProcessInfo",
-     ["pi.processName", "pi.arguments", "pi.processIdentifier"],
-     ['pi.environment["P"]'], "Env"),
+     ["pi.processIdentifier"],
+     ['pi.environment["P"]', "pi.arguments", "pi.processName"], "Env"),
     # NSPasteboard — the Clipboard handle (sweep [33]). canReadObject/canReadItem/availableType are pure
     # capability/metadata queries; setString/clearContents/writeObjects touch the clipboard.
     ("pasteboard", "_ pb: NSPasteboard",
