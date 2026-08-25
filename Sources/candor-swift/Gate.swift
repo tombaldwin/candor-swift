@@ -92,7 +92,14 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
                       // ⟨0.32⟩ exclusion classes this scan did NOT READ — `excluded[].peeked == false`
                       // without `judgedElsewhere`. Defaulted so every existing caller keeps compiling and
                       // keeps its current verdict; the routes that can supply it pass it explicitly.
-                      unpeeked: [String] = []) {
+                      unpeeked: [String] = [],
+                      // ⟨0.33⟩ THE FOURTH CAUSE — this run's own deny rules that some peeked report's
+                      // producer was never asked about (SPEC §2 ⟨0.33⟩, `CandorCore.unaskedCrossPolicyRules`).
+                      // Defaulted to `[]`: on `scan --policy` the producer and the consumer are ONE run, so
+                      // the recorded set IS this policy and the subset test cannot fail (§3.1 route
+                      // equality by construction, like ⟨0.30⟩'s `outOfScope`) — that route never computes
+                      // this and passes nothing. `gate --report` computes it and passes it explicitly.
+                      crossPolicy: [String] = []) {
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a gate over source candor could NOT analyze must NOT read green —
     // its effects are invisible, so a `deny`/`allow` that "passes" over it is a false-pure. `ok` requires
     // BOTH no violation AND a complete analysis (the caller exits 2 on this incomplete-but-clean path).
@@ -106,7 +113,11 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
     // MEASURED on candor-java before the rung: `deny Exec` passed green over a tree holding an
     // uncompiled source calling `Runtime.exec("curl … | sh")`, with `excluded` saying `peeked: false`
     // beside it and that flag moving no verdict at all.
-    let incomplete = !unanalyzed.isEmpty || !outOfScope.isEmpty || !unpeeked.isEmpty
+    // ⟨0.33⟩ THE FOURTH CAUSE — a class the producer's peek READ, but while holding a DIFFERENT deny set,
+    // so its empty finding answers a question this run is not asking. Unioned into `incomplete` HERE,
+    // never spelled again at an exit arm alone — the shape ⟨0.32⟩ recorded in blood one rung ago
+    // ("stating this at the exit arm alone is what shipped `ok:false, incomplete:true` AT EXIT 0").
+    let incomplete = !unanalyzed.isEmpty || !outOfScope.isEmpty || !unpeeked.isEmpty || !crossPolicy.isEmpty
     var dict: [String: Any] = [
         "spec": spec,
         "ok": violations.isEmpty && !incomplete,

@@ -789,6 +789,73 @@ public func scopeMatches(_ name: String, _ scope: String) -> Bool {
     return false
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ⟨0.33⟩ CROSS-POLICY — SPEC §2 ⟨0.33⟩: a peek's `peeked: true` answers only the deny set the
+// PRODUCER held. `scannedUnder.deny` records that set in its CANONICAL EXPANDED form; a consumer
+// gating with a different deny set must be able to compare its own rules against it verbatim.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+/// ⟨0.33⟩ ONE `deny`/`pure` RULE IN ITS CANONICAL EXPANDED FORM (SPEC §2 ⟨0.33⟩) — post-alias,
+/// post-`.candor/config`, the §6.2 spelling the MATCHER used. Shared with `ruleUpgrade`
+/// (CandorCore/Fix.swift) so the string an operator is quoted and the string a gate compares cannot
+/// become two spellings of one rule.
+///
+/// NOT effect NAMES: `pure` is a deny rule with an EMPTY effect list ("every effect except Unknown"),
+/// so a flattened name set would compare it equal to the empty set — the four-way false all-clear
+/// ⟨0.30⟩ closed on the peek itself, arriving one layer out. NOT the raw policy line either: §3.1
+/// already notes alias expansion breaks byte-equality, so two configs defining one alias differently
+/// would give the identical raw line two meanings.
+public func canonicalDenyRule(_ r: DenyRule) -> String {
+    let suffix = r.scope.isEmpty ? "" : " \(r.scope)"
+    if r.effects.isEmpty { return "pure\(suffix)" }
+    func term(_ e: String) -> String {
+        if e == "Unknown", !r.unknownClasses.isEmpty { return "Unknown[\(r.unknownClasses.joined(separator: ","))]" }
+        if e == "Net", !r.netClasses.isEmpty { return "Net[\(r.netClasses.joined(separator: ","))]" }
+        return e
+    }
+    return "deny \(r.effects.sorted().map(term).joined(separator: " "))\(suffix)"
+}
+
+/// ⟨0.33⟩ A rule LIST as its canonical SET — deduplicated and CODE-POINT sorted (the same collation
+/// `zeroMatch` uses, SPEC §4), so one policy produces one document however its lines were ordered and
+/// a consumer's subset test is a plain membership test rather than an order-sensitive comparison.
+public func canonicalDenySet(_ rules: [DenyRule]) -> [String] {
+    var seen = Set<String>()
+    for r in rules { seen.insert(canonicalDenyRule(r)) }
+    return seen.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }
+}
+
+/// ⟨0.33⟩ THE RULES THIS RUN'S POLICY HOLDS THAT SOME PEEKED REPORT'S PRODUCER WAS NEVER ASKED ABOUT
+/// (SPEC §2 ⟨0.33⟩) — computed ONCE, called by `gate --report`'s exit arm AND its verdict document,
+/// and by the advisory verbs' `ReportCompleteness` arming (FixCLI.swift), so the routes that answer
+/// `ok` cannot drift into different readings of one condition (⟨0.24⟩; conformance PART 67 is the
+/// standing example of what a second computation of one condition costs).
+///
+/// `scannedUnderOfPeeked` carries ONE ELEMENT PER REPORT FILE THAT PEEKED SOMETHING (an `excluded`
+/// entry with `peeked: true` and no `judgedElsewhere`) — never a union across files, because
+/// `scannedUnder` is a fact about ONE producing scan (SPEC §2 ⟨0.33⟩: "the condition is per report,
+/// never over the union of a report set" — the same §2.2 name-join hazard arriving on this key). A
+/// report's element is the EMPTY SET when it peeked something but carries no `scannedUnder` at all
+/// (a pre-⟨0.33⟩ producer, which fails closed) or when it explicitly recorded an empty deny set.
+///
+/// BOTH CARVE-OUTS ARE STRUCTURAL, not written twice: a report set that peeked NOTHING contributes no
+/// element, so an empty `scannedUnderOfPeeked` returns `[]` for free — the over-charge control this
+/// rung's design names first, because analysed code's effect sets are policy-independent and only the
+/// PEEK was ever bounded. And a policy with no deny rule has an empty canonical set, which is a subset
+/// of everything, so it returns `[]` too.
+///
+/// SUBSET IS VERBATIM OVER THE CANONICAL FORM — a deliberate SOUND UNDER-APPROXIMATION of true
+/// coverage (SPEC §2 ⟨0.33⟩): a producer's `deny Net` genuinely subsumes a consumer's
+/// `deny Net in app::x`, and this refuses it anyway, because semantic rule subsumption over scopes and
+/// class filters is undecidable in general and an allowlist of "provably narrower" forms under-reports
+/// whatever nobody thought of.
+public func unaskedCrossPolicyRules(_ deny: [DenyRule], against scannedUnderOfPeeked: [Set<String>]) -> [String] {
+    guard !scannedUnderOfPeeked.isEmpty else { return [] }
+    let mine = canonicalDenySet(deny)
+    guard !mine.isEmpty else { return [] }
+    return mine.filter { r in scannedUnderOfPeeked.contains { !$0.contains(r) } }
+}
+
 public func cmdBase(_ c: String) -> String { c.split(separator: "/").last.map(String.init) ?? c }
 public func pathCovered(_ allowed: String, _ reached: String) -> Bool {
     if reached.contains("..") { return false }
