@@ -90,9 +90,18 @@ final class AgentsDocDriftTests: XCTestCase {
     /// under a 0.24 binary) is byte-identical and passes.
     func testCurrentContractSpecClaimsMatchTheDeclaredSpec() throws {
         let spec = try declaredSpec()
-        // `spec` followed only by quote/colon/space/hyphen — so `spec §6.1` (a SECTION reference) and
-        // `SPEC §2.2` never look like versions. Covers `spec 0.24`, `spec-0.24` and `"spec": "0.24"`.
-        let claim = /spec[-: "]{1,4}([0-9]+\.[0-9]+)/
+        // THE FAMILY'S SHARED CLAIM GRAMMAR: `spec`, then one to EIGHT of `[-: "*)\]]`, then
+        // `<digits>.<digits>` — so `spec §6.1` (a SECTION reference) and `SPEC §2.2` never look like
+        // versions, while `spec 0.24`, `spec-0.24`, `"spec": "0.24"`, the ALIGNED `"spec":    "0.24"`
+        // and the markdown-link `[candor-spec](…) 0.24` are all covered.
+        //
+        // THE LAST TWO ARE THE ⟨0.32⟩ WIDENING and one of them was live in THIS repo: README.md line 3
+        // reads `**The Swift implementation of [candor-spec](…) 0.32**`, and the `) ` between the word
+        // and the version put it outside a `{1,4}` grammar. This gate is the one the other four engines
+        // ported BECAUSE it was clean through the ⟨0.32⟩ bump — and it was clean over its own README's
+        // headline claim, which it could not see. A gate cited as the reason a spelling is covered has
+        // to be asked which spellings it actually reads.
+        let claim = /spec[-: "*)\]]{1,8}([0-9]+\.[0-9]+)/
 
         for doc in ["AGENTS.md", "README.md", "SPEC-EXTENSION-privacy.md"] {
             let text = try Self.read(doc)
@@ -112,16 +121,23 @@ final class AgentsDocDriftTests: XCTestCase {
     /// The exemption must actually exempt, and must not exempt everything. Without this, a broken
     /// `, informative)` check would silently turn the gate above into a no-op.
     func testInformativeMarkerExemptionDiscriminates() throws {
-        let claim = /spec[-: "]{1,4}([0-9]+\.[0-9]+)/
+        let claim = /spec[-: "*)\]]{1,8}([0-9]+\.[0-9]+)/
+        // The same fixture the java/rust/ts/agents copies of this grammar carry, so a widening applied
+        // in one engine and forgotten in another reddens rather than going quiet. The last two lines
+        // are spellings a `{1,4}` grammar cannot reach at all.
         let sample = """
             carrying `unitKind: "accessor"` (spec 0.8, informative); ordinary
             This project is on candor-swift 9.9.9 (spec 0.9).
             a section reference, spec §6.1, is not a version
+            the gate prints { "spec": "0.7", "ok": true }
+            and the hyphenated attributive spec-0.6 form
+            an aligned envelope column, { "spec":    "0.5" }
+            a markdown link [candor-spec](https://example.org/candor-spec) 0.4
             """
         let flagged = sample.matches(of: claim).filter {
             !sample[$0.range.upperBound...].prefix(16).hasPrefix(", informative)")
         }.map { String($0.1) }
-        XCTAssertEqual(flagged, ["0.9"],
-                       "the informative-marker exemption must skip the annotated claim, keep the live one, and never read `spec §6.1` as a version")
+        XCTAssertEqual(flagged, ["0.9", "0.7", "0.6", "0.5", "0.4"],
+                       "the exemption must skip the annotated claim, keep the live prose one, SEE the JSON, hyphenated, ALIGNED-JSON and MARKDOWN-LINK spellings, and never read `spec §6.1` as a version")
     }
 }
