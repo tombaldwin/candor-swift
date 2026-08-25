@@ -9,6 +9,26 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **`callers`, `impact` and `path` had NO completeness reader in the other three engines — measured
+  here, and this engine's `path` already hedges.** ⟨0.28⟩ widened SPEC §2's re-disclosure MUST to *"any
+  verb whose output could be read as a NEGATIVE FINDING about the code — a verdict, an empty result set,
+  or a zero count"*, enumerated six verbs, and skipped these three; over a report whose `excluded` names
+  a class the producing scan never opened, candor-rust, candor-ts and candor-java answered FLAT on both
+  channels (and on candor-ts's MCP tools). All three are fixed there.
+
+  **This engine ships `path` and not `callers`/`impact`**, and `path` was driven over a real scan of a
+  tree with an excluded harness target: `{"effect":"Fs","fn":…,"path":[…],"incomplete":true}` at exit 0
+  — the data AND the warning, already. No behaviour changes here.
+
+  What lands is TWO ROWS. `testPathsEmptyChainCarriesTheHedgeToo` pins the arm the sibling engines had
+  to be TAUGHT: `path <fn> Net` where the function reaches Fs and not Net, which answers `path: []` —
+  *this function does not reach that effect*, the precise reassurance a reader asks `path` for — and it
+  asserts the empty chain is PRESENT rather than merely that the key exists, because an empty result is
+  exactly the answer this row has to be able to tell apart from a withheld one. Its premise (the report
+  really does publish `peeked: false`) is asserted first, so a broken fixture cannot pass as a green.
+  And `callers`/`impact` JOIN the surface-absence list beside `show`/`map`, so a later port cannot
+  arrive carrying the defect the other three just closed.
+
 - **`show` and `map` returned the WARNING INSTEAD OF THE ANSWER — the ⟨0.32⟩ descriptive hedge, ruled
   the other way and closed four-way.** ⟨0.28⟩ Rung A tells a verb *whose pinned shape cannot carry the
   caveat* to emit the CAVEAT DOCUMENT **instead of** its result document, and yesterday's rung armed
