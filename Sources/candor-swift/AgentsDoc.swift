@@ -36,7 +36,7 @@ git clone --depth 1 https://github.com/tombaldwin/candor-swift /tmp/candor-swift
 /tmp/candor-swift/.build/release/candor-swift <package-dir>     # Tests/ and .build/ excluded
 ```
 
-Writes `<dir>/.candor/report.<pkg>.Swift.json` (the spec-0.31 envelope) plus two sidecars:
+Writes `<dir>/.candor/report.<pkg>.Swift.json` (the spec-0.32 envelope) plus two sidecars:
 `report.<pkg>.Swift.callgraph.json` (EVERY analyzed function a key — pure ones included, SPEC §2.2)
 and `report.<pkg>.Swift.hierarchy.json` (each local type → its declared supertypes/protocols, for
 dispatch-frontier queries).
@@ -94,7 +94,7 @@ If it's behind, **ASK the user before upgrading** — e.g. "candor-swift 0.8.2 i
 bare `git pull` of main — an untagged HEAD is not a released build). Never upgrade silently. If it's current or the user declines, just proceed with the build they have;
 if candor isn't installed at all, install it normally (clone + build, below).
 
-**Report shape:** `{ "candor": {…, "spec": "0.31"}, "package": "<name>", "functions": [...] }` — an
+**Report shape:** `{ "candor": {…, "spec": "0.32"}, "package": "<name>", "functions": [...] }` — an
 ARRAY of entries keyed `fn` (`Type.method` for members, bare `name` for free functions), each with
 `inferred` (full transitive set) / `direct` / `unresolved` / `hash` (`pkg#qual`, the §2 chain key)
 / optional `hosts`/`cmds`/`paths`/`tables`. ⟨0.15⟩ the envelope also carries
