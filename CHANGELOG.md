@@ -19,6 +19,13 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   its publish workflow already carried this trigger. Re-running is safe: the steps are idempotent
   and the `engineVersion` guard still asserts the tag matches the binary before anything ships.
 
+- **`ci.yml` gains `workflow_dispatch` too.** The stall above hit `release.yml`; auditing the rest of
+  this repo's workflows for the same gap found `ci.yml` had no dispatch trigger either, so a stalled
+  push-triggered run here had no recovery but an empty commit. The `test`/`release-build`/`linux` jobs
+  already gate on `github.event_name != 'schedule'`, so a dispatch runs them exactly like an ordinary
+  push; the linux job's disclosure-recall step already special-cased `== 'workflow_dispatch'` in its
+  own `if:`, which was unreachable dead code until this trigger existed.
+
 - **MIGRATION — ⟨0.33⟩ IS NOT ADDITIVE, and the cost is measured, not estimated.** If you gate a
   **STORED** report that a pre-0.33 engine produced — committed to a repo, cached between CI jobs, or
   published by a dependency and gated downstream — expect exit 2. Measured over **32 real third-party

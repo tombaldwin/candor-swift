@@ -13,6 +13,16 @@ on:
     # Weekly spec-HEAD tracking (the spec-head job below): floor rises in candor-spec surface here,
     # not as a red X on unrelated PRs (the push/PR jobs pin the spec).
     - cron: '17 6 * * 1'
+  # Recovery: a stalled Actions queue can orphan a push-triggered run — created, never expanded into
+  # jobs, `updated_at` == `created_at` hours later — and such a run is neither cancellable (409 "has
+  # not been queued yet") nor rerunnable. Measured 2026-08-26 on the 0.33.0 cut, where the same stall
+  # orphaned this repo's TAG-triggered `release.yml` run and forced deleting and re-pushing a tag a
+  # live Release pointed at (see release.yml). This file had the identical exposure with no dispatch
+  # trigger to fall back on. The `test`/`release-build`/`linux` jobs below already gate on
+  # `github.event_name != 'schedule'`, so a dispatch runs them like an ordinary push; the linux job's
+  # disclosure-recall step already special-cased `== 'workflow_dispatch'` — that branch was dead code
+  # until this trigger existed to reach it.
+  workflow_dispatch:
 
 # The spec commit the push/PR gates run against. Bump deliberately when adopting a floor rise; the
 # weekly spec-head job is the early-warning that HEAD has moved past this pin.
