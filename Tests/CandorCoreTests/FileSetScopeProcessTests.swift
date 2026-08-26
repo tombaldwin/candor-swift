@@ -168,6 +168,54 @@ final class FileSetScopeProcessTests: XCTestCase {
         XCTAssertTrue(ex.isEmpty, "nothing was excluded, so the list must be empty: \(ex)")
     }
 
+    /// ⟨0.33⟩ **ASKED-AND-CLEAR MUST NOT COLLAPSE INTO NEVER-ASKED.** SPEC §2 binds `outOfScope` and
+    /// `scannedUnder` PRESENT iff a policy was CONFIGURED and HONOURED — full stop, never conditioned on
+    /// there being anything to peek. This engine gated the whole block on `!peekable.isEmpty` as well,
+    /// which is invisible on an ordinary SwiftPM package because `Package.swift` is always excluded as
+    /// `manifest` (a `PEEKED_CLASSES` member) whenever a `deny`/`pure` rule stands — so `peekable` was
+    /// never actually empty there. The `clean` fixture above has no `Package.swift` and nothing under
+    /// `Tests/`/`.build/`, so it is the one shape with a genuinely empty `excluded` — MEASURED: `deny
+    /// Exec` over it answered `policy ✓` at exit 0 with BOTH keys ABSENT, while candor-java and
+    /// candor-rust emit `outOfScope: []` beside `scannedUnder: {"deny":["deny Exec"]}` on the identical
+    /// tree — the ⟨0.26⟩ partial-manifest collapse one level out ("nobody asked" standing in for "asked
+    /// and clear").
+    func testAPolicyHonouredOverATreeWithNothingToPeekStillAnswersAskedAndClear() throws {
+        let clean = dir.appendingPathComponent("clean-policy")
+        try FileManager.default.createDirectory(at: clean.appendingPathComponent("Sources/App"),
+                                                withIntermediateDirectories: true)
+        try "public func add(_ a: Int) -> Int { a + 1 }\n"
+            .write(to: clean.appendingPathComponent("Sources/App/Lib.swift"), atomically: true, encoding: .utf8)
+        let r = try ProcessHarness.run(bin, [clean.path, "--json", "--policy", p("exec.policy")])
+        XCTAssertEqual(r.code, 0, r.err)
+        let d = try doc(r.out)
+        let ex = try XCTUnwrap(d["excluded"] as? [[String: Any]], r.out)
+        XCTAssertTrue(ex.isEmpty, "still nothing excluded, unchanged by the fix: \(ex)")
+        let oos = try XCTUnwrap(d["outOfScope"] as? [[String: Any]],
+                                "a policy CONFIGURED and HONOURED over a tree with nothing to peek is "
+                              + "'asked and clear', not 'nobody asked' — the key must be present, as []: "
+                              + "\(r.out)")
+        XCTAssertTrue(oos.isEmpty, "there is nothing excluded to have found an effect in: \(oos)")
+        let su = try XCTUnwrap(d["scannedUnder"] as? [String: Any], r.out)
+        XCTAssertEqual(su["deny"] as? [String] ?? [], ["deny Exec"],
+                       "the QUESTION the (vacuous) peek was put must still be recorded: \(su)")
+
+        // CONTROL: no policy at all — the key stays ABSENT, not []. A no-policy run over this SAME
+        // nothing-excluded tree must not start claiming the opposite thing the fix above closes.
+        let none = try ProcessHarness.run(bin, [clean.path, "--json"])
+        XCTAssertEqual(none.code, 0, none.err)
+        XCTAssertNil(try doc(none.out)["outOfScope"], "no policy ⇒ nothing was asked: \(none.out)")
+        XCTAssertNil(try doc(none.out)["scannedUnder"], "no policy ⇒ nothing was asked: \(none.out)")
+
+        // CONTROL: a policy the engine REFUSES — both keys stay ABSENT, not []. The peek may not
+        // certify relative to a gate that evaluated nothing (SPEC §3.1).
+        let refused = clean.appendingPathComponent("../refused.policy").standardizedFileURL
+        try "deny Exec\ndeny Unknown[corp]\n".write(to: refused, atomically: true, encoding: .utf8)
+        let bad = try ProcessHarness.run(bin, [clean.path, "--json", "--policy", refused.path])
+        XCTAssertEqual(bad.code, 2, bad.err)
+        XCTAssertNil(try doc(bad.out)["outOfScope"], "a refused policy put no question: \(bad.out)")
+        XCTAssertNil(try doc(bad.out)["scannedUnder"], "a refused policy put no question: \(bad.out)")
+    }
+
     /// THE CLASS THE PEEK DOES NOT READ SAYS SO — and this is the row that makes `peeked` more than
     /// decoration. `.build/` holds checked-out dependency sources: unbounded, and other people's tests are
     /// not a finding about your project, so the peek is held out of it deliberately. An empty

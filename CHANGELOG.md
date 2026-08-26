@@ -10,6 +10,42 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 ## Unreleased
 
 ## [0.33.0] — 2026-08-26
+- ⚠ **`outOfScope`/`scannedUnder` collapsed "asked and clear" into "never asked" over a tree with
+  NOTHING excluded.** SPEC §2 ⟨0.29⟩/⟨0.33⟩ binds both keys PRESENT iff a policy was CONFIGURED and
+  HONOURED — full stop, never conditioned on there being anything to peek — and present-and-empty IS a
+  claim (*a policy stood and it denied nothing*) that MUST NOT collapse into ABSENT (*nothing was
+  asked*). This engine additionally gated the whole peek block on `!peekable.isEmpty`, so a policy
+  honoured over a tree with a genuinely empty `excluded` answered with BOTH keys omitted — the ⟨0.26⟩
+  partial-manifest collapse one level out. MEASURED: a bare directory of `.swift` files (no
+  `Package.swift`, nothing under `Tests/`/`.build/`) has zero excluded files, so `deny Exec` over it
+  answered `policy ✓` at exit 0 with neither key present, while candor-java and candor-rust emit
+  `outOfScope: []` beside `scannedUnder: {"deny":["deny Exec"]}` on the identical tree (candor-java's
+  reference commit `05dfa53`). It fails CLOSED — an absent `scannedUnder` reads as the empty deny set
+  and a no-exclusion report has no peeked class for a gate to consult — so nothing certified wrongly;
+  it is a false statement about what was asked. INVISIBLE on every ordinary SwiftPM package, because
+  `Package.swift` is always excluded as `manifest` (a `PEEKED_CLASSES` member) whenever a `deny`/`pure`
+  rule stands, so `peekable` was never actually empty there.
+
+  FIX: the outer condition drops `!peekable.isEmpty`; `report.outOfScope`/`report.scannedUnder` are now
+  set whenever `!peekRules.isEmpty` (a policy configured and honoured), with the child-process peek
+  itself still skipped when there is nothing to hand it (`peekable.isEmpty`) — `found` stays `[]` by
+  construction rather than by never having been asked. THREE CONTROLS, unit-pinned in
+  `FileSetScopeProcessTests.testAPolicyHonouredOverATreeWithNothingToPeekStillAnswersAskedAndClear`: no
+  policy still omits both keys; a policy the engine REFUSES still omits both (§3.1 — the peek may not
+  certify relative to a gate that evaluated nothing); a tree WITH exclusions is byte-identical to
+  before, checksum-verified against the pre-fix binary rather than eyeballed.
+
+  **CORRECTS THE ENTRY BELOW AND THE KNOWN RESIDUAL IT FILED.** "NIL under exactly `outOfScope`'s own
+  emission rule" was true as an internal-consistency statement — the two keys were always set together
+  — but that shared rule itself silently carried the `!peekable.isEmpty` gate this entry removes, which
+  the entry below never disclosed. Its KNOWN RESIDUAL filed the symptom as "a conformance FIXTURE gap
+  for the swift row specifically" (PART 69's "tree D" is never actually empty for this engine); that
+  framing undersold it. The fixture gap is real and independent — PART 69 reads `swift ... OK`
+  identically before and after this fix, because its own tree still carries a `Package.swift` — but the
+  fixture never being able to reach the case is exactly how a real emission-rule defect stayed a
+  documented limitation instead of a measured one: the comment was correct about the fixture and silent
+  about the code.
+
 - **`release.yml` gains `workflow_dispatch`, because a stalled Actions queue leaves a
   tag-triggered release unrecoverable.** During the 0.33.0 cut GitHub created this repo's release
   run and never expanded it into jobs: zero jobs, `updated_at` equal to `created_at` two hours on,
