@@ -10,6 +10,14 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 ## Unreleased
 
 ## [0.33.0] — 2026-08-26
+- **`release.yml` gains `workflow_dispatch`, because a stalled Actions queue leaves a
+  tag-triggered release unrecoverable.** During the 0.33.0 cut GitHub created this repo's release
+  run and never expanded it into jobs: zero jobs, `updated_at` equal to `created_at` two hours on,
+  and both cancel and force-cancel refusing with 409 *"has not been queued yet"*. A run in that
+  state cannot be rerun either, so the only recovery was deleting and re-pushing a tag a live
+  Release already points at. candor-ts hit the identical stall and recovered in seconds because
+  its publish workflow already carried this trigger. Re-running is safe: the steps are idempotent
+  and the `engineVersion` guard still asserts the tag matches the binary before anything ships.
 
 - **MIGRATION — ⟨0.33⟩ IS NOT ADDITIVE, and the cost is measured, not estimated.** If you gate a
   **STORED** report that a pre-0.33 engine produced — committed to a repo, cached between CI jobs, or
