@@ -642,6 +642,26 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
             if segs.count >= 2 { keys.append("\(pkg)#\(segs[segs.count - 2]).\(leaf)") }
             let full = "\(pkg)#\(segs.joined(separator: "."))"
             if !keys.contains(full) { keys.append(full) }
+            // AN OVERLOADED FREE FUNCTION'S BARE NAME, additionally — the producer's own overload-suffix
+            // rewrite turns `shellOut` into `shellOut(String)` / `shellOut(Int)` (see Driver.swift's
+            // `overloadedQuals` pass, which every engine using this wire format performs identically), so a
+            // consumer's call site — which Swift always spells WITHOUT the disambiguator, `shellOut(to:
+            // "x")` never `shellOut(String)(to: "x")` — had no key to ask on for an overloaded producer
+            // function. `deps.lookup("ShellOutLib#shellOut")` MISSED even though every one of ShellOutLib's
+            // three `shellOut` overloads was right there in `byKey` under its own suffixed key, and the
+            // consumer's bare call fell through the cross-package join into the platform NAME heuristic —
+            // which, unlike this join, does not know the callee is a Fs+Ipc chain, only that it is spelled
+            // `shellOut` (the 0.33.0 gate-level cardinal sin: `deny Fs`/`deny Ipc` exited 0 over code that
+            // plainly does both). UNION across every overload sharing the base — the same over-approximate,
+            // never-guess-which-one direction `matchOverloads` already takes for an in-tree caller when arg
+            // types can't select a single candidate — so a caller inherits every reachable overload's
+            // effects, never a wrong one. FREE-FUNCTION ONLY (`segs.count == 1`): an overloaded METHOD's
+            // tail2/full keys are already reached through its OWNER type, which a cross-package member call
+            // always names explicitly (`Owner.member`), so the ambiguity a bare spelling creates does not
+            // arise there.
+            if segs.count == 1, let paren = leaf.firstIndex(of: "("), paren != leaf.startIndex {
+                keys.append("\(pkg)#\(leaf[..<paren])")
+            }
             for k in keys { idx.insert(key: k, entry) }
         }
     }
