@@ -159,6 +159,50 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   20-minute hang-detector budget, and it uploads the binary. `release.yml` is unchanged and still runs
   its own tag-anchored checks.
 
+- ⚠ **A NAME heuristic (`kappaFree`'s `shellOut`, and the whole table it belongs to) pre-empted a real,
+  in-tree, unambiguous overload resolution — the cardinal sin.** `shellOut(to: Int)` calling its own
+  sibling `shellOut(to: String)` (JohnSundell's ShellOut, real code) reported `Exec`/`cmds:["literal"]`
+  and dropped the sibling's real `Fs`, with no `Unknown`, no `incomplete` — the shadow guard
+  (`localFreeFns`) is drawn from `freeFnByName`'s keys, read AFTER the overload-suffix rewrite renames
+  `shellOut` to `shellOut(Int)`/`shellOut(String)`, so the BARE identifier a call site actually uses
+  (Swift never spells the disambiguator) no longer matched anything in the shadow set once a project
+  overloaded a heuristic-covered name. GATE-LEVEL: a two-package `App`/vendored-ShellOut fixture had
+  `deny Fs`/`deny Ipc` exit 0 — *"nothing hidden"* — over code that plainly performs both, and
+  `path setupRepo Fs` answered a confident, wrong `does not perform Fs (inferred: ["Exec"])`.
+
+  FIX, two halves, both MODULE-scoped (see below) and BOTH restore precedence to real resolution rather
+  than replacing the heuristic outright — it still fires whenever resolution genuinely cannot:
+  (1) Driver.swift now also shadows on each free function's BARE name, captured before the overload
+  rewrite; (2) the same discipline now crosses the scan boundary — a CHAINED (`--workspace`/
+  `CANDOR_DEPS`) dependency's overloaded free function shadows the heuristic too, and the cross-package
+  join answers with the UNION of every overload sharing the base name (Deps.swift), never a guess at
+  which one, mirroring `matchOverloads`'s own sound-union direction for an in-tree ambiguous call.
+
+  MODULE-SCOPED, not scan-wide, and the scoping is load-bearing: an unscoped first pass regressed 1137
+  functions on the swift-nio corpus, where a Windows-only `#if os(Windows) func getenv(...) {
+  fatalError(...) } #endif` stub in one target shadowed `getenv`'s real `Env` charge for every OTHER
+  target in the scan — a name heuristic pre-empted by a declaration the caller's own module cannot even
+  see, the opposite direction from the defect this closes. `matchOverloads` already draws this exact
+  module line for RESOLUTION; the SHADOW guard now draws it too.
+
+  CONTROLS, unit-pinned (`NameHeuristicOverloadShadowProcessTests`) and measured against the published
+  binary: an out-of-tree/unresolvable `shellOut` still charges `Exec` (the heuristic is not deleted); an
+  overload in one target does not shadow an unrelated target's heuristic call (the swift-nio control); a
+  tree with no such name collision is BYTE-IDENTICAL, checksum-verified against the pre-fix binary
+  across an 11-project real-world corpus (Alamofire, vapor, SQLite.swift, swift-async-algorithms,
+  swift-log, swift-crypto, Files, Kingfisher, ZIPFoundation, GRDB.swift, a bare no-manifest tree).
+
+  **KNOWN RESIDUAL, filed rather than routed around:** the SAME-module case of the swift-nio interaction
+  above is not fully closed — a `#if`-guarded platform stub sharing a heuristic name with the REAL
+  cross-platform call site it stands beside (both in ONE module) still shadows, because this engine
+  reads every `#if` branch unconditionally (it never models a build configuration) and, independently,
+  already treats "a locally-declared name always shadows the platform table" as policy everywhere else
+  in this file (the GRDB `bind` lesson, stated verbatim beside the code this change touches). Measured:
+  6 functions in swift-nio's `_NIOFileSystem`/`NIOFS` lose a real `Env` tag to their own module's
+  Windows-only `getenv` stub, though each keeps an `Unknown` disclosure from elsewhere in the same
+  function — a softer residual than the shellOut defect (never a *confident* wrong denial), but a real
+  one, and a conformance row should assert it does not regress further.
+
 ## [0.32.1] — 2026-08-25
 
 - Build version → 0.32.1 (`engineVersion`); no analyzer change.

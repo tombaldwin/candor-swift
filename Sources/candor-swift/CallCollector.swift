@@ -158,6 +158,11 @@ final class CallCollector: SyntaxVisitor {
     /// the PROJECT's own type, not Foundation's, so the κ table must not answer for it.
     let importedModules: Set<String>
     let projectModules: Set<String>
+    /// The CANDOR_DEPS/--workspace chain, so a bare free-call name can be shadowed by a CHAINED
+    /// dependency's REAL declaration exactly as `localFreeFns` shadows a local one — see `depShadows`.
+    /// Defaults to empty so every construction site that predates this field (tests, an unchained scan)
+    /// is byte-identical: an empty `DepIndex` answers `isChained`/`lookup` false/nil for everything.
+    let deps: DepIndex
     let declaredTypes: Set<String>  // types with a REAL local definition (NOT extension-only) — the shadow
                                     // discipline keys on this so a member call on an extension-only κ-platform
                                     // type (`self.launch()` in `extension Process`) reaches the κ table.
@@ -396,9 +401,10 @@ final class CallCollector: SyntaxVisitor {
          enclosingMembers: Set<String> = [],
          opaqueSeqBuilders: Set<String>, seqBuilderConcrete: [String: String],
          closureFields: [String: Set<String>], moduleConstStrings: [String: String] = [:],
-         importedModules: Set<String> = [], projectModules: Set<String> = []) {
+         importedModules: Set<String> = [], projectModules: Set<String> = [], deps: DepIndex = DepIndex()) {
         self.importedModules = importedModules
         self.projectModules = projectModules
+        self.deps = deps
         self.moduleConstStrings = moduleConstStrings
         self.opaqueSeqBuilders = opaqueSeqBuilders
         self.seqBuilderConcrete = seqBuilderConcrete
@@ -1120,6 +1126,24 @@ final class CallCollector: SyntaxVisitor {
         if vars[name] != nil || localTypes.contains(name) { return false }
         if let et = enclosingType, fields[et]?[name] != nil { return false }
         return true
+    }
+
+    /// A bare free-call NAME is shadowed by a CHAINED (`--workspace`/`CANDOR_DEPS`) dependency's REAL
+    /// declaration, exactly as `localFreeFns` shadows a same-package one — the sibling half of the
+    /// `shellOut` fix. `localFreeFns` only sees names THIS file's own module declares; a name declared in
+    /// an imported LOCAL package (JohnSundell's ShellOut vendored as a workspace dep, say) is invisible to
+    /// it, so a bare `shellOut(to: .gitInit())` in the CONSUMER fell straight to the platform heuristic —
+    /// `deny Fs`/`deny Ipc` exited 0 with "nothing hidden" over a call that plainly reaches both, via the
+    /// dependency's own `shellOut(ShellOutCommand) -> shellOut(String) -> Process.launchBash` chain (the
+    /// 0.33.0 gate-level cardinal sin). ONLY this file's own imports are consulted, and ONLY a package a
+    /// loaded report actually chains — the §2 never-guess rule: an unimported/unchained module's same name
+    /// never shadows, so an out-of-tree/unresolvable `shellOut` (no such package in scope) still reaches
+    /// the heuristic, which is the one place it is still needed.
+    func depShadows(_ name: String) -> Bool {
+        for m in importedModules where deps.isChained(m) {
+            if deps.lookup("\(m)#\(name)") != nil { return true }
+        }
+        return false
     }
 
     /// The member-call κ answer, with SPEC §1 ⟨0.32⟩'s whole-type rule applied to a receiver PROVEN to be
@@ -2715,7 +2739,7 @@ final class CallCollector: SyntaxVisitor {
                 // so the store is ambiguous → over-disclose BOTH Calendar and Reminders, on the same
                 // reasoning as the capture ctor directly above.
                 for e in privacyEventKitEffects(entityType: entityTypeArg(node.arguments)) { directEffects.insert(e) }
-            } else if !declaredTypes.contains(name), !localFreeFns.contains(name),
+            } else if !declaredTypes.contains(name), !localFreeFns.contains(name), !depShadows(name),
                       let eff = kappaFree(name: dealias(name), argCount: node.arguments.count) {
                 // A LOCALLY-DECLARED type ctor (`Pipe()` where `class Pipe`) or free fn (`NSLog(...)` where
                 // `func NSLog`) ALWAYS shadows the platform free-call table — else a project's own
@@ -2724,6 +2748,9 @@ final class CallCollector: SyntaxVisitor {
                 // it falls through to the unqualified Call below, which resolves to the local def.
                 // `dealias(name)` resolves a typealias-named ctor (`Proc()`→`Process`→Exec) before κ; a
                 // local type/free fn already short-circuited above, so an alias never overrides the project.
+                // `depShadows` extends the SAME discipline across the scan boundary: a name a CHAINED
+                // workspace dependency declares (`shellOut`, vendored ShellOut) shadows exactly as a local
+                // declaration does — the 0.33.0 gate-level cardinal sin (see `depShadows`'s doc).
                 keepExtensionCtorEdge(name, node, lit: lit)
                 let aliasName = dealias(name)
                 let est = isEstablishingFree(effect: eff, name: aliasName)

@@ -671,6 +671,36 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // stay exactly `<main>` (never `<main>()`), and a multi-file package's per-file top levels union under
     // the one `<main>` module-entry unit rather than becoming spurious overloads.
     for f in allFns where !f.isAccessor && !f.isTopLevel { qualGroup[f.qual, default: 0] += 1 }
+    // THE BARE NAME OF EVERY LOCAL FREE FUNCTION, captured BEFORE the overload-suffix rewrite below renames
+    // `shellOut` to `shellOut(Int)` / `shellOut(String)`. `freeFnByName` (built later, from the RENAMED
+    // quals) is what `localFreeFns` was drawn from — so once a project overloaded a name a hard-coded
+    // free-call heuristic ALSO answers for (`shellOut`, JohnSundell's ShellOut is the found case, but the
+    // whole `kappaFree` table is exposed the same way — see Classifier.swift), the bare identifier at the
+    // call site (`shellOut(to: "literal")` — Swift call sites are never written with the disambiguator) no
+    // longer matched anything in the shadow set, so the heuristic fired UNGUARDED and pre-empted real,
+    // in-tree, unambiguous overload resolution — dropping the true callee's effects with no `Unknown`, no
+    // `incomplete`, nothing (the 0.33.0 corpus find). A NON-overloaded local fn was never affected (its
+    // qual is never suffixed, so the bare name was already the key) — this only restores the shadow for the
+    // overloaded case.
+    //
+    // KEYED BY MODULE, unlike the rest of `localFreeFns` — and the restriction is load-bearing, not
+    // cosmetic. MEASURED on swift-nio: a `#if os(Windows) … #else getenv(...) #endif` idiom means the
+    // syntactic scan (which reads BOTH branches of every `#if`, having no platform to compile for) sees a
+    // Windows-only stub `func getenv(_: UnsafePointer<CChar>) { fatalError(...) }` in one target
+    // (`NIOFS`/`_NIOFileSystem`) — declared TWICE, once per target, which is exactly what made it
+    // OVERLOADED and is why an unscoped fix here would have gone live-broad instead of staying at the
+    // shellOut shape. An UNSCOPED (whole-scan) shadow set made that stub's bare name shadow the platform
+    // heuristic for `getenv(...)` calls EVERYWHERE in the scan, including inside a wholly unrelated target
+    // (`NIOEmbedded`, `NIOCore`) that cannot even SEE `NIOFS`'s internal free function — 1137 functions
+    // across the tree lost a real, previously-correct `Env` charge to a stub they cannot call, the
+    // opposite direction from the defect this fix exists to close. `matchOverloads` already draws this
+    // exact module line for RESOLUTION (`hitsInCallerModule`, above) — the SHADOW guard has to draw it too,
+    // or a name heuristic gets pre-empted by a declaration the caller's own module cannot reach, which is
+    // just as wrong as being pre-empted by a heuristic when a same-module declaration COULD reach it.
+    var localFreeFnBaseNamesByModule: [String: Set<String>] = [:]
+    for f in allFns where f.enclosingType == nil && !f.isAccessor && !f.isTopLevel {
+        localFreeFnBaseNamesByModule[swiftModuleOf(f.loc), default: []].insert(f.qual)
+    }
     // FILE-SCOPE GLOBALS are accessor units and so sit outside the overload pass above — which meant two
     // modules each declaring `let cfg` collapsed into ONE unit carrying the union of both initializers'
     // effects, reported at one file's location, and a reader of either was charged both. Give them the same
@@ -1016,7 +1046,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                opaqueFields: opaqueFields,
                                enumCaseValueType: enumCaseValueType, dynamicMemberTypes: dynamicMemberTypes,
                                propertyWrapperTypes: propertyWrapperTypes, wrappedProps: wrappedProps,
-                               localFreeFns: localFreeFnNames, typeAliases: typeAliases,
+                               localFreeFns: localFreeFnNames.union(localFreeFnBaseNamesByModule[swiftModuleOf(f.loc)] ?? []),
+                               typeAliases: typeAliases,
                                enclosingMembers: f.enclosingType.map { t in
                                    membersVisibleCache[t] ?? {
                                        let m = membersVisibleOn(t); membersVisibleCache[t] = m; return m
@@ -1025,7 +1056,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                opaqueSeqBuilders: opaqueSeqBuilders, seqBuilderConcrete: seqBuilderConcrete,
                                closureFields: closureFields, moduleConstStrings: globalConstStrings,
                                importedModules: Set(fileImports[String(f.loc.prefix { $0 != ":" })] ?? []),
-                               projectModules: projectModules)
+                               projectModules: projectModules, deps: deps)
         // The locator-move set is flow-INSENSITIVE and must be complete before the first call is collected
         // (a rebind later in the text, or earlier in time inside a loop, still invalidates the claim). The
         // parameter names go with it: a body binder that SHADOWS a parameter is the same hazard, and the

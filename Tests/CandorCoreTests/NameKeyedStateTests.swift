@@ -196,6 +196,10 @@ final class NameKeyedStateTests: XCTestCase {
         // and `isModuleQualifier` asks `vars`/`fields`/`localTypes` about exactly that at the use site
         // rather than mutating these.
         "importedModules": .immutableIndex, "projectModules": .immutableIndex,
+        // The CANDOR_DEPS/--workspace chain (`depShadows`) — keyed by MODULE name (`pkg#leaf`), injected
+        // once at construction exactly like the two rows above, and consulted the same way: a rebind of a
+        // local name has nothing to say about which packages this SCAN chained.
+        "deps": .immutableIndex,
         // ── outputs, accumulators and scope bookkeeping
         "enclosingType": .notPerBinding, "selfElementType": .notPerBinding,
         "calls": .notPerBinding, "directEffects": .notPerBinding, "unresolved": .notPerBinding,
