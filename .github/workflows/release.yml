@@ -8,6 +8,13 @@ name: release
 on:
   push:
     tags: ['v*']
+  # A stalled Actions queue orphans the tag-triggered run: GitHub creates it, never expands it
+  # into jobs, and it can be neither cancelled (409 "has not been queued yet") nor rerun. The
+  # only recovery was then deleting and re-pushing a tag a live Release points at. Measured
+  # 2026-08-26 on the 0.33.0 cut — candor-ts recovered in seconds because it already had this
+  # trigger; this repo needed tag surgery. Re-running is safe: every step is idempotent and the
+  # engineVersion guard still asserts the tag matches the binary before anything ships.
+  workflow_dispatch:
 
 permissions:
   contents: write
