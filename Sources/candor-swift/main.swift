@@ -1905,147 +1905,158 @@ if peekListPath == nil, let pp = policyPath {
     // `.build/` is held out of the peek, not just out of the scan — see `PEEKED_CLASSES`, which the
     // `excluded` block above reads too, so the disclosure and this filter cannot disagree.
     let peekable = excludedFiles.filter { PEEKED_CLASSES.contains($0.cls) }
-    if !peekRules.isEmpty && !peekable.isEmpty {
+    if !peekRules.isEmpty {
         // A policy WAS configured, so the key is now a real answer: `[]` says "we looked and found
-        // nothing", which is what ⟨0.27⟩ asks a zero-match to say out loud.
+        // nothing", which is what ⟨0.27⟩ asks a zero-match to say out loud. THIS ARM RUNS EVEN WHEN
+        // `peekable` IS EMPTY — a policy honoured over a tree with NOTHING excluded answers "asked and
+        // clear", not "nobody asked". Gating the arm on `!peekable.isEmpty` (the previous shape) made
+        // that exact case indistinguishable from no policy at all: MEASURED, a bare directory of
+        // `.swift` files (no `Package.swift`, nothing under `Tests/`/`.build/`) has zero excluded
+        // files, so `deny Exec` over it answered `policy ✓` at exit 0 with BOTH `outOfScope` and
+        // `scannedUnder` absent — while candor-java and candor-rust emit `outOfScope: []` beside
+        // `scannedUnder: {"deny":["deny Exec"]}` on the identical tree. Invisible on an ordinary
+        // SwiftPM package because `Package.swift` is always excluded as `manifest` (a PEEKED_CLASSES
+        // member) whenever a deny/pure rule stands, so `peekable` was never actually empty there.
         var found: [OutOfScopeFinding] = []
-        let peekDir = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("candor-swift-peek-\(ProcessInfo.processInfo.processIdentifier)")
-        defer { try? fm.removeItem(at: peekDir) }
-        try? fm.createDirectory(at: peekDir, withIntermediateDirectories: true)
-        let listURL = peekDir.appendingPathComponent("files.txt")
-        let absOf: (String) -> String = { (rootDir as NSString).appendingPathComponent($0) }
-        do {
-            try peekable.map { absOf($0.path) }.joined(separator: "\n")
-                .write(to: listURL, atomically: true, encoding: .utf8)
-            let child = Process()
-            // `Bundle.main.executablePath` FIRST, argv[0] only as the fallback. argv[0] is what the
-            // `--workspace` spawn beside this uses, and it is a relative name (`candor-swift`, no slash)
-            // for every PATH-invoked run — which is how the tool is actually installed. That spawn fails
-            // loudly per dep; a peek failing there would go quiet, so it takes the absolute answer where
-            // one exists.
-            child.executableURL = URL(fileURLWithPath: Bundle.main.executablePath ?? CommandLine.arguments[0])
-            child.arguments = [target, "--peek-excluded", listURL.path, "--json"]
-            let pipe = Pipe()
-            child.standardOutput = pipe
-            // The child's own stderr is DISCARDED. It is a second scan of the same tree and its
-            // κ/coverage notes are about a file set the operator never asked about — printing them
-            // twice, once per set, is how an advisory becomes noise.
-            child.standardError = FileHandle.nullDevice
-            child.standardInput = FileHandle.nullDevice
-            // NOT `waitUntilExit()` — on swift-corelibs-foundation it blocks FOREVER once the child has
-            // already finished, which is exactly the state draining to EOF guarantees. See the
-            // `--workspace` spawn above for the 10-of-10 measurement; this is the same primitive and the
-            // same fix, and using the broken one here would hang every Linux scan that has a policy.
-            let exited = DispatchSemaphore(value: 0)
-            child.terminationHandler = { _ in exited.signal() }
-            try child.run()
-            // Drain BEFORE waiting: a report larger than the pipe buffer blocks the child on write while
-            // the parent blocks on exit, and the two wait for each other forever.
-            let out = pipe.fileHandleForReading.readDataToEndOfFile()
-            try? pipe.fileHandleForReading.close()
-            // ⟨0.29⟩ A DEADLINE, because the peek re-parses exactly the files this engine has never
-            // parsed — vendored trees, generated code, a manifest nobody analyses — i.e. the inputs least
-            // likely to have been exercised. An unbounded wait turns a parser that hangs on one of them
-            // into a hung SCAN and a hung CI job, which contradicts this feature's own stated rule that a
-            // peek that cannot run must not fail the gate: hanging is the one failure that stops the gate
-            // completing at all. On timeout the child is killed and the peek reports nothing, which the
-            // `peeked: false` below then states plainly.
-            if exited.wait(timeout: .now() + 120) == .timedOut {
-                child.terminate()
-                FileHandle.standardError.write(("candor-swift: the peek did not finish within 120s and was "
-                    + "stopped — `excluded` marks its classes NOT peeked, so nothing here claims they were "
-                    + "read. The gate below is unaffected.\n").data(using: .utf8)!)
-                throw PeekTimedOut()
-            }
-            let doc = (try? JSONSerialization.jsonObject(with: out)) as? [String: Any] ?? [:]
-            // ⟨0.29⟩ THE PEEK READ SOMETHING. `peeked` was a constant of the exclusion CLASS, so a child
-            // that crashed, could not be spawned, or returned nothing still published `peeked: true`
-            // beside `outOfScope: []` — byte-identical to a clean peek, and the ⟨0.26⟩ partial-manifest
-            // failure inside the rung built to prevent it. Set only where a report actually parsed.
-            peekRead = !doc.isEmpty
-            // ⟨0.29⟩ …AND DID IT READ THEM ALL? A child report the parent could PARSE is a different fact
-            // from every peeked file having been opened. The child publishes its own ⟨0.21⟩ `unanalyzed`
-            // manifest and this code read only `functions`, so a peeked file that FAILED TO PARSE inside
-            // the child produced `peeked: true` beside `outOfScope: []` — the same overclaim one comment
-            // up, one level down. `peeked` is per CLASS, so the answer is too: a class is peeked only when
-            // no file of that class went unread. The join goes through `candorAbsolutePath` for the same
-            // reason the `functions` loop below does — a raw string compare misses every time.
-            for u in (doc["unanalyzed"] as? [[String: Any]] ?? []) {
-                let unreadPath = u["path"] as? String ?? ""
-                if unreadPath.isEmpty { peekUnattributed = true; continue }
-                let abs = candorAbsolutePath(unreadPath.hasPrefix("/") ? unreadPath
-                                             : (rootDir as NSString).appendingPathComponent(unreadPath))
-                // The child walks ONLY the list it was handed, so an unread path matching nothing on that
-                // list is one this code cannot attribute — fail closed across every class rather than let
-                // one unattributable file leave all of them claiming completeness.
-                if let hit = peekable.first(where: { candorAbsolutePath(absOf($0.path)) == abs }) {
-                    peekUnread.insert(hit.cls)
-                } else {
-                    peekUnattributed = true
+        if !peekable.isEmpty {
+            let peekDir = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("candor-swift-peek-\(ProcessInfo.processInfo.processIdentifier)")
+            defer { try? fm.removeItem(at: peekDir) }
+            try? fm.createDirectory(at: peekDir, withIntermediateDirectories: true)
+            let listURL = peekDir.appendingPathComponent("files.txt")
+            let absOf: (String) -> String = { (rootDir as NSString).appendingPathComponent($0) }
+            do {
+                try peekable.map { absOf($0.path) }.joined(separator: "\n")
+                    .write(to: listURL, atomically: true, encoding: .utf8)
+                let child = Process()
+                // `Bundle.main.executablePath` FIRST, argv[0] only as the fallback. argv[0] is what the
+                // `--workspace` spawn beside this uses, and it is a relative name (`candor-swift`, no slash)
+                // for every PATH-invoked run — which is how the tool is actually installed. That spawn fails
+                // loudly per dep; a peek failing there would go quiet, so it takes the absolute answer where
+                // one exists.
+                child.executableURL = URL(fileURLWithPath: Bundle.main.executablePath ?? CommandLine.arguments[0])
+                child.arguments = [target, "--peek-excluded", listURL.path, "--json"]
+                let pipe = Pipe()
+                child.standardOutput = pipe
+                // The child's own stderr is DISCARDED. It is a second scan of the same tree and its
+                // κ/coverage notes are about a file set the operator never asked about — printing them
+                // twice, once per set, is how an advisory becomes noise.
+                child.standardError = FileHandle.nullDevice
+                child.standardInput = FileHandle.nullDevice
+                // NOT `waitUntilExit()` — on swift-corelibs-foundation it blocks FOREVER once the child has
+                // already finished, which is exactly the state draining to EOF guarantees. See the
+                // `--workspace` spawn above for the 10-of-10 measurement; this is the same primitive and the
+                // same fix, and using the broken one here would hang every Linux scan that has a policy.
+                let exited = DispatchSemaphore(value: 0)
+                child.terminationHandler = { _ in exited.signal() }
+                try child.run()
+                // Drain BEFORE waiting: a report larger than the pipe buffer blocks the child on write while
+                // the parent blocks on exit, and the two wait for each other forever.
+                let out = pipe.fileHandleForReading.readDataToEndOfFile()
+                try? pipe.fileHandleForReading.close()
+                // ⟨0.29⟩ A DEADLINE, because the peek re-parses exactly the files this engine has never
+                // parsed — vendored trees, generated code, a manifest nobody analyses — i.e. the inputs least
+                // likely to have been exercised. An unbounded wait turns a parser that hangs on one of them
+                // into a hung SCAN and a hung CI job, which contradicts this feature's own stated rule that a
+                // peek that cannot run must not fail the gate: hanging is the one failure that stops the gate
+                // completing at all. On timeout the child is killed and the peek reports nothing, which the
+                // `peeked: false` below then states plainly.
+                if exited.wait(timeout: .now() + 120) == .timedOut {
+                    child.terminate()
+                    FileHandle.standardError.write(("candor-swift: the peek did not finish within 120s and was "
+                        + "stopped — `excluded` marks its classes NOT peeked, so nothing here claims they were "
+                        + "read. The gate below is unaffected.\n").data(using: .utf8)!)
+                    throw PeekTimedOut()
                 }
-            }
-            for f in (doc["functions"] as? [[String: Any]] ?? []) {
-                // ⟨0.30⟩ the gate's own firing decision, per (rule, function): scope test, then `pure`
-                // means every effect except Unknown and a named rule means the intersection.
-                let inf = f["inferred"] as? [String] ?? []
-                let qual = f["fn"] as? String ?? ""
-                // ⟨0.30⟩ …AND THE RULE'S CLASS FILTERS, exactly as Gate.swift applies them. Without these
-                // the peek charged `Net` for a rule that denies only ONE destination class: MEASURED,
-                // `deny Net[unknown-host]` reddened a DECLARED partner, and `deny Net[known-partner]`
-                // reddened with no partners configured at all — while the identical code IN SCOPE passed
-                // both. This is the over-charge the review round before last closed in ts and rust; the
-                // hand-port missed it here, which is what the generated policy matrix now exists to catch.
-                //
-                // The child report carries `netClass`/`unknownWhy` per entry, which is the same derived
-                // set the gate reads off the wire on its `gate --report` route.
-                let fnNet = f["netClass"] as? [String] ?? []
-                let fnWhy = f["unknownWhy"] as? [String] ?? []
-                var hitSet = Set<String>()
-                for r in peekRules where scopeMatches(qual, r.scope) {
-                    var h = Set(r.effects.isEmpty ? inf.filter { $0 != "Unknown" }
-                                                  : inf.filter { r.effects.contains($0) })
-                    if h.contains("Unknown"), !r.unknownClasses.isEmpty,
-                       !fnWhy.contains(where: { r.unknownClasses.contains($0) }) {
-                        h.remove("Unknown")
+                let doc = (try? JSONSerialization.jsonObject(with: out)) as? [String: Any] ?? [:]
+                // ⟨0.29⟩ THE PEEK READ SOMETHING. `peeked` was a constant of the exclusion CLASS, so a child
+                // that crashed, could not be spawned, or returned nothing still published `peeked: true`
+                // beside `outOfScope: []` — byte-identical to a clean peek, and the ⟨0.26⟩ partial-manifest
+                // failure inside the rung built to prevent it. Set only where a report actually parsed.
+                peekRead = !doc.isEmpty
+                // ⟨0.29⟩ …AND DID IT READ THEM ALL? A child report the parent could PARSE is a different fact
+                // from every peeked file having been opened. The child publishes its own ⟨0.21⟩ `unanalyzed`
+                // manifest and this code read only `functions`, so a peeked file that FAILED TO PARSE inside
+                // the child produced `peeked: true` beside `outOfScope: []` — the same overclaim one comment
+                // up, one level down. `peeked` is per CLASS, so the answer is too: a class is peeked only when
+                // no file of that class went unread. The join goes through `candorAbsolutePath` for the same
+                // reason the `functions` loop below does — a raw string compare misses every time.
+                for u in (doc["unanalyzed"] as? [[String: Any]] ?? []) {
+                    let unreadPath = u["path"] as? String ?? ""
+                    if unreadPath.isEmpty { peekUnattributed = true; continue }
+                    let abs = candorAbsolutePath(unreadPath.hasPrefix("/") ? unreadPath
+                                                 : (rootDir as NSString).appendingPathComponent(unreadPath))
+                    // The child walks ONLY the list it was handed, so an unread path matching nothing on that
+                    // list is one this code cannot attribute — fail closed across every class rather than let
+                    // one unattributable file leave all of them claiming completeness.
+                    if let hit = peekable.first(where: { candorAbsolutePath(absOf($0.path)) == abs }) {
+                        peekUnread.insert(hit.cls)
+                    } else {
+                        peekUnattributed = true
                     }
-                    if h.contains("Net"), !r.netClasses.isEmpty,
-                       !fnNet.contains(where: { r.netClasses.contains($0) }) {
-                        h.remove("Net")
-                    }
-                    hitSet.formUnion(h)
                 }
-                let hits = hitSet.sorted()
-                if hits.isEmpty { continue }
-                // NAME THE FILE FROM THE PARENT'S OWN LIST. The child's `loc:` is written from the
-                // absolute path it was handed, and the path the operator can act on is the one this run
-                // already disclosed as excluded — so the finding and the `excluded` entry it belongs to
-                // are spelled the same way, and its class comes from the same record rather than a
-                // second classification of the path.
-                // Both sides normalized to an ABSOLUTE path before comparing. The child writes `loc:`
-                // relative to the root it was handed — the same root as this run's — so a match on the
-                // raw strings compared a relative path against the absolute one from the list and MISSED
-                // every time, silently falling back to the class `excluded`: the finding survived and the
-                // reason string that explains it went generic. A join through `candorAbsolutePath` is the
-                // only spelling right for both an absolute and a relative scan root.
-                let childLoc = String((f["loc"] as? String ?? "").split(separator: ":").first ?? "")
-                let childAbs = candorAbsolutePath(childLoc.hasPrefix("/") ? childLoc
-                                                  : (rootDir as NSString).appendingPathComponent(childLoc))
-                let hit = peekable.first { candorAbsolutePath(absOf($0.path)) == childAbs }
-                let cls = hit?.cls ?? "excluded"
-                found.append(OutOfScopeFinding(
-                    fn: f["fn"] as? String ?? "", path: hit?.path ?? childLoc,
-                    effects: hits.sorted(), cls: cls,
-                    reason: "OUTSIDE this scan's scope (\(cls)) — the gate did NOT judge it. "
-                          + "candor's ANALYSIS of that file reaches this effect; the gate did not "
-                          + "judge it, so the verdict is INCOMPLETE rather than a pass. (An analysis "
-                          + "result, not a claim about what the code does at runtime.)"))
+                for f in (doc["functions"] as? [[String: Any]] ?? []) {
+                    // ⟨0.30⟩ the gate's own firing decision, per (rule, function): scope test, then `pure`
+                    // means every effect except Unknown and a named rule means the intersection.
+                    let inf = f["inferred"] as? [String] ?? []
+                    let qual = f["fn"] as? String ?? ""
+                    // ⟨0.30⟩ …AND THE RULE'S CLASS FILTERS, exactly as Gate.swift applies them. Without these
+                    // the peek charged `Net` for a rule that denies only ONE destination class: MEASURED,
+                    // `deny Net[unknown-host]` reddened a DECLARED partner, and `deny Net[known-partner]`
+                    // reddened with no partners configured at all — while the identical code IN SCOPE passed
+                    // both. This is the over-charge the review round before last closed in ts and rust; the
+                    // hand-port missed it here, which is what the generated policy matrix now exists to catch.
+                    //
+                    // The child report carries `netClass`/`unknownWhy` per entry, which is the same derived
+                    // set the gate reads off the wire on its `gate --report` route.
+                    let fnNet = f["netClass"] as? [String] ?? []
+                    let fnWhy = f["unknownWhy"] as? [String] ?? []
+                    var hitSet = Set<String>()
+                    for r in peekRules where scopeMatches(qual, r.scope) {
+                        var h = Set(r.effects.isEmpty ? inf.filter { $0 != "Unknown" }
+                                                      : inf.filter { r.effects.contains($0) })
+                        if h.contains("Unknown"), !r.unknownClasses.isEmpty,
+                           !fnWhy.contains(where: { r.unknownClasses.contains($0) }) {
+                            h.remove("Unknown")
+                        }
+                        if h.contains("Net"), !r.netClasses.isEmpty,
+                           !fnNet.contains(where: { r.netClasses.contains($0) }) {
+                            h.remove("Net")
+                        }
+                        hitSet.formUnion(h)
+                    }
+                    let hits = hitSet.sorted()
+                    if hits.isEmpty { continue }
+                    // NAME THE FILE FROM THE PARENT'S OWN LIST. The child's `loc:` is written from the
+                    // absolute path it was handed, and the path the operator can act on is the one this run
+                    // already disclosed as excluded — so the finding and the `excluded` entry it belongs to
+                    // are spelled the same way, and its class comes from the same record rather than a
+                    // second classification of the path.
+                    // Both sides normalized to an ABSOLUTE path before comparing. The child writes `loc:`
+                    // relative to the root it was handed — the same root as this run's — so a match on the
+                    // raw strings compared a relative path against the absolute one from the list and MISSED
+                    // every time, silently falling back to the class `excluded`: the finding survived and the
+                    // reason string that explains it went generic. A join through `candorAbsolutePath` is the
+                    // only spelling right for both an absolute and a relative scan root.
+                    let childLoc = String((f["loc"] as? String ?? "").split(separator: ":").first ?? "")
+                    let childAbs = candorAbsolutePath(childLoc.hasPrefix("/") ? childLoc
+                                                      : (rootDir as NSString).appendingPathComponent(childLoc))
+                    let hit = peekable.first { candorAbsolutePath(absOf($0.path)) == childAbs }
+                    let cls = hit?.cls ?? "excluded"
+                    found.append(OutOfScopeFinding(
+                        fn: f["fn"] as? String ?? "", path: hit?.path ?? childLoc,
+                        effects: hits.sorted(), cls: cls,
+                        reason: "OUTSIDE this scan's scope (\(cls)) — the gate did NOT judge it. "
+                              + "candor's ANALYSIS of that file reaches this effect; the gate did not "
+                              + "judge it, so the verdict is INCOMPLETE rather than a pass. (An analysis "
+                              + "result, not a claim about what the code does at runtime.)"))
+                }
+                found.sort { ($0.path, $0.fn) < ($1.path, $1.fn) }
+            } catch {
+                // A PEEK THAT CANNOT RUN MUST NOT FAIL THE GATE. It is advisory by construction, and turning
+                // a child-process failure into a red gate would make adding a policy — the safest thing an
+                // operator can do — the thing that breaks their build. `found` stays as far as it got.
             }
-            found.sort { ($0.path, $0.fn) < ($1.path, $1.fn) }
-        } catch {
-            // A PEEK THAT CANNOT RUN MUST NOT FAIL THE GATE. It is advisory by construction, and turning
-            // a child-process failure into a red gate would make adding a policy — the safest thing an
-            // operator can do — the thing that breaks their build. `found` stays as far as it got.
         }
         report.outOfScope = found
         // ⟨0.33⟩ …and the QUESTION it was put — the SAME emission rule as `outOfScope` (this block runs
