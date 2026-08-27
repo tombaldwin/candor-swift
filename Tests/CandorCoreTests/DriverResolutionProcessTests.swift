@@ -785,6 +785,98 @@ final class DriverResolutionProcessTests: XCTestCase {
                        "…including one reached through a chain of provided members")
     }
 
+    // THE SIBLING DEFECT to the test above, on the OTHER half of the SAME branch: a CONCRETE receiver
+    // (`s: S`, not a protocol-typed one) reaching a protocol's extension-PROVIDED member through
+    // `supertypesOf` (Driver.swift's "PROTOCOL-EXTENSION DEFAULT via a CONCRETE receiver" comment).
+    // That arm called plain `resolveQual(base)` with no `overloadedBases` check at all — unlike the
+    // sibling arm above and the ordinary typed-call arm (`call.typed` a few lines up), both of which
+    // already route an overloaded base through `matchOverloads`. A protocol extension declaring a
+    // second, UNRELATED overload of the provided member's name (`run()` beside `run(times:)`) made
+    // `qualBySimple[base].count == 2`, so `resolveQual` returned nil and the call's ONLY edge —
+    // `useS`'s sole reach to `Runner.run(times:)` — was dropped with no `Unknown`, no `incomplete`,
+    // nothing: `deny Exec` exited 0 over code that plainly performs it. Corpus A/B, held constant to
+    // ONE variable (the sibling overload's mere presence): candor-swift SOUNDNESS-VEIN write-up filed
+    // 2026-08-27.
+    func testOverloadedExtensionProvidedMemberStillResolvesThroughAConcreteReceiver() throws {
+        let by = try scan("""
+        import Foundation
+        protocol Runner {}
+        extension Runner {
+            func run() { print("pure") }                 // unrelated sibling overload — the trigger
+            func run(times: Int) {
+                for _ in 0..<times {
+                    let p = Process()
+                    p.launchPath = "/bin/echo"
+                    try? p.run()
+                }
+            }
+        }
+        struct S: Runner {}
+        func useS() {
+            let s = S()
+            s.run(times: 3)
+        }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "useS"), ["Exec"],
+                       "an overloaded extension-provided member must resolve through a CONCRETE "
+                       + "receiver exactly as through a protocol-typed one — the edge must never vanish "
+                       + "for being overloaded: \(by)")
+    }
+
+    // OVER-CHARGE CONTROL for the fix above: a genuine LOCAL override on the concrete conformer must
+    // still win over BOTH provided overloads (the ordinary `resolveQual(call.path)` / `overloadedBases`
+    // check earlier in the `call.typed` arm is untouched by this fix and must still fire first).
+    func testLocalOverrideStillWinsOverBothProvidedOverloadsOnAConcreteReceiver() throws {
+        let by = try scan("""
+        import Foundation
+        protocol Runner {}
+        extension Runner {
+            func run() { print("pure") }
+            func run(times: Int) {
+                let p = Process()
+                p.launchPath = "/bin/echo"
+                try? p.run()
+            }
+        }
+        struct S: Runner {
+            func run(times: Int) { print("pure override") }   // must win — no Exec
+        }
+        func useS() {
+            let s = S()
+            s.run(times: 3)
+        }
+        """)
+        XCTAssertNil(by["useS"],
+                     "a genuine local override must win over the provided default — useS must stay "
+                     + "pure: \(by)")
+    }
+
+    // OVER-CHARGE CONTROL: a genuinely AMBIGUOUS call (argument count/type cannot discriminate) must
+    // get the SOUND UNION, never a guess and never a drop — mirroring `matchOverloads`'s own fallback.
+    func testGenuinelyAmbiguousOverloadOnAConcreteReceiverUnionsRatherThanGuesses() throws {
+        let by = try scan("""
+        import Foundation
+        protocol Runner {}
+        extension Runner {
+            func run(_ x: Int) { print("pure", x) }              // same arity, can't discriminate
+            func run(y: Int) {
+                let p = Process()
+                p.launchPath = "/bin/echo"
+                try? p.run()
+            }
+        }
+        struct S: Runner {}
+        func useS(_ n: Int) {
+            let s = S()
+            s.run(y: n)
+        }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "useS"), ["Exec"],
+                       "the call's own label (`y:`) is real Swift disambiguation this engine doesn't "
+                       + "model — the sound union must include the Exec-performing sibling rather than "
+                       + "dropping it: \(by)")
+    }
+
     // A BASE-CLASS receiver dispatches over subclass OVERRIDES. The hierarchy is recorded (`conformers`
     // holds class inheritance beside protocol conformance, and the `.hierarchy.json` sidecar publishes
     // it) but the typed-call site never consulted it, so `a.run()` on an `ABase`-typed receiver charged

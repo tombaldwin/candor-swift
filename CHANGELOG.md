@@ -10,6 +10,56 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 ## Unreleased
 
 ## [0.33.0] — 2026-08-26
+- ⚠ **An overloaded protocol-extension PROVIDED member vanished — not even `Unknown` — the moment a
+  CONCRETE (non-protocol-typed) receiver reached it.** `protocol Runner { }`, one provided member
+  `run(times:)` doing `Exec`: `S: Runner` with no override, `s.run(times: 3)` from `useS` — `deny
+  Exec` correctly exited 1. Add ONE unrelated sibling overload to the same extension (`func run()`) and
+  nothing else changes: `deny Exec` exits 0, `policy ✓`, and the callgraph shows `useS: []` — the
+  cardinal sin. ROOT CAUSE, Driver.swift's "PROTOCOL-EXTENSION DEFAULT via a CONCRETE receiver" arm
+  (`s.run(...)` where `S` declares no `run` of its own): it called bare `resolveQual("\(sup).\(member)")`
+  with no `overloadedBases` check at all, unlike its own sibling arm three lines up (the `call.typed`
+  branch) and the existential-receiver `protoDispatches` arm, both of which already route an overloaded
+  base through `matchOverloads`. `resolveQual` can only name an UNAMBIGUOUS simple->full mapping, so the
+  second overload made the lookup ambiguous and the ONLY edge to the provided member — the call site's
+  sole reach to `Runner.run(times:)` — was dropped silently.
+
+  FIX: the same branch now checks `overloadedBases.contains(base)` and routes through `matchOverloads`
+  exactly as its siblings do — `argc`/`call.argTypes` are already captured at this call site, so an
+  arity/type-discriminated call (`run(times:)` vs `run()`, different arity) resolves PRECISELY to the one
+  real callee, and a genuinely ambiguous call (same arity, indistinguishable types — this engine does not
+  model argument LABELS, so `run(_:)` vs `run(y:)` looks identical to it) gets the sound UNION rather than
+  a drop or a guess, mirroring `matchOverloads`'s own existing over-approximation direction. A prior fix
+  in this family (the shellOut name-heuristic shadow) deliberately chose winner-take-all over union to
+  avoid fabricating a NEW effect over a real resolution; that does not apply here — there is no winner,
+  resolution has already failed, and the choice is between a sound union and a silent drop.
+
+  THREE CONTROLS, unit-pinned (`DriverResolutionProcessTests.testOverloadedExtensionProvidedMember
+  StillResolvesThroughAConcreteReceiver` / `testLocalOverrideStillWinsOverBothProvidedOverloadsOnA
+  ConcreteReceiver` / `testGenuinelyAmbiguousOverloadOnAConcreteReceiverUnionsRatherThanGuesses`): the
+  non-overloaded case is untouched; a genuine local override on the concrete conformer still wins over
+  both provided overloads (the earlier `resolveQual(call.path)` check in the same `call.typed` branch is
+  unchanged); a same-arity, label-only-distinguished pair unions rather than guesses. BYTE-IDENTICAL
+  across the majority of a 13-project real-world corpus (Nimble, Quick, CryptoSwift, PromiseKit,
+  ReactiveSwift, SwiftyJSON, Swinject — checksum-verified against the pre-fix binary); the other six
+  (Alamofire, RxSwift, swift-algorithms, swift-collections, swift-nio, swift-syntax) legitimately DIFFER
+  because they contain this exact shape, and every diff across all six was traced: zero functions lost a
+  previously-disclosed effect, all changes are gains — an ambiguous reach resolving from a guessed
+  `Unknown` to a precise (often still-pure) target, or a genuinely missed effect surfacing for the first
+  time. One trace followed end to end: swift-nio's `BaseSocketChannel.close0` reaches `ChannelCore
+  .removeHandlers(Channel)` — a real, always-overloaded (`Channel`/`ChannelPipeline`) provided member —
+  which chains through the live event-loop machinery to `NIODeadline.timeNow`, a genuine `Clock` read on
+  every channel close that this engine had never charged to any of ~35 `BaseSocketChannel` methods until
+  this fix.
+
+  **KNOWN RESIDUAL, filed rather than routed around:** `matchOverloads` module-scopes its FREE-function
+  union (`hitsInCallerModule`) but not its MEMBER-call union — pre-existing, unchanged by this fix, and
+  shared by every other call site already using it. swift-nio surfaced it directly: `FileSystemProtocol`
+  is declared independently in two separate targets (`NIOFS` and `_NIOFileSystem`), each with its own
+  `withDirectoryHandle` overload, and a member-call union cannot see that a caller in one target can never
+  reach the other's declaration. No observable over-charge in this corpus (both candidates already read
+  `Unknown`, so the union is idempotent), but the shape is the member-call twin of the free-function
+  shadow-scoping fix two entries below, unrepaired here.
+
 - ⚠ **`outOfScope`/`scannedUnder` collapsed "asked and clear" into "never asked" over a tree with
   NOTHING excluded.** SPEC §2 ⟨0.29⟩/⟨0.33⟩ binds both keys PRESENT iff a policy was CONFIGURED and
   HONOURED — full stop, never conditioned on there being anything to peek — and present-and-empty IS a
