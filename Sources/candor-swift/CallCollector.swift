@@ -187,6 +187,23 @@ final class CallCollector: SyntaxVisitor {
     /// name with no local declaration at all resolves the heuristic outright, same as always); it is
     /// CONDITIONAL, and union rather than a single winner is the safe reading of "cannot tell which".
     let conditionallyShadowedFreeFns: Set<String>
+    /// ⟨0.33.1⟩ THE TYPE ANALOGUE of `conditionallyShadowedFreeFns` — bare TYPE names (`Pipe`,
+    /// `AVCaptureDevice`, `EKEventStore`, `NWBrowser`, …) whose ONLY declaration(s) reachable in this scan
+    /// sit inside a `#if` (see `DeclCollector.declaredTypesUnconditional` and the Driver's
+    /// `conditionallyShadowedTypeNames`). Disjoint from `declaredTypes` shadowing by construction: a name
+    /// with even one UNCONDITIONAL declaration stays a normal shadow (still `declaredTypes.contains`,
+    /// winner-take-all — a real resolution exists). Consulted ONLY by the four BARE-CONSTRUCTOR κ arms in
+    /// `visit(FunctionCallExprSyntax)` (kappaFree, privacy-capture, Bonjour, EventKit) — deliberately NOT
+    /// by any TYPED-RECEIVER member-dispatch arm (`kappaMember` via a resolved `base.root`). MEASURED WHY:
+    /// widening this to the typed-receiver arms too (an earlier version of this fix did) changed 16
+    /// swift-nio functions, several of which LOST their existing `Clock`/`Env`/`Unknown` in favour of a
+    /// bare `Net` — `ClientBootstrap`'s OWN internal self-dispatch between its overloads is exactly the
+    /// case a locally-declared type's shadow exists to protect (`declaredTypes.contains(rt)` at the typed
+    /// arm), and `ClientBootstrap` is declared exactly once, inside `NIOPosix/Bootstrap.swift`'s file-wide
+    /// `#if !os(WASI)`, so it reads as "conditional-only" with no alternate declaration anywhere — a
+    /// materially different shape from a Windows-only STUB beside a real cross-platform declaration. A
+    /// bare CONSTRUCTOR call has no such internal-self-dispatch risk, so the narrowing is confined here.
+    let conditionallyShadowedTypes: Set<String>
     /// Swift stdlib free functions carved OUT of the half-1 provenance trigger, which cannot otherwise
     /// tell a bare `max(a, b)` from a bare imported `build()` — Swift spells both without a module root.
     ///
@@ -409,7 +426,8 @@ final class CallCollector: SyntaxVisitor {
          opaqueFields: [String: Set<String>] = [:],
          enumCaseValueType: [String: String], dynamicMemberTypes: Set<String>,
          propertyWrapperTypes: Set<String>, wrappedProps: [String: [String: String]],
-         localFreeFns: Set<String>, conditionallyShadowedFreeFns: Set<String> = [], typeAliases: [String: String],
+         localFreeFns: Set<String>, conditionallyShadowedFreeFns: Set<String> = [],
+         conditionallyShadowedTypes: Set<String> = [], typeAliases: [String: String],
          enclosingMembers: Set<String> = [],
          opaqueSeqBuilders: Set<String>, seqBuilderConcrete: [String: String],
          closureFields: [String: Set<String>], moduleConstStrings: [String: String] = [:],
@@ -424,6 +442,7 @@ final class CallCollector: SyntaxVisitor {
         self.typeAliases = typeAliases
         self.localFreeFns = localFreeFns
         self.conditionallyShadowedFreeFns = conditionallyShadowedFreeFns
+        self.conditionallyShadowedTypes = conditionallyShadowedTypes
         self.enclosingMembers = enclosingMembers
         self.propertyWrapperTypes = propertyWrapperTypes
         self.wrappedProps = wrappedProps
@@ -1208,6 +1227,21 @@ final class CallCollector: SyntaxVisitor {
                           args: argKinds(node), argTypes: argTypesOf(node), unqualified: true))
     }
 
+    /// ⟨0.33.1⟩ THE CONDITIONAL-TYPE SIBLING of `keepExtensionCtorEdge` — UNION, not winner-take-all: a
+    /// bare ctor arm fired (kappaFree, privacy-capture, Bonjour, EventKit, or the Data/String content-read
+    /// family) because `name` matched a κ spelling with no UNCONDITIONAL local declaration shadowing it,
+    /// but `conditionallyShadowedTypes` says a `#if`-gated one DOES exist — a build that actually compiles
+    /// that branch runs IT, not the platform meaning the heuristic just charged. Keep the ordinary call
+    /// edge to the conditional declaration alive too, so its own effects (if it has any beyond the stub
+    /// shape this was found on) are counted ALONGSIDE the κ charge rather than discarded — the same
+    /// discipline `conditionallyShadowedFreeFns` established for free functions. A no-op when `name` has
+    /// no local declaration at all, or an unconditional one (that case already shadowed outright, above).
+    private func unionConditionalTypeEdge(_ name: String, _ node: FunctionCallExprSyntax, lit: String?) {
+        guard conditionallyShadowedTypes.contains(name) else { return }
+        calls.append(Call(path: name, leaf: name, strArg: lit, typed: false,
+                          args: argKinds(node), argTypes: argTypesOf(node), unqualified: true))
+    }
+
     /// **THE `Data`/`NSData`/`String` CONTENT-READ CONSTRUCTOR — ONE FUNCTION, BOTH SPELLINGS.**
     /// `Data(contentsOfFile:)` / `Data(contentsOf:)` and their `Foundation.`-qualified twins. Returns
     /// true when it classified, false when the name/label pair is not this ctor (or a local declaration
@@ -1243,7 +1277,15 @@ final class CallCollector: SyntaxVisitor {
     private func chargeContentsCtor(_ name: String, _ node: FunctionCallExprSyntax, lit: String?,
                                     shadowable: Bool) -> Bool {
         guard ["Data", "NSData", "String"].contains(name) else { return false }
-        if shadowable, declaredTypes.contains(name) || localFreeFns.contains(name) { return false }
+        if shadowable, localFreeFns.contains(name) { return false }
+        // ⟨0.33.1⟩ the SAME conditional-only carve-out the other four bare-ctor arms got: a name whose
+        // ONLY local declaration(s) sit inside a `#if` (`conditionallyShadowedTypes`) does not bail this
+        // arm out — an UNCONDITIONAL declaration still does (real resolution exists, winner-take-all).
+        // MEASURED RESIDUAL this closes: a `#if`-gated local `Data`/`NSData`/`String` silently dropped
+        // the WHOLE `Fs` charge here (not even `Unknown`) — worse than the other four arms, which at
+        // least fall through to an ordinary (if unresolved) call edge; this one returned `false` all the
+        // way out with no side effect at all, so the caller charged nothing whatsoever.
+        if shadowable, declaredTypes.contains(name), !conditionallyShadowedTypes.contains(name) { return false }
         let label = node.arguments.first?.label?.text
         if label == "contentsOfFile" {
             // `String(contentsOfFile: path, …)` / `Data(contentsOfFile:)` take a FILE PATH, not a
@@ -1267,6 +1309,7 @@ final class CallCollector: SyntaxVisitor {
                     incompleteSurfaces.insert("Fs")
                 }
             }
+            unionConditionalTypeEdge(name, node, lit: lit)
             return true
         }
         if label == "contentsOf" {
@@ -1301,6 +1344,7 @@ final class CallCollector: SyntaxVisitor {
                 unresolved = true // indeterminate scheme: I/O happens, category unprovable
                 why.insert("contentsOf:indeterminate-url-scheme")
             }
+            unionConditionalTypeEdge(name, node, lit: lit)
             return true
         }
         return false
@@ -2706,7 +2750,8 @@ final class CallCollector: SyntaxVisitor {
                 if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK call IS network I/O
                 recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
                 if lit == nil, est, !(eff == "Fs" && lastResolvedHomePath) { incompleteSurfaces.insert(eff) }
-            } else if !declaredTypes.contains(name), !localFreeFns.contains(name),
+            } else if (!declaredTypes.contains(name) || conditionallyShadowedTypes.contains(name)),
+                      !localFreeFns.contains(name),
                       PRIVACY_CAPTURE_TYPES.contains(dealias(name)) {
                 keepExtensionCtorEdge(name, node, lit: lit)
                 // `privacy/1` finding 5 — an AVFoundation capture-type CONSTRUCTOR (`AVCaptureSession()`).
@@ -2733,7 +2778,9 @@ final class CallCollector: SyntaxVisitor {
                 case .absent:
                     ambiguousCapture = true
                 }
-            } else if !declaredTypes.contains(name), !localFreeFns.contains(name),
+                unionConditionalTypeEdge(name, node, lit: lit)
+            } else if (!declaredTypes.contains(name) || conditionallyShadowedTypes.contains(name)),
+                      !localFreeFns.contains(name),
                       dealias(name) == "NWBrowser" || dealias(name) == "NetServiceBrowser" {
                 keepExtensionCtorEdge(name, node, lit: lit)
                 // A BONJOUR BROWSER CONSTRUCTOR — `NWBrowser(for: .bonjour(…), using:)`, which is the
@@ -2745,14 +2792,18 @@ final class CallCollector: SyntaxVisitor {
                 if let eff = kappaFree(name: dealias(name), argCount: node.arguments.count) {
                     directEffects.insert(eff)
                 }
-            } else if !declaredTypes.contains(name), !localFreeFns.contains(name),
+                unionConditionalTypeEdge(name, node, lit: lit)
+            } else if (!declaredTypes.contains(name) || conditionallyShadowedTypes.contains(name)),
+                      !localFreeFns.contains(name),
                       PRIVACY_EVENTKIT_TYPES.contains(dealias(name)) {
                 keepExtensionCtorEdge(name, node, lit: lit)
                 // `privacy/2` — an EventKit store CONSTRUCTOR (`EKEventStore()`). Carries no entity type,
                 // so the store is ambiguous → over-disclose BOTH Calendar and Reminders, on the same
                 // reasoning as the capture ctor directly above.
                 for e in privacyEventKitEffects(entityType: entityTypeArg(node.arguments)) { directEffects.insert(e) }
-            } else if !declaredTypes.contains(name), !localFreeFns.contains(name), !depShadows(name),
+                unionConditionalTypeEdge(name, node, lit: lit)
+            } else if (!declaredTypes.contains(name) || conditionallyShadowedTypes.contains(name)),
+                      !localFreeFns.contains(name), !depShadows(name),
                       let eff = kappaFree(name: dealias(name), argCount: node.arguments.count) {
                 // A LOCALLY-DECLARED type ctor (`Pipe()` where `class Pipe`) or free fn (`NSLog(...)` where
                 // `func NSLog`) ALWAYS shadows the platform free-call table — else a project's own
@@ -2776,12 +2827,12 @@ final class CallCollector: SyntaxVisitor {
                 recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
                 if lit == nil, est, !(eff == "Fs" && lastResolvedHomePath) { incompleteSurfaces.insert(eff) }
                 // ⟨0.33.1⟩ UNION, not winner-take-all: `name` matched the κ table because no UNCONDITIONAL
-                // local declaration shadows it, but `conditionallyShadowedFreeFns` says a `#if`-gated one
-                // exists — a build that actually compiles that branch runs IT, not the platform function
-                // the heuristic just charged. Keep the ordinary call edge alive too, so the local
-                // declaration's own effects (if it has any beyond the stub shape this was found on) are
-                // ALSO counted rather than discarded the moment the heuristic answered.
-                if conditionallyShadowedFreeFns.contains(name) {
+                // local declaration shadows it, but `conditionallyShadowedFreeFns`/`conditionallyShadowedTypes`
+                // says a `#if`-gated one exists — a build that actually compiles that branch runs IT, not
+                // the platform function the heuristic just charged. Keep the ordinary call edge alive too,
+                // so the local declaration's own effects (if it has any beyond the stub shape this was
+                // found on) are ALSO counted rather than discarded the moment the heuristic answered.
+                if conditionallyShadowedFreeFns.contains(name) || conditionallyShadowedTypes.contains(name) {
                     calls.append(Call(path: name, leaf: name, strArg: lit, typed: false,
                                       args: argKinds(node), argTypes: argTypesOf(node), unqualified: true))
                 }

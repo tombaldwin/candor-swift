@@ -149,6 +149,15 @@ final class DeclCollector: SyntaxVisitor {
     // (`self.launch()` inside `extension Process`) that resolves to no local unit falls through to the κ
     // table instead of reading silent-pure (the ShellOut cardinal-sin: `Process.launch` was lost).
     var declaredTypes: Set<String> = []
+    // ⟨0.33.1⟩ The SUBSET of `declaredTypes` declared OUTSIDE any `#if` — the TYPE analogue of
+    // `FnInfo.isConditionallyCompiled`. `declaredTypes` itself stays exactly as before (every real
+    // definition, conditional or not — it also seeds the §2.2 type-hierarchy sidecar, which must still
+    // answer for a `#if`-gated type since the engine cannot rule out that branch either); this narrower
+    // set is what the Driver uses to build the shadow guard CallCollector's κ-ctor arms fence on, so a
+    // name whose ONLY declaration(s) sit inside a `#if` (no `#else` needed — the engine reads every
+    // branch) does not permanently shadow the heuristic the way an unconditional declaration must. See
+    // `pushType`'s use of `ifConfigDepth`, and the getenv/free-function fix this mirrors (098a035).
+    var declaredTypesUnconditional: Set<String> = []
     // Types declared `@propertyWrapper`, and the wrapped stored properties per type
     // (`wrappedProps["S"]["count"] = "Logged"`). A `@Logged var count` desugars `s.count` to
     // `s._count.wrappedValue`; CallCollector edges the access to `Logged.wrappedValue` so an effectful
@@ -319,7 +328,14 @@ final class DeclCollector: SyntaxVisitor {
         localTypePaths.insert(typeStack.joined(separator: "."))
         // An `extension` does not DECLARE the type — it adds to whatever (possibly platform) type already
         // exists. Only a real definition shadows the κ table (see declaredTypes' note).
-        if !isExtension { declaredTypes.insert(name) }
+        if !isExtension {
+            declaredTypes.insert(name)
+            // ⟨0.33.1⟩ `ifConfigDepth == 0` means THIS declaration is not `#if`-gated — see
+            // `declaredTypesUnconditional`'s doc. A name declared BOTH unconditionally (here or
+            // elsewhere) and conditionally still ends up in this set (Driver unions per-file), which is
+            // right: a real, in-tree declaration exists, so winner-take-all still applies.
+            if ifConfigDepth == 0 { declaredTypesUnconditional.insert(name) }
+        }
         for inh in inheritance?.inheritedTypes ?? [] {
             if let pname = typeName(inh.type).name {
                 conformers[pname, default: []].append(name)

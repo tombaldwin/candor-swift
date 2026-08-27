@@ -190,6 +190,9 @@ final class NameKeyedStateTests: XCTestCase {
         // names shadowed only by a `#if`-gated declaration (no unconditional one exists). A rebind has
         // nothing to say about it — it is computed scan-wide/per-module in the Driver, not per-binding.
         "conditionallyShadowedFreeFns": .immutableIndex,
+        // ⟨0.33.1⟩ the TYPE analogue of the row directly above, same reasoning: bare type names shadowed
+        // only by a `#if`-gated declaration, scan-wide/per-Driver, never per-binding.
+        "conditionallyShadowedTypes": .immutableIndex,
         "returns": .immutableIndex, "enumCaseValueType": .immutableIndex,
         "dynamicMemberTypes": .immutableIndex, "propertyWrapperTypes": .immutableIndex,
         "wrappedProps": .immutableIndex, "typeAliases": .immutableIndex,

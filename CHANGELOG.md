@@ -302,6 +302,81 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   type of one of those exact names would get the heuristic back but not a union with its own effects. A
   conformance row should assert the `ifhedge-A`/`ifhedge-control`/`ifhedge-unconditional` triple.
 
+- ⚠ **CLOSES THE DECLARED-TYPE RESIDUAL FILED DIRECTLY ABOVE, now constructed and firing.**
+  `DeclCollector.pushType` inserted into `declaredTypes` UNCONDITIONALLY — it never consulted
+  `ifConfigDepth`, unlike `FnInfo.isConditionallyCompiled` above. `declaredTypes` is the fence the
+  constructor heuristic (and the Bonjour/EventKit/privacy-capture ctor arms beside it) uses to decide a
+  bare `Pipe()` means `Foundation.Pipe` (→ `Ipc`) rather than a local type:
+
+      import Foundation
+      #if os(Windows)
+      class Pipe { init() { fatalError("shim") } }
+      #endif
+      func realUsage() -> Pipe { return Pipe() }
+
+  `deny Ipc` exited 0, `functions` EMPTY — no `Unknown`, no `incomplete`, nothing; `typeSurface.returns`
+  showed `TS#realUsage : TS#Pipe`, proving the engine had resolved to the local shadow before charging it
+  nothing at all.
+
+  FIX: `DeclCollector.declaredTypesUnconditional` is the type analogue of `isConditionallyCompiled` — the
+  subset of `declaredTypes` declared outside any `#if`, aggregated scan-wide in the Driver the same way.
+  `Driver.conditionallyShadowedTypeNames` (`declaredTypes.subtracting(declaredTypesUnconditional)`) is
+  passed to `CallCollector` as a NEW field, `conditionallyShadowedTypes` — deliberately NOT a blanket swap
+  of what `CallCollector.declaredTypes` itself holds (see the reverted-and-narrowed note below). The four
+  BARE-CONSTRUCTOR κ arms (`kappaFree`, privacy-capture, Bonjour, EventKit — all in
+  `visit(FunctionCallExprSyntax)`'s bare-identifier branch) now also fire when a name is in
+  `conditionallyShadowedTypes`, and each keeps the ordinary call edge to the conditional declaration
+  alive alongside the κ charge — UNION, not winner-take-all, the same discipline `conditionallyShadowedFreeFns`
+  established for free functions. A name with even one UNCONDITIONAL declaration is unaffected (winner-
+  take-all, unchanged) — verified with a control: `class Pipe { init() {} }` with no `#if` at all still
+  resolves `realUsage` to its own pure init, zero `Ipc`.
+
+  NARROWED FROM A BROADER FIRST ATTEMPT, REVERTED. Passing the restricted set as `CallCollector`'s main
+  `declaredTypes` field (unscoped, matching every one of its ~15 uses) changed 16 swift-nio functions,
+  and several LOST their existing `Clock`/`Env`/`Unknown` outright in favour of a bare `Net` —
+  `ClientBootstrap`/`ServerBootstrap`/`DatagramBootstrap` are each declared exactly once, inside
+  `NIOPosix/Bootstrap.swift`'s file-wide `#if !os(WASI)` with no alternate declaration anywhere, so they
+  read as "conditional-only" under the naive rule, and NIOPosix's own INTERNAL self-dispatch between
+  their overloads — resolved locally before this — fell to the blunt cross-package heuristic instead,
+  losing real precision. `conditionallyShadowedTypes` is therefore consulted ONLY by the four bare-
+  constructor arms, never by the typed-receiver `kappaMember` dispatch path (`bootstrap.connect(...)`),
+  matching the shape of the original defect exactly (a bare `Pipe()` call has no internal-self-dispatch
+  risk). Re-running the 13-project corpus after narrowing: all 13 are BYTE-IDENTICAL to the pre-fix
+  binary (this defect's shape — a `#if`-gated STUB TYPE colliding with a bare-constructor κ spelling — is
+  not present in this corpus; the fix is proven by four synthetic fixtures instead: the `Pipe`/`Ipc`
+  repro above, `AVCaptureDevice`→Camera+Mic, `EKEventStore`→Calendar+Reminders, and `NWBrowser`→Net, each
+  confirmed absent pre-fix and present post-fix). `098a035`'s own getenv fixture (`Env`) and the
+  swift-nio corpus row it measured are unmoved.
+
+  CONTROLS: an unconditional local `Pipe` still shadows fully (unmoved, exit 0 on `deny Ipc`); the
+  no-`#if`-at-all control is unmoved (exit 1); the conditional stub's own `NSLog` unions to `["Ipc",
+  "Log"]` on `realUsage`, mirroring the getenv fix's `["Env", "Log"]` proof exactly.
+
+  The Bonjour/EventKit/privacy-capture arms ARE affected — verified, not assumed, with the three
+  fixtures above, each going from silent-pure to their correct over-disclosure.
+
+  **A REVIEW PASS FOUND ONE MORE, WORSE THAN ANY OF THE FOUR ABOVE: `chargeContentsCtor` (the shared
+  `Data`/`NSData`/`String(contentsOfFile:|contentsOf:)` family) has its OWN separate `declaredTypes` bail-
+  out, not one of the four arms this fix touched first.** `#if os(Windows) struct Data { init
+  (contentsOfFile:) { fatalError() } } #endif` beside `Data(contentsOfFile: path)`: `functions` came back
+  completely EMPTY for the caller — not even the `Unknown`/ordinary-call-edge the other four arms fall
+  back to when shadowed, because this arm returns `false` and the CALLER (the bare-identifier chain) had
+  nothing else to try for a name shaped like a type constructor with no matching κ family — so the `Fs`
+  charge vanished with literally nothing left behind. Same fix, same set: the guard is now `declaredTypes
+  .contains(name) && !conditionallyShadowedTypes.contains(name)`, and a `unionConditionalTypeEdge` helper
+  (factored out of the four arms' identical three-line block, tightening the duplication a reviewer also
+  flagged) keeps the conditional declaration's own call edge alive here too. Verified with the same
+  triple: the `Data`/`Fs` repro goes empty→`["Fs"]`; an unconditional local `Data` still shadows fully
+  (`realUsage` absent, resolves to its own pure init); the conditional stub's own `NSLog` unions to
+  `["Fs", "Log"]`. Re-ran the 13-project corpus after this second fix too — still byte-identical across
+  all 13.
+
+  RESIDUAL: none measured, this time checked by an independent review pass rather than asserted from the
+  four arms alone. A conformance row should assert the `Pipe`/`AVCaptureDevice`/`EKEventStore`/
+  `NWBrowser`/`Data` five-way, plus a swift-nio-shaped negative control (a type whose ONLY declaration
+  sits inside a broad `#if !os(X)` file guard, with internal self-dispatch between its own overloads,
+  must not lose its typed-receiver resolution) — the shape that sank the first attempt at this fix.
+
 ## [0.32.1] — 2026-08-25
 
 - Build version → 0.32.1 (`engineVersion`); no analyzer change.
