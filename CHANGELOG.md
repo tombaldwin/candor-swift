@@ -523,6 +523,84 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   new `Unknown`), and a genuine per-conformer miss (a bridged/native property with an empty local
   extension) discloses `Unknown` rather than a false-precise partial edge set.
 
+- ⚠ **A Swift MACRO was invisible, with zero disclosure — not `Unknown`, not `unanalyzed`, nothing.**
+  `#urlFetch("https://danger.example.com")` (a freestanding expression macro) and `@MyBodyMacro func
+  doThing() { }` (an attached macro on an apparently-empty body — the shape SwiftData `@Model`,
+  `Observation`'s `@Observable`, and Swift Testing's `@Test`/`@Suite` actually take) both scanned clean
+  under `deny Net`: exit 0, `policy ✓`, `functions: []`, `analyzed.count: 1`. No visitor existed for
+  `MacroExpansionExprSyntax` (`#name(...)`) and no attribute handling treated a decl's own custom
+  attributes as a possible attached macro, so a call reaching an arbitrary macro-injected effect read as
+  though it were never there. This sat beside three siblings that were ALL already disclosed — an
+  uncovered import (`invisible` + stderr), a parse failure (`unanalyzed`, fail-closed exit 2), build-only
+  code (`excluded`/`peeked`) — making the macro gap the one silent exception, not a considered omission.
+
+  A macro cannot be expanded without running its compiler plugin, out of reach for a syntax-only engine,
+  so this does not attempt to resolve what a macro actually does (that would be fabrication in the
+  opposite direction) — it routes the miss into the SAME disclosure vocabulary an unaddressable dispatch/
+  callback already uses: `Unknown` + `unknownWhy: "macro:<name>"` (freestanding) or `"macro:@<Attr>"`
+  (attached), SPEC §4. Two new visitors: `CallCollector.visit(_ node: MacroExpansionExprSyntax)` for the
+  freestanding form, and a `DeclCollector`-collected `typeMacroAttrs`/`FnInfo.uppercaseAttrs` companion
+  pair in `Driver.swift` for the attached form (func/init attributes were already collected for the
+  `@resultBuilder` path; type-decl attributes are new). A TYPE-level attribute (`@Observable class
+  Store`) is disclosed onto every member this scan already collected for that type, never a fabricated
+  new unit — a type with NO collected members at all (a wholly empty `@Observable class Store { }`) has
+  nothing to attach it to and stays as it already was, the same pre-existing, macro-independent blind
+  spot every purely compiler-synthesized member (a memberwise init, `Equatable`'s `==`) already has here.
+
+  THE DENYLIST IS THE HARD PART. Swift re-expressed its source-location and Objective-C interop literals
+  as macros under the hood (SE-0382), so `#file`/`#line`/`#function`/`#column`/`#filePath`/`#dsohandle`/
+  `#selector`/`#keyPath`/`#colorLiteral`/`#imageLiteral` parse as the identical `MacroExpansionExprSyntax`
+  node a real macro does — the grammar cannot tell them apart, only the name can. The first cut of this
+  list MISSED `#fileID` (SE-0274) and `#isolation` (SE-0420's `isolated (any Actor)? = #isolation`
+  default), caught only by the 13-package before/after corpus diff below: swift-nio and Nimble default
+  nearly every logging/assertion parameter to one of the two, and would have produced 93 and 8 hits of
+  pure noise respectively. `#error`/`#warning` (this engine reads BOTH arms of every `#if` unconditionally
+  — an `#else #error("…") #endif` platform stub is walked like any other code) are compile-time-only
+  diagnostics and were added alongside them. Symmetrically, a LOCALLY-declared `@resultBuilder` or
+  `@globalActor` type is exempted (its own existing table, or a new `globalActorTypes` one), and a small
+  denylist of compiler builtins that inject no hidden behaviour (`@MainActor`, `@IBAction`, `@NSManaged`,
+  …) is carved out on the same denylist-over-allowlist rule the rest of this engine uses: prove a name
+  SAFE, never trust an unproven one.
+
+  THE ONE REGRESSION CAUGHT BEFORE IT SHIPPED: a freestanding macro WITH a trailing closure (`#Preview {
+  … }`) was already caught concretely — the closure body is ordinary Swift the existing
+  `ClosureExprSyntax` visitor walks regardless of what contains it — and the first cut of this fix added
+  `Unknown` right beside that concrete catch anyway, on every such node, unconditionally. Gated the
+  disclosure on `node.trailingClosure == nil && node.additionalTrailingClosures.isEmpty`; a macro with a
+  trailing closure now contributes exactly what its closure body does and nothing else, matching the
+  brief's own framing precisely: "turning that into `Unknown` would be a regression from precise to
+  vague."
+
+  FALSIFIED both fixtures red before (`functions: []`) / disclosing after (`unresolved: true`,
+  `unknownWhy: ["macro:urlFetch"]` / `["macro:@MyBodyMacro"]`), with `analyzed.count` unchanged in both.
+  CONTROLS, all held: a name-alike non-macro (`func urlFetch(_ s: String) -> String`, `struct
+  Observable`) gains nothing; a local effectful `@resultBuilder` still resolves concretely (`inferred:
+  ["Net"]`, no `Unknown`); a local `@globalActor` and the builtin `@MainActor` are silent; `#file`/
+  `#line`/`#function` defaults are silent. Before/after diff across all 13 real packages at
+  `corpus2-swift/repos/` (Alamofire, CryptoSwift, Nimble, PromiseKit, Quick, ReactiveSwift, RxSwift,
+  swift-algorithms, swift-collections, swift-nio, swift-syntax, SwiftyJSON, Swinject): every one is
+  **BYTE-IDENTICAL** post-fix — none of their own top-level-scanned trees exercises a macro this fix's
+  denylist doesn't already explain (real macro USAGE in this corpus lives inside nested packages a root
+  scan does not cross, e.g. `swift-syntax/Examples`, its own separate `Package.swift`). Scanning that
+  nested package directly confirms the mechanism end-to-end on real, macro-heavy code with zero
+  fabrication: `analyzed.count` unchanged (104, identical digest), 0 → 10 macro-disclosed functions
+  (`@Observable`, `@DictionaryStorage`, a generic `@MyOptionSet<UInt8>`, and five distinct freestanding
+  macros including custom `#Line`/`#Column`/`#FileID`/`#FilePath` examples that are deliberately
+  NOT the lowercase compiler builtins), every one carrying `inferred: ["Unknown"]` / `direct: ["Unknown"]`
+  and nothing else. `swift test` (884/884), `smoke.sh` (148/148), `fuzz.py` (25/25), and
+  `ci/self-gate.sh` (108 Unknown, unchanged) all pass unmoved.
+
+  RESIDUAL, named plainly: a type carrying an attached macro attribute with ZERO collected members
+  (declared, not used, in these fixtures) produces no disclosure — there is nothing in the per-function
+  report model to attach it to, and inventing a synthetic per-type unit was judged out of scope for this
+  fix (the brief's instruction to reuse existing disclosure vocabulary rather than mint a new one). It is
+  the same pre-existing gap every compiler-synthesized member already has here, not a new one this fix
+  introduces, but a spec-level decision on whether an empty macro-decorated type needs its own disclosure
+  surface is open. Also open: a capitalized decl-attribute that is an EXTERNAL (not locally-declared)
+  `@resultBuilder` or `@globalActor` is indistinguishable from an attached macro at the syntax level and
+  is disclosed as one — sound (never a silent miss) but imprecise; none appeared in the 13-package corpus,
+  so its real-world frequency is unmeasured.
+
 ## [0.32.1] — 2026-08-25
 
 - Build version → 0.32.1 (`engineVersion`); no analyzer change.
