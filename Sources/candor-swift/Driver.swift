@@ -180,6 +180,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var localTypes: Set<String> = []
     var localTypePaths: Set<String> = []
     var declaredTypes: Set<String> = []
+    // ⟨0.33.1⟩ scan-wide aggregate of `DeclCollector.declaredTypesUnconditional` — see that field's doc.
+    var declaredTypesUnconditional: Set<String> = []
     var typeAliases: [String: String] = [:]
     var dynamicMemberTypes: Set<String> = []
     var propertyWrapperTypes: Set<String> = []
@@ -627,6 +629,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         localTypes.formUnion(c.localTypes)
         localTypePaths.formUnion(c.localTypePaths)
         declaredTypes.formUnion(c.declaredTypes)
+        declaredTypesUnconditional.formUnion(c.declaredTypesUnconditional)
         for (a, u) in c.typeAliases { typeAliases[a] = u }   // last-writer-wins (a redeclared alias is rare)
         dynamicMemberTypes.formUnion(c.dynamicMemberTypes)
         propertyWrapperTypes.formUnion(c.propertyWrapperTypes)
@@ -1046,6 +1049,31 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // it can UNION the κ heuristic's charge with the conditional declaration's own effects (not just
     // suppress the shadow) — see `conditionallyShadowedFreeFns`'s use, below and in CallCollector.
     let conditionalOnlyFreeFnNames = Set(freeFnByName.keys).subtracting(freeFnUnconditionalQuals)
+    // ⟨0.33.1⟩ THE TYPE ANALOGUE of `conditionalOnlyFreeFnNames`, directly above — a `#if`-gated
+    // `class`/`struct`/`enum`/`actor` of the same NAME as a κ-platform type (`Pipe`, `AVCaptureDevice`,
+    // `EKEventStore`, `NWBrowser`, …) shadows the BARE-CONSTRUCTOR κ arms in `CallCollector` (the
+    // `kappaFree`/privacy-capture/Bonjour/EventKit arms in `visit(FunctionCallExprSyntax)`'s bare-
+    // identifier branch) exactly the way an unconditional one does — same "SwiftSyntax reads every `#if`
+    // branch" root cause, same missing hedge.
+    //
+    // SCOPED TO THOSE FOUR ARMS ONLY, deliberately NOT a blanket swap of `declaredTypes` itself (that was
+    // tried first and reverted — see the corpus note below). `declaredTypes` stays the RAW aggregate
+    // everywhere else it is consulted: the §2.2 type-hierarchy sidecar, `isInvocationValue`'s `Process`
+    // check, `chargeContentsCtor`, and — the reason for the narrower scope — every TYPED-RECEIVER member-
+    // dispatch arm (`kappaMember` via `base.root`, e.g. `bootstrap.connect(...)`). MEASURED on swift-nio:
+    // passing the restricted set as `CallCollector.declaredTypes` wholesale (the broad version of this
+    // fix) changed 16 functions, and several of them LOST their existing `Clock`/`Env`/`Unknown` outright
+    // in favour of a bare `Net` — `ClientBootstrap`/`ServerBootstrap`/`DatagramBootstrap` are declared
+    // exactly once each, inside `Sources/NIOPosix/Bootstrap.swift`'s file-wide `#if !os(WASI)` (no
+    // alternate declaration anywhere, so they read as "conditional-only" under the naive rule), and
+    // NIOPosix's OWN internal self-dispatch between their overloads is what the typed-receiver arm was
+    // resolving locally before this — losing that shadow there means an INTERNAL call within the type's
+    // own method loses its true local resolution in favour of the blunt cross-package heuristic, which is
+    // a real precision regression (dropping an honest `Unknown`/`Clock`/`Env` for a confident-but-
+    // incomplete `Net`), not the additive gain this fix exists to make. A bare CONSTRUCTOR call
+    // (`Pipe()`) has no such internal-self-dispatch shape — the four arms below are the only place the
+    // narrowing is safe, matching the shape of the original `getenv`/`Pipe` defect exactly.
+    let conditionallyShadowedTypeNames = declaredTypes.subtracting(declaredTypesUnconditional)
     // MEMBER NAMES PER LOCAL TYPE, for half 1's provenance conjunct. A bare `foo()` inside `struct Bar`
     // is `self.foo()` when `Bar` declares `foo` — a purely LOCAL call, never a dependency factory — but
     // the conjunct only excluded FREE functions, so every such call recorded a dependency-provenance
@@ -1097,6 +1125,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                propertyWrapperTypes: propertyWrapperTypes, wrappedProps: wrappedProps,
                                localFreeFns: localFreeFnNames.union(localFreeFnBaseNamesByModule[swiftModuleOf(f.loc)] ?? []),
                                conditionallyShadowedFreeFns: conditionalOnlyFreeFnNames.union(conditionalOnlyFreeFnNamesByModule[swiftModuleOf(f.loc)] ?? []),
+                               conditionallyShadowedTypes: conditionallyShadowedTypeNames,
                                typeAliases: typeAliases,
                                enclosingMembers: f.enclosingType.map { t in
                                    membersVisibleCache[t] ?? {
