@@ -8,6 +8,19 @@ import SwiftParserDiagnostics
 import SwiftSyntax
 import CandorCore
 
+// Swift/Apple compiler-recognized CAPITALIZED declaration attributes that inject NO hidden behaviour —
+// they are compile-time enforcement/wiring markers the compiler checks against source that is already
+// fully visible, never a synthesized member, body, or call. Carved out of the attached-macro disclosure
+// below on the denylist-over-allowlist rule (candor-spec: narrow a sound over-approximation by proving a
+// name SAFE, never by trusting an unproven one) — the over-approximation is "any unexplained capitalized
+// decl-attribute might be an attached macro"; only a name on this list, or a locally-declared
+// `@resultBuilder`/`@globalActor` type (handled separately, see their own tables), is exempted.
+private let KNOWN_BUILTIN_DECL_ATTRS: Set<String> = [
+    "MainActor", "UIApplicationMain", "NSApplicationMain",
+    "IBAction", "IBSegueAction", "IBOutlet", "IBInspectable", "IBDesignable",
+    "NSManaged", "NSCopying", "GKInspectable",
+]
+
 /// Everything the report/ledger/gate stages need from the analysis — returned as one value so the
 /// two-pass drive is a callable unit (it was ~500 lines of top-level statements in main.swift).
 struct Analysis {
@@ -186,6 +199,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var dynamicMemberTypes: Set<String> = []
     var propertyWrapperTypes: Set<String> = []
     var resultBuilderTypes: Set<String> = []
+    var globalActorTypes: Set<String> = []
+    // Type-level attached-macro candidates (`DeclCollector.typeMacroAttrs`, unioned across files —
+    // see that field's doc). Consulted per-function below, keyed on `FnInfo.enclosingType`.
+    var typeMacroAttrs: [String: [String]] = [:]
     var wrappedProps: [String: [String: String]] = [:]
     var returnsIdx: [String: String] = [:]
     var importCounts: [String: Int] = [:]
@@ -634,6 +651,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         dynamicMemberTypes.formUnion(c.dynamicMemberTypes)
         propertyWrapperTypes.formUnion(c.propertyWrapperTypes)
         resultBuilderTypes.formUnion(c.resultBuilderTypes)
+        globalActorTypes.formUnion(c.globalActorTypes)
+        for (t, attrs) in c.typeMacroAttrs { typeMacroAttrs[t, default: []].append(contentsOf: attrs) }
         for (t, ps) in c.wrappedProps { wrappedProps[t, default: [:]].merge(ps) { a, _ in a } }
         for m in c.imports { importCounts[m, default: 0] += 1 }
         fileImports[c.file] = c.imports
@@ -1213,6 +1232,34 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             for m in ["buildBlock", "buildExpression", "buildOptional", "buildEither", "buildArray",
                       "buildFinalResult", "buildPartialBlock", "buildLimitedAvailability"] {
                 edges[f.qual, default: []].formUnion(resolveQual("\(attr).\(m)"))
+            }
+        }
+        // ATTACHED MACRO / unresolved external result-builder disclosure. A capitalized decl-attribute
+        // this scan cannot explain is not a fourth possibility to enumerate — Swift admits exactly two on
+        // a func/init (a result builder or an attached macro) and exactly two on a type (a global actor or
+        // an attached macro), and both explained cases are already carved out above (`resultBuilderTypes`)
+        // or via `globalActorTypes`/the builtin denylist below. Neither can be EXPANDED without running
+        // the compiler plugin (out of reach here), so this does not guess what the attribute does — it
+        // discloses that candor could not see past it, in the SAME vocabulary a dispatch/callback already
+        // uses (`Unknown` + `unknownWhy: "macro:@Name"`, SPEC §4), never a fabricated concrete effect.
+        //
+        // A func attribute reaches only THIS function — a body/peer/accessor macro's whole visible surface
+        // is the one declaration it decorates. A TYPE attribute (`@Observable class Store`) can introduce
+        // members the source never spells, so it is disclosed onto every member this scan already collected
+        // for that type (never a synthesized new unit — see the AGENT-CORPUS-BRIEF note on not minting a
+        // new disclosure vocabulary): a type with no collected members at all stays as it already was — the
+        // pre-existing, macro-independent blind spot every purely-compiler-synthesized member (a memberwise
+        // init, Equatable's `==`) already has here.
+        for attr in f.uppercaseAttrs where !resultBuilderTypes.contains(attr)
+            && !KNOWN_BUILTIN_DECL_ATTRS.contains(attr) && !globalActorTypes.contains(attr) {
+            direct[f.qual, default: []].insert("Unknown")
+            whyMap[f.qual, default: []].insert("macro:@\(attr)")
+        }
+        if let et = f.enclosingType {
+            for attr in typeMacroAttrs[et] ?? [] where !KNOWN_BUILTIN_DECL_ATTRS.contains(attr)
+                && !globalActorTypes.contains(attr) {
+                direct[f.qual, default: []].insert("Unknown")
+                whyMap[f.qual, default: []].insert("macro:@\(attr)")
             }
         }
         // a bare-name read that names a GLOBAL initializer unit charges its first-touch effects here

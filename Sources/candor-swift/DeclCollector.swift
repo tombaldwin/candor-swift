@@ -169,6 +169,15 @@ final class DeclCollector: SyntaxVisitor {
     var wrappedProps: [String: [String: String]] = [:]
     var dynamicMemberTypes: Set<String> = []   // `@dynamicMemberLookup`-annotated local types
     var resultBuilderTypes: Set<String> = []   // `@resultBuilder`-annotated local types
+    var globalActorTypes: Set<String> = []     // `@globalActor`-annotated local types (e.g. a custom `@DBActor`)
+    // Capitalized @-attributes applied to a class/struct/enum/actor DECLARATION itself (`@Observable
+    // class Store`), raw and unfiltered — the type-level companion to `FnInfo.uppercaseAttrs`. Swift
+    // admits exactly two explanations for a capitalized custom attribute here: a global actor (excluded
+    // via `globalActorTypes` once the driver has unioned every file) or an attached macro — there is no
+    // third category a type declaration can carry, unlike a var/param site where a property wrapper is
+    // also possible. Driver filters this against the unioned `globalActorTypes` and a small denylist of
+    // compiler builtins (`@MainActor`, `@IBDesignable`, …) before disclosing the residue as Unknown.
+    var typeMacroAttrs: [String: [String]] = [:]
     // LOCAL `typealias Name = Underlying` declarations (name -> the underlying type's SIMPLE name). The
     // κ classifier keys on the LITERAL type spelling, so an alias (`typealias Proc = Process`) evaded it
     // and a `Proc()`/`FM.default` reach read silent-pure. Resolved through in CallCollector before the κ
@@ -356,6 +365,20 @@ final class DeclCollector: SyntaxVisitor {
                 // `ThisBuilder.buildBlock(...)` etc — so the builder's build methods RUN when the func is
                 // called. Record the type so Driver can edge such a func to its build* units (R29).
                 if an == "resultBuilder" { resultBuilderTypes.insert(name) }
+                // A `@globalActor` type (`@globalActor actor DBActor { … }`): a decl annotated `@DBActor`
+                // is isolation-checked at compile time only — no member is synthesized, no body supplied —
+                // so it is the one capitalized decl-attribute explanation that is NOT an attached macro.
+                // See `typeMacroAttrs`'s note; only a LOCALLY-declared global actor is exempted this way.
+                if an == "globalActor" { globalActorTypes.insert(name) }
+            }
+        }
+        // capitalized @-attributes on the TYPE decl itself (`@Observable class Store`) — raw and
+        // unfiltered, same discipline as `FnInfo.uppercaseAttrs`: this pass records candidates, Driver
+        // (after every file's tables are unioned) decides what they mean.
+        for attr in attributes ?? [] {
+            if let a = attr.as(AttributeSyntax.self) {
+                let an = a.attributeName.trimmedDescription
+                if an.first?.isUppercase == true { typeMacroAttrs[name, default: []].append(an) }
             }
         }
     }

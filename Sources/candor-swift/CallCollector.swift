@@ -3438,6 +3438,60 @@ final class CallCollector: SyntaxVisitor {
         calls.append(Call(path: opName, leaf: opName, strArg: nil, typed: false, args: opArgs, argTypes: opTypes, unqualified: true))
     }
 
+    // A well-known Swift COMPILER-BUILTIN freestanding expression macro. SE-0382 (Swift 5.9) re-expressed
+    // the language's source-location literals and Objective-C interop literals as macros under the hood,
+    // so `#file`/`#line`/`#function`/… parse as the SAME `MacroExpansionExprSyntax` node a real third-
+    // party macro does — the grammar cannot tell them apart, only the macro NAME can. All of these resolve
+    // entirely at compile time to a value the compiler already knows; none of them is a call, and none can
+    // carry an effect. Denylisted here so the fix below discloses genuine unresolved macros without
+    // drowning every defaulted `file: String = #file` / `line: Int = #line` parameter — by far the most
+    // common `#`-expressions in real Swift — in noise that would fabricate the opposite failure this fix
+    // exists to close (AGENT-CORPUS-BRIEF rule 9: a control must not gain on a `#` expression that isn't
+    // really a macro).
+    //
+    // `fileID` (SE-0274) and `isolation` (SE-0420's default-isolated-parameter literal, `isolation:
+    // isolated (any Actor)? = #isolation`) were MEASURED missing from the first cut of this list — the
+    // 13-package before/after corpus diff surfaced 93 `fileID` and 8 `isolation` hits (swift-nio and
+    // Nimble default nearly every logging/assertion parameter to one or the other), which would have been
+    // exactly the noise this denylist exists to prevent. `error`/`warning` are the compiler's source
+    // diagnostics (`#error("…")`) — this engine reads BOTH arms of every `#if` unconditionally (its
+    // documented `#if` policy), so an `#else #error(...) #endif` platform stub is walked like any other
+    // code; diagnostics run at compile time only and can carry no runtime effect either.
+    private static let KNOWN_PURE_FREESTANDING_MACROS: Set<String> = [
+        "file", "filePath", "fileID", "line", "column", "function", "dsohandle", "isolation",
+        "selector", "keyPath", "colorLiteral", "imageLiteral", "error", "warning",
+    ]
+
+    // A freestanding macro EXPRESSION (`#urlFetch("...")`) had no visitor at all before this — not even
+    // FunctionCallExprSyntax matches its syntax shape (`MacroExpansionExprSyntax` is its own node kind) —
+    // so a call reaching an arbitrary macro-injected effect (Net, Fs, …) read completely silent-pure: no
+    // `Unknown`, no `unresolved`, nothing. A macro cannot be expanded without running its compiler plugin,
+    // which is out of reach for a syntax-only engine, so this does not attempt to resolve what the macro
+    // actually does (that would be fabrication in the opposite direction) — it discloses that candor could
+    // not see past it, in the SAME vocabulary an unaddressable dispatch/callback already uses (`why:
+    // "macro:<name>"`, SPEC §4's `unknownWhy`).
+    //
+    // A TRAILING CLOSURE on the same node (`#Preview { call() }`) is ordinary Swift the compiler runs
+    // verbatim, and the existing `ClosureExprSyntax` visitor already walks it regardless of what
+    // syntactically contains it — so a trailing closure's own effects are ALREADY caught concretely with
+    // no help from this visitor. Disclosing `Unknown` ANYWAY on that same node would sit the vague verdict
+    // right beside the concrete one this scan already earned for free, which is precisely the "regression
+    // from precise to vague" this fix must not cause (measured: it double-counted `#Preview { … }` in first
+    // testing here, adding `Unknown` next to a real Net catch for no reason — the exact caution named in
+    // the brief). So the disclosure below is gated to the residual the brief scoped this to: a freestanding
+    // macro with NO trailing closure at all (neither the shorthand `trailingClosure` nor the multiple-
+    // closure form) — `.visitChildren` still runs either way, so a closure body or ordinary arguments are
+    // still walked exactly as before.
+    override func visit(_ node: MacroExpansionExprSyntax) -> SyntaxVisitorContinueKind {
+        let name = node.macroName.text
+        let hasClosure = node.trailingClosure != nil || !node.additionalTrailingClosures.isEmpty
+        if !hasClosure && !Self.KNOWN_PURE_FREESTANDING_MACROS.contains(name) {
+            unresolved = true
+            why.insert("macro:\(name)")
+        }
+        return .visitChildren
+    }
+
     // `obj[i]` / `obj[i] = v` — a subscript ACCESS runs the subscript's getter/setter body (a
     // `Type.subscript` unit). Resolve the base receiver's type; a local-type base edges to its
     // subscript unit (read/write indistinguishable here — over-approximate to the union, the sound
