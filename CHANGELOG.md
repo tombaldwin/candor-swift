@@ -9,6 +9,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.33.1] — 2026-08-27
+
 - ⚠ **An overloaded protocol-extension PROVIDED member vanished — not even `Unknown` — the moment a
   CONCRETE (non-protocol-typed) receiver reached it.** `protocol Runner { }`, one provided member
   `run(times:)` doing `Exec`: `S: Runner` with no override, `s.run(times: 3)` from `useS` — `deny
