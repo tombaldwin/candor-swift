@@ -69,6 +69,16 @@ struct FnInfo {
     // (`extension Array where Element: Saveable` → "Saveable") — so a bare `forEach { $0.method() }`
     // over `self` types `$0` and dispatches (the conditional-conformance vein, R28).
     var selfElementType: String? = nil
+    // ⟨0.33.1⟩ Declared inside a `#if` CONDITIONAL-COMPILATION block (any condition — `os(Windows)`,
+    // `DEBUG`, `canImport(…)`, with or without an `#else`). The syntactic scan has no build
+    // configuration and reads BOTH/ALL clauses of every `#if` unconditionally (SwiftSyntax's default
+    // visitor descends into an `IfConfigDeclSyntax` whichever way the condition would actually
+    // resolve), so a declaration living in one clause is exactly as visible here as an unconditional
+    // one — but it may not exist AT ALL in the build this scan's caller ships. See the SHADOW note at
+    // Driver.swift's `localFreeFnBaseNamesByModule`/`conditionalOnlyFreeFnNamesByModule`: a bare-name
+    // κ heuristic (`getenv`) must not be permanently shadowed by a same-named declaration that only
+    // exists on a platform this scan cannot pin.
+    var isConditionallyCompiled: Bool = false
 }
 
 // Collects the expression of every explicit `return <expr>` inside a body (Finding 1: pinning a function's
@@ -185,6 +195,16 @@ final class DeclCollector: SyntaxVisitor {
     // parallel to typeStack: self's ELEMENT bound when the current scope is a COLLECTION extension with a
     // `where Element: P` clause (`extension Array where Element: Saveable` → "Saveable"); nil otherwise.
     private var selfElementStack: [String?] = []
+    // ⟨0.33.1⟩ Depth of `#if` CONDITIONAL-COMPILATION nesting the walker currently sits inside. >0 for
+    // every clause of every `#if`/`#elseif`/`#else` — SwiftSyntax carries no build configuration, so
+    // this walker (like the rest of the engine) reads every branch, and cannot tell which one, if any,
+    // the actual build will keep. See `FnInfo.isConditionallyCompiled`.
+    private var ifConfigDepth = 0
+    override func visit(_ node: IfConfigDeclSyntax) -> SyntaxVisitorContinueKind {
+        ifConfigDepth += 1
+        return .visitChildren
+    }
+    override func visitPost(_ node: IfConfigDeclSyntax) { ifConfigDepth -= 1 }
 
     init(file: String, tree: SourceFileSyntax) {
         self.file = file
@@ -757,6 +777,7 @@ final class DeclCollector: SyntaxVisitor {
         info.selfElementType = selfElementStack.last ?? nil   // collection-extension element bound, if any
         info.body = body.map { Syntax($0) }
         info.isMain = name == "main"
+        info.isConditionallyCompiled = ifConfigDepth > 0
         // capture capitalized @-attributes on the func (`@EffBuilder`) — Driver edges to a result-builder
         // type's build methods once all `@resultBuilder` decls are known (declaration order is not assured).
         for attr in Syntax(node).as(FunctionDeclSyntax.self)?.attributes ?? [] {

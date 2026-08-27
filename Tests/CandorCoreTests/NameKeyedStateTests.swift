@@ -186,6 +186,10 @@ final class NameKeyedStateTests: XCTestCase {
         "opaqueFields": .immutableIndex, "localTypes": .immutableIndex,
         "declaredTypes": .immutableIndex, "enclosingMembers": .immutableIndex,
         "localFreeFns": .immutableIndex, "localProtocols": .immutableIndex,
+        // ⟨0.33.1⟩ the SIBLING of `localFreeFns`, injected at construction the same way: bare free-fn
+        // names shadowed only by a `#if`-gated declaration (no unconditional one exists). A rebind has
+        // nothing to say about it — it is computed scan-wide/per-module in the Driver, not per-binding.
+        "conditionallyShadowedFreeFns": .immutableIndex,
         "returns": .immutableIndex, "enumCaseValueType": .immutableIndex,
         "dynamicMemberTypes": .immutableIndex, "propertyWrapperTypes": .immutableIndex,
         "wrappedProps": .immutableIndex, "typeAliases": .immutableIndex,

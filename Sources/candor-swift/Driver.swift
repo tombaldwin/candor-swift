@@ -698,8 +698,40 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // or a name heuristic gets pre-empted by a declaration the caller's own module cannot reach, which is
     // just as wrong as being pre-empted by a heuristic when a same-module declaration COULD reach it.
     var localFreeFnBaseNamesByModule: [String: Set<String>] = [:]
-    for f in allFns where f.enclosingType == nil && !f.isAccessor && !f.isTopLevel {
-        localFreeFnBaseNamesByModule[swiftModuleOf(f.loc), default: []].insert(f.qual)
+    // ⟨0.33.1⟩ THE #if-GATED STUB, one scope level from the fix directly above. `getenv`/etc declared
+    // inside `#if os(Windows) … #endif` with NO `#else` is exactly as visible to this syntactic scan as
+    // an unconditional declaration — SwiftSyntax carries no build configuration, so DeclCollector reads
+    // it and it lands in `allFns` marked `isConditionallyCompiled` (see that field's doc). Left
+    // unhandled, such a declaration shadows the SAME-MODULE κ heuristic for EVERY build, including every
+    // one that will never contain the stub — swift-nio's `NIOFS`/`_NIOFileSystem` `getenv` shim lost
+    // `realUsage`'s real Env charge this way with no `Unknown`, no `incomplete`, nothing (the ifhedge-A
+    // corpus find).
+    //
+    // A name with AT LEAST ONE UNCONDITIONAL declaration in the module keeps shadowing exactly as
+    // before — a real, in-tree declaration exists and winner-take-all is right (the module-scoping fix
+    // above draws the same line for RESOLUTION; this is the same discipline for the SHADOW guard). A
+    // name whose ONLY module declaration(s) sit inside a `#if` is recorded in
+    // `conditionalOnlyFreeFnNamesByModule` instead of the shadow set: the heuristic is allowed to fire
+    // (the call MAY genuinely reach the real platform function), and `CallCollector` additionally keeps
+    // the ordinary call edge to the conditional declaration alive — so a build where the stub genuinely
+    // is the one compiled still gets ITS effects too. UNION, not winner-take-all, because resolution
+    // here has not failed — it is CONDITIONAL, and the safe side of "cannot tell" is to count both
+    // readings rather than pick one (the same direction `matchOverloads` takes when arg types cannot
+    // rule an overload out).
+    var conditionalOnlyFreeFnNamesByModule: [String: Set<String>] = [:]
+    do {
+        var unconditionalByModule: [String: Set<String>] = [:]
+        var anyByModule: [String: Set<String>] = [:]
+        for f in allFns where f.enclosingType == nil && !f.isAccessor && !f.isTopLevel {
+            let m = swiftModuleOf(f.loc)
+            anyByModule[m, default: []].insert(f.qual)
+            if !f.isConditionallyCompiled { unconditionalByModule[m, default: []].insert(f.qual) }
+        }
+        for (m, names) in unconditionalByModule { localFreeFnBaseNamesByModule[m, default: []].formUnion(names) }
+        for (m, names) in anyByModule {
+            let conditionalOnly = names.subtracting(unconditionalByModule[m] ?? [])
+            if !conditionalOnly.isEmpty { conditionalOnlyFreeFnNamesByModule[m] = conditionalOnly }
+        }
     }
     // FILE-SCOPE GLOBALS are accessor units and so sit outside the overload pass above — which meant two
     // modules each declaring `let cfg` collapsed into ONE unit carrying the union of both initializers'
@@ -809,6 +841,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var globalsByModule: [String: [String: [String]]] = [:]
     // name indexes for resolution — UNAMBIGUOUS only (the family's never-guess rule)
     var freeFnByName: [String: [String]] = [:]
+    // ⟨0.33.1⟩ `freeFnByName`'s keys, RESTRICTED to quals with at least one UNCONDITIONAL (not inside a
+    // `#if`) declaration — the scan-wide counterpart of `conditionalOnlyFreeFnNamesByModule` above, used
+    // to build `localFreeFnNames` below. `freeFnByName` itself stays untouched (still every declaration,
+    // conditional or not) because it also drives ordinary call-graph RESOLUTION, where a call made from
+    // inside the same `#if` branch as its callee must still resolve.
+    var freeFnUnconditionalQuals: Set<String> = []
     var byQual: Set<String> = []
     // Receivers resolve to SIMPLE type names (`vars`/`fields`/`typeName` are simple), but qual is now the
     // full nested path — so a typed call edge `Backend.store` (simple) is matched to the full qual through
@@ -833,6 +871,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // free-fn index so it neither resolves phantom `<main>()` calls nor makes any name ambiguous.
         if f.enclosingType == nil && !f.isAccessor && !f.isTopLevel {
             freeFnByName[f.qual, default: []].append(f.qual)
+            if !f.isConditionallyCompiled { freeFnUnconditionalQuals.insert(f.qual) }
             // key on the SIMPLE name: the qual may already carry an overload suffix (`shared()#1`).
             let leaf = f.simpleQual.split(separator: "(").first.map(String.init) ?? f.simpleQual
             freeFnByModule[swiftModuleOf(f.loc), default: [:]][leaf, default: []].append(f.qual)
@@ -996,7 +1035,17 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // the per-fn loop, so its key set is fixed. Build it ONCE here — not once PER function inside the loop
     // (`Set(freeFnByName.keys)` at the CallCollector site was O(freeFns) rebuilt N times = O(N²) on a
     // free-function-heavy corpus). Byte-identical: the set passed to each CallCollector is the same value.
-    let localFreeFnNames = Set(freeFnByName.keys)
+    //
+    // ⟨0.33.1⟩ RESTRICTED to `freeFnUnconditionalQuals`: a bare name whose EVERY declaration sits inside
+    // a `#if` (no unconditional declaration anywhere in the scan) must not shadow the κ heuristic — see
+    // the doc at `conditionalOnlyFreeFnNamesByModule` above, which this is the scan-wide counterpart of.
+    // A name with even one unconditional declaration is unaffected (still in this set, still shadows).
+    let localFreeFnNames = freeFnUnconditionalQuals
+    // The scan-wide twin of `conditionalOnlyFreeFnNamesByModule`: names in `freeFnByName` that have NO
+    // unconditional declaration anywhere. Passed to `CallCollector` alongside the module-scoped set so
+    // it can UNION the κ heuristic's charge with the conditional declaration's own effects (not just
+    // suppress the shadow) — see `conditionallyShadowedFreeFns`'s use, below and in CallCollector.
+    let conditionalOnlyFreeFnNames = Set(freeFnByName.keys).subtracting(freeFnUnconditionalQuals)
     // MEMBER NAMES PER LOCAL TYPE, for half 1's provenance conjunct. A bare `foo()` inside `struct Bar`
     // is `self.foo()` when `Bar` declares `foo` — a purely LOCAL call, never a dependency factory — but
     // the conjunct only excluded FREE functions, so every such call recorded a dependency-provenance
@@ -1047,6 +1096,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                enumCaseValueType: enumCaseValueType, dynamicMemberTypes: dynamicMemberTypes,
                                propertyWrapperTypes: propertyWrapperTypes, wrappedProps: wrappedProps,
                                localFreeFns: localFreeFnNames.union(localFreeFnBaseNamesByModule[swiftModuleOf(f.loc)] ?? []),
+                               conditionallyShadowedFreeFns: conditionalOnlyFreeFnNames.union(conditionalOnlyFreeFnNamesByModule[swiftModuleOf(f.loc)] ?? []),
                                typeAliases: typeAliases,
                                enclosingMembers: f.enclosingType.map { t in
                                    membersVisibleCache[t] ?? {

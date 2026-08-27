@@ -253,6 +253,55 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   function — a softer residual than the shellOut defect (never a *confident* wrong denial), but a real
   one, and a conformance row should assert it does not regress further.
 
+- ⚠ **CLOSES THE RESIDUAL ABOVE. A `#if`-gated stub silently shadowed a κ heuristic with NO hedge at
+  all — not even the `Unknown` the residual's own words claimed was always there.** `#if os(Windows)
+  func getenv(_:) -> ... { fatalError(...) } #endif` beside `if let v = getenv("PATH") { ... }` in the
+  SAME module, no `#else`: `deny Env` exited 0, `policy ✓`, `functions` EMPTY — `path realUsage Env`
+  answers "no function matching 'realUsage'". This engine models no build configuration, so
+  `DeclCollector` reads every `#if` branch unconditionally and the Windows-only stub is exactly as
+  visible as a real declaration — permanently shadowing the heuristic for every build, including the
+  one that never contains the stub.
+
+  FIX: `FnInfo` now carries `isConditionallyCompiled` (any `#if` depth, any condition, with or without
+  `#else` — the engine cannot evaluate any of them). The shadow sets that feed `localFreeFns`
+  (`freeFnUnconditionalQuals` scan-wide, `conditionalOnlyFreeFnNamesByModule` per-module, mirroring the
+  shellOut fix's own module line) now exclude a name whose ONLY declaration(s) are conditional — a name
+  with even one unconditional declaration keeps shadowing exactly as before (a real resolution exists,
+  winner-take-all is right). A name shadowed ONLY by a conditional declaration is passed separately as
+  `conditionallyShadowedFreeFns`: the κ heuristic fires (the call may genuinely reach the real platform
+  function), and the ordinary call edge to the conditional declaration is ALSO kept, so the two readings
+  UNION rather than one winning outright — resolution has not failed here, it is conditional, and that
+  is the same direction `matchOverloads` already takes when an overload cannot be ruled out. The
+  distinction the shellOut fix drew stands: winner-take-all when a real resolution exists, union when it
+  is conditional or has failed.
+
+  GENERAL TO THE WHOLE TABLE, not `getenv`-specific: the fix operates on the shadow-SET construction, so
+  it applies uniformly to every `kappaFree` name (the ~35 switch-case names, the 16 `CAPABILITY_
+  SPELLINGS` free spellings, and the model-SDK/privacy-SDK ctor tables gated by the same `localFreeFns`
+  check) — none of them is named in the fix itself.
+
+  CONTROLS: `ifhedge-A` (the fixture above) goes exit 1/`Env` after being exit 0/empty before;
+  `ifhedge-control` (same code, no `#if` at all) is unmoved at exit 1 throughout; a NEW
+  `ifhedge-unconditional` fixture (an unconditional same-module local `getenv`) proves the shadow still
+  holds when a real declaration exists — unmoved at exit 0 throughout. Checksum-verified BYTE-IDENTICAL
+  against the pre-fix binary across 12 of the 13-project real-world corpus (swift-collections,
+  swift-algorithms, swift-syntax, Quick, Nimble, SwiftyJSON, RxSwift, Swinject, PromiseKit, CryptoSwift,
+  Alamofire, ReactiveSwift); swift-nio is the one that legitimately differs, and every one of its 6
+  changed functions was traced: `Libc.homeDirectoryFromEnvironment()` (both `NIOFS` and
+  `_NIOFileSystem` copies) and the `temporaryDirectory`/`homeDirectory`/`withTemporaryDirectory` callers
+  above them each gain `Env` alongside their existing `Unknown` — exactly the residual's own predicted 6
+  functions, no function count change, no other effect column moved (`Env 1166 -> 1172`, everything else
+  byte-identical), and no over-charge.
+
+  **RESIDUAL, filed rather than routed around:** the DECLARED-TYPE analogue of this same defect (a
+  `#if`-gated `class`/`struct` of the same name as a κ-platform type shadowing `declaredTypes` the same
+  way) is not addressed here — measured to exist by construction (the same unconditional `#if` read
+  applies to type decls), unmeasured in the wild, and left for a separate pass. The Bonjour/EventKit/
+  privacy-capture bare-ctor arms share `localFreeFns` and so inherit the shadow-removal automatically,
+  but not the union call-edge addition (added only to the primary `kappaFree` arm) — a `#if`-gated local
+  type of one of those exact names would get the heuristic back but not a union with its own effects. A
+  conformance row should assert the `ifhedge-A`/`ifhedge-control`/`ifhedge-unconditional` triple.
+
 ## [0.32.1] — 2026-08-25
 
 - Build version → 0.32.1 (`engineVersion`); no analyzer change.

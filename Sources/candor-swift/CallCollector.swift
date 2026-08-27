@@ -175,6 +175,18 @@ final class CallCollector: SyntaxVisitor {
     let localFreeFns: Set<String>   // local free-function names — a bare `name(...)` call to one is the
                                     // project's OWN fn, so the platform free-call classifier (kappaFree)
                                     // must NOT fire (else a local `func NSLog`/`Pipe`-ctor fabricates)
+    /// ⟨0.33.1⟩ Bare free-fn names whose ONLY declaration(s) reachable here sit inside a `#if`
+    /// conditional-compilation block — see `FnInfo.isConditionallyCompiled` and the Driver's
+    /// `conditionalOnlyFreeFnNamesByModule`/`conditionalOnlyFreeFnNames`. Disjoint from `localFreeFns` by
+    /// construction (a name with even one unconditional declaration is in `localFreeFns` instead, and
+    /// keeps winner-take-all — a real resolution exists). For a name in THIS set the shadow is lifted
+    /// (`localFreeFns` does not contain it, so the κ heuristic below fires normally) and the bare call is
+    /// ADDITIONALLY kept as an ordinary call edge to the conditional declaration, so the two readings
+    /// UNION: whichever the real build keeps — the platform function the heuristic models, or the local
+    /// declaration that may or may not exist — its effects are counted. Resolution is not FAILED here (a
+    /// name with no local declaration at all resolves the heuristic outright, same as always); it is
+    /// CONDITIONAL, and union rather than a single winner is the safe reading of "cannot tell which".
+    let conditionallyShadowedFreeFns: Set<String>
     /// Swift stdlib free functions carved OUT of the half-1 provenance trigger, which cannot otherwise
     /// tell a bare `max(a, b)` from a bare imported `build()` — Swift spells both without a module root.
     ///
@@ -397,7 +409,7 @@ final class CallCollector: SyntaxVisitor {
          opaqueFields: [String: Set<String>] = [:],
          enumCaseValueType: [String: String], dynamicMemberTypes: Set<String>,
          propertyWrapperTypes: Set<String>, wrappedProps: [String: [String: String]],
-         localFreeFns: Set<String>, typeAliases: [String: String],
+         localFreeFns: Set<String>, conditionallyShadowedFreeFns: Set<String> = [], typeAliases: [String: String],
          enclosingMembers: Set<String> = [],
          opaqueSeqBuilders: Set<String>, seqBuilderConcrete: [String: String],
          closureFields: [String: Set<String>], moduleConstStrings: [String: String] = [:],
@@ -411,6 +423,7 @@ final class CallCollector: SyntaxVisitor {
         self.closureFields = closureFields
         self.typeAliases = typeAliases
         self.localFreeFns = localFreeFns
+        self.conditionallyShadowedFreeFns = conditionallyShadowedFreeFns
         self.enclosingMembers = enclosingMembers
         self.propertyWrapperTypes = propertyWrapperTypes
         self.wrappedProps = wrappedProps
@@ -2762,6 +2775,16 @@ final class CallCollector: SyntaxVisitor {
                 if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK ctor/call IS network I/O
                 recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
                 if lit == nil, est, !(eff == "Fs" && lastResolvedHomePath) { incompleteSurfaces.insert(eff) }
+                // ⟨0.33.1⟩ UNION, not winner-take-all: `name` matched the κ table because no UNCONDITIONAL
+                // local declaration shadows it, but `conditionallyShadowedFreeFns` says a `#if`-gated one
+                // exists — a build that actually compiles that branch runs IT, not the platform function
+                // the heuristic just charged. Keep the ordinary call edge alive too, so the local
+                // declaration's own effects (if it has any beyond the stub shape this was found on) are
+                // ALSO counted rather than discarded the moment the heuristic answered.
+                if conditionallyShadowedFreeFns.contains(name) {
+                    calls.append(Call(path: name, leaf: name, strArg: lit, typed: false,
+                                      args: argKinds(node), argTypes: argTypesOf(node), unqualified: true))
+                }
             } else {
                 // R32 (swift) — an UNQUALIFIED requirement call inside a PROTOCOL EXTENSION (or protocol
                 // default body): `self` is `Self: P`, so a bare `req()` may dispatch to each conformer's
