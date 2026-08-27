@@ -435,6 +435,94 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   false for this call shape) — plausibly rare, unmeasured against the corpus, and not attempted this
   session given the `resolveQual` result above.
 
+- ⚠ **CARDINAL SIN, CLOSED: `protoPropReads` had NO disclose-on-miss branch at all, stacked on
+  `resolveQual`'s ambiguous-fold from the entry above — a protocol PROPERTY read through a colliding
+  simple name went completely silent.** `protocol Loud { var value: Int { get } }`, `enum Outer1 {
+  struct Config: Loud { var value: Int { /* reads /etc/hostname */ } } }` beside an UNRELATED `enum
+  Outer2 { struct Config { var value: Int { 42 } } }` (not a conformer): `func use(_ l: Loud) -> Int {
+  l.value }` — `caller`/`use` were absent from `functions[]` entirely, `--policy pure use` exited 0
+  ("nothing hidden"), `unverified --strict` answered `{"ok":true,"unverified":[]}`, and `path use Fs`
+  found nothing. Holding `Outer2.Config` constant and deleting only the collision restored the edge and
+  flipped the gate red — the single variable is the colliding simple name, and the direct control
+  (`--policy pure Outer1.Config.value`) already caught the effect, proving the engine SAW it and lost it
+  only on the way to the caller. Two omissions stacked: `qualBySimple["Config.value"]` held both
+  `Outer1.Config.value` and `Outer2.Config.value` (DeclCollector keys on the innermost simple name,
+  outer nesting dropped), so `resolveQual` folded to `nil`; and unlike its neighbour `protoDispatches`
+  (`impls.count == conf.count || providedEdged` else `Unknown`), `protoPropReads` never disclosed
+  anything on any kind of miss — an ambiguous collision and "this conformer stores it, nothing to
+  charge" read identically, silently.
+
+  FIX, both omissions. **`resolveQual` now UNIONS instead of hedging**: `if let cands =
+  qualBySimple[target] { return cands }` (was `cands.count == 1 ? cands.first : nil`) — every real
+  candidate a colliding simple name could mean is edged, not one arbitrarily chosen and not all
+  silently dropped. An all-pure collision (the ordinary shape the reverted entry above measured)
+  contributes nothing new either way — no charge, no noise; a collision where any candidate is
+  effectful now correctly reaches it. This is the SAME over-approximation direction `matchOverloads`
+  and the `#if`-branch union already take in this file, and it is why the flood the entry above
+  measured does not recur: the 13-package corpus (the standing control for any Driver.swift change)
+  shows 7 of 13 packages differing, but only **75** newly-`Unknown` functions — well under the 116 the
+  reverted funnel produced — and every single one of the 75 is a NEW appearance (previously silent-pure)
+  with `inferred: ["Unknown"]` and nothing else: zero fabricated concrete effects anywhere in the diff.
+  The cost is real and accepted, not hidden: a pure caller unioned with a same-simple-name sibling that
+  is ITSELF `Unknown` now inherits that `Unknown` too (traced on swift-algorithms' `Iterator.next`,
+  unioned 16-wide across the package's iterator types) — an honest over-charge, never a silent miss, the
+  same bounded-CHA cost every other ambiguous-dispatch arm here already pays. One trace found the union
+  gaining PRECISION instead: swift-nio's `NIOHTTP1TestServer.handleChannels` went from a blanket
+  `dispatch:NIOSynchronousChannelOptions.setOption` `Unknown` to three real edges plus a newly-visible
+  `Clock` reach, because the three colliding `SynchronousOptions.setOption` conformers now all resolve
+  together instead of none of them resolving individually.
+
+  **`protoPropReads` now has the disclose-on-miss branch its neighbour has.** A conformer is "accounted
+  for" when `resolveQual` resolves it (via the union above) OR `fields[c][d.member]` still knows the
+  member — DeclCollector records a `fields` entry for EVERY property with an explicit type annotation,
+  stored or computed, and a computed property always carries one (Swift requires it), so an empty
+  `resolveQual` result beside a `fields` hit means "declared here, stored, pure" (nothing to charge, the
+  case the neighbouring loop has no equivalent of and the reason it was left silent rather than copying
+  `protoDispatches`' check verbatim); empty AND absent from `fields` means the requirement is satisfied
+  somewhere this loop never looked — genuine miss, now `Unknown` + `dispatch:` reason, never both, never
+  neither, matching the method loop's existing discipline exactly. Measured finding this immediately
+  surfaced in the corpus: Nimble's `NMBDoubleConvertible` has three conformers (`NSNumber`, `Date`,
+  `NSDate`); `NSNumber`'s conformance is an empty `extension NSNumber: NMBDoubleConvertible {}` — no
+  local override, satisfied entirely by NSNumber's native bridged `doubleValue` this scan cannot see —
+  and the old code silently dropped that ONE missing witness while precisely editing the other two,
+  never saying the conformer set was incomplete. Now correctly discloses `Unknown` for the whole
+  dispatch rather than a false-precise partial union; the report's top-level verdict for the one
+  affected function was already `Unknown` for an unrelated reason, so this refines the `why`, not the
+  outward verdict.
+
+  CONTROLS: the repro flips `pure use` exit 0 → exit 1, `use`/`caller` from absent to present with
+  `["Fs"]`, `path use Fs` from "no function matching" to a two-hop chain through
+  `Outer1.Config.value`, and `deny Fs` from one violation to three — all against a rebuilt, freshness-
+  verified binary (`.build/release/candor-swift` removed and rebuilt, `--version`/`git rev-parse HEAD`
+  and the binary's mtime checked together). The four defects fixed earlier in this rung are re-verified
+  BYTE-IDENTICAL post-fix (`probeA`/`probeB`, the `#if`-hedge three-fixture set, the typeshadow pair, the
+  `workspace-test` ShellOut fixture) — no class this session closed reopened. `smoke.sh` (148/148),
+  `swift test` (884/884), `fuzz.py` (25/25), `fabrication_probe.py`, and `soundness/realworld/recall/
+  recall.sh` all pass unchanged against the pinned spec commit CI uses.
+
+  **A SEPARATE, PRE-EXISTING GAP, examined and NOT folded into this fix:** the repro's `gate --report`
+  route emitted `"zeroMatch": ["pure use"]` where the scan route's `--gate-json` did not, for the
+  identical `pure use` rule — flagged by the finder as possibly a §3.1 route-equality break. It is not
+  one, and it is not specific to this defect: reproduced on a MINIMAL fixture with a genuinely pure
+  function and no collision anywhere (`func trulyPure() { }`, policy `pure trulyPure`), the same
+  divergence appears on BOTH the pre-fix and post-fix binary. The scan route resolves a `pure` rule's
+  scope against every function the analysis KNOWS about (`allFns`), including pure ones; `gate --report`
+  resolves it against the WRITTEN report's `functions[]`, which omits pure functions by design (they
+  carry no effect to report) — so a `pure` rule over a genuinely-pure function reads as a real scope
+  match on one route and a zero-match on the other, for ANY pure-scoped rule, unrelated to ambiguity or
+  to this session's fix. Post-fix, the repro's OWN `pure use` divergence disappears (both routes now
+  agree, because `use` is no longer pure), which is why it surfaced here at all rather than being a
+  standing red in `smoke.sh`'s existing "gate --report byte-equal to scan" battery — that battery's five
+  policies apparently never scope a `pure` rule onto a function that stays pure through both routes.
+  Filed rather than fixed: a conformance row should assert `pure` scope-matching agrees between routes
+  over a genuinely pure target, which is currently untested in either direction.
+
+  A conformance row for THIS rung should assert the `Outer1.Config`/`Outer2.Config` collision four-way
+  (or as a swift-specific case if the other three engines key differently): the effectful conformer's
+  reach survives past a pure same-simple-name collision, the all-pure-collision case stays silent (no
+  new `Unknown`), and a genuine per-conformer miss (a bridged/native property with an empty local
+  extension) discloses `Unknown` rather than a false-precise partial edge set.
+
 ## [0.32.1] — 2026-08-25
 
 - Build version → 0.32.1 (`engineVersion`); no analyzer change.
