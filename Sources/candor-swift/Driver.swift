@@ -888,6 +888,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // Resolve a simple "Type.member" call target to a full nested qual: an exact full-qual hit (top-level,
     // already full), else the unique simple→full mapping, else nil (ambiguous/unknown → drop the edge).
     // A closure (not a global func) so it captures the function-local indexes built just above.
+    //
+    // TRIED AND REVERTED (2026-08-27): the `cands.count == 1` branch's `nil` folds "no candidate" and "2+
+    // same-simple-name candidates, a real callee runs" into one outcome — the same shape as the four
+    // silent-drop defects fixed the day before this comment, so making it disclose `Unknown` on the
+    // ambiguous case (instead of returning `nil` either way) was tried as the "one funnel" step. MEASURED
+    // on the 13-package corpus: 6/13 packages differ, 116 newly-`Unknown` functions, dominated by ordinary
+    // Swift idioms — `Options.init`, `Index.==`, `Iterator.next`, `State.init` — where many unrelated types
+    // each declare their own nested type of that name and `qualBySimple` (keyed on the innermost simple
+    // name alone) collides them. That is the ordinary, expected shape of this index, not a rare dispatch
+    // hidden behind it, and disclosing on it is a flood, not a fix — see CHANGELOG `[0.33.0]`. Left as-is;
+    // closing this for real needs the index (or its callers) to carry outer-container context, the way
+    // `matchOverloads` disambiguates overloads by arity/type rather than by name alone.
     let resolveQual: (String) -> String? = { target in
         if byQual.contains(target) { return target }
         if let cands = qualBySimple[target], cands.count == 1 { return cands.first }
@@ -910,6 +922,24 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var direct: [String: Set<String>] = [:]
     var edges: [String: Set<String>] = [:]
     var whyMap: [String: Set<String>] = [:]
+    // THE SHARED CAP-AND-DISCLOSE DECISION for bounded CHA over a protocol's conformer set (SPEC §4's
+    // ≤12 bound). "Is this conformer set small and non-empty enough to trust individually, or must the
+    // dispatch be disclosed instead" was two independent copies below — the method-dispatch CHA
+    // (`protoDispatches`) and the property/subscript-read CHA (`protoPropReads`) each re-derived the same
+    // `count == 0 || count > 12` test with the polarity flipped (one written as `!isEmpty && count <= 12`
+    // to gate resolving, the other as `isEmpty || count > 12` to gate disclosing). Same decision, same
+    // reason string, two places it could silently drift apart if one were ever edited without the other.
+    // Returns `true` when the caller may go on to resolve each conformer; on `false` it has ALREADY
+    // disclosed `Unknown` with a `dispatch:` reason at `caller`, and the caller must resolve nothing more
+    // for this dispatch — never both, never neither.
+    let chaWithinBound: (Int, String, String, String) -> Bool = { count, proto, member, caller in
+        if count == 0 || count > 12 {
+            direct[caller, default: []].insert("Unknown")
+            whyMap[caller, default: []].insert("dispatch:\(proto).\(member)")
+            return false
+        }
+        return true
+    }
     var hostsD: [String: Set<String>] = [:], cmdsD: [String: Set<String>] = [:]
     // SPEC §2 `fs` — DIRECT ONLY, deliberately, matching candor-java's `fsDirect` ("kind performed
     // directly"). It must NOT propagate over edges: a caller reaching one callee that writes and another
@@ -1673,20 +1703,24 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // protocol-named receiver) — never a guess, never a new Unknown flood.
             guard protoOrSuperDeclares(d.proto, d.member) else { continue }
             let conf = conformers[d.proto] ?? []
-            let impls = conf.compactMap { resolveQual("\($0).\(d.member)") }
-            // A conformer that does NOT declare the member runs the extension DEFAULT, which is already
-            // edged above — so it IS accounted for, and `impls.count == conf.count` is the wrong
-            // completeness test whenever a default exists. Without this conjunct, routing field/local
-            // receivers through here would have turned the commonest Swift idiom of all (a requirement with
-            // a default that most conformers do not override) from a precise answer into an `Unknown` at
-            // every such call site. With `providedEdged` false the condition is byte-equivalent to the one
-            // it replaces: `impls.count == conf.count` with `conf` non-empty forces `impls` non-empty, and
-            // then `conf.count <= 12` and `impls.count <= 12` are the same test.
-            if !conf.isEmpty, conf.count <= 12, impls.count == conf.count || providedEdged {
-                for t in impls { edges[f.qual, default: []].insert(t) }
-            } else {
-                direct[f.qual, default: []].insert("Unknown")
-                whyMap[f.qual, default: []].insert("dispatch:\(d.proto).\(d.member)")
+            // `chaWithinBound` alone covers the `conf.isEmpty` case (an empty conformer set fails the
+            // shared `count == 0` test and discloses on its own, exactly as the standalone `!conf.isEmpty`
+            // conjunct this replaces did — an empty set discloses regardless of `providedEdged`, because a
+            // requirement with zero LOCAL conformers may still be satisfied by an external one the extension
+            // default doesn't speak for). Within bound, `impls.count == conf.count` is the wrong
+            // completeness test whenever a default exists: a conformer that does NOT declare the member
+            // runs the extension DEFAULT, already edged above, so it IS accounted for — without the
+            // `providedEdged` disjunct, the commonest Swift idiom of all (a requirement with a default that
+            // most conformers do not override) would turn from a precise answer into an `Unknown` at every
+            // such call site.
+            if chaWithinBound(conf.count, d.proto, d.member, f.qual) {
+                let impls = conf.compactMap { resolveQual("\($0).\(d.member)") }
+                if impls.count == conf.count || providedEdged {
+                    for t in impls { edges[f.qual, default: []].insert(t) }
+                } else {
+                    direct[f.qual, default: []].insert("Unknown")
+                    whyMap[f.qual, default: []].insert("dispatch:\(d.proto).\(d.member)")
+                }
             }
         }
         // CHA for protocol PROPERTY/subscript reads — identical bounded resolution to method dispatch,
@@ -1708,11 +1742,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             }
             guard protoOrSuperDeclares(d.proto, d.member) else { continue }
             let conf = conformers[d.proto] ?? []
-            if conf.isEmpty || conf.count > 12 {
-                direct[f.qual, default: []].insert("Unknown")
-                whyMap[f.qual, default: []].insert("dispatch:\(d.proto).\(d.member)")
-                continue
-            }
+            guard chaWithinBound(conf.count, d.proto, d.member, f.qual) else { continue }
             for c in conf {
                 if let t = resolveQual("\(c).\(d.member)") { edges[f.qual, default: []].insert(t) }
             }
