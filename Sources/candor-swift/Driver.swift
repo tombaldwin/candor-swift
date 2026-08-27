@@ -1238,7 +1238,27 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     let type = String(call.path[..<dot])
                     let member = String(call.path[call.path.index(after: dot)...])
                     for sup in supertypesOf[type] ?? [] {
-                        if let t = resolveQual("\(sup).\(member)") {
+                        let base = "\(sup).\(member)"
+                        // AN OVERLOADED PROVIDED MEMBER MUST NOT VANISH. `resolveQual` can only name an
+                        // UNAMBIGUOUS simple->full mapping (`qualBySimple[base].count == 1`); a protocol
+                        // extension declaring a second, unrelated overload of the same base name
+                        // (`run()` beside `run(times:)`) makes that count 2, so plain `resolveQual`
+                        // returned nil and the whole edge — the ONLY call site to the provided member —
+                        // was silently dropped, with no `Unknown`, exactly the cardinal sin this project
+                        // exists to prevent. Route through `matchOverloads` instead, exactly as the
+                        // sibling protoDispatches/existential-receiver arm above already does: `argc` and
+                        // `call.argTypes` ARE available at this call site (the call is `s.run(times: 3)`,
+                        // fully typed), so an arity/type-discriminated call resolves PRECISELY to the one
+                        // real callee, and a genuinely ambiguous one gets the sound UNION rather than
+                        // being dropped — the same over-approximate direction `matchOverloads` already
+                        // takes everywhere else, never a guess at which one.
+                        if overloadedBases.contains(base) {
+                            for t in matchOverloads(base, argc, call.argTypes, swiftModuleOf(f.loc)) {
+                                edges[f.qual, default: []].insert(t)
+                                callsiteArgs[t, default: []].append(call.args)
+                                resolved = true
+                            }
+                        } else if let t = resolveQual(base) {
                             edges[f.qual, default: []].insert(t)
                             callsiteArgs[t, default: []].append(call.args)
                             resolved = true
