@@ -9,7 +9,6 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
-## [0.33.0] — 2026-08-26
 - ⚠ **An overloaded protocol-extension PROVIDED member vanished — not even `Unknown` — the moment a
   CONCRETE (non-protocol-typed) receiver reached it.** `protocol Runner { }`, one provided member
   `run(times:)` doing `Exec`: `S: Runner` with no override, `s.run(times: 3)` from `useS` — `deny
@@ -111,103 +110,6 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   already gate on `github.event_name != 'schedule'`, so a dispatch runs them exactly like an ordinary
   push; the linux job's disclosure-recall step already special-cased `== 'workflow_dispatch'` in its
   own `if:`, which was unreachable dead code until this trigger existed.
-
-- **MIGRATION — ⟨0.33⟩ IS NOT ADDITIVE, and the cost is measured, not estimated.** If you gate a
-  **STORED** report that a pre-0.33 engine produced — committed to a repo, cached between CI jobs, or
-  published by a dependency and gated downstream — expect exit 2. Measured over **32 real third-party
-  projects, 67 reports, 402 report×policy pairs, all four engines**, published **0.32.1** binaries as
-  the producer against **0.33** HEAD as the consumer: **202 of the 265 pairs that pass today — 76.2% —
-  flip to exit 2** with the policy unchanged. It is deterministic rather than statistical: a report
-  carrying any `peeked: true` class refuses **202 of 202**, a report carrying none passes **63 of 63**,
-  and **26 of the 32 projects** have at least one.
-
-  **THE REMEDY: re-scan with a 0.33 engine under the SAME policy the gate applies** — not merely *a*
-  policy, which is the loose reading this rung exists to close. It discharges the cost in full:
-  **265 of 265** pairs green again, no residual tax and nothing to suppress. A pipeline that scans and
-  gates in ONE run under ONE policy is **unaffected** — producer and consumer are the same run, so
-  `P ⊆ P` holds by construction. Nor is legitimate narrowing over-charged: **62 pairs** whose
-  producer's deny set genuinely covers the gate's took **0 refusals**, and over the full cross-policy
-  sweep of **918 gates**, **529 refuse correctly and none fails open**.
-
-  **The operators this hits are the ones who followed ⟨0.32⟩'s own remedy** — *scan with the policy* —
-  because that is exactly what puts a `peeked: true` class into a report. They migrated one rung ago
-  and are being asked to migrate again, for a hole that remedy did not close. The wording was the
-  defect and the wording is the fix. It fails **CLOSED**.
-
-- ⚠ **`scannedUnder`: a report now records the deny set its peek was BOUNDED BY, and `gate --report` /
-  `fix-gate --strict` / `unverified --strict` refuse a report whose peek answered a DIFFERENT question**
-  (SPEC §2 ⟨0.33⟩, candor-java's reference commit `05dfa53`). `excluded[].peeked: true` is true only
-  RELATIVE to the deny set the PRODUCER held — ⟨0.29⟩ bounds the peek to effects the policy DENIES — and
-  until this rung the report never recorded what that set was. A consumer gating with a DIFFERENT deny
-  set got a definite answer to a question nobody asked, and it failed OPEN on `gate --report`, the
-  supply-chain route, past every ⟨0.32⟩ control because the class really was read:
-
-      candor <tree> --policy 'deny Net'  --out A   -> exit 0, `peeked: true`, `outOfScope: []`
-      candor <tree> --policy 'deny Exec'           -> exit 2   (there IS an Exec out there)
-      candor gate --report A --policy 'deny Exec'  -> exit 0, `no violations`      <- the hole
-
-  PRODUCER: `report.scannedUnder = { "deny": [ "<expanded rule>", … ] }`, set at the exact site
-  `outOfScope` is set (ReportModel.swift/main.swift) from the canonical-expanded rules the peek actually
-  matched with — post-alias, post-`.candor/config`, deduplicated and code-point sorted
-  (`CandorCore.canonicalDenySet`, shared with `ruleUpgrade`'s source-form renderer so an operator is
-  quoted and a gate compares the identical string). `pure` is a deny rule with an EMPTY effect list and
-  is recorded as such — flattening to effect NAMES would let the STRICTEST policy compare equal to an
-  empty set, the four-way false all-clear ⟨0.30⟩ closed on the peek one layer in. NIL (key omitted) under
-  exactly `outOfScope`'s own emission rule.
-
-  CONSUMER: `CandorCore.unaskedCrossPolicyRules` is the ONE statement of the condition, called by
-  `gate --report` (GateReportCLI.swift) and by the advisory verbs' `ReportCompleteness` arming
-  (FixCLI.swift's `armingUnread`, now arming BOTH the unread-class and cross-policy causes together) —
-  ⟨0.24⟩'s pessimism relation has broken on this family before from a new verdict cause reaching the gate
-  and not its siblings, and a second computation is how it happens again. Refusal is exit 2,
-  `ok:false, incomplete:true`, naming the unasked rules and pointing at THE SAME policy — not merely *a*
-  policy, which is the loose reading that produces this hole. `scannedUnder` is read as strictly as every
-  other §2 signature key: a non-object, or a `deny` that is not an array of strings, impeaches the
-  document rather than being read as the empty set — the fail-open direction here is the MIRROR of
-  `peeked`'s (there the safe-looking coercion was "no exclusions"; here it would be "the producer held
-  these rules"). An ABSENT `scannedUnder` beside `peeked: true` IS the empty set for the subset test, so
-  a pre-⟨0.33⟩ report fails closed — the rung, not collateral damage.
-
-  FOUR OVER-CHARGE CONTROLS, unit-pinned in `UnreadExclusionRouteEqualityProcessTests.swift`: the same
-  policy on both routes still certifies; a consumer's rules a strict subset of the producer's still
-  certifies (the reason the key is a RULE SET and not a digest — a digest can decide only equality); no
-  peeked exclusions at all still certifies under a differing policy (analysed code's effect sets are
-  policy-independent — only the peek was ever bounded); and a garbled `scannedUnder` cannot manufacture
-  coverage.
-
-  FALSIFIED against a mutant build with the consumer half short-circuited to `[]` (the producer still
-  emitting `scannedUnder`): `cross-policy`, `pure`, `fix-gate --strict` and `unverified --strict` all
-  read 0 (the fail-open, four ways) while every control cell stayed green — so the controls are not what
-  moved. Restoring the real implementation reddens all four.
-
-  **KNOWN RESIDUAL, filed rather than routed around:** conformance PART 69's swift row does not yet read
-  `OK`. This engine excludes `Package.swift` itself as the `manifest` class UNCONDITIONALLY whenever any
-  `deny`/`pure` rule stands (`isHarnessPath`, pre-existing and unrelated to this rung), so PART 69's
-  "tree D" fixture — meant to carry NO exclusions at all, for the control-3 no-peek case — is never
-  actually empty for this engine: it is a second, accidental instance of the defect fixture. The
-  producer/consumer mechanism above is complete and independently verified (unit tests + a falsified
-  mutant, both above); the residual is a conformance FIXTURE gap for the swift row specifically,
-  recorded here because a limitation left only as a comment is the shape that stops being measured.
-
-- **`AgentsDocDriftTests` now sees its own README's headline claim.** README.md line 3 reads
-  `**The Swift implementation of [candor-spec](…) 0.32**`, and the `) ` between the word and the version
-  put it outside the gate's `spec` + one-to-four-of-`[-: "]` grammar. This gate is the one the other four
-  engines ported at ⟨0.32⟩ *because* it was clean through that bump — and it was clean over a claim in
-  its own repo that it could not read. The grammar is now one to EIGHT of `[-: "*)\]]`, which also
-  covers the ALIGNED `"spec":    "0.32"` column, and the discrimination test carries both. Falsified:
-  setting README line 3 to 0.31 now fails the test naming the file and the exact text.
-
-- **The release-configuration build now happens on `main`, not for the first time on a pushed tag.**
-  Every `swift build` in `ci.yml` was a *debug* build; nothing compiled `-c release` until `release.yml`
-  did, on `push: tags: ['v*']`. So `candor-swift-macos-arm64` — the artifact a user downloads, and the
-  only install route that does not need a Swift toolchain — was first compiled *after* the tag existed.
-  `-c release` is a different compile (whole-module optimisation, a different warning set, its own link
-  step), so a failure there was discoverable only by cutting. A new `release-build` job does the release
-  compile and asserts the binary's own `--version` names `main.swift`'s declared `engineVersion` —
-  `release.yml`'s artifact-level assertion, one step earlier, against the constant instead of the tag
-  (which is what the tag is itself checked against). It is a separate job so it cannot spend `test`'s
-  20-minute hang-detector budget, and it uploads the binary. `release.yml` is unchanged and still runs
-  its own tag-anchored checks.
 
 - ⚠ **A NAME heuristic (`kappaFree`'s `shellOut`, and the whole table it belongs to) pre-empted a real,
   in-tree, unambiguous overload resolution — the cardinal sin.** `shellOut(to: Int)` calling its own
@@ -600,6 +502,105 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   `@resultBuilder` or `@globalActor` is indistinguishable from an attached macro at the syntax level and
   is disclosed as one — sound (never a silent miss) but imprecise; none appeared in the 13-package corpus,
   so its real-world frequency is unmeasured.
+
+## [0.33.0] — 2026-08-26
+
+- **MIGRATION — ⟨0.33⟩ IS NOT ADDITIVE, and the cost is measured, not estimated.** If you gate a
+  **STORED** report that a pre-0.33 engine produced — committed to a repo, cached between CI jobs, or
+  published by a dependency and gated downstream — expect exit 2. Measured over **32 real third-party
+  projects, 67 reports, 402 report×policy pairs, all four engines**, published **0.32.1** binaries as
+  the producer against **0.33** HEAD as the consumer: **202 of the 265 pairs that pass today — 76.2% —
+  flip to exit 2** with the policy unchanged. It is deterministic rather than statistical: a report
+  carrying any `peeked: true` class refuses **202 of 202**, a report carrying none passes **63 of 63**,
+  and **26 of the 32 projects** have at least one.
+
+  **THE REMEDY: re-scan with a 0.33 engine under the SAME policy the gate applies** — not merely *a*
+  policy, which is the loose reading this rung exists to close. It discharges the cost in full:
+  **265 of 265** pairs green again, no residual tax and nothing to suppress. A pipeline that scans and
+  gates in ONE run under ONE policy is **unaffected** — producer and consumer are the same run, so
+  `P ⊆ P` holds by construction. Nor is legitimate narrowing over-charged: **62 pairs** whose
+  producer's deny set genuinely covers the gate's took **0 refusals**, and over the full cross-policy
+  sweep of **918 gates**, **529 refuse correctly and none fails open**.
+
+  **The operators this hits are the ones who followed ⟨0.32⟩'s own remedy** — *scan with the policy* —
+  because that is exactly what puts a `peeked: true` class into a report. They migrated one rung ago
+  and are being asked to migrate again, for a hole that remedy did not close. The wording was the
+  defect and the wording is the fix. It fails **CLOSED**.
+
+- ⚠ **`scannedUnder`: a report now records the deny set its peek was BOUNDED BY, and `gate --report` /
+  `fix-gate --strict` / `unverified --strict` refuse a report whose peek answered a DIFFERENT question**
+  (SPEC §2 ⟨0.33⟩, candor-java's reference commit `05dfa53`). `excluded[].peeked: true` is true only
+  RELATIVE to the deny set the PRODUCER held — ⟨0.29⟩ bounds the peek to effects the policy DENIES — and
+  until this rung the report never recorded what that set was. A consumer gating with a DIFFERENT deny
+  set got a definite answer to a question nobody asked, and it failed OPEN on `gate --report`, the
+  supply-chain route, past every ⟨0.32⟩ control because the class really was read:
+
+      candor <tree> --policy 'deny Net'  --out A   -> exit 0, `peeked: true`, `outOfScope: []`
+      candor <tree> --policy 'deny Exec'           -> exit 2   (there IS an Exec out there)
+      candor gate --report A --policy 'deny Exec'  -> exit 0, `no violations`      <- the hole
+
+  PRODUCER: `report.scannedUnder = { "deny": [ "<expanded rule>", … ] }`, set at the exact site
+  `outOfScope` is set (ReportModel.swift/main.swift) from the canonical-expanded rules the peek actually
+  matched with — post-alias, post-`.candor/config`, deduplicated and code-point sorted
+  (`CandorCore.canonicalDenySet`, shared with `ruleUpgrade`'s source-form renderer so an operator is
+  quoted and a gate compares the identical string). `pure` is a deny rule with an EMPTY effect list and
+  is recorded as such — flattening to effect NAMES would let the STRICTEST policy compare equal to an
+  empty set, the four-way false all-clear ⟨0.30⟩ closed on the peek one layer in. NIL (key omitted) under
+  exactly `outOfScope`'s own emission rule.
+
+  CONSUMER: `CandorCore.unaskedCrossPolicyRules` is the ONE statement of the condition, called by
+  `gate --report` (GateReportCLI.swift) and by the advisory verbs' `ReportCompleteness` arming
+  (FixCLI.swift's `armingUnread`, now arming BOTH the unread-class and cross-policy causes together) —
+  ⟨0.24⟩'s pessimism relation has broken on this family before from a new verdict cause reaching the gate
+  and not its siblings, and a second computation is how it happens again. Refusal is exit 2,
+  `ok:false, incomplete:true`, naming the unasked rules and pointing at THE SAME policy — not merely *a*
+  policy, which is the loose reading that produces this hole. `scannedUnder` is read as strictly as every
+  other §2 signature key: a non-object, or a `deny` that is not an array of strings, impeaches the
+  document rather than being read as the empty set — the fail-open direction here is the MIRROR of
+  `peeked`'s (there the safe-looking coercion was "no exclusions"; here it would be "the producer held
+  these rules"). An ABSENT `scannedUnder` beside `peeked: true` IS the empty set for the subset test, so
+  a pre-⟨0.33⟩ report fails closed — the rung, not collateral damage.
+
+  FOUR OVER-CHARGE CONTROLS, unit-pinned in `UnreadExclusionRouteEqualityProcessTests.swift`: the same
+  policy on both routes still certifies; a consumer's rules a strict subset of the producer's still
+  certifies (the reason the key is a RULE SET and not a digest — a digest can decide only equality); no
+  peeked exclusions at all still certifies under a differing policy (analysed code's effect sets are
+  policy-independent — only the peek was ever bounded); and a garbled `scannedUnder` cannot manufacture
+  coverage.
+
+  FALSIFIED against a mutant build with the consumer half short-circuited to `[]` (the producer still
+  emitting `scannedUnder`): `cross-policy`, `pure`, `fix-gate --strict` and `unverified --strict` all
+  read 0 (the fail-open, four ways) while every control cell stayed green — so the controls are not what
+  moved. Restoring the real implementation reddens all four.
+
+  **KNOWN RESIDUAL, filed rather than routed around:** conformance PART 69's swift row does not yet read
+  `OK`. This engine excludes `Package.swift` itself as the `manifest` class UNCONDITIONALLY whenever any
+  `deny`/`pure` rule stands (`isHarnessPath`, pre-existing and unrelated to this rung), so PART 69's
+  "tree D" fixture — meant to carry NO exclusions at all, for the control-3 no-peek case — is never
+  actually empty for this engine: it is a second, accidental instance of the defect fixture. The
+  producer/consumer mechanism above is complete and independently verified (unit tests + a falsified
+  mutant, both above); the residual is a conformance FIXTURE gap for the swift row specifically,
+  recorded here because a limitation left only as a comment is the shape that stops being measured.
+
+- **`AgentsDocDriftTests` now sees its own README's headline claim.** README.md line 3 reads
+  `**The Swift implementation of [candor-spec](…) 0.32**`, and the `) ` between the word and the version
+  put it outside the gate's `spec` + one-to-four-of-`[-: "]` grammar. This gate is the one the other four
+  engines ported at ⟨0.32⟩ *because* it was clean through that bump — and it was clean over a claim in
+  its own repo that it could not read. The grammar is now one to EIGHT of `[-: "*)\]]`, which also
+  covers the ALIGNED `"spec":    "0.32"` column, and the discrimination test carries both. Falsified:
+  setting README line 3 to 0.31 now fails the test naming the file and the exact text.
+
+- **The release-configuration build now happens on `main`, not for the first time on a pushed tag.**
+  Every `swift build` in `ci.yml` was a *debug* build; nothing compiled `-c release` until `release.yml`
+  did, on `push: tags: ['v*']`. So `candor-swift-macos-arm64` — the artifact a user downloads, and the
+  only install route that does not need a Swift toolchain — was first compiled *after* the tag existed.
+  `-c release` is a different compile (whole-module optimisation, a different warning set, its own link
+  step), so a failure there was discoverable only by cutting. A new `release-build` job does the release
+  compile and asserts the binary's own `--version` names `main.swift`'s declared `engineVersion` —
+  `release.yml`'s artifact-level assertion, one step earlier, against the constant instead of the tag
+  (which is what the tag is itself checked against). It is a separate job so it cannot spend `test`'s
+  20-minute hang-detector budget, and it uploads the binary. `release.yml` is unchanged and still runs
+  its own tag-anchored checks.
 
 ## [0.32.1] — 2026-08-25
 
