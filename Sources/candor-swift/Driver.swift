@@ -187,6 +187,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var opaqueFields: [String: Set<String>] = [:]
     var caseAssocAll: [String: Set<String>] = [:]
     var staticFactoryFields: [(type: String, field: String, leaf: String)] = []
+    // Merged `DeclCollector.typeGenericBounds` across every file — a type's generic param may be BOUND by
+    // a conditional-conformance extension living anywhere (later in the same file, or another file), so
+    // the merge has to complete before `unresolvedGenericFields` below can be retried.
+    var typeGenericBoundsAll: [String: [String: String]] = [:]
+    // A stored field typed as its enclosing type's own (as-yet-unbound) generic parameter — resolved once
+    // per-file collection is done and `typeGenericBoundsAll` is complete. Mirrors `staticFactoryFields`'s
+    // two-phase shape one level down (see `DeclCollector.unresolvedGenericFields`'s doc for the ordering
+    // hazard this exists to close).
+    var unresolvedGenericFields: [(ty: String, field: String, param: String)] = []
     var protocolMethods: [String: Set<String>] = [:]
     var protocolSupers: [String: Set<String>] = [:]
     var conformers: [String: [String]] = [:]
@@ -657,6 +666,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for m in c.imports { importCounts[m, default: 0] += 1 }
         fileImports[c.file] = c.imports
         staticFactoryFields.append(contentsOf: c.staticFactoryFields)
+        for (t, bs) in c.typeGenericBounds { typeGenericBoundsAll[t, default: [:]].merge(bs) { a, _ in a } }
+        unresolvedGenericFields.append(contentsOf: c.unresolvedGenericFields)
     }
 
     // FINDING 1 — resolve the opaque/erased Sequence builder indexes now that the GLOBAL localTypes set is
@@ -944,6 +955,21 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // types it; an unknown leaf leaves the field unrecorded (the binder then clears rather than guessing).
     for (ty, field, leaf) in staticFactoryFields where fields[ty]?[field] == nil {
         if let vended = returnsIdx[leaf] { fields[ty, default: [:]][field] = (vended, false) }
+    }
+    // Conditional conformance of a USER generic type (`extension Box: Greeter2 where T: Greeter2`): now
+    // that every file's `where`-clause bounds are merged into `typeGenericBoundsAll`, retry each field
+    // DeclCollector could not resolve on its own single top-to-bottom pass (the extension supplying the
+    // bound can sit later in the same file, or in a different file, relative to the field). Guarded on the
+    // field STILL reading exactly the bare param name it was deferred under — if some other resolution
+    // already overwrote it, that one wins, never this fallback. Without this, `Box(value: NetThing2())
+    // .greet2()` under `extension Box: Greeter2 where T: Greeter2 { func greet2() { value.greet2() } }`
+    // left `value` typed `"T"` forever (a name nothing declares), so the call inside never dispatched to
+    // `Greeter2`'s conformers and a caller charged only via that field read silent-pure.
+    for (ty, field, param) in unresolvedGenericFields where fields[ty]?[field]?.name == param {
+        if let bound = typeGenericBoundsAll[ty]?[param] {
+            fields[ty, default: [:]][field] = (bound, false)
+            opaqueFields[ty, default: []].insert(field)
+        }
     }
     // An enum case binds a value type only when it is UNAMBIGUOUS project-wide (one assoc type) —
     // the same "never guess on an ambiguous leaf" discipline as the returns index.
