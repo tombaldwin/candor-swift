@@ -377,6 +377,64 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   sits inside a broad `#if !os(X)` file guard, with internal self-dispatch between its own overloads,
   must not lose its typed-receiver resolution) — the shape that sank the first attempt at this fix.
 
+- **AUDIT: an inventory of every "I can't resolve this" site in Driver.swift/CallCollector.swift/
+  GateReportCLI.swift, following the four defects above (all of which share one shape: a real callee
+  existed and the code that would have said so said nothing instead).** `GateReportCLI.swift`'s report-
+  merge same-name resolver already does this right (`guard let cands = byName[c] else { continue }`, then
+  `count == 1` edges and anything else CONTRIBUTES `Unknown`+`dispatch` — never a third, silent option).
+  `Driver.swift`'s `resolveQual` does not: `if let cands = qualBySimple[target], cands.count == 1 { return
+  cands.first }; return nil` folds "no candidate at all" and "2+ same-simple-name candidates, a real
+  callee runs" into the same `nil`, and none of its ~15 call sites can tell the two apart. This is the
+  same shape as the four fixes above, so it was tried as the session's "one funnel" step: a `QualResolution`
+  enum (`.found` / `.absent` / `.ambiguous`) plus a `resolveOrDisclose` exit that discloses `Unknown` with
+  a `dispatch:` reason on `.ambiguous` instead of silently returning `nil`, wired through all ~15 sites.
+
+  **MEASURED, THEN REVERTED: this floods.** Re-running the 13-package corpus diff (the standing control for
+  any Driver.swift change, per the swift-nio 1137-function regression this project has already paid for
+  once) showed 6 of 13 packages differing, 116 newly-`Unknown` functions in total. Spot-checking them: they
+  are overwhelmingly `Options.init`, `Index.==`, `Iterator.next`, `State.init`, `Configuration.init`,
+  `Header.capacity`, `SubSequence.init`, `Words.init` — nested-type names that are pervasive, ordinary
+  Swift idioms (nearly every specialized `Collection` declares its own `Index`; nearly every configurable
+  type its own `Options`/`Configuration`), each colliding in `qualBySimple` because that index is keyed on
+  the innermost simple name alone, with no outer-container context — the exact same collision the index's
+  own comment already documents ("a simple key with MULTIPLE full quals is a genuine same-named-nested
+  collision... the edge is dropped (honest under-report, NEVER a fabricated effect)"). Unlike the four
+  defects above, `resolveQual`'s ambiguity is not a rare, discriminable case with a real single answer
+  being thrown away — it is the ordinary, expected shape of this index, and the ONE genuine instance of it
+  that WAS a cardinal sin (the overloaded-provided-member fix, `[0.33.0]` above) was fixed by routing
+  around `resolveQual` entirely (`matchOverloads`, discriminated by arity/argument type), not by making
+  `resolveQual` itself disclose. Converting resolveQual's ambiguity into a blanket `Unknown` is a real
+  regression in the other direction this task explicitly warned about, and it is also non-conservative:
+  Unknown propagates transitively, so the 116 direct sites cascaded into further callers gaining `Unknown`
+  with no `dispatch:` reason of their own. Reverted; `resolveQual` is UNCHANGED. Closing this class for
+  real needs `qualBySimple` (or its callers) to carry enough outer-container context to disambiguate most
+  of these precisely, the way `matchOverloads` disambiguates by arity/type — a bigger job than fits one
+  pass, filed rather than forced.
+
+  **SHIPPED INSTEAD — the smallest safe step found:** the CHA "is this conformer set small and non-empty
+  enough to trust individually, or must the dispatch be disclosed" decision was ITSELF duplicated, with the
+  polarity flipped, between the method-dispatch CHA (`protoDispatches`, `!conf.isEmpty && conf.count <= 12`
+  gating resolution) and the property/subscript-read CHA (`protoPropReads`, `conf.isEmpty || conf.count >
+  12` gating disclosure) — the same `≤12`-bound decision, same `dispatch:` reason string, two places it
+  could silently drift apart. Extracted to one `chaWithinBound` closure both loops now call; each loop's
+  own additional completeness test (`protoDispatches`' `impls.count == conf.count || providedEdged`,
+  needed because an extension-default-satisfied conformer has no override to find) is unchanged and sits
+  on top of it. Proven behaviour-preserving, not merely reviewed: byte-identical `--json` output across all
+  13 corpus packages before/after, and all four defects above re-verified fixed post-refactor (`useS` in
+  the overloaded-provided-member fixture still resolves to `Runner.run(times:)`'s `Exec` rather than the
+  stale reference capture that predates this session; the `#if os(Windows)`-shadowed `getenv`/`Pipe`
+  fixtures still disclose `Env`/`Ipc` off the real heuristic, not the stub; the shellOut workspace fixture
+  is byte-identical scanned with and without `.build/checkouts` present). A synthetic 13-conformer
+  existential-dispatch fixture (one over the `≤12` cap) confirms the merged `chaWithinBound` path still
+  discloses `Unknown` / `dispatch:Speaker.speak` exactly as the two separate implementations did.
+
+  RESIDUAL, filed rather than fixed here: `resolveQual`'s no-outer-context ambiguity (above); a
+  module-qualified free-function CALL (`Core.shared()`) whose target module declares an OVERLOADED
+  `shared` falls through every branch with neither a resolution nor a disclosure (the module-qualified-call
+  branch requires `inMod.count == 1`; every other branch requires `call.typed` or `call.unqualified`, both
+  false for this call shape) — plausibly rare, unmeasured against the corpus, and not attempted this
+  session given the `resolveQual` result above.
+
 ## [0.32.1] — 2026-08-25
 
 - Build version → 0.32.1 (`engineVersion`); no analyzer change.
