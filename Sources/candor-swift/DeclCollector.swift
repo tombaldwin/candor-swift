@@ -115,12 +115,54 @@ final class ReturnExprWalker: SyntaxVisitor {
     override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind { .skipChildren }
 }
 
+/// A control character — cannot occur in a Swift identifier, so it round-trips a JOINED list of protocol
+/// names through the single-`String`-valued `protoParams`/`protoTyped` maps without a false split/merge.
+/// Used for a protocol COMPOSITION parameter (`_ x: A & B`), which needs to try EACH composed protocol at
+/// a member-dispatch call site rather than pick one. Reusing the existing single-name map (instead of
+/// adding a parallel `[String: [String]]`) means the composition case gets `protoTyped`'s entire
+/// shadow-save/clear discipline for FREE — every rebind/scope site that already invalidates a stale
+/// `protoTyped[name]` invalidates this exactly the same way, because as far as those sites are concerned
+/// it is still just a `String`. The five OTHER consumers of `protoTyped` (the closure-iterator, if-let
+/// unwrap, property-read, operator-dispatch and stringification paths) do not split on this separator, so
+/// a composition-typed name flowing through them resolves to nothing (this joined string matches no real
+/// protocol) — an inert no-op, not a fabrication, and a named residual rather than a silent gap.
+let protoCompositionSep: Character = "\u{1}"
+
+/// The composed protocol names of a param typed `A & B` / `any A & B` / `(A & B)?` (peeling the same
+/// Optional/attribute/`some`/`any` wrappers `typeName` peels), or nil for anything else — including a
+/// composition where SOME element doesn't resolve to a plain name, which is left alone rather than
+/// guessed at (the safe direction: the caller falls through to the existing, unchanged silent-pure path
+/// for a type this cannot parse the way it can already parse `A & B`).
+func compositionTypeNames(_ t: TypeSyntax) -> [String]? {
+    if let opt = t.as(OptionalTypeSyntax.self) { return compositionTypeNames(opt.wrappedType) }
+    if let att = t.as(AttributedTypeSyntax.self) { return compositionTypeNames(att.baseType) }
+    if let some = t.as(SomeOrAnyTypeSyntax.self) { return compositionTypeNames(some.constraint) }
+    guard let comp = t.as(CompositionTypeSyntax.self) else { return nil }
+    let names = comp.elements.compactMap { typeName($0.type).name }
+    return names.count == comp.elements.count ? names : nil
+}
+
 final class DeclCollector: SyntaxVisitor {
     var file: String
     var converter: SourceLocationConverter
     var fns: [FnInfo] = []
     var fields: [String: [String: (name: String?, isFunction: Bool)]] = [:] // Type -> field -> info
     var typeGenericBounds: [String: [String: String]] = [:]  // Type -> its generic param -> protocol bound
+    // Type -> the RAW generic parameter names its own declaration introduces (`struct Box<T>` -> {"Box":
+    // {"T"}}), recorded regardless of whether a bound is known yet. A conditional-conformance extension
+    // (`extension Box: Greeter2 where T: Greeter2`) supplies the BOUND for a param the type declaration
+    // already named, and — because DeclCollector is a single top-to-bottom pass per file — the extension
+    // is frequently visited AFTER a field of that same param type has already been resolved (as here: the
+    // struct's `let value: T` field sits above the extension in the fixture that found this), or lives in
+    // a DIFFERENT file entirely. This set is what lets the field-resolution branch below tell "an
+    // as-yet-unbound generic param of THIS type" (defer, see `unresolvedGenericFields`) from "a genuine
+    // forward/unresolvable type reference" (leave alone, unchanged behavior).
+    var typeGenericParamNames: [String: Set<String>] = [:]
+    // A stored field whose type is its enclosing type's OWN generic parameter, recorded with NO bound
+    // resolved at declaration time — deferred here so Driver can retry once every file's extensions
+    // (same file, later; or a different file, any order) have contributed their `where` clauses to the
+    // merged `typeGenericBounds`. Mirrors `staticFactoryFields`'s exact two-phase shape one level down.
+    var unresolvedGenericFields: [(ty: String, field: String, param: String)] = []
     /// Fields whose recorded type is MONOMORPHIZED rather than erased: a field typed as the enclosing
     /// type's generic param (`struct Pipe<T: Saver> { var item: T }` — resolved to `Saver` below), or one
     /// spelled `some P`. Whoever instantiates `Pipe` picks the single conforming type, so the conformers
@@ -413,6 +455,7 @@ final class DeclCollector: SyntaxVisitor {
     // typed `T` resolves to its bound `Saver`, letting `item.save()` dispatch (else it read silent-pure, R27).
     private func recordTypeGenerics(_ name: String, _ clause: GenericParameterClauseSyntax?, _ whereClause: GenericWhereClauseSyntax?) {
         for gp in clause?.parameters ?? [] {
+            typeGenericParamNames[name, default: []].insert(gp.name.text)
             if let it = gp.inheritedType, let b = typeName(it).name { typeGenericBounds[name, default: [:]][gp.name.text] = b }
         }
         for req in whereClause?.requirements ?? [] {
@@ -457,6 +500,16 @@ final class DeclCollector: SyntaxVisitor {
                   typeName(c.leftType).name == "Element", let bound = typeName(c.rightType).name else { continue }
             selfElementStack[selfElementStack.count - 1] = bound
         }
+        // GENERAL conditional conformance of a USER type (`extension Box: Greeter2 where T: Greeter2`):
+        // `Element` above is Swift's own collection convention, one name out of however many a type
+        // actually declares — a plain `struct Box<T>` extension needs the SAME requirement recorded under
+        // its own param name, not just under the literal string "Element". `recordTypeGenerics` (used for
+        // a type's OWN generic clause everywhere else) is exactly that general form, so run it here too;
+        // it is additive with the `Element`/`selfElementStack` special case above, not a replacement for
+        // it (that one feeds a DIFFERENT consumer — `elementTypeOf`'s `self` case in CallCollector — which
+        // still needs its own bound). See `unresolvedGenericFields`'s doc for why a field typed by this
+        // bound cannot always be resolved here, in this same pass.
+        recordTypeGenerics(name, nil, node.genericWhereClause)
         return .visitChildren
     }
     override func visitPost(_ node: ExtensionDeclSyntax) { typeStack.removeLast(); selfElementStack.removeLast() }
@@ -661,6 +714,15 @@ final class DeclCollector: SyntaxVisitor {
                         opaqueFields[ty, default: []].insert(name)
                     } else if isOpaqueParam(ann.type) {
                         opaqueFields[ty, default: []].insert(name)
+                    } else if let tn = info.name, typeGenericParamNames[ty]?.contains(tn) == true {
+                        // `tn` IS a generic parameter of `ty` (so this is exactly the case the branch
+                        // above resolves), but no bound is known YET — the constraining extension's
+                        // `where` clause sits later in this same file or in a different one. Defer to
+                        // Driver's post-merge pass rather than leave it a bare, forever-unresolved param
+                        // name (`fields["Box"]["value"] = ("T", false)`, which is what shipped before this
+                        // fix and is why `Box(value: NetThing2()).greet2()` under a conditional-conformance
+                        // extension read silent-pure: the field never resolved to `Greeter2` at all).
+                        unresolvedGenericFields.append((ty, name, tn))
                     }
                     fields[ty, default: [:]][name] = info
                     if let elem = arrayElementName(ann.type) { fieldArrayElem[ty, default: [:]][name] = elem }
@@ -925,6 +987,15 @@ final class DeclCollector: SyntaxVisitor {
                     info.params[pname] = tn
                     if isOpaqueParam(p.type) { info.opaqueParams.insert(pname) }
                 }
+            }
+            // protocol COMPOSITION param (`_ x: A5 & B5`): `t.name` is nil (`typeName` does not collapse
+            // a composition to one name — dispatch has to try EACH member, not pick one), so none of the
+            // branches above fire and this param was left completely untyped: `x.a5()` inside `func
+            // runComposed(_ x: A5 & B5) { x.a5() }` read silent-pure. Record every LOCALLY-declared
+            // composed protocol (an imported one has no conformers here to dispatch over anyway); see
+            // `protoCompositionSep`'s doc for the encoding and why it is safe through every other consumer.
+            else if let comps = compositionTypeNames(p.type)?.filter({ protocolMethods[$0] != nil }), !comps.isEmpty {
+                info.protoParams[pname] = comps.joined(separator: String(protoCompositionSep))
             }
             else { let te = tupleElements(p.type); if !te.isEmpty { info.tupleParams[pname] = te } }  // `p: (A, B)`
         }

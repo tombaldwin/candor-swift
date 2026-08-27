@@ -9,6 +9,83 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **A constrained-extension MEMBER's call edge never reached its caller — three shapes, one narrow
+  root cause each.** `deny Net` scoped to a caller (`pure callConditional` / `pure callWhereExtension` /
+  `pure callComposed`) exited 0, "policy ✓", over a caller that transitively reached `URLSession` through:
+  (1) conditional conformance of a user generic type (`extension Box: Greeter2 where T: Greeter2 { func
+  greet2() { value.greet2() } }`), (2) a `where`-constrained extension of a stdlib collection iterated
+  with a `for`-loop (`extension Array where Element: Greeter3 { func greetAll3() { for e in self {
+  e.greet3() } } }`), and (3) a protocol composition parameter (`func runComposed(_ x: A5 & B5) {
+  x.a5() }`). An UNSCOPED `deny Net` already flagged the leaf implementer in every case, so the effect was
+  discovered — the gap was the edge from the constrained member (or composed-protocol parameter) up to
+  its caller. NOT one root cause: three independent gaps in the same conceptual area (a `where`/`&`
+  constraint on a type is resolved for exactly one hard-coded consumer, not generally), plus a fourth,
+  unrelated gap (an untyped array LITERAL local never carried an element type at all) that was needed to
+  close (2)'s caller specifically.
+
+  FIX 1 (conditional conformance): `DeclCollector`'s extension visitor recorded a `where T: P` bound
+  into `selfElementStack` only when the constrained name was literally `"Element"` (the collection
+  self-iteration case) — any OTHER generic parameter (`Box`'s own `T`) was silently dropped, so the
+  struct's `value: T` field never resolved to `Greeter2` and stayed the bare, undeclared string `"T"`
+  forever. `recordTypeGenerics` (already used for a type's OWN generic clause) now also runs over an
+  extension's `where` clause, feeding the general `typeGenericBounds` map. Ordering hazard: DeclCollector
+  is a single top-to-bottom pass per file, and the struct's field is very often visited BEFORE the
+  extension that supplies the bound (as in the fixture), or the extension lives in a different file
+  entirely — so an unresolved generic-typed field is now deferred (`unresolvedGenericFields`, new
+  `typeGenericParamNames` gate) and retried once, in `Driver`, after every file's bounds are merged —
+  mirroring `staticFactoryFields`'s existing two-phase shape one level down.
+
+  FIX 2 (where-constrained collection extension via a `for`-loop): `selfElementType` (the bound `where
+  Element: P` establishes on `self`) was already computed and already consumed by the CLOSURE-iterator
+  path (`forEach { $0.persist() }`, R28) — but never by the `for`-loop path (`elementTypeOf`), so the
+  identical extension body read silent-pure when spelled as a loop instead of a closure call.
+  `elementTypeOf` now also checks `self` against `selfElementType`.
+
+  FIX 3 (protocol composition parameter): `typeName` has no case for `CompositionTypeSyntax` at all
+  (`A & B` collapses to no name), so a `_: A5 & B5` parameter was left completely untyped — none of
+  `DeclCollector`'s param-typing branches fired. A new `compositionTypeNames` helper records every
+  LOCALLY-declared composed protocol; the encoding reuses `protoParams`/`protoTyped` (a single
+  `String`, joined with a control-character separator no Swift identifier can contain) rather than
+  adding a new per-binding map, so the composition case gets `protoTyped`'s entire shadow-save/clear
+  discipline for free instead of needing its own (`NameKeyedStateTests` enumerates every NEW stored
+  property on `CallCollector` and requires it classified — reusing an existing map sidesteps that
+  surface entirely). The one dispatch site this feeds (`x.a5()`) now emits one `ProtoDispatch` per
+  composed protocol; `Driver`'s existing `protoOrSuperDeclares` guard already no-ops on a protocol that
+  does not declare the called member, so trying `B5` for an `a5()` call costs nothing.
+
+  FIX 4 (untyped array-literal local, needed to close FIX 2's caller): `let arr = [NetThing3()]` — no
+  type annotation — fell through every branch of the untyped-local initializer chain (not a closure, ctor
+  call, singleton accessor, sequence/subscript, or free-function alias), so `arr` never got an
+  `arrayElem` entry and `arr.greetAll3()` in the caller couldn't resolve to `Array.greetAll3` at all. A
+  new branch resolves an `ArrayExprSyntax` literal's element type via `rootOf` on each element,
+  conservatively: only when EVERY element resolves to the exact same concrete type (never guessed on a
+  mixed or unresolvable literal).
+
+  MEASURED on the 13-package real-world corpus (Alamofire, CryptoSwift, Nimble, PromiseKit, Quick,
+  ReactiveSwift, RxSwift, swift-algorithms, swift-collections, swift-syntax, swift-nio, SwiftyJSON,
+  Swinject), standalone, before/after byte comparison: 11/13 byte-identical. swift-nio: one function's
+  informational `calls` list narrowed by 3 entries (an overload-argument-type match that used to fall
+  back to "union every overload" now has a real, if imprecise, argument type) — the function's own
+  verdict was already `Unknown` for an unrelated reason both before and after, and the callee
+  (`ByteBuffer.writeBytes`) is a pure in-memory buffer op, so no verdict anywhere in the corpus changed;
+  this is the same measured, accepted trade-off this file already documents for the parameter case
+  (`some P`/`<T: P>` resolving to its bound over an arg-type match). swift-syntax: one NEW, honest
+  `Unknown` (`Array.makeLiteralSyntax`, `dispatch:ExpressibleByLiteralSyntax.makeLiteralSyntax`) where a
+  `for`-loop-over-`self` call inside `extension Array: ExpressibleByLiteralSyntax where Element:
+  ExpressibleByLiteralSyntax` previously resolved to nothing at all — a genuine, disclosed gain, not a
+  fabrication. Zero fabrications, zero lost effects, zero lost verdicts across all 13 packages.
+
+  CONTROLS held: existential receivers, retroactive conformance from another module, and
+  extension-shadows-extension (`fixtures/protopure` in the corpus round this fix came from) are
+  unchanged — same functions, same effects, before and after.
+
+  FOUR new unit tests (`ConstrainedExtensionCallerEdgeProcessTests`), one per shape above plus the
+  mixed-element-array rename control — each with a PURE control in its OWN package (not a second
+  function beside the defect in the same file: the bounded CHA these fixes route through unions EVERY
+  local conformer of a generic bound, a pre-existing and deliberate design this codebase already
+  documents, so a same-file pure control would still read effectful for a reason unrelated to the fix
+  — caught by running the control before trusting it).
+
 ## [0.33.1] — 2026-08-27
 
 - ⚠ **An overloaded protocol-extension PROVIDED member vanished — not even `Unknown` — the moment a

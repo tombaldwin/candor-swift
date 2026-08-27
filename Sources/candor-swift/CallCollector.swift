@@ -1830,6 +1830,14 @@ final class CallCollector: SyntaxVisitor {
             // through `typeGenericBounds`, so a `[T]` field's element is `T` (resolves to nothing) and
             // there is no monomorphized protocol name to guard — hence `false`, not an omission.
             if let et = enclosingType, let t = fieldArrayElem[et]?[n] { return (t, false) }
+            // bare `self` iterated directly — `for e in self { e.persist() }` inside `extension Array
+            // where Element: Saveable`. `selfElementType` is exactly the bound `typeClosureParams`'s bare
+            // element-iterator branch already consults for the CLOSURE form (`forEach { $0.persist() }`,
+            // R28); a `for`-in loop over the same `self` reached a different resolver here that never
+            // asked it, so the identical extension body read silent-pure when spelled as a loop instead of
+            // a closure call. Always `mono` for the same reason R28 is: `Element` is monomorphized by
+            // whoever holds the concrete array, never erased.
+            if n == "self", let elem = selfElementType { return (elem, true) }
             return nil
         }
         // `dict.values` iteration (`for v in m.values { v.go() }`) yields the dict's VALUE type — the
@@ -2863,10 +2871,18 @@ final class CallCollector: SyntaxVisitor {
                     unresolved = true
                     why.insert("dispatch:\(rt).\(member)")
                 }
-            } else if let pr = ma.base?.as(DeclReferenceExprSyntax.self), protoTyped[pr.baseName.text] != nil {
-                // dispatch through a LOCAL protocol-typed param — bounded CHA or honest Unknown
-                protoDispatches.append(ProtoDispatch(proto: protoTyped[pr.baseName.text]!, member: member,
-                                                     argc: node.arguments.count, argTypes: argTypesOf(node), args: argKinds(node)))
+            } else if let pr = ma.base?.as(DeclReferenceExprSyntax.self), let proto = protoTyped[pr.baseName.text] {
+                // dispatch through a LOCAL protocol-typed param — bounded CHA or honest Unknown. A
+                // COMPOSITION param (`_ x: A & B`) is joined into one `protoCompositionSep`-delimited
+                // string (see its doc); splitting is a no-op for the ordinary single-protocol case, which
+                // contains no separator and yields itself back as the sole element. One dispatch per
+                // composed protocol — the Driver's `protoOrSuperDeclares` guard silently skips whichever
+                // one(s) do not actually declare `member`, so trying B when the call is really `x.a()`
+                // costs nothing (see the fixture: `runComposed(_ x: A5 & B5) { x.a5() }`).
+                for p in proto.split(separator: protoCompositionSep) {
+                    protoDispatches.append(ProtoDispatch(proto: String(p), member: member,
+                                                         argc: node.arguments.count, argTypes: argTypesOf(node), args: argKinds(node)))
+                }
             } else if let baseDR = ma.base?.as(DeclReferenceExprSyntax.self),
                       arrayElem[baseDR.baseName.text] != nil, localTypes.contains("Array") {
                 // an ARRAY receiver (`xs: [Item]`) calling a method a local `extension Array` provides —
@@ -4062,6 +4078,23 @@ final class CallCollector: SyntaxVisitor {
                     // `let c = x as! T` / `let c = cond ? a : b` / `let c = cs[0]` — rootOf types these
                     let info = rootOf(v0)
                     if info.isVar, let t = info.root { vars[name] = t }
+                } else if let arr = v.as(ArrayExprSyntax.self) {
+                    // `let arr = [NetThing3()]` — an UNTYPED array LITERAL local. Every branch above types
+                    // the local from its single initializer expression; a collection literal instead needs
+                    // its ELEMENT type recorded (`arrayElem`), so `for x in arr` / a conditional-conformance
+                    // extension method (`arr.greetAll3()`, `extension Array where Element: Greeter3`)
+                    // resolves `x`'s/the element's members — else the CALLER of such an extension method
+                    // never inherited the array's element type and read silent-pure even once the extension
+                    // method itself correctly dispatched (found via that exact fixture: `whereext`).
+                    // Conservative: only an UNAMBIGUOUS single element type is recorded — every element
+                    // must resolve, via `rootOf`, to the SAME type — an empty, mixed, or unresolvable
+                    // literal is left untyped (never guessed) rather than fabricated.
+                    let roots = arr.elements.map { rootOf($0.expression).root }
+                    if let first = roots.first, let firstType = first, roots.allSatisfy({ $0 == first }) {
+                        setArrayElem(name, (firstType, false))
+                    } else {
+                        clearBinding(name)
+                    }
                 } else if let dr = v.as(DeclReferenceExprSyntax.self),
                           localFreeFns.contains(dr.baseName.text),
                           vars[dr.baseName.text] == nil, !isBoundLocal(dr.baseName.text) {
