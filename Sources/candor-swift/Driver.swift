@@ -885,25 +885,37 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             globalsByModule[swiftModuleOf(f.loc), default: [:]][bare, default: []].append(f.qual)
         }
     }
-    // Resolve a simple "Type.member" call target to a full nested qual: an exact full-qual hit (top-level,
-    // already full), else the unique simple→full mapping, else nil (ambiguous/unknown → drop the edge).
-    // A closure (not a global func) so it captures the function-local indexes built just above.
+    // Resolve a simple "Type.member" call target to the set of full nested quals it may run: an exact
+    // full-qual hit (top-level, already full) is a singleton; a `qualBySimple` hit UNIONS every colliding
+    // candidate; no candidate at all returns empty (genuinely unresolved — the only case a caller may
+    // still treat as "unknown", never "ambiguous"). A closure (not a global func) so it captures the
+    // function-local indexes built just above.
     //
-    // TRIED AND REVERTED (2026-08-27): the `cands.count == 1` branch's `nil` folds "no candidate" and "2+
-    // same-simple-name candidates, a real callee runs" into one outcome — the same shape as the four
-    // silent-drop defects fixed the day before this comment, so making it disclose `Unknown` on the
-    // ambiguous case (instead of returning `nil` either way) was tried as the "one funnel" step. MEASURED
-    // on the 13-package corpus: 6/13 packages differ, 116 newly-`Unknown` functions, dominated by ordinary
-    // Swift idioms — `Options.init`, `Index.==`, `Iterator.next`, `State.init` — where many unrelated types
-    // each declare their own nested type of that name and `qualBySimple` (keyed on the innermost simple
-    // name alone) collides them. That is the ordinary, expected shape of this index, not a rare dispatch
-    // hidden behind it, and disclosing on it is a flood, not a fix — see CHANGELOG `[0.33.0]`. Left as-is;
-    // closing this for real needs the index (or its callers) to carry outer-container context, the way
-    // `matchOverloads` disambiguates overloads by arity/type rather than by name alone.
-    let resolveQual: (String) -> String? = { target in
-        if byQual.contains(target) { return target }
-        if let cands = qualBySimple[target], cands.count == 1 { return cands.first }
-        return nil
+    // TRIED AND REVERTED, THEN FIXED (2026-08-27): the old single-qual form's `cands.count == 1` branch
+    // folded "no candidate" and "2+ same-simple-name candidates, a real callee runs" into the SAME `nil`
+    // outcome — a silent drop indistinguishable from "nothing to resolve". Disclosing `Unknown` on the
+    // ambiguous case was tried as the "one funnel" fix and reverted: MEASURED on the 13-package corpus,
+    // 6/13 packages differed, 116 newly-`Unknown` functions, dominated by ordinary Swift idioms —
+    // `Options.init`, `Index.==`, `Iterator.next`, `State.init` — where many unrelated types each declare
+    // their own nested type of that name and `qualBySimple` (keyed on the innermost simple name alone)
+    // collides them. That is the ordinary, expected shape of this index, not a rare dispatch hidden
+    // behind it, and disclosing on it was a flood, not a fix — see CHANGELOG `[0.33.0]`.
+    //
+    // UNIONING instead — every real caller of `resolveQual` already edges to WHATEVER it returns, exactly
+    // the sound-over-approximation direction `matchOverloads` and the `#if`-branch union take elsewhere
+    // in this file: a call that could run any of N same-named nested members is modeled as reaching ALL
+    // of them, never a fabrication (each edged unit is a REAL declaration, not a merged/invented one —
+    // see `FnInfo.qual`'s note on why merging the units themselves, rather than the call edges, would
+    // fabricate). An all-pure collision (`Options.init` beside another unrelated `Options.init`)
+    // contributes nothing new either way — no charge, no noise, so the 116-function flood does not
+    // recur; a collision where any candidate is effectful now correctly reaches it, which the silent
+    // `nil` never did. Cost: this can OVER-charge a caller with an effect belonging to the sibling it
+    // didn't actually call — the same bounded-CHA cost every other ambiguous-dispatch arm here already
+    // accepts, never a silent miss.
+    let resolveQual: (String) -> Set<String> = { target in
+        if byQual.contains(target) { return [target] }
+        if let cands = qualBySimple[target] { return cands }
+        return []
     }
 
     for (k, v) in returnsTmp { if let t = v { returnsIdx[k] = t } }
@@ -1182,12 +1194,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // Only when the own key doesn't resolve — an override on the subclass wins (its unit resolves first),
         // so we never fabricate over a real overriding accessor; a member no supertype defines edges nothing.
         for pe in cc.propertyEdges {
-            if let t = resolveQual(pe) {
-                edges[f.qual, default: []].insert(t)
+            let ts = resolveQual(pe)
+            if !ts.isEmpty {
+                edges[f.qual, default: []].formUnion(ts)
             } else if let dot = pe.lastIndex(of: "."), localTypes.contains(String(pe[..<dot])) {
                 let type = String(pe[..<dot]), member = String(pe[pe.index(after: dot)...])
                 for sup in supertypesOf[type] ?? [] {
-                    if let t = resolveQual("\(sup).\(member)") { edges[f.qual, default: []].insert(t) }
+                    edges[f.qual, default: []].formUnion(resolveQual("\(sup).\(member)"))
                 }
             }
         }
@@ -1199,7 +1212,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for attr in f.uppercaseAttrs where resultBuilderTypes.contains(attr) {
             for m in ["buildBlock", "buildExpression", "buildOptional", "buildEither", "buildArray",
                       "buildFinalResult", "buildPartialBlock", "buildLimitedAvailability"] {
-                if let t = resolveQual("\(attr).\(m)") { edges[f.qual, default: []].insert(t) }
+                edges[f.qual, default: []].formUnion(resolveQual("\(attr).\(m)"))
             }
         }
         // a bare-name read that names a GLOBAL initializer unit charges its first-touch effects here
@@ -1289,7 +1302,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 let member = call.leaf
                 if let et = f.enclosingType {
                     for sup in supertypesOf[et] ?? [] where sup != et {
-                        if let t = resolveQual("\(sup).\(member)") {
+                        for t in resolveQual("\(sup).\(member)") {
                             edges[f.qual, default: []].insert(t)
                             callsiteArgs[t, default: []].append(call.args)
                             resolved = true
@@ -1327,15 +1340,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     }
                 }
             } else if call.typed {
+                let typedTargets = resolveQual(call.path)   // hoisted: the else-if chain below reads it once
                 if overloadedBases.contains(call.path) {
                     for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
                         edges[f.qual, default: []].insert(t)
                         callsiteArgs[t, default: []].append(call.args)
                         resolved = true
                     }
-                } else if let t = resolveQual(call.path) {
-                    edges[f.qual, default: []].insert(t)
-                    callsiteArgs[t, default: []].append(call.args)
+                } else if !typedTargets.isEmpty {
+                    for t in typedTargets {
+                        edges[f.qual, default: []].insert(t)
+                        callsiteArgs[t, default: []].append(call.args)
+                    }
                     resolved = true
                 } else if let dot = call.path.lastIndex(of: "."),
                           localTypes.contains(String(call.path[..<dot])) {
@@ -1367,10 +1383,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                 callsiteArgs[t, default: []].append(call.args)
                                 resolved = true
                             }
-                        } else if let t = resolveQual(base) {
-                            edges[f.qual, default: []].insert(t)
-                            callsiteArgs[t, default: []].append(call.args)
-                            resolved = true
+                        } else {
+                            for t in resolveQual(base) {
+                                edges[f.qual, default: []].insert(t)
+                                callsiteArgs[t, default: []].append(call.args)
+                                resolved = true
+                            }
                         }
                     }
                     // No LOCAL supertype default resolved. If the type conforms to / inherits an EXTERNAL
@@ -1429,7 +1447,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     let member = String(call.path[call.path.index(after: dot)...])
                     if !STD_PURE_PROTOCOLS.contains(owner), !RAW_VALUE_BASE_TYPES.contains(owner) {
                         for sub in (subtypesOf[owner] ?? []).sorted() where sub != owner {
-                            if let t = resolveQual("\(sub).\(member)") { edges[f.qual, default: []].insert(t) }
+                            edges[f.qual, default: []].formUnion(resolveQual("\(sub).\(member)"))
                         }
                     }
                 }
@@ -1462,7 +1480,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // so mark resolved REGARDLESS of whether an explicit `init` unit exists — a synthesized
                     // init has no unit to edge to but the construction is still local; without this the caller
                     // was falsely tagged `invisible` (the over-disclosure regression, sweep [36]).
-                    if let t = resolveQual("\(call.path).init") { edges[f.qual, default: []].insert(t) }
+                    edges[f.qual, default: []].formUnion(resolveQual("\(call.path).init"))
                     resolved = true
                 } else if let et = f.enclosingType, overloadedBases.contains("\(et).\(call.leaf)") {  // overloaded sibling
                     for t in matchOverloads("\(et).\(call.leaf)", argc, call.argTypes, swiftModuleOf(f.loc)) {
@@ -1513,7 +1531,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                !localTypes.contains(owner), !STD_PURE_PROTOCOLS.contains(owner),
                !RAW_VALUE_BASE_TYPES.contains(owner) {
                 for sub in subtypesOf[owner] ?? [] {
-                    if let t = resolveQual("\(sub).\(call.leaf)") { edges[f.qual, default: []].insert(t) }
+                    edges[f.qual, default: []].formUnion(resolveQual("\(sub).\(call.leaf)"))
                 }
             }
             // COULD-NOT-FORM-A-KEY (DEP-RECEIVER-TYPING-DESIGN.md half 1). The receiver was bound from a
@@ -1691,10 +1709,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         callsiteArgs[t, default: []].append(d.args)
                         providedEdged = true
                     }
-                } else if let t = resolveQual(base) {
-                    edges[f.qual, default: []].insert(t)
-                    callsiteArgs[t, default: []].append(d.args)
-                    providedEdged = true
+                } else {
+                    let ts = resolveQual(base)
+                    if !ts.isEmpty {
+                        for t in ts {
+                            edges[f.qual, default: []].insert(t)
+                            callsiteArgs[t, default: []].append(d.args)
+                        }
+                        providedEdged = true
+                    }
                 }
                 frontier.append(contentsOf: protocolSupers[cur] ?? [])
             }
@@ -1713,10 +1736,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // `providedEdged` disjunct, the commonest Swift idiom of all (a requirement with a default that
             // most conformers do not override) would turn from a precise answer into an `Unknown` at every
             // such call site.
+            //
+            // `resolveQual` now UNIONS an ambiguous same-simple-name collision instead of dropping it (see
+            // its definition), so "did conformer `c` resolve" is "is the returned set non-empty", and the
+            // per-conformer completeness count is over how many conformers resolved AT ALL, not how many
+            // single quals came back.
             if chaWithinBound(conf.count, d.proto, d.member, f.qual) {
-                let impls = conf.compactMap { resolveQual("\($0).\(d.member)") }
-                if impls.count == conf.count || providedEdged {
-                    for t in impls { edges[f.qual, default: []].insert(t) }
+                let implResults = conf.map { resolveQual("\($0).\(d.member)") }
+                let resolvedCount = implResults.filter { !$0.isEmpty }.count
+                if resolvedCount == conf.count || providedEdged {
+                    for ts in implResults { edges[f.qual, default: []].formUnion(ts) }
                 } else {
                     direct[f.qual, default: []].insert("Unknown")
                     whyMap[f.qual, default: []].insert("dispatch:\(d.proto).\(d.member)")
@@ -1726,25 +1755,57 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // CHA for protocol PROPERTY/subscript reads — identical bounded resolution to method dispatch,
         // but the conformer units are accessor units (`Type.payload` / `Type.subscript`). A conformer
         // satisfying the requirement with a STORED property has no accessor unit (pure, contributes
-        // nothing) — so `impls.count == conf.count` would wrongly force Unknown when SOME conformers are
-        // stored. Instead require every conformer to be a KNOWN local type and edge to whichever accessor
-        // units exist; an unresolvable/unbounded conformer set is honest Unknown.
+        // nothing) — so a naive `impls.count == conf.count` would wrongly force Unknown when SOME
+        // conformers are stored. ⟨2026-08-27⟩ THIS LOOP HAD NO DISCLOSE-ON-MISS BRANCH AT ALL — every
+        // conformer that didn't resolve simply contributed nothing, silently, which is the exact
+        // structural gap `resolveQual`'s old ambiguous-nil fold produced one level up: a `Type.member`
+        // that could not be pinned (an ambiguous same-simple-name collision, OR the requirement being
+        // satisfied via a superclass property this per-conformer loop never climbed to) read identically
+        // to "this conformer stores it, nothing to charge". `resolveQual` now unions the ambiguous case
+        // (so that half of the gap is closed at the source), but a genuine miss — an inherited computed
+        // property, or any other conformer this loop cannot resolve at all — must still say so, the way
+        // the neighbouring method-dispatch loop above does, rather than default to pure. The stored-
+        // property case is told apart from a genuine miss by `fields[c][d.member]`: DeclCollector
+        // records a `fields` entry for EVERY property with an explicit type annotation, whether stored
+        // or computed, and a computed property always carries one (Swift requires it) — so if
+        // `resolveQual` came back empty AND `fields` still knows the member, it is a declared-here
+        // stored property (pure, accounted for); empty AND absent from `fields` means the requirement
+        // is satisfied somewhere this loop never looked, which is the honest-Unknown case.
         for d in cc.protoPropReads {
             // Same two-halved member space as the method loop above: an extension-provided COMPUTED property
             // (or `subscript`) is a real `P.<member>` accessor unit whose body runs, and no conformer
             // declares it, so the conformer CHA below can never find it. Edged first, on the protocol and on
             // its transitive supers, and a member that is not also a requirement stops there.
+            var providedEdged = false
             var frontier = [d.proto], seenProto = Set<String>()
             while let cur = frontier.popLast() {
                 guard seenProto.insert(cur).inserted else { continue }
-                if let t = resolveQual("\(cur).\(d.member)") { edges[f.qual, default: []].insert(t) }
+                let ts = resolveQual("\(cur).\(d.member)")
+                if !ts.isEmpty {
+                    edges[f.qual, default: []].formUnion(ts)
+                    providedEdged = true
+                }
                 frontier.append(contentsOf: protocolSupers[cur] ?? [])
             }
             guard protoOrSuperDeclares(d.proto, d.member) else { continue }
             let conf = conformers[d.proto] ?? []
             guard chaWithinBound(conf.count, d.proto, d.member, f.qual) else { continue }
+            var impls = Set<String>()
+            var accounted = 0
             for c in conf {
-                if let t = resolveQual("\(c).\(d.member)") { edges[f.qual, default: []].insert(t) }
+                let ts = resolveQual("\(c).\(d.member)")
+                if !ts.isEmpty {
+                    impls.formUnion(ts)
+                    accounted += 1
+                } else if fields[c]?[d.member] != nil {
+                    accounted += 1   // a declared STORED property — pure, nothing to charge, not a miss
+                }
+            }
+            if accounted == conf.count || providedEdged {
+                for t in impls { edges[f.qual, default: []].insert(t) }
+            } else {
+                direct[f.qual, default: []].insert("Unknown")
+                whyMap[f.qual, default: []].insert("dispatch:\(d.proto).\(d.member)")
             }
         }
         // IMPLICIT STRINGIFICATION over a PROTOCOL-typed operand — `"\(e)"` / `String(describing: e)` /
@@ -1767,13 +1828,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // `description` is effectful is still missed.
         for d in cc.stringifyDispatches {
             for c in subtypesOf[d.proto] ?? [] {
-                if let t = resolveQual("\(c).\(d.member)") {
-                    edges[f.qual, default: []].insert(t)
+                let ts = resolveQual("\(c).\(d.member)")
+                if !ts.isEmpty {
+                    edges[f.qual, default: []].formUnion(ts)
                 } else {
                     // an INHERITED witness (the `description` accessor lives on a superclass / a conformed
                     // protocol's extension) — climb exactly as the accessor-unit edge above does.
                     for sup in supertypesOf[c] ?? [] {
-                        if let t = resolveQual("\(sup).\(d.member)") { edges[f.qual, default: []].insert(t) }
+                        edges[f.qual, default: []].formUnion(resolveQual("\(sup).\(d.member)"))
                     }
                 }
             }
