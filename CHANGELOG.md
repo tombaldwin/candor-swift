@@ -9,6 +9,56 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **`--target` platform pruning now covers SwiftPM, not just `.xcodeproj` — candor BACKLOG.md's A4:
+  the previous entry below split `platform-pruned` out of `xcodeTargetScope`, but that machinery lived
+  ONLY behind the `.xcodeproj` resolver (XcodeTargets.swift); `PackageTargets.swift`, the SwiftPM half of
+  `--target` (~530 lines), never mentioned "platform" or `#if os` at all.** MEASURED before this fix: a
+  SwiftPM package declaring `platforms: [.macOS(.v13), .iOS(.v16)]`, with a function wholly inside
+  `#if os(watchOS)` calling `FileManager.createFile`, reported that function as a LIVE, undisclosed `Fs`
+  effect — not excluded, not flagged, not disclosed as platform-dead — and a real `--policy deny Fs` gate
+  FAILED on it (`AS-EFF-006`), a false policy violation over code that can never run on any platform the
+  package ships. Strictly worse than the entry below's own starting point: there the file at least reached
+  `excluded[]` under an imprecise label; here it reached nothing. Root cause: the audit that produced the
+  entry below asked "is there a `platform-pruned` class for `--target`?", found one, and stopped — the
+  class existed, but only ONE of `--target`'s two resolvers fed it.
+  Fixed by reusing, not re-implementing, `328a67f`'s machinery: `swiftFileCompilesToNothing` (unmodified)
+  still decides per-platform membership; a new `parsePackagePlatformFamilies` (PackageTargets.swift) reads
+  a manifest's declared `platforms:` into the same `os(…)` family vocabulary (`.macCatalyst` folds into
+  `"iOS"`, matching `inferPlatform`'s existing SDKROOT token map); a new
+  `swiftFileCompilesToNothing(source:onAnyOf:)` overload (XcodeTargets.swift) asks whether a file is dead
+  on EVERY family the manifest declares — the SwiftPM analogue of an Xcode target's single build platform,
+  since a restricted package's declared platforms are all built from the SAME target, never one at a time.
+  The SwiftPM `--target` path in `main.swift` then feeds a dead file into the SAME `excludedFiles` list
+  under the SAME `"platform-pruned"` class the Xcode path already produces, so it inherits `PEEKED_CLASSES`,
+  the `outOfScope`/INCOMPLETE verdict machinery, and the disclosure text for free — one class, two
+  producers, no parallel implementation.
+  `parsePackagePlatformFamilies` returns `nil` — "prune nothing" — for every case where a restriction
+  cannot be PROVEN: no `platforms:` argument at all (SwiftPM's own default of "every platform"), a
+  non-literal value (a hoisted variable), an empty literal array (SwiftPM does not accept a package with
+  no supported platforms, so reading one is far more likely a parse gap than intent), or any element this
+  cannot map to a known `os(…)` family (`.driverKit(…)`, a future case) — one unmappable element
+  invalidates the WHOLE declaration rather than silently narrowing it, because treating "cannot map" as
+  "not declared" would prune a family the manifest actually supports. Every one of these fails toward
+  keeping too much, never too little, matching the Xcode side's existing posture when `inferPlatform`
+  finds no SDKROOT. The shared `EXCLUDED_REASON["platform-pruned"]` string is reworded to name both
+  producers ("an Xcode build setting, or a SwiftPM package's declared `platforms:`") since it now speaks
+  for two different mechanisms.
+  Verified against the pre-fix binary: the watchOS-gated defect case now excludes+peeks (was a live
+  effect and, under a `deny Fs` policy, a false `AS-EFF-006` violation — now INCOMPLETE, exit 2, via
+  `outOfScope`); a package with the SAME `platforms:` restriction but no `#if os(…)`-gated code produces a
+  BYTE-IDENTICAL report (the over-charge control); `#if os(macOS)` code in a package that DOES declare
+  macOS support stays live and still fires as an ordinary policy violation (the control that matters most —
+  excluding it would be the silent under-report a completeness fix must never introduce); the `.xcodeproj`
+  path's own three process tests from the entry below (`PlatformPrunedFileSetProcessTests`) are unchanged.
+  Six new process tests (`SwiftPMPlatformPrunedProcessTests.swift`) pin the defect case, the peek/INCOMPLETE
+  behaviour, the over-charge control, the genuinely-live control, and both "cannot be proven" cases (no
+  `platforms:`, an unreadable one). All 911 XCTest cases, `smoke.sh` (148), `fabrication_probe.py` and
+  `fuzz.py` pass.
+  Whole-repo scans (no `--target` at all) and a `.xcodeproj` project scanned whole-repo remain OUT OF
+  SCOPE for this fix, unchanged from before: neither resolver drops a file from the scan on platform
+  grounds outside a `--target` invocation, and that is a separate, wider question (which platform is
+  "the" platform for a scan that is not scoped to one binary at all) that this fix does not answer.
+
 - ⚠ **the `--target` platform prune (`#if os(…)`, XcodeTargets.swift) now files its OWN `excluded[]`
   class, `platform-pruned`, instead of the generic `outside-the-target-closure` the before/after diff
   gave every scoped-out file.** Both classes were already MANDATORY-disclosed, PEEKED, and verdict-bearing

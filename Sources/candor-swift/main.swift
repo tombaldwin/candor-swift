@@ -1107,6 +1107,33 @@ if let want = scopeTarget {
         }
         let before = sourcePaths.count
         sourcePaths = sourcePaths.filter { p in prefixes.contains(where: { abs(p).hasPrefix($0) }) }
+        // ⟨platform pruning, SwiftPM⟩ the `.xcodeproj` resolver's `#if os(…)` membership check
+        // (`xcodeTargetScope`, XcodeTargets.swift) has no counterpart here at all — `PackageTargets.swift`
+        // had never even mentioned "platform". A manifest that RESTRICTS `platforms:` to, say,
+        // `[.macOS(.v13), .iOS(.v16)]` never builds this package for watchOS in ANY target, so a file
+        // wholly gated on `#if os(watchOS)` is dead code here for the identical reason RSCore's
+        // `SendToBlogEditorApp.swift` was dead on an iOS Xcode target — and, before this, it was reported
+        // as a LIVE, undisclosed `Fs` effect (a real `--policy deny Fs` gate FAILED on it), never excluded,
+        // never flagged, never disclosed as platform-dead. `parsePackagePlatformFamilies` returns nil for
+        // an UNRESTRICTED manifest (no `platforms:` at all — SwiftPM's default of "every platform") or an
+        // unreadable one, and nothing is pruned in either case: this feature must fail toward keeping too
+        // much, never too little, exactly as the Xcode side already does when `inferPlatform` finds no
+        // SDKROOT.
+        let platformFamilies = manifestSrc.flatMap(parsePackagePlatformFamilies(manifestSource:))
+        var platformPrunedHere = 0
+        if let platformFamilies {
+            sourcePaths = sourcePaths.filter { p in
+                // Cheap gate first, same as the Xcode side: no `#if os(` in the text, nothing to
+                // evaluate. An unreadable file is KEPT — pruning must never eat one silently.
+                guard let src = try? String(contentsOfFile: p, encoding: .utf8), src.contains("#if os(")
+                else { return true }
+                guard swiftFileCompilesToNothing(source: src, onAnyOf: platformFamilies) else { return true }
+                platformPrunedHere += 1
+                platformPrunedPaths.insert(candorAbsolutePath(p))
+                excludedFiles.append((rel(p, to: rootDir), "platform-pruned"))
+                return false
+            }
+        }
         if sourcePaths.isEmpty {
             FileHandle.standardError.write(("candor-swift: --target \(want) resolved to "
                 + "\(closure.map(\.name).joined(separator: ", ")) but no Swift sources are under "
@@ -1116,10 +1143,15 @@ if let want = scopeTarget {
         }
         // DISCLOSED, not silent. The reader must be able to tell a scoped scan from a whole-tree one:
         // a clean verdict here is a claim about ONE binary, and the same tree scanned whole may differ.
-        FileHandle.standardError.write(("candor-swift: --target \(want) — resolved via Package.swift: "
+        var note = "candor-swift: --target \(want) — resolved via Package.swift: "
             + "scanning \(closure.count) target(s) "
-            + "[\(closure.map(\.name).joined(separator: ", "))], \(sourcePaths.count) of \(before) source file(s). "
-            + "This verdict covers that closure ONLY.\n").data(using: .utf8)!)
+            + "[\(closure.map(\.name).joined(separator: ", "))], \(sourcePaths.count) of \(before) source file(s)."
+        if let platformFamilies, platformPrunedHere > 0 {
+            note += " \(platformPrunedHere) file(s) excluded as compiling to nothing on any of "
+                + "\(platformFamilies.sorted().joined(separator: ", ")) (this package's declared `platforms:`)."
+        }
+        note += " This verdict covers that closure ONLY."
+        FileHandle.standardError.write((note + "\n").data(using: .utf8)!)
     } catch let e as TargetScopeError {
         FileHandle.standardError.write("candor-swift: \(e)\n".data(using: .utf8)!)
         writeReportStreamFailClosed(reasonKey: "target-missing", why: "\(e)")
@@ -1819,11 +1851,11 @@ let EXCLUDED_REASON: [String: String] = [
         + "the harness's rather than the package's.",
     "outside-the-target-closure": "`--target` was given, so this verdict covers that target's closure "
         + "ONLY — these are production sources in the scanned tree that an unscoped scan WOULD have judged.",
-    "platform-pruned": "this target's build settings say which platform it builds for, and every "
-        + "top-level declaration in this file sits inside `#if os(…)` clauses provably FALSE for that "
-        + "platform — it compiles to NOTHING in this target's build, on ANY platform this project ships. "
-        + "An unscoped scan, or a scan of a target for the platform this file DOES build for, WOULD have "
-        + "judged it.",
+    "platform-pruned": "this target's platform (an Xcode build setting, or a SwiftPM package's declared "
+        + "`platforms:`) says which platform(s) it builds for, and every top-level declaration in this "
+        + "file sits inside `#if os(…)` clauses provably FALSE for all of them — it compiles to "
+        + "NOTHING in this target's build, on ANY platform this project ships. An unscoped scan, or a scan "
+        + "of a target/platform this file DOES build for, WOULD have judged it.",
     "build-output": "`.build/` holds the toolchain's artifacts and checked-out dependency sources, not "
         + "this package's own code. Counted, and deliberately NOT read by the peek: a checkout tree is "
         + "unbounded, and other people's tests are not a finding about your project.",

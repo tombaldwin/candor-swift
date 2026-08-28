@@ -1476,6 +1476,24 @@ private func configurationIds(of targetId: String, model: PbxprojModel) -> [Stri
 /// `swift(>=…)` and anything else evaluate to UNKNOWN, and an UNKNOWN clause KEEPS the file. Import
 /// declarations don't count as contribution (a pruned file is exactly `import Foundation` plus a
 /// fully-gated body — RSCore's `SendToBlogEditorApp.swift` verbatim).
+/// True when `source` compiles to nothing on EVERY family in `platforms` — the SwiftPM `--target`
+/// analogue of the single-platform check above, for a manifest whose `platforms:` RESTRICTS which
+/// platforms the package ships on at all (`parsePackagePlatformFamilies`, PackageTargets.swift). A
+/// package declaring `platforms: [.macOS(.v13), .iOS(.v16)]` never builds for watchOS in ANY of its
+/// targets, so a file gated on `#if os(watchOS)` is dead there for the same reason a `.xcodeproj` target
+/// finds one dead on its own single SDKROOT platform — just checked against a SET instead of one value,
+/// because an Xcode target builds one platform per invocation and a SwiftPM package's declared platforms
+/// are all built from the SAME target.
+///
+/// `platforms` must be non-empty — the caller only reaches this after `parsePackagePlatformFamilies`
+/// returns non-nil, which already folds the "no restriction provable" cases (no `platforms:` argument,
+/// an unreadable one, or a literal-but-empty one) into `nil` rather than an empty set. An empty set
+/// handed here would make `allSatisfy` vacuously `true` and prune every `#if os(…)`-gated file in the
+/// package — the exact silent-under-report this whole feature exists to avoid, not produce.
+public func swiftFileCompilesToNothing(source: String, onAnyOf platforms: Set<String>) -> Bool {
+    !platforms.isEmpty && platforms.allSatisfy { swiftFileCompilesToNothing(source: source, on: $0) }
+}
+
 public func swiftFileCompilesToNothing(source: String, on platform: String) -> Bool {
     let tree = Parser.parse(source: source)
     for item in tree.statements {
