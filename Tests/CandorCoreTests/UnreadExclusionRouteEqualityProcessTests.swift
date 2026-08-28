@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import CandorCore
 
 /// ⟨0.32⟩ **CODE THIS SCAN DID NOT READ MAKES THE VERDICT INCOMPLETE — ON BOTH ROUTES** (SPEC §3.1).
 ///
@@ -56,13 +57,21 @@ final class UnreadExclusionRouteEqualityProcessTests: XCTestCase {
     /// (SPEC §2 ⟨0.33⟩), raw JSON exactly like its siblings. `nil` omits it, which after this rung is a
     /// DIFFERENT claim from an empty `excluded[].peeked` history: an `excluded` entry with `peeked: true`
     /// beside an ABSENT `scannedUnder` is the pre-⟨0.33⟩ producer shape and fails closed on its own.
-    private func envelope(excluded: String?, outOfScope: String?, scannedUnder: String? = nil) -> String {
+    ///
+    /// ⟨0.34⟩ …and a FOURTH parameter, `spec` — the envelope's own declared `candor.spec`, defaulted to
+    /// `"0.32"` (a pre-⟨0.33⟩ producer, the shape most rows in this file pose). **NO REAL ENGINE AT SPEC
+    /// 0.32 EVER WROTE `scannedUnder`** — that key does not exist before ⟨0.33⟩ — so every row that
+    /// supplies `scannedUnder` MUST also raise `spec` to at least `"0.33"`, or the fixture claims an
+    /// impossible producer. The default stays `"0.32"` for the rows that omit `scannedUnder`, which is
+    /// exactly the shape a real pre-⟨0.33⟩ producer writes.
+    private func envelope(excluded: String?, outOfScope: String?, scannedUnder: String? = nil,
+                          spec: String = "0.32") -> String {
         var extra = ""
         if let excluded { extra += ",\"excluded\":\(excluded)" }
         if let outOfScope { extra += ",\"outOfScope\":\(outOfScope)" }
         if let scannedUnder { extra += ",\"scannedUnder\":\(scannedUnder)" }
         return """
-        {"candor":{"spec":"0.32","toolchain":"swiftsyntax","version":"candor-swift-0.32.0"},
+        {"candor":{"spec":"\(spec)","toolchain":"swiftsyntax","version":"candor-swift-\(spec).0"},
          "package":"App","analyzed":{"count":2,"digest":"1111111111111111"}\(extra),
          "functions":[{"fn":"app.Lib.add","loc":"a.swift:1:1","inferred":[],"direct":[],
                        "declared":[],"undeclared":[],"overdeclared":[],"unresolved":false,
@@ -99,7 +108,7 @@ final class UnreadExclusionRouteEqualityProcessTests: XCTestCase {
     func testAFullyPeekedReportStillGatesGreen() throws {
         let root = try makeReportDir(
             envelope: envelope(excluded: #"[{"class":"harness-target","count":2,"peeked":true,"reason":"tests"}]"#,
-                               outOfScope: "[]", scannedUnder: #"{"deny":["deny Net"]}"#),
+                               outOfScope: "[]", scannedUnder: #"{"deny":["deny Net"]}"#, spec: "0.33"),
             policy: "deny Net\n")
         defer { try? FileManager.default.removeItem(at: root) }
         let v = root.appendingPathComponent("verdict.json")
@@ -121,10 +130,15 @@ final class UnreadExclusionRouteEqualityProcessTests: XCTestCase {
     /// ⟨0.32⟩'s unread-class rule correctly does not fire here — the class really was read — and the
     /// ⟨0.29⟩ bound had filtered what the peek LOOKED FOR to the producer's denied effects, so the `Exec`
     /// was seen and discarded as out of that question.
+    /// ⟨0.34⟩ THIS FIXTURE MUST DECLARE `spec: "0.33"` — a producer old enough to lack `scannedUnder`
+    /// could not have written the key this row's whole point turns on, and combining the two would be
+    /// exactly the "impossible fixture" the rung's own controls exist to rule out (see the `envelope`
+    /// helper's doc). At `>=0.33` the narrower deny set is a REAL fact about this producer, so the
+    /// message must stay the pre-⟨0.34⟩ "does not cover" sentence, byte-for-byte — CONTROL 1.
     func testAPeekedReportUnderADifferentDenySetRefuses() throws {
         let root = try makeReportDir(
             envelope: envelope(excluded: #"[{"class":"harness-target","count":2,"peeked":true,"reason":"tests"}]"#,
-                               outOfScope: "[]", scannedUnder: #"{"deny":["deny Net"]}"#),
+                               outOfScope: "[]", scannedUnder: #"{"deny":["deny Net"]}"#, spec: "0.33"),
             policy: "deny Exec\n")
         defer { try? FileManager.default.removeItem(at: root) }
         let r = try gate(root)
@@ -135,6 +149,13 @@ final class UnreadExclusionRouteEqualityProcessTests: XCTestCase {
         XCTAssertTrue(r.err.contains("THE SAME policy"),
                       "…and the remedy must say THE SAME policy, not merely A policy — the loose reading "
                       + "is what PRODUCES this hole, because the operator DID scan with a policy: \(r.err)")
+        // ⟨0.34⟩ CONTROL 1 — a ≥⟨0.33⟩ producer's narrower deny set is REAL, so this stays the ORIGINAL
+        // cause sentence, never the pre-⟨0.33⟩ one: naming "does not cover" is correct here, and the
+        // new sentence (which never says it) must not appear.
+        XCTAssertTrue(r.err.contains("does not cover"),
+                      "a genuinely different deny set keeps the pre-⟨0.34⟩ wording verbatim: \(r.err)")
+        XCTAssertFalse(r.err.contains("before") && r.err.contains("recorded the deny set"),
+                       "…and must NOT read as a pre-⟨0.33⟩ producer, which this one is not: \(r.err)")
     }
 
     /// ⟨0.33⟩ AN ABSENT `scannedUnder` IS THE EMPTY SET, so a pre-⟨0.33⟩ report carrying `peeked: true`
@@ -153,6 +174,116 @@ final class UnreadExclusionRouteEqualityProcessTests: XCTestCase {
                        + "having been asked THIS: \(r.err)")
     }
 
+    // ── ⟨0.34⟩ THE CROSS-POLICY REMEDY NAMES ITS ACTUAL CAUSE ────────────────────────────────────────
+    //
+    // The refusal above is TRUE of a ≥⟨0.33⟩ producer that genuinely scanned under a narrower deny set,
+    // and MISLEADING of a report that predates ⟨0.33⟩ entirely — such a producer never had a
+    // `scannedUnder` key to hold ANY deny set in, so "does not cover" reads as "chose a different
+    // policy" where the truth is "could not yet record one". MESSAGE-ONLY: the verdict, exit code and
+    // `--gate-json` document are unchanged in every case (SPEC ⟨0.34⟩ explicitly rules out a version
+    // floor for the VERDICT — a report's age cannot license certification).
+
+    /// `fix`'s own INDEPENDENTLY-CODED copy of this prose (`ReportCompleteness.note`, the shared writer
+    /// `tour`/`path` also call but can never actually ARM — see `armingUnread`'s callers). Mirrors
+    /// `gate` above so BOTH of this engine's texts for this cause get exercised by name, the way rust's
+    /// port measured its own two (`gate.rs` / `completeness.rs`).
+    private func fixCmd(_ root: URL, fn: String = "app.Lib.add", effect: String = "Exec")
+        throws -> (out: String, err: String, code: Int32) {
+        try ProcessHarness.run(try bin(),
+                               ["fix", fn, effect, "--report", root.appendingPathComponent(".candor/report").path,
+                                "--policy", root.appendingPathComponent("pol.txt").path], cwd: root)
+    }
+
+    /// CONTROL 2 — A REPORT THAT PREDATES ⟨0.33⟩ NAMES THE REAL CAUSE, ON BOTH INDEPENDENTLY-CODED
+    /// TEXTS. `excluded[].peeked: true` with NO `scannedUnder` at all is the one shape that can ONLY
+    /// come from a pre-⟨0.33⟩ producer — the key did not exist yet for it to omit on purpose.
+    /// `testAPeekedReportWithoutScannedUnderRefuses` above already pins the EXIT CODE for this shape;
+    /// this row pins the MESSAGE, falsified against the pre-⟨0.34⟩ reading (which prints "does not
+    /// cover" for this exact fixture — see the git history of this file for the wording this replaces).
+    func testAPreO33ReportNamesTheRealCauseOnBothRoutes() throws {
+        let root = try makeReportDir(
+            envelope: envelope(excluded: #"[{"class":"harness-target","count":2,"peeked":true,"reason":"tests"}]"#,
+                               outOfScope: "[]"),
+            policy: "deny Exec\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let g = try gate(root)
+        XCTAssertEqual(g.code, 2, g.err)
+        XCTAssertFalse(g.err.contains("does not cover"),
+                       "a pre-⟨0.33⟩ report must not be told its producer chose a DIFFERENT deny set — "
+                       + "it never had one to record: \(g.err)")
+        XCTAssertTrue(g.err.contains("before") && g.err.contains("0.33"),
+                      "…and must name the REAL cause instead: \(g.err)")
+        XCTAssertTrue(g.err.contains("THE SAME policy"),
+                      "…and still give the SAME-policy remedy, unchanged: \(g.err)")
+
+        let f = try fixCmd(root)
+        XCTAssertFalse(f.err.contains("does not cover"),
+                       "`fix`'s independently-coded copy must not say it either: \(f.err)")
+        XCTAssertTrue(f.err.contains("before") && f.err.contains("0.33"),
+                      "…and must agree with `gate --report` on the real cause: \(f.err)")
+        XCTAssertTrue(f.err.contains("THE SAME policy"), "…and the remedy: \(f.err)")
+    }
+
+    /// CONTROL 1, ON THE SECOND ROUTE — `fix`'s copy of the ORIGINAL sentence is untouched when a
+    /// ≥⟨0.33⟩ producer genuinely scanned under a different deny set. `gate --report`'s half of this
+    /// control lives on `testAPeekedReportUnderADifferentDenySetRefuses` above; together the two rows
+    /// are the "both routes agree" control.
+    func testAo33OrLaterReportKeepsTheOriginalWordingOnFix() throws {
+        let root = try makeReportDir(
+            envelope: envelope(excluded: #"[{"class":"harness-target","count":2,"peeked":true,"reason":"tests"}]"#,
+                               outOfScope: "[]", scannedUnder: #"{"deny":["deny Net"]}"#, spec: "0.33"),
+            policy: "deny Exec\n")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let f = try fixCmd(root)
+        XCTAssertTrue(f.err.contains("does not cover"),
+                      "a genuinely different ≥⟨0.33⟩ deny set keeps the pre-⟨0.34⟩ wording verbatim: \(f.err)")
+        XCTAssertFalse(f.err.contains("recorded the deny set its peek ran under"),
+                       "…and must not read as a pre-⟨0.33⟩ producer, which this one is not: \(f.err)")
+    }
+
+    /// CONTROL 3 — THE `--gate-json` DOCUMENT DOES NOT MOVE. The cause-naming flag decides stderr's
+    /// WORDING only; the verdict document is built from `crossPolicy`'s emptiness alone (Gate.swift's
+    /// `writeGateVerdict` never reads the flag), so two reports raising the identical 1-rule gap — one
+    /// that predates ⟨0.33⟩, one that does not — must write BYTE-IDENTICAL documents.
+    func testTheGateJsonDocumentIsByteIdenticalWhicheverCauseFires() throws {
+        let oldRoot = try makeReportDir(
+            envelope: envelope(excluded: #"[{"class":"harness-target","count":2,"peeked":true,"reason":"tests"}]"#,
+                               outOfScope: "[]"),
+            policy: "deny Exec\n")
+        defer { try? FileManager.default.removeItem(at: oldRoot) }
+        let newRoot = try makeReportDir(
+            envelope: envelope(excluded: #"[{"class":"harness-target","count":2,"peeked":true,"reason":"tests"}]"#,
+                               outOfScope: "[]", scannedUnder: #"{"deny":["deny Net"]}"#, spec: "0.33"),
+            policy: "deny Exec\n")
+        defer { try? FileManager.default.removeItem(at: newRoot) }
+
+        let ov = oldRoot.appendingPathComponent("v.json"), nv = newRoot.appendingPathComponent("v.json")
+        let og = try gate(oldRoot, verdict: ov)
+        let ng = try gate(newRoot, verdict: nv)
+        XCTAssertEqual(og.code, 2, og.err)
+        XCTAssertEqual(ng.code, 2, ng.err)
+        // The two fixtures must actually land on OPPOSITE causes, or this row proves nothing.
+        XCTAssertNotEqual(og.err.contains("does not cover"), ng.err.contains("does not cover"),
+                          "expected opposite cause sentences:\nold=\(og.err)\nnew=\(ng.err)")
+        let a = try String(contentsOf: ov, encoding: .utf8), b = try String(contentsOf: nv, encoding: .utf8)
+        XCTAssertEqual(a, b, "the wire document must not depend on WHICH cause-sentence stderr chose")
+    }
+
+    /// ⟨0.34⟩ THE LADDER, NEVER LEXICOGRAPHIC — unit-tested directly against `CandorCore.specPredates`
+    /// rather than only through a process fixture, so the `"0.9"` vs `"0.33"` string-compare inversion
+    /// is pinned even if no end-to-end row happens to exercise it.
+    func testSpecPredatesComparesTheLadderNotTheString() {
+        XCTAssertTrue(specPredates("0.32", "0.33"))
+        XCTAssertTrue(specPredates("0.9", "0.33"), "0.9 < 0.33 on the ladder even though \"9\" > \"3\"")
+        XCTAssertFalse(specPredates("0.33", "0.33"))
+        XCTAssertFalse(specPredates("0.34", "0.33"))
+        XCTAssertFalse(specPredates("1.0", "0.33"))
+        XCTAssertTrue(specPredates("", "0.33"), "absent ⇒ predates")
+        XCTAssertTrue(specPredates("not-a-version", "0.33"))
+        XCTAssertTrue(specPredates("0.", "0.33"))
+    }
+
     /// ⟨0.33⟩ THE COVERAGE CONTROL, and it is why the key is the RULE SET rather than a digest: a
     /// producer that held `deny Net` AND `deny Exec` fully answers a consumer asking only one of them. A
     /// digest could decide only equality and would refuse this — same implementation cost, strictly
@@ -160,7 +291,7 @@ final class UnreadExclusionRouteEqualityProcessTests: XCTestCase {
     func testASupersetProducerStillCertifies() throws {
         let root = try makeReportDir(
             envelope: envelope(excluded: #"[{"class":"harness-target","count":2,"peeked":true,"reason":"tests"}]"#,
-                               outOfScope: "[]", scannedUnder: #"{"deny":["deny Exec","deny Net"]}"#),
+                               outOfScope: "[]", scannedUnder: #"{"deny":["deny Exec","deny Net"]}"#, spec: "0.33"),
             policy: "deny Exec\n")
         defer { try? FileManager.default.removeItem(at: root) }
         let r = try gate(root)
@@ -175,7 +306,7 @@ final class UnreadExclusionRouteEqualityProcessTests: XCTestCase {
     /// that changed no evidence.
     func testDifferingPoliciesOverAnUnpeekedNothingStillCertify() throws {
         let root = try makeReportDir(envelope: envelope(excluded: "[]", outOfScope: nil,
-                                                        scannedUnder: #"{"deny":["deny Net"]}"#),
+                                                        scannedUnder: #"{"deny":["deny Net"]}"#, spec: "0.33"),
                                      policy: "deny Exec\n")
         defer { try? FileManager.default.removeItem(at: root) }
         let r = try gate(root)
@@ -192,7 +323,7 @@ final class UnreadExclusionRouteEqualityProcessTests: XCTestCase {
         for shape in shapes {
             let root = try makeReportDir(
                 envelope: envelope(excluded: #"[{"class":"harness-target","count":2,"peeked":true,"reason":"tests"}]"#,
-                                   outOfScope: "[]", scannedUnder: shape),
+                                   outOfScope: "[]", scannedUnder: shape, spec: "0.33"),
                 policy: "deny Exec\n")
             defer { try? FileManager.default.removeItem(at: root) }
             let r = try gate(root)
@@ -376,7 +507,7 @@ final class UnreadExclusionRouteEqualityProcessTests: XCTestCase {
             // `peeked`/`judgedElsewhere` FLAGS, and without it the "peeked true" row would test the
             // ⟨0.33⟩ cause (an absent `scannedUnder`) instead of the flag shape it names.
             let root = try makeReportDir(envelope: envelope(excluded: exc, outOfScope: nil,
-                                                            scannedUnder: #"{"deny":["deny Net"]}"#),
+                                                            scannedUnder: #"{"deny":["deny Net"]}"#, spec: "0.33"),
                                          policy: "deny Net\n")
             defer { try? FileManager.default.removeItem(at: root) }
             let r = try gate(root)

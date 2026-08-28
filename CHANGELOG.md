@@ -9,6 +9,29 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.34⟩ ITEM 1: the ⟨0.33⟩ cross-policy remedy now names its ACTUAL cause — message-only, verdict and
+  `--gate-json` unchanged.** `gate --report` and `fix` (the only two independently-coded texts for this
+  cause; `fix-gate`/`unverified` disclose it as the bare `incomplete: true` flag with no sentence to
+  reword) name a report whose peek was bounded by a deny set narrower than the policy in force as *"this
+  report's peek was bounded by the deny set its producing scan held, and that set does not cover N
+  rule(s) of this policy"* — TRUE of a ≥⟨0.33⟩ producer that genuinely scanned under a different deny
+  set, but MISLEADING of a report that predates ⟨0.33⟩ entirely: such a producer never had a
+  `scannedUnder` key to hold ANY deny set in, so "does not cover" reads as "chose a different policy"
+  where the truth is "could not yet record one". Both readers now check the report's own envelope `spec`
+  (new `CandorCore.specPredates`/`parseSpecLadder`, compared on the major.minor LADDER and never
+  lexicographically — `"0.9"` sits before `"0.33"` even though the string compare inverts it; unparseable
+  or absent `spec` counts as predating) and print a second sentence naming the real cause and the remedy
+  ("re-scan with a 0.33+ engine under THE SAME policy") whenever EVERY report that contributed to the
+  cause predates the rung. A single ≥⟨0.33⟩ contributor keeps the original sentence, because for that
+  report the narrower deny set is real — the version licenses a REMEDY, never a verdict (SPEC ⟨0.34⟩
+  explicitly rules out a version floor: a report's age cannot license certification, since a pre-⟨0.33⟩
+  producer's peek was still bounded by SOME policy nobody here can see). No new wire key: `ok`, the exit
+  code and the full `--gate-json`/`fix --json` document are byte-identical in every case — verified
+  against a hand-built pre-0.33 fixture whose gate-json is byte-equal to a ≥0.33 fixture raising the
+  identical rule gap, and both of `unaskedCrossPolicyRules`'s callers (`gate --report`'s exit arm and
+  `armingUnread`, shared by `fix`/`fix-gate`/`unverified`) now read the flag from one shared computation
+  rather than two.
+
 - ⚠ **R61 — three idiomatic FFI mechanisms read silent-pure: no generic "unresolved call through an
   opaque value" fallback existed in this engine's dispatch model at all.** A raw `import Darwin`/`import
   Glibc` free-function call (`system("rm -rf /")`, `unlink(path)`), a direct C-symbol-linkage declaration
