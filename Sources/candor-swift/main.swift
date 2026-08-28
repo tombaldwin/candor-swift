@@ -610,6 +610,13 @@ var sourcePaths: [String] = []
 // one class the peek must not read: a checkout tree holds other people's tests, and the noise floor
 // "everything you vendored" is how a warning becomes something people scroll past.
 var excludedFiles: [(path: String, cls: String)] = []
+// ⟨file-set⟩ Absolute, `candorAbsolutePath`-normalized paths of files dropped by PLATFORM pruning
+// (`scopeToXcodeTarget` → `xcodeTargetScope`'s `#if os(…)` membership check below). Recorded so the
+// `--target` before/after diff further down — which files a whole-repo scan WOULD have judged that this
+// scoped one did not — can tell "compiled by a sibling target" from "dead code on this platform" and file
+// each under its OWN class rather than the one generic `outside-the-target-closure` bucket. A file
+// counted here is never ALSO counted there: see the diff loop's `platformPrunedPaths.contains` guard.
+var platformPrunedPaths: Set<String> = []
 if let listFile = peekListPath {
     // ⟨0.29⟩ THE PEEK, CHILD SIDE. The parent hands us the EXACT set it disclosed as excluded, and we
     // analyse that and nothing else — same binary, same walk-free entry into `analyze`, same classifier.
@@ -833,6 +840,8 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
                         resolved: inout (target: String, project: String, entitlements: String?)?,
                         resolvedLinksByFile: inout [String: [LocalProductRef]],
                         resolvedModulesByFile: inout [String: [String]],
+                        excludedFiles: inout [(path: String, cls: String)],
+                        platformPrunedPaths: inout Set<String>,
                         packageSwiftExists: Bool = false, alsoDeclaredInPackageSwift: [String] = []) {
     let fm = FileManager.default
     let projects = findXcodeProjects(under: rootDir)
@@ -924,6 +933,16 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
         }
         let scope = try xcodeTargetScope(model: hit.model, projectDir: projectDir, targetName: want,
                                          fs: makeXcodeScopeFS())
+        // ⟨file-set⟩ THE SCOPE'S OWN CLASS for these, recorded here rather than left to the generic
+        // before/after diff further down. That diff cannot tell "compiled by a sibling target" from
+        // "dead code on this platform" — both just remove a path from `sourcePaths` — so without this,
+        // every macOS-only file in an iOS target's closure was filed as `outside-the-target-closure`,
+        // a reason that reads as attribution when the true reason is the file never builds AT ALL. The
+        // `platformPrunedPaths` set is what stops the diff from ALSO filing these there (double
+        // counting under two classes what is one exclusion).
+        for f in scope.platformExcludedFiles where platformPrunedPaths.insert(candorAbsolutePath(f)).inserted {
+            excludedFiles.append((rel(f, to: rootDir), "platform-pruned"))
+        }
         // CASE-INSENSITIVE membership. macOS filesystems are; a pbxproj path whose case drifted from
         // the disk's still builds in Xcode, and an exact-case compare would silently drop that file
         // from the scope — the miss-shaped failure. Two repo files differing only by case would
@@ -1057,6 +1076,8 @@ if let want = scopeTarget {
                            resolved: &resolvedXcodeScope,
                            resolvedLinksByFile: &resolvedXcodeLinksByFile,
                            resolvedModulesByFile: &resolvedXcodeModulesByFile,
+                           excludedFiles: &excludedFiles,
+                           platformPrunedPaths: &platformPrunedPaths,
                            packageSwiftExists: manifestSrc != nil,
                            alsoDeclaredInPackageSwift: declaredSPM.map(\.name).sorted())
     }
@@ -1165,9 +1186,16 @@ if let want = scopeTarget {
 // ⟨0.29⟩ …and the prune's own record. `--target` is the sharpest of this engine's exclusions: the files it
 // removes are production source, in the scanned tree, that a whole-repo scan WOULD have judged — so a
 // verdict read without knowing the prune happened is a verdict about a different question.
+//
+// EXCEPT the ones already filed as `platform-pruned` above: those are also removed from `sourcePaths`
+// (they must be, to keep the SPM-membership-style filters that run after platform pruning from ever
+// seeing them again), so without this guard they would land HERE TOO under the wrong reason — the file
+// does not merely sit outside this target's closure, it compiles to nothing on this platform in ANY
+// target's closure. One exclusion, one class, never both.
 if scopeTarget != nil, sourcePaths.count < sourcePathsBeforeScoping.count {
     let kept = Set(sourcePaths)
     for p in sourcePathsBeforeScoping where !kept.contains(p) {
+        guard !platformPrunedPaths.contains(candorAbsolutePath(p)) else { continue }
         excludedFiles.append((rel(p, to: rootDir), "outside-the-target-closure"))
     }
 }
@@ -1791,6 +1819,11 @@ let EXCLUDED_REASON: [String: String] = [
         + "the harness's rather than the package's.",
     "outside-the-target-closure": "`--target` was given, so this verdict covers that target's closure "
         + "ONLY — these are production sources in the scanned tree that an unscoped scan WOULD have judged.",
+    "platform-pruned": "this target's build settings say which platform it builds for, and every "
+        + "top-level declaration in this file sits inside `#if os(…)` clauses provably FALSE for that "
+        + "platform — it compiles to NOTHING in this target's build, on ANY platform this project ships. "
+        + "An unscoped scan, or a scan of a target for the platform this file DOES build for, WOULD have "
+        + "judged it.",
     "build-output": "`.build/` holds the toolchain's artifacts and checked-out dependency sources, not "
         + "this package's own code. Counted, and deliberately NOT read by the peek: a checkout tree is "
         + "unbounded, and other people's tests are not a finding about your project.",
@@ -1802,7 +1835,8 @@ let EXCLUDED_REASON: [String: String] = [
 /// ⟨0.29⟩ thrown when the peek child misses its deadline — caught by the peek's own catch,
 /// which leaves the findings as far as they got and the classes marked unpeeked.
 struct PeekTimedOut: Error {}
-let PEEKED_CLASSES: Set<String> = ["manifest", "harness-target", "test-source", "outside-the-target-closure"]
+let PEEKED_CLASSES: Set<String> = ["manifest", "harness-target", "test-source", "outside-the-target-closure",
+                                    "platform-pruned"]
 
 /// ⟨0.32⟩ The exclusion classes that do NOT hide unjudged code — a DENYLIST, so a class nobody has
 /// thought about fails CLOSED and someone has to argue it onto this list. `.build/` is a derived copy

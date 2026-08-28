@@ -688,6 +688,12 @@ final class XcodeTargetScopeTests: XCTestCase {
         XCTAssertTrue(names.contains("Live.swift"),
                       "a PARTLY gated file has live declarations and must stay — pruning it would be "
                       + "the cardinal sin this layer exists to avoid")
+        // ⟨file-set⟩ THE PATHS, not just the count: main.swift's `excluded[]` disclosure (SPEC §2 ⟨0.29⟩)
+        // needs to name WHICH files, and a count alone cannot be turned back into a file list without a
+        // second derivation the caller has no way to keep in sync with this one.
+        XCTAssertEqual(scope.platformExcludedFiles.count, 2)
+        XCTAssertTrue(scope.platformExcludedFiles.allSatisfy { ($0 as NSString).lastPathComponent == "MacOnly.swift" },
+                      "every path this reports must be one of the files actually dropped: \(scope.platformExcludedFiles)")
     }
 
     func testUnknownPlatformMeansNoPruning() throws {
@@ -707,6 +713,7 @@ final class XcodeTargetScopeTests: XCTestCase {
             directoryExists: { _ in true }))
         XCTAssertNil(scope.platform)
         XCTAssertEqual(scope.platformExcludedCount, 0)
+        XCTAssertTrue(scope.platformExcludedFiles.isEmpty)
         XCTAssertTrue(scope.files.contains("/repo/Packages/Kit/Sources/Kit/MacOnly.swift"))
     }
 
