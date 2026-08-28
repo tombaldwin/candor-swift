@@ -9,6 +9,23 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⟨0.34⟩ the spec-ladder parse now strips surrounding ASCII whitespace before parsing, per SPEC
+  §2 ⟨0.34⟩'s explicit ruling.** `parseSpecLadder`/`specPredates` (`Sources/CandorCore/Policy.swift`,
+  added by the item below) did not trim: `Int(" 0")` is `nil` in Swift, so a report whose envelope
+  carried incidental padding on `candor.spec` (`" 0.33"`) read as unparseable and therefore as
+  predating ⟨0.33⟩ — producing, via a pure formatting artifact, the exact false "this report predates
+  ⟨0.33⟩, before its producer recorded a deny set" diagnosis on a report that was in fact at the floor,
+  with its `scannedUnder` key plainly present. Fixed by trimming the same ASCII whitespace class this
+  engine's policy-line tokenizer already uses (space, tab, CR/LF/VT/FF — never `.whitespaces`/
+  `Character.isWhitespace`, which are Unicode and would also swallow non-ASCII spaces this family
+  treats as ordinary characters elsewhere) before the major/minor split. Message-only, matching the
+  rung it belongs to: verdict, exit code and the `--gate-json`/`fix --json` document are unchanged —
+  confirmed byte-identical between a whitespace-padded and an unpadded at-floor fixture, both before
+  and after. A genuinely old, padded version (`" 0.32"`) still predates and a genuinely old, unpadded
+  one is unaffected — the over-charge control this fix could otherwise have broken by parsing too much.
+  candor-java and candor-ts already trimmed; candor-swift and candor-rust did not (conformance PART 80's
+  `ws` cell, candor-spec `0b015d3`).
+
 - **⟨0.34⟩ ITEM 1: the ⟨0.33⟩ cross-policy remedy now names its ACTUAL cause — message-only, verdict and
   `--gate-json` unchanged.** `gate --report` and `fix` (the only two independently-coded texts for this
   cause; `fix-gate`/`unverified` disclose it as the bare `incomplete: true` flag with no sentence to

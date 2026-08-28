@@ -242,6 +242,55 @@ final class UnreadExclusionRouteEqualityProcessTests: XCTestCase {
                        "…and must not read as a pre-⟨0.33⟩ producer, which this one is not: \(f.err)")
     }
 
+    /// ⟨0.34⟩ CONTROL — INCIDENTAL ASCII WHITESPACE ON THE ENVELOPE'S `candor.spec` MUST NOT FLIP THE
+    /// CAUSE, END-TO-END THROUGH THE REAL BINARY ON BOTH ROUTES. `" 0.33"` names the same producer as
+    /// `"0.33"` (SPEC ⟨0.34⟩'s whitespace-stripped-before-parse rule) — a report that is genuinely at
+    /// the floor must keep the ⟨0.33⟩ "does not cover" sentence, not be misdiagnosed as pre-⟨0.33⟩ by a
+    /// formatting artifact alone. Compares stderr AND `--gate-json` against the unpadded `"0.33"` fixture
+    /// for byte-for-byte agreement, so a fix that merely stopped crashing on whitespace without actually
+    /// reading it as 0.33 would still fail this row.
+    func testWhitespacePaddedSpecAtTheFloorKeepsTheOriginalWordingOnBothRoutes() throws {
+        let paddedRoot = try makeReportDir(
+            envelope: envelope(excluded: #"[{"class":"harness-target","count":2,"peeked":true,"reason":"tests"}]"#,
+                               outOfScope: "[]", scannedUnder: #"{"deny":["deny Net"]}"#, spec: " 0.33 "),
+            policy: "deny Exec\n")
+        defer { try? FileManager.default.removeItem(at: paddedRoot) }
+        let plainRoot = try makeReportDir(
+            envelope: envelope(excluded: #"[{"class":"harness-target","count":2,"peeked":true,"reason":"tests"}]"#,
+                               outOfScope: "[]", scannedUnder: #"{"deny":["deny Net"]}"#, spec: "0.33"),
+            policy: "deny Exec\n")
+        defer { try? FileManager.default.removeItem(at: plainRoot) }
+
+        let pg = try gate(paddedRoot)
+        XCTAssertEqual(pg.code, 2, pg.err)
+        XCTAssertTrue(pg.err.contains("does not cover"),
+                      "incidental padding around an at-floor spec must not read as pre-⟨0.33⟩: \(pg.err)")
+        XCTAssertFalse(pg.err.contains("recorded the deny set its peek ran under"), pg.err)
+
+        let pf = try fixCmd(paddedRoot)
+        XCTAssertTrue(pf.err.contains("does not cover"), "…and `fix`'s independent copy agrees: \(pf.err)")
+        XCTAssertFalse(pf.err.contains("recorded the deny set its peek ran under"), pf.err)
+
+        // Over-charge control: a genuinely old, whitespace-padded spec must still predate.
+        let oldPaddedRoot = try makeReportDir(
+            envelope: envelope(excluded: #"[{"class":"harness-target","count":2,"peeked":true,"reason":"tests"}]"#,
+                               outOfScope: "[]", scannedUnder: #"{"deny":["deny Net"]}"#, spec: " 0.32"),
+            policy: "deny Exec\n")
+        defer { try? FileManager.default.removeItem(at: oldPaddedRoot) }
+        let og = try gate(oldPaddedRoot)
+        XCTAssertEqual(og.code, 2, og.err)
+        XCTAssertFalse(og.err.contains("does not cover"),
+                       "padding must not RESCUE a genuinely pre-⟨0.33⟩ spec either: \(og.err)")
+        XCTAssertTrue(og.err.contains("before") && og.err.contains("0.33"), og.err)
+
+        // The wire document must be byte-identical to the unpadded control — spec is message-only.
+        let pv = paddedRoot.appendingPathComponent("v.json"), plv = plainRoot.appendingPathComponent("v.json")
+        _ = try gate(paddedRoot, verdict: pv)
+        _ = try gate(plainRoot, verdict: plv)
+        let a = try String(contentsOf: pv, encoding: .utf8), b = try String(contentsOf: plv, encoding: .utf8)
+        XCTAssertEqual(a, b, "incidental spec whitespace must not move the --gate-json document")
+    }
+
     /// CONTROL 3 — THE `--gate-json` DOCUMENT DOES NOT MOVE. The cause-naming flag decides stderr's
     /// WORDING only; the verdict document is built from `crossPolicy`'s emptiness alone (Gate.swift's
     /// `writeGateVerdict` never reads the flag), so two reports raising the identical 1-rule gap — one
@@ -282,6 +331,33 @@ final class UnreadExclusionRouteEqualityProcessTests: XCTestCase {
         XCTAssertTrue(specPredates("", "0.33"), "absent ⇒ predates")
         XCTAssertTrue(specPredates("not-a-version", "0.33"))
         XCTAssertTrue(specPredates("0.", "0.33"))
+    }
+
+    /// ⟨0.34⟩ SURROUNDING ASCII WHITESPACE IS STRIPPED BEFORE THE PARSE, never treated as part of the
+    /// version (SPEC ⟨0.34⟩, echoing §3.4's config-version `\r` rule). `" 0.33"` names 0.33 with
+    /// incidental padding — `Int(" 0")` is `nil` in Swift, so a naive parse would misread this as
+    /// unparseable and manufacture a false "predates ⟨0.33⟩" diagnosis on a report that is not, in fact,
+    /// old. Control 3 (`"0.32"`) is the OVER-CHARGE check: the fix must still refuse a genuinely old
+    /// report, not swallow the real case by becoming permissive about everything.
+    func testSpecPredatesStripsAsciiWhitespaceBeforeParsing() {
+        // 1 & 2: incidental padding around a AT-FLOOR version must NOT read as predating.
+        XCTAssertFalse(specPredates(" 0.33", "0.33"), "leading space")
+        XCTAssertFalse(specPredates("0.33 ", "0.33"), "trailing space")
+        XCTAssertFalse(specPredates("\t0.33", "0.33"), "leading tab")
+        XCTAssertFalse(specPredates(" 0.33 ", "0.33"), "both sides")
+        XCTAssertFalse(specPredates("\r\n0.33", "0.33"), "CR/LF")
+        // 3: the over-charge control — a genuinely old version must still predate after trimming.
+        XCTAssertTrue(specPredates(" 0.32", "0.33"), "padding must not rescue a genuinely old version")
+        XCTAssertTrue(specPredates("0.32", "0.33"))
+        // 4: the ladder trap must still hold with padding present.
+        XCTAssertTrue(specPredates(" 0.9", "0.33"), "0.9 < 0.33 on the ladder, padding aside")
+        // 5: genuine garbage, including whitespace-only, still predates (fail-closed).
+        XCTAssertTrue(specPredates("   ", "0.33"), "whitespace-only is unparseable, not zero")
+        XCTAssertTrue(specPredates(" abc ", "0.33"))
+        XCTAssertTrue(specPredates("", "0.33"))
+        // Non-ASCII whitespace is NOT stripped — a NBSP-padded token stays malformed (consistent with
+        // this family's ASCII-only separator class elsewhere, e.g. the policy-line tokenizer).
+        XCTAssertTrue(specPredates("\u{00A0}0.33", "0.33"), "NBSP is not ASCII whitespace, stays malformed")
     }
 
     /// ⟨0.33⟩ THE COVERAGE CONTROL, and it is why the key is the RULE SET rather than a digest: a
