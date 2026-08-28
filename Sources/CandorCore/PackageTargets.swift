@@ -101,6 +101,74 @@ public func parsePackageProductDeclarations(manifestSource: String) -> [PackageP
     return finder.sawLiteral ? finder.products : nil
 }
 
+/// The `Package(platforms: [...])` declaration, mapped to the `os(…)` family names
+/// `swiftFileCompilesToNothing` (XcodeTargets.swift) understands — the SwiftPM analogue of the
+/// `.xcodeproj` resolver's SDKROOT-derived `platform`, needed for the identical reason: a manifest that
+/// RESTRICTS its platforms (`platforms: [.macOS(.v13), .iOS(.v16)]`) never builds this package for
+/// watchOS, in ANY of its targets — so a file wholly gated on `#if os(watchOS)` is dead code here, not
+/// just on one target.
+///
+/// Returns `nil` — "nothing here can be PROVEN as a restriction" — for three cases that must all collapse
+/// to the SAME answer, because acting on any of them as if it meant "supports nothing" would silently
+/// prune live code, the exact failure this parser's siblings all refuse:
+///   · no `platforms:` argument at all (SwiftPM's own default: every platform is supported);
+///   · the argument is present but not a literal array (a hoisted variable, a computed list);
+///   · an element this cannot map to a known `os(…)` family — `.driverKit(…)`, a case a future SwiftPM
+///     adds, or anything else not in the table below. A PARTIAL read (map every element we understand,
+///     drop the rest) would treat an unrecognized platform as "not declared", pruning a family the
+///     manifest actually supports — so one unreadable element invalidates the whole declaration rather
+///     than silently narrowing it.
+/// `platforms: []` — a literal but EMPTY array — is folded into `nil` too: SwiftPM does not accept a
+/// package with no supported platforms, so an empty read here is far more likely a parse gap than a
+/// package declaring itself unbuildable, and treating it as a genuine restriction would make
+/// `swiftFileCompilesToNothing(source:onAnyOf:)`'s `allSatisfy` vacuously prune every gated file in the
+/// package.
+///
+/// `.macCatalyst` maps to `"iOS"` — Mac Catalyst code is `os(iOS)` plus `targetEnvironment(macCatalyst)`,
+/// the same family `inferPlatform`'s SDKROOT token map (XcodeTargets.swift) already uses for the token
+/// `maccatalyst`, for the same reason: a substring or exact match on the platform name alone would file
+/// it under a family `#if os(…)` never tests.
+public func parsePackagePlatformFamilies(manifestSource: String) -> Set<String>? {
+    let tree = Parser.parse(source: manifestSource)
+    let finder = PackagePlatformsFinder()
+    finder.walk(tree)
+    guard finder.sawLiteral, !finder.families.isEmpty else { return nil }
+    return finder.families
+}
+
+private final class PackagePlatformsFinder: SyntaxVisitor {
+    var families: Set<String> = []
+    var sawLiteral = false
+    /// SwiftPM's `platforms:` case name -> the `#if os(…)` family it actually builds as.
+    private static let known: [String: String] = [
+        "macOS": "macOS", "iOS": "iOS", "tvOS": "tvOS", "watchOS": "watchOS", "visionOS": "visionOS",
+        "macCatalyst": "iOS",
+    ]
+
+    init() { super.init(viewMode: .sourceAccurate) }
+
+    override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
+        guard DeclaredTargetFinder.isPackageCall(node) else { return .visitChildren }
+        for arg in node.arguments where arg.label?.text == "platforms" {
+            guard let array = arg.expression.as(ArrayExprSyntax.self) else { return .visitChildren }
+            for el in array.elements {
+                // Each element is `.macOS(.v13)` etc — a call whose base is nil (bare `.` form) and
+                // whose case name this table recognizes. Anything else (a qualified base, a name not in
+                // the table, a non-call element) means the declaration cannot be fully read, and per the
+                // header above that invalidates the WHOLE read rather than a single element.
+                guard let call = el.expression.as(FunctionCallExprSyntax.self),
+                      let member = call.calledExpression.as(MemberAccessExprSyntax.self),
+                      member.base == nil,
+                      let family = Self.known[member.declName.baseName.text]
+                else { return .visitChildren }
+                families.insert(family)
+            }
+            sawLiteral = true
+        }
+        return .visitChildren
+    }
+}
+
 private final class DeclaredProductFinder: SyntaxVisitor {
     var products: [PackageProduct] = []
     var sawLiteral = false
