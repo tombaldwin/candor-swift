@@ -272,6 +272,12 @@ public struct XcodeTargetScope {
     /// Files dropped because every top-level declaration sits inside `#if os(…)` clauses provably
     /// FALSE for `platform` — they compile to NOTHING in this target's build.
     public let platformExcludedCount: Int
+    /// ⟨file-set⟩ …and WHICH files, absolute paths, same set `platformExcludedCount` counts. The count
+    /// alone could only reach the human-readable disclosure (`note`, main.swift); the ⟨0.29⟩ machine
+    /// file set (`excluded[]`) needs the paths themselves so the caller can name a CLASS of its own
+    /// (`platform-pruned`) rather than let these fall into the generic `outside-the-target-closure`
+    /// bucket the caller's before/after diff would otherwise file them under.
+    public let platformExcludedFiles: [String]
     /// ⟨scope travels⟩ The `.entitlements` file THIS target signs with, from `CODE_SIGN_ENTITLEMENTS`
     /// — absolute, and only when it EXISTS. nil when the settings name none, or name one this cannot
     /// resolve: the consumer then keeps the discovery it had, so nil is never worse than before.
@@ -1047,6 +1053,7 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
     let platform = inferPlatform(of: rootTid, model: model, rootDir: rootDir,
                                  resolvedPath: resolvedPath, fs: fs)
     var platformExcluded = 0
+    var platformExcludedPaths: [String] = []
     if let platform {
         files = Set(files.filter { f in
             // Cheap gate first: no `#if os(` in the text, nothing to evaluate. An unreadable file is
@@ -1054,6 +1061,7 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
             guard let src = fs.readFile(f), src.contains("#if os(") else { return true }
             if swiftFileCompilesToNothing(source: src, on: platform) {
                 platformExcluded += 1
+                platformExcludedPaths.append(f)
                 return false
             }
             return true
@@ -1192,6 +1200,7 @@ public func xcodeTargetScope(model: PbxprojModel, projectDir: String, targetName
                             packagesReadViaDump: packagesReadViaDump.sorted(),
                             platform: platform,
                             platformExcludedCount: platformExcluded,
+                            platformExcludedFiles: platformExcludedPaths.sorted(),
                             entitlements: resolveEntitlements(of: rootTid, model: model, rootDir: rootDir,
                                                               resolvedPath: resolvedPath, fs: fs))
 }

@@ -9,6 +9,32 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **the `--target` platform prune (`#if os(…)`, XcodeTargets.swift) now files its OWN `excluded[]`
+  class, `platform-pruned`, instead of the generic `outside-the-target-closure` the before/after diff
+  gave every scoped-out file.** Both classes were already MANDATORY-disclosed, PEEKED, and verdict-bearing
+  before this change (⟨0.29⟩/⟨0.30⟩) — a file wholly inside `#if os(macOS)` in an iOS target's closure
+  already reached `excluded[]`, already got read by the child-process peek, and an effect the policy
+  denied inside it already flipped the verdict to INCOMPLETE (exit 2) via `outOfScope`, all via the
+  cross-target diff at the foot of `--target` resolution (main.swift). Filed against candor `BACKLOG.md`'s
+  "swift's platform-pruned files never enter `excluded[]`" as a completeness hole: MEASURED against HEAD,
+  the premise did not hold — the files were already there, just under an imprecise label. What was
+  missing, and what this closes, is SPEC §2's requirement that `reason` "say why the class exists, in the
+  engine's own terms": `outside-the-target-closure`'s reason ("production sources... an unscoped scan
+  WOULD have judged") is true of a sibling-target file but only half the truth of one that builds into
+  NOTHING on this platform in EVERY target — a `#if os(macOS)` guard is not an attribution boundary, it is
+  dead code. `XcodeTargetScope` now returns the dropped paths (`platformExcludedFiles`), not just their
+  count, so `--target`'s Xcode resolver can file them under the precise class directly rather than let the
+  generic diff re-derive a less specific reason for the same exclusion — and the diff loop skips any path
+  already filed this way, so one exclusion is never counted under both classes. `platform-pruned` is
+  PEEKED exactly like `outside-the-target-closure` was (same file, same classifier, same child process),
+  never `judgedElsewhere` (a single `--target` invocation has not judged the file elsewhere — a SEPARATE
+  invocation for the platform it DOES build on might, but nothing here can see that it did). Report bytes
+  change ONLY when `--target` resolves against an `.xcodeproj` AND platform pruning actually drops a file
+  (the `class` string, and only there); a whole-repo scan, an SPM-manifest-resolved `--target`, and an
+  ordinary sibling-target-only exclusion are byte-identical to before — verified against the pre-fix
+  binary on all three, plus the falsifying control that the pre-fix binary already produced exit 2 on the
+  motivating case (mislabelled, not missing).
+
 - **⟨0.34⟩ the spec-ladder parse now strips surrounding ASCII whitespace before parsing, per SPEC
   §2 ⟨0.34⟩'s explicit ruling.** `parseSpecLadder`/`specPredates` (`Sources/CandorCore/Policy.swift`,
   added by the item below) did not trim: `Int(" 0")` is `nil` in Swift, so a report whose envelope
