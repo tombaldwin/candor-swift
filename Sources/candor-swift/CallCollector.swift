@@ -110,6 +110,16 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// say WHICH function's return type would have formed it, and the callee name is the only
               /// evidence a bare Swift call site carries (see `depBoundLocals`).
               var depCallee: String? = nil
+              /// R61 — true for the ONE `unqualified` shape that is NOT a call expression at all: a bare
+              /// identifier passed as an ARGUMENT to some other call (`xs.map(loadFree)`), recorded so it
+              /// can resolve to a genuine local free-function reference. Left `false` (the default) it
+              /// would carry the same `unqualified` shape as a real `name(…)` call site, and the Driver's
+              /// C-platform-import `native:` fallback (R61) cannot tell the two apart from `path` alone —
+              /// `dlopen(path, RTLD_NOW)` synthesized exactly this shape for its plain Int32 ARGUMENT
+              /// `RTLD_NOW` (this engine cannot resolve `dlopen`'s signature to know the parameter isn't
+              /// closure-typed), and without this flag the fallback disclosed `native:RTLD_NOW` — a real
+              /// boundary answer to a question that was never asked, since nothing here was CALLED.
+              var argRef: Bool = false
               var extOwner: String? = nil }    // the RESOLVED receiver root of an otherwise-unmatched member
                                                // call (`c.fetch()` where c: RatesClient, an external type) —
                                                // carried ONLY for the §2 CANDOR_DEPS join key (`pkg#Owner.leaf`);
@@ -2675,7 +2685,7 @@ final class CallCollector: SyntaxVisitor {
                         // (assigned in init / no initializer) — the invoked value is unaddressable → Unknown.
                         unresolved = true; why.insert("dispatch:\(et).\(n)")
                     } else {
-                        calls.append(Call(path: n, leaf: n, strArg: nil, typed: false, unqualified: true))
+                        calls.append(Call(path: n, leaf: n, strArg: nil, typed: false, unqualified: true, argRef: true))
                     }
                 }
             } else if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base {
@@ -3992,6 +4002,32 @@ final class CallCollector: SyntaxVisitor {
                     // a Foundation Data producer (`let d = s.data(using:.utf8)` / `= enc.encode(x)`) types
                     // the local as Data, so a later `d.write(to:)` is Fs (the via-local dogfood vein).
                     if producesFoundationData(v0) { vars[name] = "Data" }
+                    else if let callee = v.as(FunctionCallExprSyntax.self)?.calledExpression
+                                .as(DeclReferenceExprSyntax.self)?.baseName.text,
+                            callee == "unsafeBitCast", !localFreeFns.contains(callee) {
+                        // R61 — `unsafeBitCast(_, to: SomeFnType.self)` manufactures an opaque VALUE by
+                        // raw bit reinterpretation, most idiomatically a function pointer resolved via
+                        // `dlsym`. Left to the ordinary ctor/factory arm below, this fell into
+                        // `depFactoryCallee`'s "plausible dependency factory" heuristic (`unsafeBitCast`
+                        // is lowercase and not in `PURE_STDLIB_FREE_FNS`), which sets `depBoundLocals` —
+                        // consulted ONLY by a later MEMBER call on the local (`fn.foo()`, line ~3151) and
+                        // consulted NOT AT ALL by a direct invocation `fn()`, which is the shape this
+                        // mechanism actually uses (`unsafeBitCast(sym, to: WipeFn.self); fn()`). That call
+                        // then had no local-name signal to match against ANY branch at the call site and
+                        // fell all the way to the plain unqualified-Call default, which the Driver's
+                        // fixpoint resolves against declared free functions ONLY — never against a local
+                        // variable — so it silently dropped: R61, exit 0, `deny Exec`. Route it instead
+                        // through the SAME machinery a stored/computed opaque closure property already
+                        // uses: `opaqueFnLocals`. A later bare `fn()` hits the existing check at the call
+                        // site (`opaqueFnLocals.contains(name)`, checked before `vars`/`fnTyped`) and
+                        // discloses `Unknown`/`callback:fn` — never a fabricated concrete effect, since
+                        // what the cast actually produces is, by construction, unknowable here. Mutually
+                        // exclusive with `vars`/`depBoundLocals` for this name: a bitcast result is not a
+                        // typed value this engine can chase any further than "opaque, possibly callable".
+                        opaqueFnLocals.insert(name)
+                        vars.removeValue(forKey: name)
+                        depBoundLocals.removeValue(forKey: name)
+                    }
                     else {
                         // ctor or unambiguous factory — one resolver for both (rootOf handles peeling)
                         let info = rootOf(v)

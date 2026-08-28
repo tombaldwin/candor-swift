@@ -1202,7 +1202,22 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         locOf[f.qual] = f.loc
         if f.isMain { entryPoints.insert(f.qual) }
         edges[f.qual] = edges[f.qual] ?? []
-        guard let body = f.body else { continue }
+        // R61 — a bodyless func is normally a PROTOCOL REQUIREMENT (its call sites already get an honest
+        // `dispatch:` from the bounded-CHA machinery below; this unit itself is never a call TARGET, so
+        // leaving it out of `direct` is correct, not a gap). `ffiNative` narrows to the one bodyless shape
+        // that IS a real call target with a real, unseeable body: `@_silgen_name`/`@_extern` direct
+        // C-symbol linkage. Seeding `direct` here — the ONLY place a bodyless unit's own effects are ever
+        // set — means the ordinary `propagate(direct, over: edges)` fixpoint carries `Unknown` to every
+        // caller exactly as it would for a real callee, with no special-casing anywhere else: the call
+        // graph already resolves `c_system(cstr)` to this qual via `freeFnByName` (built without a
+        // `body != nil` filter), so the transitive reach was always there — only the seed was missing.
+        guard let body = f.body else {
+            if let sym = f.ffiNative {
+                direct[f.qual, default: []].insert("Unknown")
+                whyMap[f.qual, default: []].insert("native:\(sym)")
+            }
+            continue
+        }
         let cc = CallCollector(info: f, fields: fields, localTypes: localTypes,
                                declaredTypes: declaredTypes,
                                localProtocols: localProtocolNames, returns: returnsIdx,
@@ -1566,6 +1581,23 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // a same-named sibling under a different parent).
                     edges[f.qual, default: []].insert("\(ep).\(call.leaf)")
                     resolved = true
+                } else if !call.argRef, NATIVE_DISCLOSURE_C_FREE_FNS.contains(call.path) {
+                    // R61 — every arm above tried and failed to resolve `call.path` against something THIS
+                    // scan can see (a project free fn, a local ctor, a sibling). `system("rm -rf /")` and
+                    // `unlink(path)` under `import Darwin` ended here, unresolved, and this branch used to
+                    // be silence: no `Unknown`, no `unresolved`, nothing — exit 0 under `deny Exec`/`deny Fs`.
+                    // `NATIVE_DISCLOSURE_C_FREE_FNS` is an ALLOWLIST, not a denylist — see its doc comment
+                    // for why: gating on "unresolved AND the file imports a C module", with NO name
+                    // restriction, MEASURED 1519 false hits on swift-nio alone (`os`/`canImport` `#if`
+                    // predicates, `assert`/`fatalError`, bare operators — none of them FFI). The C-module-
+                    // import check is still required (it is what makes a hit on one of these SPECIFIC names
+                    // trustworthy rather than a same-named project function this per-file pass just
+                    // couldn't see) but is no longer sufficient alone.
+                    let file = String(f.loc.prefix { $0 != ":" })
+                    if (fileImports[file] ?? []).contains(where: { C_PLATFORM_MODULES.contains($0) }) {
+                        direct[f.qual, default: []].insert("Unknown")
+                        whyMap[f.qual, default: []].insert("native:\(call.path)")
+                    }
                 }
             }
             // otherwise: unresolvable bare member (unresolved receiver) — stays out (under-report, never a
