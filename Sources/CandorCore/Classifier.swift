@@ -1563,14 +1563,68 @@ public func kappaFree(name: String, argCount: Int) -> String? {
     // the wire act, and `bind` collides with SQL binding — the first real-repo sweep caught GRDB's local
     // `bind(...)` fabricating Net onto 214 fns), the ULTRA-common words (send/recv/read/write/open — free
     // functions of these arities exist all over), and process/fs names (fork/system/mkdir/rename/unlink).
-    // For these, under-report the rare direct-syscall program beats a wrong label on a common one; idiomatic
-    // Swift reaches the network via URLSession/Network.framework (both modelled → Net) anyway.
+    // For these, a wrong CONCRETE label on a common name is the fabrication direction this function must
+    // never take — but R61 found that the alternative these names fell into was not merely "no concrete
+    // label", it was COMPLETE SILENCE: `system(...)`/`unlink(...)` under `import Darwin` read exit-0 clean
+    // under `deny Exec`/`deny Fs`, with no `Unknown`, no disclosure, nothing. This function still returns
+    // nil for them (never fabricate a concrete effect on a collision-prone name) — the residual is now
+    // caught one layer up, in the Driver's unqualified-call resolution, which discloses `Unknown` +
+    // `native:<name>` for a call that resolves to NOTHING project-local, names one of the SPECIFIC
+    // functions in `NATIVE_DISCLOSURE_C_FREE_FNS` (below — an allowlist, not a denylist; see its doc for
+    // why), AND whose file imports a C-interop platform module (`C_PLATFORM_MODULES`) — never a guess at
+    // what an unmodelled boundary call actually does, and never a flood over every unresolved name in a
+    // file that merely happens to import Darwin/Glibc for an unrelated reason.
     default:
         if SQLITE_PURE_INTROSPECTION.contains(name) { return nil }   // resident-state read — never Db
         if name.hasPrefix(DB_FREE_PREFIX) { return "Db" }
         return nil
     }
 }
+
+/// R61 — Swift's umbrella modules for the platform C standard library headers. `import Darwin` (Apple
+/// platforms) / `import Glibc` (Linux) / `import Musl` (the musl-libc targets) / `import WinSDK` (Windows)
+/// bring the WHOLE C surface into scope with no per-symbol declaration in the Swift source at all.
+/// Consumed together with `NATIVE_DISCLOSURE_C_FREE_FNS` below — see that constant for why this alone is
+/// NOT a safe gate.
+public let C_PLATFORM_MODULES: Set<String> = ["Darwin", "Glibc", "Musl", "WinSDK"]
+
+/// R61 — the SPECIFIC free-function names the Driver discloses as `native:<name>` when a call to one is
+/// left completely unresolved (not a project declaration, not a chained dependency, not anything
+/// `kappaFree` already classifies concretely) in a file that imports a `C_PLATFORM_MODULES` umbrella.
+///
+/// AN ALLOWLIST, DELIBERATELY — the one place in this codebase that pattern is right rather than the
+/// denylist default (see `CandorCore`'s standing "denylist over allowlist" rule and why this is the
+/// exception). The first cut of this fix gated on "unresolved AND the file imports a C module" with NO
+/// name restriction at all, on the theory that anything left over after every other resolution arm had
+/// failed had to be a raw C symbol. MEASURED WRONG on the 13-package corpus: swift-nio alone produced 1519
+/// `native:` hits, and the ranked list was `os`(137)/`precondition`(75)/`fatalError`(69)/`==`(65)/
+/// `assert`(64)/`canImport`(54)/`Self`(37)/`??`(34) — `#if os(Linux)` / `#if canImport(Glibc)` build-config
+/// predicates (this engine reads BOTH `#if` arms unconditionally and apparently walks the CONDITION itself
+/// as an ordinary call expression), Swift-stdlib control-flow functions, and OPERATORS, none of them
+/// remotely FFI. The "unresolved" bucket in a real file that happens to import Darwin/Glibc is dominated
+/// by ordinary Swift the per-file declaration index just doesn't happen to resolve — not by raw C calls.
+///
+/// So the gate is inverted: name the SPECIFIC, real, dangerous C functions this project already knows
+/// about and has deliberately withheld from `kappaFree`'s CONCRETE classification for being collision-
+/// prone bare words (`system`/`unlink`/`mkdir`/`rename`/`fork` — see the comment on `kappaFree`'s `default`
+/// case) or that mint an opaque callable via dynamic symbol resolution (`dlopen`/`dlsym`), and disclose
+/// `Unknown` for exactly those, in exactly the module-gated unresolved position. An admittedly-incomplete
+/// allowlist means some OTHER raw C call this project hasn't named yet stays silent — the accepted
+/// trade-off `kappaFree`'s own comment already states: "under-report the rare direct-syscall program beats
+/// a wrong label on a common one." See the fix commit message for the corpus count after narrowing to
+/// this allowlist.
+public let NATIVE_DISCLOSURE_C_FREE_FNS: Set<String> = [
+    // process / filesystem lifecycle syscalls — real, dangerous, and (pre-R61) silently unresolved
+    "system", "unlink", "mkdir", "rmdir", "rename", "remove", "fork", "vfork",
+    "symlink", "link", "chmod", "fchmod", "chown", "fchown", "lchown",
+    "truncate", "ftruncate", "kill", "popen", "pclose",
+    "setuid", "seteuid", "setgid", "setegid",
+    // dynamic symbol resolution — the paired mechanism `dlsym` hands back an opaque function pointer
+    // that only `unsafeBitCast` + invocation can run (see `opaqueFnLocals` in CallCollector.swift, which
+    // catches the INVOCATION half); `dlopen`/`dlclose` are its loader/unloader. None of the three
+    // collides with a common project name.
+    "dlopen", "dlsym", "dlclose",
+]
 
 /// Property READS that are effects (no call expression): `ProcessInfo…environment`, `Date.now`,
 /// pasteboard accessors. Checked on member-access chains outside call position.

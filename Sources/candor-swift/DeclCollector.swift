@@ -79,6 +79,16 @@ struct FnInfo {
     // κ heuristic (`getenv`) must not be permanently shadowed by a same-named declaration that only
     // exists on a platform this scan cannot pin.
     var isConditionallyCompiled: Bool = false
+    /// R61 — a bodyless func declared via DIRECT C-SYMBOL LINKAGE (`@_silgen_name("system")`,
+    /// `@_extern(c, "name")`): the compiler wires the call straight to a native symbol, so there is no
+    /// Swift body for this scan to see. `body` is nil for one other reason too (a protocol requirement),
+    /// which must NOT be treated the same way — a requirement's call sites already get an honest
+    /// `dispatch:` from the bounded-CHA machinery, and flagging every bodyless unit here would double that
+    /// disclosure (or worse, fire on requirements no fixture ever exercises). Gating on this specific,
+    /// rare, deliberately-written attribute keeps the blast radius to exactly the FFI shape it names: the
+    /// symbol string from the attribute when present, else the Swift-side function name as a fallback so
+    /// `native:<x>` is never empty. See `Driver.swift`'s `guard let body = f.body else { continue }`.
+    var ffiNative: String? = nil
 }
 
 // Collects the expression of every explicit `return <expr>` inside a body (Finding 1: pinning a function's
@@ -349,6 +359,17 @@ final class DeclCollector: SyntaxVisitor {
             if let plain = seg.as(StringSegmentSyntax.self) { out += plain.content.text } else { return nil }
         }
         return out
+    }
+
+    /// R61 — the LAST plain string-literal argument of an attribute (`@_silgen_name("system")`'s only
+    /// argument; `@_extern(c, "name")`'s second — the linked symbol name, not the `c`/`wasm` ABI tag which
+    /// is a bare identifier and never matches `StringLiteralExprSyntax`). `@_extern(c)` alone has no string
+    /// argument at all and returns nil here, on purpose — the caller falls back to the Swift-side name.
+    private func lastStringLiteralArgument(_ attr: AttributeSyntax) -> String? {
+        guard case .argumentList(let args) = attr.arguments else { return nil }
+        var last: String? = nil
+        for arg in args { if let s = plainStringLiteralValue(arg.expression) { last = s } }
+        return last
     }
 
     // Record a `let NAME = "literal"` STRING CONSTANT into the const-string index. ONLY a `let` (not `var`
@@ -885,6 +906,13 @@ final class DeclCollector: SyntaxVisitor {
             if let a = attr.as(AttributeSyntax.self) {
                 let an = a.attributeName.trimmedDescription
                 if an.first?.isUppercase == true { info.uppercaseAttrs.append(an) }
+                // R61 — `@_silgen_name("system")` / `@_extern(c, "name")`: direct C-symbol linkage, no
+                // Swift body. Prefer the symbol string the attribute names; fall back to the Swift-side
+                // name so a `native:` disclosure is never empty (`@_extern(c)` alone names no string —
+                // the linked symbol IS the Swift function's own name in that form).
+                if an == "_silgen_name" || an == "_extern" {
+                    info.ffiNative = lastStringLiteralArgument(a) ?? name
+                }
             }
         }
         // Generic constraints — a value param typed `T` then dispatches like its bound `P`-typed param.

@@ -9,6 +9,57 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **R61 — three idiomatic FFI mechanisms read silent-pure: no generic "unresolved call through an
+  opaque value" fallback existed in this engine's dispatch model at all.** A raw `import Darwin`/`import
+  Glibc` free-function call (`system("rm -rf /")`, `unlink(path)`), a direct C-symbol-linkage declaration
+  (`@_silgen_name("system")` / `@_extern(c, "name")`), and `dlopen`/`dlsym` + `unsafeBitCast` to a function
+  pointer, then calling it — all three exited 0, `policy ✓`, under `deny Exec`/`deny Fs`, with zero
+  disclosure. The modelled `Process` API stayed correctly charged on the same fixtures throughout, so this
+  was a missing fallback, not a coverage gap: candor-rust discloses `Unknown`/`native:extern fn` for the
+  analogous `ForeignMod` shape and candor-java discloses `native:<name>` for `ACC_NATIVE` methods; swift
+  had no such fallback anywhere in its dispatch model. Routes all three into the existing
+  `Unknown`/`unknownWhy` vocabulary (`native:<symbol>`, `callback:<local>`) — never a fabricated concrete
+  effect, since what a foreign call actually does is unknowable here.
+
+  FIX 1 (`@_silgen_name`/`@_extern`): `DeclCollector` now records the linked symbol name (`FnInfo.ffiNative`)
+  off either attribute; `Driver`'s `guard let body = f.body else { continue }` — previously the single
+  place EVERY bodyless unit (including this one) skipped straight past having any effects at all — now
+  seeds `direct`/`unknownWhy` for exactly this shape before continuing, so the existing `propagate(direct,
+  over: edges)` fixpoint carries `Unknown` to every caller with no other code path touched. A bodyless
+  PROTOCOL REQUIREMENT (the other reason a body is nil) is unaffected: it carries no such attribute, so it
+  keeps answering through the bounded-CHA `dispatch:` machinery exactly as before.
+
+  FIX 2 (`dlopen`/`dlsym` + `unsafeBitCast` + invocation): a `let fn = unsafeBitCast(sym, to: SomeCFn.self)`
+  binding fell into `depFactoryCallee`'s "plausible dependency factory" heuristic, which feeds ONLY a later
+  MEMBER call on the local (`fn.foo()`) — never the direct invocation (`fn()`) this mechanism actually
+  uses, so the call resolved against nothing and dropped silently. `CallCollector` now routes an
+  `unsafeBitCast`-bound local into the SAME `opaqueFnLocals` machinery an opaque stored closure property
+  already uses, so the existing call-site check (`opaqueFnLocals.contains(name)`) fires and discloses
+  `Unknown`/`callback:<name>` — infrastructure this engine already had and tested, reused rather than
+  duplicated.
+
+  FIX 3 (raw `system`/`unlink`/…): added to `Driver`'s unqualified-call resolution as the terminal case —
+  a call that resolved against NOTHING project-local (every prior arm: overloaded free fn, `freeFnByName`,
+  local ctor, enclosing sibling, all failed), in a file importing a C-interop platform module
+  (`C_PLATFORM_MODULES`: Darwin/Glibc/Musl/WinSDK), and naming one of a curated set of real, dangerous C
+  functions (`NATIVE_DISCLOSURE_C_FREE_FNS`: `system`/`unlink`/`mkdir`/`rename`/`fork`/`dlopen`/`dlsym`/…
+  — the SAME collision-prone names `kappaFree`'s own comment already named as deliberately excluded from
+  concrete classification). AN ALLOWLIST, not this codebase's usual denylist pattern — the first cut had
+  no name restriction at all ("unresolved + C-module import" alone) and MEASURED 1519 false hits on
+  swift-nio in the 13-package corpus this fix was calibrated against: `#if os(Linux)` / `#if
+  canImport(Glibc)` build-config predicates (this engine reads both `#if` arms unconditionally and walks
+  the condition expression itself as an ordinary call), `assert`/`fatalError`/`precondition`, and bare
+  operators — none of them FFI. Narrowed to the explicit allowlist: 0 new disclosures in 12 of the 13
+  packages, and exactly 3 genuine hits in the 13th (swift-syntax) — a real `dlopen(path, RTLD_LAZY |
+  RTLD_LOCAL)` in its plugin loader, a real `kill(pid_t(...), SIGKILL)` in its CLI's process-reduction
+  tool, and one more `unsafeBitCast`-to-function-pointer site (FIX 2) doing runtime metadata
+  introspection — all three spot-checked against source, zero fabrications, zero noise.
+
+  CONTROLS held: `Process`/`URLSession`/`FileHandle` stay concretely charged, unmoved, on every fixture.
+  `swift test` (896/896), `smoke.sh` (148/148), `fuzz.py` (25/25) all pass. A pre/post binary diff over
+  all 13 corpus packages AND this repo's own source is function-count-identical outside the 3 genuine
+  swift-syntax hits above — zero regressions, zero incidental fabrications.
+
 - ⚠ **A constrained-extension MEMBER's call edge never reached its caller — three shapes, one narrow
   root cause each.** `deny Net` scoped to a caller (`pure callConditional` / `pure callWhereExtension` /
   `pure callComposed`) exited 0, "policy ✓", over a caller that transitively reached `URLSession` through:
