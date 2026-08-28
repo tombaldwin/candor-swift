@@ -884,8 +884,19 @@ public func unaskedCrossPolicyRules(
 /// — the spec ladder is major.minor (SPEC carries no patch component; that lives on the engine/release
 /// version instead, e.g. `candor-swift-0.33.1`). `nil` on anything that is not exactly two dot-separated
 /// integers, including the empty string a pre-spec-field report reads as.
+///
+/// **SURROUNDING ASCII WHITESPACE IS STRIPPED BEFORE THE PARSE, not treated as part of it** (SPEC
+/// ⟨0.34⟩, echoing §3.4's "a trailing `\r` is whitespace, not part of the version" for a config version
+/// token): `" 0.33"` names the version `0.33` with incidental padding, not a different or corrupt value.
+/// `Int(" 0")` is `nil` in Swift, so leaving the padding in place would misparse a well-formed value as
+/// unparseable and manufacture a false "predates" reading via a formatting artifact alone — the exact
+/// misdiagnosis ⟨0.34⟩ exists to retire. Same ASCII-only class as the policy-line tokenizer above (space,
+/// tab, CR/LF/VT/FF) — never `.whitespaces`/`Character.isWhitespace`, which are Unicode and would also
+/// strip non-ASCII spaces this family treats as ordinary characters elsewhere.
 func parseSpecLadder(_ spec: String) -> (Int, Int)? {
-    let parts = spec.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
+    let asciiWS = CharacterSet(charactersIn: " \t\n\u{0B}\u{0C}\r")
+    let trimmed = spec.trimmingCharacters(in: asciiWS)
+    let parts = trimmed.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
     guard parts.count == 2, let maj = Int(parts[0]), let min = Int(parts[1]) else { return nil }
     return (maj, min)
 }
