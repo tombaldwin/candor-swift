@@ -849,11 +849,63 @@ public func canonicalDenySet(_ rules: [DenyRule]) -> [String] {
 /// `deny Net in app::x`, and this refuses it anyway, because semantic rule subsumption over scopes and
 /// class filters is undecidable in general and an allowlist of "provably narrower" forms under-reports
 /// whatever nobody thought of.
-public func unaskedCrossPolicyRules(_ deny: [DenyRule], against scannedUnderOfPeeked: [Set<String>]) -> [String] {
-    guard !scannedUnderOfPeeked.isEmpty else { return [] }
+///
+/// ⟨0.34⟩ EACH ELEMENT NOW CARRIES ITS OWN REPORT'S DECLARED `candor.spec` beside the deny set it
+/// qualifies — never re-read later, for the reason the deny set itself travels with the element rather
+/// than being re-parsed: a second read of one report is how the two facts drift apart. `oldCaused`
+/// answers a SEPARATE, MESSAGE-ONLY question the caller must not confuse with `rules`: is the returned
+/// gap fully explained by producers that predate ⟨0.33⟩ (`specPredates` against `"0.33"`), i.e. could
+/// none of them have recorded covering this run's rules because the key did not exist yet? `false`
+/// whenever a single ≥⟨0.33⟩ contributor is among the ones missing a rule, because for that report the
+/// omission is real — SPEC ⟨0.34⟩ licenses this to change a REMEDY sentence, never the verdict `rules`
+/// already carries.
+public func unaskedCrossPolicyRules(
+    _ deny: [DenyRule],
+    against scannedUnderOfPeeked: [(deny: Set<String>, spec: String)]
+) -> (rules: [String], oldCaused: Bool) {
+    guard !scannedUnderOfPeeked.isEmpty else { return ([], false) }
     let mine = canonicalDenySet(deny)
-    guard !mine.isEmpty else { return [] }
-    return mine.filter { r in scannedUnderOfPeeked.contains { !$0.contains(r) } }
+    guard !mine.isEmpty else { return ([], false) }
+    let missing = mine.filter { r in scannedUnderOfPeeked.contains { !$0.deny.contains(r) } }
+    guard !missing.isEmpty else { return ([], false) }
+    // ⟨0.34⟩ Did ANY entry that failed to cover one of `missing`'s rules ALSO carry a spec ≥⟨0.33⟩? One
+    // such entry is enough to keep `oldCaused` false, because for THAT report the gap is a real
+    // different-deny-set fact — it could have recorded covering this run's rules and did not. Only when
+    // EVERY contributing report predates ⟨0.33⟩ is the gap fully explained by producers that could not
+    // yet have WRITTEN `scannedUnder` at all (SPEC ⟨0.34⟩), which is the condition the caller's message
+    // choice turns on — never the verdict, which SPEC ⟨0.34⟩ explicitly keeps unmoved by a report's age.
+    let anyFromCurrentSpec = scannedUnderOfPeeked.contains { entry in
+        !specPredates(entry.spec, "0.33") && missing.contains { !entry.deny.contains($0) }
+    }
+    return (missing, !anyFromCurrentSpec)
+}
+
+/// ⟨0.34⟩ Parse a candor-spec CONTRACT version (`"0.33"`, `"0.6"`) as `(major, minor)` FOR ORDERING ONLY
+/// — the spec ladder is major.minor (SPEC carries no patch component; that lives on the engine/release
+/// version instead, e.g. `candor-swift-0.33.1`). `nil` on anything that is not exactly two dot-separated
+/// integers, including the empty string a pre-spec-field report reads as.
+func parseSpecLadder(_ spec: String) -> (Int, Int)? {
+    let parts = spec.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
+    guard parts.count == 2, let maj = Int(parts[0]), let min = Int(parts[1]) else { return nil }
+    return (maj, min)
+}
+
+/// ⟨0.34⟩ Does `spec` sit STRICTLY BEFORE `floor` on the spec LADDER — compared as `(major, minor)`, and
+/// NEVER LEXICOGRAPHICALLY: a byte/string compare inverts `"0.9"` against `"0.33"` (`"9" > "3"`) where the
+/// ladder puts 0.9 first. Unparseable or absent `spec` — the empty string a pre-spec-field report reads
+/// as — answers `true`, the same "absent ⇒ old" direction this family already commits to for a report's
+/// own envelope `spec`.
+///
+/// **MESSAGE-ONLY, NEVER A VERDICT INPUT** (SPEC ⟨0.34⟩): a report's age cannot license certification — a
+/// pre-⟨0.33⟩ producer's peek was still bounded by SOME policy nobody here can see, so refusing is correct
+/// either way the age falls. What the age licenses is naming the ACTUAL CAUSE in a remedy sentence: "this
+/// report predates ⟨0.33⟩, before producers recorded their deny set" is true exactly when this predicate
+/// answers `true`. A caller must never let the answer move `ok`, an exit code, or any `--gate-json`/
+/// `--json` field — only which of two already-true sentences gets printed.
+public func specPredates(_ spec: String, _ floor: String) -> Bool {
+    guard let f = parseSpecLadder(floor) else { return false }
+    guard let s = parseSpecLadder(spec) else { return true }
+    return s < f
 }
 
 public func cmdBase(_ c: String) -> String { c.split(separator: "/").last.map(String.init) ?? c }

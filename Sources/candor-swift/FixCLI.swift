@@ -154,7 +154,12 @@ struct ReportCompleteness {
     ///
     /// COLLECTED HERE, ARMED BY THE CALLER FOR THE EXIT CODE ONLY, exactly as `unread`/`unreadArmed` are:
     /// the condition is the policy in force NOW, and this loader holds no policy.
-    var scannedUnderOfPeeked: [Set<String>] = []
+    ///
+    /// ⟨0.34⟩ …and that file's own declared `candor.spec` (verbatim, `""` for a pre-spec-field producer),
+    /// carried BESIDE the deny set it qualifies rather than re-read later once `armingUnread` knows which
+    /// rules are missing — the same reason the deny set itself is captured here instead of re-parsing the
+    /// report a second time.
+    var scannedUnderOfPeeked: [(deny: Set<String>, spec: String)] = []
     /// ⟨0.33⟩ THE ARMED ANSWER — this run's own deny rules that some `scannedUnderOfPeeked` entry does not
     /// cover (`CandorCore.unaskedCrossPolicyRules`), set by `armingUnread` once the run's policy is known.
     /// An ARM of `isIncomplete`, not merely a disclosure: ⟨0.24⟩ binds every verb that answers `ok` to be
@@ -162,6 +167,13 @@ struct ReportCompleteness {
     /// exact condition (GateReportCLI.swift). Closing a cause on the gate and leaving its advisory
     /// siblings certifying is the ⟨0.32⟩/⟨0.30⟩ shape repeating a rung later.
     var crossPolicy: [String] = []
+    /// ⟨0.34⟩ **NAMES THE CAUSE OF `crossPolicy`, NEVER MOVES THE VERDICT.** `true` when `crossPolicy` is
+    /// non-empty AND every report that contributed to it predates ⟨0.33⟩ (`CandorCore.specPredates`
+    /// against `"0.33"`) — i.e. the gap is fully explained by producers that could not yet have WRITTEN
+    /// `scannedUnder` at all, never by one that ran under a genuinely different or narrower deny set. Set
+    /// by `armingUnread` alongside `crossPolicy`, from the identical `unaskedCrossPolicyRules` call, so
+    /// the two can never drift into disagreeing about one run's bytes.
+    var crossPolicyPredates033 = false
 
     /// Is the universe this verb reasoned over known-partial? **EITHER ARM OF THIS IS AN EXIT CODE**, and
     /// that is why `judgedNothing` is deliberately NOT one of them. `unverified --strict` and
@@ -382,11 +394,26 @@ struct ReportCompleteness {
         }
         // ⟨0.33⟩ THE FOURTH CAUSE — a peeked exclusion class the producer read under a DIFFERENT deny
         // set, so its clean finding answers a question this run is not asking (SPEC §2 ⟨0.33⟩).
+        //
+        // ⟨0.34⟩ TWO SENTENCES, ONE CAUSE, chosen by `crossPolicyPredates033` — SAME verdict, same exit
+        // (this clause only ever moves `head`'s WORDING). When every contributing report predates ⟨0.33⟩
+        // the "does not cover" framing names the wrong culprit: it reads as "a producer chose a different
+        // policy", and the true statement is "no producer here could yet WRITE the policy it peeked
+        // under". The `else` arm is character-for-character the pre-⟨0.34⟩ text — the control this rung
+        // ships with.
         if !crossPolicy.isEmpty {
             let n = crossPolicy.count
-            append("the report(s) under this locator carry a peek bounded by a deny set that does not "
-                 + "cover \(n) rule(s) of THIS policy,",
-                   ", and a peek bounded by a deny set that does not cover \(n) rule(s) of THIS policy,")
+            if crossPolicyPredates033 {
+                append("the report(s) under this locator predate ⟨0.33⟩ — before a producing scan "
+                     + "recorded the deny set its peek ran under — so they cannot say whether \(n) "
+                     + "rule(s) of THIS policy were ever asked,",
+                       ", and \(n) rule(s) of THIS policy the report(s) — from before ⟨0.33⟩ — cannot "
+                     + "say they were asked about,")
+            } else {
+                append("the report(s) under this locator carry a peek bounded by a deny set that does not "
+                     + "cover \(n) rule(s) of THIS policy,",
+                       ", and a peek bounded by a deny set that does not cover \(n) rule(s) of THIS policy,")
+            }
         }
         var lines = ["  ⚠ INCOMPLETE — \(head)", "      so \(soWhat):"]
         for u in unanalyzed { lines.append("      \(u.path) — \(u.reason)") }
@@ -426,12 +453,20 @@ struct ReportCompleteness {
         // ⟨0.33⟩ THE REMEDY SAYS THE SAME POLICY, NOT A POLICY — the loose reading is what PRODUCES this
         // hole, because the operator DID scan with a policy and got a report whose peek answered a
         // different one (SPEC §2 ⟨0.33⟩).
+        //
+        // ⟨0.34⟩ ONE FACT, TWO REMEDIES — same split as `unread`'s `remedy` above, and for the same
+        // reason: the CAUSE differs, so the REPAIR does. `else` is the pre-⟨0.34⟩ sentence, unchanged.
+        let crossPolicyCauseAndRemedy = crossPolicyPredates033
+            ? "these reports were produced before ⟨0.33⟩, when a producing scan did not yet record the "
+            + "deny set its peek ran under — so an empty finding there cannot be read as an answer to "
+            + "THIS policy's question. Re-scan with a 0.33+ engine under THE SAME policy this run is "
+            + "applying (candor-swift <dir> --policy <p>)"
+            : "this report's peek was bounded by a deny set that does not cover this rule: an excluded "
+            + "file it reports as read was searched for OTHER effects, so an empty finding there is not "
+            + "an answer to this question. Re-run the producing scan under THE SAME policy this run is "
+            + "applying (candor-swift <dir> --policy <p>)"
         for r in crossPolicy {
-            lines.append("      \(r) — this report's peek was bounded by a deny set that does not cover "
-                       + "this rule: an excluded file it reports as read was searched for OTHER effects, "
-                       + "so an empty finding there is not an answer to this question. Re-run the "
-                       + "producing scan under THE SAME policy this run is applying "
-                       + "(candor-swift <dir> --policy <p>)")
+            lines.append("      \(r) — \(crossPolicyCauseAndRemedy)")
         }
         lines.append("      \(tail)")
         return lines.joined(separator: "\n") + "\n"
@@ -551,7 +586,15 @@ private func mergeCompleteness(_ obj: [String: Any], path: String, entryCount: I
     // ⟨0.33⟩ ONLY WHEN THIS FILE PEEKED SOMETHING — the over-charge control this rung's design names
     // first. An ABSENT `scannedUnder` beside a peeked class is the EMPTY SET for the subset test, never
     // a licence (a pre-⟨0.33⟩ producer fails closed).
-    if filePeekedAny { c.scannedUnderOfPeeked.append(scannedUnderThisFile ?? []) }
+    //
+    // ⟨0.34⟩ …carried beside this file's own declared `candor.spec` — read here, once, rather than
+    // re-parsing `obj` from `armingUnread` once the missing rules are known (see the field doc on
+    // `ReportCompleteness.scannedUnderOfPeeked`). `""` when absent/unreadable, the same "treat as
+    // pre-spec-field" reading `CandorCore.specPredates` already commits to.
+    if filePeekedAny {
+        let fileSpec = (obj["candor"] as? [String: Any])?["spec"] as? String ?? ""
+        c.scannedUnderOfPeeked.append((deny: scannedUnderThisFile ?? [], spec: fileSpec))
+    }
 }
 
 // ⟨0.24⟩ Emit an advisory verb's answer and exit, applying the §3.2 incompleteness rule in ONE place so
@@ -799,7 +842,12 @@ private func armingUnread(_ c: ReportCompleteness, under pol: ParsedPolicy) -> R
     if !out.unread.isEmpty {
         if pol.deny.isEmpty { out.unread = [] } else { out.unreadArmed = true }
     }
-    out.crossPolicy = unaskedCrossPolicyRules(pol.deny, against: c.scannedUnderOfPeeked)
+    // ⟨0.34⟩ ONE CALL, BOTH FIELDS — `crossPolicy` and `crossPolicyPredates033` come from the SAME
+    // `unaskedCrossPolicyRules` computation, so this verb's document and its prose note cannot read two
+    // different accounts of which reports contributed the gap (see the field doc on `crossPolicyPredates033`).
+    let cp = unaskedCrossPolicyRules(pol.deny, against: c.scannedUnderOfPeeked)
+    out.crossPolicy = cp.rules
+    out.crossPolicyPredates033 = cp.oldCaused
     return out
 }
 
