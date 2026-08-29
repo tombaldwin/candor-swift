@@ -3871,6 +3871,50 @@ final class CallCollector: SyntaxVisitor {
     }
     override func visitPost(_ node: FunctionDeclSyntax) { leaveShadowScope(node) }
 
+    // R33 — deinit-glue, the ONE authority both binder shapes below call. `t`/`isVar` come from
+    // `rootOf` run on the initializer EXPRESSION (the ctor/factory call itself), never from a type
+    // annotation — so a `let x: SomeProtocol = Loud(path)` still resolves to what was actually built.
+    // A `let`/`var` LOCAL bound to a fresh, non-aliased CONSTRUCTION of a type with an effectful
+    // `deinit` runs that deinit at scope exit — deterministic under ARC for a non-escaping local, but
+    // silent-pure because the deinit unit has no syntactic caller (mirrors rust's Drop-glue).
+    //
+    // Found as a SECOND hole in the same mechanism: the unannotated ctor branch (`let x = Loud(path)`)
+    // had this check; the annotated one (`let x: Loud = Loud(path)`, `var x: Loud? = Loud(path)` — no
+    // rarer in real Swift, arguably more common for an Optional or protocol-typed local) took a
+    // DIFFERENT branch of the same `if`/`else if` and never reached it — `Loud`'s `deinit` effect
+    // vanished with no `Unknown`, no disclosure, nothing, on the single most ordinary way to spell an
+    // explicitly-typed local. Factored out so the two shapes cannot drift into disagreeing about it
+    // again (AGENT-CORPUS-BRIEF: two paths computing one fact must not be free to answer differently).
+    private func applyDeinitGlue(name: String?, root t: String?, isVar: Bool) {
+        // `name == nil` is the WILDCARD shape (`_ = Loud(path)`) — there is no binding for a later
+        // statement to return, so the `returnedNames` escape check does not apply (and cannot: the
+        // set is keyed by identifier, and a wildcard has none).
+        guard let t, isVar, name.map({ !returnedNames.contains($0) }) ?? true else { return }
+        // An escaping value — `return Type()` (no binding, filtered by `returnedNames` above),
+        // `self.f = Type()` (assignment, never reaches this binder at all), `let r = other` (alias,
+        // filtered by the ctor-only callers of this function) — is never charged, so a factory that
+        // RETURNS its product stays pure (no over-charge).
+        if localTypes.contains(t) {
+            // A `propertyEdges` SOFT edge, NOT a typed Call: it resolves via resolveQual and DROPS
+            // SILENTLY when the type has no deinit unit (a struct/pure class → nothing), never
+            // reaching the external-protocol member-dispatch fallback that would fabricate Unknown for
+            // any type conforming to a non-pure external protocol (the ActivityAttributes
+            // over-charge). A real class deinit resolves; an inherited deinit chains via the
+            // supertype resolution there.
+            propertyEdges.insert("\(t).deinit")
+        } else if !t.hasPrefix("<") {
+            // THE SAME GLUE ONE SCAN BOUNDARY OUT: the constructed type belongs to a chained
+            // DEPENDENCY, so it is not in `localTypes` and the soft edge above never fires — a dep
+            // class whose `deinit` is effectful, held as a local, reads silent-pure with the dep's
+            // report chained even though that report records the unit under `<Module>#<Type>.deinit`
+            // (candor-spec/SOUNDNESS-VEIN-crossing-the-scan-boundary.md). Recorded as a candidate and
+            // joined against the sibling report ONLY, in the Driver; with no dep report loaded
+            // nothing consults it. Self-filtering the same way: a struct or a class with no (or a
+            // pure) `deinit` has no entry in the dep report, so the join adds nothing.
+            deinitExternal.insert("\(t).deinit")
+        }
+    }
+
     override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
         for binding in node.bindings {
             // `let (a, b) = (X(), Y())` — destructure: bind each name from the initializer tuple element
@@ -3900,6 +3944,17 @@ final class CallCollector: SyntaxVisitor {
             // Runs BEFORE the name guard so a WILDCARD binding (`let _: W = "lit"`, common) is covered too.
             if let ann = binding.typeAnnotation, let v0 = binding.initializer?.value {
                 edgeLiteralInit(annotation: ann.type, value: v0)
+            }
+            // R33 deinit-glue, WILDCARD EDITION — run before the identifier-only guard below, which
+            // `continue`s past a `WildcardPatternSyntax` binding entirely. `_ = Loud(path)` discards
+            // the constructed value with no binding at all: the single MOST certain non-escaping
+            // shape there is (no name exists for a later statement to alias, store, or return), yet
+            // it reached neither binder branch and `Loud`'s `deinit` effect was silently dropped —
+            // found beside the annotated-binder hole above by the same array-of-shapes sweep (a
+            // direct `let x = Ctor()` was charged; `_ = Ctor()` was not, on an identical `Loud`).
+            if binding.pattern.is(WildcardPatternSyntax.self), let v0 = binding.initializer?.value {
+                let info = rootOf(Self.peel(v0))
+                applyDeinitGlue(name: nil, root: info.root, isVar: info.isVar)
             }
             // Claimed for the whole binding — the identifier form is typed below, and a form this
             // visitor does NOT model (`let (a, b) = pair()`, a tuple pattern with a non-tuple
@@ -3991,6 +4046,23 @@ final class CallCollector: SyntaxVisitor {
                     setArrayElem(name, (elem, arrayElementType(ann.type).map(isOpaqueParam) ?? false))
                 }
                 else if let val = dictValueName(ann.type) { dictElem[name] = val }        // `let m: [K: V]`
+                // R33 deinit-glue, ANNOTATED-BINDER EDITION. The ctor/factory branch below runs this
+                // exact check from `rootOf` on the initializer — but only when `binding.typeAnnotation`
+                // is `nil`, because it lives in the `else if` of this very `if`. An explicit annotation
+                // (`let x: Loud = Loud(path)`, `var x: Loud? = Loud(path)` — the ordinary way to declare
+                // an Optional or a protocol-typed local, and no rarer than the unannotated form in real
+                // code) took the branch above instead and NEVER reached the glue at all: `Loud`'s
+                // effectful `deinit` read completely silent-pure at scope exit, with no `Unknown`, no
+                // disclosure, nothing — found by comparing `let x = Loud(p)` (charged) against `let x:
+                // Loud = Loud(p)` (absent) on an otherwise-identical body. `rootOf` is run on the
+                // INITIALIZER, never the annotation, so a supertype/protocol annotation over a concrete
+                // construction still resolves to what was actually built (`rootOf`'s ctor branch reads
+                // the call, not the declared type) — same authority the unannotated path uses, not a
+                // second implementation that could drift from it.
+                if let v0 = binding.initializer?.value {
+                    let ctorInfo = rootOf(Self.peel(v0))
+                    applyDeinitGlue(name: name, root: ctorInfo.root, isVar: ctorInfo.isVar)
+                }
             } else if let v0 = binding.initializer?.value {
                 let v = Self.peel(v0)
                 if v.is(ClosureExprSyntax.self) {
@@ -4050,33 +4122,10 @@ final class CallCollector: SyntaxVisitor {
                             // ctor/factory-CALL branch, never a bare-identifier ALIAS) of a type with an
                             // effectful `deinit` runs that deinit at scope exit — deterministic under ARC for
                             // a non-escaping local, but silent-pure because the deinit unit has no syntactic
-                            // caller (mirrors rust Drop-glue). Edge to `<t>.deinit`; resolveQual DROPS it when
-                            // the type has no deinit unit (pure/none → nothing), so this self-filters with no
-                            // deinitType threading. An escaping value — `return Type()` (no binding),
-                            // `self.f = Type()` (assignment), `let r = other` (alias, not this branch) — is
-                            // never charged, so a factory that RETURNS its product stays pure (no over-charge).
-                            if localTypes.contains(t), !returnedNames.contains(name) {
-                                // A `propertyEdges` SOFT edge, NOT a typed Call: it resolves via resolveQual
-                                // and DROPS SILENTLY when the type has no deinit unit (a struct/pure class →
-                                // nothing), never reaching the external-protocol member-dispatch fallback that
-                                // would fabricate Unknown for any type conforming to a non-pure external
-                                // protocol (the ActivityAttributes over-charge). A real class deinit resolves;
-                                // an inherited deinit chains via the supertype resolution there.
-                                propertyEdges.insert("\(t).deinit")
-                            } else if !localTypes.contains(t), !t.hasPrefix("<"),
-                                      !returnedNames.contains(name) {
-                                // THE SAME GLUE ONE SCAN BOUNDARY OUT: the constructed type belongs to a
-                                // chained DEPENDENCY, so it is not in `localTypes` and the soft edge above
-                                // never fired — a dep class whose `deinit` is effectful, held as a local,
-                                // read silent-pure with the dep's report chained even though that report
-                                // records the unit under `<Module>#<Type>.deinit`
-                                // (candor-spec/SOUNDNESS-VEIN-crossing-the-scan-boundary.md). Recorded as a
-                                // candidate and joined against the sibling report ONLY, in the Driver; with
-                                // no dep report loaded nothing consults it. Self-filtering in exactly the
-                                // same way: a struct or a class with no (or a pure) `deinit` has no entry in
-                                // the dep report, so the join adds nothing.
-                                deinitExternal.insert("\(t).deinit")
-                            }
+                            // caller (mirrors rust Drop-glue). See `applyDeinitGlue` for the edge/self-filter/
+                            // external-dependency detail — shared with the ANNOTATED-binder call site above
+                            // so the two forms of `let x[: T] = Ctor()` cannot answer differently.
+                            applyDeinitGlue(name: name, root: t, isVar: true)
                         }
                         // a collection TRANSFORM result keeps the element type: `let active = cs.filter {…}`
                         // (then `for c in active` resolves). Element-preserving transforms only.

@@ -9,6 +9,45 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **CARDINAL SIN, closed: R33's deinit-glue (a `let`/`var` local bound to a fresh construction charges the
+  type's effectful `deinit` at scope exit, mirroring rust's `Drop`-glue) only ever fired for the ONE binder
+  shape it was written against — a name with NO type annotation (`let x = Loud(path)`) — and silently missed
+  every other way to spell the same non-escaping local.** Found attacking the core syntactic engine (not the
+  file-set surface the last four rounds hit): `let x: Loud = Loud(path)` and `var x: Loud? = Loud(path)` — the
+  ordinary way to declare an explicitly-typed or Optional local, no rarer in real Swift than the inferred
+  form — took the SIBLING branch of the same `if let ann = binding.typeAnnotation { … } else if let v0 =
+  binding.initializer?.value { … }` and never reached the glue at all: `Loud`'s effectful `deinit` read
+  completely silent-pure, no `Unknown`, no disclosure, on the caller whose scope actually runs it. `let _ =
+  Loud(path)` (the wildcard binder — the single MOST certain non-escaping shape, since there is no name for
+  a later statement to alias, store, or return) fell through the identifier-only guard entirely and missed
+  it the same way. Measured with a rename/reshape control on an identical `Loud` (an effectful `deinit`
+  reading `/etc/passwd`): `let x = Loud(p)` charged `Loud.deinit` to its caller; `let x: Loud = Loud(p)`,
+  `var x: Loud? = Loud(p)`, and `let _ = Loud(p)` were each ABSENT from `functions` against the *identical*
+  pre-fix binary — three silent purity claims from one mechanism missing three of its own binder shapes.
+  (`Task { }` / `Task.detached { }` / `defer { }` bodies, and a plain `var` REASSIGNED to a fresh
+  construction, were checked and already correct — closures are charged lexically to their passer
+  regardless of what invokes them, and the reassignment binder already went through the working branch.)
+  Fixed by extracting the glue into one function, `applyDeinitGlue(name:root:isVar:)`, keyed off `rootOf` on
+  the INITIALIZER expression (never the annotation — so a protocol/supertype annotation over a concrete
+  construction still resolves to what was actually built) and calling it from both the annotated-binder
+  branch and a new wildcard-binder check, alongside the pre-existing unannotated-binder call site — so the
+  three shapes can no longer drift into disagreeing about the same fact. A `_ = Loud(path)` bare discard
+  ASSIGNMENT (no `let`/`var` — a `DiscardAssignmentExprSyntax`, a different grammar production from the
+  wildcard PATTERN above) and a construction reached only through an array/dictionary LITERAL element
+  (`let arr = [Loud(path)]`) were measured and are STILL silent; left open as a residual (documented, not
+  fixed) rather than risk a rushed change to the much hotter `SequenceExprSyntax` assignment-detection path
+  under this round's time budget — the array/dictionary case would also need new per-element provenance
+  work to stay conservative.
+  Controls, falsified against the pre-fix binary: the three silent→disclosed transitions above; a `Quiet`
+  class with NO `deinit` bound via the identical annotated/wildcard binder shapes stays completely absent
+  from `functions` on the POST binary (no fabrication from the new call sites); and — the over-charge
+  control that matters most — two real, unmodified SwiftPM packages (`swift-algorithms`, 492 analyzed units;
+  `swift-collections`, 4965 analyzed units, both cloned fresh from GitHub) scanned under a real `deny Net /
+  deny Fs / deny Exec` policy are BYTE-IDENTICAL, full stdout including the report JSON, between the pre-fix
+  and post-fix binaries. Six new process tests (`DeinitGlueBinderShapeProcessTests.swift`) pin the four
+  binder shapes plus the fabrication and escape controls. All 931 XCTest cases, `smoke.sh` (148) and
+  `fabrication_probe.py`/`fuzz.py` pass.
+
 - ⚠ **CARDINAL SIN, closed: the CROSS-FILE fix directly below re-introduced a silent drop through CHA/dynamic
   dispatch, reproduced two ways.** That fix (`9496d73`) gave the peek child a `--peek-context` union and
   preserved attribution by skipping any finding whose carrying function lives in a CONTEXT (in-scope) file,
