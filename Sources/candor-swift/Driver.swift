@@ -1071,7 +1071,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
     var locOf: [String: String] = [:]
     var entryPoints: Set<String> = []
-    var callsiteArgs: [String: [[ArgKind]]] = [:]   // resolved target -> each call site's arg kinds
+    // resolved target -> each call site's (calling function, arg kinds). The CALLER travels with the
+    // args now (⟨0.34⟩ fix): callback-flow used to judge a callback param across the UNION of every call
+    // site into the target and then attribute the answer to the target's own node, which every caller
+    // inherits via the ordinary call edge — so two callers passing two different named callbacks through
+    // one HOF each inherited the OTHER's effect too. Resolution below is grouped by `caller` so each
+    // caller is judged only against the sites IT makes.
+    var callsiteArgs: [String: [(caller: String, args: [ArgKind])]] = [:]
     var deferredCallbacks: [String: (indexes: Set<Int>, names: Set<String>)] = [:]
 
     // THE ONE APPLY SITE for a chained dependency entry (SPEC §2). It was three, and they had drifted:
@@ -1378,7 +1384,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                !localTypes.contains(modName),                       // a real type shadows a module name
                let inMod = freeFnByModule[modName]?[call.leaf], inMod.count == 1 {
                 edges[f.qual, default: []].insert(inMod[0])
-                callsiteArgs[inMod[0], default: []].append(call.args)
+                callsiteArgs[inMod[0], default: []].append((f.qual, call.args))
                 resolved = true
             } else if call.extOwner == CallCollector.superMarker {
                 // `super.m()` — resolve on the SUPERTYPE chain, never on the enclosing type: for an
@@ -1392,7 +1398,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     for sup in supertypesOf[et] ?? [] where sup != et {
                         for t in resolveQual("\(sup).\(member)") {
                             edges[f.qual, default: []].insert(t)
-                            callsiteArgs[t, default: []].append(call.args)
+                            callsiteArgs[t, default: []].append((f.qual, call.args))
                             resolved = true
                         }
                     }
@@ -1432,13 +1438,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if overloadedBases.contains(call.path) {
                     for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append(call.args)
+                        callsiteArgs[t, default: []].append((f.qual, call.args))
                         resolved = true
                     }
                 } else if !typedTargets.isEmpty {
                     for t in typedTargets {
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append(call.args)
+                        callsiteArgs[t, default: []].append((f.qual, call.args))
                     }
                     resolved = true
                 } else if let dot = call.path.lastIndex(of: "."),
@@ -1468,13 +1474,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         if overloadedBases.contains(base) {
                             for t in matchOverloads(base, argc, call.argTypes, swiftModuleOf(f.loc)) {
                                 edges[f.qual, default: []].insert(t)
-                                callsiteArgs[t, default: []].append(call.args)
+                                callsiteArgs[t, default: []].append((f.qual, call.args))
                                 resolved = true
                             }
                         } else {
                             for t in resolveQual(base) {
                                 edges[f.qual, default: []].insert(t)
-                                callsiteArgs[t, default: []].append(call.args)
+                                callsiteArgs[t, default: []].append((f.qual, call.args))
                                 resolved = true
                             }
                         }
@@ -1548,12 +1554,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if overloadedBases.contains(call.path) {            // an overloaded FREE function
                     for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append(call.args)
+                        callsiteArgs[t, default: []].append((f.qual, call.args))
                         resolved = true
                     }
                 } else if let targets = freeFnByName[call.path], targets.count == 1 {
                     edges[f.qual, default: []].insert(targets[0])
-                    callsiteArgs[targets[0], default: []].append(call.args)
+                    callsiteArgs[targets[0], default: []].append((f.qual, call.args))
                     resolved = true
                 } else if localTypes.contains(call.path), overloadedBases.contains("\(call.path).init") {
                     for t in matchOverloads("\(call.path).init", argc, call.argTypes, swiftModuleOf(f.loc)) {
@@ -1811,7 +1817,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         : (overloads[base] ?? []).map(\.qual)
                     for t in targets {
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append(d.args)
+                        callsiteArgs[t, default: []].append((f.qual, d.args))
                         providedEdged = true
                     }
                 } else {
@@ -1819,7 +1825,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     if !ts.isEmpty {
                         for t in ts {
                             edges[f.qual, default: []].insert(t)
-                            callsiteArgs[t, default: []].append(d.args)
+                            callsiteArgs[t, default: []].append((f.qual, d.args))
                         }
                         providedEdged = true
                     }
@@ -1996,33 +2002,78 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
 
     // Callback-flow resolution (the TS engine's callback_named, the Rust closure-flow slice): a
-    // deferred fn-typed-param invocation drops its Unknown iff EVERY visible call site passes a
-    // closure literal (charged to its passer lexically) or a NAMED local function (edged here).
-    // No visible call site, a missing arg, or an opaque value: the §4 Unknown stands.
+    // deferred fn-typed-param invocation drops its Unknown iff EVERY visible call site *that same
+    // caller makes* passes a closure literal (charged to its passer lexically) or a NAMED local
+    // function (edged here). No visible call site, a missing arg, or an opaque value: the §4 Unknown
+    // stands.
+    //
+    // PER-CALLER, not per-target (⟨0.34⟩ fix — SOUNDNESS-VEIN, BACKLOG "a shared HOF's effects are
+    // charged to EVERY caller"): this used to pool every call site into `fq` (the HOF) into ONE
+    // judgment and, when every site happened to resolve, edge the UNION of every resolved target onto
+    // `fq` itself — which every caller inherits via the ordinary call edge into `fq`. Two callers
+    // passing two different named callbacks (`hof(sinkA)` doing Fs, `hof(sinkB)` pure) each then
+    // inherited the OTHER caller's target too: an over-report, safe-direction, but a false positive in
+    // a `deny` gate and a `tour`/scan-note diagnostic naming a call path (`2 hops away via sinkA`) the
+    // pure caller never takes. `callsiteArgs` now carries the calling function alongside each site
+    // (see its declaration), so the judgment below is grouped by CALLER: caller A's own sites decide
+    // caller A's edge, caller B's own sites decide caller B's, and callers are never allowed to see
+    // each other's resolution.
+    //
+    // `callsiteArgs` is NOT a complete map of every caller of `fq` — several edge-adding branches above
+    // (an unqualified sibling-method call, an overloaded-sibling/init resolution, a CHA/protocol-default
+    // union edge) add a plain call edge without ever recording a site, because the OLD per-target design
+    // didn't need one: any caller reached `fq`'s node through the ordinary edge regardless, and inherited
+    // whatever `fq` was marked. Judging PER CALLER now means a caller `callsiteArgs` never saw would
+    // silently escape the judgment entirely and keep its own (unrelated) direct effects — i.e. NOTHING —
+    // which is exactly the false-all-clear this fix must not introduce. `callersOf` is the fix: built
+    // from `edges` itself (the same graph `propagate` trusts as ground truth for who reaches whom), so
+    // every caller with a plain edge into `fq` is judged below, tracked or not; an untracked one has no
+    // recorded sites and so falls to the `resolved = !argLists.isEmpty` branch — the honest Unknown.
+    var callersOf: [String: Set<String>] = [:]
+    for (caller, targets) in edges {
+        for t in targets { callersOf[t, default: []].insert(caller) }
+    }
     for (fq, info) in deferredCallbacks {
-        let sites = callsiteArgs[fq] ?? []
-        var resolved = !sites.isEmpty
-        var namedTargets: Set<String> = []
-        outer: for site in sites {
-            for idx in info.indexes {
-                guard idx < site.count else { resolved = false; break outer }
-                switch site[idx] {
-                case .named(let n):
-                    if let t = freeFnByName[n], t.count == 1 { namedTargets.insert(t[0]) }
-                    else { resolved = false; break outer }
-                case .closure, .opaque:
-                    // a CLOSURE arg stays opaque for the deferral (the Rust/TS rule — its body is
-                    // charged to the passer, but the receiver still executes an unaddressable value:
-                    // the §4 Unknown stands; the fuzzer caught the looser reading red-handed)
-                    resolved = false; break outer
-                }
-            }
-        }
-        if resolved {
-            edges[fq, default: []].formUnion(namedTargets)
-        } else {
+        var byCaller: [String: [[ArgKind]]] = [:]
+        for site in callsiteArgs[fq] ?? [] { byCaller[site.caller, default: []].append(site.args) }
+        for caller in callersOf[fq] ?? [] where byCaller[caller] == nil { byCaller[caller] = [] }
+        if byCaller.isEmpty {
+            // No caller reaches `fq` at all in THIS scan (dead code, or an entry point candor doesn't
+            // model as a caller) — the old whole-target fallback: Unknown on `fq`'s own node. Nobody
+            // inherits it (there are no callers), but it keeps `fq` itself honest if it is ever queried
+            // directly (`candor path fq …`), matching the pre-fix behaviour for the unreachable case.
             direct[fq, default: []].insert("Unknown")
             for n in info.names { whyMap[fq, default: []].insert("callback:\(n)") }
+            continue
+        }
+        for (caller, argLists) in byCaller {
+            var resolved = !argLists.isEmpty
+            var namedTargets: Set<String> = []
+            outer: for args in argLists {
+                for idx in info.indexes {
+                    guard idx < args.count else { resolved = false; break outer }
+                    switch args[idx] {
+                    case .named(let n):
+                        if let t = freeFnByName[n], t.count == 1 { namedTargets.insert(t[0]) }
+                        else { resolved = false; break outer }
+                    case .closure, .opaque:
+                        // a CLOSURE arg stays opaque for the deferral (the Rust/TS rule — its body is
+                        // charged to the passer, but the receiver still executes an unaddressable value:
+                        // the §4 Unknown stands; the fuzzer caught the looser reading red-handed)
+                        resolved = false; break outer
+                    }
+                }
+            }
+            if resolved {
+                // Edge from the CALLER directly to the resolved target(s) — never onto `fq`, which is
+                // the shared node every OTHER caller also reaches. `fq`'s own (non-callback) direct
+                // effects still apply to `caller` via the pre-existing caller->fq call edge; this adds
+                // only the precisely-resolved callback effect, scoped to the one caller that chose it.
+                edges[caller, default: []].formUnion(namedTargets)
+            } else {
+                direct[caller, default: []].insert("Unknown")
+                for n in info.names { whyMap[caller, default: []].insert("callback:\(n)") }
+            }
         }
     }
 

@@ -173,6 +173,11 @@ final class DriverResolutionProcessTests: XCTestCase {
     }
 
     // ── 3. deferred closure-arg resolution ─────────────────────────────────────────────────────────
+    // ⟨0.34⟩ PER-CALLER, not per-target (BACKLOG "a shared HOF's effects are charged to EVERY caller"):
+    // the resolution used to land on the shared HOF's OWN node (`runner`), which every caller inherited
+    // via the ordinary call edge — fine with exactly one caller, but a fabrication with two (see
+    // `testTwoCallersOfOneHOFResolveIndependently` below). The edge/Unknown now lands on the CALLER that
+    // made the resolvable/unresolvable call, so `runner` itself carries no effect of its own here.
     func testFnTypedParamResolvesNamedLocalAcrossCallSites() throws {
         let by = try scan("""
         import Foundation
@@ -180,10 +185,59 @@ final class DriverResolutionProcessTests: XCTestCase {
         func namedJob() { _ = FileManager.default.contents(atPath: "/y") }
         func passesNamed() { runner(namedJob) }
         """)
-        // every visible call site passes a NAMED local fn → the deferral resolves: edge, no Unknown
-        XCTAssertEqual(ProcessHarness.inferred(by, "runner"), ["Fs"],
-                       "all-named call sites must resolve the callback (edge to namedJob, Unknown dropped)")
-        XCTAssertEqual(ProcessHarness.inferred(by, "passesNamed"), ["Fs"])
+        // the NAMED local fn at the call site resolves the deferral for THIS caller: an edge straight
+        // to `namedJob`, landing on `passesNamed` — `runner` has no direct effect of its own, so it
+        // drops out of the report (pure in isolation).
+        XCTAssertNil(by["runner"],
+                     "runner carries no effect of its own — resolution is per-CALLER now, got \(by["runner"] ?? [:])")
+        XCTAssertEqual(ProcessHarness.inferred(by, "passesNamed"), ["Fs"],
+                       "the caller that named the callback inherits its target's effect directly")
+    }
+
+    // the fabrication this fix closes: TWO callers of ONE HOF, passing two DIFFERENT named callbacks.
+    // The old per-target design pooled every call site into `hof` and unioned every resolved target onto
+    // `hof`'s own node, which BOTH callers then inherited via the ordinary call edge — `callerB` (a pure
+    // callback) fabricated `callerA`'s Fs, and `hof`'s own scan-note diagnostic named a path (`via
+    // sinkA`) `callerB` never takes. Each caller must see ONLY the effect of the callback IT passed.
+    func testTwoCallersOfOneHOFResolveIndependently() throws {
+        let by = try scan("""
+        import Foundation
+        func hof(_ cb: () -> Void) { cb() }
+        func sinkA() { _ = FileManager.default.contents(atPath: "/a") }
+        func sinkB() { }
+        func callerA() { hof(sinkA) }
+        func callerB() { hof(sinkB) }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "callerA"), ["Fs"],
+                       "callerA passed the Fs callback — the under-report guard: it must still carry it")
+        XCTAssertNil(by["callerB"],
+                     "callerB passed a PURE callback through the SAME hof callerA uses — inheriting Fs "
+                     + "here is the exact fabrication this fix closes, got \(by["callerB"] ?? [:])")
+        XCTAssertNil(by["hof"], "the shared HOF carries no effect of its own — it belongs to its callers")
+    }
+
+    // an UNQUALIFIED SIBLING call into a HOF (implicit self — the swift-collections `_read { … }`
+    // shape) must still be judged, even though that call-edging branch never records a `callsiteArgs`
+    // site (true of several branches — sibling/init/overloaded-sibling resolution, CHA/protocol-default
+    // union edges). The first cut of the per-caller fix judged ONLY tracked callers and silently DROPPED
+    // an untracked one's Unknown instead of moving it — a false all-clear caught auditing the fix
+    // against swift-collections (`BitSet.contains` briefly read pure). `callersOf` (built from the same
+    // `edges` graph `propagate` trusts) closes the gap: every caller with a plain edge into the HOF is
+    // judged, tracked by `callsiteArgs` or not.
+    func testSiblingCallIntoAHOFStillGetsJudged() throws {
+        let by = try scan("""
+        import Foundation
+        struct Box {
+            func hof(_ body: () -> Void) { body() }
+            func callerA() { hof { _ = FileManager.default.contents(atPath: "/a") } }
+            func callerB() { hof { } }
+        }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "Box.callerA"), ["Fs", "Unknown"],
+                       "the closure body charges the passer directly, and the deferred call stays Unknown too")
+        XCTAssertEqual(ProcessHarness.inferred(by, "Box.callerB"), ["Unknown"],
+                       "an untracked (sibling-call) caller must still be judged — dropping its Unknown "
+                       + "silently is the false all-clear this guards against")
     }
 
     func testClosureLiteralArgStaysOpaque() throws {
@@ -192,15 +246,16 @@ final class DriverResolutionProcessTests: XCTestCase {
         func runner(_ job: () -> Void) { job() }
         func passesClosure() { runner { _ = FileManager.default.contents(atPath: "/z") } }
         """)
-        // a CLOSURE arg stays opaque for the deferral: the receiver's §4 Unknown stands even though
-        // the closure body is charged to the passer lexically.
-        let inf = ProcessHarness.inferred(by, "runner")
-        XCTAssertEqual(inf, ["Unknown"], "a closure-literal call site must keep the receiver Unknown, got \(inf ?? [])")
-        XCTAssertEqual(by["runner"]?["unknownWhy"] as? [String], ["callback:job"],
-                       "the Unknown names the invoked fn-typed param")
-        // the passer carries the closure body's Fs (lexical charge) AND inherits the callee's Unknown.
+        // a CLOSURE arg stays opaque for the deferral: the §4 Unknown stands even though the closure
+        // body is charged to the passer lexically — but it now attributes to the CALLER (`passesClosure`),
+        // never to the shared `runner` node.
+        XCTAssertNil(by["runner"],
+                     "runner carries no effect of its own — the Unknown belongs to its caller, got \(by["runner"] ?? [:])")
+        // the passer carries the closure body's Fs (lexical charge) AND its own callback-flow Unknown.
         XCTAssertEqual(ProcessHarness.inferred(by, "passesClosure"), ["Fs", "Unknown"],
-                       "the closure body charges the passer; the receiver's Unknown propagates back")
+                       "the closure body charges the passer; the deferred callback's Unknown attributes here too")
+        XCTAssertEqual(by["passesClosure"]?["unknownWhy"] as? [String], ["callback:job"],
+                       "the Unknown names the invoked fn-typed param, now on the caller that supplied it")
     }
 
     // a fn-typed param with NO visible call site keeps the §4 Unknown (nothing to resolve against).
