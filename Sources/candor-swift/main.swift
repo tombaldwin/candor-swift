@@ -2143,6 +2143,43 @@ if peekListPath == nil, let pp = policyPath {
                         peekUnattributed = true
                     }
                 }
+                // ⟨CHA-union⟩ THE FIX FOR THE FALSE "ALREADY JUDGED" SKIP. A context-file function's finding
+                // used to be dropped unconditionally on the theory that the primary gate already judged it —
+                // true only for effects the PRIMARY'S OWN (smaller) universe actually computed. The union
+                // this child resolves dispatch over can add a conformer/override the primary never saw
+                // (declared in an excluded file), which changes what THIS SAME function's CHA resolves to
+                // without moving it to a different file — file identity cannot see that, only a comparison
+                // of effective effect sets can. `primaryInferredByQual` is this run's OWN finalized
+                // `effectors` (built long before this peek block, never mutated after) keyed by qualified
+                // name, so "was this effect already on this exact function" is answered from the same
+                // analysis the primary gate itself ran on, not a proxy for it.
+                let primaryInferredByQual: [String: Set<String>] = Dictionary(
+                    uniqueKeysWithValues: effectors.map { ($0.fn, Set($0.inferred.toNames())) })
+                // The child's OWN function list, indexed by qual, so a NEW effect on a context function can
+                // be traced to WHICH call target explains it — the same array this loop already reads,
+                // just keyed once instead of re-scanned per candidate.
+                var childFuncsByQual: [String: [String: Any]] = [:]
+                for cf in (doc["functions"] as? [[String: Any]] ?? []) {
+                    if let q = cf["fn"] as? String { childFuncsByQual[q] = cf }
+                }
+                // A single attribution can be reached two ways in one policy run — directly (the excluded
+                // declaration's own qual matches the rule's scope) and derived (a context caller's dispatch
+                // resolves into it) — e.g. an UNSCOPED `deny Net` matches both `EvilDoer.work` itself and
+                // the in-scope `Runner.invoke()` that reaches it through CHA. Both name the SAME excluded
+                // declaration, so this merges by (fn, path) instead of appending a duplicate — the union of
+                // whichever effects either route found, keeping the FIRST reason string (documenting site,
+                // not mechanism, since either route is a legitimate account of the same fact).
+                func mergeOrAppend(fn: String, path: String, cls: String, effects: [String], reason: String) {
+                    if let idx = found.firstIndex(where: { $0.fn == fn && $0.path == path }) {
+                        let merged = Set(found[idx].effects).union(effects).sorted()
+                        found[idx] = OutOfScopeFinding(fn: found[idx].fn, path: found[idx].path,
+                                                        effects: merged, cls: found[idx].cls,
+                                                        reason: found[idx].reason)
+                    } else {
+                        found.append(OutOfScopeFinding(fn: fn, path: path, effects: effects.sorted(),
+                                                        cls: cls, reason: reason))
+                    }
+                }
                 for f in (doc["functions"] as? [[String: Any]] ?? []) {
                     // ⟨0.30⟩ the gate's own firing decision, per (rule, function): scope test, then `pure`
                     // means every effect except Unknown and a named rule means the intersection.
@@ -2189,32 +2226,84 @@ if peekListPath == nil, let pp = policyPath {
                     let childLoc = String((f["loc"] as? String ?? "").split(separator: ":").first ?? "")
                     let childAbs = candorAbsolutePath(childLoc.hasPrefix("/") ? childLoc
                                                       : (rootDir as NSString).appendingPathComponent(childLoc))
-                    // ⟨file-set peek cross-file⟩ ATTRIBUTION now has three cases where there used to be two,
-                    // because the child's `functions` can hold a CONTEXT-file entry as well as an excluded
-                    // one. A precise match against `peekable` is unchanged (the ordinary case). A precise
-                    // match against `contextAbs` instead — this run's own `sourcePaths` — means an in-scope
-                    // function is carrying the effect, which the primary in-scope gate over the main report
-                    // already judges (or will): reporting it AGAIN here would attribute an in-scope finding
-                    // to the excluded slice, the ⟨0.29⟩ hardening rounds' attribution defect one level up, so
-                    // it is skipped. A match against NEITHER list keeps the pre-existing conservative
+                    // ATTRIBUTION has three cases. A precise match against `peekable` is the ordinary case:
+                    // this exact declaration lives in an excluded file, so its own effects were never
+                    // judged by anything — report in full. A precise match against `contextAbs` instead —
+                    // this run's own `sourcePaths` — means an in-scope function is carrying the effect, and
+                    // that is NOT by itself proof the primary gate already judged it (see the CHA-union
+                    // note below). A match against NEITHER list keeps the pre-existing conservative
                     // fallback — a generic "excluded" class — exactly as before this rung: an unattributable
                     // path (a normalization edge case, not a context file) must never be silently dropped.
                     if let hit = peekable.first(where: { candorAbsolutePath(absOf($0.path)) == childAbs }) {
-                        found.append(OutOfScopeFinding(
-                            fn: f["fn"] as? String ?? "", path: hit.path,
-                            effects: hits.sorted(), cls: hit.cls,
+                        mergeOrAppend(fn: qual, path: hit.path, cls: hit.cls, effects: hits,
                             reason: "OUTSIDE this scan's scope (\(hit.cls)) — the gate did NOT judge it. "
                                   + "candor's ANALYSIS of that file reaches this effect; the gate did not "
                                   + "judge it, so the verdict is INCOMPLETE rather than a pass. (An analysis "
-                                  + "result, not a claim about what the code does at runtime.)"))
-                    } else if !contextAbs.contains(childAbs) {
-                        found.append(OutOfScopeFinding(
-                            fn: f["fn"] as? String ?? "", path: childLoc,
-                            effects: hits.sorted(), cls: "excluded",
+                                  + "result, not a claim about what the code does at runtime.)")
+                    } else if contextAbs.contains(childAbs) {
+                        // ⟨CHA-union⟩ THE CARDINAL SIN THIS BLOCK CLOSES. "Already judged by the primary
+                        // gate" is a claim about EFFECTS, not about which FILE a function lives in — under
+                        // CHA/dynamic dispatch the union this child resolves over can make a context
+                        // function's dispatch reach a conformer/override the primary's own (smaller)
+                        // universe never saw, adding an effect the primary gate could not have judged
+                        // because it was never computed. `newHits` is exactly that difference: this rule's
+                        // hits on this exact qualified function, minus what the primary's OWN finalized
+                        // analysis already found for it. Empty ⇒ genuinely already judged, skip as before.
+                        // Non-empty ⇒ the union is the only reason this exists, and it must surface.
+                        let newHits = hits.filter { !(primaryInferredByQual[qual] ?? []).contains($0) }
+                        if !newHits.isEmpty {
+                            // Try to NAME the excluded declaration responsible, rather than leaving the
+                            // finding pinned to the in-scope call site: a call target this function's own
+                            // resolved edges (`calls`, CHA-expanded same as `inferred`) reach that (a) lives
+                            // in an excluded file and (b) itself carries one of the new effects is the
+                            // conformer/override that changed the answer.
+                            let calleeQuals = Set(f["calls"] as? [String] ?? [])
+                            let candidates = calleeQuals.compactMap { cq -> (path: String, cls: String, fn: String)? in
+                                guard let cf = childFuncsByQual[cq] else { return nil }
+                                let cLoc = String((cf["loc"] as? String ?? "").split(separator: ":").first ?? "")
+                                let cAbs = candorAbsolutePath(cLoc.hasPrefix("/") ? cLoc
+                                                              : (rootDir as NSString).appendingPathComponent(cLoc))
+                                guard let cHit = peekable.first(where: { candorAbsolutePath(absOf($0.path)) == cAbs })
+                                else { return nil }
+                                let cInf = Set(cf["inferred"] as? [String] ?? [])
+                                guard !cInf.isDisjoint(with: newHits) else { return nil }
+                                return (cHit.path, cHit.cls, cq)
+                            }
+                            if candidates.count == 1, let c = candidates.first {
+                                // UNAMBIGUOUS: exactly one excluded declaration this call can reach
+                                // explains the new effect(s). Attribute THERE — the excluded file is what
+                                // changed, not the in-scope call site that has always looked the same.
+                                mergeOrAppend(fn: c.fn, path: c.path, cls: c.cls, effects: newHits,
+                                    reason: "OUTSIDE this scan's scope (\(c.cls)) — the gate did NOT judge "
+                                          + "it. An in-scope call this scan analyzed dispatches to this "
+                                          + "declaration under CHA, and candor's ANALYSIS reaches this "
+                                          + "effect through it; the gate did not judge it, so the verdict "
+                                          + "is INCOMPLETE rather than a pass. (An analysis result, not a "
+                                          + "claim about what the code does at runtime.)")
+                            } else {
+                                // Zero or multiple candidates: this scan cannot name the responsible
+                                // excluded declaration with confidence (no `calls` edge into any excluded
+                                // file explains it, or more than one could). NEVER drop it on that account
+                                // — a wrong-but-visible attribution is recoverable, a silent drop is the
+                                // cardinal sin this whole rung exists to close. Disclose against the
+                                // in-scope call site instead, saying plainly that the source is a file this
+                                // scan excluded, not this call site itself.
+                                mergeOrAppend(fn: qual, path: childLoc, cls: "dispatch-widened", effects: newHits,
+                                    reason: "OUTSIDE this scan's scope (dispatch-widened) — a file this scan "
+                                          + "excluded adds a dynamic-dispatch target this call can reach, "
+                                          + "and this scan cannot name that declaration precisely, so the "
+                                          + "effect is disclosed against this in-scope call site instead. "
+                                          + "The gate did not judge the excluded declaration, so the "
+                                          + "verdict is INCOMPLETE rather than a pass. (An analysis result, "
+                                          + "not a claim about what the code does at runtime.)")
+                            }
+                        }
+                    } else {
+                        mergeOrAppend(fn: qual, path: childLoc, cls: "excluded", effects: hits,
                             reason: "OUTSIDE this scan's scope (excluded) — the gate did NOT judge it. "
                                   + "candor's ANALYSIS of that file reaches this effect; the gate did not "
                                   + "judge it, so the verdict is INCOMPLETE rather than a pass. (An analysis "
-                                  + "result, not a claim about what the code does at runtime.)"))
+                                  + "result, not a claim about what the code does at runtime.)")
                     }
                 }
                 found.sort { ($0.path, $0.fn) < ($1.path, $1.fn) }

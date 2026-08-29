@@ -9,6 +9,48 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **CARDINAL SIN, closed: the CROSS-FILE fix directly below re-introduced a silent drop through CHA/dynamic
+  dispatch, reproduced two ways.** That fix (`9496d73`) gave the peek child a `--peek-context` union and
+  preserved attribution by skipping any finding whose carrying function lives in a CONTEXT (in-scope) file,
+  reasoning it was "already judged by the primary gate". That reasoning is FALSE under CHA: the child
+  resolves dispatch (protocol conformance, class override) over the UNION, so a context function's
+  effective effect set there can include an effect the PRIMARY scan never computed, because the primary
+  never saw the EXCLUDED file's conformer/override. The skip was keyed on the FILE a function lives in; the
+  divergence is in the RESOLUTION, which file identity cannot see. Two reproductions, both `exit 0`,
+  `"policy ✓"`, `outOfScope: []` against the pre-fix binary: a protocol conformer (`EvilDoer: Doer`
+  performing `Net`) declared in an excluded test-source file, reached only through an in-scope
+  `let d: Doer = PureDoer(); d.work()`, under `deny Net Runner` scoped so only the in-scope caller matches
+  its name — and the identical shape via class inheritance and `override`. Control: the same code under an
+  UNSCOPED `deny Net` already named `EvilDoer.work` directly, isolating the scoped rule's skip as the only
+  silent route.
+  Fixed by replacing the file-identity skip with an EFFECT-SET comparison: a context function's rule-matched
+  effects are diffed against what this run's OWN finalized primary analysis (`effectors`, keyed by qualified
+  name) already found for that exact function. An effect present in both is genuinely already judged and
+  stays skipped; an effect present ONLY in the child's larger-universe computation exists solely because of
+  the union and must surface. Where the responsible excluded declaration can be named with confidence — a
+  call edge the context function's own resolved `calls` reaches, landing in an excluded file whose own
+  inferred effects include the new one — the finding is attributed THERE, not to the in-scope call site that
+  merely dispatches through it, matching `9496d73`'s own attribution rule one level up the dispatch chain.
+  Where no single excluded declaration can be named with confidence (no explaining call edge, or more than
+  one), the finding is disclosed against the in-scope call site under a new `dispatch-widened` class instead
+  of being dropped: **a wrong-but-visible attribution is recoverable, a silent drop is not** — this is the
+  direction chosen whenever attribution is uncertain. A single declaration reachable BOTH directly (its own
+  qual matches the rule) and derived (an in-scope caller's dispatch resolves into it) — an unscoped `deny
+  Net` matches both `EvilDoer.work` and the `Runner`-named caller that reaches it — is merged into ONE
+  finding, not two, so closing the drop does not open a duplicate over-charge in its place.
+  Five controls, falsified against the pre-fix binary: both CHA fixtures now answer `exit 2` naming the
+  excluded declaration; the ORIGINAL cross-file fixture from `9496d73` still answers correctly (regression
+  control, all 5 of its process tests unchanged); the unscoped-policy dedup control confirms one finding, not
+  two, when both attribution routes name the same declaration; an excluded conformer/override that NOTHING
+  in scope ever dispatches through produces no finding at all (over-charge control) — and two REAL SwiftPM
+  packages (`swift-argument-parser`, `swift-algorithms`) scanned under `deny Net` and `deny Exec` are
+  BYTE-IDENTICAL, report and callgraph sidecar, to the pre-fix binary; a 554-file real corpus (`swift-nio`)
+  under `deny Net` completes in ~2.9s, no regression against the peek's existing 120s child-process deadline
+  (measured previously at ~4.2s on a 2229-file corpus). Five new process tests
+  (`PeekCHADispatchProcessTests.swift`) pin both CHA shapes, the unscoped control, the dedup control and the
+  unreached-conformer over-charge control. All 925 XCTest cases, `smoke.sh` (148), `fabrication_probe.py`
+  and `fuzz.py` pass.
+
 - ⚠ **CARDINAL SIN, closed: the ⟨0.29⟩ peek's CROSS-FILE BLIND SPOT filed as "Cause B" below (latent
   since ⟨0.29⟩, applying to all five `PEEKED_CLASSES`).** The peek re-scans an excluded file in a CHILD
   PROCESS given only the excluded list (`--peek-excluded`), so when the excluded file's own effect reaches
