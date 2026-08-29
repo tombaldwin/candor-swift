@@ -204,3 +204,204 @@ final class SwiftPMPlatformPrunedProcessTests: XCTestCase {
                      "a hoisted `platforms:` list cannot be proven to restrict anything — keep, never guess-exclude: \(ex)")
     }
 }
+
+/// ⟨file-set, cardinal-sin fix⟩ SwiftPM's VERSION-SPECIFIC MANIFEST SELECTION governs which
+/// `Package.swift`-family file is real, and a structural read of the base file alone is UNSOUND once a
+/// `Package@swift-<version>.swift` exists beside it.
+///
+/// A CARDINAL SIN was reproduced in `ce72431` (the fix `SwiftPMPlatformPrunedProcessTests` above pins):
+/// it hardcoded `Package.swift`, so a package whose `Package@swift-6.0.swift` OVERLAY widens the declared
+/// `platforms:` (adding a platform the base manifest omits) had its overlay-only code pruned as
+/// "platform-pruned" and a real `--policy deny <Effect>` gate PASSED at exit 0 over code that genuinely
+/// ships. Measured with the exact reported shape: `Package.swift` declaring `platforms: [.macOS(.v10_15)]`
+/// plus `Package@swift-6.0.swift` declaring `platforms: [.macOS(.v10_15), .visionOS(.v1)]`, a function
+/// wholly inside `#if os(visionOS)` calling a helper in ANOTHER, in-scope file that performs `Fs` — the
+/// unscoped control caught it (`AS-EFF-006`, exit 1) and `--target` answered `policy ✓` at exit 0.
+///
+/// Fixed by asking SwiftPM ITSELF (`swift package dump-package`) whenever a `Package@swift-*.swift` file
+/// exists at all — SwiftPM's own manifest loader is the one sound authority for which file governs and
+/// what it declares, since that depends on the toolchain actually invoking the build and not on anything
+/// a structural parse of one file can see. A structural read of the base manifest continues, UNCHANGED,
+/// whenever no overlay exists (the whole `SwiftPMPlatformPrunedProcessTests` suite above).
+final class SwiftPMVersionSpecificManifestProcessTests: XCTestCase {
+
+    private func makePlatformPackage(platforms: String?, files: [String: String]) throws -> URL {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-spm-versionmanifest-\(UUID().uuidString)")
+        let fm = FileManager.default
+        try fm.createDirectory(at: root.appendingPathComponent("Sources/MyLib"), withIntermediateDirectories: true)
+        let platformsArg = platforms.map { "platforms: \($0),\n    " } ?? ""
+        try """
+        // swift-tools-version:5.7
+        import PackageDescription
+        let package = Package(
+            name: "MyLib",
+            \(platformsArg)products: [.library(name: "MyLib", targets: ["MyLib"])],
+            targets: [.target(name: "MyLib")]
+        )
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        for (name, content) in files {
+            try content.write(to: root.appendingPathComponent("Sources/MyLib/\(name)"),
+                              atomically: true, encoding: .utf8)
+        }
+        return root
+    }
+
+    /// This repo's own manifest declares `swift-tools-version:6.0`, so any toolchain able to even BUILD
+    /// candor-swift (and therefore run this test) is >= 6.0 and selects this overlay over the base —
+    /// mirroring SwiftPM's real rule (the highest declared version not exceeding the active toolchain)
+    /// without depending on which exact toolchain happens to run the suite.
+    private func writeOverlay(_ root: URL, platforms: String?) throws {
+        let platformsArg = platforms.map { "platforms: \($0),\n    " } ?? ""
+        try """
+        // swift-tools-version:6.0
+        import PackageDescription
+        let package = Package(
+            name: "MyLib",
+            \(platformsArg)products: [.library(name: "MyLib", targets: ["MyLib"])],
+            targets: [.target(name: "MyLib")]
+        )
+        """.write(to: root.appendingPathComponent("Package@swift-6.0.swift"), atomically: true, encoding: .utf8)
+    }
+
+    private func doc(_ out: String) throws -> [String: Any] {
+        try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any], out)
+    }
+
+    /// THE DEFECT CASE — falsified against `ce72431` before this fix existed (see the report): the base
+    /// manifest omits visionOS, the overlay ADDS it, and visionOS-only code must be judged LIVE — a real
+    /// `deny Fs` gate must fire on it as an ordinary violation, never a false `policy ✓`.
+    func testAnOverlayThatWidensThePlatformSetKeepsTheAddedPlatformsCodeLive() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let visionOnly = """
+        import Foundation
+        #if os(visionOS)
+        public func doVisionStuff() {
+            FileManager.default.createFile(atPath: "/tmp/vision-evidence.txt", contents: nil)
+        }
+        #endif
+        """
+        let root = try makePlatformPackage(platforms: "[.macOS(.v10_15)]",
+                                           files: ["Always.swift": alwaysHere, "Vision.swift": visionOnly])
+        try writeOverlay(root, platforms: "[.macOS(.v10_15), .visionOS(.v1)]")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let policy = root.appendingPathComponent("fs.policy")
+        try "deny Fs\n".write(to: policy, atomically: true, encoding: .utf8)
+        let r = try ProcessHarness.run(bin, [root.path, "--target", "MyLib", "--json", "--policy", policy.path],
+                                       cwd: root)
+        XCTAssertEqual(r.code, 1, "the overlay declares visionOS support the base manifest omits — this "
+                       + "function genuinely ships and a real policy violation must fire, not a false "
+                       + "`policy ✓` over code the base-only read wrongly proved dead: \(r.err)")
+        let d = try doc(r.out)
+        let ex = (d["excluded"] as? [[String: Any]] ?? [])
+        XCTAssertNil(ex.first { $0["class"] as? String == "platform-pruned" },
+                     "the overlay's platforms must govern, not the base's — nothing here is dead: \(ex)")
+        let fns = (d["functions"] as? [[String: Any]] ?? []).compactMap { $0["fn"] as? String }
+        XCTAssertTrue(fns.contains("doVisionStuff"), "\(fns)")
+    }
+
+    /// THE EXACT REPORTED SHAPE, cross-file: `doVisionStuff` (`#if os(visionOS)`) reaches `Fs` only
+    /// through `helperWritesFile`, a SEPARATE, always-in-scope file — this is the shape that made the
+    /// pre-fix defect worse than an ordinary miss, because the wrong-manifest prune (cause A) removed the
+    /// caller from `sourcePaths` entirely, and the ⟨0.29⟩ peek safety net that should have caught it
+    /// re-scans excluded files in ISOLATION and cannot resolve a call into a file that was never excluded
+    /// (cause B) — so the two compounded into a SILENT exit-0 `policy ✓` instead of even an INCOMPLETE.
+    /// Fixing cause A removes the trigger: the overlay correctly keeps `Vision.swift` in scope, so it is
+    /// scanned NORMALLY (not peeked at all) and the cross-file reach resolves exactly as the unscoped
+    /// control already does.
+    func testTheExactReportedCrossFileShapeCatchesTheViolation() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let other = "import Foundation\nfunc helperWritesFile() {\n"
+            + "    FileManager.default.createFile(atPath: \"/tmp/vision-evidence.txt\", contents: nil)\n}\n"
+            + "public func harmlessThing() -> Int { 42 }\n"
+        let visionCaller = "#if os(visionOS)\nfunc doVisionStuff() {\n    helperWritesFile()\n}\n#endif\n"
+        let root = try makePlatformPackage(platforms: "[.macOS(.v10_15)]",
+                                           files: ["Other.swift": other, "VisionCaller.swift": visionCaller])
+        try writeOverlay(root, platforms: "[.macOS(.v10_15), .visionOS(.v1)]")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let policy = root.appendingPathComponent("fs.policy")
+        try "deny Fs doVision\n".write(to: policy, atomically: true, encoding: .utf8)
+        let r = try ProcessHarness.run(bin, [root.path, "--target", "MyLib", "--json", "--policy", policy.path],
+                                       cwd: root)
+        XCTAssertEqual(r.code, 1, "the overlay declares visionOS — `doVisionStuff` is live, reaches `Fs` "
+                       + "through `helperWritesFile`, and a real `deny Fs doVision` gate must catch it as "
+                       + "an ordinary violation, not answer a false `policy ✓`: \(r.err)")
+        let d = try doc(r.out)
+        let ex = (d["excluded"] as? [[String: Any]] ?? [])
+        XCTAssertNil(ex.first { $0["class"] as? String == "platform-pruned" }, "\(ex)")
+        let fns = (d["functions"] as? [[String: Any]] ?? []).compactMap { $0["fn"] as? String }
+        XCTAssertTrue(fns.contains("doVisionStuff"), "\(fns)")
+    }
+
+    /// THE VERSION-MANIFEST CONTROL: an overlay that NARROWS the platform set (the base declares iOS, the
+    /// overlay does not) must ALSO be read correctly — code the overlay drops must be pruned+peeked, not
+    /// kept live because the wider base manifest still declares it.
+    func testAnOverlayThatNarrowsThePlatformSetPrunesWhatItDrops() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let iosOnly = """
+        import Foundation
+        #if os(iOS)
+        public func iosOnlyThing() {
+            FileManager.default.createFile(atPath: "/tmp/iosonly.txt", contents: nil)
+        }
+        #endif
+        """
+        let root = try makePlatformPackage(platforms: "[.macOS(.v13), .iOS(.v16), .watchOS(.v9)]",
+                                           files: ["Always.swift": alwaysHere, "IOSOnly.swift": iosOnly])
+        try writeOverlay(root, platforms: "[.macOS(.v13)]")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let policy = root.appendingPathComponent("fs.policy")
+        try "deny Fs\n".write(to: policy, atomically: true, encoding: .utf8)
+        let r = try ProcessHarness.run(bin, [root.path, "--target", "MyLib", "--json", "--policy", policy.path],
+                                       cwd: root)
+        XCTAssertEqual(r.code, 2, "the overlay drops iOS — this function is provably dead under it, so a "
+                       + "peeked violation must be INCOMPLETE, never a live pass or a false violation: \(r.err)")
+        let d = try doc(r.out)
+        let ex = try XCTUnwrap(d["excluded"] as? [[String: Any]], r.out)
+        let pruned = try XCTUnwrap(ex.first { $0["class"] as? String == "platform-pruned" }, "\(ex)")
+        XCTAssertEqual(pruned["peeked"] as? Bool, true)
+        let oos = try XCTUnwrap(d["outOfScope"] as? [[String: Any]], r.out)
+        XCTAssertEqual(oos.first?["fn"] as? String, "iosOnlyThing")
+    }
+
+    /// FAIL CLOSED: an overlay that EXISTS but cannot be EXECUTED (SwiftPM itself refuses it) must prune
+    /// NOTHING, exactly the existing "cannot be proven" rule for an unreadable `platforms:` — never a
+    /// guess that falls back to trusting the base manifest alone, which is the exact defect this fixes.
+    func testAnOverlayThatFailsToExecuteMeansNoPruning() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try makePlatformPackage(platforms: "[.macOS(.v13)]",
+                                           files: ["Always.swift": alwaysHere, "WatchOnly.swift": watchOnly])
+        // A syntactically-valid-enough-to-select, semantically-broken overlay: SwiftPM selects it (its
+        // declared tools-version is within range) but fails to EXECUTE it, so `dump-package` exits non-zero.
+        try """
+        // swift-tools-version:6.0
+        import PackageDescription
+        let package = Package(
+            name: "MyLib",
+            platforms: [thisIdentifierDoesNotExistAndFailsToCompile],
+            targets: [.target(name: "MyLib")]
+        )
+        """.write(to: root.appendingPathComponent("Package@swift-6.0.swift"), atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try ProcessHarness.run(bin, [root.path, "--target", "MyLib", "--json"], cwd: root)
+        XCTAssertEqual(r.code, 0, r.err)
+        let d = try doc(r.out)
+        let ex = (d["excluded"] as? [[String: Any]] ?? [])
+        XCTAssertNil(ex.first { $0["class"] as? String == "platform-pruned" },
+                     "the overlay cannot be executed to prove anything — keep, never guess-exclude: \(ex)")
+        let fns = (d["functions"] as? [[String: Any]] ?? []).compactMap { $0["fn"] as? String }
+        XCTAssertTrue(fns.contains { $0.contains("WatchOnlyThing") }, "\(fns)")
+    }
+
+    private let watchOnly = """
+    import Foundation
+    #if os(watchOS)
+    public struct WatchOnlyThing {
+        public func doIt() {
+            FileManager.default.createFile(atPath: "/tmp/whatever", contents: nil)
+        }
+    }
+    #endif
+    """
+    private let alwaysHere = "import Foundation\npublic func alwaysHere() {}\n"
+}

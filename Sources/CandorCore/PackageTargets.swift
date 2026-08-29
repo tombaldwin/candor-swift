@@ -136,6 +136,56 @@ public func parsePackagePlatformFamilies(manifestSource: String) -> Set<String>?
     return finder.families
 }
 
+/// The SAME family read as `parsePackagePlatformFamilies` above, from a `swift package dump-package`
+/// document instead of a structural parse of ONE file — the path this engine MUST take whenever a
+/// VERSION-SPECIFIC manifest (`Package@swift-<version>.swift`) sits beside `Package.swift`.
+///
+/// WHY A STRUCTURAL READ OF `Package.swift` ALONE IS UNSOUND THERE. SwiftPM's documented
+/// version-specific-manifest-selection rule picks whichever candidate file — `Package.swift` included —
+/// has the HIGHEST declared version not exceeding the ACTIVE swift toolchain's own version, and that
+/// choice depends on the toolchain actually invoking the build. No structural parse of a single file on
+/// disk can answer "which toolchain will build this" — only the toolchain itself can, by running its own
+/// manifest loader. Measured: a package with `Package.swift` (`platforms: [.macOS(.v10_15)]`) plus
+/// `Package@swift-6.0.swift` (`platforms: [.macOS(.v10_15), .visionOS(.v1)]`) has a visionOS-only function
+/// that is genuinely LIVE under any toolchain >= 6.0 — reading only the base manifest reported it dead and
+/// pruned it, a false negative under `deny Fs` a real gate would have caught.
+///
+/// `swift package dump-package` is the one sound authority for this, exactly as `dumpPackage` is already
+/// the last resort for a manifest the structural parser cannot follow at all (XcodeTargets.swift):
+/// SwiftPM's own manifest loader selects and EXECUTES the governing file and reports what it actually
+/// declared. The caller decides WHEN to reach for this — only in the presence of a version-specific
+/// manifest, since running a plain `Package.swift` this way when the structural parse already reads it
+/// soundly would cost a process spawn for no gain.
+///
+/// Returns `nil` under the IDENTICAL "cannot be proven" rule the structural parse follows: the process
+/// failed or its output did not parse as the expected document, `platforms` is absent or a literal empty
+/// array (SwiftPM's own default of "every platform" — an empty array is what dump-package emits for an
+/// unrestricted manifest, never a package declaring itself unbuildable), or any `platformName` this cannot
+/// map to a known `os(…)` family. One unmappable entry invalidates the whole read, not just that entry,
+/// for the same reason `PackagePlatformsFinder` refuses a partial read below: treating "cannot map" as
+/// "not declared" would prune a family the manifest actually supports.
+public func parsePackagePlatformFamilies(dumpPackageJSON text: String) -> Set<String>? {
+    guard let data = text.data(using: .utf8),
+          let obj = try? JSONSerialization.jsonObject(with: data),
+          let top = obj as? [String: Any],
+          let rawPlatforms = top["platforms"] as? [[String: Any]],
+          !rawPlatforms.isEmpty
+    else { return nil }
+    /// `swift package dump-package`'s `platformName` spellings -> the `#if os(…)` family it builds as —
+    /// the SAME mapping `PackagePlatformsFinder.known` makes from the structural `.macOS(...)` spelling,
+    /// keyed by dump-package's own (lowercase, unspaced) names instead.
+    let known: [String: String] = [
+        "macos": "macOS", "ios": "iOS", "tvos": "tvOS", "watchos": "watchOS", "visionos": "visionOS",
+        "maccatalyst": "iOS",
+    ]
+    var families: Set<String> = []
+    for p in rawPlatforms {
+        guard let name = p["platformName"] as? String, let family = known[name] else { return nil }
+        families.insert(family)
+    }
+    return families.isEmpty ? nil : families
+}
+
 private final class PackagePlatformsFinder: SyntaxVisitor {
     var families: Set<String> = []
     var sawLiteral = false
