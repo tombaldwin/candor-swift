@@ -27,22 +27,38 @@ BIN="${CANDOR_SWIFT_BIN:-$ROOT/.build/debug/candor-swift}"
 WS="$(mktemp -d "${TMPDIR:-/tmp}/candor-swift-self-gate.XXXXXX")"
 trap 'rm -rf "$WS"' EXIT
 
-# The subprocess sites, by unit. All four are in main.swift and all are "run a tool again": the
+# The subprocess sites, by unit. All five are in main.swift and all are "run a tool again": the
 # `--workspace` chain spawns candor-swift itself on each dependency and reads the report back through
-# a Pipe (Exec + Ipc), and Xcode-scope resolution shells out via /usr/bin/env to resolve a target.
-# `<main>` is the top-level entry, which inherits both transitively — the same file, not a fifth site.
-# `<main>` IS declared, and the reason is a limit worth stating rather than papering over. The engine
-# folds every bare top-level statement in main.swift into that one synthetic unit — ~1.8k of its 2159
-# lines — so declaring it exempts all of them, and NOT declaring it fails on a clean tree (`<main>`
-# carries Exec/Ipc even in `direct`, because file-scope declarations fold in too). Measured both ways.
-# A unit-level check therefore cannot see a subprocess spawned by unbound top-level code, and the
-# earlier claim that this gate "fails on an Exec added anywhere in main.swift" was FALSE: the
-# demonstration behind it used a named `func`, which binds its own unit and IS caught.
+# a Pipe (Exec + Ipc), and `dumpSwiftPackageJSON` shells out to `swift package dump-package` via
+# /usr/bin/env — SwiftPM's own manifest loader, used as a last resort by TWO callers: Xcode-scope
+# resolution (a manifest the structural parser cannot follow at all) and SwiftPM `--target` platform
+# pruning (a `Package@swift-<version>.swift` version-specific manifest, where only the toolchain's own
+# loader can say which file governs — b6d3bf3).
+#
+# `dumpSwiftPackageJSON` used to be an anonymous closure inline inside `makeXcodeScopeFS`, so its
+# Exec/Ipc folded into that one unit with no name of its own. b6d3bf3 extracted it to a named top-level
+# function so the platform-pruning caller could reuse the exact same spawn instead of writing a second
+# one — ONE implementation of a process spawn that shells to the same command, per its own doc comment
+# — and a named function binds its own unit. `makeXcodeScopeFS` still shows Exec/Ipc (it still passes
+# `dumpSwiftPackageJSON` through as its `dumpPackage` field), so declaring the new unit is additive:
+# nothing here went stale. The subprocess call-site COUNT below is unchanged at 3 — the Process()
+# construction moved, it did not multiply — which is exactly the shape this unit check exists to catch
+# and the source ratchet alone cannot: a rename/extraction is invisible to a call-site count.
+#
+# `<main>` is the top-level entry, which inherits every declared unit's effects transitively — the same
+# file, not an extra site. `<main>` IS declared, and the reason is a limit worth stating rather than
+# papering over. The engine folds every bare top-level statement in main.swift into that one synthetic
+# unit — ~1.8k of its 2159 lines — so declaring it exempts all of them, and NOT declaring it fails on a
+# clean tree (`<main>` carries Exec/Ipc even in `direct`, because file-scope declarations fold in too).
+# Measured both ways. A unit-level check therefore cannot see a subprocess spawned by unbound top-level
+# code, and the earlier claim that this gate "fails on an Exec added anywhere in main.swift" was FALSE:
+# the demonstration behind it used a named `func`, which binds its own unit and IS caught.
 #
 # The SOURCE RATCHET below is what covers that gap. It is cruder than the unit check — it counts call
 # sites rather than reasoning about reachability — but it is the only thing here that can see a
 # `Process()` inside a bare `if` at file scope.
 DECLARED_SPAWN="<main>
+dumpSwiftPackageJSON
 makeXcodeScopeFS
 runRounds
 scopeToXcodeTarget"

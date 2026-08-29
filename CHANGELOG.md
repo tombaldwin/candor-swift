@@ -9,6 +9,22 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **CI fix, no behavioural change: the self-gate's declared subprocess-unit list (§7.12) fell behind
+  b6d3bf3.** That commit gave `swift package dump-package` its own top-level function,
+  `dumpSwiftPackageJSON`, so the SwiftPM `--target` platform-pruning path (version-specific manifests)
+  could reuse the exact same spawn that Xcode-scope resolution already used — one implementation of a
+  process spawn that shells to the same command, instead of a second copy. The spawn itself was already
+  covered (it lived as an anonymous closure folded into `makeXcodeScopeFS`'s unit), but naming it gave it
+  its own unit, and `ci/self-gate.sh`'s `DECLARED_SPAWN` list was never updated to match — so the self-gate
+  correctly caught its own engine's undeclared `Exec`/`Ipc` unit (AS-EFF-006) on every push since, CI red
+  for four consecutive commits. Ruled a declaration gap, not a code defect: the engine's actual subprocess
+  surface didn't grow (the source-ratchet call-site count stayed at 3 — the `Process()` construction moved
+  house, it didn't multiply), so `dumpSwiftPackageJSON` was added to `ci/self-gate.sh`'s declared list and
+  `.candor/policy`'s descriptive comment was updated to name it and both its callers. Verified: self-gate
+  passes clean; also confirmed no other change across the four red commits (`9ed6bb0`, `7378f4f`,
+  `10dc79e`, `7a89dbc`) touches `ci/self-gate.sh`, `.candor/policy`, or adds a `Process()` call site —
+  `9ed6bb0` had already fixed a separate, unrelated red cause (the spec-version drift gate).
+
 - ⚠ **FABRICATION, closed (safe direction, not a cardinal sin): a shared higher-order function's callback
   effects were charged to EVERY caller, not the one that actually passed them.** Found attacking the
   BACKLOG's "FABRICATION in ts and swift" entry against all four real engines: two callers of one HOF
