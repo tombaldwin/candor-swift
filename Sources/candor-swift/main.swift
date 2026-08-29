@@ -169,6 +169,17 @@ var scopeTarget: String? = nil
 // it is the process-boundary spelling of candor-rust's `ScanOpts.peek_excluded`, which that engine can
 // hold in a struct because its scan is a callable function and this engine's is top-level code.
 var peekListPath: String? = nil
+// ⟨file-set peek cross-file⟩ THE PEEK, CHILD SIDE — a SECOND internal flag, set only by this binary on
+// itself, alongside `--peek-excluded`. It names a file of newline-separated absolute paths: the files the
+// PARENT's own primary scan read (its `sourcePaths`), given to the child so a call FROM an excluded file
+// INTO one of these can resolve exactly as it would in an ordinary scan, instead of finding no local
+// declaration and vanishing. The child parses this list PLUS the `--peek-excluded` list — one bigger
+// `analyze()` call, same classifier — but `--peek-excluded`'s list remains the ONLY set the parent
+// attributes findings to (see the consumption loop's `peekable` filter below): a resolved effect is
+// reported only when the function that carries it was declared in an excluded file, never when it was
+// declared in one of these context files, which the main scan already judged. Optional for backward
+// compatibility with a hand-invoked `--peek-excluded` (no context ⇒ old narrow-resolution behaviour).
+var peekContextPath: String? = nil
 // ⟨scope travels⟩ what the `.xcodeproj` resolver learned, for the report envelope. See
 // `ReportModel.scope`: the verify that reads this report later has only a report and a plist, so
 // anything the scan knew about WHICH binary this is must be in the artifact or it is lost.
@@ -396,6 +407,14 @@ while let a = argIter.next() {
             refuseGateAndExit("candor-swift: --peek-excluded requires a value")
         }
         peekListPath = v
+    case "--peek-context":
+        // ⟨file-set peek cross-file⟩ INTERNAL (see `peekContextPath`). Same fail-closed shape as its
+        // `--peek-excluded` neighbour: a bare context flag that silently ate the next token would resolve
+        // calls against a corrupted file list rather than refusing.
+        guard let v = argIter.next(), !v.hasPrefix("-") else {
+            refuseGateAndExit("candor-swift: --peek-context requires a value")
+        }
+        peekContextPath = v
     case "--workspace", "--deps":
         // Auto-discover the target's LOCAL PATH dependencies (`.package(path:)` in Package.swift), scan
         // each into .candor/deps/ with protocol-CHA union entries, and chain them — so a cross-package
@@ -630,7 +649,22 @@ if let listFile = peekListPath {
         FileHandle.standardError.write("candor-swift: --peek-excluded: cannot read \(listFile)\n".data(using: .utf8)!)
         exit(2)
     }
-    sourcePaths = text.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+    var peekSet = Set(text.split(separator: "\n").map(String.init).filter { !$0.isEmpty })
+    // ⟨file-set peek cross-file⟩ THE RESOLUTION CONTEXT. Union in the parent's own `sourcePaths`, if
+    // given, so a call FROM one of the excluded files above INTO one of these resolves against a real
+    // local declaration exactly as the parent's own primary scan would see it — closing the cross-file
+    // blind spot filed in b6d3bf3 (candor-spec SPEC.md §2 ⟨0.29⟩ peek design). Attribution is unaffected:
+    // this widens what the child can RESOLVE, never what the parent REPORTS — the consumption loop below
+    // still filters every finding through `peekable` (the excluded list alone), so an effect that turns
+    // out to live entirely in a context file here is silently dropped there, not double-charged.
+    if let ctxFile = peekContextPath {
+        guard let ctxText = try? String(contentsOfFile: ctxFile, encoding: .utf8) else {
+            FileHandle.standardError.write("candor-swift: --peek-context: cannot read \(ctxFile)\n".data(using: .utf8)!)
+            exit(2)
+        }
+        peekSet.formUnion(ctxText.split(separator: "\n").map(String.init).filter { !$0.isEmpty })
+    }
+    sourcePaths = peekSet.sorted()
 } else if isDir.boolValue {
     if let en = fm.enumerator(atPath: target) {
         for case let rel as String in en {
@@ -2025,10 +2059,17 @@ if peekListPath == nil, let pp = policyPath {
             defer { try? fm.removeItem(at: peekDir) }
             try? fm.createDirectory(at: peekDir, withIntermediateDirectories: true)
             let listURL = peekDir.appendingPathComponent("files.txt")
+            // ⟨file-set peek cross-file⟩ THE RESOLUTION CONTEXT (see `peekContextPath`'s doc). This run's
+            // OWN `sourcePaths` — the files the primary scan actually read — written for the child to union
+            // with the excluded list above, so a call an excluded file makes into one of them resolves
+            // exactly as it would here. Written even when empty (a directory with nothing but excluded
+            // files) so the child always receives the flag consistently; an empty file unions in nothing.
+            let contextURL = peekDir.appendingPathComponent("context.txt")
             let absOf: (String) -> String = { (rootDir as NSString).appendingPathComponent($0) }
             do {
                 try peekable.map { absOf($0.path) }.joined(separator: "\n")
                     .write(to: listURL, atomically: true, encoding: .utf8)
+                try sourcePaths.joined(separator: "\n").write(to: contextURL, atomically: true, encoding: .utf8)
                 let child = Process()
                 // `Bundle.main.executablePath` FIRST, argv[0] only as the fallback. argv[0] is what the
                 // `--workspace` spawn beside this uses, and it is a relative name (`candor-swift`, no slash)
@@ -2036,7 +2077,8 @@ if peekListPath == nil, let pp = policyPath {
                 // loudly per dep; a peek failing there would go quiet, so it takes the absolute answer where
                 // one exists.
                 child.executableURL = URL(fileURLWithPath: Bundle.main.executablePath ?? CommandLine.arguments[0])
-                child.arguments = [target, "--peek-excluded", listURL.path, "--json"]
+                child.arguments = [target, "--peek-excluded", listURL.path,
+                                    "--peek-context", contextURL.path, "--json"]
                 let pipe = Pipe()
                 child.standardOutput = pipe
                 // The child's own stderr is DISCARDED. It is a second scan of the same tree and its
@@ -2082,17 +2124,22 @@ if peekListPath == nil, let pp = policyPath {
                 // up, one level down. `peeked` is per CLASS, so the answer is too: a class is peeked only when
                 // no file of that class went unread. The join goes through `candorAbsolutePath` for the same
                 // reason the `functions` loop below does — a raw string compare misses every time.
+                // ⟨file-set peek cross-file⟩ THE CHILD NOW READS TWO LISTS, NOT ONE: `peekable` (excluded,
+                // what this loop attributes) UNIONED with this run's own `sourcePaths` (context, given so a
+                // cross-file call can resolve — see `peekContextPath`). An unread path failing to match
+                // `peekable` therefore no longer implies a bug: it is the ORDINARY case for a context file,
+                // whose own readability is the primary scan's `unanalyzed` manifest to disclose, not the
+                // peek's. Only a path matching NEITHER list is genuinely unattributable and still fails
+                // closed across every excluded class, exactly as before this rung.
+                let contextAbs = Set(sourcePaths.map(candorAbsolutePath))
                 for u in (doc["unanalyzed"] as? [[String: Any]] ?? []) {
                     let unreadPath = u["path"] as? String ?? ""
                     if unreadPath.isEmpty { peekUnattributed = true; continue }
                     let abs = candorAbsolutePath(unreadPath.hasPrefix("/") ? unreadPath
                                                  : (rootDir as NSString).appendingPathComponent(unreadPath))
-                    // The child walks ONLY the list it was handed, so an unread path matching nothing on that
-                    // list is one this code cannot attribute — fail closed across every class rather than let
-                    // one unattributable file leave all of them claiming completeness.
                     if let hit = peekable.first(where: { candorAbsolutePath(absOf($0.path)) == abs }) {
                         peekUnread.insert(hit.cls)
-                    } else {
+                    } else if !contextAbs.contains(abs) {
                         peekUnattributed = true
                     }
                 }
@@ -2142,15 +2189,33 @@ if peekListPath == nil, let pp = policyPath {
                     let childLoc = String((f["loc"] as? String ?? "").split(separator: ":").first ?? "")
                     let childAbs = candorAbsolutePath(childLoc.hasPrefix("/") ? childLoc
                                                       : (rootDir as NSString).appendingPathComponent(childLoc))
-                    let hit = peekable.first { candorAbsolutePath(absOf($0.path)) == childAbs }
-                    let cls = hit?.cls ?? "excluded"
-                    found.append(OutOfScopeFinding(
-                        fn: f["fn"] as? String ?? "", path: hit?.path ?? childLoc,
-                        effects: hits.sorted(), cls: cls,
-                        reason: "OUTSIDE this scan's scope (\(cls)) — the gate did NOT judge it. "
-                              + "candor's ANALYSIS of that file reaches this effect; the gate did not "
-                              + "judge it, so the verdict is INCOMPLETE rather than a pass. (An analysis "
-                              + "result, not a claim about what the code does at runtime.)"))
+                    // ⟨file-set peek cross-file⟩ ATTRIBUTION now has three cases where there used to be two,
+                    // because the child's `functions` can hold a CONTEXT-file entry as well as an excluded
+                    // one. A precise match against `peekable` is unchanged (the ordinary case). A precise
+                    // match against `contextAbs` instead — this run's own `sourcePaths` — means an in-scope
+                    // function is carrying the effect, which the primary in-scope gate over the main report
+                    // already judges (or will): reporting it AGAIN here would attribute an in-scope finding
+                    // to the excluded slice, the ⟨0.29⟩ hardening rounds' attribution defect one level up, so
+                    // it is skipped. A match against NEITHER list keeps the pre-existing conservative
+                    // fallback — a generic "excluded" class — exactly as before this rung: an unattributable
+                    // path (a normalization edge case, not a context file) must never be silently dropped.
+                    if let hit = peekable.first(where: { candorAbsolutePath(absOf($0.path)) == childAbs }) {
+                        found.append(OutOfScopeFinding(
+                            fn: f["fn"] as? String ?? "", path: hit.path,
+                            effects: hits.sorted(), cls: hit.cls,
+                            reason: "OUTSIDE this scan's scope (\(hit.cls)) — the gate did NOT judge it. "
+                                  + "candor's ANALYSIS of that file reaches this effect; the gate did not "
+                                  + "judge it, so the verdict is INCOMPLETE rather than a pass. (An analysis "
+                                  + "result, not a claim about what the code does at runtime.)"))
+                    } else if !contextAbs.contains(childAbs) {
+                        found.append(OutOfScopeFinding(
+                            fn: f["fn"] as? String ?? "", path: childLoc,
+                            effects: hits.sorted(), cls: "excluded",
+                            reason: "OUTSIDE this scan's scope (excluded) — the gate did NOT judge it. "
+                                  + "candor's ANALYSIS of that file reaches this effect; the gate did not "
+                                  + "judge it, so the verdict is INCOMPLETE rather than a pass. (An analysis "
+                                  + "result, not a claim about what the code does at runtime.)"))
+                    }
                 }
                 found.sort { ($0.path, $0.fn) < ($1.path, $1.fn) }
             } catch {

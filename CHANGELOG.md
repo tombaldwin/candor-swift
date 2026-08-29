@@ -9,6 +9,38 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **CARDINAL SIN, closed: the ⟨0.29⟩ peek's CROSS-FILE BLIND SPOT filed as "Cause B" below (latent
+  since ⟨0.29⟩, applying to all five `PEEKED_CLASSES`).** The peek re-scans an excluded file in a CHILD
+  PROCESS given only the excluded list (`--peek-excluded`), so when the excluded file's own effect reaches
+  ONLY through a call into a file that stayed IN SCOPE, the child has no local declaration for the callee
+  and the call resolves to nothing. **This is a false all-clear, not merely a disclosure gap**: settled
+  first, before any fix, on a fixture where a genuinely-excluded test-source file (`import XCTest`, no bug
+  in the exclusion) calls a normal in-scope `Helper.reachOut` performing `Net`, under a rule scoped so only
+  the excluded caller matches (`deny Net Runner`) — the in-scope callee is never independently judged, so
+  the ONLY route to a verdict is the peek. MEASURED against the pre-fix binary: `exit 0`, `candor-swift:
+  policy ✓`, `outOfScope: []` — the ⟨0.30⟩ INCOMPLETE machinery never fires because the finding it keys on
+  was never produced by the child in the first place (`--peek-excluded` alone against the caller's file:
+  `analyzed.count: 1`, `functions: []` — the function is ABSENT, not `Unknown`).
+  Fixed by giving the child a SECOND file list rather than re-deriving anything: the parent now also writes
+  its own `sourcePaths` (the files its PRIMARY scan actually read) and hands the child both
+  (`--peek-excluded` + the new internal `--peek-context`, main.swift). The child unions them for one
+  `analyze()` call, so a call from an excluded file into a context file resolves exactly as it would in an
+  ordinary scan — reusing the SAME blind-module/`Unknown` machinery an ordinary scan already has, for free.
+  Attribution is unchanged: the parent's consumption loop still requires a MATCH against the original
+  excluded list before reporting a finding, so an in-scope function that happens to satisfy a scope-matching
+  rule is judged by the primary gate as it always was, never double-reported under the excluded slice's
+  identity — a dedicated fixture (broad `deny Net`, matching both the excluded caller and the in-scope
+  callee) pins that `outOfScope` names only the former.
+  Four controls, falsified against the pre-fix binary: the defect fixture above now answers `exit 2`,
+  `outOfScope` naming the excluded caller with `Net`, attributed to its real class (over-charge control:
+  an excluded file with NO cross-file reach — direct effect entirely inside itself — produces a
+  BYTE-IDENTICAL report and gate document to the pre-fix binary); the attribution fixture above (the
+  control that matters most); and 30 excluded callers into one shared in-scope helper all resolve correctly
+  in well under a second, nowhere near the peek's existing 120s child-process deadline. Five new process
+  tests (`PeekCrossFileResolutionProcessTests.swift`) pin the mechanism (the child alone, given no context,
+  still loses the call — documenting exactly what `--peek-context` closes) and all four controls. All 920
+  XCTest cases, `smoke.sh` (148), `fabrication_probe.py` and `fuzz.py` pass.
+
 - ⚠ **CARDINAL SIN, closed same-day: the entry below's SwiftPM platform pruning read `Package.swift`
   unconditionally, ignoring SwiftPM's VERSION-SPECIFIC MANIFESTS (`Package@swift-<version>.swift`), which
   OVERRIDE the base file outright when the active toolchain qualifies.** Reproduced with a control before
