@@ -1,15 +1,17 @@
 # candor-swift self-gate (SPEC §7.12): the analyzer reads source and writes reports — Fs/Env are its
 # job. It must never reach the network or a database — anywhere, ever.
 #
-# It spawns a subprocess in exactly one FILE, main.swift, and both uses are "run a tool again": the
+# It spawns a subprocess in exactly one FILE, main.swift, and every use is "run a tool again": the
 # `--workspace` chain spawns candor-swift itself on each workspace dependency and reads the report back
-# through a Pipe (Exec + Ipc), and Xcode-scope resolution shells out via `/usr/bin/env` to resolve a
-# target. Those are the feature, not a hidden effect.
+# through a Pipe (Exec + Ipc), and `dumpSwiftPackageJSON` shells out to `swift package dump-package` via
+# `/usr/bin/env` — SwiftPM's own manifest loader, reused (one implementation, not two) by both Xcode-scope
+# resolution and SwiftPM `--target` platform pruning across a version-specific manifest (b6d3bf3). Those
+# are the feature, not a hidden effect.
 #
 # A prefix deny cannot say "deny Exec everywhere except main.swift", so `ci/self-gate.sh` proves the
 # two halves separately (candor-java and candor-ts split the same problem the same way):
 #   (1) the WHOLE engine under THIS policy — no Net, no Db, with no file excluded;
-#   (2) the Exec/Ipc-performing units are EXACTLY the four declared in that script — so a new
+#   (2) the Exec/Ipc-performing units are EXACTLY the five declared in that script — so a new
 #       subprocess anywhere in the engine fails the gate, main.swift included.
 #
 # WHY `deny Net Db` AND NOT `deny Net Db Exec Ipc`. The stricter string used to live here, and CI made
