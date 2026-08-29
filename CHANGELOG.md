@@ -9,6 +9,73 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **CARDINAL SIN, closed same-day: the entry below's SwiftPM platform pruning read `Package.swift`
+  unconditionally, ignoring SwiftPM's VERSION-SPECIFIC MANIFESTS (`Package@swift-<version>.swift`), which
+  OVERRIDE the base file outright when the active toolchain qualifies.** Reproduced with a control before
+  fixing: `Package.swift` declaring `platforms: [.macOS(.v10_15)]` beside `Package@swift-6.0.swift`
+  declaring `platforms: [.macOS(.v10_15), .visionOS(.v1)]`, a `#if os(visionOS)` function reaching `Fs`
+  through a helper in a SEPARATE, always-in-scope file, under `deny Fs doVision` — the unscoped control
+  caught it (`AS-EFF-006`, exit 1) and `--target Widget` answered `candor: nothing hidden` / `policy ✓` at
+  exit 0, because the base-only read proved a platform restriction that was not the one governing the
+  build and pruned live code. `grep -rn "Package@swift" Sources/` returned nothing before this fix — the
+  version-specific-manifest rule had no counterpart anywhere in this engine.
+  TWO compounding causes, only the first fixed here. **Cause A (fixed):** no structural parse of a single
+  file on disk can answer "which manifest governs" — that depends on the toolchain actually invoking the
+  build, which only the toolchain's own manifest loader can determine. Fixed by asking SwiftPM itself:
+  whenever a `Package@swift-*.swift` file exists beside `Package.swift` at all, `dumpSwiftPackageJSON`
+  (main.swift, factored out of the existing `.xcodeproj`-resolver `dump-package` fallback so both share
+  ONE process-spawn implementation) runs `swift package dump-package`, and a new
+  `parsePackagePlatformFamilies(dumpPackageJSON:)` (PackageTargets.swift) reads its resolved `platforms`
+  array into the SAME family vocabulary the structural parser already produces. A structural read of
+  `Package.swift` alone continues, UNCHANGED, whenever no version-specific manifest exists — the common
+  case, and every existing control for it is untouched. FAILS CLOSED exactly like its structural sibling:
+  no `platforms` key, an empty array (SwiftPM's own default of "every platform"), an unmappable
+  `platformName`, or `dump-package` itself failing to run or execute (no toolchain, or a version-specific
+  manifest SwiftPM selects but cannot compile) all collapse to `nil` — prune nothing, never a guess that
+  falls back to trusting the base manifest, which is the exact defect this closes.
+  **Cause B (bounded, not fixed): the ⟨0.29⟩ peek safety net that should have caught cause A as a
+  worst-case backstop has a CROSS-FILE BLIND SPOT that this release still ships with.** The peek re-scans
+  every `PEEKED_CLASSES` exclusion (`manifest`, `harness-target`, `test-source`,
+  `outside-the-target-closure`, `platform-pruned`) in a CHILD PROCESS given ONLY the excluded file list
+  (main.swift's `--peek-excluded`) — by design, so the child's answer is provably about the excluded set
+  and nothing else. When an excluded file reaches an effect ONLY through a call into a file that stayed
+  IN SCOPE, the child cannot resolve that call: MEASURED, the isolated child does not even report the
+  caller with `inferred: ["Unknown"]` — the function is ABSENT from `functions` entirely, the same as a
+  provably-pure function, so `outOfScope` stays `[]` and a gate reads `policy ✓` over code the peek never
+  actually judged. This is not new to this fix or unique to `platform-pruned` — it is a property of the
+  peek's child-process isolation itself, latent since ⟨0.29⟩, and it applies uniformly to all five peeked
+  classes. It was invisible until now because no prior peekable exclusion routed its only effect through
+  an in-scope helper; cause A's bug was the first trigger anyone measured. Closing cause A removes THIS
+  trigger (the wrongly-excluded file no longer exists, so nothing is peeked in isolation for this
+  fixture), but the blind spot itself remains open for any future exclusion whose effect crosses into
+  in-scope code, and is FILED rather than fixed here — closing it would mean giving the peek child the
+  full closure as resolution context while still attributing findings only to the excluded slice, which
+  is a materially different design than "same walk-free entry, exact excluded set" the peek was built on,
+  and risks reintroducing the timeout/attribution defects the ⟨0.29⟩ hardening rounds already closed.
+  **The `.xcodeproj` path does NOT share cause A.** Its own platform pruning (`xcodeTargetScope`,
+  XcodeTargets.swift) never reads a package manifest's `platforms:` at all, base or version-specific — it
+  derives its single platform purely from the Xcode target's own SDKROOT build setting and checks
+  `#if os(…)` against that ONE concrete value, which is not a question SwiftPM's version-specific-manifest
+  selection has any bearing on. It DOES still hardcode `Package.swift` for a local package's own
+  targets/products/dependencies (not platforms) when resolving `--target`'s dependency closure — an
+  adjacent, pre-existing, UNFIXED gap shared with this same engine's `--target` target-closure resolution
+  (`declaredSPM`/`targetClosure`, PackageTargets.swift/main.swift), reported here rather than fixed:
+  reading a local package's own version-specific manifest for its declared target/product graph is a
+  different, wider change than the platform-family read this entry closes.
+  Four controls, falsified against the pre-fix binary before this fix existed: the reported cross-file
+  shape now catches the violation (was exit 0 `policy ✓`, now exit 1 `AS-EFF-006`); a package with NO
+  version-specific manifest and genuinely platform-dead code still prunes it, byte-identical to the entry
+  below (over-charge control); `#if os(macOS)` code in a package that supports macOS stays live and still
+  fires as an ordinary violation (the control that matters most); a `Package@swift-*.swift` that NARROWS
+  the platform set — the base declares iOS, the overlay does not — is also read correctly and prunes what
+  the overlay drops (INCOMPLETE, exit 2, via the peek). A fifth control pins the fail-closed path itself:
+  a version-specific manifest SwiftPM selects but cannot execute (a real compile error) prunes nothing,
+  keeping the gated code live rather than falling back to the base manifest's wider platform set.
+  Four new process tests (`SwiftPMVersionSpecificManifestProcessTests`, SwiftPMPlatformPrunedProcessTests.swift)
+  pin the widening case, the narrowing case, the fail-closed-on-unexecutable-overlay case, and the exact
+  reported cross-file shape end to end. All 915 XCTest cases, `smoke.sh` (148), `fabrication_probe.py` and
+  `fuzz.py` pass.
+
 - ⚠ **`--target` platform pruning now covers SwiftPM, not just `.xcodeproj` — candor BACKLOG.md's A4:
   the previous entry below split `platform-pruned` out of `xcodeTargetScope`, but that machinery lived
   ONLY behind the `.xcodeproj` resolver (XcodeTargets.swift); `PackageTargets.swift`, the SwiftPM half of

@@ -33,7 +33,7 @@ let engineVersion = "candor-swift-0.33.1"
 let releaseVersion = engineVersion.replacingOccurrences(of: "candor-swift-", with: "")
 // The spec contract version this engine speaks — the SAME literal that stamps the §2 envelope's `spec`
 // field (see the envelope below), reused so `--version` and the report can never disagree.
-let specVersion = "0.33"
+let specVersion = "0.34"
 
 // `parsepolicy <file>` — dump the parsed §6.2 policy as canonical JSON, the SAME shape candor-java's
 // Query.policyJson / candor-query / candor-ts emit: {"deny":[{effects,scope}], "allow":[{effect,scope,
@@ -702,6 +702,33 @@ if noSources {
 // plus Xcode 16 synchronized folders with their per-target membership exceptions, plus the in-project
 // dependency closure. Same refusal contract as the SPM path — every failure exits 2, because a
 // half-resolved scope is a purity claim over the files it silently dropped.
+/// `swift package dump-package --package-path <dir>` as JSON text, or nil when unavailable — SwiftPM
+/// itself reading a manifest, for whichever of this engine's TWO reasons needs SwiftPM's own answer
+/// rather than a structural one: a manifest the structural parser cannot follow at all (targets built by
+/// helper functions over hoisted arrays — WordPress's Modules), or one where a structural parse of a
+/// SINGLE file cannot be trusted because a VERSION-SPECIFIC manifest (`Package@swift-<version>.swift`)
+/// means SwiftPM's real answer depends on the toolchain actually invoking the build. This EXECUTES the
+/// manifest, which is why every caller treats it as a last resort and discloses when it was reached. No
+/// toolchain ⇒ nil ⇒ every caller's own "cannot be proven" refusal fires downstream.
+///
+/// ONE IMPLEMENTATION for both reasons: a second copy of a process spawn that shells to the same command
+/// is a second set of answers about the same manifest, and the two callers must never disagree about how
+/// `swift` is found (`/usr/bin/env swift`, PATH-resolved — never an absolute guess at an install location).
+func dumpSwiftPackageJSON(_ dir: String) -> String? {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    p.arguments = ["swift", "package", "dump-package", "--package-path", dir]
+    let out = Pipe(), err = Pipe()
+    p.standardOutput = out
+    p.standardError = err
+    guard (try? p.run()) != nil else { return nil }
+    let data = out.fileHandleForReading.readDataToEndOfFile()
+    _ = err.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    guard p.terminationStatus == 0 else { return nil }
+    return String(data: data, encoding: .utf8)
+}
+
 /// The filesystem the Xcode resolver reads through — ONE construction, used by the `--target`
 /// path and the whole-repo pass. It was inline in the first and would have been copied into the
 /// second; a second copy of a filesystem stub is a second set of answers about the same disk.
@@ -727,25 +754,7 @@ func makeXcodeScopeFS() -> XcodeScopeFS {
                     .filter(isDirectory)
             },
             directoryExists: isDirectory,
-            dumpPackage: { dir in
-                // `swift package dump-package`: SwiftPM itself reading a manifest the structural
-                // parser proved it cannot (targets built by helper functions over hoisted arrays —
-                // WordPress's Modules). This EXECUTES the manifest, which is why it is a last resort,
-                // is disclosed in the scope note, and is never reached for a manifest the structural
-                // parse fully reads. No toolchain ⇒ nil ⇒ the resolution refuses loudly downstream.
-                let p = Process()
-                p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-                p.arguments = ["swift", "package", "dump-package", "--package-path", dir]
-                let out = Pipe(), err = Pipe()
-                p.standardOutput = out
-                p.standardError = err
-                guard (try? p.run()) != nil else { return nil }
-                let data = out.fileHandleForReading.readDataToEndOfFile()
-                _ = err.fileHandleForReading.readDataToEndOfFile()
-                p.waitUntilExit()
-                guard p.terminationStatus == 0 else { return nil }
-                return String(data: data, encoding: .utf8)
-            })
+            dumpPackage: dumpSwiftPackageJSON)
 }
 
 /// Fold resolved Xcode scopes into the two PER-FILE maps the driver consults: which local package
@@ -1119,7 +1128,33 @@ if let want = scopeTarget {
         // unreadable one, and nothing is pruned in either case: this feature must fail toward keeping too
         // much, never too little, exactly as the Xcode side already does when `inferPlatform` finds no
         // SDKROOT.
-        let platformFamilies = manifestSrc.flatMap(parsePackagePlatformFamilies(manifestSource:))
+        //
+        // ⟨cross-file / version-manifest⟩ …BUT `Package.swift` is not always the manifest SwiftPM will
+        // actually build from. SwiftPM's documented version-specific-manifest-selection rule lets a
+        // `Package@swift-<version>.swift` OVERRIDE the base file outright, picking whichever candidate —
+        // base included — has the HIGHEST declared version not exceeding the toolchain that actually
+        // invokes the build. Whether that toolchain qualifies is not something a structural parse of any
+        // ONE file on disk can answer — only the toolchain's own manifest loader can, by running it.
+        // Measured: `Package.swift` declaring `platforms: [.macOS(.v10_15)]` beside
+        // `Package@swift-6.0.swift` declaring `platforms: [.macOS(.v10_15), .visionOS(.v1)]` has a
+        // visionOS-gated function that is genuinely LIVE on any toolchain >= 6.0 — reading only the base
+        // manifest proved a platform restriction that was not the one governing the build, and pruned
+        // live code a real `deny Fs` gate should have caught (AS-EFF-006, silently exit 0 instead of 1).
+        //
+        // So: a structural read of `Package.swift` alone is only trustworthy when NO version-specific
+        // manifest exists at all. The moment one does, this reaches for `swift package dump-package` —
+        // SwiftPM's OWN manifest loader, the one sound authority for which file governs and what it
+        // declares, exactly as `dumpPackage` is already the last resort for a manifest the structural
+        // parser cannot follow (XcodeTargets.swift). A structural read of the BASE file is not even
+        // attempted in that case: it could be answering about a manifest that will not be the one built.
+        // `dumpSwiftPackageJSON` returning nil (no toolchain, a failed process, unparseable output) falls
+        // through to `parsePackagePlatformFamilies(dumpPackageJSON:)`'s own nil, which this feature reads
+        // exactly like "cannot be proven" everywhere else: prune nothing.
+        let hasVersionSpecificManifest = ((try? fm.contentsOfDirectory(atPath: rootDir)) ?? [])
+            .contains { $0.hasPrefix("Package@swift-") && $0.hasSuffix(".swift") }
+        let platformFamilies: Set<String>? = hasVersionSpecificManifest
+            ? dumpSwiftPackageJSON(rootDir).flatMap(parsePackagePlatformFamilies(dumpPackageJSON:))
+            : manifestSrc.flatMap(parsePackagePlatformFamilies(manifestSource:))
         var platformPrunedHere = 0
         if let platformFamilies {
             sourcePaths = sourcePaths.filter { p in
