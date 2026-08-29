@@ -9,6 +9,47 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **Test-quality fix, no production change: `ec3e50f` (R61, the three-mechanism FFI-fallback fix) shipped
+  with zero committed tests.** Reproduced directly, per candor's corpus-brief "revert test": reverting
+  `ec3e50f`'s entire production diff (`Classifier.swift`, `CallCollector.swift`, `DeclCollector.swift`,
+  `Driver.swift`) in an isolated worktree left all 934 XCTest cases, `smoke.sh`, `fabrication_probe.py` and
+  `fuzz.py` green. Every existing `native:dlopen` fixture (`AdvisoryBoundProcessTests`,
+  `GateReportVerbProcessTests`, `ScopedUnknownRemedyProcessTests`) hand-writes a JSON report string and
+  feeds it straight to `gate`/`fix-gate`/`unverified` — a downstream CONSUMER of a disclosure, never the
+  scan that must produce one — so none of them could have noticed the fix's absence.
+  New file `OpaqueFFIFallbackProcessTests.swift` drives the real binary over real source for each of the
+  three independent mechanisms and asserts the scan-produced `functions`/`unknownWhy` disclosure:
+  1. `@_silgen_name`/`@_extern` bodyless C-symbol linkage — `c_system` itself reads `Unknown` +
+     `native:system`, its caller inherits `Unknown` with no `unknownWhy` (SPEC §4 direct-only), and
+     `deny Unknown` now fails the tree. Over-charge control: an ordinary bodyless PROTOCOL REQUIREMENT
+     (not FFI-linked) stays absent from `functions`, and its caller keeps its own `dispatch:` reason,
+     never a relabelled `native:`.
+  2. `dlsym`/`unsafeBitCast` → invocation — an opaque pointer arriving as a plain parameter (no
+     `dlopen`/`dlsym` call in sight, isolating this mechanism from #3) discloses `Unknown`/`callback:fn`
+     once actually called. Over-charge control: `unsafeBitCast`ing `dlopen`'s result without ever
+     CALLING it gains nothing beyond the dlopen call's own `native:dlopen` — the bitcast alone is not a
+     boundary crossing.
+  3. the raw-syscall allowlist under a `C_PLATFORM_MODULES` import — a raw `system(...)` call under
+     `import Darwin`, unresolved against any project declaration, discloses `Unknown`/`native:system`,
+     and `deny Unknown` now fails the tree. Over-charge control: a project-LOCAL `system(_:)` sharing the
+     allowlisted name resolves to itself and stays pure — the allowlist is a terminal fallback, reached
+     only after every real resolution arm has already failed, never a name match that jumps the queue.
+  Each of the three production hunks is independently owned by exactly one mechanism (fix 1:
+  `DeclCollector.swift`'s `ffiNative` plus `Driver.swift`'s body-nil guard; fix 2: `CallCollector.swift`'s
+  `unsafeBitCast` detection alone; fix 3: `Classifier.swift`'s two new constants, `Driver.swift`'s
+  `NATIVE_DISCLOSURE_C_FREE_FNS` branch, and `CallCollector.swift`'s `argRef` flag), so each was reverted
+  ALONE in its own isolated worktree: reverting fix 1 turns red exactly its own two tests (the defect
+  assertion and its `deny Unknown` gate check) and nothing else; reverting fix 2 turns red exactly its
+  own defect assertion; reverting fix 3 turns red exactly its own defect assertion, its own gate check,
+  and the fix-2 over-charge control (which itself asserts fix 3's `native:dlopen` disclosure, so its
+  failure here is the correct coupling, not a leak). In every one of the three isolated reverts, all 934
+  pre-existing XCTest cases stayed green — confirmed by running the full suite against each, not merely
+  the new file. candor-spec's conformance PART 79 (2026-08-28) independently pins mechanisms 1 and 3
+  cross-engine (`swift-defect-silgen`, `swift-defect-rawc`) against candor-rust's equivalent seam, but
+  that suite does not run in this repo's own CI and has no fixture at all for mechanism 2
+  (`dlsym`/`unsafeBitCast`) — so all three get a local pin here regardless of PART 79's cross-engine
+  coverage.
+
 - **Test-quality fix, no production change: `testSiblingCallIntoAHOFStillGetsJudged` (added in 7a89dbc for
   the `callersOf` back-fill) could not tell that fix from its absence.** Both its callers reach the shared
   HOF through an UNTRACKED sibling call, so `callsiteArgs[fq]` is empty for both and the per-fq loop's
