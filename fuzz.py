@@ -96,10 +96,19 @@ def gen(seed):
                          f"func via{i}(_ x: P{i}) {{ x.go() }}\n"
                          f"func {me}() {{ via{i}(I{i}()) }}")
         elif form == "callback_recv":
-            # the effect reaches `recv` ONLY through a callback param it invokes -> Unknown required
+            # the effect reaches `recv` ONLY through a callback param it invokes -> Unknown required.
+            # ⟨0.34⟩ PER-CALLER, not per-target (BACKLOG "a shared HOF's effects are charged to EVERY
+            # caller"): the Unknown for an unresolvable (closure-literal) callback arg now attributes to
+            # the CALLER that made that specific call (`me`), never to the shared `recv{i}` helper.
+            # `recv{i}` is called from exactly ONE site in this generator, so this form alone can't tell
+            # a per-target fix from a per-call-site one apart — that needs a MULTI-caller seed, which is
+            # deliberately not added here (see the BACKLOG note on the generator's one-caller-per-HOF
+            # blind spot; a multi-caller form would need its own dedicated seed, not a retrofit here).
+            # `me` also carries the closure body's real effect via ordinary lexical attribution, so it
+            # must show BOTH; `recv{i}` itself is now correctly pure in isolation.
             bodies[i] = (f"func recv{i}(_ cb: () -> Void) {{ cb() }}\n"
                          f"func {me}() {{ recv{i}({{ {callee}() }}) }}")
-            expect_unknown.add(f"recv{i}")
+            expect_unknown.add(me)
         elif form == "computed_prop":
             # the accessor hole: a computed GETTER's body must be a unit, and reading the
             # property must edge to it

@@ -9,6 +9,42 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **FABRICATION, closed (safe direction, not a cardinal sin): a shared higher-order function's callback
+  effects were charged to EVERY caller, not the one that actually passed them.** Found attacking the
+  BACKLOG's "FABRICATION in ts and swift" entry against all four real engines: two callers of one HOF
+  (`hof(sinkA)` doing `Fs`, `hof(sinkB)` pure) both read `[Fs]` — `sinkB`'s caller fabricated an effect it
+  never reaches, and the scan-note diagnostic named the false path (`"callerB performs Fs, 2 hops away via
+  sinkA"` — a call `callerB` never makes). java's method-reference resolution already proved this was
+  solvable, not inherent to a syntactic scan. Root cause: the deferred callback-flow resolver (Driver.swift,
+  "a fn-typed-param invocation drops its Unknown iff EVERY visible call site …") judged every call site into
+  the shared HOF as ONE pool and, when every site resolved to a named function, edged the UNION of every
+  resolved target onto the HOF's OWN node — which every caller inherits via the ordinary call edge, so two
+  callers passing two different named callbacks each inherited the OTHER's target too. Fixed by moving the
+  judgment to PER CALLER: `callsiteArgs` now carries the calling function alongside each site, and a
+  resolvable named callback edges straight from the CALLER to the target (never through the shared HOF's
+  node); an unresolvable one (a closure literal, a dynamically-chosen value, a missing arg) attributes
+  `Unknown` directly to that caller. Chose the bare-`Unknown` shape (rust's, not java's `effect+Unknown`
+  hedge) because it is what this exact resolver already did pre-fix for the whole-target case — moving an
+  existing shape to the right scope, not choosing a new one. **The under-report guard this fix could have
+  broken:** a caller reaching the HOF through an edge-adding branch that predates callsiteArgs tracking
+  (an unqualified SIBLING-method call, an overloaded-sibling/init resolution, a CHA/protocol-default union
+  edge — several exist, because the old per-target design never needed a caller list) escaped the per-caller
+  judgment entirely in the first cut and silently kept NOTHING instead of the Unknown it deserved — caught
+  auditing the fix against a live corpus, not by any existing test. Closed with `callersOf`, a reverse index
+  built from the same call-edge graph `propagate` itself trusts, so every caller reaching the HOF is judged
+  whether `callsiteArgs` tracked its site or not. Two new deterministic pins
+  (`testTwoCallersOfOneHOFResolveIndependently`, `testSiblingCallIntoAHOFStillGetsJudged`) and
+  `fuzz.py`'s `callback_recv` form updated to match (the Unknown now pins to the CALLER, not the shared
+  `recv{i}` helper — its own comment now names why this generator's one-caller-per-HOF convention can't
+  distinguish a per-target fix from a per-call-site one, and that a multi-caller seed is the one that would).
+  `fabrication_probe.py` did not catch this: its scope is TYPE-MEMBER classification (a pure accessor vs. an
+  effectful call on a platform handle), not call-graph/callback attribution — a different axis entirely, and
+  not a gap in it. Regression-controlled against two real Swift packages used heavily for HOFs
+  (swift-algorithms, swift-collections; 492 and 4965 analyzed units): every difference in both reports is a
+  self-attributed `callback:` `Unknown` moving OFF the shared HOF's own node (now correctly pure in
+  isolation) with zero new disclosures and zero effect losses elsewhere — hand-verified functionally
+  identical except for the intended precision gain.
+
 - ⚠ **CARDINAL SIN, closed: R33's deinit-glue (a `let`/`var` local bound to a fresh construction charges the
   type's effectful `deinit` at scope exit, mirroring rust's `Drop`-glue) only ever fired for the ONE binder
   shape it was written against — a name with NO type annotation (`let x = Loud(path)`) — and silently missed
