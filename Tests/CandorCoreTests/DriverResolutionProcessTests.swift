@@ -216,15 +216,17 @@ final class DriverResolutionProcessTests: XCTestCase {
         XCTAssertNil(by["hof"], "the shared HOF carries no effect of its own — it belongs to its callers")
     }
 
-    // an UNQUALIFIED SIBLING call into a HOF (implicit self — the swift-collections `_read { … }`
-    // shape) must still be judged, even though that call-edging branch never records a `callsiteArgs`
-    // site (true of several branches — sibling/init/overloaded-sibling resolution, CHA/protocol-default
-    // union edges). The first cut of the per-caller fix judged ONLY tracked callers and silently DROPPED
-    // an untracked one's Unknown instead of moving it — a false all-clear caught auditing the fix
-    // against swift-collections (`BitSet.contains` briefly read pure). `callersOf` (built from the same
-    // `edges` graph `propagate` trusts) closes the gap: every caller with a plain edge into the HOF is
-    // judged, tracked by `callsiteArgs` or not.
-    func testSiblingCallIntoAHOFStillGetsJudged() throws {
+    // NON-DISCRIMINATING COMPANION — kept because its assertions are true, but its name used to claim
+    // coverage it doesn't provide. Both callers here reach `hof` through an UNTRACKED sibling call, so
+    // `callsiteArgs[fq]` is empty for BOTH and the per-fq loop's `byCaller` is empty too — which takes
+    // the OLD whole-target fallback (`direct[fq]` gets Unknown, inherited by every caller through the
+    // ordinary call edge) REGARDLESS of whether `callersOf`'s back-fill exists. Deleting the `callersOf`
+    // guard leaves this test green: verified directly, `swift test` still reports 0 failures with the
+    // guard removed. It still pins a real, narrower invariant — an untracked call site is not silently
+    // skipped WHEN NO OTHER caller of the same HOF is tracked — so it stays as a companion, renamed so
+    // it no longer reads as proof the back-fill works. `testUntrackedCallerOfAHOFWithATrackedSiblingStillGetsJudged`
+    // below is the test that actually discriminates the back-fill from its absence.
+    func testAllUntrackedSiblingCallersOfAHOFEachReadUnknown() throws {
         let by = try scan("""
         import Foundation
         struct Box {
@@ -238,6 +240,45 @@ final class DriverResolutionProcessTests: XCTestCase {
         XCTAssertEqual(ProcessHarness.inferred(by, "Box.callerB"), ["Unknown"],
                        "an untracked (sibling-call) caller must still be judged — dropping its Unknown "
                        + "silently is the false all-clear this guards against")
+    }
+
+    // THE DISCRIMINATING TEST for the `callersOf` back-fill. The companion above cannot tell this fix
+    // from its absence because BOTH its callers are untracked, so the pre-existing whole-target fallback
+    // (Unknown on `fq` itself, inherited by every caller via the ordinary call edge) produces the same
+    // answer with or without `callersOf`. The back-fill only matters once `byCaller` is non-empty for a
+    // reason OTHER than the untracked caller — i.e. some OTHER caller into the same HOF resolved through
+    // a TRACKED call site — because then the per-fq loop skips the whole-target fallback and iterates
+    // only `byCaller`'s keys directly. WITH `callersOf`, the untracked sibling is back-filled into
+    // `byCaller` (with no recorded sites, so it still reads Unknown). WITHOUT it, that caller is never
+    // added to `byCaller` at all: the loop never visits it, `fq` itself carries no effect of its own, and
+    // the caller inherits nothing through the ordinary edge — it VANISHES FROM THE REPORT ENTIRELY
+    // (silent-pure), not merely a changed effect value.
+    //
+    // `callerA` reaches `hof` through an EXPLICIT RECEIVER (`box.hof(sinkA)`, a typed call site —
+    // TRACKED by `callsiteArgs`), which is what makes `byCaller` non-empty for a reason independent of
+    // `callerB`. `callerB` reaches the SAME `hof` through an UNQUALIFIED SIBLING call from inside `Box`
+    // (untracked — the companion test's shape) passing a PURE callback, so if it silently drops instead
+    // of reading Unknown it disappears from `by` rather than merely changing value — asserted directly
+    // below, not just through a value comparison that a `nil` would also fail.
+    func testUntrackedCallerOfAHOFWithATrackedSiblingStillGetsJudged() throws {
+        let by = try scan("""
+        import Foundation
+        func sinkA() { _ = FileManager.default.contents(atPath: "/a") }
+        func sinkB() { }
+        struct Box {
+            func hof(_ cb: () -> Void) { cb() }
+            func callerB() { hof(sinkB) }
+        }
+        func callerA(_ box: Box) { box.hof(sinkA) }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "callerA"), ["Fs"],
+                       "the tracked caller resolves the named callback and inherits its Fs")
+        XCTAssertNotNil(by["Box.callerB"],
+                        "the untracked sibling caller must still appear in the report AT ALL — its "
+                        + "disappearance, not merely a wrong effect value, is the bug callersOf guards against")
+        XCTAssertEqual(ProcessHarness.inferred(by, "Box.callerB"), ["Unknown"],
+                       "an untracked caller reaching a HOF that ALSO has a tracked caller must still read "
+                       + "Unknown, not silently vanish from the report")
     }
 
     func testClosureLiteralArgStaysOpaque() throws {

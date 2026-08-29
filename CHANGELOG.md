@@ -9,6 +9,27 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **Test-quality fix, no production change: `testSiblingCallIntoAHOFStillGetsJudged` (added in 7a89dbc for
+  the `callersOf` back-fill) could not tell that fix from its absence.** Both its callers reach the shared
+  HOF through an UNTRACKED sibling call, so `callsiteArgs[fq]` is empty for both and the per-fq loop's
+  `byCaller` is empty too — which takes the OLD whole-target fallback (Unknown seeded on the HOF's own
+  node, inherited by every caller through the ordinary call edge) regardless of whether `callersOf`'s
+  back-fill exists. Verified directly: deleting the `callersOf` guard line leaves all 933 XCTest cases,
+  `smoke.sh`, `fabrication_probe.py` and `fuzz.py` green, including this test unchanged. The back-fill only
+  matters once some OTHER caller into the same HOF is TRACKED (an explicit-receiver call site,
+  `callsiteArgs` records it) — the per-fq loop then skips the whole-target fallback and iterates only
+  `byCaller`'s keys directly, so an untracked sibling caller that `callersOf` does not add back in is never
+  visited at all and VANISHES FROM THE REPORT ENTIRELY (silent-pure) rather than merely reading a wrong
+  effect. New test `testUntrackedCallerOfAHOFWithATrackedSiblingStillGetsJudged`
+  (DriverResolutionProcessTests.swift) pins exactly that shape — one tracked caller (`box.hof(sinkA)`, a
+  typed call site) plus one untracked sibling caller (`hof(sinkB)`, implicit self) into the same HOF —
+  and asserts the untracked caller is PRESENT in `functions` with `["Unknown"]`, so its disappearance
+  fails the assertion rather than a changed value. Confirmed RED on revert in an isolated worktree (fails
+  on exactly the presence/value assertions; every other test in the file, including the renamed companion
+  below, stays green) and GREEN at HEAD. The original test is kept as a narrower, TRUE but
+  non-discriminating companion, renamed `testAllUntrackedSiblingCallersOfAHOFEachReadUnknown` so its name
+  no longer claims coverage of the back-fill it cannot detect.
+
 - **CI fix, no behavioural change: the self-gate's declared subprocess-unit list (§7.12) fell behind
   b6d3bf3.** That commit gave `swift package dump-package` its own top-level function,
   `dumpSwiftPackageJSON`, so the SwiftPM `--target` platform-pruning path (version-specific manifests)
