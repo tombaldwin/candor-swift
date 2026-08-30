@@ -33,15 +33,43 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
      an unread entitlements file is the sin whichever directory produced it. A verify that found
      candidates and read none now emits `entitlementsUnread` (`reason` / `candidates` / `uncheckedKeys`)
      on `--json` and an equivalent comment on `--xml` — ABSENT when a file WAS read, so an ordinary
-     verify's document is byte-unchanged. `ok` and the exit code are deliberately unmoved: this run
-     cannot answer either way, and failing every multi-target repo over it (NetNewsWire: 8 `.entitlements`)
-     would delete the feature rather than fix it. SPEC-EXTENSION-privacy.md carries the clause.
+     verify's document is byte-unchanged. `ok` and the exit code were left unmoved by THIS fix; the
+     peek-bound entry below revisits that decision on the ⟨0.30⟩ precedent and moves them, under a
+     bound. SPEC-EXTENSION-privacy.md carries both clauses.
 
   Four rows: the A/B (with the `Pods` arm as its own reaching-the-code control), the disclosure on both
   machine surfaces, the OVER-CHARGE CONTROL (a genuinely declared entitlement still exits 0 / `ok: true`
   and grows NO new key, with and without a vendor directory), and the one-copy source pin. Falsified by
   disarming each half separately: reverting the list fix reddens three, reverting the disclosure reddens
   exactly the disclosure row.
+
+- ⚠ **The `entitlementsUnread` refusal can now MOVE THE VERDICT — to INCOMPLETE (`ok: false`,
+  `incomplete: true`, exit 2), under a PEEK BOUND modelled on main-spec ⟨0.30⟩.** The entry above left
+  `ok`/exit unmoved; revisited, the shipped choice was sound only for the reason ⟨0.30⟩ states for its
+  own bound — the trigger must never be "you have several `.entitlements` files" (NetNewsWire has 8)
+  but "several files, one of which grants the capability whose key you would be missing." The refusal
+  was never that the candidates are unsafe to OPEN — only that none can be ATTRIBUTED as the app's own.
+  So the verify now reads every candidate without attributing and computes `couldBear`: entitlement-
+  required keys some candidate grants that are NOT in this run's declared set (an unparseable candidate
+  bears on every undeclared entitlement-sourced key — unreadable is not benign).
+  - `couldBear` EMPTY: verdict unmoved — proven-safe, since the app's own file is among the candidates
+    read, so the pass is exactly as sound as an attributed pass. Multi-target repos stay green.
+  - `couldBear` NON-EMPTY: `ok: false`, `incomplete: true`, exit 2 on all three surfaces — and NOT
+    exit 1 / `entitlementUnderDeclared`, because filing the violation would attribute a possibly-
+    vendored file's grant to the app. ⟨0.24⟩ precedence holds: a certain code-reach violation still
+    exits 1, with the disclosure riding the same document.
+  - **Sibling found by the same analysis:** a CHOSEN `.entitlements` file (single candidate or
+    `scope.entitlements`) that exists but cannot be parsed returned an EMPTY grant set and certified
+    clean — the silent form of the same defect. Now `entitlementsUnread` `reason: "unreadable"`, same
+    bound (`couldBear` empty when the key is declared, so a corrupt file cannot fail a correct
+    manifest).
+  Rows: the over-charge control written FIRST (8 benign candidates green, and the sharp arm — a
+  candidate GRANTS critical-messaging but the plist declares the key — also green), the bearing A/B
+  with route equality checked on document AND exit for all three surfaces, and the corrupt-file pair.
+  Falsified both ways: the bearing/corrupt rows are red against the pre-fix binary, and an
+  intentionally over-firing bound (fire on any `several`) reddens exactly the over-charge control.
+  SPEC-EXTENSION-privacy.md §"Whether the verdict moves is decided by a PEEK" carries the clause and
+  the affordability argument.
 
 - **Four vacuous tests, each confirmed vacuous BY MUTATION before being fixed.**
   1. **Both `XCTSkipIf(geteuid() == 0)` rows in the repo skipped the ENTIRE Linux leg.** That leg runs
