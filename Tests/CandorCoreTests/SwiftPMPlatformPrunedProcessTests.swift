@@ -219,19 +219,32 @@ final class SwiftPMPlatformPrunedProcessTests: XCTestCase {
     /// incidental safety net, but mislabeled `outside-the-target-closure` instead of `unanalyzed` — a
     /// wrong-but-visible reclassification this test exists to catch, since no other test in the suite
     /// exercises an unreadable SOURCE file (as opposed to an unreadable `platforms:` manifest value).
+    ///
+    /// **THE UNREADABILITY IS A DECODE FAILURE, NOT `chmod 000`, AND THAT IS THE WHOLE POINT.** It was
+    /// `chmod 000` behind `XCTSkipIf(geteuid() == 0)`, and the Linux CI leg runs `container: swift:6.1`
+    /// with no `--user` — MEASURED 2026-08-30: `id -u` is 0 in that image and root reads straight through
+    /// `chmod 000`. So this row had teeth on the two macOS legs and skipped the whole Linux leg, on
+    /// swift-corelibs-foundation, which is the platform whose Foundation DIVERGES and the reason that leg
+    /// exists. A byte sequence that is not valid UTF-8 fails the identical call — the guard's condition is
+    /// `try? String(contentsOfFile:encoding:.utf8) == nil`, and permission-denied and
+    /// invalid-encoding reach it by the same `nil` — while depending on no uid, no umask and no
+    /// filesystem. A guard selected by the tester's PRIVILEGES has not been tested on the platform where
+    /// the privileges differ; one selected by the file's BYTES has.
     func testAnUnreadableSourceFileIsDisclosedAsUnreadableNotAsOutsideTheClosure() throws {
-        try XCTSkipIf(geteuid() == 0, "root reads through 0000 permissions — the arm is untestable as root")
         let bin = try ProcessHarness.binaryURL(for: Self.self)
         let root = try makePlatformPackage(platforms: "[.macOS(.v13), .iOS(.v16)]",
                                            files: ["Always.swift": alwaysHere])
         defer { try? FileManager.default.removeItem(at: root) }
         let secret = root.appendingPathComponent("Sources/MyLib/Secret.swift")
-        try """
-        import Foundation
-        public func doTheThing() { FileManager.default.createFile(atPath: "/tmp/whatever", contents: nil) }
-        """.write(to: secret, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: secret.path)
-        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: secret.path) }
+        // A lone 0xFF/0xFE pair is not valid UTF-8 in any position, so the decode fails for every user.
+        var bytes = Data("import Foundation\n// ".utf8)
+        bytes.append(contentsOf: [0xFF, 0xFE])
+        bytes.append(Data("\npublic func doTheThing() { FileManager.default.createFile(atPath: \"/tmp/whatever\", contents: nil) }\n".utf8))
+        try bytes.write(to: secret)
+        // The fixture must genuinely be unreadable AS THIS ENGINE READS IT — a fixture that quietly
+        // decoded would leave every assertion below true for the wrong reason.
+        XCTAssertNil(try? String(contentsOfFile: secret.path, encoding: .utf8),
+                     "the fixture is supposed to be undecodable — it decoded, so this row proves nothing")
 
         let r = try ProcessHarness.run(bin, [root.path, "--target", "MyLib", "--json"], cwd: root)
         XCTAssertEqual(r.code, 0, r.err)

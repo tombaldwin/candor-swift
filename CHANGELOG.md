@@ -43,6 +43,47 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   disarming each half separately: reverting the list fix reddens three, reverting the disclosure reddens
   exactly the disclosure row.
 
+- **Four vacuous tests, each confirmed vacuous BY MUTATION before being fixed.**
+  1. **Both `XCTSkipIf(geteuid() == 0)` rows in the repo skipped the ENTIRE Linux leg.** That leg runs
+     `container: swift:6.1` with no `--user`: measured, `id -u` is 0 in that image and root reads straight
+     through `chmod 000`. So two guards had teeth only on macOS — on the one platform whose Foundation
+     does NOT diverge, which is the leg's whole reason for existing. Both fixtures now make the read fail
+     for every uid, and neither skips anywhere:
+     - `SwiftPMPlatformPrunedProcessTests.testAnUnreadableSourceFileIsDisclosedAsUnreadableNotAsOutsideTheClosure`
+       uses a byte sequence that is not valid UTF-8, which fails the guard's identical
+       `try? String(contentsOfFile:encoding:.utf8) == nil`. Falsified by neutering the readability
+       guard: the file is then filed as `platform-pruned` under a reason claiming it "compiles to
+       NOTHING" — about a file the scan never read.
+     - `ChainingProcessTests.testUnreadableDepReportFileExits2` uses a DIRECTORY named `dep.json` inside
+       a `CANDOR_DEPS` directory. `depReportFiles` matches members by name suffix and never asks whether
+       they are regular files, so it is pushed like any other report and `fm.contents(atPath:)` returns
+       nil on both Foundations; `loadDeps`' `isDirectory` test is on the TOKEN, not on the members it
+       expands to. Falsified by turning the fail-closed arm into a `continue`: exit 0 instead of 2.
+
+     Both fixtures now also assert that they really are unreadable before asserting anything about the
+     engine — a fixture that quietly succeeded would leave every row below it true for the wrong reason.
+  2. `CrossPolicyRulesProcessTests.testUncoveredRuleRefusesAndNamesOnlyTheUnaskedOne` asserted
+     `XCTAssertFalse(err.contains("Net,"))`, and `"Net,"` cannot occur: `canonicalDenySet` sorts, so `Net`
+     is last and is followed by `.`. Making `unaskedCrossPolicyRules` name every rule including the asked
+     one left all four rows in the file GREEN. The refusal's rule list is now parsed out of its own
+     sentence and asserted as a LIST, order-independently, with the stated count cross-checked against it.
+  3. `XcodeTargetScopeTests`' seven `probe()` closures returned `.err` and discarded `.code`. That is not
+     a symmetric loss: the negative arms are the over-charge controls, and an absence assertion is
+     satisfied by a run that produced no output. Measured by making the engine exit 2 early with an
+     unrelated one-line diagnostic — `testAPluginNamedInADependencyListStillCannotClaimASourcesFolder`'s
+     control arm PASSED. All seven now run through one `scanStderr` helper that asserts the exit code.
+
+- **`privacy-manifest --xml` emitted output a conformant XML parser REJECTS**, found while adding the
+  entitlements caveat to that surface. Its comments read `<!-- candor privacy-manifest --verify: … -->`,
+  and XML forbids `--` inside a comment. Apple's `plutil -lint` accepts it and `xml.dom.minidom` does
+  not — so the one output whose entire purpose is to be pasted into somebody's `Info.plist` was
+  ill-formed, and the lenient parser anyone would reach for hid it. The flag names in emitted comments
+  lost their dashes, candidate paths are omitted from the XML surface (a filename may contain `--`), and
+  `testTheXmlSurfaceIsWellFormedXml` now drives a real parser over both arms. Restoring the old spelling
+  reddens it. That row in turn needed `#if canImport(FoundationXML)` — `XMLParser` is in a separate
+  module on swift-corelibs-foundation and the Linux leg does not skip without it, it FAILS TO COMPILE.
+  Found by running the suite in the `swift:6.1` container, which is the same lesson as the row above.
+
 - **Guard-deletion sweep (`bin/AGENT-CORPUS-BRIEF.md` section C: "delete each guard in turn, does anything
   go red?"), run systematically over `Sources/candor-swift/{main,Driver,CallCollector,DeclCollector,
   GateReportCLI,FixCLI}.swift` and `Sources/CandorCore/{Policy,XcodeTargets,PackageTargets,Classifier}.swift`

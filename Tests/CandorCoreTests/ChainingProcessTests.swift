@@ -476,21 +476,38 @@ final class ChainingProcessTests: XCTestCase {
                       "with no report loaded the dep package is blind again — the ledger names it: \(r.err)")
     }
 
-    // an EXISTING report file the process cannot READ (chmod 000) must fail closed (exit 2) — the
-    // Deps.swift `fm.contents == nil` arm, distinct from not-found (token test above) and bad-JSON.
+    // an EXISTING report the process cannot READ must fail closed (exit 2) — the Deps.swift
+    // `fm.contents == nil` arm, distinct from not-found (token test above) and bad-JSON.
+    //
+    // **NOT `chmod 000`, AND NOT BEHIND `XCTSkipIf(geteuid() == 0)`.** It was both, and the Linux CI leg
+    // runs `container: swift:6.1` with no `--user`: MEASURED 2026-08-30, `id -u` is 0 in that image and
+    // root reads straight through `chmod 000`, so this row skipped the ENTIRE Linux leg — the leg that
+    // exists precisely because swift-corelibs-foundation diverges from Darwin Foundation. A guard
+    // selected by the tester's PRIVILEGES has not been tested on the platform where the privileges
+    // differ; it has been assumed there.
+    //
+    // A DIRECTORY named `dep.json` inside a `CANDOR_DEPS` DIRECTORY reaches the identical arm for every
+    // uid: `depReportFiles` matches members by name suffix and never asks whether they are regular
+    // files, so it is pushed like any other report, and `fm.contents(atPath:)` over a directory is
+    // `nil` on both Foundations. `loadDeps`' own `isDirectory` test cannot see this — that test is on
+    // the TOKEN, not on the members the token expands to. It is also a real shape rather than a
+    // contrivance: an interrupted copy, or an `--out` prefix that collided with a directory name,
+    // leaves exactly this.
     func testUnreadableDepReportFileExits2() throws {
-        try XCTSkipIf(geteuid() == 0, "root reads through 0000 permissions — the arm is untestable as root")
         let bin = try binaryURL()
         let (root, dep, app) = try makeChainFixture()
         defer { try? FileManager.default.removeItem(at: root) }
-        let depReport = try scanDep(bin, dep, root: root)
-        let locked = root.appendingPathComponent("locked.json")
-        try FileManager.default.copyItem(at: depReport, to: locked)
-        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
-        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: locked.path) }
+        _ = try scanDep(bin, dep, root: root)
+        let depsDir = root.appendingPathComponent("deps-dir")
+        let unreadable = depsDir.appendingPathComponent("dep.json")
+        try FileManager.default.createDirectory(at: unreadable, withIntermediateDirectories: true)
+        // The fixture must genuinely be unreadable AS `Deps.swift` READS IT, or every assertion below
+        // is true for the wrong reason.
+        XCTAssertNil(FileManager.default.contents(atPath: unreadable.path),
+                     "the fixture is supposed to be unreadable — it read, so this row proves nothing")
 
         let r = try run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path],
-                        env: ["CANDOR_DEPS": locked.path])
+                        env: ["CANDOR_DEPS": depsDir.path])
         XCTAssertEqual(r.code, 2, "an existing-but-unreadable dep report must fail closed; stderr: \(r.err)")
         XCTAssertTrue(r.err.contains("could not be read"), "the diagnostic names the read failure: \(r.err)")
     }

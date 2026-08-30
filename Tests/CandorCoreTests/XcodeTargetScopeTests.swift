@@ -17,6 +17,27 @@ import Foundation
 /// unknown name, dangling reference, missing synchronized folder — each throws, never resolves less.
 final class XcodeTargetScopeTests: XCTestCase {
 
+    /// Run a scan and return its STDERR — **asserting the run actually completed.**
+    ///
+    /// Every `probe()` closure in this file returned `.err` and discarded `.code`, and that is not a
+    /// symmetric loss. The negative arms (`XCTAssertFalse(err.contains("Stripe"))`) are the OVER-CHARGE
+    /// CONTROLS this file's own comments call out as the reason those rows mean anything — and an
+    /// absence assertion is satisfied by a run that produced no output at all. MEASURED 2026-08-30 by
+    /// making the engine exit 2 early with an unrelated one-line diagnostic:
+    /// `testAPluginNamedInADependencyListStillCannotClaimASourcesFolder`'s control arm PASSED, and only
+    /// its positive sibling noticed. A control that a dead binary satisfies is not a control.
+    ///
+    /// The positive arms gain from it too, for the mirrored reason: stderr containing the module name is
+    /// evidence of a DISCLOSURE only if the thing that wrote it was a scan rather than a crash report.
+    private func scanStderr(_ bin: URL, _ args: [String],
+                            file: StaticString = #filePath, line: UInt = #line) throws -> String {
+        let r = try ProcessHarness.run(bin, args)
+        XCTAssertEqual(r.code, 0, "the scan did not complete, so neither the presence NOR the absence of "
+                       + "a name in its stderr says anything — stderr: \(r.err) stdout: \(r.out)",
+                       file: file, line: line)
+        return r.err
+    }
+
     // A two-target classic-format project, shaped like the measured NetNewsWire defect in miniature:
     //   MacApp   compiles Mac/AppDelegate.swift (nested group), Shared/Send.swift (the Apple-events
     //            analog) and Legacy.swift (a SOURCE_ROOT-relative reference)
@@ -1039,7 +1060,7 @@ final class XcodeTargetScopeTests: XCTestCase {
                                              atomically: true, encoding: .utf8)
             try "import Foundation\nimport Stripe\nfunc pay() { StripeAPI.charge() }\npay()\n"
                 .write(to: root.appendingPathComponent("Sources/App/main.swift"), atomically: true, encoding: .utf8)
-            return try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path]).err
+            return try scanStderr(bin, [root.path, "--out", root.appendingPathComponent("r").path])
         }
         // The control first: with no manifest mention of Stripe at all, the folder proves nothing.
         XCTAssertTrue(try probe("    .executableTarget(name: \"App\"),").contains("Stripe"),
@@ -1183,7 +1204,7 @@ final class XcodeTargetScopeTests: XCTestCase {
                                       atomically: true, encoding: .utf8)
             try "import Foundation\nimport Stripe\nfunc charge() { StripeClient().pay() }\ncharge()\n"
                 .write(to: root.appendingPathComponent("Sources/App/main.swift"), atomically: true, encoding: .utf8)
-            return try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path]).err
+            return try scanStderr(bin, [root.path, "--out", root.appendingPathComponent("r").path])
         }
         XCTAssertTrue(try probe("").contains("Stripe"),
                       "control: with no declaration at all the SDK import must be disclosed")
@@ -1237,7 +1258,7 @@ final class XcodeTargetScopeTests: XCTestCase {
                                       atomically: true, encoding: .utf8)
             try "import Foundation\nimport Stripe\nfunc charge() { StripeClient().pay() }\ncharge()\n"
                 .write(to: root.appendingPathComponent("Sources/App/main.swift"), atomically: true, encoding: .utf8)
-            return try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path]).err
+            return try scanStderr(bin, [root.path, "--out", root.appendingPathComponent("r").path])
         }
         // THE OVER-CHARGE CONTROL, first: a real `.target` of that name, whose sources this run DID read,
         // legitimately claims the module — so the disclosure must be ABSENT. Without this arm the
@@ -1317,7 +1338,7 @@ final class XcodeTargetScopeTests: XCTestCase {
                                                     atomically: true, encoding: .utf8)
             try "import Foundation\nimport Analytics\nfunc track() { AnalyticsClient().send() }\ntrack()\n"
                 .write(to: root.appendingPathComponent("Sources/App/main.swift"), atomically: true, encoding: .utf8)
-            return try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path]).err
+            return try scanStderr(bin, [root.path, "--out", root.appendingPathComponent("r").path])
         }
         XCTAssertTrue(try probe("").contains("Analytics"),
                       "control: the remote SDK must be disclosed when nothing claims its name")
@@ -1445,7 +1466,7 @@ final class XcodeTargetScopeTests: XCTestCase {
                     .write(to: root.appendingPathComponent("Mocks/Sources/AcmePay/Mock.swift"),
                            atomically: true, encoding: .utf8)
             }
-            return try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path]).err
+            return try scanStderr(bin, [root.path, "--out", root.appendingPathComponent("r").path])
         }
         XCTAssertTrue(try probe(withMock: false).contains("AcmePay"),
                       "baseline: the remote SDK is disclosed when nothing shadows its name")
@@ -1537,7 +1558,7 @@ final class XcodeTargetScopeTests: XCTestCase {
                                                 atomically: true, encoding: .utf8)
             try "import Foundation\nimport AcmePay\nfunc ship(_ s: String) { acmeUpload(s) }\nship(\"x\")\n"
                 .write(to: root.appendingPathComponent("Sources/App/main.swift"), atomically: true, encoding: .utf8)
-            return try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path]).err
+            return try scanStderr(bin, [root.path, "--out", root.appendingPathComponent("r").path])
         }
         // Control first — with no name collision the remote SDK is disclosed, so the fixture binds.
         XCTAssertTrue(try probe(internalTargetNamed: "PayMock").contains("AcmePay"),
@@ -1593,8 +1614,8 @@ final class XcodeTargetScopeTests: XCTestCase {
                        atomically: true, encoding: .utf8)
             try "import Foundation\nimport Core\nfunc ship() { CoreClient().send() }\nship()\n"
                 .write(to: root.appendingPathComponent("app/Sources/App/main.swift"), atomically: true, encoding: .utf8)
-            return try ProcessHarness.run(bin, [root.appendingPathComponent("app").path,
-                                                "--out", root.appendingPathComponent("r").path]).err
+            return try scanStderr(bin, [root.appendingPathComponent("app").path,
+                                        "--out", root.appendingPathComponent("r").path])
         }
         XCTAssertTrue(try probe(unrelatedTargetNamed: "Helpers").contains("Core"),
                       "control: LibA's Core was never read, so it must be disclosed")
