@@ -203,6 +203,50 @@ final class SwiftPMPlatformPrunedProcessTests: XCTestCase {
         XCTAssertNil(ex.first { $0["class"] as? String == "platform-pruned" },
                      "a hoisted `platforms:` list cannot be proven to restrict anything — keep, never guess-exclude: \(ex)")
     }
+
+    /// ⟨guard-deletion sweep⟩ THE READABILITY GUARD in the SAME filter (main.swift: "Cheap gate first...
+    /// An unreadable file is KEPT — pruning must never eat one silently"), tested independently of the
+    /// `#if os(` cheap-gate above it. A file this scan cannot READ at all (permissions, not a parse
+    /// failure) must fall through to the engine's general "source failed to read" disclosure
+    /// (`unanalyzed`) exactly as it would with no `--target` in play — never be swept into
+    /// `platform-pruned` (this filter cannot prove a file it never read compiles to nothing) NOR into
+    /// the generic `outside-the-target-closure` bucket the before/after diff produces for files SwiftPM's
+    /// own closure excludes (that bucket's whole premise — "an unscoped scan WOULD have judged this" — is
+    /// false here: an unscoped scan hits the identical read failure).
+    ///
+    /// Falsified against a deliberately neutered filter (folding the readability check into the same
+    /// "drop it" arm as a proven-dead file): the file was still disclosed, via the target-closure diff's
+    /// incidental safety net, but mislabeled `outside-the-target-closure` instead of `unanalyzed` — a
+    /// wrong-but-visible reclassification this test exists to catch, since no other test in the suite
+    /// exercises an unreadable SOURCE file (as opposed to an unreadable `platforms:` manifest value).
+    func testAnUnreadableSourceFileIsDisclosedAsUnreadableNotAsOutsideTheClosure() throws {
+        try XCTSkipIf(geteuid() == 0, "root reads through 0000 permissions — the arm is untestable as root")
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try makePlatformPackage(platforms: "[.macOS(.v13), .iOS(.v16)]",
+                                           files: ["Always.swift": alwaysHere])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let secret = root.appendingPathComponent("Sources/MyLib/Secret.swift")
+        try """
+        import Foundation
+        public func doTheThing() { FileManager.default.createFile(atPath: "/tmp/whatever", contents: nil) }
+        """.write(to: secret, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: secret.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: secret.path) }
+
+        let r = try ProcessHarness.run(bin, [root.path, "--target", "MyLib", "--json"], cwd: root)
+        XCTAssertEqual(r.code, 0, r.err)
+        let d = try doc(r.out)
+        let unanalyzed = (d["unanalyzed"] as? [[String: Any]]) ?? []
+        XCTAssertTrue(unanalyzed.contains { ($0["path"] as? String)?.hasSuffix("Secret.swift") == true },
+                      "an unreadable source file must reach the general 'source failed to read' "
+                      + "disclosure exactly as it would outside `--target`: \(d)")
+        let ex = (d["excluded"] as? [[String: Any]]) ?? []
+        XCTAssertNil(ex.first { $0["class"] as? String == "platform-pruned" },
+                     "a file this scan never read cannot be proven to compile to nothing: \(ex)")
+        XCTAssertNil(ex.first { $0["class"] as? String == "outside-the-target-closure" },
+                     "the file IS in the target's own source list — it simply could not be read, which "
+                     + "is a different fact from 'not part of this target': \(ex)")
+    }
 }
 
 /// ⟨file-set, cardinal-sin fix⟩ SwiftPM's VERSION-SPECIFIC MANIFEST SELECTION governs which

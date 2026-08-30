@@ -696,6 +696,49 @@ final class XcodeTargetScopeTests: XCTestCase {
                       "every path this reports must be one of the files actually dropped: \(scope.platformExcludedFiles)")
     }
 
+    /// ⟨guard-deletion sweep⟩ THE READABILITY GUARD in the SAME platform-pruning filter ("Cheap gate
+    /// first: no `#if os(` in the text, nothing to evaluate. An unreadable file is KEPT — the scan will
+    /// name its failure itself; pruning must never eat one silently"). A file this resolver cannot READ
+    /// at all must stay a MEMBER of the target's scope — `swiftFileCompilesToNothing` needs the text to
+    /// prove a file dead, and a file it never read cannot be proven dead — so a real effect inside it
+    /// (behind `#if os(macOS)`, on the iOS-only target below) is never silently pruned as platform-dead;
+    /// whatever downstream step actually tries to read the file is what must disclose the failure.
+    ///
+    /// Falsified against main.swift's SwiftPM sibling of this exact guard (`PackageTargets.swift`'s
+    /// `--target` platform-pruning filter carries the identical "cheap gate" shape) and against a
+    /// deliberately neutered copy of THIS guard (folding "cannot read" into "provably dead" — `return
+    /// false` instead of `return true`): both passed the ENTIRE 954/955-test suite unmodified, because
+    /// no test anywhere constructs an unreadable Swift source file on either path.
+    func testAnUnreadableFileIsKeptNotPrunedAsPlatformDead() throws {
+        let withPlatform = withPackages.replacingOccurrences(
+            of: "TAPP = {",
+            with: """
+            XCAPP = { isa = XCBuildConfiguration; buildSettings = { SDKROOT = iphoneos; }; name = Release; };
+                        CLAPP = { isa = XCConfigurationList; buildConfigurations = ( XCAPP ); };
+                        TAPP = {
+                            buildConfigurationList = CLAPP;
+            """)
+        let scope = try xcodeTargetScope(model: model(withPlatform), projectDir: "/repo",
+                                         targetName: "App", fs: XcodeScopeFS(
+            swiftFilesUnder: { dir in ["\(dir)/Unreadable.swift"] },
+            readFile: { path in
+                if path.hasSuffix("/Package.swift") {
+                    let dir = String(path.dropLast("/Package.swift".count))
+                    return ["/repo/Packages/Kit": self.kitManifest, "/repo/Packages/Base": self.baseManifest][dir]
+                }
+                if path.hasSuffix("/Unreadable.swift") { return nil }   // simulates a permissions failure
+                return nil
+            },
+            subdirectories: { _ in [] },
+            directoryExists: { _ in true }))
+        XCTAssertEqual(scope.platform, "iOS")
+        XCTAssertEqual(scope.platformExcludedCount, 0,
+                       "a file this resolver never read cannot be proven to compile to nothing")
+        XCTAssertTrue(scope.platformExcludedFiles.isEmpty)
+        XCTAssertTrue(scope.files.contains { ($0 as NSString).lastPathComponent == "Unreadable.swift" },
+                      "an unreadable file must stay a member of the scope, not vanish as platform-dead: \(scope.files)")
+    }
+
     func testUnknownPlatformMeansNoPruning() throws {
         // No SDKROOT anywhere: the resolver must not guess a platform, so nothing is pruned.
         let macOnly = "#if os(macOS)\nfunc f() {}\n#endif\n"
