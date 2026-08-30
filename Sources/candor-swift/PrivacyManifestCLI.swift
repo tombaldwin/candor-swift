@@ -71,7 +71,7 @@ let PLIST_DISCOVER = "\u{0}discover"
 /// every other ambiguity in this engine: a wrong answer here is worse than a question.
 func discoverInfoPlist(from root: String) -> (path: String?, error: String?) {
     let fm = FileManager.default
-    let skip: Set<String> = [".build", ".git", "DerivedData", "Pods", "node_modules", "Carthage", ".swiftpm"]
+    let skip = VENDOR_SKIP_DIRS
     // BUILD OUTPUT IS NOT A SOURCE MANIFEST. The first version of this listed 22 plists for an app that
     // has two, because every built `.app`, `.appex` and `Build/Products` tree carries a COPY of one it
     // already found. A refusal that buries the two real answers in twenty derived ones has technically
@@ -435,7 +435,7 @@ func countNonSwiftSources(near plistPath: String) -> Int? {
     let fm = FileManager.default
     guard let root = projectRootAbove(plistPath) else { return nil }
     let dir = URL(fileURLWithPath: root)
-    let skip: Set<String> = [".build", ".git", "DerivedData", "Pods", "node_modules", "Carthage", ".swiftpm"]
+    let skip = VENDOR_SKIP_DIRS
     var n = 0
     guard let en = fm.enumerator(atPath: dir.path) else { return nil }
     for case let rel as String in en {
@@ -489,16 +489,24 @@ private func plistFragment(_ keys: [(effect: String, key: String)]) -> String {
 /// `countNonSwiftSources` uses gates the recursion: no root above the plist ⇒ "beside" means literally
 /// beside, the plist's own directory and no deeper. Nothing is lost where anything could be — an
 /// entitlements file three levels under a directory that is not a checkout is not this app's.
-func discoverEntitlements(from root: String) -> (path: String?, several: Bool) {
+///
+/// **THE SKIP SET IS `VENDOR_SKIP_DIRS`, NOT A COPY OF IT.** It was a copy, and it had lost `Carthage`
+/// while the comment below still said "same exclusions as the Info.plist discovery" — so a vendored
+/// `.entitlements` under `Carthage/` made this find two files and refuse, and the refusal is INVISIBLE
+/// on `--json`. See `VENDOR_SKIP_DIRS` for the measured A/B and the `entitlementsUnread` block below
+/// for the disclosure that makes the refusal survivable when the next vendor directory is not on any
+/// list. Returns the CANDIDATES it refused over, because a refusal the reader cannot see the inputs to
+/// is not actionable.
+func discoverEntitlements(from root: String) -> (path: String?, several: Bool, candidates: [String]) {
     let fm = FileManager.default
-    let skip: Set<String> = [".build", ".git", "DerivedData", "Pods", "node_modules", ".swiftpm"]
+    let skip = VENDOR_SKIP_DIRS
     var found: [String] = []
     guard projectRootAbove(root) != nil else {
         let here = ((try? fm.contentsOfDirectory(atPath: root)) ?? [])
             .filter { $0.hasSuffix(".entitlements") }
             .map { (root as NSString).appendingPathComponent($0) }
-        if here.count == 1 { return (here[0], false) }
-        return (nil, here.count > 1)
+        if here.count == 1 { return (here[0], false, here) }
+        return (nil, here.count > 1, here.count > 1 ? here.sorted() : [])
     }
     if let en = fm.enumerator(atPath: root) {
         for case let rel as String in en {
@@ -514,8 +522,8 @@ func discoverEntitlements(from root: String) -> (path: String?, several: Bool) {
     }
     var seen = Set<String>()
     found = found.filter { seen.insert(URL(fileURLWithPath: $0).resolvingSymlinksInPath().path).inserted }
-    if found.count == 1 { return (found[0], false) }
-    return (nil, found.count > 1)
+    if found.count == 1 { return (found[0], false, found) }
+    return (nil, found.count > 1, found.count > 1 ? found.sorted() : [])
 }
 
 /// Usage-description keys an entitlements file makes REQUIRED. Boolean-true entries only: an entitlement
@@ -704,6 +712,9 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
 
     var entitlementUnderDeclared = false
     var entitlementFindings: [String] = []
+    /// Set when the verb REFUSED to read an entitlements file it found candidates for — the disclosure
+    /// that keeps `ok: true` from meaning "checked and clean" on a machine surface. See the assignment.
+    var entitlementsUnread: [String: Any]?
     if var plistPath = pm.verify {
         // ── VERIFY mode ───────────────────────────────────────────────────────────────────────────────
         // Bare `--verify` discovers the plist. Announced on stderr, never silently: a verdict is about a
@@ -852,10 +863,10 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         // key never checked). Narrowing that SEARCH would still be a search; the build settings NAME the
         // file. A recorded path that no longer exists falls back rather than failing — the report can be
         // older than the tree.
-        var ent: (path: String?, several: Bool)
+        var ent: (path: String?, several: Bool, candidates: [String])
         var entFromScope = false
         if let scoped = model.scopeEntitlements, FileManager.default.fileExists(atPath: scoped) {
-            ent = (scoped, false)
+            ent = (scoped, false, [scoped])
             entFromScope = true
         } else {
             ent = discoverEntitlements(from: plistDir.isEmpty ? FileManager.default.currentDirectoryPath : plistDir)
@@ -878,10 +889,44 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
                           + "site for candor to find, so this is a manifest-to-manifest check.)")
                 }
             }
-        } else if ent.several, !pm.json, !pm.xml {
-            print("· several .entitlements files here — not read. Entitlement-sourced keys "
-                  + "(\(ENTITLEMENT_REQUIRED_KEYS.count)) are unchecked; re-scan with --target so the "
-                  + "report carries this binary's own CODE_SIGN_ENTITLEMENTS.")
+        } else if ent.several {
+            // ⟨entitlements unread⟩ **THE REFUSAL TRAVELS ON EVERY SURFACE, NOT JUST THE HUMAN ONE.**
+            //
+            // This branch is the verb deciding NOT to read the app's own `.entitlements` — so every
+            // entitlement-sourced key goes unchecked and the verdict below is a claim about strictly
+            // less than it appears to be. It printed under `!pm.json, !pm.xml`, so the `--json`
+            // document CI reads carried `"ok": true` and NOTHING ELSE: no key, no count, no note.
+            // Measured 2026-08-30 on two trees identical but for the name of a vendor directory —
+            // `Pods/` exited 1 with `entitlementUnderDeclared`, `Carthage/` exited 0 with `ok: true`
+            // and the key absent. `Carthage` being off one skip list caused THAT instance; the reason
+            // this block exists is that the NEXT vendor directory will not be on the list either
+            // (`vendor/`, `Externals/`, `Frameworks/`, a git submodule, a sibling checkout), and a
+            // silent `ok: true` over an unread entitlements file is a cardinal sin whichever directory
+            // produced it. The list fix removes one cause; this removes the SILENCE.
+            //
+            // `ok` and the exit code are DELIBERATELY UNCHANGED. Flipping them would fail every
+            // multi-target repo this verb is meant to serve (measured on NetNewsWire: 8 `.entitlements`
+            // in the tree) over a question this run cannot answer either way — an over-charge that
+            // deletes the feature. Same shape as `conditionallyUnderDeclared` and `incomplete` above:
+            // `ok: true` beside a stated caveat is not the same claim as a bare `ok: true`, and the
+            // machine consumer is the reader who could not previously tell them apart.
+            entitlementsUnread = [
+                "reason": "several",
+                // Repo-relative to the plist's directory, not absolute: the absolute form leaks a
+                // developer's home directory into a CI artifact, and every basename here is
+                // `App.entitlements` on the repos that hit this — a list of identical basenames names
+                // nothing, which is the mistake `buildSettingUsageKeys` already made once.
+                "candidates": ent.candidates.map { c -> String in
+                    let base = plistDir.hasSuffix("/") ? plistDir : plistDir + "/"
+                    return c.hasPrefix(base) ? String(c.dropFirst(base.count)) : c
+                },
+                "uncheckedKeys": ENTITLEMENT_REQUIRED_KEYS.values.sorted(),
+            ]
+            if !pm.json, !pm.xml {
+                print("· several .entitlements files here — not read. Entitlement-sourced keys "
+                      + "(\(ENTITLEMENT_REQUIRED_KEYS.count)) are unchecked; re-scan with --target so the "
+                      + "report carries this binary's own CODE_SIGN_ENTITLEMENTS.")
+            }
         }
         // PROVENANCE, on a PASS as much as a finding: "we checked the entitlements" is only actionable
         // if the reader can see WHICH file, and an entitlements check that silently read the wrong
@@ -973,6 +1018,10 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
             if und.ops > 0 {
                 verdict["undeterminedPaths"] = ["count": und.ops, "functions": und.fns] as [String: Any]
             }
+            // …and the OTHER half of the entitlement answer: the run that checked NOTHING. Absent when
+            // an entitlements file was read (or when there was none to read), so a verify that did the
+            // check keeps its previous byte shape exactly.
+            if let unread = entitlementsUnread { verdict["entitlementsUnread"] = unread }
             if !entitlementFindings.isEmpty {
                 verdict["entitlementUnderDeclared"] = entitlementFindings
                 // `ok` MUST AGREE WITH THE EXIT CODE. Leaving it as the code-derived verdict meant a
@@ -991,8 +1040,28 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         // it pipes. A verify that tells you what is missing and then makes you go and look up how to
         // write it has done half a job; this is the other half.
         if pm.xml {
+            // THE SAME CAVEAT ON THE THIRD SURFACE. `--xml`'s "nothing missing" is a completeness claim,
+            // and it was printed over a run that never opened the app's `.entitlements` — so the one
+            // output whose entire purpose is "here is what to add" said there was nothing to add. A
+            // COMMENT, so the fragment still pastes into a plist unchanged.
+            //
+            // **NO `--` ANYWHERE IN THESE COMMENT BODIES, WHICH IS WHY THE FLAG NAMES LOST THEIR
+            // DASHES.** XML forbids `--` inside a comment. The line below used to read
+            // `<!-- candor privacy-manifest --verify: … -->` and this new one was written the same way,
+            // which produced output that Apple's lenient `plutil -lint` accepts and a conformant parser
+            // (`xml.dom.minidom`) REJECTS as "invalid token" — in the one output whose entire purpose is
+            // to be pasted into somebody's plist. Candidate PATHS are omitted for the same reason: a
+            // filename may contain `--` and nothing here could stop it. `testTheXmlSurfaceIsWellFormedXml`
+            // pins this against a real parser rather than against `plutil`.
+            if let unread = entitlementsUnread {
+                let n = (unread["candidates"] as? [String])?.count ?? 0
+                print("<!-- candor privacy-manifest verify: \(n) .entitlements files found here and "
+                      + "NONE READ, so the \(ENTITLEMENT_REQUIRED_KEYS.count) entitlement-sourced key(s) "
+                      + "are unchecked and this fragment cannot be complete. Re-scan naming this "
+                      + "binary's own CODE_SIGN_ENTITLEMENTS (the `target` flag). -->")
+            }
             if underDeclared.isEmpty {
-                print("<!-- candor privacy-manifest --verify: nothing missing; no keys to add. -->")
+                print("<!-- candor privacy-manifest verify: nothing missing; no keys to add. -->")
             } else {
                 print(plistFragment(underDeclared.compactMap { u in
                     u.keys.first.map { (effect: u.effect, key: $0) }

@@ -325,6 +325,45 @@ The verify states the provenance on a pass as well as a finding: *"entitlements 
 searching."* An entitlements check that silently read the wrong target's file is the failure this
 removes, so saying which file was read is part of the answer.
 
+## …and when discovery REFUSES, the refusal travels too (`entitlementsUnread`)
+
+The section above removes the ambiguity where the scan could name the file. Where it could not — no
+`scope.entitlements`, several `.entitlements` beside the plist — the verify still refuses to guess, and
+that refusal is a statement about **what this run did not check**: every entitlement-sourced key is
+unexamined, so the verdict beside it is a claim about strictly less than it appears to be.
+
+That refusal was printed on the human surface only. `--json` — the surface CI reads — carried
+`"ok": true` and nothing else, and `--xml` printed *"nothing missing; no keys to add"*. So the reader who
+could weigh the caveat was the only one receiving it. Measured 2026-08-30 on two trees identical but for
+the name of a vendored-dependency directory: with `Pods/` the run exited 1 naming
+`NSCriticalMessagingUsageDescription`; with `Carthage/` it exited 0, `ok: true`, key absent — because a
+vendored `.entitlements` under the second name was discovered as a candidate, made the count two, and the
+app's own file was never opened. Only the directory's NAME differed.
+
+So a verify that found candidates and read none MUST say so, on every surface it emits:
+
+```json
+"entitlementsUnread": { "reason": "several",
+                        "candidates": ["App.entitlements", "Externals/Lib/Vendored.entitlements"],
+                        "uncheckedKeys": ["NSCriticalMessagingUsageDescription"] }
+```
+
+ABSENT when an entitlements file was read, and absent when there was none to read — so a verify that did
+the check is byte-unchanged. `candidates` is relative to the plist's directory (the repos that hit this
+have several files with the SAME basename, and a list of identical basenames names nothing). `--xml`
+carries the same caveat as an XML comment, without the paths: a filename containing `--` is illegal
+inside an XML comment and would make the one output whose purpose is "paste this" unparseable.
+
+`ok` and the exit code are deliberately **unmoved**. This run cannot answer the question either way, and
+failing every multi-target repo over it would be an over-charge that deletes the feature — the same shape
+as `conditionallyUnderDeclared`: `ok: true` beside a stated caveat is not the same claim as a bare
+`ok: true`, and the machine consumer is the reader who previously could not tell them apart.
+
+The vendored-directory skip list is ONE named set (`VENDOR_SKIP_DIRS`), not a copy per discovery walk.
+It was four copies; one lost `Carthage` while its comment still said "same exclusions as the Info.plist
+discovery". Adding a name to a list closes one cause; the disclosure above is what makes the class
+survivable when the next vendored directory (`vendor/`, `Externals/`, a submodule) is not on any list.
+
 ## Wire disclosure (REQUIRED when the extension is active)
 
 An engine that classifies any `privacy/1` effect MUST disclose the extension in the report envelope:

@@ -1,5 +1,12 @@
 import XCTest
 import Foundation
+// `XMLParser` lives in Foundation on Darwin and in the SEPARATE `FoundationXML` module on
+// swift-corelibs-foundation. Without this the Linux leg does not merely skip a row, it FAILS TO
+// COMPILE — `XMLParser` resolves to a bare `AnyObject` with no initializers. Found by running the
+// suite in the `swift:6.1` container, which is the same lesson as the row two functions below.
+#if canImport(FoundationXML)
+import FoundationXML
+#endif
 
 /// PROCESS-layer pins over the `privacy-manifest` verb (PrivacyManifestCLI.runPrivacyManifestCLI) — the
 /// `privacy/1` extension's product surface (SPEC-EXTENSION-privacy.md, "Product surface"). Scans a real
@@ -752,5 +759,182 @@ final class PrivacyManifestTests: XCTestCase {
                                                  "--verify", root.appendingPathComponent("Info.plist").path])
         XCTAssertTrue(stale.out.contains("several .entitlements files here — not read"),
                       "a stale scope must fall back to discovery, not silently check nothing: \(stale.out)")
+    }
+
+    // MARK: - the vendor-directory entitlement hole, and the refusal that was silent on --json
+
+    /// Build a fixture package: an app whose `.entitlements` GRANTS critical-messaging, an `Info.plist`
+    /// that declares the key or not, and optionally one vendored `.entitlements` under `vendor/Lib/`.
+    private func makeEntitlementFixture(vendor: String?, declaresKey: Bool) throws -> URL {
+        let root = try ProcessHarness.makePackage("import Foundation\nprint(\"hi\")\n", name: "App")
+        let plist = declaresKey
+            ? "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\n"
+              + "<key>NSCriticalMessagingUsageDescription</key><string>emergency alerts</string>\n</dict></plist>\n"
+            : "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict></dict></plist>\n"
+        try plist.write(to: root.appendingPathComponent("Info.plist"), atomically: true, encoding: .utf8)
+        try ("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\n"
+             + "<key>com.apple.developer.messages.critical-messaging</key><true/>\n</dict></plist>\n")
+            .write(to: root.appendingPathComponent("App.entitlements"), atomically: true, encoding: .utf8)
+        if let vendor {
+            let d = root.appendingPathComponent("\(vendor)/Lib")
+            try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+            try "<?xml version=\"1.0\"?>\n<plist version=\"1.0\"><dict></dict></plist>\n"
+                .write(to: d.appendingPathComponent("Vendored.entitlements"), atomically: true, encoding: .utf8)
+        }
+        return root
+    }
+
+    private func verifyJSON(_ bin: URL, _ root: URL, _ extra: [String] = []) throws
+        -> (doc: [String: Any], code: Int32) {
+        _ = try ProcessHarness.run(bin, [root.path], cwd: root)
+        let r = try ProcessHarness.run(bin, ["privacy-manifest", "--verify", "--json"] + extra, cwd: root)
+        let d = (try? JSONSerialization.jsonObject(with: Data(r.out.utf8))) as? [String: Any]
+        XCTAssertNotNil(d, "the --json surface must emit a parseable document: \(r.out)\n\(r.err)")
+        return (d ?? [:], r.code)
+    }
+
+    /// **THE CARDINAL SIN: a vendor directory's NAME decided whether an undeclared entitlement was
+    /// reported at all.** Two trees identical in every respect but the name of the vendored dependency
+    /// directory. `discoverEntitlements` carried the FOURTH literal copy of the skip set and that copy
+    /// had lost `Carthage` (914b0b0 added it to the other three), so the vendored `.entitlements` was
+    /// discovered too, `found.count > 1` refused to guess, and the app's own file was never read — a
+    /// clean `ok: true` over an undeclared entitlement, on the surface CI reads.
+    ///
+    /// This is an A/B and the ONLY thing that varies is the directory name. Both arms are asserted, so
+    /// the `Pods` arm is simultaneously the control proving the fixture reaches the finding at all.
+    func testAVendorDirectorysNameCannotDecideWhetherAnUndeclaredEntitlementIsReported() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        var seen: [String: (ok: Bool, key: Bool, code: Int32)] = [:]
+        for vendor in ["Pods", "Carthage"] {
+            let root = try makeEntitlementFixture(vendor: vendor, declaresKey: false)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let (doc, code) = try verifyJSON(bin, root)
+            let keys = doc["entitlementUnderDeclared"] as? [String] ?? []
+            seen[vendor] = (doc["ok"] as? Bool ?? true,
+                            keys.contains("NSCriticalMessagingUsageDescription"), code)
+        }
+        // The CONTROL arm — if this is not red the fixture never reached the finding and the A/B below
+        // would be two identical nothings agreeing with each other.
+        XCTAssertEqual(seen["Pods"]?.code, 1, "control: the Pods arm must find the undeclared entitlement")
+        XCTAssertEqual(seen["Pods"]?.key, true, "control: the key must be named in the JSON document")
+        XCTAssertEqual(seen["Pods"]?.ok, false, "control: ok must agree with the exit code")
+        // …and the arms must agree, because the only difference between them is a directory NAME.
+        XCTAssertEqual(seen["Carthage"]?.code, seen["Pods"]?.code,
+                       "renaming Pods/ to Carthage/ changed the EXIT CODE: \(seen)")
+        XCTAssertEqual(seen["Carthage"]?.key, seen["Pods"]?.key,
+                       "renaming Pods/ to Carthage/ removed entitlementUnderDeclared from the JSON: \(seen)")
+        XCTAssertEqual(seen["Carthage"]?.ok, seen["Pods"]?.ok,
+                       "renaming Pods/ to Carthage/ flipped ok to true: \(seen)")
+    }
+
+    /// **THE DISCLOSURE HALF, which the skip-list fix does NOT cover.** Adding `Carthage` to a list
+    /// closes one cause; the next vendored dependency directory will not be on the list either. What
+    /// makes the class survivable is that the REFUSAL — "several .entitlements, none read" — reaches the
+    /// machine surface, where it used to print under `!pm.json, !pm.xml` and so reached nobody. The
+    /// directory here is `Externals/`, deliberately on NO skip list: the ambiguity still happens, and the
+    /// document must say so beside its `ok: true`.
+    func testTheEntitlementsRefusalIsDisclosedOnTheMachineSurfacesNotOnlyToAHuman() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try makeEntitlementFixture(vendor: "Externals", declaresKey: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (doc, code) = try verifyJSON(bin, root)
+        XCTAssertEqual(code, 0, "the run genuinely cannot answer — it must not start failing: \(doc)")
+        guard let unread = doc["entitlementsUnread"] as? [String: Any] else {
+            return XCTFail("`ok: true` over an entitlements file the verb refused to read, with NOTHING "
+                           + "in the document saying so — the cardinal sin: \(doc)")
+        }
+        XCTAssertEqual(unread["reason"] as? String, "several")
+        let cands = unread["candidates"] as? [String] ?? []
+        XCTAssertTrue(cands.contains("App.entitlements"),
+                      "the refusal must name what it refused over: \(cands)")
+        XCTAssertTrue(cands.contains("Externals/Lib/Vendored.entitlements"),
+                      "candidate paths must be relative to the plist, not bare basenames: \(cands)")
+        XCTAssertEqual(unread["uncheckedKeys"] as? [String], ["NSCriticalMessagingUsageDescription"],
+                       "the reader must be told WHICH keys went unchecked: \(unread)")
+        // …and the third surface. `--xml` prints "nothing missing", which is a completeness claim.
+        _ = try ProcessHarness.run(bin, [root.path], cwd: root)
+        let x = try ProcessHarness.run(bin, ["privacy-manifest", "--verify", "--xml"], cwd: root)
+        XCTAssertTrue(x.out.contains("NONE READ"),
+                      "--xml's `nothing missing` was printed over an unread entitlements file: \(x.out)")
+    }
+
+    /// **`--xml` MUST EMIT WELL-FORMED XML, CHECKED BY A PARSER RATHER THAN BY EYE.** The whole point of
+    /// that surface is that the output pastes into somebody's `Info.plist`, and its comments carried
+    /// `<!-- candor privacy-manifest --verify: … -->`. XML forbids `--` inside a comment. Apple's
+    /// `plutil -lint` accepts it (measured), which is exactly why it survived — the lenient parser is the
+    /// one anybody would reach for, and a second `--` was about to be added by the entitlements caveat.
+    ///
+    /// Parsed here with `XMLParser`, which is strict on both Darwin Foundation and
+    /// swift-corelibs-foundation. Driven over BOTH arms — the caveat comment and the plain
+    /// "nothing missing" one — because they are separate print sites and only one of them was wrong the
+    /// first time.
+    func testTheXmlSurfaceIsWellFormedXml() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        for vendor in ["Externals", nil] {           // several-and-unread, then the ordinary pass
+            let root = try makeEntitlementFixture(vendor: vendor, declaresKey: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            _ = try ProcessHarness.run(bin, [root.path], cwd: root)
+            let x = try ProcessHarness.run(bin, ["privacy-manifest", "--verify", "--xml"], cwd: root)
+            let doc = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\n"
+                + x.out + "\n</dict></plist>\n"
+            let parser = XMLParser(data: Data(doc.utf8))
+            let ok = parser.parse()
+            let why = parser.parserError.map { "\($0)" } ?? "no error reported"
+            XCTAssertTrue(ok, "`--xml` output does not parse as XML once pasted into a plist (\(why)) — "
+                          + "vendor=\(vendor ?? "none"), output:\n\(x.out)")
+        }
+    }
+
+    /// **THE OVER-CHARGE CONTROL — the direction the fix did NOT intend.** A tree whose entitlement IS
+    /// declared must still pass, and must NOT grow the disclosure key: a fix that makes every verify
+    /// noisy, or that starts failing a correct manifest, has deleted the feature rather than repaired
+    /// it. Run with the vendor directory present (so the skip set is genuinely exercised and the app's
+    /// own file IS the single candidate) and without it.
+    func testAGenuinelyDeclaredEntitlementStillPassesCleanlyAndSilently() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        for vendor in ["Carthage", "Pods", nil] {
+            let root = try makeEntitlementFixture(vendor: vendor, declaresKey: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let (doc, code) = try verifyJSON(bin, root)
+            let where_ = vendor ?? "<no vendor dir>"
+            XCTAssertEqual(code, 0, "\(where_): a declared entitlement must still exit 0: \(doc)")
+            XCTAssertEqual(doc["ok"] as? Bool, true, "\(where_): ok must stay true: \(doc)")
+            XCTAssertNil(doc["entitlementUnderDeclared"],
+                         "\(where_): the SAFE value must not be charged: \(doc)")
+            XCTAssertNil(doc["entitlementsUnread"],
+                         "\(where_): the app's own file WAS read — a disclosure here would be a false "
+                         + "caveat, and a caveat on every run is a caveat nobody reads: \(doc)")
+        }
+    }
+
+    /// The four literal copies of the vendor skip set are now ONE, so this class cannot come back by the
+    /// route it came the first time: a list edited in three places out of four. Asserted on the SOURCE,
+    /// because that is where the defect lived — the behavioural A/B above cannot see a fifth copy added
+    /// tomorrow, and "same exclusions as X" comments are what let the fourth one drift for good.
+    func testThereIsExactlyOneVendorSkipListInTheSources() throws {
+        let repo = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let srcRoot = repo.appendingPathComponent("Sources")
+        guard let en = FileManager.default.enumerator(atPath: srcRoot.path) else {
+            throw XCTSkip("no Sources/ beside the test file — this pin reads the tree, not the binary")
+        }
+        // NON-VACUOUSNESS FIRST: if the walk reads no Swift at all, "zero extra copies" is a statement
+        // about an empty set. Same failure shape as a gate whose reference value went missing.
+        var swiftFiles = 0
+        var sites: [String] = []
+        for case let rel as String in en where rel.hasSuffix(".swift") {
+            swiftFiles += 1
+            let abs = srcRoot.appendingPathComponent(rel).path
+            guard let text = try? String(contentsOfFile: abs, encoding: .utf8) else { continue }
+            for (i, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated()
+            where line.contains("\"node_modules\"") && line.contains("\"Pods\"") {
+                sites.append("\(rel):\(i + 1)")
+            }
+        }
+        XCTAssertGreaterThan(swiftFiles, 10, "the source walk found almost nothing — this pin is vacuous")
+        XCTAssertEqual(sites.count, 1,
+                       "the vendored-directory skip list must be spelled out ONCE (VENDOR_SKIP_DIRS). It "
+                       + "was written out four times, one copy silently lost `Carthage`, and that "
+                       + "divergence was a silent under-report. Found at: \(sites)")
     }
 }

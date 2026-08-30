@@ -9,6 +9,40 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **CARDINAL SIN (silent under-report) — a vendored directory's NAME decided whether
+  `privacy-manifest --verify` reported an undeclared entitlement, and the refusal that caused it was
+  invisible on `--json`.** Two halves, both fixed; measured as an A/B over two trees identical except for
+  the name of the vendor directory:
+
+  |             | exit | `ok`  | `entitlementUnderDeclared`                |
+  |-------------|------|-------|-------------------------------------------|
+  | `Pods/`     | 1    | false | `["NSCriticalMessagingUsageDescription"]` |
+  | `Carthage/` | 0    | true  | *absent from the document*                |
+
+  1. **The list.** `discoverEntitlements` carried the FOURTH literal copy of the vendored/build skip set
+     (the others in `discoverInfoPlist`, `countNonSwiftSources` and `findXcodeProjects`) and that copy had
+     lost `Carthage` — `914b0b0` added it to three of four — while the comment two lines below still read
+     *"Same exclusions as the Info.plist discovery"*. So a vendored `.entitlements` under `Carthage/` was
+     discovered as a second candidate, discovery refused to guess, and the app's own file was never read.
+     The four copies are now ONE `public let VENDOR_SKIP_DIRS` in `CandorCore`, pinned by a source-level
+     row that fails if a second copy appears.
+  2. **The disclosure, which the list fix does NOT cover.** The refusal printed under `!pm.json, !pm.xml`,
+     so `--json` returned a bare `"ok": true` and `--xml` printed *"nothing missing; no keys to add"* over
+     a run that never opened the file. `Carthage` caused THIS instance; the next vendored directory
+     (`vendor/`, `Externals/`, a submodule) will not be on the list either, and a silent `ok: true` over
+     an unread entitlements file is the sin whichever directory produced it. A verify that found
+     candidates and read none now emits `entitlementsUnread` (`reason` / `candidates` / `uncheckedKeys`)
+     on `--json` and an equivalent comment on `--xml` — ABSENT when a file WAS read, so an ordinary
+     verify's document is byte-unchanged. `ok` and the exit code are deliberately unmoved: this run
+     cannot answer either way, and failing every multi-target repo over it (NetNewsWire: 8 `.entitlements`)
+     would delete the feature rather than fix it. SPEC-EXTENSION-privacy.md carries the clause.
+
+  Four rows: the A/B (with the `Pods` arm as its own reaching-the-code control), the disclosure on both
+  machine surfaces, the OVER-CHARGE CONTROL (a genuinely declared entitlement still exits 0 / `ok: true`
+  and grows NO new key, with and without a vendor directory), and the one-copy source pin. Falsified by
+  disarming each half separately: reverting the list fix reddens three, reverting the disclosure reddens
+  exactly the disclosure row.
+
 - **Guard-deletion sweep (`bin/AGENT-CORPUS-BRIEF.md` section C: "delete each guard in turn, does anything
   go red?"), run systematically over `Sources/candor-swift/{main,Driver,CallCollector,DeclCollector,
   GateReportCLI,FixCLI}.swift` and `Sources/CandorCore/{Policy,XcodeTargets,PackageTargets,Classifier}.swift`

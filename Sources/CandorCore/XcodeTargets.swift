@@ -1584,13 +1584,28 @@ private func evalPlatformCondition(_ expr: ExprSyntax, platform: String) -> Bool
 
 // MARK: - project discovery
 
+/// The VCS / build-output / vendored-dependency directory names every discovery walk skips.
+///
+/// **THIS IS ONE SET BECAUSE FOUR COPIES OF IT DISAGREED.** It was written out literally at four sites —
+/// three here and in `PrivacyManifestCLI` (`discoverInfoPlist`, `countNonSwiftSources`,
+/// `findXcodeProjects`) and a fourth in `discoverEntitlements` — and `914b0b0` added `Carthage` to three
+/// of them. The fourth kept a comment reading *"Same exclusions as the Info.plist discovery"* while no
+/// longer being them, and the divergence was a SILENT UNDER-REPORT: a vendored `.entitlements` under
+/// `Carthage/` made the entitlements discovery find two files, refuse to guess, and never read the app's
+/// own — so `privacy-manifest --verify --json` answered `ok: true` with the undeclared entitlement key
+/// absent from the document, where the identical tree with the vendor directory named `Pods/` exited 1.
+/// Only the directory's NAME differed. A duplicated list is a list that will diverge; there is now one.
+public let VENDOR_SKIP_DIRS: Set<String> = [
+    ".build", ".git", "DerivedData", "Pods", "node_modules", "Carthage", ".swiftpm",
+]
+
 /// Every `.xcodeproj` under `root` that actually contains a `project.pbxproj`, sorted. Skips VCS/build
 /// trees and anything inside a derived bundle — the same exclusions the plist discovery uses, for the
 /// same reason: a `.xcodeproj` inside somebody's `Pods/` or a checkout's `.build/` is not a product of
 /// this repo, and resolving a target there answers about the wrong code.
 public func findXcodeProjects(under root: String) -> [String] {
     let fm = FileManager.default
-    let skip: Set<String> = [".build", ".git", "DerivedData", "Pods", "node_modules", "Carthage", ".swiftpm"]
+    let skip = VENDOR_SKIP_DIRS
     var found: [String] = []
     if let en = fm.enumerator(atPath: root) {
         for case let rel as String in en {
