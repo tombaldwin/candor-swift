@@ -67,6 +67,41 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   checks) were spot-checked rather than swept — the spot checks found no additional gap, but that is a
   much thinner claim than the three files above got.
 
+- **Guard-deletion sweep, round 2: `main.swift`'s file-set/peek wiring plus the spot-checked files above.**
+  No production change — both findings are untested-but-correct guards, fixed with a regression test
+  rather than a code change. `SwiftPMPlatformPrunedProcessTests`/`XcodeTargetScopeTests`/etc. exercise an
+  UNREADABLE `platforms:` manifest value and an unreadable pbxproj/dep-report, but nothing anywhere
+  constructed an unreadable SOURCE FILE inside either platform-pruning walk — the one case each walk's own
+  comment singles out ("Cheap gate first... An unreadable file is KEPT — pruning must never eat one
+  silently").
+  1. `PackageTargets.swift`/`main.swift`'s SwiftPM `--target` platform-pruning filter: neutering the
+     readability check (folding "cannot read" into "provably dead", `return false` instead of `return
+     true`) left all 954 tests green. The file is not fully silently dropped — the target-closure
+     before/after diff a few lines down catches anything `sourcePaths` loses and discloses it — but under
+     the WRONG label, `outside-the-target-closure` ("an unscoped scan WOULD have judged this") instead of
+     the correct `unanalyzed`/"source failed to read", which is false here: an unscoped scan hits the
+     identical read failure. New test
+     `testAnUnreadableSourceFileIsDisclosedAsUnreadableNotAsOutsideTheClosure` in
+     `SwiftPMPlatformPrunedProcessTests.swift`.
+  2. `XcodeTargets.swift`'s `xcodeTargetScope` platform-pruning filter — the sibling this engine's own
+     comment on (1) points at ("same as the Xcode side"), asked of it per the corpus brief's rule F ("when
+     one function yields, ask the sibling"): the IDENTICAL mutation on the IDENTICAL guard shape also left
+     the entire suite green, and here there is no downstream safety net at all — the file simply vanishes
+     from `scope.files`, which is the set that decides target membership for imports/links, with no
+     disclosure of any kind. New test `testAnUnreadableFileIsKeptNotPrunedAsPlatformDead` in
+     `XcodeTargetScopeTests.swift`, at the `xcodeTargetScope` unit level (an injected `XcodeScopeFS` whose
+     `readFile` returns `nil`).
+  Both: reverting the guard is RED on the new test, GREEN at HEAD; the rest of the suite (956/956 total,
+  up from 954) is unaffected either way; `smoke.sh`, `fabrication_probe.py`, `fuzz.py` and
+  `ci/self-gate.sh` stay green throughout.
+  **Remainder of the bounded scope** (`GateReportCLI.swift`'s report-corrupt-shape guards, `FixCLI.swift`'s
+  `mustHedge`/hedge-note machinery, the `--target`/pbxproj refusal paths, the peek-CHA attribution-naming
+  guards in `main.swift`, and everything in `Driver.swift`/`CallCollector.swift`/`DeclCollector.swift`/
+  `Policy.swift`/`Classifier.swift` beyond the ~20 already done) was read and spot-checked but not swept
+  guard-by-guard — it reads as heavily hardened already (near-miss poison tables, over-charge controls,
+  the ⟨0.33⟩ cross-policy tests from round 1) and no further gap was found in the time spent, but that is
+  a lead, not a clean bill.
+
 - **Test-quality fix, no production change: `ec3e50f` (R61, the three-mechanism FFI-fallback fix) shipped
   with zero committed tests.** Reproduced directly, per candor's corpus-brief "revert test": reverting
   `ec3e50f`'s entire production diff (`Classifier.swift`, `CallCollector.swift`, `DeclCollector.swift`,
