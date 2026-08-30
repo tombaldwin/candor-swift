@@ -132,6 +132,28 @@ final class PolicyTests: XCTestCase {
         XCTAssertEqual(p, ["api.stripe.com", "hooks.stripe.com"])
     }
 
+    /// ⟨0.29⟩ A MALFORMED `net-partner` VALUE IS IGNORED (and disclosed on stderr), NOT KEPT AS JUNK.
+    /// The `=` spelling an operator reaches for by habit parsed as the HOST `"= partner.example"`, entered
+    /// the set, and matched nothing for the rest of the run — the operator believes a partner is declared,
+    /// the verdict disagrees, and no line connects the two.
+    ///
+    /// GUARD-DELETION MEASURED 2026-08-30: replacing the malformed-value condition with `if false` — so
+    /// every junk value is kept verbatim — left all 958 tests GREEN. The failure direction is SAFE (the
+    /// gate stays armed), which is exactly why nothing noticed: the only observable is which strings are
+    /// in the set, and no test had ever asked.
+    func testNetPartnerMalformedValueIsIgnoredNotKeptAsJunk() {
+        let p = parseNetPartners("""
+        net-partner = partner.example
+        net-partner partner.example extra words
+        net-partner good.example
+        """)
+        XCTAssertEqual(p, ["good.example"],
+                       "an `=` or extra words is not a host — keeping it would silently enter a partner "
+                       + "that can never match, while the operator reads a declared partner")
+        // The `=` form must not survive under ANY spelling of itself: no member may carry the operator.
+        XCTAssertFalse(p.contains { $0.contains("=") })
+    }
+
     func testReasonClassMapsRawReasons() {
         XCTAssertEqual(reasonClass("reflect:eval"), "reflect")
         XCTAssertEqual(reasonClass("dynamicMemberLookup"), "reflect")
@@ -225,12 +247,86 @@ final class PolicyTests: XCTestCase {
         XCTAssertTrue(scopeMatches("a.b.c", "b::c"))
     }
 
+    /// A TRAILING SEPARATOR MEANS EXACT SEGMENT — the field-reported fix (`forbid aws -> app` firing 14
+    /// times on honest AWS SDK calls, and `app::` not helping because `split(whereSeparator:)` drops the
+    /// empty subsequence).
+    ///
+    /// GUARD-DELETION MEASURED 2026-08-30: forcing `exact` to false in `scopeMatches` — i.e. reverting
+    /// the whole feature to plain prefix matching — left all 958 tests GREEN. The one `app::` in the
+    /// suite lives in `ParsePolicyProcessTests` inside a `forbid` line whose `from`/`to` are asserted only
+    /// as STRINGS in the `parsepolicy` dump, which never calls the matcher. A fix reported by a user, on
+    /// the semantics of every `deny`/`pure`/`forbid` scope, was carried by nothing.
+    func testScopeMatchTrailingSeparatorMeansExactSegment() {
+        // bare `app` is UNCHANGED — still the documented prefix rule, which is what made the field report
+        XCTAssertTrue(scopeMatches("application_name.go", "app"))
+        // `app::` and `app.` pin the segment: `application_name` is no longer a hit…
+        XCTAssertFalse(scopeMatches("application_name.go", "app::"),
+                       "a trailing `::` means the EXACT segment `app`, so `application_name` must not match")
+        XCTAssertFalse(scopeMatches("application_name.go", "app."),
+                       "a trailing `.` is the dotted spelling of the same exact-segment rule")
+        // …while the segment it names still is, on both separators and in a mid-name run.
+        XCTAssertTrue(scopeMatches("app.handler.run", "app::"))
+        XCTAssertTrue(scopeMatches("app.handler.run", "app."))
+        XCTAssertTrue(scopeMatches("root.app.handler", "root::app::"))
+        XCTAssertFalse(scopeMatches("root.apple.handler", "root::app::"))
+    }
+
+    // ── scopeMatchesPermitted — ⟨0.29⟩ `only`'s matcher, where the prefix rule is FAIL-OPEN ───────────
+
+    /// The `to` side of an `only` rule PERMITS, so `scopeMatches`'s last-segment-prefix widening is the
+    /// exact inverse of safe there: `only model -> util` would let `model.go` reach
+    /// `utilities_untrusted.exfil`. This function is the exact-segment sibling that closes it.
+    ///
+    /// GUARD-DELETION MEASURED 2026-08-30: inverting the empty-scope guard to `return true` — an empty
+    /// permitted scope permitting EVERYTHING — left all 958 tests GREEN, and the function had no direct
+    /// unit test at all. The guard is unreachable through `parsePolicy` today (`split(whereSeparator:)`
+    /// omits empty subsequences, so no `to` token is ever ""), which is precisely why it needs a pin at
+    /// the function boundary: it is a `public` CandorCore entry point whose one in-engine caller is one
+    /// tokenizer change away from being able to hand it "".
+    func testScopeMatchesPermittedIsExactAndPermitsNothingOnAnEmptyScope() {
+        XCTAssertTrue(scopeMatchesPermitted("util.helper.read", "util"))
+        XCTAssertFalse(scopeMatchesPermitted("utilities_untrusted.exfil", "util"),
+                       "the PERMITTED side must be exact — a prefix match here PERMITS more, which is the "
+                       + "one direction `only` exists to make impossible")
+        XCTAssertTrue(scopeMatchesPermitted("a.b.c", "b::c"))
+        XCTAssertFalse(scopeMatchesPermitted("anything.at.all", ""),
+                       "an empty permitted scope permits NOTHING — the inverse of `scopeMatches`, where an "
+                       + "empty scope binds every name, because there the widening is fail-closed")
+    }
+
     // ── hostPort / hostPart ───────────────────────────────────────────────────────────────────────
 
     func testHostPortStripsSchemeAndPathKeepsPort() {
         XCTAssertEqual(hostPort("https://api.example.com:8080/v1/x"), "api.example.com:8080")
         XCTAssertEqual(hostPort("tcp://rates.internal:7070"), "rates.internal:7070")
         XCTAssertEqual(hostPort("api.example.com/x"), "api.example.com")
+    }
+
+    /// EVERY scheme in `URL_SCHEMES`, not just the two anyone writes a fixture for.
+    ///
+    /// GUARD-DELETION MEASURED 2026-08-30: cutting the list down to `["https://", "http://"]` in
+    /// `CallCollector.literalHeadAuthority` — the SECOND hand-maintained copy of it, whose comment said
+    /// "matching hostPort's scheme list" — left all 958 tests GREEN. The two copies are now one constant;
+    /// this walks it so a scheme dropped from it is red rather than silent. `wss://` is not exotic here:
+    /// `URLSession.webSocketTask` is in `NET_MEMBERS`, so a WebSocket endpoint is exactly the kind of
+    /// literal whose host must survive to reach `netDestClass`.
+    func testHostPortStripsEveryCuratedScheme() {
+        // The scheme names are SPELLED OUT here, never read back out of `URL_SCHEMES`. A loop over the
+        // constant is vacuous against the mutation it is supposed to catch: shrink the list and the loop
+        // shrinks with it, so every iteration still passes. (Measured — the first draft of this test did
+        // exactly that and stayed green on a two-scheme list.)
+        let expected = ["https://", "http://", "wss://", "ws://", "tcp://"]
+        XCTAssertEqual(URL_SCHEMES, expected,
+                       "URL_SCHEMES is the single copy `hostPort` and `literalHeadAuthority` both read — "
+                       + "a scheme dropped from it silently stops resolving that family of endpoints")
+        for scheme in expected {
+            XCTAssertEqual(hostPort(scheme + "api.example.com:8080/v1/x"), "api.example.com:8080",
+                           "`\(scheme)` is in URL_SCHEMES, so its authority must be reachable — a scheme "
+                           + "left unstripped keeps the whole URL as the 'host' and matches no allow value")
+        }
+        // The list is the boundary: an UNLISTED scheme is not stripped, so its authority never becomes
+        // the host (a non-URL literal with an embedded `//…/` must never be misread as an authority).
+        XCTAssertNotEqual(hostPort("ftp://files.example.com/x"), "files.example.com")
     }
 
     func testHostPartStripsPort() {

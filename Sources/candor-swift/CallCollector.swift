@@ -1481,10 +1481,12 @@ final class CallCollector: SyntaxVisitor {
     // it identically to a whole-URL literal. Returns nil when the authority is NOT terminated by a `/` inside
     // this literal segment (the `\(…)` could be inside the host or port — `"https://\(h)/…"`,
     // `"https://api.\(x).com/…"`, `"https://api.openai.com:\(port)/…"`) → the caller leaves it bare Net.
-    // Only the curated URL schemes are accepted (matching hostPort's scheme list) so a non-URL literal
-    // prefix with an embedded `//…/` can't be misread as an authority.
+    // Only the curated URL schemes are accepted — `URL_SCHEMES`, the SAME list `hostPort` strips, so a
+    // non-URL literal prefix with an embedded `//…/` can't be misread as an authority. This was a second
+    // hand-maintained copy held in agreement with the first by a comment saying "matching hostPort's
+    // scheme list"; both copies had tests for `https://`/`http://` and none for `wss://`/`ws://`/`tcp://`.
     static func literalHeadAuthority(_ text: String) -> String? {
-        for scheme in ["https://", "http://", "wss://", "ws://", "tcp://"] where text.hasPrefix(scheme) {
+        for scheme in URL_SCHEMES where text.hasPrefix(scheme) {
             let afterScheme = text.index(text.startIndex, offsetBy: scheme.count)
             // The authority ends at the FIRST `/` after the scheme. Require it to be WITHIN this literal —
             // if there is none, the `\(…)` (which follows this literal) is the authority terminator or lies

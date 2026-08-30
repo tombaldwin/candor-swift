@@ -132,6 +132,32 @@ final class NetLocatorProvenanceProcessTests: XCTestCase {
         XCTAssertEqual(by["send"]?["netClass"] as? [String], ["unknown-host"])
     }
 
+    /// …AND THE COMPLEMENT, on a scheme no fixture had ever driven. `literalHeadAuthority` accepts a
+    /// literal head whose authority is already complete (`"wss://host/\(room)"` — the `\(…)` is confined
+    /// to the PATH), and it does so for the five schemes in `URL_SCHEMES`.
+    ///
+    /// GUARD-DELETION MEASURED 2026-08-30: `literalHeadAuthority` carried its own hand-written copy of
+    /// that list, kept in step with `hostPort`'s by a comment reading "matching hostPort's scheme list".
+    /// Cutting the copy to `["https://", "http://"]` left all 958 tests green — only those two were ever
+    /// exercised in either place, and `wss://` is not a corner: `webSocketTask` is in `NET_MEMBERS`, so a
+    /// WebSocket endpoint is a first-class Net destination whose host must survive to `netDestClass`.
+    /// The two copies are now one constant; this drives it through the real route.
+    func testWebSocketLiteralHeadAuthorityExtractsHost() throws {
+        let by = try scan("""
+        import Foundation
+        func stream(room: String) {
+            let t = URLSession.shared.webSocketTask(with: URL(string: "wss://api.segment.io/v1/\\(room)")!)
+            t.resume()
+        }
+        stream(room: "x")
+        """)
+        XCTAssertEqual(hosts(by, "stream"), ["api.segment.io"],
+                       "the authority is complete inside the literal head — only the PATH is interpolated")
+        XCTAssertEqual(by["stream"]?["netClass"] as? [String], ["known-telemetry"],
+                       "a resolved host reaches the destination classifier; an unstripped `wss://` would "
+                       + "leave this fail-closed at unknown-host with the endpoint sitting in plain sight")
+    }
+
     /// A project's OWN `struct URL` shadows the Foundation ctor — the unwrap must not read a local type's
     /// argument as a network destination (the standing never-fabricate discipline for every κ shadow).
     func testFailClosedLocalURLTypeShadowsTheUnwrap() throws {

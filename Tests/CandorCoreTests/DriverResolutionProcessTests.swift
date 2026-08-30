@@ -463,6 +463,60 @@ final class DriverResolutionProcessTests: XCTestCase {
                      "a pure @resultBuilder must not fabricate an effect onto its annotated func")
     }
 
+    /// R29's build-method list has EIGHT members and only `buildBlock` was ever driven by a fixture.
+    ///
+    /// GUARD-DELETION MEASURED 2026-08-30: cutting `Driver.swift`'s list to `["buildBlock"]` — deleting
+    /// seven eighths of the transform — left all 958 tests GREEN, in both this suite and
+    /// `MacroDisclosureProcessTests`, the only two places that mention `@resultBuilder` at all. This is
+    /// the sidecar-segment shape one layer over: a hand-maintained list whose members are individually
+    /// load-bearing and collectively pinned by one of them.
+    ///
+    /// It is not a hypothetical remainder either. `buildExpression` is what SwiftUI's `ViewBuilder`
+    /// applies to every leaf, `buildPartialBlock` is the 5.9+ spelling that replaced variadic
+    /// `buildBlock` overloads, and `buildOptional`/`buildEither` are what `if`/`else` in a builder body
+    /// lower to — a builder that does its work in any of them and defines no `buildBlock` reads
+    /// SILENT-PURE at every annotated func, which is the exact defect R29 exists to close.
+    ///
+    /// ONE DISTINGUISHABLE EFFECT PER METHOD, deliberately (AGENT-CORPUS-BRIEF §4): a shared effect
+    /// label would let one working method mask six broken ones.
+    func testResultBuilderTransformCoversEveryBuildMethodNotJustBuildBlock() throws {
+        let by = try scan("""
+        import Foundation
+        @resultBuilder struct ExprB { static func buildExpression(_ x: Int) -> Int { try? "x".write(toFile: "/tmp/e", atomically: true, encoding: .utf8); return x } }
+        @resultBuilder struct OptB { static func buildOptional(_ x: Int?) -> Int { _ = getenv("HOME"); return 0 } }
+        @resultBuilder struct EitherB { static func buildEither(first x: Int) -> Int { _ = Date(); return x } }
+        @resultBuilder struct ArrayB { static func buildArray(_ xs: [Int]) -> Int { _ = Process(); return 0 } }
+        @resultBuilder struct FinalB { static func buildFinalResult(_ x: Int) -> Int { NSLog("x"); return x } }
+        @resultBuilder struct PartialB { static func buildPartialBlock(first x: Int) -> Int { _ = Pipe(); return x } }
+        @resultBuilder struct AvailB { static func buildLimitedAvailability(_ x: Int) -> Int { _ = sqlite3_exec(nil, nil, nil, nil, nil); return x } }
+        @ExprB func viaExpr() -> Int { 1 }
+        @OptB func viaOpt() -> Int { 1 }
+        @EitherB func viaEither() -> Int { 1 }
+        @ArrayB func viaArray() -> Int { 1 }
+        @FinalB func viaFinal() -> Int { 1 }
+        @PartialB func viaPartial() -> Int { 1 }
+        @AvailB func viaAvail() -> Int { 1 }
+        func callExpr() { _ = viaExpr() }
+        func callOpt() { _ = viaOpt() }
+        func callEither() { _ = viaEither() }
+        func callArray() { _ = viaArray() }
+        func callFinal() { _ = viaFinal() }
+        func callPartial() { _ = viaPartial() }
+        func callAvail() { _ = viaAvail() }
+        """)
+        for (caller, effect, method) in [("callExpr", "Fs", "buildExpression"),
+                                         ("callOpt", "Env", "buildOptional"),
+                                         ("callEither", "Clock", "buildEither"),
+                                         ("callArray", "Exec", "buildArray"),
+                                         ("callFinal", "Log", "buildFinalResult"),
+                                         ("callPartial", "Ipc", "buildPartialBlock"),
+                                         ("callAvail", "Db", "buildLimitedAvailability")] {
+            XCTAssertEqual(ProcessHarness.inferred(by, caller), [effect],
+                           "`\(method)` runs when the annotated func is called, exactly as `buildBlock` "
+                           + "does — a builder doing its work there must not read silent-pure")
+        }
+    }
+
     // ── conditional conformance on a stdlib collection (soundness round 2026-07-11, R28) ───────────
     // `extension Array: Saveable where Element: Saveable` reached via `xs.persist()` read silent-pure —
     // two gaps: the array-receiver → `Array.persist` edge, AND the bare `forEach { $0.persist() }` over

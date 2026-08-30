@@ -102,6 +102,81 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   the ⟨0.33⟩ cross-policy tests from round 1) and no further gap was found in the time spent, but that is
   a lead, not a clean bill.
 
+- **Guard-deletion sweep, round 4: `Policy.swift`, `Classifier.swift`, `Driver.swift` — the three files
+  round 3 named as not reached.** Eight guards were deleted one at a time against the full 958-test suite;
+  **seven stayed GREEN** and now have a test that is RED on the same deletion. Nothing here changes a report
+  byte: every guard was correct, and every one of them was carried by nothing.
+  1. **`scopeMatches`'s trailing-separator exact-segment rule** (`app::` / `app.`) — the FIELD-REPORTED fix
+     (a `forbid aws -> app` firing 14 times on honest AWS SDK calls). Forcing `exact` to false — reverting
+     the feature outright — was green. The suite's one `app::` sits in `ParsePolicyProcessTests` inside a
+     `forbid` line whose `from`/`to` are asserted only as STRINGS in the `parsepolicy` dump, so it never
+     calls the matcher: a test containing the literal case, unable to discriminate it (corpus-brief §A).
+     `PolicyTests.testScopeMatchTrailingSeparatorMeansExactSegment`.
+  2. **`scopeMatchesPermitted`'s empty-scope guard** — inverting it to `return true` (an empty permitted
+     scope permitting EVERYTHING, in the one rule kind whose whole purpose is to fail safe) was green, and
+     the function had no direct unit test at all. It is unreachable through `parsePolicy` today
+     (`split(whereSeparator:)` omits empty subsequences), which is stated in the test rather than used as
+     a reason not to pin a `public` entry point.
+     `PolicyTests.testScopeMatchesPermittedIsExactAndPermitsNothingOnAnEmptyScope`.
+  3. **`parseNetPartners`'s ⟨0.29⟩ malformed-value disclosure** — `if false` in place of the condition, so
+     `net-partner = partner.example` enters the set as the host `"= partner.example"` and matches nothing
+     for the rest of the run, was green. The failure direction is SAFE (the gate stays armed), which is
+     exactly why nothing noticed: the only observable is the set's contents and no test had asked.
+     `PolicyTests.testNetPartnerMalformedValueIsIgnoredNotKeptAsJunk`.
+  4. **`isModelHost`'s two over-charge controls**, both added by review rounds after measuring a
+     fabrication, both untested: making the `:11434` arm `return true` (any host on that port is Ollama —
+     the max-review r3 defect) was green, and so was widening the Bedrock first-label test to
+     `first.contains("bedrock")`, which re-admits the S3 bucket `bedrock-backups.s3.…` its own comment
+     names. **Two STALE COMMENTS in `ClassifierTests` were describing exactly those two defects as if they
+     were the contract** ("any host on port 11434 … host is irrelevant"; "host CONTAINS bedrock") — sitting
+     directly above the assertions that would have caught them. Comments corrected;
+     `ClassifierTests.testIsModelHostDoesNotFabricateOnLookalikes` adds the negatives.
+  5. **`Driver.swift`'s @resultBuilder build-method list (R29) had EIGHT members and only `buildBlock` was
+     ever driven by a fixture.** Cutting the list to `["buildBlock"]` — deleting seven eighths of the
+     transform — was green in both files that mention `@resultBuilder` at all. Not a hypothetical
+     remainder: `buildExpression` is what SwiftUI's `ViewBuilder` applies to every leaf,
+     `buildPartialBlock` is the 5.9+ spelling that replaced variadic `buildBlock` overloads, and
+     `buildOptional`/`buildEither` are what `if`/`else` in a builder body lower to — a builder doing its
+     work in any of them and defining no `buildBlock` read SILENT-PURE at every annotated func. This is
+     round 3's five-reserved-sidecar-segments shape one layer over.
+     `DriverResolutionProcessTests.testResultBuilderTransformCoversEveryBuildMethodNotJustBuildBlock`,
+     one DISTINGUISHABLE effect per method so a working one cannot mask six broken ones.
+  6. **`targetsIn`'s `!t.isPlugin` filter, and the existing test named for it.** Deleting the guard left
+     `XcodeTargetScopeTests.testAPluginDeclarationCannotClaimASourcesFolder` — written for exactly this
+     round-3 cardinal sin — GREEN. **In that fixture the disclosure is held up by a different conjunct:**
+     `importable(forTarget:in:)` walks the target's own `dependencies:` graph, `App` declares none, so
+     `Stripe` never enters `inPackage` and the `analyzed` filter (the half `!t.isPlugin` feeds) is never
+     consulted. Two independent mechanisms, one observable, and the arm under test was the one not
+     running (corpus-brief §4). With `dependencies: ["Stripe"]` the guard becomes the only thing left, and
+     without it the real SDK behind `import Stripe` goes silent on both channels. SwiftPM would reject
+     that manifest — which is the point: candor never builds what it scans, and a stale `Sources/<X>/`
+     beside a declaration that no longer compiles is what a half-finished migration leaves behind.
+     `XcodeTargetScopeTests.testAPluginNamedInADependencyListStillCannotClaimASourcesFolder`, with the
+     over-charge control (a genuine `.target` of that name IS internal) written first.
+  7. **The URL-scheme list was hand-maintained in TWO places** — `hostPort` (`Policy.swift`) and
+     `CallCollector.literalHeadAuthority`, whose comment read *"matching hostPort's scheme list"*, holding
+     the copies in step by a sentence a reader must remember to act on. Only `https://` and `http://` were
+     ever exercised in either; cutting the CallCollector copy to those two was green. Both now read one
+     `URL_SCHEMES` constant. `wss://` is not a corner — `webSocketTask` is in `NET_MEMBERS`, so a
+     WebSocket endpoint is a first-class Net destination whose host must survive to `netDestClass`.
+     `PolicyTests.testHostPortStripsEveryCuratedScheme` (spelling the five schemes out, because a loop
+     over the constant is vacuous against the mutation it exists to catch — the first draft did exactly
+     that and stayed green on a two-scheme list) and
+     `NetLocatorProvenanceProcessTests.testWebSocketLiteralHeadAuthorityExtractsHost`.
+  The eighth, `parseClassFilter`'s "`*` is honoured only after the whole list is walked" ordering rule, was
+  the round's control: deleting it goes RED, as do `hostPart`'s bare-IPv6 arm, `pathCovered`'s `..`
+  rejection, `netClassesOf`'s empty-hosts floor, `isHarnessPath`'s `Sources`-precedes test, `fnv1aHex`'s
+  `%016llx`, `parseSpecLadder`'s whitespace strip and ⟨0.34⟩'s `oldCaused` derivation — so the harness was
+  not simply reporting green.
+  966/966 `swift test`, `smoke.sh` 148/148, `ci/self-gate.sh` OK.
+  **Scope note:** `FixCLI.swift`, `main.swift`, `Gate.swift`, `XcodeTargets.swift`, `PackageTargets.swift`,
+  `Surface.swift`, `Propagate.swift` and the bulk of `CallCollector.swift`/`DeclCollector.swift` were **not
+  reached**. Within the three named files this was a targeted sweep (~20 guards), not the full set. One
+  observation filed rather than fixed, because it is a parser gap and not this round's subject:
+  `parsePackageTargetDeclarations` does not read `.plugin(name:)` inside a `dependencies:` array (only bare
+  strings and `.product(…)`), so that legal SwiftPM spelling drops the edge. Harmless for imports — a
+  plugin is not importable — which is why it is a note.
+
 - **Guard-deletion sweep, round 3: `GateReportCLI.swift`'s locator/sidecar-collision guard family
   (priority target of this round's brief).** The round's premise arrived stale on two of its three named
   findings — `homeAnchoredPath`, `modelOutputStreamCall` and `recordOpaqueSeqReturn` were already fixed
