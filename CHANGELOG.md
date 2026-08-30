@@ -9,6 +9,64 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **Guard-deletion sweep (`bin/AGENT-CORPUS-BRIEF.md` section C: "delete each guard in turn, does anything
+  go red?"), run systematically over `Sources/candor-swift/{main,Driver,CallCollector,DeclCollector,
+  GateReportCLI,FixCLI}.swift` and `Sources/CandorCore/{Policy,XcodeTargets,PackageTargets,Classifier}.swift`
+  (344 `guard … else` sites, plus early `continue`s and allowlist tests) — prioritised on the
+  silent-vs-disclosed boundary: anything deciding whether an effect reaches `functions`, `incomplete`,
+  `native:`, or a verdict.** Three guards were found GREEN on deletion — build, full `swift test`, `smoke.sh`,
+  `fabrication_probe.py`, `fuzz.py` and `ci/self-gate.sh` all stayed green with each deleted — meaning
+  nothing anywhere would have noticed if the guard had never existed:
+  1. `CallCollector.swift`'s `homeAnchoredPath` — the recursive `A + B` concatenation walk's
+     `guard out.hasPrefix("/Users/_") else { return nil }` ("only a HOME anchor decides a class").
+     Deleted, a `+`-concatenation of two PLAIN literals with no home anchor anywhere in it (a literal
+     `/Volumes/…` path, or a literal naming a DIFFERENT user's `/Users/<name>`) still resolved all the way
+     through and reached `pathClasses(_:)`'s unrelated `/Volumes/`/`smb://` prefix matches — a fully
+     "resolved", disclosed-clean surface (`RemovableVolume`/`NetworkVolume`) exactly where the function's
+     own doc comment promises `incomplete` ("Returns nil — NOT a guess — for anything else"). New file
+     `HomeAnchoredPathGuardProcessTests.swift` (the fix, a positive control, and the guard's own wording
+     mirrored as a second fixture).
+  2. `CallCollector.swift`'s `modelOutputStreamCall` — the `guard let leaf, ["print", "debugPrint",
+     "dump", "write"].contains(leaf) else { return }` that scopes the implicit-stream-write model to the
+     four spellings that actually trigger it. Deleted, ANY call carrying a `to:`-labelled `inout` argument
+     of a local type fabricated a call edge to that type's `write` method — an ordinary, unrelated
+     `widget.configure(to: &box)` reached `Box.write` and inherited its effects, because the local-free-
+     function/nested-func shadow check two lines below only recognises the CURRENT module's free functions
+     and unit-nested funcs, never a plain member method. New file `OutputStreamLeafAllowlistProcessTests.swift`.
+  3. `DeclCollector.swift`'s `recordOpaqueSeqReturn` ("FINDING 1", opaque/erased `Sequence` builders) —
+     `guard let t = concreteIterableType(r) else { seqConcreteRetTmp[key] = String?.none; return }`, which
+     poisons the WHOLE key the moment ANY return in the body can't be pinned to a concrete local type.
+     Weakened to a `continue` (skip the unpinnable return, keep going), a builder with one genuinely
+     unknowable return path (a bare `AnySequence` parameter) and one resolvable local-type path silently
+     resolved the ENTIRE iteration site to the resolvable path's effects and dropped `unresolved`/`Unknown`
+     outright — the cardinal sin the function's own doc comment names ("never guess... the site then reads
+     honest Unknown"). New file `OpaqueSequenceAmbiguousReturnProcessTests.swift` (this fixture, a positive
+     control, and the sibling two-different-concrete-types case already handled by the same line).
+  All three: reverting the guard is RED on the new test, the new test is GREEN at HEAD, and the rest of the
+  suite (954/954 total, up from 942) is unaffected either way.
+  **A fourth finding had no guard to delete: `CandorCore.unaskedCrossPolicyRules` (SPEC §2 ⟨0.33⟩/⟨0.34⟩,
+  wired into `gate --report`, `unverified` and `fix-gate`) had ZERO process-level test coverage anywhere in
+  the tree** — no test constructed a report whose `scannedUnder` deny set does not cover the gating
+  policy's rules, so the entire cross-policy refusal arm (exit 2, both ⟨0.34⟩ wordings) was exercised by
+  nothing. New file `CrossPolicyRulesProcessTests.swift`: the uncovered-rule refusal (names only the
+  unasked rule), its over-charge mirror (a fully-covered policy does not refuse), and the ⟨0.34⟩
+  predates-0.33-vs-not wording split, both ways.
+  **Judged genuinely dead, left untouched:** `unaskedCrossPolicyRules`'s own three early-return guards
+  (`scannedUnderOfPeeked.isEmpty`, `mine.isEmpty`, `missing.isEmpty`) are each individually, provably
+  behaviour-inert fast paths — the code below already degrades to the identical empty result via
+  `.filter`/`.contains` on an empty collection, confirmed both by hand-tracing and by deleting each one
+  alone against the new suite (byte-identical output every time). And `kappaPropertyWrite`'s
+  `root == "Process"` guard is unreachable-false: its one call site always passes the literal `"Process"`.
+  Left in place rather than removed on a hunch, per the corpus brief's guidance that a guard nothing
+  notices is either untested (fixed above) or dead (reported here, not deleted).
+  **Scope note:** this sweep is bounded, not exhaustive — roughly 20 of the 344 candidate sites got the
+  full delete/build/test/smoke/probe/fuzz/self-gate treatment, chosen by reading for the silent-vs-disclosed
+  boundary rather than by enumeration order. `main.swift`, `GateReportCLI.swift`, `FixCLI.swift`,
+  `XcodeTargets.swift` and `PackageTargets.swift`'s remaining guards (the CLI-argument parsing, the
+  Xcode/SwiftPM platform-pruning walks, and the `excluded[]`/`outOfScope`/`unanalyzed` corrupt-shape
+  checks) were spot-checked rather than swept — the spot checks found no additional gap, but that is a
+  much thinner claim than the three files above got.
+
 - **Test-quality fix, no production change: `ec3e50f` (R61, the three-mechanism FFI-fallback fix) shipped
   with zero committed tests.** Reproduced directly, per candor's corpus-brief "revert test": reverting
   `ec3e50f`'s entire production diff (`Classifier.swift`, `CallCollector.swift`, `DeclCollector.swift`,
