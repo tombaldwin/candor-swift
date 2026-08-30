@@ -39,9 +39,19 @@ public func decodeEscapes(_ raw: String) -> String {
 // The §2 host SURFACE value: scheme + path stripped, but the statically-known PORT KEPT
 // (`https://api.example.com:8080/x` → `api.example.com:8080`) — the conformance suite's [4e] pins that
 // the port is part of the surface, so it must NOT be dropped here.
+/// The URL schemes whose `scheme://` prefix this engine strips to reach an authority. ONE COPY,
+/// because there were two: `hostPort` below and `CallCollector.literalHeadAuthority`, whose own comment
+/// said *"matching hostPort's scheme list"* — a note that a reader must remember to act on, holding two
+/// hand-maintained lists in agreement by nothing but that sentence. Only `https://` and `http://` were
+/// ever exercised by a test in either place, so a scheme dropped from one copy and not the other would
+/// have gone unnoticed in the direction that matters: `literalHeadAuthority` returning nil for a
+/// `wss://…/\(path)` interpolation leaves the request bare `Net` with no host, which reads as an
+/// unresolved endpoint rather than a certifiable one.
+public let URL_SCHEMES: [String] = ["https://", "http://", "wss://", "ws://", "tcp://"]
+
 public func hostPort(_ s: String) -> String {
     var h = s
-    for scheme in ["https://", "http://", "wss://", "ws://", "tcp://"] where h.hasPrefix(scheme) {
+    for scheme in URL_SCHEMES where h.hasPrefix(scheme) {
         h = String(h.dropFirst(scheme.count))
     }
     if let slash = h.firstIndex(of: "/") { h = String(h[..<slash]) }

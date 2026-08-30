@@ -1192,6 +1192,65 @@ final class XcodeTargetScopeTests: XCTestCase {
                       + "never account for an analyzed file, so it must not claim `Sources/Stripe`")
     }
 
+    /// **…AND THE TEST ABOVE CANNOT SEE THE GUARD IT IS NAMED FOR.** Measured 2026-08-30: deleting
+    /// `!t.isPlugin` from `Driver.swift`'s `targetsIn` — the whole fix — leaves
+    /// `testAPluginDeclarationCannotClaimASourcesFolder` GREEN, and the full 958-test suite with it.
+    ///
+    /// The reason is worth more than the fix: in that fixture the disclosure is held up by a DIFFERENT
+    /// conjunct. `importable(forTarget:in:)` walks the target's own `dependencies:` graph, and `App`
+    /// declares none, so `Stripe` never enters `inPackage` and the `analyzed` filter — the half
+    /// `!t.isPlugin` actually feeds — is never consulted about it. Two independent mechanisms produce one
+    /// observable, and the arm under test is the one that was not running (AGENT-CORPUS-BRIEF §4).
+    ///
+    /// Make the plugin name reach the analyzed filter and the guard becomes the only thing left:
+    /// `dependencies: ["Stripe"]` puts it in `inPackage`, and without `!t.isPlugin` the stale
+    /// `Sources/Stripe/` counts as its source root, `Stripe` reads as analyzed-and-importable, and the
+    /// real SDK import goes silent on both channels — round 3's cardinal sin, verbatim.
+    ///
+    /// SwiftPM itself would REJECT this manifest (a plugin is attached via `plugins:`, and
+    /// `.plugin(name:)` in `dependencies:` is a different spelling this parser does not read as a name).
+    /// That is the point rather than a caveat: candor never builds the package it scans, so it meets
+    /// manifests the build system would refuse — and a stale `Sources/<X>/` beside a declaration that no
+    /// longer compiles is exactly the state a half-finished migration leaves behind. A guard whose only
+    /// job is to survive a manifest nobody can build must be tested on one.
+    func testAPluginNamedInADependencyListStillCannotClaimASourcesFolder() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let fm = FileManager.default
+        func probe(_ stripeTarget: String) throws -> String {
+            let root = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("candor-plugdep-\(UUID().uuidString)")
+            for d in ["Sources/App", "Sources/Stripe", "Plugins/Stripe"] {
+                try fm.createDirectory(at: root.appendingPathComponent(d), withIntermediateDirectories: true)
+            }
+            defer { try? fm.removeItem(at: root) }
+            try """
+            // swift-tools-version:5.9
+            import PackageDescription
+            let package = Package(name: "P", targets: [
+                .executableTarget(name: "App", dependencies: ["Stripe"]),
+            \(stripeTarget)
+            ])
+            """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+            try "public struct Stale {}\n".write(to: root.appendingPathComponent("Sources/Stripe/Shim.swift"),
+                                                 atomically: true, encoding: .utf8)
+            try "struct P {}\n".write(to: root.appendingPathComponent("Plugins/Stripe/plugin.swift"),
+                                      atomically: true, encoding: .utf8)
+            try "import Foundation\nimport Stripe\nfunc charge() { StripeClient().pay() }\ncharge()\n"
+                .write(to: root.appendingPathComponent("Sources/App/main.swift"), atomically: true, encoding: .utf8)
+            return try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path]).err
+        }
+        // THE OVER-CHARGE CONTROL, first: a real `.target` of that name, whose sources this run DID read,
+        // legitimately claims the module — so the disclosure must be ABSENT. Without this arm the
+        // assertion below passes for a build that discloses everything unconditionally.
+        XCTAssertFalse(try probe("    .target(name: \"Stripe\"),").contains("Stripe"),
+                       "a genuine .target declaring Sources/Stripe, analyzed in this run, IS internal — "
+                       + "disclosing it here would be the false-disclosure noise this thread began with")
+        XCTAssertTrue(try probe("    .plugin(name: \"Stripe\", capability: .buildTool()),").contains("Stripe"),
+                      "a .plugin declaration must not claim `Sources/Stripe` even when the app names it "
+                      + "as a dependency — app code cannot import a plugin, so the real SDK behind "
+                      + "`import Stripe` is still invisible and must still be disclosed")
+    }
+
     /// …and the same commit's other regression, in the safe direction: `Source/` (singular) is one of
     /// SwiftPM's predefined source directories, and the shared resolver did not know it — so an ANALYZED
     /// local module was named a third-party blind spot. A false disclosure, which is the noise this

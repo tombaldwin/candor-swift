@@ -72,11 +72,15 @@ final class ClassifierTests: XCTestCase {
         // a SUBDOMAIN of a listed host counts
         XCTAssertTrue(isModelHost("eu.api.openai.com"))
         XCTAssertFalse(isModelHost("openai.com.evil.example"), "a suffix that is not `.`-anchored must NOT match")
-        // Ollama: any host on port 11434 is the local model endpoint (host is irrelevant)
+        // Ollama: port 11434 on a LOOPBACK host. The comment here used to read "any host on port 11434 …
+        // (host is irrelevant)", which is what the code did before the max-review r3 parity fix and has
+        // not been true since — a stale comment sitting directly above the assertions that would have
+        // caught it, describing the defect as if it were the contract. See the negative arm below.
         XCTAssertTrue(isModelHost("localhost:11434"))
         XCTAssertTrue(isModelHost("127.0.0.1:11434"))
         XCTAssertFalse(isModelHost("localhost:8080"), "a non-11434 local port is not Ollama")
-        // Bedrock: host CONTAINS "bedrock" AND ends .amazonaws.com
+        // Bedrock: the FIRST LABEL is the model-inference service. Not "contains bedrock" (which the
+        // comment here used to claim, and which caught the S3 bucket below), and not the control plane.
         XCTAssertTrue(isModelHost("bedrock-runtime.us-east-1.amazonaws.com"))
         XCTAssertFalse(isModelHost("s3.us-east-1.amazonaws.com"), "amazonaws without bedrock is not a model host")
         XCTAssertFalse(isModelHost("bedrock.example.com"), "bedrock without amazonaws is not a model host")
@@ -99,6 +103,36 @@ final class ClassifierTests: XCTestCase {
         XCTAssertEqual(kappaMember(root: "Bundle", member: "paths"), "Fs")
         XCTAssertNil(kappaMember(root: "Bundle", member: "bundleIdentifier"))
         XCTAssertNil(kappaMember(root: "Bundle", member: "object"))  // object(forInfoDictionaryKey:) — in-memory
+    }
+
+    /// THE TWO OVER-CHARGE CONTROLS `isModelHost` CARRIES, neither of which had a test.
+    ///
+    /// Both branches below are NARROWINGS that a review round added after measuring a fabrication, and
+    /// both are documented in `Classifier.swift` by naming the exact host that broke them. Neither could
+    /// be told from its absence: GUARD-DELETION MEASURED 2026-08-30 — making the `:11434` arm
+    /// `return true` (any host on that port) left all 958 tests GREEN, and so did widening the Bedrock
+    /// first-label test to `first.contains("bedrock")`. A fabricated `Llm` is the direction that puts a
+    /// model-provider claim on code that makes none, and `Llm` rides §6.1's boundary-effect footing, so
+    /// `deny Llm` turns it into a red gate on an ordinary internal service.
+    func testIsModelHostDoesNotFabricateOnLookalikes() {
+        // ── the Ollama port. The signal is a LOCAL inference endpoint, not the number 11434.
+        XCTAssertFalse(isModelHost("internal-svc.corp:11434"),
+                       "a corporate service that happens to listen on 11434 is not Ollama — this is the "
+                       + "max-review r3 fabrication, and the ONLY thing standing against it is the "
+                       + "loopback test")
+        XCTAssertFalse(isModelHost("10.0.0.7:11434"), "a LAN address is not loopback")
+        XCTAssertTrue(isModelHost("[::1]:11434"),
+                      "the IPv6 loopback counts — and it must be written bracketed, because `hostPart` "
+                      + "returns a BARE multi-colon literal whole (there is no port to strip), so a bare "
+                      + "`::1:11434` is a different host string entirely")
+        // ── Bedrock. `bedrock-runtime` / `bedrock-agent-runtime` are the inference services; the
+        // control plane and anything merely NAMED after bedrock are not.
+        XCTAssertTrue(isModelHost("bedrock-agent-runtime.eu-west-1.amazonaws.com"))
+        XCTAssertFalse(isModelHost("bedrock-backups.s3.us-east-1.amazonaws.com"),
+                       "the S3 bucket the substring test caught — a first-label CONTAINS check fabricates "
+                       + "Llm on ordinary object storage")
+        XCTAssertFalse(isModelHost("bedrock.us-east-1.amazonaws.com"),
+                       "the CONTROL PLANE (CreateModelCustomizationJob etc.) dispatches no inference")
     }
 
     func testKappaFree() {
