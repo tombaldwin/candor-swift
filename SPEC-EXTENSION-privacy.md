@@ -353,11 +353,59 @@ the check is byte-unchanged. `candidates` is relative to the plist's directory (
 have several files with the SAME basename, and a list of identical basenames names nothing). `--xml`
 carries the same caveat as an XML comment, without the paths: a filename containing `--` is illegal
 inside an XML comment and would make the one output whose purpose is "paste this" unparseable.
+`uncheckedKeys` is the full entitlement-sourced key vocabulary — the keys no file was ATTRIBUTED for —
+and is unchanged by what follows.
 
-`ok` and the exit code are deliberately **unmoved**. This run cannot answer the question either way, and
-failing every multi-target repo over it would be an over-charge that deletes the feature — the same shape
-as `conditionallyUnderDeclared`: `ok: true` beside a stated caveat is not the same claim as a bare
-`ok: true`, and the machine consumer is the reader who previously could not tell them apart.
+### Whether the verdict moves is decided by a PEEK, with the ⟨0.30⟩ bound
+
+The refusal above was never a claim that the candidates are unsafe to OPEN — it was a refusal to
+ATTRIBUTE one candidate's grants to the app when discovery cannot tell which file is the app's own. So
+the verify reads every candidate anyway, without attributing (main-spec ⟨0.29⟩/⟨0.30⟩'s peek: look,
+don't judge), and asks the one question attribution cannot change: **could any candidate flip THIS
+run's verdict?** A candidate BEARS exactly when it grants an entitlement whose required
+usage-description key is absent from this run's declared set. A candidate that exists but cannot be
+parsed bears on EVERY undeclared entitlement-sourced key — unreadable is not benign, and the same rule
+read the other way had already certified a corrupt entitlements file clean.
+
+- **No candidate bears** (`couldBear` empty): the verdict is **UNMOVED** — `ok` and the exit code
+  exactly as computed, the disclosure stays. This is proven-safe, not assumed-safe: the app's own file
+  is among the candidates, every candidate was read, and none could have produced a finding — so this
+  pass is precisely as sound as the attributed path's pass. It is what keeps the rung affordable, stated
+  the way ⟨0.30⟩ states its own bound: the trigger is never "you have several `.entitlements` files"
+  (NetNewsWire has eight; their grants are sandbox-class capabilities outside
+  `ENTITLEMENT_REQUIRED_KEYS`, and repos of that shape stay green) but always "several files, one of
+  which grants the capability whose key you would be missing."
+- **Some candidate bears** (`couldBear` non-empty): the verdict is **INCOMPLETE** — `ok: false`,
+  `incomplete: true`, **exit 2** — and the bearing keys are named:
+
+  ```json
+  "entitlementsUnread": { "reason": "several", "candidates": [ … ],
+                          "uncheckedKeys": [ … ],
+                          "couldBear": ["NSCriticalMessagingUsageDescription"] },
+  "ok": false, "incomplete": true
+  ```
+
+  NOT exit 1 and NOT `entitlementUnderDeclared`, and the distinction is the point (⟨0.30⟩'s "still
+  never members of `violations`"): the run did not decide which file is the app's, so filing the
+  violation would attribute a possibly-vendored file's grant to the app — a fabrication in the opposite
+  direction. Exit 2 says *I could not see enough of this tree to answer*, which is exactly what
+  happened, and the remedy travels with it: re-scan with `--target` so the report carries
+  `scope.entitlements` and the question becomes attributable.
+- ⟨0.24⟩ precedence holds: a certain code-reach under-declaration still exits 1, and `incomplete: true`
+  plus the disclosure ride the same document.
+
+The same bound governs `reason: "unreadable"` — a CHOSEN entitlements file (a single discovered
+candidate, or the file `scope.entitlements` names) that exists but cannot be parsed as a plist. Its
+`candidates` list is that one file; `couldBear` is every entitlement-sourced key not already declared,
+because an unparseable grant set could contain any of them — and when every such key IS declared,
+`couldBear` is empty and the verdict stays where it was, by the same argument. Before this clause that
+path returned an empty grant set and certified clean: the silent form of the same defect.
+
+Recorded as a decision rather than a discovery, what the bound cannot see: `candidates` is what
+DISCOVERY produced, so an app's file inside a directory discovery skips (a `*Tests` dir, a vendored
+tree) is outside the peek — the identical blindness the single-candidate path already carries. And a
+vendored file that genuinely grants a bearing entitlement costs the repo an exit 2 (never a false
+exit 1) until a `--target` scan names the app's own file.
 
 The vendored-directory skip list is ONE named set (`VENDOR_SKIP_DIRS`), not a copy per discovery walk.
 It was four copies; one lost `Carthage` while its comment still said "same exclusions as the Info.plist

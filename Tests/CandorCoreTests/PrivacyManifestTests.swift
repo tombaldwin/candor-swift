@@ -740,7 +740,7 @@ final class PrivacyManifestTests: XCTestCase {
         // WITHOUT a scope: the pre-rung behaviour — several files, none read.
         let bare = try ProcessHarness.run(bin, ["privacy-manifest", "--report", try report(nil),
                                                 "--verify", root.appendingPathComponent("Info.plist").path])
-        XCTAssertTrue(bare.out.contains("several .entitlements files here — not read"),
+        XCTAssertTrue(bare.out.contains("several .entitlements files here — none attributed"),
                       "the control must show the ambiguity this rung removes: \(bare.out)")
         // WITH a scope: the named file is read, its finding appears, and the provenance is stated.
         let scoped = try ProcessHarness.run(bin, ["privacy-manifest", "--report", try report(mine.path),
@@ -757,7 +757,7 @@ final class PrivacyManifestTests: XCTestCase {
         let stale = try ProcessHarness.run(bin, ["privacy-manifest",
                                                  "--report", try report(root.appendingPathComponent("gone.entitlements").path),
                                                  "--verify", root.appendingPathComponent("Info.plist").path])
-        XCTAssertTrue(stale.out.contains("several .entitlements files here — not read"),
+        XCTAssertTrue(stale.out.contains("several .entitlements files here — none attributed"),
                       "a stale scope must fall back to discovery, not silently check nothing: \(stale.out)")
     }
 
@@ -831,14 +831,16 @@ final class PrivacyManifestTests: XCTestCase {
     /// closes one cause; the next vendored dependency directory will not be on the list either. What
     /// makes the class survivable is that the REFUSAL — "several .entitlements, none read" — reaches the
     /// machine surface, where it used to print under `!pm.json, !pm.xml` and so reached nobody. The
-    /// directory here is `Externals/`, deliberately on NO skip list: the ambiguity still happens, and the
-    /// document must say so beside its `ok: true`.
+    /// directory here is `Externals/`, deliberately on NO skip list: the ambiguity still happens, and
+    /// the document must say so. The arm here is the BENIGN one (the key is declared, so no candidate
+    /// bears and the verdict stays green) — the bearing arm, where the verdict moves, is
+    /// `testABearingUnattributableEntitlementsFileMakesTheVerdictIncompleteOnEveryRoute`.
     func testTheEntitlementsRefusalIsDisclosedOnTheMachineSurfacesNotOnlyToAHuman() throws {
         let bin = try ProcessHarness.binaryURL(for: Self.self)
-        let root = try makeEntitlementFixture(vendor: "Externals", declaresKey: false)
+        let root = try makeEntitlementFixture(vendor: "Externals", declaresKey: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let (doc, code) = try verifyJSON(bin, root)
-        XCTAssertEqual(code, 0, "the run genuinely cannot answer — it must not start failing: \(doc)")
+        XCTAssertEqual(code, 0, "no candidate bears — the refusal must not start failing: \(doc)")
         guard let unread = doc["entitlementsUnread"] as? [String: Any] else {
             return XCTFail("`ok: true` over an entitlements file the verb refused to read, with NOTHING "
                            + "in the document saying so — the cardinal sin: \(doc)")
@@ -850,7 +852,7 @@ final class PrivacyManifestTests: XCTestCase {
         XCTAssertTrue(cands.contains("Externals/Lib/Vendored.entitlements"),
                       "candidate paths must be relative to the plist, not bare basenames: \(cands)")
         XCTAssertEqual(unread["uncheckedKeys"] as? [String], ["NSCriticalMessagingUsageDescription"],
-                       "the reader must be told WHICH keys went unchecked: \(unread)")
+                       "the reader must be told WHICH keys went unattributed: \(unread)")
         // …and the third surface. `--xml` prints "nothing missing", which is a completeness claim.
         _ = try ProcessHarness.run(bin, [root.path], cwd: root)
         let x = try ProcessHarness.run(bin, ["privacy-manifest", "--verify", "--xml"], cwd: root)
@@ -870,8 +872,10 @@ final class PrivacyManifestTests: XCTestCase {
     /// first time.
     func testTheXmlSurfaceIsWellFormedXml() throws {
         let bin = try ProcessHarness.binaryURL(for: Self.self)
-        for vendor in ["Externals", nil] {           // several-and-unread, then the ordinary pass
-            let root = try makeEntitlementFixture(vendor: vendor, declaresKey: true)
+        // several-and-benign, the ordinary pass, then several-and-BEARING (the INCOMPLETE comment is a
+        // third print site, and the first two were wrong once each).
+        for (vendor, declaresKey) in [("Externals", true), (nil, true), ("Externals", false)] {
+            let root = try makeEntitlementFixture(vendor: vendor, declaresKey: declaresKey)
             defer { try? FileManager.default.removeItem(at: root) }
             _ = try ProcessHarness.run(bin, [root.path], cwd: root)
             let x = try ProcessHarness.run(bin, ["privacy-manifest", "--verify", "--xml"], cwd: root)
@@ -905,6 +909,171 @@ final class PrivacyManifestTests: XCTestCase {
                          "\(where_): the app's own file WAS read — a disclosure here would be a false "
                          + "caveat, and a caveat on every run is a caveat nobody reads: \(doc)")
         }
+    }
+
+    /// **THE OVER-CHARGE CONTROL FOR THE VERDICT BOUND — written before the bound.** A repo with MANY
+    /// `.entitlements` files where NONE could bear on a key this run is checking MUST stay exit 0 /
+    /// `ok: true`. This is the NetNewsWire shape (eight files across targets, granting sandbox-class
+    /// capabilities no usage-description key depends on), and it is the COMMON case on exactly the
+    /// multi-target repos the verb serves — moving the verdict here would delete the feature. Two arms,
+    /// and the second is the sharp one:
+    ///   1. eight benign candidates → green, disclosure present, no `couldBear`, no `incomplete`;
+    ///   2. a candidate GRANTS critical-messaging but the plist DECLARES its key → STILL green,
+    ///      because the bound is "could flip THIS run's verdict", never "grants something somewhere".
+    func testManyEntitlementsFilesThatCannotBearOnTheVerdictStayGreen() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        for grantsButDeclared in [false, true] {
+            let root = try ProcessHarness.makePackage("import Foundation\nprint(\"hi\")\n", name: "App")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let plist = grantsButDeclared
+                ? "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\n"
+                  + "<key>NSCriticalMessagingUsageDescription</key><string>emergency alerts</string>\n"
+                  + "</dict></plist>\n"
+                : "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict></dict></plist>\n"
+            try plist.write(to: root.appendingPathComponent("Info.plist"), atomically: true, encoding: .utf8)
+            let benign = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\n"
+                + "<key>com.apple.security.app-sandbox</key><true/>\n</dict></plist>\n"
+            for target in ["iOS", "Mac", "Widget", "ShareExtension", "Intents", "IntentsUI", "Sync"] {
+                let d = root.appendingPathComponent(target)
+                try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+                try benign.write(to: d.appendingPathComponent("App.entitlements"),
+                                 atomically: true, encoding: .utf8)
+            }
+            let eighth = grantsButDeclared
+                ? "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\n"
+                  + "<key>com.apple.developer.messages.critical-messaging</key><true/>\n</dict></plist>\n"
+                : benign
+            try eighth.write(to: root.appendingPathComponent("App.entitlements"),
+                             atomically: true, encoding: .utf8)
+            let (doc, code) = try verifyJSON(bin, root)
+            let arm = grantsButDeclared ? "granted-but-declared" : "eight-benign"
+            XCTAssertEqual(code, 0, "\(arm): no candidate can flip this run's verdict — exit must "
+                           + "stay 0 or the feature is deleted: \(doc)")
+            XCTAssertEqual(doc["ok"] as? Bool, true, "\(arm): ok must stay true: \(doc)")
+            // NOT asserted: `incomplete` — an SPM fixture's report already carries it (the ⟨0.28⟩
+            // REPORT-completeness disclosure fires on the excluded `Package.swift`, exit untouched).
+            // Two mechanisms share that label; the verdict keys above are the discriminating ones.
+            guard let unread = doc["entitlementsUnread"] as? [String: Any] else {
+                return XCTFail("\(arm): the refusal-to-attribute still happened and must still be "
+                               + "disclosed: \(doc)")
+            }
+            XCTAssertNil(unread["couldBear"], "\(arm): nothing bears — the key must be absent: \(unread)")
+        }
+    }
+
+    /// **THE DEFECT DIRECTION: a bearing candidate makes the verdict INCOMPLETE, on every route.**
+    /// The Carthage/Pods A/B above is closed by the skip list (both arms attribute and exit 1); this is
+    /// the NEXT vendor directory, the one no list names (`Externals/`) — the app's own file grants
+    /// critical-messaging, the key is undeclared, and discovery cannot tell the two candidates apart.
+    /// The peek CAN tell that one of them bears on the verdict, so certifying (`ok: true`, exit 0) would
+    /// be the cardinal sin with the evidence in hand, and filing `entitlementUnderDeclared` (exit 1)
+    /// would attribute a possibly-vendored grant to the app — a fabrication the other way. The verdict
+    /// is INCOMPLETE: `ok: false`, `incomplete: true`, exit 2, `couldBear` named. Checked on the
+    /// document AND the exit code, on all three surfaces — two fixes in this family passed every gate
+    /// because each gate checked the exit and none the document.
+    func testABearingUnattributableEntitlementsFileMakesTheVerdictIncompleteOnEveryRoute() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try makeEntitlementFixture(vendor: "Externals", declaresKey: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (doc, code) = try verifyJSON(bin, root)
+        XCTAssertEqual(code, 2, "a candidate could flip the verdict and none was attributed — the run "
+                       + "cannot answer, and exit 0 here is the cardinal sin: \(doc)")
+        XCTAssertEqual(doc["ok"] as? Bool, false, "ok must agree with the incomplete verdict: \(doc)")
+        XCTAssertEqual(doc["incomplete"] as? Bool, true, "the ⟨0.21⟩ vocabulary: incomplete, not a "
+                       + "violation: \(doc)")
+        XCTAssertNil(doc["entitlementUnderDeclared"], "no file was attributed, so filing the violation "
+                     + "would fabricate — the grant may be the vendored file's: \(doc)")
+        guard let unread = doc["entitlementsUnread"] as? [String: Any] else {
+            return XCTFail("the refusal must still be disclosed: \(doc)")
+        }
+        XCTAssertEqual(unread["reason"] as? String, "several")
+        XCTAssertEqual(unread["couldBear"] as? [String], ["NSCriticalMessagingUsageDescription"],
+                       "the bearing keys must be named so the reader knows WHY this went red: \(unread)")
+        let cands = unread["candidates"] as? [String] ?? []
+        XCTAssertTrue(cands.contains("App.entitlements") && cands.contains("Externals/Lib/Vendored.entitlements"),
+                      "the refusal must still name what it refused over: \(cands)")
+        // ROUTE EQUALITY: --xml and the human surface must reach the same verdict (exit 2) and carry
+        // the caveat. §3.1 — the original sin was exactly a divergence between these surfaces.
+        _ = try ProcessHarness.run(bin, [root.path], cwd: root)
+        let x = try ProcessHarness.run(bin, ["privacy-manifest", "--verify", "--xml"], cwd: root)
+        XCTAssertEqual(x.code, 2, "--xml must reach the same verdict as --json: \(x.out)\n\(x.err)")
+        XCTAssertTrue(x.out.contains("NONE READ"), "--xml must carry the caveat: \(x.out)")
+        XCTAssertTrue(x.out.contains("INCOMPLETE"), "--xml must say the verdict moved, not just that "
+                      + "files were unread: \(x.out)")
+        let h = try ProcessHarness.run(bin, ["privacy-manifest", "--verify"], cwd: root)
+        XCTAssertEqual(h.code, 2, "the human surface must reach the same verdict: \(h.out)\n\(h.err)")
+        XCTAssertTrue(h.out.contains("NSCriticalMessagingUsageDescription"),
+                      "the human reader must be told which key could flip the verdict: \(h.out)")
+        XCTAssertFalse(h.out.contains("✓"), "an incomplete verdict must not print a ✓ line: \(h.out)")
+    }
+
+    /// **THE SIBLING THE ANALYSIS FOUND: a CHOSEN entitlements file that cannot be parsed certified
+    /// clean.** `entitlementRequiredKeys` returned `[]` for garbage bytes — indistinguishable from "read
+    /// and grants nothing" — so a corrupt `.entitlements` was a silent pass (the plist gets fail-loud
+    /// treatment; the entitlements file got silence). Same bound, `reason: "unreadable"`: an unparseable
+    /// grant set could contain any entitlement, so `couldBear` is every undeclared entitlement-sourced
+    /// key — and when the key IS declared, nothing can flip and the verdict stays green (the control).
+    func testACorruptChosenEntitlementsFileCannotCertifyClean() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        for declaresKey in [false, true] {
+            let root = try makeEntitlementFixture(vendor: nil, declaresKey: declaresKey)
+            defer { try? FileManager.default.removeItem(at: root) }
+            try "not a plist at all".write(to: root.appendingPathComponent("App.entitlements"),
+                                           atomically: true, encoding: .utf8)
+            let (doc, code) = try verifyJSON(bin, root)
+            let unread = doc["entitlementsUnread"] as? [String: Any]
+            if declaresKey {
+                XCTAssertEqual(code, 0, "control: with the key declared nothing can flip — the corrupt "
+                               + "file must not start failing correct manifests: \(doc)")
+                XCTAssertEqual(doc["ok"] as? Bool, true, "control: ok stays true: \(doc)")
+                XCTAssertNil(unread?["couldBear"], "control: nothing bears: \(String(describing: unread))")
+            } else {
+                XCTAssertEqual(code, 2, "a grant set that cannot be read could grant anything — "
+                               + "certifying it clean is the silent form of the vendor-name defect: \(doc)")
+                XCTAssertEqual(doc["ok"] as? Bool, false, "ok must agree: \(doc)")
+                XCTAssertEqual(doc["incomplete"] as? Bool, true, "incomplete, not a violation: \(doc)")
+                XCTAssertEqual(unread?["reason"] as? String, "unreadable",
+                               "the reader must be told WHY nothing was checked: \(doc)")
+                XCTAssertEqual(unread?["couldBear"] as? [String], ["NSCriticalMessagingUsageDescription"],
+                               "the bearing keys must be named: \(String(describing: unread))")
+            }
+        }
+    }
+
+    /// **⟨0.24⟩ PRECEDENCE: a CERTAIN violation dominates the incomplete refusal.** Code that reaches
+    /// Location with no key declared is a judged finding; the bearing-but-unattributed entitlements
+    /// refusal fires beside it. The verdict is exit 1 naming the violation — never softened to exit 2 —
+    /// with `incomplete: true` and `couldBear` riding the same document. And the `--xml` surface must
+    /// not announce "exit 2" beside an actual exit 1 (the first cut of this change did).
+    func testACertainViolationDominatesTheIncompleteEntitlementsRefusal() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage(
+            "import CoreLocation\nfunc whereAmI() { let m = CLLocationManager(); "
+            + "m.requestWhenInUseAuthorization() }\nwhereAmI()\n", name: "App")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict></dict></plist>\n"
+            .write(to: root.appendingPathComponent("Info.plist"), atomically: true, encoding: .utf8)
+        try ("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\n"
+             + "<key>com.apple.developer.messages.critical-messaging</key><true/>\n</dict></plist>\n")
+            .write(to: root.appendingPathComponent("App.entitlements"), atomically: true, encoding: .utf8)
+        try "<?xml version=\"1.0\"?>\n<plist version=\"1.0\"><dict></dict></plist>\n"
+            .write(to: root.appendingPathComponent("Other.entitlements"), atomically: true, encoding: .utf8)
+        let (doc, code) = try verifyJSON(bin, root)
+        XCTAssertEqual(code, 1, "the certain Location violation must keep exit 1 — precedence: \(doc)")
+        XCTAssertEqual(doc["ok"] as? Bool, false, "ok agrees with the violation: \(doc)")
+        let under = (doc["underDeclared"] as? [[String: Any]])?.compactMap { $0["effect"] as? String } ?? []
+        XCTAssertTrue(under.contains("Location"), "the judged finding must not be deleted by the "
+                      + "refusal (the ⟨0.24⟩ measured defect, in this verb's shape): \(doc)")
+        let unread = doc["entitlementsUnread"] as? [String: Any]
+        XCTAssertEqual(unread?["couldBear"] as? [String], ["NSCriticalMessagingUsageDescription"],
+                       "the refusal still travels beside the violation: \(doc)")
+        _ = try ProcessHarness.run(bin, [root.path], cwd: root)
+        let x = try ProcessHarness.run(bin, ["privacy-manifest", "--verify", "--xml"], cwd: root)
+        XCTAssertEqual(x.code, 1, "route equality under precedence: \(x.out)")
+        XCTAssertFalse(x.out.contains("exit 2"), "an xml comment must not announce exit 2 beside an "
+                       + "actual exit 1: \(x.out)")
+        XCTAssertTrue(x.out.contains("could additionally require NSCriticalMessagingUsageDescription"),
+                      "the caveat itself must still travel on --xml: \(x.out)")
     }
 
     /// The four literal copies of the vendor skip set are now ONE, so this class cannot come back by the

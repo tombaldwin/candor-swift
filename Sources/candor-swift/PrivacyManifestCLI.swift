@@ -529,7 +529,13 @@ func discoverEntitlements(from root: String) -> (path: String?, several: Bool, c
 /// Usage-description keys an entitlements file makes REQUIRED. Boolean-true entries only: an entitlement
 /// present-but-false is not granted, and treating it as granted would demand a key for a capability the
 /// app has switched off.
-func entitlementRequiredKeys(_ path: String) -> [String] {
+///
+/// **`nil` MEANS UNREADABLE, AND UNREADABLE IS NOT BENIGN.** This returned `[]` for a file that exists
+/// but cannot be parsed — indistinguishable from "read and grants nothing" — so a corrupt
+/// `.entitlements` certified clean while the Info.plist next to it got fail-loud treatment. The caller
+/// decides what unreadable means (the peek bound: it could bear on every undeclared entitlement-sourced
+/// key); this function's job is only to stop conflating the two answers.
+func entitlementRequiredKeys(_ path: String) -> [String]? {
     // `PropertyListSerialization`, not `NSDictionary(contentsOfFile:)` — the same API `loadDeclaredKeys`
     // uses, and for the second of the two reasons its comment gives. The first is that NSDictionary
     // returns nil on ANY failure, indistinguishable from a plist whose root is not a dict. The second
@@ -538,7 +544,7 @@ func entitlementRequiredKeys(_ path: String) -> [String] {
     // A rule the file already documented, in a function written six hours later that ignored it.
     guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
           let obj = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
-          let d = obj as? [String: Any] else { return [] }
+          let d = obj as? [String: Any] else { return nil }
     return ENTITLEMENT_REQUIRED_KEYS.compactMap { ent, key in
         guard let v = d[ent] else { return nil }
         // NOT GRANTED unless the value says so. Rejecting only a literal Boolean `false` let three
@@ -715,6 +721,13 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
     /// Set when the verb REFUSED to read an entitlements file it found candidates for — the disclosure
     /// that keeps `ok: true` from meaning "checked and clean" on a machine surface. See the assignment.
     var entitlementsUnread: [String: Any]?
+    /// The PEEK BOUND (SPEC-EXTENSION-privacy.md "Whether the verdict moves is decided by a PEEK"):
+    /// true when an unattributed entitlements file COULD FLIP THIS RUN'S VERDICT — some candidate
+    /// grants an entitlement whose required key is undeclared, or a chosen file could not be parsed
+    /// while such a key is undeclared. Moves the verdict to INCOMPLETE (`ok: false`,
+    /// `incomplete: true`, exit 2) — never to exit 1, because no file was attributed and filing the
+    /// violation would charge the app with a possibly-vendored file's grant.
+    var entitlementsIncomplete = false
     if var plistPath = pm.verify {
         // ── VERIFY mode ───────────────────────────────────────────────────────────────────────────────
         // Bare `--verify` discovers the plist. Announced on stderr, never silently: a verdict is about a
@@ -871,8 +884,15 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         } else {
             ent = discoverEntitlements(from: plistDir.isEmpty ? FileManager.default.currentDirectoryPath : plistDir)
         }
-        if let ep = ent.path {
-            let need = entitlementRequiredKeys(ep).filter { !declaredAll.contains($0) }
+        // Candidate paths are reported relative to the plist's directory — the absolute form leaks a
+        // developer's home directory into a CI artifact, and the repos that hit this have several files
+        // with the SAME basename, so a bare-basename list names nothing.
+        let plistDirBase = plistDir.hasSuffix("/") ? plistDir : plistDir + "/"
+        func relToPlist(_ c: String) -> String {
+            c.hasPrefix(plistDirBase) ? String(c.dropFirst(plistDirBase.count)) : c
+        }
+        if let ep = ent.path, let required = entitlementRequiredKeys(ep) {
+            let need = required.filter { !declaredAll.contains($0) }
             if !need.isEmpty {
                 // `✗` is this verb's glyph for a rejection-shaped finding, and everywhere else it means
                 // exit 1. It printed AFTER a `✓` verdict line and left the exit code at 0 — a granted
@@ -889,7 +909,53 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
                           + "site for candor to find, so this is a manifest-to-manifest check.)")
                 }
             }
+        } else if let ep = ent.path {
+            // ⟨peek bound⟩ **A CHOSEN FILE THAT CANNOT BE PARSED IS NOT A CLEAN ONE.** This path used
+            // to receive `[]` from `entitlementRequiredKeys` — indistinguishable from "read and grants
+            // nothing" — so a corrupt `.entitlements` certified clean while an unreadable Info.plist
+            // fails loud three screens up. The grant set is unknowable, so it could contain ANY
+            // entitlement: every entitlement-sourced key not already declared could bear on this
+            // verdict, and the same bound as the `several` refusal below decides whether it moves.
+            let bear = ENTITLEMENT_REQUIRED_KEYS.values.filter { !declaredAll.contains($0) }.sorted()
+            var unread: [String: Any] = [
+                "reason": "unreadable",
+                "candidates": [relToPlist(ep)],
+                "uncheckedKeys": ENTITLEMENT_REQUIRED_KEYS.values.sorted(),
+            ]
+            if !bear.isEmpty {
+                unread["couldBear"] = bear
+                entitlementsIncomplete = true
+            }
+            entitlementsUnread = unread
+            if !pm.json, !pm.xml {
+                print("· \((ep as NSString).lastPathComponent) could not be parsed as a property list — "
+                      + "entitlement-sourced keys (\(ENTITLEMENT_REQUIRED_KEYS.count)) are unchecked.")
+                if !bear.isEmpty {
+                    print("⚠ INCOMPLETE: an unreadable grant set could require "
+                          + "\(bear.joined(separator: ", ")), which is not declared. Not counted as a "
+                          + "violation — nothing was read — but this run cannot certify the manifest "
+                          + "either. Fix or remove the file, then re-verify.")
+                }
+            }
         } else if ent.several {
+            // ⟨peek bound⟩ **READ EVERY CANDIDATE; ATTRIBUTE NONE** (SPEC-EXTENSION-privacy.md
+            // "Whether the verdict moves is decided by a PEEK"). The refusal above this line was never
+            // "these files are unsafe to open" — it was a refusal to ATTRIBUTE one candidate's grants
+            // to the app. So peek them all and ask the one question attribution cannot change: could
+            // any candidate flip THIS run's verdict? A candidate bears when it grants an entitlement
+            // whose key is undeclared; an unparseable candidate bears on every undeclared key (the
+            // grant set is unknowable — unreadable is not benign). Empty ⇒ the pass below is exactly
+            // as sound as an attributed pass, whichever candidate is the app's own — the bound that
+            // keeps this affordable on multi-target repos (NetNewsWire: 8 files, all sandbox-class
+            // grants, stays green). Non-empty ⇒ INCOMPLETE, exit 2, never exit 1.
+            var bearing: Set<String> = []
+            for c in ent.candidates {
+                if let req = entitlementRequiredKeys(c) {
+                    bearing.formUnion(req.filter { !declaredAll.contains($0) })
+                } else {
+                    bearing.formUnion(ENTITLEMENT_REQUIRED_KEYS.values.filter { !declaredAll.contains($0) })
+                }
+            }
             // ⟨entitlements unread⟩ **THE REFUSAL TRAVELS ON EVERY SURFACE, NOT JUST THE HUMAN ONE.**
             //
             // This branch is the verb deciding NOT to read the app's own `.entitlements` — so every
@@ -910,22 +976,31 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
             // deletes the feature. Same shape as `conditionallyUnderDeclared` and `incomplete` above:
             // `ok: true` beside a stated caveat is not the same claim as a bare `ok: true`, and the
             // machine consumer is the reader who could not previously tell them apart.
-            entitlementsUnread = [
+            var unread: [String: Any] = [
                 "reason": "several",
                 // Repo-relative to the plist's directory, not absolute: the absolute form leaks a
                 // developer's home directory into a CI artifact, and every basename here is
                 // `App.entitlements` on the repos that hit this — a list of identical basenames names
                 // nothing, which is the mistake `buildSettingUsageKeys` already made once.
-                "candidates": ent.candidates.map { c -> String in
-                    let base = plistDir.hasSuffix("/") ? plistDir : plistDir + "/"
-                    return c.hasPrefix(base) ? String(c.dropFirst(base.count)) : c
-                },
+                "candidates": ent.candidates.map(relToPlist),
                 "uncheckedKeys": ENTITLEMENT_REQUIRED_KEYS.values.sorted(),
             ]
+            if !bearing.isEmpty {
+                unread["couldBear"] = bearing.sorted()
+                entitlementsIncomplete = true
+            }
+            entitlementsUnread = unread
             if !pm.json, !pm.xml {
-                print("· several .entitlements files here — not read. Entitlement-sourced keys "
+                print("· several .entitlements files here — none attributed. Entitlement-sourced keys "
                       + "(\(ENTITLEMENT_REQUIRED_KEYS.count)) are unchecked; re-scan with --target so the "
                       + "report carries this binary's own CODE_SIGN_ENTITLEMENTS.")
+                if !bearing.isEmpty {
+                    print("⚠ INCOMPLETE: one of them grants an entitlement requiring "
+                          + "\(bearing.sorted().joined(separator: ", ")), which is not declared — and "
+                          + "this run cannot tell whether that file is the app's own. Not counted as a "
+                          + "violation (that would attribute a possibly-vendored grant to the app); not "
+                          + "a pass either. Re-scan with --target to attribute the right file.")
+                }
             }
         }
         // PROVENANCE, on a PASS as much as a finding: "we checked the entitlements" is only actionable
@@ -1029,11 +1104,22 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
                 // CI check is `if ok`, and it would pass a manifest that is about to be rejected.
                 verdict["ok"] = false
             }
+            // ⟨peek bound⟩ the INCOMPLETE verdict, in the ⟨0.21⟩ vocabulary: `ok: false`,
+            // `incomplete: true`, exit 2 below. NOT `entitlementUnderDeclared` — no file was
+            // attributed, and filing the violation would charge the app with a possibly-vendored
+            // file's grant.
+            if entitlementsIncomplete {
+                verdict["ok"] = false
+                verdict["incomplete"] = true
+            }
             // ⟨0.28⟩ the completeness caveat, in the machine document the CI consumer reads — empty on a
             // complete report, so an ordinary verify stays byte-identical. See the load site above.
             for (k, v) in comp.disclosureJSON { verdict[k] = v }
             emitPrivacyJSON(verdict)
-            exit((ok && !entitlementUnderDeclared) ? 0 : 1)
+            // ⟨0.24⟩ precedence: a CERTAIN violation (code-reach or attributed-entitlement) dominates
+            // the incomplete refusal — exit 1 names the finding; only an otherwise-clean run that the
+            // peek bound found unanswerable is exit 2.
+            exit((ok && !entitlementUnderDeclared) ? (entitlementsIncomplete ? 2 : 0) : 1)
         }
 
         // `--xml` on a VERIFY prints exactly the fragment that would fix the failure — nothing else, so
@@ -1055,10 +1141,37 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
             // pins this against a real parser rather than against `plutil`.
             if let unread = entitlementsUnread {
                 let n = (unread["candidates"] as? [String])?.count ?? 0
-                print("<!-- candor privacy-manifest verify: \(n) .entitlements files found here and "
-                      + "NONE READ, so the \(ENTITLEMENT_REQUIRED_KEYS.count) entitlement-sourced key(s) "
-                      + "are unchecked and this fragment cannot be complete. Re-scan naming this "
-                      + "binary's own CODE_SIGN_ENTITLEMENTS (the `target` flag). -->")
+                if unread["reason"] as? String == "unreadable" {
+                    print("<!-- candor privacy-manifest verify: the .entitlements file exists and "
+                          + "could not be parsed as a property list, so the "
+                          + "\(ENTITLEMENT_REQUIRED_KEYS.count) entitlement-sourced key(s) are "
+                          + "unchecked and this fragment cannot be complete. -->")
+                } else {
+                    print("<!-- candor privacy-manifest verify: \(n) .entitlements files found here and "
+                          + "NONE READ as this binary's own, so the \(ENTITLEMENT_REQUIRED_KEYS.count) "
+                          + "entitlement-sourced key(s) are unchecked and this fragment cannot be "
+                          + "complete. Re-scan naming this binary's own CODE_SIGN_ENTITLEMENTS "
+                          + "(the `target` flag). -->")
+                }
+                // ⟨peek bound⟩ the verdict statement, not just the unread count — this surface's exit
+                // code moves too, and a consumer must not learn that only from the shell. Key names are
+                // plain identifiers, so the no-double-dash rule for these comments holds. The exit-2
+                // claim is guarded the same way as the human verdict line: under ⟨0.24⟩ precedence a
+                // certain violation exits 1, and a comment announcing exit 2 beside exit 1 would be
+                // this surface lying about its own verdict.
+                if let bear = unread["couldBear"] as? [String] {
+                    if ok && !entitlementUnderDeclared {
+                        print("<!-- candor privacy-manifest verify: VERDICT INCOMPLETE (exit 2). An "
+                              + "unattributed .entitlements file could require "
+                              + "\(bear.joined(separator: ", ")) and it is not declared. Not a violation "
+                              + "(nothing was attributed) and not a pass. -->")
+                    } else {
+                        print("<!-- candor privacy-manifest verify: an unattributed .entitlements file "
+                              + "could additionally require \(bear.joined(separator: ", ")), which is "
+                              + "not declared. Not counted as a violation; the exit code reflects the "
+                              + "certain findings above it. -->")
+                    }
+                }
             }
             if underDeclared.isEmpty {
                 print("<!-- candor privacy-manifest verify: nothing missing; no keys to add. -->")
@@ -1067,7 +1180,9 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
                     u.keys.first.map { (effect: u.effect, key: $0) }
                 }))
             }
-            exit((ok && !entitlementUnderDeclared) ? 0 : 1)   // the exit code is the VERDICT and does not change with the output format
+            // the exit code is the VERDICT and does not change with the output format (⟨0.24⟩
+            // precedence: a certain violation dominates the incomplete refusal)
+            exit((ok && !entitlementUnderDeclared) ? (entitlementsIncomplete ? 2 : 0) : 1)
         }
 
         // HUMAN: the divergences first (the actionable findings), then the verdict line.
@@ -1094,7 +1209,15 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
                   + "the access is framework-mediated (a web view's geolocation, a share-sheet activity) "
                   + "and has no call site to find. NOT a recommendation to remove it.")
         }
-        if ok && overDeclared.isEmpty && conditionallyUnder.isEmpty {
+        if entitlementsIncomplete && ok && !entitlementUnderDeclared {
+            // ⟨peek bound⟩ NO ✓ LINE OVER AN UNANSWERABLE RUN. The ⚠ INCOMPLETE detail printed at the
+            // refusal site above; this is the verdict line in its place, so the two cannot disagree.
+            // Guarded on `ok` because ⟨0.24⟩ precedence makes a certain violation exit 1 even when the
+            // refusal also fired — this line names exit 2 and must only print when that is the verdict.
+            print("· VERDICT INCOMPLETE — an entitlements file this run could not attribute could "
+                  + "require a key that is not declared (see above). Exit 2: not a violation, not a "
+                  + "pass.")
+        } else if ok && overDeclared.isEmpty && conditionallyUnder.isEmpty {
             let n = reached.count
             print("✓ every MODELLED capability is declared (\(n) effect\(n == 1 ? "" : "s"))")
         } else if ok {
@@ -1138,7 +1261,8 @@ func runPrivacyManifestCLI(_ args: [String]) -> Never {
         // travel with the list so this is a limitation a reader can act on rather than a disclaimer.
         printPrivacyVocabularyBound(undetermined: undeterminedPaths(model.byName),
                                     fileProvider: reachedSet.contains("FileProvider"))
-        exit((ok && !entitlementUnderDeclared) ? 0 : 1)
+        // Same verdict on every route (§3.1): certain violation 1, peek-bound incomplete 2, else 0.
+        exit((ok && !entitlementUnderDeclared) ? (entitlementsIncomplete ? 2 : 0) : 1)
     }
 
     // ── GENERATE mode (no --verify) ─────────────────────────────────────────────────────────────────────
