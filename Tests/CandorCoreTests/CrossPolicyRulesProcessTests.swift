@@ -49,16 +49,50 @@ final class CrossPolicyRulesProcessTests: XCTestCase {
                                                root.appendingPathComponent("pol.txt").path])
     }
 
+    /// The rules the refusal actually NAMES, lifted out of the sentence rather than probed for with a
+    /// substring. `nil` when the sentence is not there at all.
+    ///
+    /// **WHY THIS EXISTS.** The assertion below used to be `XCTAssertFalse(err.contains("Net,"))`, and
+    /// `"Net,"` CANNOT OCCUR: `canonicalDenySet` returns its rules lexicographically SORTED, so `Net` is
+    /// always last in the list and always followed by `.`, never by `,`. The row therefore could not
+    /// fail — MEASURED 2026-08-30 by making `unaskedCrossPolicyRules` return every rule including the
+    /// covered one, which is exactly the defect the row is named for: all four rows in this file stayed
+    /// GREEN, this one included. A needle that cannot appear is not a weak assertion, it is the ABSENCE
+    /// of one wearing the shape of coverage.
+    private func namedRules(_ err: String) -> [String]? {
+        let head = "rule(s) of this policy: "
+        guard let a = err.range(of: head) else { return nil }
+        let rest = err[a.upperBound...]
+        guard let b = rest.range(of: ". The excluded") else { return nil }
+        return rest[..<b.lowerBound].components(separatedBy: ", ").map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+
     /// THE GAIN. The producer peeked under `deny Net` only; this gate applies `deny Net` AND `deny Db`.
     /// `Db` was never asked, so the verdict must be INCOMPLETE — exit 2, naming `Db` and not `Net`.
+    ///
+    /// Naming the ASKED rule as unasked is not cosmetic: the remedy the operator is handed is "re-run the
+    /// producing scan under THE SAME policy", and a refusal that lists a rule the producer DID hold sends
+    /// them to change a policy that was already right. The list is read as a LIST, so this holds whatever
+    /// order the canonical set happens to sort into.
     func testUncoveredRuleRefusesAndNamesOnlyTheUnaskedOne() throws {
         let root = try makeReportDir(report: report(scannedUnderDeny: ["deny Net"], spec: "0.33"),
                                       policy: "deny Net\ndeny Db\n")
         let r = try run(root)
         XCTAssertEqual(r.code, 2, "a rule the producer's peek was never asked about must not certify — stdout: \(r.out) stderr: \(r.err)")
-        XCTAssertTrue(r.err.contains("Db"), "the refusal must name the uncovered rule — stderr: \(r.err)")
-        XCTAssertFalse(r.err.contains("does not cover") && r.err.contains("Net,"),
-                       "the ASKED rule (Net) must not be named as uncovered — stderr: \(r.err)")
+        guard let named = namedRules(r.err) else {
+            return XCTFail("the refusal must name the uncovered rules in its own sentence — stderr: \(r.err)")
+        }
+        XCTAssertTrue(named.contains { $0.contains("Db") },
+                      "the refusal must name the uncovered rule — named \(named), stderr: \(r.err)")
+        XCTAssertFalse(named.contains { $0.contains("Net") },
+                       "the ASKED rule (Net) must not be named as uncovered — named \(named), stderr: \(r.err)")
+        // …and the COUNT in the sentence must agree with the list beside it. They are separate
+        // interpolations of the same array, so a fix that filters one and not the other reads as
+        // consistent to a substring test and is not.
+        XCTAssertTrue(r.err.contains("cover \(named.count) rule(s) of this policy:"),
+                      "the stated count must match the list it introduces — named \(named): \(r.err)")
     }
 
     /// THE MIRROR — the over-charge control. The SAME producer, but the gating policy asks ONLY `deny

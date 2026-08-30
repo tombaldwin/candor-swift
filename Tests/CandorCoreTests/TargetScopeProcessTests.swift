@@ -161,7 +161,16 @@ final class TargetScopeProcessTests: XCTestCase {
             if let t = target { args += ["--target", t] }
             let scan = try ProcessHarness.run(bin, args, cwd: root)
             XCTAssertEqual(scan.code, 0, "scan failed: \(scan.err)")
-            return try ProcessHarness.run(bin, ["privacy-manifest"], cwd: root).out
+            // …AND THE VERB'S OWN EXIT CODE, not only the scan's. The `MacApp` arm below is an ABSENCE
+            // assertion — "must not be charged with the microphone" — and an absence assertion is
+            // satisfied by a verb that died before printing anything. Same class as
+            // `XcodeTargetScopeTests`' `scanStderr`; found by grepping the MECHANISM (a harness call
+            // whose `.code` is discarded) across every test file rather than re-reading the one file
+            // that triggered that audit.
+            let pm = try ProcessHarness.run(bin, ["privacy-manifest"], cwd: root)
+            XCTAssertEqual(pm.code, 0, "privacy-manifest did not complete, so neither the presence NOR "
+                           + "the absence of a key in its output says anything: \(pm.err)")
+            return pm.out
         }
 
         let whole = try keys(scopedTo: nil)
