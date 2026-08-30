@@ -959,10 +959,13 @@ func resolveReportLocator(_ locator: String) -> String {
         return (locator as NSString).appendingPathComponent(".candor/report")
     }
     if locator.hasSuffix(".json") {
-        // The §2.2 reserved data segments (the same five `gateReportInputFiles` walks): a sidecar name
-        // is normalized to its report FILE, never to the prefix.
+        // The §2.2 reserved data segments (the same five `reportSidecarSegments()` names,
+        // `GateSinkArming.swift` — shared, not a second copy, after a guard-deletion sweep found this
+        // loop, `withGateReportSidecars` and the armer each hand-maintaining the identical literal with
+        // only `callgraph` ever under test): a sidecar name is normalized to its report FILE, never to
+        // the prefix.
         var s = locator
-        for sidecar in ["calibrated", "callgraph", "hierarchy", "layerreach", "locs"]
+        for sidecar in reportSidecarSegments()
         where s.hasSuffix(".\(sidecar).json") {
             s = String(s.dropLast(".\(sidecar).json".count)) + ".json"
         }
