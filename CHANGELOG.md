@@ -102,6 +102,43 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   the ⟨0.33⟩ cross-policy tests from round 1) and no further gap was found in the time spent, but that is
   a lead, not a clean bill.
 
+- **Guard-deletion sweep, round 3: `GateReportCLI.swift`'s locator/sidecar-collision guard family
+  (priority target of this round's brief).** The round's premise arrived stale on two of its three named
+  findings — `homeAnchoredPath`, `modelOutputStreamCall` and `recordOpaqueSeqReturn` were already fixed
+  and tested (rounds 1–2, this file above); attacking the premise before the sweep caught this before any
+  time went into re-finding closed work.
+  The live finding: **§2.2's five reserved sidecar segments (`calibrated`, `callgraph`, `hierarchy`,
+  `layerreach`, `locs`) were hand-written as an identical literal in THREE places** —
+  `withGateReportSidecars` (`GateReportCLI.swift`, the `gate --report --gate-json` collision guard),
+  `resolveReportLocator` (`FixCLI.swift`, the sidecar→report-file normalizer) and the canonical
+  `reportSidecarSegments()` (`GateSinkArming.swift`, the armer's own copy) — and **only the `callgraph`
+  member of the five had ever been exercised by any test in the tree**, in both of the first two
+  functions. A guard-deletion sweep (removing each of `calibrated`/`hierarchy`/`layerreach`/`locs` from
+  `withGateReportSidecars`'s walk, one at a time) left the full 956-test suite green every time — the
+  exact shape this family's own history warns about (§2.2's drift note: "one engine carving out six [reserved
+  segments], another two"; the java finding this round's brief cites, "a file-destruction guard tested only
+  via a case another guard already caught"). Confirmed the harness itself was sound by removing `callgraph`
+  the same way first: that one goes red (3 failures) as expected.
+  **Fix:** both duplicate literals now call `reportSidecarSegments()` — one owner for the fact, per the
+  family's "ask the authority, never reimplement" rule; no behavioural change, the three lists agreed on
+  content already. New tests, one per site:
+  1. `GateReportVerbProcessTests.testGateJsonNamingAnyOfTheFiveReservedSidecarsRefuses` — extends the
+     existing single-segment collision test (`testGateJsonNamingTheReportsSidecarRefusesAndAGateJsonSiblingStillGates`,
+     `callgraph` only) to a five-way table: `--gate-json <sidecar>` refuses (exit 2) and the sidecar
+     survives byte-for-byte, for each reserved segment in turn.
+  2. `LocatorResolutionProcessTests.testForeignSidecarLocatorsAlsoResolveToTheirReportFile` — the sibling
+     gap in `resolveReportLocator`: `--report <sidecar>` normalizes to the underlying report file (and
+     still refuses to widen to a prefix sibling) for the four non-`callgraph` segments, which
+     `testSidecarLocatorResolvesToItsReportFile` never posed.
+  Both: reverting `reportSidecarSegments()` to `["callgraph"]` alone is RED (16 failures across the two new
+  tests), GREEN at HEAD; the rest of the suite (958/958 total, up from 956) is unaffected either way;
+  `smoke.sh` (148/148), `fabrication_probe.py`, `fuzz.py` and `ci/self-gate.sh` stay green throughout.
+  **Scope note, stated per this round's instruction:** this was the only target fully swept this round.
+  `Driver.swift`, `Policy.swift`, `Classifier.swift`, and the remainder of `CallCollector.swift`/
+  `DeclCollector.swift` beyond rounds 1–2's ~20 sites (of 344 total candidate guard sites family-wide) were
+  **not reached** — the time went to attacking the stale premise and then to the sidecar-collision family,
+  which is the brief's stated priority order. Left unprotected and unexamined by this round.
+
 - **Test-quality fix, no production change: `ec3e50f` (R61, the three-mechanism FFI-fallback fix) shipped
   with zero committed tests.** Reproduced directly, per candor's corpus-brief "revert test": reverting
   `ec3e50f`'s entire production diff (`Classifier.swift`, `CallCollector.swift`, `DeclCollector.swift`,

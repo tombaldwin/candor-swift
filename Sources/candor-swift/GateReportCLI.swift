@@ -448,13 +448,20 @@ func gateReportInputFiles(_ prefix: String?) -> [String] {
 /// from the sibling engines, walked too because `gate --report <a foreign .json>` is supported and its
 /// pair deserves the same guard). Existing files only; see `gateReportInputFiles` for why `gate` and
 /// `encountered-*` are not in the walk.
+///
+/// Reads `reportSidecarSegments()` (`GateSinkArming.swift`) rather than its own copy of the five names —
+/// a guard-deletion sweep found this function, `resolveReportLocator` (`FixCLI.swift`) and the armer each
+/// hand-maintaining the identical literal, with only the `callgraph` member of the five ever exercised by
+/// any test anywhere in the tree (`testGateJsonNamingTheReportsSidecarRefusesAndAGateJsonSiblingStillGates`).
+/// A future edit to the reserved set — SPEC §2.2 already records the family drifting on it once — would
+/// silently fail to reach two of the three copies. One list, one owner.
 private func withGateReportSidecars(_ reports: [String]) -> [String] {
     let fm = FileManager.default
     var out: [String] = []
     for r in reports {
         if r.hasSuffix(".json") {
             let stem = String(r.dropLast(".json".count))
-            for seg in ["calibrated", "callgraph", "hierarchy", "layerreach", "locs"] {
+            for seg in reportSidecarSegments() {
                 let side = "\(stem).\(seg).json"
                 if fm.fileExists(atPath: side) { out.append(side) }
             }

@@ -1284,4 +1284,35 @@ final class GateReportVerbProcessTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: sidecar, encoding: .utf8), callgraph,
                        "…and the sidecar survives the control run too")
     }
+
+    /// **THE SIBLING SWEEP the test above never took.** §2.2 reserves FIVE trailing segments
+    /// (`reportSidecarSegments()`, `GateSinkArming.swift`) as a report's own sidecars — `calibrated`,
+    /// `callgraph`, `hierarchy`, `layerreach`, `locs` — because `gate --report` accepts a report written by
+    /// ANY of the family's engines, and the other three are the sibling engines' data segments, not this
+    /// one's. `withGateReportSidecars` (`GateReportCLI.swift`) walks all five when deciding what
+    /// `--gate-json` may not overwrite, but until this test, only `callgraph` had ever been exercised by
+    /// anything in the tree — a guard-deletion sweep found `calibrated`/`hierarchy`/`layerreach`/`locs` each
+    /// individually removable from that walk with the full 956-test suite staying green throughout,
+    /// because the ONE test with this exact shape only poses the mechanism (`callgraph`) the original
+    /// ⟨0.28⟩ bug happened to involve. This asserts the same refusal, and the same byte-for-byte survival,
+    /// for the four it left untested — plus `callgraph` again, so the five run one table rather than one
+    /// covered case standing in for four uncovered ones.
+    func testGateJsonNamingAnyOfTheFiveReservedSidecarsRefuses() throws {
+        for seg in ["calibrated", "callgraph", "hierarchy", "layerreach", "locs"] {
+            let report = envelope(fnEntry("app.Sender.send", ["Net"]), analyzed: 1)
+            let root = try makeReportDir(report: report, policy: "deny Db\n")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let sidecar = root.appendingPathComponent(".candor/report.App.Swift.\(seg).json")
+            let sidecarBytes = #"{"placeholder":"\#(seg)"}"#
+            try sidecarBytes.write(to: sidecar, atomically: true, encoding: .utf8)
+
+            let r = try ProcessHarness.run(bin(), ["gate", "--report", root.path,
+                                                   "--policy", root.appendingPathComponent("pol.txt").path,
+                                                   "--gate-json", sidecar.path])
+            XCTAssertEqual(r.code, 2, "[\(seg)] the reserved sidecar is refused like the report itself: \(r.err)")
+            XCTAssertEqual(try String(contentsOf: sidecar, encoding: .utf8), sidecarBytes,
+                           "[\(seg)] byte-for-byte untouched — an armed sink here would silently destroy "
+                           + "the sibling engines' own data segment")
+        }
+    }
 }

@@ -110,6 +110,30 @@ final class LocatorResolutionProcessTests: XCTestCase {
         XCTAssertEqual(sib.code, 2, "a sidecar locator must not widen to the prefix union either")
     }
 
+    /// **THE SIBLING SWEEP the test above never took.** `resolveReportLocator` (`FixCLI.swift`) normalizes
+    /// a §2.2 sidecar locator to its report file over `reportSidecarSegments()`'s five reserved names —
+    /// `calibrated`, `callgraph`, `hierarchy`, `layerreach`, `locs` — because `--report <a foreign .json>`
+    /// is supported and the other three are the SIBLING engines' data segments, never written by this one.
+    /// Until this test, only `callgraph` had ever been posed here: a guard-deletion sweep found the other
+    /// four each individually removable from that loop (and from the two other hand-written copies of the
+    /// same list) with the full suite staying green. Without normalization a sidecar locator falls through
+    /// to the file-locator arm UNCHANGED, reads its own (non-report) bytes as a report, and fails — the
+    /// same failure the ⟨0.28⟩ fix closed for `callgraph`, reopened per sibling name.
+    func testForeignSidecarLocatorsAlsoResolveToTheirReportFile() throws {
+        for seg in ["calibrated", "hierarchy", "layerreach", "locs"] {
+            let sidecar = root.appendingPathComponent("r.A.Swift.\(seg).json")
+            try #"{"placeholder":"\#(seg)"}"#.write(to: sidecar, atomically: true, encoding: .utf8)
+            defer { try? FileManager.default.removeItem(at: sidecar) }
+
+            let r = try ProcessHarness.run(bin, ["path", "A.doNet", "Net", "--report", sidecar.path, "--json"])
+            XCTAssertEqual(r.code, 0, "[\(seg)] a sidecar locator must resolve to its report file: \(r.err)")
+            XCTAssertTrue(r.out.contains("A.doNet"), "[\(seg)] stdout: \(r.out)")
+
+            let sib = try ProcessHarness.run(bin, ["path", "B.doFs", "Fs", "--report", sidecar.path, "--json"])
+            XCTAssertEqual(sib.code, 2, "[\(seg)] a sidecar locator must not widen to the prefix union either")
+        }
+    }
+
     /// A `.json` file locator that names NO existing file fails LOUD — it must not quietly widen to
     /// whatever siblings share its directory.
     func testMissingFileLocatorFailsLoud() throws {
