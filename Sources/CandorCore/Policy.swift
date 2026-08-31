@@ -885,7 +885,7 @@ public func unaskedCrossPolicyRules(
     // yet have WRITTEN `scannedUnder` at all (SPEC ⟨0.34⟩), which is the condition the caller's message
     // choice turns on — never the verdict, which SPEC ⟨0.34⟩ explicitly keeps unmoved by a report's age.
     let anyFromCurrentSpec = scannedUnderOfPeeked.contains { entry in
-        !specPredates(entry.spec, "0.33") && missing.contains { !entry.deny.contains($0) }
+        !specPredates(entry.spec, "0.33") && missing.contains { !entry.deny.contains($0) }  // ⟨0.33⟩ — the rung this predicate names
     }
     return (missing, !anyFromCurrentSpec)
 }
