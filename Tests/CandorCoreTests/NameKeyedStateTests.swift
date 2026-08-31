@@ -243,6 +243,16 @@ final class NameKeyedStateTests: XCTestCase {
         // same-named module-level free fn for the whole unit. Its leak direction is SUPPRESSION (a
         // loss), not fabrication, and it is unmeasured — recorded here so it is not mistaken for swept.
         "localFuncs": .notPerBinding,
+        // R33's escape gate reads SYNTAX, not names: `bodyRootID` is the identity of the unit BODY node,
+        // the stop condition for `constructionEscapes`' ancestor walk. Set once at init from the FnInfo
+        // this collector was handed, never written again, so a rebind cannot reach it — and its failure
+        // direction if it were ever wrong is a walk that climbs OUT of the unit and reads an enclosing
+        // declaration's `return` as this construction's escape, i.e. a silent under-report.
+        "bodyRootID": .notPerBinding,
+        // Likewise a fact about the unit's own DECLARATION — whether its body IS a stored property's or
+        // a global's initializer expression, in which case nothing built there is released there. Set
+        // once at init; no binding name reaches it.
+        "bodyIsStoredInitializer": .notPerBinding,
         "handledBinders": .notPerBinding, "typeScopes": .notPerBinding,
         "shadowScopes": .notPerBinding, "monoClosureParams": .notPerBinding,
     ]
