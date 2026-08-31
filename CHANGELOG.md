@@ -52,6 +52,49 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   (`let s = db.makeStatement(…)`) was charged before and is not now: zero measured instances of it
   recovering a real deinit across the corpus, one measured instance of it fabricating.
 
+- ⚠ **CARDINAL SIN (silent under-report), same day — the escape gate directly above suppressed a
+  charge whenever a name was returned ANYWHERE in the function, not just on the path that actually
+  ran it out.** `returnedNames` was a whole-function SET: every `return` in the body contributed every
+  identifier it mentioned, and E2/E3 asked simple membership. That cannot distinguish "this value
+  escapes on every execution" from "this value escapes on SOME execution" — mirrors candor-rust's
+  `7af62f1` `Drop`-glue bug, found in the sibling engine an hour after it shipped:
+  `let g = Loud(); if f { return g } else { return nil }` marked `g` escaping unconditionally, so the
+  `f == false` path — where `g` is released right here — read silent-pure. A `switch` where only one
+  case returns, a `throw` on the path that never reaches the qualifying `return`, and two UNRELATED
+  same-named locals in sibling `if`/`else` branches all reproduced it the same way. GROUND TRUTH
+  EXECUTED for every shape: an unbuffered `deinit` printed before its function returned on the
+  non-escaping path, after on the escaping one.
+
+  A second, unrelated hole surfaced chasing the first: `isImplicitReturnPosition` (E5, "the sole
+  expression of a body is that body's implicit return") could not tell a genuine if-EXPRESSION
+  implicit return from an `if`/`else` whose ARMS explicitly `return` — both parse to the identical
+  `IfExprSyntax` shape, so `func f(_ cond: Bool) -> Int { if cond { let g = Loud(…); …; return 1 }
+  else { return 2 } }`, a single-statement function body with a declared return type, read the ENTIRE
+  if/else as escaping and silenced a construction several statements before either arm's own `return`
+  — an ordinary, common Swift shape, present before this fix and unrelated to the E2 vein.
+
+  Both are now answered by a bounded, SOUND (never-under-report) path check: `guaranteedToEscape` walks
+  forward from a binding asking whether EVERY reachable path hits a qualifying `return`/`throw` before
+  falling through, reassigning the name, or reaching a construct this scan does not model (`switch`,
+  loops, `do`/`catch`) — any of which answers "not proven", which routes to CHARGE, never the reverse.
+  `if`/`else`(`-if`) and `guard … else { <exit> }` are the two shapes it resolves; everything else
+  over-approximates safely, same direction the shipped bound-local path already used.
+
+  **PERFORMANCE, found the same day by TIMING rather than reading the recursion**: the first version of
+  this fix threaded its "falls off the end" answer as an `@escaping () -> Bool` closure, re-invoked from
+  BOTH arms of every `if`. For N sequential `if`/`else` statements (both arms falling through — exactly
+  the shape a long `if usage == "…" { … } else { … }` privacy-key table has), that closure doubles at
+  every level: O(2^N). `PrivacyManifestCLI.swift` (1316 lines, this shape) alone took the engine's own
+  self-scan from 3 seconds to over 9 minutes before being killed — `swift build`/`swift test` never
+  self-scan, so all 988 tests stayed green throughout. Fixed by computing each continuation ONCE, eagerly,
+  as a plain `Bool` rather than a re-invocable closure, restoring linear time; pinned by a 500-sequential-
+  `if`/`else` performance test alongside the correctness fixtures.
+
+  A/B over the same real packages as the fix above (swift-collections, GRDB, Alamofire, Kingfisher,
+  swift-crypto, swift-nio — ~11,300 effectful functions): 0 removed, 0 effect-set changes beyond what the
+  fix above already produced, 0 rows added by this fix specifically (isolated by comparing against the
+  as-shipped binary directly, not just against pre-fix).
+
 - ⚠ **CARDINAL SIN (silent under-report) — a vendored directory's NAME decided whether
   `privacy-manifest --verify` reported an undeclared entitlement, and the refusal that caused it was
   invisible on `--json`.** Two halves, both fixed; measured as an A/B over two trees identical except for

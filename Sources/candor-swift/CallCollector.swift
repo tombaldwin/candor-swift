@@ -476,17 +476,10 @@ final class CallCollector: SyntaxVisitor {
         self.localProtocols = localProtocols
         self.returns = returns
         self.enclosingType = info.enclosingType
-        self.returnedNames = info.body.map { ReturnedNameCollector.collect(Syntax($0)) } ?? []
         self.bodyRootID = info.body?.id
         self.bodyIsStoredInitializer = info.body.map { Self.isStoredInitializerBody(Syntax($0)) } ?? false
         super.init(viewMode: .sourceAccurate)
     }
-
-    // Names this function RETURNS (any identifier mentioned in a `return <expr>`). A returned binding
-    // ESCAPES — its deinit runs at the CALLER, not here — so R33 deinit-glue must skip it. Skipping on
-    // any return-mention is the SAFE direction: a missed charge only under-reports, whereas charging the
-    // pervasive `let v = View(); …; return v` factory pattern (SwiftUI `makeNSView`) would fabricate.
-    private let returnedNames: Set<String>
 
     /// The unit body this collector was handed, so `constructionEscapes`' ancestor walk STOPS there.
     /// SwiftSyntax nodes keep their parent links, so an unbounded walk would climb out of a nested
@@ -4020,7 +4013,8 @@ final class CallCollector: SyntaxVisitor {
         while let n = cursor {
             if n.is(ReturnStmtSyntax.self) || n.is(ThrowStmtSyntax.self) { return true }   // E1
             if let pb = n.as(PatternBindingSyntax.self) {
-                if Self.patternNames(pb.pattern).contains(where: returnedNames.contains) { return true }  // E2
+                if let item = pb.parent?.parent?.parent?.as(CodeBlockItemSyntax.self),      // E2
+                   guaranteedToEscape(Set(Self.patternNames(pb.pattern)), after: item) { return true }
                 if Self.isStoredDeclaration(pb) { return true }                            // E4
             }
             if assignmentStoresOutOfScope(n, rhs: child) { return true }                    // E3
@@ -4028,6 +4022,172 @@ final class CallCollector: SyntaxVisitor {
             if n.id == bodyRootID { break }
             child = n
             cursor = n.parent
+        }
+        return false
+    }
+
+    /// E2/E3's PATH-SENSITIVE replacement for whole-function name membership (`returnedNames`, below).
+    ///
+    /// THE VEIN, measured 2026-08-31 with ground truth EXECUTED: `returnedNames` is a SET, built once
+    /// per unit by walking every `return` in the body and collecting every identifier it mentions. Set
+    /// MEMBERSHIP cannot see WHICH execution path put a name there, so a name returned on ONE branch
+    /// marked the binding escaping on EVERY branch — mirrors candor-rust's `7af62f1` `Drop`-glue bug,
+    /// ten minutes to break: `let g = Loud(); if f { return g } else { return nil }` escapes only when
+    /// `f`, and stayed silent-pure on the drop path against BOTH the pre- and post-`8a19ca3` binary (this
+    /// is not a regression that commit introduced — the binder path's old `applyDeinitGlue` guard had
+    /// the identical `returnedNames.contains` check, carried forward unchanged). A `switch` where only
+    /// one case returns, a `throw` on the path that never reaches the qualifying `return`, and two
+    /// UNRELATED same-named locals in sibling branches all reproduced it the same way.
+    ///
+    /// So this asks a narrower, SOUND question instead: does EVERY reachable path forward from `after`
+    /// hit a `return`/`throw` that actually carries one of `names`, before any path can fall through,
+    /// exit some other way, or reach a construct this scan does not model? NOT a full CFG — the STATED
+    /// LIMIT is the safe one: `switch`, loops, `do`/`catch`, a name reassigned or reshadowed mid-block,
+    /// and anything else unmodelled answer "not proven", which routes to CHARGE, never the reverse. The
+    /// two cases this DOES resolve — `if`/`else`(`-if`) chains and `guard … else { <exit> }` — are
+    /// measured to be the ones real Swift actually writes between a construction and its return; see
+    /// `testBothBranchesReturningTheSameLocalStaysPure`, the over-charge control for exactly this gate.
+    private func guaranteedToEscape(_ names: Set<String>, after item: CodeBlockItemSyntax) -> Bool {
+        guard let list = Syntax(item).parent?.as(CodeBlockItemListSyntax.self),
+              let idx = list.firstIndex(where: { $0.id == item.id }) else { return false }
+        let rest = Array(list[list.index(after: idx)...])
+        return Self.itemsGuaranteeEscape(rest, names: names, onFallThrough: fallsThrough(list, names: names))
+    }
+
+    /// What happens if control falls off the END of `list` with no exit inside it — climb to whatever
+    /// comes after the CONSTRUCT that owns this list (an `if`/`else` body), recursively. Anything this
+    /// does not recognise — the unit body root, a closure, a loop, an accessor block — ends the climb
+    /// at "not proven" (`false`), which is the safe default: it can only cause MORE charging.
+    private func fallsThrough(_ list: CodeBlockItemListSyntax, names: Set<String>) -> Bool {
+        guard list.id != bodyRootID, let block = Syntax(list).parent?.as(CodeBlockSyntax.self),
+              let owner = Syntax(block).parent else { return false }
+        if let ifExpr = owner.as(IfExprSyntax.self),
+           let ifItem = Syntax(ifExpr).parent?.as(CodeBlockItemSyntax.self) {
+            return guaranteedToEscape(names, after: ifItem)
+        }
+        return false
+    }
+
+    /// The straight-line scan proper: `first` decides, `rest` is the tail, `onFallThrough` is the
+    /// ALREADY-COMPUTED answer for "falls off the end with no exit" (a plain `Bool`, not a thunk — see
+    /// the PERFORMANCE note below for why that distinction is load-bearing).
+    ///
+    /// PERFORMANCE, measured 2026-08-31: the first version of this threaded `onFallThrough` as an
+    /// `@escaping () -> Bool` CLOSURE, rebuilt one layer deeper at every `if` so a branch's own
+    /// fallthrough could reach the code after it. That closure is invoked from BOTH `thenEscapes` and
+    /// `elseEscapes` in `ifGuaranteesEscape` below — so for a straight-line run of N sequential
+    /// `if`/`else` statements (no nesting, both arms of each falling through — the shape a long chain
+    /// of `if usage == "…" { … } else { … }` privacy-key checks actually has), evaluating statement K's
+    /// continuation re-invokes the UNMEMOIZED closure for statement K+1 twice, which each re-invoke
+    /// K+2's twice, doubling at every step: O(2^N). `PrivacyManifestCLI.swift` (1316 lines, exactly this
+    /// shape) alone made `self-gate.sh` — 3s before this fix existed — run for **over 9 minutes** before
+    /// being killed; `swift build`/`swift test` never exercise a self-scan and stayed fast throughout, so
+    /// the whole 988-test suite was GREEN while this shipped. Found by TIMING the self-gate this file's
+    /// own commit message cites as a passed gate, not by reading the recursion.
+    ///
+    /// The fix computes each `onFallThrough` value ONCE, eagerly, before branching, and passes the
+    /// plain `Bool` down — so a nested `if`'s own continuation is computed exactly once regardless of
+    /// how many arms above it would otherwise have asked for it. This is what turns the recursion back
+    /// into a single linear pass over the statement list (`testPerformanceOnALongSequentialIfElseChain`
+    /// pins 500 sequential `if`/`else` pairs finishing in seconds, not the un-fixed version's arbitrary
+    /// blowup).
+    private static func itemsGuaranteeEscape(
+        _ items: [CodeBlockItemSyntax], names: Set<String>, onFallThrough: Bool
+    ) -> Bool {
+        guard let first = items.first else { return onFallThrough }
+        let rest = Array(items.dropFirst())
+        if let ret = first.item.as(ReturnStmtSyntax.self) {
+            guard let expr = ret.expression else { return false }              // bare `return` — drops
+            return Self.exprMentionsAnyIdentifier(Syntax(expr), names)
+        }
+        if first.item.is(ThrowStmtSyntax.self) { return false }                // exits without carrying
+        // `if`/`switch` are EXPRESSIONS in swift-syntax's grammar (Swift 5.9+), so one used as a bare
+        // statement is wrapped in `ExpressionStmtSyntax` rather than appearing directly as `.item` —
+        // MEASURED by direct SwiftSyntax probe, not assumed: `item.item.as(IfExprSyntax.self)` silently
+        // returns nil for every `if` at statement position, which sent EVERY `if`/`else` through the
+        // unmodelled-construct bail below. That bail defaults to "not proven" (charge), which happens
+        // to be the right answer for three of this file's four defect fixtures but the WRONG one for
+        // the escaping-both-arms control — caught by `testBothBranchesReturningTheSameLocalStaysPure`
+        // regressing to a false CHARGE the moment this fix was first tried unwrapped.
+        if let ifExpr = (first.item.as(IfExprSyntax.self)
+                          ?? first.item.as(ExpressionStmtSyntax.self)?.expression.as(IfExprSyntax.self)) {
+            // Computed ONCE — see this function's PERFORMANCE note — then handed to BOTH arms below.
+            let afterIf = itemsGuaranteeEscape(rest, names: names, onFallThrough: onFallThrough)
+            return ifGuaranteesEscape(ifExpr, names: names, onFallThrough: afterIf)
+        }
+        if let guardStmt = first.item.as(GuardStmtSyntax.self) {
+            // The `else` block MUST exit (the compiler enforces it); if it exits by returning/throwing
+            // WITHOUT carrying `names`, that path drops — checked with `onFallThrough: false` because the
+            // block falling through here would be uncompilable, so "not proven" is inert either way.
+            let elseEscapes = itemsGuaranteeEscape(Array(guardStmt.body.statements), names: names, onFallThrough: false)
+            let continueEscapes = itemsGuaranteeEscape(rest, names: names, onFallThrough: onFallThrough)
+            return elseEscapes && continueEscapes
+        }
+        if Self.mightRebind(first, names: names) || Self.containsEarlyExit(Syntax(first.item)) {
+            return false                // can no longer trust the name, or a construct we don't model
+        }                                // might exit early some other way — bail to NOT PROVEN
+        return itemsGuaranteeEscape(rest, names: names, onFallThrough: onFallThrough)
+    }
+
+    /// `if`/`else`/`else if` all considered — every arm the condition can take must independently
+    /// guarantee escape, because at analysis time we cannot know which one runs. `onFallThrough` is the
+    /// PRECOMPUTED value for "this whole `if` falls through" — see `itemsGuaranteeEscape`'s PERFORMANCE
+    /// note; passing it as a value rather than a closure is what keeps an `else if` chain linear.
+    private static func ifGuaranteesEscape(
+        _ ifExpr: IfExprSyntax, names: Set<String>, onFallThrough: Bool
+    ) -> Bool {
+        let thenEscapes = itemsGuaranteeEscape(Array(ifExpr.body.statements), names: names, onFallThrough: onFallThrough)
+        let elseEscapes: Bool
+        if let elseIf = ifExpr.elseBody?.as(IfExprSyntax.self) {
+            elseEscapes = ifGuaranteesEscape(elseIf, names: names, onFallThrough: onFallThrough)
+        } else if let elseBlock = ifExpr.elseBody?.as(CodeBlockSyntax.self) {
+            elseEscapes = itemsGuaranteeEscape(Array(elseBlock.statements), names: names, onFallThrough: onFallThrough)
+        } else {
+            elseEscapes = onFallThrough                       // no `else` — condition false skips straight past
+        }
+        return thenEscapes && elseEscapes
+    }
+
+    /// A statement between the binding and its return that could invalidate the name tracking: a NEW
+    /// declaration shadowing one of `names`, or a plain `name = …` reassignment (the same unfolded
+    /// `SequenceExprSyntax` shape `assignmentStoresOutOfScope` reads). Either means a later `return
+    /// name` would return something OTHER than the construction under test — bail to NOT PROVEN rather
+    /// than risk crediting an escape that belongs to a different value.
+    private static func mightRebind(_ item: CodeBlockItemSyntax, names: Set<String>) -> Bool {
+        if let vd = item.item.as(VariableDeclSyntax.self) {
+            for b in vd.bindings where Self.patternNames(b.pattern).contains(where: names.contains) { return true }
+        }
+        // Confirmed by direct SwiftSyntax probe (unlike `if`): an assignment's `SequenceExprSyntax`
+        // appears directly as `.item`, with no `ExpressionStmtSyntax` wrapper.
+        if let seq = item.item.as(SequenceExprSyntax.self) {
+            let elems = Array(seq.elements)
+            if let opIdx = elems.firstIndex(where: { $0.is(AssignmentExprSyntax.self) }), opIdx > 0,
+               let dr = Self.peel(elems[0]).as(DeclReferenceExprSyntax.self), names.contains(dr.baseName.text) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Whether `node`'s subtree contains a `return`/`throw`/`break`/`continue` this scan does not
+    /// otherwise model here — an UNMODELLED early exit, not the modelled `return`/`throw`/`guard`/`if`
+    /// cases above (those are peeled off before this runs). Deliberately does not descend into a
+    /// nested `FunctionDeclSyntax`/`ClosureExprSyntax`: a `return` inside one exits THAT scope, not the
+    /// enclosing function, and treating it as an exit here would only widen the safe (over-charge)
+    /// direction for no reason.
+    private static func containsEarlyExit(_ node: Syntax) -> Bool {
+        if node.is(FunctionDeclSyntax.self) || node.is(ClosureExprSyntax.self) { return false }
+        if node.is(ReturnStmtSyntax.self) || node.is(ThrowStmtSyntax.self)
+            || node.is(BreakStmtSyntax.self) || node.is(ContinueStmtSyntax.self) { return true }
+        for c in node.children(viewMode: .sourceAccurate) where containsEarlyExit(c) { return true }
+        return false
+    }
+
+    /// Whether `expr` mentions any identifier in `names` — used to check a `return`'s expression
+    /// against the binding names it might carry (a tuple-destructuring return element, in particular).
+    private static func exprMentionsAnyIdentifier(_ expr: Syntax, _ names: Set<String>) -> Bool {
+        for tok in expr.tokens(viewMode: .sourceAccurate) where tok.tokenKind.isIdentifier {
+            if names.contains(tok.text) { return true }
         }
         return false
     }
@@ -4077,7 +4237,14 @@ final class CallCollector: SyntaxVisitor {
         if target.is(MemberAccessExprSyntax.self) || target.is(SubscriptCallExprSyntax.self) { return true }
         guard let dr = target.as(DeclReferenceExprSyntax.self) else { return false }
         let name = dr.baseName.text
-        if returnedNames.contains(name) { return true }
+        // Path-sensitive, not whole-function membership — see `guaranteedToEscape`'s doc for the vein
+        // this closes: `var x = A(); if f { x = B() } ; return x` must not read `A()`'s construction
+        // (this assignment target is `x`, but the CONSTRUCTION under test at THIS call is `B()`, whose
+        // own binder path already charges the reassignment normally) as escaping on a path where `x`
+        // is never actually returned.
+        if let seq = n.parent?.as(SequenceExprSyntax.self),
+           let item = Syntax(seq).parent?.as(CodeBlockItemSyntax.self),
+           guaranteedToEscape([name], after: item) { return true }
         // A BARE identifier is not necessarily a local. Inside a method — and above all inside an
         // `init` — it is very often IMPLICIT SELF, and then the assignment stores onto the instance.
         // MEASURED: Alamofire's `StreamOf.Iterator.init` writes `token = Token(onDeinit:)`, whose
@@ -4098,9 +4265,30 @@ final class CallCollector: SyntaxVisitor {
     /// that is later returned — is already E1/E2/E3. A closure arm was written first and cost exactly
     /// that under-report for nothing; the enclosing function's own implicit return still fires, because
     /// the walk carries on past the closure to it.
+    ///
+    /// THE VEIN, measured 2026-08-31 with ground truth EXECUTED: `if`/`switch` are EXPRESSIONS in
+    /// swift-syntax's grammar whether or not they are actually USED as one — `if cond { return 1 } else
+    /// { return 2 } }` parses to the identical `IfExprSyntax` shape as `if cond { 1 } else { 2 }`, so
+    /// this check could not tell "the sole statement is a value this function implicitly returns" from
+    /// "the sole statement is ordinary branching whose ARMS explicitly return." Both read as "one
+    /// top-level item, function has a return clause" — so `func f(_ cond: Bool) -> Int { if cond { let
+    /// g = Loud(…); …; return 1 } else { return 2 } }` marked the ENTIRE if/else escaping, silencing a
+    /// construction that sits several statements before either arm's own `return` — proven by execution
+    /// to drop in-scope, and NOT a shape `constructionEscapes`'s other checks reach: E1 never fires
+    /// (the construction is not nested inside the `ReturnStmtSyntax`, a separate later statement is),
+    /// E2 is correctly false (the bound name is never returned). This is a stand-alone hole, present
+    /// before this file's `guaranteedToEscape` was added and unrelated to it — a single-statement
+    /// `if`/`else` with an early return in it is an exceedingly common Swift shape.
+    ///
+    /// So this now additionally requires that `child`'s subtree contains no explicit `return`/`throw`/
+    /// `break`/`continue` — the same `containsEarlyExit` used to bail `guaranteedToEscape` to NOT
+    /// PROVEN. A genuine implicit-return `if`/`switch` (`if cond { Loud(a) } else { Loud(b) }`, no
+    /// `return` keyword anywhere) has none, so it still fires — see
+    /// `testGenuineIfExpressionImplicitReturnStaysPure`, the over-charge control for this exact carve-out.
     private static func isImplicitReturnPosition(_ n: Syntax, of child: Syntax) -> Bool {
         guard let item = n.as(CodeBlockItemSyntax.self), item.item.id == child.id,
-              let list = item.parent?.as(CodeBlockItemListSyntax.self), list.count == 1 else { return false }
+              let list = item.parent?.as(CodeBlockItemListSyntax.self), list.count == 1,
+              !Self.containsEarlyExit(child) else { return false }
         // `var x: T { Ctor() }` — the getter shorthand, whose items hang off the accessor block itself.
         if list.parent?.is(AccessorBlockSyntax.self) == true { return true }
         guard let owner = list.parent?.as(CodeBlockSyntax.self)?.parent else { return false }
@@ -4371,26 +4559,6 @@ final class CallCollector: SyntaxVisitor {
                     // Gated on the RHS being a known local FN name, so an ordinary value copy never fabricates.
                     fnValueAlias[name] = dr.baseName.text
                 }
-            }
-        }
-        return .visitChildren
-    }
-}
-
-/// Collects every identifier mentioned in a `return <expr>` within a function body — the escape signal
-/// R33 deinit-glue uses to avoid charging a returned (escaping) local. Descends into the return
-/// expression only; a `return v as View` / `return v!` / `return f(v)` all mark `v` as escaping.
-private final class ReturnedNameCollector: SyntaxVisitor {
-    private var names: Set<String> = []
-    static func collect(_ node: Syntax) -> Set<String> {
-        let c = ReturnedNameCollector(viewMode: .sourceAccurate)
-        c.walk(node)
-        return c.names
-    }
-    override func visit(_ node: ReturnStmtSyntax) -> SyntaxVisitorContinueKind {
-        if let expr = node.expression {
-            for ref in expr.tokens(viewMode: .sourceAccurate) where ref.tokenKind.isIdentifier {
-                names.insert(ref.text)
             }
         }
         return .visitChildren
