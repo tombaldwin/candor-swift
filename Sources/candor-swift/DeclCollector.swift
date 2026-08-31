@@ -222,6 +222,29 @@ final class DeclCollector: SyntaxVisitor {
     var dynamicMemberTypes: Set<String> = []   // `@dynamicMemberLookup`-annotated local types
     var resultBuilderTypes: Set<String> = []   // `@resultBuilder`-annotated local types
     var globalActorTypes: Set<String> = []     // `@globalActor`-annotated local types (e.g. a custom `@DBActor`)
+    // R73 — module-scope `let`/`var` global NAME -> its resolved concrete type, so a method call on the
+    // global as a RECEIVER (`worker.doWork()`) can type the same way a local/param/field already does.
+    // Before this table existed, `CallCollector.rootOf`'s bare-identifier branch had nothing to consult for
+    // a name absent from `vars`/`fields`, fell through to the untyped-name fallback, and the call edge
+    // silently pointed at the GLOBAL's own bare identifier (which has no members) instead of the method —
+    // the caller's effects collapsed to empty and it vanished from `functions[]` entirely (SOUNDNESS.md
+    // R73). Populated from the SAME three initializer shapes `fields` already recognises just above: an
+    // explicit type annotation, a constructor-call initializer, and the `Type.shared` singleton-accessor
+    // idiom — kept UNDEALIASED, matching how `fields[ty][name]` stores a raw ctor name (rootOf's fallback
+    // path is what dealiases). Only a SINGLE-identifier binding is typed (`let x = …`, not a tuple
+    // destructure) — a destructured global stays exactly as under-resolved as before this fix, an existing,
+    // narrower gap this change does not claim to close. A bare free-FACTORY initializer's return type isn't
+    // known on this first per-file pass, so it is deferred via `globalFactories`, mirroring
+    // `staticFactoryFields` one scope up.
+    var globalTypes: [String: String] = [:]
+    var globalFactories: [(name: String, leaf: String)] = []
+    /// R73, the loop sibling — a module-scope `[T]` global (`let workers: [Worker] = […]`), iterated
+    /// (`for w in workers { w.doWork() }`). `globalTypes` alone does not cover this: `w` binds to the
+    /// ARRAY's ELEMENT type, not the array's own type, exactly the distinction `arrayElem` (locals) and
+    /// `fieldArrayElem` (fields) already draw for their two receiver kinds. Only the explicit-annotation
+    /// shape is recognised (mirrors the plain-type table above); an array-literal initializer with no
+    /// annotation is left unresolved, same as before this fix.
+    var globalArrayElem: [String: String] = [:]
     // Capitalized @-attributes applied to a class/struct/enum/actor DECLARATION itself (`@Observable
     // class Store`), raw and unfiltered — the type-level companion to `FnInfo.uppercaseAttrs`. Swift
     // admits exactly two explanations for a capitalized custom attribute here: a global actor (excluded
@@ -798,6 +821,34 @@ final class DeclCollector: SyntaxVisitor {
                 if node.bindingSpecifier.text == "let", binding.accessorBlock == nil,
                    let only = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
                     recordConstString(name: only, isLet: true, initializer: binding.initializer?.value)
+                }
+                // R73 — type this global exactly like a field would be typed (see `globalTypes` above),
+                // so a later method call on it as a RECEIVER resolves to the method, not the bare global
+                // name. `let`/`var` both qualify (a `var` global can still receive a dispatched call).
+                if let only = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
+                    if let ann = binding.typeAnnotation {
+                        let info = typeName(ann.type)
+                        if let tn = info.name, !info.isFunction { globalTypes[only] = tn }
+                        else if let elem = arrayElementName(ann.type) { globalArrayElem[only] = elem }
+                    } else if let initVal = binding.initializer?.value {
+                        if let call = initVal.as(FunctionCallExprSyntax.self),
+                           let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self) {
+                            if ctor.baseName.text.first?.isUppercase == true {
+                                globalTypes[only] = ctor.baseName.text
+                            } else {
+                                // a lowercase callee — a free-FACTORY call (`let x = makeX()`); its return
+                                // type isn't known until the returns index is built (see `staticFactoryFields`).
+                                globalFactories.append((only, ctor.baseName.text))
+                            }
+                        } else if let ma = initVal.as(MemberAccessExprSyntax.self),
+                                  let base = ma.base?.as(DeclReferenceExprSyntax.self),
+                                  base.baseName.text.first?.isUppercase == true,
+                                  SINGLETON_ACCESSORS.contains(ma.declName.baseName.text) {
+                            // `let session = URLSession.shared` — the same singleton-field idiom `fields`
+                            // recognises above, applied to a module-scope global.
+                            globalTypes[only] = base.baseName.text
+                        }
+                    }
                 }
                 var bodies: [Syntax] = []
                 if let ab = binding.accessorBlock {

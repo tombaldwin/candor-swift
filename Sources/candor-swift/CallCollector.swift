@@ -154,6 +154,19 @@ final class CallCollector: SyntaxVisitor {
     var dictElem: [String: String]          // name -> VALUE type of a `[K: V]` local/param (dict loops)
     var tupleElem: [String: [String: String]]  // name -> tuple element types (`p.0` / `p.c`)
     let fields: [String: [String: (name: String?, isFunction: Bool)]]
+    /// R73 — module-scope global NAME -> its concrete type, MODULE-SLICED by the Driver before
+    /// construction (see `Driver.globalTypesByModule`). Consulted by `rootOf`'s bare-identifier branch,
+    /// same rung as `vars`/`fields`: a local/param shadows a global of the same name (checked first via
+    /// `vars`), an implicit-`self` field shadows a global too (checked next, matching real Swift lookup
+    /// order — a type's own member wins over an outer-scope global of the same bare name) — a global is
+    /// consulted only once neither of those answers. Before this table existed there was NOTHING for a
+    /// module-scope global receiver to resolve through, so `worker.doWork()` fell to the untyped-name
+    /// fallback and the call edge silently pointed at `worker` itself (which has no members) instead of
+    /// `Worker.doWork` — SOUNDNESS.md R73.
+    let globalTypes: [String: String]
+    /// R73's loop sibling — module-scope `[T]` global name -> ELEMENT type, consulted by
+    /// `elementTypeOf`'s bare-identifier branch the same way `globalTypes` is consulted by `rootOf`'s.
+    let globalArrayElem: [String: String]
     let fieldArrayElem: [String: [String: String]]  // Type -> field -> [T] element (self.field loops)
     let fieldDictValue: [String: [String: String]]  // Type -> field -> [K: V] value
     let opaqueFields: [String: Set<String>]         // Type -> fields whose type is monomorphized
@@ -430,6 +443,7 @@ final class CallCollector: SyntaxVisitor {
     let closureFields: [String: Set<String>]   // FINDING 2 — Type -> stored closure-property names (own unit)
 
     init(info: FnInfo, fields: [String: [String: (name: String?, isFunction: Bool)]], localTypes: Set<String>,
+         globalTypes: [String: String] = [:], globalArrayElem: [String: String] = [:],
          declaredTypes: Set<String>,
          localProtocols: Set<String>, returns: [String: String],
          fieldArrayElem: [String: [String: String]], fieldDictValue: [String: [String: String]],
@@ -468,6 +482,8 @@ final class CallCollector: SyntaxVisitor {
         self.dictElem = info.dictParams
         self.tupleElem = info.tupleParams
         self.fields = fields
+        self.globalTypes = globalTypes
+        self.globalArrayElem = globalArrayElem
         self.fieldArrayElem = fieldArrayElem
         self.fieldDictValue = fieldDictValue
         self.opaqueFields = opaqueFields
@@ -572,6 +588,19 @@ final class CallCollector: SyntaxVisitor {
             if let et = enclosingType, let f = fields[et]?[n], let ft = f.name {
                 return (ft, true, [n], opaqueFields[et]?.contains(n) == true)
             }
+            // R73 — a MODULE-SCOPE GLOBAL `let`/`var` receiver (`worker.doWork()` where `let worker =
+            // Worker()` sits at file scope). Checked after locals/params and implicit-self fields, which
+            // is the real Swift lookup order — either would otherwise SHADOW a global of the same bare
+            // name. Before this branch existed the identifier fell straight to the untyped-name fallback
+            // below, which returns `isVar: false` — so the terminal owner-resolution arm in
+            // `visit(FunctionCallExprSyntax)` treated `worker` as neither a typed receiver nor a valid
+            // extension owner and dropped the call edge entirely. The caller's only surviving edge came
+            // from a SEPARATE mechanism (a lazy-global-read edge straight to the global's own unit,
+            // Driver.swift's `cc.globalReads` handling) — which points at the global, not the method,
+            // and the global itself has no effects. That produced `invoke -> ["worker"]` with `worker`
+            // a dead end and `Worker.doWork` disconnected: the caller's effects collapsed to empty and it
+            // vanished from `functions[]` outright (SOUNDNESS.md R73).
+            if let t = globalTypes[n] { return (t, true, [n], false) }
             // a bare TYPE/alias reference (`FM.default`, the base of a static-member chain): resolve a
             // typealias to its underlying type so κ keys on the real spelling (`FM`→`FileManager`).
             return (dealias(n), false, [n], false)
@@ -1854,6 +1883,9 @@ final class CallCollector: SyntaxVisitor {
             // through `typeGenericBounds`, so a `[T]` field's element is `T` (resolves to nothing) and
             // there is no monomorphized protocol name to guard — hence `false`, not an omission.
             if let et = enclosingType, let t = fieldArrayElem[et]?[n] { return (t, false) }
+            // R73's loop sibling — a module-scope `[T]` global iterated bare (`for w in workers { … }`).
+            // Checked after locals/fields, the same shadowing order `rootOf`'s global lookup uses.
+            if let t = globalArrayElem[n] { return (t, false) }
             // bare `self` iterated directly — `for e in self { e.persist() }` inside `extension Array
             // where Element: Saveable`. `selfElementType` is exactly the bound `typeClosureParams`'s bare
             // element-iterator branch already consults for the CLOSURE form (`forEach { $0.persist() }`,

@@ -417,7 +417,7 @@ survivable when the next vendored directory (`vendor/`, `Externals/`, a submodul
 An engine that classifies any `privacy/1` effect MUST disclose the extension in the report envelope:
 
 ```json
-{ "candor": { "version": "…", "toolchain": "swiftsyntax", "spec": "0.34" },
+{ "candor": { "version": "…", "toolchain": "swiftsyntax", "spec": "0.35" },
   "extensions": ["privacy/2"],
   "functions": [ … ] }
 ```
