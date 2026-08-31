@@ -1326,6 +1326,17 @@ private func parseTourArgs(_ args: [String]) -> TourArgs {
             reportFlag = v
         default:
             if a == "--text" || a == "--human" { continue }  // candor-ts output-mode flags (#8); swift prose is the default — tolerate for cross-engine `candor <verb> --text`
+            // SPEC §3.3.1 ⟨0.34⟩: `tour`'s pinned §3.1 shape carries no policy-derived field (it ranks
+            // existing reach by surprise, not by any deny rule), so `--policy` is a usage error, not a
+            // silently-dropped flag. Named, like `gains` and `path` already do, rather than falling into
+            // the generic "unknown flag" arm below — a bare echo of the flag would satisfy a naive
+            // "mentions policy" check without telling the operator what to run instead.
+            if a == "--policy" {
+                fixDie("candor-swift: unknown flag `--policy` — `tour` is a descriptive query with no "
+                       + "policy-relative verdict (its SPEC §3.1 JSON shape carries no policy-derived "
+                       + "field); apply a policy to this report with `candor-swift gate --report <locator> "
+                       + "--policy <file>`, or use fix/fix-gate/unverified for a policy-relative pre-edit check")
+            }
             if a.hasPrefix("-") { fixDie("candor-swift: unknown flag \(a)") }
             positionals.append(a)
         }
@@ -1719,6 +1730,17 @@ private func parsePathArgs(_ args: [String]) -> PathArgs {
             reportFlag = v
         default:
             if a == "--text" || a == "--human" { continue }  // candor-ts output-mode flags (#8); swift prose is the default — tolerate for cross-engine `candor <verb> --text`
+            // SPEC §3.3.1 ⟨0.34⟩: `path`'s pinned §3.1 shape carries no policy-derived field (it traces a
+            // call chain to a DIRECT source — the same fact regardless of any policy), so `--policy` is a
+            // usage error, not a silently-dropped flag. Named, like `gains` already does, rather than
+            // falling into the generic "unknown flag" arm below — a bare echo of the flag would satisfy a
+            // naive "mentions policy" check without telling the operator what to run instead.
+            if a == "--policy" {
+                fixDie("candor-swift: unknown flag `--policy` — `path` is a descriptive query with no "
+                       + "policy-relative verdict (its SPEC §3.1 JSON shape carries no policy-derived "
+                       + "field); apply a policy to this report with `candor-swift gate --report <locator> "
+                       + "--policy <file>`, or use fix/fix-gate/unverified for a policy-relative pre-edit check")
+            }
             if a.hasPrefix("-") { fixDie("candor-swift: unknown flag \(a)") }
             positionals.append(a)
         }
