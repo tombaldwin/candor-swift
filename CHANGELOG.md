@@ -9,6 +9,49 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **CARDINAL SIN (silent under-report) — R33's deinit-glue fired only where the construction ROOTED
+  A LOCAL BINDING; every other construction POSITION was silent.** A class with an effectful `deinit`
+  is charged to the scope that releases it. That charge hung off `visit(VariableDeclSyntax)`, in three
+  binder-shaped call sites, so `let x = Ctor()` was charged and **nineteen other positions were not** —
+  `_ = Ctor()` (no `let`), a bare expression statement, a call ARGUMENT, an array / dictionary / tuple
+  literal element, a struct-field argument, a capture list, `if let` / `guard let` / a `switch`
+  subject, a TUPLE DESTRUCTURING, a ternary arm, `Ctor().member`, `xs.append(Ctor())`. Most contain no
+  closure and no existential, which is why the earlier "binder shape" framing could not see them: the
+  discriminator was never the binder, it was the POSITION.
+
+  GROUND TRUTH EXECUTED: the shapes were compiled and run with an unbuffered `deinit` interleaved
+  against call/return markers — every one printed **before** its function returned. Gate consequence,
+  measured: a scoped `deny Fs Callers` over eleven such functions reported **4 violations where the
+  truth is 11**; the silent ones sat inside `analyzed.count` with no `Unknown`, no per-fn `incomplete`
+  and no advisory, which is an affirmative purity claim. Severity is bounded and stays bounded: an
+  UNSCOPED `deny Fs` still fired, because the `Type.deinit` units are themselves reported. This
+  defeated scoped and layered policies, `path`, `gains`, `tour` and `fix-gate`, not a blanket deny.
+
+  The rule is now stated ONCE, at the construction expression, and the three binder call sites were
+  REMOVED rather than left beside it — two paths computing one fact are free to disagree, which is
+  exactly how this vein opened. One of those sites claimed in its comment to cover `_ = Loud(path)`
+  while sitting behind a `WildcardPatternSyntax` check, which is the `let _ =` spelling; a bare
+  `_ = Loud(path)` is not a `VariableDecl` at all. A claim written down stops being checked.
+
+  **The escape gate is the load-bearing half** (candor-spec SOUNDNESS.md R49: rust's analogous `Drop`
+  fix went regression-green and was REVERTED on the A/B, fabricating 14 false `Unknown`s on flate2).
+  A construction escapes via `return`/`throw`, a binding whose name is returned, an assignment into a
+  member/subscript/returned local, a stored property or global, or an implicit return. **Three
+  fabrications the first cut introduced were caught by the corpus A/B and by nothing else**, each now
+  pinned by a control falsified in both directions: an enum case with a payload resolving through the
+  leaf-keyed `returns` index (GRDB charged `Database.trace_v2` the `Db` of an unrelated `Statement`
+  class, over a `TraceEvent.Statement` that is a STRUCT); a stored-property/global initializer, whose
+  unit body IS the initializer so the ancestor walk never reaches the binding (Kingfisher,
+  swift-crypto); and IMPLICIT SELF in an initializer, `token = Ctor()` read as a local (Alamofire).
+
+  A/B over **13 real packages, 9,566 effectful functions**: 0 removed, 0 effect-set changes, **2 new
+  rows**, both `Unknown`, both swift-nio's `self.addHandlers([… ByteToMessageHandler(decoder) …])`.
+  STATED LIMIT, not a closure claim: a value handed to a callee that RETAINS it is charged, because
+  syntax cannot see the callee's retention — the same over-approximation the bound-local path has
+  always made for `let x = Ctor(); self.registry.append(x)`. A member-access factory bound to a local
+  (`let s = db.makeStatement(…)`) was charged before and is not now: zero measured instances of it
+  recovering a real deinit across the corpus, one measured instance of it fabricating.
+
 - ⚠ **CARDINAL SIN (silent under-report) — a vendored directory's NAME decided whether
   `privacy-manifest --verify` reported an undeclared entitlement, and the refusal that caused it was
   invisible on `--json`.** Two halves, both fixed; measured as an A/B over two trees identical except for

@@ -477,6 +477,8 @@ final class CallCollector: SyntaxVisitor {
         self.returns = returns
         self.enclosingType = info.enclosingType
         self.returnedNames = info.body.map { ReturnedNameCollector.collect(Syntax($0)) } ?? []
+        self.bodyRootID = info.body?.id
+        self.bodyIsStoredInitializer = info.body.map { Self.isStoredInitializerBody(Syntax($0)) } ?? false
         super.init(viewMode: .sourceAccurate)
     }
 
@@ -485,6 +487,23 @@ final class CallCollector: SyntaxVisitor {
     // any return-mention is the SAFE direction: a missed charge only under-reports, whereas charging the
     // pervasive `let v = View(); …; return v` factory pattern (SwiftUI `makeNSView`) would fabricate.
     private let returnedNames: Set<String>
+
+    /// The unit body this collector was handed, so `constructionEscapes`' ancestor walk STOPS there.
+    /// SwiftSyntax nodes keep their parent links, so an unbounded walk would climb out of a nested
+    /// `func` or closure into the ENCLOSING declaration and read ITS `return` as this construction's
+    /// escape — a FALSE escape, i.e. a silent under-report, which is the direction that must never be
+    /// left to chance.
+    private let bodyRootID: SyntaxIdentifier?
+
+    /// True when this unit's BODY IS a stored declaration's initializer expression — a stored property
+    /// (`let imageViews = [AnimatedImageView(), …]`, collected onto the type's synthesized `init`) or a
+    /// file-level global. E4 in `constructionEscapes` cannot see these: the walk starts INSIDE the
+    /// initializer and stops at the body root before it ever reaches the `PatternBinding` that would
+    /// say "stored". MEASURED, not predicted — Kingfisher's `GIFHeavyViewController` charged its
+    /// synthesized init the `Unknown` of four `AnimatedImageView.deinit`s that run when the VIEW
+    /// CONTROLLER dies, and swift-crypto's `emptyStorage` global the same way. Whatever such an
+    /// expression builds is retained by the declaration, so nothing in it is released here.
+    private let bodyIsStoredInitializer: Bool
 
     /// Peel the effect-transparent wrappers Swift puts around calls — `try`/`try?`/`await`/`!`/`?`.
     /// (The GRDB interop probe: every `try statement.execute()` receiver failed to type because
@@ -2627,6 +2646,10 @@ final class CallCollector: SyntaxVisitor {
     }
 
     override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
+        // R33 — deinit-glue, asked of the CONSTRUCTION rather than of a binder. See `applyDeinitGlue`
+        // for the vein this position closes and `constructionEscapes` for the gate that keeps a
+        // factory's returned product uncharged.
+        noteConstructionForDeinitGlue(node)
         typeClosureParams(node)
         typeEnumCaseBinding(node)
         // VECTOR 2 — `String(describing: x)` / `String(reflecting: x)` and `print(x)` / `debugPrint(x)`
@@ -3873,29 +3896,27 @@ final class CallCollector: SyntaxVisitor {
     }
     override func visitPost(_ node: FunctionDeclSyntax) { leaveShadowScope(node) }
 
-    // R33 — deinit-glue, the ONE authority both binder shapes below call. `t`/`isVar` come from
-    // `rootOf` run on the initializer EXPRESSION (the ctor/factory call itself), never from a type
-    // annotation — so a `let x: SomeProtocol = Loud(path)` still resolves to what was actually built.
-    // A `let`/`var` LOCAL bound to a fresh, non-aliased CONSTRUCTION of a type with an effectful
-    // `deinit` runs that deinit at scope exit — deterministic under ARC for a non-escaping local, but
-    // silent-pure because the deinit unit has no syntactic caller (mirrors rust's Drop-glue).
+    // R33 — deinit-glue. A CONSTRUCTION of a type with an effectful `deinit` runs that deinit where
+    // the value's last reference dies; for a value that never leaves the constructing function that is
+    // THIS scope, deterministically under ARC — but silent-pure, because the deinit unit has no
+    // syntactic caller (mirrors rust's Drop-glue).
     //
-    // Found as a SECOND hole in the same mechanism: the unannotated ctor branch (`let x = Loud(path)`)
-    // had this check; the annotated one (`let x: Loud = Loud(path)`, `var x: Loud? = Loud(path)` — no
-    // rarer in real Swift, arguably more common for an Optional or protocol-typed local) took a
-    // DIFFERENT branch of the same `if`/`else if` and never reached it — `Loud`'s `deinit` effect
-    // vanished with no `Unknown`, no disclosure, nothing, on the single most ordinary way to spell an
-    // explicitly-typed local. Factored out so the two shapes cannot drift into disagreeing about it
-    // again (AGENT-CORPUS-BRIEF: two paths computing one fact must not be free to answer differently).
-    private func applyDeinitGlue(name: String?, root t: String?, isVar: Bool) {
-        // `name == nil` is the WILDCARD shape (`_ = Loud(path)`) — there is no binding for a later
-        // statement to return, so the `returnedNames` escape check does not apply (and cannot: the
-        // set is keyed by identifier, and a wildcard has none).
-        guard let t, isVar, name.map({ !returnedNames.contains($0) }) ?? true else { return }
-        // An escaping value — `return Type()` (no binding, filtered by `returnedNames` above),
-        // `self.f = Type()` (assignment, never reaches this binder at all), `let r = other` (alias,
-        // filtered by the ctor-only callers of this function) — is never charged, so a factory that
-        // RETURNS its product stays pure (no over-charge).
+    // THE VEIN, measured 2026-08-31 with ground truth EXECUTED: this mechanism used to hang off the
+    // BINDER — three call sites inside `visit(VariableDeclSyntax)` — so it fired if and only if the
+    // construction rooted a `let`/`var` local. Every OTHER position a construction can occupy was a
+    // silent under-report, and most of them contain no closure and no existential, so the "binder
+    // shape" framing the previous fix was filed under could not see them: `_ = Ctor()` (no `let`), a
+    // bare expression statement, a call ARGUMENT, an array / dictionary / tuple literal element, a
+    // struct-field argument, a capture list, `if let` / `guard let` / a `switch` subject, a TUPLE
+    // DESTRUCTURING, a ternary arm, `Ctor().member`, `xs.append(Ctor())`. Sixteen positions were
+    // compiled and RUN with an unbuffered `deinit`: every one printed before its function returned.
+    //
+    // So the rule is stated ONCE, at the construction expression (`visit(FunctionCallExprSyntax)` →
+    // `noteConstructionForDeinitGlue`), and the three binder call sites were REMOVED rather than left
+    // beside it. Two paths computing one fact are free to disagree, which is exactly how this vein
+    // opened: the annotated binder and the unannotated binder had drifted, that drift was closed by
+    // factoring THEM together, and the factoring left the position question unasked.
+    private func applyDeinitGlue(root t: String) {
         if localTypes.contains(t) {
             // A `propertyEdges` SOFT edge, NOT a typed Call: it resolves via resolveQual and DROPS
             // SILENTLY when the type has no deinit unit (a struct/pure class → nothing), never
@@ -3915,6 +3936,185 @@ final class CallCollector: SyntaxVisitor {
             // pure) `deinit` has no entry in the dep report, so the join adds nothing.
             deinitExternal.insert("\(t).deinit")
         }
+    }
+
+    /// The TYPE a call CONSTRUCTS, or nil if the call is not a construction.
+    ///
+    /// `rootOf` answers a BROADER question — "what type does this expression's value have" — and two of
+    /// its arms are true of that question and false of this one. Both were MEASURED on the corpus, not
+    /// reasoned about, and the second is the one that would have shipped a fabrication:
+    ///
+    /// · a SINGLETON accessor (`AVAudioSession.sharedInstance()`) hands back a shared instance this
+    ///   scope neither created nor releases;
+    /// · a MEMBER-ACCESS FACTORY (`X.make()`) resolves through `returns`, which is keyed by LEAF NAME
+    ///   across the whole module. An ENUM CASE WITH A PAYLOAD is spelled identically. GRDB has both a
+    ///   `Database.TraceEvent.statement(_:)` case and an unrelated `func statement(_:) -> Statement`,
+    ///   so `trace(TraceEvent.statement(s))` resolved to `Statement` and charged `Database.trace_v2`
+    ///   the `Db` of `Statement.deinit`'s `sqlite3_finalize` — a construction that never happened, of a
+    ///   type that never appears in that function. `TraceEvent.Statement` is a STRUCT, with no `deinit`
+    ///   at all. Caught by the A/B, which is the only thing that could have caught it.
+    ///
+    /// So a construction is a CONSTRUCTOR SPELLING: an uppercase bare callee, a dotted path naming a
+    /// local nested type, a module-qualified uppercase name, or a bare call to a known local free
+    /// FACTORY (`localFreeFns` narrows the same leaf-key collision that sinks the member form).
+    /// Resolution itself is still delegated to `rootOf`, so the type this yields cannot drift from the
+    /// type the rest of the collector believes the value has.
+    ///
+    /// STATED NARROWING: `let s = db.makeStatement(…)` — a member-access factory bound to a local — WAS
+    /// charged before this commit and is not now. There is no measured instance of it recovering a real
+    /// deinit anywhere in the 13-package corpus, and one measured instance of it fabricating.
+    private func constructedTypeOf(_ call: FunctionCallExprSyntax) -> String? {
+        let callee = call.calledExpression
+        var isConstructorSpelling = false
+        if let dr = callee.as(DeclReferenceExprSyntax.self) {
+            let n = dr.baseName.text
+            isConstructorSpelling = n.first?.isUppercase == true
+                || (returns[n] != nil && localFreeFns.contains(n))
+        } else if let ma = callee.as(MemberAccessExprSyntax.self) {
+            if let dotted = dottedTypePath(Syntax(ma)), localTypes.contains(dealias(dotted)) {
+                isConstructorSpelling = true
+            } else if let mod = ma.base?.as(DeclReferenceExprSyntax.self)?.baseName.text,
+                      isModuleQualifier(mod), ma.declName.baseName.text.first?.isUppercase == true {
+                isConstructorSpelling = true
+            }
+        }
+        guard isConstructorSpelling else { return nil }
+        let info = rootOf(ExprSyntax(call))
+        guard let t = info.root, info.isVar, t != Self.superMarker else { return nil }
+        return t
+    }
+
+    /// R33's ESCAPE GATE — the load-bearing half of this fix, and the half rust's analogous `Drop`
+    /// prototype was missing when it went regression-green and was REVERTED on the A/B for fabricating
+    /// 14 false `Unknown`s on flate2 (`Compress::new` and friends: constructors that CONSTRUCT AND
+    /// RETURN the owner, whose destructor runs in the CALLER's scope). candor-spec SOUNDNESS.md R49.
+    ///
+    /// A construction's value LEAVES this scope by exactly these lexical routes, checked by walking the
+    /// ancestors from the construction up to (and stopping at) the unit body:
+    ///
+    ///   E1  inside a `return` or `throw` expression — handed to the caller.
+    ///   E2  inside the initializer of a binding ANY of whose names is returned — `let h = Holder(g:
+    ///       Ctor()); return h`, and the tuple-destructuring form, where any element name returning
+    ///       takes the whole initializer with it.
+    ///   E3  on the right of an ASSIGNMENT into something that outlives this scope: a member
+    ///       (`self.f = Ctor()`, `box.f = Ctor()`), a subscript (`d[k] = Ctor()`), or a plain local
+    ///       that is itself returned. An assignment to an ordinary local is NOT an escape — `var x =
+    ///       A(); x = B()` releases the first value right there, and the shipped binder path already
+    ///       charged it.
+    ///   E4  the initializer of a STORED PROPERTY or a file-level global — the value is stored on the
+    ///       instance, or lives for the process, either way not released where it is written.
+    ///   E5  the sole expression of a single-expression body — Swift's implicit return, from a function
+    ///       with a return clause, an accessor, or a closure.
+    ///
+    /// STATED LIMIT, not a closure claim, and deliberately NOT drawn around this vein's own trigger:
+    /// a value handed to a callee that STORES it (`self.registry.append(Ctor())`, a completion handler
+    /// that retains) is charged here, because syntax cannot see the callee's retention. That is the
+    /// over-charge direction, it is the same over-approximation the SHIPPED bound-local path already
+    /// made (`let x = Ctor(); self.registry.append(x)` has always been charged), and extending it
+    /// rather than special-casing it is what keeps the two answers equal. It is measured, not assumed:
+    /// see the corpus A/B in this commit's message.
+    private func constructionEscapes(_ node: Syntax) -> Bool {
+        if bodyIsStoredInitializer { return true }                                         // E4, whole-body
+        var child = node
+        var cursor = node.parent
+        while let n = cursor {
+            if n.is(ReturnStmtSyntax.self) || n.is(ThrowStmtSyntax.self) { return true }   // E1
+            if let pb = n.as(PatternBindingSyntax.self) {
+                if Self.patternNames(pb.pattern).contains(where: returnedNames.contains) { return true }  // E2
+                if Self.isStoredDeclaration(pb) { return true }                            // E4
+            }
+            if assignmentStoresOutOfScope(n, rhs: child) { return true }                    // E3
+            if Self.isImplicitReturnPosition(n, of: child) { return true }                 // E5
+            if n.id == bodyRootID { break }
+            child = n
+            cursor = n.parent
+        }
+        return false
+    }
+
+    /// E4 — a binding declared in a TYPE's member block or at FILE scope, rather than in a body.
+    private static func isStoredDeclaration(_ pb: PatternBindingSyntax) -> Bool {
+        guard let decl = pb.parent?.parent?.as(VariableDeclSyntax.self), let owner = decl.parent else {
+            return false
+        }
+        return owner.is(MemberBlockItemSyntax.self)
+            || owner.as(CodeBlockItemSyntax.self)?.parent?.parent?.is(SourceFileSyntax.self) == true
+    }
+
+    /// E4 asked of the unit BODY rather than of an ancestor — see `bodyIsStoredInitializer`.
+    private static func isStoredInitializerBody(_ body: Syntax) -> Bool {
+        var cursor: Syntax? = body
+        while let n = cursor {
+            if let pb = n.as(PatternBindingSyntax.self) { return isStoredDeclaration(pb) }
+            // Stop at anything that introduces a body of its own: past here we are no longer inside an
+            // initializer EXPRESSION, and a `let x = { … }()` property would otherwise silence the
+            // closure's own constructions.
+            if n.is(CodeBlockSyntax.self) || n.is(ClosureExprSyntax.self) { return false }
+            cursor = n.parent
+        }
+        return false
+    }
+
+    /// E3 — `<lhs> = <…rhs…>` where `lhs` outlives this scope. SwiftParser leaves operators unfolded,
+    /// so an assignment is a `SequenceExprSyntax` whose `elements` are an `ExprListSyntax` of
+    /// `[lhs, AssignmentExprSyntax, rhs…]`.
+    ///
+    /// Checked at the LIST, not at the SequenceExpr: the walk climbs one link at a time, so by the time
+    /// `n` is the SequenceExpr the `child` it came from is the whole ExprList and matches no element.
+    /// Written the other way first, this silently answered "not an assignment" for every shape it
+    /// exists to catch — `b.g = Ctor()` and `d["k"] = Ctor()` were both charged, which is how it was
+    /// found (the escape control was RUN, not reasoned about).
+    private func assignmentStoresOutOfScope(_ n: Syntax, rhs child: Syntax) -> Bool {
+        guard let list = n.as(ExprListSyntax.self), list.parent?.is(SequenceExprSyntax.self) == true
+        else { return false }
+        let elems = Array(list)
+        guard let opIdx = elems.firstIndex(where: { $0.is(AssignmentExprSyntax.self) }),
+              let childIdx = elems.firstIndex(where: { $0.id == child.id }), childIdx > opIdx,
+              let lhs = elems.first else { return false }
+        let target = Self.peel(lhs)
+        // A member or subscript destination is reached THROUGH some other object, which outlives the
+        // assignment.
+        if target.is(MemberAccessExprSyntax.self) || target.is(SubscriptCallExprSyntax.self) { return true }
+        guard let dr = target.as(DeclReferenceExprSyntax.self) else { return false }
+        let name = dr.baseName.text
+        if returnedNames.contains(name) { return true }
+        // A BARE identifier is not necessarily a local. Inside a method — and above all inside an
+        // `init` — it is very often IMPLICIT SELF, and then the assignment stores onto the instance.
+        // MEASURED: Alamofire's `StreamOf.Iterator.init` writes `token = Token(onDeinit:)`, whose
+        // `deinit` invokes the escaping cancellation closure when the ITERATOR dies; read as a local,
+        // it charged the initializer an `Unknown` for a deinit that cannot run there. A name this body
+        // actually binds wins, exactly as it does in `rootOf` — a local shadows the field.
+        if isBoundLocal(name) || vars[name] != nil { return false }
+        if let et = enclosingType, fields[et]?[name] != nil { return true }
+        return false
+    }
+
+    /// E5 — Swift's implicit return: the sole expression of a body IS that body's result.
+    ///
+    /// Deliberately NOT applied to a CLOSURE body, though a closure's sole expression is equally its
+    /// result. A closure returning a value says nothing about whether the value leaves the FUNCTION:
+    /// `_ = xs.map { Ctor() }` builds and discards the products right here, while every route by which
+    /// such an array actually escapes — `return xs.map { … }`, `self.items = xs.map { … }`, a binding
+    /// that is later returned — is already E1/E2/E3. A closure arm was written first and cost exactly
+    /// that under-report for nothing; the enclosing function's own implicit return still fires, because
+    /// the walk carries on past the closure to it.
+    private static func isImplicitReturnPosition(_ n: Syntax, of child: Syntax) -> Bool {
+        guard let item = n.as(CodeBlockItemSyntax.self), item.item.id == child.id,
+              let list = item.parent?.as(CodeBlockItemListSyntax.self), list.count == 1 else { return false }
+        // `var x: T { Ctor() }` — the getter shorthand, whose items hang off the accessor block itself.
+        if list.parent?.is(AccessorBlockSyntax.self) == true { return true }
+        guard let owner = list.parent?.as(CodeBlockSyntax.self)?.parent else { return false }
+        if let fd = owner.as(FunctionDeclSyntax.self) { return fd.signature.returnClause != nil }
+        // An explicit `get { Ctor() }`; a `set`/`willSet`/`didSet` returns nothing, so it is not one.
+        if let acc = owner.as(AccessorDeclSyntax.self) { return acc.accessorSpecifier.text == "get" }
+        return false
+    }
+
+    /// R33's ONE call site. Every construction the walk reaches is asked the same two questions —
+    /// what does it construct, and does the value leave — instead of the binder deciding for it.
+    private func noteConstructionForDeinitGlue(_ node: FunctionCallExprSyntax) {
+        guard let t = constructedTypeOf(node), !constructionEscapes(Syntax(node)) else { return }
+        applyDeinitGlue(root: t)
     }
 
     override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
@@ -3947,17 +4147,12 @@ final class CallCollector: SyntaxVisitor {
             if let ann = binding.typeAnnotation, let v0 = binding.initializer?.value {
                 edgeLiteralInit(annotation: ann.type, value: v0)
             }
-            // R33 deinit-glue, WILDCARD EDITION — run before the identifier-only guard below, which
-            // `continue`s past a `WildcardPatternSyntax` binding entirely. `_ = Loud(path)` discards
-            // the constructed value with no binding at all: the single MOST certain non-escaping
-            // shape there is (no name exists for a later statement to alias, store, or return), yet
-            // it reached neither binder branch and `Loud`'s `deinit` effect was silently dropped —
-            // found beside the annotated-binder hole above by the same array-of-shapes sweep (a
-            // direct `let x = Ctor()` was charged; `_ = Ctor()` was not, on an identical `Loud`).
-            if binding.pattern.is(WildcardPatternSyntax.self), let v0 = binding.initializer?.value {
-                let info = rootOf(Self.peel(v0))
-                applyDeinitGlue(name: nil, root: info.root, isVar: info.isVar)
-            }
+            // (R33's WILDCARD-binder call site stood here. Its comment claimed to cover `_ = Loud(path)`
+            //  and described it as found-and-closed — but the code sat inside `visit(VariableDeclSyntax)`
+            //  behind a `WildcardPatternSyntax` check, which is the `let _ =` spelling. A bare
+            //  `_ = Loud(path)` is not a VariableDecl at all and never reached it, so the comment named
+            //  a shape the code could not see and, being written down, stopped it being measured. Both
+            //  spellings are now answered at the construction itself — see `applyDeinitGlue`.)
             // Claimed for the whole binding — the identifier form is typed below, and a form this
             // visitor does NOT model (`let (a, b) = pair()`, a tuple pattern with a non-tuple
             // initializer) falls out of the guard on the next line, so leaving it unclaimed lets
@@ -4048,23 +4243,10 @@ final class CallCollector: SyntaxVisitor {
                     setArrayElem(name, (elem, arrayElementType(ann.type).map(isOpaqueParam) ?? false))
                 }
                 else if let val = dictValueName(ann.type) { dictElem[name] = val }        // `let m: [K: V]`
-                // R33 deinit-glue, ANNOTATED-BINDER EDITION. The ctor/factory branch below runs this
-                // exact check from `rootOf` on the initializer — but only when `binding.typeAnnotation`
-                // is `nil`, because it lives in the `else if` of this very `if`. An explicit annotation
-                // (`let x: Loud = Loud(path)`, `var x: Loud? = Loud(path)` — the ordinary way to declare
-                // an Optional or a protocol-typed local, and no rarer than the unannotated form in real
-                // code) took the branch above instead and NEVER reached the glue at all: `Loud`'s
-                // effectful `deinit` read completely silent-pure at scope exit, with no `Unknown`, no
-                // disclosure, nothing — found by comparing `let x = Loud(p)` (charged) against `let x:
-                // Loud = Loud(p)` (absent) on an otherwise-identical body. `rootOf` is run on the
-                // INITIALIZER, never the annotation, so a supertype/protocol annotation over a concrete
-                // construction still resolves to what was actually built (`rootOf`'s ctor branch reads
-                // the call, not the declared type) — same authority the unannotated path uses, not a
-                // second implementation that could drift from it.
-                if let v0 = binding.initializer?.value {
-                    let ctorInfo = rootOf(Self.peel(v0))
-                    applyDeinitGlue(name: name, root: ctorInfo.root, isVar: ctorInfo.isVar)
-                }
+                // (R33's ANNOTATED-BINDER call site stood here, and the unannotated one in the `else if`
+                //  below. Both are gone: the annotation was never the question — the CONSTRUCTION is —
+                //  and keeping a binder-shaped copy beside the construction hook is what let the
+                //  annotated and unannotated spellings drift apart in the first place.)
             } else if let v0 = binding.initializer?.value {
                 let v = Self.peel(v0)
                 if v.is(ClosureExprSyntax.self) {
@@ -4120,14 +4302,10 @@ final class CallCollector: SyntaxVisitor {
                         } else { depBoundLocals.removeValue(forKey: name) }
                         if let t = info.root, info.isVar {
                             vars[name] = t
-                            // R33 — deinit-glue: a `let`/`var` LOCAL bound to a fresh CONSTRUCTION (this
-                            // ctor/factory-CALL branch, never a bare-identifier ALIAS) of a type with an
-                            // effectful `deinit` runs that deinit at scope exit — deterministic under ARC for
-                            // a non-escaping local, but silent-pure because the deinit unit has no syntactic
-                            // caller (mirrors rust Drop-glue). See `applyDeinitGlue` for the edge/self-filter/
-                            // external-dependency detail — shared with the ANNOTATED-binder call site above
-                            // so the two forms of `let x[: T] = Ctor()` cannot answer differently.
-                            applyDeinitGlue(name: name, root: t, isVar: true)
+                            // (R33's third and original call site stood here. The construction hook in
+                            //  `visit(FunctionCallExprSyntax)` reaches this same initializer — this
+                            //  visitor returns `.visitChildren` — so the charge is unchanged and the
+                            //  binder no longer has an opinion about it.)
                         }
                         // a collection TRANSFORM result keeps the element type: `let active = cs.filter {…}`
                         // (then `for c in active` resolves). Element-preserving transforms only.
