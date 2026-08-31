@@ -187,6 +187,22 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var opaqueFields: [String: Set<String>] = [:]
     var caseAssocAll: [String: Set<String>] = [:]
     var staticFactoryFields: [(type: String, field: String, leaf: String)] = []
+    // R73 — module-scope global NAME -> its concrete type, scoped by MODULE (not merged flat like `fields`)
+    // because a bare global name is not guaranteed unique project-wide the way a declared TYPE name is —
+    // two different modules can each declare their own `let worker = …`, and picking the wrong one to
+    // dispatch a method call against would FABRICATE an effect from the wrong class, not just under-report
+    // one. Module-scoping is free of that risk: within one Swift module a top-level `let`/`var` name is
+    // unique by construction (a redeclaration is a compile error), so there is no in-module ambiguity to
+    // adjudicate. Consulted by `CallCollector.rootOf` exactly like `fields`/`vars`, module-sliced at
+    // construction time below (mirrors `localFreeFnBaseNamesByModule`'s existing per-module slicing).
+    var globalTypesByModule: [String: [String: String]] = [:]
+    // R73's loop sibling — module-scope `[T]` global name -> its ELEMENT type, module-scoped for the
+    // same reason `globalTypesByModule` is.
+    var globalArrayElemByModule: [String: [String: String]] = [:]
+    // (module, global name, factory leaf) for a global initialized by a bare lowercase call
+    // (`let x = makeX()`) — the leaf's return type isn't known until `returnsIdx` is built, so resolution
+    // is deferred exactly like `staticFactoryFields` above.
+    var globalFactories: [(module: String, name: String, leaf: String)] = []
     // Merged `DeclCollector.typeGenericBounds` across every file — a type's generic param may be BOUND by
     // a conditional-conformance extension living anywhere (later in the same file, or another file), so
     // the merge has to complete before `unresolvedGenericFields` below can be retried.
@@ -666,6 +682,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for m in c.imports { importCounts[m, default: 0] += 1 }
         fileImports[c.file] = c.imports
         staticFactoryFields.append(contentsOf: c.staticFactoryFields)
+        // R73 — module-scope global receiver typing (see `globalTypesByModule` above). A same-module
+        // redeclaration is a compile error, so `merge(a,_ in a)` here only ever protects against the
+        // pathological/unparseable edge case, never adjudicates a real ambiguity.
+        let cMod = swiftModuleOf(c.file)
+        globalTypesByModule[cMod, default: [:]].merge(c.globalTypes) { a, _ in a }
+        globalArrayElemByModule[cMod, default: [:]].merge(c.globalArrayElem) { a, _ in a }
+        globalFactories.append(contentsOf: c.globalFactories.map { (cMod, $0.name, $0.leaf) })
         for (t, bs) in c.typeGenericBounds { typeGenericBoundsAll[t, default: [:]].merge(bs) { a, _ in a } }
         unresolvedGenericFields.append(contentsOf: c.unresolvedGenericFields)
     }
@@ -956,6 +979,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     for (ty, field, leaf) in staticFactoryFields where fields[ty]?[field] == nil {
         if let vended = returnsIdx[leaf] { fields[ty, default: [:]][field] = (vended, false) }
     }
+    // R73 — same deferred resolution for a module-scope global initialized by a bare factory call
+    // (`let worker = makeWorker()`). Only an UNAMBIGUOUS project-wide factory return types it — an
+    // ambiguous/unknown leaf leaves the global untyped, same "never guess" discipline as every other
+    // consumer of `returnsIdx`.
+    for (module, name, leaf) in globalFactories where globalTypesByModule[module]?[name] == nil {
+        if let vended = returnsIdx[leaf] { globalTypesByModule[module, default: [:]][name] = vended }
+    }
     // Conditional conformance of a USER generic type (`extension Box: Greeter2 where T: Greeter2`): now
     // that every file's `where`-clause bounds are merged into `typeGenericBoundsAll`, retry each field
     // DeclCollector could not resolve on its own single top-to-bottom pass (the extension supplying the
@@ -1225,6 +1255,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             continue
         }
         let cc = CallCollector(info: f, fields: fields, localTypes: localTypes,
+                               globalTypes: globalTypesByModule[swiftModuleOf(f.loc)] ?? [:],
+                               globalArrayElem: globalArrayElemByModule[swiftModuleOf(f.loc)] ?? [:],
                                declaredTypes: declaredTypes,
                                localProtocols: localProtocolNames, returns: returnsIdx,
                                fieldArrayElem: fieldArrayElem, fieldDictValue: fieldDictValue,

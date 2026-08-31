@@ -186,6 +186,14 @@ final class NameKeyedStateTests: XCTestCase {
         "opaqueFields": .immutableIndex, "localTypes": .immutableIndex,
         "declaredTypes": .immutableIndex, "enclosingMembers": .immutableIndex,
         "localFreeFns": .immutableIndex, "localProtocols": .immutableIndex,
+        // R73 — module-scope GLOBAL name -> concrete type (and its array-element sibling), injected at
+        // construction from the Driver's module-sliced merge (`globalTypesByModule`). Keyed by the
+        // GLOBAL's own declaration name, not by any binding local to the walked function, and `rootOf`/
+        // `elementTypeOf` only ever consult it AFTER `vars`/`fields` have both already missed — so a local
+        // binding that shadows a global's bare name is resolved by that CHECK ORDER, exactly the same way
+        // an implicit-self field shadow already is, never by clearing this table. A rebind has nothing to
+        // say about it, same as `fields` immediately above.
+        "globalTypes": .immutableIndex, "globalArrayElem": .immutableIndex,
         // ⟨0.33.1⟩ the SIBLING of `localFreeFns`, injected at construction the same way: bare free-fn
         // names shadowed only by a `#if`-gated declaration (no unconditional one exists). A rebind has
         // nothing to say about it — it is computed scan-wide/per-module in the Driver, not per-binding.
