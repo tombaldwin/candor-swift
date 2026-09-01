@@ -422,6 +422,56 @@ final class DeclCollector: SyntaxVisitor {
         return []   // wildcard / other — binds no name (the <main> collector handles wildcard-only)
     }
 
+    // R85 — the SHARED type-inference authority for a single bound global NAME + its own initializer
+    // expression: explicit annotation, an uppercase constructor call, a lowercase free-FACTORY call
+    // (deferred — see `globalFactories`), or the `Type.shared` singleton-accessor idiom. Used for BOTH
+    // a plain-identifier global binding (`let x = …`, the whole binding's initializer) AND, new in R85,
+    // EACH element of a tuple-destructured one (`let (x, y) = (…, …)`, that element's own sub-expression)
+    // — one function so the two binder shapes cannot answer a DIFFERENT question about the same
+    // initializer, which is exactly the drift that produced R85: a tuple-destructure binder used to run
+    // NONE of this logic for any of its names, so a destructured global was untyped (and un-public-marked)
+    // regardless of module, not merely invisible cross-module.
+    //
+    // `isPublicGlobal` is recorded into `globalPublic` on EVERY branch, including the deferred factory
+    // one — R79 left the factory branch out of `globalPublic` entirely ("`globalFactories` carries no
+    // access level"), which is the other half of R85: the name was typed, eventually, by Driver's later
+    // pass, but never entered the public-visibility set at all, so it could never reach
+    // `publicGlobalTypesByModule` no matter when its type resolved. The FACT of being public is known
+    // right here, at parse time, independent of whether the type resolves now or later.
+    private func inferGlobalType(name: String, annotation: TypeSyntax?, initExpr: ExprSyntax?, isPublicGlobal: Bool) {
+        if let ann = annotation {
+            let info = typeName(ann)
+            if let tn = info.name, !info.isFunction {
+                globalTypes[name] = tn
+                if isPublicGlobal { globalPublic.insert(name) }
+            } else if let elem = arrayElementName(ann) {
+                globalArrayElem[name] = elem
+            }
+            return
+        }
+        guard let initVal = initExpr else { return }
+        if let call = initVal.as(FunctionCallExprSyntax.self),
+           let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self) {
+            if ctor.baseName.text.first?.isUppercase == true {
+                globalTypes[name] = ctor.baseName.text
+                if isPublicGlobal { globalPublic.insert(name) }
+            } else {
+                // a lowercase callee — a free-FACTORY call (`let x = makeX()`); its return type isn't
+                // known until the returns index is built (see `staticFactoryFields`/`globalFactories`).
+                globalFactories.append((name, ctor.baseName.text))
+                if isPublicGlobal { globalPublic.insert(name) }
+            }
+        } else if let ma = initVal.as(MemberAccessExprSyntax.self),
+                  let base = ma.base?.as(DeclReferenceExprSyntax.self),
+                  base.baseName.text.first?.isUppercase == true,
+                  SINGLETON_ACCESSORS.contains(ma.declName.baseName.text) {
+            // `let session = URLSession.shared` — the same singleton-field idiom `fields` recognises
+            // for a type member, applied to a module-scope (or tuple-element) global.
+            globalTypes[name] = base.baseName.text
+            if isPublicGlobal { globalPublic.insert(name) }
+        }
+    }
+
     private func pushType(_ name: String, inheritance: InheritanceClauseSyntax?, attributes: AttributeListSyntax? = nil,
                           isExtension: Bool = false) {
         typeStack.append(name)
@@ -835,38 +885,28 @@ final class DeclCollector: SyntaxVisitor {
                 // R73 — type this global exactly like a field would be typed (see `globalTypes` above),
                 // so a later method call on it as a RECEIVER resolves to the method, not the bare global
                 // name. `let`/`var` both qualify (a `var` global can still receive a dispatched call).
+                // R85 — TWO binder shapes now feed the SAME `inferGlobalType` authority: a plain
+                // identifier (the whole binding's initializer), and a tuple-destructure pattern (each
+                // element paired POSITIONALLY with its own sub-expression in a matching tuple-expr
+                // initializer). Before this fix the tuple branch did not exist at all, so a destructured
+                // global's names never entered `globalTypes`/`globalPublic` regardless of module —
+                // SOUNDNESS.md R85's second binder shape.
                 if let only = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
-                    if let ann = binding.typeAnnotation {
-                        let info = typeName(ann.type)
-                        if let tn = info.name, !info.isFunction {
-                            globalTypes[only] = tn
-                            if isPublicGlobal { globalPublic.insert(only) }
-                        }
-                        else if let elem = arrayElementName(ann.type) { globalArrayElem[only] = elem }
-                    } else if let initVal = binding.initializer?.value {
-                        if let call = initVal.as(FunctionCallExprSyntax.self),
-                           let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self) {
-                            if ctor.baseName.text.first?.isUppercase == true {
-                                globalTypes[only] = ctor.baseName.text
-                                if isPublicGlobal { globalPublic.insert(only) }
-                            } else {
-                                // a lowercase callee — a free-FACTORY call (`let x = makeX()`); its return
-                                // type isn't known until the returns index is built (see `staticFactoryFields`).
-                                // R79 — a PUBLIC factory-initialized global is a real, narrower gap this
-                                // fix does not claim to close: `globalFactories` carries no access level,
-                                // so a cross-module `public let x = makeX()` stays unresolved exactly as
-                                // before. Only the two shapes ABOVE (explicit annotation, direct ctor) and
-                                // the singleton-accessor shape BELOW gained cross-module resolution.
-                                globalFactories.append((only, ctor.baseName.text))
+                    inferGlobalType(name: only, annotation: binding.typeAnnotation?.type,
+                                     initExpr: binding.initializer?.value, isPublicGlobal: isPublicGlobal)
+                } else if let tuplePattern = binding.pattern.as(TuplePatternSyntax.self),
+                          let tupleExpr = binding.initializer?.value.as(TupleExprSyntax.self) {
+                    // Positional pairing only: `let (a, b) = (X(), Y())`. A NESTED tuple-pattern element
+                    // (`let ((a, b), c) = …`) or a mismatched element count falls through untouched —
+                    // never guess a pairing the syntax doesn't hand us directly.
+                    let patternElements = Array(tuplePattern.elements)
+                    let exprElements = Array(tupleExpr.elements)
+                    if patternElements.count == exprElements.count {
+                        for (pe, ee) in zip(patternElements, exprElements) {
+                            if let id = pe.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
+                                inferGlobalType(name: id, annotation: nil, initExpr: ee.expression,
+                                                 isPublicGlobal: isPublicGlobal)
                             }
-                        } else if let ma = initVal.as(MemberAccessExprSyntax.self),
-                                  let base = ma.base?.as(DeclReferenceExprSyntax.self),
-                                  base.baseName.text.first?.isUppercase == true,
-                                  SINGLETON_ACCESSORS.contains(ma.declName.baseName.text) {
-                            // `let session = URLSession.shared` — the same singleton-field idiom `fields`
-                            // recognises above, applied to a module-scope global.
-                            globalTypes[only] = base.baseName.text
-                            if isPublicGlobal { globalPublic.insert(only) }
                         }
                     }
                 }

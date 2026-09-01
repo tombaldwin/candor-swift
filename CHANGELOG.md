@@ -28,6 +28,61 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   A/B over swift-collections/algorithms/argument-parser/nio (fresh clones): byte-identical
   `functions[]` before/after (this change touches only stderr/stdout prose, never report content).
 
+- ⚠ **R85 (SOUNDNESS.md) — a FACTORY-initialized or DESTRUCTURED public global drops the caller
+  silently, the same cardinal sin R79 closed for a direct constructor call, one binder shape over.**
+  `public let sharedWorker = makeWorker()` (a factory call rather than `= Worker()`) and
+  `public let (a, b) = (Worker(), 42)` (tuple-destructured) both left the CALLER absent from
+  `functions[]` entirely — not merely `Unknown`, absent — while the callee itself stayed correctly
+  classified and the engine's unqualified "nothing hidden" clean bill printed over the gap regardless.
+  Ground truth EXECUTED: changing one line from `= Worker()` to `= makeWorker()`, everything else held
+  constant, took the report from `<main>`/`run` carrying `Fs` to only `Worker.doWork` — both callers
+  gone. `deny Fs run` and `deny Fs <main>` both went exit 0 over provable file I/O; `deny Unknown` also
+  went exit 0 (no disclosure either — a true silent gap, not a coarser answer).
+
+  ROOT CAUSE, two independent binder shapes, one question: `Driver.swift` populated
+  `publicGlobalTypesByModule` only from the per-file merge of `globalTypes`/`globalPublic`; a factory
+  global's TYPE resolves in a separate, LATER pass (once the project-wide `returns` index exists) that
+  wrote only into the module-local `globalTypesByModule` and never revisited the cross-module-visible
+  table. Separately, `DeclCollector` ran its type-inference logic ONLY for the plain-identifier binder
+  shape — a tuple-destructure pattern's elements never entered `globalTypes`/`globalPublic` at all, for
+  any module, so a destructured global was untyped full stop, not merely invisible cross-module.
+
+  FIX: both binder shapes now feed the SAME authority the direct-constructor shape always used, rather
+  than gaining a third write site that could drift the same way again. `DeclCollector.inferGlobalType`
+  is one function shared by the plain-identifier binder (the whole initializer) and each element of a
+  tuple-destructure binder (its own positional sub-expression), covering explicit annotation / ctor
+  call / factory call / singleton access identically for both, and marking `globalPublic` on every
+  branch including the deferred factory one (R79 left that branch out of `globalPublic` entirely, which
+  was the other half of the gap — a factory global's public/open FACT is known at parse time,
+  independent of when its TYPE resolves). In `Driver.swift`, `publicGlobalTypesByModule` is no longer
+  written at per-file-merge time; it is DERIVED once, after every pass that can populate the underlying
+  `globalTypesByModule` (the merge AND the later factory-resolution pass) has run, from that table plus
+  a new `globalPublicByModule` name set. Two upstream tables, one filter, computed once — not two
+  separate write sites that can answer a different question about the same name.
+
+  CONTROLS, all executed: the two sin fixtures (factory, destructured) both flip caller ABSENT ->
+  carries the callee's real `Fs`. A genuinely PURE factory/destructured cross-module global gains
+  NOTHING (over-charge control). A non-`public` factory/destructured global still does NOT resolve
+  (access control — resolving it would be fabrication dressed as a fix). R79's own direct-constructor
+  case and its three original controls still pass unchanged. Revert test: stashing the fix turns
+  exactly the two fix-pinning tests red (`FactoryAndDestructuredGlobalReceiverProcessTests`); the four
+  control tests in that file pass with or without the fix — not vacuous.
+
+  ALSO FIXED, same round: R79's own fourth control, `testAmbiguousCrossModuleGlobalNameResolvesNothing`
+  (two imported modules both declaring `public let sharedWorker`), asserted behaviour for a program
+  shape that does not compile — `swift build` on that exact fixture fails with `error: ambiguous use of
+  'sharedWorker'`, unconditionally, in every language mode tried. No reachable Swift program can trigger
+  the `moduleCount > 1` exclusion branch it existed to pin, so it was evidence of nothing. Replaced with
+  `testInternalGlobalInOneModuleDoesNotPoisonAPublicSameNameInAnother`: a REACHABLE, executed sibling —
+  one imported module declares the colliding name `internal`, the other `public` — that genuinely
+  compiles and runs, and exercises the real candidate-counting logic (an internal declaration must never
+  enter `publicGlobalTypesByModule` and must not inflate the ambiguity count against the real public
+  candidate).
+
+  1006/1006 tests (1000 + 6 new), `smoke.sh` 148/148, `fuzz.py` 25/25, `fabrication_probe.py` 28/28,
+  `soundness/realworld/recall/recall.sh` 5/5, `ci/self-gate.sh` OK; `soundness/realworld/run.sh` and
+  `disclosure_recall.sh` SELFSKIP on Darwin (Linux+strace only), reported UNRUN not green.
+
 ## [0.34.0] — 2026-08-31
 
 - **UPGRADING FROM 0.33.1 — re-baselining is not review.** ⟨0.34⟩ is NON-ADDITIVE and this wave

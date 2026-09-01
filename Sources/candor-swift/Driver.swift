@@ -296,7 +296,24 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // `globalTypesByModule` directly: an internal/private global genuinely is not visible outside its
     // declaring module, and resolving it anyway would fabricate a receiver type across a boundary real
     // Swift access control forbids. Same module-scoping discipline as `globalTypesByModule` itself.
+    //
+    // R85 — this table is now DERIVED, once, after every pass that can populate `globalTypesByModule`
+    // has run (see the derivation just after the `globalFactories` resolution loop below), rather than
+    // written directly during the per-file merge. It used to be written at merge time, filtered through
+    // that file's OWN `globalTypes` — which only ever held the DIRECT-annotation and DIRECT-constructor
+    // shapes, because the FACTORY shape (`let x = makeX()`) resolves its type in a separate, LATER pass
+    // that wrote only into `globalTypesByModule` and never revisited this table. A public factory (or
+    // destructured) global was therefore typed but permanently invisible cross-module — SOUNDNESS.md
+    // R85, a cardinal sin. One authority (`globalTypesByModule` for the TYPE, `globalPublicByModule`
+    // just below for VISIBILITY) computed into a single filter closes the class rather than adding a
+    // third write site that could drift the same way again.
     var publicGlobalTypesByModule: [String: [String: String]] = [:]
+    // R85 — the NAME SET half of the derivation above: every `public`/`open` global name, module-scoped,
+    // merged from each file's `DeclCollector.globalPublic` regardless of which binder shape recorded it
+    // (plain identifier, direct constructor, factory call, singleton access, or — new in R85 — a
+    // tuple-destructure element). `publicGlobalTypesByModule` is computed from this PLUS
+    // `globalTypesByModule`, once, after all resolution passes complete.
+    var globalPublicByModule: [String: Set<String>] = [:]
     // R73's loop sibling — module-scope `[T]` global name -> its ELEMENT type, module-scoped for the
     // same reason `globalTypesByModule` is.
     var globalArrayElemByModule: [String: [String: String]] = [:]
@@ -788,8 +805,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // pathological/unparseable edge case, never adjudicates a real ambiguity.
         let cMod = swiftModuleOf(c.file)
         globalTypesByModule[cMod, default: [:]].merge(c.globalTypes) { a, _ in a }
-        // R79 — same source, filtered to the `public`/`open` subset (see `publicGlobalTypesByModule`).
-        for n in c.globalPublic { if let t = c.globalTypes[n] { publicGlobalTypesByModule[cMod, default: [:]][n] = t } }
+        // R85 — ONLY the public/open NAME SET is recorded here now; the TYPE lookup is deferred to the
+        // single derivation pass after the `globalFactories` resolution loop below, once every pass that
+        // can populate `globalTypesByModule` (this merge AND that later factory pass) has run. See
+        // `publicGlobalTypesByModule`'s own comment for why a second, earlier write site here was the
+        // R85 defect, not a style choice.
+        globalPublicByModule[cMod, default: []].formUnion(c.globalPublic)
         globalArrayElemByModule[cMod, default: [:]].merge(c.globalArrayElem) { a, _ in a }
         globalFactories.append(contentsOf: c.globalFactories.map { (cMod, $0.name, $0.leaf) })
         for (t, bs) in c.typeGenericBounds { typeGenericBoundsAll[t, default: [:]].merge(bs) { a, _ in a } }
@@ -1123,6 +1144,20 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // consumer of `returnsIdx`.
     for (module, name, leaf) in globalFactories where globalTypesByModule[module]?[name] == nil {
         if let vended = returnsIdx[leaf] { globalTypesByModule[module, default: [:]][name] = vended }
+    }
+    // R85 — derive `publicGlobalTypesByModule` HERE, in the one place, now that both passes that can
+    // populate `globalTypesByModule` (the per-file merge above and this factory-resolution loop) have
+    // run. A name is visible cross-module iff it is in the public/open name set AND ended up with a
+    // resolved type — a public factory (or destructured) global whose leaf never resolved (ambiguous or
+    // unknown) correctly stays absent here too, the same "never guess" discipline `globalFactories`'
+    // own resolution already documents. This single derivation is what makes the factory/destructure
+    // binder shapes gain cross-module visibility for free: they write into the SAME two upstream tables
+    // (`globalTypesByModule`, `globalPublicByModule`) the plain-identifier/direct-constructor shapes
+    // always did, so nothing downstream of this line needs to know which binder shape produced a name.
+    for (module, names) in globalPublicByModule {
+        for n in names {
+            if let t = globalTypesByModule[module]?[n] { publicGlobalTypesByModule[module, default: [:]][n] = t }
+        }
     }
     // Conditional conformance of a USER generic type (`extension Box: Greeter2 where T: Greeter2`): now
     // that every file's `where`-clause bounds are merged into `typeGenericBoundsAll`, retry each field

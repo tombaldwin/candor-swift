@@ -121,10 +121,38 @@ final class CrossModuleGlobalReceiverProcessTests: XCTestCase {
                      + "not a residual of the fix: \(by)")
     }
 
-    // ── 4. AMBIGUITY CONTROL — two imported modules declaring the same public global resolve NOTHING
-    func testAmbiguousCrossModuleGlobalNameResolvesNothing() throws {
+    // ── 4. NAME-COLLISION CONTROL — an INTERNAL global in one imported module must not poison
+    //      resolution of a genuinely PUBLIC same-named global in another ─────────────────────────────
+    //
+    // REPLACES `testAmbiguousCrossModuleGlobalNameResolvesNothing` (SOUNDNESS.md R85, 2026-09-01): that
+    // control asserted `<main>` stays absent when two imported modules BOTH declare `public let
+    // sharedWorker`, referenced unqualified. Compiling that exact fixture — `swift build`, not just
+    // reasoning about it — produces `error: ambiguous use of 'sharedWorker'` UNCONDITIONALLY, in every
+    // language mode tried (Swift 5 and Swift 6 both reject it; Swift 6 mode additionally rejects the
+    // underlying two-module fixture earlier still, on Sendable grounds, before ever reaching name
+    // lookup). There is no way to construct a REACHABLE Swift program where two imported modules both
+    // export the same bare top-level name PUBLICLY and an unqualified reference to it is anything but
+    // a compiler error — Swift's own name lookup refuses it before the call site the pass inspects is
+    // ever legal. So the ambiguity-resolves-nothing branch in `crossModuleGlobalTypes`
+    // (Driver.swift, the `moduleCount > 1` exclusion) can never be exercised by real, compiling source.
+    // The deleted control was evidence of nothing — it could not have failed regardless of what that
+    // branch did.
+    //
+    // The REACHABLE sibling of the same concern, and what this control replaces it with: one imported
+    // module declares the name `internal` (invisible outside its own module — genuinely compiles, and
+    // real Swift resolves the bare use unambiguously to the OTHER, public, declaration — proved below
+    // by actually building and running it). This exercises the real candidate-counting logic: an
+    // internal global must never enter `publicGlobalTypesByModule` in the first place, so it must not
+    // inflate the imported-module candidate count and wrongly mark the genuinely public candidate
+    // "ambiguous" — which would silently reintroduce a milder R79/R85-shaped gap for a case that DOES
+    // occur in real code (a library renaming a global from `public` to `internal`, or two vendored
+    // dependencies that happen to share an internal implementation-detail name). `WorkerA` is made
+    // genuinely PURE on purpose (SOUNDNESS.md corpus-round rule 4 — "prefer distinguishable effects per
+    // mechanism under test"): a wrong resolution and a right one would otherwise both read `Fs` and the
+    // assertion would not discriminate between them.
+    func testInternalGlobalInOneModuleDoesNotPoisonAPublicSameNameInAnother() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("candor-swift-r79-ambig-\(UUID().uuidString)")
+            .appendingPathComponent("candor-swift-r85-shadow-\(UUID().uuidString)")
         let modADir = root.appendingPathComponent("Sources/ModA")
         let modBDir = root.appendingPathComponent("Sources/ModB")
         let appDir = root.appendingPathComponent("Sources/App")
@@ -132,21 +160,21 @@ final class CrossModuleGlobalReceiverProcessTests: XCTestCase {
         try FileManager.default.createDirectory(at: modBDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
         try """
-        // swift-tools-version: 6.0
+        // swift-tools-version: 5.9
         import PackageDescription
-        let package = Package(name: "R79Ambig", targets: [
+        let package = Package(name: "R85Shadow", targets: [
             .target(name: "ModA"),
             .target(name: "ModB"),
             .executableTarget(name: "App", dependencies: ["ModA", "ModB"]),
         ])
         """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
         try """
-        import Foundation
         public final class WorkerA {
             public init() {}
-            public func doWork() { _ = try? String(contentsOfFile: "/etc/hosts") }
+            public func compute(_ x: Int) -> Int { x * 2 }
         }
-        public let sharedWorker = WorkerA()
+        // Deliberately INTERNAL, same bare name as ModB's PUBLIC one below.
+        let sharedWorker = WorkerA()
         """.write(to: modADir.appendingPathComponent("A.swift"), atomically: true, encoding: .utf8)
         try """
         import Foundation
@@ -164,12 +192,13 @@ final class CrossModuleGlobalReceiverProcessTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
 
         let (by, _) = try scan(root)
-        XCTAssertEqual(ProcessHarness.inferred(by, "WorkerA.doWork"), ["Fs"], "\(by)")
+        XCTAssertNil(ProcessHarness.inferred(by, "WorkerA.compute"),
+                     "the internal, pure candidate must stay pure and uninvolved: \(by)")
         XCTAssertEqual(ProcessHarness.inferred(by, "WorkerB.doWork"), ["Fs"], "\(by)")
-        XCTAssertNil(ProcessHarness.inferred(by, "<main>"),
-                     "two imported modules both declaring `public let sharedWorker` is a genuine "
-                     + "ambiguity this pass cannot adjudicate — it must resolve NOTHING (leaving the "
-                     + "pre-fix silent-absence unchanged here) rather than guess either module's global: "
-                     + "\(by)")
+        XCTAssertEqual(ProcessHarness.inferred(by, "<main>"), ["Fs"],
+                     "ModA's INTERNAL `sharedWorker` must not count as a second resolution candidate "
+                     + "and must not poison resolution of ModB's PUBLIC one into 'ambiguous, resolve "
+                     + "nothing' — real Swift resolves this call unambiguously to WorkerB.doWork "
+                     + "(provable Fs), and this exact fixture really compiles and runs that way: \(by)")
     }
 }
