@@ -9,6 +9,25 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **R79 (SOUNDNESS.md), partial — the false "nothing hidden" clean bill over a ≥1-Unknown graph.**
+  `candor: nothing hidden — every effect sits where its name says it should.` is an ABSOLUTE claim, and
+  the scan-note (`emitSurface`) and `tour` shared one formula — "is at least ⅓ of the graph Unknown" —
+  that licensed the unqualified sentence over any report whose Unknown count fell below that line,
+  however small a fraction of the codebase it was. A handful of unresolved-dispatch callers in an
+  otherwise large, mostly-resolved real package never crossed ⅓, so the unqualified claim kept printing
+  over a report that demonstrably had something hidden. `unknown == 0` is now the ONLY gate for the
+  unqualified sentence; any nonzero count gets a qualified one (a NEW, lighter tier below the existing
+  ⅓ line, alongside the pre-existing dense-graph one). Both callers now share one `unknownDensity`
+  function (`CandorCore/Surface.swift`) rather than two independent copies of the same formula.
+  **PARTIAL**: this closes the false-disclosure half of R79. The silent under-report half — a caller
+  through a cross-module/cross-package global receiver vanishing from `functions[]` entirely — remains
+  OPEN; see SOUNDNESS.md R79 for the measured reason a disclosure-only fix at that exact call site was
+  attempted and reverted (it broke 8 unrelated, pre-existing tests spanning keypath charging, fn-ref
+  shadowing, singleton-field typing, accessor joins, global initializers and protocol-shadow
+  resolution — the terminal member-access fallback is shared far more widely than R79's own shape).
+  A/B over swift-collections/algorithms/argument-parser/nio (fresh clones): byte-identical
+  `functions[]` before/after (this change touches only stderr/stdout prose, never report content).
+
 ## [0.34.0] — 2026-08-31
 
 - **UPGRADING FROM 0.33.1 — re-baselining is not review.** ⟨0.34⟩ is NON-ADDITIVE and this wave
