@@ -254,4 +254,98 @@ final class TopLevelMainProcessTests: XCTestCase {
             "KNOWN LIMIT: scanning Sources/ directly cannot derive a module, so targets still merge "
             + "under one `<main>`. If this now splits, the residual is closed — rewrite this test. \(by.keys)")
     }
+
+    // ── R74 FOLLOW-ON — a vendored NESTED SwiftPM package collides `swiftModuleOf`'s bare heuristic ──────
+    //
+    // `swiftModuleOf` (Driver.swift) takes the FIRST `Sources`/`Tests` path segment it finds. A target
+    // that physically vendors a full copy of another SwiftPM package — its own `Package.swift`, several
+    // segments below the enclosing target's `Sources/<Name>/` root — has TWO such segments in one path,
+    // and the plain heuristic picks the OUTER one for both. So a genuinely pure outer target and a
+    // genuinely effectful vendored one resolved to the SAME module name, and R74's `<main>` disambiguation
+    // — which keys off that exact string — could not tell them apart: the pure target's `<main>` inherited
+    // the vendored one's effect. FIXED by scoping `swiftModuleOf` to the NEAREST enclosing `Package.swift`
+    // (an `analyze`-local shadow keyed by `nestedManifestDirs`, gathered from the walk's own `excluded[]`
+    // "manifest" signal), so a nested manifest boundary always produces a module key the outer target's
+    // name cannot collide with.
+    private func makeVendoredNestedPackage() throws -> URL {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-fix-\(UUID().uuidString)")
+        let outerPure = root.appendingPathComponent("Sources/outerPure")
+        let vendored = root.appendingPathComponent("Sources/outerPure/Vendor/NestedPkg/Sources/NestedTarget")
+        try FileManager.default.createDirectory(at: outerPure, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: vendored, withIntermediateDirectories: true)
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "Outer", targets: [.executableTarget(name: "outerPure")])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try "print(\"pure\")\n"
+            .write(to: outerPure.appendingPathComponent("main.swift"), atomically: true, encoding: .utf8)
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "NestedPkg", targets: [.executableTarget(name: "NestedTarget")])
+        """.write(to: vendored.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try """
+        import Foundation
+        let e = ProcessInfo.processInfo.environment["HOME"] ?? ""
+        print(e)
+        """.write(to: vendored.appendingPathComponent("main.swift"), atomically: true, encoding: .utf8)
+        return root
+    }
+
+    func testVendoredNestedPackageDoesNotFabricateOntoThePureOuterTarget() throws {
+        let bin = try ProcessHarness.binaryURL(for: TopLevelMainProcessTests.self)
+        let root = try makeVendoredNestedPackage()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try ProcessHarness.run(bin, [root.path, "--json"])
+        XCTAssertEqual(r.code, 0, "scan must succeed — stderr: \(r.err)")
+        let by = try ProcessHarness.fns(ofJson: r.out)
+        // The outer target is genuinely pure (`print` only) — a pure top level mints NO unit, so no
+        // entry of ANY qual may carry `Sources/outerPure/main.swift` as its `loc`.
+        let outerLocs = by.values.compactMap { $0["loc"] as? String }
+            .filter { $0.hasPrefix("Sources/outerPure/main.swift") }
+        XCTAssertTrue(outerLocs.isEmpty,
+            "the pure outer target must mint NO unit at all — any entry located at its main.swift is a "
+            + "fabrication inherited from the vendored package: \(by)")
+        // The vendored package's own effectful top level must still be reported, attributed to ITSELF.
+        let vendoredMains = by.filter {
+            ($0.value["loc"] as? String)?.contains("Vendor/NestedPkg/Sources/NestedTarget/main.swift") == true
+                && ($0.key == "<main>" || $0.key.hasPrefix("<main>#"))
+        }
+        XCTAssertEqual(vendoredMains.count, 1,
+            "the vendored package's own top level must appear exactly once, at its own location: \(by.keys)")
+        XCTAssertEqual(vendoredMains.first.flatMap { ProcessHarness.inferred(by, $0.key) }, ["Env"])
+    }
+
+    // OVER-CHARGE CONTROL for the fix above: a target that legitimately spans MULTIPLE FILES with no
+    // nested manifest anywhere in the tree must still union into ONE `<main>` — the boundary-detection
+    // machinery must never fire when there is nothing to detect.
+    func testMultiFileTargetWithNoNestedManifestStillUnionsIntoOneMain() throws {
+        let bin = try ProcessHarness.binaryURL(for: TopLevelMainProcessTests.self)
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-fix-\(UUID().uuidString)")
+        let src = root.appendingPathComponent("Sources/outer2")
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "ControlShared", targets: [.executableTarget(name: "outer2")])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try "print(\"part one\")\nhelper()\n"
+            .write(to: src.appendingPathComponent("main.swift"), atomically: true, encoding: .utf8)
+        try """
+        import Foundation
+        func helper() { try? "x".write(toFile: "/tmp/r74_control.txt", atomically: true, encoding: .utf8) }
+        """.write(to: src.appendingPathComponent("Helper.swift"), atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try ProcessHarness.run(bin, [root.path, "--json"])
+        XCTAssertEqual(r.code, 0, "scan must succeed — stderr: \(r.err)")
+        let by = try ProcessHarness.fns(ofJson: r.out)
+        let mains = Array(by.keys).filter { $0.hasPrefix("<main>") }
+        XCTAssertEqual(mains, ["<main>"],
+            "a single target spread across two files with no nested manifest must union into ONE bare "
+            + "`<main>`, never split by the new boundary detection: \(by.keys)")
+        XCTAssertEqual(ProcessHarness.inferred(by, "<main>"), ["Fs"])
+    }
 }
