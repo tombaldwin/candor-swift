@@ -1642,9 +1642,21 @@ let depsSpec = [workspaceDepsDir, envOrConfigDeps].compactMap { $0 }.joined(sepa
     ? nil : [workspaceDepsDir, envOrConfigDeps].compactMap { $0 }.joined(separator: ":")
 let depsIndex = loadDepReports(spec: depsSpec, engineVersion: engineVersion)
 
+// R73/R74 FOLLOW-ON (Driver.swift `analyze`'s `nestedManifestDirs` doc has the full mechanism/enumeration):
+// every NESTED `Package.swift` this walk found — the outer scan's own root manifest excluded (its rel
+// path is the literal "Package.swift" with an empty dirname) — so `swiftModuleOf` can scope a vendored
+// package's own module names to ITS boundary instead of the enclosing target's. Reusing `excludedFiles`
+// (already collected, already the walk's own signal for "this is a manifest") rather than a second pass.
+let nestedManifestDirs: [String] = excludedFiles.compactMap { e in
+    guard e.cls == "manifest" else { return nil }
+    let dir = (e.path as NSString).deletingLastPathComponent
+    return dir.isEmpty ? nil : dir
+}
+
 let analysis = analyze(sourcePaths: sourcePaths, rootDir: rootDir, pkgName: pkgName, deps: depsIndex,
                        xcodeLinksByFile: resolvedXcodeLinksByFile,
-                       xcodeModulesByFile: resolvedXcodeModulesByFile)
+                       xcodeModulesByFile: resolvedXcodeModulesByFile,
+                       nestedManifestDirs: nestedManifestDirs)
 let allFns = analysis.allFns
 let conformers = analysis.conformers
 let declaredTypes = analysis.declaredTypes

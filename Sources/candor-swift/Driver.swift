@@ -166,19 +166,114 @@ let RAW_VALUE_BASE_TYPES: Set<String> = [
     "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
 ]
 
-/// The Swift MODULE (SwiftPM target) a source path belongs to — `Sources/<Target>/…` / `Tests/<Target>/…`,
-/// one module per target. Empty for anything outside that layout.
-func swiftModuleOf(_ loc: String) -> String {
-    let parts = loc.split(separator: ":").first.map(String.init)?.split(separator: "/").map(String.init) ?? []
+/// The bare `Sources`/`Tests`-segment heuristic, taking a PATH ALREADY STRIPPED of its `:line:col`
+/// suffix and already relative to whatever root it is being read against. Factored out so both the
+/// plain top-level `swiftModuleOf` below and `analyze`'s nested-package-aware shadow of it (see
+/// `nestedManifestDirs` there) share the exact one-segment rule rather than drifting apart.
+func swiftModuleSegment(_ filePath: String) -> String {
+    let parts = filePath.split(separator: "/").map(String.init)
     for (i, seg) in parts.enumerated() where seg == "Sources" || seg == "Tests" {
         if i + 1 < parts.count { return parts[i + 1] }
     }
     return ""
 }
 
+/// The Swift MODULE (SwiftPM target) a source path belongs to — `Sources/<Target>/…` / `Tests/<Target>/…`,
+/// one module per target. Empty for anything outside that layout.
+///
+/// PLAIN top-level form: no knowledge of nested manifests, so a vendored SwiftPM package physically
+/// nested inside another target's `Sources/` tree (its own `Package.swift` sitting several segments
+/// below the enclosing target's) resolves to the FIRST `Sources`/`Tests` segment found — the OUTER
+/// target's name, colliding with the outer target's own module. `analyze` shadows this with a
+/// manifest-boundary-aware version (see `nestedManifestDirs` below) for every call site it makes
+/// internally; this plain form remains for anything outside that scope (currently nothing — kept as
+/// the fallback definition and the thing the shadow delegates to past its last boundary).
+func swiftModuleOf(_ loc: String) -> String {
+    let filePath = loc.split(separator: ":").first.map(String.init) ?? loc
+    return swiftModuleSegment(filePath)
+}
+
 func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepIndex = DepIndex(),
              xcodeLinksByFile: [String: [LocalProductRef]] = [:],
-             xcodeModulesByFile: [String: [String]] = [:]) -> Analysis {
+             xcodeModulesByFile: [String: [String]] = [:],
+             nestedManifestDirs: [String] = []) -> Analysis {
+    // R73/R74 FOLLOW-ON — a target that vendors a nested SwiftPM package (its own `Package.swift`
+    // physically inside the enclosing target's `Sources/<Name>/` tree, e.g. `Sources/outer2/Vendor/
+    // NestedPkg/Sources/NestedTarget/main.swift`) broke the plain `swiftModuleOf` heuristic above: it
+    // takes the FIRST `Sources`/`Tests` segment it finds, so BOTH `Sources/outer2/main.swift` and the
+    // vendored `.../Vendor/NestedPkg/Sources/NestedTarget/main.swift` resolved to the SAME module name
+    // ("outer2") — a genuine collision, not a mere duplicate label: R74's `<main>` disambiguation keys
+    // off exactly this string, so a pure target's `<main>` inherited the vendored package's `Env` read.
+    // MEASURED: reproduces even after R74 (R74 disambiguates BY module name; it cannot help when two
+    // DIFFERENT targets compute the SAME name).
+    //
+    // FIX: `nestedManifestDirs` is every directory (relative to the scan root, `/`-separated, the outer
+    // scan's own root manifest EXCLUDED) that main.swift's walk found a `Package.swift` in — i.e. every
+    // NESTED manifest, gathered from signal the walk already collects (the `excluded[].class ==
+    // "manifest"` entries), not a second filesystem pass ("ask the authority", corpus brief rule G: the
+    // nested Package.swift IS the authoritative boundary marker SwiftPM itself would use to know this is
+    // a separate package root — reading its presence is strictly more sound than guessing from path
+    // shape alone). A file under the DEEPEST such directory that contains it is scoped to a MODULE KEY
+    // PREFIXED by that directory, so it can never collide with a module name computed outside the
+    // boundary, or with another nested package's module of the same bare name (two vendored copies of
+    // the same library, say). Sorted longest-first so a doubly-nested vendor (a vendored package that
+    // itself vendors another) resolves to its own innermost boundary, not an ancestor's.
+    //
+    // ENUMERATED, against the plain heuristic's failure modes (corpus brief, Finding 1's instruction):
+    //   - first-match vs last-match ambiguity                    MOOT — boundaries come from manifests,
+    //                                                             not from guessing which occurrence to
+    //                                                             prefer; each boundary's OWN first match
+    //                                                             is unambiguous by construction.
+    //   - `Tests` nested under `Sources` (or vice versa)         SAME MECHANISM — a nested manifest under
+    //                                                             either resolves relative to its own
+    //                                                             boundary regardless of which literal
+    //                                                             the outer segment was.
+    //   - a target directory literally named `Sources`/`Tests`   UNCHANGED — still resolved by
+    //                                                             `swiftModuleSegment`'s first-match
+    //                                                             WITHIN a boundary, which was already
+    //                                                             correct for this case (a target named
+    //                                                             `Sources` has no nested manifest of its
+    //                                                             own, so this never engages).
+    //   - a nested package under `Tests/`                        COVERED — boundary detection does not
+    //                                                             care which literal precedes it.
+    //   - symlinked package roots                                NOT VERIFIED. `FileManager.enumerator`'s
+    //                                                             symlink-following behaviour is untested
+    //                                                             here; a symlinked nested package may
+    //                                                             still collide. Disclosed, not fixed.
+    //   - a path with no `Sources` segment at all                UNCHANGED — falls through to the same
+    //                                                             `""` a bare heuristic already returned.
+    //   - a module colliding with a directory name higher up     FIXED — the boundary prefix makes the
+    //                                                             two keys unequal even when the bare
+    //                                                             target names are spelled identically.
+    //
+    // NOT ATTEMPTED: routing this through SwiftPM's own target resolution (`swift package describe`,
+    // as `--target` already does for ITS manifest parse) rather than a heuristic at all. That would
+    // still not resolve THIS case soundly — a vendored copy with its own `Package.swift`, physically
+    // inside another target's source tree but never declared via `.package(path:)`, is invisible to the
+    // OUTER manifest's own target resolution; SwiftPM's real `swift build` over such a tree does not
+    // treat it as a separate module either (confirmed: it tries to compile the vendored package's own
+    // files as part of the outer target and can fail with a duplicate-producer error when both trees
+    // have same-named entry points). The manifest-boundary heuristic here answers a narrower, achievable
+    // question — "give genuinely different targets genuinely different keys" — without claiming to
+    // reproduce what SwiftPM would actually build.
+    // Sorted longest-first so a doubly-nested vendor resolves to its own innermost boundary. When this
+    // is empty (the overwhelmingly common case — no vendored nested package anywhere in the scan) the
+    // loop below never matches anything and every call falls straight through to `swiftModuleSegment`,
+    // making this SHADOW byte-for-byte identical to the plain top-level `swiftModuleOf` it replaces for
+    // every call site inside `analyze` — no behaviour change for any tree without a nested manifest.
+    let sortedNestedDirs = nestedManifestDirs.sorted { $0.count > $1.count }
+    // Shadows the top-level `swiftModuleOf(_:)` for every unqualified call inside `analyze` (all of
+    // them — see the enumeration above for why a NAME conflict inside its own body would recurse: this
+    // is a fresh definition, not a wrapper around the outer one, so it does not call it).
+    func swiftModuleOf(_ loc: String) -> String {
+        let filePath = loc.split(separator: ":").first.map(String.init) ?? loc
+        for d in sortedNestedDirs where filePath.hasPrefix(d + "/") {
+            let rel = String(filePath.dropFirst(d.count + 1))
+            let inner = swiftModuleSegment(rel)
+            return inner.isEmpty ? "" : "\(d)::\(inner)"
+        }
+        return swiftModuleSegment(filePath)
+    }
 
     var allFns: [FnInfo] = []
     var fields: [String: [String: (name: String?, isFunction: Bool)]] = [:]
