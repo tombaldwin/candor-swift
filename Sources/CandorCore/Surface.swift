@@ -282,6 +282,45 @@ func surfaceAnyEffectful(_ inferred: [String: Set<String>]) -> Bool {
     inferred.values.contains { $0.contains { $0 != "Unknown" } }
 }
 
+/// R79 (SOUNDNESS.md) — the "how much of the graph is Unknown" tier, shared by the scan-note
+/// (`emitSurface`) and `tour` so the two callers can never answer the SAME total/unknown counts two
+/// different ways (they used to be two independent copies of one formula — the family's own "ask the
+/// authority, never reimplement it" rule, applied here to stop a THIRD copy from drifting).
+///
+/// THREE tiers, not two. The pre-R79 code only ever asked "is at least ⅓ of the graph Unknown" and
+/// treated everything below that line as licensing the unqualified *"nothing hidden — every effect sits
+/// where its name says it should"* — an ABSOLUTE claim. R79 measured that a caller whose ONLY reachable
+/// effect is `Unknown` (a receiver the classifier could not resolve at all) is real, present-in-the-graph
+/// evidence that the claim is false, however small a fraction of the codebase it is. A large real
+/// package with a handful of such callers among thousands of functions never crossed the OLD ⅓ line, so
+/// `emitSurface`/`tour` kept printing the unqualified all-clear over a report that demonstrably had
+/// something hidden. So: `unknown == 0` is now the ONLY gate for the unqualified sentence; any nonzero
+/// count gets a qualified one, and the pre-existing ⅓ line still decides WHICH qualified sentence (the
+/// ranking-is-meaningless one vs. the smaller "too few to re-rank, but still not nothing" one) — it is
+/// unchanged as the boundary between `.some` and `.mostly`, so a graph that already tripped it keeps
+/// tripping it byte-for-byte.
+public enum UnknownDensity: Equatable {
+    /// `unknown == 0` — the absolute claim is actually true; the caller may print it unqualified.
+    case none
+    /// `0 < unknown`, below the ⅓ line — too sparse to make ranking meaningless, but present enough that
+    /// "nothing hidden" would overclaim. The caller must qualify, not re-use the unqualified sentence.
+    case some(unknown: Int, total: Int)
+    /// `unknown * 3 >= total` (the original, unchanged threshold) — dense enough that ranking itself is
+    /// unreliable; the caller's existing "no surprising reaches — but N of M are Unknown" sentence.
+    case mostly(unknown: Int, total: Int)
+}
+
+/// Compute the tier from the SAME two counts both callers already computed independently:
+/// `total` = functions with a non-empty inferred set, `unknown` = functions whose inferred set contains
+/// `Unknown`. Both counted over `inferred` alone, matching the pre-R79 code exactly (no new inputs).
+public func unknownDensity(_ inferred: [String: Set<String>]) -> UnknownDensity {
+    let total = inferred.values.filter { !$0.isEmpty }.count
+    let unknown = inferred.values.filter { $0.contains("Unknown") }.count
+    if unknown == 0 { return .none }
+    if total > 0 && unknown * 3 >= total { return .mostly(unknown: unknown, total: total) }
+    return .some(unknown: unknown, total: total)
+}
+
 /// Compute the single most surprising reach — the scan-note view, expressed via `bestFinds(…, n: 1)`
 /// so the ranking cannot drift from `tour`. Returns the three-valued result the scan-note emit wants.
 func surfaceBestFind(
@@ -310,15 +349,23 @@ public func emitSurface(
         break  // zero effectful functions — emit nothing
     case .fallback:
         // Effectful-but-nothing-surprising lands here — BUT never reassure "nothing hidden" over a
-        // meaningfully-Unknown graph: the Unknowns (unresolved calls) ARE the hidden part, their transitive
-        // effects unanalyzed. ≥⅓ effectful Unknown → qualify + point at `blindspots` (Fable-review finding A:
-        // the trio-#1 gate reached tour but NOT this scan opener — a false all-clear on ordinary `candor scan`;
-        // rust/java/ts gate the opener too — surface.rs/Surface.java/surface.mjs).
-        let total = inferred.values.filter { !$0.isEmpty }.count
-        let unknown = inferred.values.filter { $0.contains("Unknown") }.count
-        let msg = (total > 0 && unknown * 3 >= total)
-            ? "candor: no surprising reaches — but \(unknown) of \(total) function(s) are Unknown (unresolved calls; their transitive effects are NOT analyzed). Run `candor blindspots`; unresolvable imports are the usual cause.\n"
-            : "candor: nothing hidden — every effect sits where its name says it should.\n"
+        // graph that carries ANY Unknown: the Unknowns (unresolved calls) ARE the hidden part, their
+        // transitive effects unanalyzed, and "nothing hidden" is an ABSOLUTE claim (Fable-review finding
+        // A + R79). ≥⅓ effectful Unknown → the dense-graph sentence (ranking itself is unreliable,
+        // pointing at `blindspots`); >0 but below ⅓ → a lighter sentence (few enough not to re-rank over,
+        // but still enough that the unqualified all-clear would be false — R79's exact shape: a handful
+        // of cross-module dispatch failures in an otherwise large, mostly-resolved package). Only a
+        // LITERAL zero earns the unqualified sentence. rust/java/ts gate the opener too —
+        // surface.rs/Surface.java/surface.mjs.
+        let msg: String
+        switch unknownDensity(inferred) {
+        case .mostly(let unknown, let total):
+            msg = "candor: no surprising reaches — but \(unknown) of \(total) function(s) are Unknown (unresolved calls; their transitive effects are NOT analyzed). Run `candor blindspots`; unresolvable imports are the usual cause.\n"
+        case .some(let unknown, let total):
+            msg = "candor: no surprising reaches — and \(unknown) of \(total) function(s) are Unknown (unresolved calls; their transitive effects are NOT analyzed), too few to change the ranking but too many to call \"nothing hidden\". Run `candor blindspots` to see them.\n"
+        case .none:
+            msg = "candor: nothing hidden — every effect sits where its name says it should.\n"
+        }
         FileHandle.standardError.write(msg.data(using: .utf8)!)
     case .winner(let f):
         // `surfaceBestFind` computes with an empty `loc` (the note doesn't need per-candidate loc), so

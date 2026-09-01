@@ -171,18 +171,46 @@ final class SurfaceTests: XCTestCase {
                       "must qualify (N of M … are Unknown … blindspots); got: \(out)")
     }
 
-    func testFallbackStaysCleanWhenFewUnknowns() {
-        // The control (Fable-review finding F / no over-fire): below the ⅓ threshold the opener keeps the
-        // honest "nothing hidden" — one Unknown among three effectful fns (⅓ is the boundary; 1*3 >= 3 → the
-        // gate DOES trip at exactly ⅓, so use 1 Unknown of 4 to stay below).
+    func testFallbackQualifiesEvenBelowThirdWhenAnyUnknown() {
+        // R79 (SOUNDNESS.md): "nothing hidden — every effect sits where its name says it should" is an
+        // ABSOLUTE claim, and it was false whenever the graph carried ANY Unknown at all — a handful of
+        // unresolved-dispatch callers in an otherwise large, mostly-resolved real package never crossed
+        // the ⅓ line, so the unqualified sentence kept printing over a report that demonstrably had
+        // something hidden. This SUPERSEDES the old `testFallbackStaysCleanWhenFewUnknowns`, which pinned
+        // exactly that false all-clear as "the control, no over-fire" — it was the bug, not a control.
+        // Below ⅓ now gets the LIGHTER qualified sentence, never the unqualified one.
         var inferred: [String: Set<String>] = [:]
         var direct: [String: Set<String>] = [:]
         for f in ["net.client.send", "fs.io.write", "fs.io.read"] { inferred[f] = set(["Net"]); direct[f] = set(["Net"]) }
-        inferred["util.loadA"] = set(["Unknown"])  // 1 Unknown of 4 effectful → 1*3 < 4 → below threshold
+        inferred["util.loadA"] = set(["Unknown"])  // 1 Unknown of 4 effectful → 1*3 < 4 → below the ⅓ line
         guard case .fallback = surfaceBestFind(inferred: inferred, direct: direct, calls: [:])
         else { return XCTFail("fixture must land in .fallback") }
+        guard case .some(1, 4) = unknownDensity(inferred) else {
+            return XCTFail("expected the .some(1, 4) tier — below ⅓ but nonzero")
+        }
         let out = captureStderr { emitSurface(inferred: inferred, direct: direct, calls: [:], loc: [:]) }
-        XCTAssertTrue(out.contains("nothing hidden"), "below ⅓ Unknown, the honest fallback stands; got: \(out)")
+        XCTAssertFalse(out.contains("nothing hidden — every effect"),
+                       "any nonzero Unknown must withdraw the unqualified claim; got: \(out)")
+        XCTAssertTrue(out.contains("are Unknown"), "must still name the count; got: \(out)")
+    }
+
+    func testFallbackStaysCleanWhenZeroUnknown() {
+        // The REAL control (Control #1: a genuinely clean scan must still print the clean bill). With
+        // ZERO Unknown anywhere, the unqualified "nothing hidden" is a TRUE claim and must still print —
+        // this is the case the fix must not regress into permanent hedging.
+        var inferred: [String: Set<String>] = [:]
+        var direct: [String: Set<String>] = [:]
+        for f in ["net.client.send", "fs.io.write", "fs.io.read", "db.query.run"] {
+            inferred[f] = set(["Net"]); direct[f] = set(["Net"])
+        }
+        guard case .fallback = surfaceBestFind(inferred: inferred, direct: direct, calls: [:])
+        else { return XCTFail("fixture must land in .fallback") }
+        guard case .none = unknownDensity(inferred) else {
+            return XCTFail("expected the .none tier — zero Unknown anywhere")
+        }
+        let out = captureStderr { emitSurface(inferred: inferred, direct: direct, calls: [:], loc: [:]) }
+        XCTAssertTrue(out.contains("nothing hidden — every effect"),
+                      "zero Unknown must still earn the unqualified all-clear; got: \(out)")
     }
 
     /// The `tour` verb's top-N heuristic (CandorCore.bestFinds), the Swift port of the Rust

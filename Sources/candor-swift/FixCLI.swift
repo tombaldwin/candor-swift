@@ -1477,13 +1477,21 @@ func runTourCLI(_ args: [String]) -> Never {
     if finds.isEmpty {
         // Effectful-but-nothing-surprising vs genuinely-pure both land here; either way the honest line is
         // the useful answer (never a manufactured surprise) — mirrors the scan-note fallback. BUT never
-        // reassure "nothing hidden" over a meaningfully-Unknown graph: the Unknowns ARE the hidden part
-        // (re-audit cardinal sin; four-way with candor-ts/rust/java). ≥⅓ effectful Unknown → qualify.
-        let total = inferred.values.filter { !$0.isEmpty }.count
-        let unknown = inferred.values.filter { $0.contains("Unknown") }.count
-        if total > 0 && unknown * 3 >= total {
+        // reassure "nothing hidden" over a graph that carries ANY Unknown: the Unknowns ARE the hidden part
+        // (re-audit cardinal sin; four-way with candor-ts/rust/java), and "nothing hidden" is an ABSOLUTE
+        // claim (R79, SOUNDNESS.md). ≥⅓ effectful Unknown → the dense-graph qualification; >0 but below ⅓ →
+        // a lighter one — only a LITERAL zero earns the unqualified sentence below. `unknownDensity` is the
+        // SAME function `emitSurface` (the scan-note) calls, so the two callers cannot answer this question
+        // two different ways.
+        switch unknownDensity(inferred) {
+        case .mostly(let unknown, let total):
             print("candor: no surprising reaches — but \(unknown) of \(total) function(s) are Unknown (unresolved calls; their transitive effects are NOT analyzed). Run `candor blindspots` — the report records a reason for each.")
             exit(0)
+        case .some(let unknown, let total):
+            print("candor: no surprising reaches — and \(unknown) of \(total) function(s) are Unknown (unresolved calls; their transitive effects are NOT analyzed), too few to change the ranking but too many to call \"nothing hidden\". Run `candor blindspots` — the report records a reason for each.")
+            exit(0)
+        case .none:
+            break
         }
         // ⟨0.28⟩ "nothing hidden" is the single most reassuring sentence this binary prints, and over a
         // report that judged nothing it is the false all-clear in plain English. The ⅓-Unknown branch
