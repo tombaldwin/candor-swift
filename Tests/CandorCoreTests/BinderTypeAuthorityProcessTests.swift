@@ -211,6 +211,36 @@ final class BinderTypeAuthorityProcessTests: XCTestCase {
         XCTAssertEqual((by["uniform"]?["inferred"] as? [String]).map(Set.init), ["Fs"])
     }
 
+    /// ATTACKING THIS COMMIT'S OWN ASSERTION, which is what `assert-audit` flags those lines for.
+    /// "Alias-transparent by construction" is a claim about everything reached THROUGH `rootOf`; the
+    /// container maps (`arrayElem`, `dictElem`, `fieldArrayElem`, `tupleElem`) reach it via the binder
+    /// they type, so they are covered — measured here rather than reasoned. `callAsFunction` was the one
+    /// reader that consults a type map WITHOUT going through `rootOf`, and it was silent on an aliased
+    /// local type until this row was written. Ground truth EXECUTED for all seven.
+    func testAliasThroughContainerMapsResolves() throws {
+        let src = """
+        import Foundation
+        typealias FM = FileManager
+        struct H { let xs: [FM]; let m: [String: FM]; let t: (a: FM, b: Int) }
+        func b1(_ xs: [FM])           { for fm in xs { try? fm.removeItem(atPath: "/tmp/b1") } }
+        func b2(_ m: [String: FM])    { for (_, fm) in m { try? fm.removeItem(atPath: "/tmp/b2") } }
+        func b3(_ h: H)               { for fm in h.xs { try? fm.removeItem(atPath: "/tmp/b3") } }
+        func b4(_ t: (a: FM, b: Int)) { try? t.a.removeItem(atPath: "/tmp/b4") }
+        func b5() { let xs: [FM] = [FM.default]; for fm in xs { try? fm.removeItem(atPath: "/tmp/b5") } }
+        struct Caller { func callAsFunction() { try? FileManager.default.removeItem(atPath: "/tmp/b6") } }
+        typealias C = Caller
+        func b6(_ c: C) { c() }
+        func b6c(_ c: Caller) { c() }
+        b1([FM.default]); b2(["k": FM.default]); b3(H(xs: [FM.default], m: [:], t: (FM.default, 1)))
+        b4((FM.default, 1)); b5(); b6(Caller()); b6c(Caller())
+        """
+        let by = try scan(src, "R97Cont")
+        for a in ["b1", "b2", "b3", "b4", "b5", "b6", "b6c"] {
+            XCTAssertEqual((by[a]?["inferred"] as? [String]).map(Set.init), ["Fs"],
+                           "\(a): a type map's alias was not resolved")
+        }
+    }
+
     /// A MEASURED RESIDUAL, stated as a residual. `{ fm in … }` with the type only on the closure
     /// VARIABLE is still silent — executed ground truth, so it is a real under-report and not a
     /// theoretical one. Written as an expectation so that closing it turns this row red and forces the
