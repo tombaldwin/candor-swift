@@ -206,6 +206,11 @@ final class NameKeyedStateTests: XCTestCase {
         "wrappedProps": .immutableIndex, "typeAliases": .immutableIndex,
         "opaqueSeqBuilders": .immutableIndex, "seqBuilderConcrete": .immutableIndex,
         "closureFields": .immutableIndex,
+        // R96 — the REASSIGNABLE (`var`) subset of the row above, keyed by TYPE + property name and
+        // built once in the Driver from every file's declarations. A local binding never reaches it:
+        // the sole reader is `closurePropertyInvocation`, asked about an already-resolved receiver
+        // type, and each caller gates on `isBoundLocal`/`rootOf` before it gets there.
+        "mutableClosureFields": .immutableIndex,
         // MODULE names — this file's imports, and the modules the project itself defines. Keyed by a
         // MODULE, never by a binding: a local `let Foundation = …` does not make the qualifier a value,
         // and `isModuleQualifier` asks `vars`/`fields`/`localTypes` about exactly that at the use site
@@ -263,6 +268,10 @@ final class NameKeyedStateTests: XCTestCase {
         "bodyIsStoredInitializer": .notPerBinding,
         "handledBinders": .notPerBinding, "typeScopes": .notPerBinding,
         "shadowScopes": .notPerBinding, "monoClosureParams": .notPerBinding,
+        // R98 — a set of SYNTAX IDs, not names: which `if/guard case` conditions deferred their binder
+        // clear to `visitPost` because the initializer mentions the bound name. Entered and removed by
+        // the same node's visit/visitPost pair, so no binding name reaches it and a rebind cannot.
+        "deferredPatternClears": .notPerBinding,
     ]
 
     // ── the DERIVATION ──────────────────────────────────────────────────────────────────────────────

@@ -283,6 +283,12 @@ final class DeclCollector: SyntaxVisitor {
     // its OWN property-scoped accessor unit `<Type>.f` (so a pure closure property contributes nothing — no
     // flood), and record the property name so CallCollector can edge an invocation to it.
     var closureFields: [String: Set<String>] = [:]   // Type -> stored closure-property names (with a `<Type>.<prop>` unit)
+    // R96 — the subset of `closureFields` declared `var`, i.e. REASSIGNABLE. The visible default is what
+    // this scan saw; it is NOT what the field holds at the invocation, because anything holding the object
+    // may store a different closure into it. `let` is genuinely closed (Swift forbids assigning a `let`
+    // that already has an initializer, in `init` or anywhere else), so it stays fully resolved — that is
+    // the precision R79/R85 depends on. See `closurePropertyInvocation` in CallCollector for the rule.
+    var mutableClosureFields: [String: Set<String>] = [:]
     // CONST-STRING PROPAGATION — module/global and `static let` string CONSTANTS whose initializer is a
     // PLAIN string literal (`let apiBase = "https://api.openai.com/v1"`). Keyed by the SIMPLE bound name —
     // a bare reference / interpolation-prefix / concat-left uses the name only. VALUE is the literal, or
@@ -775,6 +781,10 @@ final class DeclCollector: SyntaxVisitor {
                     info.isAccessor = true
                     fns.append(info)
                     closureFields[ty, default: []].insert(name)
+                    // R96 — record REASSIGNABILITY from the declaration, not from whether this scan
+                    // happened to see a write. A `var` permits an external store, so the default this
+                    // scan read is one possible value, not the value.
+                    if node.bindingSpecifier.text == "var" { mutableClosureFields[ty, default: []].insert(name) }
                 }
                 for (b, setterParam) in accessorBodies {
                     var info = FnInfo(qual: qual, loc: loc(binding))

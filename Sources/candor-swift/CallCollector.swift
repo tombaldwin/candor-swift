@@ -441,6 +441,10 @@ final class CallCollector: SyntaxVisitor {
     let opaqueSeqBuilders: Set<String>
     let seqBuilderConcrete: [String: String]
     let closureFields: [String: Set<String>]   // FINDING 2 — Type -> stored closure-property names (own unit)
+    // R96 — the REASSIGNABLE (`var`) subset of `closureFields`. Never read directly; go through
+    // `closurePropertyInvocation`, the single authority for what an invocation of a stored closure
+    // property means, so the four call sites cannot drift apart again.
+    let mutableClosureFields: [String: Set<String>]
 
     init(info: FnInfo, fields: [String: [String: (name: String?, isFunction: Bool)]], localTypes: Set<String>,
          globalTypes: [String: String] = [:], globalArrayElem: [String: String] = [:],
@@ -454,7 +458,8 @@ final class CallCollector: SyntaxVisitor {
          conditionallyShadowedTypes: Set<String> = [], typeAliases: [String: String],
          enclosingMembers: Set<String> = [],
          opaqueSeqBuilders: Set<String>, seqBuilderConcrete: [String: String],
-         closureFields: [String: Set<String>], moduleConstStrings: [String: String] = [:],
+         closureFields: [String: Set<String>], mutableClosureFields: [String: Set<String>] = [:],
+         moduleConstStrings: [String: String] = [:],
          importedModules: Set<String> = [], projectModules: Set<String> = [], deps: DepIndex = DepIndex()) {
         self.importedModules = importedModules
         self.projectModules = projectModules
@@ -463,6 +468,7 @@ final class CallCollector: SyntaxVisitor {
         self.opaqueSeqBuilders = opaqueSeqBuilders
         self.seqBuilderConcrete = seqBuilderConcrete
         self.closureFields = closureFields
+        self.mutableClosureFields = mutableClosureFields
         self.typeAliases = typeAliases
         self.localFreeFns = localFreeFns
         self.conditionallyShadowedFreeFns = conditionallyShadowedFreeFns
@@ -536,8 +542,26 @@ final class CallCollector: SyntaxVisitor {
     /// type wins, exactly as the κ shadow rules do). A non-alias name returns unchanged.
     private func dealias(_ name: String) -> String {
         var n = name, hops = 0
-        while !localTypes.contains(n), let u = typeAliases[n], u != n, hops < 16 { n = u; hops += 1 }
-        return n
+        while !localTypes.contains(n), let u = typeAliases[n], u != n, hops < 16 {
+            n = u; hops += 1
+            n = Self.stripModuleQualifier(n, isModule: isModuleQualifier)
+        }
+        return Self.stripModuleQualifier(n, isModule: isModuleQualifier)
+    }
+
+    /// R97 — `Foundation.FileManager` names the SAME type as `FileManager`, and the κ tables are keyed
+    /// by the bare spelling. `typeName` deliberately produces the dotted form (a nested `Outer.Inner`
+    /// needs it), and Classifier.swift's own comment recorded the module-qualified case as a known
+    /// "under-report, never a guess" — a documented limitation, which is what stopped it being measured.
+    /// It is a silent under-report: `typealias FMQ = Foundation.FileManager` (and a bare
+    /// `let fm: Foundation.FileManager`) certified a real file deletion pure.
+    ///
+    /// Stripping is gated on `isModuleQualifier`, which already refuses a head that is a local type, a
+    /// project module, a bound local or a field — so a genuine nested type `Outer.Inner` is never
+    /// touched. Only the FIRST segment is considered: `Foundation.Outer.Inner` keeps `Outer.Inner`.
+    private static func stripModuleQualifier(_ name: String, isModule: (String) -> Bool) -> String {
+        guard let dot = name.firstIndex(of: "."), isModule(String(name[name.startIndex..<dot])) else { return name }
+        return String(name[name.index(after: dot)...])
     }
 
     /// The dotted TYPE-PATH spelled by a member-access chain of plain identifiers — `Outer.Inner` →
@@ -561,6 +585,25 @@ final class CallCollector: SyntaxVisitor {
     /// because the same receiver spelling can resolve through vars, a field, or a subscript element,
     /// and only the resolving branch knows which one answered.
     private func rootOf(_ raw: ExprSyntax, _ depth: Int = 0) -> (root: String?, isVar: Bool, path: [String], mono: Bool) {
+        // R97 — THE SINGLE PLACE A RESOLVED TYPE NAME IS DEALIASED. `dealias` used to be spelled by each
+        // arm that felt like it: of the 23 sites that bind a name to a type, exactly ONE called it, and
+        // the other 22 lost `typealias FM = FileManager` outright — thirteen binder spellings certifying
+        // a file deletion PURE, each with a plain-spelled twin one line away that was charged correctly.
+        // That is this engine's signature failure for the third time (R33, R73), and §G's answer is not
+        // 22 more calls that can drift again: it is ONE authority.
+        //
+        // Every map the resolver reads holds a name as DECLARED — `vars` (params, annotated locals, all
+        // the binder arms), `fields`, `globalTypes`, `returns`, `tupleElem`, `catchBindings` — so the
+        // one point where all of them converge is this function's ANSWER. Dealias it here and every
+        // producer is alias-transparent by construction, including producers not yet written.
+        // `superMarker` is not a type spelling and cannot collide (`dealias` is a `typeAliases` lookup,
+        // and no `typealias` can be named it).
+        let r = rootOfUnaliased(raw, depth)
+        guard let root = r.root else { return r }
+        return (dealias(root), r.isVar, r.path, r.mono)
+    }
+
+    private func rootOfUnaliased(_ raw: ExprSyntax, _ depth: Int = 0) -> (root: String?, isVar: Bool, path: [String], mono: Bool) {
         // Receiver chains recurse with the syntactic nesting (`a.b.c…`, ternary arms, subscript bases —
         // the last via elementTypeOf/dictValueOf, which call back here). Real receivers nest <10 deep;
         // a pathological/generated expression could otherwise overflow the stack. Past a generous bound,
@@ -601,9 +644,10 @@ final class CallCollector: SyntaxVisitor {
             // a dead end and `Worker.doWork` disconnected: the caller's effects collapsed to empty and it
             // vanished from `functions[]` outright (SOUNDNESS.md R73).
             if let t = globalTypes[n] { return (t, true, [n], false) }
-            // a bare TYPE/alias reference (`FM.default`, the base of a static-member chain): resolve a
-            // typealias to its underlying type so κ keys on the real spelling (`FM`→`FileManager`).
-            return (dealias(n), false, [n], false)
+            // a bare TYPE/alias reference (`FM.default`, the base of a static-member chain). The
+            // typealias resolution that used to be spelled HERE is now the wrapper's job — R97: this arm
+            // having it, and the other arms not, is exactly how the bug was shaped.
+            return (n, false, [n], false)
         }
         if let ma = expr.as(MemberAccessExprSyntax.self) {
             // tuple element/member: `p.0` / `p.c` where p is a tuple-typed local/param
@@ -629,8 +673,8 @@ final class CallCollector: SyntaxVisitor {
             if let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self) {
                 let n = ctor.baseName.text
                 // `Proc()` where `typealias Proc = Process` — the ctor types the value as the aliased
-                // type so its members classify (`p.run()`→Exec). A LOCAL type shadows (dealias no-ops).
-                if n.first?.isUppercase == true { return (dealias(n), true, [n], false) }
+                // type so its members classify (`p.run()`→Exec). Dealiased by the wrapper (R97).
+                if n.first?.isUppercase == true { return (n, true, [n], false) }
                 if let rt = returns[n] { return (rt, true, [n], false) }
             }
             // `AVAudioSession.sharedInstance()` — a SINGLETON FACTORY METHOD on a type, returning an
@@ -1914,6 +1958,21 @@ final class CallCollector: SyntaxVisitor {
                .contains(ma.declName.baseName.text), let base = ma.base {
             return elementTypeOf(base, depth + 1)  // element-preserving transform → same element type
         }
+        // R97 — AN INLINE ARRAY LITERAL. `for fm in [FileManager.default] { fm.removeItem(…) }` read
+        // silent-pure while the identical loop over a named `let fms: [FileManager]` was charged: the
+        // named binding went through `arrayElem`, and the literal reached no arm at all. UNANIMITY is
+        // required — every element must resolve to the SAME root type — so a heterogeneous or partly
+        // unresolvable literal yields nil and the binder stays untyped, exactly as before. An EMPTY
+        // literal also yields nil (`first` is nil), which is the safe answer and not a special case.
+        if let arr = e.as(ArrayExprSyntax.self) {
+            var only: String?
+            for el in arr.elements {
+                guard let r = rootOf(el.expression, depth + 1).root else { return nil }
+                if let o = only, o != r { return nil }
+                only = r
+            }
+            if let o = only { return (o, false) }
+        }
         return nil
     }
 
@@ -2127,6 +2186,28 @@ final class CallCollector: SyntaxVisitor {
         boundLocals.contains(name) || casePayloadLocals.contains(name)
     }
 
+    // R96 — THE SINGLE AUTHORITY for "what does invoking the stored closure property `<type>.<name>`
+    // mean?". Four call sites asked this question (bare `f()`, `obj.f()`, `map(f)`, `map(obj.f)`) and
+    // each spelled the answer itself; that is exactly the shape §G names, and R97 is the same engine's
+    // third instance of it. Every site now goes through here.
+    //
+    // Returns nil when the property has no visible closure unit at all (assigned in `init`, or no
+    // initializer) — the caller's existing Unknown branch is right for that.
+    //
+    // `hedge` is the R96 fix. The property-scoped unit records the closure THIS SCAN SAW in the
+    // declaration's initializer. For a `let` that is the whole story: Swift forbids assigning a `let`
+    // stored property that already has an initializer, so the binding is closed and the resolved answer
+    // is exact — that precision is real and R85's recall evidence depends on it. For a `var` the default
+    // is one possible value among many: any holder of the object may store a different closure, from
+    // this scan or from a downstream module the scan will never see. So the honest answer is the UNION —
+    // the visible default's effects (still genuinely reachable) AND the §4 Unknown that README.md:44
+    // already promises for "a closure-typed field `d.f()`". Replacing rather than unioning would lose
+    // the effectful-default recall (`deny Net` over a `var` whose default does Net), so it unions.
+    private func closurePropertyInvocation(_ type: String, _ name: String) -> (unit: String, hedge: Bool)? {
+        guard closureFields[type]?.contains(name) == true else { return nil }
+        return (unit: "\(type).\(name)", hedge: mutableClosureFields[type]?.contains(name) == true)
+    }
+
     // The name-keyed per-binding state saved per scope-delimiting node and restored when the node
     // closes. Keyed by node id rather than a stack so an un-entered scope can never pop someone else's
     // save; SwiftSyntax calls `visitPost` for every visited node (including one whose `visit` returned
@@ -2190,6 +2271,12 @@ final class CallCollector: SyntaxVisitor {
     }
 
     private func leaveShadowScope(_ node: some SyntaxProtocol) {
+        // R97 — the TYPE snapshots taken by binders inside this scope are given back HERE, not by each
+        // statement's own `visitPost`. `visit(ForStmtSyntax)` used to own that restore alone, which is
+        // why every other scoped binder either leaked its type outward or (more often) was never typed
+        // at all rather than risk it. One scope, one restore, and `scopeBindingType` is the only saver.
+        // Reverse order so nested saves of the SAME name unwind to the outermost value.
+        for (n, b) in (typeScopes.removeValue(forKey: node.id) ?? []).reversed() { restoreType(n, b) }
         guard let saved = shadowScopes.removeValue(forKey: node.id) else { return }
         monoNames = saved.opaque
         opaqueElem = saved.opaqueElem
@@ -2235,13 +2322,76 @@ final class CallCollector: SyntaxVisitor {
     override func visitPost(_ node: IfExprSyntax) { leaveShadowScope(node) }
     override func visit(_ node: WhileStmtSyntax) -> SyntaxVisitorContinueKind { enterShadowScope(node); return .visitChildren }
     override func visitPost(_ node: WhileStmtSyntax) { leaveShadowScope(node) }
+    /// R97 — save `name`'s current type against the nearest OPEN shadow scope, so a binder that types
+    /// it does not leak that type past the construct. No per-statement enumeration: whichever ancestor
+    /// is currently an open scope owns the restore, and `leaveShadowScope` performs it.
+    private func scopeBindingType(_ from: Syntax, _ name: String) {
+        var p: Syntax? = from
+        while let n = p {
+            if shadowScopes[n.id] != nil { typeScopes[n.id, default: []].append((name, snapshotType(name))); return }
+            p = n.parent
+        }
+    }
+
+    /// R97 — THE ONE ROUTINE THAT TYPES A `case let x as T` BINDER. Three grammars spell it and they had
+    /// three different fates: `for case let x as T in xs` was typed (the single site in this file that
+    /// called `dealias`), while `case let x as T:` in a switch and `if/guard case let x as T = e` were
+    /// typed NOWHERE — both silent-pure over a real file deletion, with `for case` and
+    /// `if let x = e as? T` charging correctly one spelling away. The type is WRITTEN IN THE SOURCE in
+    /// all three; nothing is inferred, so there is no reason for them to differ, and the way to keep
+    /// them from differing again is for there to be one of them.
+    private func typeCastBinder(_ pattern: PatternSyntax, at node: Syntax) {
+        guard Self.patternBinders(pattern).count == 1,
+              let only = Self.patternBinders(pattern).first,
+              let t = Self.castBinderType(pattern).flatMap({ typeName($0).name }) else { return }
+        let name = only.identifier.text
+        scopeBindingType(node, name)
+        markBinders(pattern)
+        vars[name] = t                      // dealiased by `rootOf`, the read-side authority
+    }
+
+    override func visit(_ node: SwitchCaseItemSyntax) -> SyntaxVisitorContinueKind {
+        typeCastBinder(node.pattern, at: Syntax(node)); return .visitChildren
+    }
+    /// R98 — `if case let w? = w.kill()` read silent-pure while `if case let q? = w.kill()` charged.
+    /// SwiftSyntax walks the PATTERN before the INITIALIZER, so `visit(IdentifierPatternSyntax)`'s
+    /// catch-all cleared the receiver a moment before its own initializer was collected. Marking the
+    /// binders here stops that; the clear (and the R97 cast typing) then happen in `visitPost`, after the
+    /// initializer subtree, and the binder's SCOPE — the `if` body, or the rest of the block for a
+    /// `guard` — is a sibling of this node, so nothing that needs the new binding has run yet.
+    override func visit(_ node: MatchingPatternConditionSyntax) -> SyntaxVisitorContinueKind {
+        // Deferred ONLY when the initializer MENTIONS a name this pattern binds — the one case where the
+        // ordering can change an answer. The unconditional form CLOBBERED `typeEnumCaseBinding`: it types
+        // `case .callback(let handler)` from the enum's associated value DURING the pattern walk, and a
+        // blanket `clearBinding` in `visitPost` then wiped it. Measured on swift-nio, where it cost the
+        // `SelectableEventLoop.cancelScheduledCallback → …didCancelScheduledCallback` edge and an `Env`
+        // reach with it — a silent under-report introduced by the fix for a silent under-report, which is
+        // this family's measured rate (4 defects in 5 fabrication-fixes) arriving on schedule. Caught by
+        // the corpus A/B's narrow `inferred` column, not by the suite.
+        if Self.patternBinders(node.pattern)
+            .contains(where: { Self.referencesName(node.initializer.value, $0.identifier.text) }) {
+            markBinders(node.pattern)
+            deferredPatternClears.insert(node.id)
+        }
+        return .visitChildren
+    }
+    override func visitPost(_ node: MatchingPatternConditionSyntax) {
+        if deferredPatternClears.remove(node.id) != nil {
+            // `casePayloadLocals` names the binders `typeEnumCaseBinding` already claimed and TYPED
+            // during the pattern walk; clearing those would undo it (see above).
+            for b in Self.patternBinders(node.pattern) where !casePayloadLocals.contains(b.identifier.text) {
+                scopeBindingType(Syntax(node), b.identifier.text)
+                clearBinding(b.identifier.text)
+            }
+        }
+        typeCastBinder(node.pattern, at: Syntax(node))   // R97 — `case let x as T`, when that is the shape
+    }
+    private var deferredPatternClears: Set<SyntaxIdentifier> = []
+
     override func visit(_ node: SwitchCaseSyntax) -> SyntaxVisitorContinueKind { enterShadowScope(node); return .visitChildren }
     override func visitPost(_ node: SwitchCaseSyntax) { leaveShadowScope(node) }
     override func visitPost(_ node: CatchClauseSyntax) { leaveShadowScope(node) }
-    override func visitPost(_ node: ForStmtSyntax) {
-        leaveShadowScope(node)
-        for (n, b) in typeScopes.removeValue(forKey: node.id) ?? [] { restoreType(n, b) }
-    }
+    override func visitPost(_ node: ForStmtSyntax) { leaveShadowScope(node) }   // R97: restore folded in
     // A closure's PARAMETERS are cleared here rather than in `typeClosureParams` (which runs on the
     // enclosing CALL, i.e. before this node is entered, so the save would capture the already-cleared
     // set and restore nothing).
@@ -2259,6 +2409,17 @@ final class CallCollector: SyntaxVisitor {
         // parameter (`xs.forEach { $0.greet() }` over a `[T]`/`[some P]`): the shadow above is what makes
         // the flag scoped to THIS closure, so it has to be set after it, not before.
         if let mono = monoClosureParams.removeValue(forKey: node.id) { monoNames.formUnion(mono) }
+        // R97 — AN EXPLICIT `{ (fm: FileManager) in … }` ANNOTATION IS TYPED HERE, at the closure, not
+        // at the enclosing call. `typeClosureParams` did it, and it runs from `visit(FunctionCallExpr)`
+        // over a call's closure ARGUMENTS — so the identical closure in any other position was never
+        // typed at all. Measured, one file, plain-spelled (no alias involved): `take { (fm: FileManager)
+        // in fm.removeItem(…) }` → `['Fs','Unknown']`, while `let c: (FileManager) -> Void = { (fm:
+        // FileManager) in fm.removeItem(…) }; c(…)` → ABSENT. The comment on `typeClosureParams`'s
+        // annotated arm reads `// explicit { (x: Foo) in } — precise`; it was precise about a position
+        // it never said it was about (attack K). The annotation is written in the source, so this
+        // infers nothing, and the write lands INSIDE the closure's own save — the shadow above ran
+        // first — so it cannot leak past the closure.
+        for p in closureParamNames(node) where p.annotated != nil { vars[p.name] = p.annotated }
         return .visitChildren
     }
     override func visitPost(_ node: ClosureExprSyntax) { leaveShadowScope(node) }
@@ -2267,6 +2428,15 @@ final class CallCollector: SyntaxVisitor {
     // variable from the collection so its member calls resolve (else dropped to pure — §4 under-report).
     override func visit(_ node: ForStmtSyntax) -> SyntaxVisitorContinueKind {
         enterShadowScope(node)
+        // R98 — THE SEQUENCE IS EVALUATED BEFORE THE LOOP BINDER EXISTS, so it is walked before anything
+        // below touches the name. `for w in w.many()` read silent-pure while `for q in w.many()` charged
+        // `Fs`: the clear below ran, and only then did `.visitChildren` reach `w.many()` with `w` already
+        // gone. Same class as the optional-binding deferral above; different visitor, because here the
+        // loop BODY is a child too, so `visitPost` would be too late for it. Hence the explicit order —
+        // sequence, then the binding, then pattern/where/body — and `.skipChildren` at the end so nothing
+        // is walked twice. `visitPost` still fires (SwiftSyntax calls it for a skipped node), so
+        // `leaveShadowScope` and the type restore are unaffected.
+        walk(node.sequence)
         modelImplicitIteration(node.sequence)
         // EVERY name the pattern binds is CLEARED, including the ones no branch below types (a
         // `for (key, _) in dict` key, a tuple arity this doesn't model, a `for case let x? in`) — an
@@ -2339,14 +2509,17 @@ final class CallCollector: SyntaxVisitor {
             // leading-dot case pattern and belongs to `typeEnumCaseBinding`, which types it from
             // `enumCaseValueType` or clears it. `x?` has no second reading in the grammar.
             let name = only.identifier.text
-            if let t = Self.castBinderType(node.pattern).flatMap({ typeName($0).name }) {
-                vars[name] = dealias(t)
+            if Self.castBinderType(node.pattern) != nil {
+                typeCastBinder(node.pattern, at: Syntax(node))   // R97 — shared with switch/if-case
             } else if Self.isOptionalUnwrapBinder(node.pattern), let elem = elementTypeOf(node.sequence) {
                 vars[name] = elem.name
                 if elem.mono { monoNames.insert(name) }
             }
         }
-        return .visitChildren
+        walk(node.pattern)
+        if let w = node.whereClause { walk(w) }
+        walk(node.body)
+        return .skipChildren
     }
 
     /// `case let x as T` — the type the cast NAMES. SwiftParser leaves `as` unfolded, so the pattern is
@@ -2728,8 +2901,10 @@ final class CallCollector: SyntaxVisitor {
                     // enclosing type: passing it as a fn-ref to a HOF that invokes it reaches the closure's
                     // effects. Edge to the property-scoped unit `<Type>.transform` (its own collected unit).
                     // Implicit-self property, so it's NOT a free-fn ref — guard before the free-call emit.
-                    if let et = enclosingType, closureFields[et]?.contains(n) == true {
-                        propertyEdges.insert("\(et).\(n)")
+                    if let et = enclosingType, let cp = closurePropertyInvocation(et, n) {
+                        propertyEdges.insert(cp.unit)
+                        // R96 — a `var` closure property may hold a different closure by the time it runs.
+                        if cp.hedge { unresolved = true; why.insert("dispatch:\(et).\(n)") }
                     } else if let et = enclosingType, let f = fields[et]?[n], f.isFunction {
                         // a function-typed FIELD passed by ref that is NOT a resolvable local closure
                         // (assigned in init / no initializer) — the invoked value is unaddressable → Unknown.
@@ -2741,9 +2916,10 @@ final class CallCollector: SyntaxVisitor {
             } else if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base {
                 let recv = rootOf(base)
                 let m = ma.declName.baseName.text
-                if let rt = recv.root, closureFields[rt]?.contains(m) == true {
+                if let rt = recv.root, let cp = closurePropertyInvocation(rt, m) {
                     // `xs.map(obj.transform)` — an explicit closure-property ref on a local receiver.
-                    propertyEdges.insert("\(rt).\(m)")
+                    propertyEdges.insert(cp.unit)
+                    if cp.hedge { unresolved = true; why.insert("dispatch:\(rt).\(m)") }   // R96
                 } else if let rt = recv.root, let f = fields[rt]?[m], f.isFunction {
                     // a non-closure function-typed field passed by ref → unaddressable invocation → Unknown.
                     unresolved = true; why.insert("dispatch:\(rt).\(m)")
@@ -2778,12 +2954,14 @@ final class CallCollector: SyntaxVisitor {
                 // lexically) or a named function (an edge), the Unknown is redundant; otherwise
                 // it stands (§4). The TS engine's callback_named move.
                 callbackInvoked.insert(name)
-            } else if let et = enclosingType, !isBoundLocal(name), closureFields[et]?.contains(name) == true {
+            } else if let et = enclosingType, !isBoundLocal(name),
+                      let cp = closurePropertyInvocation(et, name) {
                 // FINDING 2 — a bare `f(0)` invoking a stored CLOSURE PROPERTY of the enclosing type
                 // (`self.f` implicit): the closure body runs. Edge to its property-scoped unit `<Type>.f` so
                 // the closure's effects are reached (was silent-pure — the deferred/direct closure-property
                 // hole). Guarded against a shadowing local `f` (boundLocals), which is a different value.
-                propertyEdges.insert("\(et).\(name)")
+                propertyEdges.insert(cp.unit)
+                if cp.hedge { unresolved = true; why.insert("dispatch:\(et).\(name)") }   // R96
             } else if let et = enclosingType, !isBoundLocal(name),
                       let f = fields[et]?[name], f.isFunction {
                 // a bare invocation of a function-typed FIELD that is NOT a resolvable local closure
@@ -2925,8 +3103,9 @@ final class CallCollector: SyntaxVisitor {
                 // FINDING 2 — `obj.f()` where `f` is a stored CLOSURE PROPERTY (a resolvable local closure
                 // unit `<Type>.f`): edge to that unit (its closure's effects), precise instead of Unknown.
                 // A function-typed field WITHOUT a closure unit (assigned in init / no init) stays Unknown.
-                if closureFields[rt]?.contains(member) == true {
-                    propertyEdges.insert("\(rt).\(member)")
+                if let cp = closurePropertyInvocation(rt, member) {
+                    propertyEdges.insert(cp.unit)
+                    if cp.hedge { unresolved = true; why.insert("dispatch:\(rt).\(member)") }   // R96
                 } else {
                     unresolved = true
                     why.insert("dispatch:\(rt).\(member)")
@@ -3241,13 +3420,36 @@ final class CallCollector: SyntaxVisitor {
     // `guard let c = <expr>` / `if let c = <expr>` — type the unwrapped binding from the initializer
     // (a factory call, subscript, cast, …) so `c.method()` resolves. A shorthand `guard let c` (no
     // initializer) keeps the existing param/var type. The optional is stripped by typing the value.
+    /// R98 — THE BINDING IS APPLIED IN `visitPost`, AND THAT IS THE WHOLE FIX FOR THIS BINDER FAMILY.
+    ///
+    /// `if let u = u.asURL()` / `guard let w = w.kill()` / `while let w = w.kill()`: the INITIALIZER is a
+    /// CHILD of this node, so everything this visitor did before returning `.visitChildren` — `shadowName`,
+    /// the typing branches, the `clearBinding` in the `else` — had already replaced or wiped the receiver
+    /// by the time its own initializer was walked. Measured, one file, holding only the binder's NAME
+    /// constant: `if let w = w.kill()` ABSENT while `if let q = w.kill()` charged `Fs`, and the same pair
+    /// in `guard let` and `while let`, across two effect classes. This is rust R92's class one language
+    /// over (closed there at `9c4d5be` by generalising a deferral rather than adding an ordering rule).
+    ///
+    /// The file already knew: `rebindTyped`'s `Self.referencesName` carve-out and the `protoTyped` note in
+    /// `visit(VariableDeclSyntax)` both reason about exactly this, and both were applied to ONE index.
+    /// Deferring the whole binding is the general form — nothing here needs to run before the initializer,
+    /// and the binder's SCOPE (the `if`/`while` body, or the enclosing block for `guard`) is a SIBLING of
+    /// this node, not a child, so `visitPost` is still in time for every use of the new binding.
+    ///
+    /// `markBinders` stays in `visit`: it only records syntax ids, so it reads nothing, and it must run
+    /// before the pattern child is walked or `visit(IdentifierPatternSyntax)`'s catch-all would clear the
+    /// shorthand `guard let c` binding this visitor deliberately keeps.
     override func visit(_ node: OptionalBindingConditionSyntax) -> SyntaxVisitorContinueKind {
+        markBinders(node.pattern)
+        return .visitChildren
+    }
+
+    override func visitPost(_ node: OptionalBindingConditionSyntax) {
         // Claimed UNCONDITIONALLY, before the branch below decides whether it can type it: the
         // shorthand `guard let c` deliberately keeps the enclosing binding — `c` is the SAME value,
         // unwrapped — so letting `visit(IdentifierPatternSyntax)` clear it would drop a genuine type and
         // half 1's provenance with it. This is the one place where "unmarked means clear" would be
         // wrong, and it is marked for exactly that reason.
-        markBinders(node.pattern)
         if let name = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text,
            let initVal = node.initializer?.value {
             shadowName(name)  // a rebind, typed or not — the `if`/`while` (or the enclosing block, for
@@ -3277,7 +3479,6 @@ final class CallCollector: SyntaxVisitor {
                 else { clearBinding(name) }  // can't type the unwrapped value → clear (don't leak a stale type)
             }
         }
-        return .visitChildren
     }
 
     // effectful property READS (no call): κ chains AND local accessor units (computed getters)
@@ -4338,6 +4539,20 @@ final class CallCollector: SyntaxVisitor {
     }
 
     override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
+        // R98 — SAME ORDERING RULE, THE PLAIN-BINDER CASE. `let w = w.kill()` read silent-pure while
+        // `let q = w.kill()` charged `Fs`. This file already reasoned about it TWICE and applied the
+        // carve-out to one index each time — `fnValueAlias` ("captured before, reinstated after") and
+        // `protoTyped` ("SwiftSyntax walks a binding's PATTERN before its INITIALIZER … `let u =
+        // u.asURL()`") — while `vars` itself went unguarded, and `vars` is what resolves the receiver.
+        // The typing branch below writes it from `rootOf(initializer)`, so `w` became `String` before
+        // `w.kill()` was ever walked. (The SOUNDNESS row expected this arm to survive "accidentally,
+        // because its write is conditional on `info.root != nil`" — measured, `info.root` is `String`
+        // here and it does not survive.)
+        //
+        // Guarding the write would have left a STALE type, which is the fabrication direction. Walking
+        // the initializer first is the general answer, and the same one `visit(ForStmtSyntax)` takes:
+        // the initializer is evaluated before the name exists, so it is walked before the name moves.
+        for binding in node.bindings { if let v = binding.initializer?.value { walk(v) } }
         for binding in node.bindings {
             // `let (a, b) = (X(), Y())` — destructure: bind each name from the initializer tuple element
             if let tp = binding.pattern.as(TuplePatternSyntax.self),
@@ -4593,7 +4808,13 @@ final class CallCollector: SyntaxVisitor {
                 }
             }
         }
-        return .visitChildren
+        // The initializers were walked above; everything else is walked here, after the binding moved.
+        for binding in node.bindings {
+            walk(binding.pattern)
+            if let ann = binding.typeAnnotation { walk(ann) }
+            if let acc = binding.accessorBlock { walk(acc) }
+        }
+        return .skipChildren
     }
 }
 

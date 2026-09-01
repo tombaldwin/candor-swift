@@ -754,6 +754,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var opaqueSeqLeaves: Set<String> = []
     var seqConcreteTmp: [String: String?] = [:]
     var closureFields: [String: Set<String>] = [:]   // FINDING 2 — Type -> closure-property names (own unit)
+    var mutableClosureFields: [String: Set<String>] = [:]   // R96 — the `var` subset of the above
     // CONST-STRING PROPAGATION — module/global + static string constants, aggregated across files. Same
     // ambiguity rule: a name bound to ≥2 DIFFERENT literals (here, across files) → nil (never resolved).
     var constStrings: [String: String?] = [:]
@@ -765,6 +766,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             } else { seqConcreteTmp[k] = v }
         }
         for (t, ps) in c.closureFields { closureFields[t, default: []].formUnion(ps) }
+        for (t, ps) in c.mutableClosureFields { mutableClosureFields[t, default: []].formUnion(ps) }
         for (k, v) in c.constStrings {
             if let existing = constStrings[k] {
                 if existing != v { constStrings[k] = String?.none }   // ambiguous across files — never guess
@@ -1491,7 +1493,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                    }()
                                } ?? [],
                                opaqueSeqBuilders: opaqueSeqBuilders, seqBuilderConcrete: seqBuilderConcrete,
-                               closureFields: closureFields, moduleConstStrings: globalConstStrings,
+                               closureFields: closureFields, mutableClosureFields: mutableClosureFields,
+                               moduleConstStrings: globalConstStrings,
                                importedModules: Set(fileImports[String(f.loc.prefix { $0 != ":" })] ?? []),
                                projectModules: projectModules, deps: deps)
         // The locator-move set is flow-INSENSITIVE and must be complete before the first call is collected
