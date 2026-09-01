@@ -593,9 +593,17 @@ final class CallCollector: SyntaxVisitor {
         // 22 more calls that can drift again: it is ONE authority.
         //
         // Every map the resolver reads holds a name as DECLARED — `vars` (params, annotated locals, all
-        // the binder arms), `fields`, `globalTypes`, `returns`, `tupleElem`, `catchBindings` — so the
-        // one point where all of them converge is this function's ANSWER. Dealias it here and every
-        // producer is alias-transparent by construction, including producers not yet written.
+        // the binder arms), `fields`, `globalTypes`, `returns`, `tupleElem`, `catchBindings` — and this
+        // function's ANSWER is where all of them converge, so dealiasing here covers each of them
+        // without the producer having to remember.
+        //
+        // WHAT THAT IS AND IS NOT. It is a claim about everything reached THROUGH `rootOf`, measured
+        // over the container maps too (`arrayElem`/`dictElem`/`fieldArrayElem`/`tupleElem`, which reach
+        // it via the binder they type — see `testAliasThroughContainerMapsResolves`). It is NOT a claim
+        // about the whole collector: a reader that consults a type map WITHOUT going through `rootOf` is
+        // outside it. There was exactly one such reader when this landed — the `callAsFunction` arm's
+        // `vars[name]` — and it was silent on an aliased local type until it was measured and fixed.
+        // Anything added later that reads a type map directly needs its own `dealias` or its own row.
         // `superMarker` is not a type spelling and cannot collide (`dealias` is a `typeAliases` lookup,
         // and no `typealias` can be named it).
         let r = rootOfUnaliased(raw, depth)
@@ -2968,7 +2976,13 @@ final class CallCollector: SyntaxVisitor {
                 // (assigned in init / no initializer) — the value is unaddressable → honest Unknown.
                 unresolved = true
                 why.insert("dispatch:\(et).\(name)")
-            } else if let t = vars[name], localTypes.contains(t) {
+            } else if let t = vars[name].map(dealias), localTypes.contains(t) {
+                // R97 — THE LAST RAW `vars` READ, and it was the one place the `rootOf` wrapper does not
+                // cover: this arm asks about the BINDING, not about a receiver chain. `typealias C =
+                // Caller; func b(_ c: C) { c() }` was ABSENT (executed: the deletion really happens) while
+                // the plain-spelled `Caller` twin charged `Fs`. Found by attacking the commit's own
+                // "alias-transparent by construction" assertion rather than by a fixture, which is what
+                // assert-audit flags those lines for.
                 // `f()` where `f` is an INSTANCE of a local type — a `callAsFunction` invocation (Swift
                 // desugars `f(args)` on a non-function value to `f.callAsFunction(args)`). Edge to the
                 // type's callAsFunction unit (if it has one; resolveQual drops the edge otherwise).

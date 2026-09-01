@@ -48,6 +48,11 @@ routine that types a `case let x as T` binder for all three grammars that spell 
 `leaveShadowScope` performs the type restore for every scope, so a binder can be typed without each
 statement kind owning a save.
 
+A seventh spelling was found by attacking this change's OWN "alias-transparent by construction" comment
+rather than by a fixture: the `callAsFunction` arm reads `vars[name]` directly instead of through
+`rootOf`, so `typealias C = Caller; func b(_ c: C) { c() }` was silent while the `Caller`-spelled twin
+charged. Fixed, and the comment now says what it covers and what it does not.
+
 RESIDUAL, measured and executed: `let c: (FileManager) -> Void = { fm in … }` — an UNANNOTATED closure
 parameter typed only by the closure variable's annotation — is still silent, and is pinned as such.
 
