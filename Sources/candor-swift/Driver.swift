@@ -291,6 +291,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // adjudicate. Consulted by `CallCollector.rootOf` exactly like `fields`/`vars`, module-sliced at
     // construction time below (mirrors `localFreeFnBaseNamesByModule`'s existing per-module slicing).
     var globalTypesByModule: [String: [String: String]] = [:]
+    // R79 — the SUBSET of each module's `globalTypesByModule` entry that is `public`/`open`
+    // (`DeclCollector.globalPublic`). A cross-module lookup consults ONLY this table, never
+    // `globalTypesByModule` directly: an internal/private global genuinely is not visible outside its
+    // declaring module, and resolving it anyway would fabricate a receiver type across a boundary real
+    // Swift access control forbids. Same module-scoping discipline as `globalTypesByModule` itself.
+    var publicGlobalTypesByModule: [String: [String: String]] = [:]
     // R73's loop sibling — module-scope `[T]` global name -> its ELEMENT type, module-scoped for the
     // same reason `globalTypesByModule` is.
     var globalArrayElemByModule: [String: [String: String]] = [:]
@@ -782,6 +788,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // pathological/unparseable edge case, never adjudicates a real ambiguity.
         let cMod = swiftModuleOf(c.file)
         globalTypesByModule[cMod, default: [:]].merge(c.globalTypes) { a, _ in a }
+        // R79 — same source, filtered to the `public`/`open` subset (see `publicGlobalTypesByModule`).
+        for n in c.globalPublic { if let t = c.globalTypes[n] { publicGlobalTypesByModule[cMod, default: [:]][n] = t } }
         globalArrayElemByModule[cMod, default: [:]].merge(c.globalArrayElem) { a, _ in a }
         globalFactories.append(contentsOf: c.globalFactories.map { (cMod, $0.name, $0.leaf) })
         for (t, bs) in c.typeGenericBounds { typeGenericBoundsAll[t, default: [:]].merge(bs) { a, _ in a } }
@@ -1364,6 +1372,45 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // App`, `App.Process()` names the project's own type — so `isModuleQualifier` refuses it. See
     // `CallCollector.importedModules`.
     let projectModules = Set(allFns.map { swiftModuleOf($0.loc) }).subtracting([""])
+    // R79 — a cross-module global RECEIVER (`sharedWorker.doWork()` where `public let sharedWorker =
+    // SharedWorker()` lives in a DIFFERENT module the calling file imports). `globalTypesByModule` is
+    // deliberately module-scoped (see its own comment: a bare global name is not project-wide unique),
+    // so a name declared only in an imported module missed it entirely — `rootOf` fell through to the
+    // untyped-name fallback, `owner` came back nil, and the terminal member-access arm in
+    // `visit(FunctionCallExprSyntax)` recorded a bare-leaf `Call` no edge ever matches: the CALLER itself
+    // (not just this one call) could end up carrying no effect and vanish from `functions[]` outright
+    // (SOUNDNESS.md R79). Resolved by walking the calling FILE's own `import`s: a name absent from the
+    // file's own module is looked up across every OTHER imported PROJECT module's `publicGlobalTypesByModule`
+    // — the access-checked table, so a non-public global in another module keeps missing exactly as before.
+    // A name two-or-more imported modules each declare `public` is genuinely ambiguous (which one binds is
+    // a real Swift name-lookup question this pass cannot answer without the compiler) — resolve NOTHING,
+    // never guess: same "never guess" discipline `globalFactories`' deferred resolution already documents.
+    // Cached per FILE (not per module) because imports are per-file — two files in one module can import
+    // different things — and this runs once per function below, not once per file.
+    var crossModuleGlobalTypesCache: [String: [String: String]] = [:]
+    func crossModuleGlobalTypes(forFile file: String, ownModule: String) -> [String: String] {
+        if let cached = crossModuleGlobalTypesCache[file] { return cached }
+        let ownGlobals = globalTypesByModule[ownModule] ?? [:]
+        let imported = Set(fileImports[file] ?? []).intersection(projectModules).subtracting([ownModule])
+        var extra: [String: String] = [:]
+        if !imported.isEmpty {
+            var byName: [String: (type: String, moduleCount: Int)] = [:]
+            for m in imported {
+                for (name, ty) in publicGlobalTypesByModule[m] ?? [:] where ownGlobals[name] == nil {
+                    if let existing = byName[name] {
+                        // a second imported module also declares this name — ambiguous, mark the count
+                        // (the actual TYPE recorded doesn't matter once count > 1; it's dropped below).
+                        byName[name] = (existing.type, existing.moduleCount + 1)
+                    } else {
+                        byName[name] = (ty, 1)
+                    }
+                }
+            }
+            for (name, v) in byName where v.moduleCount == 1 { extra[name] = v.type }
+        }
+        crossModuleGlobalTypesCache[file] = extra
+        return extra
+    }
     for f in allFns {
         locOf[f.qual] = f.loc
         if f.isMain { entryPoints.insert(f.qual) }
@@ -1384,8 +1431,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             }
             continue
         }
+        let fMod = swiftModuleOf(f.loc)
+        // R79 — own-module entries win unconditionally (`merging` keeps the FIRST/left value on a
+        // collision); `crossModuleGlobalTypes` already excludes any name the own module has anyway, so
+        // this `merging` call never actually adjudicates a real collision, only documents which side wins.
+        let effectiveGlobalTypes = (globalTypesByModule[fMod] ?? [:])
+            .merging(crossModuleGlobalTypes(forFile: String(f.loc.prefix { $0 != ":" }), ownModule: fMod)) { own, _ in own }
         let cc = CallCollector(info: f, fields: fields, localTypes: localTypes,
-                               globalTypes: globalTypesByModule[swiftModuleOf(f.loc)] ?? [:],
+                               globalTypes: effectiveGlobalTypes,
                                globalArrayElem: globalArrayElemByModule[swiftModuleOf(f.loc)] ?? [:],
                                declaredTypes: declaredTypes,
                                localProtocols: localProtocolNames, returns: returnsIdx,
