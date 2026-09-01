@@ -9,6 +9,62 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ R96 — a reassignable (`var`) closure FIELD is resolved from whatever default the scan saw
+
+`README.md:44` promises: *"A function-typed value invoked (`let f: () -> Void` param, a closure-typed
+field `d.f()`) reads `Unknown` — never silent purity."* The engine kept that only for a field with no
+visible closure initializer. A `public var f: () -> Void = { }`, reassigned by anyone holding the
+object, was resolved to the empty default and certified PURE — `deny Unknown <that unit>`, README's own
+named strictness knob, exited 0 over a file deletion proved by running the program, and so did blanket
+`deny Unknown`. **The discriminator was "is there a closure literal here?"; `var` versus `let` was never
+consulted.**
+
+The fix consults REASSIGNABILITY. A `let` stored property with an initializer cannot be assigned
+anywhere in Swift, so it stays exactly resolved — no hedge, no flood. A `var` gets the UNION: the
+visible default's effects (still genuinely reachable) AND the §4 `Unknown`, named as
+`dispatch:<Type>.<field>`. Replacing rather than unioning would have traded this silent under-report
+for a lost `deny <E>` on an effectful default. `pure <scope>` still passes on `Unknown` — that is
+README.md:47 / AS-EFF-003, and `unverified --strict` now names the scope and prints the upgrade.
+
+Four call sites (`f()`, `obj.f()`, `map(f)`, `map(obj.f)`) each spelled this rule themselves; they now
+share one authority, `closurePropertyInvocation`.
+
+### ⚠ R97 — 22 of 23 binder arms dropped the type; one `dealias` call was doing all the work
+
+`typealias FM = FileManager; let fm = FM.default; try fm.removeItem(…)` was **absent from the report**
+while the plain-spelled twin one line away was charged `Fs`. Of the 23 sites that bind a name to a
+type, exactly one called `dealias`. Eighteen binder spellings were silent — parameter annotation,
+annotated local, inferred local, `for…in` annotation, `if let`, `guard let`, `as!`, `as?`, return type,
+stored property, module-scope global, alias-of-alias, module-qualified alias — plus three siblings that
+were broken with **no alias involved at all**: `switch case let x as T`, `if case let x as T =`, an
+explicitly annotated closure parameter outside call-argument position, and `for x in [Host.singleton]`
+over an inline array literal. All exit 0 on every policy form over a program whose only purpose is
+deleting a file.
+
+Fixed by three authorities rather than 22 more calls: `rootOf` dealiases its ANSWER once (so `vars`,
+`fields`, `globalTypes`, `returns` and `tupleElem` are alias-transparent by construction, including
+producers not yet written, and a module qualifier is stripped there too); `typeCastBinder` is the one
+routine that types a `case let x as T` binder for all three grammars that spell it; and
+`leaveShadowScope` performs the type restore for every scope, so a binder can be typed without each
+statement kind owning a save.
+
+RESIDUAL, measured and executed: `let c: (FileManager) -> Void = { fm in … }` — an UNANNOTATED closure
+parameter typed only by the closure variable's annotation — is still silent, and is pinned as such.
+
+### ⚠ R98 — a binder that shadows its receiver's name loses the effect in its own initializer
+
+rust R92's ordering bug, one language over. The initializer or sequence expression is a CHILD of the
+binder's syntax node, so a visitor that cleared or rebound the name and then descended resolved that
+expression against a receiver it had already destroyed. Holding everything constant but the binder's
+name: `if let w = w.kill()` ABSENT vs `if let q = w.kill()` `['Fs']`, and the same pair for
+`guard let`, `while let`, `for…in`, plain `let` and `if case let w?`.
+
+One rule in three places: the expression that produces the value is walked BEFORE the name it binds is
+touched. `OptionalBindingConditionSyntax` and `MatchingPatternConditionSyntax` defer the binding to
+`visitPost`; `ForStmtSyntax` and `VariableDeclSyntax` walk the sequence/initializers explicitly and then
+skip children. `catch let` and `switch case let` were ALREADY correct — their producing expression is
+not a child of the binder's node — and are pinned so the list is closed.
+
 - **R79 (SOUNDNESS.md), partial — the false "nothing hidden" clean bill over a ≥1-Unknown graph.**
   `candor: nothing hidden — every effect sits where its name says it should.` is an ABSOLUTE claim, and
   the scan-note (`emitSurface`) and `tour` shared one formula — "is at least ⅓ of the graph Unknown" —
