@@ -789,6 +789,41 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             if !conditionalOnly.isEmpty { conditionalOnlyFreeFnNamesByModule[m] = conditionalOnly }
         }
     }
+    // R74 — `<main>` IS THE SAME VEIN AS `<lazy>::CFG` / bare `cfg`, ONE NAME OVER. `<main>` is minted once
+    // PER FILE (DeclCollector, `isTopLevel`) and deliberately kept out of both disambiguation passes above
+    // (the `qualGroup`/overload pass and the free-fn shadow pass both exclude `isTopLevel`) — on purpose,
+    // because a single SwiftPM executable target commonly spreads its top-level statements over several
+    // files, and Swift really does run them as ONE program entry, so they must union under one `<main>`
+    // unit rather than becoming spurious siblings. But the qual stayed the bare literal, unscoped by
+    // module — so a directory holding TWO+ SwiftPM executable targets (each its own separate program
+    // entry) unions under that SAME literal too: `direct["<main>"]`/`edges["<main>"]` are dictionary keys,
+    // and every target's top-level FnInfo shares the key. MEASURED: a pure target's `<main>` inherited an
+    // unrelated target's `Fs` read on a 2-target fixture, reported at the PURE target's own file location —
+    // a fabrication, not an under-report (candor-spec SOUNDNESS-VEIN-global-unit-identity.md — the identical
+    // class; that vein's fixes (b616caf/7cec437/7f18c38) never reached `<main>` because `isTopLevel` sits
+    // outside the passes they patched).
+    //
+    // Disambiguate ONLY when 2+ DISTINCT modules actually mint a `<main>` — by far the common case is one
+    // module (a single executable target, or zero: a pure library tree mints no `<main>` at all), and that
+    // case touches nothing here, so its qual stays the bare literal `<main>`, byte-identical to every
+    // report emitted before this fix. Modules are ordered ALPHABETICALLY, not by file-walk order (which is
+    // not a stable public contract), so the assignment is deterministic run to run: the alphabetically-first
+    // module keeps bare `<main>`; each subsequent module gets `<main>#n` — the same positional-suffix shape
+    // `globalDup` immediately below already uses for a same-named global collision. Every FnInfo belonging
+    // to one module receives the SAME suffix (not a per-file one), so a target's own multi-file union is
+    // completely unaffected — only the CROSS-module collision breaks.
+    let topLevelModules = Set(allFns.filter { $0.isTopLevel }.map { swiftModuleOf($0.loc) }).sorted()
+    if topLevelModules.count > 1 {
+        var mainQualForModule: [String: String] = [:]
+        for (i, m) in topLevelModules.enumerated() {
+            mainQualForModule[m] = i == 0 ? "<main>" : "<main>#\(i)"
+        }
+        for i in allFns.indices where allFns[i].isTopLevel {
+            let q = mainQualForModule[swiftModuleOf(allFns[i].loc)] ?? allFns[i].qual
+            allFns[i].qual = q
+            allFns[i].simpleQual = q
+        }
+    }
     // FILE-SCOPE GLOBALS are accessor units and so sit outside the overload pass above — which meant two
     // modules each declaring `let cfg` collapsed into ONE unit carrying the union of both initializers'
     // effects, reported at one file's location, and a reader of either was charged both. Give them the same

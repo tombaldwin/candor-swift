@@ -153,4 +153,105 @@ final class TopLevelMainProcessTests: XCTestCase {
         XCTAssertEqual(ProcessHarness.inferred(by, "S.p"), ["Fs"], "static tuple member `p` carries the initializer effect")
         XCTAssertEqual(ProcessHarness.inferred(by, "S.q"), ["Fs"], "static tuple member `q` carries the initializer effect")
     }
+
+    // ── R74 — `<main>` is minted PER FILE with the bare literal qual, unscoped by module. A directory
+    // holding two+ SwiftPM executable targets (each its own program entry) used to union under that one
+    // literal exactly like SOUNDNESS-VEIN-global-unit-identity.md's `<lazy>::CFG` / bare `cfg` — a PURE
+    // target's `<main>` inherited an unrelated target's effect. These three pins are the fixed shape's
+    // over-charge controls: a pure target must not gain an effect, an effectful target must keep its own
+    // and ONLY its own, and a single-target tree (by far the common case) must be byte-for-byte unaffected.
+
+    private func multiScan(_ targets: [(name: String, main: String)]) throws -> [String: [String: Any]] {
+        let bin = try ProcessHarness.binaryURL(for: TopLevelMainProcessTests.self)
+        let root = try ProcessHarness.makeMultiTargetPackage(targets)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try ProcessHarness.run(bin, [root.path, "--json"])
+        XCTAssertEqual(r.code, 0, "scan must succeed — stderr: \(r.err)")
+        return try ProcessHarness.fns(ofJson: r.out)
+    }
+
+    func testTwoTargetsOnePureOneEffectfulDoesNotFabricate() throws {
+        let by = try multiScan([
+            ("PureExe", "print(\"hello\")\n"),
+            ("EffectfulExe", """
+             import Foundation
+             let contents = try? String(contentsOfFile: "/etc/hosts", encoding: .utf8)
+             print(contents ?? "")
+             """),
+        ])
+        // The pure target's <main> must carry NO effect — a pure unit is omitted from the report, so
+        // there must be exactly ONE <main>-family entry, not two, and it must not be located in PureExe.
+        let mains = by.keys.filter { $0 == "<main>" || $0.hasPrefix("<main>#") }
+        XCTAssertEqual(mains.count, 1, "a pure target's <main> must not surface as a second effectful unit: \(by.keys)")
+        for m in mains {
+            XCTAssertEqual(ProcessHarness.inferred(by, m), ["Fs"], "the surviving <main> must carry only EffectfulExe's own effect")
+            let loc = by[m]?["loc"] as? String ?? ""
+            XCTAssertTrue(loc.contains("EffectfulExe"), "the effect must be located in the target that actually performs it, not PureExe: \(loc)")
+        }
+    }
+
+    func testTwoEffectfulTargetsEachKeepOwnEffectNoLossNoCrossCharge() throws {
+        let by = try multiScan([
+            ("FsExe", """
+             import Foundation
+             let x = try? String(contentsOfFile: "/etc/hosts", encoding: .utf8)
+             print(x ?? "")
+             """),
+            ("EnvExe", """
+             import Foundation
+             let e = ProcessInfo.processInfo.environment["HOME"] ?? ""
+             print(e)
+             """),
+        ])
+        let mains = by.keys.filter { $0 == "<main>" || $0.hasPrefix("<main>#") }
+        XCTAssertEqual(mains.count, 2, "two distinct effectful targets must produce two distinct <main> units, not one merged / one lost: \(by.keys)")
+        let effectSets = Set(mains.map { ProcessHarness.inferred(by, $0) ?? [] })
+        XCTAssertEqual(effectSets, [["Env"], ["Fs"]],
+                       "each target's <main> must carry EXACTLY its own effect — never the sibling's, and never both merged: \(by)")
+    }
+
+    func testSingleTargetMainQualIsUnaffectedByTheFix() throws {
+        // The common case: ONE target's top level performs an effect. The qual must stay the bare
+        // literal `<main>` — the multi-module disambiguation must never fire when there is only one
+        // module, so this scan is byte-for-byte identical to every report emitted before R74's fix.
+        let by = try multiScan([
+            ("OnlyExe", """
+             import Foundation
+             let x = try? String(contentsOfFile: "/etc/hosts", encoding: .utf8)
+             print(x ?? "")
+             """),
+        ])
+        XCTAssertEqual(Array(by.keys).filter { $0.hasPrefix("<main>") }, ["<main>"],
+                       "a single-target tree must never grow a `<main>#n` suffix: \(by.keys)")
+        XCTAssertEqual(ProcessHarness.inferred(by, "<main>"), ["Fs"])
+    }
+
+    /// THE STATED LIMIT OF THE R74 FIX, pinned so it is not silent.
+    ///
+    /// `swiftModuleOf` derives a module by finding a literal `Sources`/`Tests` path segment and taking
+    /// the next one, so the disambiguation fires only when the scan target sits ABOVE
+    /// `Sources/<Module>/` — the package root, which is how a Swift package is normally scanned.
+    /// Point the engine AT `Sources/` itself and the locs lose the marker segment, every target
+    /// resolves to the same fallback, the distinct-module count is 1, and the targets merge under one
+    /// `<main>` again: the very fabrication R74 closes, reached by a degenerate invocation.
+    ///
+    /// Asserts CURRENT behaviour, deliberately. A limit that is measured and named is one somebody can
+    /// decide about; a limit a consumer discovers is a defect. If this goes red because the merge
+    /// stopped, the residual has been closed — rewrite it to demand the split, do not delete it.
+    func testScanningSourcesDirectlyStillMergesTargets_KNOWN_LIMIT() throws {
+        let bin = try ProcessHarness.binaryURL(for: TopLevelMainProcessTests.self)
+        let root = try ProcessHarness.makePackage("""
+        // MODULE: alpha
+        import Foundation
+        try? "x".write(toFile: "/tmp/r74a.txt", atomically: true, encoding: .utf8)
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let r = try ProcessHarness.run(bin, [root.appendingPathComponent("Sources").path, "--json"])
+        XCTAssertEqual(r.code, 0, "scan must succeed — stderr: \(r.err)")
+        let by = try ProcessHarness.fns(ofJson: r.out)
+        let mains = Array(by.keys).filter { $0.hasPrefix("<main>") }
+        XCTAssertLessThanOrEqual(mains.count, 1,
+            "KNOWN LIMIT: scanning Sources/ directly cannot derive a module, so targets still merge "
+            + "under one `<main>`. If this now splits, the residual is closed — rewrite this test. \(by.keys)")
+    }
 }

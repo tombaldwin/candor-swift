@@ -26,7 +26,12 @@ A computed property's getter/setter/observer (and a `lazy` initializer) is its o
 functions omit the field. A file's TOP-LEVEL executable statements (the bare statements Swift allows
 at file scope in `main.swift` / script files) are collected as one synthetic unit named `<main>`
 carrying `unitKind: "initializer"` — but only when they carry an effect or reach one; a pure top level
-mints no unit.
+mints no unit. A single SwiftPM executable target's `<main>` stays the bare `<main>`, unchanged, even
+when its top-level statements span several files (they run as one program entry and union into one
+unit). A directory holding **two or more** SwiftPM executable targets — each its own separate program
+entry — disambiguates: the alphabetically-first target's effectful top level keeps `<main>`, and each
+other target's gets `<main>#n`. This only ever fires when 2+ targets each mint an effectful `<main>`;
+the common single-target case is unaffected.
 
 ## Produce a report
 

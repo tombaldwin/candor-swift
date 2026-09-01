@@ -56,6 +56,27 @@ enum ProcessHarness {
         return root
     }
 
+    /// A throwaway SPM package with MULTIPLE executable targets, each its own `main.swift` — the R74
+    /// fixture shape (`<main>` fabricating one target's effects onto another's). `targets` is
+    /// `[(targetName, mainSwiftSource)]`; returns the root, same cleanup contract as `makePackage`.
+    static func makeMultiTargetPackage(_ targets: [(name: String, main: String)], pkgName: String = "MultiApp") throws -> URL {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-fix-\(UUID().uuidString)")
+        var decls = ""
+        for (name, main) in targets {
+            let srcDir = root.appendingPathComponent("Sources/\(name)")
+            try FileManager.default.createDirectory(at: srcDir, withIntermediateDirectories: true)
+            try main.write(to: srcDir.appendingPathComponent("main.swift"), atomically: true, encoding: .utf8)
+            decls += ".executableTarget(name: \"\(name)\"), "
+        }
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "\(pkgName)", targets: [\(decls)])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        return root
+    }
+
     /// THE EXIT LATCH — install BEFORE `run()`, `wait()` after the pipes are drained.
     ///
     /// `Process.waitUntilExit()` MUST NOT be used in this repo. On swift-corelibs-foundation it blocks
