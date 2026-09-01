@@ -238,6 +238,13 @@ final class DeclCollector: SyntaxVisitor {
     // `staticFactoryFields` one scope up.
     var globalTypes: [String: String] = [:]
     var globalFactories: [(name: String, leaf: String)] = []
+    /// R79 — the SUBSET of `globalTypes`'/`globalFactories`' names declared `public`/`open`. Swift access
+    /// control means a non-public global is genuinely invisible outside its own module; the Driver
+    /// consults this (module-sliced, like `globalTypesByModule`) to decide whether a CROSS-module lookup
+    /// may resolve a name at all — an internal/private global must keep missing there exactly as it did
+    /// before this table existed. Within the DECLARING module nothing changes: `globalTypes` itself still
+    /// answers every global regardless of level, matching real same-module visibility.
+    var globalPublic: Set<String> = []
     /// R73, the loop sibling — a module-scope `[T]` global (`let workers: [Worker] = […]`), iterated
     /// (`for w in workers { w.doWork() }`). `globalTypes` alone does not cover this: `w` binds to the
     /// ARRAY's ELEMENT type, not the array's own type, exactly the distinction `arrayElem` (locals) and
@@ -809,6 +816,9 @@ final class DeclCollector: SyntaxVisitor {
             // (lazy, like a static), so it's a unit charged to the first bare-name read (`_ = x`).
             // Only a stored global with an initializer; a computed global var is collected via the
             // accessor branch above (which requires a type stack, so handle it here too).
+            // R79 — the modifier list is on `node` (shared by every binding in this declaration), so
+            // it's read once here rather than per-binding.
+            let isPublicGlobal = node.modifiers.contains { $0.name.text == "public" || $0.name.text == "open" }
             for binding in node.bindings {
                 // A tuple-destructured global (`let (a, b) = effectfulInit()`) binds several names sharing
                 // one initializer; mint a unit for EACH so any name's first-touch read carries the effect
@@ -828,16 +838,25 @@ final class DeclCollector: SyntaxVisitor {
                 if let only = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
                     if let ann = binding.typeAnnotation {
                         let info = typeName(ann.type)
-                        if let tn = info.name, !info.isFunction { globalTypes[only] = tn }
+                        if let tn = info.name, !info.isFunction {
+                            globalTypes[only] = tn
+                            if isPublicGlobal { globalPublic.insert(only) }
+                        }
                         else if let elem = arrayElementName(ann.type) { globalArrayElem[only] = elem }
                     } else if let initVal = binding.initializer?.value {
                         if let call = initVal.as(FunctionCallExprSyntax.self),
                            let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self) {
                             if ctor.baseName.text.first?.isUppercase == true {
                                 globalTypes[only] = ctor.baseName.text
+                                if isPublicGlobal { globalPublic.insert(only) }
                             } else {
                                 // a lowercase callee — a free-FACTORY call (`let x = makeX()`); its return
                                 // type isn't known until the returns index is built (see `staticFactoryFields`).
+                                // R79 — a PUBLIC factory-initialized global is a real, narrower gap this
+                                // fix does not claim to close: `globalFactories` carries no access level,
+                                // so a cross-module `public let x = makeX()` stays unresolved exactly as
+                                // before. Only the two shapes ABOVE (explicit annotation, direct ctor) and
+                                // the singleton-accessor shape BELOW gained cross-module resolution.
                                 globalFactories.append((only, ctor.baseName.text))
                             }
                         } else if let ma = initVal.as(MemberAccessExprSyntax.self),
@@ -847,6 +866,7 @@ final class DeclCollector: SyntaxVisitor {
                             // `let session = URLSession.shared` — the same singleton-field idiom `fields`
                             // recognises above, applied to a module-scope global.
                             globalTypes[only] = base.baseName.text
+                            if isPublicGlobal { globalPublic.insert(only) }
                         }
                     }
                 }
