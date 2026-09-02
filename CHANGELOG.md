@@ -9,6 +9,44 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ R124 — `vars` is not in `ShadowSave`, so every raw `vars[…] =` in a scoped visitor leaked
+
+`leaveShadowScope` gives back seven name-keyed FLAG maps. The TYPE indexes come back through a
+different channel, `typeScopes`, written only by `scopeBindingType` — and of the eight sites that write
+`vars`, two used it. The other six wrote the map raw, so a binder's type outlived the construct that
+bound it, for the rest of the function body.
+
+That is wrong in BOTH directions, and both were measured with rename controls and with the fixture
+EXECUTED:
+
+* **Silent under-report.** `func f(_ fm: FileManager) { if let fm = o { }; fm.removeItem(…) }` was
+  ABSENT from the report over a file deletion the program is observed to perform. `deny Fs`, `deny Fs
+  Unknown`, `deny Unknown` and `pure` all exited 0 on it — silent, not coarse. Nine binder forms.
+* **Fabrication.** The mirror: an inner binder typed `FileManager` shadowing an inert outer parameter
+  charged `Fs` to a call that provably deletes nothing.
+
+Two of the nine were introduced since 0.34.0, by R96/R97/R98, and seven were pre-existing. Both new
+ones came from this release's own work and one of them was asserted safe in a comment written by the
+change that introduced it (*"the write lands INSIDE the closure's own save … so it cannot leak past
+the closure"* — `vars` is not in that save):
+
+* `visit(ClosureExprSyntax)` — R97's annotated closure parameter (`{ (fm: FileManager) in … }`).
+* `visit(VariableDeclSyntax)` — R98's rewrite to `.skipChildren` hand-enumerates what to walk and
+  `node.attributes` was not on the list, so a property-wrapper attribute ARGUMENT
+  (`@Tagged(effTag()) var n`) was never visited at all. A different mechanism reaching the same
+  silence.
+
+The pre-existing seven: `typeClosureParams`' annotated and element arms, both of
+`typeEnumCaseBinding`'s arms, `visitPost(OptionalBindingConditionSyntax)`, and the plain and
+tuple binders of `visit(VariableDeclSyntax)`. They were found by widening the audit past the two sites
+it was handed.
+
+Every site now routes through `scopeBindingType` (or, for `typeClosureParams`, registers against the
+closure's own node id, because it runs before the closure's scope is open). A/B over five real Swift
+corpora (swift-collections, swift-nio, swift-argument-parser, swift-algorithms, Alamofire), 7,876
+common rows keyed on EVERY field: **ADDED 0, REMOVED 0, CHANGED 16, `inferred` changes 0.** Regression
+suite `BinderTypeScopeProcessTests`, revert-tested site by site.
+
 ### ⚠ R96 — a reassignable (`var`) closure FIELD is resolved from whatever default the scan saw
 
 `README.md:44` promises: *"A function-typed value invoked (`let f: () -> Void` param, a closure-typed
