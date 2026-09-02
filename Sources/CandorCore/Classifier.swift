@@ -105,7 +105,7 @@ public func fsKind(root: String, member: String) -> [String] {
     switch member {
     // WRITE — mutates the disk.
     case "createFile", "removeItem", "createDirectory", "createSymbolicLink", "write", "writeToFile",
-         "changeCurrentDirectoryPath", "setAttributes", "trashItem", "unlinkItem", "truncate",
+         "changeCurrentDirectoryPath", "setAttributes", "setResourceValues", "trashItem", "unlinkItem", "truncate",
          "createTempFile", "createTempDirectory", "SecItemAdd", "SecItemUpdate", "SecItemDelete":
         return ["write"]
     // READ — observes the disk without mutating it. Metadata probes are reads: `fileExists` is an I/O
@@ -114,7 +114,11 @@ public func fsKind(root: String, member: String) -> [String] {
          "isReadableFile", "isWritableFile", "isExecutableFile", "isDeletableFile",
          "destinationOfSymbolicLink", "enumerator", "subpaths", "currentDirectoryPath",
          "contentsEqual", "attributesOfFileSystem", "read", "readToEnd", "readData", "readDataToEndOfFile",
-         "SecItemCopyMatching":
+         "SecItemCopyMatching",
+         // R130 — `URL`'s stat-shaped members (see `URL_FS_MEMBERS`). `setResourceValues` is the one
+         // WRITE in that set and is handled by the `write`-prefix rule below.
+         "checkResourceIsReachable", "checkPromisedItemIsReachable", "resourceValues", "bookmarkData",
+         "resolvingSymlinksInPath":
         return ["read"]
     default: break
     }
@@ -157,6 +161,17 @@ public let FS_TWO_PATH_MEMBERS: [String: [Set<String>]] = [
 ]
 public let NET_MEMBERS: Set<String> = ["dataTask", "data", "upload", "download", "bytes", "webSocketTask",
     "uploadTask", "downloadTask", "streamTask"]
+/// R130 — the members of `URL` that issue a filesystem syscall, as opposed to the (much larger) pure path
+/// algebra the type is mostly made of. Kept as a NAMED SET beside `FS_MEMBERS` rather than inline in
+/// `kappaMember`, so `fsKind` and the classifier read one list.
+///
+/// `resolvingSymlinksInPath()` is here because it is a `readlink` walk, not a string operation — the name
+/// says so. `standardized`/`standardizedFileURL` are NOT: they are lexical (`..`/`.` collapsing) and
+/// touch nothing. `startAccessingSecurityScopedResource()` is a sandbox permission toggle rather than
+/// I/O, and `removeCachedResourceValue`/`setTemporaryResourceValue` operate on an in-memory cache — all
+/// three deliberately absent, and pinned as controls.
+public let URL_FS_MEMBERS: Set<String> = ["checkResourceIsReachable", "checkPromisedItemIsReachable",
+    "resourceValues", "setResourceValues", "bookmarkData", "resolvingSymlinksInPath"]
 // κ batch — the COVERED-MODULE silent-pure sweep (2026-07-09). Foundation/Security are PLATFORM_MODULES:
 // they get no ledger naming and no Unknown, so an unmodeled effectful member there reads SILENT-PURE —
 // the exact covered-module cardinal-sin shape (candor-java's Panache lesson, Swift edition). Modeled → Fs:
@@ -1220,6 +1235,20 @@ public func kappaMember(root: String, member: String) -> String? {
     case "FileManager", "FileHandle": return FS_MEMBERS.contains(member) || member == "readToEnd"
         || member == "write" || member == "read" ? "Fs" : nil
     case "URLSession": return NET_MEMBERS.contains(member) ? "Net" : nil
+    // R130 — `URL`'s FEW disk-touching members. Almost all of URL is pure path algebra
+    // (`appendingPathComponent`, `lastPathComponent`, `pathComponents`, `standardized`), which is why
+    // the type had no entry at all — and why the five verbs that DO issue a syscall read silent-pure:
+    // `checkResourceIsReachable()` is a `stat` and is THE idiomatic Swift file-existence test, the
+    // sibling of `FileManager.fileExists` which has always been `Fs`. Verb-precise, ADDITIVE (this root
+    // returned nil for everything before), and a project's own `URL` type shadows it via `declaredTypes`
+    // like every other κ root.
+    case "URL": return URL_FS_MEMBERS.contains(member) ? "Fs" : nil
+    // R130 — the pre-URLSession networking class. Deprecated since iOS 9 and still all over legacy code;
+    // every one of these verbs issues the request. Verb-precise: `canHandle(_:)` is a static predicate
+    // over a URLRequest and touches no socket.
+    case "NSURLConnection":
+        return ["sendSynchronousRequest", "sendAsynchronousRequest", "start", "cancel", "init"]
+            .contains(member) ? "Net" : nil
     // JohnSundell's Files (third-party Fs wrapper). The pure builder/property surface (path/name/url/
     // subfolders/files/nameExcludingExtension) is not a verb → stays out. A LOCAL `File`/`Folder`/`Storage`
     // type shadows this in the driver (declaredTypes), so this only fires on the real package's types.

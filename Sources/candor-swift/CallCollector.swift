@@ -1384,9 +1384,52 @@ final class CallCollector: SyntaxVisitor {
     /// `Data` and its content reads in DIFFERENT packages, so no unit moved.) The escape hatch is the
     /// spelling rule directly above — `Foundation.Data(contentsOfFile:)` is charged whatever the package
     /// declares, which is measured in `ModuleQualifierSpellingProcessTests`.
+    /// R130 — `OutputStream`/`InputStream` OPENED ON A FILE, and only then. Returns the `fs` direction, or
+    /// nil when this is not a file-stream construction at all.
+    ///
+    /// The discriminator has to be the ARGUMENT LABEL, not the arity: `InputStream(fileAtPath:)`,
+    /// `InputStream(url:)` and `InputStream(data:)` are all one-argument, and only the first two touch a
+    /// disk. `kappaFree` is keyed on `(name, argCount)` and so cannot tell them apart — which is why this
+    /// lives here, beside `chargeContentsCtor`, where the syntax node is in hand. A label this does not
+    /// recognise yields nil and the ctor stays uncharged, so a future `OutputStream(toBuffer:capacity:)`
+    /// is an under-report rather than a fabricated file write.
+    ///
+    /// `InputStream(url:)` is charged Fs and not split by scheme the way `Data(contentsOf:)` is: Foundation
+    /// documents it as a *file* URL initializer (it returns nil for anything else), so there is no remote
+    /// arm to get wrong.
+    private func fileStreamCtorEffect(_ name: String, _ node: FunctionCallExprSyntax) -> String? {
+        guard name == "OutputStream" || name == "InputStream" else { return nil }
+        switch node.arguments.first?.label?.text {
+        case "toFileAtPath": return "write"
+        case "fileAtPath": return "read"
+        case "url": return name == "OutputStream" ? "write" : "read"
+        // `toMemory:` / `toBuffer:capacity:` / `data:` are IN-MEMORY streams — the fabrication mirror for
+        // this arm, and pinned as a control rather than left to the reader.
+        default: return nil
+        }
+    }
+
     private func chargeContentsCtor(_ name: String, _ node: FunctionCallExprSyntax, lit: String?,
                                     shadowable: Bool) -> Bool {
-        guard ["Data", "NSData", "String"].contains(name) else { return false }
+        // R130 — THE OBJC-BRIDGED SPELLINGS OF THE SAME CONSTRUCTOR, and the file STREAM ctors.
+        // `NSString(contentsOfFile:)`, `NSDictionary(contentsOfFile:)` and `NSArray(contentsOfFile:)` take
+        // the identical argument label, do the identical read, and were ABSENT — silent-pure over a real
+        // file read — while `String(contentsOfFile:)` beside them was charged. `NSDictionary(contentsOfFile:)`
+        // is how a decade of plist-reading Swift is written. This is the ⟨0.32⟩ one-capability-every-spelling
+        // vein exactly, in the one family whose own doc comment is titled "ONE FUNCTION, BOTH SPELLINGS";
+        // the function was shared between the bare and module-qualified CALL SITES and still knew only
+        // three of the six TYPE spellings of the same constructor.
+        if let e = fileStreamCtorEffect(name, node) {
+            if shadowable, localFreeFns.contains(name) { return false }
+            if shadowable, declaredTypes.contains(name), !conditionallyShadowedTypes.contains(name) { return false }
+            directEffects.insert("Fs")
+            fsKinds.insert(e)
+            recordSurfaces(effect: "Fs", lit: lit)
+            if lit == nil { incompleteSurfaces.insert("Fs") }
+            unionConditionalTypeEdge(name, node, lit: lit)
+            return true
+        }
+        guard ["Data", "NSData", "String", "NSString", "NSDictionary", "NSArray"].contains(name) else { return false }
         if shadowable, localFreeFns.contains(name) { return false }
         // ⟨0.33.1⟩ the SAME conditional-only carve-out the other four bare-ctor arms got: a name whose
         // ONLY local declaration(s) sit inside a `#if` (`conditionallyShadowedTypes`) does not bail this
@@ -3248,7 +3291,12 @@ final class CallCollector: SyntaxVisitor {
                 // κ: a local protocol shadows the platform table.
                 protoDispatches.append(ProtoDispatch(proto: rt, member: member, argc: node.arguments.count,
                                                      argTypes: argTypesOf(node), args: argKinds(node)))
-            } else if ((base.root == "Data" || base.root == "String")
+            } else if ((base.root == "Data" || base.root == "String"
+                        // R130 — the ObjC-bridged spellings. `NSData.write(toFile:atomically:)` is the
+                        // same syscall through the same label and was silent-pure; `NSString` has the
+                        // same `write(toFile:atomically:encoding:)`. Same list as `chargeContentsCtor`'s
+                        // read half, for the same reason.
+                        || base.root == "NSData" || base.root == "NSString")
                        // a STRING-LITERAL receiver IS a String (`"data".write(toFile:…)`): rootOf can't type a
                        // literal (no var/decl), so the `Data`/`String` branch missed it and the file write read
                        // silent-pure. A literal base has the same write(toFile:)/write(to:) surface as a typed

@@ -9,6 +9,43 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ R130b — the Foundation file routes that are neither `FileManager` nor raw C
+
+The other half of "does the `Fs` rule cover only the ordinary spelling". Surveying 27 Swift-level routes
+against the pre-fix binary, one executed fixture each, found a second family reading **silent-pure** —
+absent from the report entirely, which under ⟨0.21⟩ is a positive purity claim:
+
+| route | pre-R130b | why it matters |
+|---|---|---|
+| `NSString(contentsOfFile:)`, `NSDictionary(contentsOfFile:)`, `NSArray(contentsOfFile:)` (and the `contentsOf:` forms) | ABSENT | `String(contentsOfFile:)` beside them was charged. `NSDictionary(contentsOfFile:)` is how a decade of plist-reading Swift is written. |
+| `NSData.write(toFile:)` | ABSENT | the bridged twin of `Data.write(to:)`, charged since ⟨0.29⟩ |
+| `URL.checkResourceIsReachable()`, `.checkPromisedItemIsReachable()`, `.resourceValues(forKeys:)`, `.setResourceValues(_:)`, `.bookmarkData()`, `.resolvingSymlinksInPath()` | ABSENT | `URL` had no κ entry at all, because nearly all of it is pure path algebra. `checkResourceIsReachable()` is a `stat` and the sibling of `FileManager.fileExists`, always `Fs`. |
+| `OutputStream(toFileAtPath:)`, `OutputStream(url:)`, `InputStream(fileAtPath:)`, `InputStream(url:)` | ABSENT | `kappaFree` is keyed on `(name, argCount)` and `InputStream(fileAtPath:)` / `InputStream(data:)` are both one argument — only the LABEL separates a file open from an in-memory stream, so the arm had to move beside `chargeContentsCtor` where the syntax node is in hand |
+| `NSURLConnection.sendSynchronousRequest` etc. | ABSENT (`Net`) | the pre-URLSession class, still all over legacy code |
+
+Ground truth EXECUTED for the four `Fs` rows: `NSDictionary(contentsOfFile:)` read back one key from a
+plist it had just written; `checkResourceIsReachable()` returned false then true across a file creation;
+`OutputStream(toFileAtPath:)` left 8 bytes readable by an independent read; `NSData.write(toFile:)` left 7.
+Pre-fix each was ABSENT and all five policy forms exited 0. The `NSURLConnection` row is ANALYSIS-ONLY and
+is labelled so in its test.
+
+The additions are verb-precise and each carries its own fabrication control: `URL`'s path algebra
+(`appendingPathComponent`/`standardized`/`pathComponents`), the in-memory streams
+(`OutputStream(toMemory:)`, `InputStream(data:)`), and `NSURLConnection.canHandle(_:)` must all stay
+uncharged, and are pinned.
+
+A/B, same 13 packages and same wide key: **ADDED 1 · REMOVED 0 · CHANGED 14**. All 15 audited against
+source: 13 genuine recall gains (Kingfisher's disk cache ×8 through `resourceValues`/`checkResourceIsReachable`,
+Alamofire's `writeEncodedData` gaining its `write` direction through `OutputStream(url:append:)`,
+swift-argument-parser's `executeCommand` + 2 callers through `checkResourceIsReachable`); **1 precision
+gain that reads as a loss on the narrow key** — Alamofire's `MultipartFormData.append(_:withName:…)` drops
+`Unknown` + `dispatch:URLConvertible.checkPromisedItemIsReachable` and keeps `Fs`, and a grep of the whole
+package confirms no conformer declares that member, so the CHA entry was noise now answered precisely;
+**1 over-charge riding a pre-existing defect** — Kingfisher's `MemoryStorage.Backend.isCached` gains `Fs`
+because its only recorded call edge is literally `DiskStorage.Backend.value(String,ExpirationExtending)`,
+a same-simple-name nested-type mis-resolution that predates R130 (it already carried that edge's `Unknown`).
+Filed separately rather than folded in.
+
 ### ⚠ R130 — the raw-syscall disclosure was gated on `import Darwin`, and Foundation re-exports Darwin
 
 R61 discloses `Unknown` + `native:<name>` for a raw C call on a curated allowlist (`system`, `unlink`,
