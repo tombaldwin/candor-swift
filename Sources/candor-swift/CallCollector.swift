@@ -2425,9 +2425,24 @@ final class CallCollector: SyntaxVisitor {
         // FileManager) in fm.removeItem(…) }; c(…)` → ABSENT. The comment on `typeClosureParams`'s
         // annotated arm reads `// explicit { (x: Foo) in } — precise`; it was precise about a position
         // it never said it was about (attack K). The annotation is written in the source, so this
-        // infers nothing, and the write lands INSIDE the closure's own save — the shadow above ran
-        // first — so it cannot leak past the closure.
-        for p in closureParamNames(node) where p.annotated != nil { vars[p.name] = p.annotated }
+        // infers nothing.
+        //
+        // R124 — AND THE SENTENCE THAT USED TO END THIS PARAGRAPH WAS FALSE. It read: "the write lands
+        // INSIDE the closure's own save — the shadow above ran first — so it cannot leak past the
+        // closure." **`vars` IS NOT IN `ShadowSave`.** The shadow above (`shadowName`) drops the five
+        // FLAG maps and nothing else; the TYPE indexes are given back only through `typeScopes`, which
+        // only `scopeBindingType` writes, and this line did not call it. So
+        // `func f(_ s: Shouty) { let c: (Quiet) -> Void = { (s: Quiet) in _ = s }; s.act() }` typed the
+        // PARAMETER `s` as `Quiet` for the rest of the body and `s.act()` went silent-pure over a real
+        // file deletion — a cardinal sin introduced by the fix directly above, in the sentence that
+        // asserted it could not happen (attack K, on a comment one round old). Measured against the
+        // published `819fac6` with two controls varying one thing each (drop the annotation; rename the
+        // binder to `z`), and the deletion EXECUTED. `scopeBindingType` is the authority `typeCastBinder`
+        // already uses, and `enterShadowScope(node)` has run, so the nearest open scope IS this closure.
+        for p in closureParamNames(node) where p.annotated != nil {
+            scopeBindingType(Syntax(node), p.name)
+            vars[p.name] = p.annotated
+        }
         return .visitChildren
     }
     override func visitPost(_ node: ClosureExprSyntax) { leaveShadowScope(node) }
@@ -2713,6 +2728,27 @@ final class CallCollector: SyntaxVisitor {
         for closure in closures {
             let params = closureParamNames(closure)
             for (i, p) in params.enumerated() {
+                // R124 — EVERY WRITE BELOW IS SCOPED TO THE CLOSURE, and none of them were. This runs
+                // from `visit(FunctionCallExprSyntax)`, i.e. BEFORE the closure node is entered, so
+                // `scopeBindingType` cannot be used: the closure's shadow scope is not open yet and the
+                // walk would find the ENCLOSING block instead, which for `func f(_ s: Shouty) { xs.forEach
+                // { (s: Quiet) in … }; s.act() }` is the function body — no restore at all where it is
+                // needed. So the snapshot is registered DIRECTLY against the closure's node id, the same
+                // hand-over `monoClosureParams` uses one branch down and for the same reason.
+                // `leaveShadowScope(closure)` pops `typeScopes[closure.id]` unconditionally, before its
+                // own `guard`, so this is given back when the closure closes.
+                //
+                // Two silent under-reports, BOTH measured against the published `819fac6` (i.e. NOT
+                // introduced by R96/R97/R98 — pre-existing, and found only because the audit for the
+                // R124 closure-annotation regression was widened past the site it was handed):
+                //   - the ANNOTATED arm: `take { (s: Quiet) in _ = s }; s.act()` — ABSENT, rename
+                //     control `z` charged `Fs`.
+                //   - the ELEMENT arm: `let qs: [Quiet] = []; qs.forEach { s in _ = s }; s.act()` —
+                //     ABSENT, rename control `z` charged `Fs`.
+                // and the `clearBindingTypeOnly` arm's own comment ("outside the save, lossy-but-safe")
+                // was true and is now unnecessary: a clear that is given back is not lossy either.
+                // Ground truth EXECUTED — every arm really deletes its probe file.
+                typeScopes[closure.id, default: []].append((p.name, snapshotType(p.name)))
                 if let annotated = p.annotated {
                     vars[p.name] = annotated                 // explicit `{ (x: Foo) in }` — precise
                 } else if (i == 0 || pairIterator), let elem = iteratorElem, closure == elemClosure {
@@ -2790,6 +2826,17 @@ final class CallCollector: SyntaxVisitor {
                 // The clear is SCOPED, not permanent: `protoTyped` and `opaqueElem` are in `ShadowSave`
                 // and the enclosing `SwitchCaseSyntax`/`IfExprSyntax` gives them back, so the genuine
                 // parameter's dispatch below the case is untouched (asserted, not argued).
+                //
+                // R124 — AND THAT PARAGRAPH IS THE WHOLE PROBLEM: it enumerates `ShadowSave`'s members and
+                // `vars` IS NOT ONE OF THEM, so the `vars` write on the next line was NOT scoped and the
+                // payload's type outlived the case. `func f(_ s: Shouty, _ b: Box) { switch b { case
+                // .quiet(let s): _ = s }; s.act() }` — ABSENT, against a rename control `z` that charges
+                // `Fs`, with the deletion EXECUTED. Pre-existing at the published `819fac6`.
+                // `scopeBindingType` finds the enclosing `SwitchCaseSyntax` / `IfExprSyntax` / (for
+                // `guard case`) the enclosing `CodeBlockSyntax`, which is the binding's real Swift scope
+                // in each of the three grammars. It is taken BEFORE `clearBinding` so the snapshot is
+                // the outer binding, not the cleared one.
+                scopeBindingType(Syntax(node), name)
                 clearBinding(name)
                 if let singleAssoc { vars[name] = singleAssoc }
                 casePayloadLocals.insert(name)
@@ -2798,6 +2845,17 @@ final class CallCollector: SyntaxVisitor {
                 // `case let .active(c)` — claimed for the EXISTENCE claim only. `clearBinding` is
                 // exactly what `visit(IdentifierPatternSyntax)` did with it before, so the sole
                 // difference this branch makes is the `casePayloadLocals` entry.
+                //
+                // R124 — SCOPED for the same reason as the typed branch above, but in the other
+                // direction: this arm CLEARS, and an unrestored clear loses the enclosing binding's type
+                // for the rest of the body rather than fabricating one. That is the safe direction and
+                // still a loss, and it is the direction item 0 of the vein's standing bar forbids
+                // trading a fabrication for. Written as the SIBLING of the branch above (§A.2) rather
+                // than from a fixture — and then measured, because a fix no test can distinguish from
+                // its absence reads as coverage: `func f(_ fm: FileManager, _ b: Box) { switch b {
+                // case let .inert(fm): _ = fm }; fm.removeItem(…) }` was ABSENT over a real deletion,
+                // rename control `zz` charged `Fs`, and the revert test reds `caseLetOutside`.
+                scopeBindingType(Syntax(node), ip.identifier.text)
                 clearBinding(ip.identifier.text)
                 casePayloadLocals.insert(ip.identifier.text)
                 markBinders(PatternSyntax(ip))
@@ -3466,6 +3524,21 @@ final class CallCollector: SyntaxVisitor {
         // wrong, and it is marked for exactly that reason.
         if let name = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text,
            let initVal = node.initializer?.value {
+            // R124 — THE TYPE IS SCOPED TOO, and the comment on the next line is exactly why it was not:
+            // it says the `if`/`while`/enclosing block "restores it", which is true of the five FLAG maps
+            // `shadowName` drops and false of `vars`, which is not in `ShadowSave`. So
+            // `func f(_ s: Shouty, _ o: Quiet?) { if let s = o { _ = s }; s.act() }` typed the PARAMETER
+            // as `Quiet` for the rest of the body and went ABSENT over a real file deletion, against a
+            // rename control `z` that charges `Fs`. Pre-existing at the published `819fac6`; found by
+            // widening the R124 audit past the two sites it was handed (§9).
+            //
+            // `scopeBindingType` picks the binding's REAL Swift scope in each grammar without enumerating
+            // them: `if let` → the `IfExprSyntax`, `while let` → the `WhileStmtSyntax`, and `guard let` →
+            // the enclosing `CodeBlockSyntax`, because a `GuardStmtSyntax` is not a shadow scope and its
+            // `else` block is a CHILD of the condition's parent rather than an ancestor of it — which is
+            // the correct answer, a `guard let` binding running to the end of the enclosing block.
+            // Taken BEFORE `shadowName`/`rebindTyped` so the snapshot is the outer binding.
+            scopeBindingType(Syntax(node), name)
             shadowName(name)  // a rebind, typed or not — the `if`/`while` (or the enclosing block, for
                               // `guard let`, whose binding runs to the end of that block) restores it
             // …and the TYPE indexes with them. Every branch below either types the name or clears it,
@@ -4566,6 +4639,23 @@ final class CallCollector: SyntaxVisitor {
         // Guarding the write would have left a STALE type, which is the fabrication direction. Walking
         // the initializer first is the general answer, and the same one `visit(ForStmtSyntax)` takes:
         // the initializer is evaluated before the name exists, so it is walked before the name moves.
+        //
+        // R124 — THE ATTRIBUTES GO WITH THEM, AND THEY WERE DROPPED ENTIRELY. This visitor returns
+        // `.skipChildren` and hand-enumerates what to walk; the enumeration at the bottom lists
+        // `pattern`/`typeAnnotation`/`accessorBlock` and this line lists the initializer, which is FOUR
+        // of `VariableDeclSyntax`'s children. The fifth is `attributes`, and a property-wrapper
+        // attribute takes ARGUMENTS that are ordinary expressions evaluated where the declaration is:
+        // `@Tagged(effTag()) var n: Int = 1` never reached `effTag`, so the enclosing function was
+        // ABSENT from the report over a real file deletion — silent, with `deny Fs`, `deny Unknown` and
+        // `pure` all exit 0 on it. The old `.visitChildren` walked attributes; the rewrite to
+        // `.skipChildren` lost them and nothing said so. Measured against the published `819fac6`,
+        // control = the identical call in INITIALIZER position, deletion EXECUTED.
+        //
+        // Walked HERE, with the initializers, and for the same reason: an attribute argument is
+        // evaluated in the scope the declaration sits in, where the name being bound does not yet exist.
+        // (`modifiers` — `static`, `lazy`, `private(set)` — is the only remaining unwalked child and is
+        // tokens all the way down; `bindingSpecifier` and the binding's `trailingComma` likewise.)
+        walk(node.attributes)
         for binding in node.bindings { if let v = binding.initializer?.value { walk(v) } }
         for binding in node.bindings {
             // `let (a, b) = (X(), Y())` — destructure: bind each name from the initializer tuple element
@@ -4578,6 +4668,7 @@ final class CallCollector: SyntaxVisitor {
                 // WHOLE tuple initializer rather than the matching element — conservative in the safe
                 // direction, and it covers the arities the zip below does not reach.
                 for n in Self.patternNames(PatternSyntax(tp)) {
+                    scopeBindingType(Syntax(node), n)   // R124 — see the identifier form below
                     shadowName(n); rebindTyped(n, through: binding.initializer?.value)
                 }
                 markBinders(PatternSyntax(tp))
@@ -4610,6 +4701,22 @@ final class CallCollector: SyntaxVisitor {
             guard let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
             markBinders(binding.pattern)
             boundLocals.insert(name)  // record the SHADOW (any local, even a literal-typed one `vars` drops)
+            // R124 — A DECLARATION'S TYPE DOES NOT OUTLIVE ITS BLOCK EITHER, and this is the last of the
+            // six `vars`-write sites the audit found unscoped. The file's standing position is that
+            // "`vars` is deliberately function-wide … a stale TYPE is dangerous inward and harmless
+            // outward" — and the OUTWARD half of that is false whenever the declaration SHADOWS
+            // something, which is the only situation in which the name is still readable after the
+            // block at all. `func f(_ s: Shouty, _ c: Bool) { if c { let s = Quiet(); _ = s }; s.act() }`
+            // read ABSENT over a real file deletion, against a rename control `z` that charges `Fs`.
+            // Pre-existing at the published `819fac6`.
+            //
+            // The restore cannot LOSE a genuine type: Swift's own scope for this binding ends where
+            // `leaveShadowScope` fires, so nothing that could legally read the name runs after it.
+            // Top-level code is unaffected — `SourceFileSyntax.statements` is a `CodeBlockItemList`, not
+            // a `CodeBlockSyntax`, so there is no open scope to register against and this is a no-op
+            // there. Nested saves of one name unwind outermost-last (`leaveShadowScope` replays in
+            // reverse), so a redeclaration inside a redeclaration still lands on the original.
+            scopeBindingType(Syntax(node), name)
             // THE SAME ORDERING CARVE-OUT `protoTyped` needs below, for the same reason and with a
             // fixture of its own: `shadowName` runs before the initializer is walked, so a
             // SELF-REFERENTIAL rebind (`let g = g`, `let g = g()`) would drop the alias the initializer
