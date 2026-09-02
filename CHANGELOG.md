@@ -9,6 +9,43 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ R125 — a higher-order function lost its OWN `callback:` disclosure as soon as anything called it
+
+A function whose fn-typed parameter is invoked (`func hof(_ body: (Int) -> Void) { body(1) }`) discloses
+`Unknown` / `callback:body` — unless something in the scan calls it. Then the ⟨0.34⟩ per-caller callback
+flow wrote the `Unknown` to each caller and never to the callee, so the callee dropped out of the report
+and `deny Unknown <that function>` exited **0** over a value it provably cannot address. Two byte-identical
+methods, one called and one not, answered differently; the fixture was built and RUN, and the closure the
+called one receives really does delete a file.
+
+Present in the published 0.34.0 artifacts (introduced by the ⟨0.34⟩ per-caller fix, not by anything since).
+Across five real packages the callee now keeps its own disclosure on **93 functions** that previously
+certified clean — `Mutex.withLockUnchecked`, `Deque._Storage.update`, `_HTable.find_Large(tester:)`,
+`NIOAsyncTestingEventLoop.executeInContext`, `sockaddr_storage.withMutableSockAddr` and the rest of the
+`with*` family, plus `_BTree.forEach` in swift-collections.
+
+The callee's copy is added **only when not one caller resolved the deferral**, so every caller already
+carries the identical `Unknown` and nothing propagates anywhere new: A/B over 7,876 common rows is
+ADDED 59 / **REMOVED 0** / CHANGED 274 on every field, and every moved row is one of the 406 functions the
+changed branch fired on. ⟨0.34⟩'s precision is untouched — a HOF whose callers all pass named functions
+still carries nothing of its own, and no caller inherits another caller's target.
+
+**Known residual, pinned by a test rather than left to drift:** when one caller resolves and another does
+not, the callee is still left silent. Marking it would push `Unknown` into the caller that resolved
+precisely, which is the fabrication ⟨0.34⟩ removed; closing it needs a per-caller node. That arm occurred
+**zero times** in the five corpora (406 branch hits, 0 mixed).
+
+### R126 — RETRACTED: there is no nested-func/closure/property-receiver conjunction
+
+A reported loss of the `callback:` disclosure "inside a closure inside a nested `func` whose receiver is an
+instance property" was an artefact of R125 above. The four arms it rested on differed in two variables:
+only the property-receiver arm was ever *called*, and having a caller was the entire effect. A 20-arm
+sweep holding "has a caller" constant — instance `let`/`var`, `static`, computed, subscript, tuple element,
+local copy, nested-func parameter, nested-type property, literal receivers; direct, one closure, two
+closures, nested func, nested func in a closure, closure in two nested funcs, `defer`, a stored local
+closure, and a by-reference pass to a sync invoker — is ABSENT for **all twenty** before the R125 fix and
+discloses `Unknown` / `callback:body` for **all twenty** after it. No position-specific hole exists.
+
 ### ⚠ R124 — `vars` is not in `ShadowSave`, so every raw `vars[…] =` in a scoped visitor leaked
 
 `leaveShadowScope` gives back seven name-keyed FLAG maps. The TYPE indexes come back through a
