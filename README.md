@@ -1,7 +1,7 @@
 # candor-swift
 
 **The Swift implementation of [candor-spec](https://github.com/tombaldwin/candor-spec) 0.35** — per-function
-side effects (Net/Fs/Db/Exec/Env/Clock/Ipc/Log/Rand/Clipboard), transitively across the call graph, with
+side effects (Net/Llm/Fs/Db/Exec/Env/Clock/Ipc/Log/Rand/Clipboard), transitively across the call graph, with
 the §6.2 policy gate. One of the candor family's four code engines (JVM · Rust · TypeScript · Swift —
 [candor-java](https://github.com/tombaldwin/candor-java) is the reference engine — plus
 [candor-agents](https://github.com/tombaldwin/candor-agents) for agent fleets), written
