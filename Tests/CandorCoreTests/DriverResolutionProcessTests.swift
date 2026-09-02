@@ -288,10 +288,19 @@ final class DriverResolutionProcessTests: XCTestCase {
         func passesClosure() { runner { _ = FileManager.default.contents(atPath: "/z") } }
         """)
         // a CLOSURE arg stays opaque for the deferral: the §4 Unknown stands even though the closure
-        // body is charged to the passer lexically — but it now attributes to the CALLER (`passesClosure`),
-        // never to the shared `runner` node.
-        XCTAssertNil(by["runner"],
-                     "runner carries no effect of its own — the Unknown belongs to its caller, got \(by["runner"] ?? [:])")
+        // body is charged to the passer lexically. It attributes to the CALLER (`passesClosure`) —
+        // AND, since R125, to `runner` itself as well.
+        //
+        // THIS ASSERTION WAS INVERTED UNTIL R125, and the old wording ("runner carries no effect of its
+        // own — the Unknown belongs to its caller") is the reason the hole survived a release: `runner`
+        // invokes a value it cannot address on every execution, so `deny Unknown runner` exited 0 over it.
+        // The Unknown belongs to the caller AND to `runner`; those are not alternatives. Costs nothing
+        // here because the caller already carries the identical Unknown (see the R125 note in Driver.swift).
+        XCTAssertEqual(ProcessHarness.inferred(by, "runner"), ["Unknown"],
+                       "the HOF whose every caller passed an unresolvable closure must carry its OWN "
+                       + "Unknown — a scoped `deny Unknown runner` reads this row and nothing else")
+        XCTAssertEqual(by["runner"]?["unknownWhy"] as? [String], ["callback:job"],
+                       "and it names the param it cannot address")
         // the passer carries the closure body's Fs (lexical charge) AND its own callback-flow Unknown.
         XCTAssertEqual(ProcessHarness.inferred(by, "passesClosure"), ["Fs", "Unknown"],
                        "the closure body charges the passer; the deferred callback's Unknown attributes here too")
@@ -306,6 +315,173 @@ final class DriverResolutionProcessTests: XCTestCase {
         """)
         XCTAssertEqual(ProcessHarness.inferred(by, "runner"), ["Unknown"],
                        "no visible call site — the fn-typed invocation must stay Unknown")
+    }
+
+    // ── R125: a HOF's OWN row when every caller leaves the deferral unresolved ─────────────────────
+    // The source below is VERBATIM the fixture that was `swift build`-ed and RUN (§E3): it creates the
+    // probe file, calls `passer`, and prints `probe still exists after passer() == false` — the closure
+    // handed to `hofWithCaller` really does delete a file, through a value `hofWithCaller` cannot address.
+    //
+    // `hofWithCaller` and `hofNoCaller` have BYTE-IDENTICAL bodies. The only variable is whether anything
+    // in the scan calls them. On the PUBLISHED 0.34.0 binary (`819fac6`) and every commit of the unpushed
+    // wave, `hofNoCaller` read `Unknown`/`callback:body` and `hofWithCaller` was ABSENT FROM THE REPORT —
+    // so `deny Unknown Store.hofWithCaller` exited 0 while `deny Unknown Store.hofNoCaller` exited 1.
+    // Introduced by `7a89dbc` (⟨0.34⟩ per-caller callback flow), not by the wave.
+    private static let r125Fixture = """
+    import Foundation
+
+    let probe = NSTemporaryDirectory() + "r125probe.txt"
+
+    struct Store {
+        let items: [Int] = [1]
+        // A HOF that invokes an OPAQUE, caller-supplied callback. It HAS a visible caller below.
+        func hofWithCaller(_ body: (Int) throws -> Void) rethrows {
+            try body(items[0])
+        }
+        // Byte-identical body. The ONLY difference: nothing in this scan calls it.
+        func hofNoCaller(_ body: (Int) throws -> Void) rethrows {
+            try body(items[0])
+        }
+    }
+
+    func passer() {
+        try? Store().hofWithCaller { _ in try? FileManager.default.removeItem(atPath: probe) }
+    }
+
+    FileManager.default.createFile(atPath: probe, contents: Data("x".utf8))
+    passer()
+    print("probe still exists after passer() == \\(FileManager.default.fileExists(atPath: probe))")
+    """
+
+    func testHOFWhoseOnlyCallerPassedAClosureKeepsItsOwnUnknown() throws {
+        let by = try scan(DriverResolutionProcessTests.r125Fixture)
+        XCTAssertEqual(ProcessHarness.inferred(by, "Store.hofWithCaller"), ["Unknown"],
+                       "having a caller must not DELETE the callee's own disclosure — it invokes an "
+                       + "unaddressable value whether or not anything in this scan happens to call it")
+        XCTAssertEqual(by["Store.hofWithCaller"]?["unknownWhy"] as? [String], ["callback:body"],
+                       "and the reason names the param, exactly as the caller-less twin's does")
+        // THE CONTROL, unchanged by the fix and unchanged since 819fac6: the twin with no caller.
+        XCTAssertEqual(ProcessHarness.inferred(by, "Store.hofNoCaller"), ["Unknown"],
+                       "the caller-less twin was always correct — it is the arm that made the loss visible")
+        // THE OVER-CHARGE CONTROL: the passer's own row must not move. It carried the closure body's Fs
+        // (lexical) and its own callback-flow Unknown before the fix and must carry exactly those after —
+        // this is the assertion that would catch the fix leaking a second Unknown up the call graph.
+        XCTAssertEqual(ProcessHarness.inferred(by, "passer"), ["Fs", "Unknown"],
+                       "the passer is unchanged: the callee's copy of the Unknown reaches no caller that "
+                       + "did not already have it")
+    }
+
+    /// Scan `src` under a one-line policy and return the process exit code (0 clean / 1 violation /
+    /// 2 could-not-evaluate). Runs the SCAN+`--policy` form, which is the form a repo gates with;
+    /// `gate --report` over a report scanned WITHOUT a policy fails closed for an unrelated reason
+    /// (the manifest was never read) and so cannot discriminate this defect.
+    private func policyExit(_ src: String, _ rule: String) throws -> Int32 {
+        let bin = try ProcessHarness.binaryURL(for: DriverResolutionProcessTests.self)
+        let root = try ProcessHarness.makePackage(src)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pol = root.appendingPathComponent("p.policy")
+        try (rule + "\n").write(to: pol, atomically: true, encoding: .utf8)
+        let out = root.appendingPathComponent("out")
+        let r = try ProcessHarness.run(bin, [root.path, "--policy", pol.path, "--out", out.path])
+        return r.code
+    }
+
+    func testScopedDenyUnknownAtTheHOFItselfFires() throws {
+        let src = DriverResolutionProcessTests.r125Fixture
+        // THE DEFECT, at the exit code a repo actually gates on. 0 before the fix, 1 after.
+        XCTAssertEqual(try policyExit(src, "deny Unknown Store.hofWithCaller"), 1,
+                       "a scoped `deny Unknown` on the HOF must fire — it exited 0 on the published binary")
+        // The discriminating control: the byte-identical twin, which always fired.
+        XCTAssertEqual(try policyExit(src, "deny Unknown Store.hofNoCaller"), 1,
+                       "the caller-less twin fired before and after — it is what proves the rule form works")
+        // The OVER-CHARGE control, and it is the one that says what the fix does NOT claim: the Fs is
+        // the passer's closure, not the HOF's, and `deny Fs` scoped at the HOF must still exit 0.
+        XCTAssertEqual(try policyExit(src, "deny Fs Store.hofWithCaller"), 0,
+                       "the fix adds the honest Unknown, NOT the caller's concrete effect — fabricating "
+                       + "Fs onto the HOF is the mirror sin and must not happen")
+    }
+
+    // R126 — the ENUMERATION, not the instance. The row that prompted this claimed the loss needed a
+    // conjunction of "nested func + closure + instance-property receiver", inferred from four arms. It
+    // did not: those four arms differed in TWO variables, because only the property-receiver arm was ever
+    // CALLED, and having a caller is the whole effect (R125 above). Held constant here: every arm below is
+    // called exactly once by `driver`, so the receiver kind and the nesting are the only variables left.
+    //
+    // The full 20-arm sweep — instance `let`/`var`, `static`, computed, subscript, tuple element, local
+    // copy, nested-func parameter, nested-type property, literal; direct / one closure / two closures /
+    // nested func / nested func in a closure / closure in two nested funcs / `defer` / a stored local
+    // closure / a by-reference pass to a sync invoker — was built as an SPM package and RUN (§E3: it
+    // prints `arms whose callback did NOT run: none`, so every arm's callback really executes and really
+    // deletes its own probe file). ALL TWENTY were ABSENT at the published `819fac6` and at `4f12099`,
+    // and all twenty read `Unknown`/`callback:body` after the fix. There is no position-specific hole.
+    // Six representatives are pinned here, one per distinct formation site in CallCollector (a direct
+    // fn-typed invocation, a by-reference pass to a SYNC_CALLBACK_INVOKER, and an opaque local fn value).
+    func testTheCallbackDisclosureSurvivesEveryNestingAndReceiverKind() throws {
+        let by = try scan("""
+        import Foundation
+        struct Store {
+            let items: [Int] = [1]
+            var computed: [Int] { [1] }
+            func direct(_ body: (Int) throws -> Void) rethrows { try body(1) }
+            func viaClosureOverProperty(_ body: (Int) throws -> Void) rethrows {
+                try items.forEach { i in try body(i) }
+            }
+            func viaNestedFuncAndClosure(_ body: (Int) throws -> Void) rethrows {
+                func loop(_ xs: [Int]) throws { try xs.forEach { i in try body(i) } }
+                try loop(items)
+            }
+            func viaComputedReceiver(_ body: (Int) throws -> Void) rethrows {
+                try computed.forEach { i in try body(i) }
+            }
+            func viaByReferencePass(_ body: (Int) throws -> Void) rethrows { try items.forEach(body) }
+            func viaStoredLocalClosure(_ body: @escaping (Int) throws -> Void) {
+                let c = { (i: Int) in try? body(i) }; c(1)
+            }
+        }
+        func driver(_ s: Store) {
+            try? s.direct { _ in }
+            try? s.viaClosureOverProperty { _ in }
+            try? s.viaNestedFuncAndClosure { _ in }
+            try? s.viaComputedReceiver { _ in }
+            try? s.viaByReferencePass { _ in }
+            s.viaStoredLocalClosure { _ in }
+        }
+        """)
+        for arm in ["direct", "viaClosureOverProperty", "viaNestedFuncAndClosure",
+                    "viaComputedReceiver", "viaByReferencePass", "viaStoredLocalClosure"] {
+            XCTAssertEqual(ProcessHarness.inferred(by, "Store.\(arm)"), ["Unknown"],
+                           "Store.\(arm) invokes an unaddressable value and must say so — every one of "
+                           + "these was ABSENT on the published 0.34.0 binary purely because `driver` calls it")
+            XCTAssertEqual(by["Store.\(arm)"]?["unknownWhy"] as? [String], ["callback:body"],
+                           "Store.\(arm) must name the param it cannot address")
+        }
+    }
+
+    // KNOWN RESIDUAL, PINNED SO IT CANNOT DRIFT SILENTLY. When SOME caller resolves the deferral and
+    // another does not, `fq` is STILL left silent: `callerA` passes a named fn (resolved) and `Box.callerB`
+    // passes an unresolvable one, and `Box.hof` carries nothing of its own. Marking it would propagate
+    // `Unknown` over the ordinary call edge into `callerA`, which resolved precisely — undoing the
+    // ⟨0.34⟩ per-caller precision this file's `testTwoCallersOfOneHOFResolveIndependently` guards.
+    // Closing it needs a per-caller node, not a flag. Asserted in its CURRENT (wrong) shape deliberately:
+    // if someone closes it, this test goes red and the reader is sent here rather than to a silent diff.
+    func testMixedResolutionLeavesTheHOFsOwnRowSilent() throws {
+        let by = try scan("""
+        import Foundation
+        func sinkA() { _ = FileManager.default.contents(atPath: "/a") }
+        struct Box {
+            func hof(_ cb: () -> Void) { cb() }
+            func callerB() { hof { } }
+        }
+        func callerA(_ box: Box) { box.hof(sinkA) }
+        """)
+        XCTAssertEqual(ProcessHarness.inferred(by, "callerA"), ["Fs"],
+                       "the resolved caller keeps its precise answer and gains no Unknown")
+        XCTAssertEqual(ProcessHarness.inferred(by, "Box.callerB"), ["Unknown"],
+                       "the unresolved caller carries the disclosure")
+        XCTAssertNil(by["Box.hof"],
+                     "RESIDUAL: one resolved caller is enough to leave the HOF's own row silent, so "
+                     + "`deny Unknown Box.hof` still exits 0 here. Not fixed; see the R125 note in "
+                     + "Driver.swift. Got \(by["Box.hof"] ?? [:])")
     }
 
     // ── INHERITED PROPERTY ACCESSORS (soundness round 2026-07-10, R22) ─────────────────────────────

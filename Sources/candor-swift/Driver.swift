@@ -2299,6 +2299,24 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             for n in info.names { whyMap[fq, default: []].insert("callback:\(n)") }
             continue
         }
+        // R125 — `fq`'s OWN row is honest only if SOME caller discharged the deferral. `byCaller.isEmpty`
+        // above is not the only way `fq` ends up carrying nothing: when every caller is judged UNRESOLVED
+        // the Unknown was written to each caller and never to `fq`, so `fq` — a function that provably
+        // invokes an unaddressable value — dropped out of the report and `pure <fq>` / `deny Unknown <fq>`
+        // exited 0 on it. Measured on the PUBLISHED 0.34.0 binary and introduced by `7a89dbc`, not by the
+        // unpushed wave; `_BTree.forEach` in swift-collections is the real-code instance.
+        // WHY THIS COSTS NO PRECISION, which is the whole reason it can be done here: it fires only when
+        // NOT ONE caller resolved, so every caller of `fq` has ALREADY had the identical `Unknown` +
+        // `callback:<n>` written to it three lines below. Propagating `fq`'s copy over the call edges can
+        // therefore reach no caller that did not already have it — the A/B in the commit message is the
+        // measurement, not this sentence.
+        // KNOWN RESIDUAL, MEASURED AND DELIBERATE — see `testMixedResolutionLeavesTheHOFsOwnRowSilent`:
+        // when SOME caller resolves and another does not, `fq` is still left silent, because marking it
+        // would propagate `Unknown` into the caller that resolved precisely (⟨0.34⟩'s own fabrication
+        // control, `testTwoCallersOfOneHOFResolveIndependently`). The engine's graph has one node per
+        // function and cannot hold a per-caller specialisation, so that arm needs a node split, not a
+        // flag. It is pinned rather than left to drift.
+        var anyCallerResolved = false
         for (caller, argLists) in byCaller {
             var resolved = !argLists.isEmpty
             var namedTargets: Set<String> = []
@@ -2323,10 +2341,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // effects still apply to `caller` via the pre-existing caller->fq call edge; this adds
                 // only the precisely-resolved callback effect, scoped to the one caller that chose it.
                 edges[caller, default: []].formUnion(namedTargets)
+                anyCallerResolved = true
             } else {
                 direct[caller, default: []].insert("Unknown")
                 for n in info.names { whyMap[caller, default: []].insert("callback:\(n)") }
             }
+        }
+        if !anyCallerResolved {
+            direct[fq, default: []].insert("Unknown")
+            for n in info.names { whyMap[fq, default: []].insert("callback:\(n)") }
         }
     }
 
