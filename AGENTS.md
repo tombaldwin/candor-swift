@@ -106,6 +106,8 @@ ARRAY of entries keyed `fn` (`Type.method` for members, bare `name` for free fun
 imports; the field name stays `calls` per the spec), OMITTED entirely when nothing is uncovered
 (a fully-covered report is byte-identical to a pre-⟨0.15⟩ one). Consume it before trusting an
 "all clear": those modules' effects are absent from the report, NOT claimed pure.
+Effects: `Net`, `Llm` (a call to a model provider — refines `Net`), `Fs`, `Db`, `Exec`, `Env`,
+`Clock`, `Ipc`, `Log`, `Rand`, `Clipboard`.
 Only effectful-or-unresolved functions appear; a
 function in the SIDECAR but absent from the report is pure **as far as this engine resolved** —
 candor-swift claims §4 (below), but read `unresolved` before trusting any specific entry. **A MULTI-TARGET PACKAGE: SCAN ONCE PER SHIPPED BINARY.** `candor-swift <dir>` reads every `.swift`
