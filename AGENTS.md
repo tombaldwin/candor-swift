@@ -2,7 +2,8 @@
 # Using candor-swift (instructions for an AI coding agent)
 
 You are working in a Swift package. **candor-swift** tells you, for every function, which side
-effects it can reach — network, filesystem, database, subprocess, env, clock — *including effects
+effects it can reach — network, calls to LLM/model providers (`Llm`, refines network), filesystem,
+database, subprocess, env, clock — *including effects
 inherited transitively through any chain of calls across files*. The language-agnostic consumption
 contract is [candor-spec/AGENTS.md](https://github.com/tombaldwin/candor-spec/blob/main/AGENTS.md);
 this file is the Swift-specific surface.
