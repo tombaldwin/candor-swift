@@ -1840,7 +1840,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // a same-named sibling under a different parent).
                     edges[f.qual, default: []].insert("\(ep).\(call.leaf)")
                     resolved = true
-                } else if !call.argRef, NATIVE_DISCLOSURE_C_FREE_FNS.contains(call.path) {
+                } else if !call.argRef, !call.argLabelled,
+                          NATIVE_DISCLOSURE_C_FREE_FNS.contains(call.path) {
                     // R61 — every arm above tried and failed to resolve `call.path` against something THIS
                     // scan can see (a project free fn, a local ctor, a sibling). `system("rm -rf /")` and
                     // `unlink(path)` under `import Darwin` ended here, unresolved, and this branch used to
@@ -1848,15 +1849,29 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // `NATIVE_DISCLOSURE_C_FREE_FNS` is an ALLOWLIST, not a denylist — see its doc comment
                     // for why: gating on "unresolved AND the file imports a C module", with NO name
                     // restriction, MEASURED 1519 false hits on swift-nio alone (`os`/`canImport` `#if`
-                    // predicates, `assert`/`fatalError`, bare operators — none of them FFI). The C-module-
-                    // import check is still required (it is what makes a hit on one of these SPECIFIC names
-                    // trustworthy rather than a same-named project function this per-file pass just
-                    // couldn't see) but is no longer sufficient alone.
-                    let file = String(f.loc.prefix { $0 != ":" })
-                    if (fileImports[file] ?? []).contains(where: { C_PLATFORM_MODULES.contains($0) }) {
-                        direct[f.qual, default: []].insert("Unknown")
-                        whyMap[f.qual, default: []].insert("native:\(call.path)")
-                    }
+                    // predicates, `assert`/`fatalError`, bare operators — none of them FFI).
+                    //
+                    // R130 — AND THE C-MODULE-IMPORT CHECK IS GONE. It read as the half that made a hit
+                    // trustworthy; what it actually did was make the whole allowlist a SILENT UNDER-REPORT
+                    // on the commonest spelling. Foundation re-exports Darwin on Apple platforms, so
+                    // `import Foundation` + `symlink(a, b)` compiles, RUNS, creates a real symlink on disk
+                    // — and reported `functions: 0` with all five policy forms exit 0, against an
+                    // `import Darwin` arm identical in every other byte that reported `Unknown` +
+                    // `native:symlink`. The gate was an allowlist of MODULES sitting in front of an
+                    // allowlist of NAMES, and only the names were ever load-bearing: see
+                    // `C_PLATFORM_MODULES` for the A/B and for the two real-corpus shapes (swift-nio's
+                    // `dlopen`/`dlsym` under `import Atomics`/`NIOCore`, swift-tools-support-core's
+                    // `unlink` under selective `import class Foundation.FileHandle`) that no module list
+                    // could have covered.
+                    //
+                    // `!call.argLabelled` is the one narrowing that replaced it, and it is a fact about
+                    // Swift rather than a guess about intent: a C function imported into Swift has NO
+                    // argument labels, so `remove(at: index)` cannot bind to libc's `remove`. Measured: it
+                    // removes 2 of the 3 false hits gate-removal costs across 13 real packages. The third
+                    // — `remove(element)` on an `OptionSet` — is syntactically identical to a libc
+                    // `remove(path)` and stays disclosed, in the fail-closed direction.
+                    direct[f.qual, default: []].insert("Unknown")
+                    whyMap[f.qual, default: []].insert("native:\(call.path)")
                 }
             }
             // otherwise: unresolvable bare member (unresolved receiver) — stays out (under-report, never a

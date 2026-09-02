@@ -1321,7 +1321,16 @@ public func isEstablishingFree(effect: String, name: String) -> Bool {
     case "Net":  return isNetEstablishingFree(name: name)
     case "Fs":   return name == "FileHandle" || name == "fopen"                       // path arg
         || name == "File" || name == "Folder"                                        // Files: path arg
-    case "Exec": return name == "posix_spawn" || name == "execv" || name == "execvp"  // path arg (Process() ctor
+    // R130 — the establishing set must list EVERY spelling `kappaFree` charges Exec, or a masked
+    // (runtime-built) command through the newly-charged spellings evades an `allow Exec` allowlist while
+    // `posix_spawn`'s does not: the gate-masking hole this function exists to close, reopened by adding
+    // a spelling to one table and not the other. `fexecve` is left OUT under the same rule this function
+    // already applies to `Process()`: its argument is an already-open fd, so the command was fixed
+    // somewhere else and a missing literal HERE is the legitimate split-construct/use shape rather than
+    // masking. Untested, and stated as the rule being applied rather than as a guarantee — no fixture
+    // here would fail if the ruling were wrong, only if the mechanism were.
+    case "Exec": return name == "posix_spawn" || name == "posix_spawnp"
+        || name == "execv" || name == "execvp" || name == "execve" || name == "execvP"  // path arg (Process() ctor
         // takes NO command — set via .executableURL/.arguments — so the ctor is not establishing)
         || name == "shellOut"   // ShellOut's `shellOut(to:)` takes the command as its arg → establishing;
         // a MASKED (runtime) command must mark Exec incomplete (fail-closed) like posix_spawn, else
@@ -1548,7 +1557,11 @@ public func kappaFree(name: String, argCount: Int) -> String? {
          "gethostbyname_r", "gethostbyaddr_r", "getaddrinfo_a": return "Net"
     case "NSXPCConnection": return "Ipc"
     case "os_log": return "Log"
-    case "posix_spawn", "execv", "execvp": return "Exec"
+    // R130 — `execve` and `posix_spawnp` were absent from BOTH this table and the `native:` disclosure
+    // list, so they read SILENT-PURE under every import while their siblings one letter over were
+    // charged. `execve` is the syscall the other `exec*` spellings are libc wrappers AROUND, and
+    // `posix_spawnp` differs from `posix_spawn` only in PATH lookup. Same distinctive-name footing.
+    case "posix_spawn", "posix_spawnp", "execv", "execvp", "execve", "execvP", "fexecve": return "Exec"
     case "fopen": return "Fs"
     // POSIX SOCKET WIRE verbs → Net, GATED ON THE EXACT ARITY of the C signature (and still shadow-guarded
     // by the call site's localFreeFns, so a project's own same-named fn never fabricates). This closes a
@@ -1584,8 +1597,22 @@ public func kappaFree(name: String, argCount: Int) -> String? {
 /// R61 — Swift's umbrella modules for the platform C standard library headers. `import Darwin` (Apple
 /// platforms) / `import Glibc` (Linux) / `import Musl` (the musl-libc targets) / `import WinSDK` (Windows)
 /// bring the WHOLE C surface into scope with no per-symbol declaration in the Swift source at all.
-/// Consumed together with `NATIVE_DISCLOSURE_C_FREE_FNS` below — see that constant for why this alone is
-/// NOT a safe gate.
+///
+/// **R130 — THIS SET IS NO LONGER A GATE ON THE `native:` DISCLOSURE, AND MUST NOT BECOME ONE AGAIN.**
+/// It was, and the gate was a silent under-report over the whole of `NATIVE_DISCLOSURE_C_FREE_FNS`:
+/// these are not the only imports that put the C surface in scope, they are only the ones that say so.
+/// Foundation re-exports Darwin on Apple platforms — and, checked under `swift:6.1` in Docker rather than
+/// assumed, swift-corelibs-foundation re-exports Glibc on Linux — so `import Foundation` alone compiles and RUNS
+/// `symlink("a","b")` — measured with one variable held against `import Darwin`, a real symlink created
+/// on disk in both arms, and the Foundation arm reported `functions: 0` with all five policy forms
+/// exit 0 where the Darwin arm reported `Unknown` + `native:symlink`. The same held for every name on
+/// that list. Two more shapes on REAL code: swift-nio's `dlsym(dlopen(nil, RTLD_NOW), …)` sits in a file
+/// importing only `Atomics`/`NIOCore`, and swift-tools-support-core's `unlink(tempFile.path.pathString)`
+/// in a file importing `TSCLibc` plus SELECTIVE `import class Foundation.FileHandle` declarations.
+/// A module allowlist cannot see any of that; the NAME allowlist is what carries the trust. See
+/// `NATIVE_DISCLOSURE_C_FREE_FNS` for what replaced it.
+///
+/// Still read by the ordinary blind/coverage-ledger machinery, which is what it is for.
 public let C_PLATFORM_MODULES: Set<String> = ["Darwin", "Glibc", "Musl", "WinSDK"]
 
 /// R61 — the SPECIFIC free-function names the Driver discloses as `native:<name>` when a call to one is
@@ -1608,17 +1635,89 @@ public let C_PLATFORM_MODULES: Set<String> = ["Darwin", "Glibc", "Musl", "WinSDK
 /// about and has deliberately withheld from `kappaFree`'s CONCRETE classification for being collision-
 /// prone bare words (`system`/`unlink`/`mkdir`/`rename`/`fork` — see the comment on `kappaFree`'s `default`
 /// case) or that mint an opaque callable via dynamic symbol resolution (`dlopen`/`dlsym`), and disclose
-/// `Unknown` for exactly those, in exactly the module-gated unresolved position. An admittedly-incomplete
+/// `Unknown` for exactly those, in the unresolved position. An admittedly-incomplete
 /// allowlist means some OTHER raw C call this project hasn't named yet stays silent — the accepted
 /// trade-off `kappaFree`'s own comment already states: "under-report the rare direct-syscall program beats
 /// a wrong label on a common one." See the fix commit message for the corpus count after narrowing to
 /// this allowlist.
+///
+/// **R130, HALF 1 — THE MODULE-IMPORT GATE IS GONE.** R61 required the file to import a
+/// `C_PLATFORM_MODULES` umbrella as a SECOND condition. That condition was itself the cardinal sin over
+/// this whole list (see `C_PLATFORM_MODULES` for the measurement): the imports that put the C surface in
+/// scope are not the ones that name it. The name allowlist here is what makes a hit trustworthy, and it
+/// is now the only gate — plus one PROVABLE narrowing: a call carrying an ARGUMENT LABEL cannot be one of
+/// these, because a C function imported into Swift has no argument labels at all, so `remove(at: index)`
+/// could not bind to `remove(_: UnsafePointer<CChar>)` however the compiler tried. (That is a fact about
+/// the language, not a heuristic about intent — the distinction §F1.5 turns on. `CNativeDisclosureTests`
+/// pins both directions.)
+///
+/// MEASURED over 13 real packages (swift-nio, swift-argument-parser, alamofire, swift-collections, vapor,
+/// GRDB, swift-format, Kingfisher, swift-log, swift-tools-support-core, Publish, swift-nio-ssl, and
+/// candor-swift itself), gate-removal alone, every hit audited against source with no sampling:
+/// **+4 disclosures, all genuine raw C** (nio `dlopen`+`dlsym`, TSC `unlink` ×2 — the two overloads of
+/// `withTemporaryFile`), **+3 false, all one name and one mechanism** — `remove` reached as an
+/// implicit-`self` call to an inherited stdlib member inside a type/extension body. The argument-label
+/// narrowing removes 2 of those 3 (`remove(at: index)` in GRDB); the third, swift-format's
+/// `remove(element)` in an `OptionSet`, is a bare 1-argument call that is SYNTACTICALLY IDENTICAL to a
+/// libc `remove(path)` and is left disclosed. That residual is stated, not hidden: it costs one extra
+/// `Unknown` on one function in one package, in the fail-closed direction, and the alternative — dropping
+/// `remove` or suppressing it inside type bodies — trades a disclosure for a silence on the C call, which
+/// is the direction this project does not take.
+///
+/// **R130, HALF 2 — THE SIBLINGS THE R61 LIST NEVER ASKED ABOUT** (CLAUDE.md §9: an audit's boundary must
+/// not be drawn around its own trigger). R61's list was written from the names its own repro used. The
+/// `*at` twins of five names ALREADY on it were silent under BOTH imports, as were `chroot`, `mkfifo`,
+/// `mknod` and the exec-family spellings — measured one fixture per name, executed. They are added here on
+/// exactly the R61 criteria: a real syscall with a dangerous effect, and a distinctive enough name that a
+/// project or stdlib symbol of that spelling is implausible.
+///
+/// DELIBERATELY STILL ABSENT, each measured rather than assumed — a name here would FABRICATE:
+///   * `stat`, `lstat`, `fstat`, `statfs` — `stat` is also a Foundation STRUCT, and `var s = stat()` is
+///     the idiomatic way to make one. That is a zero-argument call to this exact spelling in essentially
+///     every file that stats anything; disclosing on it answers a question nobody asked.
+///   * `open`, `close`, `read`, `write`, `send`, `recv` — the ultra-common words R61 already named. (The
+///     inout-buffer ones already disclose `Unknown` by another route; see the survey in the commit.)
+///   * `socket`, `bind`, `listen`, `accept` — the POSIX socket SETUP verbs. `bind` was measured
+///     fabricating `Net` onto 214 GRDB functions when it was concretely classified; the other three are
+///     ordinary domain words. `connect` (the establishing act) is concretely `Net` in `kappaFree` instead.
+///   * `time`, `clock`, `random`, `rand`, `getpid`, `getuid`, `uname` — see the `CAPABILITY_SPELLINGS`
+///     note, which states the reason for each and is the one place that decision lives.
 public let NATIVE_DISCLOSURE_C_FREE_FNS: Set<String> = [
     // process / filesystem lifecycle syscalls — real, dangerous, and (pre-R61) silently unresolved
     "system", "unlink", "mkdir", "rmdir", "rename", "remove", "fork", "vfork",
     "symlink", "link", "chmod", "fchmod", "chown", "fchown", "lchown",
     "truncate", "ftruncate", "kill", "popen", "pclose",
     "setuid", "seteuid", "setgid", "setegid",
+    // R130 — the `*at` twins of unlink/mkdir/rename/symlink/link/chmod/chown/open, plus the rest of the
+    // `openat(2)` family. Every one is the SAME syscall with a directory-fd base; five of the eight base
+    // names were already on the list and their twins were not, which is the whole shape of the §9 rule.
+    // `openat`/`faccessat`/`fstatat`/`readlinkat` are safe here where their base names are not: the `at`
+    // suffix takes them out of the ultra-common-word class entirely.
+    "openat", "unlinkat", "renameat", "mkdirat", "symlinkat", "linkat",
+    "fchmodat", "fchownat", "readlinkat", "faccessat", "fstatat", "mkfifoat", "mknodat", "utimensat",
+    // R130 — the process's own view of the filesystem, and the special-file creators. `chroot` and
+    // `chdir` change what every LATER path in the process resolves against, so a scan that misses them
+    // misreports every path surface downstream of one.
+    "chroot", "chdir", "fchdir", "mkfifo", "mknod", "creat", "freopen",
+    // R130 — file metadata/extent mutation and the macOS whole-file copy verbs. Distinctive C spellings.
+    "chflags", "fchflags", "lchflags", "utimes", "futimes", "lutimes",
+    "copyfile", "fcopyfile", "clonefile", "sendfile", "flock",
+    // R130 — directory enumeration, durability, the file-creation mask, and file MAPPING. `mmap` reaches
+    // a file's bytes without any read/write verb ever appearing, which is exactly the shape that reads
+    // pure; an anonymous mapping is memory rather than Fs, and `Unknown` is the honest answer to a
+    // distinction this engine cannot make from the flags argument.
+    "opendir", "fdopendir", "readdir", "readdir_r", "closedir", "umask",
+    "fsync", "fdatasync", "mmap", "munmap", "msync",
+    // R130 — child-process reaping. Not itself an exec, but nothing waits on a child it did not spawn,
+    // and `posix_spawn`'s own caller is the usual site.
+    "waitpid", "wait4", "waitid",
+    // R130 — the exec spellings `kappaFree` does not classify concretely (it takes `execv`/`execvp`/
+    // `execve`/`execvP`/`fexecve`/`posix_spawn`/`posix_spawnp`). The varargs `execl*` forms cannot be
+    // given a fixed arity, and `ptrace`/`syscall` are open-ended by construction — all four are
+    // disclosures rather than claims.
+    "execl", "execle", "execlp", "ptrace", "syscall",
+    // R130 — the remaining privilege-boundary setters, siblings of setuid/seteuid/setgid/setegid above.
+    "setreuid", "setregid", "setresuid", "setresgid", "setgroups", "initgroups",
     // dynamic symbol resolution — the paired mechanism `dlsym` hands back an opaque function pointer
     // that only `unsafeBitCast` + invocation can run (see `opaqueFnLocals` in CallCollector.swift, which
     // catches the INVOCATION half); `dlopen`/`dlclose` are its loader/unloader. None of the three

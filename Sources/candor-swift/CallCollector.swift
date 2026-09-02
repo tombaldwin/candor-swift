@@ -120,6 +120,13 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// closure-typed), and without this flag the fallback disclosed `native:RTLD_NOW` — a real
               /// boundary answer to a question that was never asked, since nothing here was CALLED.
               var argRef: Bool = false
+              /// R130 — this call site passes at least one LABELLED argument. Read only by the Driver's
+              /// `native:` disclosure arm: a C function imported into Swift has no argument labels at all,
+              /// so `remove(at: index)` provably cannot bind to libc's `remove(_: UnsafePointer<CChar>)`.
+              /// A fact about the language rather than a guess about intent. DEFAULTS TO FALSE, which is
+              /// the DISCLOSING direction — a construction site that forgets to set it over-discloses,
+              /// never silently drops a raw C call.
+              var argLabelled: Bool = false
               var extOwner: String? = nil }    // the RESOLVED receiver root of an otherwise-unmatched member
                                                // call (`c.fetch()` where c: RatesClient, an external type) —
                                                // carried ONLY for the §2 CANDOR_DEPS join key (`pkg#Owner.leaf`);
@@ -3165,7 +3172,9 @@ final class CallCollector: SyntaxVisitor {
                     protoDispatches.append(ProtoDispatch(proto: et, member: name, argc: node.arguments.count,
                                                          argTypes: argTypesOf(node), args: argKinds(node)))
                 }
-                calls.append(Call(path: name, leaf: name, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), unqualified: true))
+                calls.append(Call(path: name, leaf: name, strArg: lit, typed: false, args: argKinds(node),
+                                  argTypes: argTypesOf(node), unqualified: true,
+                                  argLabelled: node.arguments.contains { $0.label != nil }))
             }
         } else if let ma = node.calledExpression.as(MemberAccessExprSyntax.self) {
             let member = ma.declName.baseName.text

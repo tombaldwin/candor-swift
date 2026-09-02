@@ -9,6 +9,54 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ R130 — the raw-syscall disclosure was gated on `import Darwin`, and Foundation re-exports Darwin
+
+R61 discloses `Unknown` + `native:<name>` for a raw C call on a curated allowlist (`system`, `unlink`,
+`symlink`, `chmod`, `dlopen`, …), but only in a file whose imports named `Darwin`/`Glibc`/`Musl`/`WinSDK`.
+**That second condition was a silent under-report over the whole allowlist at once**, because the imports
+that put the C surface in scope are not the ones that name it: Foundation re-exports Darwin on Apple
+platforms, and swift-corelibs-foundation re-exports Glibc on Linux (checked under `swift:6.1` in Docker,
+not assumed).
+
+Two SPM packages differing in ONE line, both built and RUN, each creating a real symlink verified by
+`lstat` + `S_IFLNK` in the program's own output, scanned over a BARE directory so no manifest exclusion
+could mask the verdict:
+
+| arm | report | `deny Fs` | `deny Unknown` | `deny Fs Unknown` | `deny Fs doWork` | `pure doWork` |
+|---|---|---|---|---|---|---|
+| `import Darwin` | `Unknown`, `native:symlink` | 0 | **1** | **1** | 0 | 0 |
+| `import Foundation` | **`functions: 0`** | 0 | 0 | 0 | 0 | 0 |
+
+The Foundation arm carried no `Unknown`, no `invisible`, no `incomplete` — a positive purity claim over an
+executed syscall. The gate is now the NAME allowlist alone, plus one narrowing that is a fact about the
+language rather than a guess about intent: a C function imported into Swift has no argument labels, so
+`remove(at: i)` cannot bind to libc's `remove`.
+
+**Half 2 — the siblings that list never asked about.** R61's names were the ones its own repro used. The
+`*at` twins of five names already on it (`unlinkat`/`renameat`/`mkdirat`/`symlinkat`/`linkat`/`fchmodat`/
+`fchownat`), plus `openat`/`chroot`/`chdir`/`mkfifo`/`mknod`/`creat`/`opendir`/`readdir`/`closedir`/
+`flock`/`fsync`/`mmap`/`umask`/`waitpid`/`copyfile`/`sendfile`/`chflags`/`utimes`, the `execl*` family and
+the remaining `set*id` setters were silent under BOTH imports — one executed fixture per name.
+`execve`/`execvP`/`fexecve`/`posix_spawnp` were in NEITHER table and are now concretely `Exec` beside
+`execv`/`execvp`/`posix_spawn`, **and establishing**, so a runtime-built command through them can no
+longer mask an `allow Exec` allowlist while the same command through `posix_spawn` fails closed.
+
+`stat`/`lstat`/`fstat`/`statfs` are deliberately still absent and now say why in the table: `var s = stat()`
+constructs the Foundation STRUCT, so that spelling appears in essentially every file that stats anything.
+
+A/B over **13 real packages, 11,008 common rows**, keyed on every field (`inferred`, `direct`, `incomplete`,
+`declared`, `invisible`, `unknownWhy`, `unresolved`, `netClass`, `fs`, `paths`, `hosts`, `commands`,
+`ambiguous`), pre-image a release binary built from the parent commit in a separate worktree and proven
+pre-fix on the fixture: **ADDED 2 · REMOVED 0 · CHANGED 39** (6 on `inferred` alone). All 41 audited
+against source with no sampling: 40 correct — swift-nio's `Syscalls.swift` wrappers and its
+`dlsym(dlopen(nil, RTLD_NOW), …)` under `import Atomics`, swift-nio-ssl's `opendir`/`readdir`/`closedir`
+directory iterator, swift-tools-support-core's `flock`/`unlink`/`waitpid`, and 22 rows gaining
+`incomplete: ["Fs"] → ["Exec","Fs"]` because `Process.launch` spawns a runtime command through
+`posix_spawnp`. **One false**: swift-format's `DebugOptions.set` calls `remove(element)` on an `OptionSet`,
+a bare one-argument call syntactically identical to a libc `remove(path)`, and is now disclosed `Unknown`.
+That residual is stated rather than narrowed away — suppressing it would trade a disclosure for silence on
+the C call.
+
 ### ⚠ R125 — a higher-order function lost its OWN `callback:` disclosure as soon as anything called it
 
 A function whose fn-typed parameter is invoked (`func hof(_ body: (Int) -> Void) { body(1) }`) discloses
