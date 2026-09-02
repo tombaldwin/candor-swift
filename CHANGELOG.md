@@ -9,6 +9,67 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ R135 — `flock` is a raw syscall AND a struct, so building a lock record read `Unknown`
+
+R130 added `flock` to the `native:` disclosure allowlist in the same commit whose *"DELIBERATELY STILL
+ABSENT"* block excludes `stat`/`statfs` **because they are also structs**. `struct flock` is the fcntl
+advisory-lock record, so `var fl = flock()` — a zero-argument construction that touches no fd and no path
+— was charged `Unknown` + `unknownWhy ["native:flock"]`, and `deny Unknown describeLock` exited **1** over
+it. Never published; introduced and closed inside the same unreleased block.
+
+GROUND TRUTH EXECUTED on both platforms — the fixture is an SPM package that was built and RUN
+(`describeLock() = 3` on macOS, `= 1` under `swift:6.1`; `F_WRLCK` differs, the program does not).
+
+**The fix is ARITY, not deletion.** Dropping the name would have traded the fabrication for silence on the
+real `flock(fd, LOCK_EX)`, which exists in shipped code (swift-tools-support-core
+`Sources/TSCBasic/Lock.swift:138,140,160`). A C function that requires an argument cannot be what a bare
+`name()` bound to, so a zero-argument call to an allowlisted name is suppressed — **except** for the names
+whose C prototype really is nullary, which are exempted by name in `NATIVE_DISCLOSURE_C_NULLARY_FNS`.
+
+`!argLabelled`, R130's other narrowing, could not have caught this: a struct construction carries no
+labels either, so `flock()` and `flock(fd, LOCK_EX)` are identical on every field that branch reads except
+the count.
+
+THE AUDIT, because the trigger was one name. All 84 allowlist entries were probed with
+`func p(_ x: <name>) {}` and `_ = <name>()` under `swiftc -typecheck`, on macOS and on Linux under
+`swift:6.1`:
+
+- **`flock` is the only name on the list that is also a TYPE** — on both platforms (glibc declares
+  `struct flock` exactly as Darwin does), so the Linux half is measured rather than inferred.
+- **`fork` and `vfork` are the only nullary entries**, `pid_t fork(void)` in both platforms' `unistd.h`.
+  A blanket "zero arguments ⇒ not a C call" would have made `fork()` silent — a cardinal sin swapped in
+  for a fabrication. Executed under `swift:6.1`: a `fork()` + `waitpid` fixture really forks and reaps.
+  `ptrace`/`setresuid`/`setresgid` are declared on neither Swift overlay and were read from the headers
+  instead; that part is analysis, and is labelled as such in the source.
+- No allowlisted name resolves with only the Swift stdlib in scope (84/84 "cannot find in scope"), so
+  there is no stdlib-collision class; a project's own declaration of one of these spellings resolves
+  several arms earlier in the Driver and never reaches this branch.
+- CORRECTION to R130's own comment: its stated reason covers `stat` and `statfs` and **not**
+  `lstat`/`fstat`, which are functions only. All four are now admissible under the arity gate — left out
+  deliberately, as a stated under-report awaiting its own over-charge control, because widening the
+  disclosure surface is a separate change from removing a fabrication.
+
+A/B — 17 packages, **20,929 common rows**, keyed on EVERY field (`inferred`, `direct`, `incomplete`,
+`declared`, `invisible`, `unknownWhy`, `unresolved`, `netClass`, `fs`, `paths`, `hosts`, `commands`,
+`ambiguous`): **ADDED 0 · REMOVED 0 · CHANGED 0.** Pre-image: a release binary built from `29f317a` in a
+separate worktree, proven pre-fix by reporting `native:flock` on the fixture the post binary reports
+`functions: 0` for.
+
+**BRANCH HITS (§E1), and this A/B is SAFETY-ONLY.** A third, instrumented binary counted every arrival at
+the changed branch: **83 arrivals, 83 `PASS` (argc > 0), 0 suppressions, 0 nullary rescues.** The corpus
+contains no instance of the shape, so the byte-identical result is an over-charge control and **not**
+evidence the fix fires. What fires it is the executed fixture and the revert test. A recall hunt over the
+17 packages plus swift-package-manager, swift-system, swift-corelibs-foundation and swift-nio-extras found
+34 textual zero-argument calls to an allowlisted name and **every one resolves to a local declaration**
+(swift-collections' own `func remove()`, swift-nio's `FileDescriptor.opendir()`); SwiftPM's apparent
+`flock(fd, LOCK_EX)` sites are inside a generated-source STRING LITERAL, which candor reads correctly as
+one unit — a near-miss, recorded rather than counted.
+
+REVERT TEST, run twice rather than reasoned about. Reverting the gate turns three rows red. Replacing it
+with the tempting blanket `argc > 0` turns **a different row** red — `spawnChild` comes back with
+`["native:waitpid"]` alone, `fork()` gone silent. A suite that only reverts the whole change cannot tell a
+correct narrowing from an over-wide one, because both fix the bug in front of them.
+
 ### ⚠ R130b — the Foundation file routes that are neither `FileManager` nor raw C
 
 The other half of "does the `Fs` rule cover only the ordinary spelling". Surveying 27 Swift-level routes
