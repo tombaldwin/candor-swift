@@ -5,7 +5,8 @@ let AGENTS_MD = #####"""
 # Using candor-swift (instructions for an AI coding agent)
 
 You are working in a Swift package. **candor-swift** tells you, for every function, which side
-effects it can reach — network, filesystem, database, subprocess, env, clock — *including effects
+effects it can reach — network, calls to LLM/model providers (`Llm`, refines network), filesystem,
+database, subprocess, env, clock — *including effects
 inherited transitively through any chain of calls across files*. The language-agnostic consumption
 contract is [candor-spec/AGENTS.md](https://github.com/tombaldwin/candor-spec/blob/main/AGENTS.md);
 this file is the Swift-specific surface.
@@ -108,6 +109,8 @@ ARRAY of entries keyed `fn` (`Type.method` for members, bare `name` for free fun
 imports; the field name stays `calls` per the spec), OMITTED entirely when nothing is uncovered
 (a fully-covered report is byte-identical to a pre-⟨0.15⟩ one). Consume it before trusting an
 "all clear": those modules' effects are absent from the report, NOT claimed pure.
+Effects: `Net`, `Llm` (a call to a model provider — refines `Net`), `Fs`, `Db`, `Exec`, `Env`,
+`Clock`, `Ipc`, `Log`, `Rand`, `Clipboard`.
 Only effectful-or-unresolved functions appear; a
 function in the SIDECAR but absent from the report is pure **as far as this engine resolved** —
 candor-swift claims §4 (below), but read `unresolved` before trusting any specific entry. **A MULTI-TARGET PACKAGE: SCAN ONCE PER SHIPPED BINARY.** `candor-swift <dir>` reads every `.swift`
