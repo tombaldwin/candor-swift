@@ -1700,10 +1700,41 @@ public let C_PLATFORM_MODULES: Set<String> = ["Darwin", "Glibc", "Musl", "WinSDK
 /// exactly the R61 criteria: a real syscall with a dangerous effect, and a distinctive enough name that a
 /// project or stdlib symbol of that spelling is implausible.
 ///
+/// **R135 — THE EXCLUSION RULE R130 WROTE DOWN AND DID NOT SWEEP (CLAUDE.md §9 again, one commit later).**
+/// R130's own "DELIBERATELY STILL ABSENT" block below excludes `stat`/`statfs` *because they are also
+/// Foundation structs* — and the same commit ADDED `flock`, which is the fcntl advisory-lock record.
+/// `var fl = flock()` is how you build one, and the branch fabricated `Unknown` + `native:flock` onto a
+/// function that touches no fd and no path. GROUND TRUTH EXECUTED, both platforms: the fixture builds and
+/// RUNS (`describeLock() = 3` on macOS, `= 1` on Linux under `swift:6.1` — F_WRLCK differs, the program
+/// does not), and at 29f317a `deny Unknown describeLock` exited 1 over it.
+///
+/// The narrowing that closes it is ARITY, not deletion — see `NATIVE_DISCLOSURE_C_NULLARY_FNS`. Dropping
+/// `flock` from this list would have traded the fabrication for silence on the REAL `flock(fd, LOCK_EX)`,
+/// which exists in real code (swift-tools-support-core `Sources/TSCBasic/Lock.swift:146,166`).
+///
+/// THE SWEEP, since the trigger was one name (§9). Every one of the 84 names here was probed with
+/// `func p(_ x: <name>) {}` + `swiftc -typecheck`, on macOS under `import Foundation` AND on Linux under
+/// `swift:6.1` with `import Glibc`. **`flock` is the ONLY name on this list that is also a TYPE** — on
+/// BOTH platforms (glibc declares `struct flock` in `bits/fcntl.h` exactly as Darwin does in
+/// `sys/fcntl.h`), so this was never an Apple-overlay quirk. The same sweep, run over the excluded names
+/// below, reproduces `stat` and `statfs` as types and shows `lstat`/`fstat`/`fstatfs` are NOT — which is
+/// recorded there rather than left implied. No name here resolves at all with only the Swift stdlib in
+/// scope (probed with no import: 84/84 "cannot find in scope"), so the stdlib-free-function collision
+/// class is empty. A PROJECT-declared type or free function of one of these spellings never reaches this
+/// branch at all — `localTypes`/`freeFnByName` resolve it several arms earlier in the Driver, which
+/// `testAProjectDeclarationSharingAnAllowlistedNameStillWinsWithoutTheModuleGate` pins.
+///
 /// DELIBERATELY STILL ABSENT, each measured rather than assumed — a name here would FABRICATE:
 ///   * `stat`, `lstat`, `fstat`, `statfs` — `stat` is also a Foundation STRUCT, and `var s = stat()` is
 ///     the idiomatic way to make one. That is a zero-argument call to this exact spelling in essentially
 ///     every file that stats anything; disclosing on it answers a question nobody asked.
+///     **R135 CORRECTION, MEASURED: that reason covers `stat` and `statfs` and NOT `lstat`/`fstat`** —
+///     probed on both platforms, `lstat`/`fstat`/`fstatfs` are functions only and reject a zero-argument
+///     call. All four are now ADMISSIBLE under the arity gate (`stat()` would be suppressed as the
+///     struct, `stat(p, &s)` disclosed as the syscall), so their absence is a stated under-report awaiting
+///     its own over-charge control on the corpus, NOT a safety property of this list. Left out here
+///     deliberately: widening the disclosure surface is a separate change from removing a fabrication,
+///     and bundling them is how the removal stops being measurable.
 ///   * `open`, `close`, `read`, `write`, `send`, `recv` — the ultra-common words R61 already named. (The
 ///     inout-buffer ones already disclose `Unknown` by another route; see the survey in the commit.)
 ///   * `socket`, `bind`, `listen`, `accept` — the POSIX socket SETUP verbs. `bind` was measured
@@ -1730,6 +1761,9 @@ public let NATIVE_DISCLOSURE_C_FREE_FNS: Set<String> = [
     "chroot", "chdir", "fchdir", "mkfifo", "mknod", "creat", "freopen",
     // R130 — file metadata/extent mutation and the macOS whole-file copy verbs. Distinctive C spellings.
     "chflags", "fchflags", "lchflags", "utimes", "futimes", "lutimes",
+    // `flock` STAYS, and is the reason the arity gate exists: it is the only name here that is also a
+    // TYPE (`struct flock`, both Darwin and glibc), so `var fl = flock()` is a struct construction and
+    // `flock(fd, LOCK_EX)` is the syscall. See `NATIVE_DISCLOSURE_C_NULLARY_FNS`.
     "copyfile", "fcopyfile", "clonefile", "sendfile", "flock",
     // R130 — directory enumeration, durability, the file-creation mask, and file MAPPING. `mmap` reaches
     // a file's bytes without any read/write verb ever appearing, which is exactly the shape that reads
@@ -1753,6 +1787,36 @@ public let NATIVE_DISCLOSURE_C_FREE_FNS: Set<String> = [
     // collides with a common project name.
     "dlopen", "dlsym", "dlclose",
 ]
+
+/// R135 — the names on `NATIVE_DISCLOSURE_C_FREE_FNS` whose C prototype takes **no arguments**, so a
+/// ZERO-ARGUMENT call site really can be the syscall. The Driver's `native:` arm suppresses a zero-argument
+/// call to every OTHER name on that list: a C function that requires an argument cannot be what a bare
+/// `name()` bound to, so the suppression cannot lose a raw C call — while `var fl = flock()` (the
+/// `struct flock` construction R130 fabricated on) stops disclosing, and `flock(fd, LOCK_EX)` still does.
+///
+/// **THIS SET IS THE SAFETY ASSERTION, SO IT WAS MEASURED, NOT ASSERTED (§E2).** The tempting form of this
+/// fix is a blanket "zero arguments ⇒ not a C call", and it is WRONG: `fork` and `vfork` are `pid_t
+/// fork(void)` / `pid_t vfork(void)` in both `MacOSX.sdk/usr/include/unistd.h:459,620` and glibc's
+/// `unistd.h:778,786`, and `fork()` is exactly how you call the real thing. A blanket gate would have
+/// converted R130's fabrication into a SILENT UNDER-REPORT on a process-creating syscall — the trade this
+/// project does not make. GROUND TRUTH EXECUTED under `swift:6.1`: a fixture calling `fork()` + `waitpid`
+/// builds, runs, really forks, and its child's exit status comes back through `waitpid` (7); candor
+/// discloses `native:fork` on it, and must keep doing so.
+///
+/// HOW THE REST OF THE LIST WAS CLEARED, one probe per name, `_ = <name>()` + `swiftc -typecheck`, on
+/// macOS (`import Foundation`) and on Linux under `swift:6.1` (`import Glibc`). Every name not listed here
+/// reports `missing argument for parameter #1 in call` on at least one platform, which is the compiler
+/// stating the arity rather than this file claiming it. Four names are declared on NEITHER platform's
+/// Swift overlay and so could not be probed — `ptrace`, `setresuid`, `setresgid` (and `vfork`, which is
+/// marked `unavailable` on both). Their prototypes were read from the headers instead and are ANALYSIS,
+/// not execution: `ptrace(int, pid_t, caddr_t, int)`, `setresuid(3)`, `setresgid(3)` all take arguments;
+/// `vfork(void)` does not, so it is listed here beside `fork`.
+///
+/// NOTE the direction of a mistake in each column. A name wrongly ADDED here costs a fabrication on a
+/// zero-argument call of that spelling (R130's own bug, one name wide). A name wrongly OMITTED costs
+/// silence on a real nullary syscall — the cardinal sin. That asymmetry is why the omission side is the
+/// one carrying an executed fixture.
+public let NATIVE_DISCLOSURE_C_NULLARY_FNS: Set<String> = ["fork", "vfork"]
 
 /// Property READS that are effects (no call expression): `ProcessInfo…environment`, `Date.now`,
 /// pasteboard accessors. Checked on member-access chains outside call position.

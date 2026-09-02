@@ -1841,7 +1841,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     edges[f.qual, default: []].insert("\(ep).\(call.leaf)")
                     resolved = true
                 } else if !call.argRef, !call.argLabelled,
-                          NATIVE_DISCLOSURE_C_FREE_FNS.contains(call.path) {
+                          NATIVE_DISCLOSURE_C_FREE_FNS.contains(call.path),
+                          argc > 0 || NATIVE_DISCLOSURE_C_NULLARY_FNS.contains(call.path) {
                     // R61 — every arm above tried and failed to resolve `call.path` against something THIS
                     // scan can see (a project free fn, a local ctor, a sibling). `system("rm -rf /")` and
                     // `unlink(path)` under `import Darwin` ended here, unresolved, and this branch used to
@@ -1870,6 +1871,28 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // removes 2 of the 3 false hits gate-removal costs across 13 real packages. The third
                     // — `remove(element)` on an `OptionSet` — is syntactically identical to a libc
                     // `remove(path)` and stays disclosed, in the fail-closed direction.
+                    //
+                    // R135 — AND `argc > 0`, THE SAME KIND OF FACT, ON THE ARITY. R130's own exclusion
+                    // rule was "this name is ALSO A TYPE" (`stat`/`statfs`), and the same commit added
+                    // `flock` without applying it: `struct flock` is the fcntl advisory-lock record and
+                    // `var fl = flock()` is how you build one, so this branch charged `Unknown` +
+                    // `native:flock` to a function that touches no fd and no path (executed:
+                    // `describeLock() = 3`, and `deny Unknown describeLock` exited 1 over it).
+                    // `!call.argLabelled` CANNOT catch that — a struct construction carries no labels
+                    // either, so `flock()` and `flock(fd, LOCK_EX)` are byte-identical on every other
+                    // field this arm can read. The count is the only thing that distinguishes them.
+                    //
+                    // NOT a blanket "zero args ⇒ not C": `fork(void)`/`vfork(void)` really are nullary, so
+                    // they are exempted BY NAME through `NATIVE_DISCLOSURE_C_NULLARY_FNS`, whose doc holds
+                    // the per-name arity measurement. A blanket gate here would have swapped a fabrication
+                    // for a silent under-report on process creation.
+                    //
+                    // `argc` is `call.args.count`, the SAME authority `matchOverloads` uses a few arms up
+                    // — not a second count computed for this branch (§F1.3). The one Call construction
+                    // site that does not populate `args` is the bare-identifier ARGUMENT form, and it sets
+                    // `argRef: true`, which this arm already rejects on its first condition;
+                    // `CNativeDisclosureArityProcessTests.testEveryUnqualifiedCallSiteRecordsItsArguments`
+                    // pins that over the source rather than leaving it as a claim in this comment.
                     direct[f.qual, default: []].insert("Unknown")
                     whyMap[f.qual, default: []].insert("native:\(call.path)")
                 }
