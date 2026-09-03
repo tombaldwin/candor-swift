@@ -13,6 +13,109 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 - `AGENTS.md` now enumerates the full eleven-effect vocabulary including `Llm`, and the embedded
   `--agents` contract is regenerated from it (SOUNDNESS R155).
+
+### ⚠ R178 — a stored optional closure invoked through an UNWRAP BINDER was ABSENT, in 14 spellings
+
+A PUBLISHED cardinal sin, byte-identical on the v0.34.0 build and on this branch before the fix.
+`if let c = cb { c() }` and `cb.map { $0() }` over a stored optional closure reported the INVOKING
+function **absent from `functions[]`** — no effects, no `Unknown`, no row — while `cb?()` one line away
+disclosed `Unknown`/`unresolved: true`/`callback:computed`. `pure`, `deny Fs` and `deny Unknown` over
+`Holder.fireIfLet` all exited **0** with *"policy rule matched NO function"*, which is this class's
+signature: the caller was never judged at all. Ground truth EXECUTED.
+
+Fourteen spellings, measured before anything was written, and they shared no branch — `if let`,
+`if let self.`, `guard let`, the shorthand `if let cb`, `.map { $0() }`, `.map { f in f() }`,
+`switch case .some(let c)`, `if case let .some(c)`, `if case let c?`, `let c = cb ?? {}`, over both a
+`typealias`-spelled and a plainly-spelled field, plus a fn-typed optional parameter and local. What they
+share is upstream: nothing in the collector could answer *"the value being unwrapped is a FUNCTION"*. One
+predicate answers it now and each binder position asks.
+
+**A second, wider defect sat under it.** `typeName` returns `(name: nil, isFunction: true)` for a function
+type, so `typealias Cb = () -> Void` was recorded in NO alias table and every callable spelled through it
+read as a plain nominal type — an alias-typed FIELD, PARAMETER and LOCAL were each invisible as callables
+while the plainly-spelled twin one line away disclosed. The Driver now completes the three indexes that
+carry the `isFunction` flag with exactly what `DeclCollector` would have written had it known, so the two
+spellings are byte-identical downstream rather than two paths that happen to agree.
+
+REAL-CODE RECALL: **Alamofire's `Adapter.adapt` (both overloads) and `Retrier.retry`** — the public entry
+points of its closure-based `RequestInterceptor`s, whose bodies do nothing but invoke a caller-supplied
+`AdaptHandler`/`RetryHandler` — were ABSENT on the published v0.34.0 build and now read
+`['Unknown'] dispatch:Adapter.adaptHandler`. `deny Unknown Adapter.adapt` bound nothing before and is a
+violation now.
+
+A/B, WIDE KEY (every disclosure channel, not just `inferred`), 5 corpora, **15,861 analyzed units**:
+ADDED 3 · REMOVED 0 · CHANGED 62. Zero rows lost an effect; zero lost a call edge; 4 lost an `unknownWhy`
+reason and every one is a ground-truthed owner CORRECTION (`dispatch:HTTPServerProtocolUpgrader.
+shouldUpgrade` → `dispatch:NIOWebSocketServerUpgrader.shouldUpgrade`, and the protocol does not declare
+that member — the concrete type does). Branch reach was counted first with an instrumented binary:
+swift-nio 36 hits, Alamofire 50, swift-argument-parser 5, **swift-collections 0, swift-algorithms 0** —
+those two arms are safety-only and their zero-diff says nothing either way.
+
+The A/B caught two regressions the fix now carries the answer to: a callable field whose name is also a
+METHOD on the same type is left alone (swift-nio's `ClientBootstrap` declares both a
+`channelInitializer` property and a `channelInitializer(_:)` builder, and completing the field turned a
+real method edge into a hedge), and a binder that re-binds a fn-typed parameter under its OWN name adds
+nothing, because the existing callback-flow deferral answers it better.
+
+The reason carries the owner: SPEC §4 ⟨0.7⟩ makes `dispatch:owner.member` the one normative detail, so a
+field unwrap answers `dispatch:Holder.cb` and a parameter/local unwrap — which genuinely has no owner —
+answers `callback:c`. And an unwrapped callable is not always opaque: `let cb: Cb? = { … }` has a visible
+closure unit, so the binder spelling resolves it EXACTLY (`['Fs']`, no reason owed) through R96's single
+authority, a `var` gets R96's union (the visible default AND `Unknown`), and only a field with no visible
+unit hedges — the binder spelling is never less precise than `obj.cb()` for the same program.
+
+### R180 — ⟨0.35⟩ at a protocol dispatch site: NO CHANGE, and the reasoning is pinned by tests
+
+Filed as *"swift fails ⟨0.35⟩(b)'s third conjunct — `Widget.fire` is `Unknown` + `unresolved: true` with
+no `unknownWhy`"*. The observation is exact; the conclusion does not follow, and emitting the reason
+would have violated the spec rather than satisfied it.
+
+SPEC §2 requires `unknownWhy` on a fn that introduces `Unknown` **DIRECTLY**, and requires it **absent
+when purely inherited**. That row has `direct: []` and `calls: [ClosureTask.go, Repaint.go]` — it
+RESOLVED the dispatch, taking ⟨0.35⟩'s branch **(a)**, to a conformer whose own effect happens to be
+`Unknown` because that conformer invokes a stored closure field; `ClosureTask.go` carries
+`dispatch:ClosureTask.f`. Claiming the inheriting caller as a source is the one thing `blindspots` exists
+to prevent. `path Widget.fire Unknown` already answers `Widget.fire → ClosureTask.go [Unknown source]`.
+
+Instantiating the toggle the clause actually names — one conformer whose effect is VISIBLE, then one
+unrelated pure conformer added and nothing else changed — the caller carries `['Fs']` in both arms. The
+java/ts vanishing does not reproduce here. The engine's branch-(b) machinery is proven able to fire in
+the same test file, on a genuinely incomplete candidate set (a requirement satisfied by an inherited
+superclass method), where it emits `['Unknown'] unresolved:true dispatch:Task.go`.
+
+### ⚠ R73 — a module-scope global RECEIVER resolved to its own bare identifier, not to the method
+
+Ships here; the published 0.34.0 advisory promised it and this is the entry it never got.
+`final class Worker { func doWork() { …writes a file… } }` · `let worker = Worker()` ·
+`func invoke() { worker.doWork() }` — five lines, no protocol, no closure. On v0.34.0 `invoke` was
+**ABSENT** from `functions[]` and `deny Fs invoke` exited **0**, `policy ✓`; here `invoke` reads `['Fs']`
+and the same rule exits **1**. The call-graph sidecar showed the mechanism plainly: `invoke → ["worker"]`,
+`worker → []`, with `Worker.doWork` disconnected — the edge pointed at the global, which has no effects.
+
+BOUNDED, and the bound is the honest part: an UNSCOPED `deny Fs` still exited 1 on v0.34.0, because
+`Worker.doWork` is itself in the report. What this defeated was CALLER ATTRIBUTION — scoped and layered
+policies, `path`, `gains`, `tour` and `fix-gate`, i.e. the reachability surface. Same class as R65/R66/R71.
+
+### ⚠ R74 — top-level code is keyed by its MODULE, so one target no longer inherits another's effects
+
+Ships here, found while fixing R73, and it is the opposite direction: a FABRICATION. A package with two
+executable targets collapsed every target's top-level code into ONE `functions[]` entry keyed by the
+literal qual `"<main>"`, carrying the UNION of both.
+
+Measured on a two-target fixture where each target's top-level code performs a DIFFERENT effect —
+v0.34.0: one row, `<main>` `['Env', 'Fs']`, located at the PURE target's file. Here: two rows, `<main>`
+`['Fs']` at the target that writes and `<main>#1` `['Env']` at the target that reads the environment.
+
+**Say exactly what closed.** On a fixture where one target is genuinely pure there is still only ONE
+`<main>` row after the fix — not because the merge survived, but because a pure `<main>` carries no
+effects and every engine omits pure functions; what moved is that the surviving row's `loc` is now the
+target that performs the effect instead of the one that does not. WHAT DID NOT CLOSE: the suffix is
+POSITIONAL, assigned alphabetically over the top-level modules, so `<main>#1` is not a stable name for a
+particular target — adding or renaming a target renumbers it, and a policy still cannot name one
+target's top-level code by a meaningful identifier.
+
+This also invalidated the swift-nio arm of R73's own A/B, which was re-run after this fix rather than
+trusted.
 ### ⚠ R135 — `flock` is a raw syscall AND a struct, so building a lock record read `Unknown`
 
 R130 added `flock` to the `native:` disclosure allowlist in the same commit whose *"DELIBERATELY STILL
