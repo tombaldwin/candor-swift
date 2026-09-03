@@ -441,6 +441,10 @@ final class CallCollector: SyntaxVisitor {
     let propertyWrapperTypes: Set<String> // `@propertyWrapper` types — confirm a wrapped-property edge
     let wrappedProps: [String: [String: String]]  // Type -> property -> wrapper type (`S.count -> Logged`)
     let typeAliases: [String: String]     // `typealias Proc = Process` — name -> underlying simple type
+    /// R178 — the TRANSITIVE closure of function-typed aliases (`typealias Cb = () -> Void`, and any
+    /// chain onto one), computed by the Driver after every file's aliases are merged. Keyed by a TYPE
+    /// SPELLING, never by a binding, so a rebind has nothing to say about it.
+    let fnTypeAliases: Set<String>
     // FINDING 1 — opaque/erased iterable builders. `opaqueSeqBuilders` = leaf names whose declared return is
     // `some Sequence`/`AnySequence` with NO resolvable concrete local type (iterating the result is Unknown);
     // `seqBuilderConcrete` = leaf -> the CONCRETE LOCAL iterable type its body returns (iterating edges to
@@ -463,6 +467,7 @@ final class CallCollector: SyntaxVisitor {
          propertyWrapperTypes: Set<String>, wrappedProps: [String: [String: String]],
          localFreeFns: Set<String>, conditionallyShadowedFreeFns: Set<String> = [],
          conditionallyShadowedTypes: Set<String> = [], typeAliases: [String: String],
+         fnTypeAliases: Set<String> = [],
          enclosingMembers: Set<String> = [],
          opaqueSeqBuilders: Set<String>, seqBuilderConcrete: [String: String],
          closureFields: [String: Set<String>], mutableClosureFields: [String: Set<String>] = [:],
@@ -477,6 +482,7 @@ final class CallCollector: SyntaxVisitor {
         self.closureFields = closureFields
         self.mutableClosureFields = mutableClosureFields
         self.typeAliases = typeAliases
+        self.fnTypeAliases = fnTypeAliases
         self.localFreeFns = localFreeFns
         self.conditionallyShadowedFreeFns = conditionallyShadowedFreeFns
         self.conditionallyShadowedTypes = conditionallyShadowedTypes
@@ -2266,6 +2272,147 @@ final class CallCollector: SyntaxVisitor {
         return (unit: "\(type).\(name)", hedge: mutableClosureFields[type]?.contains(name) == true)
     }
 
+    // ══ R178 — THE SINGLE AUTHORITY for "is this value CALLED, not merely read?" ═════════════════════
+    //
+    // A stored optional closure invoked through an UNWRAP BINDER was ABSENT from `functions[]` in
+    // FOURTEEN spellings while the optional-chained twin `cb?()` disclosed `Unknown`/`callback:computed`
+    // one line away — a PUBLISHED cardinal sin, byte-identical on the true v0.34.0 build and on HEAD,
+    // ground truth EXECUTED (every spelling really runs the closure; every control really does not).
+    // `pure`/`deny Fs`/`deny Unknown Holder.fireIfLet` all exited 0 with "policy rule matched NO
+    // function", which is the sin's signature: the caller was never judged at all.
+    //
+    // The binders each landed on a DIFFERENT untyped branch, so a fix shaped for `if let` would have
+    // closed one of fourteen. What they have in common is upstream of all of them — nothing in this
+    // collector could answer "the thing being unwrapped is a FUNCTION VALUE", because `typeName` reports
+    // `isFunction` and every consumer of it asked separately. So this pair is the answer and the
+    // BINDERS are the call sites, per §G: one predicate, one marker, and each binder position spells
+    // neither.
+    //
+    // `isCallableTypeName` is the alias half — see `fnTypeAliases`. `callableValue` is the
+    // EXPRESSION half, and it deliberately answers only for shapes whose callability is DECLARED
+    // somewhere (a fn-typed local/param, an alias-typed one, a stored field): it never guesses from a
+    // call's return, because a wrong YES here converts an ordinary optional binding into a spurious
+    // `Unknown` on every `if let` in a real codebase. The controls that pin that direction are
+    // `ctlNumIfLet`/`ctlNumMap`/`ctlStoreIfLet` in `OptionalCallableBinderProcessTests`.
+    private func isCallableTypeName(_ name: String?) -> Bool {
+        guard let name else { return false }
+        return fnTypeAliases.contains(name) || fnTypeAliases.contains(dealias(name))
+    }
+
+    /// Does `type.member` name a stored property that holds a CALLABLE? Both spellings — the plain
+    /// `(() -> Void)?`, which `typeName` flags directly, and the alias `Cb?`, which the Driver's
+    /// completion pass has already rewritten to the same `(nil, true)`. The alias arm stays here as
+    /// well because `fields` is not the only source of a type spelling.
+    private func fieldIsCallable(_ type: String, _ member: String) -> Bool {
+        guard let f = fields[type]?[member] else { return false }
+        return f.isFunction || isCallableTypeName(f.name)
+    }
+
+    /// A callable value, and — when the scan can name it — the STORED PROPERTY it came out of.
+    ///
+    /// The owner is not decoration. SPEC §4 ⟨0.7⟩ splits the two `Unknown` kinds on exactly this: a
+    /// `callback:` is "an owner-less function value", a `dispatch:` is "a resolvable owner whose target
+    /// is not", and `owner.member` is the ONE normative detail in the whole vocabulary. `self.handler`
+    /// unwrapped by an `if let` has a perfectly resolvable owner, so answering `callback:handler` there
+    /// would throw away the only conformance-compared field this report carries. MEASURED on swift-nio:
+    /// the first cut of this fix moved `HTTPHandler.channelRead` from `dispatch:HTTPHandler.handler` to
+    /// `callback:handler` — no disclosure lost, but the owner was, on a row that was already honest.
+    private struct CallableValue { var origin: String? }
+
+    /// Is `name`, AT THIS POINT IN THE WALK, bound to a callable value?
+    private func callableName(_ name: String) -> CallableValue? {
+        if opaqueFnLocals.contains(name) || fnTyped.contains(name) {
+            return CallableValue(origin: opaqueCallableOrigin[name])
+        }
+        if isCallableTypeName(vars[name]) { return CallableValue(origin: nil) }
+        // an implicit-`self` stored property — only when no local of that name shadows it
+        if !isBoundLocal(name), let et = enclosingType, fieldIsCallable(et, name) {
+            return CallableValue(origin: "\(et).\(name)")
+        }
+        return nil
+    }
+
+    /// Does this EXPRESSION denote a callable value? `peel` already strips `try`/`await`/`!`/`?` and a
+    /// single-element tuple, so `cb!`, `cb?` and `(cb)` all reduce to the bare reference.
+    private func callableValue(_ e: ExprSyntax) -> CallableValue? {
+        let p = Self.peel(e)
+        if let dr = p.as(DeclReferenceExprSyntax.self) { return callableName(dr.baseName.text) }
+        if let ma = p.as(MemberAccessExprSyntax.self), let base = ma.base {
+            // `self.cb`, `obj.cb`, `a.b.cb` — rootOf resolves the receiver chain to a type name.
+            let member = ma.declName.baseName.text
+            if let rt = rootOf(base).root, fieldIsCallable(rt, member) {
+                return CallableValue(origin: "\(rt).\(member)")
+            }
+            return nil
+        }
+        // `cb ?? fallback`, `flag ? cb : other` — an unfolded operator sequence. ANY callable operand
+        // makes the result callable: a pure `{}` default does not make the OTHER side resolvable, and
+        // the union is the direction that cannot go silent. The origin is taken from the first operand
+        // that has one — two operands with different owners have no single owner, and the arm below
+        // that consumes a nil origin says `callback:`, which is the honest answer for exactly that.
+        if let seq = p.as(SequenceExprSyntax.self) {
+            let found = seq.elements.compactMap { callableValue($0) }
+            guard !found.isEmpty else { return nil }
+            let origins = Set(found.compactMap { $0.origin })
+            return CallableValue(origin: origins.count == 1 ? origins.first : nil)
+        }
+        if let tern = p.as(TernaryExprSyntax.self) {
+            let found = [tern.thenExpression, tern.elseExpression].compactMap { callableValue($0) }
+            guard !found.isEmpty else { return nil }
+            let origins = Set(found.compactMap { $0.origin })
+            return CallableValue(origin: origins.count == 1 ? origins.first : nil)
+        }
+        return nil
+    }
+
+    /// The MARKER. An unwrapped callable binding routes through exactly the machinery a stored opaque
+    /// closure property already uses (`opaqueFnLocals`), so a later `c()` hits the existing
+    /// `opaqueFnLocals` arm in `visit(FunctionCallExprSyntax)`.
+    ///
+    /// IT IS NOT ALWAYS OPAQUE, and the first draft of this comment said it was — caught by
+    /// `assert-audit.sh` flagging its own "opaque BY CONSTRUCTION" line and then MEASURED rather than
+    /// argued. `let cb: Cb? = { … }` has a visible closure initializer, so `closureFields` holds a real
+    /// `<Type>.cb` unit and R96's `closurePropertyInvocation` can answer exactly; `var cb: Cb? = { … }`
+    /// is the union (the visible default AND Unknown, because any holder may store another closure);
+    /// `= nil` / assigned-in-`init` has no unit at all and is genuinely opaque. Those are the three
+    /// answers `obj.f()` and a bare `f()` already give, so the invocation site asks the SAME authority
+    /// instead of assuming the third — see `opaqueCallableReason`'s caller. Measured incidence of the
+    /// difference on the 5-corpus A/B: zero rows, because none of them stores a visible closure in an
+    /// OPTIONAL field. It is written for the recall, not for the corpus.
+    ///
+    /// `fnTyped` too, not only `opaqueFnLocals`: `xs.forEach(c)` reads `fnTyped` first, and the
+    /// argument arm's `!fnTyped.contains(n)` guard is what stops a same-named free function being
+    /// fabricated onto the passed value. Both sets are `deliberatelyKept` in `NameKeyedStateTests`
+    /// (never cleared, never scoped) — so this OVER-hedges past the binder's scope, which is the
+    /// direction that costs precision rather than soundness, and is the disposition those two entries
+    /// already argue for.
+    private func markOpaqueCallableBinding(_ name: String, origin: String?) {
+        fnTyped.insert(name)
+        opaqueFnLocals.insert(name)
+        vars.removeValue(forKey: name)
+        if let origin { opaqueCallableOrigin[name] = origin }
+        else { opaqueCallableOrigin.removeValue(forKey: name) }
+    }
+
+    /// R178 — the `owner.member` an entry in `opaqueFnLocals` was unwrapped OUT OF, when there is one.
+    /// Read only at the two invocation sites that consult that set.
+    ///
+    /// IT MOVES IN LOCKSTEP WITH `opaqueFnLocals`, at every write on both sides — which is a stronger
+    /// claim than the first draft made and is the reason it is enumerable at all. `markOpaqueCallableBinding`
+    /// sets or clears it with the insert; the two places that REMOVE a name from `opaqueFnLocals` (a
+    /// visible closure literal rebinding an annotated fn-typed local, and the unannotated form of the
+    /// same) clear it on the same line. Without that second half a rebind could leave a stale owner
+    /// standing while `fnTyped` still held the name, and a LATER binder over that name would then report
+    /// somebody else's `dispatch:owner.member` — a wrong normative detail, which is worse than none.
+    private var opaqueCallableOrigin: [String: String] = [:]
+
+    /// The §4 reason for invoking an opaque callable bound to `name`: the normative `dispatch:` form
+    /// when the value's owner is known, `callback:` — an owner-less function value — when it is not.
+    private func opaqueCallableReason(_ name: String) -> String {
+        if let o = opaqueCallableOrigin[name] { return "dispatch:\(o)" }
+        return "callback:\(name)"
+    }
+
     // The name-keyed per-binding state saved per scope-delimiting node and restored when the node
     // closes. Keyed by node id rather than a stack so an un-entered scope can never pop someone else's
     // save; SwiftSyntax calls `visitPost` for every visited node (including one whose `visit` returned
@@ -2411,6 +2558,35 @@ final class CallCollector: SyntaxVisitor {
     override func visit(_ node: SwitchCaseItemSyntax) -> SyntaxVisitorContinueKind {
         typeCastBinder(node.pattern, at: Syntax(node)); return .visitChildren
     }
+    /// R178 — `switch cb { case .some(let c): c() }` and `case let c?:`. The pattern is walked by
+    /// `typeEnumCaseBinding` (which CLEARS the binding — `enumCaseValueType` has nothing to say about
+    /// `Optional.some`), so the mark has to land after it, in `visitPost`.
+    override func visitPost(_ node: SwitchCaseItemSyntax) {
+        markCallableMatchBinder(node.pattern, subject: Self.switchSubject(of: Syntax(node)))
+    }
+
+    /// The value a `switch` is matching, found from a case ITEM. Bounded to the nearest enclosing
+    /// `SwitchExprSyntax` — a nested switch inside a case body is a different subject, and the walk
+    /// stops at the first one it meets, which is that nesting's own.
+    private static func switchSubject(of node: Syntax) -> ExprSyntax? {
+        var p: Syntax? = node.parent
+        while let n = p {
+            if let sw = n.as(SwitchExprSyntax.self) { return sw.subject }
+            p = n.parent
+        }
+        return nil
+    }
+
+    /// R178 — the MATCH half of the unwrap-binder family: `case .some(let c)`, `case let .some(c)`,
+    /// `case let c?`. All three bind exactly ONE name out of an Optional, so the arity guard is both
+    /// the precision guard and the shape check: a multi-binder pattern is a tuple/enum payload, not an
+    /// Optional unwrap, and gets nothing from here.
+    private func markCallableMatchBinder(_ pattern: PatternSyntax, subject: ExprSyntax?) {
+        guard let subject, let cv = callableValue(subject) else { return }
+        let binders = Self.patternBinders(pattern)
+        guard binders.count == 1 else { return }
+        markOpaqueCallableBinding(binders[0].identifier.text, origin: cv.origin)
+    }
     /// R98 — `if case let w? = w.kill()` read silent-pure while `if case let q? = w.kill()` charged.
     /// SwiftSyntax walks the PATTERN before the INITIALIZER, so `visit(IdentifierPatternSyntax)`'s
     /// catch-all cleared the receiver a moment before its own initializer was collected. Marking the
@@ -2443,6 +2619,9 @@ final class CallCollector: SyntaxVisitor {
             }
         }
         typeCastBinder(node.pattern, at: Syntax(node))   // R97 — `case let x as T`, when that is the shape
+        // R178 — `if case let .some(c) = cb` / `if case let c? = cb`, the `if case`/`guard case`
+        // spellings of the same unwrap. After the clears above, for the same reason as the switch arm.
+        markCallableMatchBinder(node.pattern, subject: node.initializer.value)
     }
     private var deferredPatternClears: Set<SyntaxIdentifier> = []
 
@@ -2771,6 +2950,17 @@ final class CallCollector: SyntaxVisitor {
             }
             return nil
         }()
+        // R178 — `cb.map { $0() }` / `cb.map { f in f() }`. `Optional.map`'s closure parameter IS the
+        // unwrapped payload, so when the receiver holds a callable the parameter is one too — the same
+        // fact `iteratorElem`'s protocol arm establishes for `o.map { $0.go() }`, for a payload that has
+        // no nominal type to record. Without it the parameter stayed untyped and `$0()` resolved against
+        // nothing: ABSENT, while `cb?()` disclosed.
+        let callableElem: CallableValue? = {
+            guard let ma = node.calledExpression.as(MemberAccessExprSyntax.self),
+                  Self.ELEMENT_ITERATORS.contains(ma.declName.baseName.text) || pairIterator,
+                  let base = ma.base else { return nil }
+            return callableValue(base)
+        }()
         // the TRAILING closure (or first positional) is the iterator's element closure
         let elemClosure = node.trailingClosure
             ?? node.arguments.lazy.compactMap { Self.peel($0.expression).as(ClosureExprSyntax.self) }.first
@@ -2799,7 +2989,13 @@ final class CallCollector: SyntaxVisitor {
                 // was true and is now unnecessary: a clear that is given back is not lossy either.
                 // Ground truth EXECUTED — every arm really deletes its probe file.
                 typeScopes[closure.id, default: []].append((p.name, snapshotType(p.name)))
-                if let annotated = p.annotated {
+                if let ce = callableElem, i == 0, closure == elemClosure {
+                    // R178 — the unwrapped callable payload. Ahead of the annotation branch on purpose:
+                    // `cb.map { (f: Cb) in f() }` spells the type, and that spelling is the alias whose
+                    // `isFunction` flag is the thing this row exists about — recording it in `vars`
+                    // would put the binding back on the arm that resolved to nothing.
+                    markOpaqueCallableBinding(p.name, origin: ce.origin)
+                } else if let annotated = p.annotated {
                     vars[p.name] = annotated                 // explicit `{ (x: Foo) in }` — precise
                 } else if (i == 0 || pairIterator), let elem = iteratorElem, closure == elemClosure {
                     // iterator element param — typed (both params for a pair-iterator like
@@ -3003,7 +3199,7 @@ final class CallCollector: SyntaxVisitor {
                         // call-site flow can never resolve it → §4 Unknown directly (sibling of the direct
                         // `cb()` opaqueFnLocals path).
                         unresolved = true
-                        why.insert("callback:\(n)")
+                        why.insert(opaqueCallableReason(n))
                     } else {
                         // a fn-typed PARAM invoked via forEach — defer to callback-flow (index-resolved).
                         callbackInvoked.insert(n)
@@ -3062,8 +3258,29 @@ final class CallCollector: SyntaxVisitor {
                 // never resolve it — §4 Unknown, directly. (Without this it fell through to the
                 // param-deferral below and was silently resolved to pure whenever the enclosing
                 // function had any caller — a soundness hole the fuzzer's forms didn't cover.)
-                unresolved = true
-                why.insert("callback:\(name)")
+                // R178 — …UNLESS the value was unwrapped out of a stored property this scan CAN pin to
+                // a body. `if let c = cb { c() }` where `cb` is `let cb: Cb? = { … }` is not opaque at
+                // all: `closureFields` holds a real `<Type>.cb` unit, and R96's
+                // `closurePropertyInvocation` is the single authority on what invoking that property
+                // means — an exact edge for a `let`, the union (edge AND `dispatch:` hedge) for a `var`
+                // whose default any holder may replace, and nil when there is no visible unit, which is
+                // the genuinely-opaque case this arm was written for. Asking it here rather than
+                // assuming the third answer is what keeps the BINDER spelling from being less precise
+                // than the `obj.cb()` spelling of the same program: `H.viaIfLet` over a `let` closure
+                // field reads `['Fs']`, not `['Fs','Unknown']`.
+                if let o = opaqueCallableOrigin[name],
+                   let dot = o.lastIndex(of: "."),
+                   case let owner = String(o[o.startIndex..<dot]),
+                   case let member = String(o[o.index(after: dot)...]),
+                   let cp = closurePropertyInvocation(owner, member) {
+                    propertyEdges.insert(cp.unit)
+                    if cp.hedge { unresolved = true; why.insert("dispatch:\(owner).\(member)") }   // R96
+                } else {
+                    // `opaqueCallableReason` gives the normative `dispatch:owner.member` when the owner
+                    // is nameable and `callback:<name>` — an owner-less function value — when it is not.
+                    unresolved = true
+                    why.insert(opaqueCallableReason(name))
+                }
             } else if fnTyped.contains(name) {
                 // a function-typed PARAM invoked — DEFERRED to callback-flow resolution: when
                 // every visible call site passes a closure (already charged to its passer
@@ -3574,6 +3791,28 @@ final class CallCollector: SyntaxVisitor {
     }
 
     override func visitPost(_ node: OptionalBindingConditionSyntax) {
+        // R178 — THE SHORTHAND `if let cb { cb() }`, which has no initializer at all and so never
+        // reaches the branch below. The name still means something different inside the body: the
+        // FIELD `cb` is an Optional, the BINDING `cb` is the unwrapped callable, and `markBinders` has
+        // already claimed it as a local, which is precisely what stopped the stored-closure-property
+        // arm at the call site from firing. Asked before any marking so the question is about the
+        // enclosing binding, not about what this line is establishing.
+        //
+        // `!fnTyped.contains(name)` IS THE WHOLE GUARD, and it was written from a regression the corpus
+        // A/B caught. `if let completionHandler { … completionHandler(data) }` (Alamofire
+        // `DownloadRequest.cancel(optionallyProducingResumeData:)`) re-binds a fn-typed PARAM under its
+        // OWN name, which the existing machinery already answers BETTER than an opaque mark can: the
+        // param defers to callback-flow, which resolves it from the call sites and attributes
+        // `callback:completionHandler` to the three public `cancel` overloads that reach it. Marking it
+        // opaque replaced that with a direct `Unknown` at the one site and dropped the attribution from
+        // all three callers — no effect lost, but `unresolved: true` with NO `unknownWhy`, which is the
+        // shape R180 is filed about. A binder that does not rename has nothing to add here.
+        if node.initializer == nil,
+           let name = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text,
+           !fnTyped.contains(name),
+           let cv = callableName(name) {
+            markOpaqueCallableBinding(name, origin: cv.origin)
+        }
         // Claimed UNCONDITIONALLY, before the branch below decides whether it can type it: the
         // shorthand `guard let c` deliberately keeps the enclosing binding — `c` is the SAME value,
         // unwrapped — so letting `visit(IdentifierPatternSyntax)` clear it would drop a genuine type and
@@ -3581,6 +3820,9 @@ final class CallCollector: SyntaxVisitor {
         // wrong, and it is marked for exactly that reason.
         if let name = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text,
            let initVal = node.initializer?.value {
+            // R178 — asked BEFORE `shadowName`/`rebindTyped` touch anything: `if let cb = cb` unwraps
+            // the OUTER binding, and the answer must be about that one.
+            let unwrapsCallable = callableValue(initVal)
             // R124 — THE TYPE IS SCOPED TOO, and the comment on the next line is exactly why it was not:
             // it says the `if`/`while`/enclosing block "restores it", which is true of the five FLAG maps
             // `shadowName` drops and false of `vars`, which is not in `ShadowSave`. So
@@ -3605,9 +3847,14 @@ final class CallCollector: SyntaxVisitor {
             // — see `rebindTyped`, and note the protocol-unwrap branch below READS `protoTyped` for the
             // initializer's own name, which the carve-out is exactly what preserves.
             rebindTyped(name, through: initVal)
+            // R178 — `if let c = cb` / `guard let c = cb` / `while let c = cb`, the binder family this
+            // row was filed on. FIRST, ahead of every typing branch: a callable has no nominal type for
+            // them to find, so without this the chain fell through to `clearBinding` and `c()` resolved
+            // against nothing at all.
+            if let cv = unwrapsCallable { markOpaqueCallableBinding(name, origin: cv.origin) }
             // `guard let d = s.data(using:.utf8)` / `= enc.encode(x)` — the unwrapped value is Data, so a
             // later `d.write(to:)` is Fs (the via-optional-binding dogfood vein; matches the plain-`let` path).
-            if producesFoundationData(initVal) { vars[name] = "Data" }
+            else if producesFoundationData(initVal) { vars[name] = "Data" }
             // `if let d = o` where `o: (any Doer)?` — unwrapping a PROTOCOL-typed optional param yields
             // the protocol; type `d` as the protocol so `d.go()` dispatches over the conformers (the
             // optional sibling of the array-element/dict-value existential paths). `protoTyped` holds the
@@ -4840,13 +5087,16 @@ final class CallCollector: SyntaxVisitor {
             if let ann = binding.typeAnnotation {
                 if !tupleElements(ann.type).isEmpty { tupleElem[name] = tupleElements(ann.type) }  // `let p: (A, B)`
                 let t = typeName(ann.type)
-                if t.isFunction {
+                // R178 — `|| isCallableTypeName(t.name)`: `let l: Cb = f` and `let l: Cb? = h.cb` are
+                // function-typed locals whose `isFunction` flag reads false because `typeName` cannot
+                // see through a typealias. Measured: `localAlias` ABSENT, `localPlain` `callback:l`.
+                if t.isFunction || isCallableTypeName(t.name) {
                     fnTyped.insert(name); vars.removeValue(forKey: name)
                     // A fn-typed local: a VISIBLE closure initializer walks lexically (its effects
                     // are already charged), so it is not opaque; anything else (a field/factory/
                     // force-unwrap value, or no initializer) IS opaque — invoking it is Unknown.
                     if let v0 = binding.initializer?.value, Self.peel(v0).is(ClosureExprSyntax.self) {
-                        opaqueFnLocals.remove(name)
+                        opaqueFnLocals.remove(name); opaqueCallableOrigin.removeValue(forKey: name)
                     } else {
                         opaqueFnLocals.insert(name)
                     }
@@ -4862,10 +5112,17 @@ final class CallCollector: SyntaxVisitor {
                 //  annotated and unannotated spellings drift apart in the first place.)
             } else if let v0 = binding.initializer?.value {
                 let v = Self.peel(v0)
-                if v.is(ClosureExprSyntax.self) {
+                // R178 — an unannotated COPY of a callable: `let c = cb`, `let c = self.cb`,
+                // `let c = cb ?? {}` (the `??` unwrap spelling), `let c = flag ? cb : other`. None of
+                // these has a nominal type for the branches below to record, so every one of them fell
+                // through to `clearBinding` and a later `c()` resolved against nothing. A VISIBLE
+                // closure literal is excluded and keeps its lexical charge — its body really is here.
+                if !v.is(ClosureExprSyntax.self), let cv = callableValue(v0) {
+                    markOpaqueCallableBinding(name, origin: cv.origin)
+                } else if v.is(ClosureExprSyntax.self) {
                     // visible local closure: body walks lexically; calling it adds nothing
                     fnTyped.remove(name)
-                    opaqueFnLocals.remove(name)
+                    opaqueFnLocals.remove(name); opaqueCallableOrigin.removeValue(forKey: name)
                     vars.removeValue(forKey: name)
                 } else if v.is(FunctionCallExprSyntax.self) {
                     // a Foundation Data producer (`let d = s.data(using:.utf8)` / `= enc.encode(x)`) types

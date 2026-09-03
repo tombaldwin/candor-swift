@@ -109,6 +109,20 @@ final class NameKeyedStateTests: XCTestCase {
         "opaqueFnLocals": .deliberatelyKept(
             "an opaque fn-typed local invoked is §4 Unknown; clearing it drops the Unknown, and an "
             + "over-hedge on a shadowing binder costs precision where the clear would cost soundness"),
+        "opaqueCallableOrigin": .deliberatelyKept(
+            "R178 — the `owner.member` an entry in `opaqueFnLocals` was unwrapped OUT OF, so that "
+            + "`if let c = self.handler { c() }` answers `dispatch:Type.handler` (the one normative "
+            + "detail in the §4 vocabulary) rather than the owner-less `callback:c`. Kept for exactly "
+            + "the reason `opaqueFnLocals` is, and it MOVES IN LOCKSTEP WITH IT AT EVERY WRITE ON "
+            + "BOTH SIDES: `markOpaqueCallableBinding` sets or clears it with the insert, and the two "
+            + "sites that REMOVE a name from `opaqueFnLocals` clear it on the same line. The lockstep "
+            + "is not decoration — without it a rebind could leave a stale owner standing while "
+            + "`fnTyped` still held the name, and a later binder over that name would report somebody "
+            + "else's `dispatch:owner.member`, which is a WRONG normative detail and worse than none. "
+            + "Clearing it independently of the hedge could only downgrade a disclosure's KIND, never "
+            + "remove the disclosure."),
+        // ── R178: a program-wide TYPE-SPELLING index, injected at construction
+        "fnTypeAliases":     .immutableIndex,
         // ── a lexical existence set: nothing clears it, the scope gives it back
         "casePayloadLocals": .lexicallyScoped(
             "enum-case payload bindings (`case let .x(a)` / `case .x(let a)`), which the collector's own "

@@ -42,6 +42,13 @@ struct FnInfo {
                                              // pre-pass needs the WHOLE list (see prescanLocatorMoves).
     var fnTypedParams: Set<String> = []      // params of function type
     var fnTypedParamIndex: [String: Int] = [:] // fn-typed param name -> position
+    /// R178 — EVERY parameter's position, not just the fn-typed ones. `fnTypedParamIndex` is what
+    /// callback-flow resolves a deferred invocation with, and the Driver has to be able to move an
+    /// ALIAS-typed param (`_ c: Cb`) into `fnTypedParams` after the cross-file alias closure is known.
+    /// Moving it without its position would downgrade the answer from "resolved from the call sites" to
+    /// a bare `Unknown` — sound, but a precision loss the DeclCollector would not have taken had it
+    /// known, and the whole point of the completion is that the two spellings end up identical.
+    var paramIndex: [String: Int] = [:]
     /// Params declared `some P` — opaque, so the CALLER monomorphizes and the local conformers are NOT
     /// this receiver's candidate witnesses. Recorded so the Driver's CHA arm can skip them while every
     /// other use of the type (classifier, §2 dep join) proceeds normally.
@@ -266,6 +273,23 @@ final class DeclCollector: SyntaxVisitor {
     // table and type resolution so `Proc`→`Process`→Exec, `FM`→`FileManager`→Fs. Only a simple-identifier
     // underlying type is recorded (a function-type/generic/tuple alias has no κ-relevant single name).
     var typeAliases: [String: String] = [:]
+    /// R178 — ALIASES WHOSE UNDERLYING TYPE IS A **FUNCTION** TYPE (`typealias Cb = () -> Void`).
+    ///
+    /// `typeAliases` above deliberately drops these: `typeName` answers `(name: nil, isFunction: true)`
+    /// for a function type, so the `guard let underlying` skips the record. That is right for the κ
+    /// table — a function type names no κ-relevant type — and it is exactly wrong for the OTHER question
+    /// every consumer of `typeName` asks: *is this thing CALLED?* `fields[T][n].isFunction`,
+    /// `FnInfo.fnTypedParams` and CallCollector's annotated-local branch all read that flag, so a field,
+    /// a parameter and a local spelled through an alias were each invisible as callables while the
+    /// plainly-spelled twin one line away disclosed `Unknown`. MEASURED on the true v0.34.0 build and on
+    /// HEAD, ground truth EXECUTED: `Box.fireA` (alias field) ABSENT vs `Box.fireP` (plain field)
+    /// `['Unknown'] dispatch:Box.cbP`; `directAliasParam` ABSENT vs `directPlainParam` `callback:c`;
+    /// `localAlias` ABSENT vs `localPlain` `callback:l`.
+    ///
+    /// Recorded RAW (the direct spelling only). An alias CHAIN (`typealias Cb2 = Cb`) is closed
+    /// transitively in the Driver, after every file's aliases are merged — the chain may cross files, so
+    /// no single-file pass can see it.
+    var fnTypeAliases: Set<String> = []
     var imports: [String] = []
     // FINDING 1 — opaque/erased effectful Sequence builders. A function whose DECLARED return type is an
     // opaque (`some Sequence`) or erased (`AnySequence`) iterable hides its concrete iterator from callers:
@@ -553,9 +577,13 @@ final class DeclCollector: SyntaxVisitor {
     // name (peeling Optional/some/any/single-tuple) is recorded; a function/generic/tuple alias is left
     // out (no single κ-relevant type). The CallCollector resolves a receiver/type spelling through these.
     override func visit(_ node: TypeAliasDeclSyntax) -> SyntaxVisitorContinueKind {
-        if let underlying = typeName(node.initializer.value).name {
+        let t = typeName(node.initializer.value)
+        if let underlying = t.name {
             typeAliases[node.name.text] = underlying
         }
+        // R178 — …and the branch the `if` above cannot take: a FUNCTION-typed alias has no name at all.
+        // See `fnTypeAliases` for what read the dropped flag and what it cost.
+        if t.isFunction { fnTypeAliases.insert(node.name.text) }
         return .skipChildren
     }
     // TYPE-LEVEL generic bounds (`struct Pipe<T: Saver>` / `… where T: Saver`) — recorded so a stored field
@@ -1056,6 +1084,7 @@ final class DeclCollector: SyntaxVisitor {
             let pname = (p.secondName ?? p.firstName).text
             let t = typeName(p.type)
             info.paramNames.insert(pname)
+            info.paramIndex[pname] = idx        // R178 — see `paramIndex`
             // ordered signature for overload resolution: the param's simple type name (nil if unresolvable)
             // and whether it has a default (so a call may legitimately omit it).
             info.paramSig.append((t.name, p.defaultValue != nil, p.ellipsis != nil))
