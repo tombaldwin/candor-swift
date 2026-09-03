@@ -11,6 +11,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [0.35.0] — 2026-09-03
 
+- `AGENTS.md` now enumerates the full eleven-effect vocabulary including `Llm`, and the embedded
+  `--agents` contract is regenerated from it (SOUNDNESS R155).
 ### ⚠ R135 — `flock` is a raw syscall AND a struct, so building a lock record read `Unknown`
 
 R130 added `flock` to the `native:` disclosure allowlist in the same commit whose *"DELIBERATELY STILL
