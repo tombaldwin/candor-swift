@@ -339,6 +339,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // ⟨0.33.1⟩ scan-wide aggregate of `DeclCollector.declaredTypesUnconditional` — see that field's doc.
     var declaredTypesUnconditional: Set<String> = []
     var typeAliases: [String: String] = [:]
+    // R178 — function-typed aliases (`typealias Cb = () -> Void`), unioned across files and then
+    // closed transitively below. See `DeclCollector.fnTypeAliases`.
+    var fnTypeAliasesRaw: Set<String> = []
     var dynamicMemberTypes: Set<String> = []
     var propertyWrapperTypes: Set<String> = []
     var resultBuilderTypes: Set<String> = []
@@ -793,6 +796,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         declaredTypes.formUnion(c.declaredTypes)
         declaredTypesUnconditional.formUnion(c.declaredTypesUnconditional)
         for (a, u) in c.typeAliases { typeAliases[a] = u }   // last-writer-wins (a redeclared alias is rare)
+        fnTypeAliasesRaw.formUnion(c.fnTypeAliases)          // R178
         dynamicMemberTypes.formUnion(c.dynamicMemberTypes)
         propertyWrapperTypes.formUnion(c.propertyWrapperTypes)
         resultBuilderTypes.formUnion(c.resultBuilderTypes)
@@ -1176,6 +1180,66 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             opaqueFields[ty, default: []].insert(field)
         }
     }
+    // ══ R178 — COMPLETE THE FUNCTION-TYPE ALIASES, IN ONE PLACE, BEFORE ANYTHING READS `isFunction` ══
+    //
+    // `typeName` peels `Optional`/`some`/`any` but knows nothing about typealiases, so `typealias Cb =
+    // () -> Void` made every callable spelled through it read as a plain nominal type and its
+    // `isFunction` flag FALSE. Three indexes carry that flag and all three were wrong together:
+    // `fields[T][n]`, `FnInfo.fnTypedParams`/`fnTypedParamIndex`, and (in CallCollector) an annotated
+    // local's `typeName(ann).isFunction`. Measured against the true v0.34.0 build AND HEAD, with ground
+    // truth EXECUTED and a plainly-spelled twin as the control in every row: `Box.fireA` ABSENT while
+    // `Box.fireP` disclosed `dispatch:Box.cbP`; `directAliasParam` ABSENT while `directPlainParam`
+    // disclosed `callback:c`; `localAlias` ABSENT while `localPlain` disclosed `callback:l`.
+    //
+    // Done HERE rather than in DeclCollector because an alias CHAIN (`typealias Cb2 = Cb`) and the alias
+    // itself may live in different files from the use — a single-file top-to-bottom pass cannot see
+    // either. This is the same deferred-completion shape as `staticFactoryFields` and
+    // `unresolvedGenericFields` directly above, for the same reason.
+    //
+    // THE FIX IS A COMPLETION, NOT A SECOND RESOLVER: each index ends up holding exactly what
+    // DeclCollector would have written had it known — `(nil, true)` for a field, the name in
+    // `fnTypedParams` WITH its position in `fnTypedParamIndex` for a parameter. So the alias spelling
+    // and the plain spelling are byte-identical downstream rather than two paths that agree today.
+    var fnTypeAliases = fnTypeAliasesRaw.subtracting(localTypes)   // a real type of the same name wins
+    var aliasClosureChanged = true
+    while aliasClosureChanged {                                    // `typealias Cb2 = Cb`, any depth
+        aliasClosureChanged = false
+        for (a, u) in typeAliases
+        where !fnTypeAliases.contains(a) && !localTypes.contains(a) && fnTypeAliases.contains(u) {
+            fnTypeAliases.insert(a); aliasClosureChanged = true
+        }
+    }
+    if !fnTypeAliases.isEmpty {
+        // A NAME THAT IS BOTH A CALLABLE FIELD AND A METHOD ON THE SAME TYPE IS NOT COMPLETED, and this
+        // guard was written from a measurement, not from caution. swift-nio's `ClientBootstrap` declares
+        // BOTH `private var channelInitializer: ChannelInitializerCallback` (Bootstrap.swift:814) and
+        // `public func channelInitializer(_:) -> Self` (:888). Completing the field made the member-call
+        // arm read `bootstrap.channelInitializer { … }` — the BUILDER METHOD, spelled with a trailing
+        // closure — as an invocation of the field, so three callers (`TCPThroughputBenchmark.setUp`,
+        // `makeHTTPChannel`, `<main>#8`) lost a real call edge and got a `dispatch:` hedge instead. The
+        // effect sets happened not to move, which is exactly why the wide-key diff is the one to audit.
+        // Where the two spellings collide, the pre-existing answer stands: this completion may add a
+        // disclosure, never take an edge away.
+        var methodNamesByType: [String: Set<String>] = [:]
+        for f in allFns where !f.isAccessor && !f.isTopLevel {
+            guard let ty = f.enclosingType else { continue }
+            methodNamesByType[ty, default: []].insert(String(f.qual.split(separator: ".").last ?? ""))
+        }
+        for (ty, fs) in fields {
+            for (name, info) in fs where !info.isFunction {
+                guard methodNamesByType[ty]?.contains(name) != true else { continue }
+                if let n = info.name, fnTypeAliases.contains(n) { fields[ty]![name] = (nil, true) }
+            }
+        }
+        for i in allFns.indices {
+            for (p, t) in allFns[i].params where fnTypeAliases.contains(t) {
+                allFns[i].params.removeValue(forKey: p)
+                allFns[i].fnTypedParams.insert(p)
+                if let idx = allFns[i].paramIndex[p] { allFns[i].fnTypedParamIndex[p] = idx }
+            }
+        }
+    }
+
     // An enum case binds a value type only when it is UNAMBIGUOUS project-wide (one assoc type) —
     // the same "never guess on an ambiguous leaf" discipline as the returns index.
     var enumCaseValueType: [String: String] = [:]
@@ -1486,7 +1550,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                localFreeFns: localFreeFnNames.union(localFreeFnBaseNamesByModule[swiftModuleOf(f.loc)] ?? []),
                                conditionallyShadowedFreeFns: conditionalOnlyFreeFnNames.union(conditionalOnlyFreeFnNamesByModule[swiftModuleOf(f.loc)] ?? []),
                                conditionallyShadowedTypes: conditionallyShadowedTypeNames,
-                               typeAliases: typeAliases,
+                               typeAliases: typeAliases, fnTypeAliases: fnTypeAliases,
                                enclosingMembers: f.enclosingType.map { t in
                                    membersVisibleCache[t] ?? {
                                        let m = membersVisibleOn(t); membersVisibleCache[t] = m; return m
