@@ -9,6 +9,44 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ R192 — a closure read out of a CONTAINER was not a callable source, so its invoker was ABSENT
+
+The R178 cardinal sin one level of nesting out, still open on the shipped 0.35.0 binary and re-measured
+against it with ground truth EXECUTED. `if let h = handlers["k"] { h() }` over a `[String: Cb]` field,
+its plainly-spelled `[String: () -> Void]` twin, `if let c = list.first`, and the tuple element `pair.0`
+all reported the INVOKING function **absent from `functions[]`** — no effects, no `Unknown`, no row —
+while `handlers["k"]?()` one line away was correctly `['Unknown'] callback:computed`.
+`deny Unknown H.fireDictIfLet` exited **0** with *"policy rule matched NO function"* for every silent
+shape and 1 for that control: the signature of this class, because the caller was never judged at all.
+Eight spellings measured silent, across all fourteen R178 binder forms.
+
+Both halves of R178 recurred, which is why the fix has two parts. `callableValue` — R178's single
+authority for *"is this value CALLED, not merely read?"* — had no arm for a SUBSCRIPT, an element
+accessor (`first`/`last`/`randomElement()`) or a TUPLE ELEMENT, so every binder went silent again the
+moment the closure came out of a container. And under that, the wider one: `typeName` answers
+`(name: nil, isFunction: true)` for a function type, so every container index that projects an element
+through it — `arrayElem`, `dictElem`, `tupleElem`, `fieldArrayElem`, `fieldDictValue` and the
+param/global twins — DROPPED a `[() -> Void]` / `[K: () -> Void]` / `(() -> Void, Int)` element
+entirely. Those indexes are now COMPLETED with a reserved element spelling rather than shadowed by a
+parallel index that could drift. A container element claims NO owner: `H.handlers` owns the dictionary,
+not the closure, so the reason is `callback:`, matching the optional-chained twin it is brought into
+line with.
+
+REAL-CODE RECALL: **Firebase Auth's `AuthAppCredentialManager.callbackWithReceipt`** — `guard let
+callback = callbacksByReceipt[receipt]` over a `[String: (AuthAppCredential) -> Void]`, then invoking
+that caller-supplied callback — was ABSENT on the shipped 0.35.0 build and is `['Unknown']
+callback:callback` here, taking three of its callers plus `AuthNotificationManager.canHandle` from
+`['Fs']` to `['Fs', 'Unknown']`. `deny Unknown AuthAppCredentialManager.callbackWithReceipt` moved from
+*"evaluated and bound nothing"* to an `AS-EFF-006` violation. Only the plainly-spelled half reaches it:
+an alias-only fix would have missed Firebase entirely.
+
+A/B, wide-keyed on every disclosure channel rather than on `inferred` — Alamofire, GRDB, Kingfisher,
+swift-collections, swift-crypto, swift-nio; 11,637 common rows: **ADDED 0 REMOVED 0 CHANGED 0**, and
+the changed branch was instrumented and counted first: **0 hits in all six**, so those six arms are
+SAFETY-ONLY and say nothing about recall. That is what sent the evidence to a recall hunt over 20,290
+Swift files on disk, which is where Firebase came from. FirebaseAuth (1,271 units): ADDED 1, REMOVED 0,
+CHANGED 4, every change in the disclosure direction and no row losing an effect.
+
 ## [0.35.0] — 2026-09-03
 
 - `AGENTS.md` now enumerates the full eleven-effect vocabulary including `Llm`, and the embedded

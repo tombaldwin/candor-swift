@@ -2296,6 +2296,11 @@ final class CallCollector: SyntaxVisitor {
     // `ctlNumIfLet`/`ctlNumMap`/`ctlStoreIfLet` in `OptionalCallableBinderProcessTests`.
     private func isCallableTypeName(_ name: String?) -> Bool {
         guard let name else { return false }
+        // R192 — the CONTAINER half. A `[() -> Void]`/`[K: () -> Void]`/`(() -> Void, Int)` element is
+        // recorded under the reserved `FUNCTION_TYPE_ELEMENT` spelling, because `typeName` returns no
+        // name for a function type and every element index projects through it (see Classifier). This
+        // is the ONE reader of that spelling.
+        if name == FUNCTION_TYPE_ELEMENT { return true }
         return fnTypeAliases.contains(name) || fnTypeAliases.contains(dealias(name))
     }
 
@@ -2332,6 +2337,25 @@ final class CallCollector: SyntaxVisitor {
         return nil
     }
 
+    /// R192 — collection members that yield ONE ELEMENT of the receiver, rather than a new collection
+    /// or a summary. Deliberately NOT `ELEMENT_ITERATORS` (which is about a CLOSURE PARAMETER being the
+    /// element) — this is about the RESULT being the element — but the two answer the same underlying
+    /// fact and both must be told when the element type is callable, which is why they sit together.
+    /// `min`/`max` are here for shape completeness; a `[() -> Void]` is not Comparable, so they never
+    /// fire on a callable element in code that compiles.
+    private static let ELEMENT_ACCESSORS: Set<String> =
+        ["first", "last", "min", "max", "randomElement", "popLast", "popFirst", "removeFirst", "removeLast"]
+
+    /// R192 — does this CONTAINER expression hold callable elements? Array element or dictionary value,
+    /// through the two resolvers (`elementTypeOf`/`dictValueOf`) every other element consumer already
+    /// uses, so a container shape they cannot type is one this cannot either — under-report, never a
+    /// guess. An element that is not callable answers false and the binder stays exactly as it was:
+    /// pinned by `ctlNumSubscript`/`ctlStoreFirst`/`ctlTupleNum` in `ContainerCallableSourceTests`.
+    private func containerElementIsCallable(_ base: ExprSyntax) -> Bool {
+        if isCallableTypeName(elementTypeOf(base)?.name) { return true }
+        return isCallableTypeName(dictValueOf(base))
+    }
+
     /// Does this EXPRESSION denote a callable value? `peel` already strips `try`/`await`/`!`/`?` and a
     /// single-element tuple, so `cb!`, `cb?` and `(cb)` all reduce to the bare reference.
     private func callableValue(_ e: ExprSyntax) -> CallableValue? {
@@ -2343,7 +2367,39 @@ final class CallCollector: SyntaxVisitor {
             if let rt = rootOf(base).root, fieldIsCallable(rt, member) {
                 return CallableValue(origin: "\(rt).\(member)")
             }
+            // R192 — A TUPLE ELEMENT: `pair.0` / `p.cb`, where `p` is a tuple-typed local or param.
+            // `tupleElem` is the same index `rootOf`'s tuple arm reads; asking it directly rather than
+            // through `rootOf` is deliberate — `rootOf` falls back to the BARE BASE NAME for a member
+            // chain it cannot resolve, and a local that happens to share a name with a function
+            // typealias would then read callable. This arm can only answer from a recorded tuple type.
+            if let baseDR = base.as(DeclReferenceExprSyntax.self),
+               isCallableTypeName(tupleElem[baseDR.baseName.text]?[member]) {
+                return CallableValue(origin: nil)
+            }
+            // R192 — AN ELEMENT ACCESSOR on a container of callables: `list.first`, `xs.last`.
+            if Self.ELEMENT_ACCESSORS.contains(member), containerElementIsCallable(base) {
+                return CallableValue(origin: nil)
+            }
             return nil
+        }
+        // R192 — A SUBSCRIPT: `handlers["k"]`, `xs[0]`. The element/value type is resolved by the same
+        // two resolvers `rootOf`'s own subscript arm uses, so the two cannot disagree about what a
+        // subscript yields. NO OWNER: `H.handlers` is the container's owner, not the callable's, and
+        // §4 ⟨0.7⟩ `dispatch:owner.member` is normative about the CALLABLE's owner — a dictionary of
+        // closures has none. `callback:<binder>` is the same kind the already-honest optional-chained
+        // twin `handlers["k"]?()` reports (`callback:computed`), which is the answer being matched.
+        if let sub = p.as(SubscriptCallExprSyntax.self), containerElementIsCallable(sub.calledExpression) {
+            return CallableValue(origin: nil)
+        }
+        // R192 — the CALL-shaped element accessors: `xs.randomElement()`, `xs.first(where:)`,
+        // `xs.popLast()`. This does NOT breach the "never guess from a call's return" rule this
+        // predicate is built on: the answer comes from the RECEIVER's recorded element type, not from
+        // the callee's signature, and the member set is closed to accessors that yield one element.
+        if let call = p.as(FunctionCallExprSyntax.self),
+           let ma = call.calledExpression.as(MemberAccessExprSyntax.self), let base = ma.base,
+           Self.ELEMENT_ACCESSORS.contains(ma.declName.baseName.text),
+           containerElementIsCallable(base) {
+            return CallableValue(origin: nil)
         }
         // `cb ?? fallback`, `flag ? cb : other` — an unfolded operator sequence. ANY callable operand
         // makes the result callable: a pure `{}` default does not make the OTHER side resolvable, and

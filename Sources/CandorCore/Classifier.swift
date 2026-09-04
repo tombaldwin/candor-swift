@@ -2116,12 +2116,51 @@ public func isOpaqueParam(_ t: TypeSyntax) -> Bool {
     return false
 }
 
+/// R192 — THE ELEMENT SPELLING OF A FUNCTION-TYPED CONTAINER ELEMENT.
+///
+/// `typeName` answers `(name: nil, isFunction: true)` for a function type, so every container index
+/// that projects an element through `typeName(…).name` DROPPED a `[() -> Void]`/`[K: () -> Void]`/
+/// `(() -> Void, Int)` element on the floor — the container had no record at all, and a closure read
+/// out of it (`handlers["k"]`, `list.first`, `pair.0`) could not be recognised as callable. This is
+/// the CONTAINER half of exactly the defect R178 fixed for `typealias Cb = () -> Void`, one level of
+/// nesting out, and it is why an alias-spelled `[String: Cb]` was half-recognisable while the plainly
+/// spelled twin was not: the alias arm records the NAME `Cb`, which `isCallableTypeName` knows.
+///
+/// The answer is a reserved spelling rather than a parallel `isFunction` index because the consumers
+/// of those five indexes (`arrayElem`/`dictElem`/`tupleElem`/`fieldArrayElem`/`fieldDictValue` and the
+/// param/global twins) already ask ONE question of a String — §G, and R178's own shape: COMPLETE the
+/// index the projection dropped rather than add a second one beside it that can drift. `()->()` cannot
+/// collide with a real type name: `typeName` only ever yields identifiers and dotted paths of them.
+///
+/// WHAT COMPLETING THE INDEXES ACTUALLY CHANGES, MEASURED RATHER THAN ASSERTED — the first draft of
+/// this comment said it "types nothing and can fabricate nothing", and that was false in one place.
+/// `isCallableTypeName` is the only predicate that answers TRUE for the spelling, and no unit key or
+/// κ entry can match it (both are built from `typeName`, which yields only identifiers). But two arms
+/// key on the index being NON-NIL rather than on what it says, and those did move:
+///  - the local-`extension Array` dispatch arm (`arrayElem[x] != nil && localTypes.contains("Array")`).
+///    A `[() -> Void]` argument calling the project's own `extension Array` method now resolves it, as
+///    the nominal `[Int]` twin already did: measured, `viaArrayExtEff(_ xs: [() -> Void]) { xs.touchAll() }`
+///    ABSENT → `['Fs']`, with the pure `xs.runAll()` twin staying absent. That is recall the arm was
+///    always written for and could not reach, not a new guess — the edge still resolves only against a
+///    unit the project really declares. Pinned by `testALocalArrayExtensionResolvesOverAFunctionElement`.
+///  - the bare-global-read shadow check in `visit(DeclReferenceExprSyntax)`. No measured change: the
+///    names it newly skips are local bindings, which is what that check is for.
+public let FUNCTION_TYPE_ELEMENT = "()->()"
+
+/// A container element's recorded SPELLING: its type name, or `FUNCTION_TYPE_ELEMENT` when the element
+/// is a function type. The single projection all three element helpers below share.
+public func elementSpelling(_ t: TypeSyntax) -> String? {
+    let tn = typeName(t)
+    if tn.isFunction { return FUNCTION_TYPE_ELEMENT }
+    return tn.name
+}
+
 /// The ELEMENT type name of a collection type: `[T]`/`Set<T>`/`Array<T>`/`ContiguousArray<T>` → `T`
 /// (peeling Optional/`some`/`any` wrappers). Used to type a `for x in coll`/`coll.forEach { x in … }`
 /// iteration variable so its member calls classify — without it, a loop/closure over a typed
 /// collection dropped its receiver to pure (a §4 under-report on a very common Swift shape).
 public func arrayElementName(_ t: TypeSyntax) -> String? {
-    arrayElementType(t).flatMap { typeName($0).name }
+    arrayElementType(t).flatMap { elementSpelling($0) }
 }
 
 /// The ELEMENT type SYNTAX of a collection type — `arrayElementName` without the name projection, so a
@@ -2183,7 +2222,7 @@ public func tupleElements(_ t: TypeSyntax) -> [String: String] {
     guard let tup = e.as(TupleTypeSyntax.self), tup.elements.count >= 2 else { return [:] }
     var out: [String: String] = [:]
     for (i, el) in tup.elements.enumerated() {
-        guard let tn = typeName(el.type).name else { continue }
+        guard let tn = elementSpelling(el.type) else { continue }   // R192 — a fn-typed element too
         out[String(i)] = tn
         if let label = el.firstName?.text, label != "_" { out[label] = tn }
     }
@@ -2193,14 +2232,22 @@ public func tupleElements(_ t: TypeSyntax) -> [String: String] {
 /// The VALUE type name of a dictionary type: `[K: V]`/`Dictionary<K, V>` → `V` (peeling wrappers).
 /// `for (k, v) in dict { v.method() }` iterates (key, value) pairs, so the value carries the type.
 public func dictValueName(_ t: TypeSyntax) -> String? {
-    if let d = t.as(DictionaryTypeSyntax.self) { return typeName(d.value).name }
-    if let opt = t.as(OptionalTypeSyntax.self) { return dictValueName(opt.wrappedType) }
-    if let att = t.as(AttributedTypeSyntax.self) { return dictValueName(att.baseType) }
-    if let some = t.as(SomeOrAnyTypeSyntax.self) { return dictValueName(some.constraint) }
+    dictValueType(t).flatMap { elementSpelling($0) }
+}
+
+/// The VALUE type SYNTAX of a dictionary type — `dictValueName` without the spelling projection, the
+/// dictionary twin of `arrayElementType`. Factored out for R192 so the two projections (name, and
+/// "is it a function") cannot drift the way the array and dictionary peelings would have if each
+/// grew its own copy of the wrapper-stripping.
+public func dictValueType(_ t: TypeSyntax) -> TypeSyntax? {
+    if let d = t.as(DictionaryTypeSyntax.self) { return d.value }
+    if let opt = t.as(OptionalTypeSyntax.self) { return dictValueType(opt.wrappedType) }
+    if let att = t.as(AttributedTypeSyntax.self) { return dictValueType(att.baseType) }
+    if let some = t.as(SomeOrAnyTypeSyntax.self) { return dictValueType(some.constraint) }
     if let gen = t.as(IdentifierTypeSyntax.self), let args = gen.genericArgumentClause,
        gen.name.text == "Dictionary", args.arguments.count == 2,
        let second = Array(args.arguments).last, let vt = second.argument.as(TypeSyntax.self) {
-        return typeName(vt).name
+        return vt
     }
     return nil
 }
