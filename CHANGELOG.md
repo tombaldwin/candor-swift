@@ -9,6 +9,47 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ R211 — a closure invoked while ITERATING a container was silent, and this is the spelling real code uses
+
+The iteration sibling of R192, and it SURVIVED R192's fix — measured on both arms of `020f976`, not
+found by a review. `for f in handlers { f() }`, `for f in dict.values { f() }`, `handlers.forEach { $0() }`
+and `handlers.map { $0() }` reported the invoking function **absent from `functions[]`** — no effects,
+no `Unknown`, no row — while `handlers.first` one source shape over disclosed correctly. **Nineteen
+spellings were silent, not the five the row named**; widening the audit past the shapes it was handed
+(§9) found the last four — an annotated loop binder (`for f: Cb in fs`), an annotated closure parameter
+`{ (f: Cb) in f() }` and its bare `{ (f: () -> Void) in f() }` twin (which read as UNANNOTATED and was
+cleared outright), and the `for (k, v) in dict` pair form. Eighteen of the nineteen are closed here.
+The nineteenth is stated rather than quietly left: iterating a container of TUPLES that hold a closure
+(`for p in pairs { p.cb() }` over `[(cb: () -> Void, n: Int)]`) is still absent and still invokes — it
+needs the loop binder to carry a tuple-element index rather than a type name, which is a different
+mechanism, and adding it here would be the parallel path this fix exists to avoid.
+
+R192 completed the container element INDEXES and gave `callableValue` — the EXPRESSION half — subscript,
+element-accessor and tuple-element arms. Iteration binds its element through neither: a `for` pattern
+binding or a closure parameter records a type NAME in `vars`, and the invocation site for a bare `f()`
+reads `opaqueFnLocals`/`fnTyped` and never `vars`. So the binder held the reserved function-element
+spelling, `f()` resolved against no unit at all, and the enclosing function vanished. All four element
+binders now route through one `bindCallableElement`, which extends R192's own `isCallableTypeName`
+rather than adding a predicate beside it. An iterated element claims NO owner — the array owns the
+container, not the closure — so the reason is `callback:<binder>`, matching what R192 gives `xs.first`.
+
+REAL-CODE RECALL, and unlike R192 the library corpora do reach it. **GRDB's `Configuration.setUp`** —
+`for f in setups { try f(db) }` over a `[@Sendable (Database) throws -> Void]` populated by the public
+`prepareDatabase(_:)` with caller-supplied closures — was `inferred: []` on the R192 build and is
+`['Unknown'] callback:f` here. `deny Unknown Configuration.setUp` over the GRDB tree goes from
+**`policy ✓`, exit 0** to an `AS-EFF-006` violation, exit 1. swift-nio's `BaseSocketChannel.close0`
+(`for callout in errorCallouts`) gains `unknownWhy: ['callback:callout']` — visible only on the wide
+key, because that row already carried `Unknown` from an unrelated mechanism.
+
+A/B wide-keyed on every disclosure channel — Alamofire, GRDB, Kingfisher, swift-collections,
+swift-crypto, swift-nio; 11,637 common rows: **ADDED 0 REMOVED 0 CHANGED 2** (narrow key: 1), with the
+changed branch INSTRUMENTED first: **3 hits**, against R192's 0 on the identical six corpora. No row
+lost an effect, a call edge or a disclosure channel. One measured over-disclosure, stated rather than
+narrowed away: a `let` global array of visible closure literals keeps its resolved effect and its exact
+edge and now also carries the `Unknown` hedge. And `assert-audit.sh` caught this fix writing its own
+false guarantee — a claim that a callable element and the `mono` protocol-bound flag are "disjoint by
+construction", which holds only for code that compiles and is now worded as the assumption it is.
+
 ### ⚠ R192 — a closure read out of a CONTAINER was not a callable source, so its invoker was ABSENT
 
 The R178 cardinal sin one level of nesting out, still open on the shipped 0.35.0 binary and re-measured

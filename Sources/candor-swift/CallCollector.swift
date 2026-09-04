@@ -2450,6 +2450,39 @@ final class CallCollector: SyntaxVisitor {
         else { opaqueCallableOrigin.removeValue(forKey: name) }
     }
 
+    /// R211 — THE ITERATION SIBLING OF R192, and the half of it that real code actually spells.
+    ///
+    /// Every ELEMENT BINDER establishes one fact: this name IS one element of a container. There are
+    /// four of them — a `for`-in loop variable, the `v` of `for (k, v) in dict`, a `for case let x?`
+    /// binder, and the element parameter of `forEach`/`map`/… — and they all record a type NAME in
+    /// `vars`. R192 taught the element INDEXES and `callableValue` (the EXPRESSION half) that an
+    /// element can be a CALLABLE, so `if let f = xs.first { f() }` discloses; the binders never
+    /// learned it, because the invocation site for a bare `f()` reads `opaqueFnLocals`/`fnTyped` and
+    /// NEVER `vars`. So `for f in handlers { f() }` typed `f` as the reserved `()->()` spelling,
+    /// resolved it against no unit, and the ENCLOSING FUNCTION went ABSENT — no effects, no `Unknown`,
+    /// no row, which is the cardinal sin's signature.
+    ///
+    /// ONE AUTHORITY FOR ALL FOUR, and it is R192's own `isCallableTypeName` reached from further out
+    /// rather than a second predicate beside it (§G). A NON-callable element takes exactly the path it
+    /// always took — the guard answers true only for the reserved function-element spelling and for a
+    /// declared function typealias, and neither of those has resolvable members to displace. Pinned in
+    /// `IteratedCallableElementTests` by `ctlIntField`/`ctlStorePure` (a non-callable element still
+    /// types) and `keepStoreEff`/`keepStoreForEach` (a concrete element still resolves its methods).
+    ///
+    /// NO OWNER IS CLAIMED, for R192's reason: `H.handlers` owns the ARRAY, not the closure, and
+    /// SPEC §4 ⟨0.7⟩'s `dispatch:owner.member` is normative about the CALLABLE's owner. So the reason
+    /// is `callback:<binder>` — the same answer R192 already gives `xs.first`, which is the honest
+    /// spelling of the identical program one source shape over.
+    ///
+    /// Returns true when the name has been CLAIMED as a callable; false leaves the caller to type it
+    /// precisely as before, `mono` flag and all.
+    @discardableResult
+    private func bindCallableElement(_ name: String, _ spelling: String?) -> Bool {
+        guard isCallableTypeName(spelling) else { return false }
+        markOpaqueCallableBinding(name, origin: nil)
+        return true
+    }
+
     /// R178 — the `owner.member` an entry in `opaqueFnLocals` was unwrapped OUT OF, when there is one.
     /// Read only at the two invocation sites that consult that set.
     ///
@@ -2781,22 +2814,30 @@ final class CallCollector: SyntaxVisitor {
             // An EXPLICIT loop-var annotation (`for await x: Item in s`) names the element type directly —
             // honor it over the sequence's inferred element, so an unpinned/async sequence whose element
             // type candor can't infer still types the loop var (was ignored → `x.member()` silent-pure).
-            if let ann = node.typeAnnotation, let tn = typeName(ann.type).name {
-                vars[name] = tn
+            // R211 — `elementSpelling`, not `typeName(…).name`: an annotation that names a function
+            // type (`for f: () -> Void in fs`) has no NAME, so this branch answered nil for it and the
+            // spelled-out form fell through to the inferred one below. Both now reach the one binder.
+            if let ann = node.typeAnnotation, let tn = elementSpelling(ann.type) {
+                if !bindCallableElement(name, tn) { vars[name] = tn }   // R211
             } else if let elem = elementTypeOf(node.sequence) {
-                vars[name] = elem.name
-                if elem.mono { monoNames.insert(name) }   // `for x in xs` over `[T]`/`[some P]` (shadowName ran above)
+                if !bindCallableElement(name, elem.name) {              // R211 — `for f in handlers { f() }`
+                    vars[name] = elem.name
+                    if elem.mono { monoNames.insert(name) }   // `for x in xs` over `[T]`/`[some P]` (shadowName ran above)
+                }
             } else { clearBinding(name) }
         } else if let tup = node.pattern.as(TuplePatternSyntax.self), tup.elements.count == 2,
                   let second = tup.elements.last?.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
             if let v = dictValueOf(node.sequence) {
-                vars[second] = v  // for (key, value) in dict — value carries the type
+                // for (key, value) in dict — value carries the type (R211: or the callable)
+                if !bindCallableElement(second, v) { vars[second] = v }
             } else if let call = Self.peel(node.sequence).as(FunctionCallExprSyntax.self),
                       let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
                       ma.declName.baseName.text == "enumerated", let base = ma.base,
                       let elem = elementTypeOf(base) {
-                vars[second] = elem.name  // for (offset, element) in coll.enumerated()
-                if elem.mono { monoNames.insert(second) }
+                if !bindCallableElement(second, elem.name) {   // R211
+                    vars[second] = elem.name  // for (offset, element) in coll.enumerated()
+                    if elem.mono { monoNames.insert(second) }
+                }
             } else { clearBinding(second) }
         } else if Self.patternBinders(node.pattern).count == 1,
                   let only = Self.patternBinders(node.pattern).first {
@@ -2820,8 +2861,10 @@ final class CallCollector: SyntaxVisitor {
             if Self.castBinderType(node.pattern) != nil {
                 typeCastBinder(node.pattern, at: Syntax(node))   // R97 — shared with switch/if-case
             } else if Self.isOptionalUnwrapBinder(node.pattern), let elem = elementTypeOf(node.sequence) {
-                vars[name] = elem.name
-                if elem.mono { monoNames.insert(name) }
+                if !bindCallableElement(name, elem.name) {   // R211 — `for case let f? in [Cb?] { f() }`
+                    vars[name] = elem.name
+                    if elem.mono { monoNames.insert(name) }
+                }
             }
         }
         walk(node.pattern)
@@ -2947,7 +2990,11 @@ final class CallCollector: SyntaxVisitor {
     private func closureParamNames(_ closure: ClosureExprSyntax) -> [(name: String, annotated: String?)] {
         if let params = closure.signature?.parameterClause?.as(ClosureParameterClauseSyntax.self) {
             return params.parameters.map { p in
-                (p.firstName.text, p.type.flatMap { typeName($0).name })
+                // R211 — `elementSpelling`, not `typeName(…).name`. A param annotated with a bare
+                // function type (`{ (f: () -> Void) in f() }`) has no NAME, so it read as UNANNOTATED
+                // and was cleared: the invocation resolved against nothing and the enclosing function
+                // went ABSENT, while its `(f: Cb)` alias twin one line away had at least a spelling.
+                (p.firstName.text, p.type.flatMap { elementSpelling($0) })
             }
         }
         if let shorthand = closure.signature?.parameterClause?.as(ClosureShorthandParameterListSyntax.self) {
@@ -3052,16 +3099,37 @@ final class CallCollector: SyntaxVisitor {
                     // would put the binding back on the arm that resolved to nothing.
                     markOpaqueCallableBinding(p.name, origin: ce.origin)
                 } else if let annotated = p.annotated {
-                    vars[p.name] = annotated                 // explicit `{ (x: Foo) in }` — precise
+                    // R211 — an annotation that SPELLS a callable (`{ (f: Cb) in f() }`,
+                    // `{ (f: () -> Void) in f() }`) binds a callable, exactly as the R178 arm above
+                    // does for the unwrapped payload. `vars` is the wrong home for it for R178's own
+                    // stated reason: the invocation site reads `opaqueFnLocals`/`fnTyped`, so a name
+                    // parked in `vars` resolves to nothing and the caller goes silent.
+                    if !bindCallableElement(p.name, annotated) {
+                        vars[p.name] = annotated             // explicit `{ (x: Foo) in }` — precise
+                    }
                 } else if (i == 0 || pairIterator), let elem = iteratorElem, closure == elemClosure {
                     // iterator element param — typed (both params for a pair-iterator like
                     // sorted/min/max; only the first for the rest)
-                    vars[p.name] = elem.name
-                    // …and its opacity is DEFERRED to `visit(ClosureExprSyntax)`. This runs on the
-                    // enclosing CALL, before the closure node is entered, and that visit shadows every
-                    // closure parameter — so a flag set here would be wiped a moment later. Record it
-                    // against the closure and let the closure's own visit re-apply it inside its save.
-                    if elem.mono { monoClosureParams[closure.id, default: []].insert(p.name) }
+                    // R211 — …unless the ELEMENT IS CALLABLE (`handlers.forEach { $0() }`), which is
+                    // the closure-parameter binder of the four `bindCallableElement` owns.
+                    //
+                    // THE `mono` FLAG IS NOT CARRIED OVER TO A CLAIMED NAME, and the first draft of
+                    // this line called that "disjoint by construction". It is not: `opaqueElem` and
+                    // `selfElementType` are set only for a `[some P]` element or a protocol-bound
+                    // `Array` extension, and neither of those is a function type IN CODE THAT
+                    // COMPILES — which is a property of valid Swift, not of this predicate, so it is
+                    // written as the assumption it is (§E2). The cost if it were ever wrong is nil in
+                    // the dangerous direction anyway: `mono` exists to SUPPRESS the local-conformer
+                    // CHA on a receiver, and a claimed name has had `vars[name]` removed, so it
+                    // resolves against no type and no CHA runs on it to need suppressing.
+                    if !bindCallableElement(p.name, elem.name) {
+                        vars[p.name] = elem.name
+                        // …and its opacity is DEFERRED to `visit(ClosureExprSyntax)`. This runs on the
+                        // enclosing CALL, before the closure node is entered, and that visit shadows every
+                        // closure parameter — so a flag set here would be wiped a moment later. Record it
+                        // against the closure and let the closure's own visit re-apply it inside its save.
+                        if elem.mono { monoClosureParams[closure.id, default: []].insert(p.name) }
+                    }
                 } else {
                     clearBindingTypeOnly(p.name)             // every other param — CLEARED, never leak
                     // (the FLAGS are cleared in visit(ClosureExprSyntax), inside the closure's save)
