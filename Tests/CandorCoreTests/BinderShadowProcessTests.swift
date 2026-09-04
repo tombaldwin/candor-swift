@@ -228,10 +228,24 @@ final class BinderShadowProcessTests: XCTestCase {
         XCTAssertEqual(by["eff"]?["inferred"] as? [String], ["Fs"])
         XCTAssertEqual(by["aliasResolves"]?["inferred"] as? [String], ["Fs"],
                        "the alias rung itself: `let g = eff; g()` edges to the real unit")
-        // the fabrication and its rename control
-        XCTAssertNil(by["aliasLoopShadow"],
-                     "the loop binder is one of `jobs`, not `eff` — charging eff's Fs here is a fabrication")
-        XCTAssertNil(by["aliasLoopNoShadow"], "the rename control: same body, different binder name")
+        // The fabrication and its rename control. R211 SPLIT THIS ROW IN TWO, and the split is the
+        // finding: both halves were true of the one `XCTAssertNil` this used to be, and only one of
+        // them is what the row is about. GROUND TRUTH EXECUTED — `aliasLoopShadow([{ … }])` runs the
+        // caller's closure and does NOT run `eff`. So charging `eff`'s `Fs` is still the fabrication
+        // this row exists to catch, and that is now asserted directly; but ABSENCE additionally claimed
+        // the function performs NOTHING, and it invokes a caller-supplied closure out of `jobs` on
+        // every iteration. That was R211's cardinal sin sitting inside a control written against the
+        // opposite direction — the §A.2 shape, where a test inherits the blind spot of the bug that
+        // prompted it. The `Fs` assertion keeps every tooth the old line had.
+        for fn in ["aliasLoopShadow", "aliasLoopNoShadow"] {
+            let inferred = Set((by[fn]?["inferred"] as? [String]) ?? [])
+            XCTAssertFalse(inferred.contains("Fs"),
+                           "\(fn)'s loop binder is one of `jobs`, not `eff` — charging eff's Fs here is "
+                           + "the fabrication this row exists to catch. got \(inferred)")
+            XCTAssertEqual(inferred, ["Unknown"],
+                           "\(fn) really invokes a caller-supplied closure out of `jobs` (R211), so it "
+                           + "owes an Unknown — absence here would certify it pure. got \(inferred)")
+        }
         XCTAssertNil(by["aliasInnerShadow"],
                      "the inner `let g = { }` is a pure closure — it must not inherit eff's body")
         XCTAssertNil(by["aliasInnerNoShadow"], "the rename control")
