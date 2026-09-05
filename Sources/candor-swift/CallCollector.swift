@@ -821,7 +821,29 @@ final class CallCollector: SyntaxVisitor {
         var kinds: [ArgKind] = node.arguments.map { a in
             let e = Self.peel(a.expression)
             if e.is(ClosureExprSyntax.self) { return .closure }
-            if let dr = e.as(DeclReferenceExprSyntax.self) { return .named(dr.baseName.text) }
+            // R215's neighbour, and a PRE-EXISTING silent under-report this row's own fix multiplies
+            // rather than causes (measured on the shipped `969effa` with an ordinary ctor-typed
+            // receiver, no R215 code in the arm). `.named(n)` is the ONLY thing the Driver's
+            // callback-flow resolution reads to decide that a deferred callback parameter was
+            // discharged, and it discharges it by looking `n` up in `freeFnByName` — so a bare
+            // identifier that is LOCAL here, but shares its name with some free function ANYWHERE in
+            // the tree, resolved the deferral against a function nobody passed. GRDB is the live
+            // instance: `OrderedDictionary.merging` forwards its own `combine` PARAMETER to
+            // `merge(_:uniquingKeysWith:)`, an unrelated `private func combine` sits in
+            // AssociationAggregate.swift, and `merge` — which really does invoke a caller-supplied
+            // closure — went from `['Unknown'] callback:combine` to ABSENT, i.e. certified pure, while
+            // the caller took an edge to the wrong function and a reasonless `Unknown` (the R180 shape).
+            //
+            // The engine already answers this question in two other places and answers it correctly in
+            // both — the Driver's unqualified-CALL shadow guard, and the fn-reference ARGUMENT arm in
+            // `visit(FunctionCallExprSyntax)` — so this is §F1.3, three implementations of one question
+            // where the third had never been given the guard. `namesAFreeFunctionReference` is now that
+            // one authority and the argument arm calls it too, rather than a fourth copy of the
+            // predicate living here.
+            if let dr = e.as(DeclReferenceExprSyntax.self) {
+                let n = dr.baseName.text
+                return namesAFreeFunctionReference(n) ? .named(n) : .opaque
+            }
             return .opaque
         }
         if node.trailingClosure != nil { kinds.append(.closure) }
@@ -2250,6 +2272,22 @@ final class CallCollector: SyntaxVisitor {
         boundLocals.contains(name) || casePayloadLocals.contains(name)
     }
 
+    /// Does a bare identifier used as a call ARGUMENT refer to a free function of that name, or to
+    /// something LOCAL that merely shares the name? Two consumers ask it: the fn-reference argument arm
+    /// in `visit(FunctionCallExprSyntax)`, which emits a free-call edge, and `argKinds`, whose `.named`
+    /// is what the Driver's callback-flow resolution looks up in `freeFnByName`. The arm had the guard
+    /// and `argKinds` did not, which is the drift §F1.3 describes; both now read the same predicate.
+    ///
+    /// A DENYLIST, not an allowlist: it refuses when the name is a tracked local — a typed binding
+    /// (`vars`), a function-typed local or parameter (`fnTyped`), or any other binder (`isBoundLocal`,
+    /// which covers literal-typed locals `vars` drops and `case` payloads). Anything it cannot place
+    /// stays a free-function reference, so what it refuses costs precision and never soundness: an
+    /// unresolved deferral falls to the honest `Unknown`, which is the direction a callback whose
+    /// identity is not established has to fail in.
+    private func namesAFreeFunctionReference(_ name: String) -> Bool {
+        vars[name] == nil && !fnTyped.contains(name) && !isBoundLocal(name)
+    }
+
     // R96 — THE SINGLE AUTHORITY for "what does invoking the stored closure property `<type>.<name>`
     // mean?". Four call sites asked this question (bare `f()`, `obj.f()`, `map(f)`, `map(obj.f)`) and
     // each spelled the answer itself; that is exactly the shape §G names, and R97 is the same engine's
@@ -3332,7 +3370,7 @@ final class CallCollector: SyntaxVisitor {
                 // skip a bound LOCAL (a value, not a free-fn reference) — `vars` drops literal-typed
                 // locals, so `boundLocals` guards them too, else passing such a local fabricates a
                 // same-named free fn's effect.
-                if vars[n] == nil && !fnTyped.contains(n) && !isBoundLocal(n) {
+                if namesAFreeFunctionReference(n) {
                     // FINDING 2 — `xs.map(transform)` where `transform` is a stored CLOSURE PROPERTY of the
                     // enclosing type: passing it as a fn-ref to a HOF that invokes it reaches the closure's
                     // effects. Edge to the property-scoped unit `<Type>.transform` (its own collected unit).
@@ -5364,6 +5402,72 @@ final class CallCollector: SyntaxVisitor {
                     // Alias `g`→`eff` so invoking `g()` edges to the REAL unit (more precise than Unknown).
                     // Gated on the RHS being a known local FN name, so an ordinary value copy never fabricates.
                     fnValueAlias[name] = dr.baseName.text
+                } else if v.is(DeclReferenceExprSyntax.self) || v.is(MemberAccessExprSyntax.self) {
+                    // R215 — AN UNANNOTATED COPY OF AN ALREADY-TYPED VALUE, WHICH THIS CHAIN TYPED NOWHERE.
+                    // `let ys = stores`, `let ys = self.plain`, `let a = one`, `let b = param`. Every other
+                    // initializer shape above reaches a resolver — a ctor/factory call and a
+                    // cast/ternary/subscript both go to `rootOf`, an array literal to its own elements —
+                    // and a plain COPY reached none of them: the DeclReference arm above answers only a
+                    // `localFreeFns` NAME, and a MemberAccess only a singleton accessor. So `arrayElem`,
+                    // `dictElem` and `vars` were all dropped and the copy was untyped, which is why the
+                    // ANNOTATED twin `let ys: [S2] = stores; ys.forEach { $0.eff() }` charges `Fs` while
+                    // the unannotated one reported the enclosing function ABSENT from `functions[]`.
+                    // NOMINAL elements too, not only callable ones — R192 and R211 both sit one layer
+                    // inside this, and it is why Kingfisher's `let blocks = pendingBlocks;
+                    // blocks.forEach { $0() }` scored ZERO instrumented hits for R211: that line is an
+                    // instance of THIS, not of that.
+                    //
+                    // Nothing new is inferred here. These are the same three resolvers the annotated
+                    // binder and the call-initializer arm already use, asked in the order the annotated
+                    // binder asks them (container before scalar — `typeName` declines `[T]`/`[K: V]` so
+                    // the annotated path falls through to `arrayElem`/`dictElem`, and `rootOf` does not
+                    // decline, so asking it first would type `let ys = stores` with its ELEMENT).
+                    //
+                    // THE SCALAR ARM IS RESTRICTED TO A BARE IDENTIFIER, and the restriction is an
+                    // ASSUMPTION rather than a measurement — stated that way because I could not build a
+                    // compiling instance of the thing it guards against. `rootOf`'s MemberAccess arm ends
+                    // `return (inner.root, inner.isVar, …)`: when the member is not a recorded stored
+                    // field it hands back the BASE's type, which for a receiver-typing question is right
+                    // (the `path` carries the member) and for a BINDING's type would be wrong — `let d =
+                    // fm.temporaryDirectory` would type `d` as `FileManager` rather than `URL`. Whether
+                    // any COMPILING program can then spend that wrong type is a separate question: it
+                    // needs the two types to share a member name, and the one local-type attempt in the
+                    // fixture (`Outer.run` effectful, `Outer.inner: Inner` with `Inner.run` pure) does
+                    // not reach the fallthrough at all, because the field IS recorded. A bare identifier
+                    // cannot take that path either way — `rootOf`'s DeclReference arm reports
+                    // `isVar: true` only from `vars`, an implicit-self `fields` entry or `globalTypes`,
+                    // and `isVar: false` for a name it did not find — so the cheap half is taken and the
+                    // speculative half is not. `let ys = self.plain` therefore gets its ELEMENT type here
+                    // and `let a = self.one` does NOT get its scalar one; that half is filed, not fixed.
+                    if let elem = elementTypeOf(v0) { setArrayElem(name, elem) }
+                    else if let dv = dictValueOf(v0) { dictElem[name] = dv }
+                    else if let dr = v.as(DeclReferenceExprSyntax.self) {
+                        // THE `monoNames` OPACITY FLAG IS DELIBERATELY NOT CARRIED TO THE COPY, and the
+                        // first draft of this arm carried it under a comment calling that a MEASURED
+                        // over-charge. It is not one, and the claim is withdrawn (§E2/§K): a build with
+                        // the propagation and a build without it are BYTE-IDENTICAL on all five fixtures
+                        // here, including `[some P]`, `some P` and `<T: Doer>` parameters copied and then
+                        // dispatched — the local-conformer CHA those take reaches `protoTyped`/
+                        // `localProtocols` and never consults `mono`, and the DIRECT spelling `p.go()`
+                        // unions both conformers too. What is left is a choice with a stated direction:
+                        // not carrying it matches the two sibling `rootOf` arms in this same chain (the
+                        // cast/ternary/subscript one and the ctor/factory one) and fails toward the CHA
+                        // RUNNING — over-charge — where carrying a flag that was ever stale would
+                        // SUPPRESS the CHA, the sin direction. `setArrayElem` above does carry the
+                        // element form, because `elementTypeOf` returns it AS PART OF the resolution
+                        // rather than as a separate name-keyed lookup.
+                        if let proto = protoTyped[dr.baseName.text] {
+                            // a PROTOCOL-typed source. `rootOf` leaves a proto binding's root the bare
+                            // NAME, so it has to be asked before `rootOf` — the same order and the same
+                            // reason as `visit(OptionalBindingConditionSyntax)`'s protocol-unwrap branch.
+                            vars[name] = proto
+                        } else {
+                            let info = rootOf(v0)
+                            if info.isVar, let t = info.root {
+                                vars[name] = t
+                            }
+                        }
+                    }
                 }
             }
         }
