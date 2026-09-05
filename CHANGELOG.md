@@ -9,6 +9,78 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ R215 — an unannotated `let`/`var` COPY of a container dropped its element index, for NOMINAL elements too
+
+`stores.forEach { $0.eff() }` charges `Fs`. `let ys: [Store] = stores; ys.forEach { $0.eff() }` charges
+`Fs`. **`let ys = stores; ys.forEach { $0.eff() }` — the same program with the annotation removed —
+reported the enclosing function ABSENT from `functions[]`**: no effects, no `Unknown`, no row. Nominal
+element types, not only callable ones, which is why R192 and R211 (both about callables) left it
+standing — and it is why **Kingfisher scored ZERO instrumented branch hits for R211**: its real
+`let blocks = pendingBlocks; blocks.forEach { $0() }` is an instance of THIS, not of that.
+
+**Nine spellings on the row's own shape, and widening past them (§9) found the scalar sibling.** The
+element form covers a field, a `self.`-qualified field, a parameter, a local, a module-scope global, a
+dictionary under both `for (k, v)` and `.values`, a chained copy-of-a-copy, and a `[() -> Void]`. The
+sibling the row did not name is the same binder one type away: `let a = one; a.eff()`, `let b = param`,
+and `let g = fm; try? g.removeItem(…)` over `FileManager.default` — an ordinary scalar copy dropped
+`vars` exactly as the container copy dropped `arrayElem`, and a real file deletion read silent-pure.
+
+**The mechanism.** Every other initializer shape in `visit(VariableDeclSyntax)`'s unannotated chain
+reaches a resolver — a ctor/factory call and a cast/ternary/subscript both go to `rootOf`, an array
+literal to its own elements — and a plain COPY reached none of them: the DeclReference arm answers only
+a `localFreeFns` NAME and the MemberAccess arm only a singleton accessor. So `arrayElem`, `dictElem` and
+`vars` were all dropped and the copy was untyped. The fix consults the three resolvers that already hold
+the answer (`elementTypeOf`, `dictValueOf`, `rootOf`), in the order the ANNOTATED binder asks them —
+container before scalar, because `typeName` declines `[T]`/`[K: V]` and `rootOf` does not. The scalar arm
+takes a BARE IDENTIFIER only: `rootOf`'s member arm hands back the BASE's type for a member it cannot
+place, so `let d = fm.temporaryDirectory` would type `d` as `FileManager`. Whether any compiling program
+can spend that wrong type is a question this change did not answer, so the restriction is worded as the
+assumption it is and the member-access scalar half is filed, not fixed.
+
+**Real-code recall, one variable held.** Kingfisher's `DownloadTaskUpdatedCallbackGate.open` —
+`let blocks = pendingBlocks; … blocks.forEach { $0() }` over a `[@Sendable () -> Void]` its own
+`execute(_:)` appends caller-supplied blocks to — was **ABSENT** and is now `['Unknown'] callback:$0`.
+Same tree, same policy, same command, different binary: `deny Unknown DownloadTaskUpdatedCallbackGate.open`
+goes from **`policy ✓`, exit 0** to an `AS-EFF-006` violation, exit 1. GRDB's `Set.union(_ cursor:)`
+and `Set.intersection(_ cursor:)` (`var result = self; try result.formUnion(cursor)`) gain `Db` +
+`Unknown` for the same reason — they really step a database cursor. swift-nio's
+`ChannelOptions.TCPConvenienceOptions.applyFallbackMapping` (`var result = universalBootstrap`) gains
+its `NIOClientTCPBootstrap.channelOption` edge.
+
+**A/B wide-keyed on every disclosure channel** — Alamofire, GRDB, Kingfisher, swift-collections,
+swift-crypto, swift-nio; 11,639 common rows: **ADDED 36 REMOVED 0 CHANGED 108** (narrow key: 14), with
+the changed branch INSTRUMENTED first — **465 hits** (52/208/105/814/129/455 reached, 17/78/31/229/35/75
+resolved), against R211's 3 and R192's 0 on the same six corpora. **Zero rows lost an effect.** Sixteen
+rows gained a concrete (non-`Unknown`) effect and every one was ground-truthed from source rather than
+from candor's own report; four of them (`DatabaseRegion.intersection`, `TableRegion.intersection`,
+`TableRegion.union`, and their `Set` leaf) inherit `Db` through candor's existing sound-union treatment
+of an ambiguous overload — GRDB's `extension Set { func intersection(_ cursor: some Cursor) }` shares a
+name and an arity with the stdlib's, so both candidates are charged. That is over-charge by a
+pre-existing policy this change did not touch, and it is stated rather than narrowed away.
+
+### ⚠ A local forwarded to a HOF was resolved against a same-named FREE FUNCTION — pre-existing, found by R215's A/B
+
+Measured on the shipped `969effa` with an ordinary ctor-typed receiver, so **not caused by R215** — but
+R215's fix multiplies the call sites that reach it, and the first A/B of that fix removed two real GRDB
+rows because of it. `argKinds` recorded every bare identifier argument as `.named(n)`, and the Driver's
+callback-flow discharges a deferred callback parameter by looking `n` up in `freeFnByName`. So a LOCAL
+`combine` forwarded to a HOF resolved against an unrelated `private func combine` elsewhere in the tree:
+**GRDB's `OrderedDictionary.merge(_:uniquingKeysWith:)`**, which really does invoke a caller-supplied
+closure, went from `['Unknown'] callback:combine` to ABSENT — certified pure — while its caller took an
+edge to the wrong function and a reasonless `Unknown`.
+
+The engine already answers that question correctly in two other places (the Driver's unqualified-CALL
+shadow guard and the fn-reference ARGUMENT arm), so this is three implementations of one question where
+the third had never been given the guard. `namesAFreeFunctionReference` is now the single authority and
+the argument arm reads it too. It is a denylist — it refuses only a name it can place as a tracked local
+— so what it refuses costs precision and never soundness: an undischarged deferral falls to the honest
+`Unknown`. In isolation over the six corpora it is **safety-only (0 rows changed)**; in combination with
+R215 it is what turns `REMOVED 2` into `REMOVED 0`.
+
+Reverting `Sources/` leaves the new suite RED: **56 failures across 4 of 8 tests**. The four that stay
+green are the absence controls, the stated-limit control and the free-function precision control, which
+assert unchanged behaviour by construction.
+
 ### ⚠ R211 — a closure invoked while ITERATING a container was silent, and this is the spelling real code uses
 
 The iteration sibling of R192, and it SURVIVED R192's fix — measured on both arms of `020f976`, not
