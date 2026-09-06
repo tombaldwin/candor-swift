@@ -9,6 +9,62 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ SHADOWED-MEMBER — a module-scope function with the same name as a member of `self` claimed the call (row id to be allocated)
+
+`func wipe(_:)` at module scope beside `class Base { func wipe(_:) }`: an unqualified `wipe(p)` inside a
+subclass — or inside the declaring class itself — resolved to the module-scope function. Where the global
+is pure and the member is effectful, **the caller had NO ROW**: a real, EXECUTED file deletion certified
+silent-pure, with the pure global charged in its place, and `pure SubA.caller` exiting 0. Found by
+widening past R134 (§9): R134's supertype climb is the LAST arm in the unqualified chain, so it never
+sees a call the free-function arm has already claimed. Both spellings — inherited AND own-class.
+
+**Swift's rule is settled by the compiler, not by judgement,** and that also removes the fallback case the
+reorder would otherwise have to preserve. Unqualified lookup stops at the innermost scope holding the
+name and never widens to module scope, so a program where the member exists but its signature does not
+match DOES NOT COMPILE: `error: use of 'wipeC' refers to instance method rather than global function
+'wipeC' in module 'shadow'`. Reaching the global requires spelling the module, which is not an
+unqualified call. The three member arms therefore run BEFORE the free-function arms.
+
+**OPERATORS ARE EXCLUDED — a second language fact, and the exclusion is scoped to the ORDERING DECISION
+alone.** Swift resolves an operator by overload resolution over the OPERAND TYPES, not by lexical scope.
+Without the exclusion, `r1.cacheKey == r2.cacheKey` inside Kingfisher's
+`extension Source: Hashable { static func == }` resolved to `Source.==` itself: three `KFImage.Context`
+rows left `functions[]` and `Source.==` LOST its `Unknown` — a disclosure loss introduced by the change
+that closes one. Gating the member arms outright would also change how an operator resolves when no
+free-function arm claims it, a third and pre-existing question worth **802 changed rows** when measured;
+`freeArmWouldClaim` keeps operators on exactly the old path.
+
+**A/B over 16 freshly cloned trees, 4,401 `.swift` files** (source counts asserted non-zero first, per
+R242): **15,057 common rows, ADDED 0, REMOVED 1, CHANGED 654 wide, 5 narrow.** Reach, counted at the
+site: **35 shadowed calls** in 7 packages, and every package with a changed row has a non-zero count.
+
+**Every change audited, and the losses in full (§E1).** `inferred` moved on 5 rows and only UPWARDS —
+Nimble's `NMBWait.until` × 4 plus `waitUntil` gain `Clock`, because `throwableUntil` is a
+`public class func` on `NMBWait` (DSL+Wait.swift:45) while a `private func throwableUntil` sits at module
+scope in ANOTHER file (DSL+AsyncAwait.swift:134); Swift binds the member, candor bound the global, and
+the member is the one that reaches `Clock`. **A real silent under-report in real third-party code,
+closed.** Nothing lost an effect or an `Unknown` anywhere in 15,057 rows. What was lost is 643
+`invisible` values and 6 `unknownWhy` reasons, every one traced to a call that previously resolved to the
+WRONG unit: swift-nio's `ChannelOutboundInvoker.write` was bound to `Sources/NIOPosix/Windows.swift:28
+func write(_ fd: Int32, …)`, a Windows syscall shim of different arity; `Array.remove`/
+`CircularBuffer.removeSubrange` to `SystemPackage+Windows.swift:329 func remove(_ path:)`;
+`HTTPServerPipelineHandler`'s three rows to one of three module-scope `debugOnly` functions rather than
+the `private func debugOnly` on the type itself (HTTPServerPipelineHandler.swift:678); Moya's eight
+`Publisher.*` rows to ReactiveMoya's file-private `unwrapThrowable` rather than the `private func
+unwrapThrowable` in their own extension. The `invisible` module names (`CNIOWindows`, `ReactiveSwift`)
+were attributed through those mis-resolutions. RxSwift's six `ObservableType.bind` rows keep
+`inferred: ['Unknown']` and `callback:binder`, dropping only a duplicate reason and two edges to a free
+`bind(_)` Swift would never bind.
+
+**Revert-red verified by actually stashing the source change: all 3 tests RED, 5 assertions.**
+
+**A GUARD THAT IS CORPUS-COVERED BUT NOT UNIT-COVERED, said plainly.** Three attempts at a minimal
+in-repo fixture for the operator exclusion — a typed receiver, an enum payload binding, and a
+protocol-typed payload beside a top-level `func ==` — each resolve through a different path and each
+PASSED with the guard degraded, i.e. tested nothing. Rather than ship a control that survives its own
+degradation, that guard's evidence is the 16-package A/B, reproducible by flipping `memberFirst` to
+`true` and re-scanning Kingfisher.
+
 ### ⚠ R243 (swift half) — a callable field constrained by a SAME-TYPE requirement was invisible; the row's own framing is corrected
 
 `struct Gen<F> { let op: F }` with `extension Gen where F == (Int) -> Bool { func run(_ v: [Int]) ->

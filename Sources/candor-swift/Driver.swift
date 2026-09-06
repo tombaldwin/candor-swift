@@ -1920,43 +1920,56 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // guessed onto a same-named sibling/free fn (Get's `handler.delegate?.urlSession?(…)` forwards
                 // to an EXTERNAL delegate; resolving it to self's `urlSession` overload cluster unioned a
                 // sibling's real Fs onto the pure forwarder — a fabrication).
-                if overloadedBases.contains(call.path) {            // an overloaded FREE function
-                    for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
-                        edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append((f.qual, call.args))
-                        resolved = true
-                    }
-                } else if let targets = freeFnByName[call.path], targets.count == 1 {
-                    edges[f.qual, default: []].insert(targets[0])
-                    callsiteArgs[targets[0], default: []].append((f.qual, call.args))
-                    resolved = true
-                } else if localTypes.contains(call.path), overloadedBases.contains("\(call.path).init") {
-                    for t in matchOverloads("\(call.path).init", argc, call.argTypes, swiftModuleOf(f.loc)) {
-                        edges[f.qual, default: []].insert(t)
-                        resolved = true
-                    }
-                } else if localTypes.contains(call.path) {
-                    // `_ = C0()` — a constructor call edges to the declared init (the fuzzer's init_wired
-                    // form caught this silent-pure hole on the harness's FIRST run: effects wired in an
-                    // initializer vanished — the same hole the TS engine's got-dogfood found in ctors).
-                    // Constructing a local type is a fully-resolved LOCAL reach (touches no κ-unknown module),
-                    // so mark resolved REGARDLESS of whether an explicit `init` unit exists — a synthesized
-                    // init has no unit to edge to but the construction is still local; without this the caller
-                    // was falsely tagged `invisible` (the over-disclosure regression, sweep [36]).
-                    edges[f.qual, default: []].formUnion(resolveQual("\(call.path).init"))
-                    resolved = true
-                } else if let et = f.enclosingType, overloadedBases.contains("\(et).\(call.leaf)") {  // overloaded sibling
+                // SHADOWED-MEMBER — A MEMBER OF `self` BEATS A MODULE-SCOPE FUNCTION OF THE SAME NAME, and
+                // these three member arms therefore run BEFORE the free-function arms. They used to run
+                // after, so
+                // `func wipe(_:)` at module scope beside `class Base { func wipe(_:) }` made the free function
+                // claim the call and BOTH `SubA.caller` (inherited) and `OwnB.caller` (own class) were ABSENT
+                // from `functions[]` — a real, EXECUTED file deletion certified silent-pure while the pure
+                // global was charged in its place.
+                //
+                // NOT A JUDGEMENT CALL — the compiler settles it, and it also removes the fallback case this
+                // reorder would otherwise have to preserve. Swift's unqualified lookup stops at the innermost
+                // scope holding the name and never widens to module scope, so a program where the member
+                // exists but its SIGNATURE does not match DOES NOT COMPILE:
+                //     error: use of 'wipeC' refers to instance method rather than global function 'wipeC' in
+                //            module 'shadow' — note: use 'shadow.' to reference the global function
+                // There is no arity-mismatch arm to fall through to; the only way to reach the global is to
+                // spell the module (`shadow.wipeC(p)`), which is not an unqualified call and never lands here.
+                // So when a member arm matches by name, edging the global instead is a FABRICATION, and
+                // resolving to nothing when its overloads do not match is the pre-existing honest answer for a
+                // member call — this reorder extends that behaviour to the shadowed case, it does not add it.
+                //
+                // OPERATORS ARE EXCLUDED, and that is a second fact about the language rather than
+                // caution. Swift does NOT resolve an operator by lexical scope: `a == b` is resolved by
+                // OVERLOAD RESOLUTION OVER THE OPERAND TYPES across every visible declaration, so the
+                // enclosing type's own `==` has no priority at all. MEASURED on Kingfisher: without this
+                // gate, `r1.cacheKey == r2.cacheKey` — a String comparison — inside
+                // `extension Source: Hashable { static func == }` resolved to `Source.==` itself, and
+                // `Source.==` LOST its `Unknown` disclosure while three `KFImage.Context` rows dropped
+                // out of `functions[]` entirely. A disclosure loss, i.e. the exact direction this reorder
+                // exists to close, introduced by the reorder. `memberFirst` is the identifier test.
+                // …and the exclusion is scoped to the ORDERING DECISION ALONE. Gating the member arms
+                // outright would ALSO change how an operator resolves when no free-function arm claims
+                // it — a THIRD question, pre-existing, and worth 802 changed rows across this corpus
+                // when measured. `freeArmWouldClaim` keeps operators on exactly the old path: an
+                // operator reaches a member arm only in the cases where it already did.
+                let freeArmWouldClaim = overloadedBases.contains(call.path)
+                    || (freeFnByName[call.path]?.count == 1)
+                    || localTypes.contains(call.path)
+                let memberFirst = (call.leaf.first.map { $0.isLetter || $0 == "_" } ?? false) || !freeArmWouldClaim
+                if memberFirst, let et = f.enclosingType, overloadedBases.contains("\(et).\(call.leaf)") {  // overloaded sibling
                     for t in matchOverloads("\(et).\(call.leaf)", argc, call.argTypes, swiftModuleOf(f.loc)) {
                         edges[f.qual, default: []].insert(t)
                         resolved = true
                     }
-                } else if let ep = f.enclosingTypePath, byQual.contains("\(ep).\(call.leaf)") {
+                } else if memberFirst, let ep = f.enclosingTypePath, byQual.contains("\(ep).\(call.leaf)") {
                     // an unqualified call inside a type body reaches the sibling method — resolved against the
                     // FULL enclosing path, so a nested type's sibling call hits its own member precisely (never
                     // a same-named sibling under a different parent).
                     edges[f.qual, default: []].insert("\(ep).\(call.leaf)")
                     resolved = true
-                } else if let et = f.enclosingType,
+                } else if memberFirst, let et = f.enclosingType,
                           case let inherited = inheritedUnqualTargets(et, call.leaf, argc, call.argTypes,
                                                                       swiftModuleOf(f.loc)),
                           !inherited.isEmpty {
@@ -1994,6 +2007,31 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         callsiteArgs[t, default: []].append((f.qual, call.args))
                         resolved = true
                     }
+                } else if overloadedBases.contains(call.path) {            // an overloaded FREE function
+                    for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
+                        edges[f.qual, default: []].insert(t)
+                        callsiteArgs[t, default: []].append((f.qual, call.args))
+                        resolved = true
+                    }
+                } else if let targets = freeFnByName[call.path], targets.count == 1 {
+                    edges[f.qual, default: []].insert(targets[0])
+                    callsiteArgs[targets[0], default: []].append((f.qual, call.args))
+                    resolved = true
+                } else if localTypes.contains(call.path), overloadedBases.contains("\(call.path).init") {
+                    for t in matchOverloads("\(call.path).init", argc, call.argTypes, swiftModuleOf(f.loc)) {
+                        edges[f.qual, default: []].insert(t)
+                        resolved = true
+                    }
+                } else if localTypes.contains(call.path) {
+                    // `_ = C0()` — a constructor call edges to the declared init (the fuzzer's init_wired
+                    // form caught this silent-pure hole on the harness's FIRST run: effects wired in an
+                    // initializer vanished — the same hole the TS engine's got-dogfood found in ctors).
+                    // Constructing a local type is a fully-resolved LOCAL reach (touches no κ-unknown module),
+                    // so mark resolved REGARDLESS of whether an explicit `init` unit exists — a synthesized
+                    // init has no unit to edge to but the construction is still local; without this the caller
+                    // was falsely tagged `invisible` (the over-disclosure regression, sweep [36]).
+                    edges[f.qual, default: []].formUnion(resolveQual("\(call.path).init"))
+                    resolved = true
                 } else if !call.argRef, !call.argLabelled,
                           NATIVE_DISCLOSURE_C_FREE_FNS.contains(call.path),
                           argc > 0 || NATIVE_DISCLOSURE_C_NULLARY_FNS.contains(call.path) {
