@@ -1136,6 +1136,39 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         return []
     }
 
+    /// R134 — the project units an UNQUALIFIED (implicit-self) call to `leaf` can run when the enclosing
+    /// type `et` does not declare `leaf` itself: the member is INHERITED from a superclass, a base's
+    /// extension, or a conformed protocol's extension default. Empty ⇒ no supertype provides it ⇒ the
+    /// caller must resolve to NOTHING, exactly as before.
+    ///
+    /// This is the same query the TYPED-receiver protocol-extension-default arm answers (`j.emit()` where
+    /// Job conforms to Logging and Logging's extension defaults `emit`), so it climbs the SAME index the
+    /// same way and carries no extra filter: the direction is UP, from one concrete type to the few
+    /// supertypes it actually declares, and only REAL `<sup>.<leaf>` units are returned — never DOWN over
+    /// a supertype's conformers, which is the direction that needs `STD_PURE_PROTOCOLS`/
+    /// `RAW_VALUE_BASE_TYPES` to stay out of a fabrication flood. `supertypesOf` is already transitive, so
+    /// `Base -> Mid -> Sub` needs no loop here.
+    ///
+    /// AN OVERLOADED INHERITED MEMBER MUST NOT VANISH — the R32/R44 provided-member class, and the exact
+    /// way a fix like this reintroduces the sin it closes. An overloaded declaration's qual carries a
+    /// SIGNATURE SUFFIX (see `overloads`/`overloadedBases` above), so plain `resolveQual("Base.run")`
+    /// returns EMPTY when `Base` declares `run()` beside `run(times:)` — the whole edge would be dropped
+    /// silently. Route those through `matchOverloads`, exactly as the typed arm does, using the same
+    /// `argc`/`argTypes` authority the rest of this file uses (§F1.3: one question, one implementation).
+    let inheritedUnqualTargets: (String, String, Int, [String?], String) -> Set<String> = {
+        et, leaf, argc, argTypes, callerModule in
+        var out = Set<String>()
+        for sup in (supertypesOf[et] ?? []).sorted() where sup != et {
+            let base = "\(sup).\(leaf)"
+            if overloadedBases.contains(base) {
+                out.formUnion(matchOverloads(base, argc, argTypes, callerModule))
+            } else {
+                out.formUnion(resolveQual(base))
+            }
+        }
+        return out
+    }
+
     for (k, v) in returnsTmp { if let t = v { returnsIdx[k] = t } }
     // `static let shared = factory()` — now that the returns index exists, resolve the factory's vended
     // type and record it as the field's type, so `let r = Type.shared` carries the REAL type (not the
@@ -1904,6 +1937,44 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // a same-named sibling under a different parent).
                     edges[f.qual, default: []].insert("\(ep).\(call.leaf)")
                     resolved = true
+                } else if let et = f.enclosingType,
+                          case let inherited = inheritedUnqualTargets(et, call.leaf, argc, call.argTypes,
+                                                                      swiftModuleOf(f.loc)),
+                          !inherited.isEmpty {
+                    // R134 — THE INHERITED member reached by the IMPLICIT-SELF spelling. Every arm above
+                    // resolves `call.leaf` against the ENCLOSING TYPE only (`byQual`/`overloadedBases` keyed
+                    // on `ep`/`et`), so `class Sub: Base { func caller(p) { wipe(p) } }` — `wipe` declared on
+                    // `Base` — matched nothing and `Sub.caller` was ABSENT from `functions[]` entirely, under
+                    // the "nothing hidden" clean bill. EXECUTED ground truth: the file is really deleted, and
+                    // `deny Fs Sub.caller` / `pure Sub.caller` / `deny Unknown Sub.caller` /
+                    // `deny Fs Unknown Sub.caller` all exited 0; a blanket `deny Fs` exits 1 only
+                    // INCIDENTALLY, via `Base.wipe`, never naming the caller.
+                    //
+                    // PARITY WITH `super.`, which is the right target and not a coincidence: `wipe(p)` and
+                    // `super.wipe(p)` run the SAME body whenever the subclass declares no `wipe` of its own,
+                    // and that is exactly the case this arm sees — the sibling arms above already claimed
+                    // every call an override would answer, so an override can never be shadowed by this
+                    // climb. The `super.` arm (`CallCollector.superMarker`, ~200 lines up) has climbed
+                    // `supertypesOf` since the initializer-edge vein; the property/subscript accessor path
+                    // climbs too, and its comment at the `propertyEdges` loop asserts it does so "exactly as
+                    // the method-call path does" — an assertion that was FALSE for this spelling, which is
+                    // §E2/§F1.3 (two paths answering one question, drifted) on top of the hole itself.
+                    // SOUNDNESS R22 had already closed this for accessors reached through an EXPLICIT
+                    // receiver; the implicit spelling kept the hole.
+                    //
+                    // MEASURED, 18 executed shapes: THIRTEEN were silent, not one — two-level
+                    // `Base -> Mid -> Sub`, a generic base, a member declared in `extension Base`, a
+                    // protocol-extension default (struct AND via a class hierarchy), a caller declared in
+                    // `extension Sub`, an inherited `class func` from a static caller, the call nested in a
+                    // closure, an argument-labelled call, a protocol requirement witnessed on the base, a
+                    // conformance spelled on `extension S: P`, and a nested `enum Outer { class S: B }`.
+                    // `supertypesOf` is TRANSITIVE (built from the transitive `subtypesOf`), so one lookup
+                    // covers the whole chain.
+                    for t in inherited {
+                        edges[f.qual, default: []].insert(t)
+                        callsiteArgs[t, default: []].append((f.qual, call.args))
+                        resolved = true
+                    }
                 } else if !call.argRef, !call.argLabelled,
                           NATIVE_DISCLOSURE_C_FREE_FNS.contains(call.path),
                           argc > 0 || NATIVE_DISCLOSURE_C_NULLARY_FNS.contains(call.path) {

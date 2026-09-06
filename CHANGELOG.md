@@ -9,6 +9,73 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ R134 — an unqualified implicit-self call to an INHERITED member resolved to NOTHING, under a clean bill
+
+`class Sub: Base { func caller(_ p: String) { wipe(p) } }` with `wipe` declared on `Base`: **`Sub.caller`
+was ABSENT from `functions[]`** — no effects, no `Unknown`, no `unresolved`, no row. Ground truth executed
+as an SPM package: the program really deletes the file. The gate matrix, all four forms scoped to the
+caller, exited **0**: `deny Fs Sub.caller`, `pure Sub.caller`, `deny Unknown Sub.caller`,
+`deny Fs Unknown Sub.caller`. A blanket `deny Fs` exited 1 only INCIDENTALLY, via `Base.wipe`, never
+naming the caller. **And the engine issued its clean bill over it** — `candor: nothing hidden — every
+effect sits where its name says it should.`
+
+**Thirteen of eighteen executed spellings, not one.** Widening past the shape in the row (§9) found the
+two-level `Base -> Mid -> Sub`, a generic base, a member declared in `extension Base`, a
+protocol-extension default (via a struct AND via a class hierarchy), a caller declared in
+`extension Sub`, an inherited `class func` from a static caller, the call nested in a closure, an
+argument-labelled call, a protocol requirement witnessed on the base, a conformance spelled on
+`extension S: P`, and a nested `enum Outer { class S: B }`. The five already-correct spellings are the
+controls that pin the finding: `self.wipe(p)`, `super.wipe(p)`, a same-class `wipe(p)`, an inherited
+PROPERTY and an inherited SUBSCRIPT.
+
+**The mechanism.** Every resolution arm for an unqualified call keyed on the ENCLOSING type
+(`byQual`/`overloadedBases` on `f.enclosingTypePath`/`f.enclosingType`) — the enclosing type path only,
+no supertype climb. Two sibling paths answering the same question DO climb: the `super.` arm, and the
+property-accessor path whose own comment says it climbs *"exactly as the method-call path does"* — an
+assertion that was false for this spelling (§E2 on top of §F1.3). SOUNDNESS R22 closed this hole for
+accessors reached through an EXPLICIT receiver; the implicit spelling kept it. The fix climbs
+`supertypesOf` (already transitive) from the enclosing type, PRECISE-OR-NOTHING and local-only:
+deliberately no `Unknown` fallback onto an EXTERNAL base, because an unqualified call is also how every
+unresolved std free function is spelled and `class MyVC: UIViewController { print(x) }` would otherwise
+charge `dispatch:UIViewController.print`.
+
+**An overloaded inherited member must not vanish.** An overloaded declaration's qual carries a signature
+suffix, so plain `resolveQual("Base.run")` returns EMPTY when `Base` declares `run()` beside
+`run(times:)` — the R32/R44 provided-member class, i.e. exactly how this fix would have reintroduced the
+sin it closes. The climb routes those through `matchOverloads` on the same `argc`/`argTypes` authority
+the rest of the file uses.
+
+**A/B over ten freshly cloned third-party trees** (Alamofire 98 `.swift`, Kingfisher 176, Moya 64,
+RxSwift 1019, SQLite.swift 79, swift-argument-parser 170, swift-collections 727, swift-nio 554,
+SwiftyJSON 23, vapor 250 — source counts asserted non-zero first, per R242): **12,925 common rows,
+ADDED 85, REMOVED 0, CHANGED 214 on the WIDE key** (every field), 86 on the narrow `inferred` key alone.
+Reach counts from a counter placed INSIDE the changed arm: 648 hits — RxSwift 571, Alamofire 39,
+swift-nio 19, Kingfisher 10, swift-collections 6, SQLite.swift 3, and **ZERO in Moya,
+swift-argument-parser, SwiftyJSON and vapor, whose byte-identical reports are SAFETY-ONLY evidence.**
+Every one of the 501 new call edges was audited mechanically, not sampled: 429 name a member of a real
+supertype and 72 rows changed by pure propagation with no new edge. Exactly one row lost a disclosure
+value anywhere (`WKInterfaceImage.image` dropped `invisible: ['TVUIKit']`) and it went
+`inferred: [] -> ['Unknown']` in the same row — strictly stronger. Ground-truthed from the libraries'
+own source, never from candor's report: Alamofire `DataRequest._response` → `appendResponseSerializer`
+(`Request.swift:589`), `DataStreamRequest.asInputStream` → `resume()` (`:768`),
+`UploadRequest.didFailToCreateUploadable` → `retryOrFinish` (`:543`, a two-level climb), swift-nio
+`Socket.write` → `withUnsafeHandle` (`BaseSocket.swift:385`), RxSwift `DefaultIfEmptySink.on` →
+`forwardOn` (`Sink.swift:26`, a generic base). **77 Alamofire rows gained `Net` + `netClass`** — the
+`deny Net` recall this engine previously failed on Alamofire's own request path.
+
+**Every guard degraded, and each turns a NAMED test red** (`InheritedImplicitSelfCallProcessTests`):
+the else-if ORDER → `testAnOverrideWinsOverTheInheritedBody`; the `matchOverloads` route →
+`testAnOverloadedInheritedMemberResolvesPreciselyAndNeverVanishes` (`Sub.callsEffectful` vanishes — the
+sin the fix closes, reintroduced); the `!inherited.isEmpty` guard →
+`testAnUnresolvedUnqualifiedCallInASubclassKeepsItsNativeDisclosure` (`native:unlink` swallowed).
+Revert-red verified by actually stashing the source change: 5 of 8 tests RED, 20 assertions.
+
+**Known residual, measured and NOT closed here.** A project-level free function with the same name as a
+member of `self` still claims the call first, so `func wipe(_:)` at module scope beside
+`class Base { func wipe(_:) }` makes both `SubS.caller` (inherited) and `OwnS.caller` (own class)
+silent — executed, the file really is deleted, and Swift binds the MEMBER in both. That is a distinct
+finding one arm over, reported rather than fixed in this change.
+
 ### ⚠ R215 — an unannotated `let`/`var` COPY of a container dropped its element index, for NOMINAL elements too
 
 `stores.forEach { $0.eff() }` charges `Fs`. `let ys: [Store] = stores; ys.forEach { $0.eff() }` charges
