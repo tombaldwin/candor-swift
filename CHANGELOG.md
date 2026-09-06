@@ -9,6 +9,71 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ R243 (swift half) — a callable field constrained by a SAME-TYPE requirement was invisible; the row's own framing is corrected
+
+`struct Gen<F> { let op: F }` with `extension Gen where F == (Int) -> Bool { func run(_ v: [Int]) ->
+[Int] { v.filter(op) } }`: **`Gen.run` was ABSENT from `functions[]`** while the same engine correctly
+disclosed a directly-typed closure property (`dispatch:Direct.cb`) and a protocol-typed one. Ground
+truth EXECUTED — the fixture really deletes a file through the stored closure, and
+`deny Unknown Gen.run` exited 0 over it.
+
+**THE ROW'S FRAMING IS WRONG FOR THIS ENGINE, and the correction is worth as much as the fix.** R243
+says the discriminator is *where the constraint lives* — the extension rather than the type declaration.
+Measured: `extension Gen where F: RunnerC` — a bound on the EXTENSION, exactly where the row says the
+defect is — is disclosed correctly and identically to the declaration-bound `struct Gen<F: RunnerC>`.
+What discriminates in candor-swift is the **KIND OF REQUIREMENT**: `recordTypeGenerics` read
+`.conformanceRequirement` (`F: P`) and dropped `.sameTypeRequirement` (`F == …`) whole. The two axes
+look identical from outside because Swift FORBIDS a same-type requirement to a concrete type on the
+declaring type's own clause ("same-type requirement makes generic parameter non-generic"), so `F == …`
+can only ever appear on an extension or a member.
+
+**Five silent spellings, one requirement kind** — the extension-level form, the same through a function
+`typealias`, the requirement written on the METHOD instead of the extension, direct `op()` invocation
+rather than through a HOF, and — a second cardinal sin the row does not mention — the CONCRETE side,
+`extension Gen where F == Wiper { func run() { op.doIt() } }`, also absent over a real file deletion.
+A function type has no NAME, so `typeGenericBounds` could not carry the first four; they go through a
+new `typeGenericFnParams` index and the field is retyped `(nil, true)` — the one spelling every other
+callable field is already normalised to. It is a DISCLOSURE, not a resolution: the field has no visible
+body, so the answer is the `dispatch:` hedge, never a guess at which closure was stored. And it is far
+narrower than charging an UNBOUNDED generic field, the +1,697-row over-charge shape candor-java measured
+and rejected during R217 — it fires only where a requirement in the source SAYS the param is a function.
+
+**A MEMBER's `where` clause is read for that one thing and nothing else, and both halves of that gate
+are defects this change had before they were guards.** Measured on swift-nio: `func unwrap<NewValue>
+(orError:) -> EventLoopFuture<NewValue> where Value == NewValue?` (EventLoopFuture.swift:1875) recorded
+`EventLoopFuture.Value -> NewValue`, a name nothing declares; and reading member-level CONFORMANCE
+requirements type-wide moved four real rows (`_reduceSuccesses0`/`_reduceCompletions0` each lost a call
+edge). Both were found by the corpus A/B, not by review.
+
+**A/B over SIXTEEN freshly cloned third-party trees, 4,401 `.swift` files** (Alamofire, Kingfisher,
+Moya, Nimble, PromiseKit, RxSwift, SQLite.swift, swift-algorithms, swift-argument-parser,
+swift-async-algorithms, swift-collections, swift-composable-architecture, swift-log, swift-nio,
+SwiftyJSON, vapor — per-tree source counts asserted non-zero first, per R242): **15,058 common rows,
+ADDED 0, REMOVED 0, CHANGED 0 on the WIDE key** (every field) and 0 on the narrow key — byte-identical.
+
+**REACH, counted per branch at the site, because a zero diff over a corpus that cannot reach the change
+is the most flattering number available:**
+
+    same-type requirement to a FUNCTION type   0 hits   <- the branch R243 is about
+    same-type requirement to a NOMINAL type   12 hits   in 6 packages
+    field retyped to a callable                0 hits
+
+So the byte-identical A/B is **SAFETY-ONLY for the callable-field branch**, and this is written down here
+rather than discovered later. A recall hunt confirms the zero is the shape's rarity and not a broken
+instrument: `where <X> == <function type>` occurs **0 times** in those 4,401 files. The concrete-typed
+branch DOES reach real code — `EventLoopPromise.Value == Void`, `Selector.R == NIORegistration`,
+`Promise.T == Void`, `Guarantee.T == Void`, `Flag.Value == Bool`, `Delegate.Input == Void`,
+`AsyncTimerSequence.C == SuspendingClock` and five more — and moved nothing.
+
+**Every guard degraded, and each turns a NAMED test red** (`SameTypeRequirementCallableFieldProcessTests`):
+dropping the retype branch → four tests, including both over-charge controls' reach instruments;
+`l.isFunction != r.isFunction` → `testASameTypeRequirementToANonFunctionTypeResolvesExactlyRatherThanHedging`,
+where `deny Fs Ex.run` flips 1 -> 0 over a real file deletion — the degradation introduces a cardinal
+sin; the member-level clause → `testEverySameTypeRequirementSpellingIsDisclosed` via the method-level
+spelling. **The non-function control had to be rewritten because its first version survived its own
+degradation**: an `op.n`-only fixture stays green when the field is wrongly marked callable, since a
+callable field is only ever charged where it is INVOKED and a property read is not an invocation.
+
 ### ⚠ R134 — an unqualified implicit-self call to an INHERITED member resolved to NOTHING, under a clean bill
 
 `class Sub: Base { func caller(_ p: String) { wipe(p) } }` with `wipe` declared on `Base`: **`Sub.caller`

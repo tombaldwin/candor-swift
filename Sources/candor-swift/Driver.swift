@@ -325,6 +325,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // a conditional-conformance extension living anywhere (later in the same file, or another file), so
     // the merge has to complete before `unresolvedGenericFields` below can be retried.
     var typeGenericBoundsAll: [String: [String: String]] = [:]
+    /// R243 — merged `DeclCollector.typeGenericFnParams`: Type -> generic params a SAME-TYPE requirement
+    /// binds to a FUNCTION TYPE. Same merge-then-retry ordering as `typeGenericBoundsAll`, and for the
+    /// same reason: the constraining extension can live in any file.
+    var typeGenericFnParamsAll: [String: Set<String>] = [:]
     // A stored field typed as its enclosing type's own (as-yet-unbound) generic parameter — resolved once
     // per-file collection is done and `typeGenericBoundsAll` is complete. Mirrors `staticFactoryFields`'s
     // two-phase shape one level down (see `DeclCollector.unresolvedGenericFields`'s doc for the ordering
@@ -820,6 +824,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         globalArrayElemByModule[cMod, default: [:]].merge(c.globalArrayElem) { a, _ in a }
         globalFactories.append(contentsOf: c.globalFactories.map { (cMod, $0.name, $0.leaf) })
         for (t, bs) in c.typeGenericBounds { typeGenericBoundsAll[t, default: [:]].merge(bs) { a, _ in a } }
+        for (t, ps) in c.typeGenericFnParams { typeGenericFnParamsAll[t, default: []].formUnion(ps) }   // R243
         unresolvedGenericFields.append(contentsOf: c.unresolvedGenericFields)
     }
 
@@ -1211,6 +1216,20 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         if let bound = typeGenericBoundsAll[ty]?[param] {
             fields[ty, default: [:]][field] = (bound, false)
             opaqueFields[ty, default: []].insert(field)
+        } else if typeGenericFnParamsAll[ty]?.contains(param) == true {
+            // R243 — the param is bound to a FUNCTION TYPE by a same-type requirement
+            // (`extension Gen where F == (Int) -> Bool`), so the field HOLDS A CALLABLE. `(nil, true)` is
+            // the exact spelling R178's alias completion below already normalises every other callable
+            // field to, which is what makes `v.filter(op)` / `op()` disclose here the way a directly-typed
+            // `let cb: (Int) -> Bool` does — one representation, one consumer (§F1.3). Before this,
+            // `Gen.run` was ABSENT from `functions[]` over a real, executed file deletion.
+            //
+            // A DISCLOSURE, NOT A RESOLUTION: the field carries no visible body, so this yields the
+            // `dispatch:`/`callback:` hedge, never a guess at which closure was stored. And it is
+            // strictly narrower than charging an UNBOUNDED generic field — the +1,697-row over-charge
+            // shape candor-java measured and rejected during R217 — because it fires only where a
+            // requirement in the source SAYS the param is a function.
+            fields[ty, default: [:]][field] = (nil, true)
         }
     }
     // ══ R178 — COMPLETE THE FUNCTION-TYPE ALIASES, IN ONE PLACE, BEFORE ANYTHING READS `isFunction` ══
