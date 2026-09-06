@@ -175,6 +175,13 @@ final class DeclCollector: SyntaxVisitor {
     // as-yet-unbound generic param of THIS type" (defer, see `unresolvedGenericFields`) from "a genuine
     // forward/unresolvable type reference" (leave alone, unchanged behavior).
     var typeGenericParamNames: [String: Set<String>] = [:]
+    /// R243 — Type -> the generic params a SAME-TYPE requirement binds to a FUNCTION TYPE
+    /// (`extension Gen where F == (Int) -> Bool`, or that requirement written on a member). A field typed
+    /// by such a param HOLDS A CALLABLE, so invoking it must disclose exactly as a directly-typed closure
+    /// property does. `typeGenericBounds` cannot carry it: a function type has NO NAME — the same hole
+    /// R178 found one level down for `typealias` — which is why the whole shape read silent. Driver
+    /// retypes the deferred field to `(nil, true)` once every file's clauses are merged.
+    var typeGenericFnParams: [String: Set<String>] = [:]
     // A stored field whose type is its enclosing type's OWN generic parameter, recorded with NO bound
     // resolved at declaration time — deferred here so Driver can retry once every file's extensions
     // (same file, later; or a different file, any order) have contributed their `where` clauses to the
@@ -588,16 +595,85 @@ final class DeclCollector: SyntaxVisitor {
     }
     // TYPE-LEVEL generic bounds (`struct Pipe<T: Saver>` / `… where T: Saver`) — recorded so a stored field
     // typed `T` resolves to its bound `Saver`, letting `item.save()` dispatch (else it read silent-pure, R27).
-    private func recordTypeGenerics(_ name: String, _ clause: GenericParameterClauseSyntax?, _ whereClause: GenericWhereClauseSyntax?) {
+    /// `memberLevel` — this clause is a MEMBER's own `where`, not the type's or an extension's. Such a
+    /// clause is read for ONE thing: a same-type requirement binding one of the enclosing type's params to
+    /// a FUNCTION TYPE (`func run() where F == (Int) -> Bool`), which is a fact about the type's field and
+    /// nothing else. Every other requirement there is scoped to the MEMBER and constrains the member's own
+    /// generics as often as the type's, so recording it type-wide is simply wrong.
+    ///
+    /// MEASURED, twice, on swift-nio, and both were defects in this change before they were guards:
+    /// `func unwrap<NewValue>(orError:) -> EventLoopFuture<NewValue> where Value == NewValue?`
+    /// (EventLoopFuture.swift:1875) recorded `EventLoopFuture.Value -> NewValue`, a name nothing declares;
+    /// and reading member-level CONFORMANCE requirements type-wide moved four real rows in the corpus A/B
+    /// (`EventLoopFuture._reduceSuccesses0`/`_reduceCompletions0` each lost a call edge). With this gate
+    /// the whole 16-package A/B is byte-identical.
+    private func recordTypeGenerics(_ name: String, _ clause: GenericParameterClauseSyntax?, _ whereClause: GenericWhereClauseSyntax?,
+                                    memberLevel: Bool = false) {
         for gp in clause?.parameters ?? [] {
             typeGenericParamNames[name, default: []].insert(gp.name.text)
             if let it = gp.inheritedType, let b = typeName(it).name { typeGenericBounds[name, default: [:]][gp.name.text] = b }
         }
         for req in whereClause?.requirements ?? [] {
-            guard case .conformanceRequirement(let c) = req.requirement,
-                  let l = typeName(c.leftType).name, let r = typeName(c.rightType).name else { continue }
-            typeGenericBounds[name, default: [:]][l] = r
+            switch req.requirement {
+            case .conformanceRequirement(let c):
+                guard !memberLevel,
+                      let l = typeName(c.leftType).name, let r = typeName(c.rightType).name else { continue }
+                typeGenericBounds[name, default: [:]][l] = r
+            case .sameTypeRequirement(let s):
+                // R243 — `extension Gen where F == (Int) -> Bool`. Only the CONFORMANCE kind was read, so
+                // a same-type requirement was dropped whole and a field typed `F` stayed the bare,
+                // forever-unresolved param name: `Gen.run`, which does `v.filter(op)`, was ABSENT from
+                // `functions[]` while the same engine disclosed a directly-typed closure property
+                // (`dispatch:Direct.cb`) and a protocol-typed one. Ground truth EXECUTED — the file is
+                // really deleted.
+                //
+                // AND THE ROW'S OWN FRAMING IS WRONG FOR THIS ENGINE, measured: `extension Gen where
+                // F: RunnerC` — the constraint on the EXTENSION, exactly where the row says the defect
+                // lives — is disclosed correctly, identically to the declaration-bound `struct
+                // Gen<F: RunnerC>` form. WHERE the constraint sits is not the discriminator here; WHAT
+                // KIND OF REQUIREMENT it is, is. `==` was never read. (Swift also forbids a same-type
+                // requirement to a concrete type on the declaring type's own clause — "same-type
+                // requirement makes generic parameter non-generic" — so this requirement can ONLY ever
+                // appear on an extension or a member, which is what makes the two axes look identical.)
+                guard let lt = typeSyntax(s.leftType), let rt = typeSyntax(s.rightType) else { continue }
+                let l = typeName(lt), r = typeName(rt)
+                // WHICH SIDE NAMES THE PARAM is decided by a fact about the grammar, not by the author's
+                // order: a generic parameter is always a bare identifier, so a FUNCTION TYPE is never the
+                // param. `F == (Int) -> Bool` and `(Int) -> Bool == F` are the same requirement and both
+                // land here.
+                if l.isFunction != r.isFunction {
+                    if let p = (l.isFunction ? r.name : l.name) { typeGenericFnParams[name, default: []].insert(p) }
+                } else if !memberLevel, !l.isFunction, let p = l.name, let o = r.name, o != p,
+                          rt.is(IdentifierTypeSyntax.self),
+                          typeGenericParamNames[name]?.contains(p) == true,
+                          typeGenericParamNames[name]?.contains(o) != true {
+                    // `F == SomeConcreteType` — an EXACT type, strictly more precise than a protocol
+                    // bound, so it feeds the same index the conformance kind does. Gated on `p` being a
+                    // KNOWN generic param of this type, because with both sides bare identifiers nothing
+                    // in the syntax says which is which: `where F.Element == String` would otherwise
+                    // record a bound for whatever `typeName` makes of the left member type. `rt` must be a
+                    // plain `IdentifierTypeSyntax` — `NewValue?` and `T.Element` are not bounds — and `o`
+                    // must not be another of THIS type's own params. Conservative in the direction that
+                    // loses precision, never disclosure: an unrecorded bound is exactly the pre-R243
+                    // behaviour. See `memberLevel` for the member-level case and what it measured.
+                    typeGenericBounds[name, default: [:]][p] = o
+                }
+            default:
+                continue
+            }
         }
+    }
+
+    /// The `TypeSyntax` inside a same-type requirement's side. swift-syntax models each side as a
+    /// `.type`/`.expr` choice (the expr case is the value-generics spelling, `let N == 4`), and only the
+    /// type case can name a generic parameter or a function type.
+    private func typeSyntax(_ side: SameTypeRequirementSyntax.LeftType) -> TypeSyntax? {
+        if case .type(let t) = side { return t }
+        return nil
+    }
+    private func typeSyntax(_ side: SameTypeRequirementSyntax.RightType) -> TypeSyntax? {
+        if case .type(let t) = side { return t }
+        return nil
     }
     override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {
         recordTypeGenerics(node.name.text, node.genericParameterClause, node.genericWhereClause)
@@ -1197,6 +1273,15 @@ final class DeclCollector: SyntaxVisitor {
     }
 
     override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
+        // R243 — a MEMBER may carry the constraint instead of the extension:
+        // `extension Gen { func run(_ v: [Int]) -> [Int] where F == (Int) -> Bool { v.filter(op) } }`.
+        // Measured silent in exactly the same way as the extension-level spelling, so the clause is
+        // recorded under the ENCLOSING TYPE, the one scope a field of `F` can be reached from. Recording
+        // it type-wide cannot over-charge a sibling method: the field is only ever CHARGED where it is
+        // INVOKED, and it can only be invoked where some constraint makes it callable.
+        if let ty = typeStack.last, node.genericWhereClause != nil {
+            recordTypeGenerics(ty, nil, node.genericWhereClause, memberLevel: true)
+        }
         recordReturn(node.name.text, node.signature)
         recordOpaqueSeqReturn(node.name.text, node.signature, body: node.body)
         collect(node.name.text, sig: node.signature, body: node.body, node: node)
