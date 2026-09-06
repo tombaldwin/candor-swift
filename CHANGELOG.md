@@ -9,7 +9,7 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
-### ⚠ SHADOWED-MEMBER — a module-scope function with the same name as a member of `self` claimed the call (row id to be allocated)
+### ⚠ SOUNDNESS R255 — a module-scope function with the same name as a member of `self` claimed the call
 
 `func wipe(_:)` at module scope beside `class Base { func wipe(_:) }`: an unqualified `wipe(p)` inside a
 subclass — or inside the declaring class itself — resolved to the module-scope function. Where the global

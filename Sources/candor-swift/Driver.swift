@@ -1920,7 +1920,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // guessed onto a same-named sibling/free fn (Get's `handler.delegate?.urlSession?(…)` forwards
                 // to an EXTERNAL delegate; resolving it to self's `urlSession` overload cluster unioned a
                 // sibling's real Fs onto the pure forwarder — a fabrication).
-                // SHADOWED-MEMBER — A MEMBER OF `self` BEATS A MODULE-SCOPE FUNCTION OF THE SAME NAME, and
+                // SOUNDNESS R255 — A MEMBER OF `self` BEATS A MODULE-SCOPE FUNCTION OF THE SAME NAME, and
                 // these three member arms therefore run BEFORE the free-function arms. They used to run
                 // after, so
                 // `func wipe(_:)` at module scope beside `class Base { func wipe(_:) }` made the free function

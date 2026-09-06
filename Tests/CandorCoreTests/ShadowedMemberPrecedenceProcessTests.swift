@@ -3,7 +3,7 @@ import Foundation
 
 /// **A MODULE-SCOPE FUNCTION WITH THE SAME NAME AS A MEMBER OF `self` CLAIMED THE CALL, and the caller
 /// was ABSENT from `functions[]`.** (Row id to be allocated — the greppable marker in `Driver.swift` is
-/// `SHADOWED-MEMBER`.)
+/// `SOUNDNESS R255`.)
 ///
 /// `func wipe(_:)` at module scope beside `class Base { func wipe(_:) }`: an unqualified `wipe(p)` inside
 /// a subclass, or inside the declaring class itself, resolved to the module-scope function. Where that
