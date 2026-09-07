@@ -21,7 +21,11 @@ command -v strace >/dev/null 2>&1 || { echo "strace not installed — skipping."
 echo "building candor-swift…"; ( cd "$ROOT" && swift build -q ) || { echo "FAIL: candor-swift build"; exit 1; }
 SW="$ROOT/.build/debug/candor-swift"; [ -x "$SW" ] || { echo "FAIL: no candor-swift"; exit 1; }
 
-WORK="${CORPUS_WORK:-${TMPDIR:-/tmp}/candor-swift-corpus}"; mkdir -p "$WORK" "$HERE/results"
+# SOUNDNESS R242/R306 — evidence does not live under $TMPDIR. macOS sweeps the per-user
+# /var/folders tree and /tmp alike, and a HOLLOWED corpus (directories intact, files gone) makes
+# a differential print ADDED 0 / REMOVED 0 / CHANGED 0 — which is exactly what a correct,
+# safely-inert change prints. That is the result you were hoping for, so nobody looks twice.
+WORK="${CORPUS_WORK:-$HOME/.candor/corpus-swift}"; mkdir -p "$WORK" "$HERE/results"
 SUM="$HERE/results/FROZEN-SUMMARY.tsv"
 # Columns (see FROZEN.md):
 #   observed_raw  = every effect class the kernel emitted under strace (THE CHECKED SET).
@@ -84,7 +88,10 @@ echo "harness baseline effect classes (informational, subtracted from observed_c
 grep -vE '^\s*#|^\s*$' "$HERE/manifest.tsv" | while IFS=$'\t' read -r name url tag effects why; do
   echo; echo "################## $name ($tag) ##################"
   d="$WORK/$name"
-  [ -d "$d/.git" ] || { rm -rf "$d"; git clone --quiet --depth 1 --branch "$tag" "$url" "$d" 2>/dev/null \
+# …and ACQUISITION IS TESTED BY CONTENT, not by the presence of `.git`. A gutted checkout keeps
+# `.git/hooks` and `.git/info`, so a `-d "$d/.git"` test answers "already got it" forever about a
+# tree with no source in it. Count real files instead.
+  [ -n "$(find "$d" -type f -name "*.swift" 2>/dev/null | head -1)" ] || { rm -rf "$d"; git clone --quiet --depth 1 --branch "$tag" "$url" "$d" 2>/dev/null \
       || { echo "  clone-failed"; printf '%s\t%s\t-\t-\t-\t-\t-\t-\tclone-failed\n' "$name" "$tag" >>"$SUM"; continue; }; }
   rm -rf "$d/.candor"; "$SW" "$d" >/dev/null 2>&1
   rep=$(ls "$d"/.candor/report.*.Swift.json 2>/dev/null | grep -vE 'callgraph|hierarchy' | head -1)
