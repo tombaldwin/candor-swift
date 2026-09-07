@@ -160,6 +160,12 @@ final class CallCollector: SyntaxVisitor {
     var arrayElem: [String: String]         // name -> element type of a `[T]` local/param (loop typing)
     var dictElem: [String: String]          // name -> VALUE type of a `[K: V]` local/param (dict loops)
     var tupleElem: [String: [String: String]]  // name -> tuple element types (`p.0` / `p.c`)
+    /// SOUNDNESS R269 — a local tuple's SLOTS, when a slot holds a CONTAINER. `tupleElem` holds only
+    /// NOMINAL element types and is written only from an annotation, so `let t = (cbs, 1); for c in t.0`
+    /// had nowhere to record that slot `0` is an array of callables and read silent-pure. Keyed
+    /// name -> slot -> the same shapes `arrayElem`/`dictElem` hold.
+    var tupleArrayElem: [String: [String: (name: String, mono: Bool)]] = [:]
+    var tupleDictValue: [String: [String: String]] = [:]
     let fields: [String: [String: (name: String?, isFunction: Bool)]]
     /// R73 — module-scope global NAME -> its concrete type, MODULE-SLICED by the Driver before
     /// construction (see `Driver.globalTypesByModule`). Consulted by `rootOf`'s bare-identifier branch,
@@ -2034,6 +2040,13 @@ final class CallCollector: SyntaxVisitor {
            ma.declName.baseName.text == "values", let v = dictValueOf(base, depth + 1) {
             return (v, false)
         }
+        // R269 — a LOCAL TUPLE's slot: `let t = (cbs, 1); for c in t.0`. Asked before the field arm
+        // below, which resolves `t` to a TYPE and would answer about a member of that type instead.
+        if let ma = e.as(MemberAccessExprSyntax.self),
+           let baseDR = ma.base?.as(DeclReferenceExprSyntax.self),
+           let slot = tupleArrayElem[baseDR.baseName.text]?[ma.declName.baseName.text] {
+            return slot
+        }
         if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base,
            let bt = rootOf(base, depth + 1).root, let t = fieldArrayElem[bt]?[ma.declName.baseName.text] {
             return (t, false)  // a `[E]` field of ANY typed receiver: `self.items` / `pool.clients` / `ps[0].items`
@@ -2071,6 +2084,10 @@ final class CallCollector: SyntaxVisitor {
             if let t = dictElem[n] { return t }
             if let et = enclosingType, let t = fieldDictValue[et]?[n] { return t }
         }
+        // R269 — a LOCAL TUPLE's slot holding a dictionary; the sibling of the `tupleArrayElem` arm.
+        if let ma = e.as(MemberAccessExprSyntax.self),
+           let baseDR = ma.base?.as(DeclReferenceExprSyntax.self),
+           let v = tupleDictValue[baseDR.baseName.text]?[ma.declName.baseName.text] { return v }
         if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base,
            let bt = rootOf(base, depth + 1).root, let t = fieldDictValue[bt]?[ma.declName.baseName.text] { return t }
         return nil
@@ -2094,6 +2111,50 @@ final class CallCollector: SyntaxVisitor {
     // the closure's save and could never be restored — `let c = depBuild(); xs.forEach { c in … };
     // c.fetch()` would lose its disclosure for good. `visit(ClosureExprSyntax)` does the flag clearing
     // instead, after the save.
+    /// SOUNDNESS R269 — BIND `name`'S CONTAINER ELEMENT INDEX FROM `expr`. **One implementation of the
+    /// one question every binder form has to answer**, called from each binder site, because R124 already
+    /// enumerates nine binder forms in this file and this index was read by one of them.
+    ///
+    /// Measured on a generated 78-cell matrix, every cell compiled and EXECUTED (each really invokes a
+    /// stored closure that deletes a file): the direct spelling and the plain `let` copy are correctly
+    /// disclosed `Unknown callback:`, while the TUPLE PATTERN, `case let`, `if case let`, the
+    /// `Optional(…)`-wrapped `guard let`, the tuple-ELEMENT read and every dictionary spelling through a
+    /// binder reported the enclosing function **ABSENT — no row, no `Unknown`** — with `deny Fs`, `pure`,
+    /// `deny Unknown` and `deny Fs Unknown` all exiting 0 when scoped to it. It holds identically over a
+    /// stored field, a function parameter and a local.
+    ///
+    /// Returns whether it could bind, so a caller can fall through to its own clear.
+    @discardableResult
+    private func bindContainerIndex(_ name: String, from expr: ExprSyntax) -> Bool {
+        let src = Self.unwrapOptionalInit(expr)
+        if let elem = elementTypeOf(src) { setArrayElem(name, elem); return true }
+        if let dv = dictValueOf(src) { dictElem[name] = dv; return true }
+        return false
+    }
+
+    /// The single argument of a literal `Optional(x)` call, or nil. `Optional.init` has exactly one
+    /// reading, so unwrapping it is exact rather than a guess — which is what lets a binder ask the
+    /// container question ahead of `rootOf`, which would otherwise type the binding `Optional`.
+    private static func optionalInitArgument(_ e: ExprSyntax) -> ExprSyntax? {
+        guard let call = peel(e).as(FunctionCallExprSyntax.self),
+              call.calledExpression.as(DeclReferenceExprSyntax.self)?.baseName.text == "Optional",
+              call.arguments.count == 1, let inner = call.arguments.first?.expression else { return nil }
+        return peel(inner)
+    }
+
+    /// `Optional(x)` is the IDENTITY for the container question — its only argument is the value being
+    /// wrapped, and every consumer here already looks through Optionality. Peeled so the wrapped
+    /// spelling of a binder answers the same as the bare one.
+    private static func unwrapOptionalInit(_ e: ExprSyntax) -> ExprSyntax {
+        let p = peel(e)
+        if let call = p.as(FunctionCallExprSyntax.self),
+           call.calledExpression.as(DeclReferenceExprSyntax.self)?.baseName.text == "Optional",
+           call.arguments.count == 1, let inner = call.arguments.first?.expression {
+            return peel(inner)
+        }
+        return p
+    }
+
     private func clearBindingTypeOnly(_ name: String) {
         vars.removeValue(forKey: name)
         protoTyped.removeValue(forKey: name)
@@ -2101,6 +2162,8 @@ final class CallCollector: SyntaxVisitor {
         opaqueElem.remove(name)
         dictElem.removeValue(forKey: name)
         tupleElem.removeValue(forKey: name)
+        tupleArrayElem.removeValue(forKey: name)   // R269 — moves with `tupleElem`, one binding
+        tupleDictValue.removeValue(forKey: name)
     }
 
     // `arrayElem` and `opaqueElem` describe the same binding and must move together: a name rebound to a
@@ -2690,6 +2753,17 @@ final class CallCollector: SyntaxVisitor {
     /// `Optional.some`), so the mark has to land after it, in `visitPost`.
     override func visitPost(_ node: SwitchCaseItemSyntax) {
         markCallableMatchBinder(node.pattern, subject: Self.switchSubject(of: Syntax(node)))
+        // R269 — `switch cbs { case let z: for c in z { c(p) } }`. A bare `case let` binder over a
+        // CONTAINER subject reached no typing branch and was left cleared, so the copy lost its element
+        // index. Single-binder only: a multi-binder pattern is a tuple/enum payload and the subject is
+        // not what it binds. Asked after `markCallableMatchBinder`, which answers the scalar-callable
+        // form of the same question and takes precedence when it fires.
+        if let subject = Self.switchSubject(of: Syntax(node)) {
+            let binders = Self.patternBinders(node.pattern)
+            if binders.count == 1, !opaqueFnLocals.contains(binders[0].identifier.text) {
+                bindContainerIndex(binders[0].identifier.text, from: subject)
+            }
+        }
     }
 
     /// The value a `switch` is matching, found from a case ITEM. Bounded to the nearest enclosing
@@ -2737,11 +2811,28 @@ final class CallCollector: SyntaxVisitor {
         return .visitChildren
     }
     override func visitPost(_ node: MatchingPatternConditionSyntax) {
+        // SOUNDNESS R269 — `if case let z? = opt { for c in z { c(p) } }` / `guard case let z = cbs`.
+        // UNCONDITIONAL, and that is the point: the deferred block below runs only when the initializer
+        // MENTIONS a name this pattern binds, so on the ordinary spelling nothing here ran at all and
+        // `visit(IdentifierPatternSyntax)`'s catch-all cleared the binder — the copy lost its element
+        // index and the enclosing function went ABSENT, while the direct spelling of the same program is
+        // `Unknown callback:`. Single-binder only, for the same reason `markCallableMatchBinder` is: a
+        // multi-binder pattern is a tuple/enum payload and the initializer is not what it binds.
+        let condBinders = Self.patternBinders(node.pattern)
+        if condBinders.count == 1, !casePayloadLocals.contains(condBinders[0].identifier.text) {
+            bindContainerIndex(condBinders[0].identifier.text, from: node.initializer.value)
+        }
         if deferredPatternClears.remove(node.id) != nil {
             // `casePayloadLocals` names the binders `typeEnumCaseBinding` already claimed and TYPED
             // during the pattern walk; clearing those would undo it (see above).
             for b in Self.patternBinders(node.pattern) where !casePayloadLocals.contains(b.identifier.text) {
                 scopeBindingType(Syntax(node), b.identifier.text)
+                // R269 — `if case let z? = opt { for c in z { c(p) } }` / `guard case let z = cbs`.
+                // The clear below is right about the FLAGS and wrong to drop the container index with
+                // them: the binder holds the same container the initializer names. Single-binder only,
+                // for the same reason `markCallableMatchBinder` is.
+                if Self.patternBinders(node.pattern).count == 1,
+                   bindContainerIndex(b.identifier.text, from: node.initializer.value) { continue }
                 clearBinding(b.identifier.text)
             }
         }
@@ -4026,9 +4117,17 @@ final class CallCollector: SyntaxVisitor {
                 vars[name] = proto
             }
             else {
+                // R269 — an `Optional(x)` source, asked BEFORE `rootOf`, which types the binding
+                // `Optional` (a constructor call) and so never let the container question be asked.
+                if let inner = Self.optionalInitArgument(initVal), bindContainerIndex(name, from: inner) {
+                    return
+                }
                 let info = rootOf(initVal)
                 if info.isVar, let t = info.root { vars[name] = t }
-                else if let elem = elementTypeOf(initVal) { setArrayElem(name, elem) }
+                // R269 — through the ONE binder helper, so this site gains the two spellings it was
+                // missing: an `Optional(…)`-wrapped source, and a DICTIONARY (only `elementTypeOf` was
+                // asked here, so `guard let z = optDict` lost its value index and read silent-pure).
+                else if bindContainerIndex(name, from: initVal) { }
                 else { clearBinding(name) }  // can't type the unwrapped value → clear (don't leak a stale type)
             }
         }
@@ -5141,8 +5240,20 @@ final class CallCollector: SyntaxVisitor {
                 for (pe, ve) in zip(tp.elements, tupleInit.elements) {
                     guard let n = pe.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
                     boundLocals.insert(n)
-                    let info = rootOf(ve.expression)
-                    if info.isVar, let t = info.root { vars[n] = t } else { clearBinding(n) }
+                    // R269 — THE CONTAINER INDEX, asked FIRST. `let (z, _) = (cbs, 1)` bound `z` to
+                    // nothing at all and `for c in z { c(p) }` read silent-pure while the DIRECT twin in
+                    // the same scan is `Unknown callback:`. CONTAINER BEFORE SCALAR, the order R215's
+                    // plain-`let` arm already documents and the reason the `self.`-qualified spelling
+                    // was still silent after the first attempt at this: `rootOf` does NOT decline a
+                    // container — for `self.cbs` it answers with a nominal root — so asking it first
+                    // types the binding with something that is not its element and the container
+                    // question is never put. Where `elementTypeOf`/`dictValueOf` answer, the element IS
+                    // a container and the nominal answer would have been wrong anyway.
+                    if bindContainerIndex(n, from: ve.expression) { boundLocals.insert(n) }
+                    else {
+                        let info = rootOf(ve.expression)
+                        if info.isVar, let t = info.root { vars[n] = t } else { clearBinding(n) }
+                    }
                 }
                 continue
             }
@@ -5375,6 +5486,21 @@ final class CallCollector: SyntaxVisitor {
                     // `let c = x as! T` / `let c = cond ? a : b` / `let c = cs[0]` — rootOf types these
                     let info = rootOf(v0)
                     if info.isVar, let t = info.root { vars[name] = t }
+                } else if let tup = v.as(TupleExprSyntax.self) {
+                    // R269 — `let t = (cbs, 1)` then `for c in t.0`. Record each SLOT that holds a
+                    // container, under the slot's positional name (`0`, `1`, …) and its label when it
+                    // has one, which are the two spellings `MemberAccessExprSyntax` can carry.
+                    // Unrecorded slots simply do not answer — nothing is inferred and nothing is guessed.
+                    clearBinding(name)
+                    for (i, el) in tup.elements.enumerated() {
+                        var keys = ["\(i)"]
+                        if let label = el.label?.text { keys.append(label) }
+                        if let elem = elementTypeOf(el.expression) {
+                            for k in keys { tupleArrayElem[name, default: [:]][k] = elem }
+                        } else if let dv = dictValueOf(el.expression) {
+                            for k in keys { tupleDictValue[name, default: [:]][k] = dv }
+                        }
+                    }
                 } else if let arr = v.as(ArrayExprSyntax.self) {
                     // `let arr = [NetThing3()]` — an UNTYPED array LITERAL local. Every branch above types
                     // the local from its single initializer expression; a collection literal instead needs
