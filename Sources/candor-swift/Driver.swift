@@ -1687,6 +1687,53 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         return out
     }
     var membersVisibleCache: [String: Set<String>] = [:]
+    // ── SOUNDNESS R268 — AN INHERITED STORED PROPERTY IS A CALLABLE / CONTAINER SOURCE TOO ─────────
+    //
+    // R211/R192/R215 made a container or callable field of `self` a callable source, so
+    // `for c in cbs { c(p) }` over `let cbs: [(String) -> Void]` is charged. Those three indexes —
+    // `fields` (via `CallCollector.fieldIsCallable`), `fieldArrayElem` and `fieldDictValue` — are keyed
+    // on the enclosing type and are read with `enclosingType` alone, so they NEVER CLIMBED. The
+    // method-call path (R134, the same range and the same day) climbs, and the property-ACCESSOR path
+    // climbs and asserts in its own comment that it does so "exactly as the method-call path does".
+    // Three paths answer "what does this member hold"; one did not — §F1.3, two implementations of one
+    // question, drifted.
+    //
+    // MEASURED on a generated 126-cell matrix, every cell compiled and EXECUTED: an inherited container
+    // field really invokes a stored closure that deletes a file, and the enclosing function is **ABSENT
+    // from `functions[]` — no row, no `Unknown`, nothing** — while the OWN-TYPE spelling of the same
+    // program is correctly disclosed as `Unknown`. **36 cells, and every sub-axis fails: one and two
+    // levels of inheritance, `[T]` element / `[K: V]` value / plain callable, and the bare, `self.`- and
+    // `let`-copy spellings.**
+    //
+    // THE ROW'S EXCULPATING CLAUSE WAS WRONG AND IT IS A FIX BOUNDARY. It said "the inherited COMPUTED
+    // property is correct, which is the drift." That is true of the property-ACCESSOR path — an
+    // effectful getter reached from a subclass is charged correctly at every depth (9 of 9 cells) — and
+    // FALSE of a computed property that VENDS CALLABLES: `var cbs: [(String) -> Void] { [bomb] }` is
+    // silent at every inherited depth exactly like the stored `let`, and **18 of the 36 silent cells are
+    // computed**. A fix written to that sentence would climb for stored fields only and leave half the
+    // class open. The real drift is OWN-TYPE DISCLOSED vs INHERITED ABSENT, not stored vs computed.
+    //
+    // FIXED IN THE INDEX, NOT AT THE FOUR READ SITES. `CallCollector` has no supertype index and there
+    // are four consumers (`elementTypeOf`, `dictValueOf`, `callableName`, `closurePropertyInvocation`);
+    // teaching each to climb is the shape that produced this drift in the first place. Flattening once,
+    // here, is exact rather than approximate — a subclass really does have its superclasses' stored
+    // properties — and it is ADDITIVE: an entry is written only where the subtype does not declare that
+    // member itself, so an OVERRIDE always wins and nothing already resolved can move. `supertypesOf` is
+    // transitive, so `Base -> Mid -> Sub` needs no loop.
+    for (sub, sups) in supertypesOf where sub != "" {
+        for sup in sups.sorted() where sup != sub {
+            for (m, v) in fields[sup] ?? [:] where fields[sub]?[m] == nil {
+                fields[sub, default: [:]][m] = v
+            }
+            for (m, v) in fieldArrayElem[sup] ?? [:] where fieldArrayElem[sub]?[m] == nil {
+                fieldArrayElem[sub, default: [:]][m] = v
+            }
+            for (m, v) in fieldDictValue[sup] ?? [:] where fieldDictValue[sub]?[m] == nil {
+                fieldDictValue[sub, default: [:]][m] = v
+            }
+        }
+    }
+
     // The module names the SCANNED PROJECT itself defines (`Sources/<Module>/…`, `Tests/<Module>/…`).
     // A dotted callee whose base is one of these is NOT a platform spelling — under `@testable import
     // App`, `App.Process()` names the project's own type — so `isModuleQualifier` refuses it. See
