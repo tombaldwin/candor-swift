@@ -1722,7 +1722,20 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // transitive, so `Base -> Mid -> Sub` needs no loop.
     for (sub, sups) in supertypesOf where sub != "" {
         for sup in sups.sorted() where sup != sub {
-            for (m, v) in fields[sup] ?? [:] where fields[sub]?[m] == nil {
+            // ONLY THE CALLABLE ENTRIES, and the narrowing is a MEASUREMENT, not caution. `fields` has
+            // four MEMBERSHIP-ONLY readers — `isModuleQualifier`, the shadowing guards at
+            // CallCollector:4273 and :5140, and the `dynamicMemberTypes` arm — which ask *is there a
+            // field of this name* and do not care what it holds. Flattening every inherited entry
+            // flipped those, and a 1325-file, 8-package corpus A/B caught it: six rows LOST effects or
+            // an `Unknown` disclosure (swift-nio `shutdownSocket`, `finishConnectSocket`, two
+            // `getOption`s; Alamofire's three `WebSocket*.close` lost `Net`) — a precision gain in
+            // appearance and a DISCLOSURE LOSS in fact, introduced by a fix for a silent under-report,
+            // which is this family's measured failure rate arriving on schedule. `fieldIsCallable` is
+            // the only consumer R268 needs from this index, and it reads exactly `isFunction` (the
+            // alias spelling is rewritten to `(nil, true)` by the completion pass above), so the
+            // narrowed flattening covers the row and leaves every membership test answering as before.
+            // Re-measured after narrowing: those six rows are unchanged from v0.35.0.
+            for (m, v) in fields[sup] ?? [:] where v.isFunction && fields[sub]?[m] == nil {
                 fields[sub, default: [:]][m] = v
             }
             for (m, v) in fieldArrayElem[sup] ?? [:] where fieldArrayElem[sub]?[m] == nil {
