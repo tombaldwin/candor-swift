@@ -188,6 +188,50 @@ func swiftModuleSegment(_ filePath: String) -> String {
 /// manifest-boundary-aware version (see `nestedManifestDirs` below) for every call site it makes
 /// internally; this plain form remains for anything outside that scope (currently nothing — kept as
 /// the fallback definition and the thing the shadow delegates to past its last boundary).
+/// SOUNDNESS R267 — IS THIS CALL LEAF AN OPERATOR? A DENYLIST, NOT AN ALLOWLIST.
+///
+/// `memberFirst` (below, in the unqualified-call chain) has to exclude operators, because Swift resolves
+/// an operator by overload resolution over the OPERAND TYPES rather than by lexical scope. It used to ask
+/// the opposite question — *"does the leaf START WITH A LETTER OR `_`?"* — and treated everything else as
+/// an operator. That is an ALLOWLIST over a set nobody enumerated, and it fails in the direction that
+/// hides itself: **SwiftSyntax hands back a backtick-escaped or raw identifier WITH its backticks**, so
+/// `` `default` `` and Swift 5.9's `` `w 288` `` both begin with a backtick, were classified as operators,
+/// and the three member arms were skipped onto the pre-R255 free-first path.
+///
+/// MEASURED over a generated 1152-cell matrix (visibility x file/module placement x call site x nesting x
+/// identifier spelling x inheritance depth x overloading x effect polarity), every cell compiled and RUN:
+/// **232 cells red — the member is what executes and candor charged the global instead** — and 152 more
+/// where the same misclassification happened to give the right answer only because the member was
+/// invisible at the call site anyway (R265), i.e. right for the wrong reason. It runs in BOTH directions:
+/// with an effectful member it is a silent under-report; with a PURE member (116 of the 232) it is a pure
+/// OVER-CHARGE, the caller charged `Fs` over a program that provably deletes nothing.
+///
+/// The fix is to ask the question the language actually defines. A backticked leaf is an IDENTIFIER by
+/// construction — Swift spells a keyword or a raw identifier with backticks and never spells an operator
+/// that way — and anything else is an operator only if its first character is an `operator-head` from the
+/// Swift grammar. Enumerating the OPERATOR set (a denylist) rather than the identifier set means a
+/// spelling nobody thought of lands on the member-first path, which is where R255 says it belongs; the old
+/// allowlist sent every unforeseen spelling to the free arm instead.
+func swiftLeafIsOperator(_ leaf: String) -> Bool {
+    // Backticked: an identifier, full stop (`default`, `w 288`, any Swift 5.9 raw identifier).
+    if leaf.hasPrefix("`") { return false }
+    guard let c = leaf.unicodeScalars.first else { return false }
+    // `operator-head` from the Swift language grammar (Lexical Structure -> Operators).
+    if "/=-+!*%<>&|^~?".unicodeScalars.contains(c) { return true }
+    for r in SWIFT_OPERATOR_HEAD_SCALARS where r.contains(c.value) { return true }
+    return false
+}
+
+/// The non-ASCII `operator-head` ranges, transcribed from the Swift grammar. Kept beside the function
+/// that reads them so the two cannot drift.
+let SWIFT_OPERATOR_HEAD_SCALARS: [ClosedRange<UInt32>] = [
+    0x00A1...0x00A7, 0x00A9...0x00A9, 0x00AB...0x00AB, 0x00AC...0x00AC, 0x00AE...0x00AE,
+    0x00B0...0x00B1, 0x00B6...0x00B6, 0x00BB...0x00BB, 0x00BF...0x00BF, 0x00D7...0x00D7,
+    0x00F7...0x00F7, 0x2016...0x2017, 0x2020...0x2027, 0x2030...0x203E, 0x2041...0x2053,
+    0x2055...0x205E, 0x2190...0x23FF, 0x2500...0x2775, 0x2794...0x2BFF, 0x2E00...0x2E7F,
+    0x3001...0x3003, 0x3008...0x3020, 0x3030...0x3030,
+]
+
 func swiftModuleOf(_ loc: String) -> String {
     let filePath = loc.split(separator: ":").first.map(String.init) ?? loc
     return swiftModuleSegment(filePath)
@@ -1957,7 +2001,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 let freeArmWouldClaim = overloadedBases.contains(call.path)
                     || (freeFnByName[call.path]?.count == 1)
                     || localTypes.contains(call.path)
-                let memberFirst = (call.leaf.first.map { $0.isLetter || $0 == "_" } ?? false) || !freeArmWouldClaim
+                // SOUNDNESS R267 — the operator test is `swiftLeafIsOperator` (a DENYLIST over the
+                // grammar's `operator-head`), not "starts with a letter". The old allowlist classified
+                // every BACKTICK-ESCAPED and raw identifier as an operator, because SwiftSyntax keeps the
+                // backticks in the leaf. See that function for the 232-red-cell measurement.
+                let memberFirst = !swiftLeafIsOperator(call.leaf) || !freeArmWouldClaim
                 if memberFirst, let et = f.enclosingType, overloadedBases.contains("\(et).\(call.leaf)") {  // overloaded sibling
                     for t in matchOverloads("\(et).\(call.leaf)", argc, call.argTypes, swiftModuleOf(f.loc)) {
                         edges[f.qual, default: []].insert(t)
