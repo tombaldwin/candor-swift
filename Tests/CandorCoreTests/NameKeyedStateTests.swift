@@ -102,6 +102,11 @@ final class NameKeyedStateTests: XCTestCase {
         "arrayElem":         .clearedOnRebind(scoped: false),
         "dictElem":          .clearedOnRebind(scoped: false),
         "tupleElem":         .clearedOnRebind(scoped: false),
+        // R269 — the container-holding SLOTS of a local tuple (`let t = (cbs, 1)`). Same disposition as
+        // `tupleElem`, which describes the same binding one index over, and cleared in the same call so
+        // the three cannot drift apart on a rebind.
+        "tupleArrayElem":    .clearedOnRebind(scoped: false),
+        "tupleDictValue":    .clearedOnRebind(scoped: false),
         // ── hedges: MUST NOT be cleared
         "fnTyped": .deliberatelyKept(
             "invoking a fn-typed param defers to callback-flow; clearing it on a rebind sends the "
