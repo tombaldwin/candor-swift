@@ -64,6 +64,17 @@ struct FnInfo {
     var tupleParams: [String: [String: String]] = [:]  // param -> tuple element types (`p.0`/`p.c`)
     var body: Syntax?
     var enclosingType: String?
+    /// SOUNDNESS R265 — THE EFFECTIVE ACCESS LEVEL of this declaration, one of
+    /// `private`/`fileprivate`/`internal`/`package`/`public`/`open`. Swift's unqualified lookup stops at
+    /// the type scope only when the member is VISIBLE at the call site; the three member arms in
+    /// `Driver.swift` had no visibility information at all and claimed the call regardless, so a `private`
+    /// member shadowed an effectful module-scope function that Swift really binds and really runs.
+    ///
+    /// EFFECTIVE, not "as written": a member's own modifier is capped by every enclosing type/extension it
+    /// is nested in (`public func` inside an `internal class` is internal), and a member with NO modifier
+    /// inside an `internal extension`/`public extension` takes the extension's level, which is the one
+    /// place Swift does propagate. `accessStack` (parallel to `typeStack`) carries the enclosing chain.
+    var access: String = "internal"
     var isMain: Bool = false
     var isAccessor: Bool = false   // a computed-property/observer/lazy-init body (spec 0.5 unitKind)
     // the synthetic `<main>` unit for a file's TOP-LEVEL executable statements (Swift allows executable
@@ -207,6 +218,12 @@ final class DeclCollector: SyntaxVisitor {
     /// the simple name, which is exactly the collision `typeSurface` must not publish through: two
     /// `Client`s under `enum Sync` and `enum Mock` are ONE string there and two strings here.
     var localTypePaths: Set<String> = []
+    /// SOUNDNESS R266 — declared supertypes keyed on the SUBTYPE'S FULL NESTED PATH, the precise twin of
+    /// `conformers` (which is keyed on SHORT names on both sides). Two same-short-named types —
+    /// `enum Outer { class S: Base }` beside an unrelated top-level `class S: Other` — merge in
+    /// `conformers`, so an inherited-member climb keyed on the short name reaches the WRONG hierarchy's
+    /// members. Used only to disambiguate that case; the short index still answers everywhere else.
+    var pathSupers: [String: [String]] = [:]
     // Types with a REAL local definition (class/struct/enum/actor/protocol) — a SUBSET of localTypes,
     // which also carries types that only ever appear in an `extension`. An `extension Process { … }` adds
     // "Process" to localTypes (so its members resolve to any sibling helpers) but NOT to declaredTypes —
@@ -329,6 +346,9 @@ final class DeclCollector: SyntaxVisitor {
     // a const-anchored Net/Db/Llm host is resolved through the EXISTING host-refinement path.
     var constStrings: [String: String?] = [:]
     private var typeStack: [String] = []
+    /// SOUNDNESS R265 — parallel to `typeStack`: each pushed type/extension's OWN access modifier as
+    /// written (empty when it has none). A member's effective access is capped by every entry here.
+    private var accessStack: [String] = []
     // parallel to typeStack: self's ELEMENT bound when the current scope is a COLLECTION extension with a
     // `where Element: P` clause (`extension Array where Element: Saveable` → "Saveable"); nil otherwise.
     private var selfElementStack: [String?] = []
@@ -509,9 +529,43 @@ final class DeclCollector: SyntaxVisitor {
         }
     }
 
+    /// The access modifier written on a declaration, or "" when it has none. `open` and `package` are
+    /// kept as themselves — collapsing either into `public` would be a guess in the direction that
+    /// silently widens visibility.
+    private func accessModifier(_ mods: DeclModifierListSyntax?) -> String {
+        for m in mods ?? [] {
+            let t = m.name.text
+            if ["private", "fileprivate", "internal", "package", "public", "open"].contains(t) { return t }
+        }
+        return ""
+    }
+
+    /// SOUNDNESS R265 — the EFFECTIVE access of a member declared at the current `typeStack` depth.
+    /// `own` is its own modifier (""` when absent). Two Swift rules, both load-bearing:
+    ///   * a member with no modifier defaults to `internal`, EXCEPT directly inside an `extension` that
+    ///     carries one, where the extension's level becomes the default;
+    ///   * the result is capped by every enclosing declaration — `public func` inside an `internal class`
+    ///     is internal, and a member of a file-scoped (`private`/`fileprivate`) type is file-scoped.
+    /// A type-level `private` is file-scoped rather than declaration-scoped (Swift treats a `private`
+    /// top-level or nested TYPE as visible within its file), so it caps at `fileprivate`, never at
+    /// `private` — capping harder would under-report visibility and reintroduce R255's silence.
+    private func effectiveAccess(own: String) -> String {
+        let order = ["private": 0, "fileprivate": 1, "internal": 2, "package": 3, "public": 4, "open": 5]
+        var level = own.isEmpty ? (accessStack.last.flatMap { $0.isEmpty ? nil : $0 } ?? "internal") : own
+        // the extension-default rule above may hand back `private`; a `private extension`'s members are
+        // fileprivate in Swift, not declaration-private.
+        if own.isEmpty, level == "private" { level = "fileprivate" }
+        for enclosing in accessStack where !enclosing.isEmpty {
+            let capped = enclosing == "private" ? "fileprivate" : enclosing
+            if (order[capped] ?? 2) < (order[level] ?? 2) { level = capped }
+        }
+        return level
+    }
+
     private func pushType(_ name: String, inheritance: InheritanceClauseSyntax?, attributes: AttributeListSyntax? = nil,
-                          isExtension: Bool = false) {
+                          isExtension: Bool = false, modifiers: DeclModifierListSyntax? = nil) {
         typeStack.append(name)
+        accessStack.append(accessModifier(modifiers))
         selfElementStack.append(nil)   // extensions with a `where Element: P` overwrite this below
         localTypes.insert(name)
         localTypePaths.insert(typeStack.joined(separator: "."))
@@ -525,9 +579,14 @@ final class DeclCollector: SyntaxVisitor {
             // right: a real, in-tree declaration exists, so winner-take-all still applies.
             if ifConfigDepth == 0 { declaredTypesUnconditional.insert(name) }
         }
+        let selfPath = typeStack.joined(separator: ".")
         for inh in inheritance?.inheritedTypes ?? [] {
             if let pname = typeName(inh.type).name {
                 conformers[pname, default: []].append(name)
+                // R266 — the same edge, recorded against the subtype's FULL PATH. An `extension S: P`
+                // conformance counts exactly as a declaration-site one does, so this is not gated on
+                // `isExtension`.
+                pathSupers[selfPath, default: []].append(pname)
             }
         }
         // `@dynamicMemberLookup` — a member access `p.x` on this type desugars to the dynamic
@@ -677,24 +736,28 @@ final class DeclCollector: SyntaxVisitor {
     }
     override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {
         recordTypeGenerics(node.name.text, node.genericParameterClause, node.genericWhereClause)
-        pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes); return .visitChildren
+        pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes,
+                 modifiers: node.modifiers); return .visitChildren
     }
-    override func visitPost(_ node: ClassDeclSyntax) { typeStack.removeLast(); selfElementStack.removeLast() }
+    override func visitPost(_ node: ClassDeclSyntax) { typeStack.removeLast(); accessStack.removeLast(); selfElementStack.removeLast() }
     override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind {
         recordTypeGenerics(node.name.text, node.genericParameterClause, node.genericWhereClause)
-        pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes); return .visitChildren
+        pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes,
+                 modifiers: node.modifiers); return .visitChildren
     }
-    override func visitPost(_ node: StructDeclSyntax) { typeStack.removeLast(); selfElementStack.removeLast() }
+    override func visitPost(_ node: StructDeclSyntax) { typeStack.removeLast(); accessStack.removeLast(); selfElementStack.removeLast() }
     override func visit(_ node: EnumDeclSyntax) -> SyntaxVisitorContinueKind {
         recordTypeGenerics(node.name.text, node.genericParameterClause, node.genericWhereClause)
-        pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes); return .visitChildren
+        pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes,
+                 modifiers: node.modifiers); return .visitChildren
     }
-    override func visitPost(_ node: EnumDeclSyntax) { typeStack.removeLast(); selfElementStack.removeLast() }
+    override func visitPost(_ node: EnumDeclSyntax) { typeStack.removeLast(); accessStack.removeLast(); selfElementStack.removeLast() }
     override func visit(_ node: ActorDeclSyntax) -> SyntaxVisitorContinueKind {
         recordTypeGenerics(node.name.text, node.genericParameterClause, node.genericWhereClause)
-        pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes); return .visitChildren
+        pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes,
+                 modifiers: node.modifiers); return .visitChildren
     }
-    override func visitPost(_ node: ActorDeclSyntax) { typeStack.removeLast(); selfElementStack.removeLast() }
+    override func visitPost(_ node: ActorDeclSyntax) { typeStack.removeLast(); accessStack.removeLast(); selfElementStack.removeLast() }
     override func visit(_ node: ExtensionDeclSyntax) -> SyntaxVisitorContinueKind {
         // A non-identifier extended type (`extension [Foo]`, `extension Optional<X>`) needs a
         // STABLE name — the old "?" fallback merged every such extension into one phantom unit
@@ -702,7 +765,7 @@ final class DeclCollector: SyntaxVisitor {
         // methods. The trimmed source text is unique per type; spaces drop for qual hygiene.
         let name = typeName(node.extendedType).name
             ?? node.extendedType.trimmedDescription.replacingOccurrences(of: " ", with: "")
-        pushType(name, inheritance: node.inheritanceClause, isExtension: true)
+        pushType(name, inheritance: node.inheritanceClause, isExtension: true, modifiers: node.modifiers)
         // A conditional-conformance extension of a COLLECTION (`extension Array where Element: Saveable`):
         // record self's element bound so a bare `forEach { $0.persist() }` over self dispatches (R28). The
         // element param is Swift's collection convention `Element`; a `where Element: P` requirement gives P.
@@ -723,7 +786,7 @@ final class DeclCollector: SyntaxVisitor {
         recordTypeGenerics(name, nil, node.genericWhereClause)
         return .visitChildren
     }
-    override func visitPost(_ node: ExtensionDeclSyntax) { typeStack.removeLast(); selfElementStack.removeLast() }
+    override func visitPost(_ node: ExtensionDeclSyntax) { typeStack.removeLast(); accessStack.removeLast(); selfElementStack.removeLast() }
 
     override func visit(_ node: ProtocolDeclSyntax) -> SyntaxVisitorContinueKind {
         // ⟨0.23⟩ A protocol is a TYPE PATH for `typeSurface.returns`, and `func make() -> SomeProtocol`
@@ -1118,6 +1181,9 @@ final class DeclCollector: SyntaxVisitor {
         info.simpleQual = typeStack.last.map { "\($0).\(name)" } ?? name
         info.enclosingType = typeStack.last
         info.enclosingTypePath = tyPath
+        // SOUNDNESS R265 — the declaration's EFFECTIVE access, for the visibility filter on the
+        // unqualified member arms. `WithModifiersSyntax` covers func/init/subscript/var alike.
+        info.access = effectiveAccess(own: accessModifier(node.asProtocol(WithModifiersSyntax.self)?.modifiers))
         // ⟨0.23⟩ `typeSurface.returns`: what a binding bound from THIS function actually holds. See
         // `plainNominalTypeName` for why this is not `typeName` — a wrapper return must publish nothing.
         info.retBoundTypeSpelling = sig.returnClause.flatMap { plainNominalTypeName($0.type) }
@@ -1266,6 +1332,7 @@ final class DeclCollector: SyntaxVisitor {
             d.simpleQual = info.simpleQual
             d.enclosingType = typeStack.last
             d.enclosingTypePath = tyPath
+            d.access = info.access
             d.body = Syntax(dv)
             d.isAccessor = true
             fns.append(d)

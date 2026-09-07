@@ -381,6 +381,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var protocolMethods: [String: Set<String>] = [:]
     var protocolSupers: [String: Set<String>] = [:]
     var conformers: [String: [String]] = [:]
+    /// R266 — `DeclCollector.pathSupers`, unioned: SUBTYPE FULL PATH -> supertype names.
+    var pathSupers: [String: [String]] = [:]
     var localTypes: Set<String> = []
     var localTypePaths: Set<String> = []
     var declaredTypes: Set<String> = []
@@ -839,6 +841,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (pn, ms) in c.protocolMethods { protocolMethods[pn, default: []].formUnion(ms) }
         for (pn, ss) in c.protocolSupers { protocolSupers[pn, default: []].formUnion(ss) }
         for (pn, ts) in c.conformers { conformers[pn, default: []].append(contentsOf: ts) }
+        for (sub, sups) in c.pathSupers { pathSupers[sub, default: []].append(contentsOf: sups) }
         localTypes.formUnion(c.localTypes)
         localTypePaths.formUnion(c.localTypePaths)
         declaredTypes.formUnion(c.declaredTypes)
@@ -1027,17 +1030,26 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     let overloadedQuals = Set(qualGroup.filter { $0.value > 1 }.keys)
     var overloads: [String: [(qual: String, sig: [(type: String?, hasDefault: Bool, variadic: Bool)], module: String)]] = [:]
     var overloadedBases = Set<String>()
+    /// SOUNDNESS R266 — the same overload table keyed on the declaration's FULL NESTED PATH instead of
+    /// its `simpleQual`. `overloadedBases` is keyed short (`S.run`), so `enum Outer { class S }` and an
+    /// unrelated top-level `class S` share one key and an unqualified sibling call inside either reaches
+    /// BOTH. This twin is exact. It is ADDITIVE — the short index still drives every other consumer.
+    var overloadsByPath: [String: [(qual: String, sig: [(type: String?, hasDefault: Bool, variadic: Bool)], module: String)]] = [:]
+    var overloadedBasesPath = Set<String>()
     if !overloadedQuals.isEmpty {
         var seen: [String: Int] = [:]   // identical type-sigs get a positional suffix so they stay distinct nodes
         for i in allFns.indices where !allFns[i].isAccessor && !allFns[i].isTopLevel && overloadedQuals.contains(allFns[i].qual) {
             let base = allFns[i].simpleQual
+            let pathBase = allFns[i].qual        // R266 — the FULL nested path, before the sig suffix
             overloadedBases.insert(base)
+            overloadedBasesPath.insert(pathBase)
             var suffix = sigStr(allFns[i].paramSig)
             let dupKey = "\(allFns[i].qual)\(suffix)"
             let n = seen[dupKey, default: 0]; seen[dupKey] = n + 1
             if n > 0 { suffix += "#\(n)" }
-            overloads[base, default: []].append(("\(allFns[i].qual)\(suffix)", allFns[i].paramSig,
-                                                 swiftModuleOf(allFns[i].loc)))
+            let entry = ("\(allFns[i].qual)\(suffix)", allFns[i].paramSig, swiftModuleOf(allFns[i].loc))
+            overloads[base, default: []].append(entry)
+            overloadsByPath[pathBase, default: []].append(entry)
             allFns[i].qual = "\(allFns[i].qual)\(suffix)"
             allFns[i].simpleQual = "\(base)\(suffix)"
         }
@@ -1185,6 +1197,99 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         return []
     }
 
+    /// SOUNDNESS R266 — `matchOverloads` against the PATH-keyed table. Same body, same authority; the
+    /// only difference is that `base` is a full nested path (`Outer.S.run`), so a same-short-named type
+    /// elsewhere in the scan cannot answer. The free-function branch below is unreachable here (a path
+    /// base always contains a dot) and is kept only so the two forms stay literally one implementation.
+    let matchOverloadsPath: (String, Int, [String?], String) -> [String] = { base, argc, argTypes, callerModule in
+        guard let cands = overloadsByPath[base] else { return [] }
+        var hits: [String] = []
+        for c in cands {
+            let variadicIdx = c.sig.firstIndex(where: { $0.variadic })
+            let required = c.sig.filter { !$0.hasDefault && !$0.variadic }.count
+            let upper = variadicIdx != nil ? Int.max : c.sig.count
+            if argc < required || argc > upper { continue }
+            var ok = true
+            let typeLimit = variadicIdx ?? c.sig.count
+            for j in 0..<min(argc, typeLimit) where j < argTypes.count {
+                guard let at = argTypes[j], let pt = c.sig[j].type, at != pt else { continue }
+                if subtypesOf[pt]?.contains(at) == true { continue }
+                ok = false; break
+            }
+            if ok { hits.append(c.qual) }
+        }
+        return hits
+    }
+
+    /// SOUNDNESS R266 — SHORT type name -> every declared FULL PATH carrying it. More than one entry is a
+    /// genuine same-short-name collision, and it is the only condition under which the short-keyed
+    /// inherited climb below is narrowed to the path-keyed one. Everywhere else the short index answers
+    /// exactly as it did, so R134's coverage is untouched (`localTypePaths` holds top-level types too,
+    /// where path == short name and the two indexes are the same index).
+    var typePathsBySimple: [String: Set<String>] = [:]
+    for tp in localTypePaths {
+        typePathsBySimple[tp.split(separator: ".").last.map(String.init) ?? tp, default: []].insert(tp)
+    }
+
+    /// SOUNDNESS R266 — transitive supertypes keyed on the SUBTYPE'S FULL PATH. Supertype names are
+    /// resolved through `typePathsBySimple` so a nested base spelled by its short name lands on its own
+    /// path; a name that resolves to several paths is kept as ALL of them (over-approximate, never a
+    /// dropped edge — the same direction every other climb here takes).
+    var supertypePathsOf: [String: Set<String>] = [:]
+    for (sub, sups) in pathSupers {
+        var seen = Set<String>(), frontier = sups
+        while let name = frontier.popLast() {
+            for path in (typePathsBySimple[name] ?? [name]) where !seen.contains(path) {
+                seen.insert(path)
+                frontier.append(contentsOf: pathSupers[path] ?? [])
+            }
+        }
+        supertypePathsOf[sub] = seen.subtracting([sub])
+    }
+
+    /// SOUNDNESS R265 — per-declaration ACCESS CONTROL, keyed on the FINAL qual (after the overload
+    /// signature suffix, so `matchOverloads`/`matchOverloadsPath` results look up directly).
+    var declVisibility: [String: (access: String, file: String, owner: String)] = [:]
+    for f in allFns where f.enclosingTypePath != nil {
+        declVisibility[f.qual] = (f.access,
+                                  f.loc.split(separator: ":").first.map(String.init) ?? f.loc,
+                                  f.enclosingTypePath ?? "")
+    }
+
+    /// SOUNDNESS R265 — CAN AN UNQUALIFIED CALL AT THIS SITE SEE THIS MEMBER?
+    ///
+    /// Swift's unqualified lookup stops at the type scope only when the member is VISIBLE there. R255
+    /// reordered the member arms in front of the free-function arms on the (true) ground that a visible
+    /// member always beats a module-scope function of the same name — but keyed that decision on
+    /// `overloadedBases`/`byQual`/`supertypesOf`, none of which carry access control or file/module
+    /// scope. So a `private` member claimed a call Swift binds to the effectful global, and the caller
+    /// went ABSENT from `functions[]` under the "nothing hidden" clean bill.
+    ///
+    /// MEASURED on a generated 1152-cell matrix, every cell compiled and EXECUTED: **94 cells regressed
+    /// against the v0.35.0 artifact** — `private` 52, `fileprivate` 28, `internal` 14, `public` **0**,
+    /// which is the visibility axis behaving exactly as the language says and the control that this is
+    /// the right rule. 24 of the 94 are in ONE FILE: `private` is scoped to the declaring declaration and
+    /// its same-file extensions, and **a subclass is neither**, so an inherited `private` member is
+    /// invisible even to a subclass one line below it. A guard written against file PLACEMENT rather than
+    /// against the language's visibility rule leaves exactly those 24.
+    ///
+    /// `package` is treated as visible. It is visible across every module of the same Swift package, and a
+    /// scan is normally one package; guessing the other way would decline a member arm that Swift does
+    /// bind, which is R255's silence reintroduced.
+    let memberVisibleAt: (String, String, String?) -> Bool = { target, callerFile, callerTypePath in
+        guard let v = declVisibility[target] else { return true }   // not a member decl: unchanged behaviour
+        switch v.access {
+        case "open", "public", "package": return true
+        case "internal":   return swiftModuleOf(v.file) == swiftModuleOf(callerFile)
+        case "fileprivate": return v.file == callerFile
+        case "private":
+            guard v.file == callerFile, let cp = callerTypePath else { return false }
+            // the declaring declaration itself, its same-file extensions, and scopes nested inside it
+            return cp == v.owner || cp.hasPrefix(v.owner + ".") || v.owner.hasPrefix(cp + ".")
+        default: return true
+        }
+    }
+
     /// R134 — the project units an UNQUALIFIED (implicit-self) call to `leaf` can run when the enclosing
     /// type `et` does not declare `leaf` itself: the member is INHERITED from a superclass, a base's
     /// extension, or a conformed protocol's extension default. Empty ⇒ no supertype provides it ⇒ the
@@ -1211,6 +1316,24 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             let base = "\(sup).\(leaf)"
             if overloadedBases.contains(base) {
                 out.formUnion(matchOverloads(base, argc, argTypes, callerModule))
+            } else {
+                out.formUnion(resolveQual(base))
+            }
+        }
+        return out
+    }
+
+    /// SOUNDNESS R266 — `inheritedUnqualTargets` climbing FULL PATHS. Used only when the caller's short
+    /// type name is ambiguous scan-wide (`typePathsBySimple[et].count > 1`), because that is the only
+    /// condition under which the short-keyed climb can reach an unrelated hierarchy's members. Same body,
+    /// same overload authority; `supertypePathsOf` replaces `supertypesOf`.
+    let inheritedUnqualTargetsPath: (String, String, Int, [String?], String) -> Set<String> = {
+        ep, leaf, argc, argTypes, callerModule in
+        var out = Set<String>()
+        for sup in (supertypePathsOf[ep] ?? []).sorted() where sup != ep {
+            let base = "\(sup).\(leaf)"
+            if overloadedBasesPath.contains(base) {
+                out.formUnion(matchOverloadsPath(base, argc, argTypes, callerModule))
             } else {
                 out.formUnion(resolveQual(base))
             }
@@ -2006,21 +2129,82 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // every BACKTICK-ESCAPED and raw identifier as an operator, because SwiftSyntax keeps the
                 // backticks in the leaf. See that function for the 232-red-cell measurement.
                 let memberFirst = !swiftLeafIsOperator(call.leaf) || !freeArmWouldClaim
-                if memberFirst, let et = f.enclosingType, overloadedBases.contains("\(et).\(call.leaf)") {  // overloaded sibling
-                    for t in matchOverloads("\(et).\(call.leaf)", argc, call.argTypes, swiftModuleOf(f.loc)) {
+                // SOUNDNESS R265 / R266 — the three member arms are resolved BEFORE the chain branches,
+                // because two things now have to be true of a candidate before it may claim the call, and
+                // both of them can empty an arm that used to match:
+                //
+                //   * R266 — IT MUST BE THE CALLER'S OWN TYPE'S MEMBER, keyed on the FULL nested path.
+                //     `overloadedBases` and `supertypesOf` are keyed on the SHORT type name, so
+                //     `enum Outer { class S }` and an unrelated top-level `class S` shared one key: an
+                //     unqualified call inside the nested type edged into the OTHER type's members, and
+                //     R255 moved these arms in FRONT of the free arms, so the collision now pre-empts a
+                //     call Swift binds to a global. Executed: 16 of a 1152-cell matrix gained an unrelated
+                //     `Clock`, 4 of them also losing the real member. Arm 2 was already path-precise and
+                //     its comment SAID SO — the two siblings it names were the ones that were wrong.
+                //     Keying arm 1 on the path also closes the opposite miss: a caller in
+                //     `extension Outer.S` has `enclosingType == "Outer.S"` (an extension pushes the whole
+                //     dotted spelling as ONE stack element), so the short-keyed lookup missed its own
+                //     overloaded sibling and fell to the global.
+                //   * R265 — IT MUST BE VISIBLE HERE. See `memberVisibleAt`.
+                //
+                // When every arm is empty the chain falls through to the free-function arms exactly as it
+                // did before R255 — which is the correct answer precisely when no member is visible.
+                let callerFile = f.loc.split(separator: ":").first.map(String.init) ?? f.loc
+                let visibleHere: (Set<String>) -> Set<String> = { cands in
+                    cands.filter { memberVisibleAt($0, callerFile, f.enclosingTypePath) }
+                }
+                var siblingOverloads: Set<String> = []
+                if memberFirst, let ep = f.enclosingTypePath, overloadedBasesPath.contains("\(ep).\(call.leaf)") {
+                    siblingOverloads = visibleHere(Set(matchOverloadsPath("\(ep).\(call.leaf)", argc,
+                                                                          call.argTypes, swiftModuleOf(f.loc))))
+                }
+                var siblingExact: Set<String> = []
+                if memberFirst, siblingOverloads.isEmpty, let ep = f.enclosingTypePath,
+                   byQual.contains("\(ep).\(call.leaf)") {
+                    siblingExact = visibleHere(["\(ep).\(call.leaf)"])
+                }
+                var inheritedTargets: Set<String> = []
+                if memberFirst, siblingOverloads.isEmpty, siblingExact.isEmpty, let et = f.enclosingType {
+                    // R266 — narrow to the path-keyed climb ONLY where the short name is proven ambiguous;
+                    // everywhere else the short index answers exactly as R134 left it, UNIONED with the
+                    // path climb (which adds nothing when the name is unique, and is the only index that
+                    // answers for a nested type).
+                    //
+                    // SOUNDNESS R277 — and the short key is `et`'s LAST COMPONENT, not `et`. An
+                    // `extension Outer.S` pushes the whole dotted spelling as ONE `typeStack` element, so
+                    // `enclosingType` there is `"Outer.S"` while `conformers`/`supertypesOf` were keyed
+                    // `"S"` at the DECLARATION — the climb looked up a key that cannot exist and returned
+                    // empty, and R255 then handed the call to a same-named module-scope function. Silent
+                    // at v0.35.0 as well as at HEAD: 96 cells of the matrix, every one a caller in an
+                    // extension of a nested type reaching an INHERITED member, both effect polarities.
+                    let etShort = et.split(separator: ".").last.map(String.init) ?? et
+                    var raw: Set<String>
+                    if (typePathsBySimple[etShort]?.count ?? 0) > 1, let ep = f.enclosingTypePath {
+                        raw = inheritedUnqualTargetsPath(ep, call.leaf, argc, call.argTypes, swiftModuleOf(f.loc))
+                    } else {
+                        raw = inheritedUnqualTargets(etShort, call.leaf, argc, call.argTypes, swiftModuleOf(f.loc))
+                        if let ep = f.enclosingTypePath {
+                            raw.formUnion(inheritedUnqualTargetsPath(ep, call.leaf, argc, call.argTypes,
+                                                                     swiftModuleOf(f.loc)))
+                        }
+                    }
+                    inheritedTargets = visibleHere(raw)
+                }
+
+                if !siblingOverloads.isEmpty {                            // overloaded sibling
+                    for t in siblingOverloads.sorted() {
                         edges[f.qual, default: []].insert(t)
                         resolved = true
                     }
-                } else if memberFirst, let ep = f.enclosingTypePath, byQual.contains("\(ep).\(call.leaf)") {
+                } else if !siblingExact.isEmpty {
                     // an unqualified call inside a type body reaches the sibling method — resolved against the
                     // FULL enclosing path, so a nested type's sibling call hits its own member precisely (never
                     // a same-named sibling under a different parent).
-                    edges[f.qual, default: []].insert("\(ep).\(call.leaf)")
-                    resolved = true
-                } else if memberFirst, let et = f.enclosingType,
-                          case let inherited = inheritedUnqualTargets(et, call.leaf, argc, call.argTypes,
-                                                                      swiftModuleOf(f.loc)),
-                          !inherited.isEmpty {
+                    for t in siblingExact.sorted() {
+                        edges[f.qual, default: []].insert(t)
+                        resolved = true
+                    }
+                } else if !inheritedTargets.isEmpty {
                     // R134 — THE INHERITED member reached by the IMPLICIT-SELF spelling. Every arm above
                     // resolves `call.leaf` against the ENCLOSING TYPE only (`byQual`/`overloadedBases` keyed
                     // on `ep`/`et`), so `class Sub: Base { func caller(p) { wipe(p) } }` — `wipe` declared on
@@ -2050,7 +2234,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // conformance spelled on `extension S: P`, and a nested `enum Outer { class S: B }`.
                     // `supertypesOf` is TRANSITIVE (built from the transitive `subtypesOf`), so one lookup
                     // covers the whole chain.
-                    for t in inherited {
+                    for t in inheritedTargets.sorted() {
                         edges[f.qual, default: []].insert(t)
                         callsiteArgs[t, default: []].append((f.qual, call.args))
                         resolved = true

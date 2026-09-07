@@ -56,6 +56,52 @@ enum ProcessHarness {
         return root
     }
 
+    /// A throwaway SPM package with SEVERAL FILES in one target. Access control is a FILE-scoped
+    /// question in Swift (`private`, `fileprivate`), so a one-file fixture cannot express the shapes
+    /// SOUNDNESS R265 is about: the member and its caller have to be able to sit in different files.
+    /// `files` is `[filename: source]`; the caller supplies every name (`a.swift`, `b.swift`, ...).
+    static func makeFilesPackage(_ files: [String: String], name: String = "App") throws -> URL {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-fix-\(UUID().uuidString)")
+        let srcDir = root.appendingPathComponent("Sources/\(name)")
+        try FileManager.default.createDirectory(at: srcDir, withIntermediateDirectories: true)
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "\(name)", targets: [.executableTarget(name: "\(name)")])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        for (fn, src) in files {
+            try src.write(to: srcDir.appendingPathComponent(fn), atomically: true, encoding: .utf8)
+        }
+        return root
+    }
+
+    /// A throwaway SPM package with a LIBRARY target and an executable that depends on it — two real
+    /// modules. `internal` (Swift's default) is invisible across this boundary and `public` is not,
+    /// which is the axis SOUNDNESS R265's cross-module half turns on and which no single-target fixture
+    /// can express. `lib`/`exe` are `[filename: source]` as in `makeFilesPackage`.
+    static func makeLibExePackage(lib: [String: String], exe: [String: String],
+                                  libName: String = "Core", exeName: String = "App") throws -> URL {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-swift-fix-\(UUID().uuidString)")
+        for (target, files) in [(libName, lib), (exeName, exe)] {
+            let dir = root.appendingPathComponent("Sources/\(target)")
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            for (fn, src) in files {
+                try src.write(to: dir.appendingPathComponent(fn), atomically: true, encoding: .utf8)
+            }
+        }
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+        let package = Package(name: "\(exeName)", targets: [
+          .target(name: "\(libName)"),
+          .executableTarget(name: "\(exeName)", dependencies: ["\(libName)"]),
+        ])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        return root
+    }
+
     /// A throwaway SPM package with MULTIPLE executable targets, each its own `main.swift` — the R74
     /// fixture shape (`<main>` fabricating one target's effects onto another's). `targets` is
     /// `[(targetName, mainSwiftSource)]`; returns the root, same cleanup contract as `makePackage`.
