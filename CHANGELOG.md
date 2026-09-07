@@ -9,6 +9,54 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **Every BACKTICK-ESCAPED and RAW identifier was classified as an OPERATOR — 232 red cells in both
+  directions — SOUNDNESS R267.** `Driver.swift`'s unqualified-call chain excludes operators from R255's
+  member-first ordering, because Swift resolves an operator over the OPERAND TYPES rather than by
+  lexical scope. The exclusion asked the opposite question — "does the leaf start with a letter or
+  `_`?" — and treated everything else as an operator. SwiftSyntax hands back a backtick-escaped or raw
+  identifier WITH its backticks, so `` `default` `` and Swift 5.9's `` `w z` `` both begin with a
+  backtick, were read as operators, and skipped the three member arms onto the pre-R255 free-first
+  path. R134 and R255 both missed this spelling. Red on the SHIPPED v0.35.0 artifact as well as on
+  HEAD. Measured on a generated 1152-cell matrix.
+
+- ⚠ **The member arms claimed calls they cannot SEE, and keyed on the SHORT type name — 94 regressed
+  and 96 pre-existing cells — SOUNDNESS R265, R266, R277.** R255 moved the three MEMBER arms of the
+  unqualified-call chain in front of the free-function arms on the true ground that a visible member of
+  `self` beats a module-scope function of the same name. It keyed that on `overloadedBases` / `byQual` /
+  `supertypesOf` — none of which carry access control or file/module scope, and two of which are keyed
+  on the SHORT type name. Swift's unqualified lookup stops at the type scope only when the member is
+  visible there; otherwise it binds the global. Three defects in one region, one fix, measured on a
+  generated 1152-cell matrix across visibility × file/module placement × call site × nesting.
+
+- **An INHERITED stored or computed field holding callables was not a callable source — 36 spellings
+  ABSENT under a clean bill — SOUNDNESS R268.** R211/R192/R215 made a container or callable field of
+  `self` a callable source, so `for c in cbs { c(p) }` over `let cbs: [(String) -> Void]` discloses
+  `Unknown callback:`. The three indexes those fixes read are keyed on the enclosing type and were
+  consulted with `enclosingType` ALONE, so they never climbed `supertypesOf` — while the method-call
+  path climbs, and the property-accessor path climbs and asserts in its own comment that it does so
+  "exactly as the method-call path does". Three paths answer *what does this member hold*; one did not.
+  Measured on a generated 126-cell matrix, every cell compiled and executed.
+
+- **R268's flattening was too WIDE, and the CORPUS A/B caught it rather than the suite.** The first cut
+  flattened every inherited entry of `fields` into each subtype. `fieldIsCallable` is the only consumer
+  that needed it, but `fields` has four MEMBERSHIP-ONLY readers — `isModuleQualifier`, the two shadowing
+  guards in `CallCollector`, and the `dynamicMemberTypes` arm — which ask *is there a field of this
+  name* and never look at what it holds; giving a subtype its base's entries flipped all four. Eight
+  freshly cloned packages, 1,325 `.swift` files, 6,732 rows: **six rows lost an effect or an `Unknown`**
+  (swift-nio's `BaseStreamSocketChannel.shutdownSocket` and `SocketChannel.finishConnectSocket` went
+  ABSENT, two `getOption` paths lost `Clock`). A fix for a silent under-report introducing disclosure
+  losses is the shape this family measures on itself.
+
+- **Six BINDER FORMS of a container copy carried no element index, leaving the enclosing function
+  ABSENT — SOUNDNESS R269.** R215 gave the plain `let ys = xs` copy its element index and R192/R211 made
+  a container of callables a callable source; the other binder forms in the grammar reached none of that
+  machinery — the tuple pattern, `case let` in a switch, `if case let` / `guard case let`, an
+  `Optional(…)`-wrapped `guard let`, the tuple-element read, and every dictionary spelling through a
+  binder (which asked `elementTypeOf` and never `dictValueOf`). Each reported the enclosing function
+  ABSENT from `functions[]` — no row, no `Unknown`, nothing — while the direct spelling of the same
+  program is correctly `Unknown callback:`. Measured on a generated 78-cell matrix, every cell compiled
+  and executed against a stored field, a function parameter and a local alike.
+
 ### ⚠ SOUNDNESS R255 — a module-scope function with the same name as a member of `self` claimed the call
 
 `func wipe(_:)` at module scope beside `class Base { func wipe(_:) }`: an unqualified `wipe(p)` inside a
