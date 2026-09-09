@@ -9,6 +9,30 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **An OPTIONAL payload bound by a `case` pattern was never typed — SOUNDNESS R344.**
+  `if let h = o { h.run() }` typed `h` and charged `Fs`; every MATCH spelling of the same unwrap did
+  not — `switch o { case .some(let h) }`, `case let .some(h)`, the same with a `default:` arm, and
+  `if case let .some(h) = o` all left `h` untyped, so the enclosing function was ABSENT over a real
+  file write, with `deny Fs` and `pure` both exiting 0 and nothing disclosed. The cause was written
+  down one comment above the site: `enumCaseValueType` "has nothing to say about `Optional.some`", and
+  the branches after it answered only the CALLABLE (R178) and CONTAINER (R269) forms — the concrete
+  nominal payload had no branch at all. Two sites, because `if case let` reaches
+  `MatchingPatternConditionSyntax` rather than `SwitchCaseItemSyntax`, and fixing only the `switch`
+  form turned three of four spellings green and looked finished.
+
+  **The corpus A/B caught an over-reach and it is the part worth reading.** The first cut typed the
+  single binder of ANY arity-1 case pattern from the subject's root type — right for an Optional,
+  wrong for every other enum, where the binder is the PAYLOAD and the subject's type is the container.
+  swift-nio's `EventLoop.makeCompletedFuture(_ result: Result<Success, Error>)` lost its `Env`:
+  REMOVED 1. An arity guard is a shape check and was being read as a type check. With the pattern
+  check added, the same A/B is 0/0/0 over Alamofire + swift-nio + swift-argument-parser, with the
+  branch instrumented and reached 6 times — reached and inert, which is a different result from never
+  reached.
+
+  Same class as candor-rust's R185, closed the same day. The four-way sweep is finished: java is
+  structurally immune (it reads bytecode, so the source pattern does not survive to the classfile) and
+  ts is immune too (all six narrowing spellings already charge).
+
 - ⚠ **Every BACKTICK-ESCAPED and RAW identifier was classified as an OPERATOR — 232 red cells in both
   directions — SOUNDNESS R267.** `Driver.swift`'s unqualified-call chain excludes operators from R255's
   member-first ordering, because Swift resolves an operator over the OPERAND TYPES rather than by
