@@ -18,7 +18,10 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   parameter) via one new authority and a sibling index; the nested question is asked BEFORE the flat
   one, because the generic spelling makes the flat one answer `"Array"` rather than refuse. A
   module-scope global, a `??`-wrapped sequence and a three-deep `[[[T]]]` remain, each for a stated
-  reason.
+  reason. The ARRAY-LITERAL spelling `for z in [cbs]` closed too: `elementTypeOf`'s literal arm answered
+  from the first element expression's NAME (`"cbs"`, a variable name read as a type name), and because it
+  answered, the nested arm after it never ran — so the nested resolver gained its own literal arm and the
+  binder now asks the nested question first.
 
 - ⚠ **`lazy` sat in the element-preserving adapter list, inside a guard it can never satisfy —
   SOUNDNESS R348.** `elementTypeOf` peels adapters like `reversed()`/`dropFirst()` so a following
