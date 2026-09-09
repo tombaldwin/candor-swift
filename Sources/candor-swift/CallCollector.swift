@@ -2053,9 +2053,24 @@ final class CallCollector: SyntaxVisitor {
         }
         if let call = e.as(FunctionCallExprSyntax.self),
            let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
-           ["filter", "sorted", "reversed", "shuffled", "prefix", "suffix", "dropFirst", "dropLast", "lazy"]
+           ["filter", "sorted", "reversed", "shuffled", "prefix", "suffix", "dropFirst", "dropLast"]
                .contains(ma.declName.baseName.text), let base = ma.base {
             return elementTypeOf(base, depth + 1)  // element-preserving transform → same element type
+        }
+        // SOUNDNESS R348 — `lazy` IS THE ONLY ONE OF THAT FAMILY SPELLED AS A PROPERTY, and it spent its
+        // whole life listed one line above, inside a `FunctionCallExprSyntax` guard it can never satisfy:
+        // there is no `xs.lazy()` in Swift, so the entry read as coverage and could not fire. Every other
+        // adapter in the family was measured working (`reversed`/`dropFirst`/`dropLast`/`suffix`/`prefix`/
+        // `shuffled`, and the `for`-in form of each); `v.lazy.forEach { $0.run() }` alone was ABSENT — a
+        // purity CLAIM over a body that writes a file. A name sitting in a list is the strongest thing
+        // there is for stopping someone measuring whether it works.
+        //
+        // Ordered AFTER the field arms deliberately: a user type may own a `[E]` field actually named
+        // `lazy`, and that reading — established by `fieldArrayElem` — must win. Only an unresolved
+        // `.lazy` reaches here, so this arm can add element types and never replace a known one.
+        if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base,
+           ma.declName.baseName.text == "lazy" {
+            return elementTypeOf(base, depth + 1)
         }
         // R97 — AN INLINE ARRAY LITERAL. `for fm in [FileManager.default] { fm.removeItem(…) }` read
         // silent-pure while the identical loop over a named `let fms: [FileManager]` was charged: the

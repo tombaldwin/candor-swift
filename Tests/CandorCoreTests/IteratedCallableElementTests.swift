@@ -377,4 +377,64 @@ final class IteratedCallableElementTests: XCTestCase {
         throw XCTSkip("no swiftc on this host")
         #endif
     }
+
+    // ────────────────────────────────────────────────────────────────────────────────────────────────
+    // R348 — `lazy` is the ONE element-preserving adapter Swift spells as a PROPERTY, and it sat in the
+    // adapter list inside a `FunctionCallExprSyntax` guard it can never satisfy. Every sibling was
+    // measured working; `xs.lazy.forEach { $0.eff() }` alone claimed purity over a file write. The
+    // controls below are the point of the row: the same shapes over a NON-effectful element, and a
+    // `lazy` element that is read and never called, must stay absent — a fix to a silence is where
+    // over-charge gets introduced.
+    // ────────────────────────────────────────────────────────────────────────────────────────────────
+    static let lazyFixture = """
+    import Foundation
+
+    struct Store { func eff() { try? "x".write(toFile: "/tmp/r348.txt", atomically: true, encoding: .utf8) } }
+    struct Calm  { func pure() -> Int { 7 } }
+
+    final class L {
+      var stores: [Store] = []
+      var calms: [Calm] = []
+      var ints: [Int] = []
+
+      // the honest baseline — the non-lazy spelling was never in doubt
+      func baseForEach()     { stores.forEach { $0.eff() } }
+
+      // THE ROW: every `lazy` spelling of the same iteration
+      func lazyForEach()     { stores.lazy.forEach { $0.eff() } }
+      func lazyForIn()       { for s in stores.lazy { s.eff() } }
+      func lazyThenFilter()  { stores.lazy.filter { _ in true }.forEach { $0.eff() } }
+      func lazyThenMap()     { _ = stores.lazy.map { $0.eff() } }
+      func reversedThenLazy(){ stores.reversed().lazy.forEach { $0.eff() } }
+
+      // ── OVER-CHARGE CONTROLS — each must stay ABSENT
+      func ctlLazyPure()     { calms.lazy.forEach { _ = $0.pure() } }
+      func ctlLazyInts()     { ints.lazy.forEach { _ = $0 + 1 } }
+      func ctlLazyNotCalled(){ stores.lazy.forEach { _ = $0 } }
+      func ctlLazyForInPure(){ for c in calms.lazy { _ = c.pure() } }
+    }
+    """
+
+    func testLazyIsElementPreservingDespiteBeingAProperty() throws {
+        let by = try scan(Self.lazyFixture, "R348")
+
+        XCTAssertTrue(effects(by["L.baseForEach"]).contains("Fs"),
+                      "the non-lazy baseline must charge Fs, or this row is measuring a broken harness "
+                      + "rather than `lazy`. got \(effects(by["L.baseForEach"]))")
+
+        for fn in ["L.lazyForEach", "L.lazyForIn", "L.lazyThenFilter", "L.lazyThenMap",
+                   "L.reversedThenLazy"] {
+            XCTAssertNotNil(by[fn], "\(fn) is ABSENT from functions[] — a purity CLAIM over a body that "
+                                  + "writes a file. This is the R348 cardinal sin.")
+            XCTAssertTrue(effects(by[fn]).contains("Fs"),
+                          "\(fn) must charge Fs through the element of a `lazy` view, exactly as its "
+                          + "non-lazy sibling does. got \(effects(by[fn]))")
+        }
+
+        for fn in ["L.ctlLazyPure", "L.ctlLazyInts", "L.ctlLazyNotCalled", "L.ctlLazyForInPure"] {
+            XCTAssertTrue(effects(by[fn]).isEmpty,
+                          "\(fn) must stay effect-free: typing a `lazy` element must not manufacture an "
+                          + "effect for an element that has none. got \(effects(by[fn]))")
+        }
+    }
 }
