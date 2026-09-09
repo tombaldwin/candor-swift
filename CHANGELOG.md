@@ -9,6 +9,16 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **The flat and nested element indexes describe one binding and were not written in lockstep —
+  SOUNDNESS R351.** `setArrayElem`'s own comment has stated the rule since it was written; R278 added a
+  third map for that same binding and joined it to neither writer, so a name could carry a live FLAT
+  entry and a stale NESTED one at once — and the nested resolver is asked first at the `for` binder.
+  `func f(_ n: [[G]], _ p: [G]) { let n: [G] = p; for z in n { z.run() } }` charged `Fs` on the
+  PUBLISHED v0.35.0 and went ABSENT before this fix: a regression against a shipped artifact. Fixed
+  with a pair of writers rather than one clear, which also closes two silences that predate this
+  release (the unannotated copy spelling, and the flat-param/nested-`let` mirror). A/B vs the published
+  v0.35.0 over 22 packages: ADDED 42, REMOVED 0, 24 strict effect gains and no losses.
+
 - ⚠ **A container OF containers never reached its inner element — SOUNDNESS R278.**
   `for z in nested { for g in z { g.run() } }` over a `[[Guard]]` field was ABSENT while the
   one-container-out `for g in flat` charged `Fs` in the same scan. `arrayElementName` projects an
