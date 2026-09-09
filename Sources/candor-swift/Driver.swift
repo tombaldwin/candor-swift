@@ -322,6 +322,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var allFns: [FnInfo] = []
     var fields: [String: [String: (name: String?, isFunction: Bool)]] = [:]
     var fieldArrayElem: [String: [String: String]] = [:]
+    var fieldArrayElemNested: [String: [String: String]] = [:]   // R278
     var fieldDictValue: [String: [String: String]] = [:]
     var opaqueFields: [String: Set<String>] = [:]
     var caseAssocAll: [String: Set<String>] = [:]
@@ -835,6 +836,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         allFns.append(contentsOf: c.fns)
         for (t, fs) in c.fields { fields[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.fieldArrayElem { fieldArrayElem[t, default: [:]].merge(fs) { a, _ in a } }
+        for (t, fs) in c.fieldArrayElemNested { fieldArrayElemNested[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.fieldDictValue { fieldDictValue[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.opaqueFields { opaqueFields[t, default: []].formUnion(fs) }
         for (cn, ts) in c.caseAssoc { caseAssocAll[cn, default: []].formUnion(ts) }
@@ -1738,6 +1740,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             for (m, v) in fields[sup] ?? [:] where v.isFunction && fields[sub]?[m] == nil {
                 fields[sub, default: [:]][m] = v
             }
+            for (m, v) in fieldArrayElemNested[sup] ?? [:] where fieldArrayElemNested[sub]?[m] == nil {
+                fieldArrayElemNested[sub, default: [:]][m] = v
+            }
             for (m, v) in fieldArrayElem[sup] ?? [:] where fieldArrayElem[sub]?[m] == nil {
                 fieldArrayElem[sub, default: [:]][m] = v
             }
@@ -1822,7 +1827,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                globalArrayElem: globalArrayElemByModule[swiftModuleOf(f.loc)] ?? [:],
                                declaredTypes: declaredTypes,
                                localProtocols: localProtocolNames, returns: returnsIdx,
-                               fieldArrayElem: fieldArrayElem, fieldDictValue: fieldDictValue,
+                               fieldArrayElem: fieldArrayElem, fieldArrayElemNested: fieldArrayElemNested,
+                               fieldDictValue: fieldDictValue,
                                opaqueFields: opaqueFields,
                                enumCaseValueType: enumCaseValueType, dynamicMemberTypes: dynamicMemberTypes,
                                propertyWrapperTypes: propertyWrapperTypes, wrappedProps: wrappedProps,

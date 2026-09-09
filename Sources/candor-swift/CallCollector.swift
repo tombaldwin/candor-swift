@@ -181,6 +181,13 @@ final class CallCollector: SyntaxVisitor {
     /// `elementTypeOf`'s bare-identifier branch the same way `globalTypes` is consulted by `rootOf`'s.
     let globalArrayElem: [String: String]
     let fieldArrayElem: [String: [String: String]]  // Type -> field -> [T] element (self.field loops)
+    let fieldArrayElemNested: [String: [String: String]]  // R278 — Type -> field -> INNER element of `[[T]]`
+    /// R278 — LOCALS and PARAMETERS whose type is a container OF containers, mapped to the INNER
+    /// element. Deliberately a SEPARATE index from `arrayElem` rather than a flag on it: `arrayElem[n]`
+    /// means "n's element type", and storing the inner element there would make it say `T` for a name
+    /// whose element is `[T]`. Every other reader believes that index — `n.forEach { $0.run() }` would
+    /// type `$0` as `T` — so the compact representation buys containment with a fabrication.
+    var arrayElemNested: [String: String] = [:]
     let fieldDictValue: [String: [String: String]]  // Type -> field -> [K: V] value
     let opaqueFields: [String: Set<String>]         // Type -> fields whose type is monomorphized
     let localTypes: Set<String>
@@ -467,7 +474,8 @@ final class CallCollector: SyntaxVisitor {
          globalTypes: [String: String] = [:], globalArrayElem: [String: String] = [:],
          declaredTypes: Set<String>,
          localProtocols: Set<String>, returns: [String: String],
-         fieldArrayElem: [String: [String: String]], fieldDictValue: [String: [String: String]],
+         fieldArrayElem: [String: [String: String]], fieldArrayElemNested: [String: [String: String]],
+         fieldDictValue: [String: [String: String]],
          opaqueFields: [String: Set<String>] = [:],
          enumCaseValueType: [String: String], dynamicMemberTypes: Set<String>,
          propertyWrapperTypes: Set<String>, wrappedProps: [String: [String: String]],
@@ -504,12 +512,14 @@ final class CallCollector: SyntaxVisitor {
         self.monoNames = info.opaqueParams
         self.opaqueElem = info.opaqueArrayParams
         self.arrayElem = info.arrayParams
+        self.arrayElemNested = info.arrayParamsNested   // R278
         self.dictElem = info.dictParams
         self.tupleElem = info.tupleParams
         self.fields = fields
         self.globalTypes = globalTypes
         self.globalArrayElem = globalArrayElem
         self.fieldArrayElem = fieldArrayElem
+        self.fieldArrayElemNested = fieldArrayElemNested
         self.fieldDictValue = fieldDictValue
         self.opaqueFields = opaqueFields
         self.localTypes = localTypes
@@ -2009,6 +2019,34 @@ final class CallCollector: SyntaxVisitor {
     // The ELEMENT type a sequence yields per iteration. A `[T]` local/param/field; `self.field`; an
     // element-PRESERVING transform (`coll.filter/sorted/reversed/prefix/…`) → coll's element. A
     // literal/computed/transforming (map) sequence is left untyped — never guess.
+    /// SOUNDNESS R278 — the INNER element of an expression whose type is a container OF containers.
+    /// `elementTypeOf`'s sibling, and it answers where that one must refuse: the element of a `[[T]]` is
+    /// a `[T]`, which has no type NAME, so `elementTypeOf` returns nil and the outer binder of
+    /// `for z in nested { for g in z { g.run() } }` had nothing to take an element from — the whole
+    /// statement read ABSENT while the one-container-out spelling charged.
+    ///
+    /// The three sources are the three that were measured silent: a LOCAL or PARAMETER (`arrayElemNested`,
+    /// seeded from `info.arrayParamsNested`), an implicit-self FIELD, and a field of any typed receiver.
+    /// A module-scope GLOBAL is deliberately NOT here — the global element index is per-module in the
+    /// Driver (`globalArrayElemByModule`) and threading a second one is a larger change than the shape it
+    /// would close; the boundary is stated on the row rather than left for someone to discover.
+    private func nestedElementOf(_ expr: ExprSyntax, _ depth: Int = 0) -> String? {
+        if depth > 200 { return nil }
+        let e = Self.peel(expr)
+        if let dr = e.as(DeclReferenceExprSyntax.self) {
+            let n = dr.baseName.text
+            if let t = arrayElemNested[n] { return t }
+            if let et = enclosingType, let t = fieldArrayElemNested[et]?[n] { return t }
+            return nil
+        }
+        if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base,
+           let bt = rootOf(base, depth + 1).root,
+           let t = fieldArrayElemNested[bt]?[ma.declName.baseName.text] {
+            return t
+        }
+        return nil
+    }
+
     private func elementTypeOf(_ expr: ExprSyntax, _ depth: Int = 0) -> (name: String, mono: Bool)? {
         if depth > 200 { return nil }   // bounds the rootOf ⇄ elementTypeOf recursion (see rootOf)
         let e = Self.peel(expr)
@@ -2179,6 +2217,12 @@ final class CallCollector: SyntaxVisitor {
         tupleElem.removeValue(forKey: name)
         tupleArrayElem.removeValue(forKey: name)   // R269 — moves with `tupleElem`, one binding
         tupleDictValue.removeValue(forKey: name)
+        // R278 — name-keyed exactly as `arrayElem` is, so it is cleared exactly as `arrayElem` is. The
+        // first draft of the row's fix added the index and NOT this line; `NameKeyedStateTests` refused
+        // to compile a disposition for it and said so, which is the whole reason that gate exists. A
+        // stale nested entry is the FABRICATION direction — `let n: [[G]] = …; for z in n {…}; let n =
+        // Calm(); for z in n {…}` would give the second `z` the first `n`'s element.
+        arrayElemNested.removeValue(forKey: name)
     }
 
     // `arrayElem` and `opaqueElem` describe the same binding and must move together: a name rebound to a
@@ -2285,11 +2329,11 @@ final class CallCollector: SyntaxVisitor {
     /// give the name back (see `visit(ForStmtSyntax)`). These four are exactly the maps
     /// `clearBindingTypeOnly` drops; `opaqueElem` is restored by the shadow scope with the other flags,
     /// and it is written only in lockstep with `arrayElem`, so the pair cannot come back inconsistent.
-    private typealias TypeBinding = (type: String?, arrayElem: String?, dictElem: String?, tupleElem: [String: String]?)
+    private typealias TypeBinding = (type: String?, arrayElem: String?, dictElem: String?, tupleElem: [String: String]?, arrayElemNested: String?)
     private var typeScopes: [SyntaxIdentifier: [(String, TypeBinding)]] = [:]
 
     private func snapshotType(_ name: String) -> TypeBinding {
-        (vars[name], arrayElem[name], dictElem[name], tupleElem[name])
+        (vars[name], arrayElem[name], dictElem[name], tupleElem[name], arrayElemNested[name])
     }
 
     private func restoreType(_ name: String, _ b: TypeBinding) {
@@ -2297,6 +2341,7 @@ final class CallCollector: SyntaxVisitor {
         arrayElem[name] = b.arrayElem
         dictElem[name] = b.dictElem
         tupleElem[name] = b.tupleElem
+        arrayElemNested[name] = b.arrayElemNested   // R278 — saved and restored with its siblings
     }
 
     // A binder REBINDS `name`, so the name-keyed FLAGS carried by the signature or by an earlier
@@ -3043,6 +3088,14 @@ final class CallCollector: SyntaxVisitor {
                     vars[name] = elem.name
                     if elem.mono { monoNames.insert(name) }   // `for x in xs` over `[T]`/`[some P]` (shadowName ran above)
                 }
+            } else if let inner = nestedElementOf(node.sequence) {
+                // R278 — the sequence is a container OF containers, so this binder is itself a container
+                // and its ELEMENT is the inner one. `setArrayElem` is the single writer that keeps
+                // `opaqueElem` paired, and the `mono` answer is false for the same reason the sibling
+                // `fieldArrayElem` arm in `elementTypeOf` gives false: the nested index records a
+                // SPELLING and never resolves it through `typeGenericBounds`, so there is no
+                // monomorphized protocol name to guard.
+                setArrayElem(name, (inner, false))
             } else { clearBinding(name) }
         } else if let tup = node.pattern.as(TuplePatternSyntax.self), tup.elements.count == 2,
                   let second = tup.elements.last?.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
@@ -3272,6 +3325,18 @@ final class CallCollector: SyntaxVisitor {
             }
             return nil
         }()
+        // SOUNDNESS R278 — the `forEach` spelling of the nested-container loop. `iteratorElem` answers
+        // with the element's TYPE NAME, and the element of a `[[T]]` is a `[T]`, which has none — so this
+        // records the parameter's own ELEMENT instead, exactly as the `for`-binder arm does. Without it
+        // `nested.forEach { z in z.forEach { $0.run() } }` stayed ABSENT after the three `for` spellings
+        // were closed, which is the asymmetry R346/R347 keep recording: two consumers of one fact, and
+        // fixing the one in front of you leaves the other silent.
+        let nestedIterElem: String? = {
+            guard let ma = node.calledExpression.as(MemberAccessExprSyntax.self),
+                  Self.ELEMENT_ITERATORS.contains(ma.declName.baseName.text) || pairIterator,
+                  let base = ma.base else { return nil }
+            return nestedElementOf(base)
+        }()
         // R178 — `cb.map { $0() }` / `cb.map { f in f() }`. `Optional.map`'s closure parameter IS the
         // unwrapped payload, so when the receiver holds a callable the parameter is one too — the same
         // fact `iteratorElem`'s protocol arm establishes for `o.map { $0.go() }`, for a payload that has
@@ -3326,6 +3391,12 @@ final class CallCollector: SyntaxVisitor {
                     if !bindCallableElement(p.name, annotated) {
                         vars[p.name] = annotated             // explicit `{ (x: Foo) in }` — precise
                     }
+                } else if (i == 0 || pairIterator), iteratorElem == nil, let inner = nestedIterElem,
+                          closure == elemClosure {
+                    // R278 — the parameter is itself a container; give it its ELEMENT, not a type.
+                    // Guarded on `iteratorElem == nil` so it can only fire where the existing arm
+                    // refuses: this may add an element index, never replace one.
+                    setArrayElem(p.name, (inner, false))
                 } else if (i == 0 || pairIterator), let elem = iteratorElem, closure == elemClosure {
                     // iterator element param — typed (both params for a pair-iterator like
                     // sorted/min/max; only the first for the rest)
@@ -5465,6 +5536,9 @@ final class CallCollector: SyntaxVisitor {
                     }
                 }
                 else if let tn = t.name { vars[name] = tn }
+                else if let inner = nestedArrayElementName(ann.type) {                    // R278 `let xs: [[T]]`
+                    arrayElemNested[name] = inner
+                }
                 else if let elem = arrayElementName(ann.type) {                            // `let xs: [T]`
                     setArrayElem(name, (elem, arrayElementType(ann.type).map(isOpaqueParam) ?? false))
                 }

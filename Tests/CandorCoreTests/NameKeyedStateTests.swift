@@ -100,6 +100,12 @@ final class NameKeyedStateTests: XCTestCase {
         //    binder, whose scope is strictly the loop, and that is the only place it is needed.
         "vars":              .clearedOnRebind(scoped: false),
         "arrayElem":         .clearedOnRebind(scoped: false),
+        // R278 — `[[T]]`'s INNER element, for a binder whose own element is a container. Keyed by the
+        // binding name and cleared with `arrayElem` in the same call, for the same reason: a stale entry
+        // would hand a later binder over the same name somebody else's element type, which is the
+        // fabrication direction. Saved and restored by `snapshotType`/`restoreType` alongside it too, so
+        // a loop binder's nested element does not outlive its loop.
+        "arrayElemNested":   .clearedOnRebind(scoped: false),
         "dictElem":          .clearedOnRebind(scoped: false),
         "tupleElem":         .clearedOnRebind(scoped: false),
         // R269 — the container-holding SLOTS of a local tuple (`let t = (cbs, 1)`). Same disposition as
@@ -201,7 +207,8 @@ final class NameKeyedStateTests: XCTestCase {
             + "every binder. Entangled with the row above and filed with it."),
         // ── program-wide indexes injected at construction
         "moduleConstStrings": .immutableIndex, "fields": .immutableIndex,
-        "fieldArrayElem": .immutableIndex, "fieldDictValue": .immutableIndex,
+        "fieldArrayElem": .immutableIndex, "fieldArrayElemNested": .immutableIndex,
+        "fieldDictValue": .immutableIndex,
         "opaqueFields": .immutableIndex, "localTypes": .immutableIndex,
         "declaredTypes": .immutableIndex, "enclosingMembers": .immutableIndex,
         "localFreeFns": .immutableIndex, "localProtocols": .immutableIndex,

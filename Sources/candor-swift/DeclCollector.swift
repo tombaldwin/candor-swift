@@ -60,6 +60,7 @@ struct FnInfo {
     var opaqueArrayParams: Set<String> = []
     var protoParams: [String: String] = [:]  // param name -> local protocol name
     var arrayParams: [String: String] = [:]  // param name -> ELEMENT type (a `[T]` param, for `for x in p`)
+    var arrayParamsNested: [String: String] = [:]  // R278 — `[[T]]` param -> INNER element `T`
     var dictParams: [String: String] = [:]   // param name -> VALUE type (a `[K: V]` param, for `for (k,v)`)
     var tupleParams: [String: [String: String]] = [:]  // param -> tuple element types (`p.0`/`p.c`)
     var body: Syntax?
@@ -204,6 +205,7 @@ final class DeclCollector: SyntaxVisitor {
     /// visible here are not this field's candidate witnesses. Consumed only by the Driver's CHA arm.
     var opaqueFields: [String: Set<String>] = [:]         // Type -> field names
     var fieldArrayElem: [String: [String: String]] = [:]  // Type -> field -> ELEMENT type (`[T]` field)
+    var fieldArrayElemNested: [String: [String: String]] = [:]  // R278 — `[[T]]` field -> INNER element `T`
     var fieldDictValue: [String: [String: String]] = [:]  // Type -> field -> VALUE type (`[K: V]` field)
     var protocolMethods: [String: Set<String>] = [:]   // protocol -> declared method names
     var protocolSupers: [String: Set<String>] = [:]    // protocol -> its DIRECT super-protocols (`Sub: Sup`)
@@ -1003,7 +1005,9 @@ final class DeclCollector: SyntaxVisitor {
                         unresolvedGenericFields.append((ty, name, tn))
                     }
                     fields[ty, default: [:]][name] = info
-                    if let elem = arrayElementName(ann.type) { fieldArrayElem[ty, default: [:]][name] = elem }
+                    if let inner = nestedArrayElementName(ann.type) {   // R278 — `[[T]]`, asked first
+                        fieldArrayElemNested[ty, default: [:]][name] = inner
+                    } else if let elem = arrayElementName(ann.type) { fieldArrayElem[ty, default: [:]][name] = elem }
                     if let val = dictValueName(ann.type) { fieldDictValue[ty, default: [:]][name] = val }
                 } else if let initVal = binding.initializer?.value,
                           let call = initVal.as(FunctionCallExprSyntax.self),
@@ -1243,6 +1247,9 @@ final class DeclCollector: SyntaxVisitor {
             // may hold any conformer; `[T]` under `<T: Doer>` and `[some Doer]` are monomorphized by the
             // CALLER, so the element binder is flagged opaque and the Driver's local-conformer CHA skips
             // it (every other use of the element type — classifier, §2 dep join — proceeds).
+            else if let inner = nestedArrayElementName(p.type) {        // R278 — a `[[T]]` parameter
+                info.arrayParamsNested[pname] = genericBounds[inner] ?? inner
+            }
             else if let elem = arrayElementName(p.type) {
                 info.arrayParams[pname] = genericBounds[elem] ?? elem
                 if genericBounds[elem] != nil || (arrayElementType(p.type).map(isOpaqueParam) ?? false) {
