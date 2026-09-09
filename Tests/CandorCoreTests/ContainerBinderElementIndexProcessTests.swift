@@ -236,14 +236,18 @@ final class ContainerBinderElementIndexProcessTests: XCTestCase {
                        + "its outer binder the INNER element, so the inner loop resolves the closure and "
                        + "the caller discloses. This assertion was `XCTAssertNil` until the row closed, "
                        + "and it went red and named itself, exactly as it was written to: \(r.out)")
+        // …and these two closed the same day, which is why the pin is worth writing rather than the
+        // silence merely noted. The cause was never the nesting: `elementTypeOf`'s literal arm answers
+        // from the first element EXPRESSION's name, so `[cbs]` yielded `"cbs"` — a variable name read as
+        // a type name — and because it ANSWERED, the nested arm after it never ran. `nestedElementOf`
+        // now has its own literal arm, and the binder asks NESTED FIRST so a genuinely nested literal
+        // reaches the resolver that can type it. This assertion has now been inverted TWICE by the row
+        // it was written to track.
         for fn in ["T.plainFor", "T.caseFor"] {
-            XCTAssertNil(r.fns[fn],
-                         "\(fn) is KNOWN-SILENT and the cause is NOT the nested container — it is the "
-                         + "ARRAY LITERAL. `elementTypeOf`'s literal arm answers `\"cbs\"` for `[cbs]` (a "
-                         + "variable name read as a type name), and because it ANSWERS, R278's nested arm "
-                         + "never runs. Closing this means making that arm refuse when its element is "
-                         + "itself a container — a change to the path every array literal takes, and its "
-                         + "own row: \(r.out)")
+            XCTAssertEqual(r.fns[fn], ["Unknown"],
+                           "\(fn) must disclose: `for z in [cbs]` is a literal whose element is itself a "
+                           + "container, so the binder takes the INNER element and the inner loop "
+                           + "resolves the stored closure: \(r.out)")
         }
         XCTAssertEqual(r.code, 1, "`deny Fs Unknown T.direct` must FAIL: \(r.out)")
     }
