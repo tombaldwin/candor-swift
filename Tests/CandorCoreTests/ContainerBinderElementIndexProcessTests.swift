@@ -369,19 +369,26 @@ final class ContainerBinderElementIndexProcessTests: XCTestCase {
     // the same name and charged that global's initializer effect. A hard charge on a body that
     // reaches nothing.
     //
-    // WHAT THIS TEST ACTUALLY PINS, measured by stubbing each half in turn and re-running:
-    //   · `shadow`/`pureNested`  — the GUARD. Reverting it fails 2 assertions here. TEETH.
-    //   · `staleFlat`/`staleNested` — NO TEETH, and this comment says so rather than implying
-    //     otherwise. Both charge `Fs` with `setArrayElem`'s nested clear removed AND with
-    //     `setArrayElemNested`'s flat clear removed; the answer does not move. **So neither clear of
-    //     the R351 pair is pinned by any fixture I could construct**, and the rows below assert
-    //     today's behaviour without discriminating the code that produces it.
+    // WHAT THIS TEST PINS — measured by stubbing each half in turn against the FULL suite:
+    //   · guard reverted (`|| arrayElemNested[n] != nil` removed)  -> 2 failures: shadow, pureNested
+    //   · `setArrayElem`'s `arrayElemNested.removeValue` removed   -> 4 failures: staleNested, the
+    //        `deny Fs` exit, and R351's own regression + unannCopy rows
+    //   · `setArrayElemNested`'s `arrayElem.removeValue` removed   -> 1 failure: staleFlat
+    // All three halves have teeth.
     //
-    // That is left recorded rather than deleted, because the open question it names is the useful
-    // part: if neither clear changes an observable answer, one of them is doing nothing — and it is
-    // `setArrayElemNested`'s `arrayElem.removeValue` that caused R358's fabrication. Either a fixture
-    // exists that reaches them and nobody has written it, or that clear should be removed. Do not add
-    // teeth by asserting internal state; find the shape, or drop the line. SOUNDNESS R351/R358.
+    // AN EARLIER VERSION OF THIS COMMENT SAID THE OPPOSITE — that `staleFlat`/`staleNested` did not
+    // discriminate, that "neither clear of the R351 pair is pinned by any fixture I could construct",
+    // and that therefore "one of them is doing nothing … or that clear should be removed". Every part
+    // of that was wrong, and a review caught it. **The recommendation it invited — deleting
+    // `setArrayElemNested`'s clear — is measured to cause a SILENT UNDER-REPORT** (`staleFlat` goes
+    // ABSENT over a body that writes a file), so the false claim pointed directly at a cardinal sin.
+    //
+    // The measurement was wrong for a reason worth keeping: the stub was applied with a string
+    // `.replace(..., 1)` on `arrayElemNested.removeValue(forKey: name)`, which appears TWICE in
+    // `CallCollector.swift` — it landed in `clearBindingTypeOnly`, not in `setArrayElem` — and the
+    // run used `swift test --filter`, which excluded the R351 rows that would have failed. Two
+    // instruments, both wrong in the direction that produced a comfortable answer. Anchor a stub on
+    // the enclosing FUNCTION's body, and run the full suite. SOUNDNESS R351/R358.
     static let pairFixture = """
     class G { func run(_ p: String) { bomb(p) } }
     class Q { func run(_ p: String) -> Int { return 7 } }
@@ -416,9 +423,10 @@ final class ContainerBinderElementIndexProcessTests: XCTestCase {
                        + "to drop the stale NESTED entry or the nested resolver answers first and the "
                        + "loop resolves against the wrong element: \(r.out)")
         XCTAssertEqual(r.fns["T.staleFlat"], ["Fs"],
-                       "T.staleFlat must charge Fs. NOTE: this row does NOT discriminate the "
-                       + "clear it was written for — measured, it charges with either clear removed. "
-                       + "It pins today's answer, not the mechanism. See the comment above: \(r.out)")
+                       "T.staleFlat must charge Fs: `n` is rebound NESTED to [[G]], so "
+                       + "`setArrayElemNested` has to drop the stale FLAT entry or the flat resolver "
+                       + "answers first. Measured: removing that clear makes this row ABSENT — a "
+                       + "silent under-report over a body that writes a file: \(r.out)")
         XCTAssertEqual(r.code, 1, "`deny Fs T.staleNested` must FAIL: \(r.out)")
     }
 }
