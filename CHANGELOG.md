@@ -9,6 +9,15 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **`lazy` sat in the element-preserving adapter list, inside a guard it can never satisfy —
+  SOUNDNESS R348.** `elementTypeOf` peels adapters like `reversed()`/`dropFirst()` so a following
+  `forEach`/`map` closure param is typed from the receiver's element. Its list already named `lazy`,
+  but the arm is guarded on a function CALL and there is no `xs.lazy()` in Swift — `lazy` is the one
+  member of that family spelled as a property, so the entry could never fire. Every sibling was
+  measured charging `Fs`; `v.lazy.forEach { $0.run() }` alone was ABSENT, a purity claim over a body
+  that writes a file. A second arm handles the member-access form, ordered after the field arms so a
+  `[E]` field genuinely named `lazy` keeps its own reading.
+
 - ⚠ **An OPTIONAL payload bound by a `case` pattern was never typed — SOUNDNESS R344.**
   `if let h = o { h.run() }` typed `h` and charged `Fs`; every MATCH spelling of the same unwrap did
   not — `switch o { case .some(let h) }`, `case let .some(h)`, the same with a `default:` arm, and
