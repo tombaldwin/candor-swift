@@ -2044,6 +2044,24 @@ final class CallCollector: SyntaxVisitor {
            let t = fieldArrayElemNested[bt]?[ma.declName.baseName.text] {
             return t
         }
+        // AN ARRAY LITERAL whose elements are THEMSELVES containers — `for z in [cbs]`. This is the
+        // spelling R278 left pinned, and the cause was never the nesting: `elementTypeOf` has an arm for
+        // a literal that answers from the first element EXPRESSION's name, so `[cbs]` yields `"cbs"` — a
+        // variable name read as a type name — and because it ANSWERS, the nested arm after it never ran.
+        // Asked HERE, and asked BEFORE `elementTypeOf` at the binder, the literal's element is resolved
+        // by the resolver that can actually type it. UNANIMITY is required exactly as the sibling arm
+        // requires it: every element must yield the SAME inner element, so a heterogeneous or partly
+        // unresolvable literal returns nil and the binder stays as it was. An EMPTY literal yields nil,
+        // which is the safe answer and not a special case.
+        if let arr = e.as(ArrayExprSyntax.self) {
+            var only: String?
+            for el in arr.elements {
+                guard let r = elementTypeOf(el.expression, depth + 1)?.name else { return nil }
+                if let o = only, o != r { return nil }
+                only = r
+            }
+            return only
+        }
         return nil
     }
 
@@ -3083,11 +3101,6 @@ final class CallCollector: SyntaxVisitor {
             // spelled-out form fell through to the inferred one below. Both now reach the one binder.
             if let ann = node.typeAnnotation, let tn = elementSpelling(ann.type) {
                 if !bindCallableElement(name, tn) { vars[name] = tn }   // R211
-            } else if let elem = elementTypeOf(node.sequence) {
-                if !bindCallableElement(name, elem.name) {              // R211 — `for f in handlers { f() }`
-                    vars[name] = elem.name
-                    if elem.mono { monoNames.insert(name) }   // `for x in xs` over `[T]`/`[some P]` (shadowName ran above)
-                }
             } else if let inner = nestedElementOf(node.sequence) {
                 // R278 — the sequence is a container OF containers, so this binder is itself a container
                 // and its ELEMENT is the inner one. `setArrayElem` is the single writer that keeps
@@ -3096,6 +3109,11 @@ final class CallCollector: SyntaxVisitor {
                 // SPELLING and never resolves it through `typeGenericBounds`, so there is no
                 // monomorphized protocol name to guard.
                 setArrayElem(name, (inner, false))
+            } else if let elem = elementTypeOf(node.sequence) {
+                if !bindCallableElement(name, elem.name) {              // R211 — `for f in handlers { f() }`
+                    vars[name] = elem.name
+                    if elem.mono { monoNames.insert(name) }   // `for x in xs` over `[T]`/`[some P]` (shadowName ran above)
+                }
             } else { clearBinding(name) }
         } else if let tup = node.pattern.as(TuplePatternSyntax.self), tup.elements.count == 2,
                   let second = tup.elements.last?.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
