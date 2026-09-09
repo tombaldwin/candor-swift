@@ -2222,6 +2222,38 @@ final class CallCollector: SyntaxVisitor {
         return out
     }
 
+    /// SOUNDNESS R344 — is this case pattern an OPTIONAL unwrap (`.some(x)`, `let .some(x)`, `x?`)
+    /// rather than any other enum case?
+    ///
+    /// **THE GUARD EXISTS BECAUSE ITS ABSENCE WAS MEASURED, not because it looked prudent.** The first
+    /// cut typed the single binder of ANY arity-1 case pattern from the subject's own root type, which
+    /// is correct for an Optional — the subject is `T?` and `rootOf` gives `T` — and WRONG for every
+    /// other enum, where the binder is the PAYLOAD and the subject's type is the container. swift-nio's
+    /// `EventLoop.makeCompletedFuture(_ result: Result<Success, Error>)` is `switch result { case
+    /// .success(let value): … case .failure(let error): … }`, and typing `value` as `Result` cost the
+    /// function its `Env` in the corpus A/B: REMOVED 1, which is the direction that must never be
+    /// waved through. The arity-1 test alone is a SHAPE check and not a TYPE check, and this is the
+    /// type check.
+    private static func isOptionalUnwrapPattern(_ pattern: PatternSyntax) -> Bool {
+        // `x?` — the postfix spelling. SwiftSyntax models it as an expression pattern ending in `?`,
+        // so it is recognised by the trailing token rather than by a dedicated node.
+        if pattern.description.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("?") {
+            return true
+        }
+        // `let .some(x)` / `var .some(x)` — peel the binding and ask again.
+        if let vb = pattern.as(ValueBindingPatternSyntax.self) {
+            return isOptionalUnwrapPattern(PatternSyntax(vb.pattern))
+        }
+        // `.some(x)` / `Optional.some(x)` — an expression pattern whose callee names `some`.
+        if let ep = pattern.as(ExpressionPatternSyntax.self) {
+            if let call = ep.expression.as(FunctionCallExprSyntax.self),
+               let member = call.calledExpression.as(MemberAccessExprSyntax.self) {
+                return member.declName.baseName.text == "some"
+            }
+        }
+        return false
+    }
+
     private static func patternNames(_ pattern: PatternSyntax) -> [String] {
         patternBinders(pattern).map { $0.identifier.text }
     }
@@ -2761,7 +2793,30 @@ final class CallCollector: SyntaxVisitor {
         if let subject = Self.switchSubject(of: Syntax(node)) {
             let binders = Self.patternBinders(node.pattern)
             if binders.count == 1, !opaqueFnLocals.contains(binders[0].identifier.text) {
-                bindContainerIndex(binders[0].identifier.text, from: subject)
+                let bound = binders[0].identifier.text
+                // SOUNDNESS R344 — the CONCRETE optional payload, which this site never typed. The
+                // comment above says `enumCaseValueType` "has nothing to say about `Optional.some`",
+                // and the two branches that follow answer only the CALLABLE and the CONTAINER forms —
+                // so `switch o { case .some(let h): h.run() }` over an `Optional<Guard>` left `h`
+                // untyped and the caller read ABSENT. Measured, one variable, four spellings:
+                // `if let h = o` charges `Fs`; `case .some(let h)`, `case let .some(h)`,
+                // `case .some(let h) … default:` and `if case let .some(h) = o` are ALL silent, with
+                // `deny Fs` and `pure` both exiting 0 and nothing disclosed.
+                //
+                // This is the same shape candor-rust closed as R185 the same day, one engine over: the
+                // DISPATCH route for an unwrap binder existed and the CONCRETE one did not. Mirrors the
+                // `if let` site's own branch exactly — `rootOf(subject)` then `vars[..]` — rather than
+                // inventing a second answer to the question that site already answers.
+                //
+                // Ordered AFTER the callable mark and BEFORE the container index, matching the if-let
+                // site's precedence, and it only writes when nothing has typed the name yet: a bare
+                // `case let z` over a container must keep reaching `bindContainerIndex`.
+                if Self.isOptionalUnwrapPattern(node.pattern),
+                   vars[bound] == nil, !opaqueFnLocals.contains(bound) {
+                    let info = rootOf(subject)
+                    if info.isVar, let t = info.root { vars[bound] = t }
+                }
+                bindContainerIndex(bound, from: subject)
             }
         }
     }
@@ -2819,6 +2874,26 @@ final class CallCollector: SyntaxVisitor {
         // `Unknown callback:`. Single-binder only, for the same reason `markCallableMatchBinder` is: a
         // multi-binder pattern is a tuple/enum payload and the initializer is not what it binds.
         let condBinders = Self.patternBinders(node.pattern)
+        // SOUNDNESS R344 — the `if case let .some(h) = o` spelling, which reaches THIS node rather than
+        // `SwitchCaseItemSyntax`. Same defect, same fix, kept beside its twin: the container route
+        // below was here and the CONCRETE nominal one was not, so `h.run()` over an `Optional<Guard>`
+        // read the caller ABSENT while `if let h = o` charged `Fs`.
+        //
+        // DELIBERATELY OUTSIDE the `casePayloadLocals` guard below, and that is the whole reason this
+        // spelling stayed silent after the `switch` one was fixed. Probed rather than reasoned:
+        // `typeEnumCaseBinding` CLAIMS `h` into `casePayloadLocals` during the pattern walk and then
+        // has nothing to say about `Optional.some`, so the binder is claimed-but-UNTYPED and the guard
+        // — which exists to stop a later pass UNDOING a real typing — skipped the one case that had
+        // none. `vars[bound] == nil` is the honest precondition: it writes only where nothing has
+        // typed the name, so it cannot undo anything the guard was protecting.
+        if condBinders.count == 1 {
+            let bound = condBinders[0].identifier.text
+            if Self.isOptionalUnwrapPattern(node.pattern),
+               vars[bound] == nil, !opaqueFnLocals.contains(bound) {
+                let info = rootOf(node.initializer.value)
+                if info.isVar, let t = info.root { vars[bound] = t }
+            }
+        }
         if condBinders.count == 1, !casePayloadLocals.contains(condBinders[0].identifier.text) {
             bindContainerIndex(condBinders[0].identifier.text, from: node.initializer.value)
         }
