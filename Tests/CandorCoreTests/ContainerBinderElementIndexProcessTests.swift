@@ -50,7 +50,7 @@ final class ContainerBinderElementIndexProcessTests: XCTestCase {
         return (by, r.code, r.out + r.err)
     }
 
-    private static let head = """
+    static let head = """
     import Foundation
     func bomb(_ p: String) { try? FileManager.default.removeItem(atPath: p) }
 
@@ -306,5 +306,57 @@ final class ContainerBinderElementIndexProcessTests: XCTestCase {
                          + "than as a silence: \(r.out)")
         }
         XCTAssertEqual(r.code, 1, "`deny Fs Unknown H.direct` must FAIL: \(r.out)")
+    }
+
+    // ── 7. R351 — THE TWO ELEMENT INDEXES DESCRIBE ONE BINDING AND MUST MOVE TOGETHER ────────────
+    // `setArrayElem`'s own comment has said this since it was written: "arrayElem and opaqueElem
+    // describe the same binding and must move together … one writer, so the pair can never drift."
+    // R278 added a THIRD map for that same binding and joined it to neither writer. A name could then
+    // carry a live FLAT entry and a stale NESTED one at once, and because the `for` binder asks the
+    // nested resolver first, the stale one won.
+    //
+    // `regression` below charged Fs on the PUBLISHED v0.35.0 and went ABSENT at HEAD — a regression
+    // against a shipped artifact, not merely against an unreleased commit. `control` differs from it
+    // only in the parameter's declared type, which is what pins the cause to the index rather than to
+    // the loop, the element or the rebind.
+    static let lockstepBody = """
+    class G { func run(_ p: String) { bomb(p) } }
+    class P { func run(_ p: String) -> Int { return 7 } }
+    class T {
+      func regression(_ n: [[G]], _ p: [G])  { let n: [G] = p; for z in n { z.run("/tmp/r351-a") } }
+      func unannCopy(_ n: [[G]], _ p: [G])   { let n = p; for z in n { z.run("/tmp/r351-b") } }
+      func mirror(_ n: [G], _ q: [[G]])      { let n: [[G]] = q
+                                               for zs in n { for z in zs { z.run("/tmp/r351-c") } } }
+      func control(_ n: Int, _ p: [G])       { let n: [G] = p; for z in n { z.run("/tmp/r351-d") } }
+      func ctlPure(_ n: [[P]], _ p: [P])     { let n: [P] = p; for z in n { _ = z.run("/tmp/r351-e") } }
+    }
+    """
+
+    func testTheFlatAndNestedElementIndexesMoveTogether() throws {
+        let r = try scan(Self.head + Self.lockstepBody, name: "R351Lockstep", policy: "deny Fs T.control\n")
+
+        XCTAssertEqual(r.fns["T.control"], ["Fs"],
+                       "REACH INSTRUMENT: identical body, the parameter's TYPE is the only "
+                       + "difference. If this is absent the fixture is broken, not the engine: \(r.out)")
+
+        XCTAssertEqual(r.fns["T.regression"], ["Fs"],
+                       "T.regression is R351: a flat `let` rebind left the parameter's NESTED entry "
+                       + "standing, and the `for` binder asks nested FIRST, so the stale entry won and "
+                       + "the caller became a purity claim over a body that writes a file. This shape "
+                       + "charged on the PUBLISHED v0.35.0 — absence here is a regression against a "
+                       + "shipped artifact: \(r.out)")
+
+        for fn in ["T.unannCopy", "T.mirror"] {
+            XCTAssertEqual(r.fns[fn], ["Fs"],
+                           "\(fn) must disclose. These two were ABSENT on v0.35.0 as well — the "
+                           + "lockstep closes them in both directions, which is why the fix is a pair "
+                           + "of writers and not a single clear: \(r.out)")
+        }
+
+        XCTAssertNil(r.fns["T.ctlPure"],
+                     "T.ctlPure must stay ABSENT. It is the same shape over an element whose `run` is "
+                     + "PURE, so a binder typed from the wrong container surfaces here as a "
+                     + "fabrication rather than as a silence: \(r.out)")
+        XCTAssertEqual(r.code, 1, "`deny Fs Unknown T.control` must FAIL: \(r.out)")
     }
 }

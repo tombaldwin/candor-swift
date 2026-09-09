@@ -2246,9 +2246,37 @@ final class CallCollector: SyntaxVisitor {
     // `arrayElem` and `opaqueElem` describe the same binding and must move together: a name rebound to a
     // NON-monomorphized collection has to LOSE its opacity, or the CHA stays suppressed on a receiver that
     // is now erased — a silent under-report. One writer, so the pair can never drift.
+    // …AND `arrayElemNested` DESCRIBES THE SAME BINDING TOO — SOUNDNESS R351. The paragraph above
+    // states the rule ("one writer, so the pair can never drift") and R278 then added a THIRD map
+    // describing that same binding without joining it to either writer. The result was a name
+    // carrying a live FLAT entry and a stale NESTED one at the same time, and because cf6d109 asks
+    // the nested resolver FIRST at the `for` binder, the stale one won:
+    //
+    //     func f(_ n: [[G]], _ p: [G]) { let n: [G] = p; for z in n { z.run() } }
+    //
+    // charged `Fs` on the PUBLISHED v0.35.0 and went ABSENT at HEAD — a purity claim over a body
+    // that writes a file, and a regression against a shipped artifact rather than only against last
+    // night's tree. The control that isolates it differs only in the parameter's declared type.
+    //
+    // A blanket clear at the plain-`let` binder is NOT the fix and was measured wrong: that path
+    // deliberately does not call `clearBindingTypeOnly`, because clearing the type maps before the
+    // initializer is walked kills self-referential rebinds like `let u = u.asURL()`. The lockstep
+    // belongs in the WRITERS, which is what the comment above already said and what R278 did not do.
     private func setArrayElem(_ name: String, _ elem: (name: String, mono: Bool)) {
         arrayElem[name] = elem.name
         if elem.mono { opaqueElem.insert(name) } else { opaqueElem.remove(name) }
+        arrayElemNested.removeValue(forKey: name)
+    }
+
+    /// SOUNDNESS R351 — the second single writer, and the mirror of `setArrayElem`. R278's doc says
+    /// "`setArrayElem` is the single writer"; that stopped being true the moment a nested element was
+    /// written straight into the map beside it. Both directions must clear, or the defect simply runs
+    /// the other way: a name bound `[[T]]` after being bound `[T]` would keep the flat entry and
+    /// `elementTypeOf` would answer with it for an inner iteration.
+    private func setArrayElemNested(_ name: String, _ inner: String) {
+        arrayElemNested[name] = inner
+        arrayElem.removeValue(forKey: name)
+        opaqueElem.remove(name)
     }
 
     /// Every binder a pattern introduces, as the `IdentifierPatternSyntax` NODES — `x`, `(k, v)`,
@@ -5555,7 +5583,7 @@ final class CallCollector: SyntaxVisitor {
                 }
                 else if let tn = t.name { vars[name] = tn }
                 else if let inner = nestedArrayElementName(ann.type) {                    // R278 `let xs: [[T]]`
-                    arrayElemNested[name] = inner
+                    setArrayElemNested(name, inner)                                        // R351 — lockstep
                 }
                 else if let elem = arrayElementName(ann.type) {                            // `let xs: [T]`
                     setArrayElem(name, (elem, arrayElementType(ann.type).map(isOpaqueParam) ?? false))
