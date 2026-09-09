@@ -4463,7 +4463,24 @@ final class CallCollector: SyntaxVisitor {
         let n = node.baseName.text
         // skip when shadowed by a local binding, or when this reference is the callee/base of a call
         // or member access (those expression forms charge through their own visitors).
-        if vars[n] != nil || fnTyped.contains(n) || arrayElem[n] != nil || dictElem[n] != nil { return .skipChildren }
+        // SOUNDNESS R358 — `arrayElemNested` IS A LOCAL BINDING TOO, and this guard never heard of it.
+        // The list enumerates the indexes that mean "this name is bound locally, so it does NOT read the
+        // module-scope global of the same name". R278 added a fourth such index and did not add it here;
+        // R351 then made `setArrayElemNested` clear `arrayElem`, so a name rebound to a NESTED container
+        // stopped appearing in any index this line consults — and the reference fell through to the
+        // global, edging to its initializer. Measured, on a body that only returns `n.count`:
+        //     let n: [String] = { bomb("/tmp/glob"); return [] }()     // effectful global
+        //     func shadow(_ n: [G], _ q: [[G]]) -> Int { let n: [[G]] = q; return n.count }  -> ['Fs']
+        // A hard charge, not a hedge, on a function that reaches nothing. `shadowFlat` — the same shape
+        // with a FLAT rebind — is correctly absent, which is the control that isolates the index.
+        //
+        // The hole is OLDER than R351 and wider: `func pureNested(_ q: [[G]]) -> Int { let n: [[G]] = q
+        // ... }` fabricates with no flat parameter at all, on both sides of R351. R351 widened it to
+        // flat→nested rebinds; R278 opened it. **A name-keyed index added anywhere must be added to every
+        // list that answers "is this name locally bound"** — the same discipline `NameKeyedStateTests`
+        // enforces for the rebind CLEAR, one question over.
+        if vars[n] != nil || fnTyped.contains(n) || arrayElem[n] != nil || dictElem[n] != nil
+            || arrayElemNested[n] != nil { return .skipChildren }
         if let p = node.parent {
             // ...but a global read is still a read when it is the BASE of a member access or subscript:
             // `dbg.count` / `table[k]` force `dbg`/`table`'s initializer exactly as a bare `dbg` does, and

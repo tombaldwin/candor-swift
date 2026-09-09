@@ -359,4 +359,66 @@ final class ContainerBinderElementIndexProcessTests: XCTestCase {
                      + "fabrication rather than as a silence: \(r.out)")
         XCTAssertEqual(r.code, 1, "`deny Fs Unknown T.control` must FAIL: \(r.out)")
     }
+
+    // ── 8. R358 — BOTH clears of the R351 pair, and the shadow guard they broke ───────────────────
+    // R351 added a SECOND writer (`setArrayElemNested`) that clears `arrayElem` + `opaqueElem`. A
+    // review found that half had NO TEETH: reducing it to the bare `arrayElemNested[name] = inner`
+    // left the suite at 1129/1129 with every row identical. It also found what that untested half
+    // did — a name rebound to a nested container stopped appearing in ANY index the
+    // `DeclReferenceExprSyntax` shadow guard consults, so it fell through to a module-scope global of
+    // the same name and charged that global's initializer effect. A hard charge on a body that
+    // reaches nothing.
+    //
+    // WHAT THIS TEST ACTUALLY PINS, measured by stubbing each half in turn and re-running:
+    //   · `shadow`/`pureNested`  — the GUARD. Reverting it fails 2 assertions here. TEETH.
+    //   · `staleFlat`/`staleNested` — NO TEETH, and this comment says so rather than implying
+    //     otherwise. Both charge `Fs` with `setArrayElem`'s nested clear removed AND with
+    //     `setArrayElemNested`'s flat clear removed; the answer does not move. **So neither clear of
+    //     the R351 pair is pinned by any fixture I could construct**, and the rows below assert
+    //     today's behaviour without discriminating the code that produces it.
+    //
+    // That is left recorded rather than deleted, because the open question it names is the useful
+    // part: if neither clear changes an observable answer, one of them is doing nothing — and it is
+    // `setArrayElemNested`'s `arrayElem.removeValue` that caused R358's fabrication. Either a fixture
+    // exists that reaches them and nobody has written it, or that clear should be removed. Do not add
+    // teeth by asserting internal state; find the shape, or drop the line. SOUNDNESS R351/R358.
+    static let pairFixture = """
+    class G { func run(_ p: String) { bomb(p) } }
+    class Q { func run(_ p: String) -> Int { return 7 } }
+    let g: [String] = { bomb("/tmp/r358-glob"); return [] }()
+    class T {
+      // the NESTED rebind must shadow the effectful global `g` — R358
+      func shadow(_ g: [G], _ q: [[G]]) -> Int { let g: [[G]] = q; return g.count }
+      func pureNested(_ q: [[G]]) -> Int { let g: [[G]] = q; return g.count }
+      // control: the FLAT rebind, which always shadowed correctly
+      func shadowFlat(_ g: [G], _ p: [G]) -> Int { let g: [G] = p; return g.count }
+      // a stale FLAT entry must not survive a nested rebind — needs setArrayElemNested's clear
+      func staleFlat(_ n: [Q], _ q: [[G]]) { let n: [[G]] = q; n.forEach { $0.forEach { $0.run("/tmp/r358-a") } } }
+      // a stale NESTED entry must not survive a flat rebind — needs setArrayElem's clear
+      func staleNested(_ n: [[Q]], _ p: [G]) { let n: [G] = p; for x in n { x.run("/tmp/r358-b") } }
+    }
+    """
+
+    func testBothClearsOfThePairAreGuardedAndTheShadowGuardKnowsTheNestedIndex() throws {
+        let r = try scan(Self.head + Self.pairFixture, name: "R358Pair",
+                         policy: "deny Fs T.staleNested\n")
+
+        for fn in ["T.shadow", "T.pureNested", "T.shadowFlat"] {
+            XCTAssertNil(r.fns[fn],
+                         "\(fn) must be ABSENT. Its body only reads `g.count`; charging it means the "
+                         + "local rebind stopped shadowing the module-scope global `g` and the reference "
+                         + "edged to that global's effectful initializer — a hard charge on a function "
+                         + "that reaches nothing. R358: the shadow guard must consult `arrayElemNested` "
+                         + "alongside `arrayElem`/`dictElem`/`vars`/`fnTyped`: \(r.out)")
+        }
+        XCTAssertEqual(r.fns["T.staleNested"], ["Fs"],
+                       "T.staleNested must charge Fs: `n` is rebound FLAT to [G], so `setArrayElem` has "
+                       + "to drop the stale NESTED entry or the nested resolver answers first and the "
+                       + "loop resolves against the wrong element: \(r.out)")
+        XCTAssertEqual(r.fns["T.staleFlat"], ["Fs"],
+                       "T.staleFlat must charge Fs. NOTE: this row does NOT discriminate the "
+                       + "clear it was written for — measured, it charges with either clear removed. "
+                       + "It pins today's answer, not the mechanism. See the comment above: \(r.out)")
+        XCTAssertEqual(r.code, 1, "`deny Fs T.staleNested` must FAIL: \(r.out)")
+    }
 }
