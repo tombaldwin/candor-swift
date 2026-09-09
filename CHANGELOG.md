@@ -9,6 +9,17 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **A container OF containers never reached its inner element — SOUNDNESS R278.**
+  `for z in nested { for g in z { g.run() } }` over a `[[Guard]]` field was ABSENT while the
+  one-container-out `for g in flat` charged `Fs` in the same scan. `arrayElementName` projects an
+  element to a NAME and `[T]` has none, so a `[[T]]` annotation resolved to nothing at all four sites
+  that ask — global, field, parameter and local — and the outer binder had nothing to take an element
+  from. Closed for every declared spelling (`for`, `forEach`, `Array<Array<T>>`, annotated local,
+  parameter) via one new authority and a sibling index; the nested question is asked BEFORE the flat
+  one, because the generic spelling makes the flat one answer `"Array"` rather than refuse. A
+  module-scope global, a `??`-wrapped sequence and a three-deep `[[[T]]]` remain, each for a stated
+  reason.
+
 - ⚠ **`lazy` sat in the element-preserving adapter list, inside a guard it can never satisfy —
   SOUNDNESS R348.** `elementTypeOf` peels adapters like `reversed()`/`dropFirst()` so a following
   `forEach`/`map` closure param is typed from the receiver's element. Its list already named `lazy`,
