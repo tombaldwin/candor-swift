@@ -9,6 +9,13 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **A nested rebind stopped shadowing a global of the same name — SOUNDNESS R358.** R351's second
+  writer clears `arrayElem`, so a name rebound to a nested container appeared in NO index the
+  identifier shadow guard consults and fell through to a module-scope global, charging that global's
+  initializer on a body that reaches nothing. The hole is older and wider than R351: R278 added the
+  index and never added it to that guard, so the no-flat-parameter spelling fabricated on both sides.
+  Fixed in the guard.
+
 - ⚠ **The flat and nested element indexes describe one binding and were not written in lockstep —
   SOUNDNESS R351.** `setArrayElem`'s own comment has stated the rule since it was written; R278 added a
   third map for that same binding and joined it to neither writer, so a name could carry a live FLAT
