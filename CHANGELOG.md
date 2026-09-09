@@ -9,6 +9,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.36.0] — 2026-09-09
+
 - ⚠ **A nested rebind stopped shadowing a global of the same name — SOUNDNESS R358.** R351's second
   writer clears `arrayElem`, so a name rebound to a nested container appeared in NO index the
   identifier shadow guard consults and fell through to a module-scope global, charging that global's
