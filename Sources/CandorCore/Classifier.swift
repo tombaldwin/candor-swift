@@ -2163,6 +2163,22 @@ public func arrayElementName(_ t: TypeSyntax) -> String? {
     arrayElementType(t).flatMap { elementSpelling($0) }
 }
 
+/// SOUNDNESS R278 — the INNER element of a container whose elements are THEMSELVES containers:
+/// `[[T]]`/`Array<Array<T>>`/`[Set<T>]`/`[[T]]?` → `T`, and nil for anything one container deep.
+/// `arrayElementName` cannot answer this and does not pretend to: it projects the element to a NAME,
+/// and `[T]` has no name (`typeName` returns nil for an `ArrayTypeSyntax`), so a `[[T]]` annotation
+/// resolved to nothing at every one of the four sites that ask — the field, the global, the parameter
+/// and the local — and each lost the nesting independently. The result was that `for z in nested { for
+/// g in z { g.run() } }` was ABSENT while the one-container-out `for g in flat` charged.
+///
+/// Callers must ask THIS FIRST, before `arrayElementName`. The bracket spelling `[[T]]` makes
+/// `arrayElementName` refuse, but the generic spelling `Array<Array<T>>` makes it ANSWER — with
+/// `"Array"`, the name of the container rather than of any element, a wrong answer rather than a
+/// refusal. Asking nested-first is what makes the two spellings agree.
+public func nestedArrayElementName(_ t: TypeSyntax) -> String? {
+    arrayElementType(t).flatMap { arrayElementType($0) }.flatMap { elementSpelling($0) }
+}
+
 /// The ELEMENT type SYNTAX of a collection type — `arrayElementName` without the name projection, so a
 /// caller that needs to inspect the element's SPELLING (is it `some P`? — `isOpaqueParam`) can, rather
 /// than re-deriving the same peeling and drifting from it.

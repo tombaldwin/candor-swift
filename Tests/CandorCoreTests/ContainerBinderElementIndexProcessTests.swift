@@ -202,10 +202,18 @@ final class ContainerBinderElementIndexProcessTests: XCTestCase {
         XCTAssertEqual(r.code, 1, "`deny Fs Unknown T.uncalled` must FAIL: \(r.out)")
     }
 
-    // ── 5. THE REMAINING SILENCE, PINNED AS KNOWN — a NESTED CONTAINER, not a binder ─────────────
-    // `for case let z in [cbs]` is silent, and so are its plain-`for` and fully-annotated twins, which
-    // is what proves the axis is the nested container rather than the `case let`. Filed as its own row.
-    // Asserted as SILENT deliberately: when that row is closed this test goes red and names itself.
+    // ── 5. THE NESTED CONTAINER — R278, now CLOSED for every DECLARED spelling ───────────────────
+    // This test was written asserting all three were SILENT, with the note "when that row is closed
+    // this assertion goes red and names itself". It did exactly that, which is the only reason a pin
+    // is worth writing: the `annotated` case now DISCLOSES and the assertion below is inverted.
+    //
+    // The two ARRAY-LITERAL spellings are still pinned, and the reason is specific rather than "not
+    // done yet": `elementTypeOf` has an arm for a literal that answers from the first element
+    // EXPRESSION's name, so `[cbs]` yields `"cbs"` — a variable name used as a type name. It resolves
+    // to nothing downstream, so it costs nothing today, but it is a WRONG ANSWER rather than a refusal,
+    // and because it answers, R278's nested arm (an `else if` after it) never runs. Closing these two
+    // means making that arm REFUSE when its element is itself a container, which is a change to a path
+    // every array literal takes — deliberately not bundled into this row.
     func testANestedContainerIsStillSilentAndThatIsADifferentRow() throws {
         let src = Self.head + """
         class T {
@@ -223,13 +231,76 @@ final class ContainerBinderElementIndexProcessTests: XCTestCase {
         let r = try scan(src, name: "BindNested", policy: "deny Fs Unknown T.direct\n")
         XCTAssertEqual(r.fns["T.direct"], ["Unknown"],
                        "REACH INSTRUMENT: one container out, the same scan discloses: \(r.out)")
-        for fn in ["T.plainFor", "T.caseFor", "T.annotated"] {
+        XCTAssertEqual(r.fns["T.annotated"], ["Unknown"],
+                       "R278 CLOSED for the declared spelling: `let g: [[(String) -> Void]]` now gives "
+                       + "its outer binder the INNER element, so the inner loop resolves the closure and "
+                       + "the caller discloses. This assertion was `XCTAssertNil` until the row closed, "
+                       + "and it went red and named itself, exactly as it was written to: \(r.out)")
+        for fn in ["T.plainFor", "T.caseFor"] {
             XCTAssertNil(r.fns[fn],
-                         "\(fn) is KNOWN-SILENT: a container of containers loses the inner element "
-                         + "index in EVERY binder, including the plain `for` and the fully annotated "
-                         + "local — a nested-container row, not a binder-form one. When that row is "
-                         + "closed this assertion goes red and names itself: \(r.out)")
+                         "\(fn) is KNOWN-SILENT and the cause is NOT the nested container — it is the "
+                         + "ARRAY LITERAL. `elementTypeOf`'s literal arm answers `\"cbs\"` for `[cbs]` (a "
+                         + "variable name read as a type name), and because it ANSWERS, R278's nested arm "
+                         + "never runs. Closing this means making that arm refuse when its element is "
+                         + "itself a container — a change to the path every array literal takes, and its "
+                         + "own row: \(r.out)")
         }
         XCTAssertEqual(r.code, 1, "`deny Fs Unknown T.direct` must FAIL: \(r.out)")
+    }
+
+    // ── 6. R278's ROW — every DECLARED nested-container spelling, and the controls that make the
+    //       fix a fix rather than a blanket charge ────────────────────────────────────────────────
+    func testEveryDeclaredNestedContainerSpellingReachesItsInnerElement() throws {
+        let src = Self.head + """
+        class G { func run(_ p: String) { bomb(p) } }
+        class C { func run(_ p: String) -> Int { return 7 } }     // SAME member name, no effect
+        class H {
+            var flat:    [G]            = [G()]
+            var nested:  [[G]]          = [[G()]]
+            var generic: Array<Array<G>> = [[G()]]
+            var pureN:   [[C]]          = [[C()]]
+            var ints:    [[Int]]        = [[1]]
+            func direct(_ p: String)   { for g in flat { g.run(p) } }
+            func nestFor(_ p: String)  { for z in nested { for g in z { g.run(p) } } }
+            func nestEach(_ p: String) { nested.forEach { z in z.forEach { $0.run(p) } } }
+            func nestGen(_ p: String)  { for z in generic { for g in z { g.run(p) } } }
+            func nestLocal(_ p: String) { let n: [[G]] = nested; for z in n { for g in z { g.run(p) } } }
+            func nestParam(_ p: String, _ n: [[G]]) { for z in n { for g in z { g.run(p) } } }
+            func ctlPure(_ p: String)  { for z in pureN { for c in z { _ = c.run(p) } } }
+            func ctlInts()             { for z in ints { for i in z { _ = i + 1 } } }
+            func ctlRebind(_ p: String) { let n: [[C]] = pureN; for z in n { for c in z { _ = c.run(p) } } }
+        }
+        let h = H()
+        h.direct("/tmp/r278-a"); h.nestFor("/tmp/r278-b"); h.nestEach("/tmp/r278-c")
+        h.nestGen("/tmp/r278-d"); h.nestLocal("/tmp/r278-e"); h.nestParam("/tmp/r278-f", [[G()]])
+        h.ctlPure("/tmp/r278-g"); h.ctlInts(); h.ctlRebind("/tmp/r278-h")
+        """
+        let r = try scan(src, name: "R278Nested", policy: "deny Fs Unknown H.direct\n")
+
+        // `Fs`, not `Unknown`: `G.run` is a LOCAL class calling a local `bomb`, so the element resolves
+        // to a concrete effect rather than to a hedge. That is the stronger assertion — it says the
+        // binder reached the right TYPE, not merely that something was disclosed about it.
+        XCTAssertEqual(r.fns["H.direct"], ["Fs"],
+                       "REACH INSTRUMENT: one container out, same scan, must charge Fs: \(r.out)")
+
+        for fn in ["H.nestFor", "H.nestEach", "H.nestGen", "H.nestLocal", "H.nestParam"] {
+            XCTAssertEqual(r.fns[fn], ["Fs"],
+                           "\(fn) must charge Fs: the outer binder of a container-of-containers takes "
+                           + "the INNER element, so the inner loop resolves. ABSENT here is R278's "
+                           + "cardinal sin — the body really invokes a closure that deletes a file. "
+                           + "`nestGen` is the `Array<Array<G>>` spelling, which is the one where "
+                           + "`arrayElementName` ANSWERS (with \"Array\") rather than refusing, and is "
+                           + "why the nested question must be asked FIRST: \(r.out)")
+        }
+
+        // The controls. An adapter TYPES an element; it must not CHARGE one.
+        for fn in ["H.ctlPure", "H.ctlInts", "H.ctlRebind"] {
+            XCTAssertNil(r.fns[fn],
+                         "\(fn) must stay ABSENT. `ctlPure`/`ctlRebind` iterate a nested container whose "
+                         + "element's `run` is PURE and shares its name with the effectful one, so a "
+                         + "binder typed from the wrong container shows up here as a fabrication rather "
+                         + "than as a silence: \(r.out)")
+        }
+        XCTAssertEqual(r.code, 1, "`deny Fs Unknown H.direct` must FAIL: \(r.out)")
     }
 }
