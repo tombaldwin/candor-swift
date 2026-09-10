@@ -429,4 +429,60 @@ final class ContainerBinderElementIndexProcessTests: XCTestCase {
                        + "silent under-report over a body that writes a file: \(r.out)")
         XCTAssertEqual(r.code, 1, "`deny Fs T.staleNested` must FAIL: \(r.out)")
     }
+
+    // ── 9. R362 — the sixth index, and the seventh that was REJECTED ─────────────────────────────
+    // The `DeclReferenceExprSyntax` shadow guard enumerates the indexes meaning "this name is bound
+    // locally, so it does NOT read the module-scope global of that name". R358 added the fourth after
+    // a fabrication; this adds `tupleElem`, the sixth.
+    //
+    // `blockThenGlobal` IS THE POINT OF THIS TEST. It pins why `isBoundLocal(n)` — which would close
+    // the remaining `let h = 42` case — is deliberately NOT on that list. `boundLocals` is
+    // function-wide and monotone by design, so adding it makes the trailing read of the global go
+    // ABSENT: a silent under-report manufactured by a fabrication fix. Built, measured, rejected.
+    // If someone adds it, this row goes red and names itself.
+    static let shadowFixture = """
+    let g: Int = { bomb("/tmp/r362-g"); return 1 }()
+    let tg: (Int, Int) = { bomb("/tmp/r362-tg"); return (1, 2) }()
+    class T {
+      func tupleLocal(_ p: (Int, Int)) -> Int { let tg: (Int, Int) = p; return tg.0 }
+      func readsGlobal() -> Int { return g }
+      func readThenBind() -> Int { let first = g; let g = 5; return first + g }
+      func blockThenGlobal(_ c: Bool) -> Int { if c { let g = 1; _ = g }; return g }
+      func litLocal() -> Int { let g = 42; return g }
+    }
+    """
+
+    func testTheShadowGuardKnowsTupleElemAndDeliberatelyNotBoundLocals() throws {
+        let r = try scan(Self.head + Self.shadowFixture, name: "R362Shadow",
+                         policy: "deny Fs T.readsGlobal\n")
+
+        XCTAssertNil(r.fns["T.tupleLocal"],
+                     "T.tupleLocal must be ABSENT: its body returns `tg.0` and reaches nothing. Charging "
+                     + "it means `let tg: (Int, Int) = p` left the name invisible to the shadow guard and "
+                     + "the reference fell through to the effectful global `tg` — R362: \(r.out)")
+
+        for fn in ["T.readsGlobal", "T.readThenBind"] {
+            XCTAssertEqual(r.fns[fn], ["Fs"],
+                           "\(fn) really reads the global and must charge Fs. `readThenBind` reads it "
+                           + "BEFORE binding a shadow, and this guard runs during the walk, so source "
+                           + "order protects it — that is why the read-before-shadow case is safe: \(r.out)")
+        }
+
+        // THE REJECTION, pinned. If `isBoundLocal(n)` is ever added to the guard this goes red.
+        XCTAssertEqual(r.fns["T.blockThenGlobal"], ["Fs"],
+                       "T.blockThenGlobal must charge Fs: the local `g` is bound inside an `if` block "
+                       + "and the TRAILING `return g` is the module-scope global. Adding `isBoundLocal` "
+                       + "to the shadow guard makes this ABSENT, because `boundLocals` is function-wide "
+                       + "and monotone by design — a silent under-report manufactured by a fabrication "
+                       + "fix, the same shape `casePayloadLocals` exists to avoid. That is why the "
+                       + "seventh index is deliberately absent; closing `litLocal` needs a lexically "
+                       + "scoped companion set, which is its own rung: \(r.out)")
+
+        // The stated residual, pinned so its closure announces itself rather than passing silently.
+        XCTAssertEqual(r.fns["T.litLocal"], ["Fs"],
+                       "T.litLocal is R362's KNOWN-OPEN half: a literal-typed local that no typed index "
+                       + "records, so the guard cannot see it and the body fabricates the global's Fs. "
+                       + "When a scoped binder set closes it, this assertion goes red and names itself: \(r.out)")
+        XCTAssertEqual(r.code, 1, "`deny Fs T.readsGlobal` must FAIL: \(r.out)")
+    }
 }

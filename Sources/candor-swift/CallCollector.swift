@@ -4479,8 +4479,29 @@ final class CallCollector: SyntaxVisitor {
         // flat→nested rebinds; R278 opened it. **A name-keyed index added anywhere must be added to every
         // list that answers "is this name locally bound"** — the same discipline `NameKeyedStateTests`
         // enforces for the rebind CLEAR, one question over.
+        // SOUNDNESS R362 — `tupleElem` IS A LOCAL BINDING INDEX TOO, and this list did not consult it,
+        // so `let t: (Int, Int) = p` left `t` invisible here and a bare `t` read the module-scope global
+        // of that name and charged its initializer. Measured on a body that only returns `t.0`: `['Fs']`.
+        // Sixth index into a list R358 already had to extend once; the rule R358 states — a name-keyed
+        // index added anywhere must be added to every list answering "is this name locally bound" — is
+        // what this closes, one index further.
+        //
+        // **`isBoundLocal(n)` IS THE OBVIOUS SEVENTH AND IS DELIBERATELY ABSENT: IT WAS BUILT, MEASURED,
+        // AND REJECTED.** It closes the remaining case — a literal-typed local (`let h = 42`) that no
+        // typed index records — but `boundLocals` is FUNCTION-WIDE and MONOTONE by design (see its
+        // declaration: the Driver reads it after the walk, and scoping it is separately measured-bad).
+        // Adding it here therefore suppresses a genuine read of the global that follows an inner block:
+        //
+        //     func f(_ c: Bool) -> Int { if c { let h = 1; _ = h }; return h }   // trailing h IS the global
+        //
+        // goes ABSENT — a silent under-report manufactured by a fabrication fix, which is precisely the
+        // shape `casePayloadLocals` exists to avoid one door over (swift-syntax's `IfConfigDiagnostic`).
+        // Note `let first = h; let h = 5` is NOT the problem: this guard runs during the walk, so source
+        // order already protects a read that precedes its shadow. Only an inner-block binding does it.
+        // Closing that case needs the `casePayloadLocals` treatment — a lexically scoped companion set —
+        // which is its own rung. Pinned by `aBlockScopedShadowDoesNotSilenceTheTrailingGlobalRead`.
         if vars[n] != nil || fnTyped.contains(n) || arrayElem[n] != nil || dictElem[n] != nil
-            || arrayElemNested[n] != nil { return .skipChildren }
+            || arrayElemNested[n] != nil || tupleElem[n] != nil { return .skipChildren }
         if let p = node.parent {
             // ...but a global read is still a read when it is the BASE of a member access or subscript:
             // `dbg.count` / `table[k]` force `dbg`/`table`'s initializer exactly as a bare `dbg` does, and
