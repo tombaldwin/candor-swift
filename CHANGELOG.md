@@ -9,6 +9,15 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **A tuple-typed local stopped shadowing a global of the same name — SOUNDNESS R362.** The identifier
+  shadow guard enumerates the indexes meaning "this name is bound locally", and did not consult
+  `tupleElem`, so `let t: (Int, Int) = p` left `t` invisible and a bare `t` read the module-scope global
+  of that name, charging its initializer on a body that only returns `t.0`. Sixth index added.
+  The obvious seventh — the function-wide set of every local binding name — was built, measured and
+  REJECTED: it closes the remaining literal-typed case and manufactures a silent under-report doing it,
+  because a local bound inside an inner block would then suppress the genuine read of the global that
+  follows the block. Pinned in the test with that reason, so the next attempt meets the measurement.
+
 ## [0.36.0] — 2026-09-09
 
 - ⚠ **A nested rebind stopped shadowing a global of the same name — SOUNDNESS R358.** R351's second
