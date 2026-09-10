@@ -452,7 +452,7 @@ final class ContainerBinderElementIndexProcessTests: XCTestCase {
     }
     """
 
-    func testTheShadowGuardKnowsTupleElemAndDeliberatelyNotBoundLocals() throws {
+    func testTheShadowGuardKnowsTupleElemAndAScopedLiteralLocalButNotFunctionWideBoundLocals() throws {
         let r = try scan(Self.head + Self.shadowFixture, name: "R362Shadow",
                          policy: "deny Fs T.readsGlobal\n")
 
@@ -478,11 +478,18 @@ final class ContainerBinderElementIndexProcessTests: XCTestCase {
                        + "seventh index is deliberately absent; closing `litLocal` needs a lexically "
                        + "scoped companion set, which is its own rung: \(r.out)")
 
-        // The stated residual, pinned so its closure announces itself rather than passing silently.
-        XCTAssertEqual(r.fns["T.litLocal"], ["Fs"],
-                       "T.litLocal is R362's KNOWN-OPEN half: a literal-typed local that no typed index "
-                       + "records, so the guard cannot see it and the body fabricates the global's Fs. "
-                       + "When a scoped binder set closes it, this assertion goes red and names itself: \(r.out)")
+        // CLOSED 2026-09-11 by `literalLocals`, and THE PIN DID ITS JOB — it went red on the fix and
+        // named its own remedy ("a scoped binder set"), which is why this assertion is now inverted
+        // rather than deleted. R362's remaining half: a literal-typed local that no TYPED index records
+        // still shadows, because `literalLocals` records every local binding and is SAVED AND RESTORED
+        // with each shadow scope. The rejection above (`T.blockThenGlobal`) is the reason it had to be
+        // scoped rather than function-wide, and it still passes — the two assertions are the two
+        // directions of one question and neither is safe to check alone.
+        XCTAssertNil(r.fns["T.litLocal"],
+                     "T.litLocal must be ABSENT: `let h = 42` shadows the effectful global `h`, so a "
+                     + "body that only returns the local reaches nothing. Charging it is R362's "
+                     + "fabrication — measured on swift-nio, where it made a `deny Net` gate fail "
+                     + "`EchoHandler.channelActive` over a network effect it does not perform: \(r.out)")
         XCTAssertEqual(r.code, 1, "`deny Fs T.readsGlobal` must FAIL: \(r.out)")
     }
 }

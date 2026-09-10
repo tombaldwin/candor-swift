@@ -142,6 +142,20 @@ final class NameKeyedStateTests: XCTestCase {
             + "read after the block (swift-syntax `IfConfigDiagnostic.asDiagnostic`), and scoping "
             + "`boundLocals` instead un-shadows the Driver's post-walk guard. Both measured; see "
             + "`EnumPayloadBindingProcessTests`."),
+        // ── R362's remaining half: the same shape, one question over
+        "literalLocals": .lexicallyScoped(
+            "EVERY local binding name, written at the same three sites as `boundLocals` and differing "
+            + "from it in exactly one respect: it is saved and restored with each shadow scope. It exists "
+            + "because the shadow guard consults six TYPED indexes and a literal-typed local (`let h = "
+            + "42`) is in none of them, so a bare read of that name fell through to the module-scope "
+            + "global and charged its initializer — measured on swift-nio, where it made a `deny Net` "
+            + "gate FAIL `EchoHandler.channelActive` over a network effect the function does not "
+            + "perform. Nothing clears it; the scope gives it back, which is the whole point: "
+            + "`isBoundLocal` was built, measured and REJECTED for this guard because `boundLocals` is "
+            + "function-wide and monotone, so it silences the genuine trailing read after an inner block "
+            + "(`if c { let h = 1 }; return h` goes ABSENT). Both directions are pinned by "
+            + "`testTheShadowGuardKnowsTupleElemAndAScopedLiteralLocalButNotFunctionWideBoundLocals`, "
+            + "and neither is safe to assert alone."),
         // ── the locator-move PRE-PASS: kept, and kept for the OPPOSITE reason to the two hedges above
         "movedNames": .deliberatelyKept(
             "the flow-insensitive move set behind locator provenance, computed over the WHOLE body "
