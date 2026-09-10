@@ -443,6 +443,31 @@ final class CallCollector: SyntaxVisitor {
     /// function-wide set (swift-syntax `TokenKind.fromRaw`). Both are filed in the work queue; neither is
     /// this change's to fix, and a second set is what lets this change not depend on either.
     private var casePayloadLocals: Set<String> = []
+
+    /// SOUNDNESS R362, THE REMAINING HALF — LOCAL BINDINGS AS A LEXICALLY SCOPED SET, which is the
+    /// `casePayloadLocals` treatment its own rung was owed.
+    ///
+    /// The shadow guard consults six TYPED indexes (`vars`, `fnTyped`, `arrayElem`, `dictElem`,
+    /// `arrayElemNested`, `tupleElem`). A local that none of them records — `let h = 42`, a literal whose
+    /// type `vars` drops — was invisible there, so a bare `h` read the module-scope global of that name
+    /// and charged its initializer. Measured on swift-nio: `ChatHandler.channelInactive` carries
+    /// `['Clock','Env','Unknown']` and loses the edge on a one-identifier rename of the LOCAL only, and
+    /// `EchoHandler.channelActive` drops from `['Env','Net','Unknown']` to `['Env','Unknown']` — **a
+    /// `deny Net` gate failing over a network effect the function does not perform.**
+    ///
+    /// **`isBoundLocal(n)` IS NOT THE FIX AND WAS MEASURED NOT TO BE.** `boundLocals` is FUNCTION-WIDE and
+    /// monotone by design — the Driver reads it after the walk, where "is this a local" has no lexical
+    /// position to be asked at — so putting it in the guard suppresses a genuine read of the global that
+    /// FOLLOWS an inner block: `func f(_ c: Bool) -> Int { if c { let h = 1; _ = h }; return h }` goes
+    /// ABSENT, a silent under-report manufactured by a fabrication fix. This set is written at the same
+    /// three sites `boundLocals` is, and differs in exactly one respect: it is SAVED AND RESTORED with
+    /// every shadow scope, so a binding stops shadowing where it stops being in scope. A function BODY is
+    /// a `CodeBlockSyntax` and therefore its own scope, so a top-level `let` shadows for the rest of the
+    /// body and no further — which is what Swift means.
+    ///
+    /// `boundLocals` keeps its function-wide spelling and its Driver consumer untouched: this is a second
+    /// set, for the same reason `casePayloadLocals` is one, and neither depends on the other's scoping.
+    private var literalLocals: Set<String> = []
     var localFuncs: Set<String> = []      // NESTED `func` names declared in this unit's body. Their bodies
                                           // attribute lexically (DeclCollector skips them; we walk them here),
                                           // so a bare `helper()` call to a local func must NOT also edge to a
@@ -2749,6 +2774,8 @@ final class CallCollector: SyntaxVisitor {
         var opaque: Set<String>, opaqueElem: Set<String>, depBound: [String: String]
         var protoTyped: [String: String], constStrings: [String: String]
         var fnValueAlias: [String: String], casePayload: Set<String>
+        // R362 — see `literalLocals`. Scoped for the same reason `casePayload` is.
+        var literalLocals: Set<String>
     }
     private var shadowScopes: [SyntaxIdentifier: ShadowSave] = [:]
 
@@ -2800,7 +2827,8 @@ final class CallCollector: SyntaxVisitor {
         shadowScopes[node.id] = ShadowSave(opaque: monoNames, opaqueElem: opaqueElem,
                                            depBound: depBoundLocals, protoTyped: protoTyped,
                                            constStrings: localConstStrings, fnValueAlias: fnValueAlias,
-                                           casePayload: casePayloadLocals)
+                                           casePayload: casePayloadLocals,
+                                           literalLocals: literalLocals)
     }
 
     private func leaveShadowScope(_ node: some SyntaxProtocol) {
@@ -2818,6 +2846,7 @@ final class CallCollector: SyntaxVisitor {
         localConstStrings = saved.constStrings
         fnValueAlias = saved.fnValueAlias
         casePayloadLocals = saved.casePayload
+        literalLocals = saved.literalLocals
     }
 
     /// THE CATCH-ALL BINDER, and it exists to invert a failure mode rather than to add a case.
@@ -4501,7 +4530,10 @@ final class CallCollector: SyntaxVisitor {
         // Closing that case needs the `casePayloadLocals` treatment — a lexically scoped companion set —
         // which is its own rung. Pinned by `aBlockScopedShadowDoesNotSilenceTheTrailingGlobalRead`.
         if vars[n] != nil || fnTyped.contains(n) || arrayElem[n] != nil || dictElem[n] != nil
-            || arrayElemNested[n] != nil || tupleElem[n] != nil { return .skipChildren }
+            || arrayElemNested[n] != nil || tupleElem[n] != nil
+            // R362, the remaining half — a local no TYPED index records still shadows. Scoped, so the
+            // trailing read of a global after an inner block survives; see `literalLocals`.
+            || literalLocals.contains(n) { return .skipChildren }
         if let p = node.parent {
             // ...but a global read is still a read when it is the BASE of a member access or subscript:
             // `dbg.count` / `table[k]` force `dbg`/`table`'s initializer exactly as a bare `dbg` does, and
@@ -5485,6 +5517,7 @@ final class CallCollector: SyntaxVisitor {
                 for (pe, ve) in zip(tp.elements, tupleInit.elements) {
                     guard let n = pe.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
                     boundLocals.insert(n)
+                    literalLocals.insert(n)   // R362 — the scoped twin; see `literalLocals`
                     // R269 — THE CONTAINER INDEX, asked FIRST. `let (z, _) = (cbs, 1)` bound `z` to
                     // nothing at all and `for c in z { c(p) }` read silent-pure while the DIRECT twin in
                     // the same scan is `Unknown callback:`. CONTAINER BEFORE SCALAR, the order R215's
@@ -5494,7 +5527,7 @@ final class CallCollector: SyntaxVisitor {
                     // types the binding with something that is not its element and the container
                     // question is never put. Where `elementTypeOf`/`dictValueOf` answer, the element IS
                     // a container and the nominal answer would have been wrong anyway.
-                    if bindContainerIndex(n, from: ve.expression) { boundLocals.insert(n) }
+                    if bindContainerIndex(n, from: ve.expression) { boundLocals.insert(n); literalLocals.insert(n) }
                     else {
                         let info = rootOf(ve.expression)
                         if info.isVar, let t = info.root { vars[n] = t } else { clearBinding(n) }
@@ -5523,6 +5556,7 @@ final class CallCollector: SyntaxVisitor {
             guard let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
             markBinders(binding.pattern)
             boundLocals.insert(name)  // record the SHADOW (any local, even a literal-typed one `vars` drops)
+            literalLocals.insert(name)   // R362 — the same fact, LEXICALLY SCOPED; see `literalLocals`
             // R124 — A DECLARATION'S TYPE DOES NOT OUTLIVE ITS BLOCK EITHER, and this is the last of the
             // six `vars`-write sites the audit found unscoped. The file's standing position is that
             // "`vars` is deliberately function-wide … a stale TYPE is dangerous inward and harmless

@@ -18,6 +18,20 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   because a local bound inside an inner block would then suppress the genuine read of the global that
   follows the block. Pinned in the test with that reason, so the next attempt meets the measurement.
 
+  **AND THE REMAINING CASE IS NOW CLOSED, WITH A LEXICALLY SCOPED SET RATHER THAN THAT ONE.** A
+  literal-typed local (`let h = 42`) is recorded by no typed index, so a bare read of that name fell
+  through to the module-scope global and charged its initializer — a body that reaches nothing reading
+  `["Fs"]`. Measured on swift-nio, where it made a **`deny Net` gate FAIL `EchoHandler.channelActive`
+  over a network effect the function does not perform**, and moved `ChatHandler.channelInactive` on a
+  one-identifier rename of the local alone.
+
+  The fix records every local binding in a second set that is SAVED AND RESTORED with each shadow
+  scope, which is the one respect in which it differs from the function-wide set the pin rejected. A
+  function body is itself a block, so a top-level `let` shadows for the rest of the body and no
+  further — what Swift means. The rejected case stays pinned beside the closed one: they are opposite
+  directions of a single question (does this name still name the global *here*), and asserting either
+  alone is how the previous attempt manufactured a silence.
+
 ## [0.36.0] — 2026-09-09
 
 - ⚠ **A nested rebind stopped shadowing a global of the same name — SOUNDNESS R358.** R351's second
