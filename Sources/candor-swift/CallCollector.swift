@@ -1615,7 +1615,13 @@ final class CallCollector: SyntaxVisitor {
         }
         if alias == "NWBrowser" || alias == "NetServiceBrowser" {
             if bonjourDescriptorArg(node.arguments) { directEffects.insert("LocalNetwork") }
-            if let eff = kappaFree(name: alias, argCount: node.arguments.count) { directEffects.insert(eff) }
+            if let eff = kappaFree(name: alias, argCount: node.arguments.count) {
+                directEffects.insert(eff)
+                // R385 — the alias/free spelling. THIS SITE IS NOT REACHED BY THE MEASURED FIXTURES
+                // (the probe fired only CTOR and MEMBER), so it carries its own fixture rather than
+                // being left as an untested guess — an entry in a position it can never match is R348.
+                if eff == "Net" { incompleteSurfaces.insert("Net") }
+            }
             return true
         }
         if PRIVACY_EVENTKIT_TYPES.contains(alias) {
@@ -3881,6 +3887,24 @@ final class CallCollector: SyntaxVisitor {
                 if bonjourDescriptorArg(node.arguments) { directEffects.insert("LocalNetwork") }
                 if let eff = kappaFree(name: dealias(name), argCount: node.arguments.count) {
                     directEffects.insert(eff)
+                // SOUNDNESS R385, the Net half — A BROWSE HAS NO EXPRESSIBLE DESTINATION, so its
+                // surface is INCOMPLETE and must never read as complete. The effect was inserted here
+                // and the branch returns without touching `recordSurfaces`, so nothing ever marked the
+                // surface — a benign sibling literal then certified the browse. Measured: a `URLSession`
+                // request to a literal `api.stripe.com` beside `NWBrowser(for: .bonjour(type:
+                // callerType))` reported `hosts:['api.stripe.com'] incomplete:NONE` and `allow Net
+                // api.stripe.com` exited 0, isolated as well as alongside.
+                //
+                // FOUR EARLIER PATCHES MISSED THIS because they went to the establishing PREDICATES, and
+                // this path never reaches one: instrumenting all nine `recordSurfaces` sites showed the
+                // browse reaches NONE of them. `incompleteSurfaces` is inserted DIRECTLY here for that
+                // reason — there is no surface machinery on this branch to route through.
+                //
+                // Establishing-yes / capture-no, ⟨0.29⟩'s bind/listen rule: nothing is added to `hosts`,
+                // because a bonjour `type:` is a SERVICE TYPE and naming it a destination would
+                // fabricate one (R381's first cut captured `"443"` as a host exactly that way).
+                // `LocalNetwork` remains the positive channel and still fires.
+                    if eff == "Net" { incompleteSurfaces.insert("Net") }
                 }
                 unionConditionalTypeEdge(name, node, lit: lit)
             } else if (!declaredTypes.contains(name) || conditionallyShadowedTypes.contains(name)),
@@ -4076,7 +4100,13 @@ final class CallCollector: SyntaxVisitor {
                 // for ANY member on a browser receiver, so without this `b.start(queue:)` — the verb that
                 // actually begins discovery — was silent-pure, and the `Net` entry this very wave added to
                 // kappaMember was unreachable for exactly the receivers it was written for.
-                if let eff = kappaMember(root: rt, member: member) { directEffects.insert(eff) }
+                if let eff = kappaMember(root: rt, member: member) {
+                    directEffects.insert(eff)
+                    // R385 — the member verb (`b.start(queue:)`) reaches this branch and no surface
+                    // site; see the ctor arm above for the measurement and why the predicates could not
+                    // close it.
+                    if eff == "Net" { incompleteSurfaces.insert("Net") }
+                }
             } else if let rt = base.root, rt == "FileManager", member == "urls" || member == "url",
                       !declaredTypes.contains(rt) {
                 // CONSTANT-PROVENANCE rung 2 — `FileManager.default.urls(for: .desktopDirectory, in: …)`.
