@@ -1320,12 +1320,70 @@ public func isNetEstablishingMember(root: String, member: String) -> Bool {
     case "Channel", "ChannelHandlerContext": return ["connect", "bind"].contains(member) // write/read/flush = USE
     case "HTTPClient", "AsyncHTTPClient":
         return ["execute", "get", "post", "put", "patch", "delete"].contains(member)     // shutdown = teardown
+    // SOUNDNESS R381 — `NSURLConnection` is classified `Net` by `kappaMember` and had NO case here, so a
+    // legacy request whose `URLRequest` is built at runtime was never marked incomplete and its host was
+    // never captured. The request object CARRIES the URL, so these forms establish.
+    case "NSURLConnection":
+        return ["sendSynchronousRequest", "sendAsynchronousRequest", "start", "init"].contains(member)
     default: return false
     }
 }
 /// The free-call/ctor Net forms whose host is an argument of the construction (`NWConnection(host:)`).
+///
+/// **SOUNDNESS R381 — THE DNS RESOLVERS WERE MISSING AND THAT WAS A GATE BYPASS, not a missed
+/// disclosure.** This list was two names while `kappaFree` (see the `getaddrinfo` arm) already classified
+/// EIGHT resolver verbs as `Net`. Two tables, one question, never connected — R379's finding in
+/// candor-rust, verbatim, one engine over, and found only because that question was carried here instead
+/// of being filed and left.
+///
+/// Measured on a fixture that builds and runs, with the instrument CALIBRATED first: a function issuing a
+/// `URLSession` request to a literal `api.stripe.com` beside `getaddrinfo(callerHost, "443", …)` reported
+/// `hosts:['api.stripe.com'] incomplete:NONE`. `deny Net` exited 1 — the gate is live and able to fail —
+/// and **`allow Net api.stripe.com` exited 0**, with the resolver's destination appearing nowhere in the
+/// report. A policy saying "this code may only reach api.stripe.com" returned green over a DNS
+/// resolution of a caller-controlled name.
+///
+/// The host is the FIRST ARGUMENT of every one of these, which is what makes them establishing: a
+/// runtime value there is structurally invisible to the gate.
+///
+/// **DIRECTION: this stays an ALLOWLIST, deliberately, and R379 is why.** Inverting to a denylist is
+/// what this family's usual rule recommends, and R379 built exactly that, A/B'd it over 1,545 crates and
+/// was REFUSED — 544 rows over-masked, because a whole-crate classification makes every method carry the
+/// effect and a denylist then masks everything in such a crate. candor-swift classifies per-file and
+/// syntactically, so that counter-example may not apply here — but "may not apply" is reasoning, and
+/// R379 is precisely the row recording what a general rule costs when the local constraint is not
+/// checked. The swift A/B is cheap; run it before inverting.
 public func isNetEstablishingFree(name: String) -> Bool {
-    return name == "NWConnection" || name == "NWListener"
+    switch name {
+    case "NWConnection", "NWListener": return true
+    // R381 — the POSIX/libc resolver family, matching `kappaFree`'s own list rather than the two
+    // spellings that were measured (R346: write the whole family down and run it).
+    case _ where isNetResolverFree(name): return true
+    default: return false
+    }
+}
+
+/// SOUNDNESS R381 — THE POSIX/LIBC RESOLVER FAMILY, as ONE authority with TWO consumers.
+///
+/// `isNetEstablishingFree` asks "does this call's locator arrive as an argument" and the call collector
+/// asks "which argument is the locator" — the same family, and R347 is this register's record of what two
+/// copies of one list cost. Kept beside `kappaFree`'s own arm, which is where these names are classified
+/// `Net` in the first place.
+///
+/// **THE LOCATOR IS POSITIONAL ARGUMENT 0, and that is not a detail.** `getaddrinfo(host, service, …)`
+/// takes the NODE first and the SERVICE/port second. The collector's default literal picker returns the
+/// first string literal found ANYWHERE in the argument list, so `getaddrinfo(callerHost, "443", …)`
+/// captured **"443" as a host** — measured, on the first cut of R381's own fix: the report read
+/// `hosts: ['443', 'api.stripe.com']` and the gate failed with *"reaches { 443 } outside the allowlist"*
+/// instead of *"no visible literal — the surface cannot be certified"*. Right verdict, fabricated reason,
+/// and a false disclosure naming a host that is not one is precisely what this engine refuses to emit.
+/// ⟨0.29⟩'s rule, learned once already: **the locator comes from the locator POSITION.**
+public func isNetResolverFree(_ name: String) -> Bool {
+    switch name {
+    case "getaddrinfo", "getnameinfo", "gethostbyname", "gethostbyname2", "gethostbyaddr",
+         "gethostbyname_r", "gethostbyaddr_r", "getaddrinfo_a": return true
+    default: return false
+    }
 }
 
 // The masking guard generalizes from Net to ALL FOUR allowlisted effects (Net/Fs/Exec/Db): for each, a
