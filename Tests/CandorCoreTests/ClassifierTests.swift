@@ -278,11 +278,12 @@ final class ClassifierTests: XCTestCase {
     /// ⟨0.29⟩'s bind/listen rule, already in this codebase as the dotless-model-host break: mark
     /// establishing so a missing locator fails closed, and capture NOTHING.
     ///
-    /// THE BONJOUR HALF IS STILL OPEN and is deliberately asserted as open below rather than left
-    /// unmentioned: `NWBrowser` classifies through `kappaMember` on `start()`, and the engine
-    /// deliberately does not mask at a USE-site because the locator was fixed at construction
-    /// (`isNetEstablishingMember`'s own doc). The predicate here is correct and simply is not reached
-    /// for that shape yet.
+    /// THE BONJOUR HALF IS NOW CLOSED (candor-swift, 2026-09-11) — this doc said "STILL OPEN" and was
+    /// stale at HEAD, which a release panel caught. It is closed by setting `incompleteSurfaces`
+    /// DIRECTLY at the three sites that insert the effect, because that path reaches none of the nine
+    /// `recordSurfaces` sites; and by a THIRD root the panel found unmeasured, `NetService`, which was
+    /// asserted here while appearing in none of those sites — R348's shape. The behaviour is pinned by
+    /// `BonjourSurfaceProcessTests`, in-tree, all three roots plus the fabrication control.
     func testR385OpaqueLocatorFormsEstablishWithoutCapturing() {
         // The Keychain family — the locator is a CFDictionary, invisible to any surface.
         for n in ["SecItemAdd", "SecItemUpdate", "SecItemDelete", "SecItemCopyMatching"] {
