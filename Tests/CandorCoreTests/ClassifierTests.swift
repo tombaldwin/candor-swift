@@ -263,6 +263,36 @@ final class ClassifierTests: XCTestCase {
         XCTAssertFalse(isEstablishingFree(effect: "Exec", name: "Process"))
     }
 
+    /// SOUNDNESS R381 — R379's GATE BYPASS, CARRIED TO THIS ENGINE. The κ tables classify eight POSIX
+    /// resolver verbs and `NSURLConnection` as `Net`; the masking tables that decide certifiability knew
+    /// only `NWConnection`/`NWListener`. Two tables, one question, never connected.
+    ///
+    /// Measured before the fix, with the instrument calibrated first: a `URLSession` request to a literal
+    /// `api.stripe.com` beside `getaddrinfo(callerHost, "443", …)` reported
+    /// `hosts:['api.stripe.com'] incomplete:NONE`; `deny Net` exited 1 (so the gate was live) and
+    /// **`allow Net api.stripe.com` exited 0** over a DNS resolution of a caller-supplied name.
+    ///
+    /// The whole family is asserted, not the two spellings that were measured — R346.
+    func testR381ResolverVerbsAreEstablishing() {
+        for n in ["getaddrinfo", "getnameinfo", "gethostbyname", "gethostbyname2", "gethostbyaddr",
+                  "gethostbyname_r", "gethostbyaddr_r", "getaddrinfo_a"] {
+            XCTAssertTrue(isNetEstablishingFree(name: n),
+                          "\(n) resolves a caller-supplied host — R381. Absent, `allow Net <benign literal>` "
+                          + "exits 0 over a DNS lookup of a runtime name.")
+            XCTAssertTrue(isEstablishingFree(effect: "Net", name: n), "\(n) must reach the generalized guard too")
+            XCTAssertTrue(isNetResolverFree(n), "\(n) belongs to the family the LOCATOR POSITION rule keys on")
+        }
+        // `NSURLConnection`'s request object carries the URL, so these forms establish.
+        for m in ["sendSynchronousRequest", "sendAsynchronousRequest", "start", "init"] {
+            XCTAssertTrue(isNetEstablishingMember(root: "NSURLConnection", member: m), "R381: \(m)")
+        }
+        // The pre-existing entries must survive, and USE-verbs must stay out — this is an ALLOWLIST and
+        // R379 measured why inverting it is not automatically right.
+        XCTAssertTrue(isNetEstablishingFree(name: "NWConnection"))
+        XCTAssertFalse(isNetEstablishingFree(name: "send"))
+        XCTAssertFalse(isNetResolverFree("NWConnection"), "only the libc resolver family keys the locator rule")
+    }
+
     func testKappaPropertyRead() {
         XCTAssertEqual(kappaPropertyRead(root: "ProcessInfo", path: ["processInfo", "environment"]), "Env")
         XCTAssertEqual(kappaPropertyRead(root: "Date", path: ["now"]), "Clock")

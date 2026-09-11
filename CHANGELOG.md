@@ -9,6 +9,24 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **`allow Net <host>` returned exit 0 over a DNS lookup of a caller-supplied hostname —
+  SOUNDNESS R381.** The masking guard marks a `Net` call whose host is a runtime value as an incomplete
+  surface, so a benign sibling literal cannot certify it. Its tables listed two names while the
+  classifier already mapped eight POSIX resolver functions (`getaddrinfo`, `gethostbyname`, …) and
+  `NSURLConnection`'s request verbs to `Net` — two tables, one question, never connected. Measured: a
+  `URLSession` request to a literal `api.stripe.com` beside `getaddrinfo(callerHost, "443", …)`
+  published only the benign literal, claimed a complete surface, and **passed `allow Net
+  api.stripe.com`**, with the resolver's destination appearing nowhere in the report.
+
+  **This is candor-rust's R379 in this engine**, found by carrying that question here rather than
+  filing it. And the first cut of the fix captured **`"443"` as a host** — `getaddrinfo` takes the node
+  first and the service second, while the literal picker scanned the whole argument list — so the gate
+  failed for an invented reason. The resolver family now keys on its locator POSITION, and one shared
+  definition answers both "is this establishing" and "which argument is the locator".
+
+  **If you gate with `allow Net <host>` and your code resolves hostnames at runtime, that gate was
+  passing and will now fail closed** — the answer it should always have given.
+
 - ⚠ **A tuple-typed local stopped shadowing a global of the same name — SOUNDNESS R362.** The identifier
   shadow guard enumerates the indexes meaning "this name is bound locally", and did not consult
   `tupleElem`, so `let t: (Int, Int) = p` left `t` invisible and a bare `t` read the module-scope global

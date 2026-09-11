@@ -3729,7 +3729,17 @@ final class CallCollector: SyntaxVisitor {
                 }
             }
         }
-        let lit = firstStringLiteral(node.arguments)
+        // SOUNDNESS R381 — THE LOCATOR COMES FROM THE LOCATOR POSITION. `firstStringLiteral` scans the
+        // whole argument list, which is right for a call whose only literal IS its locator and wrong for
+        // the resolver family: `getaddrinfo(host, service, …)` takes the NODE first and the SERVICE
+        // second, so a runtime host beside a literal port captured **"443" as a host**. Measured on the
+        // first cut of R381's fix. Positional arg 0 only, via the label-aware picker (`""` is the first
+        // UNLABELED arg), which yields nil when that argument is not a plain literal — so the surface is
+        // honestly incomplete rather than fabricated.
+        let freeCallName = node.calledExpression.as(DeclReferenceExprSyntax.self)?.baseName.text
+        let lit = (freeCallName.map(isNetResolverFree) ?? false)
+            ? literalForLabel(node.arguments, [""])
+            : firstStringLiteral(node.arguments)
         if let dr = node.calledExpression.as(DeclReferenceExprSyntax.self) {
             let name = dr.baseName.text
             if chargeContentsCtor(name, node, lit: lit, shadowable: true) {
