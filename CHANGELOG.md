@@ -27,6 +27,20 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   **If you gate with `allow Net <host>` and your code resolves hostnames at runtime, that gate was
   passing and will now fail closed** — the answer it should always have given.
 
+- ⚠ **`allow Net <host>` also returned exit 0 over a bonjour/mDNS browse — SOUNDNESS R385, the second
+  half.** `NWBrowser`/`NetService`/`NetServiceBrowser` carry `Net`, and their effect is recorded on a path
+  that never touches the surface machinery at all — so nothing ever marked the surface incomplete and a
+  benign sibling literal certified the browse. A function requesting a literal `api.stripe.com` and then
+  browsing for a caller-supplied service type **passed `allow Net api.stripe.com`**.
+
+  A browse has no destination a host surface can express, so the fix marks the surface incomplete and
+  captures **nothing**: a bonjour `type:` is a service type, not a host, and naming it one would invent a
+  destination. `LocalNetwork` remains the separate positive channel. The same treatment closes the
+  Keychain case for `Fs` — a `SecItem` query is a CFDictionary, not a path.
+
+  **If you gate with `allow Net <host>` and your app does service discovery, that gate was passing and
+  will now fail closed.**
+
 - ⚠ **A tuple-typed local stopped shadowing a global of the same name — SOUNDNESS R362.** The identifier
   shadow guard enumerates the indexes meaning "this name is bound locally", and did not consult
   `tupleElem`, so `let t: (Int, Int) = p` left `t` invisible and a bare `t` read the module-scope global
