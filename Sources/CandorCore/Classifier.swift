@@ -1378,6 +1378,41 @@ public func isNetEstablishingFree(name: String) -> Bool {
 /// instead of *"no visible literal — the surface cannot be certified"*. Right verdict, fabricated reason,
 /// and a false disclosure naming a host that is not one is precisely what this engine refuses to emit.
 /// ⟨0.29⟩'s rule, learned once already: **the locator comes from the locator POSITION.**
+/// SOUNDNESS R385 — A LOCATOR THE DESTINATION SURFACE CANNOT EXPRESS.
+///
+/// These forms establish — their locator arrives as an argument, so a runtime value there is invisible
+/// and the gate must fail closed — but that locator is NOT a host or a path. A bonjour `type:` is a
+/// SERVICE TYPE (`_http._tcp`) and a `SecItem` query is a CFDictionary. Capturing either into
+/// `hosts`/`paths` would be a FABRICATION: it names a destination that does not exist, which is how
+/// R381's first cut put `"443"` into `hosts` and made a gate fail for an invented reason.
+///
+/// So the posture is ⟨0.29⟩'s bind/listen rule, already in this codebase for the same reason: WITHHOLD
+/// the literal and mark the surface incomplete. `is_net_local_bind` exists because a listen address must
+/// never enter `hosts`; the dotless model host two doc-blocks down does the same thing for
+/// `allow Llm localhost`. The effect is still named — `LocalNetwork` is a separate, working channel and
+/// `deny LocalNetwork` fires — what was missing is that the `Net`/`Fs` surface claimed a completeness it
+/// did not have.
+///
+/// **MEASURED, with every gate calibrated first** (`deny Net`, `deny Fs`, `deny LocalNetwork` each exit
+/// 1 on the fixture): `NWBrowser(for: .bonjour(type: callerType, domain: nil))` beside a literal
+/// `URLSession` host reported `hosts:['api.stripe.com'] incomplete:NONE` and **`allow Net
+/// api.stripe.com` exited 0**, isolated as well as alongside. `SecItemAdd(runtimeQuery, nil)` beside a
+/// literal file write reported `paths:['/tmp/benign.txt'] incomplete:NONE` and **`allow Fs
+/// /tmp/benign.txt` exited 0** over a write to the Keychain.
+///
+/// The consequence is deliberate and loud: every bonjour browse and every Keychain call now reads as an
+/// incomplete surface for `allow Net`/`allow Fs`. `allow Net api.stripe.com` should not be able to
+/// certify code that browses the local network.
+public func isOpaqueLocatorFree(_ name: String) -> Bool {
+    switch name {
+    // bonjour / mDNS discovery — the locator is a SERVICE TYPE, not a host
+    case "NWBrowser", "NetService", "NetServiceBrowser": return true
+    // the Keychain — the locator is a CFDictionary query, not a path
+    case "SecItemAdd", "SecItemUpdate", "SecItemDelete", "SecItemCopyMatching": return true
+    default: return false
+    }
+}
+
 public func isNetResolverFree(_ name: String) -> Bool {
     switch name {
     case "getaddrinfo", "getnameinfo", "gethostbyname", "gethostbyname2", "gethostbyaddr",
@@ -1405,8 +1440,10 @@ public func isEstablishingMember(effect: String, root: String, member: String) -
 }
 public func isEstablishingFree(effect: String, name: String) -> Bool {
     switch effect {
-    case "Net":  return isNetEstablishingFree(name: name)
-    case "Fs":   return name == "FileHandle" || name == "fopen"                       // path arg
+    // R385 — an opaque-locator form ESTABLISHES (its locator is an argument), and `recordSurfaces` is
+    // separately told to capture nothing for it. Establishing-yes / capture-no is the whole fix.
+    case "Net":  return isNetEstablishingFree(name: name) || isOpaqueLocatorFree(name)
+    case "Fs":   return name == "FileHandle" || name == "fopen" || isOpaqueLocatorFree(name)                       // path arg
         || name == "File" || name == "Folder"                                        // Files: path arg
     // R130 — the establishing set must list EVERY spelling `kappaFree` charges Exec, or a masked
     // (runtime-built) command through the newly-charged spellings evades an `allow Exec` allowlist while

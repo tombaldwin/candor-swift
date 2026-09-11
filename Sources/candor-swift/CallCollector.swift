@@ -1624,6 +1624,12 @@ final class CallCollector: SyntaxVisitor {
         }
         guard let eff = kappaFree(name: alias, argCount: node.arguments.count) else { return false }
         let est = isEstablishingFree(effect: eff, name: alias)
+        // SOUNDNESS R385 — WITHHOLD THE LITERAL for a form whose locator the destination surface cannot
+        // express. A bonjour `type:` and a `SecItem` CFDictionary are not hosts or paths, so capturing
+        // one would FABRICATE a destination (R381's first cut captured `"443"` as a host exactly this
+        // way). Forcing `lit` to nil here means the `incomplete` line below still fires — establishing
+        // with no visible literal — while `hosts`/`paths` gain nothing. ⟨0.29⟩'s bind/listen rule.
+        let lit = isOpaqueLocatorFree(alias) ? nil : lit
         directEffects.insert(eff)
         if eff == "Fs" { let ks = fsKind(root: alias, member: "<init>")
                           if ks.isEmpty { fsKinds.insert("?") } else { for k in ks { fsKinds.insert(k) } } }
@@ -3902,6 +3908,11 @@ final class CallCollector: SyntaxVisitor {
                 keepExtensionCtorEdge(name, node, lit: lit)
                 let aliasName = dealias(name)
                 let est = isEstablishingFree(effect: eff, name: aliasName)
+                // R385 — the CTOR path. `recordSurfaces` has THREE call sites and the first cut of this
+                // fix patched ONE, so `SecItemAdd` (a free call) closed while `NWBrowser(...)` (a ctor)
+                // stayed open — R347's two-copies shape inside the fix for a two-copies defect. Withhold
+                // the literal here for the same reason and by the same rule.
+                let lit = isOpaqueLocatorFree(aliasName) ? nil : lit
                 directEffects.insert(eff)
                 // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. A verb that
                 // does not say contributes nothing, so the field stays absent rather than half-claimed.
