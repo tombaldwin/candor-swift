@@ -263,6 +263,49 @@ final class ClassifierTests: XCTestCase {
         XCTAssertFalse(isEstablishingFree(effect: "Exec", name: "Process"))
     }
 
+    /// SOUNDNESS R385 — A LOCATOR THE DESTINATION SURFACE CANNOT EXPRESS.
+    ///
+    /// The Keychain half. `SecItem*` classify `Fs` (the system secure store) and `isEstablishingFree`
+    /// for Fs was two names, so a benign path literal certified a Keychain write with a runtime query:
+    /// `"x".write(toFile: "/tmp/benign.txt")` beside `SecItemAdd(runtimeQuery, nil)` reported
+    /// `paths:['/tmp/benign.txt'] incomplete:NONE` and `allow Fs /tmp/benign.txt` exited 0. Calibrated
+    /// first — `deny Fs` exits 1 on the same fixture.
+    ///
+    /// **THE FIX IS NOT "ADD THE NAMES", and that is the whole row.** A `SecItem` query is a
+    /// CFDictionary and a bonjour `type:` is a service type; neither is a path or a host. Adding them to
+    /// the establishing predicates while the literal picker scans the argument list would CAPTURE one as
+    /// a destination — which is exactly how R381's first cut put `"443"` into `hosts`. So the posture is
+    /// ⟨0.29⟩'s bind/listen rule, already in this codebase as the dotless-model-host break: mark
+    /// establishing so a missing locator fails closed, and capture NOTHING.
+    ///
+    /// THE BONJOUR HALF IS STILL OPEN and is deliberately asserted as open below rather than left
+    /// unmentioned: `NWBrowser` classifies through `kappaMember` on `start()`, and the engine
+    /// deliberately does not mask at a USE-site because the locator was fixed at construction
+    /// (`isNetEstablishingMember`'s own doc). The predicate here is correct and simply is not reached
+    /// for that shape yet.
+    func testR385OpaqueLocatorFormsEstablishWithoutCapturing() {
+        // The Keychain family — the locator is a CFDictionary, invisible to any surface.
+        for n in ["SecItemAdd", "SecItemUpdate", "SecItemDelete", "SecItemCopyMatching"] {
+            XCTAssertTrue(isOpaqueLocatorFree(n), "\(n)'s locator is a CFDictionary — R385")
+            XCTAssertTrue(isEstablishingFree(effect: "Fs", name: n),
+                          "\(n) must ESTABLISH so a runtime query fails closed — R385")
+        }
+        // Bonjour — the predicate is right; reaching it is the open half.
+        for n in ["NWBrowser", "NetService", "NetServiceBrowser"] {
+            XCTAssertTrue(isOpaqueLocatorFree(n), "\(n)'s locator is a SERVICE TYPE, not a host — R385")
+        }
+        // The pre-existing Fs establishing names must survive.
+        XCTAssertTrue(isEstablishingFree(effect: "Fs", name: "fopen"))
+        XCTAssertTrue(isEstablishingFree(effect: "Fs", name: "FileHandle"))
+        // CONTROLS — an ordinary host-bearing Net form is NOT opaque: its locator IS a host and must
+        // still be captured, or this fix would withhold every real destination in the engine.
+        for n in ["NWConnection", "NWListener", "getaddrinfo", "connect", "fopen"] {
+            XCTAssertFalse(isOpaqueLocatorFree(n),
+                           "\(n) names a real host or path — withholding its literal would destroy "
+                           + "the surface this engine exists to publish")
+        }
+    }
+
     /// SOUNDNESS R381 — R379's GATE BYPASS, CARRIED TO THIS ENGINE. The κ tables classify eight POSIX
     /// resolver verbs and `NSURLConnection` as `Net`; the masking tables that decide certifiability knew
     /// only `NWConnection`/`NWListener`. Two tables, one question, never connected.
