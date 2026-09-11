@@ -41,6 +41,12 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   **If you gate with `allow Net <host>` and your app does service discovery, that gate was passing and
   will now fail closed.**
 
+  **Still open on this engine and NOT closed here:** `FileManager.url(for:…, create: true)` is the
+  fourth site of the same class — it creates a directory while publishing no path, so an `allow Fs
+  <path>` rule with a benign literal elsewhere in the function still returns exit 0 over it
+  (SOUNDNESS R387). Its fix would mark every `FileManager.url(for:)` incomplete, including lookups
+  that only stat, so the over-mask is being priced before it ships rather than after.
+
 - ⚠ **A tuple-typed local stopped shadowing a global of the same name — SOUNDNESS R362.** The identifier
   shadow guard enumerates the indexes meaning "this name is bound locally", and did not consult
   `tupleElem`, so `let t: (Int, Int) = p` left `t` invisible and a bare `t` read the module-scope global

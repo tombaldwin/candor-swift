@@ -1613,7 +1613,15 @@ final class CallCollector: SyntaxVisitor {
             }
             return true
         }
-        if alias == "NWBrowser" || alias == "NetServiceBrowser" {
+        // SOUNDNESS R385, THE THIRD ROOT — `NetService` was asserted `isOpaqueLocatorFree` in
+        // ClassifierTests and given `Net` by `kappaMember` for any non-pure verb, while appearing in
+        // NONE of the three sites this fix patched. A release panel flagged it as unmeasured and the
+        // in-tree fixture settled it: `svc.resolve(withTimeout:)` beside a benign `URLSession` literal
+        // left `incomplete` empty and `allow Net api.stripe.com` exited 0. **That is R348's shape — a
+        // predicate entry in a position nothing reaches — inside the fix whose own commit message
+        // named R348 as the trap it avoided.** Two of three roots is what a κ family looks like when
+        // it is fixed from the spelling in hand rather than written down and run (R346).
+        if alias == "NWBrowser" || alias == "NetServiceBrowser" || alias == "NetService" {
             if bonjourDescriptorArg(node.arguments) { directEffects.insert("LocalNetwork") }
             if let eff = kappaFree(name: alias, argCount: node.arguments.count) {
                 directEffects.insert(eff)
@@ -3877,7 +3885,8 @@ final class CallCollector: SyntaxVisitor {
                 unionConditionalTypeEdge(name, node, lit: lit)
             } else if (!declaredTypes.contains(name) || conditionallyShadowedTypes.contains(name)),
                       !localFreeFns.contains(name),
-                      dealias(name) == "NWBrowser" || dealias(name) == "NetServiceBrowser" {
+                      dealias(name) == "NWBrowser" || dealias(name) == "NetServiceBrowser"
+                        || dealias(name) == "NetService" {
                 keepExtensionCtorEdge(name, node, lit: lit)
                 // A BONJOUR BROWSER CONSTRUCTOR — `NWBrowser(for: .bonjour(…), using:)`, which is the
                 // spelling real code uses; the member arm below only sees `browser.start()`. `.bonjour` is
@@ -4089,7 +4098,7 @@ final class CallCollector: SyntaxVisitor {
                         incompleteSurfaces.insert("Fs")
                     }
                 }
-            } else if let rt = base.root, rt == "NWBrowser" || rt == "NetServiceBrowser",
+            } else if let rt = base.root, rt == "NWBrowser" || rt == "NetServiceBrowser" || rt == "NetService",
                       !declaredTypes.contains(rt) {
                 // A BONJOUR DESCRIPTOR is local-network by definition — `.bonjour(type:domain:)` is mDNS,
                 // there is no non-LAN spelling of it. Unlike a HOST literal (where an unreadable value must
