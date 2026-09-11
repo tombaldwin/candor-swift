@@ -9,6 +9,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.36.1] — 2026-09-11
+
 - ⚠ **`allow Net <host>` returned exit 0 over a DNS lookup of a caller-supplied hostname —
   SOUNDNESS R381.** The masking guard marks a `Net` call whose host is a runtime value as an incomplete
   surface, so a benign sibling literal cannot certify it. Its tables listed two names while the
