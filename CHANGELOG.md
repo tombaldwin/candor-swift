@@ -9,6 +9,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.36.2] — 2026-09-12
+
 - **`shellOut(to: cmd, at: "/tmp/work")` reported the WORKING DIRECTORY as the command — SOUNDNESS
   R394.** `firstStringLiteral` scans the whole argument list, so the `at:` directory was captured as
   `cmds`. Both a FABRICATION (the command was never `/tmp/work`) and a GATE BYPASS (`allow Exec
