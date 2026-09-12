@@ -30,6 +30,14 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   exit 0 with no spurious `incomplete`. `RelativePathSurfaceProcessTests` pins all of it, and was
   CALIBRATED — with the fix removed and the engine rebuilt, all three cases fail.
 
+- **R395's fix also closed SOUNDNESS R393** (`fopen(path, mode)`), because the positional picker hands
+  that arm the MODE string `"r"`, which now routes to the incomplete branch instead of silently
+  standing in for a captured locator. Pinned with its own case rather than left as a happy accident —
+  an incidental closure is the kind this family has watched reopen quietly. **Residual, stated:** the
+  picker is still positional-by-accident for non-resolver free calls, and is safe today only because no
+  Fs establishing call has a PATH-SHAPED non-locator argument; `f(runtimePath, "/etc/config")` would
+  still capture the wrong one.
+
 
 ## [0.36.1] — 2026-09-11
 

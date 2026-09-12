@@ -70,6 +70,39 @@ final class RelativePathSurfaceProcessTests: XCTestCase {
         XCTAssertNil(steal["incomplete"], "having recorded both locators it must NOT also claim incompleteness")
     }
 
+    /// SOUNDNESS R393, CLOSED AS A CONSEQUENCE OF R395 — AND THEREFORE PINNED HERE ON PURPOSE.
+    ///
+    /// `fopen(path, mode)` takes the locator FIRST and a string MODE second, and the positional picker
+    /// (`firstStringLiteral`) scans the whole argument list, so it hands this arm `"r"`. Before R395 that
+    /// non-nil literal silenced the fail-closed marker and `allow Fs <benign>` certified a runtime path.
+    /// R395's shape test now routes `"r"` to the incomplete branch instead, which closes R393 without a
+    /// second fix — an INCIDENTAL closure, which is exactly the kind this family has watched reopen
+    /// silently. It gets its own case so that cannot happen quietly.
+    ///
+    /// RESIDUAL, stated rather than implied: the picker is still positional-by-accident for every
+    /// non-resolver free call. This is safe today only because no Fs establishing call has a
+    /// PATH-SHAPED non-locator argument — a `f(runtimePath, "/etc/config")` spelling would still
+    /// capture the wrong one and fabricate. That is the general repair R393 actually asks for.
+    func testFopenModeStringDoesNotSilenceTheFailClosedMarker() throws {
+        let src = """
+        import Foundation
+        public func masked(_ p: String) throws {
+            try "x".write(toFile: "/tmp/benign.txt", atomically: true, encoding: .utf8)
+            let f = fopen(p, "r"); if f != nil { fclose(f) }
+        }
+        public func determined() { let f = fopen("/tmp/lit.txt", "r"); if f != nil { fclose(f) } }
+        """
+        let r = try scan(src, name: "R393Fopen", policy: "allow Fs /tmp/benign.txt\n")
+        XCTAssertEqual(r.code, 1, "a runtime fopen path beside a benign sibling must NOT certify:\n\(r.out)")
+        let masked = try XCTUnwrap(r.fns["masked"], "masked absent:\n\(r.out)")
+        XCTAssertEqual(masked["incomplete"] as? [String], ["Fs"],
+                       "the mode string must not stand in for a captured locator")
+        let det = try XCTUnwrap(r.fns["determined"], "determined absent:\n\(r.out)")
+        XCTAssertEqual(det["paths"] as? [String], ["/tmp/lit.txt"],
+                       "arg 0 is the locator — the mode string must never be recorded as a path")
+        XCTAssertNil(det["incomplete"], "a fully determined fopen path is complete")
+    }
+
     /// CONTROL — the fix must not make ordinary code uncertifiable, or nobody can adopt it.
     func testOrdinaryAbsolutePathsStillCertify() throws {
         let src = """
