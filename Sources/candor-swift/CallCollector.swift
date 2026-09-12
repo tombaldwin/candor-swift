@@ -1987,7 +1987,14 @@ final class CallCollector: SyntaxVisitor {
         var anyMissing = false
         for spelling in locators {
             if let lit = literalForLabel(args, spelling) {
-                if lit.contains("/") || lit.hasPrefix(".") || lit.hasPrefix("~") { paths.insert(lit) }
+                // SOUNDNESS R395 — this literal is taken BY LABEL, so it IS this locator by construction
+                // and the path-shape filter that used to sit here was simply wrong: it dropped a bare
+                // relative filename from `paths` while leaving `anyMissing` false, so
+                // `copyItem(atPath: "id_rsa", toPath: "stolen.key")` published NEITHER destination and
+                // reported the surface complete. Unlike the positional arm above there is no ambiguity
+                // about what this string is, so the honest move is to RECORD it — which also lets
+                // `allow Fs id_rsa` legitimately certify — rather than to fail closed.
+                paths.insert(lit)
             } else {
                 anyMissing = true  // this required locator is runtime-built (or absent) → invisible
             }
@@ -2055,6 +2062,22 @@ final class CallCollector: SyntaxVisitor {
                 // untouched. The UNDETERMINED case is not handled here at all — it is the absence of a
                 // path, counted and disclosed by the verify rather than guessed at from this side.
                 for c in pathClasses(lit) { directEffects.insert(c) }
+            } else {
+                // SOUNDNESS R395 — THE ENGINE SAW THE DESTINATION, DISCARDED IT, AND THEN CLAIMED THE
+                // SURFACE WAS COMPLETE. A literal failing the path-shape test above was silently dropped
+                // while `lit != nil` kept the caller's incompleteness guard from firing, so
+                // `String(contentsOfFile: "credentials.json")`, `FileHandle(forReadingAtPath: "id_rsa")`
+                // and `write(toFile: "exfil.txt")` all passed `allow Fs /tmp/benign` at exit 0 beside a
+                // benign sibling write — published since 2026-07-09. Isolated, each failed closed; the
+                // sibling was the mask.
+                //
+                // FAIL CLOSED rather than record it. `lit` reaching here is not known to BE the locator:
+                // some callers pass a positional `firstStringLiteral`, which is how `fopen(p, "r")` hands
+                // this arm a MODE string (R393). Recording that would fabricate a path — R394's shape, one
+                // effect over. "I could not determine this locator" is the honest answer and it is what
+                // `incomplete` means. The precision cost is real and bounded: a genuinely relative path
+                // cannot be certified through this arm, which is why the label-keyed sites record instead.
+                incompleteSurfaces.insert("Fs")
             }
         case "Db": for t in tablesInSql(lit) { tables.formUnion([t]) }
         default: break
