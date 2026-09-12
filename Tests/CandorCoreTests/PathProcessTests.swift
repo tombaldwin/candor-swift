@@ -27,7 +27,11 @@ final class PathProcessTests: XCTestCase {
     private func scanned(_ binary: URL, _ root: URL) throws -> String {
         let prefix = root.appendingPathComponent(".candor/report").path
         let r = try ProcessHarness.run(binary, [root.appendingPathComponent("Sources/App").path, "--out", prefix])
-        try XCTSkipUnless(r.code == 0, "scan failed: \(r.err)")
+        // A FAILED SCAN IS A FAILURE, NOT A SKIP. This helper serves 14 process tests; while it
+        // skipped, a crashing scan removed all 14 from the run and the aggregate still read green
+        // — detection worked and aggregation discarded it. There is no toolchain question here:
+        // `binaryURL` has already resolved the built engine, and the fixture is in-tree.
+        XCTAssertEqual(r.code, 0, "scan failed: \(r.err)")
         return prefix
     }
 
