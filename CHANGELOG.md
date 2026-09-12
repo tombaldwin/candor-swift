@@ -9,6 +9,23 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **`shellOut(to: cmd, at: "/tmp/work")` reported the WORKING DIRECTORY as the command — SOUNDNESS
+  R394.** `firstStringLiteral` scans the whole argument list, so the `at:` directory was captured as
+  `cmds`. Both a FABRICATION (the command was never `/tmp/work`) and a GATE BYPASS (`allow Exec
+  /tmp/work` certified a caller-controlled command). Measured before and after on binaries either side of
+  the edit: `cmds: ["/tmp/work"], incomplete: none` → `cmds: none, incomplete: ["Exec"]`.
+
+  **Fixed with a declared table, not another special case.** `locatorLabelsForFree(name)` now says WHICH
+  argument holds the locator, and the single free-call site consults it. R381 found this exact bug on
+  `getaddrinfo` (a literal port captured as a host) and fixed it *for the resolver family only* — which
+  is why the next call over still had it. The table also retires the residual recorded on R393: `fopen`
+  was safe only because `"r"` happens to fail a downstream path-shape test, and that was luck rather than
+  design. A name absent from the table behaves exactly as before, so the blast radius is bounded.
+
+  CONTROL, measured: `shellOut(to: "ls -la", at: "/tmp/work")` still captures the command head `ls` and
+  is not marked incomplete — the fix must not become blanket over-masking. 1142 tests, 0 failures.
+
+
 - **A bare relative filename was seen, discarded, and the surface then declared COMPLETE — SOUNDNESS
   R395, published since 2026-07-09.** A path literal was recorded only if it contained a slash or began
   with `.` or `~`; a bare filename failed that shape test and was dropped, while `lit != nil` kept the

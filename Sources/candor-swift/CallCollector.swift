@@ -3780,9 +3780,13 @@ final class CallCollector: SyntaxVisitor {
         // UNLABELED arg), which yields nil when that argument is not a plain literal — so the surface is
         // honestly incomplete rather than fabricated.
         let freeCallName = node.calledExpression.as(DeclReferenceExprSyntax.self)?.baseName.text
-        let lit = (freeCallName.map(isNetResolverFree) ?? false)
-            ? literalForLabel(node.arguments, [""])
-            : firstStringLiteral(node.arguments)
+        // SOUNDNESS R394 — the locator POSITION is now declared per call name (`locatorLabelsForFree`)
+        // rather than special-cased for the resolver family alone. `shellOut(to:at:)` was publishing its
+        // WORKING DIRECTORY as the command; the resolver family was the only spelling this site knew to
+        // treat positionally, which is the audit-boundary-around-its-own-trigger shape R381 left behind.
+        let lit = freeCallName.flatMap(locatorLabelsForFree)
+            .map { literalForLabel(node.arguments, $0) }
+            ?? firstStringLiteral(node.arguments)
         if let dr = node.calledExpression.as(DeclReferenceExprSyntax.self) {
             let name = dr.baseName.text
             if chargeContentsCtor(name, node, lit: lit, shadowable: true) {

@@ -1421,6 +1421,30 @@ public func isNetResolverFree(_ name: String) -> Bool {
     }
 }
 
+/// SOUNDNESS R394 (and the residual R393 stated) — WHICH ARGUMENT IS THE LOCATOR, by NAME.
+///
+/// `firstStringLiteral` scans the WHOLE argument list, which is right only for a call whose only literal
+/// IS its locator. Where it is not, the picker captures the wrong string and the engine then treats that
+/// as proof of completeness:
+///   * `shellOut(to: runtimeCmd, at: "/tmp/work")` published `cmds: ["/tmp/work"]` — the WORKING
+///     DIRECTORY reported as the command. A fabrication AND a gate bypass: `allow Exec /tmp/work` exit 0
+///     over a caller-controlled command.
+///   * `getaddrinfo(host, service, …)` captured `"443"` as a host — measured on R381's first cut.
+///   * `fopen(path, mode)` hands the Fs arm `"r"`; that one is currently caught only because `"r"` fails
+///     a path-shape test downstream, which is luck rather than design.
+///
+/// So the locator POSITION is declared per call name instead of guessed. `""` means the first UNLABELED
+/// argument. Returning nil keeps the old whole-list scan for calls whose single literal is their locator.
+/// A name absent here is no worse than before; a name present here can no longer capture a sibling.
+public func locatorLabelsForFree(_ name: String) -> Set<String>? {
+    if isNetResolverFree(name) { return [""] }
+    switch name {
+    case "shellOut": return ["to"]          // ShellOut: shellOut(to:arguments:at:) — `at:` is a directory
+    case "fopen", "freopen": return [""]    // POSIX: the path is argument 0, the mode is a string too
+    default: return nil
+    }
+}
+
 // The masking guard generalizes from Net to ALL FOUR allowlisted effects (Net/Fs/Exec/Db): for each, a
 // classify at an ESTABLISHING form (the resource LOCATOR — host / path / command / SQL — is conceptually an
 // argument of THIS call) with no captured literal means the locator is structurally INVISIBLE, so the
