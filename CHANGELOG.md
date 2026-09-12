@@ -9,6 +9,28 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **A bare relative filename was seen, discarded, and the surface then declared COMPLETE — SOUNDNESS
+  R395, published since 2026-07-09.** A path literal was recorded only if it contained a slash or began
+  with `.` or `~`; a bare filename failed that shape test and was dropped, while `lit != nil` kept the
+  incompleteness guard from firing. So each of these passed `allow Fs /tmp/benign.txt` at **exit 0**
+  beside one benign sibling write — `String(contentsOfFile: "credentials.json")`,
+  `FileHandle(forReadingAtPath: "id_rsa")`, `write(toFile: "exfil.txt")` and
+  `copyItem(atPath: "id_rsa", toPath: "stolen.key")`. Isolated, every one failed closed: the sibling was
+  the mask.
+
+  **The two arms are fixed differently, and that is the fix.** The LABEL-keyed arm (`recordTwoPathFs`)
+  takes its literal by argument label, so the string IS that locator by construction — it now RECORDS it
+  whatever its shape, which also lets `allow Fs id_rsa` legitimately certify, and `steal` now reports
+  `paths: [/tmp/benign.txt, id_rsa, stolen.key]` and is refused by NAME rather than by incompleteness.
+  The POSITIONAL arm (`recordSurfaces`) cannot know the string is the locator — `fopen(p, "r")` hands it
+  a MODE string — so recording there would fabricate a path; it fails closed and marks `incomplete`
+  instead. A uniform fix would have been wrong in one direction or the other.
+
+  Controls, measured: an ordinary absolute write and a fully-literal two-path copy both still certify at
+  exit 0 with no spurious `incomplete`. `RelativePathSurfaceProcessTests` pins all of it, and was
+  CALIBRATED — with the fix removed and the engine rebuilt, all three cases fail.
+
+
 ## [0.36.1] — 2026-09-11
 
 - ⚠ **`allow Net <host>` returned exit 0 over a DNS lookup of a caller-supplied hostname —
