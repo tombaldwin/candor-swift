@@ -86,12 +86,13 @@ final class UnreadExclusionRouteEqualityProcessTests: XCTestCase {
         return try ProcessHarness.run(try bin(), args, cwd: root)
     }
 
-    private func doc(_ s: String) throws -> [String: Any] {
-        guard let d = s.data(using: .utf8),
-              let o = try JSONSerialization.jsonObject(with: d) as? [String: Any] else {
-            throw XCTSkip("not JSON: \(s)")
-        }
-        return o
+    /// NON-JSON OUTPUT IS A FAILURE, NOT A SKIP. `--json` output that will not parse is the verb
+    /// crashing or printing prose where a document was promised — precisely what these tests exist to
+    /// catch — and a skip removed the case from the run while the aggregate still read green.
+    private func doc(_ s: String, file: StaticString = #filePath, line: UInt = #line) throws -> [String: Any] {
+        let d = try XCTUnwrap(s.data(using: .utf8), "output is not UTF-8: \(s)", file: file, line: line)
+        return try XCTUnwrap(try JSONSerialization.jsonObject(with: d) as? [String: Any],
+                             "not a JSON object: \(s)", file: file, line: line)
     }
 
     // ── THE OVER-CHARGE CONTROLS, WRITTEN AND GREEN BEFORE THE FIX ─────────────────────────────────

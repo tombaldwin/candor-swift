@@ -1459,8 +1459,50 @@ public func isEstablishingMember(effect: String, root: String, member: String) -
     case "Net": return isNetEstablishingMember(root: root, member: member)
     case "Fs":  return root == "FileManager" && FS_MEMBERS.contains(member) // atPath:/at:/to: is an arg;
         // FileHandle.read/write are USE (the path was fixed at the FileHandle(for…:) ctor) — not establishing.
+        || isReceiverLocatorMember(effect: "Fs", root: root, member: member)   // R414 — the locator IS the receiver
     default:    return false
     }
+}
+
+/// SOUNDNESS R414 / SPEC ⟨0.37⟩ — **A CALL'S LOCATOR MAY ARRIVE AS THE RECEIVER, AND IT IS STILL THE
+/// CALL'S OWN.**
+///
+/// `isEstablishingMember`'s Fs arm asked only "is the path an ARGUMENT of this call", which is how
+/// `FileManager.default.fileExists(atPath: p)` is spelled — and this engine marks that one correctly,
+/// which is the discriminator. The same syscall spelled on the path itself,
+/// `u.checkResourceIsReachable()`, took the `est == false` branch reserved for USE-VERBS ON AN
+/// ALREADY-OPENED HANDLE, so no literal was ever demanded and none was ever missed. MEASURED on the
+/// shipped 0.36.2 binary, one variable (a benign allowed literal beside a caller-controlled `URL`):
+///
+///     public func f(_ u: URL) throws {
+///         try "x".write(toFile: "/tmp/benign", atomically: true, encoding: .utf8)
+///         _ = try? u.checkResourceIsReachable()
+///     }
+///
+/// reported `paths: ["/tmp/benign"], incomplete: NONE` and **`allow Fs /tmp/benign` exited 0** over a
+/// stat of a caller-supplied path. The AS-EFF-008 masked-literal evasion by another spelling — and
+/// family-wide: rust's `p.exists()` and java's `f.exists()` were measured silent the same day (cited
+/// from the ⟨0.37⟩ ruling draft's own table — measured by its author, not re-measured here).
+///
+/// **WHY THIS IS NOT THE HANDLE CASE, which the same clause forbids marking.** A `FileHandle` was
+/// OPENED at a path this analysis already saw, so `h.availableData` names nothing new and marking it
+/// would fail every program that opens a file by a literal name (the conformance part's `a3handle`
+/// control). A `URL` is a PATH VALUE, not an open descriptor: `URL_FS_MEMBERS` is exactly the set of
+/// its members that issue a syscall against that path, so each of them names a destination and NONE of
+/// them takes one as an argument. That last clause is why the call site must also stop reading the
+/// ARGUMENT list for this call's literal — R385's establishing-yes / capture-no, for the same reason:
+/// a string inside `resourceValues(forKeys:)` is not a path, and recording it would fabricate one.
+///
+/// **WHAT THIS DOES NOT COVER, stated rather than left to be found.** `File`/`Folder`/`Storage`
+/// (JohnSundell's Files) carry the same shape — `f.read()`, `folder.delete()` are verbs on a path
+/// VALUE, not on an open handle, and `isEstablishingMember` is silent on them too. They are left out
+/// deliberately, not by omission: the ctor `File(path:)` IS in `isEstablishingFree`, so the masked
+/// case there needs the value to arrive as a parameter, and the four swift corpora this change was
+/// priced against contain no Files dependency, so a fix there would be shipped UNPRICED. Reported for
+/// the family register rather than fixed here.
+public func isReceiverLocatorMember(effect: String, root: String, member: String) -> Bool {
+    guard effect == "Fs" else { return false }
+    return root == "URL" && URL_FS_MEMBERS.contains(member)
 }
 public func isEstablishingFree(effect: String, name: String) -> Bool {
     switch effect {

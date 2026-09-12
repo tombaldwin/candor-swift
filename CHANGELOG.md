@@ -9,6 +9,58 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ A RECEIVER-FORM PATH STAT NAMED ITS DESTINATION AND WAS SILENT — SOUNDNESS R414
+
+- **`u.checkResourceIsReachable()` let a benign sibling literal certify a stat of a caller-controlled
+  path.** MEASURED on the shipped 0.36.2 binary, one variable:
+
+      public func f(_ u: URL) throws {
+          try "x".write(toFile: "/tmp/benign", atomically: true, encoding: .utf8)
+          _ = try? u.checkResourceIsReachable()
+      }
+
+  reported `paths: ["/tmp/benign"], incomplete: none` and **`allow Fs /tmp/benign` exited 0**. The
+  AS-EFF-008 masked-literal evasion by another spelling, and family-wide: rust's `p.exists()` and java's
+  `f.exists()` were measured silent on the same shape the same day.
+
+  **The rule (SPEC ⟨0.37⟩, drafted): a call's LOCATOR may arrive as an ARGUMENT or as the RECEIVER, and
+  both are the call's own.** `isEstablishingMember`'s Fs arm asked only "is the path an argument", so
+  `URL`'s stat verbs took the branch reserved for use-verbs on an already-OPENED handle. A `URL` is a
+  path VALUE, not a descriptor: every member of `URL_FS_MEMBERS` issues a syscall against it and none of
+  them takes a path as an argument — which is why the fix is establishing-YES / capture-NO (R385's
+  pattern), reading the locator from the receiver and no longer scanning the argument list for it.
+
+  **AND IT GAINED PRECISION RATHER THAN SPENDING IT.** The receiver resolves through the same const /
+  locator-ctor resolver the argument positions use, so `URL(fileURLWithPath: "/tmp/x").checkResource…`
+  and `let u = URL(fileURLWithPath: "/tmp/x"); u.checkResource…` now RECORD `/tmp/x` — the pre-fix engine
+  recorded no path for either and certified them against any policy at all. ⟨0.37⟩'s "determined is
+  determined however it reaches the call" is not narrowed here; rust and ts lose it on this rung (R416).
+
+  **A/B, `bin/corpus-ab.py`, 4 swift corpora** (alamofire, swift-nio, swift-argument-parser, candor-swift
+  itself), PRE = a worktree at `182b8bf` rebuilt from source, 4,437 common rows:
+  **ADDED 0 · REMOVED 0 · CHANGED 3** on the wide key (`entry+package+fn+hash`, multiset), **0 on
+  `inferred`**. REACH, counted on an instrumented POST arm: **6 hits across 3 entries** — so this is not
+  a safety-only zero. All three changed rows are `incomplete` GAINING `Fs`, traced to bodies: the direct
+  one is swift-argument-parser's `executeCommand(executable: URL, …)`, which stats a caller-supplied
+  executable URL, and the other two are its transitive callers. Alamofire's reach site
+  (`MultipartFormData.append`) and all four in candor-swift's own tree already carried `incomplete:
+  ["Fs"]` from a sibling call, which is why they did not move.
+
+  CONTROLS, all green and all in `ReceiverLocatorStatProcessTests` (5 of its 7 arms go red against a
+  rebuilt pre-fix engine; the other 2 are labelled as correct-in-both): a `FileHandle` use-verb must
+  still certify (it has no locator of its own), the argument-form spelling must still fail closed (the
+  discriminator), and a determined receiver must both certify under a matching policy and be REFUSED by
+  one naming a different directory — the second half because a policy pass over an engine that recorded
+  nothing looks exactly like a pass over one that recorded correctly. 1149 tests, 0 failures.
+
+- **Four tests were green-on-failure.** `PathProcessTests`/`TourProcessTests` skipped rather than failed
+  when the scan they depend on exited non-zero — one helper each, gating 14 process tests between them —
+  and the two unread-exclusion suites skipped when `--json` output would not parse. Detection worked and
+  aggregation discarded it; a crashing scan or a verb printing prose where a document was promised
+  removed the cases from the run and left the total green. Now assertions. The suite's legitimate skip
+  sites (no `swiftc` on this host, corelibs-xctest gaps, no built binary) are untouched.
+
+
 ## [0.36.2] — 2026-09-12
 
 - **`shellOut(to: cmd, at: "/tmp/work")` reported the WORKING DIRECTORY as the command — SOUNDNESS

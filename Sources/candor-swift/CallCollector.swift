@@ -2003,6 +2003,33 @@ final class CallCollector: SyntaxVisitor {
         return true
     }
 
+    /// SOUNDNESS R414 — **WHERE THE LOCATOR IS, FOR A CALL WHOSE LOCATOR IS ITS RECEIVER.**
+    ///
+    /// The two member-call sites below both answer "which literal is this call's destination" from the
+    /// ARGUMENT list, which is the only place a locator could be until `URL`'s stat verbs were
+    /// classified `Fs` (R130). For those, the destination is the receiver: `u.checkResourceIsReachable()`
+    /// takes no arguments at all, so the argument-derived literal is at best absent and at worst a
+    /// SIBLING's string that would be published as a path this program never touches — R394's
+    /// fabrication, one effect over. So this returns the pair both sites hand `recordSurfaces`: the
+    /// literal resolved from the RECEIVER, and a nil argument list so the home-anchored fallback cannot
+    /// read the locator out of an argument either.
+    ///
+    /// The receiver resolves through `resolveConstString`, which is the SAME resolver the argument
+    /// positions use — so `URL(fileURLWithPath: "/tmp/x").checkResourceIsReachable()` and `let u =
+    /// URL(fileURLWithPath: "/tmp/x")` (the locator-binder provenance index) still certify, and
+    /// ⟨0.37⟩'s "determined is determined however it reaches the call" is not narrowed by this fix.
+    /// A receiver that is a parameter, a field or a computed expression yields nil — fail closed.
+    ///
+    /// The guard returns the caller's own `(argLit, args)` untouched, so a call outside
+    /// `isReceiverLocatorMember`'s set takes the identical path it took before — stated as the mechanism,
+    /// not as a guarantee: what actually holds it is the suite and the 4-corpus A/B (ADDED 0, REMOVED 0).
+    private func receiverLocator(effect: String, root: String, member: String, receiver: ExprSyntax?,
+                                 argLit: String?, args: LabeledExprListSyntax?)
+        -> (lit: String?, args: LabeledExprListSyntax?) {
+        guard isReceiverLocatorMember(effect: effect, root: root, member: member) else { return (argLit, args) }
+        return (receiver.flatMap { resolveConstString($0) }, nil)
+    }
+
     // `netEstablishing`: the Net literal surface is captured ONLY at establishing forms (connect/bind/
     // ctor — where the host is conceptually an argument of THIS call). At a USE verb on an established
     // channel (`Channel.writeAndFlush("x")`, `NWConnection.send`) the string arg is a PAYLOAD, not a
@@ -3879,8 +3906,14 @@ final class CallCollector: SyntaxVisitor {
                                   if ks.isEmpty { fsKinds.insert("?") } else { for k in ks { fsKinds.insert(k) } } }
                 if PRIVACY_EFFECTS_ALL.contains(eff) { for k in privacyKind(root: et, member: name) { privacyKinds[eff, default: []].insert(k) } }
                 if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK call IS network I/O
-                recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
-                if lit == nil, est, !(eff == "Fs" && lastResolvedHomePath) { incompleteSurfaces.insert(eff) }
+                // R414 — an implicit-self call inside `extension URL`: the receiver is `self`, which is
+                // not a resolvable locator here, so the surface is honestly incomplete rather than
+                // certified off a sibling literal. Routed through the same picker as the explicit-self
+                // site so the two cannot drift (§G — one authority, two consumers).
+                let loc = receiverLocator(effect: eff, root: et, member: name, receiver: nil,
+                                          argLit: lit, args: node.arguments)
+                recordSurfaces(effect: eff, lit: loc.lit, args: loc.args, netEstablishing: est)
+                if loc.lit == nil, est, !(eff == "Fs" && lastResolvedHomePath) { incompleteSurfaces.insert(eff) }
             } else if (!declaredTypes.contains(name) || conditionallyShadowedTypes.contains(name)),
                       !localFreeFns.contains(name),
                       PRIVACY_CAPTURE_TYPES.contains(dealias(name)) {
@@ -4292,8 +4325,12 @@ final class CallCollector: SyntaxVisitor {
                     recordProcessRun(receiver: ma.base)
                 } else {
                     let est = isEstablishingMember(effect: eff, root: rt, member: member)
-                    recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
-                    if lit == nil, est, !(eff == "Fs" && lastResolvedHomePath) { incompleteSurfaces.insert(eff) }
+                    // R414 — `u.checkResourceIsReachable()`. The locator is the RECEIVER, so it is read
+                    // from `ma.base` and NOT from the argument list (see `isReceiverLocatorMember`).
+                    let loc = receiverLocator(effect: eff, root: rt, member: member, receiver: ma.base,
+                                              argLit: lit, args: node.arguments)
+                    recordSurfaces(effect: eff, lit: loc.lit, args: loc.args, netEstablishing: est)
+                    if loc.lit == nil, est, !(eff == "Fs" && lastResolvedHomePath) { incompleteSurfaces.insert(eff) }
                 }
             } else {
                 // `extOwner` carries the CONFIDENTLY-resolved receiver root (a typed value chain, or a
