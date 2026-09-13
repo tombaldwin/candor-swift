@@ -9,6 +9,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.37.0] — 2026-09-13
+
 - **SPEC §2.2's reserved sidecar set has ONE owner, and the §2.2 enumeration in the code was STALE** — it
   listed six segments plus the family and called them SEVEN, missing `refused`, which ⟨0.32⟩ added. The
   code was right; the sentence justifying it had expired. `reportSidecarSegments()` now derives from
