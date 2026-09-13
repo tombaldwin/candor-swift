@@ -165,6 +165,15 @@ final class NameKeyedStateTests: XCTestCase {
             + "FABRICATION, the mirror of the silence the other hedges guard. It is not per-binding at "
             + "all: a name in it is refused for the whole unit, deliberately, including at a use that "
             + "is lexically EARLIER than the move (the loop-carried rebind case)."),
+        "typeAliasArms": .deliberatelyKept(
+            "SOUNDNESS R429 — every underlying type a `typealias` NAME was declared over, not just the "
+            + "last one written. It is keyed by a TYPE name, not by a binding, so a rebind is not a "
+            + "question that arises: the map is built once by DeclCollector, unioned across files by the "
+            + "Driver, and read at exactly one site (the typed member-call edge) to emit one edge per "
+            + "arm. Clearing or overwriting it is what the row was FILED against — `typeAliases` is a "
+            + "plain map merged last-writer-wins, so a `#if`/`#else` alias pair kept only the arm "
+            + "written last and the other arm's effects were dropped, making a scoped `deny Fs` depend "
+            + "on where `#else` sat. This map exists precisely so that collapse cannot happen."),
         "callsOnName": .deliberatelyKept(
             "SOUNDNESS R419 — the third member of the locator-move pre-pass: the member CALL spellings "
             + "made on each name. Same body-wide, flow-insensitive discipline as `movedNames` and "

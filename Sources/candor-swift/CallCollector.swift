@@ -496,6 +496,9 @@ final class CallCollector: SyntaxVisitor {
     let propertyWrapperTypes: Set<String> // `@propertyWrapper` types — confirm a wrapped-property edge
     let wrappedProps: [String: [String: String]]  // Type -> property -> wrapper type (`S.count -> Logged`)
     let typeAliases: [String: String]     // `typealias Proc = Process` — name -> underlying simple type
+    /// R429 — every arm recorded for an alias name. Read ONLY at the typed member-call edge, to
+    /// emit one edge per arm instead of one for whichever arm was written last.
+    let typeAliasArms: [String: Set<String>]
     /// R178 — the TRANSITIVE closure of function-typed aliases (`typealias Cb = () -> Void`, and any
     /// chain onto one), computed by the Driver after every file's aliases are merged. Keyed by a TYPE
     /// SPELLING, never by a binding, so a rebind has nothing to say about it.
@@ -523,6 +526,7 @@ final class CallCollector: SyntaxVisitor {
          propertyWrapperTypes: Set<String>, wrappedProps: [String: [String: String]],
          localFreeFns: Set<String>, conditionallyShadowedFreeFns: Set<String> = [],
          conditionallyShadowedTypes: Set<String> = [], typeAliases: [String: String],
+         typeAliasArms: [String: Set<String>] = [:],
          fnTypeAliases: Set<String> = [],
          enclosingMembers: Set<String> = [],
          opaqueSeqBuilders: Set<String>, seqBuilderConcrete: [String: String],
@@ -538,6 +542,7 @@ final class CallCollector: SyntaxVisitor {
         self.closureFields = closureFields
         self.mutableClosureFields = mutableClosureFields
         self.typeAliases = typeAliases
+        self.typeAliasArms = typeAliasArms
         self.fnTypeAliases = fnTypeAliases
         self.localFreeFns = localFreeFns
         self.conditionallyShadowedFreeFns = conditionallyShadowedFreeFns
@@ -4209,6 +4214,10 @@ final class CallCollector: SyntaxVisitor {
         } else if let ma = node.calledExpression.as(MemberAccessExprSyntax.self) {
             let member = ma.declName.baseName.text
             let base = ma.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [], mono: false)
+            // R429 — the WRITTEN receiver name, before `dealias` collapses a `#if`-duplicated
+            // alias to whichever arm happened to be recorded last. Only the typed-local-receiver
+            // edge below reads it; everything else keeps the dealiased answer it already had.
+            let rawBaseRoot = ma.base.flatMap { rootOfUnaliased($0).root }
             // a function-typed FIELD invoked (`d.f()` where f: () -> Void) — the unknown_dyn case
             if let rt = base.root, let f = fields[rt]?[member], f.isFunction {
                 // FINDING 2 — `obj.f()` where `f` is a stored CLOSURE PROPERTY (a resolvable local closure
@@ -4270,6 +4279,37 @@ final class CallCollector: SyntaxVisitor {
                 // method instead of fabricating Net from the NIO tier (the GRDB `bind` lesson, for
                 // member calls). Under-report-don't-fabricate.
                 calls.append(Call(path: "\(rt).\(member)", leaf: member, strArg: lit, typed: true, args: argKinds(node), argTypes: argTypesOf(node)))
+                // SOUNDNESS R429 — …AND ONE EDGE PER REMAINING ARM. `rt` is the dealiased root, and
+                // `dealias` reads a map the Driver merges LAST-WRITER-WINS, so a `#if`/`#else` pair
+                // declaring one alias over two types resolved to whichever arm was written last and
+                // the other arm's effects were dropped — not hedged, GONE. Measured on 0.37.0: two
+                // programs identical but for arm ORDER answered `["Env"]` and `["Fs"]`, and a scoped
+                // `deny Fs` PASSED on one of them over a real file write.
+                //
+                // The union happens through the edges rather than through `dealias` because 26 call
+                // sites read that as single-valued; an edge per arm reaches the same answer via the
+                // propagation that already exists. Keyed on the WRITTEN name, never by searching for
+                // aliases whose arms happen to contain `rt` — two unrelated aliases sharing an arm
+                // type would then cross-charge, which is fabrication in the direction this engine is
+                // least able to notice.
+                //
+                // RULED 2026-09-12 — UNION: both arms are IN THE SOURCE the engine was pointed at,
+                // so charging both is not fabrication under SPEC §4's definition, while picking one
+                // is the ⟨0.21⟩ cardinal sin SPEC ⟨0.36⟩ names explicitly.
+                if let raw = rawBaseRoot, let arms = typeAliasArms[raw], arms.count > 1 {
+                    // `declaredTypes`, NOT `localTypes`: an EXTENSION puts the extended type's name
+                    // into `localTypes` (visit(ExtensionDeclSyntax) calls pushType), so a project
+                    // carrying `extension Double: …` made `Double` an eligible arm — and a real app's
+                    // `typealias LocationDistance = CLLocationDistance | Double` then edged every
+                    // Double-rooted call into a widely-conformed protocol. MEASURED: 29 SwiftUI view
+                    // bodies flipped from pure to `Unknown` on `dispatch:` reasons their code never
+                    // names. An arm the project DECLARES is a real alternative target; one it merely
+                    // extends is a platform type whose members this edge cannot resolve.
+                    for arm in arms.sorted() where arm != rt && declaredTypes.contains(arm) {
+                        calls.append(Call(path: "\(arm).\(member)", leaf: member, strArg: lit,
+                                          typed: true, args: argKinds(node), argTypes: argTypesOf(node)))
+                    }
+                }
             } else if let rt = base.root, localProtocols.contains(rt) {
                 // a PROTOCOL-typed receiver reached via a field/let/factory (`self.handler.log()`
                 // where `var handler: LogHandler`) — the params-only protoTyped path missed these

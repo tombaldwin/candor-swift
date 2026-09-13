@@ -390,6 +390,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // ⟨0.33.1⟩ scan-wide aggregate of `DeclCollector.declaredTypesUnconditional` — see that field's doc.
     var declaredTypesUnconditional: Set<String> = []
     var typeAliases: [String: String] = [:]
+    var typeAliasArms: [String: Set<String>] = [:]   // R429 — every arm of a `#if`-duplicated alias
     // R178 — function-typed aliases (`typealias Cb = () -> Void`), unioned across files and then
     // closed transitively below. See `DeclCollector.fnTypeAliases`.
     var fnTypeAliasesRaw: Set<String> = []
@@ -849,6 +850,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         declaredTypes.formUnion(c.declaredTypes)
         declaredTypesUnconditional.formUnion(c.declaredTypesUnconditional)
         for (a, u) in c.typeAliases { typeAliases[a] = u }   // last-writer-wins (a redeclared alias is rare)
+        // R429 — …and the ARMS, unioned. The line above is the last-writer-wins the row was filed
+        // against; it stays because 26 call sites read `dealias` as single-valued and a multi-valued
+        // resolution there would be a large mechanical refactor, which this project's own history
+        // prices above the defect it prevents. The arm SET is what the call-edge site reads instead:
+        // an edge per arm makes the effects union through the propagation that already exists.
+        for (a, u) in c.typeAliasArms { typeAliasArms[a, default: []].formUnion(u) }
         fnTypeAliasesRaw.formUnion(c.fnTypeAliases)          // R178
         dynamicMemberTypes.formUnion(c.dynamicMemberTypes)
         propertyWrapperTypes.formUnion(c.propertyWrapperTypes)
@@ -1835,7 +1842,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                localFreeFns: localFreeFnNames.union(localFreeFnBaseNamesByModule[swiftModuleOf(f.loc)] ?? []),
                                conditionallyShadowedFreeFns: conditionalOnlyFreeFnNames.union(conditionalOnlyFreeFnNamesByModule[swiftModuleOf(f.loc)] ?? []),
                                conditionallyShadowedTypes: conditionallyShadowedTypeNames,
-                               typeAliases: typeAliases, fnTypeAliases: fnTypeAliases,
+                               typeAliases: typeAliases, typeAliasArms: typeAliasArms,
+                               fnTypeAliases: fnTypeAliases,
                                enclosingMembers: f.enclosingType.map { t in
                                    membersVisibleCache[t] ?? {
                                        let m = membersVisibleOn(t); membersVisibleCache[t] = m; return m
