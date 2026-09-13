@@ -9,6 +9,16 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **SPEC §2.2's reserved sidecar set has ONE owner, and the §2.2 enumeration in the code was STALE** — it
+  listed six segments plus the family and called them SEVEN, missing `refused`, which ⟨0.32⟩ added. The
+  code was right; the sentence justifying it had expired. `reportSidecarSegments()` now derives from
+  `reservedSidecarSegments` with `gate` and `refused` excluded BY NAME rather than by omission.
+- **A source-hygiene census, whose first cut SHIPPED VACUOUS** — it asserted `contains("\"refused\"")`
+  over a whole file where `"refused"` also appears three times as a JSON `reasonKey`, so renaming the
+  segment left it green. It now parses the array. Probe on a token that appears ONCE, or parse the
+  structure; never `contains` over a whole file.
+- **Spec floor 0.36 → 0.37** (the STAT-LOCATOR rung), and `assert-audit` + `workflow-check` now run in CI.
+
 ### ⚠ A RECEIVER-FORM PATH STAT NAMED ITS DESTINATION AND WAS SILENT — SOUNDNESS R414
 
 - **`u.checkResourceIsReachable()` let a benign sibling literal certify a stat of a caller-controlled
