@@ -11,6 +11,19 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **R419 — a mutating call moved the locator and the binder's original literal went on being published
+  as the destination.** `LocatorMoveScanner` recorded assignment, `&inout` and property writes, but not
+  a method call on the name. A `URL` is a value type whose path is edited in place, so
+  `var u = URL(fileURLWithPath: "/bin"); u.appendPathComponent(caller)` left `/bin` standing as the
+  command: **`allow Exec /bin` certified `/bin/<caller-supplied>`** — a gate bypass that pre-dates
+  ⟨0.37⟩. The Fs half is worse than silence: `deleteLastPathComponent()` ×3 published the deepest path
+  for a write that lands in `/tmp` — a positive claim about a path the program never touches. The
+  fabricated locator is now WITHDRAWN, not corrected, because the true destination is unknowable.
+  Unknown member calls on a locator binder fail closed; the inert allowlist covers the ordinary
+  `URLRequest` idiom (`setValue`/`addValue`) and the ⟨0.37⟩ stat verbs, so determined code still
+  certifies. Whether calls count at all depends on the binder's KIND — for a `Process` (a class) no call
+  can move the name, and configure-then-launch is pinned by its own test.
+
 - **R418 — a `Files` verb on a caller-supplied `File` deleted it and the gate said `policy ✓`.** ⟨0.37⟩
   closed the receiver-as-locator shape for `URL` and left JohnSundell's `File`/`Folder`/`Storage` open
   deliberately, arguing a fix would ship UNPRICED because no corpus here carried the dependency. That

@@ -95,13 +95,16 @@ final class FilesReceiverLocatorProcessTests: XCTestCase {
         target.delete()
     }
     """
+    /// `copy`, not `rename`, and the difference is load-bearing: `rename` MOVES the receiver's own path
+    /// (R419), so a rename arm would go red for two reasons at once and stop isolating the masking. Both
+    /// are two-locator verbs; `copy` leaves the receiver where it is.
     private static let twoPathMasked = tree("twoPathMasked",
-        "    let s = try File(path: \"\(ALLOWED)\")\n    try s.rename(to: dest)", param: "_ dest: String")
+        "    let s = try File(path: \"\(ALLOWED)\")\n    try s.copy(to: dest)", param: "_ dest: String")
     private static let twoPathDetermined = """
     import Files
     public func twoPathDetermined() throws {
         let s = try File(path: "\(ALLOWED)")
-        try s.rename(to: "\(ALLOWED)")
+        try s.copy(to: "\(ALLOWED)")
     }
     """
 
