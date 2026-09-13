@@ -53,6 +53,23 @@ final class LocatorMoveScanner: SyntaxVisitor {
         return .visitChildren
     }
 
+    /// SOUNDNESS R419 — `name.member(…)`, recorded per name. A `URL` is a VALUE type whose path is
+    /// edited IN PLACE (`u.appendPathComponent(x)`, `u.deleteLastPathComponent()`), so a mutating call
+    /// moves the locator exactly as an assignment does — and this scanner recorded assignment, `&inout`
+    /// and property writes but not calls, which is why the binder's ORIGINAL literal went on being
+    /// published as the destination. Stored rather than folded into `moved` because whether a call can
+    /// move a name depends on the binder's KIND, which only the consumer knows: for a `Process` (a
+    /// CLASS) no method call can change which object the name denotes, while for a `URL` almost any of
+    /// them can.
+    private(set) var callsOn: [String: Set<String>] = [:]
+    override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
+        if let ma = CallCollector.peel(node.calledExpression).as(MemberAccessExprSyntax.self), let base = ma.base,
+           let dr = CallCollector.peel(base).as(DeclReferenceExprSyntax.self) {
+            callsOn[dr.baseName.text, default: []].insert(ma.declName.baseName.text)
+        }
+        return .visitChildren
+    }
+
     /// `f(&p)` — the callee may write through the reference, so the name's value can move.
     override func visit(_ node: InOutExprSyntax) -> SyntaxVisitorContinueKind {
         if let dr = CallCollector.peel(node.expression).as(DeclReferenceExprSyntax.self) {
@@ -1086,6 +1103,7 @@ final class CallCollector: SyntaxVisitor {
     // denylist, because the direction here is RELAXING: an unknown property might be `req.url`.
     private var movedNames: Set<String> = []            // the name itself was reassigned / passed inout
     private var propWrites: [String: Set<String>] = [:] // name → the property spellings written on it
+    private var callsOnName: [String: Set<String>] = [:] // name → the member CALL spellings made on it (R419)
 
     /// Property writes that provably do NOT move the locator of a `URLRequest`/`URL` binder: they set the
     /// method, body, headers and caching knobs. `url`/`mainDocumentURL` are POINTEDLY absent.
@@ -1095,6 +1113,33 @@ final class CallCollector: SyntaxVisitor {
         "allowsConstrainedNetworkAccess", "httpShouldHandleCookies", "httpShouldUsePipelining",
         "assumesHTTP3Capable", "attribution",
     ]
+    /// SOUNDNESS R419 — member CALLS that provably do NOT move a `URL`/`URLRequest` binder's locator.
+    /// An ALLOWLIST, matching `LOCATOR_INERT_WRITES` beside it and for the same reason: the default has
+    /// to be "this moved the path", because the movers are ordinary Foundation spellings
+    /// (`appendPathComponent`, `deleteLastPathComponent`, `append(path:)`, `standardize`,
+    /// `resolveSymlinksInPath`) and a list of MOVERS would be exactly the hand-list that has to be
+    /// complete to be sound. The criterion is not "non-mutating" but "does not change the PATH" — which
+    /// is why `setResourceValues` is here: it is `mutating`, and it writes metadata, not the locator.
+    ///
+    /// `URL_FS_MEMBERS` is included WHOLESALE and deliberately: those are the stat verbs ⟨0.37⟩ reads
+    /// the receiver for, so treating one as a move would make `let u = URL(fileURLWithPath: "/tmp/x");
+    /// u.checkResourceIsReachable()` — a locator in plain sight — uncertifiable, which is R414's own
+    /// determined-arm control. A fix for one row must not break the control of the row beside it.
+    private static let LOCATOR_INERT_CALLS: Set<String> = URL_FS_MEMBERS
+        // R418's verbs, for the same reason URL_FS_MEMBERS are here: `f.delete()` acts on the path the
+        // name already holds, it does not change WHICH path that is. `move`/`rename` are absent — they
+        // DO change it (through Files' `Storage` reference), and the R419 arm below pins that.
+        .union(FILES_NON_MOVING_MEMBERS)
+        .union([
+        // the non-mutating `-ing`/`-ed` counterparts, which RETURN a new URL and leave the receiver alone
+        "appendingPathComponent", "appendingPathExtension", "deletingLastPathComponent",
+        "deletingPathExtension", "standardizingPath", "withUnsafeFileSystemRepresentation",
+        // URLRequest configuration — headers are not the locator (`url` is a property write, and it is
+        // POINTEDLY absent from LOCATOR_INERT_WRITES, so it is caught there)
+        "setValue", "addValue", "value",
+        // universal protocol witnesses
+        "hash", "encode", "isEqual",
+    ])
     /// The same idea for a `Process` handle: writes that configure the child WITHOUT changing which program
     /// is executed. `arguments` is inert BY THE FAMILY'S RULE — the Exec surface is argv[0], the HEAD, and a
     /// literal `"curl"` in `arguments` must not refine the cliff (conformance `exec_dyn_head`).
@@ -1107,8 +1152,32 @@ final class CallCollector: SyntaxVisitor {
 
     /// True when `name` may hold a different value at a use site than at its binding — see `movedNames`.
     /// `inert` is the spelling allowlist for this binder's kind.
-    private func locatorNameIsStable(_ name: String, inert: Set<String>) -> Bool {
+    /// `inertCalls` is the same allowlist one syntax over, for MEMBER CALLS (R419) — and `nil` means
+    /// this binder is a REFERENCE type, where no call can change which object the name denotes. Passing
+    /// `nil` is a claim about the binder's kind and must be justified at the call site, because passing
+    /// it wrongly re-opens the bypass this parameter exists to close.
+    /// Hoisted out of the predicate: it is consulted once per locator binder, and an environment lookup
+    /// per call is not something to pay for a probe that is off.
+    private static let r419Debug = ProcessInfo.processInfo.environment["CANDOR_R419_DEBUG"] != nil
+
+    private func locatorNameIsStable(_ name: String, inert: Set<String>,
+                                     inertCalls: Set<String>? = Set()) -> Bool {
         if movedNames.contains(name) { return false }
+        if let inertCalls {
+            let calls = callsOnName[name] ?? []
+            // REACH PROBE (R419). An A/B that reports "nothing changed" cannot tell a safely-inert rule
+            // from one the corpus never reached, and this rule's whole risk is over-masking real code —
+            // so the decision point announces itself on demand. `CONSULT` counts every locator binder
+            // judged; `REFUSE` counts the ones this rule actually withdrew.
+            if Self.r419Debug {
+                FileHandle.standardError.write("R419CONSULT \(name) calls=\(calls.sorted())\n".data(using: .utf8)!)
+                if !calls.isSubset(of: inertCalls) {
+                    FileHandle.standardError.write(
+                        "R419REFUSE \(name) movers=\(calls.subtracting(inertCalls).sorted())\n".data(using: .utf8)!)
+                }
+            }
+            if !calls.isSubset(of: inertCalls) { return false }
+        }
         return (propWrites[name] ?? []).isSubset(of: inert)
     }
 
@@ -1126,6 +1195,7 @@ final class CallCollector: SyntaxVisitor {
         s.walk(body)
         movedNames = s.moved
         propWrites = s.propWrites
+        callsOnName = s.callsOn
         multiplyBoundNames = Set(s.binderCounts.filter { $0.value + (params.contains($0.key) ? 1 : 0) > 1 }.keys)
     }
 
@@ -1672,9 +1742,14 @@ final class CallCollector: SyntaxVisitor {
         // sites for one name means the literal under it was written about a binding that may not be the
         // one being launched here. Refusing empties the surface, which `allow Exec` reads as incomplete —
         // the same direction the two guards beside it fail in.
+        // `inertCalls: nil` — `name` here is a `Process` HANDLE, and `Process` is a CLASS: `p.run()`,
+        // `p.waitUntilExit()`, `p.terminate()` cannot change which object `p` denotes, so no call on it
+        // can move the locator recorded by an earlier `executableURL`/`launchPath` write. R419's
+        // call-invalidation is for VALUE types; applying it here would refuse every ordinary
+        // configure-then-launch body, which is the shape this whole provenance path exists to read.
         guard !literals.isEmpty, !execLocatorInvisible.contains(name),
               !multiplyBoundNames.contains(name),
-              locatorNameIsStable(name, inert: inert) else {
+              locatorNameIsStable(name, inert: inert, inertCalls: nil) else {
             incompleteSurfaces.insert("Exec"); return
         }
         for lit in literals { recordSurfaces(effect: "Exec", lit: lit) }
@@ -5793,7 +5868,8 @@ final class CallCollector: SyntaxVisitor {
                 localConstStrings[name] = sv
             } else if binding.accessorBlock == nil, let v0 = binding.initializer?.value,
                       let loc = locatorCtorLiteral(v0),
-                      locatorNameIsStable(name, inert: Self.LOCATOR_INERT_WRITES) {
+                      locatorNameIsStable(name, inert: Self.LOCATOR_INERT_WRITES,
+                                          inertCalls: Self.LOCATOR_INERT_CALLS) {
                 // LOCATOR-BINDER PROVENANCE — `let u = URL(string: "…")!`, `var req = URLRequest(url: u)`.
                 // The literal travels through the SAME const-string index the direct form uses, so the host
                 // refinement, the ⟨0.13⟩ `Llm` classification and the privacy manifest all follow with no

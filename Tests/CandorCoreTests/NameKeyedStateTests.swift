@@ -165,6 +165,16 @@ final class NameKeyedStateTests: XCTestCase {
             + "FABRICATION, the mirror of the silence the other hedges guard. It is not per-binding at "
             + "all: a name in it is refused for the whole unit, deliberately, including at a use that "
             + "is lexically EARLIER than the move (the loop-carried rebind case)."),
+        "callsOnName": .deliberatelyKept(
+            "SOUNDNESS R419 — the third member of the locator-move pre-pass: the member CALL spellings "
+            + "made on each name. Same body-wide, flow-insensitive discipline as `movedNames` and "
+            + "`propWrites` beside it, and kept for the same reason — it IS the record that a mutation "
+            + "happened, so clearing it on a rebind would delete the evidence and leave the binder's "
+            + "ORIGINAL literal standing as the published destination, which is precisely the "
+            + "fabrication R419 records: `var u = URL(fileURLWithPath: \"/bin\"); u.appendPathComponent(s)` "
+            + "published `cmds: [\"/bin\"]` and `allow Exec /bin` certified `/bin/<caller>`. It is read "
+            + "against a PER-BINDER-KIND allowlist, not a global one: for a `Process` (a CLASS) no call "
+            + "can move the name at all, and the consumer passes `inertCalls: nil` to say so."),
         "propWrites": .deliberatelyKept(
             "the companion of `movedNames` — the property spellings written on each name, judged at the "
             + "point of use against a per-binder-kind inert allowlist. Same argument for keeping it: it "

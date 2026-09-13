@@ -224,6 +224,17 @@ public let FILES_TWO_PATH_DEST: [String: Set<String>] = [
 // locator. Listed rather than left out of an allowlist so that a member ADDED to FILES_MEMBERS later is
 // treated as a locator by default (fail-closed) instead of silently joining the exempt set.
 public let FILES_NON_LOCATOR_MEMBERS: Set<String> = ["managedBy"]
+// SOUNDNESS R419 — the Files verbs that act ON the receiver's path without CHANGING it, so a body-wide
+// literal claim about the name survives them. `move` and `rename` are the two that do not, and they are
+// excluded BY OMISSION here on purpose: this is the one place in the pair where the sound default is
+// "moves", so a verb added to FILES_MEMBERS later invalidates the claim until someone proves otherwise.
+//
+// **`mutating` IS NOT THE TEST, and reading it as one would have got this backwards.** `File` is a
+// struct and NEITHER `move` NOR `rename` is marked `mutating` — they write through a `Storage` CLASS the
+// value holds a reference to, and `File.path` reads back through it. Determined from the package's own
+// source, not from the declaration keyword.
+public let FILES_NON_MOVING_MEMBERS: Set<String> =
+    FILES_MEMBERS.subtracting(["move", "rename"])
 public let LOG_MEMBERS: Set<String> = ["trace", "debug", "info", "notice", "warning", "error", "critical", "fault", "log"]
 public let RAND_ROOTS: Set<String> = ["Int", "UInt", "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16",
     "UInt32", "UInt64", "Double", "Float", "Bool", "CGFloat"]
