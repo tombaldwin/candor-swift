@@ -2087,7 +2087,7 @@ final class CallCollector: SyntaxVisitor {
                 // reported the surface complete. Unlike the positional arm above there is no ambiguity
                 // about what this string is, so the honest move is to RECORD it — which also lets
                 // `allow Fs id_rsa` legitimately certify — rather than to fail closed.
-                paths.insert(lit)
+                if !insertFsPath(lit) { anyMissing = true }   // R420 — a non-file URL names no path
             } else {
                 anyMissing = true  // this required locator is runtime-built (or absent) → invisible
             }
@@ -2105,18 +2105,66 @@ final class CallCollector: SyntaxVisitor {
     /// EITHER half alone is the masked-literal evasion, which is the bug this row exists for. Same rule
     /// as the FileManager arm: record every locator that resolves, and mark Fs INCOMPLETE if ANY does
     /// not, so a literal source cannot mask a runtime-built destination.
+    /// SOUNDNESS R420 — **A LOCATOR LITERAL CAN ARRIVE AS A FULL URL STRING, AND AN Fs PATH IS NOT A URL.**
+    ///
+    /// `resolveConstString`/`locatorCtorLiteral` treat `URL(string: X)` and `URL(fileURLWithPath: X)`
+    /// identically, which is right for the Net surface they were built for and wrong the moment the
+    /// result lands in `paths`. Measured: two spellings of ONE destination disagreed —
+    ///
+    ///     URL(fileURLWithPath: "/Users/t/Desktop/x").checkResourceIsReachable()
+    ///         → inferred ["FolderDesktop", "Fs"],  `deny FolderDesktop` EXIT 1
+    ///     URL(string: "file:///Users/t/Desktop/x")!.checkResourceIsReachable()
+    ///         → inferred ["Fs"],                   `deny FolderDesktop` EXIT 0, SILENT
+    ///
+    /// `pathClasses` keys on a `/Users/…` prefix and the scheme defeats it; and because a literal WAS
+    /// captured, R395's incompleteness guard never fired either. An app whose privacy manifest lacks
+    /// `NSDesktopFolderUsageDescription` verified green.
+    ///
+    /// Returns the filesystem path a locator literal names, or nil when it names none:
+    ///   * no scheme — already a path, unchanged (the overwhelmingly common case).
+    ///   * `file:` — DECODED through Foundation's own parser, so percent-escapes and the authority form
+    ///     are handled by the thing that defines them rather than by string surgery here.
+    ///   * any other scheme — nil. `https://example.com/a` is not a filesystem destination, and
+    ///     publishing it as one is a FABRICATION; the caller fails closed instead, which is the same
+    ///     answer R395 gives for a literal it cannot confirm is a locator.
+    ///
+    /// A scheme requires the remainder to begin with `/`, so a relative name that merely contains a
+    /// colon (`a:b`) is not mistaken for one.
+    private static func fsPathFromLocator(_ lit: String) -> String? {
+        guard let i = lit.firstIndex(of: ":") else { return lit }
+        let head = String(lit[lit.startIndex..<i])
+        guard head.count > 1, let f = head.first, f.isLetter,
+              head.allSatisfy({ $0.isLetter || $0.isNumber || "+-.".contains($0) }),
+              lit[lit.index(after: i)...].hasPrefix("/") else { return lit }   // not a scheme → a path
+        guard head.lowercased() == "file" else { return nil }                  // names no fs destination
+        guard let u = URL(string: lit), !u.path.isEmpty else { return nil }
+        return u.path
+    }
+
+    /// The ONE way an Fs path enters the report. Every caller went through `paths.insert` directly
+    /// before R420, which is how one of them could publish a URL string while another published a path —
+    /// the same destination, two shapes, and a protected-folder class that survived only one of them.
+    /// Returns false when the literal names no filesystem destination, so the caller can fail closed.
+    @discardableResult
+    private func insertFsPath(_ lit: String) -> Bool {
+        guard let path = Self.fsPathFromLocator(lit) else { return false }
+        paths.insert(path)
+        for c in pathClasses(path) { directEffects.insert(c) }
+        return true
+    }
+
     private func recordFilesTwoPath(member: String, receiver: ExprSyntax?,
                                     _ args: LabeledExprListSyntax?) -> Bool {
         guard let destLabels = FILES_TWO_PATH_DEST[member] else { return false }
         var anyMissing = false
-        if let lit = receiver.flatMap({ resolveConstString($0) }) { paths.insert(lit) } else { anyMissing = true }
+        if let lit = receiver.flatMap({ resolveConstString($0) }), insertFsPath(lit) {} else { anyMissing = true }
         // NOT `literalForLabel`, which accepts a bare string literal only: `move(to:)` and `copy(to:)`
         // take a `Folder` VALUE, so the destination has to go through the same resolver the receiver
         // uses or every determined move in real code would fail closed on a locator sitting in plain
         // sight. Label-KEYED either way, so `createFile(named:contents:)`'s payload is never mistaken
         // for a destination — which is what stopped this engine publishing a written `.gitignore`'s
         // CONTENTS as a filesystem path.
-        if let args, let lit = resolvedForLabel(args, destLabels) { paths.insert(lit) } else { anyMissing = true }
+        if let args, let lit = resolvedForLabel(args, destLabels), insertFsPath(lit) {} else { anyMissing = true }
         if anyMissing { incompleteSurfaces.insert("Fs") }
         return true
     }
@@ -2200,13 +2248,14 @@ final class CallCollector: SyntaxVisitor {
             for e in classifyCommandHead(head) { directEffects.insert(e) }
         case "Fs":
             if lit.contains("/") || lit.hasPrefix(".") || lit.hasPrefix("~") {
-                paths.insert(lit)
-                // CONSTANT-PROVENANCE rung 1: a determined path also names a protected FOLDER, and Apple
-                // requires a usage-description key for three of them plus mounted volumes. The class is
-                // decided by the prefix; an unrecognised path yields nothing, so ordinary sandbox I/O is
-                // untouched. The UNDETERMINED case is not handled here at all — it is the absence of a
-                // path, counted and disclosed by the verify rather than guessed at from this side.
-                for c in pathClasses(lit) { directEffects.insert(c) }
+                // R420 — normalise first: `file://…` decodes to its path (so `pathClasses` can see the
+                // protected-folder prefix that the scheme was hiding), and any other scheme names no
+                // filesystem destination at all and falls through to the same fail-closed answer below.
+                guard insertFsPath(lit) else { incompleteSurfaces.insert("Fs"); break }
+                // CONSTANT-PROVENANCE rung 1 (the protected-FOLDER class, for which Apple requires a
+                // usage-description key) now happens INSIDE `insertFsPath`, against the NORMALISED path.
+                // It used to run here on the raw literal, which is exactly how R420 hid: a `file://`
+                // spelling reached `pathClasses` with its scheme still attached and matched nothing.
             } else {
                 // SOUNDNESS R395 — THE ENGINE SAW THE DESTINATION, DISCARDED IT, AND THEN CLAIMED THE
                 // SURFACE WAS COMPLETE. A literal failing the path-shape test above was silently dropped
