@@ -203,6 +203,27 @@ public let BUNDLE_RESOURCE_MEMBERS: Set<String> = ["url", "urls", "path", "paths
 public let FILES_MEMBERS: Set<String> = ["read", "readAsString", "readAsInt", "readAsDictionary",
     "write", "append", "delete", "move", "moveContents", "copy", "rename", "empty",
     "createFile", "createFileIfNeeded", "createSubfolder", "createSubfolderIfNeeded", "managedBy"]
+// SOUNDNESS R418 — the Files verbs whose destination is NOT the receiver alone. The receiver is the
+// SOURCE (`move`/`copy`/`rename`) or the PARENT FOLDER (`createFile`/`createSubfolder`), and the named
+// argument carries the rest of it. Certifying such a call off the receiver would publish the source and
+// leave a runtime-built destination invisible — the two-path evasion `FS_TWO_PATH_MEMBERS` closes for
+// `FileManager`, one spelling over. Handled by `recordFilesTwoPath`, same rule: capture every locator
+// that resolves, mark Fs INCOMPLETE if ANY does not.
+// EVERY label is taken from the Files package's own signatures, not from memory: the same verb spells
+// its locator `named:`, `at:` AND `withName:` across overloads, and a table that lists only the first
+// silently drops the others' destinations. Measured — the first cut of this table listed `named` alone
+// and lost `createSubfolderIfNeeded(withName: ".publish")`, a fully determined path, in the one real
+// dependent it was priced against.
+public let FILES_TWO_PATH_DEST: [String: Set<String>] = [
+    "move": ["to"], "copy": ["to"], "moveContents": ["to"], "rename": ["to"],
+    "createFile": ["named", "at"], "createFileIfNeeded": ["named", "withName", "at"],
+    "createSubfolder": ["named", "at"], "createSubfolderIfNeeded": ["withName", "named", "at"],
+]
+// `managedBy(_:)` rebinds a `Location` to a different `FileManager` and issues NO syscall against the
+// receiver's path — it names no destination, so it is the one FILES_MEMBERS entry that must NOT demand a
+// locator. Listed rather than left out of an allowlist so that a member ADDED to FILES_MEMBERS later is
+// treated as a locator by default (fail-closed) instead of silently joining the exempt set.
+public let FILES_NON_LOCATOR_MEMBERS: Set<String> = ["managedBy"]
 public let LOG_MEMBERS: Set<String> = ["trace", "debug", "info", "notice", "warning", "error", "critical", "fault", "log"]
 public let RAND_ROOTS: Set<String> = ["Int", "UInt", "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16",
     "UInt32", "UInt64", "Double", "Float", "Bool", "CGFloat"]
@@ -1502,7 +1523,17 @@ public func isEstablishingMember(effect: String, root: String, member: String) -
 /// the family register rather than fixed here.
 public func isReceiverLocatorMember(effect: String, root: String, member: String) -> Bool {
     guard effect == "Fs" else { return false }
-    return root == "URL" && URL_FS_MEMBERS.contains(member)
+    if root == "URL" { return URL_FS_MEMBERS.contains(member) }
+    // R418 — Files' `File`/`Folder`/`Storage`. A `File` is a PATH VALUE exactly as a `URL` is, not an
+    // open descriptor, so `f.delete()` names its own destination and the receiver is where that name is.
+    // The two-locator verbs are excluded HERE and answered by `recordFilesTwoPath` instead, because this
+    // function's contract is "the receiver is THE locator" and for them it is only half of one.
+    if root == "File" || root == "Folder" || root == "Storage" {
+        return FILES_MEMBERS.contains(member)
+            && FILES_TWO_PATH_DEST[member] == nil
+            && !FILES_NON_LOCATOR_MEMBERS.contains(member)
+    }
+    return false
 }
 public func isEstablishingFree(effect: String, name: String) -> Bool {
     switch effect {

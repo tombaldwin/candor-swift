@@ -1749,6 +1749,11 @@ final class CallCollector: SyntaxVisitor {
     // `string:` argument as the destination would FABRICATE the host "/v1/track" — the mirror defect.
     private static let LOCATOR_CTOR_ARG: [String: String] = [
         "URL": "string", "NSURL": "string", "URLRequest": "url", "NSURLRequest": "url",
+        // R418 — Files' locator ctors. Without these, widening `isReceiverLocatorMember` to `File`/
+        // `Folder` would make the FULLY DETERMINED case fail closed: `File(path: "/tmp/x").delete()`
+        // has a locator in plain sight and must still certify. Guarded like every other entry here by
+        // `declaredTypes`/`localFreeFns`, so a project's own `File` resolves to nothing.
+        "File": "path", "Folder": "path",
     ]
     /// `URL`'s FILE spellings — the same ctor, a different locator label. Kept separate only for clarity;
     /// both resolve through the same allowlisted-companion rule.
@@ -1954,6 +1959,19 @@ final class CallCollector: SyntaxVisitor {
     // the first UNLABELED positional arg — `replaceItemAt`'s source). Same pure-segment discipline as
     // firstStringLiteral: an interpolated/computed value yields nil (no literal claim). Returns nil if
     // no matching arg or it is not a plain literal.
+    /// `literalForLabel` WIDENED to the constant resolver — a bound local, a `let` constant or a locator
+    /// ctor (`Folder(path: "Output")`) all resolve, where a raw literal match sees none of them.
+    ///
+    /// Both halves are needed and neither subsumes the other, which is worth stating because assuming it
+    /// did cost a measurement: `resolveConstString` is the resolver the NET locator work built, and it
+    /// has no plain-string-literal case at all — a bare `".gitignore"` takes its interpolation branch and
+    /// comes back nil. Literal first, resolver second.
+    private func resolvedForLabel(_ args: LabeledExprListSyntax, _ labels: Set<String>) -> String? {
+        if let lit = literalForLabel(args, labels) { return lit }
+        for a in args where labels.contains(a.label?.text ?? "") { return resolveConstString(a.expression) }
+        return nil
+    }
+
     private func literalForLabel(_ args: LabeledExprListSyntax, _ labels: Set<String>) -> String? {
         for a in args {
             let lab = a.label?.text ?? ""
@@ -1999,6 +2017,31 @@ final class CallCollector: SyntaxVisitor {
                 anyMissing = true  // this required locator is runtime-built (or absent) → invisible
             }
         }
+        if anyMissing { incompleteSurfaces.insert("Fs") }
+        return true
+    }
+
+    /// SOUNDNESS R418 — the Files verbs with TWO locators, where one of them is the RECEIVER.
+    ///
+    /// `recordTwoPathFs` above reads both locators out of the ARGUMENT list because that is where
+    /// `FileManager.copyItem(atPath:toPath:)` puts them. `file.move(to: folder)` puts the source on the
+    /// receiver and the destination in an argument, so neither the argument-only path nor the
+    /// receiver-only path (`isReceiverLocatorMember`) can see the whole destination — and certifying off
+    /// EITHER half alone is the masked-literal evasion, which is the bug this row exists for. Same rule
+    /// as the FileManager arm: record every locator that resolves, and mark Fs INCOMPLETE if ANY does
+    /// not, so a literal source cannot mask a runtime-built destination.
+    private func recordFilesTwoPath(member: String, receiver: ExprSyntax?,
+                                    _ args: LabeledExprListSyntax?) -> Bool {
+        guard let destLabels = FILES_TWO_PATH_DEST[member] else { return false }
+        var anyMissing = false
+        if let lit = receiver.flatMap({ resolveConstString($0) }) { paths.insert(lit) } else { anyMissing = true }
+        // NOT `literalForLabel`, which accepts a bare string literal only: `move(to:)` and `copy(to:)`
+        // take a `Folder` VALUE, so the destination has to go through the same resolver the receiver
+        // uses or every determined move in real code would fail closed on a locator sitting in plain
+        // sight. Label-KEYED either way, so `createFile(named:contents:)`'s payload is never mistaken
+        // for a destination — which is what stopped this engine publishing a written `.gitignore`'s
+        // CONTENTS as a filesystem path.
+        if let args, let lit = resolvedForLabel(args, destLabels) { paths.insert(lit) } else { anyMissing = true }
         if anyMissing { incompleteSurfaces.insert("Fs") }
         return true
     }
@@ -4310,6 +4353,9 @@ final class CallCollector: SyntaxVisitor {
                 // locator: capture all literals, mark Fs incomplete if any locator is non-literal.
                 if eff == "Fs", rt == "FileManager", recordTwoPathFs(member: member, node.arguments) {
                     // handled — surfaces + incompleteness recorded per-locator
+                } else if eff == "Fs", ["File", "Folder", "Storage"].contains(rt),
+                          recordFilesTwoPath(member: member, receiver: ma.base, node.arguments) {
+                    // R418 — handled: receiver IS one of the two locators (see `recordFilesTwoPath`)
                 } else if rt == "Process", ["run", "launch"].contains(member) {
                     // The LAUNCHING verb on a Process handle. Its command was fixed by an earlier property
                     // write, not by an argument here, so the locator comes from `execLocatorWrites` —
