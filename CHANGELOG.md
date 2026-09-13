@@ -9,6 +9,37 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed
+
+- **R418 — a `Files` verb on a caller-supplied `File` deleted it and the gate said `policy ✓`.** ⟨0.37⟩
+  closed the receiver-as-locator shape for `URL` and left JohnSundell's `File`/`Folder`/`Storage` open
+  deliberately, arguing a fix would ship UNPRICED because no corpus here carried the dependency. That
+  priced the fix and never priced the hole. Measured on the shipped 0.37.0 binary: `try target.delete()`
+  on a `File` parameter, beside a benign allowed literal, reported `incomplete: NONE`, printed *"nothing
+  hidden"*, and `allow Fs /tmp/benign` **exited 0** over a caller-chosen deletion. The ctor spelling of
+  the same deletion exited 1 — the engine could always see this family and declined to read its receiver.
+- **R424 — the two-locator `Files` verbs let a literal SOURCE mask a runtime DESTINATION.**
+  `move`/`copy`/`rename`/`create*` name a destination with the receiver AND an argument, so treating
+  them as plain receiver-locators would have published the source and called the surface complete. That
+  hole would have been INTRODUCED by the R418 fix; it is answered by `recordFilesTwoPath` on the
+  existing `FS_TWO_PATH_MEMBERS` model — record every locator that resolves, mark `Fs` incomplete if any
+  does not.
+- **R425 — a written file's CONTENTS were published as a filesystem PATH.** `createFile(named:)` followed
+  by `.write("…")` put the whole written body into `paths`; in a real dependent that meant a
+  `.gitignore`'s entire text was reported as a destination. An `allow Fs` list could be tripped by DATA.
+  Locator reads are now label-keyed, so `contents:` can never be mistaken for a destination.
+
+**Priced against real dependents** (`JohnSundell/Publish` — 95 Swift files, 27 importing Files — plus
+`Files` and `XcodeTheme`): **0 real paths lost, 1 fabricated path removed, 5 destinations newly named,
+34 functions newly marked incomplete.** The last were verified genuine by reading the call sites — a
+`File` parameter being read, a runtime-computed output path, a call where both locators are parameters.
+Publish writes wherever it is pointed, so *incomplete* is the correct verdict there and the pre-fix
+*complete* was the false one.
+
+**Upgrade note:** this is verdict-affecting in the fail-closed direction. A tree that uses Files with
+runtime-chosen paths and passed `allow Fs <literals>` under 0.37.0 will now report the surface incomplete
+and exit 1 — correctly: the destination was never visible. Name the real destinations, or widen the rule.
+
 ## [0.37.0] — 2026-09-13
 
 - **SPEC §2.2's reserved sidecar set has ONE owner, and the §2.2 enumeration in the code was STALE** — it
