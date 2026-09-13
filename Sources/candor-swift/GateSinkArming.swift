@@ -180,7 +180,8 @@ func armOutPrefixReports(_ prefix: String, target: String?, policyFlag: String?)
         // The first version of this armer excluded `.callgraph`/`.hierarchy`/`.locs` by SUFFIX and armed
         // everything else under the prefix. SPEC §2.2 ⟨0.24⟩ (the "reserved set, family-wide" paragraph)
         // lists SEVEN reserved trailing segments — `callgraph`, `hierarchy`, `calibrated`, `layerreach`,
-        // `locs`, `gate`, and the `encountered-*` family — and records that the engines were already
+        // `locs`, `gate`, ⟨0.32⟩ `refused`, and the `encountered-*` family — and records that the engines
+        // were already
         // drifting on it, one carving out six and another two. This carved out three. Measured on the
         // reference engine: the armer overwrote `<prefix>.calibrated.json`, `.layerreach.json`,
         // `.encountered-hosts.json` and — worst — `<prefix>.gate.json`, a GATE VERDICT, each replaced by a
@@ -271,8 +272,25 @@ nonisolated(unsafe) var armedOutSidecars: [(report: String, path: String, previo
 /// The `encountered-*` family is reserved by §2.2 but is not taken either: this engine does not emit it,
 /// so a file by that name under a report's stem was written by something else, and the miss direction is
 /// the cheap one here (see `removeArmedReportSidecars`).
+/// SPEC §2.2's reserved set, in ONE place in this engine. The narrowing below is the function's content.
+let reservedSidecarSegments = ["calibrated", "callgraph", "gate", "hierarchy", "layerreach", "locs",
+                               "refused"]   // sorted, so stderr is stable
+
+/// The two names taken OUT, each an argument rather than an omission.
+///
+/// `gate` — argued at length above: a `<stem>.gate.json` is the VERDICT SINK's document, not a sidecar
+/// derived from this report, and deleting it from the report sink fails OPEN in the way
+/// `armGateJsonFailClosed` refuses to.
+///
+/// `refused` — ⟨0.32⟩, and it was previously excluded by OMISSION with nothing saying so. The refusal
+/// MARKER has its own lifecycle: a run that completes its write phase removes it, and the rung's whole
+/// guarantee is that a LOST marker fails OPEN while a STALE one fails CLOSED. Sweeping it with the report
+/// makes "lost" the common case, inverting exactly that. The deletion argument for the five turns on no
+/// consumer treating their absence as a claim; for the marker, absence IS the claim.
+let reportSidecarExcluded: Set<String> = ["gate", "refused"]
+
 func reportSidecarSegments() -> [String] {
-    ["calibrated", "callgraph", "hierarchy", "layerreach", "locs"]   // sorted, so stderr is stable
+    reservedSidecarSegments.filter { !reportSidecarExcluded.contains($0) }
 }
 
 /// SPEC §3.3.1 ⟨0.28⟩ — **THE §2.2 SIDECARS GO WITH THE ARMED REPORT, DELETED NOT EMPTIED.**
