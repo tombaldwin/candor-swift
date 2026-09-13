@@ -1514,13 +1514,18 @@ public func isEstablishingMember(effect: String, root: String, member: String) -
 /// ARGUMENT list for this call's literal — R385's establishing-yes / capture-no, for the same reason:
 /// a string inside `resourceValues(forKeys:)` is not a path, and recording it would fabricate one.
 ///
-/// **WHAT THIS DOES NOT COVER, stated rather than left to be found.** `File`/`Folder`/`Storage`
-/// (JohnSundell's Files) carry the same shape — `f.read()`, `folder.delete()` are verbs on a path
-/// VALUE, not on an open handle, and `isEstablishingMember` is silent on them too. They are left out
-/// deliberately, not by omission: the ctor `File(path:)` IS in `isEstablishingFree`, so the masked
-/// case there needs the value to arrive as a parameter, and the four swift corpora this change was
-/// priced against contain no Files dependency, so a fix there would be shipped UNPRICED. Reported for
-/// the family register rather than fixed here.
+/// **WHAT THIS DID NOT COVER — and the deferral was wrong, R418.** This comment used to say that
+/// `File`/`Folder`/`Storage` (JohnSundell's Files) carry the same shape, were left out DELIBERATELY,
+/// and were reported for the register rather than fixed, on two grounds: that the ctor `File(path:)` is
+/// already establishing, and that no swift corpus here carried the dependency so a fix would ship
+/// UNPRICED. Both were wrong, and the second is the one worth keeping.
+///
+/// It priced the FIX and never priced the HOLE. Pricing the hole took one `git clone`: on the shipped
+/// 0.37.0 binary, `try target.delete()` on a `File` PARAMETER beside a benign literal reported
+/// `incomplete: NONE` and `allow Fs /tmp/benign` EXITED 0 over a caller-chosen deletion. And the corpus
+/// existed — `JohnSundell/Publish` is 95 Swift files, 27 importing Files. **A limitation written as a
+/// comment reads as CONSIDERED, which is what stopped it being measured.**
+///
 public func isReceiverLocatorMember(effect: String, root: String, member: String) -> Bool {
     guard effect == "Fs" else { return false }
     if root == "URL" { return URL_FS_MEMBERS.contains(member) }
