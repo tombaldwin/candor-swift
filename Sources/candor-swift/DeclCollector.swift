@@ -299,6 +299,14 @@ final class DeclCollector: SyntaxVisitor {
     // table and type resolution so `Proc`→`Process`→Exec, `FM`→`FileManager`→Fs. Only a simple-identifier
     // underlying type is recorded (a function-type/generic/tuple alias has no κ-relevant single name).
     var typeAliases: [String: String] = [:]
+    /// SOUNDNESS R429 — EVERY underlying type recorded for an alias NAME, not just the last one written.
+    /// `typeAliases` is a plain map and the Driver merges it last-writer-wins, so a `#if`/`#else` pair
+    /// declaring one alias over two different types kept only the arm written LAST — and the losing
+    /// arm's effects were GONE, not hedged: measured on 0.37.0, two programs identical but for arm
+    /// ORDER reported `["Env"]` and `["Fs"]`, and a scoped `deny Fs` passed on one of them over a real
+    /// file write. That is resolution by SOURCE ORDER, which SPEC ⟨0.36⟩ names the cardinal sin under
+    /// ⟨0.21⟩, and it is R105's rust defect in a second engine.
+    var typeAliasArms: [String: Set<String>] = [:]
     /// R178 — ALIASES WHOSE UNDERLYING TYPE IS A **FUNCTION** TYPE (`typealias Cb = () -> Void`).
     ///
     /// `typeAliases` above deliberately drops these: `typeName` answers `(name: nil, isFunction: true)`
@@ -648,6 +656,19 @@ final class DeclCollector: SyntaxVisitor {
         let t = typeName(node.initializer.value)
         if let underlying = t.name {
             typeAliases[node.name.text] = underlying
+            // ONLY INSIDE A `#if`, and the corpus is why. The first cut recorded every declaration, and
+            // `typeAliasArms` is keyed by the BARE name and unioned across files — so two UNRELATED
+            // aliases sharing a name in different scopes (`extension A { typealias Value = … }` beside
+            // `extension B { typealias Value = … }`) became an "arm set" and the call-edge site charged
+            // both. Measured over 14 real Swift projects: 117 rows moved, and the sample read was
+            // SwiftUI view bodies gaining a fabricated `Unknown` from `dispatch:` edges to types their
+            // code never names. That is the bare-name merge hazard this engine already carries,
+            // AMPLIFIED by the fix rather than caused by it — which is exactly how a union over-charges.
+            //
+            // A conditional-compilation arm is the only thing R429 is about: `ifConfigDepth > 0` means
+            // this declaration sits in a `#if`/`#else` clause, so a second declaration of the same name
+            // is the alternative build's, not an unrelated scope's.
+            if ifConfigDepth > 0 { typeAliasArms[node.name.text, default: []].insert(underlying) }
         }
         // R178 — …and the branch the `if` above cannot take: a FUNCTION-typed alias has no name at all.
         // See `fnTypeAliases` for what read the dropped flag and what it cost.

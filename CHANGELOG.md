@@ -11,6 +11,23 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **R429 — a `#if`-duplicated `typealias` was resolved by SOURCE ORDER, and the losing arm's effects were
+  dropped.** `typeAliases` is a plain map the Driver merged last-writer-wins (its own comment called a
+  redeclared alias "rare" — it is the idiom conditional compilation exists for). Two programs identical
+  but for arm order reported `["Env"]` and `["Fs"]`. **A bare `deny Fs` could not see it** — the helper
+  type carries `Fs` on its own, so the deny lands there; it is the FUNCTION-level attribution that is
+  wrong, and `deny Fs go` exited **0** on one order and 1 on the other. A program that writes a file
+  passed a scoped deny because of where its `#else` sat. This is R105's rust defect in a second engine,
+  and SPEC ⟨0.36⟩ already names it: *"resolution by SOURCE ORDER was and remains the cardinal sin."*
+  Fixed per Tom's 2026-09-12 UNION ruling: every arm is kept and the typed member-call edge emits one
+  edge per arm, so the effects union through the propagation that already exists — `dealias` stays
+  single-valued because 26 call sites read it that way.
+  Scoped twice, and the corpus drove both narrowings: arms are recorded only inside a `#if` (a bare-name
+  collision across unrelated scopes is not an arm set), and only arms the project **declares** are
+  eligible (an *extension* puts a platform type's name in `localTypes`, which made `Double` an arm and
+  flipped 29 SwiftUI view bodies from pure to `Unknown`). Final price over 14 real Swift projects —
+  17,944 units, 8,163 effectful functions: **0 changed, 0 added, 0 removed.**
+
 - **R420 — two spellings of one destination disagreed, and the protected-folder class survived only
   one.** `URL(string: "file:///Users/t/Desktop/x")` and `URL(fileURLWithPath: "/Users/t/Desktop/x")`
   name the same file; `pathClasses` decides the class from a PREFIX, so the scheme defeated it. The
