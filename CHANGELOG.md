@@ -11,6 +11,18 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **R420 — two spellings of one destination disagreed, and the protected-folder class survived only
+  one.** `URL(string: "file:///Users/t/Desktop/x")` and `URL(fileURLWithPath: "/Users/t/Desktop/x")`
+  name the same file; `pathClasses` decides the class from a PREFIX, so the scheme defeated it. The
+  first yielded `inferred: ["Fs"]` and `deny FolderDesktop` was **silent**, while the second was caught
+  — so an app whose privacy manifest lacks `NSDesktopFolderUsageDescription` verified green. Because a
+  literal WAS captured, the incompleteness guard never fired either. A `file:` locator is now decoded
+  through Foundation's own parser (so percent-escapes and authority forms are handled by the thing that
+  defines them), and a NON-file scheme names no filesystem destination at all: `https://example.com/a`
+  is no longer published in `paths`, it is withheld and DISCLOSED. Four sites inserted into `paths`
+  directly; they now route through one `insertFsPath`, and the folder classification happens there
+  against the normalised path — it used to run on the raw literal, which is exactly where this hid.
+
 - **R419 — a mutating call moved the locator and the binder's original literal went on being published
   as the destination.** `LocatorMoveScanner` recorded assignment, `&inout` and property writes, but not
   a method call on the name. A `URL` is a value type whose path is edited in place, so
