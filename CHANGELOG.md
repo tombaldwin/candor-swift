@@ -11,6 +11,17 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **R436 — `URL.append(path:)` was exempted by a set borrowed from another type family, and
+  `allow Fs` exited 0 over a caller-controlled path.** R419's inert-call allowlist unioned Files'
+  non-moving verbs into the URL set so that a `File` binder's `f.delete()` would not withdraw its
+  locator. Both families declare **`append`**, meaning opposite things: appending to a file's CONTENTS
+  moves nothing, while `URL.append(path:)` is the modern mutating path mover. So the URL spelling was
+  ruled inert while its one-variable sibling `appendPathComponent` failed closed. The comment above the
+  allowlist listed `append(path:)` among the movers, thirteen lines above the union that exempted it.
+  The inert set is now chosen by the BINDER'S KIND rather than merged — keyed on the ctor, not by
+  subtracting the one colliding name, because a subtraction is a hand-list that has to stay complete as
+  either family grows.
+
 - **R431 — a DECLARED locator was weaker than an undeclared one.** The free-call site applied
   `literalForLabel` to a table hit but fell back to `firstStringLiteral`, and only the fallback runs the
   constant resolver. So a name IN `locatorLabelsForFree` lost a const-bound locator that a name outside

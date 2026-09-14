@@ -1131,10 +1131,6 @@ final class CallCollector: SyntaxVisitor {
     /// u.checkResourceIsReachable()` — a locator in plain sight — uncertifiable, which is R414's own
     /// determined-arm control. A fix for one row must not break the control of the row beside it.
     private static let LOCATOR_INERT_CALLS: Set<String> = URL_FS_MEMBERS
-        // R418's verbs, for the same reason URL_FS_MEMBERS are here: `f.delete()` acts on the path the
-        // name already holds, it does not change WHICH path that is. `move`/`rename` are absent — they
-        // DO change it (through Files' `Storage` reference), and the R419 arm below pins that.
-        .union(FILES_NON_MOVING_MEMBERS)
         .union([
         // the non-mutating `-ing`/`-ed` counterparts, which RETURN a new URL and leave the receiver alone
         "appendingPathComponent", "appendingPathExtension", "deletingLastPathComponent",
@@ -1161,6 +1157,36 @@ final class CallCollector: SyntaxVisitor {
     /// this binder is a REFERENCE type, where no call can change which object the name denotes. Passing
     /// `nil` is a claim about the binder's kind and must be justified at the call site, because passing
     /// it wrongly re-opens the bypass this parameter exists to close.
+    /// SOUNDNESS R436 — THE INERT-CALL SET IS PER BINDER KIND, and merging two kinds' sets was a LIVE
+    /// GATE BYPASS. `LOCATOR_INERT_CALLS` above is the URL/URLRequest set. R419's first cut `.union`ed
+    /// `FILES_NON_MOVING_MEMBERS` into it so that `f.delete()` would not withdraw a `File` binder's
+    /// locator — correct for a `File`, and catastrophic for a `URL`, because both type families declare
+    /// a member called **`append`** and it means opposite things: appending to a file's CONTENTS moves
+    /// nothing, while `URL.append(path:)` is the modern mutating path mover Apple steers new code to.
+    ///
+    /// MEASURED on the shipped build, one variable against `appendPathComponent`:
+    ///     var u = URL(fileURLWithPath: "/tmp/benign"); u.append(path: user); write(to: u)
+    ///     → paths ["/tmp/benign"], incomplete NONE, `allow Fs /tmp/benign` EXIT 0
+    /// and the probe said `R419CONSULT u calls=["append"]` with no REFUSE — the rule RAN and ruled it
+    /// inert. **The comment 13 lines above `LOCATOR_INERT_CALLS` names `append(path:)` in its own list of
+    /// movers.** The fix licensed the bypass: without the union `append` would have been unknown on a URL
+    /// and failed closed, so R419 converted "not yet considered" into "considered and ruled safe", which
+    /// is the state that stops a thing being measured again.
+    ///
+    /// Keyed on the CTOR the binder was built from rather than by subtracting the one colliding name:
+    /// `append` is the collision that exists today, and a set-subtraction would be a hand-list that has
+    /// to stay complete as either family grows. Two kinds, two sets, chosen by what the binding IS.
+    private static let FILES_INERT_CALLS: Set<String> =
+        FILES_NON_MOVING_MEMBERS.union(["hash", "encode", "isEqual"])
+
+    /// The locator ctor a binding was built from — `URL(…)`, `File(path:)` — so the inert-call set can be
+    /// chosen by kind. nil when the initializer is not a recognised locator ctor.
+    private func locatorCtorName(_ raw: ExprSyntax) -> String? {
+        guard let call = Self.peel(raw).as(FunctionCallExprSyntax.self),
+              let callee = call.calledExpression.as(DeclReferenceExprSyntax.self) else { return nil }
+        return dealias(callee.baseName.text)
+    }
+
     /// Hoisted out of the predicate: it is consulted once per locator binder, and an environment lookup
     /// per call is not something to pay for a probe that is off.
     private static let r419Debug = ProcessInfo.processInfo.environment["CANDOR_R419_DEBUG"] != nil
@@ -5998,7 +6024,10 @@ final class CallCollector: SyntaxVisitor {
             } else if binding.accessorBlock == nil, let v0 = binding.initializer?.value,
                       let loc = locatorCtorLiteral(v0),
                       locatorNameIsStable(name, inert: Self.LOCATOR_INERT_WRITES,
-                                          inertCalls: Self.LOCATOR_INERT_CALLS) {
+                                          // R436 — the set is chosen by the BINDER'S KIND. A `File`'s
+                                          // `append` adds bytes; a `URL`'s moves the path.
+                                          inertCalls: ["File", "Folder"].contains(locatorCtorName(v0) ?? "")
+                                              ? Self.FILES_INERT_CALLS : Self.LOCATOR_INERT_CALLS) {
                 // LOCATOR-BINDER PROVENANCE — `let u = URL(string: "…")!`, `var req = URLRequest(url: u)`.
                 // The literal travels through the SAME const-string index the direct form uses, so the host
                 // refinement, the ⟨0.13⟩ `Llm` classification and the privacy manifest all follow with no
