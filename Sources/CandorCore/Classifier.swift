@@ -1473,6 +1473,26 @@ public func locatorLabelsForFree(_ name: String) -> Set<String>? {
     switch name {
     case "shellOut": return ["to"]          // ShellOut: shellOut(to:arguments:at:) — `at:` is a directory
     case "fopen", "freopen": return [""]    // POSIX: the path is argument 0, the mode is a string too
+    // SOUNDNESS R415 — THE `exec*` FAMILY, and `execvP` is why it is a family and not one name.
+    // `execvP(file, search_path, argv)` takes a `const char *` SEARCH PATH as argument 1, so the
+    // whole-argument fallback published it as the command. MEASURED, with `deny Exec` calibrated to 1 on
+    // the same file: `execvP(runtimeFile, "/usr/bin:/bin", &argv)` reported `cmds: ["/usr/bin:/bin"]`,
+    // `incomplete: none`, and **`allow Exec /usr/bin:/bin` exited 0** over a caller-controlled command.
+    // A fabricated command AND the AS-EFF-008 masking, from one sibling literal.
+    //
+    // THE OTHER FOUR WORK ONLY BY LUCK and are declared with it rather than left to it: `execv`,
+    // `execvp` and `execve` take an argv/envp ARRAY second, which is not a string literal, so the
+    // fallback happens to land on argument 0. That is the same "caught by spelling luck" this register
+    // keeps recording — R418's `createFile(named: "z")`, R393's `fopen` mode — so the position is now
+    // declared for all four.
+    //
+    // `posix_spawn`/`posix_spawnp` are NOT here and cannot be: their locator is argument 1
+    // (`posix_spawn(pid_t *pid, const char *path, …)`), and this table's `""` means the FIRST unlabeled
+    // argument — `literalForLabel` takes the first arg whose label matches and returns nil if it is not
+    // a plain literal, so `[""]` lands on `&pid` and yields nothing. They need the POSITION schema this
+    // row's fix is really about; today they resolve correctly by the same luck (nothing before the path
+    // is a string literal).
+    case "execv", "execvp", "execve", "execvP": return [""]
     default: return nil
     }
 }

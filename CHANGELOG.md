@@ -11,6 +11,17 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **R415 — `execvP`'s SEARCH PATH was published as the command, and `allow Exec` certified a
+  caller-controlled one.** A free-call name absent from `locatorLabelsForFree` falls back to a scan of
+  the whole argument list. `execvP(file, search_path, argv)` takes a `const char *` as argument 1, so
+  that scan found the search path: `execvP(runtimeFile, "/usr/bin:/bin", &argv)` reported
+  `cmds: ["/usr/bin:/bin"]` with no incompleteness, and **`allow Exec /usr/bin:/bin` exited 0** over a
+  command the caller chose — a fabricated command and the AS-EFF-008 masking from one sibling literal.
+  The position is now declared for the whole `exec*` family: `execv`/`execvp`/`execve` worked only
+  because their second argument is an argv ARRAY and the scan happened to land on argument 0, and
+  spelling luck is not coverage. `posix_spawn`/`posix_spawnp` still cannot be expressed here — their
+  locator is argument 1 and this table's `""` means the first UNLABELED argument — and remain open.
+
 - **R429 — a `#if`-duplicated `typealias` was resolved by SOURCE ORDER, and the losing arm's effects were
   dropped.** `typeAliases` is a plain map the Driver merged last-writer-wins (its own comment called a
   redeclared alias "rare" — it is the idiom conditional compilation exists for). Two programs identical
