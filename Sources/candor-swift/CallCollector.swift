@@ -1164,6 +1164,7 @@ final class CallCollector: SyntaxVisitor {
     /// Hoisted out of the predicate: it is consulted once per locator binder, and an environment lookup
     /// per call is not something to pay for a probe that is off.
     private static let r419Debug = ProcessInfo.processInfo.environment["CANDOR_R419_DEBUG"] != nil
+    private static let r431Debug = ProcessInfo.processInfo.environment["CANDOR_R431_DEBUG"] != nil
 
     private func locatorNameIsStable(_ name: String, inert: Set<String>,
                                      inertCalls: Set<String>? = Set()) -> Bool {
@@ -3983,8 +3984,47 @@ final class CallCollector: SyntaxVisitor {
         // rather than special-cased for the resolver family alone. `shellOut(to:at:)` was publishing its
         // WORKING DIRECTORY as the command; the resolver family was the only spelling this site knew to
         // treat positionally, which is the audit-boundary-around-its-own-trigger shape R381 left behind.
+        // SOUNDNESS R431 — `resolvedForLabel`, NOT `literalForLabel`, and the difference is that a
+        // DECLARED locator was WEAKER than an undeclared one. The fallback below
+        // (`firstStringLiteral`) runs `resolveConstString` on a non-literal argument; `literalForLabel`
+        // accepts a plain string literal and nothing else. So a name IN the table lost a const-bound
+        // locator that a name OUTSIDE it resolved — declaring the position cost precision, which is the
+        // opposite of what R381/R394 were for.
+        //
+        // Measured, one variable (covered vs uncovered, identical `let` spelling):
+        //     let p = "/tmp/x.txt"; fopen(p, "r")                → incomplete:[Fs]      (covered)
+        //     let p = "/tmp/x.txt"; FileHandle(forReadingAtPath: p) → paths:["/tmp/x.txt"] (uncovered)
+        // and the same split for `shellOut` on Exec.
+        //
+        // `resolvedForLabel` is literal-FIRST and only then the resolver, because `resolveConstString`
+        // has no plain-string-literal case at all (it was built for the Net locator work and takes its
+        // interpolation branch on a bare literal). It reads the argument AT THE DECLARED LABEL, so this
+        // cannot reach a sibling — the whole point of the table is preserved.
+        //
+        // THIS IS THE PREREQUISITE FOR MAKING THE TABLE TOTAL: doing that on top of `literalForLabel`
+        // would have extended the loss to every establishing name — ~35 non-test call sites in the
+        // 15-package corpus (`shellOut(` 20, `File(path` 7, `Folder(path` 6, `FileHandle(for` 2).
         let lit = freeCallName.flatMap(locatorLabelsForFree)
-            .map { literalForLabel(node.arguments, $0) }
+            .map { labels -> String? in
+                let byResolver = resolvedForLabel(node.arguments, labels)
+                // REACH PROBE (R431). The corpus A/B for this change reports an empty diff, and an empty
+                // diff is indistinguishable from a change nothing reached. HIT counts every table hit;
+                // GAIN counts the ones where the OLD picker returned nil and the new one does not —
+                // the behaviour change itself, not a proxy for it. The old picker is evaluated ONLY
+                // inside the guard: a probe that costs work when it is off is a probe that gets deleted.
+                //
+                // MEASURED with it: 13 hits across 14 real Swift projects, all `shellOut`, and 0 GAINS —
+                // every real call passes its command as a direct literal, so both pickers agree and the
+                // corpus diff is empty for a reason rather than by luck.
+                if Self.r431Debug {
+                    FileHandle.standardError.write("R431HIT \(freeCallName ?? "?")\n".data(using: .utf8)!)
+                    if literalForLabel(node.arguments, labels) == nil, let g = byResolver {
+                        FileHandle.standardError.write(
+                            "R431GAIN \(freeCallName ?? "?") -> \(g)\n".data(using: .utf8)!)
+                    }
+                }
+                return byResolver
+            }
             ?? firstStringLiteral(node.arguments)
         if let dr = node.calledExpression.as(DeclReferenceExprSyntax.self) {
             let name = dr.baseName.text
