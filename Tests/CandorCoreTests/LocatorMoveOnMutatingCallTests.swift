@@ -170,6 +170,52 @@ final class LocatorMoveOnMutatingCallTests: XCTestCase {
         XCTAssertEqual(r.code, 0, "reading a property moves nothing:\n\(r.out)")
     }
 
+    /// SOUNDNESS R436 — **`URL.append(path:)` WAS EXEMPTED BY A SET BORROWED FROM ANOTHER TYPE FAMILY.**
+    ///
+    /// R419's first cut `.union`ed `FILES_NON_MOVING_MEMBERS` into the URL allowlist so a `File`
+    /// binder's `f.delete()` would not withdraw its locator. Both families declare **`append`** and it
+    /// means opposite things: appending to a file's CONTENTS moves nothing, while `URL.append(path:)` is
+    /// the modern mutating path mover. So the URL spelling was ruled inert and
+    /// `allow Fs /tmp/benign` EXITED 0 over a caller-controlled path — while the one-variable sibling
+    /// `appendPathComponent` exited 1.
+    ///
+    /// **The comment above `LOCATOR_INERT_CALLS` listed `append(path:)` among the movers**, thirteen
+    /// lines above the union that exempted it. The fix LICENSED the bypass: without it `append` would
+    /// have been unknown on a URL and failed closed, so R419 turned "not yet considered" into
+    /// "considered and ruled safe" — the state that stops a thing being measured again.
+    ///
+    /// Both modern spellings are asserted, not just the measured one, and the control is a determined
+    /// URL with NO mutation which must still publish its path — a fix that made everything incomplete
+    /// would satisfy the arms above and be useless.
+    func testAURLPathAppendIsAMoveEvenThoughAFilesAppendIsNot() throws {
+        for spelling in ["append(path: s)", "append(component: s)", "appendPathComponent(s)"] {
+            let src = """
+            import Foundation
+            public func go(_ s: String) throws {
+                var u = URL(fileURLWithPath: "/tmp/benign")
+                u.\(spelling)
+                try "x".write(to: u, atomically: true, encoding: .utf8)
+            }
+            """
+            let r = try scan(src, name: "R436\(spelling.prefix(6))", policy: Self.allowBenignFs)
+            XCTAssertEqual(r.code, 1, "\(spelling): a URL path append is a MOVE — the binder's literal "
+                           + "must not certify a caller-controlled path:\n\(r.out)")
+        }
+        let ctl = """
+        import Foundation
+        public func go() throws {
+            let u = URL(fileURLWithPath: "/tmp/benign")
+            try "x".write(to: u, atomically: true, encoding: .utf8)
+        }
+        """
+        let c = try scan(ctl, name: "R436Ctl", policy: Self.allowBenignFs)
+        XCTAssertEqual(c.code, 0, "a determined URL with no mutation must still certify:\n\(c.out)")
+        let fn = try XCTUnwrap(c.fns["go"], "go absent:\n\(c.out)")
+        XCTAssertEqual(fn["paths"] as? [String], ["/tmp/benign"],
+                       "and must still PUBLISH its path — an all-incomplete fix passes the arms above "
+                       + "and is useless:\n\(c.out)")
+    }
+
     /// And the Files counterpart of the rule, which is not symmetric with R418's: `f.delete()` acts on
     /// the path the name holds and must NOT invalidate it, while `f.rename(to:)` genuinely relocates the
     /// receiver and must. Both directions in one place, because the cost of getting the split wrong is a
