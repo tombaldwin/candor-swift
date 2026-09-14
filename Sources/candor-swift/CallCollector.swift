@@ -383,6 +383,11 @@ final class CallCollector: SyntaxVisitor {
     // captured host — the masking guard; see isNetEstablishingMember). Propagated transitively; an
     // allowlisted-effect gate fails CLOSED on an incomplete surface (AS-EFF-008).
     var incompleteSurfaces: Set<String> = []
+    /// SOUNDNESS R429 — this function makes a call through a `#if`-duplicated alias one of whose arms
+    /// this engine COULD NOT READ (a framework type whose member is not in the κ table, beside a
+    /// project-declared arm). The effects are not known here — they arrive by propagation — so the
+    /// Driver expands this into `incompleteD` once `inferred` exists. Set, never cleared.
+    var unreadableAliasArm = false
     /// Locals bound to a home-anchored path expression — `let p = NSHomeDirectory() + "/Desktop"`.
     var homeAnchoredLocals: [String: String] = [:]
     /// Home-anchored paths rung 4 resolved — so the `incomplete` marker can be withdrawn.
@@ -4281,9 +4286,89 @@ final class CallCollector: SyntaxVisitor {
             let member = ma.declName.baseName.text
             let base = ma.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [], mono: false)
             // R429 — the WRITTEN receiver name, before `dealias` collapses a `#if`-duplicated
-            // alias to whichever arm happened to be recorded last. Only the typed-local-receiver
-            // edge below reads it; everything else keeps the dealiased answer it already had.
+            // alias to whichever arm happened to be recorded last.
             let rawBaseRoot = ma.base.flatMap { rootOfUnaliased($0).root }
+            // ── SOUNDNESS R429, THE MIXED ARM SET — BEFORE THE DISPATCH CHAIN, NOT INSIDE IT ──
+            // This union used to sit inside the typed-local-receiver branch below, which is entered only
+            // when the DEALIASED root is a project type. `dealias` reads a last-writer-wins map, so for
+            // `#if os(macOS) typealias Impl = EnvImpl #else typealias Impl = FileManager` the picked root
+            // is `FileManager` — in neither `declaredTypes` nor `localTypes` — the branch is never
+            // entered, and `EnvImpl`'s effects are dropped entirely. MEASURED as PART 89's b8mixedrev:
+            // the SAME program with its arms written the other way round answered `deny Env` rc=1 and
+            // rc=0. Order-dependence is R429's own signature, and the first fix closed it only for the
+            // order in which the project arm happened to win — a fix drawn around its fixture.
+            //
+            // Handled here, where every member call passes, and the chain below still does whatever it
+            // does for the PICKED arm. A mixed set carries two different obligations:
+            //
+            //   * a PROJECT-DECLARED arm gets a call edge — its effects are its own and propagate, now
+            //     and after someone edits it.
+            //   * an arm this engine cannot resolve — a framework type whose member is not in the κ
+            //     table — is an UNANSWERED question, so the call is marked `unresolved` with a
+            //     `dispatch:` reason naming it. That is NOT the `{Unknown}` hedge ⟨0.38⟩ withdraws:
+            //     that one replaces a DETERMINED answer, while this arm's behaviour was never
+            //     determined at all. It is also what stops the resolved arm's literal certifying for
+            //     both — b9mixedallow is `allow Fs <lit>` over a set whose other arm names a
+            //     destination this engine never saw, and a literal that answers for an arm nobody read
+            //     is the pick-by-position ⟨0.38⟩ forbids arriving through the surface.
+            //
+            // `declaredTypes` NOT `localTypes`, for the reason recorded at the old site: an EXTENSION
+            // puts the extended type's name into `localTypes`, so `extension Double` made `Double` an
+            // eligible arm and 29 SwiftUI view bodies flipped pure→`Unknown` on reasons their code never
+            // names. And keyed on the WRITTEN name, never by searching for aliases whose arms contain
+            // the resolved type — that cross-charges two unrelated aliases that happen to share an arm.
+            //
+            // SCOPED TO A SET THAT HAS A PROJECT ARM, AND THAT BOUND IS LOAD-BEARING. The commonest
+            // conditional typealias in real Swift is ALL-FRAMEWORK — `typealias Color = NSColor` /
+            // `UIColor`, `typealias Image = NSImage` / `UIImage` — where every arm is a platform type
+            // this engine resolves through the κ table and NONE is project-declared. Running the
+            // `else` below on those would mark `unresolved` on every call through every such alias,
+            // which is a new `Unknown` on one of the most widespread shapes in the ecosystem and is
+            // not what R429 is about: R429 is the PROJECT arm being dropped. An all-framework set gets
+            // whatever κ already gives the picked arm, unchanged — it has its own question and its own
+            // (pre-existing) answer, and widening into it here would be a fix drawn around a mechanism
+            // rather than around a defect.
+            if let raw = rawBaseRoot, let arms = typeAliasArms[raw], arms.count > 1,
+               arms.contains(where: { declaredTypes.contains($0) }) {
+                // EVERY ARM, INCLUDING THE ONE `dealias` PICKED — and that is not belt-and-braces, it
+                // is a third order-dependence. Skipping the picked arm assumes the chain below handles
+                // it, and for an UNRESOLVABLE arm the chain does nothing at all: no branch matches
+                // `FileManager.act`, so no `unresolved` is recorded. The same mixed set then answered
+                // ["Env"] when the framework arm was picked and ["Env","Unknown"] when it was not —
+                // caught by asserting the two orders are IDENTICAL rather than that the same gate fires,
+                // which is the assertion the weaker form would have passed. Re-handling the picked arm
+                // costs a duplicate edge (targets dedupe) or a re-inserted effect (a Set), and buys the
+                // invariant the whole row is about.
+                // Instrument the PRECONDITION. A byte-identical A/B over a corpus that never reaches
+                // this line is the most flattering measurement available and reads exactly like a
+                // safely-inert change — the standing bar, and the reason R438's rust number meant
+                // something. REACH is the arm set being seen; GAIN is an edge or a charge coming out.
+                if ProcessInfo.processInfo.environment["CANDOR_R429_PROBE"] != nil {
+                    FileHandle.standardError.write(
+                        "R429 REACH \(raw) :: \(arms.sorted().joined(separator: " | ")) :: \(member)\n"
+                            .data(using: .utf8)!)
+                }
+                for arm in arms.sorted() {
+                    if declaredTypes.contains(arm) {
+                        calls.append(Call(path: "\(arm).\(member)", leaf: member, strArg: nil,
+                                          typed: true, args: argKinds(node), argTypes: argTypesOf(node)))
+                    } else if let eff = kappaMember(root: arm, member: member) {
+                        directEffects.insert(eff)
+                        incompleteSurfaces.insert(eff)   // a different arm is a different destination
+                    } else {
+                        unresolved = true
+                        why.insert("dispatch:\(arm).\(member)")
+                        // …AND THE SURFACE GOES WITH IT. An `Unknown` alone does not stop
+                        // `allow Fs <lit>`: the Fs surface still reads COMPLETE, so the arm this engine
+                        // COULD read certifies for the arm it could not. That is the pick-by-position
+                        // ⟨0.38⟩ forbids, arriving through the surface instead of through the effect —
+                        // PART 89 b9mixedallow. Which effects to mark is not knowable here (they arrive
+                        // by propagation from the sibling arm's edge), so the Driver expands this flag
+                        // once `inferred` exists.
+                        unreadableAliasArm = true
+                    }
+                }
+            }
             // a function-typed FIELD invoked (`d.f()` where f: () -> Void) — the unknown_dyn case
             if let rt = base.root, let f = fields[rt]?[member], f.isFunction {
                 // FINDING 2 — `obj.f()` where `f` is a stored CLOSURE PROPERTY (a resolvable local closure
@@ -4362,20 +4447,11 @@ final class CallCollector: SyntaxVisitor {
                 // RULED 2026-09-12 — UNION: both arms are IN THE SOURCE the engine was pointed at,
                 // so charging both is not fabrication under SPEC §4's definition, while picking one
                 // is the ⟨0.21⟩ cardinal sin SPEC ⟨0.36⟩ names explicitly.
-                if let raw = rawBaseRoot, let arms = typeAliasArms[raw], arms.count > 1 {
-                    // `declaredTypes`, NOT `localTypes`: an EXTENSION puts the extended type's name
-                    // into `localTypes` (visit(ExtensionDeclSyntax) calls pushType), so a project
-                    // carrying `extension Double: …` made `Double` an eligible arm — and a real app's
-                    // `typealias LocationDistance = CLLocationDistance | Double` then edged every
-                    // Double-rooted call into a widely-conformed protocol. MEASURED: 29 SwiftUI view
-                    // bodies flipped from pure to `Unknown` on `dispatch:` reasons their code never
-                    // names. An arm the project DECLARES is a real alternative target; one it merely
-                    // extends is a platform type whose members this edge cannot resolve.
-                    for arm in arms.sorted() where arm != rt && declaredTypes.contains(arm) {
-                        calls.append(Call(path: "\(arm).\(member)", leaf: member, strArg: lit,
-                                          typed: true, args: argKinds(node), argTypes: argTypesOf(node)))
-                    }
-                }
+                // (The arm union RAN HERE and now runs BEFORE this whole chain — see the R429
+                // block just after `rawBaseRoot` is bound. Here it could only fire when `dealias`
+                // happened to pick a PROJECT arm, so the same program with its arms written the other
+                // way round dropped them: PART 89 b8mixedrev, `deny Env` rc=1 one order and rc=0 the
+                // other. Order-dependence is R429's own signature and this placement was carrying it.)
             } else if let rt = base.root, localProtocols.contains(rt) {
                 // a PROTOCOL-typed receiver reached via a field/let/factory (`self.handler.log()`
                 // where `var handler: LogHandler`) — the params-only protoTyped path missed these

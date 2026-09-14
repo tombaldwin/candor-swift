@@ -11,6 +11,21 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **R429 (reopened) — the mixed arm set: a `#if`-duplicated `typealias` whose arms are one PROJECT type
+  and one FRAMEWORK type.** The first fix put the union edge inside the typed-local-receiver branch,
+  which is entered only when the DEALIASED root is a project type — so for a mixed set the branch was
+  entered in one arm order and not the other, and `deny Env <fn>` answered exit 1 and exit 0 on the same
+  program written both ways. Order-dependence is R429's own signature, and it survived the row filed for
+  it because that row's fixture had TWO PROJECT ARMS. The union now runs before the dispatch chain,
+  over EVERY arm including the picked one (skipping the picked arm was a third order-dependence: no
+  branch handles an unresolvable framework arm, so it recorded nothing where a non-picked one recorded
+  `Unknown`). An arm the engine cannot read now also makes the caller's surface incomplete, so the arm
+  it COULD read no longer certifies for the arm it could not. Bounded to arm sets with a project-declared
+  arm — an ALL-FRAMEWORK alias (`NSColor`/`UIColor`) is untouched, with a fixture saying so. PART 89's
+  nine arms are green on both engines and its xfail list is now empty. **The A/B over 878 real Swift
+  files measured REACH 0** — those trees contain no conditional typealias at all — so the blast radius
+  is bounded by construction and by fixtures, not by a measurement over code that has the shape.
+
 - **R436 — `URL.append(path:)` was exempted by a set borrowed from another type family, and
   `allow Fs` exited 0 over a caller-controlled path.** R419's inert-call allowlist unioned Files'
   non-moving verbs into the URL set so that a `File` binder's `f.delete()` would not withdraw its
