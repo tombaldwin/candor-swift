@@ -1504,6 +1504,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var privKindD: [String: [String: Set<String>]] = [:]
     var pathsD: [String: Set<String>] = [:], tablesD: [String: Set<String>] = [:]
     var incompleteD: [String: Set<String>] = [:]   // fn -> effects with a structurally-incomplete surface (masking)
+    var unreadableAliasArmFns: Set<String> = []   // R429 — see CallCollector.unreadableAliasArm
     var blindDirect: [String: Set<String>] = [:]    // fn -> blind modules it DIRECTLY reaches (per-fn `invisible`)
     // The κ-unknown modules this code imports (the ledger's set, hoisted for per-fn `invisible` attribution):
     // not a platform-frontier module, not a κ tier, not an internal target — effects through them are
@@ -1957,6 +1958,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         pathsD[f.qual, default: []].formUnion(cc.paths)
         tablesD[f.qual, default: []].formUnion(cc.tables)
         if !cc.incompleteSurfaces.isEmpty { incompleteD[f.qual, default: []].formUnion(cc.incompleteSurfaces) }
+        if cc.unreadableAliasArm { unreadableAliasArmFns.insert(f.qual) }   // R429 — expanded after propagate
 
         // fn-typed params INVOKED: defer to callback-flow (resolved after all call sites are known)
         if !cc.callbackInvoked.isEmpty {
@@ -2899,6 +2901,22 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     let pathsAcc = propagate(pathsD, over: edges), tablesAcc = propagate(tablesD, over: edges)
     // the masking surface-incompleteness and the per-fn blind-module disclosure propagate the SAME way: a
     // caller transitively reaches a callee's invisible endpoint / blind module, so it inherits the flag/set.
+    // SOUNDNESS R429 — A `#if` ARM THIS ENGINE COULD NOT READ MAKES THE CALLER'S SURFACE INCOMPLETE.
+    // Deferred to here because the effects are not known at collection time: they arrive by propagation
+    // from the sibling arm's call edge. `inferred` exists now, so the flag can be expanded into the real
+    // effect names. Without this the arm the engine COULD read publishes its literal and certifies for
+    // the arm it could not — `allow Fs <lit>` passing over a set whose other arm names a destination
+    // nobody saw (PART 89 b9mixedallow). `Unknown` is excluded: it names no destination, so there is no
+    // surface of it to be incomplete, and including it would put a meaningless key in every such row.
+    //
+    // PER FUNCTION, NOT PER CALL, and that is this engine's existing granularity rather than a choice
+    // made here — `incomplete` is keyed by qual throughout. It over-marks a function that also reaches
+    // the same effect through an unrelated, fully-determined call. That is the fail-closed direction:
+    // the cost is a refusal to certify, never a silent certification.
+    for q in unreadableAliasArmFns {
+        let effs = (inferred[q] ?? []).subtracting(["Unknown"])
+        if !effs.isEmpty { incompleteD[q, default: []].formUnion(effs) }
+    }
     let incompleteAcc = propagate(incompleteD, over: edges)
     let invisibleAcc = propagate(blindDirect, over: edges)
 

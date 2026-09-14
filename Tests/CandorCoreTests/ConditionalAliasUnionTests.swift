@@ -100,6 +100,96 @@ final class ConditionalAliasUnionTests: XCTestCase {
                        + "defect coming back through the fix:\n\(r.out)")
     }
 
+    // ── R429, THE MIXED ARM SET (reopened 2026-09-14) ────────────────────────────────────────────────
+
+    /// **THE FIRST FIX CLOSED ONLY THE ORDER IN WHICH THE PROJECT ARM HAPPENED TO WIN.** The union edge
+    /// lived INSIDE the typed-local-receiver branch, which is entered only when the DEALIASED root is a
+    /// project type. `dealias` reads a last-writer-wins map, so for a MIXED set — one project enum, one
+    /// FRAMEWORK type, which is what real code writes (`typealias Impl = FileManager` / `MyImpl`) — the
+    /// picked root is the framework one in one arm order and the project one in the other. In the first
+    /// order the branch is never entered at all and the project arm's effects are dropped.
+    ///
+    /// So the SAME program with its arms written the other way round answered `deny Env go` rc=1 and
+    /// rc=0. Order-dependence is R429's own signature, and it survived the row that was filed for it —
+    /// the fixture that closed R429 had TWO PROJECT ARMS, so it sat entirely inside the narrowing that
+    /// hides this. PART 89 b8mixedrev is the conformance form.
+    ///
+    /// The union now runs BEFORE the dispatch chain, where every member call passes.
+    func testAMixedArmSetIsNotDecidedByWhichArmDealiasPicked() throws {
+        let mixed = { (first: String, second: String) -> String in
+            """
+            \(Self.HELPERS)
+            #if os(macOS)
+            typealias Impl = \(first)
+            #else
+            typealias Impl = \(second)
+            #endif
+            public func go() { Impl.act("/tmp/benign", "x") }
+            """
+        }
+        for (tag, src) in [("ProjectFirst", mixed("EnvImpl", "FileManager")),
+                           ("FrameworkFirst", mixed("FileManager", "EnvImpl"))] {
+            let r = try scan(src, name: "R429Mixed\(tag)", policy: "deny Env go\n")
+            XCTAssertEqual(r.code, 1, "\(tag): the project arm sets an environment variable, and whether "
+                           + "`deny Env go` sees it must not depend on which side of `#else` the "
+                           + "FRAMEWORK arm was written:\n\(r.out)")
+        }
+    }
+
+    /// AND THE ARM SET MUST ANSWER IDENTICALLY IN BOTH ORDERS, not merely fire the same gate — the
+    /// stronger form, and the one that catches a future change making the two orders agree by accident.
+    func testAMixedArmSetAnswersIdenticallyInBothOrders() throws {
+        let a = try scan("""
+        \(Self.HELPERS)
+        #if os(macOS)
+        typealias Impl = EnvImpl
+        #else
+        typealias Impl = FileManager
+        #endif
+        public func go() { Impl.act("/tmp/benign", "x") }
+        """, name: "R429MixA")
+        let b = try scan("""
+        \(Self.HELPERS)
+        #if os(macOS)
+        typealias Impl = FileManager
+        #else
+        typealias Impl = EnvImpl
+        #endif
+        public func go() { Impl.act("/tmp/benign", "x") }
+        """, name: "R429MixB")
+        let ea = (try XCTUnwrap(a.fns["go"], "go absent:\n\(a.out)")["inferred"] as? [String])?.sorted()
+        let eb = (try XCTUnwrap(b.fns["go"], "go absent:\n\(b.out)")["inferred"] as? [String])?.sorted()
+        XCTAssertEqual(ea, eb, "a MIXED arm set answered differently by arm order:\nA:\n\(a.out)\nB:\n\(b.out)")
+        XCTAssertEqual(ea?.contains("Env"), true,
+                       "the PROJECT arm's effect is owed in both orders — it is in the source the engine "
+                       + "was pointed at:\n\(a.out)")
+    }
+
+    /// **THE BOUND THAT MAKES THE ABOVE AFFORDABLE, and it is the one narrowing worth a fixture of its
+    /// own.** The commonest conditional typealias in Swift is ALL-FRAMEWORK — `typealias Color = NSColor`
+    /// / `UIColor`, `typealias Image = NSImage` / `UIImage` — where no arm is project-declared. The
+    /// mixed-set handling must not touch those: its unresolvable-arm branch would mark `unresolved` on
+    /// every call through every such alias, putting a new `Unknown` on one of the most widespread shapes
+    /// in the ecosystem. That is not what R429 is about; R429 is the PROJECT arm being dropped.
+    ///
+    /// This control matters more than usual here because the corpus could not supply it: a 878-file A/B
+    /// over two real Swift apps, swift-syntax and candor's own sources measured REACH **0** — those trees
+    /// contain no conditional typealias at all — so the blast radius of this change on real code is
+    /// bounded by construction and by this fixture, NOT by a measurement over code that has the shape.
+    func testAnAllFrameworkArmSetIsLeftAlone() throws {
+        let r = try scan("""
+        #if os(macOS)
+        typealias Surface = NSObject
+        #else
+        typealias Surface = NSString
+        #endif
+        public func go() { _ = Surface.description() }
+        """, name: "R429AllFramework", policy: "deny Unknown go\n")
+        XCTAssertEqual(r.code, 0, "an ALL-FRAMEWORK conditional alias has no project arm to drop, so the "
+                       + "mixed-set handling must not reach it — marking these `unresolved` would put a "
+                       + "new Unknown on `NSColor`/`UIColor`, the commonest shape there is:\n\(r.out)")
+    }
+
     // ── the over-charge controls ─────────────────────────────────────────────────────────────────────
 
     /// An ORDINARY alias must charge exactly its own arm. If this gains `Env`, the union is firing on

@@ -284,6 +284,15 @@ final class NameKeyedStateTests: XCTestCase {
         "calls": .notPerBinding, "directEffects": .notPerBinding, "unresolved": .notPerBinding,
         "why": .notPerBinding, "hosts": .notPerBinding, "cmds": .notPerBinding,
         "paths": .notPerBinding, "tables": .notPerBinding, "incompleteSurfaces": .notPerBinding,
+        // R429 — a WRITE-ONCE output flag: this function made a call through a `#if`-duplicated alias
+        // one of whose arms the engine could not read. It sits beside `incompleteSurfaces` because it
+        // becomes exactly that, one stage later — the Driver expands it into real effect names once
+        // `inferred` exists, since the effects arrive by propagation and are not known at collection
+        // time. Keyed by nothing: it is a property of the FUNCTION, never consulted to resolve a name,
+        // and a rebind cannot make an unreadable arm readable. Set, never cleared — the fail-closed
+        // direction, and the only one that is safe for a flag whose meaning is "something here was
+        // not read".
+        "unreadableAliasArm": .notPerBinding,
         // SPEC §2 `fs` — a flat per-FUNCTION accumulator of read/write kinds, exactly like the
         // literal surfaces beside it. Not keyed by a binding name, so a shadow scope must neither
         // save nor clear it: a `let` rebinding a name says nothing about which disk verbs the
