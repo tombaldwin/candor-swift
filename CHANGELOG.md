@@ -11,6 +11,15 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **R431 — a DECLARED locator was weaker than an undeclared one.** The free-call site applied
+  `literalForLabel` to a table hit but fell back to `firstStringLiteral`, and only the fallback runs the
+  constant resolver. So a name IN `locatorLabelsForFree` lost a const-bound locator that a name outside
+  it resolved: `let p = "/tmp/x.txt"; fopen(p, "r")` reported the surface incomplete while the identical
+  spelling through `FileHandle(forReadingAtPath: p)` published the path. Declaring the position cost
+  precision, which is the opposite of what ⟨0.29⟩'s position rule is for. The declared path now uses
+  `resolvedForLabel` — literal first, then the resolver, at the declared label only, so it still cannot
+  reach a sibling. Runtime locators are unaffected and still fail closed.
+
 - **R415 — `execvP`'s SEARCH PATH was published as the command, and `allow Exec` certified a
   caller-controlled one.** A free-call name absent from `locatorLabelsForFree` falls back to a scan of
   the whole argument list. `execvP(file, search_path, argv)` takes a `const char *` as argument 1, so
