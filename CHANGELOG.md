@@ -9,6 +9,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.38.0] — 2026-09-14
+
 ### ⚠ Fixed
 
 - **R429 (reopened) — the mixed arm set: a `#if`-duplicated `typealias` whose arms are one PROJECT type
