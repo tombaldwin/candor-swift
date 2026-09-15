@@ -978,6 +978,20 @@ final class CallCollector: SyntaxVisitor {
             if m.declName.baseName.text == "bonjour" || m.declName.baseName.text == "bonjourWithTXTRecord" {
                 return true
             }
+            // SOUNDNESS R390, THE NETWORK-FRAMEWORK TAIL — the same mDNS registration under three more
+            // spellings, none of which contains the token `bonjour`:
+            //     NWConnection(to: .service(name:type:domain:interface:), using:)
+            //     NWListener(service: NWListener.Service(name:type:domain:txtRecord:), using:)
+            //     NWListener(service: .init(name:type:), using:)
+            // Matching on the MEMBER NAME would need three entries and would miss the fourth spelling —
+            // R346's hand-list shape. The discriminator used instead is the SIGNATURE: a nested
+            // constructor carrying BOTH a `name:` and a `type:` label IS the Bonjour service descriptor,
+            // whichever of `service` / `Service` / `init` it is spelled with. Nothing else in the Net
+            // establishing family takes that pair (`NWConnection(host:port:)`, `NWEndpoint.hostPort`,
+            // `URLSession`, `getaddrinfo` — none has a `name:`+`type:` argument), which is the
+            // over-charge control `testR390NonBonjourNetFormsGainNoLocalNetworkKey` pins.
+            let labels = Set(call.arguments.compactMap { $0.label?.text })
+            if labels.contains("name") && labels.contains("type") { return true }
         }
         return false
     }
@@ -1196,6 +1210,7 @@ final class CallCollector: SyntaxVisitor {
     /// per call is not something to pay for a probe that is off.
     private static let r419Debug = ProcessInfo.processInfo.environment["CANDOR_R419_DEBUG"] != nil
     private static let r431Debug = ProcessInfo.processInfo.environment["CANDOR_R431_DEBUG"] != nil
+    private static let r349Debug = ProcessInfo.processInfo.environment["CANDOR_R349_DEBUG"] != nil
 
     private func locatorNameIsStable(_ name: String, inert: Set<String>,
                                      inertCalls: Set<String>? = Set()) -> Bool {
@@ -1729,7 +1744,12 @@ final class CallCollector: SyntaxVisitor {
         // named R348 as the trap it avoided.** Two of three roots is what a κ family looks like when
         // it is fixed from the spelling in hand rather than written down and run (R346).
         if alias == "NWBrowser" || alias == "NetServiceBrowser" || alias == "NetService" {
-            if bonjourDescriptorArg(node.arguments) { directEffects.insert("LocalNetwork") }
+            // R390 — the DESCRIPTOR question is the right one for `NWBrowser` (which also serves ordinary
+            // networking) and answers "no" for every `NetService`/`NetServiceBrowser` call, whose service
+            // type is a plain String parameter. `isMdnsOnlyRoot` is the type half; see its doc.
+            if isMdnsOnlyRoot(alias) || bonjourDescriptorArg(node.arguments) {
+                directEffects.insert("LocalNetwork")
+            }
             if let eff = kappaFree(name: alias, argCount: node.arguments.count) {
                 directEffects.insert(eff)
                 // R385 — the alias/free spelling. THIS SITE IS NOT REACHED BY THE MEASURED FIXTURES
@@ -1755,6 +1775,12 @@ final class CallCollector: SyntaxVisitor {
         if eff == "Fs" { let ks = fsKind(root: alias, member: "<init>")
                           if ks.isEmpty { fsKinds.insert("?") } else { for k in ks { fsKinds.insert(k) } } }
         if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK ctor/call IS network I/O
+        // SOUNDNESS R390, THE NETWORK-FRAMEWORK TAIL — asked HERE too, and the reason is this function's
+        // own doc: the module-qualified spelling (`Network.NWConnection(to: .service(…))`) and the bare
+        // one must answer IDENTICALLY, or a qualifier silently turns a local-network registration into
+        // ordinary networking. Two spellings of one program disagreeing is R429's signature and this
+        // file already carries the rule; it costs one line to keep.
+        if eff == "Net", bonjourDescriptorArg(node.arguments) { directEffects.insert("LocalNetwork") }
         recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
         if lit == nil, est, !(eff == "Fs" && lastResolvedHomePath) { incompleteSurfaces.insert(eff) }
         return true
@@ -2082,6 +2108,37 @@ final class CallCollector: SyntaxVisitor {
         if let lit = literalForLabel(args, labels) { return lit }
         for a in args where labels.contains(a.label?.text ?? "") { return resolveConstString(a.expression) }
         return nil
+    }
+
+    /// SOUNDNESS R415 — `resolvedForLabel`'s POSITIONAL twin, and it is a twin deliberately: R431 measured
+    /// that a DECLARED locator was WEAKER than an undeclared one because the table's picker accepted a
+    /// plain string literal and nothing else, while the whole-list fallback ran `resolveConstString`. A
+    /// positional arm written on `literalAtPosition` alone would have reintroduced exactly that loss for
+    /// every name the position schema newly declares — `let p = "/tmp/x.db"; sqlite3_open_v2(p, &db, 6,
+    /// "unix-dotfile")` would have gone from a resolved locator to none. Literal FIRST, then the
+    /// resolver, at the DECLARED index only, so this can never reach a sibling.
+    ///
+    /// The index counts EVERY argument, labelled or not: a C call has no labels, and the whole reason
+    /// this exists is that `posix_spawn`'s locator is argument 1.
+    private func resolvedAtPosition(_ args: LabeledExprListSyntax, _ k: Int) -> String? {
+        if let lit = literalAtPosition(args, k) { return lit }
+        let all = Array(args)
+        guard k >= 0, k < all.count else { return nil }
+        return resolveConstString(all[k].expression)
+    }
+
+    /// The plain-literal reading of argument `k`. Returns nil the moment that argument is not a plain
+    /// string literal — which is the point: the surface is then honestly incomplete rather than filled
+    /// from whatever sibling happened to be a literal.
+    private func literalAtPosition(_ args: LabeledExprListSyntax, _ k: Int) -> String? {
+        let all = Array(args)
+        guard k >= 0, k < all.count,
+              let lit = all[k].expression.as(StringLiteralExprSyntax.self) else { return nil }
+        var out = ""
+        for seg in lit.segments {
+            if let plain = seg.as(StringSegmentSyntax.self) { out += plain.content.text } else { return nil }
+        }
+        return decodeEscapes(out)
     }
 
     private func literalForLabel(_ args: LabeledExprListSyntax, _ labels: Set<String>) -> String? {
@@ -3447,6 +3504,27 @@ final class CallCollector: SyntaxVisitor {
                 }
             } else { clearBinding(name) }
         } else if let tup = node.pattern.as(TuplePatternSyntax.self), tup.elements.count == 2,
+                  let slots = zipElementSlots(node.sequence) {
+            // SOUNDNESS R349 — `for (g, _) in zip(v, w)`. The arm below requires the SECOND binder to be
+            // an identifier, so the commonest zip spelling — take the left, discard the right — did not
+            // even reach it: `_` is a `WildcardPattern`, the whole branch was skipped, and `g` fell to
+            // the single-binder `for case` arm which types only `as T` / `x?` and cleared it. MEASURED:
+            // `for (g, _) in zip(v, [1]) { _ = g.run() }` ABSENT, against `for (_, g) in v.enumerated()`
+            // charging `Fs` as the control — so the sequence was understood in one adapter and not the
+            // other, and the SHAPE of the pattern decided which.
+            //
+            // BOTH positions, by slot, because zip's two sides have DIFFERENT element types — this is
+            // the one adapter here where "the element" is not a single answer.
+            for (idx, el) in tup.elements.enumerated() {
+                guard let nm = el.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
+                if let t = slots[String(idx)] {
+                    if !bindCallableElement(nm, t) { vars[nm] = t }   // R211
+                    if Self.r349Debug {
+                        FileHandle.standardError.write("R349ZIPFOR \(nm) -> \(t)\n".data(using: .utf8)!)
+                    }
+                } else { clearBinding(nm) }
+            }
+        } else if let tup = node.pattern.as(TuplePatternSyntax.self), tup.elements.count == 2,
                   let second = tup.elements.last?.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
             if let v = dictValueOf(node.sequence) {
                 // for (key, value) in dict — value carries the type (R211: or the callable)
@@ -3586,9 +3664,66 @@ final class CallCollector: SyntaxVisitor {
          "drop", "prefix", "firstIndex", "lastIndex", "last", "partition", "removeAll", "split"]
     // Methods whose closure params are ALL the receiver's element (`sorted(by:)`/`min(by:)`/`max(by:)`
     // take `(Element, Element) -> Bool`) — type EVERY param, not just the first, so `$0.x < $1.x`
-    // resolves both sides. (reduce is deliberately ABSENT: its closure is `(Acc, Element)` — the first
-    // param is the accumulator, so element-typing it would mistype the fold state.)
+    // resolves both sides.
+    //
+    // SOUNDNESS R349 — **THE SENTENCE THAT USED TO END THIS COMMENT WAS CORRECT, AND IT WAS THE DEFECT.**
+    // It read: *"reduce is deliberately ABSENT: its closure is `(Acc, Element)` — the first param is the
+    // accumulator, so element-typing it would mistype the fold state."* True of parameter 0, and it
+    // reads as a ruling on `reduce`, so **parameter 1 — which IS the element — was never typed by
+    // anything.** MEASURED against `v.forEach { _ = $0.run() }` charging `Fs` as the control, over a
+    // `[Guard]` whose `run()` writes a file: `v.reduce(0) { a, x in a + x.run() }` ABSENT,
+    // `v.reduce(0) { $0 + $1.run() }` ABSENT, `v.reduce(into: 0) { a, x in a += x.run() }` ABSENT.
+    // A settled exclusion for one parameter read as a decision about the method — the shape R348 and
+    // R346 keep recording, here inside a comment rather than a table.
+    //
+    // **AN INDEX, NOT "THE LAST PARAMETER", AND THE DIFFERENCE IS MEASURABLE.** The row that filed this
+    // prescribed a third category meaning *the LAST parameter is the element*. That cannot be
+    // implemented here: `closureParamNames` returns `$0`/`$1`/`$2` for a SHORTHAND closure because the
+    // arity of `{ $0 + $1.run() }` is not visible in its syntax, so "last" is `$2` — a name the closure
+    // does not bind — and the shorthand spelling, which is the commonest one, would have stayed silent
+    // while the named spelling closed. Both of `reduce`'s closures take exactly TWO parameters
+    // (`(Acc, Element)` and `(inout Acc, Element)`), so the element is at index 1 under both spellings
+    // and the index is exact where "last" is not.
+    //
+    // `reduce(into:)`'s accumulator is `inout`, which is the trap on the other side: this types index 1
+    // and nothing else, so the fold state keeps whatever the annotation or the clear gives it.
     private static let ELEMENT_PAIR_ITERATORS: Set<String> = ["sorted", "min", "max"]
+    // R349 — the element is at a FIXED INDEX that is not 0. One entry today; a table because the next
+    // one will be a signature fact about another HOF, not another special case at the call site.
+    private static let ELEMENT_PARAM_INDEX: [String: Int] = ["reduce": 1]
+
+    /// SOUNDNESS R349 — `zip(a, b)`'S TWO SLOTS, RESOLVED ONCE FOR BOTH SPELLINGS THAT CONSUME THEM.
+    ///
+    /// `for (g, _) in zip(v, [1]) { _ = g.run() }` and `zip(v, [1]).forEach { _ = $0.0.run() }` were both
+    /// ABSENT, which is the ONE case in this row where neither consumer was wired — so this is written
+    /// as a shared resolver from the start rather than at the site in hand. The `for`-binder arm one
+    /// screen down handles `enumerated()` and did NOT handle `zip`; the closure arm handled neither.
+    ///
+    /// SHADOW DISCIPLINE, the same this file applies to every free name: a project that declares its own
+    /// `zip` (or a chained workspace dependency that does) gets ITS `zip`, and typing slots from that
+    /// one's arguments would FABRICATE. Returns nil there, which is the pre-existing behaviour.
+    private func zipElementSlots(_ expr: ExprSyntax) -> [String: String]? {
+        guard let call = Self.peel(expr).as(FunctionCallExprSyntax.self),
+              let dr = call.calledExpression.as(DeclReferenceExprSyntax.self),
+              dr.baseName.text == "zip", call.arguments.count == 2,
+              !localFreeFns.contains("zip"), !declaredTypes.contains("zip"), !depShadows("zip")
+        else { return nil }
+        let args = Array(call.arguments)
+        var slots: [String: String] = [:]
+        if let a = elementTypeOf(args[0].expression) { slots["0"] = a.name }
+        if let b = elementTypeOf(args[1].expression) { slots["1"] = b.name }
+        return slots.isEmpty ? nil : slots
+    }
+
+    /// R349 — ONE PREDICATE FOR "DOES THIS METHOD HAND ITS CLOSURE THE RECEIVER'S ELEMENT", because the
+    /// three tables above had four separate `ELEMENT_ITERATORS.contains(x) || pairIterator` spellings at
+    /// the call site and a fourth table would have meant editing all four. R346/R347's rule applied to
+    /// this file's own machinery: the defect being fixed here IS a category that one of these lists knew
+    /// about and the others did not.
+    private static func isElementIterator(_ name: String) -> Bool {
+        ELEMENT_ITERATORS.contains(name) || ELEMENT_PAIR_ITERATORS.contains(name)
+            || ELEMENT_PARAM_INDEX[name] != nil
+    }
 
     // SYNC callback-invokers: standard higher-order methods on Sequence/Collection/Optional that
     // invoke their closure argument SYNCHRONOUSLY, in-thread, before returning. An OPAQUE closure arg
@@ -3650,9 +3785,18 @@ final class CallCollector: SyntaxVisitor {
         let iteratorMethod: String? = (node.calledExpression.as(MemberAccessExprSyntax.self))?.declName.baseName.text
             ?? node.calledExpression.as(DeclReferenceExprSyntax.self)?.baseName.text
         let pairIterator = iteratorMethod.map(Self.ELEMENT_PAIR_ITERATORS.contains) ?? false
+        // R349 — WHICH PARAMETER IS THE ELEMENT, as one question asked once. `reduce`'s is index 1 and
+        // its index 0 is the ACCUMULATOR, so this must also EXCLUDE index 0 rather than merely add an
+        // index: typing a fold state from the element is the fabrication direction of the same defect,
+        // and `reduce(into:)`'s accumulator is `inout`. Index 0 therefore falls through to the clear.
+        let elemParamIndex: Int? = iteratorMethod.flatMap { Self.ELEMENT_PARAM_INDEX[$0] }
+        let isElementParam: (Int) -> Bool = { i in
+            if let k = elemParamIndex { return i == k }
+            return i == 0 || pairIterator
+        }
         let iteratorElem: (name: String, mono: Bool)? = {
             if let ma = node.calledExpression.as(MemberAccessExprSyntax.self),
-               Self.ELEMENT_ITERATORS.contains(ma.declName.baseName.text) || pairIterator,
+               Self.isElementIterator(ma.declName.baseName.text),
                let base = ma.base {
                 if let e = elementTypeOf(base) { return e }
                 // `o.map { $0.go() }` where `o: (any Doer)?` — Optional.map's closure param is the
@@ -3667,7 +3811,7 @@ final class CallCollector: SyntaxVisitor {
             // BARE element-iterator over implicit `self` — `forEach { $0.persist() }` inside
             // `extension Array where Element: Saveable`: self's element is that bound (R28).
             if let dr = node.calledExpression.as(DeclReferenceExprSyntax.self),
-               Self.ELEMENT_ITERATORS.contains(dr.baseName.text) || pairIterator {
+               Self.isElementIterator(dr.baseName.text) {
                 // `extension Array where Element: P` — Element is a generic parameter of the ARRAY the
                 // caller holds, so it is monomorphized there, never erased. Always `mono`.
                 return selfElementType.map { ($0, true) }
@@ -3682,7 +3826,7 @@ final class CallCollector: SyntaxVisitor {
         // fixing the one in front of you leaves the other silent.
         let nestedIterElem: String? = {
             guard let ma = node.calledExpression.as(MemberAccessExprSyntax.self),
-                  Self.ELEMENT_ITERATORS.contains(ma.declName.baseName.text) || pairIterator,
+                  Self.isElementIterator(ma.declName.baseName.text),
                   let base = ma.base else { return nil }
             return nestedElementOf(base)
         }()
@@ -3693,9 +3837,39 @@ final class CallCollector: SyntaxVisitor {
         // nothing: ABSENT, while `cb?()` disclosed.
         let callableElem: CallableValue? = {
             guard let ma = node.calledExpression.as(MemberAccessExprSyntax.self),
-                  Self.ELEMENT_ITERATORS.contains(ma.declName.baseName.text) || pairIterator,
+                  Self.isElementIterator(ma.declName.baseName.text),
                   let base = ma.base else { return nil }
             return callableValue(base)
+        }()
+        // SOUNDNESS R349, THE TUPLE-ADAPTER HALF. `v.enumerated()` and `zip(v, w)` yield TUPLES, so the
+        // element the body calls arrives as a SLOT of the closure's parameter (`$0.1.run()`), not as the
+        // parameter. `elementTypeOf` correctly answers nil for both — neither is element-PRESERVING —
+        // so `iteratorElem` is nil and the parameter was cleared, and the enclosing function went
+        // ABSENT. The discriminator that proves this is the axis rather than a missing name:
+        // `for (_, g) in v.enumerated() { _ = g.run() }` CHARGES `Fs` today, so `enumerated` itself is
+        // understood; what was not is the tuple reaching a CLOSURE parameter rather than a `for` binder.
+        // Two consumers of one fact, and only the one in front of the last author was wired — R346.
+        //
+        // `tupleElem` is the index `rootOf` already reads for `p.0`/`p.c`, so this adds no name-keyed
+        // state and inherits its clear (`clearBindingTypeOnly`) and its snapshot/restore unchanged.
+        let tupleAdapterSlots: [String: String]? = {
+            guard let ma = node.calledExpression.as(MemberAccessExprSyntax.self),
+                  Self.isElementIterator(ma.declName.baseName.text),
+                  let base = ma.base,
+                  let call = Self.peel(base).as(FunctionCallExprSyntax.self) else { return nil }
+            // `v.enumerated()` → `(offset, element)`; the element is slot 1. The arity guard matters:
+            // a user type's `enumerated(from:)` is a different method.
+            if let inner = call.calledExpression.as(MemberAccessExprSyntax.self),
+               inner.declName.baseName.text == "enumerated", call.arguments.isEmpty,
+               let recv = inner.base, let e = elementTypeOf(recv) {
+                return ["1": e.name]
+            }
+            // `zip(a, b)` → `(a.Element, b.Element)`, via the SHARED resolver the `for`-binder arm also
+            // uses. One authority for one fact — writing it out twice here is precisely R347, and the
+            // `for` and closure spellings of `zip` were BOTH silent, so there is no "existing copy"
+            // excuse available.
+            if let slots = zipElementSlots(base) { return slots }
+            return nil
         }()
         // the TRAILING closure (or first positional) is the iterator's element closure
         let elemClosure = node.trailingClosure
@@ -3725,7 +3899,7 @@ final class CallCollector: SyntaxVisitor {
                 // was true and is now unnecessary: a clear that is given back is not lossy either.
                 // Ground truth EXECUTED — every arm really deletes its probe file.
                 typeScopes[closure.id, default: []].append((p.name, snapshotType(p.name)))
-                if let ce = callableElem, i == 0, closure == elemClosure {
+                if let ce = callableElem, isElementParam(i), closure == elemClosure {
                     // R178 — the unwrapped callable payload. Ahead of the annotation branch on purpose:
                     // `cb.map { (f: Cb) in f() }` spells the type, and that spelling is the alias whose
                     // `isFunction` flag is the thing this row exists about — recording it in `vars`
@@ -3740,13 +3914,19 @@ final class CallCollector: SyntaxVisitor {
                     if !bindCallableElement(p.name, annotated) {
                         vars[p.name] = annotated             // explicit `{ (x: Foo) in }` — precise
                     }
-                } else if (i == 0 || pairIterator), iteratorElem == nil, let inner = nestedIterElem,
+                } else if isElementParam(i), iteratorElem == nil, let inner = nestedIterElem,
                           closure == elemClosure {
                     // R278 — the parameter is itself a container; give it its ELEMENT, not a type.
                     // Guarded on `iteratorElem == nil` so it can only fire where the existing arm
                     // refuses: this may add an element index, never replace one.
                     setArrayElem(p.name, (inner, false))
-                } else if (i == 0 || pairIterator), let elem = iteratorElem, closure == elemClosure {
+                } else if isElementParam(i), let elem = iteratorElem, closure == elemClosure {
+                    // REACH PROBE (R349). An empty corpus diff is indistinguishable from a change
+                    // nothing reached; this counts the arms the fix ADDED, never the ones it inherited.
+                    if Self.r349Debug, elemParamIndex != nil {
+                        FileHandle.standardError.write(
+                            "R349REDUCE \(iteratorMethod ?? "?") -> \(elem.name)\n".data(using: .utf8)!)
+                    }
                     // iterator element param — typed (both params for a pair-iterator like
                     // sorted/min/max; only the first for the rest)
                     // R211 — …unless the ELEMENT IS CALLABLE (`handlers.forEach { $0() }`), which is
@@ -3768,6 +3948,20 @@ final class CallCollector: SyntaxVisitor {
                         // closure parameter — so a flag set here would be wiped a moment later. Record it
                         // against the closure and let the closure's own visit re-apply it inside its save.
                         if elem.mono { monoClosureParams[closure.id, default: []].insert(p.name) }
+                    }
+                } else if isElementParam(i), iteratorElem == nil, nestedIterElem == nil,
+                          let slots = tupleAdapterSlots, closure == elemClosure {
+                    // R349 — the parameter IS the tuple (`enumerated()`/`zip`), so record its SLOTS and
+                    // not a type. Ordered LAST of the typing arms and guarded on both resolvers having
+                    // refused, for the reason the R278 arm above states: this may add an index, never
+                    // replace one. `clearBindingTypeOnly` first because a tuple binding must not sit
+                    // beside a stale `vars`/`arrayElem` entry for the same name — that pairing is the
+                    // drift R351 records.
+                    clearBindingTypeOnly(p.name)
+                    tupleElem[p.name] = slots
+                    if Self.r349Debug {
+                        FileHandle.standardError.write(
+                            "R349TUPLE \(iteratorMethod ?? "?") -> \(slots)\n".data(using: .utf8)!)
                     }
                 } else {
                     clearBindingTypeOnly(p.name)             // every other param — CLEARED, never leak
@@ -4035,21 +4229,29 @@ final class CallCollector: SyntaxVisitor {
         // THIS IS THE PREREQUISITE FOR MAKING THE TABLE TOTAL: doing that on top of `literalForLabel`
         // would have extended the loss to every establishing name — ~35 non-test call sites in the
         // 15-package corpus (`shellOut(` 20, `File(path` 7, `Folder(path` 6, `FileHandle(for` 2).
-        let lit = freeCallName.flatMap(locatorLabelsForFree)
-            .map { labels -> String? in
-                let byResolver = resolvedForLabel(node.arguments, labels)
-                // REACH PROBE (R431). The corpus A/B for this change reports an empty diff, and an empty
-                // diff is indistinguishable from a change nothing reached. HIT counts every table hit;
-                // GAIN counts the ones where the OLD picker returned nil and the new one does not —
-                // the behaviour change itself, not a proxy for it. The old picker is evaluated ONLY
-                // inside the guard: a probe that costs work when it is off is a probe that gets deleted.
-                //
-                // MEASURED with it: 13 hits across 14 real Swift projects, all `shellOut`, and 0 GAINS —
-                // every real call passes its command as a direct literal, so both pickers agree and the
-                // corpus diff is empty for a reason rather than by luck.
+        // SOUNDNESS R415 / R432 — THE TABLE NOW CARRIES POSITIONS AND AN OPAQUE ARM, so it can say what
+        // `Set<String>` of labels could not. `.position(k)` is the k'th argument counting ALL of them
+        // (`posix_spawn(&pid, PATH, …)`); `.opaque` withholds the literal for a form whose locator no
+        // surface can express, DERIVED from `isOpaqueLocatorFree` rather than listed again (R347/R432).
+        // The live defect this closed was `sqlite3_open_v2(runtimePath, &db, 6, "unix-dotfile")` reading
+        // `incomplete: None` because the whole-list scan found the VFS-name sibling; see `locatorForFree`.
+        let lit = freeCallName.flatMap(locatorForFree)
+            .map { slot -> String? in
+                let byResolver: String?
+                switch slot {
+                case .opaque:                 byResolver = nil
+                case .label(let l):           byResolver = resolvedForLabel(node.arguments, [l])
+                case .position(let k):        byResolver = resolvedAtPosition(node.arguments, k)
+                }
                 if Self.r431Debug {
                     FileHandle.standardError.write("R431HIT \(freeCallName ?? "?")\n".data(using: .utf8)!)
-                    if literalForLabel(node.arguments, labels) == nil, let g = byResolver {
+                    let old: String?
+                    switch slot {
+                    case .opaque:          old = nil
+                    case .label(let l):    old = literalForLabel(node.arguments, [l])
+                    case .position(let k): old = literalAtPosition(node.arguments, k)
+                    }
+                    if old == nil, let g = byResolver {
                         FileHandle.standardError.write(
                             "R431GAIN \(freeCallName ?? "?") -> \(g)\n".data(using: .utf8)!)
                     }
@@ -4196,7 +4398,11 @@ final class CallCollector: SyntaxVisitor {
                 // mDNS by definition, so the descriptor decides the key with no over-disclosure rule
                 // needed: a non-bonjour descriptor is simply not local-network. `Net` still comes from
                 // kappaFree, which now knows this type at all — it did not before.
-                if bonjourDescriptorArg(node.arguments) { directEffects.insert("LocalNetwork") }
+                // R390 — …and for `NetService(domain:type:name:port:)` / `NetServiceBrowser()` there IS no
+                // descriptor to read: the TYPE is the evidence. See `isMdnsOnlyRoot`.
+                if isMdnsOnlyRoot(dealias(name)) || bonjourDescriptorArg(node.arguments) {
+                    directEffects.insert("LocalNetwork")
+                }
                 if let eff = kappaFree(name: dealias(name), argCount: node.arguments.count) {
                     directEffects.insert(eff)
                 // SOUNDNESS R385, the Net half — A BROWSE HAS NO EXPRESSIBLE DESTINATION, so its
@@ -4255,6 +4461,17 @@ final class CallCollector: SyntaxVisitor {
                 if eff == "Fs" { let ks = fsKind(root: aliasName, member: "<init>")
                                   if ks.isEmpty { fsKinds.insert("?") } else { for k in ks { fsKinds.insert(k) } } }
                 if eff == "Llm" { directEffects.insert("Net") } // §1 ⟨0.13⟩ a model-SDK ctor/call IS network I/O
+                // SOUNDNESS R390, THE NETWORK-FRAMEWORK TAIL. The three bonjour-aware sites are all
+                // guarded on the THREE browser roots, so `NWConnection(to: .service(name:type:…))` and
+                // `NWListener(service: .init(name:type:))` — the same mDNS registration, spelled on the
+                // types that also serve ordinary networking — reached none of them and charged `Net`
+                // alone. Asked HERE, where every κ-Net ctor already lands, rather than by adding two more
+                // roots to a guard that has now been widened three times (R346's hand-list shape). The
+                // descriptor is the evidence, not the type: `NWConnection(host:port:)` carries no
+                // `name:`+`type:` pair and gains nothing, which the over-charge control pins.
+                if eff == "Net", bonjourDescriptorArg(node.arguments) {
+                    directEffects.insert("LocalNetwork")
+                }
                 recordSurfaces(effect: eff, lit: lit, args: node.arguments, netEstablishing: est)
                 if lit == nil, est, !(eff == "Fs" && lastResolvedHomePath) { incompleteSurfaces.insert(eff) }
                 // ⟨0.33.1⟩ UNION, not winner-take-all: `name` matched the κ table because no UNCONDITIONAL
@@ -4524,6 +4741,14 @@ final class CallCollector: SyntaxVisitor {
                     // site; see the ctor arm above for the measurement and why the predicates could not
                     // close it.
                     if eff == "Net" { incompleteSurfaces.insert("Net") }
+                    // R390 — the VERB half of the type rule. `searchForServices(ofType:inDomain:)` and
+                    // `publish()` carry no descriptor to read, so the descriptor question above answers
+                    // "no" for every Foundation Bonjour call; `isMdnsOnlyRoot` is what makes the type the
+                    // evidence. Placed INSIDE the κ guard on purpose: `LocalNetwork` refines `Net`, and
+                    // `NW_PURE_VERBS` (`cancel`/`forceCancel`/`batch`) are teardown — charging a privacy
+                    // key on a call this engine has just ruled performs no network I/O would be exactly
+                    // the fabrication the `NSLocalNetworkUsageDescription` exclusion was written about.
+                    if eff == "Net", isMdnsOnlyRoot(rt) { directEffects.insert("LocalNetwork") }
                 }
             } else if let rt = base.root, rt == "FileManager", member == "urls" || member == "url",
                       !declaredTypes.contains(rt) {

@@ -298,12 +298,34 @@ final class ClassifierTests: XCTestCase {
         // The pre-existing Fs establishing names must survive.
         XCTAssertTrue(isEstablishingFree(effect: "Fs", name: "fopen"))
         XCTAssertTrue(isEstablishingFree(effect: "Fs", name: "FileHandle"))
-        // CONTROLS — an ordinary host-bearing Net form is NOT opaque: its locator IS a host and must
-        // still be captured, or this fix would withhold every real destination in the engine.
-        for n in ["NWConnection", "NWListener", "getaddrinfo", "connect", "fopen"] {
+        // SOUNDNESS R432 — `NWListener` MOVED TO THIS SIDE, and it used to be a CONTROL on the other one.
+        //
+        // The control below asserted that `NWListener` "names a real host or path". It does not, and the
+        // sentence was never measured: `NWListener(using:on:)`'s locator is an `NWEndpoint.Port`, and
+        // there is no `NWListener(host:)` spelling in the framework. Because `NWEndpoint.Port` is
+        // `ExpressibleByStringLiteral`, `NWListener(using: .tcp, on: "8080")` handed the whole-argument
+        // fallback a top-level string and it entered `hosts` as `["8080"]`, COMPLETE — while the INT
+        // spelling `on: 8080` reported `incomplete: ["Net"]`, which is the right answer for both. Two
+        // spellings of one listen disagreeing, and the one that read complete NAMING A HOST THAT DOES NOT
+        // EXIST. ⟨0.29⟩'s rule that a listen address must never enter `hosts` is cited in this engine's
+        // own source and was violated by the one free-call spelling of listen.
+        //
+        // A control whose premise is wrong is worse than no control: this one made the defect look
+        // considered. It is kept as a control on the OTHER side of the same line.
+        XCTAssertTrue(isOpaqueLocatorFree("NWListener"),
+                      "R432: a listen address is a PORT, not a host — capturing it fabricates a "
+                      + "destination, exactly as R381's first cut captured \"443\"")
+        XCTAssertTrue(isNetEstablishingFree(name: "NWListener"),
+                      "R432: a listen still ESTABLISHES — withholding the literal is only sound because "
+                      + "the masking guard then marks the surface incomplete rather than silent")
+        // CONTROLS — an ordinary host-bearing or path-bearing form is NOT opaque: its locator IS the
+        // destination and must still be captured, or this fix would withhold every real destination in
+        // the engine. `NWConnection` is the discriminator against `NWListener` above: same framework,
+        // same ctor shape, and its `host:` argument is a genuine host.
+        for n in ["NWConnection", "getaddrinfo", "connect", "fopen", "shellOut", "posix_spawn"] {
             XCTAssertFalse(isOpaqueLocatorFree(n),
-                           "\(n) names a real host or path — withholding its literal would destroy "
-                           + "the surface this engine exists to publish")
+                           "\(n) names a real host, path or command — withholding its literal would "
+                           + "destroy the surface this engine exists to publish")
         }
     }
 

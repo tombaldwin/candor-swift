@@ -1441,6 +1441,62 @@ public func isOpaqueLocatorFree(_ name: String) -> Bool {
     case "NWBrowser", "NetService", "NetServiceBrowser": return true
     // the Keychain — the locator is a CFDictionary query, not a path
     case "SecItemAdd", "SecItemUpdate", "SecItemDelete", "SecItemCopyMatching": return true
+    // SOUNDNESS R432 — A LISTEN ADDRESS IS NOT A HOST, AND `NWListener`'S IS A PORT.
+    //
+    // `NWEndpoint.Port` is `ExpressibleByStringLiteral`, so `NWListener(using: .tcp, on: "8080")` handed
+    // the whole-argument fallback a top-level string and it entered `hosts` as `["8080"]`, COMPLETE.
+    // The INT spelling `on: 8080` reported `incomplete: ["Net"]` — the right answer for both — so two
+    // spellings of one listen disagreed, and the one that read complete named a host that does not
+    // exist. That is the fabrication R381's first cut made with `"443"`, and ⟨0.29⟩'s rule that a listen
+    // address must never enter `hosts` is cited in THIS FILE (`is_net_local_bind`, ~40 lines up) and was
+    // violated by the one free-call spelling of listen.
+    //
+    // It belongs HERE and not in a second list: this predicate is exactly "establishes, but its locator
+    // is not a host or a path", and `locatorForFree`'s `.opaque` arm DERIVES from it (R347/R432). A
+    // listen on a port is establishing — `isNetEstablishingFree` already says so — so withholding the
+    // literal makes the masking guard fire and the surface fail closed, which is the same posture the
+    // bonjour browse and the Keychain query take and for the same reason.
+    case "NWListener": return true
+    default: return false
+    }
+}
+
+/// SOUNDNESS R390 — **A TYPE CAN BE DEFINITIONALLY mDNS, AND TWO OF THEM ARE.**
+///
+/// The three sites that charge `LocalNetwork` all asked one question — *is a `.bonjour(…)` DESCRIPTOR
+/// among these arguments* — and `NetService`/`NetServiceBrowser` never carry one, because for them the
+/// service type is a plain `String` parameter (`NetService(domain:type:name:port:)`,
+/// `searchForServices(ofType:inDomain:)`). So the whole Foundation half of Bonjour charged `Net` and
+/// never `LocalNetwork`, while `062d3c9` — the commit that added `NetService` to all three sites for the
+/// `Net` half — asserted in its own diff that *"`LocalNetwork` remains the positive channel and still
+/// fires"*. It did not fire, for the root that commit introduced.
+///
+/// **THE CONSEQUENCE IS A FALSE ANSWER TO A COMPLIANCE QUESTION, not a missing row.** MEASURED at HEAD
+/// (0.38.2), one variable — the API spelling of one mDNS browse, everything else held identical:
+///
+///     NWBrowser(for: .bonjour(type: t, domain: nil), using: .tcp)   → LocalNetwork; `deny LocalNetwork`
+///         exit 1; `privacy-manifest` → "LocalNetwork → NSLocalNetworkUsageDescription (reached by: browse)"
+///     NetServiceBrowser().searchForServices(ofType: t, inDomain: "local.")
+///                                                                   → Net only; `deny LocalNetwork`
+///         exit 0; `privacy-manifest` → **"no privacy-sensor reach found; no usage-description keys
+///         required."**
+///
+/// That last line is the engine telling a Bonjour app it needs no `NSLocalNetworkUsageDescription`.
+///
+/// **WHY A TYPE, AND NOT A DESCRIPTOR, IS SOUND HERE — given the reason this key was withheld.** The
+/// declared exclusion for `NSLocalNetworkUsageDescription` (in `MANIFEST_EXCLUSIONS`) says the key is
+/// *"not separable by type (NWBrowser/NWConnection also serve ordinary networking)"*. That sentence is
+/// TRUE of the Network framework types and FALSE of these two: `NetService` and `NetServiceBrowser` ARE
+/// the Bonjour API. There is no non-mDNS operation on either — every verb publishes, browses or resolves
+/// an mDNS record — so the type itself is the evidence and no over-disclosure judgement is needed. The
+/// exclusion's reason was right about the names it named, and was never re-asked for the names it did not.
+///
+/// ONE AUTHORITY, consulted by all three charge sites, rather than the name written out at each — R347 is
+/// this register's record of what two copies of one list cost, and the defect being fixed here IS three
+/// copies of one question that a fourth root had to be added to.
+public func isMdnsOnlyRoot(_ name: String) -> Bool {
+    switch name {
+    case "NetService", "NetServiceBrowser": return true
     default: return false
     }
 }
@@ -1468,31 +1524,84 @@ public func isNetResolverFree(_ name: String) -> Bool {
 /// So the locator POSITION is declared per call name instead of guessed. `""` means the first UNLABELED
 /// argument. Returning nil keeps the old whole-list scan for calls whose single literal is their locator.
 /// A name absent here is no worse than before; a name present here can no longer capture a sibling.
-public func locatorLabelsForFree(_ name: String) -> Set<String>? {
-    if isNetResolverFree(name) { return [""] }
+public enum FreeLocatorSlot: Equatable {
+    /// A LABELLED argument (`shellOut(to:)`). `""` means the first UNLABELED argument, which is what the
+    /// `Set<String>` schema this replaced could express — and all it could express.
+    case label(String)
+    /// The Nth argument, 0-based, counting EVERY argument. This is the arm the old schema did not have,
+    /// and `posix_spawn(pid_t *pid, const char *path, …)` is why: its locator is argument 1, so `""`
+    /// landed on `&pid` and yielded nothing.
+    case position(Int)
+    /// ESTABLISHES, but no surface can express its locator — withhold the literal and let the masking
+    /// guard mark the surface incomplete. ⟨0.29⟩'s bind/listen rule, R385's establishing-yes/capture-no.
+    case opaque
+}
+
+/// SOUNDNESS R394 / R415 / R432 — WHICH ARGUMENT IS THE LOCATOR, by NAME, WITH A TYPE THAT CAN SAY IT.
+///
+/// `firstStringLiteral` scans the WHOLE argument list, which is right only for a call whose only literal
+/// IS its locator. Where it is not, the picker captures the wrong string and the engine then treats that
+/// as proof of completeness:
+///   * `shellOut(to: runtimeCmd, at: "/tmp/work")` published `cmds: ["/tmp/work"]` — the WORKING
+///     DIRECTORY reported as the command. A fabrication AND a gate bypass: `allow Exec /tmp/work` exit 0
+///     over a caller-controlled command.
+///   * `getaddrinfo(host, service, …)` captured `"443"` as a host — measured on R381's first cut.
+///   * `execvP(file, search_path, argv)` published its SEARCH PATH as the command: `allow Exec
+///     /usr/bin:/bin` exit 0 over a caller-controlled program (R415).
+///   * `fopen(path, mode)` hands the Fs arm `"r"`; that one is caught only because `"r"` fails a
+///     path-shape test downstream, which is luck rather than design.
+///
+/// A name absent here falls back to the whole-list scan and is no worse than before; a name present here
+/// can no longer capture a sibling.
+///
+/// **WHY THE RETURN TYPE CHANGED, and why adding names to the old one would have LOOKED like a fix.**
+/// The old schema was `Set<String>` of LABELS with `""` meaning *the first UNLABELED argument*. A C call
+/// has no labels, so every argument is unlabeled and `""` always meant argument 0 — the schema could not
+/// express "the second one" AT ALL. `posix_spawn`/`posix_spawnp`'s locator IS argument 1, so adding them
+/// to the old table would have pointed the picker at `&pid`, found nothing, and marked every spawn
+/// incomplete; leaving them out kept them resolving BY TYPE (below). Either way the table read as
+/// covering them and did not.
+///
+/// **`posix_spawn` WAS ALREADY CORRECT, and the reason is worth writing down because it is not luck the
+/// way the `exec*` siblings were.** MEASURED at 0.38.2 before this change: `posix_spawn(&pid, p, …)` over
+/// a runtime `p` reported `incomplete: ["Exec"]`, and with a literal `"/bin/ls"` reported
+/// `cmds: ["/bin/ls"]`. In `posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *,
+/// const posix_spawnattr_t *, char *const argv[], char *const envp[])` the ONLY parameter a Swift string
+/// literal can inhabit in code that compiles is `path`. So the whole-list scan could not reach a sibling
+/// — a TYPE argument, not a spelling accident, which is the distinction `execvP` did not have (its
+/// argument 1 is a `const char *` too). It is declared anyway: a name whose correctness rests on a
+/// signature nobody wrote down is a name the next author will reason about wrongly.
+///
+/// **`sqlite3_open_v2` IS THE ONE THAT WAS STILL LIVE (R415).** `sqlite3_open_v2(filename, ppDb, flags,
+/// zVfs)` takes a VFS NAME as argument 3, and it is a string literal in ordinary code. MEASURED:
+/// `sqlite3_open_v2(runtimePath, &db, 6, "unix-dotfile")` reported **`incomplete: None`** — the
+/// whole-argument scan found `"unix-dotfile"`, `lit != nil` kept the incompleteness guard from firing,
+/// and the literal was then DISCARDED downstream (a filename is not SQL, so no `tables` entry is
+/// published either way). A runtime-controlled locator whose surface reads COMPLETE: SPEC ⟨0.29⟩'s
+/// position rule violated, which PART 51 pins four-way. The sibling `sqlite3_open(filename, ppDb)` has no
+/// second string and was correct — the same one-spelling-of-a-family shape `execvP` had.
+///
+/// `sqlite3_exec`/`sqlite3_prepare*` take the SQL as argument 1 and were also correct by type (a db
+/// handle, an Int32 and pointers are the other arguments); declared for the same reason as `posix_spawn`.
+///
+/// **THE OPAQUE ARM IS DERIVED FROM `isOpaqueLocatorFree`, NOT COPIED FROM IT.** R347 is this register's
+/// record of what two copies of one list cost, and R432 arrived as "add `NWListener` to the opaque arm" —
+/// which, written as a second list here, would have been that bug on the day it was introduced. Ask the
+/// authority.
+public func locatorForFree(_ name: String) -> FreeLocatorSlot? {
+    if isOpaqueLocatorFree(name) { return .opaque }
+    if isNetResolverFree(name) { return .position(0) }   // getaddrinfo(node, service, …)
     switch name {
-    case "shellOut": return ["to"]          // ShellOut: shellOut(to:arguments:at:) — `at:` is a directory
-    case "fopen", "freopen": return [""]    // POSIX: the path is argument 0, the mode is a string too
-    // SOUNDNESS R415 — THE `exec*` FAMILY, and `execvP` is why it is a family and not one name.
-    // `execvP(file, search_path, argv)` takes a `const char *` SEARCH PATH as argument 1, so the
-    // whole-argument fallback published it as the command. MEASURED, with `deny Exec` calibrated to 1 on
-    // the same file: `execvP(runtimeFile, "/usr/bin:/bin", &argv)` reported `cmds: ["/usr/bin:/bin"]`,
-    // `incomplete: none`, and **`allow Exec /usr/bin:/bin` exited 0** over a caller-controlled command.
-    // A fabricated command AND the AS-EFF-008 masking, from one sibling literal.
-    //
-    // THE OTHER FOUR WORK ONLY BY LUCK and are declared with it rather than left to it: `execv`,
-    // `execvp` and `execve` take an argv/envp ARRAY second, which is not a string literal, so the
-    // fallback happens to land on argument 0. That is the same "caught by spelling luck" this register
-    // keeps recording — R418's `createFile(named: "z")`, R393's `fopen` mode — so the position is now
-    // declared for all four.
-    //
-    // `posix_spawn`/`posix_spawnp` are NOT here and cannot be: their locator is argument 1
-    // (`posix_spawn(pid_t *pid, const char *path, …)`), and this table's `""` means the FIRST unlabeled
-    // argument — `literalForLabel` takes the first arg whose label matches and returns nil if it is not
-    // a plain literal, so `[""]` lands on `&pid` and yields nothing. They need the POSITION schema this
-    // row's fix is really about; today they resolve correctly by the same luck (nothing before the path
-    // is a string literal).
-    case "execv", "execvp", "execve", "execvP": return [""]
+    case "shellOut": return .label("to")      // ShellOut: shellOut(to:arguments:at:) — `at:` is a directory
+    case "fopen", "freopen": return .position(0)         // POSIX: the path is arg 0, the mode is a string too
+    // R415 — the `exec*` family. `execvP(file, search_path, argv)` takes a `const char *` SEARCH PATH as
+    // argument 1; `execv`/`execvp`/`execve` take an argv/envp ARRAY there, so they landed on argument 0
+    // by spelling luck. Declared for all four rather than left to it.
+    case "execv", "execvp", "execve", "execvP": return .position(0)
+    case "posix_spawn", "posix_spawnp": return .position(1)          // (pid, PATH, file_actions, attr, argv, envp)
+    case "sqlite3_open", "sqlite3_open16", "sqlite3_open_v2": return .position(0)   // (FILENAME, ppDb, flags, zVfs)
+    case "sqlite3_exec", "sqlite3_prepare", "sqlite3_prepare_v2", "sqlite3_prepare_v3",
+         "sqlite3_prepare16", "sqlite3_prepare16_v2", "sqlite3_prepare16_v3": return .position(1)  // (db, SQL, …)
     default: return nil
     }
 }
