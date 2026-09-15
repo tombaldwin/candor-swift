@@ -9,6 +9,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.38.2] — 2026-09-15
+
 - No engine change; released to keep the family line aligned at 0.38.2, so `ENGINE_PIN` names a version
   every engine has published and the per-engine pin overrides can all be cleared.
 
