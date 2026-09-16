@@ -9,6 +9,24 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **A Bonjour app was told it needs no privacy key (SOUNDNESS R390 — a FALSE VERDICT, not just a missing
+  row).** `NetServiceBrowser().searchForServices(...)` charged `Net` only, so `deny LocalNetwork` exited 0
+  and `privacy-manifest --verify` returned `ok:true` against an EMPTY `Info.plist`. Fixed with one
+  authority (`isMdnsOnlyRoot`) consulted by all three charge sites, and swept past the trigger:
+  `NWConnection(to:.service(name:type:))` and `NWListener(service:)` were silent too, closed by the
+  `name:`+`type:` SIGNATURE rather than by three more names.
+- **A fold over an effectful element is no longer silent (R349).** `v.reduce(0) { $0 + $1.run() }`,
+  `enumerated().forEach`, `zip` all read pure. The row's own prescribed fix was UNIMPLEMENTABLE — shorthand
+  closures give `$0/$1/$2` regardless of arity, so "the last parameter" never binds — and is implemented as
+  an index instead. A/B over 15 packages / 3,575 files: ADDED 3 / REMOVED 1 / CHANGED 2, reach 25 across 10.
+- **Locator schema + `sqlite3_open_v2` (R415, R432).** The locator table moved from `Set<String>` to
+  `label/position/opaque`, because a set of names could not express "argument 1" at all.
+- **The privacy `why` column can no longer go stale (R445/R449).** 56 of 57 entries carried an expired
+  "not modelled" string — including the `NSLocalNetworkUsageDescription` one that made R390 read as
+  CONSIDERED. The reason no longer travels with the universe, so the stale state is UNREPRESENTABLE, and
+  `PrivacyKeyUniverseTests` — cited in a doc comment since 2026-08-05 and **never actually written** — now
+  exists and is calibrated in four arms.
+
 ## [0.38.2] — 2026-09-15
 
 - No engine change; released to keep the family line aligned at 0.38.2, so `ENGINE_PIN` names a version
