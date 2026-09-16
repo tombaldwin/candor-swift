@@ -9,6 +9,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.38.3] — 2026-09-16
+
 - **A Bonjour app was told it needs no privacy key (SOUNDNESS R390 — a FALSE VERDICT, not just a missing
   row).** `NetServiceBrowser().searchForServices(...)` charged `Net` only, so `deny LocalNetwork` exited 0
   and `privacy-manifest --verify` returned `ok:true` against an EMPTY `Info.plist`. Fixed with one
