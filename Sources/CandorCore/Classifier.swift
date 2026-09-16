@@ -992,70 +992,115 @@ public let PRIVACY_CONDITIONAL_REQUIREMENT: [String: String] = [
 /// One key is here that the page does not list: NSFocusStatusUsageDescription. It is real (Focus status
 /// sharing) and documented elsewhere; kept, and flagged, rather than dropped because it did not appear
 /// in one source.
-public let APPLE_PRIVACY_KEYS: [(key: String, why: String)] = [
-    ("NFCReaderUsageDescription", "not modelled"),
-    ("NSAccessoryTrackingUsageDescription", "visionOS surface; not modelled"),
-    ("NSAppBundlesUsageDescription", "enterprise/managed surface; not modelled"),
-    ("NSAppDataUsageDescription", "enterprise/managed surface; not modelled"),
-    ("NSAppleEventsUsageDescription", "not modelled"),
-    ("NSAppleMusicUsageDescription", "not modelled"),
-    ("NSAudioCaptureUsageDescription", "visionOS surface; not modelled"),
-    ("NSBluetoothAlwaysUsageDescription", "not modelled"),
-    ("NSBluetoothPeripheralUsageDescription", "not modelled"),
-    ("NSCalendarsFullAccessUsageDescription", "not modelled"),
-    ("NSCalendarsUsageDescription", "not modelled"),
-    ("NSCalendarsWriteOnlyAccessUsageDescription", "not modelled"),
-    ("NSCameraUsageDescription", "not modelled"),
-    ("NSContactsUsageDescription", "not modelled"),
-    ("NSCriticalMessagingUsageDescription", "NO PUBLIC API NAMES IT — Apple's page for this key links no symbol at all. It gates an entitlement for emergency SMS, so the evidence is a .entitlements file, not a call site"),
-    ("NSDesktopFolderUsageDescription", "triggered by PATH, not by API — needs value provenance"),
-    ("NSDocumentsFolderUsageDescription", "triggered by PATH, not by API — needs value provenance"),
-    ("NSDownloadsFolderUsageDescription", "triggered by PATH, not by API — needs value provenance"),
-    ("NSEnterpriseMCAMUsageDescription", "enterprise/managed surface; not modelled"),
-    ("NSFaceIDUsageDescription", "not modelled"),
-    ("NSFallDetectionUsageDescription", "not modelled"),
-    ("NSFileProviderDomainUsageDescription", "not modelled"),
-    ("NSFileProviderPresenceUsageDescription", "RESEARCHED 2026-08-05 AND GENUINELY UNDETERMINABLE: Apple's key page links no symbol, the FileProvider framework index contains no presence/known-folder/materialised symbol, and no entitlement names it either. It is not a table row anyone forgot — there is nothing in code to see. The verify raises it CONDITIONALLY where a file provider exists, which is the most that can be said"),
-    ("NSFinancialDataUsageDescription", "enterprise/managed surface; not modelled"),
-    ("NSGKFriendListUsageDescription", "not modelled"),
-    ("NSHandsTrackingUsageDescription", "visionOS surface; not modelled"),
-    ("NSHealthClinicalHealthRecordsShareUsageDescription", "not modelled"),
-    ("NSHealthShareUsageDescription", "not modelled"),
-    ("NSHealthUpdateUsageDescription", "not modelled"),
-    ("NSHomeKitUsageDescription", "not modelled"),
-    ("NSIdentityUsageDescription", "not modelled"),
-    ("NSLocalNetworkUsageDescription", "not separable by type (NWBrowser/NWConnection also serve ordinary networking) and the key travels with an entitlement this engine does not read; the bonjour-descriptor and .local-host spellings are tractable — CONSTANT-PROVENANCE-DESIGN.md step 3"),
-    ("NSLocationAlwaysAndWhenInUseUsageDescription", "not modelled"),
-    ("NSLocationAlwaysUsageDescription", "not modelled"),
-    ("NSLocationTemporaryUsageDescription", "a temporary-accuracy REQUEST on a modelled Location manager; the key is purpose-string-keyed, not API-keyed"),
-    ("NSLocationUsageDescription", "not modelled"),
-    ("NSLocationWhenInUseUsageDescription", "not modelled"),
-    ("NSMainCameraUsageDescription", "visionOS surface; not modelled"),
-    ("NSMicrophoneUsageDescription", "not modelled"),
-    ("NSMotionUsageDescription", "not modelled"),
-    ("NSNearbyInteractionAllowOnceUsageDescription", "the allow-once variant of a modelled key; not separable at the call site"),
-    ("NSNearbyInteractionUsageDescription", "not modelled"),
-    ("NSNetworkVolumesUsageDescription", "triggered by PATH, not by API — needs value provenance"),
-    ("NSPhotoLibraryAddUsageDescription", "not modelled"),
-    ("NSPhotoLibraryUsageDescription", "not modelled"),
-    ("NSRemindersFullAccessUsageDescription", "not modelled"),
-    ("NSRemindersUsageDescription", "not modelled"),
-    ("NSRemovableVolumesUsageDescription", "triggered by PATH, not by API — needs value provenance"),
-    ("NSSensorKitUsageDescription", "not modelled"),
-    ("NSSiriUsageDescription", "not modelled"),
-    ("NSSpeechRecognitionUsageDescription", "not modelled"),
-    ("NSSystemAdministrationUsageDescription", "not modelled"),
-    ("NSSystemExtensionUsageDescription", "not modelled"),
-    ("NSUserTrackingUsageDescription", "not modelled"),
-    ("NSVideoSubscriberAccountUsageDescription", "not modelled"),
-    ("NSWorldSensingUsageDescription", "visionOS surface; not modelled"),
-    ("NSFocusStatusUsageDescription", "not modelled (documented outside the protected-resources page)"),
+///
+/// THIS USED TO BE A LIST OF `(key, why)` PAIRS AND 56 OF THE 57 `why` STRINGS WERE FALSE (R445). Every
+/// modelled key still carried the reason it had when it was NOT modelled — 47 of them the bare string
+/// "not modelled" — one line under an output that reads *"56 of Apple's 57 … are modelled"*. The strings
+/// were inert (only `PRIVACY_UNMODELLED_KEYS` ever printed one, and it filters), which is exactly what
+/// let them rot: nothing that anyone ran could disagree with them. THE COST WAS PAID ELSEWHERE — the
+/// stale `NSLocalNetworkUsageDescription` reason ("not separable by type … the key travels with an
+/// entitlement this engine does not read") is what made R390, a Bonjour app told by `--verify` that it
+/// needed no privacy key, read as a CONSIDERED limitation rather than a live false all-clear, sitting in
+/// the one table a reader checks before deciding whether a gap is known.
+///
+/// So the reason no longer travels with the universe. A `why` exists ONLY for a key that is actually
+/// unmodelled (`PRIVACY_UNMODELLED_WHY` below), which makes the stale state UNREPRESENTABLE for the 56 —
+/// there is no field left to go stale — and `PrivacyKeyUniverseTests` derives BOTH sides from
+/// `privacyKeyMap` so the remaining one cannot drift either. Not a second hand-written list checked
+/// against the first: that is the two-sided drift that makes a ratchet vacuous.
+///
+/// Nothing load-bearing was dropped with the 56 strings. "triggered by PATH, not by API" survives as
+/// `PRIVACY_KEY_BASIS`' `constant` basis plus the §6 undetermined-path count; NSCriticalMessaging's
+/// "no public API names it" survives verbatim in `ENTITLEMENT_REQUIRED_KEYS`' doc comment; the
+/// allow-once and Enterprise-MCAM alternatives survive as comments in `privacyKeyMap`; and
+/// NSFocusStatus' provenance note is the paragraph above, where it was always a fact about the
+/// UNIVERSE rather than about modelling.
+public let APPLE_PRIVACY_KEYS: [String] = [
+    "NFCReaderUsageDescription",
+    "NSAccessoryTrackingUsageDescription",
+    "NSAppBundlesUsageDescription",
+    "NSAppDataUsageDescription",
+    "NSAppleEventsUsageDescription",
+    "NSAppleMusicUsageDescription",
+    "NSAudioCaptureUsageDescription",
+    "NSBluetoothAlwaysUsageDescription",
+    "NSBluetoothPeripheralUsageDescription",
+    "NSCalendarsFullAccessUsageDescription",
+    "NSCalendarsUsageDescription",
+    "NSCalendarsWriteOnlyAccessUsageDescription",
+    "NSCameraUsageDescription",
+    "NSContactsUsageDescription",
+    "NSCriticalMessagingUsageDescription",
+    "NSDesktopFolderUsageDescription",
+    "NSDocumentsFolderUsageDescription",
+    "NSDownloadsFolderUsageDescription",
+    "NSEnterpriseMCAMUsageDescription",
+    "NSFaceIDUsageDescription",
+    "NSFallDetectionUsageDescription",
+    "NSFileProviderDomainUsageDescription",
+    "NSFileProviderPresenceUsageDescription",
+    "NSFinancialDataUsageDescription",
+    "NSGKFriendListUsageDescription",
+    "NSHandsTrackingUsageDescription",
+    "NSHealthClinicalHealthRecordsShareUsageDescription",
+    "NSHealthShareUsageDescription",
+    "NSHealthUpdateUsageDescription",
+    "NSHomeKitUsageDescription",
+    "NSIdentityUsageDescription",
+    "NSLocalNetworkUsageDescription",
+    "NSLocationAlwaysAndWhenInUseUsageDescription",
+    "NSLocationAlwaysUsageDescription",
+    "NSLocationTemporaryUsageDescription",
+    "NSLocationUsageDescription",
+    "NSLocationWhenInUseUsageDescription",
+    "NSMainCameraUsageDescription",
+    "NSMicrophoneUsageDescription",
+    "NSMotionUsageDescription",
+    "NSNearbyInteractionAllowOnceUsageDescription",
+    "NSNearbyInteractionUsageDescription",
+    "NSNetworkVolumesUsageDescription",
+    "NSPhotoLibraryAddUsageDescription",
+    "NSPhotoLibraryUsageDescription",
+    "NSRemindersFullAccessUsageDescription",
+    "NSRemindersUsageDescription",
+    "NSRemovableVolumesUsageDescription",
+    "NSSensorKitUsageDescription",
+    "NSSiriUsageDescription",
+    "NSSpeechRecognitionUsageDescription",
+    "NSSystemAdministrationUsageDescription",
+    "NSSystemExtensionUsageDescription",
+    "NSUserTrackingUsageDescription",
+    "NSVideoSubscriberAccountUsageDescription",
+    "NSWorldSensingUsageDescription",
+    "NSFocusStatusUsageDescription",
+]
+
+/// WHY a key in Apple's universe is NOT modelled — the reason that used to sit beside all 57.
+///
+/// EXACTLY ONE ENTRY PER UNMODELLED KEY, no more and no fewer, and `PrivacyKeyUniverseTests` asserts
+/// that set equality against the DERIVED unmodelled set. A modelled key with a leftover reason fails the
+/// gate (that is R445); an unmodelled key with no reason fails it too (a disclosure that names a gap and
+/// cannot say why is the weaker half of the same defect).
+public let PRIVACY_UNMODELLED_WHY: [String: String] = [
+    "NSFileProviderPresenceUsageDescription":
+        "RESEARCHED 2026-08-05 AND GENUINELY UNDETERMINABLE: Apple's key page links no symbol, the "
+        + "FileProvider framework index contains no presence/known-folder/materialised symbol, and no "
+        + "entitlement names it either. It is not a table row anyone forgot — there is nothing in code to "
+        + "see. The verify raises it CONDITIONALLY where a file provider exists, which is the most that can "
+        + "be said",
 ]
 
 /// The keys candor does NOT model — Apple's universe minus what `privacyKeyMap` can emit. Derived.
+///
+/// The `?? ` arm is REACHABLE and deliberately loud rather than plausible: a key that falls out of the
+/// model with no reason recorded prints the placeholder into the user-facing disclosure instead of a
+/// confident sentence. `PrivacyKeyUniverseTests` fails first, in CI; this is what the output says if
+/// someone ships past it.
 public var PRIVACY_UNMODELLED_KEYS: [(key: String, why: String)] {
     let modelled = Set(privacyKeyMap.values.flatMap { $0 })
-    return APPLE_PRIVACY_KEYS.filter { !modelled.contains($0.key) }
+    return APPLE_PRIVACY_KEYS.filter { !modelled.contains($0) }
+        .map { (key: $0, why: PRIVACY_UNMODELLED_WHY[$0] ?? "NO REASON RECORDED — this key left the "
+                                 + "model without one; treat the gap as unexplained, not as understood") }
 }
 
 public let privacyKeyMap: [String: [String]] = [
@@ -2014,8 +2059,10 @@ public let C_PLATFORM_MODULES: Set<String> = ["Darwin", "Glibc", "Musl", "WinSDK
 /// is now the only gate — plus one PROVABLE narrowing: a call carrying an ARGUMENT LABEL cannot be one of
 /// these, because a C function imported into Swift has no argument labels at all, so `remove(at: index)`
 /// could not bind to `remove(_: UnsafePointer<CChar>)` however the compiler tried. (That is a fact about
-/// the language, not a heuristic about intent — the distinction §F1.5 turns on. `CNativeDisclosureTests`
-/// pins both directions.)
+/// the language, not a heuristic about intent — the distinction §F1.5 turns on. `CNativeDisclosureArityProcessTests`
+/// pins both directions (`testTheLabelGateCannotSeparateTheStructFromTheSyscall`). THE NAME IN THIS
+/// COMMENT WAS `CNativeDisclosureTests`, WHICH HAS NEVER EXISTED — see R450: a backticked test name in a
+/// comment is a claim nothing resolves, and this repo had two of them.)
 ///
 /// MEASURED over 13 real packages (swift-nio, swift-argument-parser, alamofire, swift-collections, vapor,
 /// GRDB, swift-format, Kingfisher, swift-log, swift-tools-support-core, Publish, swift-nio-ssl, and
