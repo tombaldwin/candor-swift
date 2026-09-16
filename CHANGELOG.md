@@ -18,9 +18,11 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   `NWConnection(to:.service(name:type:))` and `NWListener(service:)` were silent too, closed by the
   `name:`+`type:` SIGNATURE rather than by three more names.
 - **A fold over an effectful element is no longer silent (R349).** `v.reduce(0) { $0 + $1.run() }`,
-  `enumerated().forEach`, `zip` all read pure. The row's own prescribed fix was UNIMPLEMENTABLE — shorthand
-  closures give `$0/$1/$2` regardless of arity, so "the last parameter" never binds — and is implemented as
-  an index instead. A/B over 15 packages / 3,575 files: ADDED 3 / REMOVED 1 / CHANGED 2, reach 25 across 10.
+  `enumerated().forEach` and `zip` each left the caller ABSENT from `functions[]`. SOUNDNESS R349
+  prescribed "the last parameter is the element"; that spelling was tried and did not hold, because shorthand closures give `$0/$1/$2` regardless
+  of arity — so it is implemented as an index, with a test per spelling in
+  `FoldElementParamProcessTests.swift`. A/B over 15 packages / 3,575 files: ADDED 3 / REMOVED 1 / CHANGED 2,
+  reach 25 hits across 10 entries.
 - **Locator schema + `sqlite3_open_v2` (R415, R432).** The locator table moved from `Set<String>` to
   `label/position/opaque`, because a set of names could not express "argument 1" at all.
 - **The privacy `why` column can no longer go stale (R445/R449).** 56 of 57 entries carried an expired
