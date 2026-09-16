@@ -964,7 +964,10 @@ final class CallCollector: SyntaxVisitor {
     /// asymmetry is deliberate: an unreadable MEDIA TYPE still means a capture is happening, whereas an
     /// unreadable search path is overwhelmingly an app-scoped directory that needs no key at all, and
     /// charging all three folders on every `urls(for:)` call would fabricate on ordinary code. The miss
-    /// is caught by the undetermined-path disclosure instead.
+    /// is caught by the undetermined-path disclosure instead — TRUE FOR A LOOKUP AND FALSE FOR A CALL
+    /// THAT CREATES, which is R387: the disclosure that catches it fires at the WRITE, so a call whose
+    /// whole effect happens inside the search-path API has no later site to be caught at. See
+    /// `searchPathMaterialisesDestination`.
     /// Is a `.bonjour(…)` service descriptor among these arguments? mDNS by definition, so this needs no
     /// over-disclosure rule: a descriptor that is not bonjour is simply not local-network.
     private func bonjourDescriptorArg(_ args: LabeledExprListSyntax) -> Bool {
@@ -993,6 +996,49 @@ final class CallCollector: SyntaxVisitor {
             let labels = Set(call.arguments.compactMap { $0.label?.text })
             if labels.contains("name") && labels.contains("type") { return true }
         }
+        return false
+    }
+
+    /// R387 / R467 — does this `FileManager` search-path call PERFORM a filesystem operation at the
+    /// directory it names, or only NAME a directory the caller then operates on?
+    ///
+    /// The distinction is the whole fix, and it is MEASURED rather than argued. R387 proposed marking `Fs`
+    /// incomplete on EVERY `url(for:)`/`urls(for:)` — sound, but it would have been redundant on the
+    /// common spelling and inconsistent with the ⟨0.32⟩ free-function twins. One fixture settles it
+    /// (`nightswift-flow`, five functions, each mixing a benign literal with one search-path spelling):
+    ///
+    ///     let u = FileManager.default.urls(for:.documentDirectory,in:…)[0]; "y".write(to: u…)
+    ///                                               incomplete ['Fs']  ← ALREADY disclosed
+    ///     url(for:…,create:false) then write to it  incomplete ['Fs']  ← ALREADY disclosed
+    ///     "y".write(toFile: NSTemporaryDirectory()+…)   incomplete ['Fs']  ← ALREADY disclosed
+    ///     url(for:…,create:true), result DISCARDED      incomplete NONE   ← R387, the hole
+    ///     url(forUbiquityContainerIdentifier:), DISCARDED  incomplete NONE ← R467, same shape
+    ///
+    /// A LOOKUP hands back a URL, and the general unreadable-locator rule (`lit == nil` → incomplete)
+    /// fires at whatever the caller does with it. A call that CREATES the directory has no later site:
+    /// the effect is complete when the call returns, so nothing downstream can disclose it, and
+    /// `allow Fs <literal>` certifies the whole function on the strength of an unrelated benign literal.
+    /// Marking the lookups too would add a second, redundant `incomplete` to rows that already carry
+    /// one — and would assert *"reaches a structurally-invisible Fs endpoint"* (AS-EFF-008's own words)
+    /// of a call that reaches no endpoint at all.
+    ///
+    /// FAIL-CLOSED on the flag, per the denylist discipline: only a literal `false` is evidence that
+    /// nothing is created. `create: shouldCreate` is unreadable, so it counts as creating.
+    private func searchPathMaterialisesDestination(args: LabeledExprListSyntax) -> Bool {
+        // R467 — `url(forUbiquityContainerIdentifier:)` establishes access to (and materialises) the
+        // iCloud container. Same posture as `create: true`: callers invoke it for that side effect and
+        // discard the URL, and the identifier is not a path any policy surface can name.
+        if args.contains(where: { $0.label?.text == "forUbiquityContainerIdentifier" }) { return true }
+        for a in args where a.label?.text == "create" {
+            if let b = Self.peel(a.expression).as(BooleanLiteralExprSyntax.self) {
+                return b.literal.text != "false"
+            }
+            return true
+        }
+        // No `create:` label at all: `urls(for:in:)`, or a `url(…)` overload that only locates.
+        // DELIBERATELY EXCLUDED, with the reason rather than by omission —
+        // `containerURL(forSecurityApplicationGroupIdentifier:)` does not reach this branch (its member
+        // is `containerURL`, not `url`/`urls`), and it is a lookup, so the general rule covers its use.
         return false
     }
 
@@ -4767,7 +4813,15 @@ final class CallCollector: SyntaxVisitor {
                 for c in searchPathClasses(searchPathArg(node.arguments)) { directEffects.insert(c) }
                 if let eff = kappaMember(root: rt, member: member) {
                     directEffects.insert(eff)
-                    if eff == "Fs" { fsKinds.insert("?") }   // destination is an enum, not a literal path
+                    if eff == "Fs" {
+                        fsKinds.insert("?")   // destination is an enum, not a literal path
+                        // R387/R467 — the SURFACE half, and it is deliberately NOT the whole branch.
+                        // `searchPathMaterialisesDestination` carries the measurement that drew the line
+                        // where it is rather than around the branch.
+                        if searchPathMaterialisesDestination(args: node.arguments) {
+                            incompleteSurfaces.insert("Fs")
+                        }
+                    }
                 }
             } else if let rt = base.root, PRIVACY_AUDIO_SESSION_TYPES.contains(rt), !declaredTypes.contains(rt) {
                 // AVAudioSession / AVAudioApplication. `setCategory(.record)` is how essentially every

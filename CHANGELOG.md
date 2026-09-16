@@ -9,6 +9,47 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Verdict-affecting
+
+- **`allow Fs <a benign literal>` exited 0 over a directory creation (SOUNDNESS R387, a LIVE GATE
+  BYPASS; R467 is the sibling).** `FileManager.url(for:in:appropriateFor:create: true)` charged `Fs`
+  and captured NOTHING into `paths`, so one unrelated readable literal anywhere in the same function
+  made the surface read complete. Measured on the pre-fix binary: `inferred:['Fs']
+  paths:['/tmp/benign.txt'] incomplete:NONE`, `deny Fs` exit 1, **`allow Fs /tmp/benign.txt` exit 0**
+  over a call that creates a directory. Now exit 1. R467 is `url(forUbiquityContainerIdentifier:)`,
+  measured in the identical posture by the same fixture.
+
+  **The fix is NOT the whole branch, and the arm was chosen by measurement rather than by argument.**
+  R387 proposed marking `Fs` incomplete on EVERY `url(for:)`/`urls(for:)`. Measured instead, five
+  functions each pairing a benign literal with one search-path spelling: `urls(for:)` then a write to
+  the result, `url(…create:false)` then a write, and `NSTemporaryDirectory()` then a write ALL already
+  report `incomplete:['Fs']` — the general unreadable-locator rule fires at the WRITE. Only
+  `create: true` and the ubiquity container, whose whole effect happens inside the call, had no later
+  site to be caught at. `SearchPathSurfaceProcessTests.testALookupsDestinationIsAlreadyDisclosedDownstream`
+  pins that premise and passes on BOTH arms deliberately, so the scoping stops being safe loudly.
+  Fail-closed on the flag: only a literal `false` counts as not creating (`create: shouldCreate` marks).
+
+  A/B over 6 real Swift corpora (alamofire, swift-argument-parser, swift-nio, pollen,
+  FirebaseCoreInternal, swift-syntax), **12,610 rows: ADDED 0 / REMOVED 0 / CHANGED 0, REACH 1** —
+  `bin/corpus-ab.py`, wide key, with an instrumented arm. The single reach site is pollen's
+  `SnapshotCache.fileURL` (a real `create: true`), traced to ground: it already carried
+  `incomplete:['Fs']` from its `createDirectory(at:)`, so no change there is correct, not assumed.
+  **The corpus CANNOT price the over-mask and the reason is written down rather than smoothed:** of
+  328 `Fs` rows across those 6 corpora, exactly ONE has a non-empty `paths` and NONE is certifiable
+  (223 are already `incomplete`), so `allow Fs <literal>` certifies nothing there either way. The blast
+  radius is bounded by the fixtures, not by the A/B.
+
+- **`--target` named targets its own verdict excluded (R468 — a FALSE DISCLOSURE).** On
+  swift-argument-parser, `--target ArgumentParserEndToEndTests` printed *"scanning 4 target(s)
+  [ArgumentParser, ArgumentParserEndToEndTests, ArgumentParserTestHelpers, ArgumentParserToolInfo] …
+  This verdict covers that closure ONLY"* while the report held zero functions from `Tests/` and 67
+  files under `harness-target`. The `excluded` array and the sentence introducing it disagreed about
+  the same run. The note now DERIVES its list from the files that survived into the scan, on both
+  resolvers, and names the uncovered closure members instead of omitting them: *"scanning 3 target(s)
+  […]. 1 target(s) resolved into the closure contributed NO analysed file and are NOT covered
+  [ArgumentParserEndToEndTests]"*. Verified on both the SwiftPM and the `.xcodeproj` resolver, with the
+  mirror control (a target that DID contribute is never reported uncovered).
+
 ## [0.38.3] — 2026-09-16
 
 - **A Bonjour app was told it needs no privacy key (SOUNDNESS R390 — a FALSE VERDICT, not just a missing

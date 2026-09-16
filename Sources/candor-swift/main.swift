@@ -1014,9 +1014,40 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
         // statement in the one line whose whole job is provenance.
         let why = packageSwiftExists ? "Package.swift declares no target of this name"
                                      : "no Package.swift"
+        // SOUNDNESS R468 — THE NAMED LIST IS DERIVED FROM THE FILES THAT SURVIVED, NEVER RESTATED FROM
+        // THE CLOSURE. This line used to print `scope.closure` verbatim, which is the set the RESOLVER
+        // produced — and the resolver runs before the harness/test/platform exclusions have had their
+        // say. So `--target <AnExecutable>` on swift-argument-parser printed *"scanning 4 target(s)
+        // [ArgumentParser, ArgumentParserEndToEndTests, ArgumentParserTestHelpers,
+        // ArgumentParserToolInfo] … This verdict covers that closure ONLY"* while the report carried
+        // zero functions from `Tests/` and 67 files filed under `harness-target`. The `excluded` array
+        // was right and this sentence was wrong about the same run — a FALSE DISCLOSURE, which this
+        // register treats as worse than silence, because a reader checking whether their test target
+        // was judged reads the sentence, not the array.
+        //
+        // A restated note has already drifted by the time anyone reads it; a derived one cannot. The
+        // derivation is the COMPLEMENT of the excluded set — the paths still in `sourcePaths` at this
+        // point — because that is the set the verdict is actually computed from, and it is the one
+        // quantity every exclusion rule (harness walk, `isTestSource`, platform prune, closure filter)
+        // has already been applied to. Deriving from `excludedFiles` instead would need every rule's
+        // class vocabulary to stay in sync with this line, which is the drift again one level over.
+        // `std` is the resolver's own normalizer, declared above for the membership filter — the two
+        // sides of this comparison must agree byte for byte, same as they must there.
+        let survivingFiles = Set(sourcePaths.map(std))
+        var scanningTargets: [String] = []
+        var judgedNoTargets: [String] = []
+        for t in scope.closure {
+            if (scope.filesByTarget[t.name] ?? []).contains(where: { survivingFiles.contains(std($0)) }) {
+                scanningTargets.append(t.name)
+            } else {
+                // Zero attributed files, or every attributed file excluded — either way this target
+                // contributed nothing to the verdict, and saying otherwise is the defect above.
+                judgedNoTargets.append(t.name)
+            }
+        }
         var note = "candor-swift: --target \(want) — resolved via \(rel(hit.path, to: rootDir)) "
-            + "(\(why)): scanning \(scope.closure.count) target(s) "
-            + "[\(scope.closure.map(\.name).joined(separator: ", "))]"
+            + "(\(why)): scanning \(scanningTargets.count) target(s) "
+            + "[\(scanningTargets.joined(separator: ", "))]"
         if !scope.localPackages.isEmpty {
             note += " + \(scope.localPackages.count) local Swift package(s) "
                 + "[\(scope.localPackages.joined(separator: ", "))]"
@@ -1028,6 +1059,11 @@ func scopeToXcodeTarget(_ want: String, rootDir: String, sourcePaths: inout [Str
                 + "`swift package dump-package` — manifest too dynamic for the structural parser)"
         }
         note += ", \(sourcePaths.count) of \(before) source file(s)."
+        if !judgedNoTargets.isEmpty {
+            note += " \(judgedNoTargets.count) target(s) resolved into the closure contributed NO "
+                + "analysed file and are NOT covered [\(judgedNoTargets.joined(separator: ", "))] "
+                + "— see `excluded` in the report for the class and reason of each file."
+        }
         if let p = scope.platform, scope.platformExcludedCount > 0 {
             // The platform prune is a MEMBERSHIP statement and it is disclosed like one: these files
             // are in the target's packages but compile to nothing on its platform (`#if os(…)`).
@@ -1212,9 +1248,36 @@ if let want = scopeTarget {
         }
         // DISCLOSED, not silent. The reader must be able to tell a scoped scan from a whole-tree one:
         // a clean verdict here is a claim about ONE binary, and the same tree scanned whole may differ.
+        //
+        // SOUNDNESS R468 — and the named list is DERIVED from the files that survived, never restated
+        // from `closure`. This is the site D4 measured: `--target` on swift-argument-parser printed
+        // "scanning 4 target(s) [ArgumentParser, ArgumentParserEndToEndTests, ArgumentParserTestHelpers,
+        // ArgumentParserToolInfo] … This verdict covers that closure ONLY" over a report holding zero
+        // functions from `Tests/` and 67 files filed `harness-target`. See the Xcode resolver's copy of
+        // this note for why the derivation reads the SURVIVORS rather than `excludedFiles`.
+        let survivingSPM = Set(sourcePaths.map(abs))
+        var scanningSPM: [String] = []
+        var judgedNoSPM: [String] = []
+        for t in closure {
+            let own = (try? targetSourceDirs([t], packageRoot: rootDir, exists: { p in
+                var d: ObjCBool = false
+                return fm.fileExists(atPath: p, isDirectory: &d) && d.boolValue
+            })) ?? []
+            let tp = own.map { d -> String in let n = abs(d); return n.hasSuffix("/") ? n : n + "/" }
+            if survivingSPM.contains(where: { p in tp.contains(where: { p.hasPrefix($0) }) }) {
+                scanningSPM.append(t.name)
+            } else {
+                judgedNoSPM.append(t.name)
+            }
+        }
         var note = "candor-swift: --target \(want) — resolved via Package.swift: "
-            + "scanning \(closure.count) target(s) "
-            + "[\(closure.map(\.name).joined(separator: ", "))], \(sourcePaths.count) of \(before) source file(s)."
+            + "scanning \(scanningSPM.count) target(s) "
+            + "[\(scanningSPM.joined(separator: ", "))], \(sourcePaths.count) of \(before) source file(s)."
+        if !judgedNoSPM.isEmpty {
+            note += " \(judgedNoSPM.count) target(s) resolved into the closure contributed NO analysed "
+                + "file and are NOT covered [\(judgedNoSPM.joined(separator: ", "))] — see `excluded` "
+                + "in the report for the class and reason of each file."
+        }
         if let platformFamilies, platformPrunedHere > 0 {
             note += " \(platformPrunedHere) file(s) excluded as compiling to nothing on any of "
                 + "\(platformFamilies.sorted().joined(separator: ", ")) (this package's declared `platforms:`)."
