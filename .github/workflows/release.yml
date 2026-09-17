@@ -46,7 +46,7 @@ jobs:
         # `3c643e5` (the ⟨0.32⟩ carve-out commit) to match ci.yml.
         run: |
           git clone https://github.com/tombaldwin/candor-spec ../candor-spec
-          git -C ../candor-spec checkout --quiet 3c643e54c22b5f4352ea944800b55fba72dc211b
+          git -C ../candor-spec checkout --quiet 1bafc45d69aab687e0027f228cc495929afa8fdd
           bash smoke.sh
       - name: Create the GitHub release (idempotent)
         env:

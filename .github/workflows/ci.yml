@@ -35,7 +35,7 @@ on:
 # Bumped to `3c643e5` (2026-08-24) — the ⟨0.32⟩ carve-out commit, which is the contract this engine now
 # implements. Keep this and release.yml's literal in step.
 env:
-  CANDOR_SPEC_PIN: 3c643e54c22b5f4352ea944800b55fba72dc211b
+  CANDOR_SPEC_PIN: 1bafc45d69aab687e0027f228cc495929afa8fdd
 
 jobs:
   # SOUNDNESS R339 — A SAFETY ASSERTION MUST ARRIVE WITH A TEST.
