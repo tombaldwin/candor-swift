@@ -47,6 +47,15 @@ jobs:
         run: |
           git clone https://github.com/tombaldwin/candor-spec ../candor-spec
           git -C ../candor-spec checkout --quiet 1bafc45d69aab687e0027f228cc495929afa8fdd
+          # REACHABILITY GUARD (SOUNDNESS R473). A `checkout` of an ORPHANED commit SUCCEEDS —
+          # GitHub serves unreachable objects to fetch until it garbage-collects, on no published
+          # schedule — so running this step is NOT a test that the pin is sound. Measured 2026-09-17
+          # after the client-redaction rewrite orphaned the previous pin: checkout rc=0 both ways,
+          # raw.githubusercontent 200, and the only discriminator is reachability from a ref.
+          if [ "$(git -C ../candor-spec for-each-ref --contains 1bafc45d69aab687e0027f228cc495929afa8fdd 2>/dev/null | wc -l)" -eq 0 ]; then
+            echo "::error ::candor-spec pin 1bafc45d is UNREACHABLE from any ref — a history rewrite orphaned it. It still checks out, and it will stop doing so without warning when GitHub GCs. Remap it: in a candor-spec clone, grep -i '^1bafc45d69aab687e0027f228cc495929afa8fdd' .git/filter-repo/commit-map | awk '{print \$2}', or match by subject + author date, then verify the files this job READS are unchanged."
+            exit 1
+          fi
           bash smoke.sh
       - name: Create the GitHub release (idempotent)
         env:
