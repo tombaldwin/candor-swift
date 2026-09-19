@@ -81,6 +81,11 @@ struct DepEntry: Equatable {
     /// the dependency's report ALREADY carries `unknownWhy` — nothing looked for it. Same here.
     /// `dep:<hash>` is KEPT alongside: it names the origin, which the raw tokens do not.
     var whyClasses: Set<String> = []
+    /// ⟨0.39⟩ SPEC §4 obligation 1 — the abstraction MEMBERS this dependency function dispatches on, in
+    /// wire form (`<owning pkg>#<type path>.<member>`). The consumer's join (obligation 3) unions, per
+    /// key, every chained entry carrying it plus its OWN visible implementors — which is how an effectful
+    /// implementor supplied from a THIRD package reaches a consumer that can see both.
+    var dispatchesOn: Set<String> = []
 
     /// Fold another entry filed under the SAME index key into this one — the family-wide entry-collision
     /// rule (candor-spec/ENTRY-COLLISION-DECISION.md), replacing withdrawal and the trust-level preference.
@@ -95,6 +100,7 @@ struct DepEntry: Equatable {
         invisible.formUnion(other.invisible)
         incomplete.formUnion(other.incomplete)
         whyClasses.formUnion(other.whyClasses)
+        dispatchesOn.formUnion(other.dispatchesOn)     // ⟨0.39⟩
         // `whyReason` is the one non-Set field, so its merge has to be stated rather than fall out.
         // ORDER-INDEPENDENT BY CONSTRUCTION: a `dep-stale:` reason wins over a `dep:<hash>` one whichever
         // side it arrives on. Both project to `unresolved` so no gate turns on the choice, but they say
@@ -564,7 +570,18 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
             let pkg = hash.flatMap { $0.contains("#") ? String($0.split(separator: "#", maxSplits: 1)[0]) : nil }
                 ?? (obj?["package"] as? String)
             guard let pkg, !pkg.isEmpty else { continue }
-            register(pkg)
+            // ⟨0.39⟩ A FOREIGN UNION ENTRY IS NOT COVERAGE OF THE PACKAGE IT NAMES — and this line is the
+            // one place ⟨0.39⟩'s own fix could manufacture ⟨0.39⟩'s own defect. Obligation 2 makes a
+            // package publish `Iface#Backend.size` from EffImpl's report; `register` is the single
+            // mechanism that turns a report's SILENCE into a purity claim (§2 rule 3), so registering that
+            // hash prefix would grant EffImpl's report COVERAGE of Iface and withdraw `invisible` for
+            // every unanswered call into Iface — R475's own shape, deleted disclosure and all, produced by
+            // R475's own remedy. Withheld for EVERY `interfaceUnion` entry, not only the foreign ones: a
+            // local one's package is registered by the envelope anyway, so the narrow reading buys
+            // nothing and the broad one cannot be got wrong. The entry itself is still INDEXED below — the
+            // effect it carries is the whole point; only its authority over silence is refused.
+            let isUnionEntry = (e["interfaceUnion"] as? Bool) == true
+            if !isUnionEntry { register(pkg) }
 
             var entry = DepEntry()
             if stale {
@@ -612,8 +629,22 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
                         entry.whyReason = "dep:\(hash ?? "\(pkg)#\(qual)")"
                     }
                 }
+                // ⟨0.39⟩ obligation 1's wire field. NOT carried from a STALE report, for the same reason
+                // its effects are not: §2.1 refused to believe this producer, and a dispatch key is an
+                // instruction to go and union somebody else's effects into this consumer's row.
+                guard let dispatchNames = depStrs("dispatchesOn", e) else {
+                    depsFail("CANDOR_DEPS report \(f) entry `\(qual)` carries a `dispatchesOn` that is not "
+                             + "a list of strings — reading it as EMPTY would drop the abstraction member "
+                             + "SPEC §4 ⟨0.39⟩ published it to name")
+                }
+                for d in dispatchNames where d.contains("#") { entry.dispatchesOn.insert(d) }
             }
-            if entry.effects.isEmpty && entry.invisible.isEmpty && entry.incomplete.isEmpty { continue }
+            // ⟨0.39⟩ …AND AN ENTRY WHOSE ONLY CONTENT IS `dispatchesOn` IS KEPT. Obligation 1 makes a PURE
+            // dispatching function emit a row precisely so the consumer can union on the member it names;
+            // dropping it here as "nothing to say" would discard the whole producer leg and leave the join
+            // with nothing to ask on — the rung inert, and inert in the silent direction.
+            if entry.effects.isEmpty && entry.invisible.isEmpty && entry.incomplete.isEmpty
+                && entry.dispatchesOn.isEmpty { continue }
 
             // THREE key shapes per entry: `pkg#leaf`, `pkg#tail2`, and `pkg#<full qual>` — the shapes
             // this engine's call sites can derive (§2 rule 1). The full qual is the PRECISE one, and it

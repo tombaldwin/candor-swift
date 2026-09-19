@@ -1736,6 +1736,8 @@ let hostsAcc = analysis.hostsAcc, cmdsAcc = analysis.cmdsAcc
 let pathsAcc = analysis.pathsAcc, tablesAcc = analysis.tablesAcc
 let incompleteAcc = analysis.incompleteAcc
 let invisibleAcc = analysis.invisibleAcc
+// ⟨0.39⟩ SPEC §4 obligation 1 — the abstraction members each fn dispatches on, transitively, in wire form.
+let dispatchAcc = analysis.dispatchAcc
 // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): the target source candor could NOT read/parse — rides the report
 // (`unanalyzed`) + drives the fail-closed gate verdict + exit 2 below.
 let unanalyzedUnits = analysis.unanalyzed
@@ -1765,11 +1767,16 @@ let topLevelQuals = Set(allFns.filter { $0.isTopLevel }.map { $0.qual })
 var effectors: [Effector] = []
 // A pure fn that reaches a blind module is NOT in `inferred` (no effect seeds it), but it must still
 // appear — carrying `invisible` — so `inferred: []` is never an unqualified pure claim. Union the keys.
-let reportQuals = Set(inferred.keys).union(invisibleAcc.keys)
+// ⟨0.39⟩ …and a PURE function that DISPATCHES must appear too — the deliberate exception to §2 rule 3 the
+// clause names. Its absence was the purity claim that deleted a chained consumer's disclosure: a library
+// whose abstraction has ZERO implementors hedged, and adding ONE PURE implementor made the row vanish and
+// certified every consumer silent. Absence keeps its meaning; a dispatching row is simply no longer absent.
+let reportQuals = Set(inferred.keys).union(invisibleAcc.keys).union(dispatchAcc.keys)
 for qual in reportQuals.sorted() {
     let inf = inferred[qual] ?? []
     let invisible = (invisibleAcc[qual] ?? []).sorted()
-    if inf.isEmpty && invisible.isEmpty { continue }
+    let dispatches = (dispatchAcc[qual] ?? []).sorted()
+    if inf.isEmpty && invisible.isEmpty && dispatches.isEmpty { continue }
     // `unresolved` IS DERIVED FROM THE EFFECT SET, HERE, and that is the whole of this engine's answer to
     // candor-ts `e66f29e` (an entry inherited `Unknown` while its `unresolved` marker stayed absent, so a
     // TIER-1 consumer read `false` on an entry that genuinely carries Unknown). A marker maintained in
@@ -1788,6 +1795,7 @@ for qual in reportQuals.sorted() {
     if entryPoints.contains(qual) { ef.entryPoint = true }
     if topLevelQuals.contains(qual) { ef.unitKind = "initializer" }
     else if accessorQuals.contains(qual) { ef.unitKind = "accessor" }
+    if !dispatches.isEmpty { ef.dispatchesOn = dispatches }     // ⟨0.39⟩ SPEC §4 obligation 1
     if let w = whyMap[qual], !w.isEmpty { ef.unknownWhy = w.sorted() }
     if let h = hostsAcc[qual], !h.isEmpty { ef.hosts = h.sorted() }
     if let c = cmdsAcc[qual], !c.isEmpty { ef.cmds = c.sorted() }
@@ -1841,16 +1849,22 @@ for qual in reportQuals.sorted() {
     }
     effectors.append(ef)
 }
-// ⟨workspace-chain, opt-in via CANDOR_WORKSPACE_CHAIN⟩ PROTOCOL-CHA union entries — the candor-ts
-// `interfaceUnion` analog. A CONSUMER of this package that calls a protocol method on a `P`-typed value
-// imported from here resolves the call to the protocol REQUIREMENT (no body → no entry → the chain reads
-// it pure). Emit a synthetic `pkg#P.method` entry = the UNION over every local conformer of that method's
-// effects (inferred + invisible), reusing the `conformers` CHA universe in-package dispatch already uses.
-// Sound over-approximation; a `P.m` a consumer never resolves (not a real requirement) is harmless data.
-// GATED so a default scan stays byte-identical (four-way conformance unaffected until the rung is pinned).
-// For swift this is a PRECISION upgrade — an unresolved cross-package protocol call already discloses
-// `Unknown` (never silent-pure, Driver.swift), so the union only sharpens `Unknown` → the precise effect.
-if ProcessInfo.processInfo.environment["CANDOR_WORKSPACE_CHAIN"] != nil {
+// ⟨0.23/0.39⟩ PROTOCOL-CHA union entries — the candor-ts `interfaceUnion` analog. A CONSUMER of this
+// package that calls a protocol method on a `P`-typed value imported from here resolves the call to the
+// protocol REQUIREMENT (no body → no entry → the chain reads it pure). Emit a synthetic `pkg#P.method`
+// entry = the UNION over every local conformer of that method's effects (inferred + invisible), reusing
+// the `conformers` CHA universe in-package dispatch already uses. Sound over-approximation; a `P.m` a
+// consumer never resolves (not a real requirement) is harmless data.
+//
+// ⟨0.39⟩ TWO CHANGES, AND THE FIRST ONE IS WHY THE TOGGLE SURVIVED. (1) UN-GATED. This rode behind
+// CANDOR_WORKSPACE_CHAIN while SPEC §2's ⟨0.23⟩ paragraph read "gated until a floor rung pins it"; ⟨0.39⟩
+// is that rung and makes the field REQUIRED, and the gate is exactly why a default scan could not answer.
+// (2) KEYED UNDER THE PACKAGE THAT OWNS THE ABSTRACTION, not under this one. Obligation 2: a package
+// implementing a FOREIGN abstraction — `ratatui-crossterm`'s `CrosstermBackend: Backend` — publishes its
+// entry under the OWNER (`Iface#Backend.size`), because that is the key a consumer of the OWNER forms.
+// Keyed under the implementor, as this loop did, the entry names a key nobody asks on and the measured
+// real-world instance is missed entirely. `abstractionOwnerPkg` decides, and OMITS what it cannot decide.
+do {
     // index: bare owner-type -> the (method, qual) pairs it owns (built once from the report quals);
     // ownersByTail tracks the DISTINCT full owner paths per bare tail, for the ambiguity guard below.
     var ownerMethods: [String: [(method: String, qual: String)]] = [:]
@@ -1900,9 +1914,11 @@ if ProcessInfo.processInfo.environment["CANDOR_WORKSPACE_CHAIN"] != nil {
                 byMethod[method] = cur
             }
         }
+        // ⟨0.39⟩ obligation 2 — whose namespace this entry belongs in. UNDECIDABLE OWNER ⇒ NO ENTRY.
+        guard let ownerPkg = analysis.abstractionOwnerPkg[proto] else { continue }
         for (method, eff) in byMethod {
             if eff.inf.isEmpty && eff.inv.isEmpty { continue }   // pure across all conformers — silence = purity
-            let hash = "\(pkgName)#\(proto).\(method)"
+            let hash = "\(ownerPkg)#\(proto).\(method)"
             if emitted.contains(hash) { continue }               // a real entry already claims this hash
             var ef = Effector(fn: "\(proto).\(method)", loc: "",
                 inferred: EffectSet(names: eff.inf), direct: EffectSet(names: [String]()),
@@ -2233,8 +2249,21 @@ if peekListPath == nil, let pp = policyPath {
                 // The child's OWN function list, indexed by qual, so a NEW effect on a context function can
                 // be traced to WHICH call target explains it — the same array this loop already reads,
                 // just keyed once instead of re-scanned per candidate.
+                //
+                // ⟨0.39⟩ A SYNTHETIC UNION ENTRY IS NOT A UNIT, so it is filtered out of BOTH loops here.
+                // `interfaceUnion` entries carry `loc: ""` by construction — they are a CHA union, not a
+                // declaration in a file — and this block attributes a finding by its `loc`. An empty one
+                // matches neither `peekable` nor `contextAbs`, so it fell to the conservative
+                // "unattributable ⇒ class `excluded`" arm and published `Doer.work` with an EMPTY path as
+                // an out-of-scope finding. Under ⟨0.30⟩ a non-empty `outOfScope` makes the verdict
+                // INCOMPLETE (exit 2), so an un-gated union entry would have turned a green gate into a
+                // refusal on any package with a protocol — found by `PeekCHADispatchProcessTests`, which
+                // counts findings, not by anything that reads them. Same class as candor-rust's
+                // `5e89962` (a synthetic union entry is not a possible caller) and candor-java's frontier
+                // filter: a synthetic entry must be excluded wherever entries stand for units.
+                func isUnionEntry(_ e: [String: Any]) -> Bool { (e["interfaceUnion"] as? Bool) == true }
                 var childFuncsByQual: [String: [String: Any]] = [:]
-                for cf in (doc["functions"] as? [[String: Any]] ?? []) {
+                for cf in (doc["functions"] as? [[String: Any]] ?? []) where !isUnionEntry(cf) {
                     if let q = cf["fn"] as? String { childFuncsByQual[q] = cf }
                 }
                 // A single attribution can be reached two ways in one policy run — directly (the excluded
@@ -2255,7 +2284,7 @@ if peekListPath == nil, let pp = policyPath {
                                                         cls: cls, reason: reason))
                     }
                 }
-                for f in (doc["functions"] as? [[String: Any]] ?? []) {
+                for f in (doc["functions"] as? [[String: Any]] ?? []) where !isUnionEntry(f) {
                     // ⟨0.30⟩ the gate's own firing decision, per (rule, function): scope test, then `pure`
                     // means every effect except Unknown and a named rule means the intersection.
                     let inf = f["inferred"] as? [String] ?? []

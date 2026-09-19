@@ -207,4 +207,23 @@ enum ProcessHarness {
         guard let e = byName[fn] else { return nil }
         return (e["inferred"] as? [String])?.sorted()
     }
+
+    /// ⟨0.39⟩ A PURE ROW IS NO LONGER AN ABSENT ROW, so `XCTAssertNil(by[fn])` no longer says what the
+    /// fixtures using it meant. SPEC §4 ⟨0.39⟩ obligation 1 makes a function that DISPATCHES emit a row
+    /// even when it is otherwise pure — the deliberate exception to §2 rule 3 — precisely because that
+    /// row's ABSENCE was the purity claim a chained consumer's disclosure was being deleted by. An
+    /// absence assertion therefore now means "charged nothing AND does not dispatch", which is a
+    /// stronger claim than any of these controls was written to make and one that goes stale the moment
+    /// an unrelated dispatch is added to a fixture.
+    ///
+    /// This asserts what they meant: present or absent, the row carries NO effect, NO `Unknown` hedge
+    /// and NO blind-spot disclosure. It fails on every entry `XCTAssertNil` failed on except a
+    /// dispatch-only one, so it narrows nothing else. Returns the offending entry for the message, or
+    /// nil when the claim holds — used as `XCTAssertNil(ProcessHarness.chargedNothing(by, fn), …)`.
+    static func chargedNothing(_ byName: [String: [String: Any]], _ fn: String) -> String? {
+        guard let e = byName[fn] else { return nil }
+        let inf = (e["inferred"] as? [String]) ?? [], inv = (e["invisible"] as? [String]) ?? []
+        let inc = (e["incomplete"] as? [String]) ?? []
+        return (inf.isEmpty && inv.isEmpty && inc.isEmpty) ? nil : "\(e)"
+    }
 }

@@ -49,7 +49,15 @@ struct Effector {
     var privacy: [String: [String]]? = nil
     var invisible: [String]? = nil   // per-fn blind-spot disclosure: κ-unknown modules reached (qualifies `inferred`)
     var netClass: [String]? = nil    // ⟨0.20⟩ Net destination classes present in the fn's transitive Net surface
-    var interfaceUnion = false       // ⟨workspace-chain⟩ synthetic protocol-CHA union entry (not an analyzed unit)
+    var interfaceUnion = false       // ⟨0.23/0.39⟩ synthetic protocol-CHA union entry (not an analyzed unit)
+    /// ⟨0.39⟩ SPEC §4 obligation 1 — the abstraction MEMBERS this function dispatches on, in wire form
+    /// (`<owning pkg>#<type path>.<member>`, the ⟨0.23⟩ `typeSurface` spelling, which is also obligation
+    /// 2's key spelling; the clause forbids a second one). TRANSITIVE: propagated over the call graph
+    /// with the same fixpoint `inferred` uses, so a pure intermediary cannot break a consumer's walk one
+    /// hop short. Its PRESENCE is what makes an otherwise-PURE function EMIT a row — the deliberate
+    /// exception to §2 rule 3 the clause names, because the row's ABSENCE was the purity claim that
+    /// deleted the consumer's disclosure.
+    var dispatchesOn: [String]? = nil
     func toJSON() -> [String: Any] {
         var e: [String: Any] = [
             "fn": fn, "loc": loc,
@@ -70,7 +78,8 @@ struct Effector {
         if let pk = privacy, !pk.isEmpty { e["privacy"] = pk }
         if let v = invisible, !v.isEmpty { e["invisible"] = v }
         if let n = netClass, !n.isEmpty { e["netClass"] = n }   // ⟨0.20⟩ Net destination-class (SPEC §1)
-        if interfaceUnion { e["interfaceUnion"] = true }        // ⟨workspace-chain⟩ synthetic union entry
+        if let d = dispatchesOn, !d.isEmpty { e["dispatchesOn"] = d }   // ⟨0.39⟩ SPEC §4 obligation 1
+        if interfaceUnion { e["interfaceUnion"] = true }        // ⟨0.23/0.39⟩ synthetic union entry
         return e
     }
 }

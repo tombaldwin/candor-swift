@@ -208,6 +208,15 @@ final class DeclCollector: SyntaxVisitor {
     var fieldArrayElemNested: [String: [String: String]] = [:]  // R278 — `[[T]]` field -> INNER element `T`
     var fieldDictValue: [String: [String: String]] = [:]  // Type -> field -> VALUE type (`[K: V]` field)
     var protocolMethods: [String: Set<String>] = [:]   // protocol -> declared method names
+    /// ⟨0.39⟩ Every locally-declared protocol's FULLY QUALIFIED path (`Backend`, `Term.Backend`) — the
+    /// ⟨0.23⟩ `typeSurface` spelling, which SPEC §4 ⟨0.39⟩ makes the ONE wire spelling for a dispatched
+    /// abstraction (obligation 2's key and `dispatchesOn`'s value take the same rule, and the clause
+    /// forbids a second one). `protocolMethods` is keyed on the BARE name — it has to be, because a
+    /// dispatch site spells a nested protocol's leaf as often as its path — so it cannot answer "what do
+    /// I put on the wire". Swift 5.10 (SE-0404) allows `enum Term { protocol Backend {…} }`, so
+    /// `Term.Backend` and `Ui.Backend` really can share a leaf: that is why the wire pass REFUSES an
+    /// ambiguous leaf rather than guessing, exactly as candor-rust's R503 does.
+    var protocolPaths: Set<String> = []
     var protocolSupers: [String: Set<String>] = [:]    // protocol -> its DIRECT super-protocols (`Sub: Sup`)
     var returnsTmp: [String: String?] = [:]            // fn leaf -> return type (nil = ambiguous)
     var conformers: [String: [String]] = [:]           // protocol -> conforming local types
@@ -819,8 +828,10 @@ final class DeclCollector: SyntaxVisitor {
         // body, and is answered only by an `interfaceUnion` entry the producer emits under
         // CANDOR_WORKSPACE_CHAIN. Without one the lookup misses and falls to half 1's disclosure, so the
         // two mechanisms are LAYERED, never redundant, and the unanswerable key is never silence.
-        localTypePaths.insert(typeStack.isEmpty ? node.name.text
-                                                : typeStack.joined(separator: ".") + "." + node.name.text)
+        let protoPath = typeStack.isEmpty ? node.name.text
+                                          : typeStack.joined(separator: ".") + "." + node.name.text
+        localTypePaths.insert(protoPath)
+        protocolPaths.insert(protoPath)       // ⟨0.39⟩ the wire spelling — see `protocolPaths`
         var methods = Set<String>()
         for member in node.memberBlock.members {
             if let f = member.decl.as(FunctionDeclSyntax.self) { methods.insert(f.name.text) }

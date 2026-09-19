@@ -67,6 +67,14 @@ struct Analysis {
     /// its destination", which only the direct map can answer.
     var incompleteDirect: [String: Set<String>]
     var invisibleAcc: [String: Set<String>]
+    /// ⟨0.39⟩ SPEC §4 obligation 1 — fn -> the abstraction MEMBERS it dispatches on, transitively, in wire
+    /// form. Its presence makes an otherwise-PURE row EMIT (the deliberate exception to §2 rule 3).
+    var dispatchAcc: [String: Set<String>]
+    /// ⟨0.39⟩ SPEC §4 obligation 2 — every abstraction this package implements, mapped to the package that
+    /// OWNS it: this one for a locally-declared protocol or superclass, the DEPENDENCY for a foreign one.
+    /// A name absent from this map is one whose owner could not be decided; its union entry is not
+    /// published at all, because a key keyed under the wrong package is worse than an absent one.
+    var abstractionOwnerPkg: [String: String]
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): the TARGET's own .swift source candor could NOT read/parse —
     // a file whose `String(contentsOfFile:)` returned nil (unreadable: EACCES, invalid UTF-8, gone).
     // (SwiftSyntax's Parser.parse is error-TOLERANT — always returns a tree, never throws — so the
@@ -380,6 +388,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // hazard this exists to close).
     var unresolvedGenericFields: [(ty: String, field: String, param: String)] = []
     var protocolMethods: [String: Set<String>] = [:]
+    var protocolPaths: Set<String> = []           // ⟨0.39⟩ see DeclCollector.protocolPaths
     var protocolSupers: [String: Set<String>] = [:]
     var conformers: [String: [String]] = [:]
     /// R266 — `DeclCollector.pathSupers`, unioned: SUBTYPE FULL PATH -> supertype names.
@@ -405,6 +414,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var returnsIdx: [String: String] = [:]
     var importCounts: [String: Int] = [:]
     var fileImports: [String: [String]] = [:]   // file (rel path) -> modules it imports (per-fn blind disclosure)
+    /// ⟨0.39⟩ spelled inherited-type path -> the FILES whose conformances named it. Obligation 2 keys a
+    /// foreign abstraction's union entry under the OWNING package, and the only evidence a Swift
+    /// conformance carries about the owner is its file's import list — see `foreignOwnerModule`.
+    var conformanceFiles: [String: Set<String>] = [:]
     // ── INTERNAL MODULES: A DECLARED TARGET'S ACTUAL SOURCE ROOT, AND NOTHING ELSE ────────────────
     //
     // `internalModules` gates BOTH disclosure channels — the κ coverage ledger and the per-function
@@ -842,8 +855,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (t, fs) in c.opaqueFields { opaqueFields[t, default: []].formUnion(fs) }
         for (cn, ts) in c.caseAssoc { caseAssocAll[cn, default: []].formUnion(ts) }
         for (pn, ms) in c.protocolMethods { protocolMethods[pn, default: []].formUnion(ms) }
+        protocolPaths.formUnion(c.protocolPaths)   // ⟨0.39⟩
         for (pn, ss) in c.protocolSupers { protocolSupers[pn, default: []].formUnion(ss) }
-        for (pn, ts) in c.conformers { conformers[pn, default: []].append(contentsOf: ts) }
+        for (pn, ts) in c.conformers {
+            conformers[pn, default: []].append(contentsOf: ts)
+            conformanceFiles[pn, default: []].insert(c.file)     // ⟨0.39⟩ obligation 2, see `conformanceFiles`
+        }
         for (sub, sups) in c.pathSupers { pathSupers[sub, default: []].append(contentsOf: sups) }
         localTypes.formUnion(c.localTypes)
         localTypePaths.formUnion(c.localTypePaths)
@@ -1506,6 +1523,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var incompleteD: [String: Set<String>] = [:]   // fn -> effects with a structurally-incomplete surface (masking)
     var unreadableAliasArmFns: Set<String> = []   // R429 — see CallCollector.unreadableAliasArm
     var blindDirect: [String: Set<String>] = [:]    // fn -> blind modules it DIRECTLY reaches (per-fn `invisible`)
+    /// ⟨0.39⟩ SPEC §4 obligation 1 — fn -> the abstraction MEMBERS it dispatches on, already in wire form
+    /// (`<owning pkg>#<type path>.<member>`). DIRECT; `propagate`d over the call graph below, because the
+    /// clause requires the member to REACH the caller transitively and a pure intermediary omitted breaks
+    /// a consumer's walk one hop short.
+    var dispatchDirect: [String: Set<String>] = [:]
     // The κ-unknown modules this code imports (the ledger's set, hoisted for per-fn `invisible` attribution):
     // not a platform-frontier module, not a κ tier, not an internal target — effects through them are
     // INVISIBLE. A module a chained sibling report COVERS is exempt (SPEC §2 rule 3): the report — even an
@@ -1578,6 +1600,65 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var callsiteArgs: [String: [(caller: String, args: [ArgKind])]] = [:]
     var deferredCallbacks: [String: (indexes: Set<Int>, names: Set<String>)] = [:]
 
+    /// ⟨0.39⟩ Which DEPENDENCY package owns an external type named in `file`, when that can be decided
+    /// without guessing. Swift spells neither the owner at the type (`b: Backend`, not rust's
+    /// `&dyn iface::Backend` or java's `iface.Backend b`) nor the module at the import (`import Iface`
+    /// imports every name in it), so the owner is only derivable when the file leaves ONE candidate:
+    /// an import that its own target DECLARES as a dependency, is not a platform/κ module, and is not a
+    /// target this run analyzed. Two candidates refuse — the never-guess rule the whole dep index runs on
+    /// — which costs a disclosure the engine did not have before and can never mint a charge.
+    func foreignOwnerModule(inFile file: String) -> String? {
+        let declared = declaredByFile[file] ?? [], importable = importableByFile[file] ?? []
+        let cands = (fileImports[file] ?? []).filter {
+            declared.contains($0) && !importable.contains($0)
+                && !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0)
+        }
+        return cands.count == 1 ? cands.first : nil
+    }
+    /// ⟨0.39⟩ OBLIGATION 2 — the abstractions this package implements that it does NOT own, each with the
+    /// dependency package that DOES. Anything local (a protocol declared here, a superclass declared here)
+    /// is excluded: it is already keyed under this package. A name whose owner cannot be decided is
+    /// OMITTED, not keyed under this package — candor-rust published nine `io#Write::write_all` rows
+    /// naming a package that does not exist before it added the manifest filter, and a key no consumer can
+    /// join is worse than an absent one because it looks like an answer.
+    var abstractionOwnerPkg: [String: String] = [:]
+    for (pn, files) in conformanceFiles {
+        // LOCAL WINS, and on three indexes rather than one. The two error directions cost differently:
+        // keying a genuinely local abstraction under a DEPENDENCY would publish a union entry into
+        // someone else's namespace, where a same-named abstraction's consumer could join it — a
+        // fabricated charge. Keying a foreign one under OURS only ever produces a key nobody asks for.
+        if protocolPaths.contains(pn) || localTypePaths.contains(pn) || localTypes.contains(pn) {
+            abstractionOwnerPkg[pn] = pkgName
+        } else {
+            let mods = Set(files.compactMap { foreignOwnerModule(inFile: $0) })
+            if mods.count == 1, let m = mods.first { abstractionOwnerPkg[pn] = m }
+        }
+    }
+    /// ⟨0.39⟩ OBLIGATION 3, HALF 2 — THIS CONSUMER'S OWN VISIBLE IMPLEMENTORS of the abstraction a
+    /// chained key names, edged as ordinary calls so their effects flow through the same fixpoint
+    /// everything else does. `key` is a wire key, `<owning pkg>#<type path>.<member>`.
+    ///
+    /// GATED ON THE ABSTRACTION BEING THE SAME ONE. `conformers` is keyed on the spelled inheritance
+    /// path, so a consumer with its own unrelated `protocol Backend` would otherwise have ITS conformers
+    /// charged to a call dispatching the DEPENDENCY's `Backend` — a minted edge, which §4 lists as
+    /// fabrication. `abstractionOwnerPkg` answers "whose abstraction is the one I conform to", using the
+    /// same owner resolution the PRODUCER side keys its union entries with, so the two ends cannot drift.
+    func unionOwnImplementors(forKey key: String, to qual: String) {
+        guard let hashSep = key.firstIndex(of: "#") else { return }
+        let keyPkg = String(key[key.startIndex..<hashSep])
+        let path = String(key[key.index(after: hashSep)...])
+        guard let dot = path.lastIndex(of: "."), abstractionOwnerPkg[String(path[..<dot])] == keyPkg
+        else { return }
+        let proto = String(path[..<dot]), member = String(path[path.index(after: dot)...])
+        let conf = conformers[proto] ?? []
+        guard !conf.isEmpty else { return }
+        // SPEC §4's shared bound, through the SAME decision the in-scan protocol CHA makes rather than a
+        // second copy of it: too many implementors is disclosed indeterminacy, never a partial union read
+        // as the whole set. `chaWithinBound` discloses on `false` itself.
+        guard chaWithinBound(conf.count, proto, member, qual) else { return }
+        for c in conf { edges[qual, default: []].formUnion(resolveQual("\(c).\(member)")) }
+    }
+
     // THE ONE APPLY SITE for a chained dependency entry (SPEC §2). It was three, and they had drifted:
     // the chained-GLOBAL read carried the effects, `hosts`, `cmds` and `paths` and silently dropped
     // `tables`, `invisible` and `incomplete`. So a consumer that reached a dependency's effectful lazy
@@ -1589,23 +1670,57 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // Every field of `DepEntry` a consumer can inherit is applied HERE and nowhere else; adding one to
     // `DepEntry` and not to this function is the next instance of the same bug.
     func applyDepEntry(_ de: DepEntry, to qual: String) {
-        direct[qual, default: []].formUnion(de.effects)
-        if de.effects.contains("Unknown") {
-            if let why = de.whyReason { whyMap[qual, default: []].insert(why) }
-            // ⟨0.19⟩ the dependency's OWN reason tokens travel too, so the reason CLASS survives the
-            // boundary and `deny E Unknown[<class>]` is not silently inert on a chained consumer.
-            // `dep:<hash>` above names WHERE; these name WHY. See DepEntry.whyClasses.
-            whyMap[qual, default: []].formUnion(de.whyClasses)
+        // ⟨0.39⟩ OBLIGATION 3 — THE JOIN UNIONS, PER KEY. A worklist rather than recursion because a
+        // chained entry reached through `dispatchesOn` may itself dispatch (the abstraction's owner is not
+        // always the implementor's owner — that is R504's four-package chain), and Swift's local functions
+        // cannot be mutually recursive. `seenKeys` makes it terminate on a cyclic chain and idempotent on
+        // a diamond, which matters because the whole index is built on union being commutative and
+        // associative (ENTRY-COLLISION-DECISION.md).
+        var pending = [de]
+        var seenKeys = Set<String>()
+        while let cur = pending.popLast() {
+            direct[qual, default: []].formUnion(cur.effects)
+            if cur.effects.contains("Unknown") {
+                if let why = cur.whyReason { whyMap[qual, default: []].insert(why) }
+                // ⟨0.19⟩ the dependency's OWN reason tokens travel too, so the reason CLASS survives the
+                // boundary and `deny E Unknown[<class>]` is not silently inert on a chained consumer.
+                // `dep:<hash>` above names WHERE; these name WHY. See DepEntry.whyClasses.
+                whyMap[qual, default: []].formUnion(cur.whyClasses)
+            }
+            hostsD[qual, default: []].formUnion(cur.hosts)
+            cmdsD[qual, default: []].formUnion(cur.cmds)
+            pathsD[qual, default: []].formUnion(cur.paths)
+            tablesD[qual, default: []].formUnion(cur.tables)
+            if !cur.invisible.isEmpty { blindDirect[qual, default: []].formUnion(cur.invisible) }
+            if !cur.incomplete.isEmpty { incompleteD[qual, default: []].formUnion(cur.incomplete) }
+            for k in cur.dispatchesOn where seenKeys.insert(k).inserted {
+                // (a) EVERY CHAINED ENTRY CARRYING THAT KEY. One `lookup`, because the index has already
+                // UNIONED the contributors filed under it — which is precisely the ⟨0.25⟩ ambiguous-key
+                // rule ⟨0.39⟩ says it is reusing: this adds a contributor, not a resolution rule.
+                if let e = deps.lookup(k) { pending.append(e) }
+                // (b) …AND THIS CONSUMER'S OWN VISIBLE IMPLEMENTORS — see `unionOwnImplementors`.
+                unionOwnImplementors(forKey: k, to: qual)
+            }
         }
-        hostsD[qual, default: []].formUnion(de.hosts)
-        cmdsD[qual, default: []].formUnion(de.cmds)
-        pathsD[qual, default: []].formUnion(de.paths)
-        tablesD[qual, default: []].formUnion(de.tables)
-        if !de.invisible.isEmpty { blindDirect[qual, default: []].formUnion(de.invisible) }
-        if !de.incomplete.isEmpty { incompleteD[qual, default: []].formUnion(de.incomplete) }
     }
 
     let localProtocolNames = Set(protocolMethods.keys)  // loop-invariant: build once, not per fn
+    // ⟨0.39⟩ THE ONE WIRE SPELLING FOR A DISPATCHED ABSTRACTION (SPEC §4, obligations 1 and 2). It is
+    // ⟨0.23⟩'s `typeSurface` rule — fully qualified in the OWNING package's namespace, the namespace that
+    // package's entry hashes use — and the clause forbids inventing a second one. A dispatch site spells a
+    // nested protocol either way (`Backend` inside `Term`, `Term.Backend` outside it), so a bare leaf is
+    // mapped to its declared path and an AMBIGUOUS leaf is REFUSED rather than guessed: Swift 5.10's
+    // SE-0404 makes `Term.Backend` and `Ui.Backend` a real pair, and publishing the leaf for either would
+    // key a consumer onto the other's effects — a fabricated charge, not a missed one.
+    var protocolPathByLeaf: [String: [String]] = [:]
+    for pp in protocolPaths {
+        protocolPathByLeaf[pp.contains(".") ? String(pp.split(separator: ".").last!) : pp, default: []].append(pp)
+    }
+    func localProtocolWirePath(_ spelled: String) -> String? {
+        if protocolPaths.contains(spelled) { return spelled }
+        guard let c = protocolPathByLeaf[spelled], c.count == 1 else { return nil }
+        return c[0]
+    }
     // Does protocol `p` declare `member` DIRECTLY, or INHERIT it from a (transitive) super-protocol
     // (`protocol Sub: Sup` → `protocolSupers[Sub] = {Sup}`)? A super-protocol method IS callable on a
     // `Sub`-bound / `any Sub` receiver, and the sub's own concrete conformers (which provide the inherited
@@ -2435,6 +2550,36 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 for sub in subtypesOf[owner] ?? [] {
                     edges[f.qual, default: []].formUnion(resolveQual("\(sub).\(call.leaf)"))
                 }
+                // ⟨0.39⟩ OBLIGATION 1 OVER A FOREIGN ABSTRACTION — SOUNDNESS R504's shape, the MIDDLE
+                // package that owns neither the abstraction nor any implementor of it. The loop above is
+                // this package's own LOWER bound on the witness set; naming the member is what lets a
+                // CONSUMER add the rest, and without it the chain breaks one hop short and the consumer's
+                // row is ABSENT — under ⟨0.21⟩ a positive claim of purity.
+                //
+                // DELIBERATELY THE SAME SITE AND THE SAME CONJUNCTS as the CHA above, not a second
+                // judgement about what may be a dispatch. Those guards are this engine's existing answer
+                // to exactly that question, fabrication carve-outs included: `STD_PURE_PROTOCOLS` because
+                // nearly every type conforms to them, and `RAW_VALUE_BASE_TYPES` because `enum Suit:
+                // String` records `String` as a supertype. A first cut recorded at its own site with its
+                // own conjuncts and published `DepLib#String.lowercased` — a key naming an owner the
+                // package does not have — which `testRawValueBaseDoesNotDispatchIntoItsEnums` caught, the
+                // same class candor-rust's nine `io#Write::write_all` rows were.
+                //
+                // AND THIS ENGINE CANNOT SEE THAT THE CALL IS A DISPATCH, which is a real difference from
+                // the other three and is recorded rather than smoothed over: rust reads `&dyn
+                // iface::Backend`, java reads INVOKEINTERFACE, ts reads the named import — Swift source
+                // says only `b.size()` on a parameter typed `Backend`, and whether `Backend` is a
+                // protocol, a class or a struct lives in a module this scan never opened. So the member is
+                // named for every surviving unresolved member call on a dependency-owned receiver. That
+                // over-approximates "dispatch" in the only direction that is safe: the key published is
+                // the key the consumer's ordinary §2 join would form for the same call, so a union under
+                // it charges what the call really reaches — a concrete method's entry when the owner is
+                // concrete, the implementors' union when it is an abstraction — never a body the call
+                // cannot reach.
+                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                if let m = foreignOwnerModule(inFile: file) {
+                    dispatchDirect[f.qual, default: []].insert("\(m)#\(owner).\(call.leaf)")
+                }
             }
             // COULD-NOT-FORM-A-KEY (DEP-RECEIVER-TYPING-DESIGN.md half 1). The receiver was bound from a
             // call out of this target whose return type never travelled, so no key was ever formed and
@@ -2492,8 +2637,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             + " :: .\(call.leaf)()\n"
                         FileHandle.standardError.write(line.data(using: .utf8)!)
                     }
-                    if answers.count == 1, hits.count == 1, let de = hits.first {
+                    if answers.count == 1, hits.count == 1, let de = hits.first,
+                       let ty = answers.first {
                         applyDepEntry(de, to: f.qual)
+                        // ⟨0.39⟩ OBLIGATION 3 AT THIS JOIN TOO. The key formed here — `<pkg>#<type>.<member>`
+                        // — is answered by the dependency's own `interfaceUnion` entry, whose union is over
+                        // the DEPENDENCY's conformers. That is a lower bound on the witness set whenever the
+                        // consumer supplies a conformer of its own, which is exactly the case ⟨0.39⟩ exists
+                        // for; without this line the hedge is traded for an answer that is missing the half
+                        // the consumer can see. Reaching the union entry at all is new in this rung (it rode
+                        // behind CANDOR_WORKSPACE_CHAIN), so this is the second half of one change, not an
+                        // extension of an old one.
+                        unionOwnImplementors(forKey: "\(ty).\(call.leaf)", to: f.qual)
                         continue
                     }
                 }
@@ -2627,6 +2782,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // member it stays a silent drop, exactly as before (an inherited external member, a κ call on a
             // protocol-named receiver) — never a guess, never a new Unknown flood.
             guard protoOrSuperDeclares(d.proto, d.member) else { continue }
+            // ⟨0.39⟩ OBLIGATION 1. RECORDED WHATEVER THE CHA BELOW ANSWERS, and that is the whole point:
+            // the toggle this rung closes runs between ZERO implementors (disclosed `Unknown`) and ONE
+            // PURE one (silently certified), so a field recorded only on the indeterminate branch is
+            // absent in exactly the arm that needs it.
+            if let path = localProtocolWirePath(d.proto) {
+                dispatchDirect[f.qual, default: []].insert("\(pkgName)#\(path).\(d.member)")
+            }
             let conf = conformers[d.proto] ?? []
             // `chaWithinBound` alone covers the `conf.isEmpty` case (an empty conformer set fails the
             // shared `count == 0` test and discloses on its own, exactly as the standalone `!conf.isEmpty`
@@ -2690,6 +2852,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 frontier.append(contentsOf: protocolSupers[cur] ?? [])
             }
             guard protoOrSuperDeclares(d.proto, d.member) else { continue }
+            if let path = localProtocolWirePath(d.proto) {     // ⟨0.39⟩ obligation 1, property/subscript half
+                dispatchDirect[f.qual, default: []].insert("\(pkgName)#\(path).\(d.member)")
+            }
             let conf = conformers[d.proto] ?? []
             guard chaWithinBound(conf.count, d.proto, d.member, f.qual) else { continue }
             var impls = Set<String>()
@@ -2919,6 +3084,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
     let incompleteAcc = propagate(incompleteD, over: edges)
     let invisibleAcc = propagate(blindDirect, over: edges)
+    // ⟨0.39⟩ …and the dispatched MEMBERS travel the same way. SPEC §4 obligation 1 requires the member to
+    // REACH the caller transitively, and states explicitly that a producer MAY instead publish DIRECT
+    // members and let `calls` carry the closure. This engine takes the transitive spelling — the same
+    // fixpoint every other transitive fact here uses — because its `calls` list is already every local
+    // edge including pure ones, so both readings are available to a consumer and the transitive one costs
+    // it no walk. (candor-java takes the other branch, and had to: on the JVM the closure is
+    // unserialisable — jooq-3.19.10 died with 8 GB of heap. Swift protocols are not JVM interfaces; the
+    // corpus A/B for this change is in the commit message.)
+    let dispatchAcc = propagate(dispatchDirect, over: edges)
 
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a LOUD stderr line naming the count (like rust/java), so a
     // human sees the incompleteness even when they don't read the JSON. The machine-legible disclosure
@@ -2941,6 +3115,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         locOf: locOf, entryPoints: entryPoints, inferred: inferred, hostsAcc: hostsAcc, fsD: fsAcc, privKindD: privKindD,
         cmdsAcc: cmdsAcc, pathsAcc: pathsAcc, tablesAcc: tablesAcc, incompleteAcc: incompleteAcc,
         incompleteDirect: incompleteD,
-        invisibleAcc: invisibleAcc, unanalyzed: unanalyzed,
+        invisibleAcc: invisibleAcc, dispatchAcc: dispatchAcc,
+        abstractionOwnerPkg: abstractionOwnerPkg, unanalyzed: unanalyzed,
         typeSurfaceReturns: buildTypeSurfaceReturns(allFns, localTypePaths))
 }

@@ -714,7 +714,11 @@ public func unverified(_ fns: [UnverifiedFn], _ deny: [DenyRule], classFilter: S
 }
 
 // The query name-match ladder (exact > segment-suffix > substring), same tiers as the family engines.
-func matchTier(_ name: String, _ q: String) -> Int {
+// PUBLIC since ⟨0.39⟩/R507: `path` used to hand-roll its own resolution (exact, else the first
+// unanchored `contains`) and answered a confident NEGATIVE about a substituted subject. It now resolves
+// through THIS ladder. One ladder, two verbs — a second copy is how `path` drifted from `fix` in the
+// first place.
+public func matchTier(_ name: String, _ q: String) -> Int {
     if name == q { return 3 }
     if name.hasSuffix(q), name.count > q.count {
         let before = name[name.index(name.endIndex, offsetBy: -q.count - 1)]
@@ -723,7 +727,7 @@ func matchTier(_ name: String, _ q: String) -> Int {
     if name.contains(q) { return 1 }
     return 0
 }
-func bestMatches(_ names: [String], _ q: String) -> [String]? {
+public func bestMatches(_ names: [String], _ q: String) -> [String]? {
     let best = names.map { matchTier($0, q) }.max() ?? 0
     if best == 0 { return nil }
     return names.filter { matchTier($0, q) >= best }.sorted()

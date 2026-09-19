@@ -11,6 +11,93 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Verdict-affecting
 
+- **SPEC §4 ⟨0.39⟩ — THE CHAINED-DISPATCH UNION (SOUNDNESS R475/R504).** The defect is a toggle running
+  the wrong way: a library whose public abstraction has ZERO local conformers gave a chained consumer a
+  disclosed `Unknown`; adding ONE PURE conformer to that library SILENTLY CERTIFIED the consumer pure.
+  So adding a pure implementation to a library removed a disclosure from every consumer of it — the
+  ⟨0.21⟩ cardinal sin by a route no single scan can see. Measured live on `ratatui`. Three obligations,
+  none separable, because the effectful conformer lives in a THIRD package:
+  1. `dispatchesOn` names the abstraction member a row dispatches on, EVEN WHEN THE ROW IS OTHERWISE
+     PURE — the deliberate exception to §2 rule 3, because the row's ABSENCE was the purity claim. Its
+     value is TRANSITIVE (propagated by the same fixpoint `inferred` uses), and it is recorded at the
+     bounded-CHA site whatever the CHA answers: the toggle runs between zero and one conformer, so a
+     field recorded only on the indeterminate branch is absent in exactly the arm that needs it.
+  2. A package conforming to a FOREIGN abstraction publishes its `interfaceUnion` entry keyed under the
+     OWNING package, in the ⟨0.23⟩ `typeSurface` spelling — the one wire spelling the clause allows.
+     `interfaceUnion` is also UN-GATED: it rode behind `CANDOR_WORKSPACE_CHAIN` while SPEC §2 read
+     "gated until a floor rung pins it", and that gate is why the toggle survived default scans.
+  3. The consumer unions per key: every chained entry carrying it, plus its OWN visible conformers as
+     ordinary call EDGES, so their effects flow through the same fixpoint. Applied at the `dispatchesOn`
+     join and at the ⟨0.23⟩ `typeSurface` join, which reaches the union entry for the first time here.
+  **THIS ENGINE CANNOT SEE THAT A CALL IS A DISPATCH, and that is a real difference from the other
+  three.** rust reads `&dyn iface::Backend`, java reads `INVOKEINTERFACE`, ts reads the named import;
+  Swift source says only `b.size()` on a parameter typed `Backend`, and whether `Backend` is a protocol,
+  a class or a struct lives in a module the scan never opened. So obligation 1 over a FOREIGN
+  abstraction is recorded for every surviving unresolved member call on a dependency-owned receiver, at
+  the engine's EXISTING imported-supertype CHA site and under its existing conjuncts (`STD_PURE_PROTOCOLS`
+  and `RAW_VALUE_BASE_TYPES` carve-outs included) rather than a second judgement about what a dispatch
+  is. The over-approximation is safe in the only direction that matters: the key published is the key the
+  consumer's ordinary §2 join would form for the same call.
+  **Swift also spells no owner at the type or at the import**, so a foreign abstraction's owning package
+  is derived from the file's imports intersected with its target's DECLARED dependencies, and a file
+  leaving two candidates publishes NOTHING — a refusal costs a disclosure the engine did not have
+  before and can never mint a charge.
+  A/B, PRODUCER side, `bin/corpus-ab.py`, 11 real Swift packages, 18,908 pre rows against 23,367 post:
+  **ADDED 4,459 · REMOVED 0 · CHANGED 2,768**, and on `inferred` alone **ADDED 4,459 · REMOVED 0 ·
+  CHANGED 0** — not one existing row's effect set moved. Additions bucketed by MECHANISM: 4,380
+  `interfaceUnion` entries and 79 PURE rows whose only content is `dispatchesOn`; zero non-union
+  additions carry an effect. All 2,768 changed rows differ in `dispatchesOn` ALONE, and the withdrawal
+  audit over all of them found zero rows losing `inferred`, `invisible`, `incomplete`, `unknownWhy`,
+  `netClass`, `calls` or any other field.
+  A/B, CONSUMER side — the join, where this rung can LOSE a row. Five hand-written consumers of real
+  libraries (swift-log, Alamofire, SQLite.swift, SwiftyJSON, Kingfisher), each scanned with its real
+  dependency chained: **ADDED 8 · REMOVED 0 · CHANGED 4**. Four additions are FOREIGN union entries
+  keyed under the owning package (`Logging#LogHandler.log`, `Alamofire#EventMonitor.requestDidFinish`,
+  `Alamofire#RequestInterceptor.adapt`, `Kingfisher#ImageDownloaderDelegate.imageDownloader`) — the
+  measured real-world instance of obligation 2 — and four are pure dispatching rows. Of the four changed
+  rows, three moved on `dispatchesOn` alone and one GAINED `Unknown` (`viaMonitor`, inheriting
+  Alamofire's own disclosed indeterminacy). Zero rows lost an effect, a hedge or a field.
+  **A FOREIGN UNION ENTRY IS NOT COVERAGE OF THE PACKAGE IT NAMES**, withheld explicitly and with a
+  NEAR-MISS control: coverage is the single mechanism that turns a report's silence into a purity claim
+  (§2 rule 3), so registering `Iface#Backend.size`'s hash prefix from EffImpl's report would withdraw
+  `invisible` for every unanswered call into Iface — R475's own shape, manufactured by R475's own
+  remedy. Measured on the broad reading: the consumer's rows vanish entirely and the κ ledger goes
+  from `uncovered: [Iface]` to null.
+  **A SYNTHETIC UNION ENTRY IS NOT A UNIT**, and un-gating put one in every report, so it is filtered
+  wherever entries stand for units: out of the ⟨0.29⟩ peek attribution (its empty `loc` matched no file
+  and published an out-of-scope finding with an EMPTY path — under ⟨0.30⟩ that turns a green gate into
+  exit 2 on any package with a protocol), and out of the query model every verb reads (`path` could
+  resolve a selector onto one; `fix`/`fix-gate` could compute a hoist plan naming a body that does not
+  exist). Nothing is lost: a union entry's effects are the union of rows already in the same report.
+  Same ruling as candor-rust `5e89962` and candor-java's `callers` frontier filter.
+  Conformance PART 92's two `swift` XFAILs (`c1_foreign_effectful`, `c6_middle_package`) are retired by
+  this change — a passing xfail is a FAILURE in that harness, which is what it exists to notice.
+
+- **`path` RESOLVED A FUNCTION SELECTOR BY UNANCHORED SUBSTRING AND ANSWERED ABOUT THE FIRST MATCH
+  (SOUNDNESS R507, = R497's class).** `FixCLI.swift` did `names.first { $0 == arg } ?? names.first {
+  $0.contains(arg) }`, and its own comment said it *"mirrors the Rust reference"* — the copy inherited
+  the defect along with the design. Two faults compound: the fallback is unanchored, so
+  `ProfileCredentialsProvider` matches INSIDE `InstanceProfileCredentialsProvider`; and with several
+  matches it PICKS rather than refusing. Reproduced on the pre-fix binary: `path
+  ProfileCredentialsProvider.resolveCredentials Exec` printed *"credentials.InstanceProfileCredentials-
+  Provider.resolveCredentials does not perform Exec (inferred: [Env])"* at **exit 0**, while the
+  function actually asked about performs `Exec` — a FALSE NEGATIVE ON THE REAL QUESTION, not merely a
+  wrong subject. Note the asymmetry that is the whole defect: `path` ALREADY refuses at exit 2 when
+  ZERO functions match; only MANY was answered silently, and conformance pins only the zero case.
+  **Both halves, because neither alone is right.** Anchoring is now done by `CandorCore.bestMatches` —
+  this engine's EXISTING ladder (exact > segment-suffix on `.`/`:`/`#`/`$` > substring), which `fix` has
+  used all along and `path` was the one verb that hand-rolled around — so there is one ladder, not two.
+  Then a best tier with more than one survivor REFUSES at exit 2 and NAMES the candidates, the ⟨0.24⟩
+  `ambiguous:` discipline on the query surface. `fix`'s tie-break (prefer a match that performs the
+  effect) is deliberately NOT copied here: on `path` the effect is the QUESTION, so preferring a match
+  that performs it would answer "yes" whenever any candidate does.
+  **Verb-sweep boundary, stated.** This engine's verbs are `fix`, `fix-gate`, `unverified`, `tour`,
+  `path`, `gains`, `privacy-manifest`, `gate --report` and `parsepolicy`; it ships no `impact`,
+  `callers`, `whatif` or `show`. Only TWO take a function selector: `path` (fixed here) and `fix`, which
+  already resolves through `bestMatches` and then prefers a best-tier match that performs the effect, so
+  it cannot emit "nothing to hoist" while a sibling performs it — left alone deliberately, matching
+  candor-java's ruling. Every other verb takes a report locator, an integer, or nothing.
+
 - **`allow Fs <a benign literal>` exited 0 over a directory creation (SOUNDNESS R387, a LIVE GATE
   BYPASS; R467 is the sibling).** `FileManager.url(for:in:appropriateFor:create: true)` charged `Fs`
   and captured NOTHING into `paths`, so one unrelated readable literal anywhere in the same function

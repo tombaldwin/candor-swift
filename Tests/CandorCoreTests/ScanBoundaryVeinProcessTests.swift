@@ -102,6 +102,13 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
         public func speak() { _ = ProcessInfo.processInfo.environment["APP_SPEAK"] }
     }
     public func viaFactoryBoundReceiver() { let s = makeSpeaker(); s.speak() }
+    // ⟨0.39⟩ THE HALF-1 BASELINE, and it needs a member the dependency CANNOT answer. Until this rung
+    // `viaFactoryBoundReceiver` was that baseline: `makeSpeaker()` is pure, so the surface typed the
+    // binding and the key `DepLib#Speaker.speak` was formed and MISSED, leaving the disclosure as the
+    // only outcome. ⟨0.39⟩ un-gates the producer's protocol-CHA union, so that key is now ANSWERED and
+    // the site resolves — the layering working, not a lost disclosure. `notAThing` is a member no
+    // conformer declares, so no union entry can name it and the half-1 disclosure is still all there is.
+    public func viaFactoryBoundUnanswerable() { let s = makeSpeaker(); _ = s.notAThing() }
     public func viaImportedProtocol(_ s: Speaker) { s.speak() }
     public func viaImportedProtocolLocal() { let s: Speaker = AppSpeaker(); s.speak() }
 
@@ -693,11 +700,15 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
             XCTAssertTrue(Set(by[fn]?["inferred"] as? [String] ?? []).contains("Env"),
                           "\(fn) must reach the LOCAL conformer's witness; got \(by[fn] ?? [:])")
         }
-        // RESIDUAL, pinned not repaired: the DEPENDENCY's own conformer (`LoudSpeaker`, Fs) is not
-        // reachable from a plain dep report — it needs the protocol-CHA union entries a `--workspace`
-        // child scan emits. The local half is recovered; the dep half stays out.
-        XCTAssertFalse(Set(by["viaImportedProtocol"]?["inferred"] as? [String] ?? []).contains("Fs"),
-                       "a plain dep report carries no conformer hierarchy — nothing may be invented for it")
+        // ⟨0.39⟩ THE RESIDUAL THIS ROW PINNED IS CLOSED, and closing it is the rung. It read: "the
+        // DEPENDENCY's own conformer (`LoudSpeaker`, Fs) is not reachable from a plain dep report — it
+        // needs the protocol-CHA union entries a `--workspace` child scan emits." Those entries rode
+        // behind CANDOR_WORKSPACE_CHAIN; SPEC §4 ⟨0.39⟩ obligation 2 makes them REQUIRED and un-gated, so
+        // a PLAIN dep report carries them and both halves of the union arrive. Nothing is invented: the
+        // Fs comes from an entry the dependency published about its own conformers.
+        XCTAssertTrue(Set(by["viaImportedProtocol"]?["inferred"] as? [String] ?? []).contains("Fs"),
+                      "⟨0.39⟩: the dependency's own conformer reaches the consumer through the "
+                      + "`interfaceUnion` entry it publishes; got \(by["viaImportedProtocol"] ?? [:])")
 
         // ERASURE. `any Speaker` keeps the recovery; `some Speaker` must NOT get it — the caller
         // monomorphizes it, so charging every conformer's effect is a fabrication, not a conservative
@@ -706,8 +717,18 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
         // COULD-NOT-FORM-A-KEY (half 1, row 2). `makeSpeaker` is pure, so it is omitted from the dep's
         // report and no return type travels; the binding is untyped and NO key is formed. The report's
         // silence answers a question that was never asked, so this must DISCLOSE, not read pure.
-        XCTAssertTrue(Set(by["viaFactoryBoundReceiver"]?["inferred"] as? [String] ?? []).contains("Unknown"),
-                      "an untyped receiver from a CHAINED package must disclose; got \(by["viaFactoryBoundReceiver"] ?? [:])")
+        // ⟨0.39⟩ The comment above this row said `makeSpeaker` is pure so "no return type travels" — the
+        // surface DOES travel it (that is ⟨0.23⟩'s whole point); what did not travel until this rung was
+        // an entry that could ANSWER the key it forms. Now one does, and BOTH sides of obligation 3 are
+        // asserted: the dependency's `Fs` through its published union entry, and the consumer's OWN
+        // conformer `AppSpeaker`'s `Env`, which a union keyed only on the dependency's implementors would
+        // silently drop. The member nothing can answer keeps the disclosure — `viaFactoryBoundUnanswerable`.
+        XCTAssertEqual(Set(by["viaFactoryBoundReceiver"]?["inferred"] as? [String] ?? []), ["Env", "Fs"],
+                       "a factory-bound receiver unions the dependency's implementors with the "
+                       + "consumer's own; got \(by["viaFactoryBoundReceiver"] ?? [:])")
+        XCTAssertTrue(Set(by["viaFactoryBoundUnanswerable"]?["inferred"] as? [String] ?? []).contains("Unknown"),
+                      "…and a member NO entry can answer still discloses; "
+                      + "got \(by["viaFactoryBoundUnanswerable"] ?? [:])")
 
         XCTAssertTrue(Set(by["viaExistentialImported"]?["inferred"] as? [String] ?? []).contains("Env"),
                       "an EXISTENTIAL `any P` receiver keeps the dispatch; got \(by["viaExistentialImported"] ?? [:])")
@@ -895,13 +916,19 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
                        "caseLetOutsideBindsItsOwnValue: `case let .quiet(s)` binds a QuietSpeaker — "
                        + "keeping the enclosing AppSpeaker parameter's type for the name charges an "
                        + "effect this case cannot reach; got \(by["caseLetOutsideBindsItsOwnValue"] ?? [:])")
-        XCTAssertNil(by["provenanceNotOntoOptionalBinder"],
+        XCTAssertNil(ProcessHarness.chargedNothing(by, "provenanceNotOntoOptionalBinder"),
                      "the loop's own binder is a purely LOCAL value — disclosing the factory's provenance "
                      + "for it is false uncertainty that flips `deny E Unknown[dispatch]` on clean code; "
                      + "got \(by["provenanceNotOntoOptionalBinder"] ?? [:])")
-        XCTAssertTrue(eff("provenanceRestoredAfterOptionalBinder").contains("Unknown"),
+        // ⟨0.39⟩ `Fs` where this used to read `Unknown`, for the reason recorded on
+        // `viaFactoryBoundUnanswerable`: the dependency's un-gated protocol-CHA union ANSWERS
+        // `DepLib#Speaker.speak` now, so a receiver the factory's provenance types resolves to the
+        // dependency's own effect instead of hedging. The property is unchanged — once the loop closes,
+        // `c` is the factory-bound receiver again — and the probe is sharper, since a silent purity claim
+        // and an unrelated hedge are now told apart.
+        XCTAssertTrue(eff("provenanceRestoredAfterOptionalBinder").contains("Fs"),
                       "…and once the loop CLOSES `c` is the factory-bound receiver again and must "
-                      + "disclose, or the mirror fix manufactures a silent purity claim; got "
+                      + "answer for it, or the mirror fix manufactures a silent purity claim; got "
                       + "\(by["provenanceRestoredAfterOptionalBinder"] ?? [:])")
     }
 
@@ -995,12 +1022,23 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
         func why(_ n: String) -> Set<String> { Set(by[n]?["unknownWhy"] as? [String] ?? []) }
         let marker = "dispatch:untyped cross-package receiver"
 
-        XCTAssertTrue(why("viaFactoryBoundReceiver").contains(marker),
-                      "BASELINE for the rung — without this the two assertions below are vacuous")
+        func eff(_ n: String) -> Set<String> { Set(by[n]?["inferred"] as? [String] ?? []) }
+        XCTAssertTrue(why("viaFactoryBoundUnanswerable").contains(marker),
+                      "BASELINE for the rung — without this the control below is vacuous; "
+                      + "got \(by["viaFactoryBoundUnanswerable"] ?? [:])")
+        // ⟨0.39⟩ THE OBSERVABLE MOVED FROM THE HEDGE TO THE ANSWER, and the rung is the same one. Half 1's
+        // provenance is what types `c` from `makeSpeaker()`'s published return; until this rung nothing
+        // could answer `DepLib#Speaker.speak` so the only visible consequence was the `Unknown`, and these
+        // rows asserted it. The dependency's un-gated protocol-CHA union answers it now, so the same
+        // provenance shows up as the dependency's OWN `Fs` — a strictly sharper probe of the same fact,
+        // and one that is not satisfiable by a site that disclosed for some unrelated reason.
+        XCTAssertTrue(eff("viaFactoryBoundReceiver").contains("Fs"),
+                      "BASELINE: the factory-bound receiver must carry the dependency's answer; "
+                      + "got \(by["viaFactoryBoundReceiver"] ?? [:])")
         for fn in ["factoryThenLoopShadow", "factoryThenClosureShadow"] {
-            XCTAssertTrue(why(fn).contains(marker),
+            XCTAssertTrue(eff(fn).contains("Fs"),
                           "\(fn): the shadow is confined to the binder; the call BELOW it is the "
-                          + "factory-bound receiver and must still disclose; got \(by[fn] ?? [:])")
+                          + "factory-bound receiver and must still answer for it; got \(by[fn] ?? [:])")
         }
         XCTAssertFalse(why("shadowMustNotInheritProvenance").contains(marker),
                        "the receiver INSIDE the shadow is a purely local value that merely reuses the "
@@ -1028,8 +1066,13 @@ final class ScanBoundaryVeinProcessTests: XCTestCase {
         func why(_ n: String) -> Set<String> { Set(by[n]?["unknownWhy"] as? [String] ?? []) }
         let marker = "dispatch:untyped cross-package receiver"
 
-        XCTAssertTrue(why("viaFactoryBoundReceiver").contains(marker),
-                      "BASELINE for the rung — without this every row below is vacuous")
+        // ⟨0.39⟩ …and the baseline is `viaFactoryBoundUnanswerable`, not `viaFactoryBoundReceiver`: the
+        // dependency's un-gated protocol-CHA union now ANSWERS `DepLib#Speaker.speak`, so that site
+        // resolves instead of hedging. `notAThing` is a member no conformer declares, so it still cannot
+        // be answered and the disclosure is still the whole outcome — which is what a baseline must probe.
+        XCTAssertTrue(why("viaFactoryBoundUnanswerable").contains(marker),
+                      "BASELINE for the rung — without this every row below is vacuous; "
+                      + "got \(by["viaFactoryBoundUnanswerable"] ?? [:])")
         for fn in ["viaWithoutActuallyEscaping", "viaWithUnsafePointer", "viaUnsafeDowncast",
                    "viaSequence"] {
             XCTAssertTrue(why(fn).contains(marker),

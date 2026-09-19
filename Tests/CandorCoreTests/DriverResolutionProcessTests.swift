@@ -516,7 +516,7 @@ final class DriverResolutionProcessTests: XCTestCase {
                        "an inherited didSet observer runs on the subclass assignment")
         XCTAssertEqual(ProcessHarness.inferred(by, "viaInheritedMethod"), ["Fs"],
                        "control: an inherited method already climbed")
-        XCTAssertNil(by["viaPure"],
+        XCTAssertNil(ProcessHarness.chargedNothing(by, "viaPure"),
                      "a PURE inherited property must not fabricate an effect onto its reader")
     }
 
@@ -715,7 +715,7 @@ final class DriverResolutionProcessTests: XCTestCase {
         """)
         XCTAssertEqual(ProcessHarness.inferred(by, "viaConditional"), ["Fs"],
                        "the conditional-conformance chain xs.persist() → Array.persist → Item.persist must charge")
-        XCTAssertNil(by["viaPureConditional"],
+        XCTAssertNil(ProcessHarness.chargedNothing(by, "viaPureConditional"),
                      "a pure conditional conformance must not fabricate an effect")
         XCTAssertEqual(ProcessHarness.inferred(by, "viaStdArrayMethod"), ["Fs"],
                        "a std array method with a local Array extension present must charge Fs and NOT disclose a spurious Unknown")
@@ -748,7 +748,7 @@ final class DriverResolutionProcessTests: XCTestCase {
         """)
         XCTAssertEqual(ProcessHarness.inferred(by, "viaProvided"), ["Fs"],
                        "s.provided() → the extension's req() must dispatch to the S.req witness (Fs)")
-        XCTAssertNil(by["viaPure"],
+        XCTAssertNil(ProcessHarness.chargedNothing(by, "viaPure"),
                      "a pure witness reached via an extension provided method must stay pure (no over-fire)")
         XCTAssertEqual(ProcessHarness.inferred(by, "viaFree"), ["Fs"],
                        "a bare free fn inside a protocol extension must still resolve by name (not filtered away)")
@@ -800,9 +800,9 @@ final class DriverResolutionProcessTests: XCTestCase {
         XCTAssertEqual(ProcessHarness.inferred(by, "genEff"), ["Fs"],
                        "a generic operator `a+b` on a `T: EAdd` bound must dispatch to the effectful witness")
         XCTAssertEqual(ProcessHarness.inferred(by, "concrete"), ["Fs"], "the concrete-operand path still carries")
-        XCTAssertNil(by["genPure"], "a pure operator witness must stay pure (no over-fire)")
-        XCTAssertNil(by["genNumeric"], "a std Numeric bound has no local witness — must not fabricate")
-        XCTAssertNil(by["stdInt"], "plain Int + Int is the stdlib operator — pure")
+        XCTAssertNil(ProcessHarness.chargedNothing(by, "genPure"), "a pure operator witness must stay pure (no over-fire)")
+        XCTAssertNil(ProcessHarness.chargedNothing(by, "genNumeric"), "a std Numeric bound has no local witness — must not fabricate")
+        XCTAssertNil(ProcessHarness.chargedNothing(by, "stdInt"), "plain Int + Int is the stdlib operator — pure")
     }
 
     // R35 — a `@dynamicCallable` value: `c(1, 2)` desugars to `c.dynamicallyCall(withArguments:)`, whose
@@ -821,7 +821,7 @@ final class DriverResolutionProcessTests: XCTestCase {
         """)
         XCTAssertEqual(ProcessHarness.inferred(by, "viaDynCall"), ["Fs"],
                        "c(args) on a @dynamicCallable type must dispatch to dynamicallyCall")
-        XCTAssertNil(by["viaPure"], "a pure dynamicallyCall witness stays pure")
+        XCTAssertNil(ProcessHarness.chargedNothing(by, "viaPure"), "a pure dynamicallyCall witness stays pure")
         XCTAssertEqual(ProcessHarness.inferred(by, "viaCallAsFn"), ["Fs"], "callAsFunction dispatch is unaffected")
     }
 
@@ -843,7 +843,7 @@ final class DriverResolutionProcessTests: XCTestCase {
         XCTAssertEqual(ProcessHarness.inferred(by, "viaGeneric"), ["Fs"],
                        "a generic `[T: Doer]` array element must dispatch over the bound")
         XCTAssertEqual(ProcessHarness.inferred(by, "viaExistential"), ["Fs"], "the existential control still carries")
-        XCTAssertNil(by["viaPure"], "a pure-protocol bound must stay pure (no over-fire)")
+        XCTAssertNil(ProcessHarness.chargedNothing(by, "viaPure"), "a pure-protocol bound must stay pure (no over-fire)")
     }
 
     // Dispatching a method on a PROTOCOL-typed value reached through a CONTAINER/OPTIONAL — the sibling
@@ -878,10 +878,10 @@ final class DriverResolutionProcessTests: XCTestCase {
                        "an if-let-unwrapped `(any Doer)?` must dispatch over the protocol")
         XCTAssertEqual(ProcessHarness.inferred(by, "viaOptMap"), ["Fs"],
                        "an Optional.map closure over `(any Doer)?` must dispatch over the protocol")
-        XCTAssertNil(by["ctrlDictConcretePure"], "a concrete pure-method dict value stays pure (no over-fire)")
-        XCTAssertNil(by["ctrlOptPureProto"], "a pure-protocol optional stays pure (no over-fire)")
-        XCTAssertNil(by["ctrlOptMapPureProto"], "a pure-protocol optional map stays pure (no over-fire)")
-        XCTAssertNil(by["ctrlPlainDict"], "a plain `[String: Int]` stays pure (no fabrication)")
+        XCTAssertNil(ProcessHarness.chargedNothing(by, "ctrlDictConcretePure"), "a concrete pure-method dict value stays pure (no over-fire)")
+        XCTAssertNil(ProcessHarness.chargedNothing(by, "ctrlOptPureProto"), "a pure-protocol optional stays pure (no over-fire)")
+        XCTAssertNil(ProcessHarness.chargedNothing(by, "ctrlOptMapPureProto"), "a pure-protocol optional map stays pure (no over-fire)")
+        XCTAssertNil(ProcessHarness.chargedNothing(by, "ctrlPlainDict"), "a plain `[String: Int]` stays pure (no fabrication)")
     }
 
     // A SUPER-PROTOCOL method dispatched via a Sub bound / `any Sub`. `protocol Sub: Sup`, `base ∈ Sup`,
@@ -920,9 +920,9 @@ final class DriverResolutionProcessTests: XCTestCase {
                        "an inherited (super-protocol) method via `any Sub` must dispatch to the conformer's Fs")
         XCTAssertEqual(ProcessHarness.inferred(by, "viaGeneric"), ["Fs"],
                        "an inherited (super-protocol) method via a `T: Sub` bound must dispatch to the conformer's Fs")
-        XCTAssertNil(by["ownPure"], "the sub's OWN pure method stays pure (no over-fire)")
-        XCTAssertNil(by["superPure"], "a super method with a pure conformer impl stays pure (no over-fire)")
-        XCTAssertNil(by["noHijack"], "an unrelated same-named protocol must not hijack a Sub receiver")
+        XCTAssertNil(ProcessHarness.chargedNothing(by, "ownPure"), "the sub's OWN pure method stays pure (no over-fire)")
+        XCTAssertNil(ProcessHarness.chargedNothing(by, "superPure"), "a super method with a pure conformer impl stays pure (no over-fire)")
+        XCTAssertNil(ProcessHarness.chargedNothing(by, "noHijack"), "an unrelated same-named protocol must not hijack a Sub receiver")
         XCTAssertEqual(ProcessHarness.inferred(by, "viaNoConf"), ["Unknown"],
                        "a conformer-less super chain reads honest Unknown, never fabricated pure")
     }
@@ -1076,11 +1076,11 @@ final class DriverResolutionProcessTests: XCTestCase {
                            "\(fn) reaches LiveDeployer.deploy through a Deployer seam — a protocol-typed "
                            + "receiver must answer BOTH member kinds, whatever binder the receiver came from")
         }
-        XCTAssertNil(by["Fmt.one"],
+        XCTAssertNil(ProcessHarness.chargedNothing(by, "Fmt.one"),
                      "an all-pure protocol family must stay pure — the CHA must not fabricate")
-        XCTAssertNil(by["viaCache"],
+        XCTAssertNil(ProcessHarness.chargedNothing(by, "viaCache"),
                      "a same-named requirement on an UNRELATED protocol must not inherit DiskStore's Exec")
-        XCTAssertNil(by["viaCacheProvided"],
+        XCTAssertNil(ProcessHarness.chargedNothing(by, "viaCacheProvided"),
                      "…and neither must its extension-provided member")
     }
 

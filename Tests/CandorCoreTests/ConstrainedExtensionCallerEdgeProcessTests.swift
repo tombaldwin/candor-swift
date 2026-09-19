@@ -91,7 +91,9 @@ final class ConstrainedExtensionCallerEdgeProcessTests: XCTestCase {
         func callPureControl() { Box(value: PureThing()).greet2() }
         """
         let pr = try scan(pureSrc, name: "CondPure", policy: "pure callPureControl\n")
-        XCTAssertNil(pr.fns["callPureControl"],
+        XCTAssertEqual(pr.fns["callPureControl"] ?? [], [],   // ⟨0.39⟩ a pure DISPATCHING row is now
+                       // emitted (SPEC §4 obligation 1), so the claim is "charged nothing", not "absent"
+                       
                      "PURE CONTROL: a conditional conformance with NO effectful conformer in scope "
                      + "must not be charged: \(pr.out)")
         XCTAssertEqual(pr.code, 0, "`pure callPureControl` must pass: \(pr.out)")
@@ -140,7 +142,9 @@ final class ConstrainedExtensionCallerEdgeProcessTests: XCTestCase {
         func callPureControl() { let arr = [PureThing3()]; arr.greetAll3() }
         """
         let pr = try scan(pureSrc, name: "WhereExtPure", policy: "pure callPureControl\n")
-        XCTAssertNil(pr.fns["callPureControl"],
+        XCTAssertEqual(pr.fns["callPureControl"] ?? [], [],   // ⟨0.39⟩ a pure DISPATCHING row is now
+                       // emitted (SPEC §4 obligation 1), so the claim is "charged nothing", not "absent"
+                       
                      "PURE CONTROL: a `where Element: P` extension with no effectful conformer in "
                      + "scope must not be charged: \(pr.out)")
         XCTAssertEqual(pr.code, 0, "`pure callPureControl` must pass: \(pr.out)")
@@ -203,7 +207,9 @@ final class ConstrainedExtensionCallerEdgeProcessTests: XCTestCase {
         XCTAssertEqual(r.fns["callDefect"], ["Env"],
                        "THE DEFECT: the caller must inherit the composed-protocol member's effect: "
                        + "\(r.out)")
-        XCTAssertNil(r.fns["callPureControl"],
+        XCTAssertEqual(r.fns["callPureControl"] ?? [], [],   // ⟨0.39⟩ a pure DISPATCHING row is now
+                       // emitted (SPEC §4 obligation 1), so the claim is "charged nothing", not "absent"
+                       
                      "PURE CONTROL: calling the OTHER composed protocol's member (`b5`, always pure "
                      + "here) through the same composition type must not fabricate Env — proves the "
                      + "fix dispatches through the RIGHT member of the RIGHT protocol, not a blanket "

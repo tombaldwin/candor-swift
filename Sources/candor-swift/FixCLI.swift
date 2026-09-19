@@ -670,6 +670,21 @@ private func mergeFixReport(_ full: String, into byName: inout [String: FixFn],
     }
     for e in fns {
         guard let fn = e["fn"] as? String, !fn.isEmpty else { continue }
+        // ⟨0.39⟩ A SYNTHETIC UNION ENTRY IS NOT A UNIT, AND EVERY QUERY VERB HERE ANSWERS ABOUT UNITS.
+        // `interfaceUnion` entries are a CHA union published for a CHAINED CONSUMER to join on: they have
+        // no body, no `loc` and no call sites. Un-gating them (obligation 2) put them in every report, so
+        // without this filter `path` could resolve a selector onto one and answer "its source is not a
+        // local function" about a function that has no source at all; `fix`/`fix-gate` could compute a
+        // HOIST PLAN naming it, telling an agent to edit a body that does not exist; and `unverified` and
+        // `tour` would name it as a hole and a find.
+        //
+        // NOTHING IS LOST, and that is the reason this is a filter rather than a special case downstream:
+        // a union entry's effects are the UNION OF ROWS THAT ARE ALREADY IN THIS REPORT — the local
+        // conformers' own `Type.member` entries — so every effect it carries is reachable, and every
+        // question these verbs ask is answerable, from the real rows. Same ruling as candor-rust's
+        // `5e89962` (a synthetic union entry is not a possible caller) and candor-java's `callers`
+        // frontier filter, which that port reported as owed by this engine too.
+        if (e["interfaceUnion"] as? Bool) == true { continue }
         let inferred = Set((e["inferred"] as? [Any])?.compactMap { $0 as? String } ?? [])
         let direct = Set((e["direct"] as? [Any])?.compactMap { $0 as? String } ?? [])
         let calls = (e["calls"] as? [Any])?.compactMap { $0 as? String } ?? []
@@ -1808,14 +1823,47 @@ func runPathCLI(_ args: [String]) -> Never {
     let pathTail = "A function in an unread unit is ABSENT from the report, so no chain can be traced "
                  + "through it and none can be ruled out. \(comp.gateLine) Re-scan for a complete answer."
 
-    // Resolve <fn>: EXACT name first, else the first (deterministic) fn whose qual CONTAINS the substring —
-    // mirrors the Rust reference (`find(func == arg).or_else(find(func.contains(arg)))`). Sorted so the
-    // substring fallback is stable across dictionary orderings.
+    // Resolve <fn> — SOUNDNESS R507/[[R497]], and BOTH halves, because neither alone is right.
+    //
+    // THE DEFECT. This read `names.first { $0 == fnArg } ?? names.first { $0.contains(fnArg) }`, and its
+    // own comment said it "mirrors the Rust reference" — the copy inherited the defect along with the
+    // design. Two things were wrong with it and they compound. (1) The fallback is an UNANCHORED
+    // substring, so `ProfileCredentialsProvider` matches INSIDE `InstanceProfileCredentialsProvider`.
+    // (2) With several matches it PICKS THE FIRST instead of refusing. Measured in candor-java on
+    // `auth-2.25.60`: `path ProfileCredentialsProvider.resolveCredentials Exec` printed
+    // *"InstanceProfileCredentialsProvider.resolveCredentials does not perform Exec (inferred: [])"* at
+    // exit 0 — a confident NEGATIVE about a function nobody asked about, while the function actually
+    // asked about carries `Exec`. A negative is a claim in this family; a negative about a substituted
+    // subject is a fabricated one.
+    //
+    // NOTE THE ASYMMETRY THAT IS THE WHOLE DEFECT: this verb ALREADY refuses at exit 2 when ZERO
+    // functions match (the `guard` below, unchanged). Only MANY was answered silently.
+    //
+    // HALF 1, ANCHORING — and through `bestMatches`, this engine's EXISTING match ladder (exact >
+    // segment-suffix on `.`/`:`/`#`/`$` > substring), not a second copy of it. `fix` has resolved
+    // selectors through that ladder all along; `path` was the one verb that hand-rolled its own. Half 1
+    // alone answers the measured case correctly, because the dot-anchored spelling is the only tier-2
+    // match — and half 1 alone is NOT enough, because it leaves genuine ambiguity silent.
+    //
+    // HALF 2, REFUSAL — exit 2, naming the candidates, the ⟨0.24⟩ `ambiguous:` discipline applied to the
+    // query surface. And refusal alone is not enough either: it would reject a question that has exactly
+    // one right answer, which is why the ladder runs FIRST and only the best tier is counted.
+    //
+    // NOT `fix`'s tie-break, deliberately. `fix` prefers a best-tier match that PERFORMS the effect
+    // (sound there: it is looking for something to hoist, so a sibling that performs it is the better
+    // subject). Here the effect is the QUESTION — preferring a match that performs it would answer
+    // "yes" whenever any candidate does, which is the same substitution in the other direction.
     let names = byName.keys.sorted()
-    let startName = names.first { $0 == fnArg } ?? names.first { $0.contains(fnArg) }
-    guard let start = startName else {
+    guard let matches = bestMatches(names, fnArg), let start = matches.first else {
         // Fail loud (exit 2) on an unmatched fn — never a silently-empty answer (matches the family).
         fixDie("candor-swift path: no function matching '\(fnArg)'")
+    }
+    if matches.count > 1 {
+        let shown = matches.prefix(12).joined(separator: "\n  ")
+        fixDie("candor-swift path: `\(fnArg)` is AMBIGUOUS — \(matches.count) functions match it equally "
+             + "well, and answering about one of them would be a claim about a function you did not ask "
+             + "about. Name one:\n  \(shown)"
+             + (matches.count > 12 ? "\n  … and \(matches.count - 12) more" : ""))
     }
     let startFn = byName[start]!
 

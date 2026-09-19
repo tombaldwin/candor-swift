@@ -471,26 +471,44 @@ final class TypeSurfaceProcessTests: XCTestCase {
     /// THE PROTOCOL FACTORY, AND THE LAYERING. `openSink() -> Sink` publishes `DepLib#Sink`, and the key
     /// that forms — `DepLib#Sink.save` — names a REQUIREMENT with no body. Both directions are asserted
     /// because each alone is satisfiable by a wrong implementation:
-    ///   - dep scanned PLAIN: nothing can answer, so the row must fall to half 1's DISCLOSURE. Resolving
-    ///     it from anywhere else would mean the key was answered by a guess.
-    ///   - dep scanned with CANDOR_WORKSPACE_CHAIN: the union entry answers it and the row RESOLVES.
+    ///   - with NO union entry in the dep report: nothing can answer, so the row must fall to half 1's
+    ///     DISCLOSURE. Resolving it from anywhere else would mean the key was answered by a guess.
+    ///   - with the union entry present: it answers and the row RESOLVES.
     /// That is the layering the work queue records for swift's row 3 — the surface says WHICH type, the
     /// union says what that type's requirement runs, and neither substitutes for the other.
+    ///
+    /// ⟨0.39⟩ THE ARMS ARE MADE BY EDITING THE DEP REPORT, NOT BY AN ENV VAR. They used to be "scan the
+    /// dep plain" vs "scan it with CANDOR_WORKSPACE_CHAIN". SPEC §4 ⟨0.39⟩ obligation 2 UN-GATES the
+    /// union entries — that gate is precisely why the silent-purity toggle survived default scans — so
+    /// both arms would now produce the same bytes and the test would assert nothing while still passing,
+    /// which is the vacuity mode this suite exists to avoid. Stripping `interfaceUnion` entries from the
+    /// produced report is a sharper discriminator anyway: it holds the SCAN fixed and varies only the one
+    /// thing under test, so the "resolving it anyway means it was guessed" direction really is about that
+    /// entry and not about any other difference two scans might carry.
     func testProtocolFactoryIsLayeredWithTheInterfaceUnion() throws {
         let bin = try binaryURL()
         let (root, dep, app, _) = try makeFixture()
         defer { try? FileManager.default.removeItem(at: root) }
+        let depReportPath = root.appendingPathComponent("d.DepLib.Swift.json")
+        try? FileManager.default.removeItem(at: depReportPath)
+        XCTAssertEqual(try ProcessHarness.run(bin, [dep.path, "--out", root.appendingPathComponent("d").path]).code, 0)
+        let depDoc = try JSONSerialization.jsonObject(with: Data(contentsOf: depReportPath)) as? [String: Any] ?? [:]
+        let depFns = depDoc["functions"] as? [[String: Any]] ?? []
+        XCTAssertTrue(depFns.contains { ($0["interfaceUnion"] as? Bool) == true
+                                        && ($0["hash"] as? String) == "DepLib#Sink.save" },
+                      "BASELINE: un-gated, a plain scan of the dependency MUST publish the union entry "
+                      + "this rung is about — without it the stripped arm below is the only arm")
 
         func consumerEffects(union: Bool) throws -> Set<String> {
-            let depOut = root.appendingPathComponent("d\(union)")
-            try? FileManager.default.removeItem(at: root.appendingPathComponent("d\(union).DepLib.Swift.json"))
-            XCTAssertEqual(try ProcessHarness.run(bin, [dep.path, "--out", depOut.path],
-                                                  env: union ? ["CANDOR_WORKSPACE_CHAIN": "1"] : [:]).code, 0)
+            let depPath = root.appendingPathComponent("dep-\(union).DepLib.Swift.json")
+            var doc = depDoc
+            if !union { doc["functions"] = depFns.filter { ($0["interfaceUnion"] as? Bool) != true } }
+            try JSONSerialization.data(withJSONObject: doc).write(to: depPath)
             let appOut = root.appendingPathComponent("a\(union)")
             try? FileManager.default.removeItem(at: root.appendingPathComponent("a\(union).App.Swift.json"))
             XCTAssertEqual(try ProcessHarness.run(
                 bin, [app.path, "--out", appOut.path],
-                env: ["CANDOR_DEPS": root.appendingPathComponent("d\(union).DepLib.Swift.json").path]).code, 0)
+                env: ["CANDOR_DEPS": depPath.path]).code, 0)
             let by = try fns(root.appendingPathComponent("a\(union).App.Swift.json"))
             return Set(by["viaProtocolFactory"]?["inferred"] as? [String] ?? [])
         }
