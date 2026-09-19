@@ -271,6 +271,56 @@ final class ChainedDispatchUnionProcessTests: XCTestCase {
                        + "above is not vacuous; ledger was \(withOwner.sorted())")
     }
 
+    /// A SYNTHETIC UNION ENTRY IS NOT A UNIT, AND THE TWO GATE ROUTES MUST AGREE ABOUT THAT. Un-gating
+    /// the union entries (obligation 2) put one in every report, and `gate --report` reads `functions`
+    /// directly: measured before the filter, the supply-chain route reported THREE violations over a
+    /// package the in-process route reports TWO for, the third naming `Ui.Backend.size` — a function
+    /// with no body and an empty `loc`, which `fix-gate` is then asked to compute a hoist plan for.
+    /// Nothing is lost by filtering: a union entry's effects are the union of rows already in the same
+    /// report, so every effect is still charged to the function that really performs it. ONE ASSERTION,
+    /// on AGREEMENT rather than on a count, because the property is that the two routes answer the same
+    /// question the same way whatever the fixture grows into.
+    func testTheTwoGateRoutesAgreeOverAReportCarryingUnionEntries() throws {
+        let bin = try binaryURL()
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("candor-r475-gate-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try write(root.appendingPathComponent("Package.swift"), Self.manifest("Nest", deps: []))
+        try write(root.appendingPathComponent("Sources/Nest/n.swift"), """
+        import Foundation
+        public protocol Backend { func size() -> Int }
+        public struct Loud: Backend { public init() {}; public func size() -> Int { \(Self.SINK); return 0 } }
+        public func termSize(_ b: Backend) -> Int { return b.size() }
+        """)
+        try write(root.appendingPathComponent("p.policy"), "deny Net\n")
+        let out = root.appendingPathComponent("r")
+        let inProcess = try run(bin, [root.path, "--policy", root.appendingPathComponent("p.policy").path,
+                                      "--out", out.path])
+        XCTAssertEqual(inProcess.code, 1, "CONTROL: the effectful conformer must violate `deny Net`")
+        let report = root.appendingPathComponent("r.Nest.Swift.json")
+        let doc = try JSONSerialization.jsonObject(with: Data(contentsOf: report)) as? [String: Any] ?? [:]
+        XCTAssertTrue((doc["functions"] as? [[String: Any]] ?? []).contains { ($0["interfaceUnion"] as? Bool) == true },
+                      "BASELINE: the report must actually CARRY a union entry, or this test measures nothing")
+
+        let viaReport = try run(bin, ["gate", "--report", report.path,
+                                      "--policy", root.appendingPathComponent("p.policy").path])
+        XCTAssertEqual(viaReport.code, inProcess.code, "the two routes must agree on the verdict")
+        func named(_ text: String) -> Set<String> {
+            Set(text.split(separator: "\n").compactMap { line -> String? in
+                guard line.contains("AS-EFF-006"), let a = line.firstIndex(of: "`") else { return nil }
+                let rest = line[line.index(after: a)...]
+                guard let b = rest.firstIndex(of: "`") else { return nil }
+                return String(rest[..<b])
+            })
+        }
+        XCTAssertEqual(named(viaReport.out + viaReport.err), named(inProcess.out + inProcess.err),
+                       "the supply-chain route must name exactly the functions the in-process route "
+                       + "names — a violation naming a synthetic union entry is a finding about a body "
+                       + "that does not exist; via report: \(viaReport.out)\n\(viaReport.err)\n"
+                       + "in process: \(inProcess.out)\n\(inProcess.err)")
+        XCTAssertFalse(named(viaReport.out + viaReport.err).isEmpty, "…and both named something")
+    }
+
     /// THE REPORT MUST BE THE SAME BYTES TWICE. Swift seeds Dictionary hashing PER PROCESS, and these
     /// union entries are built by iterating two dictionaries — a defect this engine has already shipped
     /// once (five runs of one binary over Alamofire gave five report hashes). Obligation 2 re-keys the

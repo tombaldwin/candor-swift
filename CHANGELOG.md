@@ -69,7 +69,12 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   exit 2 on any package with a protocol), and out of the query model every verb reads (`path` could
   resolve a selector onto one; `fix`/`fix-gate` could compute a hoist plan naming a body that does not
   exist). Nothing is lost: a union entry's effects are the union of rows already in the same report.
-  Same ruling as candor-rust `5e89962` and candor-java's `callers` frontier filter.
+  Same ruling as candor-rust `5e89962` and candor-java's `callers` frontier filter. The `gate --report`
+  route needed it too and was found by asking, not by the instance in hand: MEASURED, the supply-chain
+  gate reported THREE violations over a package the in-process gate reports TWO for, the third naming
+  `Ui.Backend.size` — a function with no body — which `fix-gate` is then asked to remedy. The exit code
+  was unchanged there and can only ever move in the over-firing direction, so this is a veracity defect
+  rather than a sin; it is closed where it lives, and the two routes are now pinned to AGREE.
   Conformance PART 92's two `swift` XFAILs (`c1_foreign_effectful`, `c6_middle_package`) are retired by
   this change — a passing xfail is a FAILURE in that harness, which is what it exists to notice.
 

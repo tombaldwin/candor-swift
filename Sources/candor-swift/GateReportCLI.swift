@@ -175,6 +175,22 @@ private func mergeGateReport(_ full: String, into env: inout GateReportEnvelope)
                            + "an entry that cannot be NAMED cannot be gated, and dropping it would make it "
                            + "read as pure")
         }
+        // ⟨0.39⟩ A SYNTHETIC UNION ENTRY IS NOT A UNIT, and this verb NAMES the units it charges. An
+        // `interfaceUnion` entry is a protocol-CHA union published for a chained consumer to join on: no
+        // body, no `loc`, no call site. Un-gating them (SPEC §4 ⟨0.39⟩ obligation 2) put one in every
+        // report, and MEASURED before this line, `gate --report` over a package with one effectful
+        // conformer reported THREE violations where the in-process gate over the same code reports two —
+        // the third naming `Ui.Backend.size`, a function that does not exist, which `fix-gate` is then
+        // asked to compute a hoist plan for.
+        //
+        // NOTHING IS LOST, and that is why this is a filter and not a special case downstream: a union
+        // entry's effects are the union of rows THAT ARE ALREADY IN THIS REPORT — the conformers' own
+        // `Type.member` entries — so every effect it carries is still charged, to the function that
+        // really performs it. The exit code is unchanged in the measured case and can only ever have
+        // moved in the over-firing direction (a scope naming the PROTOCOL rather than the conformer),
+        // which is a phantom finding, not a caught violation. Same ruling as the ⟨0.29⟩ peek attribution
+        // and the `fix`/`path` query model, candor-rust `5e89962`, and candor-java's frontier filter.
+        if (e["interfaceUnion"] as? Bool) == true { continue }
         // Every list-valued entry key, checked BEFORE any of them is used — `inferred` is the effect set
         // the whole verdict is computed from, and `calls` is the graph the ⟨0.19⟩ reason classes resolve
         // over, so a silently-dropped member of either narrows the gate for lack of evidence.
