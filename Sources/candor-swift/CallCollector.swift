@@ -1789,7 +1789,7 @@ final class CallCollector: SyntaxVisitor {
         // predicate entry in a position nothing reaches — inside the fix whose own commit message
         // named R348 as the trap it avoided.** Two of three roots is what a κ family looks like when
         // it is fixed from the spelling in hand rather than written down and run (R346).
-        if alias == "NWBrowser" || alias == "NetServiceBrowser" || alias == "NetService" {
+        if isBonjourRoot(alias) {                       // R391 — ONE authority for the root set
             // R390 — the DESCRIPTOR question is the right one for `NWBrowser` (which also serves ordinary
             // networking) and answers "no" for every `NetService`/`NetServiceBrowser` call, whose service
             // type is a plain String parameter. `isMdnsOnlyRoot` is the type half; see its doc.
@@ -1798,9 +1798,26 @@ final class CallCollector: SyntaxVisitor {
             }
             if let eff = kappaFree(name: alias, argCount: node.arguments.count) {
                 directEffects.insert(eff)
-                // R385 — the alias/free spelling. THIS SITE IS NOT REACHED BY THE MEASURED FIXTURES
-                // (the probe fired only CTOR and MEMBER), so it carries its own fixture rather than
-                // being left as an untested guess — an entry in a position it can never match is R348.
+                // R385 — the alias/free spelling.
+                //
+                // **SOUNDNESS R392 — THE SENTENCE THAT USED TO BE HERE CLAIMED A FIXTURE THAT DID NOT
+                // EXIST**, and it read as coverage for eight days. It said this site *"carries its own
+                // fixture rather than being left as an untested guess"*. MEASURED at HEAD by deleting
+                // this one line: **1229 tests, 0 failures.** The bare-ctor copy of this insert
+                // (`visit(FunctionCallExprSyntax)`'s bonjour arm) measured the same — only the MEMBER
+                // copy was protected.
+                //
+                // The reason every bonjour fixture was blind to both is brief attack A.2: they all
+                // construct the browser AND call a verb on it in one function, and the member site's
+                // insert then masks the ctor sites'. The discriminator is a factory — construct and
+                // RETURN, verb called elsewhere. With this line deleted that shape reported
+                // `hosts:["api.stripe.com"]`, `incomplete` ABSENT, and **`allow Net api.stripe.com`
+                // exit 0** over a Bonjour registration with a caller-supplied service name: R385's
+                // masking evasion, reopened through the one spelling nothing measured.
+                //
+                // `BonjourSurfaceProcessTests.testR392TheModuleQualifiedBonjourCtorAloneMarksItsNet-
+                // SurfaceIncomplete` is the fixture, and it was calibrated by deleting this line and
+                // watching it go red — not by reading it.
                 if eff == "Net" { incompleteSurfaces.insert("Net") }
             }
             return true
@@ -4436,8 +4453,7 @@ final class CallCollector: SyntaxVisitor {
                 unionConditionalTypeEdge(name, node, lit: lit)
             } else if (!declaredTypes.contains(name) || conditionallyShadowedTypes.contains(name)),
                       !localFreeFns.contains(name),
-                      dealias(name) == "NWBrowser" || dealias(name) == "NetServiceBrowser"
-                        || dealias(name) == "NetService" {
+                      isBonjourRoot(dealias(name)) {   // R391 — ONE authority for the root set
                 keepExtensionCtorEdge(name, node, lit: lit)
                 // A BONJOUR BROWSER CONSTRUCTOR — `NWBrowser(for: .bonjour(…), using:)`, which is the
                 // spelling real code uses; the member arm below only sees `browser.start()`. `.bonjour` is
@@ -4468,6 +4484,10 @@ final class CallCollector: SyntaxVisitor {
                 // because a bonjour `type:` is a SERVICE TYPE and naming it a destination would
                 // fabricate one (R381's first cut captured `"443"` as a host exactly that way).
                 // `LocalNetwork` remains the positive channel and still fires.
+                    // R392 — the BARE ctor copy, and it was as unprotected as the module-qualified
+                    // one: deleting it left 1229 tests green while `allow Net <a benign sibling
+                    // literal>` went to exit 0 over `return NWBrowser(for: .bonjour(type: t, …))`.
+                    // Pinned now by `testR392TheBareBonjourCtorAloneMarksItsNetSurfaceIncomplete`.
                     if eff == "Net" { incompleteSurfaces.insert("Net") }
                 }
                 unionConditionalTypeEdge(name, node, lit: lit)
@@ -4770,7 +4790,7 @@ final class CallCollector: SyntaxVisitor {
                         incompleteSurfaces.insert("Fs")
                     }
                 }
-            } else if let rt = base.root, rt == "NWBrowser" || rt == "NetServiceBrowser" || rt == "NetService",
+            } else if let rt = base.root, isBonjourRoot(rt),   // R391 — ONE authority for the root set
                       !declaredTypes.contains(rt) {
                 // A BONJOUR DESCRIPTOR is local-network by definition — `.bonjour(type:domain:)` is mDNS,
                 // there is no non-LAN spelling of it. Unlike a HOST literal (where an unreadable value must
@@ -4785,7 +4805,9 @@ final class CallCollector: SyntaxVisitor {
                     directEffects.insert(eff)
                     // R385 — the member verb (`b.start(queue:)`) reaches this branch and no surface
                     // site; see the ctor arm above for the measurement and why the predicates could not
-                    // close it.
+                    // close it. R392: this is the ONE of the three copies the suite could already see —
+                    // deleting it reddens `BonjourSurfaceProcessTests`, deleting either ctor copy did
+                    // not, because every fixture called a verb in the same function as the ctor.
                     if eff == "Net" { incompleteSurfaces.insert("Net") }
                     // R390 — the VERB half of the type rule. `searchForServices(ofType:inDomain:)` and
                     // `publish()` carry no descriptor to read, so the descriptor question above answers

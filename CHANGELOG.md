@@ -9,6 +9,42 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### Tests / internals (no report-byte change)
+
+- **SOUNDNESS R392 — A COMMENT CLAIMED A FIXTURE THAT DID NOT EXIST, AND THE SIBLING IT DID NOT NAME WAS
+  UNPROTECTED TOO.** `CallCollector`'s module-qualified Bonjour arm carried *"THIS SITE IS NOT REACHED BY
+  THE MEASURED FIXTURES … so it carries its own fixture rather than being left as an untested guess"*.
+  MEASURED by deleting that site's `incompleteSurfaces.insert("Net")`: **1229 tests, 0 failures.**
+  Deleting the BARE-ctor copy measured the same. Only the MEMBER copy was protected — and the reason all
+  three reads as covered is that every Bonjour fixture in the tree constructs the browser AND calls a
+  verb on it in one function, so the member site's insert masks both ctor sites'.
+  **Both ctor sites are LIVE:** with either deleted, `func make(_ t: String) -> NWBrowser { …; return
+  NWBrowser(for: .bonjour(type: t, domain: nil), using: .tcp) }` beside a benign literal reported
+  `hosts:["api.stripe.com"]` with `incomplete` ABSENT and **`allow Net api.stripe.com` exit 0** — R385's
+  masking evasion through the one spelling nothing measured. Four ctor-only fixtures added
+  (`BonjourSurfaceProcessTests`), each calibrated by deleting the site it pins and watching it go red,
+  plus the fabrication control that a host-bearing `NWConnection` constructed and returned still
+  publishes `api.stripe.com:443` and reads COMPLETE. The false comment is replaced by what was measured.
+
+- **SOUNDNESS R391 — THE ROW'S PREMISE IS STALE, AND DELETING THE ENTRIES WAS THE UNSAFE DIRECTION.** The
+  row filed the three Bonjour entries in `isOpaqueLocatorFree` as UNREACHABLE, measured 2026-09-12. At
+  HEAD they ARE reached — `3eca7f5` (R415/R432, 2026-09-15) gave `locatorForFree` an `.opaque` arm that
+  DERIVES from this predicate, and an in-process probe counts 1–2 hits per Bonjour fixture. They are
+  nonetheless INERT: a `__DEAD_` rename of all three produced byte-identical JSON over nine fixtures
+  (bare ctor, literal type, module-qualified ctor, member verb, ctor-only, `extension` shadow, `#if`
+  shadow), with the same rename applied to `NWListener` flipping `incomplete:["Net"]` → `hosts:["8080"]`
+  as the calibration that the instrument can fail. Deleting them would re-arm `firstStringLiteral` for
+  those names, which is R381's `"443"` and R432's `"8080"` one reorder away. Conditioning the three
+  fail-closed `incompleteSurfaces` inserts on the predicate was the other candidate and is also unsafe —
+  it turns an unconditional insert into one gated by an INCLUSION list, where a forgotten name
+  UNDER-reports. Taken in the third direction instead: `isBonjourRoot` is now the ONE authority for the
+  Bonjour root set, consulted by `isOpaqueLocatorFree` and by all three charge-site guards, which were
+  four copies of one list. Removing `"NetService"` from it now reddens 10 tests; before, the entries were
+  pinned only by list-membership assertions. Behaviour-preserving: A/B over alamofire /
+  swift-argument-parser / swift-nio / RxSwift — **10,411 rows, ADDED 0 / REMOVED 0 / CHANGED 0** on the
+  wide key. That A/B is an over-charge control ONLY: the corpus contains zero occurrences of any Bonjour
+  API, so its reach for this change is ZERO and the fixtures above are the evidence.
+
 ### ⚠ Verdict-affecting
 
 - **SPEC §4 ⟨0.39⟩ — THE CHAINED-DISPATCH UNION (SOUNDNESS R475/R504).** The defect is a toggle running

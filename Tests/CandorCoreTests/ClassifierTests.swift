@@ -284,6 +284,11 @@ final class ClassifierTests: XCTestCase {
     /// `recordSurfaces` sites; and by a THIRD root the panel found unmeasured, `NetService`, which was
     /// asserted here while appearing in none of those sites — R348's shape. The behaviour is pinned by
     /// `BonjourSurfaceProcessTests`, in-tree, all three roots plus the fabrication control.
+    ///
+    /// R392 CORRECTION: "all three roots" was true of the roots and false of the SITES. Only the member
+    /// charge site was pinned; both ctor sites could be deleted with 1229 tests green, because every
+    /// fixture called a verb in the same function as the ctor and the member insert masked them. The
+    /// ctor-only fixtures in that file are what closed it.
     func testR385OpaqueLocatorFormsEstablishWithoutCapturing() {
         // The Keychain family — the locator is a CFDictionary, invisible to any surface.
         for n in ["SecItemAdd", "SecItemUpdate", "SecItemDelete", "SecItemCopyMatching"] {
@@ -291,9 +296,23 @@ final class ClassifierTests: XCTestCase {
             XCTAssertTrue(isEstablishingFree(effect: "Fs", name: n),
                           "\(n) must ESTABLISH so a runtime query fails closed — R385")
         }
-        // Bonjour — the predicate is right; reaching it is the open half.
+        // Bonjour. SOUNDNESS R391 — THIS ASSERTION PINS A LIST, AND THAT WAS THE ROW'S COMPLAINT.
+        // It is kept because the property is real, but it is no longer what protects the behaviour:
+        // `isOpaqueLocatorFree` now ANSWERS from `isBonjourRoot`, the single authority the three charge
+        // sites also consult, so removing a name from that authority reddens `BonjourSurfaceProcessTests`
+        // — measured, 10 failures in 1233 tests on deleting `"NetService"` from it. The second
+        // assertion below is the derivation, in the shape `LocatorSlotSchemaProcessTests` uses for the
+        // `.opaque` arm: read the authority back THROUGH the predicate rather than restating its members.
         for n in ["NWBrowser", "NetService", "NetServiceBrowser"] {
+            XCTAssertTrue(isBonjourRoot(n), "\(n) is a Bonjour root — R391's single authority")
             XCTAssertTrue(isOpaqueLocatorFree(n), "\(n)'s locator is a SERVICE TYPE, not a host — R385")
+        }
+        // The control on the authority itself: a Network-framework type that also serves ORDINARY
+        // networking is not a Bonjour root, or the three charge sites would swallow every connection.
+        for n in ["NWConnection", "NWListener", "URLSession"] {
+            XCTAssertFalse(isBonjourRoot(n),
+                           "\(n) also serves ordinary networking — R390's own stated reason for why "
+                           + "`NSLocalNetworkUsageDescription` is not separable by type for these")
         }
         // The pre-existing Fs establishing names must survive.
         XCTAssertTrue(isEstablishingFree(effect: "Fs", name: "fopen"))

@@ -1482,8 +1482,29 @@ public func isNetEstablishingFree(name: String) -> Bool {
 /// certify code that browses the local network.
 public func isOpaqueLocatorFree(_ name: String) -> Bool {
     switch name {
-    // bonjour / mDNS discovery — the locator is a SERVICE TYPE, not a host
-    case "NWBrowser", "NetService", "NetServiceBrowser": return true
+    // bonjour / mDNS discovery — the locator is a SERVICE TYPE, not a host.
+    //
+    // SOUNDNESS R391 — ASKED OF `isBonjourRoot`, NOT SPELLED AGAIN. The row filed these three names as
+    // UNREACHABLE, measured against the tree of 2026-09-12; that is STALE at HEAD (R415/R432 gave
+    // `locatorForFree` an `.opaque` arm on 2026-09-15 that DERIVES from this predicate, and an in-process
+    // probe counts 1–2 hits per bonjour fixture). What the row got right is that they were INERT: a
+    // `__DEAD_` rename of all three produced byte-identical JSON over nine fixtures (bare ctor, literal
+    // type, module-qualified ctor, member verb, ctor-only, `extension` shadow, `#if` shadow), with the
+    // SAME rename applied to `NWListener` flipping `incomplete:["Net"]` → `hosts:["8080"]` as the
+    // calibration that the instrument can fail.
+    //
+    // DELETING THEM WOULD HAVE BEEN THE UNSAFE DIRECTION. `locatorForFree`'s `.opaque` arm is what stops
+    // `firstStringLiteral` handing a bonjour `type:` to `lit`; the three bonjour branches happen to route
+    // that `lit` only into the shadow-edge helpers today, so nothing publishes it — but any reorder or
+    // any new consumer of `lit` would put `_http._tcp` into `hosts`, which is R381's `"443"` and R432's
+    // `"8080"` verbatim, both live defects in this file.
+    //
+    // CONDITIONING THE THREE FAIL-CLOSED `incompleteSurfaces.insert("Net")` SITES ON THIS PREDICATE WAS
+    // THE OTHER CANDIDATE AND IS ALSO UNSAFE: it turns an unconditional insert into one gated by an
+    // INCLUSION list, so a forgotten name UNDER-reports. The fix is the third direction — one authority
+    // for the bonjour root set, consulted by this predicate AND by all three charge-site guards, so a
+    // name removed from it turns `BonjourSurfaceProcessTests` red instead of nothing at all.
+    case _ where isBonjourRoot(name): return true
     // the Keychain — the locator is a CFDictionary query, not a path
     case "SecItemAdd", "SecItemUpdate", "SecItemDelete", "SecItemCopyMatching": return true
     // SOUNDNESS R432 — A LISTEN ADDRESS IS NOT A HOST, AND `NWListener`'S IS A PORT.
@@ -1542,6 +1563,30 @@ public func isOpaqueLocatorFree(_ name: String) -> Bool {
 public func isMdnsOnlyRoot(_ name: String) -> Bool {
     switch name {
     case "NetService", "NetServiceBrowser": return true
+    default: return false
+    }
+}
+
+/// SOUNDNESS R391 — **THE BONJOUR ROOT SET, WRITTEN ONCE.**
+///
+/// Three charge sites (the module-qualified ctor, the bare ctor, the member verb) each guarded on the
+/// same three names, and `isOpaqueLocatorFree` spelled them a fourth time. Four copies of one question
+/// is R346/R347's shape and it is exactly what R390 had to widen three times in one commit.
+///
+/// **WHAT THIS BUYS, AND IT IS THE POINT OF THE ROW.** R391 observed that the three entries in
+/// `isOpaqueLocatorFree` were pinned only by list-membership assertions — *"the tests pin the LIST, not
+/// the behaviour"*. With one authority they are load-bearing: remove a name here and all three charge
+/// sites stop firing, so `BonjourSurfaceProcessTests` goes red. MEASURED by deleting `NetService` from
+/// this function and running the suite — see that file's R391 note for the counts.
+///
+/// **THE DIRECTION IS DELIBERATE.** The three sites' `incompleteSurfaces.insert("Net")` stays
+/// UNCONDITIONAL: a root that reaches those branches fails closed whatever any list says. This authority
+/// decides only WHICH ROOTS REACH THEM, which is the guard that already existed — so a forgotten name
+/// leaves a bonjour form on the generic κ arm (where its locator is captured and its surface reads
+/// complete), and that is a change the fixtures can see rather than one they cannot.
+public func isBonjourRoot(_ name: String) -> Bool {
+    switch name {
+    case "NWBrowser", "NetService", "NetServiceBrowser": return true
     default: return false
     }
 }
