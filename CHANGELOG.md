@@ -9,6 +9,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.39.0] — 2026-09-20
+
 ### Tests / internals (no report-byte change)
 
 - **SOUNDNESS R392 — A COMMENT CLAIMED A FIXTURE THAT DID NOT EXIST, AND THE SIBLING IT DID NOT NAME WAS
