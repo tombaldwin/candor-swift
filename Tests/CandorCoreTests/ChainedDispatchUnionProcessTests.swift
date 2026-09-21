@@ -97,7 +97,11 @@ final class ChainedDispatchUnionProcessTests: XCTestCase {
     }
 
     /// Renders one arm and returns (root, dependency package dirs in scan order, app dir).
-    private func render(iface: String, third: Bool, middle: Bool) throws -> (URL, [URL], URL) {
+    /// `appOverride` replaces the consumer's own source — the R532 arms dispatch DIRECTLY on a
+    /// `Backend`-typed receiver in the consumer (the site that forms the wire key), where the arms above
+    /// forward to the dependency's `termSize`.
+    private func render(iface: String, third: Bool, middle: Bool,
+                        appOverride: String? = nil) throws -> (URL, [URL], URL) {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("candor-r475-\(UUID().uuidString)")
         func pkg(_ n: String) -> URL { root.appendingPathComponent(n.lowercased()) }
@@ -115,8 +119,13 @@ final class ChainedDispatchUnionProcessTests: XCTestCase {
             try write(pkg("EffImpl").appendingPathComponent("Sources/EffImpl/eff.swift"), Self.effimplSource)
             order.append(pkg("EffImpl")); appDeps.append("EffImpl")
         }
-        var body = middle ? Self.appMiddle : Self.appDispatch
-        if third { body += Self.appThird }
+        // `appThird` is NOT appended to an override, and that is load-bearing rather than tidiness: it
+        // carries `import EffImpl`, which would leave the app file with TWO dependency imports, and
+        // `foreignOwnerModule` REFUSES a file that leaves two candidates. The R532 arms form their key
+        // in the consumer itself, so the consumer's own import list has to stay decidable; the arms
+        // above form theirs in the dependency, where it never mattered.
+        var body = appOverride ?? (middle ? Self.appMiddle : Self.appDispatch)
+        if third, appOverride == nil { body += Self.appThird }
         try write(pkg("App").appendingPathComponent("Package.swift"), Self.manifest("App", deps: appDeps))
         try write(pkg("App").appendingPathComponent("Sources/App/app.swift"), body)
         return (root, order, pkg("App"))
@@ -133,10 +142,12 @@ final class ChainedDispatchUnionProcessTests: XCTestCase {
 
     /// Scan every dependency STANDALONE (each is its own package — chaining them to each other would
     /// hide which report carried which fact), then the consumer with their reports on CANDOR_DEPS.
-    private func consumer(iface: String, third: Bool, middle: Bool = false, chained: Bool = true) throws
+    private func consumer(iface: String, third: Bool, middle: Bool = false, chained: Bool = true,
+                          appOverride: String? = nil) throws
         -> (app: [String: [String: Any]], deps: [[String: [String: Any]]], root: URL) {
         let bin = try binaryURL()
-        let (root, order, app) = try render(iface: iface, third: third, middle: middle)
+        let (root, order, app) = try render(iface: iface, third: third, middle: middle,
+                                            appOverride: appOverride)
         var reports: [String] = []
         var depDocs: [[String: [String: Any]]] = []
         for (i, d) in order.enumerated() {
@@ -212,6 +223,69 @@ final class ChainedDispatchUnionProcessTests: XCTestCase {
         XCTAssertFalse((app["appSize"]?["invisible"] as? [String] ?? []).isEmpty,
                        "unchained, the same consumer discloses through `invisible` — chaining must not "
                        + "DELETE that disclosure, which is what the defect did; got \(app["appSize"] ?? [:])")
+    }
+
+    // ── SOUNDNESS R532 — A GENERIC PARAMETER IS NOT A TYPE NAME ─────────────────────────────────
+    //
+    // ⟨0.39⟩ made the receiver's SPELLED type a WIRE KEY. Four ways of spelling one existential
+    // (`Backend`, `Iface.Backend`, `any Backend`, `[Backend]`) form `Iface#Backend.size`; the FIFTH —
+    // the generic bound — formed `Iface#T.size`, a key naming a type the owning package does not have
+    // and one no producer can ever publish under. MEASURED at 0.39.0, one variable, everything else
+    // held identical: `_ b: Backend` → `inferred: [Net]`, `deny Net` exit 1; `<B: Backend>(_ b: B)` →
+    // `inferred: []`, `dispatchesOn: [Iface#B.size]`, exit 0 — over the same dependency, the same
+    // conformer and the same binary. The LOCAL-protocol path has resolved the bound since R26, so this
+    // is §F1.3, two implementations of one question that drifted, with only the newer one on the wire.
+    //
+    // THE ARMS ARE A CROSS, not a single assertion: the generic spelling is asserted EQUAL to the
+    // existential one rendered from the same helper, so the test keeps its meaning if the rung's key
+    // format changes and cannot pass by both arms going silent (`chargedNothing` would then fire).
+    private static let appGeneric =
+        "import Iface\npublic func appSize<B: Backend>(_ b: B) -> Int { return b.size() }\n"
+    private static let appWhere =
+        "import Iface\npublic func appSize<B>(_ b: B) -> Int where B: Backend { return b.size() }\n"
+    private static let appExistential =
+        "import Iface\npublic func appSize(_ b: Backend) -> Int { return b.size() }\n"
+
+    private func dispatchKeyAndEffects(_ appSrc: String) throws -> (key: [String], eff: Set<String>) {
+        let (app, _, root) = try consumer(iface: "impl", third: true, appOverride: appSrc)
+        defer { try? FileManager.default.removeItem(at: root) }
+        return (app["appSize"]?["dispatchesOn"] as? [String] ?? [], eff(app, "appSize"))
+    }
+
+    func testAGenericBoundReceiverFormsTheSameDispatchKeyAsTheExistentialOne() throws {
+        let existential = try dispatchKeyAndEffects(Self.appExistential)
+        // The reference arm must itself be non-vacuous — if the existential spelling stopped carrying
+        // the effect, an equality assertion below would pass over two silences.
+        XCTAssertEqual(existential.key, ["Iface#Backend.size"])
+        XCTAssertTrue(existential.eff.contains("Net"), "reference arm is vacuous: \(existential)")
+
+        for (name, src) in [("<B: Backend>", Self.appGeneric), ("where B: Backend", Self.appWhere)] {
+            let generic = try dispatchKeyAndEffects(src)
+            XCTAssertEqual(generic.key, existential.key,
+                           "\(name) must key on the BOUND, not on the type-parameter name — "
+                           + "`Iface#B.size` is a key no producer can publish under; got \(generic.key)")
+            XCTAssertEqual(generic.eff, existential.eff,
+                           "…and therefore carry the same effects as the existential spelling of the "
+                           + "same dispatch; got \(generic.eff) vs \(existential.eff)")
+        }
+    }
+
+    /// THE FABRICATION CONTROL, and the near-miss the resolution has to refuse. `<T: Encodable>` is a
+    /// bound nearly every type satisfies, so keying a dispatch under it would union an unrelated
+    /// package's `Encodable` conformers onto this row — the `STD_PURE_PROTOCOLS` carve-out the CHA arm
+    /// beside this already applies to a non-generic owner, which the resolution must not step around.
+    /// It compiles and the call is a real protocol requirement, so the absence asserted here is an
+    /// absence over a reachable site (§E3).
+    func testAStdPureBoundPublishesNoDispatchKeyAtAll() throws {
+        let src = "import Iface\npublic func appSize<T: Encodable>(_ x: T, _ e: Encoder) -> Int {\n"
+                + "    try? x.encode(to: e)\n    return 0\n}\n"
+        let (app, _, root) = try consumer(iface: "impl", third: true, appOverride: src)
+        defer { try? FileManager.default.removeItem(at: root) }
+        XCTAssertNil(app["appSize"]?["dispatchesOn"],
+                     "a std-pure bound must publish NO dispatch key: keying it would charge this row "
+                     + "with an unrelated package's Encodable conformers, and BEFORE this resolution it "
+                     + "published `Iface#T.encode` — a nonsense key that read as an answer; "
+                     + "got \(app["appSize"] ?? [:])")
     }
 
     // ── THE MIDDLE PACKAGE (PART 92 `c6_middle_package`, SOUNDNESS R504) ─────────────────────────

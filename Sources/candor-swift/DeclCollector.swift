@@ -58,6 +58,16 @@ struct FnInfo {
     /// a `for x in p` / `p.forEach { $0 … }` binder inherits a protocol name for which the CALLER picked a
     /// single conformer — the same monomorphized receiver `opaqueParams` covers, one container out.
     var opaqueArrayParams: Set<String> = []
+    /// SOUNDNESS R532 — THIS FUNCTION'S OWN GENERIC PARAMETERS, EACH MAPPED TO ITS BOUND: `<T: Handler>`
+    /// and `where T: Handler` alike (both forms are unioned at the one site that builds this, so the two
+    /// spellings cannot drift). It exists because ⟨0.39⟩ turned a receiver's SPELLED type name into a
+    /// WIRE KEY, and a generic parameter is a name that is NOT a type. `params` records the spelling
+    /// (`T`) — until the rung nothing published it, which is why `opaqueArrayParams`' doc four lines up
+    /// could say a bare `T` param "resolves to nothing" and be right. It no longer is: the published key
+    /// `<dep pkg>#T.<member>` names a type the owning package does not have (the
+    /// `DepLib#String.lowercased` class the rung's own commit message names) AND it costs the charge,
+    /// because no producer can publish under a key spelled from the CONSUMER's type-parameter name.
+    var genericBounds: [String: String] = [:]
     var protoParams: [String: String] = [:]  // param name -> local protocol name
     var arrayParams: [String: String] = [:]  // param name -> ELEMENT type (a `[T]` param, for `for x in p`)
     var arrayParamsNested: [String: String] = [:]  // R278 — `[[T]]` param -> INNER element `T`
@@ -1258,6 +1268,11 @@ final class DeclCollector: SyntaxVisitor {
                   let lhs = typeName(conf.leftType).name, let rhs = typeName(conf.rightType).name else { continue }
             genericBounds[lhs] = rhs   // `where T: P` — same binding as `<T: P>`
         }
+        // R532 — published, so the Driver can tell a TYPE NAME from a TYPE-PARAMETER NAME at the one
+        // place ⟨0.39⟩ spells one onto the wire. Set here rather than recomputed there: both spellings
+        // are already unioned above, and a second reader of the generic clause is the two-copies-of-one-
+        // question shape this register keeps paying for (R346/R347).
+        info.genericBounds = genericBounds
         for (idx, p) in sig.parameterClause.parameters.enumerated() {
             let pname = (p.secondName ?? p.firstName).text
             let t = typeName(p.type)

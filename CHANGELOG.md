@@ -9,6 +9,69 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed
+
+- **SOUNDNESS R532a — A GENERIC PARAMETER IS NOT A TYPE NAME, AND ⟨0.39⟩ PUT ONE ON THE WIRE.** The rung
+  turned the receiver's SPELLED type into a dispatch key. Four spellings of one existential
+  (`_ b: Backend`, `_ b: Iface.Backend`, `_ b: any Backend`, `_ hs: [Backend]`) form
+  `Iface#Backend.size`; the FIFTH, the generic bound, formed **`Iface#B.size`** — a key naming a type the
+  owning package does not have, which is the `DepLib#String.lowercased` class the rung's own commit
+  message names, **and a lost charge**, because no producer can publish under the CONSUMER's
+  type-parameter name. MEASURED at 0.39.0 across a three-package chain (a protocol package, an
+  implementor package with the effectful conformer, a consumer), ONE VARIABLE — the parameter's spelling
+  — same dependency, same conformer, same binary:
+
+      public func useIt(_ h: Handler)          → inferred: ["Net"]   deny Net EXIT 1
+      public func useIt<T: Handler>(_ h: T)    → inferred: []        deny Net EXIT 0
+                                                 dispatchesOn: ["Iface#T.handle"]
+
+  The consumer really does perform the network call — EXECUTED, with a listener receiving the request —
+  so exit 0 is a silent under-report. The LOCAL-protocol path has resolved the bound since R26 (both
+  spellings give `solo#Handler.handle` and both charge), so this is §F1.3: two implementations of one
+  question that drifted, with only the newer one on the wire. Fixed by resolving the spelling through
+  the declaration's own generic clause (`FnInfo.genericBounds`, both the `<T: P>` and `where T: P`
+  forms, unioned at the one site that already reads them) at the ⟨0.39⟩ key site AND at the §2 dep-join
+  key, through ONE function so the key the join ASKS on and the key the rung PUBLISHES cannot spell one
+  abstraction two ways. The CHA edge loop beside it keeps the raw spelling deliberately: a monomorphized
+  generic's witnesses are the caller's, not ours.
+
+  CALIBRATED, not asserted. Degrading `dispatchAbstraction` to the pre-fix `return owner` takes
+  `ChainedDispatchUnionProcessTests` from 10 passed / 0 failed to **5 failures**, and the degraded run
+  prints the pre-fix key verbatim: `("["Iface#B.size"]") is not equal to ("["Iface#Backend.size"]")`.
+  The std-pure control fires there too — it published `Iface#T.encode` — so the `STD_PURE_PROTOCOLS`
+  refusal in the resolution is load-bearing rather than decorative.
+
+  **A/B — SAFETY-ONLY, AND THAT IS WRITTEN DOWN HERE RATHER THAN DISCOVERED LATER.**
+  `bin/corpus-ab.py`, 9 real Swift packages (Alamofire, Kingfisher, SQLite.swift, SwiftyJSON,
+  swift-collections, swift-log, swift-protobuf, swift-argument-parser, swift-nio), 27,165 pre rows
+  against 27,165 post:
+
+      ADDED 0 · REMOVED 0 · CHANGED 0     (wide key, entry+package+fn+hash multiset; inferred alone: 0)
+      REACH: R532-REACH 0 hits across 0 entries  — run with --allow-zero-reach
+
+  The corpus does not reach the changed branch: it needs a FUNCTION-level generic bound on a receiver in
+  a file whose single declared dependency import decides the owner, and these nine packages contain
+  none. The fixtures above are the evidence; the A/B is an over-charge control only.
+
+### Known — measured, not fixed (see SOUNDNESS R532b/c/d)
+
+- **R532b/c — on real code, essentially every foreign `dispatchesOn` key ⟨0.39⟩ publishes is a key
+  nobody can answer.** Counted over the same nine packages: 12,498 LOCAL keys (`pkg#Proto.member`,
+  fine) and **2,071 FOREIGN keys in 69 distinct spellings, of which zero name an abstraction the owning
+  package has.** Two mechanisms, neither covered by the rung's `STD_PURE_PROTOCOLS` /
+  `RAW_VALUE_BASE_TYPES` carve-outs, because both are about a name that is not a protocol at all:
+  a MODULE-qualified free call published as a type member (`CNIOLinux#CNIOLinux.io_uring_submit` ×117,
+  `CNIOWindows#WinSDK.closesocket` ×150 — and `CNIOLinux#WinSDK.inet_ntop` ×50, keyed under the wrong
+  module entirely, because the owner is the file's one declared dep import rather than the module the
+  call names), and a Swift STDLIB type (`CNIOLinux#Unmanaged.passRetained` ×264,
+  `CNIOLinux#MemoryLayout.size` ×65, `CNIOLinux#Swift.type` ×66, `UnsafeRawPointer.load` ×69). The
+  free-call form is a MISSED JOIN as well as noise: a consumer resolves `dispatchesOn` by
+  `deps.lookup(k)`, and the producer of a free function files it under `M#name`, not `M#M.name`.
+- **R532d — the fix above covers a FUNCTION-level generic clause only.** A TYPE-level parameter still
+  reaches the wire: `CNIOAtomics#T.nio_atomic_load` and 15 sibling spellings, 36 rows on this corpus.
+- **R532 (the rung's residual) — a conformance declared inside a FUNCTION or INITIALIZER body is
+  invisible to obligation 2, and the consumer has no hedge to fall back on.** See SOUNDNESS R532.
+
 ## [0.39.0] — 2026-09-20
 
 ### Tests / internals (no report-byte change)

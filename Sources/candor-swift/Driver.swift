@@ -1615,6 +1615,38 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         return cands.count == 1 ? cands.first : nil
     }
+    /// SOUNDNESS R532 — THE ABSTRACTION A RECEIVER SPELLING NAMES, once a GENERIC PARAMETER has been
+    /// resolved to its bound. `nil` means "publish nothing for this receiver".
+    ///
+    /// ⟨0.39⟩ obligation 1 turns `call.extOwner` — the receiver's spelled type — into a wire key. For
+    /// `func useIt<T: Handler>(_ h: T) { h.handle() }` that spelling is `T`, so the engine published
+    /// `Iface#T.handle`: a key naming a type the owning package does not have, which is the
+    /// `DepLib#String.lowercased` class the rung's own commit message names, AND a lost charge, because
+    /// no producer can publish under the CONSUMER's type-parameter name. MEASURED at 0.39.0, one
+    /// variable — the parameter's spelling — everything else held identical: `_ h: Handler` gives
+    /// `inferred: [Net]` and `deny Net` exit 1; `<T: Handler>(_ h: T)` gives `inferred: []`,
+    /// `dispatchesOn: [Iface#T.handle]` and exit 0, over the same dependency and the same conformer.
+    /// The LOCAL-protocol path has resolved the bound since R26 (`solo#Handler.handle` for both
+    /// spellings), so this is two implementations of one question that drifted — F1.3 — and only the
+    /// newer one is on the wire.
+    ///
+    /// THE RESOLUTION IS SOUND FOR THIS KEY AND NOT FOR THE CHA EDGE LOOP BESIDE IT, which is why it is
+    /// applied here and not by rewriting the receiver's type. `<T: P>` is monomorphized by the CALLER, so
+    /// this package's own conformers are NOT the witness set (the argument is written out at
+    /// `DeclCollector.collect`'s `some P` branch and was measured on 14 targets); the KEY, by contrast,
+    /// says only "this row dispatches on `P.member`", which every instantiation of `T` does by the
+    /// declaration's own constraint. Identical to what the rung already publishes for `any P`/`_ : P`.
+    ///
+    /// A bound that is LOCAL, a std-pure protocol, or a raw-value base returns nil rather than a key:
+    /// a local abstraction is the in-scan CHA's question, and the other two are the fabrication
+    /// carve-outs the call site beside this one already applies to a non-generic owner. Refusing is the
+    /// same posture `foreignOwnerModule` takes on an undecidable owner — never a key nobody can answer.
+    func dispatchAbstraction(_ owner: String, _ f: FnInfo) -> String? {
+        guard let bound = f.genericBounds[owner] else { return owner }   // not a type parameter: unchanged
+        guard !localTypes.contains(bound), !STD_PURE_PROTOCOLS.contains(bound),
+              !RAW_VALUE_BASE_TYPES.contains(bound) else { return nil }
+        return bound
+    }
     /// ⟨0.39⟩ OBLIGATION 2 — the abstractions this package implements that it does NOT own, each with the
     /// dependency package that DOES. Anything local (a protocol declared here, a superclass declared here)
     /// is excluded: it is already keyed under this package. A name whose owner cannot be decided is
@@ -2576,9 +2608,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // it charges what the call really reaches — a concrete method's entry when the owner is
                 // concrete, the implementors' union when it is an abstraction — never a body the call
                 // cannot reach.
+                //
+                // R532 — AND THE SPELLING IS RESOLVED THROUGH `dispatchAbstraction` BEFORE IT BECOMES A
+                // KEY. `owner` is the receiver's spelled type, which for `<T: Handler>(_ h: T)` is the
+                // TYPE PARAMETER. See that function for the measurement; the edge loop above deliberately
+                // keeps the raw spelling, because a monomorphized generic's witnesses are the caller's,
+                // not ours.
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
-                if let m = foreignOwnerModule(inFile: file) {
-                    dispatchDirect[f.qual, default: []].insert("\(m)#\(owner).\(call.leaf)")
+                if let m = foreignOwnerModule(inFile: file), let abs = dispatchAbstraction(owner, f) {
+                    dispatchDirect[f.qual, default: []].insert("\(m)#\(abs).\(call.leaf)")
                 }
             }
             // COULD-NOT-FORM-A-KEY (DEP-RECEIVER-TYPING-DESIGN.md half 1). The receiver was bound from a
@@ -2682,7 +2720,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             hits.append(e)
                         }
                     } else if let owner = call.extOwner {
-                        if let e = deps.lookup("\(m)#\(owner).\(call.leaf)")
+                        // R532 — the same type-parameter resolution the ⟨0.39⟩ key above uses, and the
+                        // SAME function, so the key this join ASKS on and the key the rung PUBLISHES
+                        // cannot spell one abstraction two ways. `owner == m` stays on the RAW spelling:
+                        // that arm is the module-qualified free call (`RatesDep.hit()`), where the owner
+                        // IS the module name and no generic bound can apply.
+                        let key = dispatchAbstraction(owner, f) ?? owner
+                        if let e = deps.lookup("\(m)#\(key).\(call.leaf)")
                             ?? (owner == m ? deps.lookup("\(m)#\(call.leaf)") : nil) {
                             hits.append(e)
                         }
