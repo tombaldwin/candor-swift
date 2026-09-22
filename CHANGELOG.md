@@ -11,6 +11,75 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R537 — AN ELEMENT ACCESSOR WAS NOT A TYPED RECEIVER, so `hs.first?.emitN()` over a
+  `[PN]` of protocol existentials read SILENT-PURE while `hs[0].emitN()`, `for g in hs { … }`,
+  `d["k"]?.emitN()` and `hs.map { … }` all charged.** `ELEMENT_ACCESSORS` has named
+  `first`/`last`/`popLast`/`removeFirst`/`randomElement`/… since R192, and `rootOf`'s subscript arm has
+  typed `cs[0]` since long before that — but the two were never one question: R192 wired that set to
+  `callableValue` ("is this a closure?") and nobody wired it to the resolver ("what TYPE is this
+  receiver?"). MEASURED at v0.39.0 on a 38-arm fixture where **every arm compiles and really deletes its
+  own probe file**: 30 arms ABSENT — no row, no `Unknown` — against 4 charged controls in the same scan.
+  The protocol is declared in a DIFFERENT FILE from every call site, so no same-file shortcut explains
+  the controls. Fixed through ONE shared answer (`elementAccessorContainer`/`elementAccessorType`), read
+  by the resolver's member arm, its call arm, `elementTypeOf`'s nested arm and the closure-parameter
+  arm — because four consumers of one fact is exactly how this engine keeps losing halves of a shape.
+  Ordered after the field arms so a user type's own stored `first`/`last` still wins.
+
+  Swept as a FAMILY, not as the eight spellings reported: the property forms, the call forms
+  (`popLast()`/`removeFirst()`/`randomElement()`/`first(where:)`/`min(by:)`), `Set`, `ArraySlice`, the
+  `.values` of a dictionary and a dictionary PAIR's `.value`, every element-preserving adapter, `lazy`,
+  a container of containers, and the binder forms (`if let` / `guard let` / `Optional.map`). Two
+  siblings of the SAME two allowlists were silent for their own reasons and are closed with it:
+  **`drop(while:)`** — the one element-preserving adapter the list never named, silent even in the
+  `for`-in form with `dropFirst` one character away charging — and the container CONVERSIONS
+  `Array(…)`/`Set(…)`/`joined()`. NOT closed, pinned as known-silent with controls: `compactMap`/`map`
+  (not element-preserving — typing through them is a guess about a closure's return) and `d.keys.first`
+  (no key-type index exists; `dictElem` records the VALUE).
+
+- **SOUNDNESS R537, THE FIX'S OWN FAILURE DIRECTION — `matchOverloads` EXCLUDED EVERY CANDIDATE WHEN
+  THE PARAMETER TYPE WAS A TYPE PARAMETER, and the emptied set DROPPED THE EDGE.** Typing a receiver
+  that was previously untyped hands the overload filter a CONCRETE argument type where it had none, and
+  `at != pt` with no `subtypesOf` entry was read as a PROVEN mismatch — which it can never be when `pt`
+  is `Self`, `Element`, or a bare generic, because no subtype entry can exist for a name that is not a
+  type. `Bag.add(_ other: Self)` went from `Fs` to ABSENT: a silent under-report INTRODUCED by R537's
+  first cut, found in the corpus A/B's CHANGED column on a run whose headline read `ADDED 0 REMOVED 0`.
+
+  Closed in `Driver.narrowByArgTypes`, now the single implementation shared by `matchOverloads` and
+  R266's `matchOverloadsPath` twin (they were two copies of the loop): **the type filter may narrow the
+  candidate set, never empty it** — when type-filtering leaves nothing, fall back to the ARITY-compatible
+  set, which is the same sound over-approximation the function already uses when argument types are
+  unknown. A rule keyed on the OUTCOME needs no index; detecting a type parameter would need the set of
+  generic-parameter NAMES, and the scan records only the BOUNDED ones, so a bare `struct Box<T>`'s `T`
+  is invisible to any such test (measured). Every case where at least one overload matched is unchanged.
+
+  It was PRE-EXISTING through a second spelling this fix does not touch: `b.add(bags[0])` — a subscript,
+  typed by this engine since long before R537 — and `b.add(t)` for a plainly-typed parameter are both
+  ABSENT at v0.39.0 and charge after. Ground-truthed on real code: **swift-nio's public
+  `EventLoopPromise.succeed()`**, whose body is `succeed(Void())`, read PURE at v0.39.0 and now carries
+  `Env`/`Unknown`; **38 public `TableBuilder.column(…)` overloads in SQLite.swift**, every one
+  delegating to the private `column(_ name: Expressible, …)`, carried no effect at all and now carry
+  `Unknown`.
+
+  CORPUS A/B (`bin/corpus-ab.py`, 12 real Swift packages — swift-syntax, swift-nio,
+  swift-argument-parser, Alamofire, Kingfisher, SQLite.swift, swift-collections, swift-crypto,
+  swift-protobuf, swift-algorithms, swift-log, SwiftyJSON; 41,249 pre-rows), pre = v0.39.0 `5c53e96`
+  release build, post = this change, key `entry+package+fn+hash` multiset, value WIDE:
+
+      R537 alone            ADDED   0   REMOVED 0   CHANGED   24   (inferred: 0)
+      R537 + never-zero     ADDED 158   REMOVED 7   CHANGED 1577   (inferred: 158/7/74)
+
+  REACH, counted on an instrumented post arm (the probe was removed before commit and the reports
+  proven byte-identical without it): **186 hits across 10 of the 12 entries** — this is not a
+  safety-only A/B. Of the 158 additions, **156 are `Unknown`-only disclosure gains and 2 are real
+  effect gains** (both swift-nio, `Env`). **Every one of the 74 `inferred`-CHANGED rows is a pure GAIN:
+  zero rows lost an effect anywhere in the corpus.** All 7 REMOVED rows audited in FULL, not sampled:
+  every one carries `inferred: []` and existed only for an `invisible:` blind-module hedge that an
+  emptied overload set had manufactured — `Box(address)` in swift-nio, `_Hash(…)` twice in
+  swift-collections' `TreeDictionary.Keys`, `_HashNode._itemString(for:)` — all four ground-truthed from
+  SOURCE, the other three the same shape. The held-constant control for that channel: the `[0]`
+  spelling of the identical Kingfisher program, which this fix does not touch, reports no `invisible`
+  in BOTH arms.
+
 - **SOUNDNESS R532 — A CONFORMANCE DECLARED INSIDE A BODY REACHED NO INDEX, SO THE DISPATCH CERTIFIED
   PURITY.** `struct L: Handler` written inside `func register()`'s body minted no unit, recorded no
   `conformers` edge, published no ⟨0.39⟩ obligation-2 `interfaceUnion` entry, and left obligation 3 with

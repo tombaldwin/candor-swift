@@ -754,6 +754,34 @@ final class CallCollector: SyntaxVisitor {
             if let rt = inner.root, let f = fields[rt]?[member], let ft = f.name, !f.isFunction {
                 return (ft, true, inner.path + [member], opaqueFields[rt]?.contains(member) == true)
             }
+            // SOUNDNESS R537 — AN ELEMENT ACCESSOR IS A TYPED RECEIVER: `hs.first?.emitN()`,
+            // `hs.last?`, `d.values.first?`, `hs.dropFirst().first?`. The subscript arm below has
+            // answered this since `cs[0].send()`, and `ELEMENT_ACCESSORS` has NAMED these members
+            // since R192 — but that set was wired to ONE consumer, `callableValue`'s "is this a
+            // closure" question, and never to the "what TYPE is this receiver" question the resolver
+            // asks. Two implementations of one fact, and only the one in front of R192's author was
+            // wired (§F1.3); the cost was a positive purity claim over `[PN]`-typed handler lists in
+            // their single most idiomatic spelling.
+            //
+            // Ordered AFTER the field walk for the same reason the `lazy` arm in `elementTypeOf` is:
+            // a user type may own a stored property actually named `first`/`last`, and that reading —
+            // established by `fields` — must win. Only a member the field index cannot explain
+            // reaches here, and it answers only when the RECEIVER is a recorded container, so this
+            // can add a type and never replace a known one.
+            if let e = elementAccessorType(ExprSyntax(ma), depth) {
+                return (e.name, true, [], e.mono)
+            }
+            // SOUNDNESS R537 — A DICTIONARY PAIR'S `.value`: `d.first?.value.emitN()`,
+            // `d.popFirst()?.value`. A `[K: V]`'s ELEMENT is a `(key, value)` tuple, which has no type
+            // NAME, so the arm above correctly refuses it — and refusing is what left the one spelling
+            // that reaches the payload silent. `.key` is deliberately NOT here: there is no key-type
+            // index in this collector to answer from (`dictElem` records the VALUE), and inventing one
+            // is a bigger change than the shape it closes — stated on the row rather than left to be
+            // discovered.
+            if member == "value", let container = Self.elementAccessorContainer(ma.base),
+               let v = dictValueOf(container, depth + 1) {
+                return (v, true, [], false)
+            }
             return (inner.root, inner.isVar, inner.path + [member], inner.mono)
         }
         if let call = expr.as(FunctionCallExprSyntax.self) {
@@ -803,6 +831,16 @@ final class CallCollector: SyntaxVisitor {
             if let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
                let rt = returns[ma.declName.baseName.text] {
                 return (rt, true, [ma.declName.baseName.text], false)
+            }
+            // SOUNDNESS R537 — the CALL-SHAPED element accessors: `v.popLast()?.emitN()`,
+            // `v.removeFirst().emitN()`, `hs.randomElement()?`, `hs.first(where:)?`, `hs.min(by:)?`.
+            // LAST in this arm, after `returns`, so a project's OWN function named `popLast` keeps its
+            // recorded return type — only a call nothing else can type reaches here. This does not
+            // breach the "never guess from a call's return" rule the resolver is built on, for the
+            // reason `callableValue`'s twin of this arm already gives: the answer comes from the
+            // RECEIVER's recorded element type, not from the callee's signature.
+            if let e = elementAccessorType(expr, depth) {
+                return (e.name, true, [], e.mono)
             }
             return (nil, false, [], false)
         }
@@ -2528,9 +2566,35 @@ final class CallCollector: SyntaxVisitor {
         }
         if let call = e.as(FunctionCallExprSyntax.self),
            let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
-           ["filter", "sorted", "reversed", "shuffled", "prefix", "suffix", "dropFirst", "dropLast"]
+           // SOUNDNESS R537 — `drop` IS `drop(while:)`, the one element-preserving adapter this list
+           // never named. `dropFirst`/`dropLast` sat beside it from the start and `drop` is spelled
+           // without a suffix, so it read as covered; `for g in hs.drop(while: …) { g.run() }` was
+           // ABSENT while the `dropFirst` twin one character away charged. That is the allowlist-chain
+           // rule: when a name on a list is wrong, the FAMILY goes into one fixture, not the name.
+           ["filter", "sorted", "reversed", "shuffled", "prefix", "suffix", "dropFirst", "dropLast", "drop"]
                .contains(ma.declName.baseName.text), let base = ma.base {
             return elementTypeOf(base, depth + 1)  // element-preserving transform → same element type
+        }
+        // SOUNDNESS R537 — A CONTAINER CONVERSION: `Array(hs)`, `Array(d.values)`, `Set(hs)`. The
+        // conversion preserves the element, and the element index is exactly what it lost: `for g in
+        // Array(hs) { g.emitN() }` was ABSENT while the bare `for g in hs` charged. Guarded to a SINGLE
+        // UNLABELLED argument, which is what excludes `Array(repeating:count:)` (whose element is the
+        // repeated VALUE, not a container's) and every other labelled initialiser; a conversion whose
+        // argument is not a recorded container answers nil exactly as before.
+        if let call = e.as(FunctionCallExprSyntax.self),
+           let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self),
+           Self.CONTAINER_CONVERSIONS.contains(ctor.baseName.text),
+           call.arguments.count == 1, let only = call.arguments.first, only.label == nil {
+            return elementTypeOf(only.expression, depth + 1)
+        }
+        // SOUNDNESS R537 — `joined()` FLATTENS ONE LEVEL, so a `[[T]]`'s flattening yields `T` — the
+        // INNER element, which is what `nestedElementOf` answers. Zero-argument only: `joined(separator:)`
+        // over `[String]` yields a String, not an element.
+        if let call = e.as(FunctionCallExprSyntax.self),
+           let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
+           ma.declName.baseName.text == "joined", call.arguments.isEmpty, let base = ma.base,
+           let inner = nestedElementOf(base, depth + 1) {
+            return (inner, false)
         }
         // SOUNDNESS R348 — `lazy` IS THE ONLY ONE OF THAT FAMILY SPELLED AS A PROPERTY, and it spent its
         // whole life listed one line above, inside a `FunctionCallExprSyntax` guard it can never satisfy:
@@ -2546,6 +2610,14 @@ final class CallCollector: SyntaxVisitor {
         if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base,
            ma.declName.baseName.text == "lazy" {
             return elementTypeOf(base, depth + 1)
+        }
+        // SOUNDNESS R537 — ONE ELEMENT OF A CONTAINER OF CONTAINERS, taken by an accessor rather than
+        // by a loop: `n.first?.first?.run()`, `for g in n.first! { … }` where `n: [[P]]`. The element of
+        // `n.first` is the INNER element of `n`, which is the fact `nestedElementOf` owns — R278's
+        // resolver, asked at the one spelling that reaches an element without a binder. Ordered after
+        // every arm above so a container this resolver can already type keeps its own answer.
+        if let container = Self.elementAccessorContainer(e), let inner = nestedElementOf(container, depth + 1) {
+            return (inner, false)
         }
         // R97 — AN INLINE ARRAY LITERAL. `for fm in [FileManager.default] { fm.removeItem(…) }` read
         // silent-pure while the identical loop over a named `let fms: [FileManager]` was charged: the
@@ -3003,6 +3075,68 @@ final class CallCollector: SyntaxVisitor {
     /// fire on a callable element in code that compiles.
     private static let ELEMENT_ACCESSORS: Set<String> =
         ["first", "last", "min", "max", "randomElement", "popLast", "popFirst", "removeFirst", "removeLast"]
+
+    /// SOUNDNESS R537 — the SPELLINGS THAT MAKE A NEW CONTAINER OUT OF AN OLD ONE'S ELEMENTS. Kept
+    /// beside `ELEMENT_ACCESSORS` rather than inside `elementTypeOf` because both lists answer one
+    /// question — which expressions carry a container's element typing — and the whole cost of R537 was
+    /// two answers to that question living apart. `Set` is here for the shape; a `Set` of existentials
+    /// does not compile, so it fires only on a concrete conformer.
+    private static let CONTAINER_CONVERSIONS: Set<String> =
+        ["Array", "ContiguousArray", "ArraySlice", "Set"]
+
+    /// SOUNDNESS R537 — WHICH OVERLOAD OF AN ACCESSOR ACTUALLY YIELDS AN ELEMENT. `xs.removeFirst()`
+    /// returns the element; `xs.removeFirst(2)` returns **Void**, and so does `removeLast(_ k:)`.
+    ///
+    /// **THIS GUARD IS NOT PINNED BY ANY CONTROL AND CANNOT BE, and saying so is the point.** A
+    /// fixture that deletes it stays green, because the overloads it excludes return `Void`: no
+    /// compiling Swift program can use `xs.removeFirst(2)` as a RECEIVER, so a type wrongly recorded
+    /// for it is never read back. `popLast`/`popFirst` are nullary, so their clause is unreachable for
+    /// a second reason. It is kept as an assumption written down — the overload split is real and the
+    /// next widening of this set may well reach a spelling where it matters — and NOT as a tested
+    /// property; `ovrRemoveFirstCount`/`ovrRemoveLastCount` in the R537 fixture record the absence
+    /// they produce, which would also hold with the guard deleted.
+    /// Everything else in the set is safe at every arity it has: `first(where:)`, `last(where:)`,
+    /// `min()`/`min(by:)`, `max()`/`max(by:)` and `randomElement()`/`randomElement(using:)` all yield
+    /// one element.
+    private static func accessorArityYieldsElement(_ name: String, _ args: LabeledExprListSyntax) -> Bool {
+        switch name {
+        case "removeFirst", "removeLast", "popLast", "popFirst": return args.isEmpty
+        default: return true
+        }
+    }
+
+    /// SOUNDNESS R537 — THE CONTAINER an element-accessor expression takes its element out of:
+    /// `hs.first` → `hs`, `v.popLast()` → `v`, `d.values.first` → `d.values`. nil when the expression
+    /// is not an element accessor at all.
+    ///
+    /// **One implementation of the one question**, because R192 already answered it for `callableValue`
+    /// and the resolver answered a subset of it for `[i]`, and those two not being the same function is
+    /// the whole of this row. Every consumer that needs "what does this expression hold" now goes
+    /// through here or through `elementTypeOf`.
+    private static func elementAccessorContainer(_ expr: ExprSyntax?) -> ExprSyntax? {
+        guard let expr else { return nil }
+        let e = peel(expr)
+        // the PROPERTY spellings — `xs.first`, `xs.last` (neither takes arguments)
+        if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base,
+           ELEMENT_ACCESSORS.contains(ma.declName.baseName.text) { return base }
+        // the CALL spellings — `xs.popLast()`, `xs.first(where:)`, `xs.min(by:)`
+        if let call = e.as(FunctionCallExprSyntax.self),
+           let ma = call.calledExpression.as(MemberAccessExprSyntax.self), let base = ma.base,
+           ELEMENT_ACCESSORS.contains(ma.declName.baseName.text),
+           accessorArityYieldsElement(ma.declName.baseName.text, call.arguments) { return base }
+        return nil
+    }
+
+    /// SOUNDNESS R537 — the TYPE of the one element an accessor expression yields. Answers only when
+    /// the RECEIVER is a container this collector has already typed, through the same `elementTypeOf`
+    /// every other element consumer uses — so a container shape it cannot type is one this cannot
+    /// either: under-report, never a guess. A DICTIONARY deliberately answers nil (its element is a
+    /// `(key, value)` tuple with no type name); the `.value` reader in `rootOf` handles the one
+    /// spelling that reaches the payload.
+    private func elementAccessorType(_ expr: ExprSyntax, _ depth: Int = 0) -> (name: String, mono: Bool)? {
+        guard depth <= 200, let container = Self.elementAccessorContainer(expr) else { return nil }
+        return elementTypeOf(container, depth + 1)
+    }
 
     /// R192 — does this CONTAINER expression hold callable elements? Array element or dictionary value,
     /// through the two resolvers (`elementTypeOf`/`dictValueOf`) every other element consumer already
@@ -3870,6 +4004,13 @@ final class CallCollector: SyntaxVisitor {
                 if let dr = Self.peel(base).as(DeclReferenceExprSyntax.self), let proto = protoTyped[dr.baseName.text] {
                     return (proto, false)
                 }
+                // SOUNDNESS R537 — `hs.first.map { $0.emitN() }`. `Optional.map`'s closure parameter is
+                // the WRAPPED payload, and when the optional came out of an element ACCESSOR the payload
+                // is the container's element. The arm above answers that for a protocol-typed optional
+                // LOCAL; an accessor is not a `DeclReferenceExpr`, so the identical program spelled
+                // through `.first` reached neither and the parameter was cleared. Asked last, so any
+                // receiver `elementTypeOf` can type keeps its own answer.
+                if let e = elementAccessorType(base) { return e }
             }
             // BARE element-iterator over implicit `self` — `forEach { $0.persist() }` inside
             // `extension Array where Element: Saveable`: self's element is that bound (R28).

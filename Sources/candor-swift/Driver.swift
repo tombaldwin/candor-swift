@@ -1108,10 +1108,36 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // Match a call (arg count + inferred arg types) to overload target qual(s). Empty ⇒ confident no local
     // overload matches ⇒ DROP. Non-empty ⇒ edge to all (one hit precise; several = sound union). A closure so
     // it captures `overloads`/`subtypesOf`.
-    let matchOverloads: (String, Int, [String?], String) -> [String] = { base, argc, argTypes, callerModule in
-        guard let cands = overloads[base] else { return [] }
-        var hits: [String] = []
-        var hitsInCallerModule: [String] = []
+    /// SOUNDNESS R537 — THE ARG-TYPE FILTER MAY NARROW THE CANDIDATE SET, NEVER EMPTY IT. One
+    /// implementation of the one question, shared by `matchOverloads` and `matchOverloadsPath` (R266's
+    /// twin) so the two cannot drift — the comment on that twin already says they are meant to be
+    /// literally one implementation, and they were two copies of this loop.
+    ///
+    /// **THE DEFECT.** `at != pt` with no recorded subtype relation was read as a PROVEN mismatch. It is
+    /// not one when `pt` is a TYPE PARAMETER — `Self`, the owner's generic parameter, an associated type
+    /// — because no `subtypesOf` entry can ever exist for a name that is not a type. So every overload of
+    /// `Rope.prepend(_ other: Self)` / `prepend(_ item: Element)` was excluded once the argument had a
+    /// concrete type, the candidate set went to ZERO, the edge was DROPPED, and the caller read
+    /// SILENTLY PURE — the cardinal sin, in the one direction this filter's own comment says it must
+    /// never take.
+    ///
+    /// **WHY THE FIX IS "NEVER ZERO" AND NOT "DETECT A TYPE PARAMETER".** Detecting one needs the set of
+    /// generic-parameter NAMES, and the scan records only the BOUNDED ones (`typeGenericBounds` is
+    /// written from `gp.inheritedType`), so a bare `struct Box<T>`'s `T` is invisible to any such test —
+    /// measured, `Box.take(T)` is dropped exactly like `Self`. A rule keyed on the OUTCOME needs no
+    /// index: when type-filtering leaves nothing, fall back to the ARITY-compatible set, which is
+    /// precisely the sound over-approximation this function already uses whenever argument types are
+    /// unknown. Every case where at least one overload matches is byte-identical to before, so no
+    /// precision is given back; only the silent-pure outcome is removed.
+    ///
+    /// Reachable from TWO spellings and pre-existing in one of them: `b.add(bags[0])` — a subscript, which
+    /// this engine has typed since long before R537 — is ABSENT at v0.39.0 and charges `Fs` after this.
+    /// R537's widening is what made the second spelling (`bags.first`) reach it, and finding it that way
+    /// is the reason the fix's own A/B is run on real code rather than reasoned about.
+    let narrowByArgTypes: ([(qual: String, sig: [(type: String?, hasDefault: Bool, variadic: Bool)], module: String)], Int, [String?])
+        -> [(qual: String, sig: [(type: String?, hasDefault: Bool, variadic: Bool)], module: String)] = { cands, argc, argTypes in
+        var arityOK: [(qual: String, sig: [(type: String?, hasDefault: Bool, variadic: Bool)], module: String)] = []
+        var typed: [(qual: String, sig: [(type: String?, hasDefault: Bool, variadic: Bool)], module: String)] = []
         for c in cands {
             // arity by COUNT RANGE: a call must provide every REQUIRED param (not defaulted, not variadic) and
             // no more than the total — independent of WHICH params a labeled call omitted. A trailing VARIADIC
@@ -1120,6 +1146,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             let required = c.sig.filter { !$0.hasDefault && !$0.variadic }.count
             let upper = variadicIdx != nil ? Int.max : c.sig.count
             if argc < required || argc > upper { continue }
+            arityOK.append(c)
             var ok = true
             let typeLimit = variadicIdx ?? c.sig.count   // don't positionally type-check at/after a variadic param
             for j in 0..<min(argc, typeLimit) where j < argTypes.count {  // confident type mismatch (positional call)
@@ -1132,11 +1159,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if subtypesOf[pt]?.contains(at) == true { continue }   // arg is a known subtype/conformer of param
                 ok = false; break
             }
-            if ok {
-                hits.append(c.qual)
-                if c.module == callerModule { hitsInCallerModule.append(c.qual) }
-            }
+            if ok { typed.append(c) }
         }
+        return typed.isEmpty ? arityOK : typed
+    }
+
+    let matchOverloads: (String, Int, [String?], String) -> [String] = { base, argc, argTypes, callerModule in
+        guard let cands = overloads[base] else { return [] }
+        let kept = narrowByArgTypes(cands, argc, argTypes)
+        let hits = kept.map(\.qual)
+        let hitsInCallerModule = kept.filter { $0.module == callerModule }.map(\.qual)
         let isFreeFunction = !base.contains(".")
         return (isFreeFunction && !hitsInCallerModule.isEmpty) ? hitsInCallerModule : hits
     }
@@ -1231,24 +1263,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// only difference is that `base` is a full nested path (`Outer.S.run`), so a same-short-named type
     /// elsewhere in the scan cannot answer. The free-function branch below is unreachable here (a path
     /// base always contains a dot) and is kept only so the two forms stay literally one implementation.
-    let matchOverloadsPath: (String, Int, [String?], String) -> [String] = { base, argc, argTypes, callerModule in
+    let matchOverloadsPath: (String, Int, [String?], String) -> [String] = { base, argc, argTypes, _ in
         guard let cands = overloadsByPath[base] else { return [] }
-        var hits: [String] = []
-        for c in cands {
-            let variadicIdx = c.sig.firstIndex(where: { $0.variadic })
-            let required = c.sig.filter { !$0.hasDefault && !$0.variadic }.count
-            let upper = variadicIdx != nil ? Int.max : c.sig.count
-            if argc < required || argc > upper { continue }
-            var ok = true
-            let typeLimit = variadicIdx ?? c.sig.count
-            for j in 0..<min(argc, typeLimit) where j < argTypes.count {
-                guard let at = argTypes[j], let pt = c.sig[j].type, at != pt else { continue }
-                if subtypesOf[pt]?.contains(at) == true { continue }
-                ok = false; break
-            }
-            if ok { hits.append(c.qual) }
-        }
-        return hits
+        // R537 — through the SHARED filter, which is what "literally one implementation" above was
+        // supposed to mean: the two copies of this loop had already drifted by the time the never-zero
+        // rule was needed, and fixing one of them would have left the other silent.
+        return narrowByArgTypes(cands, argc, argTypes).map(\.qual)
     }
 
     /// SOUNDNESS R266 — SHORT type name -> every declared FULL PATH carrying it. More than one entry is a
