@@ -340,6 +340,14 @@ final class NameKeyedStateTests: XCTestCase {
         // clear to `visitPost` because the initializer mentions the bound name. Entered and removed by
         // the same node's visit/visitPost pair, so no binding name reaches it and a rebind cannot.
         "deferredPatternClears": .notPerBinding,
+        // R534 — the SAVE SIDE of `vars`' nested-func scoping, keyed by FunctionDecl SyntaxIdentifier
+        // with the shadowed names underneath. Not itself a per-binding fact a rebind invalidates: it is
+        // the *previous* fact, parked for the duration of one nested signature and handed back by that
+        // node's own `visitPost` — written and drained by the same visit/visitPost pair, exactly as
+        // `deferredPatternClears` and `shadowScopes` are, so no rebind can reach it. (`vars` itself stays
+        // `.clearedOnRebind(scoped: false)` above: this adds ONE scope, a nested func's parameter list,
+        // and does not make `vars` block-scoped in general.)
+        "nestedFuncSavedVars": .notPerBinding,
     ]
 
     // ── the DERIVATION ──────────────────────────────────────────────────────────────────────────────

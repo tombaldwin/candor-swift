@@ -4805,7 +4805,16 @@ final class CallCollector: SyntaxVisitor {
                     unresolved = true
                     why.insert("dispatch:\(rt).\(member)")
                 }
-            } else if let pr = ma.base?.as(DeclReferenceExprSyntax.self), let proto = protoTyped[pr.baseName.text] {
+            // SOUNDNESS R534 — `Self.peel` HERE, because six consumers read `protoTyped` and only four
+            // peeled. `peel` strips `try`/`await`/`!`/`?`/`(…)`, so without it the base of `h?.emit()`,
+            // `h!.emit()` and `(h!).emit()` is an OptionalChaining/ForceUnwrap/Tuple node rather than the
+            // DeclReference this pattern wants, and the branch silently misses. The other spelling of the
+            // same fact — `params` → `vars` → `rootOf`, which DOES peel — is what made the miss invisible
+            // wherever BOTH maps were populated; a `<T: P>(_ h: T?)` parameter has only this one, because
+            // `params` records the useless generic name `T`. §F1.3: two implementations of one question,
+            // and the one nobody was looking at had drifted.
+            } else if let pr = ma.base.map({ Self.peel($0) })?.as(DeclReferenceExprSyntax.self),
+                      let proto = protoTyped[pr.baseName.text] {
                 // dispatch through a LOCAL protocol-typed param — bounded CHA or honest Unknown. A
                 // COMPOSITION param (`_ x: A & B`) is joined into one `protoCompositionSep`-delimited
                 // string (see its doc); splitting is a no-op for the ordinary single-protocol case, which
@@ -5322,7 +5331,11 @@ final class CallCollector: SyntaxVisitor {
             // a protocol-typed PARAM base (`p.payload` where `p: HasPayload`) — `protoTyped` holds the
             // protocol, not `rootOf` (which leaves a proto param's root the bare name). Mirror the
             // method-dispatch path's `protoTyped[…]` lookup before the localTypes/localProtocols checks.
-            if let baseDR = node.base?.as(DeclReferenceExprSyntax.self), let proto = protoTyped[baseDR.baseName.text] {
+            // …AND ITS `Self.peel` TOO (R534): `h?.payload` / `h!.payload` are the property siblings of
+            // the unwrap spellings that branch missed, and leaving one of a mirrored pair unpeeled is how
+            // the pair drifts apart again.
+            if let baseDR = node.base.map({ Self.peel($0) })?.as(DeclReferenceExprSyntax.self),
+               let proto = protoTyped[baseDR.baseName.text] {
                 protoPropReads.append((proto, prop))
             } else if let root = recvRoot, dynamicMemberTypes.contains(root), fields[root]?[prop] == nil {
                 // `@dynamicMemberLookup`: `p.x` for a non-stored `x` desugars to the dynamic subscript
@@ -5957,17 +5970,49 @@ final class CallCollector: SyntaxVisitor {
             // A NESTED FUNC'S PARAMETER REBINDS THE NAME TOO. `protoTyped` and `opaqueElem` are the two
             // scoped maps, so clearing them here is given back at `visitPost` and costs nothing outside;
             // without it `func f(_ p: Job) { func inner(_ p: Ctx) { p.run() } }` dispatched over `Job`'s
-            // conformers, against a rename control that is ABSENT. The type indexes are deliberately NOT
-            // touched — `vars` is not in `ShadowSave`, so clearing it here would leak the clear outward
-            // past the nested func, which is the pre-existing leak the note above this visitor files as
-            // a separate measurement.
+            // conformers, against a rename control that is ABSENT.
             protoTyped.removeValue(forKey: name)
+            // …AND `vars` WITH THEM NOW (SOUNDNESS R534). The paragraph that stood here called the type
+            // indexes "a pre-existing leak, a separate measurement" and left them — which was survivable
+            // only while a protocol-typed parameter was ABSENT from `vars`. R534 puts it there (that
+            // absence WAS the defect), so the leak stopped being latent: `nestedFuncShadow` in
+            // `TypedRebindShadowProcessTests` went from ABSENT to a fabricated `Fs`, dispatching the
+            // NESTED `Ctx` parameter over the OUTER `Job`'s conformers. That test is the reason this is
+            // a fix and not a note — it was written for exactly this and it fired.
+            //
+            // Scoped, not cleared: `vars` is function-wide and NOT in `ShadowSave`, so an unconditional
+            // clear here would leak OUTWARD past the nested func and silence the enclosing parameter's
+            // own dispatch afterwards — the mirror fabrication. The previous value is saved per
+            // FunctionDecl id and restored in `visitPost`, so the name means the nested signature's type
+            // inside and the enclosing one outside, which is what Swift's scoping says it means.
+            nestedFuncSavedVars[node.id, default: [:]][name] = vars[name]
+            if let tn = Self.parameterTypeNameForShadow(p.type) { vars[name] = tn } else { vars.removeValue(forKey: name) }
             if isOpaqueParam(p.type) { monoNames.insert(name) }
             if arrayElementType(p.type).map(isOpaqueParam) == true { opaqueElem.insert(name) }
         }
         return .visitChildren
     }
-    override func visitPost(_ node: FunctionDeclSyntax) { leaveShadowScope(node) }
+    /// R534 — the enclosing `vars` entries a nested func's parameters shadowed, restored on the way out.
+    /// Keyed by FunctionDecl id exactly as `ShadowSave` is, so nesting composes; the value is optional
+    /// because the name may not have been typed at all before the nested signature claimed it.
+    private var nestedFuncSavedVars: [SyntaxIdentifier: [String: String?]] = [:]
+
+    /// The type a nested func's parameter gives its NAME for the body below it. `parameterTypeName`'s
+    /// rules (`T?`/`T!`/`some P`/`any P` all collapse to the nominal) are DeclCollector's, and asking it
+    /// here rather than re-spelling them is the point — two implementations of "what type is this
+    /// parameter" is the shape this engine keeps re-opening. A function type or an unresolvable spelling
+    /// yields nil, which UNTYPES the name for the nested body rather than leaving the enclosing type.
+    private static func parameterTypeNameForShadow(_ t: TypeSyntax) -> String? {
+        let n = DeclCollector.parameterTypeName(t)
+        return n.isFunction ? nil : n.name
+    }
+
+    override func visitPost(_ node: FunctionDeclSyntax) {
+        for (name, old) in nestedFuncSavedVars.removeValue(forKey: node.id) ?? [:] {
+            if let old { vars[name] = old } else { vars.removeValue(forKey: name) }
+        }
+        leaveShadowScope(node)
+    }
 
     // R33 — deinit-glue. A CONSTRUCTION of a type with an effectful `deinit` runs that deinit where
     // the value's last reference dies; for a value that never leaves the constructing function that is
@@ -6530,8 +6575,34 @@ final class CallCollector: SyntaxVisitor {
             // unless the initializer mentions the name, which is the one case where the old binding is
             // still live while the initializer is walked. A DENYLIST (clear unless proven unsafe), not
             // an allowlist of binder shapes.
-            if !Self.referencesName(binding.initializer?.value, name) { protoTyped.removeValue(forKey: name) }
-            else if let a = aliasBeforeRebind { fnValueAlias[name] = a }
+            // SOUNDNESS R534 — …AND THE `referencesName` EXEMPTION IS GONE, BECAUSE THE ORDERING FACT IT
+            // RESTS ON EXPIRED. The paragraph above is right that `var u = u.asURL()` needs
+            // `protoTyped[u]` alive while the initializer is walked, and it was written when SwiftSyntax's
+            // own child order decided that. **R98 then moved the initializer walk to the TOP of this
+            // visitor** (`for binding in node.bindings { walk(v) }`, with `.skipChildren` below), so by the
+            // time this line runs the initializer's calls are already collected and nothing is left to
+            // protect — a comment that was true when written and expired when the thing it points at moved.
+            //
+            // Keeping the exemption cost a real reach, and it is this fix's own failure direction:
+            // `func enc(_ r: Conv) { var r = r.asReq(); _ = r.headers }` read `r.headers` through the
+            // PROTOCOL, which declares no such member, so the effectful `Req.headers` accessor was dropped
+            // and `enc` read PURE. MEASURED with one variable — where the protocol is declared: at
+            // `5b6e806` the protocol-BELOW spelling charged `Fs` and the protocol-ABOVE spelling was
+            // ALREADY silent, so this is R534's order dependence again, and populating `protoParams` for
+            // every order would have spread the silent arm to all three. **The corpus could not see it**:
+            // Alamofire's four `URLRequest.headers`/`.method` sites and `ResponseSerializer
+            // .dataPreprocessor` lose exactly this edge with `inferred` unchanged, because those
+            // accessors happen to be effect-free. Movement in `inferred` is not the test for this shape.
+            //
+            // `let u = u` (a rename to the same protocol) must not lose its type, and the copy arm far
+            // below reads `protoTyped` — which this line has by then emptied. So the value is CAPTURED
+            // here and handed to that arm explicitly (`protoBeforeRebind`), rather than left to a lookup
+            // whose answer this line changes. The control is in `ProtocolParamDeclOrderProcessTests`.
+            let protoBeforeRebind = protoTyped[name]
+            protoTyped.removeValue(forKey: name)
+            if Self.referencesName(binding.initializer?.value, name), let a = aliasBeforeRebind {
+                fnValueAlias[name] = a
+            }
             // CONST-STRING PROPAGATION — a LOCAL `let NAME = "literal"` string constant. Resolves a later
             // const-anchored host in the SAME fn body (`let apiBase = "…"; dataTask(with: "\(apiBase)/x")`).
             // ONLY a `let` with a PLAIN string-literal initializer and no accessor block. A `var` of the
@@ -6786,7 +6857,10 @@ final class CallCollector: SyntaxVisitor {
                         // SUPPRESS the CHA, the sin direction. `setArrayElem` above does carry the
                         // element form, because `elementTypeOf` returns it AS PART OF the resolution
                         // rather than as a separate name-keyed lookup.
-                        if let proto = protoTyped[dr.baseName.text] {
+                        // R534 — `?? protoBeforeRebind` for the SELF-rename `let u = u`, whose source name
+                        // IS the name being bound and whose `protoTyped` entry this binding just cleared.
+                        if let proto = protoTyped[dr.baseName.text]
+                            ?? (dr.baseName.text == name ? protoBeforeRebind : nil) {
                             // a PROTOCOL-typed source. `rootOf` leaves a proto binding's root the bare
                             // NAME, so it has to be asked before `rootOf` — the same order and the same
                             // reason as `visit(OptionalBindingConditionSyntax)`'s protocol-unwrap branch.

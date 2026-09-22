@@ -11,6 +11,73 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R534 — WHERE A PROTOCOL IS *DECLARED* DECIDED WHETHER ITS PARAMETERS WERE TYPED AT ALL, and
+  the hole it opened ran in BOTH directions.** `DeclCollector` recorded a parameter's protocol in
+  `protoParams` *or* its type in `params`, never both, and the branch that chose read
+  `protocolMethods[resolved] != nil` — a per-FILE map filled as that file's walk descends. So the question
+  actually being asked was *"is this protocol spelled ABOVE this function, in this file?"*, and the answer
+  decided which index the parameter reached. The two indexes have DISJOINT consumer sets, so whichever one
+  was populated, the other one's consumers went blind:
+
+  - protocol ABOVE, same file → only `protoParams`: `h?.emit()`, `h!.emit()`, `(h!).emit()`,
+    `h.unsafelyUnwrapped.emit()`, `switch h { case .some(let g) }`, `_ = h?.emit()` and a capturing closure
+    were **ABSENT from `functions[]`** — a scoped `deny Net h_opt` exited **0** over a real `URLSession`
+    reach that the built program executes.
+  - protocol BELOW, or in another file → only `params`: `h.map { $0.emit() }` and
+    `<T: P>(_ h: T?) { if let g = h … }` were **ABSENT instead** — the same hole, mirrored. A fix that
+    simply always populated `protoParams` would have closed the reported direction and opened this one.
+
+  **And it is not always an absence, which is worse.** `func j(_ h: P?) { _ = ProcessInfo…; h?.emit() }`
+  published a present, affirmative, complete-looking row — `inferred: ["Env"]`, `unresolved: false`,
+  `unknownWhy: null` — that silently dropped the optional-chained dispatch's whole reach. A reader sees a
+  row and believes it; an absence at least invites the question.
+
+  MEASURED at `5b6e806` on a **66-arm fixture (22 spellings × 3 declaration orders)** in which every arm
+  COMPILES and EXECUTES — a hit counter proved all 66 really reach the witness, because an absence
+  assertion over a program that cannot run is asserting nothing (§E3). **23 of 66 silent or incomplete
+  before, 3 after**, and the three columns now agree arm for arm, which is the property
+  `ProtocolParamDeclOrderProcessTests` pins: the same program written three ways must not answer three
+  ways. Fixed by populating BOTH maps in `DeclCollector` and **backfilling `protoParams` in the Driver**,
+  where `protocolMethods` is scan-global and complete — so the answer no longer depends on source layout.
+
+- **SOUNDNESS R534, two spellings silent in ALL THREE orders, closed with it.** `<T: P>(_ h: T?)`:
+  `params` records the useless generic name `T`, so only the `protoTyped` path can answer — and **two of
+  that map's six consumers did not `Self.peel` the receiver**, so an optional-chained or force-unwrapped
+  base missed the branch (§F1.3, two implementations of one question and only the one in front of the last
+  author kept current). And `h: P!`: `ImplicitlyUnwrappedOptionalTypeSyntax` appeared **nowhere** in this
+  engine's sources, so every `T!` fell off the end of `typeName` as `nil` and was untyped for every
+  consumer.
+
+  **The `T!` peel is SCOPED TO PARAMETERS, and the boundary was drawn by a measurement rather than by
+  caution.** The first cut put it inside `typeName` itself, where it also reaches fields and bindings — and
+  on Kingfisher that turned **four disclosed rows into ABSENCES**: `@IBOutlet weak var cellImageView:
+  UIImageView!` became typed, `(cell as! ImageCollectionViewCell).cellImageView.kf.cancelDownloadTask()`
+  stopped resolving to `dispatch:UICollectionViewCell.cancelDownloadTask`, and a row that had published
+  `Unknown` published nothing at all. One variable — same tree, same binary, only the peel's location — so
+  `T!` FIELDS and BINDINGS remain untyped and OPEN, named here rather than quietly shipped.
+
+- **SOUNDNESS R534, THE FIX'S OWN FAILURE DIRECTION — A REBOUND NAME KEPT ITS PARAMETER'S PROTOCOL, and
+  the exemption that caused it was a STALE ORDERING FACT.** `protoTyped` is consulted before `vars` at
+  every dispatch and property-read site, and `visit(VariableDeclSyntax)` SKIPPED clearing it whenever the
+  initializer mentioned the name — the `var u = u.asURL()` shape. So
+  `func enc(_ r: Conv) { var r = r.asReq(); _ = r.headers }` read `r.headers` through `Conv`, which
+  declares no such member: the effectful `Req.headers` accessor was dropped and `enc` read **PURE**. The
+  exemption was correct when written (SwiftSyntax walked a binding's pattern before its initializer) and
+  expired when **R98 moved the initializer walk to the top of that visitor** — by the time the clear runs
+  there is nothing left to protect. Cleared unconditionally now, with the self-rename `let u = u` carried
+  explicitly (`protoBeforeRebind`) rather than by a lookup this line empties.
+
+  MEASURED with ONE variable, where the protocol is declared: at `5b6e806` the protocol-BELOW spelling
+  charged `Fs` and the protocol-ABOVE spelling was **already silent** — so it is R534's order dependence
+  again, and making `protoParams` order-independent without this would have spread the silent arm to all
+  three orders instead of closing it. **The corpus could not see it**: Alamofire's four
+  `URLRequest.headers`/`.method` sites and `ResponseSerializer.dataPreprocessor` lose exactly this edge
+  with `inferred` unchanged, because those accessors happen to be effect-free. Movement in `inferred` is
+  not the test for this shape — which is why it was found by widening the fixture past the corpus.
+
+  **A/B, 12 real Swift packages, 41,400 pre-rows** (`bin/corpus-ab.py`, `--key unit`, wide value): see the
+  commit message for the exact ADDED/REMOVED/CHANGED, the REACH count and the full removal audit.
+
 - **SOUNDNESS R537 — AN ELEMENT ACCESSOR WAS NOT A TYPED RECEIVER, so `hs.first?.emitN()` over a
   `[PN]` of protocol existentials read SILENT-PURE while `hs[0].emitN()`, `for g in hs { … }`,
   `d["k"]?.emitN()` and `hs.map { … }` all charged.** `ELEMENT_ACCESSORS` has named

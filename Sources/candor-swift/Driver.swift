@@ -1761,6 +1761,33 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
 
     let localProtocolNames = Set(protocolMethods.keys)  // loop-invariant: build once, not per fn
+    // SOUNDNESS R534 — BACKFILL `protoParams`, THE HALF DeclCollector STRUCTURALLY CANNOT SEE.
+    // `DeclCollector.protocolMethods` is per-FILE and filled as that file's walk descends, so the test it
+    // can run at parameter-collection time is "is this protocol declared EARLIER, in THIS file?" — a
+    // question about source layout, answered as if it were a question about types. `protocolMethods` here
+    // is the merged, scan-global map, and this is the first point it is complete; every `CallCollector`
+    // below is constructed after it, so a `protoParams` entry written here reaches all seven of the
+    // consumers that read `protoTyped` (method dispatch, property read, `if let` unwrap, closure/`map`
+    // element typing, operator dispatch, stringification, the let-binding copy).
+    //
+    // WHY IT IS NOT ENOUGH TO POPULATE `params` (which DeclCollector now also always does): the two maps
+    // have DISJOINT consumer sets, which is the whole shape of R534. Measured on the 66-arm fixture: with
+    // the protocol declared BELOW or in another file, `params` was populated and `h?.emit()` charged —
+    // while `h.map { $0.emit() }` and `<T: P>(_ h: T?) { if let g = h … }` were ABSENT, because the
+    // closure- and `if let`-typing paths read `protoTyped` and nothing else. Fixing only the direction the
+    // row was filed from would have left that mirror hole open and looked like a complete fix.
+    //
+    // ADDITIVE and PRECISE-OR-NOTHING: only a name already recorded in `params` (so a real parameter of a
+    // real declared type), only when that name — resolved through this function's OWN generic bounds, so
+    // `<T: P>(_ h: T?)` reaches `P` rather than the useless `T` — names a protocol THIS SCAN declared, and
+    // never over an entry DeclCollector already wrote. A dependency's protocol is not in `protocolMethods`
+    // and is left to the imported-protocol CHA further down, unchanged.
+    for i in allFns.indices {
+        for (pname, tn) in allFns[i].params where allFns[i].protoParams[pname] == nil {
+            let resolved = allFns[i].genericBounds[tn] ?? tn
+            if protocolMethods[resolved] != nil { allFns[i].protoParams[pname] = resolved }
+        }
+    }
     // ⟨0.39⟩ THE ONE WIRE SPELLING FOR A DISPATCHED ABSTRACTION (SPEC §4, obligations 1 and 2). It is
     // ⟨0.23⟩'s `typeSurface` rule — fully qualified in the OWNING package's namespace, the namespace that
     // package's entry hashes use — and the clause forbids inventing a second one. A dispatch site spells a

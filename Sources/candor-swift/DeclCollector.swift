@@ -217,6 +217,28 @@ final class DeclCollector: SyntaxVisitor {
     var fieldArrayElem: [String: [String: String]] = [:]  // Type -> field -> ELEMENT type (`[T]` field)
     var fieldArrayElemNested: [String: [String: String]] = [:]  // R278 — `[[T]]` field -> INNER element `T`
     var fieldDictValue: [String: [String: String]] = [:]  // Type -> field -> VALUE type (`[K: V]` field)
+    /// SOUNDNESS R534 — A PARAMETER'S DECLARED TYPE, SEEING THROUGH `T!`.
+    ///
+    /// `ImplicitlyUnwrappedOptionalTypeSyntax` is its own node kind, NOT an `OptionalTypeSyntax`, and the
+    /// string `ImplicitlyUnwrapped` appeared NOWHERE in this engine's sources: `typeName` fell off its end
+    /// and returned `nil`, so every `T!`-spelled parameter was untyped for every consumer. Measured:
+    /// `func f(_ h: P!) { h.emit() }` was ABSENT from `functions[]` in all three protocol-declaration
+    /// orders while the `P?` spelling one character away charged.
+    ///
+    /// **SCOPED TO PARAMETERS ON PURPOSE, and the boundary was drawn by a measurement rather than by
+    /// caution.** The first cut put this peel inside `typeName` itself, where it also reaches fields and
+    /// bindings — and on Kingfisher that converted FOUR disclosed rows into ABSENCES: an `@IBOutlet weak
+    /// var cellImageView: UIImageView!` became typed, `(cell as! ImageCollectionViewCell).cellImageView
+    /// .kf.cancelDownloadTask()` stopped resolving to `dispatch:UICollectionViewCell.cancelDownloadTask`,
+    /// and the row that had published `Unknown` published nothing at all. One variable — same tree, same
+    /// binary, only this peel's location — so the attribution is not a guess. The FIELD/BINDING half of
+    /// `T!` is therefore still open and deliberately unfixed here; it needs its own resolution work, not a
+    /// wider `typeName`.
+    static func parameterTypeName(_ t: TypeSyntax) -> (name: String?, isFunction: Bool) {
+        if let iuo = t.as(ImplicitlyUnwrappedOptionalTypeSyntax.self) { return typeName(iuo.wrappedType) }
+        return typeName(t)
+    }
+
     var protocolMethods: [String: Set<String>] = [:]   // protocol -> declared method names
     /// ⟨0.39⟩ Every locally-declared protocol's FULLY QUALIFIED path (`Backend`, `Term.Backend`) — the
     /// ⟨0.23⟩ `typeSurface` spelling, which SPEC §4 ⟨0.39⟩ makes the ONE wire spelling for a dispatched
@@ -1304,7 +1326,7 @@ final class DeclCollector: SyntaxVisitor {
         info.genericBounds = genericBounds
         for (idx, p) in sig.parameterClause.parameters.enumerated() {
             let pname = (p.secondName ?? p.firstName).text
-            let t = typeName(p.type)
+            let t = Self.parameterTypeName(p.type)
             info.paramNames.insert(pname)
             info.paramIndex[pname] = idx        // R178 — see `paramIndex`
             // ordered signature for overload resolution: the param's simple type name (nil if unresolvable)
@@ -1336,7 +1358,28 @@ final class DeclCollector: SyntaxVisitor {
             else if let tn = t.name {
                 // resolve a generic param to its protocol BOUND (`x: T` where `<T: Sender>` → dispatch P)
                 let resolved = genericBounds[tn] ?? tn
+                // SOUNDNESS R534 — THESE TWO RECORDS ARE NOT ALTERNATIVES, and the `else` that made them
+                // one encoded an ORDER DEPENDENCE rather than a choice. `protocolMethods` is THIS FILE's
+                // map, filled as the walk descends, so `protocolMethods[resolved] != nil` answers "was
+                // this protocol spelled ABOVE this function, in this file?" — and under the old exclusive
+                // `else` that question decided whether the parameter reached `info.params` AT ALL. The
+                // same program with the protocol moved below the function built a different index and
+                // gave a different answer.
+                //
+                // MEASURED on a 66-arm fixture whose three configurations differ ONLY in where the
+                // protocol is declared (above / below / another file), every arm compiled and EXECUTED:
+                // with the protocol ABOVE, `func f(_ h: P?) { h?.emit() }` and six sibling unwrap
+                // spellings were ABSENT from `functions[]` and `deny Net` exited 0, while the
+                // byte-identical file with the protocol BELOW charged them. The INVERSE existed too —
+                // `h.map { $0.emit() }` and a generic `if let` charged ABOVE and went silent BELOW and
+                // cross-file — because those consumers read `protoParams` where the others read `params`.
+                // Populating whichever ONE map blinds the other's consumers, so populate BOTH; the
+                // Driver's `backfillProtoParams` closes the half this file cannot see.
                 if protocolMethods[resolved] != nil { info.protoParams[pname] = resolved }
+                // …and the TYPE, unconditionally. Not a new index shape: this is exactly what the
+                // protocol-declared-BELOW spelling has always recorded, now recorded for both orders.
+                info.params[pname] = tn
+                if isOpaqueParam(p.type) { info.opaqueParams.insert(pname) }
                 // ERASED vs MONOMORPHIZED. `typeName` collapses `some P` and `any P` to `P`, but they are
                 // not interchangeable for class-hierarchy analysis: `any P` is an existential, so the
                 // types conforming here really are its candidate witnesses, whereas `some P` is opaque and
@@ -1379,17 +1422,14 @@ final class DeclCollector: SyntaxVisitor {
                 // THIS program is pure still carries the union. That is a statement about what a public
                 // generic function can be asked to do, and it is the same answer any caller-agnostic
                 // per-function analysis gives.
-                else {
-                    // RESTORED. Suppressing the type here (the first version of this fix) killed far
-                    // more than the local-conformer CHA it was aiming at: `vars` is seeded from
-                    // `info.params`, so the receiver lost typed resolution for the classifier AND for
-                    // the SPEC §2 cross-package join — and `func upload(_ c: some Uploader) { c.send() }`
-                    // went from Fs to ABSENT-and-pure against a chained report that named Uploader.send.
-                    // The erasure distinction belongs on the CHA arm alone; it is recorded, not enforced,
-                    // here.
-                    info.params[pname] = tn
-                    if isOpaqueParam(p.type) { info.opaqueParams.insert(pname) }
-                }
+                //
+                // (RESTORED, and now unconditional — see the two lines above. Suppressing the type here,
+                // the first version of that fix, killed far more than the local-conformer CHA it was
+                // aiming at: `vars` is seeded from `info.params`, so the receiver lost typed resolution
+                // for the classifier AND for the SPEC §2 cross-package join — `func upload(_ c: some
+                // Uploader) { c.send() }` went from Fs to ABSENT-and-pure against a chained report that
+                // named Uploader.send. The erasure distinction belongs on the CHA arm alone; it is
+                // recorded, not enforced, here.)
             }
             // protocol COMPOSITION param (`_ x: A5 & B5`): `t.name` is nil (`typeName` does not collapse
             // a composition to one name — dispatch has to try EACH member, not pick one), so none of the
