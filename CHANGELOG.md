@@ -11,6 +11,87 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R532 — A CONFORMANCE DECLARED INSIDE A BODY REACHED NO INDEX, SO THE DISPATCH CERTIFIED
+  PURITY.** `struct L: Handler` written inside `func register()`'s body minted no unit, recorded no
+  `conformers` edge, published no ⟨0.39⟩ obligation-2 `interfaceUnion` entry, and left obligation 3 with
+  no visible conformer — so a consumer of a FOREIGN abstraction carried no zero-witness `Unknown` at all.
+  DeclCollector's four `.skipChildren` sites (func / init / subscript / deinit) walk no declaration in a
+  body, and the comment beside the first of them — *nested decls attribute lexically via the body walk* —
+  is TRUE about effect ATTRIBUTION and SILENT about the conformance, which is the half that crosses the
+  package boundary. MEASURED at 0.39.0, TWO FIXTURES DIFFERING IN ONE THING (where the conformer is
+  declared), same policy, same binary, EXECUTED ground truth (the built program delivered
+  `GET /charges HTTP/1.1` to a local listener):
+
+      file scope  L.handle ['Net']   fire ['Net']       Handler.handle ['Net']   deny Net fire → EXIT 1
+      body-local  (no unit)          fire [] +dispatch  (no entry)               deny Net fire → EXIT 0
+
+  Only a SCOPED rule sees it — a blanket `deny Net` catches both arms, because `register` still carries
+  the effect by syntactic containment. Cross-package is worse: the consumer's own scan has no `register`
+  to carry anything.
+
+  **COMPLETED, NOT HEDGED, and the choice was measured.** candor-rust took the hedge for the same defect
+  because a body-local method there has no unit to edge to; this engine's `fns` list IS the unit list, so
+  the conformer can be minted and the two spellings made to agree exactly. On a one-variable fixture the
+  body-local arm now returns the FILE-SCOPE arm's answers row for row — including the pure-conformer
+  control, where both read `Log` rather than `Log,Unknown`.
+
+  **THE CONTRIBUTION IS ENUMERATED, AND THAT NARROWING IS THE MEASUREMENT.** The first cut merged the
+  body-local declaration into the file's tables wholesale and the 12-package A/B came back
+  **ADDED 13 REMOVED 2 CHANGED 22**. Both removals were swift-syntax, both SILENT, both ONE mechanism:
+  `validateLayout` declares `enum TokenChoice { case keyword(StaticString) … }` in its body while the
+  package also has a file-scope `public enum TokenChoice { case keyword(Keyword) … }`; `caseAssoc` is
+  keyed on the CASE NAME scan-globally and the Driver binds a pattern only when that name has exactly one
+  associated type, so the extra entry made `keyword` ambiguous and `TokenChoice.identifier` went from
+  `inferred: ["Unknown"]` to **ABSENT** — a purity claim manufactured by a fabrication fix — taking the
+  `SwiftSyntax#Equatable.identifier` union entry with it. Ground-truthed from swift-syntax's source, not
+  from candor's report. `finishBodyLocalTypes()` now walks each declaration with a THROWAWAY
+  sub-collector and copies out exactly three outputs — the units, `conformers`, `pathSupers`. `caseAssoc`
+  is not the only bare-name index that fails this way (`returnsTmp`, `constStrings`, `typeAliases`,
+  `fields`, `declaredTypes`, the `typeGeneric*` maps all do), so excluding the one that bit would have
+  been an audit boundary drawn around its own trigger; enumerating what a body-local declaration MAY
+  contribute inverts the direction, and an index this list forgets stays byte-identical to the pre-fix
+  engine. It is also what the LANGUAGE licenses: a body-local type's name is unspellable outside its own
+  body, and `extension`/`protocol` are file-scope-only in Swift, so a conformance is the only route out
+  and the CHA — keyed on the PROTOCOL — is the only index it can answer.
+
+  **A/B, `bin/corpus-ab.py`, 12 real Swift packages** (Alamofire, Kingfisher, SQLite.swift, SwiftyJSON,
+  swift-collections, swift-log, swift-protobuf, swift-argument-parser, swift-composable-architecture,
+  swift-nio, swift-syntax, vapor; 49,648 pre / 49,664 post rows), wide key: **ADDED 16 REMOVED 0
+  CHANGED 3**; keyed on `inferred`: ADDED 16 REMOVED 0 CHANGED 0. **REACH 17 hits across 3 of 12 entries**
+  (`CANDOR_R532_INSTR=1`, marker `R532HIT`) — an unchanged row is not evidence the code ran. 13 of the 16
+  ADDED are units that were ABSENT and now carry `Unknown`; 3 are new union entries. All 3 CHANGED are
+  precision gains with `inferred` byte-identical: one union entry gains `invisible: XcodeKit`, and two
+  vapor rows convert a `dispatch:` hedge into a resolved edge (`BasicAuthenticator.authenticate`:
+  `direct ['Unknown'] → []`, `inferred ['Unknown']` unchanged, `unresolved` unchanged, and
+  `deny Unknown[dispatch] BasicAuthenticator.authenticate` still exits 1 on both arms). Package-wide
+  `deny Unknown` on vapor 617 → 618 violations, `deny Unknown[dispatch]` 555 → 556 — additive.
+  GROUND-TRUTHED FROM SOURCE: vapor's `Sources/Development/routes.swift:309`/`:317` declare
+  `struct Test: Authenticatable` and `struct TestAuthenticator: BasicAuthenticator` inside `func routes`;
+  swift-syntax has 13 such declarations; Kingfisher's `ImageCache.swift:423` has `struct TempProcessor`.
+
+  **THE DECLARATION-KIND SWEEP WAS RE-RUN AGAINST THE FIX, not around its trigger** — 22 hosts × 4
+  conformer kinds, each with a distinct effect. Every host now collects: func, static func, class func,
+  init, convenience init, deinit, subscript get, a nested type's method, an extension member, a local
+  function, an `if` block, a `defer` block, a local closure, a `#if` arm, and a **default-argument
+  expression**, which the four `.skipChildren` sites do not reach at all and which this commit fixes in
+  its own line. Type-member computed properties and `didSet`/`willSet` observers were already correct
+  (they collect path-qualified, `S.C.emit`). All eight receiver spellings at the dispatch site —
+  `Sink`, `any Sink`, `some Sink`, `[Sink]`, `<T: Sink>`, `where T: Sink`, a stored property, an
+  `if let`-unwrapped optional — go from `Unknown`/ABSENT to the resolved `Net`.
+
+  **BRANCH WITH ZERO CORPUS REACH, said here rather than left to be discovered:** the default-argument
+  host has no instance in the 12 packages, so for that one line the A/B is an over-charge control only.
+
+  Twelve smoke rows, and the §A revert test was EXECUTED rather than reasoned: against the pre-fix
+  `9f74856` build, **9 of the 12 go RED** (`A.emit -> absent (want Net)`, the init/deinit/subscript/
+  static-func siblings, `Sink.emit -> absent`, `fireSink -> Unknown`, `firePinger -> Log,Unknown`). The
+  three that stay green are the two file-scope controls and the narrowing guard, which is a regression
+  guard for the FIX rather than for the defect — and it was calibrated per §1b by re-adding the
+  `caseAssoc` merge, which takes smoke 160/0 → **1 failure**, on exactly the row that names it.
+
+  PINNED FOUR-WAY as candor-spec PART 92 arm `c8_body_local_implementor`; swift's XFAIL line is now a
+  PASSING XFAIL and must be retired in candor-spec.
+
 - **SOUNDNESS R532a — A GENERIC PARAMETER IS NOT A TYPE NAME, AND ⟨0.39⟩ PUT ONE ON THE WIRE.** The rung
   turned the receiver's SPELLED type into a dispatch key. Four spellings of one existential
   (`_ b: Backend`, `_ b: Iface.Backend`, `_ b: any Backend`, `_ hs: [Backend]`) form

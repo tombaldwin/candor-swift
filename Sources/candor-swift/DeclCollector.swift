@@ -245,6 +245,26 @@ final class DeclCollector: SyntaxVisitor {
     /// `conformers`, so an inherited-member climb keyed on the short name reaches the WRONG hierarchy's
     /// members. Used only to disambiguate that case; the short index still answers everywhere else.
     var pathSupers: [String: [String]] = [:]
+
+    /// SOUNDNESS R532 — type declarations found INSIDE a func / init / subscript / deinit body, queued
+    /// here and walked after the file pass by `finishBodyLocalTypes()`.
+    ///
+    /// The four visitors below return `.skipChildren`, and their comment — *nested decls attribute
+    /// lexically via the body walk* — is TRUE about effect ATTRIBUTION (CallCollector walks the whole
+    /// body, so a body-local conformer's `Net` is charged to the enclosing function by containment) and
+    /// SILENT about the CONFORMANCE, which is the half that crosses the package boundary. With no
+    /// `conformers` edge and no unit, `struct L: Handler` written inside `func register()` left the
+    /// ⟨0.39⟩ obligation-2 union with no entry to publish and the in-package CHA with no witness, so a
+    /// SCOPED `deny Net fire` went from exit 1 (same code, conformer at file scope) to exit 0.
+    ///
+    /// ONLY A TYPE THAT DECLARES A SUPERTYPE IS QUEUED, and the boundary is the LANGUAGE's, not this
+    /// defect's: a body-local type's NAME is unspellable outside its own body, `extension` and `protocol`
+    /// are file-scope-only in Swift, so a conformance (to a protocol or a class) is the ONLY route by
+    /// which such a type can be reached from another unit — as `some P`, `any P`, a protocol-typed field,
+    /// or a superclass-typed one. A body-local type with no supertype can be called only from the body
+    /// that declares it, which the lexical walk already charges; minting a unit for it would add rows
+    /// that carry no information.
+    private var pendingBodyLocalTypes: [(node: Syntax, conditional: Bool)] = []
     // Types with a REAL local definition (class/struct/enum/actor/protocol) — a SUBSET of localTypes,
     // which also carries types that only ever appear in an `extension`. An `extension Process { … }` adds
     // "Process" to localTypes (so its members resolve to any sibling helpers) but NOT to declaredTypes —
@@ -395,6 +415,15 @@ final class DeclCollector: SyntaxVisitor {
     init(file: String, tree: SourceFileSyntax) {
         self.file = file
         self.converter = SourceLocationConverter(fileName: file, tree: tree)
+        super.init(viewMode: .sourceAccurate)
+    }
+
+    /// R532 — a sub-collector over ONE body-local type declaration, sharing the file's converter so its
+    /// `loc`s are the real ones. Its tables are THROWN AWAY except the two `finishBodyLocalTypes()`
+    /// copies out; see that method for why the contribution is enumerated rather than merged.
+    private init(file: String, converter: SourceLocationConverter) {
+        self.file = file
+        self.converter = converter
         super.init(viewMode: .sourceAccurate)
     }
 
@@ -1390,6 +1419,12 @@ final class DeclCollector: SyntaxVisitor {
             d.body = Syntax(dv)
             d.isAccessor = true
             fns.append(d)
+            // R532 — a default-argument EXPRESSION is a body too, and the declaration-kind sweep found it
+            // was the one host in the class the four `.skipChildren` sites do not name: it reaches here
+            // rather than through them, so `func f(_ s: Sink = { struct C: Sink {…}; return C() }())` was
+            // silent BEFORE this row and would have stayed silent after it. Fixing the trigger's four
+            // sites and not this one is an audit boundary drawn around the trigger.
+            queueBodyLocalTypes(dv)
         }
     }
 
@@ -1406,10 +1441,12 @@ final class DeclCollector: SyntaxVisitor {
         recordReturn(node.name.text, node.signature)
         recordOpaqueSeqReturn(node.name.text, node.signature, body: node.body)
         collect(node.name.text, sig: node.signature, body: node.body, node: node)
+        queueBodyLocalTypes(node.body)   // R532 — the conformance the lexical walk does NOT carry
         return .skipChildren // nested decls attribute lexically via the body walk (documented)
     }
     override func visit(_ node: InitializerDeclSyntax) -> SyntaxVisitorContinueKind {
         collect("init", sig: node.signature, body: node.body, node: node)
+        queueBodyLocalTypes(node.body)   // R532
         return .skipChildren
     }
 
@@ -1419,6 +1456,7 @@ final class DeclCollector: SyntaxVisitor {
     // union — a read of an effectful setter over-approximates (the sound direction), as candor can't
     // tell read vs write apart at every site (`obj[i] += 1` does both).
     override func visit(_ node: SubscriptDeclSyntax) -> SyntaxVisitorContinueKind {
+        queueBodyLocalTypes(node.accessorBlock)   // R532 — ahead of the guard, which is a skip site too
         guard let ty = typeStack.last else { return .skipChildren }
         let tyPath = typeStack.joined(separator: ".")
         // the element type — types the setter's implicit `newValue` so `newValue.effectfulMethod()` in a
@@ -1461,6 +1499,7 @@ final class DeclCollector: SyntaxVisitor {
     // effect attributes to the deinit unit itself (it runs at scope-exit; there is no single caller
     // site to charge, mirroring a JVM finalizer / the spec's scope-exit attribution).
     override func visit(_ node: DeinitializerDeclSyntax) -> SyntaxVisitorContinueKind {
+        queueBodyLocalTypes(node.body)   // R532
         guard let ty = typeStack.last else { return .skipChildren }
         let tyPath = typeStack.joined(separator: ".")
         var info = FnInfo(qual: "\(tyPath).deinit", loc: loc(node))
@@ -1472,4 +1511,108 @@ final class DeclCollector: SyntaxVisitor {
         fns.append(info)
         return .skipChildren
     }
+
+    // ---- SOUNDNESS R532 — body-local conformers -------------------------------------------------
+
+    /// Queue every OUTERMOST supertype-declaring type declaration inside `body` (see
+    /// `pendingBodyLocalTypes`). Outermost only: once the queued node is walked, a type nested inside
+    /// IT is reached by the ordinary member walk, exactly as it is at file scope.
+    private func queueBodyLocalTypes(_ body: (some SyntaxProtocol)?) {
+        guard let body else { return }
+        let finder = BodyLocalTypeFinder(viewMode: .sourceAccurate)
+        finder.walk(body)
+        for n in finder.found {
+            // `#if`-gated INSIDE the body, or the whole declaration gated from further out — either way
+            // this declaration is conditional, which is what `declaredTypesUnconditional` records.
+            var conditional = ifConfigDepth > 0
+            var p: Syntax? = n.parent
+            while let cur = p, cur.id != Syntax(body).id {
+                if cur.is(IfConfigDeclSyntax.self) { conditional = true; break }
+                p = cur.parent
+            }
+            pendingBodyLocalTypes.append((node: n, conditional: conditional))
+            if ProcessInfo.processInfo.environment["CANDOR_R532_INSTR"] == "1" {
+                let l = n.startLocation(converter: converter)
+                FileHandle.standardError.write(
+                    "R532HIT \(file):\(l.line) \(n.asProtocol(NamedDeclSyntax.self)?.name.text ?? "?")\n".data(using: .utf8)!)
+            }
+        }
+    }
+
+    /// Walk the queued body-local type declarations. Called ONCE per file, by the Driver, after
+    /// `walk(tree)`. Each declaration is walked by a FRESH sub-collector whose tables are discarded,
+    /// and exactly three outputs are copied back: the minted UNITS, and the conformance edge in its two
+    /// spellings (`conformers`, keyed on the protocol; `pathSupers`, keyed on the subtype's path).
+    ///
+    /// THE ENUMERATION IS THE FIX, AND IT WAS MEASURED, NOT REASONED. The first cut merged the
+    /// body-local declaration into this collector wholesale — the identical treatment a file-scope type
+    /// gets — and the 12-package A/B came back `ADDED 13 REMOVED 2 CHANGED 22`. Both removals were
+    /// swift-syntax, both in the SILENT direction, and both were ONE mechanism: `validateLayout` declares
+    /// `enum TokenChoice { case keyword(StaticString) … }` inside its body, while the package also has a
+    /// file-scope `public enum TokenChoice { case keyword(Keyword) … }`. `caseAssoc` is keyed on the CASE
+    /// NAME, scan-globally, and the Driver binds a `case .keyword(let k)` pattern only when that name has
+    /// exactly ONE associated type (`ts.count == 1`, never guess). The extra entry made `keyword`
+    /// ambiguous, `k.spec` stopped resolving, and `TokenChoice.identifier` went from `inferred:
+    /// ["Unknown"]` to ABSENT — a purity claim manufactured by a fabrication fix, plus the
+    /// `SwiftSyntax#Equatable.identifier` union entry it fed. Ground-truthed from swift-syntax's own
+    /// source (`RawSyntaxValidation.swift:22` and `CodeGeneration/…/Child.swift:17`), not from a report.
+    ///
+    /// WHY AN ENUMERATED CONTRIBUTION AND NOT A CASE-BY-CASE EXCLUSION. `caseAssoc` is not the only
+    /// index here whose semantics is "unique ⇒ resolve, ambiguous ⇒ give up" or "last write wins":
+    /// `returnsTmp`, `constStrings`, `typeAliases`, `fields`, `declaredTypes`, the `typeGeneric*` maps
+    /// are all keyed on a BARE name and all fail in the same direction. Excluding the one that bit
+    /// would be an audit boundary drawn around its own trigger. Enumerating what a body-local
+    /// declaration MAY contribute inverts the failure direction: an index this method forgets to copy
+    /// stays byte-identical to the pre-fix engine, so an omission costs precision on the NEW unit and
+    /// can never delete an existing row.
+    ///
+    /// AND THE ENUMERATION IS EXACTLY WHAT THE LANGUAGE LICENSES. A body-local type's NAME is
+    /// unspellable outside its own body — `extension` and `protocol` are file-scope-only in Swift — so
+    /// every index that answers *"what does this type name written elsewhere mean"* can only be made
+    /// wrong by it. The one question where a body-local conformer is a genuine answer is the CHA's,
+    /// which is keyed on the PROTOCOL and asks who implements it; that is `conformers`, and it is the
+    /// direction that over-charges rather than the one that goes silent.
+    ///
+    /// The units are appended under the BARE type name, exactly as a file-scope declaration's are.
+    /// Two same-named conformers merge into one over-charging unit — the bare-name identity this engine
+    /// already has for file-scope types across files. The alternative, a path-qualified `register.L`, is
+    /// worse and measurably so: the ⟨0.39⟩ union loop skips any bare tail owned by two distinct paths,
+    /// so a qualified body-local `L` beside a file-scope `L` would DELETE the file-scope type's union
+    /// entry.
+    func finishBodyLocalTypes() {
+        var rounds = 0
+        while !pendingBodyLocalTypes.isEmpty {
+            rounds += 1
+            if rounds > 64 { break }   // a body-local type inside a body-local type's method, ad infinitum
+            let batch = pendingBodyLocalTypes
+            pendingBodyLocalTypes = []
+            for item in batch {
+                let sub = DeclCollector(file: file, converter: converter)
+                sub.ifConfigDepth = item.conditional ? 1 : 0
+                sub.walk(item.node)
+                // ---- THE ENUMERATED CONTRIBUTION. Everything else in `sub` is discarded. ----
+                fns.append(contentsOf: sub.fns)
+                for (proto, types) in sub.conformers { conformers[proto, default: []].append(contentsOf: types) }
+                for (path, sups) in sub.pathSupers { pathSupers[path, default: []].append(contentsOf: sups) }
+                // a body-local type declared inside a body-local type's own method
+                pendingBodyLocalTypes.append(contentsOf: sub.pendingBodyLocalTypes)
+            }
+        }
+    }
+}
+
+/// SOUNDNESS R532 — finds the OUTERMOST supertype-declaring type declarations in a statement body.
+/// Stops at each hit (`.skipChildren`): what is nested inside a queued declaration is reached by
+/// `DeclCollector`'s ordinary member walk once that declaration is walked.
+private final class BodyLocalTypeFinder: SyntaxVisitor {
+    var found: [Syntax] = []
+    private func take(_ n: some SyntaxProtocol, _ inh: InheritanceClauseSyntax?) -> SyntaxVisitorContinueKind {
+        guard let inh, !inh.inheritedTypes.isEmpty else { return .visitChildren }
+        found.append(Syntax(n))
+        return .skipChildren
+    }
+    override func visit(_ n: StructDeclSyntax) -> SyntaxVisitorContinueKind { take(n, n.inheritanceClause) }
+    override func visit(_ n: ClassDeclSyntax) -> SyntaxVisitorContinueKind { take(n, n.inheritanceClause) }
+    override func visit(_ n: EnumDeclSyntax) -> SyntaxVisitorContinueKind { take(n, n.inheritanceClause) }
+    override func visit(_ n: ActorDeclSyntax) -> SyntaxVisitorContinueKind { take(n, n.inheritanceClause) }
 }

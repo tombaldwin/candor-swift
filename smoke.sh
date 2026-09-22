@@ -1700,5 +1700,110 @@ print('yes' if e and e.get('incomplete') else 'no')" "$1"; }
     || bad "incomplete propagation: a pure function was marked \`incomplete\` — the key is being raised unconditionally, which makes the two rows above vacuous"
 fi
 
+# SOUNDNESS R532 — A CONFORMANCE DECLARED INSIDE A func / init / subscript / deinit BODY.
+# DeclCollector's four `.skipChildren` sites walk no declaration in a body, and their comment — "nested
+# decls attribute lexically via the body walk" — is true of effect ATTRIBUTION and silent about the
+# CONFORMANCE. Measured on 0.39.0: `struct L: Handler` inside `func register()` minted no unit, recorded
+# no `conformers` edge, published no ⟨0.39⟩ obligation-2 union entry, and left a dispatching caller
+# reading `Unknown` in-package and ABSENT across a package boundary — `deny Net fire` exit 1 -> exit 0.
+#
+# ONE VARIABLE: the two fixtures below differ ONLY in where the conformer is declared. The FILE-SCOPE
+# arm is the control and it is not absence-shaped — it states the exact rows the body-local arm must
+# reproduce, so an engine that answered `Unknown` everywhere would fail it.
+mkdir -p "$W/r532"
+cat > "$W/r532/local.swift" <<'SWIFT'
+import Foundation
+protocol Sink { func emit() }
+protocol Pinger { func ping() }
+enum Reg { static var s: Sink? = nil; static var p: Pinger? = nil }
+func blFunc()  { struct A: Sink { func emit() { URLSession.shared.dataTask(with: URL(string: "https://a.example")!) { _,_,_ in }.resume() } }; Reg.s = A() }
+final class Holder { init() { struct B: Sink { func emit() { let _ = try? Data(contentsOf: URL(fileURLWithPath: "/x")) } }; Reg.s = B() } }
+final class Dtor { deinit { struct C: Sink { func emit() { let _ = ProcessInfo.processInfo.environment["X"] } }; Reg.s = C() } }
+struct Sub { subscript(i: Int) -> Int { struct D: Sink { func emit() { NSLog("x") } }; Reg.s = D(); return i } }
+enum Fac { static func make() { struct E: Sink { func emit() { let _ = try? String(contentsOf: URL(string: "https://e.example")!) } }; Reg.s = E() } }
+func blPure()  { struct P: Pinger { func ping() { let _ = 1 + 1 } }; Reg.p = P() }
+func fireSink()   { Reg.s?.emit() }
+func firePinger() { NSLog("marker"); Reg.p?.ping() }
+SWIFT
+cat > "$W/r532/scope.swift" <<'SWIFT'
+import Foundation
+protocol Sink2 { func emit() }
+protocol Pinger2 { func ping() }
+enum Reg2 { static var s: Sink2? = nil; static var p: Pinger2? = nil }
+struct A2: Sink2 { func emit() { URLSession.shared.dataTask(with: URL(string: "https://a.example")!) { _,_,_ in }.resume() } }
+struct P2: Pinger2 { func ping() { let _ = 1 + 1 } }
+func fireSink2()   { Reg2.s?.emit() }
+func firePinger2() { NSLog("marker"); Reg2.p?.ping() }
+SWIFT
+r532() { python3 -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+e=next((f for f in d['functions'] if f['fn']==sys.argv[2]), None)
+print('absent' if e is None else ','.join(sorted(e.get('inferred',[]))))" "$2" "$1"; }
+for arm in local scope; do
+  "$BIN" "$W/r532/$arm.swift" --out "$W/r532/$arm" >/dev/null 2>&1
+done
+LJ=$(ls "$W/r532"/local.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
+SJ=$(ls "$W/r532"/scope.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
+if [ -z "$LJ" ] || [ -z "$SJ" ]; then
+  bad "R532: a fixture scan produced no report — instrument fault, not a result"
+else
+  # The FILE-SCOPE control first: if these two rows are not what the body-local arm is being held to,
+  # every assertion below is measuring the engine against a number nobody checked.
+  [ "$(r532 fireSink2 "$SJ")" = "Net" ]     && ok "R532 control: file-scope conformer — dispatch resolves (fireSink2 -> Net)"   || bad "R532 control: file-scope fireSink2 -> $(r532 fireSink2 "$SJ") (want Net) — the comparison has no left side"
+  [ "$(r532 firePinger2 "$SJ")" = "Log" ]   && ok "R532 control: file-scope PURE conformer — no hedge (firePinger2 -> Log)"     || bad "R532 control: file-scope firePinger2 -> $(r532 firePinger2 "$SJ") (want Log)"
+  # …and the same code with the conformers moved into bodies must answer the same way.
+  for t in "A.emit Net func" "B.emit Fs init" "C.emit Env deinit" "D.emit Log subscript" "E.emit Net static-func"; do
+    set -- $t
+    [ "$(r532 "$1" "$LJ")" = "$2" ] \
+      && ok "R532 body-local conformer in a $3 body is a UNIT ($1 -> $2)" \
+      || bad "R532 $3-body conformer: $1 -> $(r532 "$1" "$LJ") (want $2) — declared inside a body, so it reached no index"
+  done
+  [ "$(r532 Sink.emit "$LJ")" = "Env,Fs,Log,Net" ] \
+    && ok "R532 ⟨0.39⟩ obligation 2: the body-local conformers publish a union entry (Sink.emit)" \
+    || bad "R532 union entry Sink.emit -> $(r532 Sink.emit "$LJ") (want Env,Fs,Log,Net) — a chained consumer is told nothing"
+  [ "$(r532 fireSink "$LJ")" = "Env,Fs,Log,Net" ] \
+    && ok "R532 …and an in-package dispatch on the protocol resolves to them (fireSink)" \
+    || bad "R532 fireSink -> $(r532 fireSink "$LJ") (want Env,Fs,Log,Net)"
+  # OVER-CHARGE CONTROL, in the direction the fix did not intend: a body-local conformer of ANOTHER
+  # protocol is PURE, so its dispatcher must stay DETERMINED and must not collect Sink's effects. Not
+  # absence-shaped (`Log` is there to be read) — an engine that dropped the row would fail this.
+  [ "$(r532 firePinger "$LJ")" = "Log" ] \
+    && ok "R532 over-charge control: a PURE body-local conformer leaves its dispatcher determined (firePinger -> Log)" \
+    || bad "R532 over-charge: firePinger -> $(r532 firePinger "$LJ") (want Log) — the union is charging a conformer that performs nothing"
+fi
+
+# R532, THE NARROWING, AND THE REASON IT IS NARROW. The first cut merged a body-local declaration into
+# the file's tables wholesale, exactly as a file-scope one is merged, and the 12-package A/B came back
+# ADDED 13 REMOVED 2 CHANGED 22. Both removals were swift-syntax and both were ONE mechanism:
+# `validateLayout` declares `enum TokenChoice { case keyword(StaticString) … }` in its BODY while the
+# package also has a file-scope `public enum TokenChoice { case keyword(Keyword) … }`. `caseAssoc` is
+# keyed on the CASE NAME scan-globally and the Driver binds a pattern only when that name has exactly
+# ONE associated type — so the extra entry made `keyword` ambiguous, the binding vanished, and
+# `TokenChoice.identifier` went from `Unknown` to ABSENT. A purity claim manufactured by a fix.
+# `finishBodyLocalTypes()` now copies an ENUMERATED set of outputs out of a throwaway sub-collector;
+# this row is what would go red if that enumeration grew a name-keyed index.
+cat > "$W/r532/poison.swift" <<'SWIFT'
+import Foundation
+struct Payload { func send() { URLSession.shared.dataTask(with: URL(string: "https://p.example")!) { _,_,_ in }.resume() } }
+enum Outer { case wrap(Payload) }
+func unwrap(_ o: Outer) { if case .wrap(let p) = o { p.send() } }
+protocol Shown { func show() }
+func decl() { enum Inner: Shown { case wrap(String); func show() { NSLog("i") } }; Keep.k = Inner.wrap("x") }
+enum Keep { static var k: Shown? = nil }
+SWIFT
+"$BIN" "$W/r532/poison.swift" --out "$W/r532/poison" >/dev/null 2>&1
+PJ2=$(ls "$W/r532"/poison.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
+if [ -z "$PJ2" ]; then
+  bad "R532 narrowing: the fixture scan produced no report — instrument fault, not a result"
+else
+  [ "$(r532 Inner.show "$PJ2")" = "Log" ] \
+    && ok "R532 narrowing control: the body-local enum IS collected (Inner.show -> Log)" \
+    || bad "R532 narrowing control: Inner.show -> $(r532 Inner.show "$PJ2") (want Log) — the poison never reaches the table, so the row below is vacuous"
+  [ "$(r532 unwrap "$PJ2")" = "Net" ] \
+    && ok "R532 narrowing: a body-local enum case name does NOT blur a file-scope case binding (unwrap -> Net)" \
+    || bad "R532 narrowing: unwrap -> $(r532 unwrap "$PJ2") (want Net) — a body-local declaration made a scan-global name-keyed index ambiguous and deleted a real charge"
+fi
+
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -815,6 +815,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         let c = DeclCollector(file: rel, tree: tree)
         c.walk(tree)
+        // R532 — the type declarations found inside func/init/subscript/deinit bodies, which the four
+        // `.skipChildren` sites cannot walk in place. Drained HERE, after the file pass, rather than by a
+        // nested `walk` from inside a visit: `SyntaxVisitor.walk` is not re-entrant.
+        c.finishBodyLocalTypes()
         collectors.append(c)
     }
     var returnsTmp: [String: String?] = [:]
