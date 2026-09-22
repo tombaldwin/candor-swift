@@ -9,6 +9,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.39.2] — 2026-09-22
+
 ### ⚠ Fixed
 
 - **SOUNDNESS R534 — WHERE A PROTOCOL IS *DECLARED* DECIDED WHETHER ITS PARAMETERS WERE TYPED AT ALL, and
