@@ -1364,7 +1364,18 @@ if scopeTarget != nil, sourcePaths.count < sourcePathsBeforeScoping.count {
     }
 }
 
-/// THE package-name parse — the WRITER's, and the only one. `<dir>/Package.swift`'s first `name: "…"`.
+/// THE package-name parse — the WRITER's, and the only one. `<dir>/Package.swift`'s `Package(name:)`.
+///
+/// SOUNDNESS R559 — IT USED TO BE THE FIRST `name: "…"` IN THE FILE, and the paragraph below said that
+/// was not good without anyone measuring what it cost. It cost two of eleven real packages their own
+/// identity: swift-nio reported itself as `Atomics` (a `.product(name:)` seventeen lines above
+/// `Package(`) and swift-collections as `_CollectionsTestSupport` (a hoisted `let targets:` array). The
+/// package name is SPEC §2 rule 3's COVERAGE key, so a consumer importing the REAL swift-atomics and
+/// chaining swift-nio's report had `coverage.uncovered` go `["Atomics"]` → `[]` — chaining DELETED a
+/// disclosure over a package that report does not cover. It is also the `hash` prefix and the report
+/// FILENAME. Now `CandorCore.parsePackageName`, the structured parse that has been one file away the
+/// whole time; `PackageTargets.swift`'s own header already named THIS function as the fragile
+/// counter-example. The fallback on an unreadable name is the directory, as before.
 ///
 /// THERE WERE TWO OF THESE AND THEY WERE NOT THE SAME. `--workspace`'s sweep carried its own copy,
 /// anchored AFTER `Package(`, under a comment claiming it used "the same three sources the writer uses,
@@ -1383,11 +1394,8 @@ if scopeTarget != nil, sourcePaths.count < sourcePathsBeforeScoping.count {
 /// comment asserting they agree is exactly the shape that survives review while being false.
 func manifestPackageName(atDir dir: String) -> String? {
     guard let manifest = try? String(contentsOfFile: (dir as NSString).appendingPathComponent("Package.swift"),
-                                     encoding: .utf8),
-          let r = manifest.range(of: #"name:\s*"([^"]+)""#, options: .regularExpression) else { return nil }
-    let m = String(manifest[r])
-    guard let q1 = m.firstIndex(of: "\""), let q2 = m.lastIndex(of: "\""), q1 < q2 else { return nil }
-    return String(m[m.index(after: q1)..<q2])
+                                     encoding: .utf8) else { return nil }
+    return parsePackageName(manifestSource: manifest)
 }
 
 // The package name — the first half of the §2 `hash` join key. Package.swift's name, else the dir.

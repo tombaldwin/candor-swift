@@ -285,11 +285,20 @@ final class WorkspaceCacheProcessTests: XCTestCase {
     // ── THE SWEEP AND THE WRITER MUST DERIVE THE SAME NAME ───────────────────────────────────────
     //
     // `ownedReportFile` had its OWN `Package.swift` parse, anchored after `Package(`, under a comment
-    // saying it used "the same three sources the writer uses, in the same order". The writer's parse is
+    // saying it used "the same three sources the writer uses, in the same order". The writer's parse was
     // UNANCHORED — the first `name: "…"` in the whole manifest — so a manifest that mentions one before
-    // the `Package(` call makes the two disagree, and BOTH failure directions land at once.
+    // the `Package(` call made the two disagree, and BOTH failure directions landed at once.
     //
     // A hoisted target array is ordinary Swift manifest style, and it is all it takes.
+    //
+    // SOUNDNESS R559 — THE NAMES ARE NOW THE OTHER WAY ROUND, and the fixture is mirrored rather than
+    // relaxed. Both parses are now the ANCHORED one (`CandorCore.parsePackageName`), because the first
+    // `name:` in a manifest is very often somebody else's — measured, two of eleven real packages. So the
+    // writer's answer is `Package(name:)` = `Dep0`, and `Dep0Kit` — what the OLD unanchored parse would
+    // have computed — is the user's file that must survive. Every assertion below is the same property
+    // with the two names swapped, which means this row now ALSO reds if either side regresses to the
+    // unanchored read. The package name is deliberately the MODULE name, as before, so the app chains and
+    // the row can assert an analysis consequence rather than just a filename.
 
     func testTheSweepAndTheWriterDeriveTheSameReportNameFromOneManifest() throws {
         let bin = try ProcessHarness.binaryURL(for: Self.self)
@@ -298,15 +307,15 @@ final class WorkspaceCacheProcessTests: XCTestCase {
             .appendingPathComponent("candor-swift-ws-\(UUID().uuidString)")
         defer { try? fm.removeItem(at: root) }
         try fm.createDirectory(at: root.appendingPathComponent("dep0dir/Sources/Dep0"), withIntermediateDirectories: true)
-        // THE MANIFEST THAT SPLITS THE TWO PARSES. The writer takes `Dep0` (the first `name:` in the
-        // file, which is the TARGET's) and files the report under it; the anchored parse takes
-        // `Dep0Kit`. Deliberately the shape where the writer's answer is the MODULE name, so the app's
+        // THE MANIFEST THAT SPLITS THE TWO PARSES. The first `name:` in the file is a hoisted array's
+        // and says `Dep0Kit`; `Package(name:)` says `Dep0`. Post-R559 both the writer and the sweep read
+        // the latter, so the report is filed under `Dep0` — which is also the MODULE name, so the app's
         // chaining works and the row can assert an analysis consequence rather than just a filename.
         try """
         // swift-tools-version: 6.0
         import PackageDescription
-        let libTargets: [Target] = [.target(name: "Dep0")]
-        let package = Package(name: "Dep0Kit", targets: libTargets)
+        let libTargets: [Target] = [.target(name: "Dep0Kit")]
+        let package = Package(name: "Dep0", targets: [.target(name: "Dep0")])
         """.write(to: root.appendingPathComponent("dep0dir/Package.swift"), atomically: true, encoding: .utf8)
         try "public func work0() { }\n"
             .write(to: root.appendingPathComponent("dep0dir/Sources/Dep0/D.swift"), atomically: true, encoding: .utf8)
@@ -325,10 +334,10 @@ final class WorkspaceCacheProcessTests: XCTestCase {
         let deps = root.appendingPathComponent("app/.candor/deps")
         XCTAssertEqual(try scan(bin, root, out: "warm").code, 0)
         XCTAssertTrue(fm.fileExists(atPath: deps.appendingPathComponent("Dep0.json").path),
-                      "the WRITER files it under the manifest's first `name:` — if this moves, the row "
-                      + "below is measuring something else")
+                      "the WRITER files it under `Package(name:)` (R559) — if this moves, the row below "
+                      + "is measuring something else; \(((try? fm.contentsOfDirectory(atPath: deps.path)) ?? []))")
 
-        // a user-placed report that happens to sit under the name the ANCHORED parse computes
+        // a user-placed report that happens to sit under the name the OLD UNANCHORED parse computed
         try "{\"candor\":{\"version\":\"hand-written\"},\"package\":\"Dep0Kit\",\"functions\":[]}"
             .write(to: deps.appendingPathComponent("Dep0Kit.json"), atomically: true, encoding: .utf8)
         // now break the dep, in a fresh process that has recorded no package name for it

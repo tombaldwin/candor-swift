@@ -254,6 +254,51 @@ public func parsePackageProducts(manifestSource: String) -> [PackageProduct] {
     return finder.products
 }
 
+/// SOUNDNESS R559 — THE PACKAGE'S OWN NAME, read from the `Package(…)` call and from nothing else.
+///
+/// `manifestPackageName` (main.swift) took the FIRST `name: "…"` anywhere in the manifest, and said so
+/// itself: *"the first `name:` in a manifest is very often a target's"*. This file's own header names
+/// that regex as the fragile counter-example a structured parse avoids. The limitation was documented
+/// in two places and measured in none.
+///
+/// MEASURED over 11 real packages: **two are wrong.** swift-nio reports itself as `Atomics` — its
+/// line-18 `.product(name: "Atomics", package: "swift-atomics")`, seventeen lines above `Package(` — and
+/// swift-collections as `_CollectionsTestSupport`, from a hoisted `let targets:` array 126 lines above
+/// it. Both are ordinary manifest idioms, and both make the report claim a name belonging to somebody
+/// else.
+///
+/// IT IS NOT COSMETIC. The package name is SPEC §2 rule 3's COVERAGE key, and a covered package's
+/// silence is a PURITY CLAIM. A consumer that imports `Atomics` — the real swift-atomics — and chains
+/// swift-nio's report has `coverage.uncovered` go from `["Atomics"]` unchained to `[]` chained, over a
+/// package that report does not cover at all: chaining DELETED a disclosure, which is R475's own shape.
+/// The same string is the `hash` prefix every §2 join keys on and the `<prefix>.<pkg>.Swift.json`
+/// filename two packages would then collide in.
+///
+/// Returns nil when the name is not a plain string literal (an interpolation, a computed name) — the
+/// same "cannot be read" every sibling parser in this file answers with. The caller's fallback is the
+/// directory name, which is at worst uninformative rather than another package's identity.
+public func parsePackageName(manifestSource: String) -> String? {
+    let tree = Parser.parse(source: manifestSource)
+    let finder = PackageNameFinder()
+    finder.walk(tree)
+    return finder.name
+}
+
+private final class PackageNameFinder: SyntaxVisitor {
+    var name: String?
+    init() { super.init(viewMode: .sourceAccurate) }
+
+    override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
+        guard name == nil, DeclaredTargetFinder.isPackageCall(node) else { return .visitChildren }
+        for arg in node.arguments where arg.label?.text == "name" {
+            guard let lit = arg.expression.as(StringLiteralExprSyntax.self), lit.segments.count == 1,
+                  let seg = lit.segments.first?.as(StringSegmentSyntax.self) else { continue }
+            name = seg.content.text
+        }
+        return .visitChildren
+    }
+}
+
 /// Are the `Package(products:targets:)` LISTS themselves fully readable — i.e. literal arrays whose
 /// every element is a call the walkers above collect?
 ///

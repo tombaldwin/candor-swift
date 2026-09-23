@@ -28,6 +28,87 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R559 — A PACKAGE'S OWN NAME WAS READ WITH A REGEX THAT MATCHES A DEPENDENCY'S FIRST, so a
+  chained report REGISTERED COVERAGE OF A PACKAGE IT DOES NOT COVER and the consumer's disclosure was
+  deleted.** `manifestPackageName` took the FIRST `name: "…"` anywhere in `Package.swift`. Its own doc
+  said that was not good — *"the first `name:` in a manifest is very often a target's"* — and
+  `PackageTargets.swift`'s header named it as the fragile counter-example a structured parse avoids. The
+  limitation was documented in two places and **measured in neither**, which is the whole mechanism: a
+  comment that reads as considered is a comment nobody measures.
+
+  MEASURED over the same 11 real packages: **2 of 11 report a name that is not theirs.** swift-nio calls
+  itself `Atomics`, from its line-18 `.product(name: "Atomics", package: "swift-atomics")` — seventeen
+  lines above `Package(` — and swift-collections calls itself `_CollectionsTestSupport`, from a hoisted
+  `let targets:` array 126 lines above it. Both are ordinary manifest idioms.
+
+  IT IS NOT COSMETIC. The package name is SPEC §2 rule 3's COVERAGE key, and a covered package's silence
+  is a PURITY CLAIM. Reproduced end to end on a three-package fixture carrying swift-nio's exact manifest
+  shape, one variable, the consumer's text and binary held identical:
+
+  | consumer scan | `coverage.uncovered` | `use`'s `invisible` |
+  |---|---|---|
+  | unchained | `["Dep", "Ghost"]` | `["Dep", "Ghost"]` |
+  | chained onto `Dep`'s report | `["Dep"]` | `["Dep"]` |
+
+  The pairing is **inverted**: chaining withdrew the disclosure for `Ghost`, which that report does not
+  cover and candor has never read, and KEPT it for `Dep`, which it does. Chaining deleted a disclosure —
+  R475's own property, reached through the identity field instead of the join. The same string is also
+  the `hash` prefix every §2 join keys on and the `<prefix>.<pkg>.Swift.json` filename two packages would
+  then collide in.
+
+  The fix asks the authority that was already in the tree (§G): `CandorCore.parsePackageName`, a
+  SwiftSyntax parse of the `Package(…)` call, beside the six sibling manifest parsers in
+  `PackageTargets.swift`. A name that is not a plain string literal returns nil — the same "cannot be
+  read" every sibling answers with — and the caller falls back to the DIRECTORY name, which is
+  uninformative rather than another package's identity.
+
+  A/B with `bin/corpus-ab.py` over the 11 packages, 11,680 rows, PRE = `0c16614` (the R555 commit):
+  **`--key unit` ADDED 7,734 / REMOVED 7,734 / CHANGED 0, and `--key entry+fn` ADDED 0 / REMOVED 0 /
+  CHANGED 7,186** — the unit key carries `package` and `hash`, so a re-prefixed row reads as a new
+  identity; keyed on the function it is a rename and nothing else (7,186 < 7,734 is the multiset's
+  duplicate-`fn` collapse, not a lost row).
+
+  **REMOVED 7,734 is the number that has to be defended, so all 7,734 were audited, not sampled.** Every
+  removed row has exactly one added counterpart in the same entry under the same `fn`, and after
+  substituting the old package prefix the two are **field-for-field identical — residual zero**. They lie
+  in exactly the two entries whose manifests were misread (swift-nio 5,141, swift-collections 2,593);
+  the other nine packages are byte-identical, which is the control for "the ordinary manifest shape still
+  answers exactly as before". A first pass of this audit reported 306 apparent mismatches and they were
+  ALL an artefact of the audit: `dispatchesOn` is sorted, and `swift-nio#…` sorts differently from
+  `Atomics#…`, so a string comparison saw a change where the multiset had none. Recorded because a
+  residual read as real is how a rename would hide a genuine loss. Envelope `coverage.uncovered` is
+  unchanged in all 11 — the consumer-side effect exists only when the misnamed report is CHAINED, which
+  is what the process arm below measures.
+
+  **The existing suite caught this and was right to.**
+  `WorkspaceCacheProcessTests.testTheSweepAndTheWriterDeriveTheSameReportNameFromOneManifest` — the
+  `43a0eaa` regression guard — went RED, because its fixture is built on the writer taking the manifest's
+  FIRST `name:`, which is what this changes. The property it guards (writer and sweep derive the SAME
+  name) still holds; both now read `Package(name:)`. The fixture is MIRRORED rather than relaxed: the
+  package is now `Dep0` (also the module name, so the app still chains and the row still asserts an
+  analysis consequence) and `Dep0Kit` — what the old unanchored parse computed — is the user's file that
+  must survive. Every assertion is the same property with the two names swapped, so that row now also
+  reds if either side regresses to the unanchored read.
+
+  Measured while doing so, and stated because it LOOKS like a regression and is not: in that fixture the
+  app chained pre-fix and does not post-fix. §2 registers only the PACKAGE name (envelope `package` plus
+  each entry's hash prefix) while a consumer asks `isChained(<imported MODULE>)`, so chaining only ever
+  fires when the two coincide — and pre-fix they coincided BY ACCIDENT, the misread name happening to be
+  the target's. The ordinary manifest (`Package(name: "Dep0Kit")`, target `Dep0`, no hoisted array)
+  behaves IDENTICALLY in both arms: neither chains, both disclose `invisible: ["Dep0"]`. The
+  package-vs-module keying gap is pre-existing, is named as an open row in `manifestPackageName`'s own
+  doc, and is untouched here; the direction this moves that fixture is the safe one (`use0` goes from
+  ABSENT under `uncovered: []` to present with `invisible: ["Dep0"]`).
+
+  Calibrated in this commit (§1b): unit arms for both real manifest shapes (a hoisted `.product(name:)`
+  and a hoisted `let targets:`), a CONTROL arm for the plain shape the old regex already answered, the
+  `PackageDescription.Package(` spelling, and a refusal arm for an interpolated name. Plus the process
+  arm above, which asserts BOTH halves of the pairing so it cannot pass by everything going silent. The
+  process arm FINDS the dependency report rather than naming it, which is load-bearing: hard-coding
+  `depR.Dep.Swift.json` made the pre-fix arm fail by chaining NOTHING (an absent `CANDOR_DEPS` file
+  refuses, exit 2), so the coverage assertions never executed in the arm they exist to catch — a
+  calibration that reds for the wrong reason has not tested the property.
+
 - **SOUNDNESS R555 — A GUARD WRITTEN TO EXCLUDE LOCAL ABSTRACTIONS COULD NOT FIRE FOR NEARLY ANY
   ABSTRACTION IT WAS WRITTEN FOR, so a protocol THIS package declares was published under a DEPENDENCY's
   module.** `dispatchAbstraction`'s doc says *"a bound that is LOCAL … returns nil rather than a key"*.
