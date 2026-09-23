@@ -9,6 +9,23 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### Documented
+
+- **SOUNDNESS R547 (swift half) — THE NAMED MISS FOR DISPATCH THROUGH A DEPENDENCY'S ABSTRACTION.**
+  SPEC §4 permits leaving such a dispatch unflagged ONLY if it is documented as a named miss (§7 item
+  7), and this engine documented nothing for the shape. README's "Known v0 bounds" now carries it,
+  written from first-hand measurement rather than from intent, and it names three separate behaviours
+  rather than one comforting sentence: (a) chained with no implementor anywhere, the consumer row is
+  `inferred: []` / `unresolved: false` / no `unknownWhy` / no `invisible` and **`pure` and `deny Net`
+  both exit 0** (R533); (b) unchained, whether anything is said depends on the CONSUMER'S BODY SHAPE —
+  a free call into the dependency carries `invisible`, a direct `b.size()` carries none and its row can
+  be absent from `functions[]` entirely, which under ⟨0.21⟩ is a positive purity claim (R548); (c) the
+  `dispatchesOn` owner is GUESSED from the file's single declared non-platform dependency import, so a
+  published key can name a package that does not own the abstraction, and none is published at all when
+  the file has zero or two such imports (R532b). The R548 entry also records that the obvious widening
+  was tried and reverted — it tagged an `NSPasteboard` receiver in a file that merely imports a blind
+  module, which this engine's own smoke gate rejects as false uncertainty.
+
 ### ⚠ Fixed
 
 - **SOUNDNESS R550 — R532's FIX READ THE FUNCTION'S GENERICS ONLY, so a bound declared on the ENCLOSING

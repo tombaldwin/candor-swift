@@ -66,6 +66,42 @@ known effect through receiver-typing idioms (singletons, fields, collections, ca
 nested receivers) and asserts every reachable function is effect-or-`Unknown`, so the §4 claim here is
 now adversarially tested.
 
+### The named miss: dispatch through a DEPENDENCY's abstraction
+
+SPEC §4 permits an engine to leave a dispatch through an external abstraction it does not model
+unflagged **only if it is documented as a named miss** (§7 item 7). This is that document, and it is
+written from measurements on this engine rather than from the intent.
+
+**This engine cannot see that such a call IS a dispatch.** rust reads `&dyn iface::Backend`, java reads
+`INVOKEINTERFACE`, TypeScript reads the named import; Swift source says only `b.size()` on a value
+typed `Backend`, and whether `Backend` is a protocol, a class or a struct lives in a module this scan
+never opened. What follows are the consequences, each measured on a three-package fixture (an
+abstraction's owner, an effectful conformer, a consumer):
+
+- **Chained, and nothing anywhere implements the abstraction: the consumer reads silently pure.** The
+  row is `inferred: []`, `unresolved: false`, no `unknownWhy`, no `invisible` — it carries only the
+  non-gating `dispatchesOn` key. `pure` and `deny Net` both **exit 0** over a call whose target this
+  engine knows nothing about. (SOUNDNESS R533; three of the four engines behave this way, TypeScript
+  is the one that discloses. Pinned four-way as conformance PART 92 `c9_consumer_zero_union`.)
+- **Unchained, the disclosure depends on how the consumer's body is written.** A consumer that calls a
+  free function taking the abstraction (`termSize(b)`) carries `invisible: [<blind modules>]`; a
+  consumer that dispatches directly on the value (`b.size()`) carries none, and where the owning module
+  cannot be decided its row is **absent from `functions[]` entirely** — under the ⟨0.21⟩ manifest that
+  is a positive claim of purity, not a gap. (SOUNDNESS R548, open, PART 92 `c10_unchained_direct`. The
+  obvious widening — treat such a member call as a blind reach — was tried and **reverted**: it tagged
+  a `NSPasteboard` receiver in a file that merely imports a blind module, which is false uncertainty in
+  every such file, and this engine's own smoke gate rejects it. No narrower predicate exists today,
+  because deciding it needs to know which module declares the receiver's type.)
+- **The `dispatchesOn` key names an owner this engine GUESSES from the file's imports.** It is the
+  file's single declared, non-platform dependency import; a file with zero or two such imports
+  publishes no key at all, and a bound that is a protocol the scanned package declares *itself* is
+  still keyed under that import. So a published key may name a package that does not own the
+  abstraction, and a consumer joining on it finds nothing. (SOUNDNESS R532b.)
+
+`CANDOR_DEPS` narrows the first of these — chaining the implementor's report lets the effect cross —
+but it does not remove it: a chained abstraction with no implementor in *any* chained report still
+reads pure.
+
 ## Development
 
 ```sh
