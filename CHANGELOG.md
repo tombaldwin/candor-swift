@@ -9,6 +9,85 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed
+
+- **SOUNDNESS R563 — A GENERIC PARAMETER USED AS A *TYPE* RECEIVER OVER A LOCAL PROTOCOL LOST THE EFFECT
+  ENTIRELY: FIVE SPELLINGS ABSENT FROM `functions[]`, `deny Net` EXIT 0 OVER A CONFORMER THAT REACHES
+  `URLSession.dataTask`.** Every other protocol-dispatch path in this engine keys on a VALUE whose type
+  is a protocol — `protoParams` for a parameter, `localProtocols` for a field or local. When the type
+  parameter is itself the RECEIVER the spelling is `P`, which is in NEITHER index, so every branch missed
+  and the call was dropped. Under ⟨0.21⟩ absence is a POSITIVE CLAIM OF PURITY.
+
+  MEASURED on a fixture that `swift build`s and RUNS (§E3 — all seven spellings execute and reach the
+  sink, printing `RAN 1 2 4 5 6 7 EffPrim`). One variable, the receiver's spelling; the protocol, the
+  conformer and the sink identical in every row:
+
+  | spelling                                                    | before      | `deny Net <fn>` |
+  |---|---|---|
+  | `func instFnLevel<P: Prim>(_ p: P, _ v: Int) { p.inst(v) }` | `[Net]`     | exit **1** |
+  | `func existentialInst(_ p: Prim, _ v: Int)   { p.inst(v) }` | `[Net]`     | exit **1** |
+  | `func staticFnLevel<P: Prim>(_ t: P.Type, …) { P.make(v) }` | **ABSENT**  | exit **0** |
+  | `struct Box<P: Prim> { func f(…)            { P.make(v) } }`| **ABSENT**  | exit **0** |
+  | `func ctorFnLevel<P: Prim>(…) -> P          { P(sink: v) }` | **ABSENT**  | exit **0** |
+  | `func staticVarFnLevel<P: Prim>(…)          { P.maker(v) }` | **ABSENT**  | exit **0** |
+  | `func metatypeParam<P: Prim>(_ t: P.Type, …){ t.make(v) }`  | **ABSENT**  | exit **0** |
+
+  **THE TWO INSTANCE ROWS ARE WHAT MAKE IT A DEFECT RATHER THAN A DESIGN:** this engine's own ruling for
+  a LOCAL protocol is to union the conformers, and it applied that ruling through one spelling of the
+  receiver and not the other (§F1.3 — two implementations of one question, and only one of them resolves
+  the bound).
+
+  **FIXED ACROSS ALL THREE SYNTACTIC PATHS, because a fix for one draws the audit boundary around its own
+  trigger (§9).** (a) the STATIC MEMBER — `CallCollector` receives `protoBoundParams`, the unit's generic
+  parameters bound to a local protocol, built by the Driver from `FnInfo.genericBounds` unioned with
+  R550's `typeGenericBoundsAll[enclosingType]`, and hands the call to the SAME `ProtoDispatch` machinery
+  a protocol-typed value uses rather than a second CHA (§G). (b) the METATYPE PARAMETER — `_ t: P.Type`
+  is a second spelling of the same receiver, recorded by `DeclCollector.metatypeParams` in its own map
+  rather than by widening `typeName`, which would make `t` look like a `P`-typed VALUE to seven other
+  consumers. (c) the INITIALIZER — `P(sink: v)`, which also needed `DeclCollector` to learn that an
+  `init` REQUIREMENT is a requirement: `InitializerDeclSyntax` is not a `FunctionDecl`, so
+  `protoOrSuperDeclares(Prim, "init")` answered false and every protocol-CHA site refused the dispatch.
+  (d) the FUNCTION-TYPED requirement — `P.maker(v)` INVOKES a stored closure rather than dispatching to
+  a witness body, so it hedges `Unknown` **beside** the dispatch, which is exactly what the CONCRETE
+  spelling `EffPrim.maker(v)` already answers (parity, not a second more confident rule).
+
+  After: `staticFnLevel`, `Box.staticTypeLevel` and `metatypeParam` carry `[Net]` and `deny Net` exits 1;
+  `ctorFnLevel` and `staticVarFnLevel` carry `[Unknown]` with `unknownWhy: ["dispatch:Prim.init"]` /
+  `["dispatch:Prim.maker"]` and `deny Net Unknown` exits 1. **Zero of the five stays silent.**
+
+  **A/B — `bin/corpus-ab.py`, 11 real packages, 16,428 analyzed functions, 11,680 rows, PRE = `52c1668`
+  built from a detached worktree:** wide unit key **ADDED 3 · REMOVED 0 · CHANGED 358**; narrow
+  (`inferred`) **ADDED 3 · REMOVED 0 · CHANGED 25**. **REACH 46 probe hits across 4 of 11 packages**
+  (swift-argument-parser 18, swift-nio 16, swift-collections 10, Kingfisher 2) — an unchanged row is not
+  evidence the code ran. **ZERO effect losses and ZERO `dispatchesOn` key losses**, audited in full over
+  every changed row rather than sampled: all 25 `inferred` movements are a GAIN of `Unknown`, no row
+  gained a concrete effect it could not reach, and the 423 new obligation-1 key occurrences are 10 keys
+  whose protocol declares the member (`protoOrSuperDeclares` gates the publish).
+
+  **REAL-WORLD REACH, ground-truthed from source rather than from candor's own report:** swift-nio's
+  `Pool<Element: PoolElement>.get()` is `return Element()` over `protocol PoolElement { init() }` and was
+  **ABSENT from `functions[]`**; swift-argument-parser's `extension RawRepresentable where Self:
+  ExpressibleByArgument` initializer calls `RawValue(argument:)`, also absent; swift-nio's
+  `AtomicPrimitive`/`NIOAtomicPrimitive` are eight function-typed `static var` requirements each, called
+  as `T.atomic_load(…)`.
+
+  **THE FIRST CUT OF (d) REGRESSED THE ⟨0.39⟩ WIRE AND THE A/B CAUGHT IT, which is why it is recorded
+  here rather than smoothed over.** Emitting the hedge INSTEAD of the dispatch removed **15 keys / 33
+  occurrences** of `swift-nio#AtomicPrimitive.*` and `swift-nio#NIOAtomicPrimitive.*` from `dispatchesOn`
+  — a consumer's only join point for its own implementors, the exact keys R555 had just fixed the
+  ownership of. The shipped form emits BOTH, and `testTheWireKeyIsPublishedForEveryGenericTypeReceiver`
+  pins it.
+
+  **CALIBRATED IN THIS COMMIT (§1b), four degradations, each red in its own place** — full RED lines in
+  the commit message: neutering `typeReceiverProto` gives **17 failures**; dropping the `init` requirement
+  gives **4** (all `ctorFnLevel`); dropping the function-typed hedge gives **2** (`staticVarFnLevel`
+  silently pure); emitting the hedge instead of the dispatch gives **1** (the lost wire key).
+
+  A stored-property audit this engine already runs caught the two new indexes: `NameKeyedStateTests`
+  required both to be classified, and the classification is `.immutableIndex` with the shadowing case
+  handled by CHECK ORDER — `typeReceiverProto` answers nil whenever `vars` already knows the spelling, so
+  a local shadowing a generic parameter's name falls through to the ordinary receiver paths.
+
 ### Documented
 
 - **SOUNDNESS R547 (swift half) — THE NAMED MISS FOR DISPATCH THROUGH A DEPENDENCY'S ABSTRACTION.**

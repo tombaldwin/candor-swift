@@ -69,6 +69,15 @@ struct FnInfo {
     /// because no producer can publish under a key spelled from the CONSUMER's type-parameter name.
     var genericBounds: [String: String] = [:]
     var protoParams: [String: String] = [:]  // param name -> local protocol name
+    /// SOUNDNESS R563 — a METATYPE parameter (`_ t: P.Type`) -> the type it is a metatype OF (`P`).
+    ///
+    /// `typeName`/`parameterTypeName` have no `MetatypeTypeSyntax` case, so `t` reaches `params` as
+    /// NOTHING at all — and that is the right answer for every other consumer, which asks what a
+    /// receiver's INSTANCE type is. `t.make(v)` is a call on the METATYPE, so it needs the base name
+    /// and must not be confused with an instance of it. Recorded in its own map for that reason rather
+    /// than by widening `typeName`, which would make `t` look like a `P`-typed value to seven other
+    /// consumers and could union conformer instance methods onto a metatype receiver.
+    var metatypeParams: [String: String] = [:]
     var arrayParams: [String: String] = [:]  // param name -> ELEMENT type (a `[T]` param, for `for x in p`)
     var arrayParamsNested: [String: String] = [:]  // R278 — `[[T]]` param -> INNER element `T`
     var dictParams: [String: String] = [:]   // param name -> VALUE type (a `[K: V]` param, for `for (k,v)`)
@@ -239,7 +248,10 @@ final class DeclCollector: SyntaxVisitor {
         return typeName(t)
     }
 
-    var protocolMethods: [String: Set<String>] = [:]   // protocol -> declared method names
+    var protocolMethods: [String: Set<String>] = [:]
+    /// SOUNDNESS R563 — `"<Proto>.<member>"` for every protocol requirement whose declared type is a
+    /// FUNCTION type. See the fill site for why an invocation of one must hedge rather than dispatch.
+    var protocolFnTypedMembers: Set<String> = []
     /// ⟨0.39⟩ Every locally-declared protocol's FULLY QUALIFIED path (`Backend`, `Term.Backend`) — the
     /// ⟨0.23⟩ `typeSurface` spelling, which SPEC §4 ⟨0.39⟩ makes the ONE wire spelling for a dispatched
     /// abstraction (obligation 2's key and `dispatchesOn`'s value take the same rule, and the clause
@@ -903,10 +915,32 @@ final class DeclCollector: SyntaxVisitor {
                 for b in v.bindings {
                     if let n = b.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
                         protocolMethods[node.name.text, default: []].insert(n)
+                        // SOUNDNESS R563 — …and whether that requirement is FUNCTION-TYPED. `static var
+                        // maker: (Int) -> Int { get }` is INVOKED (`P.maker(v)`), not dispatched: what
+                        // runs is whatever closure the conformer stored, and a conformer satisfying it
+                        // with `static let maker = sink` has a real but PURE accessor unit — so routing
+                        // the call through the CHA resolves to that unit and certifies purity over a
+                        // closure that reaches the network. The CONCRETE spelling of the identical call,
+                        // `EffPrim.maker(v)` with no generics and no protocol, answers `Unknown` (measured
+                        // on a three-control fixture), so this set exists to make the generic spelling
+                        // give the SAME answer rather than a second, more confident one (§F1.3).
+                        if let ann = b.typeAnnotation, typeName(ann.type).isFunction {
+                            protocolFnTypedMembers.insert("\(node.name.text).\(n)")
+                        }
                     }
                 }
             } else if member.decl.is(SubscriptDeclSyntax.self) {
                 protocolMethods[node.name.text, default: []].insert("subscript")
+            }
+            // SOUNDNESS R563 — AN `init` REQUIREMENT IS A REQUIREMENT. `InitializerDeclSyntax` is not a
+            // `FunctionDecl`, so `protocol Prim { init(sink: Int) }` recorded NOTHING here and
+            // `protoOrSuperDeclares(Prim, "init")` answered false — which is the guard every protocol-CHA
+            // site passes through. So `P(sink: v)` inside `func f<P: Prim>(…)` could not resolve to the
+            // conformers' initializers even once the call site named the dispatch: the member space said
+            // the protocol has no such member. Same shape as the property/subscript lines above, which
+            // exist because function requirements were once the only kind this loop knew.
+            else if member.decl.is(InitializerDeclSyntax.self) {
+                protocolMethods[node.name.text, default: []].insert("init")
             }
         }
         protocolMethods[node.name.text, default: []].formUnion(methods)
@@ -1327,6 +1361,13 @@ final class DeclCollector: SyntaxVisitor {
         for (idx, p) in sig.parameterClause.parameters.enumerated() {
             let pname = (p.secondName ?? p.firstName).text
             let t = Self.parameterTypeName(p.type)
+            // SOUNDNESS R563 — the METATYPE spelling, recorded beside the ordinary one. `.Type` only:
+            // `P.Protocol` is the existential metatype and a member call on it does not dispatch to a
+            // conformer, so it is deliberately not recorded.
+            if let mt = p.type.as(MetatypeTypeSyntax.self), mt.metatypeSpecifier.text == "Type",
+               let base = typeName(mt.baseType).name {
+                info.metatypeParams[pname] = base
+            }
             info.paramNames.insert(pname)
             info.paramIndex[pname] = idx        // R178 — see `paramIndex`
             // ordered signature for overload resolution: the param's simple type name (nil if unresolvable)

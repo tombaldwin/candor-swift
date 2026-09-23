@@ -388,6 +388,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // hazard this exists to close).
     var unresolvedGenericFields: [(ty: String, field: String, param: String)] = []
     var protocolMethods: [String: Set<String>] = [:]
+    var protocolFnTypedMembers: Set<String> = []   // SOUNDNESS R563 — see DeclCollector
     var protocolPaths: Set<String> = []           // ⟨0.39⟩ see DeclCollector.protocolPaths
     var protocolSupers: [String: Set<String>] = [:]
     var conformers: [String: [String]] = [:]
@@ -859,6 +860,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (t, fs) in c.opaqueFields { opaqueFields[t, default: []].formUnion(fs) }
         for (cn, ts) in c.caseAssoc { caseAssocAll[cn, default: []].formUnion(ts) }
         for (pn, ms) in c.protocolMethods { protocolMethods[pn, default: []].formUnion(ms) }
+        protocolFnTypedMembers.formUnion(c.protocolFnTypedMembers)   // R563
         protocolPaths.formUnion(c.protocolPaths)   // ⟨0.39⟩
         for (pn, ss) in c.protocolSupers { protocolSupers[pn, default: []].formUnion(ss) }
         for (pn, ts) in c.conformers {
@@ -2072,7 +2074,32 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                globalTypes: effectiveGlobalTypes,
                                globalArrayElem: globalArrayElemByModule[swiftModuleOf(f.loc)] ?? [:],
                                declaredTypes: declaredTypes,
-                               localProtocols: localProtocolNames, returns: returnsIdx,
+                               localProtocols: localProtocolNames,
+                               // SOUNDNESS R563 — the unit's GENERIC PARAMETERS that are bound to a LOCAL
+                               // protocol, so a type parameter used as a RECEIVER (`P.make(v)`,
+                               // `P(sink: v)`, `t.make(v)`) reaches the same bounded CHA a protocol-typed
+                               // VALUE does. Function bound FIRST, enclosing type second — a method may
+                               // shadow its type's parameter name, which is the same precedence
+                               // `dispatchAbstraction` applies to the wire key (R550).
+                               protoBoundParams: {
+                                   var pb: [String: String] = [:]
+                                   if let et = f.enclosingType, let tb = typeGenericBoundsAll[et] {
+                                       for (g, b) in tb where localProtocolNames.contains(b) { pb[g] = b }
+                                   }
+                                   for (g, b) in f.genericBounds where localProtocolNames.contains(b) { pb[g] = b }
+                                   // …AND THE METATYPE PARAMETER THAT STANDS FOR ONE. `_ t: P.Type` makes
+                                   // `t` a second spelling of `P` in receiver position, so it is entered
+                                   // under the PARAMETER's name against the same bound. Keyed off `pb`
+                                   // rather than off the bounds maps directly, so a metatype of something
+                                   // that is NOT a local-protocol-bound parameter contributes nothing.
+                                   for (pn, base) in f.metatypeParams {
+                                       if let b = pb[base] { pb[pn] = b }
+                                       else if localProtocolNames.contains(base) { pb[pn] = base }
+                                   }
+                                   return pb
+                               }(),
+                               protoFnTypedMembers: protocolFnTypedMembers,
+                               returns: returnsIdx,
                                fieldArrayElem: fieldArrayElem, fieldArrayElemNested: fieldArrayElemNested,
                                fieldDictValue: fieldDictValue,
                                opaqueFields: opaqueFields,

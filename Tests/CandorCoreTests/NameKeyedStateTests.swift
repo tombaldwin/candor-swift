@@ -245,6 +245,14 @@ final class NameKeyedStateTests: XCTestCase {
         "opaqueFields": .immutableIndex, "localTypes": .immutableIndex,
         "declaredTypes": .immutableIndex, "enclosingMembers": .immutableIndex,
         "localFreeFns": .immutableIndex, "localProtocols": .immutableIndex,
+        // SOUNDNESS R563 — keyed by a GENERIC PARAMETER name and by `"<Proto>.<member>"`, both supplied
+        // by the Driver from the DECLARATION indexes (`FnInfo.genericBounds`, `typeGenericBoundsAll`,
+        // `FnInfo.metatypeParams`, `DeclCollector.protocolFnTypedMembers`). A generic parameter is not a
+        // binding a rebind can invalidate — but a LOCAL may shadow its spelling in expression position,
+        // and that is handled by CHECK ORDER rather than by clearing: `typeReceiverProto` answers nil
+        // whenever `vars` already knows the spelling, so a shadowing local falls through to the ordinary
+        // receiver paths. Same discipline as `globalTypes` two rows down.
+        "protoBoundParams": .immutableIndex, "protoFnTypedMembers": .immutableIndex,
         // R73 — module-scope GLOBAL name -> concrete type (and its array-element sibling), injected at
         // construction from the Driver's module-sliced merge (`globalTypesByModule`). Keyed by the
         // GLOBAL's own declaration name, not by any binding local to the walked function, and `rootOf`/

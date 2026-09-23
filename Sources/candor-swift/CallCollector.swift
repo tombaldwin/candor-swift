@@ -331,6 +331,27 @@ final class CallCollector: SyntaxVisitor {
     /// suppressed the CHA on the ERASED binding it shadowed for the rest of the function.
     var opaqueElem: Set<String> = []
     let localProtocols: Set<String> // local protocol names — a receiver typed as one is DISPATCH
+    /// SOUNDNESS R563 — GENERIC PARAMETER -> the LOCAL PROTOCOL it is bound to, for THIS unit.
+    ///
+    /// Every other protocol-dispatch branch in this file keys on a VALUE whose type is a protocol:
+    /// `protoTyped` for a parameter, `localProtocols` for a field/local. When the type parameter is
+    /// itself the RECEIVER — `P.make(v)`, `P(sink: v)`, `P.maker(v)`, `t.make(v)` for `t: P.Type` —
+    /// the spelling is `P`, which is in NEITHER index, so every branch missed and the call was dropped
+    /// outright. Under ⟨0.21⟩ that is a positive claim of purity, and it was measured over a conformer
+    /// reaching `URLSession.dataTask`: `deny Net` exit 0 on five spellings while the INSTANCE sibling
+    /// `p.inst(v)` and the existential `_ p: Prim` both read `[Net]` and exit 1.
+    ///
+    /// The map is built by the Driver from `FnInfo.genericBounds` (this unit's own clause) unioned with
+    /// `typeGenericBoundsAll[enclosingType]` (R550's index — `struct Box<P: Prim>`), restricted to names
+    /// that are LOCAL protocols. The function's own bound wins, because a method may shadow its type's
+    /// parameter name. Restricting to local protocols is what keeps this from fabricating: the answer is
+    /// the SAME bounded protocol CHA every other branch here defers to, over conformers declared in this
+    /// scan, and a bound naming a dependency's protocol contributes nothing rather than a guessed union.
+    let protoBoundParams: [String: String]
+    /// SOUNDNESS R563 — `"<Proto>.<member>"` for protocol requirements of FUNCTION type (see
+    /// `DeclCollector.protocolFnTypedMembers`). `P.maker(v)` INVOKES a stored closure; it does not
+    /// dispatch to a witness body, so it takes the same honest `Unknown` the concrete spelling takes.
+    let protoFnTypedMembers: Set<String>
     let returns: [String: String]   // unambiguous factory return types (the candor-scan move)
     /// Locals bound from a CALL whose return type we could not determine, where the callee is not a local
     /// function — `let s = build()` with `build` living in a dependency. The value's PROVENANCE is known
@@ -523,7 +544,9 @@ final class CallCollector: SyntaxVisitor {
     init(info: FnInfo, fields: [String: [String: (name: String?, isFunction: Bool)]], localTypes: Set<String>,
          globalTypes: [String: String] = [:], globalArrayElem: [String: String] = [:],
          declaredTypes: Set<String>,
-         localProtocols: Set<String>, returns: [String: String],
+         localProtocols: Set<String>, protoBoundParams: [String: String] = [:],
+         protoFnTypedMembers: Set<String> = [],
+         returns: [String: String],
          fieldArrayElem: [String: [String: String]], fieldArrayElemNested: [String: [String: String]],
          fieldDictValue: [String: [String: String]],
          opaqueFields: [String: Set<String>] = [:],
@@ -577,11 +600,34 @@ final class CallCollector: SyntaxVisitor {
         self.localTypes = localTypes
         self.declaredTypes = declaredTypes
         self.localProtocols = localProtocols
+        self.protoBoundParams = protoBoundParams
+        self.protoFnTypedMembers = protoFnTypedMembers
         self.returns = returns
         self.enclosingType = info.enclosingType
         self.bodyRootID = info.body?.id
         self.bodyIsStoredInitializer = info.body.map { Self.isStoredInitializerBody(Syntax($0)) } ?? false
         super.init(viewMode: .sourceAccurate)
+    }
+
+    /// SOUNDNESS R563 — THE LOCAL PROTOCOL A **TYPE-POSITION** RECEIVER SPELLING DENOTES, or nil.
+    ///
+    /// Two spellings reach here and they are one question: the type parameter written directly
+    /// (`P.make(v)`, `P(sink: v)`, `P.maker(v)`) and a METATYPE PARAMETER standing for it
+    /// (`func f<P: Prim>(_ t: P.Type) { t.make(v) }`), whose `vars` entry is the declared type `P.Type`.
+    /// Answering only the first would have drawn the audit boundary around its own trigger (§9): the two
+    /// are the same call, and the metatype spelling is the idiomatic one.
+    ///
+    /// Both arrive in ONE map, keyed by the spelling as written, because the Driver is where both
+    /// indexes live (`FnInfo.genericBounds` + R550's `typeGenericBoundsAll` + `FnInfo.metatypeParams`)
+    /// and a second resolution here would be the two-implementations-of-one-question shape (§F1.3).
+    private func typeReceiverProto(_ spelling: String) -> String? {
+        // A LOCAL SHADOWING THE SPELLING WINS, and it is decided by CHECK ORDER rather than by clearing
+        // the index (`NameKeyedStateTests`): `let P = something` makes `P.member(…)` an INSTANCE call on
+        // that value, so answering the generic bound there would charge a conformer set the call cannot
+        // reach. A metatype PARAMETER never lands in `vars` (`typeName` has no metatype case), so this
+        // guard does not cost the `t: P.Type` spelling.
+        guard vars[spelling] == nil else { return nil }
+        return protoBoundParams[spelling]
     }
 
     /// The unit body this collector was handed, so `constructionEscapes`' ancestor walk STOPS there.
@@ -1294,6 +1340,10 @@ final class CallCollector: SyntaxVisitor {
     /// per call is not something to pay for a probe that is off.
     private static let r419Debug = ProcessInfo.processInfo.environment["CANDOR_R419_DEBUG"] != nil
     private static let r431Debug = ProcessInfo.processInfo.environment["CANDOR_R431_DEBUG"] != nil
+    /// SOUNDNESS R563 REACH PROBE (§E1) — "an unchanged row is not evidence the new code ran". Fires on
+    /// the two arms this fix ADDS, so an A/B over a corpus containing none of the shape says so out loud
+    /// instead of reporting a flattering zero.
+    static let r563Probe = ProcessInfo.processInfo.environment["CANDOR_R563_PROBE"] != nil
     private static let r349Debug = ProcessInfo.processInfo.environment["CANDOR_R349_DEBUG"] != nil
 
     private func locatorNameIsStable(_ name: String, inert: Set<String>,
@@ -4468,6 +4518,19 @@ final class CallCollector: SyntaxVisitor {
             if chargeContentsCtor(name, node, lit: lit, shadowable: true) {
                 // `Data`/`String(contentsOfFile:|contentsOf:)` — classified by the SHARED family function
                 // so the module-qualified spelling of the same ctor answers identically (see it).
+            } else if let proto = typeReceiverProto(name) {
+                // SOUNDNESS R563, THE INITIALIZER SPELLING. `P(sink: v)` inside `func f<P: Prim>(…)`:
+                // the callee is a bare `DeclReference` naming a TYPE PARAMETER, so the ordinary
+                // construction arm (`localTypes.contains(name)`) missed and the call was dropped. `init`
+                // is the member the CHA resolves, the same name `Prim.init(Int)` is already published
+                // under by the protocol-CHA union — so both ends of this spell one member, not two.
+                if Self.r563Probe {
+                    FileHandle.standardError.write(
+                        "R563HIT init \(proto).init\n".data(using: .utf8)!)
+                }
+                protoDispatches.append(ProtoDispatch(proto: proto, member: "init",
+                                                     argc: node.arguments.count,
+                                                     argTypes: argTypesOf(node), args: argKinds(node)))
             } else if let target = fnValueAlias[name] {
                 // an INFERRED-type fn-value local invoked (`let g = eff; g()`): edge to the aliased local
                 // fn (the real unit). Emit as an unqualified free-call so the fixpoint resolver links it to
@@ -4825,6 +4888,42 @@ final class CallCollector: SyntaxVisitor {
                 for p in proto.split(separator: protoCompositionSep) {
                     protoDispatches.append(ProtoDispatch(proto: String(p), member: member,
                                                          argc: node.arguments.count, argTypes: argTypesOf(node), args: argKinds(node)))
+                }
+            // SOUNDNESS R563 — THE TYPE PARAMETER AS THE RECEIVER. `P.make(v)` / `P.maker(v)` inside
+            // `func f<P: Prim>(…)` or `struct Box<P: Prim>`, and `t.make(v)` for a `t: P.Type`. The
+            // branch above answers a protocol-typed VALUE; this one answers the protocol-bound TYPE, and
+            // hands it to the SAME `ProtoDispatch` machinery rather than a second CHA (§G/§F1.3) — so a
+            // static requirement, an extension default and the `protoOrSuperDeclares` guard all behave
+            // exactly as they do for `p.inst(v)`, including disclosing `Unknown` when the conformer set
+            // is out of bound. `Self.peel` for the same reason the branch above carries it.
+            } else if let baseDR = ma.base.map({ Self.peel($0) })?.as(DeclReferenceExprSyntax.self),
+                      let proto = typeReceiverProto(baseDR.baseName.text) {
+                if Self.r563Probe {
+                    FileHandle.standardError.write(
+                        "R563HIT static \(proto).\(member)\n".data(using: .utf8)!)
+                }
+                protoDispatches.append(ProtoDispatch(proto: proto, member: member,
+                                                     argc: node.arguments.count,
+                                                     argTypes: argTypesOf(node), args: argKinds(node)))
+                // …AND THE HEDGE ON TOP, for a FUNCTION-TYPED requirement. `P.maker(v)` INVOKES the
+                // closure a conformer stored; the CHA below resolves the conformer's ACCESSOR unit, which
+                // for `static let maker = sink` is real and PURE — so the dispatch alone certifies purity
+                // over a closure that reaches the network. The concrete spelling of the same call
+                // (`EffPrim.maker(v)`, no generics, no protocol) answers `Unknown` through
+                // `closurePropertyInvocation`; this makes the generic spelling give the SAME answer
+                // instead of a second, more confident one (§F1.3).
+                //
+                // BESIDE the dispatch, never INSTEAD of it. Emitting only the hedge was measured first
+                // and REGRESSED the ⟨0.39⟩ wire: swift-nio's `AtomicPrimitive`/`NIOAtomicPrimitive` are
+                // eight function-typed `static var` requirements each, called as `T.atomic_load(…)`, and
+                // suppressing the `ProtoDispatch` took obligation 1's key with it — 15 keys / 33
+                // occurrences of `swift-nio#AtomicPrimitive.*` vanished from `dispatchesOn` in the
+                // corpus A/B, which is a consumer's only join point for its own implementors. The union
+                // of both is sound: the CHA's conformer effects are real, and the hedge says the
+                // invocation is not fully answered by them.
+                if protoFnTypedMembers.contains("\(proto).\(member)") {
+                    unresolved = true
+                    why.insert("dispatch:\(proto).\(member)")
                 }
             } else if let baseDR = ma.base?.as(DeclReferenceExprSyntax.self),
                       arrayElem[baseDR.baseName.text] != nil, localTypes.contains("Array") {
