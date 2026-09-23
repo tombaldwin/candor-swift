@@ -1685,7 +1685,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// THE FUNCTION'S OWN BOUND STILL WINS, because a method may shadow its type's parameter name; and an
     /// UNBOUND type parameter is deliberately not handled — `b.size()` on a `B` with no constraint does
     /// not type-check in Swift, so that branch has no reachable input to be tested with (§E3).
+    ///
+    /// SOUNDNESS R555 — AND THE `localTypes` GUARD BELOW CANNOT FIRE FOR A PROTOCOL, which is nearly
+    /// every bound a dispatch has. `pushType` fills `localTypes` from class/struct/enum/actor/extension
+    /// and DELIBERATELY not from `ProtocolDecl` (a protocol in `conformers` would pollute the CHA), so
+    /// the doc paragraph above — "a bound that is LOCAL … returns nil" — described a check with no
+    /// reachable input for the case it was written for. It is left as it is rather than widened,
+    /// because REFUSING is the wrong remedy: `subtypesOf["T"]` is empty for a type parameter, so the
+    /// in-scan CHA this function defers to never runs on this spelling and dropping the key loses the
+    /// chain outright. The OWNERSHIP is what was wrong, and it is fixed where the key is SPELLED — see
+    /// the publish site's R555 comment. This function keeps one job: name the abstraction.
     let r550Probe = ProcessInfo.processInfo.environment["CANDOR_R550_PROBE"] != nil
+    let r555Probe = ProcessInfo.processInfo.environment["CANDOR_R555_PROBE"] != nil
     func dispatchAbstraction(_ owner: String, _ f: FnInfo) -> String? {
         let typeBound = f.enclosingType.flatMap { typeGenericBoundsAll[$0]?[owner] }
         // REACH PROBE (§E1) — "CHANGED 0 is not evidence until REACH is measured". Fires only on the arm
@@ -2694,9 +2705,51 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // TYPE PARAMETER. See that function for the measurement; the edge loop above deliberately
                 // keeps the raw spelling, because a monomorphized generic's witnesses are the caller's,
                 // not ours.
+                //
+                // SOUNDNESS R555 — AND WHOSE ABSTRACTION IT IS IS DECIDED HERE, LOCAL FIRST. The owner
+                // module used to be `foreignOwnerModule` unconditionally, on the reasoning that a LOCAL
+                // bound had already been refused upstream — and that refusal cannot fire for a protocol,
+                // which is nearly every bound (see `dispatchAbstraction`'s R555 paragraph). So a protocol
+                // THIS package declares was published under a DEPENDENCY's module: measured on swift-nio,
+                // 15 keys / 33 occurrences / 29 rows spelling `CNIOAtomics#AtomicPrimitive.*` and
+                // `CNIOAtomics#NIOAtomicPrimitive.*` for two protocols declared in NIOConcurrencyHelpers
+                // itself. That key is dead in both directions: no consumer can join it (obligation 3's
+                // `unionOwnImplementors` gates on `abstractionOwnerPkg[proto] == keyPkg`, and obligation
+                // 2 already answers `pkgName` for a local protocol), and it names an abstraction the
+                // module it names does not have — the `DepLib#String.lowercased` class again.
+                //
+                // `localProtocolWirePath` is THE existing answer to "is this spelling a protocol of ours,
+                // and what is its wire path" — the same function the in-scan protocol-CHA publish site
+                // keys with, not a second copy (§F1.3), so the two sites that spell one abstraction can
+                // no longer disagree (R549's shape). It also carries the nested-path and AMBIGUOUS-leaf
+                // rules for free. An ambiguous leaf returns nil and therefore keeps the foreign spelling
+                // rather than gaining a guessed local one: refusing to decide must not be spelled as a
+                // decision.
+                //
+                // `foreignOwnerModule` IS STILL THE TRIGGER, and that is deliberate even though the local
+                // branch does not use `m`. Dropping it was implemented and MEASURED first: it publishes a
+                // local key in files with no decidable dependency import too — 18 further sites, 10 new
+                // rows — and 4 of those keys name a member the protocol does not have
+                // (`_CollectionsTestSupport#_SortedCollection.distance`; `_SortedCollection` is an EMPTY
+                // marker protocol and `distance` arrives from `Collection`). Adding keys nobody can answer
+                // is the class R532b already has open, so that widening is NOT taken here: it needs a
+                // requirement gate (`protoOrSuperDeclares`, the sibling site's answer to the same
+                // question) and its own removal audit. Keeping the trigger makes this change exactly one
+                // thing — the OWNER of a key that was already published — and the A/B says so: ADDED 0.
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                 if let m = foreignOwnerModule(inFile: file), let abs = dispatchAbstraction(owner, f) {
-                    dispatchDirect[f.qual, default: []].insert("\(m)#\(abs).\(call.leaf)")
+                    let localPath = localProtocolWirePath(abs)
+                    // REACH PROBE (§E1) — an unchanged row is not evidence the branch ran.
+                    if r555Probe, localPath != nil {
+                        FileHandle.standardError.write(
+                            "R555HIT \(f.qual) \(owner)->\(abs).\(call.leaf)\n".data(using: .utf8)!)
+                    }
+                    if r555Probe, localPath == nil, (protocolPathByLeaf[abs]?.count ?? 0) > 1 {
+                        FileHandle.standardError.write(
+                            "R555AMBIG \(f.qual) \(abs).\(call.leaf)\n".data(using: .utf8)!)
+                    }
+                    let ownerPrefix = localPath.map { "\(pkgName)#\($0)" } ?? "\(m)#\(abs)"
+                    dispatchDirect[f.qual, default: []].insert("\(ownerPrefix).\(call.leaf)")
                 }
             }
             // COULD-NOT-FORM-A-KEY (DEP-RECEIVER-TYPING-DESIGN.md half 1). The receiver was bound from a

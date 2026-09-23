@@ -28,6 +28,70 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R555 — A GUARD WRITTEN TO EXCLUDE LOCAL ABSTRACTIONS COULD NOT FIRE FOR NEARLY ANY
+  ABSTRACTION IT WAS WRITTEN FOR, so a protocol THIS package declares was published under a DEPENDENCY's
+  module.** `dispatchAbstraction`'s doc says *"a bound that is LOCAL … returns nil rather than a key"*.
+  The check behind that sentence reads `localTypes`, which `pushType` fills from
+  class/struct/enum/actor/extension and **deliberately not from `ProtocolDecl`** — a protocol in
+  `conformers` would pollute the CHA. A protocol bound is nearly every bound, so the guard was vacuous
+  for exactly the case its comment describes, and ⟨0.39⟩ obligation 1 keyed the abstraction under
+  `foreignOwnerModule` — the file's single declared dependency import — regardless.
+
+  MEASURED on swift-nio at 0.39.2: **15 keys, 33 occurrences, 29 rows** spelling
+  `CNIOAtomics#AtomicPrimitive.*` and `CNIOAtomics#NIOAtomicPrimitive.*`, for two protocols declared in
+  `Sources/NIOConcurrencyHelpers/` **itself**. `CNIOAtomics` is a C target with **zero Swift files**, so
+  it cannot declare either one. The key is dead in both directions: it names an abstraction the module it
+  names does not have (the `DepLib#String.lowercased` class), and no consumer can join it, because
+  obligation 3's `unionOwnImplementors` gates on `abstractionOwnerPkg[proto] == keyPkg` and obligation 2
+  already answers **this package** for a local protocol. Two sites answering one ownership question and
+  disagreeing — R549's shape, one level over.
+
+  The fix decides ownership where the key is SPELLED, through `localProtocolWirePath` — the same function
+  the in-scan protocol-CHA publish site keys with, not a second copy of the question (§F1.3) — so the two
+  sites cannot drift again, and the nested-path and ambiguous-leaf rules come with it. An ambiguous leaf
+  still returns nil and keeps the foreign spelling: refusing to decide must not be spelled as a decision.
+  `foreignOwnerModule` remains the TRIGGER even though the local branch does not use it, which is a
+  deliberate narrowing — dropping it was implemented and measured first, and it publishes 18 further
+  sites / 10 new rows, **4 of them naming a member the protocol does not have**
+  (`_CollectionsTestSupport#_SortedCollection.distance`; `_SortedCollection` is an empty marker protocol
+  and `distance` arrives from `Collection`). Adding keys nobody can answer is R532b's open class, so that
+  widening was reverted; it needs a `protoOrSuperDeclares` requirement gate and its own removal audit.
+
+  **A/B with `bin/corpus-ab.py` over 11 real packages** (swift-nio, Alamofire, Kingfisher,
+  swift-argument-parser, swift-collections, swift-algorithms, swift-async-algorithms, swift-log,
+  swift-numerics, swift-nio-ssl, swift-nio-http2), 11,680 rows, PRE built from the tree at `4ef6f48`:
+  **ADDED 0, REMOVED 0, CHANGED 29, and `inferred` CHANGED 0** — and the removal column is the claim under
+  test here, because closing this REMOVES keys. Audited in FULL, not sampled: 29 rows changed, **only**
+  `dispatchesOn` changed on any of them, **no row lost its last key**, 15 distinct keys lost / 33
+  occurrences against 15 distinct gained / 33 occurrences, and **every lost key has an exactly-matching
+  replacement at the identical count** (`CNIOAtomics#X` → `Atomics#X`). Ground-truthed from swift-nio's
+  source, not from candor's report. REACH (`CANDOR_R555_PROBE`): **15 hits, all swift-nio**; the
+  ambiguous-leaf branch fired **0** times across the corpus.
+
+  A SECOND A/B over the CHAINED arm — swift-nio-ssl and swift-nio-http2 with swift-nio's report on
+  `CANDOR_DEPS`, each arm's dep report produced by its own binary — is **byte-identical** (1,470 rows,
+  ADDED/REMOVED/CHANGED all 0). **Stated rather than left to be found: its REACH IS ZERO** — neither
+  consumer carries any atomics-related key, so that arm is SAFETY-ONLY and is not evidence that a
+  consumer join was exercised.
+
+  Calibrated in this commit per AGENT-CORPUS-BRIEF §1b, with a fixture that `swift build`s cleanly (§E3):
+  a consumer declaring its OWN protocol beside `import Iface`, dispatching it through a function-level
+  bound (`<L: AppLocal>` → `L.make()`) and an enclosing-type bound (`struct LBox<L: AppLocal>`), each
+  asserted to carry the SAME owner prefix as the EXISTENTIAL spelling of the same protocol in the same
+  file — a cross, not a literal, since the existential goes through the other ownership site. Plus the
+  control for the opposite direction, in the same file and binary: a FOREIGN abstraction under the
+  identical spelling must keep `Iface#Backend.size`, so LOCAL WINS cannot become LOCAL ALWAYS. The
+  receiver is the type parameter used as a STATIC receiver because that is the real shape
+  (`Atomic<T: AtomicPrimitive>` calls `T.atomic_load(…)`); an INSTANCE receiver never reaches this site,
+  which is why the defect survived R532 and R550 both.
+
+  LEFT OPEN, DELIBERATELY AND IN WRITING: the §2 chained-JOIN site a few lines below asks the same
+  resolution (`dispatchAbstraction(owner, f) ?? owner`) and then looks the key up under the DEPENDENCY
+  (`deps.lookup("<m>#<abs>.<leaf>")`). For a local protocol that lookup can only miss — unless a
+  dependency happens to declare a same-named type, in which case it would inherit the WRONG entry's
+  effects. That is a fabrication direction, not a loss, and it is unmeasured: no corpus instance was
+  found, and narrowing it removes lookups, so it wants its own arms rather than a ride on this commit.
+
 - **SOUNDNESS R550 — R532's FIX READ THE FUNCTION'S GENERICS ONLY, so a bound declared on the ENCLOSING
   TYPE lost both the dispatch key and the effect.** `dispatchAbstraction` resolved a receiver's
   type-parameter spelling through `FnInfo.genericBounds`, which `DeclCollector` builds from a

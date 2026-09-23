@@ -330,6 +330,83 @@ final class ChainedDispatchUnionProcessTests: XCTestCase {
         }
     }
 
+    // ── SOUNDNESS R555 — A GUARD THAT CANNOT FIRE FOR THE CASE IT WAS WRITTEN FOR ───────────────
+    //
+    // `dispatchAbstraction`'s doc says "a bound that is LOCAL … returns nil rather than a key", and the
+    // check behind that sentence reads `localTypes`, which `pushType` fills from
+    // class/struct/enum/actor/extension and DELIBERATELY not from `ProtocolDecl` (a protocol in
+    // `conformers` would pollute the CHA). A protocol bound is nearly every bound, so the guard was
+    // vacuous for exactly the case it was written for, and the key went out under
+    // `foreignOwnerModule` — a DEPENDENCY's module — for an abstraction this package declares.
+    //
+    // MEASURED on swift-nio at 0.39.2: 15 keys, 33 occurrences, 29 rows spelling
+    // `CNIOAtomics#AtomicPrimitive.*` and `CNIOAtomics#NIOAtomicPrimitive.*`, for two protocols declared
+    // in `Sources/NIOConcurrencyHelpers` itself. `CNIOAtomics` is a C target with ZERO Swift files, so it
+    // cannot declare either one.
+    //
+    // THE ASSERTION IS A CROSS, NOT A LITERAL. The existential spelling of the SAME local protocol goes
+    // through the in-scan protocol-CHA site, which has keyed `<pkg>#<Proto>.<member>` since R26 — so this
+    // asserts that the two sites answering one ownership question AGREE (R549's shape), and keeps its
+    // meaning if the wire format changes. `foreignGeneric` is the control for the other direction: a
+    // FOREIGN abstraction in the same file, same spelling, must keep the dependency's module.
+    //
+    // The receiver here is the TYPE PARAMETER used as a STATIC receiver (`L.make()`) because that is the
+    // real-world shape — swift-nio's `Atomic<T: AtomicPrimitive>` calls `T.atomic_load(...)`. An INSTANCE
+    // receiver (`_ p: L`) never reaches this site at all: `DeclCollector` resolves the parameter's bound
+    // into `protoParams` and the local CHA path handles it, which is why the defect survived R532 and
+    // R550 both.
+    private static let appLocalProto = """
+    import Iface
+    public protocol AppLocal {
+        static func make() -> Int
+        func inst() -> Int
+    }
+    public func localStatic<L: AppLocal>(_ t: L.Type) -> Int { return L.make() }
+    public struct LBox<L: AppLocal> {
+        public init() {}
+        public func localStaticTypeLevel() -> Int { return L.make() }
+    }
+    public func localExistential(_ l: AppLocal) -> Int { return l.inst() }
+    public func foreignGeneric<B: Backend>(_ b: B) -> Int { return b.size() }
+    """
+
+    func testALocalProtocolBoundIsKeyedUnderThisPackageNotADependencyModule() throws {
+        let (app, _, root) = try consumer(iface: "impl", third: true, appOverride: Self.appLocalProto)
+        defer { try? FileManager.default.removeItem(at: root) }
+        func keys(_ fn: String) -> [String] { app[fn]?["dispatchesOn"] as? [String] ?? [] }
+
+        // THE REFERENCE ARM, asserted non-vacuous first: if the existential spelling stopped publishing,
+        // the owner-prefix equality below would be comparing two silences.
+        let reference = keys("localExistential")
+        XCTAssertEqual(reference, ["App#AppLocal.inst"],
+                       "reference arm is vacuous — the in-scan protocol-CHA site must key a LOCAL "
+                       + "protocol under this package; got \(app["localExistential"] ?? [:])")
+        let localOwner = String(reference.first?.prefix { $0 != "#" } ?? "")
+
+        for (name, fn) in [("<L: AppLocal>", "localStatic"),
+                           ("struct LBox<L: AppLocal>", "LBox.localStaticTypeLevel")] {
+            let k = keys(fn)
+            XCTAssertEqual(k.count, 1, "\(name): expected exactly one dispatch key; got \(k)")
+            XCTAssertEqual(k.first.map { String($0.prefix { $0 != "#" }) }, localOwner,
+                           "\(name): a bound naming a protocol THIS package declares must be keyed "
+                           + "under this package, exactly as the existential spelling of the same "
+                           + "protocol already is. Keying it under the file's dependency import "
+                           + "(`Iface#AppLocal.make`) names an abstraction that module does not have and "
+                           + "no consumer can join — obligation 3 gates on "
+                           + "`abstractionOwnerPkg[proto] == keyPkg`, which answers this package. "
+                           + "Got \(k)")
+            XCTAssertEqual(k.first, "\(localOwner)#AppLocal.make")
+        }
+
+        // THE CONTROL FOR THE OTHER DIRECTION, in the same file and the same binary: a FOREIGN
+        // abstraction under the identical spelling must still be keyed under the DEPENDENCY. Without it
+        // a fix that keyed everything locally would satisfy every assertion above.
+        XCTAssertEqual(keys("foreignGeneric"), ["Iface#Backend.size"],
+                       "CONTROL: a bound naming a DEPENDENCY's protocol must keep the dependency's "
+                       + "module — LOCAL WINS must not become LOCAL ALWAYS; "
+                       + "got \(app["foreignGeneric"] ?? [:])")
+    }
+
     /// THE FABRICATION CONTROL FOR R550, the same near-miss its function-level sibling below refuses.
     /// `struct Box<T: Encodable>` is a bound nearly every type satisfies; resolving it into a wire key
     /// would union an unrelated package's `Encodable` conformers onto this row. Compiles, and the call is
