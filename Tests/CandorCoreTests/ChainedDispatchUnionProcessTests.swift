@@ -246,10 +246,11 @@ final class ChainedDispatchUnionProcessTests: XCTestCase {
     private static let appExistential =
         "import Iface\npublic func appSize(_ b: Backend) -> Int { return b.size() }\n"
 
-    private func dispatchKeyAndEffects(_ appSrc: String) throws -> (key: [String], eff: Set<String>) {
+    private func dispatchKeyAndEffects(_ appSrc: String, fn: String = "appSize") throws
+        -> (key: [String], eff: Set<String>) {
         let (app, _, root) = try consumer(iface: "impl", third: true, appOverride: appSrc)
         defer { try? FileManager.default.removeItem(at: root) }
-        return (app["appSize"]?["dispatchesOn"] as? [String] ?? [], eff(app, "appSize"))
+        return (app[fn]?["dispatchesOn"] as? [String] ?? [], eff(app, fn))
     }
 
     func testAGenericBoundReceiverFormsTheSameDispatchKeyAsTheExistentialOne() throws {
@@ -268,6 +269,81 @@ final class ChainedDispatchUnionProcessTests: XCTestCase {
                            "…and therefore carry the same effects as the existential spelling of the "
                            + "same dispatch; got \(generic.eff) vs \(existential.eff)")
         }
+    }
+
+    // ── SOUNDNESS R550 — R532's FIX READ THE FUNCTION'S GENERICS ONLY ───────────────────────────
+    //
+    // `dispatchAbstraction` resolved a receiver's type-parameter spelling through `FnInfo.genericBounds`,
+    // and `DeclCollector` builds that map from a `FunctionDecl`/`InitializerDecl`'s OWN generic clause and
+    // `where` clause. A parameter declared on the ENCLOSING TYPE — `struct Box<B: Backend>` — is therefore
+    // invisible at the one site ⟨0.39⟩ spells a receiver onto the wire, so R532's fix closed one spelling
+    // of its own class and left the sibling open. That is §A.2 exactly: a fixture inherits the blind spot
+    // of the report that prompted it, and the report named a function-level bound.
+    //
+    // IT IS A LOST EFFECT, NOT ONLY A BAD KEY, because `dispatchAbstraction` is also what the §2 chained
+    // JOIN keys on (the "same function, so the key this join ASKS on and the key the rung PUBLISHES cannot
+    // spell one abstraction two ways" line beside it). MEASURED on this fixture at HEAD before the fix,
+    // one variable — WHERE `B: Backend` is written — and the two arms in ONE app file so the dependency,
+    // the conformer, the consumer text and the binary are all literally shared:
+    //
+    //   func   appSize<B: Backend>(_ b: B)   inferred [Net]  dispatchesOn [Iface#Backend.size]  deny Net → 1
+    //   struct Box<B: Backend>.appSize(_ b: B)  inferred []  dispatchesOn [Iface#B.size]        deny Net → 0
+    //
+    // so a `deny Net` gate went GREEN over a call reaching a third package's `URLSession.dataTask`, and
+    // `Iface#B.size` is a key no producer can publish under — R532's own words for the defect it fixed.
+    private static let appTypeGeneric =
+        "import Iface\npublic struct Box<B: Backend> {\n    public init() {}\n"
+        + "    public func boxSize(_ b: B) -> Int { return b.size() }\n}\n"
+    private static let appTypeGenericWhere =
+        "import Iface\npublic struct Box<B> where B: Backend {\n    public init() {}\n"
+        + "    public func boxSize(_ b: B) -> Int { return b.size() }\n}\n"
+    /// An `extension Box where B: Backend` — the bound is on neither the function NOR the type's own
+    /// declaration clause, and `recordTypeGenerics` merges it under the same type name.
+    private static let appTypeGenericExtension =
+        "import Iface\npublic struct Box<B> {\n    let b: B\n    public init(_ b: B) { self.b = b }\n}\n"
+        + "extension Box where B: Backend {\n    public func boxSize(_ x: B) -> Int { return x.size() }\n}\n"
+
+    func testATypeLevelGenericBoundReceiverFormsTheSameDispatchKeyAsTheExistentialOne() throws {
+        let existential = try dispatchKeyAndEffects(Self.appExistential)
+        XCTAssertEqual(existential.key, ["Iface#Backend.size"])
+        XCTAssertTrue(existential.eff.contains("Net"), "reference arm is vacuous: \(existential)")
+        // THE IN-TEST CONTROL: the function-level spelling of the identical dispatch, which R532 already
+        // resolves. It is what makes "where the bound is written" the ONLY variable — without it a
+        // regression that broke both spellings would still satisfy the equalities below.
+        let fnLevel = try dispatchKeyAndEffects(Self.appGeneric)
+        XCTAssertEqual(fnLevel.key, existential.key, "CONTROL (R532, function-level bound) has regressed")
+        XCTAssertEqual(fnLevel.eff, existential.eff, "CONTROL (R532, function-level bound) has regressed")
+
+        for (name, src) in [("struct Box<B: Backend>", Self.appTypeGeneric),
+                            ("struct Box<B> where B: Backend", Self.appTypeGenericWhere),
+                            ("extension Box where B: Backend", Self.appTypeGenericExtension)] {
+            let generic = try dispatchKeyAndEffects(src, fn: "Box.boxSize")
+            XCTAssertEqual(generic.key, existential.key,
+                           "\(name): a bound declared on the ENCLOSING TYPE must key on the BOUND exactly "
+                           + "as a function-level one does — `Iface#B.size` is a key no producer can "
+                           + "publish under; got \(generic.key)")
+            XCTAssertEqual(generic.eff, existential.eff,
+                           "…and the §2 join keys on the SAME resolution, so the third package's effect "
+                           + "must arrive. An empty set here is a ⟨0.21⟩ positive claim of purity over a "
+                           + "call that reaches `URLSession.dataTask`; got \(generic.eff) vs "
+                           + "\(existential.eff)")
+        }
+    }
+
+    /// THE FABRICATION CONTROL FOR R550, the same near-miss its function-level sibling below refuses.
+    /// `struct Box<T: Encodable>` is a bound nearly every type satisfies; resolving it into a wire key
+    /// would union an unrelated package's `Encodable` conformers onto this row. Compiles, and the call is
+    /// a real protocol requirement, so the asserted absence is an absence over a reachable site (§E3).
+    func testATypeLevelStdPureBoundPublishesNoDispatchKeyAtAll() throws {
+        let src = "import Iface\npublic struct Box<T: Encodable> {\n    public init() {}\n"
+                + "    public func boxSize(_ x: T, _ e: Encoder) -> Int {\n        try? x.encode(to: e)\n"
+                + "        return 0\n    }\n}\n"
+        let (app, _, root) = try consumer(iface: "impl", third: true, appOverride: src)
+        defer { try? FileManager.default.removeItem(at: root) }
+        XCTAssertNil(app["Box.boxSize"]?["dispatchesOn"],
+                     "a std-pure bound on the ENCLOSING TYPE must publish NO dispatch key, for the same "
+                     + "reason a function-level one must not: keying it would charge this row with an "
+                     + "unrelated package's Encodable conformers; got \(app["Box.boxSize"] ?? [:])")
     }
 
     /// THE FABRICATION CONTROL, and the near-miss the resolution has to refuse. `<T: Encodable>` is a

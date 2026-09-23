@@ -1665,8 +1665,37 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// a local abstraction is the in-scan CHA's question, and the other two are the fabrication
     /// carve-outs the call site beside this one already applies to a non-generic owner. Refusing is the
     /// same posture `foreignOwnerModule` takes on an undecidable owner — never a key nobody can answer.
+    ///
+    /// SOUNDNESS R550 — AND THE BOUND IS NOT ALWAYS THE FUNCTION'S. `FnInfo.genericBounds` is built by
+    /// `DeclCollector` from a `FunctionDecl`/`InitializerDecl`'s OWN generic clause and `where` clause, so
+    /// `struct Box<B: Backend> { func f(_ b: B) { b.size() } }` — the bound declared on the ENCLOSING TYPE
+    /// — was invisible HERE, at the one site ⟨0.39⟩ spells a receiver onto the wire. R532 therefore closed
+    /// one spelling of its own class and left the sibling open (§A.2: the fixture inherits the blind spot
+    /// of the report, and the report named a function-level bound). `typeGenericBoundsAll` is the merged,
+    /// scan-global answer to "is this name a bounded generic parameter of that type", already built above
+    /// for `unresolvedGenericFields` — the same question, one index, not a second copy of it (§F1.3).
+    ///
+    /// IT WAS A LOST EFFECT, NOT ONLY A BAD KEY, because the §2 chained join below keys on THIS function
+    /// too. MEASURED before the fix, one variable — where `B: Backend` is written — the dependency, the
+    /// conformer, the consumer text and the binary all held identical:
+    /// `func appSize<B: Backend>(_ b: B)` → `inferred [Net]`, `dispatchesOn [Iface#Backend.size]`,
+    /// `deny Net` exit 1; `struct Box<B: Backend>` → `inferred []`, `dispatchesOn [Iface#B.size]`, exit 0
+    /// over a call reaching a third package's `URLSession.dataTask`.
+    ///
+    /// THE FUNCTION'S OWN BOUND STILL WINS, because a method may shadow its type's parameter name; and an
+    /// UNBOUND type parameter is deliberately not handled — `b.size()` on a `B` with no constraint does
+    /// not type-check in Swift, so that branch has no reachable input to be tested with (§E3).
+    let r550Probe = ProcessInfo.processInfo.environment["CANDOR_R550_PROBE"] != nil
     func dispatchAbstraction(_ owner: String, _ f: FnInfo) -> String? {
-        guard let bound = f.genericBounds[owner] else { return owner }   // not a type parameter: unchanged
+        let typeBound = f.enclosingType.flatMap { typeGenericBoundsAll[$0]?[owner] }
+        // REACH PROBE (§E1) — "CHANGED 0 is not evidence until REACH is measured". Fires only on the arm
+        // this change ADDS, so an A/B over a corpus containing none of the shape says so out loud instead
+        // of reporting a flattering zero. Same channel and same shape as `CANDOR_TYPESURFACE_DEBUG`.
+        if r550Probe, typeBound != nil, f.genericBounds[owner] == nil {
+            FileHandle.standardError.write(
+                "R550HIT \(f.qual) \(owner)->\(typeBound!)\n".data(using: .utf8)!)
+        }
+        guard let bound = f.genericBounds[owner] ?? typeBound else { return owner }  // not a type parameter
         guard !localTypes.contains(bound), !STD_PURE_PROTOCOLS.contains(bound),
               !RAW_VALUE_BASE_TYPES.contains(bound) else { return nil }
         return bound

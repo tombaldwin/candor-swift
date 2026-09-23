@@ -9,6 +9,48 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed
+
+- **SOUNDNESS R550 — R532's FIX READ THE FUNCTION'S GENERICS ONLY, so a bound declared on the ENCLOSING
+  TYPE lost both the dispatch key and the effect.** `dispatchAbstraction` resolved a receiver's
+  type-parameter spelling through `FnInfo.genericBounds`, which `DeclCollector` builds from a
+  `FunctionDecl`/`InitializerDecl`'s OWN generic clause and `where` clause. `struct Box<B: Backend>` was
+  therefore invisible at the one site ⟨0.39⟩ spells a receiver onto the wire — and at the §2 chained JOIN
+  beside it, which keys on the same function. MEASURED over a three-package fixture with ONE variable, the
+  two spellings in a single consumer file so the dependency, the conformer, the consumer text and the
+  binary are literally shared:
+
+  | consumer body | `inferred` | `dispatchesOn` | `deny Net` |
+  |---|---|---|---|
+  | `func appSize<B: Backend>(_ b: B)` | `[Net]` | `[Iface#Backend.size]` | exit **1** |
+  | `struct Box<B: Backend> { func boxSize(_ b: B) }` | `[]` | `[Iface#B.size]` | exit **0** |
+
+  So a `deny Net` gate went GREEN over a call reaching a third package's `URLSession.dataTask`, and
+  `Iface#B.size` is a key no producer can publish under — R532's own words for the defect it fixed, one
+  spelling over. The fix reads `typeGenericBoundsAll`, the merged scan-global index the resolver already
+  builds for `unresolvedGenericFields`, rather than a second copy of the question; the function's own
+  bound still wins, so a method may shadow its type's parameter name.
+
+  A/B over 11 real packages (swift-nio, Alamofire, Kingfisher, swift-argument-parser, swift-collections,
+  swift-algorithms, swift-async-algorithms, swift-log, swift-numerics, plus swift-nio-ssl and
+  swift-nio-http2 CHAINED onto swift-nio), 10,210 rows: **ADDED 0, REMOVED 0, CHANGED 29, and `inferred`
+  CHANGED 0** — every changed row is a `dispatchesOn` key re-spelled from a type-parameter name to its
+  bound. REACH, counted on the changed branch (`CANDOR_R550_PROBE`): **15 hits, all in swift-nio, all on
+  bounds the scanned package declares itself** — so on this corpus the change is name-only, and the
+  effect-recovering direction is evidenced by the fixture alone. Recorded here rather than left to be
+  found later: the recall hunt DID locate the shape in real chained code
+  (`NIOSSLClientTLSProvider<Bootstrap: NIOClientTCPBootstrapProtocol>`,
+  `DOSHeuristics<DeadlineClock: NIODeadlineClock>`) but neither calls a member on that receiver, so
+  neither reaches the site.
+
+  Calibrated in this commit per AGENT-CORPUS-BRIEF §1b: three spellings of the enclosing-type bound
+  (`struct Box<B: Backend>`, `struct Box<B> where B: Backend`, `extension Box where B: Backend`) each
+  asserted EQUAL to the existential spelling, with the function-level spelling as an in-test CONTROL so
+  "where the bound is written" is the only variable; plus a `struct Box<T: Encodable>` fabrication control
+  that must publish NO key. All four fixture arms `swift build` cleanly (§E3). With the fix absent the
+  arms fail on exactly their own assertions (`["Iface#B.size"]` vs `["Iface#Backend.size"]`, `[]` vs
+  `["Net"]`).
+
 ## [0.39.2] — 2026-09-22
 
 ### ⚠ Fixed
