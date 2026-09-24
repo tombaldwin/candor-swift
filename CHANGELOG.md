@@ -11,6 +11,24 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R127 — ONE RESOLVED CALLER WAS ENOUGH TO LEAVE A HIGHER-ORDER FUNCTION'S OWN ROW
+  SILENT.** The callback-flow deferral marked the HOF's own node only when NOT ONE of its callers
+  resolved (`anyCallerResolved`). When SOME caller resolved and another did not, the HOF — a function
+  that provably invokes an unaddressable value on the unresolved path — stayed ABSENT from `functions`,
+  which under ⟨0.21⟩ is a positive purity claim. Measured on the fixture: `deny Unknown Box.hof`
+  **exit 0 → 1**. The quantifier is now ALL.
+
+  THE PRECISION COST IS THE ONE THE ROW PRICED, and it is measured at ZERO rather than argued: the
+  caller that resolved precisely inherits the HOF's `Unknown` over the ordinary call edge
+  (`["Fs"] → ["Fs", "Unknown"]` on the fixture — a false disclosure, the cheap direction against a
+  silent under-report). Re-measured after R563 moved resolution rates, with a counter at the decision
+  site (`CANDOR_R127_PROBE`, calibrated: it prints the mixed line on the fixture, so the zero can fail):
+  **419 HOF deferral sites across 12 real packages — 418 with no caller resolved, 1 with every caller
+  resolved, 0 MIXED.** The corpus A/B is therefore byte-identical (12,346 rows, ADDED/REMOVED/CHANGED
+  0/0/0 on every key, REACH 419 hits across 11 entries) and is **SAFETY-ONLY**, recorded as such here
+  rather than discovered later. All-callers-resolved is still silent and is not the same residual: with
+  no unaddressed invocation left there is nothing to disclose.
+
 - **SOUNDNESS R565 — A MODULE IS NOT A PACKAGE, AND THE ENTIRE §2 CHAIN WAS ASKING WITH THE WRONG ONE.**
   Every §2 join gate read `deps.isChained(m)` with an `m` straight out of `fileImports` — a MODULE — while
   every key in the index is `<PACKAGE>#<qual>`, because SPEC §2 ⟨0.39⟩ obligation 2 says the key is

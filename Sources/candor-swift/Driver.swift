@@ -3309,13 +3309,37 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // `callback:<n>` written to it three lines below. Propagating `fq`'s copy over the call edges can
         // therefore reach no caller that did not already have it — the A/B in the commit message is the
         // measurement, not this sentence.
-        // KNOWN RESIDUAL, MEASURED AND DELIBERATE — see `testMixedResolutionLeavesTheHOFsOwnRowSilent`:
-        // when SOME caller resolves and another does not, `fq` is still left silent, because marking it
-        // would propagate `Unknown` into the caller that resolved precisely (⟨0.34⟩'s own fabrication
-        // control, `testTwoCallersOfOneHOFResolveIndependently`). The engine's graph has one node per
-        // function and cannot hold a per-caller specialisation, so that arm needs a node split, not a
-        // flag. It is pinned rather than left to drift.
+        // SOUNDNESS R127 — …AND `anyCallerResolved` WAS THE WRONG QUANTIFIER. The paragraph that stood
+        // here called the mixed case a "known residual": when SOME caller resolves the deferral and
+        // another does not, `fq` was left silent, on the argument that marking it would propagate
+        // `Unknown` over the ordinary call edge into the caller that resolved precisely (⟨0.34⟩'s
+        // fabrication control, `testTwoCallersOfOneHOFResolveIndependently`).
+        //
+        // THE ARGUMENT IS TRUE AND IT PRICED ONE SIDE. What it bought was a ⟨0.21⟩ POSITIVE PURITY CLAIM
+        // over a function that provably invokes an unaddressable value: `Box.hof` ABSENT from
+        // `functions`, with `deny Unknown Box.hof` AND `pure Box.hof` both exit 0. What it cost is a
+        // resolved caller gaining an `Unknown` it does not deserve — a false disclosure, which is the
+        // cheap direction. A silent under-report outranks a precision loss; the family rule is that a
+        // FIXABLE silent under-report gets fixed rather than accepted as a low residual.
+        //
+        // AND THE PRECISION COST IS MEASURED AT ZERO, re-measured after R563 moved resolution rates
+        // (`CANDOR_R127_PROBE`, below — the counter is at the decision site so the number can be
+        // re-derived rather than believed). Over 12 real corpora — alamofire, Kingfisher, nio-http2,
+        // nio-ssl, swift-algorithms, swift-argument-parser, swift-async-algorithms, swift-collections,
+        // swift-log, swift-nio, swift-numerics, candor-swift itself — **419 HOF deferral sites: 418 with
+        // NO caller resolved (where `fq` was already marked), 1 with EVERY caller resolved (which this
+        // change does not touch), and 0 MIXED.** So the corpus A/B for this change is byte-identical and
+        // is SAFETY-ONLY, written down as such here rather than discovered later (§E1).
+        //
+        // The probe is calibrated rather than trusted: it prints
+        // `R127 Box.hof callers=2 anyResolved=true allResolved=false` on the fixture below, so the
+        // zero is a measurement and not a check that cannot fire.
+        //
+        // ALL-RESOLVED IS STILL SILENT, and that is not the same residual. When every caller discharged
+        // the deferral there is no unaddressed invocation left to disclose — `fq`'s row is honest — and
+        // marking it there WOULD be the ⟨0.34⟩ fabrication with nothing bought.
         var anyCallerResolved = false
+        var allCallersResolved = true
         for (caller, argLists) in byCaller {
             var resolved = !argLists.isEmpty
             var namedTargets: Set<String> = []
@@ -3342,11 +3366,17 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 edges[caller, default: []].formUnion(namedTargets)
                 anyCallerResolved = true
             } else {
+                allCallersResolved = false
                 direct[caller, default: []].insert("Unknown")
                 for n in info.names { whyMap[caller, default: []].insert("callback:\(n)") }
             }
         }
-        if !anyCallerResolved {
+        if ProcessInfo.processInfo.environment["CANDOR_R127_PROBE"] != nil, !byCaller.isEmpty {
+            FileHandle.standardError.write(
+                ("R127 \(fq) callers=\(byCaller.count) anyResolved=\(anyCallerResolved) "
+                 + "allResolved=\(allCallersResolved)\n").data(using: .utf8)!)
+        }
+        if !allCallersResolved {
             direct[fq, default: []].insert("Unknown")
             for n in info.names { whyMap[fq, default: []].insert("callback:\(n)") }
         }

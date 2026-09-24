@@ -271,8 +271,16 @@ final class DriverResolutionProcessTests: XCTestCase {
         }
         func callerA(_ box: Box) { box.hof(sinkA) }
         """)
-        XCTAssertEqual(ProcessHarness.inferred(by, "callerA"), ["Fs"],
-                       "the tracked caller resolves the named callback and inherits its Fs")
+        XCTAssertEqual(ProcessHarness.inferred(by, "callerA"), ["Fs", "Unknown"],
+                       "the tracked caller resolves the named callback and inherits its Fs. The Unknown "
+                       + "beside it is SOUNDNESS R127's measured price: `Box.callerB` did NOT resolve, so "
+                       + "`Box.hof` now carries its own Unknown (it was ABSENT — a ⟨0.21⟩ purity claim "
+                       + "over a function that provably invokes an unaddressable value) and this caller "
+                       + "inherits it over the ordinary call edge. Losing the `Fs` would be the "
+                       + "under-report; gaining the `Unknown` is a false disclosure, the cheap direction")
+        XCTAssertEqual(ProcessHarness.inferred(by, "Box.hof"), ["Unknown"],
+                       "R127 — and the HOF's own row is where that Unknown originates; asserting it here "
+                       + "keeps the line above readable as a CONSEQUENCE rather than a mystery")
         XCTAssertNotNil(by["Box.callerB"],
                         "the untracked sibling caller must still appear in the report AT ALL — its "
                         + "disappearance, not merely a wrong effect value, is the bug callersOf guards against")
@@ -457,14 +465,18 @@ final class DriverResolutionProcessTests: XCTestCase {
         }
     }
 
-    // KNOWN RESIDUAL, PINNED SO IT CANNOT DRIFT SILENTLY. When SOME caller resolves the deferral and
-    // another does not, `fq` is STILL left silent: `callerA` passes a named fn (resolved) and `Box.callerB`
-    // passes an unresolvable one, and `Box.hof` carries nothing of its own. Marking it would propagate
-    // `Unknown` over the ordinary call edge into `callerA`, which resolved precisely — undoing the
-    // ⟨0.34⟩ per-caller precision this file's `testTwoCallersOfOneHOFResolveIndependently` guards.
-    // Closing it needs a per-caller node, not a flag. Asserted in its CURRENT (wrong) shape deliberately:
-    // if someone closes it, this test goes red and the reader is sent here rather than to a silent diff.
-    func testMixedResolutionLeavesTheHOFsOwnRowSilent() throws {
+    // SOUNDNESS R127 — THE RESIDUAL THIS TEST USED TO PIN, CLOSED. `callerA` passes a named fn (the
+    // deferral resolves) and `Box.callerB` passes an unresolvable one, so ONE caller resolved and one did
+    // not. `anyCallerResolved` left `Box.hof` — a function that provably invokes an unaddressable value —
+    // ABSENT from `functions`, which under ⟨0.21⟩ is a POSITIVE PURITY CLAIM: `deny Unknown Box.hof`
+    // exited 0 over it. The quantifier is now ALL.
+    //
+    // ITS PRICE IS THE `callerA` ASSERTION BELOW, and it is deliberately asserted rather than tolerated:
+    // the resolved caller inherits `Box.hof`'s `Unknown` over the ordinary call edge, so it goes
+    // `["Fs"] -> ["Fs", "Unknown"]`. A false disclosure is the cheap direction against a silent
+    // under-report, and the corpus cost is MEASURED at zero — `CANDOR_R127_PROBE` counted 419 HOF
+    // deferral sites over 12 real packages with 0 in this mixed shape (see the R127 note in Driver.swift).
+    func testMixedResolutionMarksTheHOFsOwnRow() throws {
         let by = try scan("""
         import Foundation
         func sinkA() { _ = FileManager.default.contents(atPath: "/a") }
@@ -474,14 +486,18 @@ final class DriverResolutionProcessTests: XCTestCase {
         }
         func callerA(_ box: Box) { box.hof(sinkA) }
         """)
-        XCTAssertEqual(ProcessHarness.inferred(by, "callerA"), ["Fs"],
-                       "the resolved caller keeps its precise answer and gains no Unknown")
+        XCTAssertEqual(ProcessHarness.inferred(by, "Box.hof"), ["Unknown"],
+                       "the HOF provably invokes an unaddressable value on the `callerB` path and must "
+                       + "say so. ABSENT here is a ⟨0.21⟩ purity claim and `deny Unknown Box.hof` exits "
+                       + "0 over it; got \(by["Box.hof"] ?? [:])")
+        XCTAssertEqual(by["Box.hof"]?["unknownWhy"] as? [String], ["callback:cb"],
+                       "…naming the parameter it cannot address")
+        XCTAssertEqual(ProcessHarness.inferred(by, "callerA"), ["Fs", "Unknown"],
+                       "THE PRICE, asserted rather than tolerated: the caller that resolved precisely "
+                       + "inherits the HOF's Unknown over the ordinary call edge. It keeps its Fs — "
+                       + "losing that would be an under-report, not a precision cost")
         XCTAssertEqual(ProcessHarness.inferred(by, "Box.callerB"), ["Unknown"],
-                       "the unresolved caller carries the disclosure")
-        XCTAssertNil(by["Box.hof"],
-                     "RESIDUAL: one resolved caller is enough to leave the HOF's own row silent, so "
-                     + "`deny Unknown Box.hof` still exits 0 here. Not fixed; see the R125 note in "
-                     + "Driver.swift. Got \(by["Box.hof"] ?? [:])")
+                       "the unresolved caller carries the disclosure, as it always did")
     }
 
     // ── INHERITED PROPERTY ACCESSORS (soundness round 2026-07-10, R22) ─────────────────────────────
