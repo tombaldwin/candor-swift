@@ -274,6 +274,16 @@ over-approximation of the blind set (disclosed, never a silent-pure); a MODULE-Q
   body runs). This paragraph used to say "protocol", and only "protocol", which is a fair description of
   what the engine did: a class hierarchy dispatched to the base alone, and which half of a protocol's
   member space resolved depended on how the receiver was bound.
+- **…and the receiver can be the TYPE rather than a value — `P.make()`, `t.make()` for a `t: P.Type`,
+  `type(of: x).make()` — with the SAME bounded CHA, for a protocol bound (R563) and a class bound
+  (R584) alike.** A class bound resolves to exactly what the class named LITERALLY resolves to: its own
+  implementation unioned with every local subclass `override`. **THE ONE SENTENCE ABOVE THAT DOES NOT
+  CARRY OVER IS "however the receiver was bound".** For a TYPE receiver, only a function/initializer
+  PARAMETER is wired; a metatype held in a local `let`/`var`, a stored property, an array element or a
+  function's return is still DROPPED — silently, in both the protocol and the class half (SOUNDNESS
+  R585, measured, open). `t.go()` where `let t: Base.Type = Sub.self` is ABSENT from `functions[]` over
+  a body that dials, and `deny Net` and `pure` both exit 0 on it. Do not read this paragraph as covering
+  that shape.
 - **Constructors are edges**: `_ = C()` reaches `C.init` (the fuzzer's first catch — effects wired
   in an initializer were silently pure for one build).
 - The §7.13 soundness harness is `fuzz.py` (9 forms, deterministic seeds); run it after touching

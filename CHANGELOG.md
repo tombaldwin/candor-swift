@@ -91,6 +91,15 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   and where it does occur it was completely silent. The evidence for this fix is the executing fixture;
   the corpus is the over-charge control.
 
+- **AGENTS.md's bounded-CHA paragraph was over-claiming for the TYPE-receiver half, and the sentence
+  that was wrong is the one a reader would rely on.** It said the contract holds *"however the receiver
+  was bound — parameter, stored property, local `let`"*, which is true of a VALUE receiver and false of
+  a TYPE one: only a function/initializer PARAMETER is wired. A metatype held in a local `let`/`var`, a
+  stored property, an array element or a function's return is DROPPED, silently, in BOTH the protocol
+  and the class half — `let t: Base.Type = Sub.self; t.go()` is ABSENT from `functions[]` over a body
+  that dials, with `deny Net` and `pure` both exit 0 (SOUNDNESS R585, measured, open). The paragraph now
+  states the TYPE-receiver contract and names that residual instead of appearing to cover it.
+
 - **SOUNDNESS R580 — R563's LOCAL-PROTOCOL FILTER RAN BEFORE THE SHADOWING PRECEDENCE, so an inner
   generic bound that is NOT a local protocol could not DISPLACE the enclosing type's, and the receiver
   was charged the outer protocol's conformers. A FABRICATION, introduced by R563 the day before.**
