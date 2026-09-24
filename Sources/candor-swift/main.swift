@@ -1711,7 +1711,18 @@ if wantWorkspace {
 let envOrConfigDeps = ProcessInfo.processInfo.environment["CANDOR_DEPS"] ?? candorConfig["deps"]
 let depsSpec = [workspaceDepsDir, envOrConfigDeps].compactMap { $0 }.joined(separator: ":").isEmpty
     ? nil : [workspaceDepsDir, envOrConfigDeps].compactMap { $0 }.joined(separator: ":")
-let depsIndex = loadDepReports(spec: depsSpec, engineVersion: engineVersion)
+var depsIndex = loadDepReports(spec: depsSpec, engineVersion: engineVersion)
+// SOUNDNESS R565 — the module -> owning-package map every §2 join, the κ coverage ledger and the two
+// ⟨0.39⟩ PUBLISH sites need. See `CandorCore.dependencyModulePackages` for the measurement and
+// `DepIndex.pkgOfModule` for the never-guess fallback.
+//
+// BUILT UNCONDITIONALLY, and the conditional version of this line was a determinism bug. Gating it on
+// `!depsIndex.isEmpty` is tempting — no chained report, no join to key — but this map ALSO decides the
+// spelling of what this run PUBLISHES: obligation 1's `dispatchesOn` and obligation 2's `interfaceUnion`
+// hash. Under the gate, `candor-swift .` and `CANDOR_DEPS=… candor-swift .` over the SAME tree emit
+// different wire keys for the same abstraction, so whether a downstream consumer can join a report would
+// depend on how the producer happened to be invoked. It reads a handful of `Package.swift` files.
+depsIndex.modulePkgs = dependencyModulePackages(rootDir: rootDir)
 
 // R73/R74 FOLLOW-ON (Driver.swift `analyze`'s `nestedManifestDirs` doc has the full mechanism/enumeration):
 // every NESTED `Package.swift` this walk found — the outer scan's own root manifest excluded (its rel

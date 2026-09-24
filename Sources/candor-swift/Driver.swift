@@ -1602,7 +1602,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         let importable = importableByFile[file] ?? []
         return Set((fileImports[file] ?? []).filter {
             !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !importable.contains($0)
-                && !deps.coveredPkgs.contains($0) })
+                && !deps.coversModule($0) })      // R565 — the ledger asked a MODULE of a PACKAGE set
     }
 
     // COMPUTED HERE, NOT WHERE `importableByFile` IS BUILT. `fileImports` is filled by the collector
@@ -1636,7 +1636,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         let importable = importableByFile[file] ?? []
         for m in imports where !PLATFORM_MODULES.contains(m) && !KAPPA_MODULES.contains(m)
                                 && !importable.contains(m) {
-            guard !deps.coveredPkgs.contains(m) else {
+            guard !deps.coversModule(m) else {   // R565
                 if let declared = declaredByFile[file], !declared.contains(m) {
                     coverageNotDeclared[m, default: []].insert(file)
                 }
@@ -1758,8 +1758,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         if protocolPaths.contains(pn) || localTypePaths.contains(pn) || localTypes.contains(pn) {
             abstractionOwnerPkg[pn] = pkgName
         } else {
+            // R565 — ⟨0.39⟩ obligation 2 says the key is "fully qualified in the OWNING package's
+            // namespace, the same namespace that package's entry hashes use". `foreignOwnerModule`
+            // answers with a MODULE, so every foreign union entry this engine published was keyed under
+            // a name no producer's hash prefix can equal and no consumer could join.
             let mods = Set(files.compactMap { foreignOwnerModule(inFile: $0) })
-            if mods.count == 1, let m = mods.first { abstractionOwnerPkg[pn] = m }
+            if mods.count == 1, let m = mods.first { abstractionOwnerPkg[pn] = deps.pkgOfModule(m) }
         }
     }
     /// ⟨0.39⟩ OBLIGATION 3, HALF 2 — THIS CONSUMER'S OWN VISIBLE IMPLEMENTORS of the abstraction a
@@ -2274,8 +2278,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // an unambiguous single hit joins, so an unimported or ambiguous name resolves to nothing.
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                 var hits: [DepEntry] = []
-                for m in fileImports[file] ?? [] where deps.isChained(m) {
-                    if let e = deps.lookup("\(m)#\(name)") { hits.append(e) }
+                // R565 — the key is `<PACKAGE>#<name>`, and this loop used to spell a MODULE there.
+                for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {
+                    if let e = deps.lookup("\(p)#\(name)") { hits.append(e) }
                 }
                 if hits.count == 1, let de = hits.first { applyDepEntry(de, to: f.qual) }
             }
@@ -2369,8 +2374,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     if !resolved, !deps.isEmpty {
                         let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                         for sup in supertypesOf[et] ?? [] where sup != et {
-                            for m in fileImports[file] ?? [] where deps.isChained(m) {
-                                if let de = deps.lookup("\(m)#\(sup).\(member)") {
+                            for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {   // R565
+                                if let de = deps.lookup("\(p)#\(sup).\(member)") {
                                     applyDepEntry(de, to: f.qual)
                                     resolved = true
                                 }
@@ -2843,7 +2848,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         FileHandle.standardError.write(
                             "R555AMBIG \(f.qual) \(abs).\(call.leaf)\n".data(using: .utf8)!)
                     }
-                    let ownerPrefix = localPath.map { "\(pkgName)#\($0)" } ?? "\(m)#\(abs)"
+                    // R565 — AND THE FOREIGN HALF IS A PACKAGE, NOT A MODULE. `DepEntry.dispatchesOn`
+                    // documents this key's wire form as `<owning pkg>#<type path>.<member>`, and
+                    // `applyDepEntry` feeds it straight to `deps.lookup(k)` and to
+                    // `unionOwnImplementors`, which compares it against `abstractionOwnerPkg` — so
+                    // obligation 1's key and obligation 2's hash MUST be spelled in one namespace or the
+                    // join silently misses. The local arm already spells `pkgName`; this is the same
+                    // resolution for the foreign one.
+                    let ownerPrefix = localPath.map { "\(pkgName)#\($0)" } ?? "\(deps.pkgOfModule(m))#\(abs)"
                     dispatchDirect[f.qual, default: []].insert("\(ownerPrefix).\(call.leaf)")
                 }
             }
@@ -2871,8 +2883,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if let callee = call.depCallee {
                     var hits: [DepEntry] = []
                     var surfaced: [String] = []
-                    for m in fileImports[file] ?? [] where deps.isChained(m) {
-                        guard let ty = deps.boundType("\(m)#\(callee)") else { continue }
+                    for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {   // R565
+                        guard let ty = deps.boundType("\(p)#\(callee)") else { continue }
                         surfaced.append(ty)
                         if let e = deps.lookup("\(ty).\(call.leaf)") { hits.append(e) }
                     }
@@ -2924,7 +2936,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // entries share (§2 rule 1), so a miss cannot distinguish "no such method" from "I
                 // withdrew the answer", and a refusal to answer is not a purity claim. rust shipped that
                 // `continue` and reverted it.
-                if (fileImports[file] ?? []).contains(where: { deps.isChained($0) }) {
+                if !deps.chainedPkgs(importing: fileImports[file] ?? []).isEmpty {   // R565
                     direct[f.qual, default: []].insert("Unknown")
                     whyMap[f.qual, default: []].insert("dispatch:untyped cross-package receiver")
                 }
@@ -2942,9 +2954,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             if !resolved, !deps.isEmpty, !call.typed {
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                 var hits: [DepEntry] = []
-                for m in fileImports[file] ?? [] where deps.isChained(m) {
+                // R565 — `m` was a MODULE and the key prefix is a PACKAGE. `mods` carries the modules
+                // that resolved to this package, because the `owner == m` arm below asks about the
+                // MODULE spelling, not the package.
+                for (p, mods) in deps.chainedPkgs(importing: fileImports[file] ?? []) {
                     if call.unqualified {
-                        if let e = deps.lookup("\(m)#\(call.path)") ?? deps.lookup("\(m)#\(call.path).init") {
+                        if let e = deps.lookup("\(p)#\(call.path)") ?? deps.lookup("\(p)#\(call.path).init") {
                             hits.append(e)
                         }
                     } else if let owner = call.extOwner {
@@ -2954,8 +2969,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         // that arm is the module-qualified free call (`RatesDep.hit()`), where the owner
                         // IS the module name and no generic bound can apply.
                         let key = dispatchAbstraction(owner, f) ?? owner
-                        if let e = deps.lookup("\(m)#\(key).\(call.leaf)")
-                            ?? (owner == m ? deps.lookup("\(m)#\(call.leaf)") : nil) {
+                        if let e = deps.lookup("\(p)#\(key).\(call.leaf)")
+                            ?? (mods.contains(owner) ? deps.lookup("\(p)#\(call.leaf)") : nil) {
                             hits.append(e)
                         }
                     }
@@ -3219,8 +3234,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
             for cand in cc.stringifyExternal.union(cc.deinitExternal).union(cc.propertyExternal) {
                 var hits: [DepEntry] = []
-                for m in fileImports[file] ?? [] where deps.isChained(m) {
-                    if let e = deps.lookup("\(m)#\(cand)") { hits.append(e) }
+                for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {   // R565
+                    if let e = deps.lookup("\(p)#\(cand)") { hits.append(e) }
                 }
                 // An A/B diff shows which FUNCTIONS moved, never which KEY moved them — and the one
                 // over-fire this join has had (`String.init`, see `METATYPE_MEMBERS`) was invisible in

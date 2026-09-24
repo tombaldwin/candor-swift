@@ -689,3 +689,101 @@ final class ProductFinder: SyntaxVisitor {
         return .skipChildren
     }
 }
+
+// MARK: - SOUNDNESS R565 — the module -> owning-package map the §2 chain join needs
+
+/// **A MODULE IS NOT A PACKAGE, AND SPEC §2 KEYS ON THE PACKAGE.**
+///
+/// `<pkg>#<qual>` is the §2 join key, and `pkg` is the PRODUCER's `Package(name:)` — SPEC §2 ⟨0.39⟩
+/// obligation 2 says the key is "fully qualified in the OWNING package's namespace, the same namespace
+/// that package's entry hashes use", and that an engine "MUST NOT invent a second spelling". The
+/// CONSUMER, though, only ever holds MODULE names: `import NIOCore` names a module, Swift spells no
+/// package anywhere in source, and every §2 gate in this engine asked `deps.isChained(m)` with an
+/// `m` straight out of `fileImports`. For any dependency whose `Package(name:)` differs from its module
+/// names — `swift-nio`/`NIOCore`, `swift-collections`/`DequeModule`, `swift-atomics`/`Atomics`, i.e. the
+/// normal shape of a real SwiftPM dependency — the whole §2 chain was therefore a NO-OP: the report was
+/// loaded, parsed, indexed, and never once consulted.
+///
+/// MEASURED, one variable, everything else held byte-identical (the dep manifest's `Package(name:)`
+/// string, `.package(path:)` reference and all sources the same):
+///
+///     Package(name: "RatesDep"), module RatesCore   chained  go -> [] invisible:[RatesCore]  deny Fs exit 0
+///     Package(name: "RatesCore"), module RatesCore  chained  go -> ['Fs']                    deny Fs exit 1
+///
+/// So: resolve the module to its owner. **FROM THE DEPENDENCY'S OWN MANIFEST, never from the consumer's
+/// `.product(name:package:)` reference** — that `package:` string is an SPM IDENTITY (case-insensitive,
+/// and for a path dependency it is the DIRECTORY name, not `Package(name:)`: conformance PART 92's
+/// fixture writes `.product(name: "Iface", package: "iface")` against a `Package(name: "Iface")`), so
+/// resolving through it would need a case-folding guess this does not have to make. The dependency's
+/// manifest states both halves — its `Package(name:)` and the targets/products it declares — and it is
+/// the authority SwiftPM itself reads (brief rule G).
+///
+/// `parsePackageName` is THE writer's parse, the same function `manifestPackageName` uses to spell this
+/// engine's own `package` envelope and hash prefix, so the map's VALUE and a chained report's PREFIX
+/// cannot drift into two spellings of one package (R559 is what that costs).
+///
+/// **AMBIGUITY DROPS, never guesses** — the §2 rule 1 posture. Two dependency packages declaring a target
+/// or product of the same name leave that module unmapped, and an unmapped module falls back to ITSELF,
+/// which is exactly the pre-fix behaviour. Every entry this map does not contain is therefore a
+/// no-change, and the only direction it moves is: a key the producer really published becomes askable.
+///
+/// A module that already equals its package name is omitted — nothing to resolve.
+public func dependencyModulePackages(rootDir: String,
+                                     readManifest: (String) -> String? = {
+                                         try? String(contentsOfFile: $0, encoding: .utf8)
+                                     },
+                                     listDir: (String) -> [String]? = {
+                                         try? FileManager.default.contentsOfDirectory(atPath: $0)
+                                     }) -> [String: String] {
+    func manifestPath(_ dir: String) -> String { (dir as NSString).appendingPathComponent("Package.swift") }
+
+    // The dependency package ROOTS to read: every local `.package(path:)` reachable transitively from the
+    // root manifest, plus every `.build/checkouts/<dir>` SwiftPM has materialised (the root's, and each
+    // local dep's own — a workspace member resolves its own checkouts). The ROOT package itself is
+    // deliberately NOT in the map: its modules are the scan's own, `importableByFile` already answers for
+    // them, and a self-entry could only ever let this run's own package name stand in for a dependency's.
+    var depRoots: [String] = []
+    var seenRoots = Set<String>()
+    var localQueue: [String] = [rootDir]
+    var seenLocal = Set<String>()
+    while let dir = localQueue.popLast() {
+        guard seenLocal.insert(dir).inserted, let src = readManifest(manifestPath(dir)) else { continue }
+        for c in listDir((dir as NSString).appendingPathComponent(".build/checkouts")) ?? [] {
+            let abs = ((dir as NSString).appendingPathComponent(".build/checkouts") as NSString)
+                .appendingPathComponent(c)
+            if seenRoots.insert(abs).inserted { depRoots.append(abs) }
+        }
+        // nil ("the `dependencies:` array is not literal") is NOT "declares none" — it just means this
+        // manifest contributes no local roots, the same read `parsePackageLocalDependencies` documents.
+        for rel in parsePackageLocalDependencies(manifestSource: src) ?? [] {
+            let abs = ((dir as NSString).appendingPathComponent(rel) as NSString).standardizingPath
+            localQueue.append(abs)
+            if seenRoots.insert(abs).inserted { depRoots.append(abs) }
+        }
+    }
+    let rootStd = (rootDir as NSString).standardizingPath
+    depRoots.removeAll { $0 == rootDir || ($0 as NSString).standardizingPath == rootStd }
+
+    var claims: [String: Set<String>] = [:]     // module -> the packages declaring a target/product of that name
+    for dir in depRoots {
+        guard let src = readManifest(manifestPath(dir)) else { continue }
+        guard let pkg = parsePackageName(manifestSource: src), !pkg.isEmpty else { continue }
+        var modules = Set<String>()
+        // The STRICT declaration parses first — they refuse rather than under-read — with the loose walks
+        // as the fallback for a manifest whose lists are not literal arrays. Under-reading here is a
+        // missing map entry, i.e. the pre-fix behaviour, so the fallback can only ever recover reach.
+        for t in parsePackageTargetDeclarations(manifestSource: src) ?? parsePackageTargets(manifestSource: src)
+        where !t.isTest && !t.isPlugin { modules.insert(t.name) }
+        for p in parsePackageProductDeclarations(manifestSource: src) ?? parsePackageProducts(manifestSource: src) {
+            modules.insert(p.name)
+        }
+        for m in modules where !m.isEmpty { claims[m, default: []].insert(pkg) }
+    }
+
+    var out: [String: String] = [:]
+    for (m, pkgs) in claims where pkgs.count == 1 {
+        guard let p = pkgs.first, p != m else { continue }
+        out[m] = p
+    }
+    return out
+}

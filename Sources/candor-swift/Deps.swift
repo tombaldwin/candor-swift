@@ -211,6 +211,51 @@ struct DepIndex {
         coveredPkgs.contains(pkg) || stalePkgs.contains(pkg) || incompletePkgs.contains(pkg)
             || unjudgedPkgs.contains(pkg)
     }
+    /// SOUNDNESS R565 — MODULE -> OWNING PACKAGE, from the dependencies' OWN manifests
+    /// (`CandorCore.dependencyModulePackages`, whose doc carries the measurement and the never-guess
+    /// rules). Every key in this index is package-prefixed because SPEC §2 ⟨0.39⟩ obligation 2 says so;
+    /// every consumer-side question is asked with a MODULE, because that is the only name Swift source
+    /// spells. Nothing bridged the two, so the entire §2 chain was inert for any dependency whose
+    /// `Package(name:)` differs from its module names — the normal shape of a real SwiftPM package.
+    ///
+    /// EMPTY BY DEFAULT, so every construction site that predates this field (every test, every
+    /// unchained scan) is byte-identical: `pkgOfModule` is then the identity and each call site asks
+    /// exactly the key it asked before.
+    var modulePkgs: [String: String] = [:]
+    /// The package a module belongs to, or the module itself when that cannot be decided WITHOUT
+    /// GUESSING. The fallback is deliberately the pre-R565 spelling rather than a refusal: a module whose
+    /// owner is unknown (two packages declare the name; no manifest is readable; an Xcode tree with no
+    /// SwiftPM graph at all) must keep asking the key it always asked, or the fix would REMOVE reach from
+    /// the packages that already worked — every one whose module name IS its package name, which is what
+    /// every hand-written fixture and conformance PART in the family looks like.
+    func pkgOfModule(_ m: String) -> String { modulePkgs[m] ?? m }
+    /// The CHAINED DEPENDENCY PACKAGES a set of imported modules reaches, in import order, each paired
+    /// with the imported MODULES that resolve to it.
+    ///
+    /// **DEDUPED BY PACKAGE, AND THE DEDUP IS LOAD-BEARING.** Every §2 join site gates on
+    /// `hits.count == 1` — the never-guess rule — and a file importing two modules of ONE package
+    /// (`import NIOCore` + `import NIOPosix`, both `swift-nio`) would otherwise ask the index the same
+    /// package-prefixed key twice, collect the same entry twice, and REFUSE the join as ambiguous. That
+    /// is a loss manufactured by the fix, on exactly the multi-module dependencies the fix exists for.
+    /// The module list is carried because one arm still asks a question about the MODULE: a
+    /// module-qualified free call (`NIOCore.foo()`) whose `extOwner` IS an imported module name.
+    func chainedPkgs(importing modules: [String]) -> [(pkg: String, modules: [String])] {
+        var order: [String] = []
+        var mods: [String: [String]] = [:]
+        for m in modules {
+            let p = pkgOfModule(m)
+            guard isChained(p) else { continue }
+            if mods[p] == nil { order.append(p) }
+            mods[p, default: []].append(m)
+        }
+        return order.map { (pkg: $0, modules: mods[$0] ?? []) }
+    }
+    /// SOUNDNESS R565 — is this imported MODULE's owning package covered (§2 rule 3, the κ ledger and the
+    /// per-fn `invisible` hedge)? The coverage half had the identical module-vs-package confusion as the
+    /// join half, and it fails in the opposite direction: a covered dependency kept being named a blind
+    /// spot. Both halves must move together or the two voices contradict — a call whose effects the join
+    /// now inherits while the ledger still calls the module invisible.
+    func coversModule(_ m: String) -> Bool { coveredPkgs.contains(pkgOfModule(m)) }
     /// ⟨0.23⟩ `typeSurface.returns` (SPEC §2): `<pkg>#<fn qual>` -> `<pkg>#<type qual>`, exactly as the
     /// producer published it. Same never-guess discipline as `byKey`: two reports publishing the same fn
     /// key with DIFFERENT types drop the key rather than pick one.

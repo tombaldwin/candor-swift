@@ -1706,8 +1706,10 @@ final class CallCollector: SyntaxVisitor {
     /// never shadows, so an out-of-tree/unresolvable `shellOut` (no such package in scope) still reaches
     /// the heuristic, which is the one place it is still needed.
     func depShadows(_ name: String) -> Bool {
-        for m in importedModules where deps.isChained(m) {
-            if deps.lookup("\(m)#\(name)") != nil { return true }
+        // R565 — the key is `<PACKAGE>#<name>` and `m` is a MODULE; `chainedPkgs` resolves the one to
+        // the other and dedups, so a two-module dependency is asked once.
+        for (p, _) in deps.chainedPkgs(importing: Array(importedModules)) {
+            if deps.lookup("\(p)#\(name)") != nil { return true }
         }
         return false
     }

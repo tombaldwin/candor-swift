@@ -11,6 +11,51 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R565 — A MODULE IS NOT A PACKAGE, AND THE ENTIRE §2 CHAIN WAS ASKING WITH THE WRONG ONE.**
+  Every §2 join gate read `deps.isChained(m)` with an `m` straight out of `fileImports` — a MODULE — while
+  every key in the index is `<PACKAGE>#<qual>`, because SPEC §2 ⟨0.39⟩ obligation 2 says the key is
+  "fully qualified in the OWNING package's namespace, the same namespace that package's entry hashes
+  use". For any dependency whose `Package(name:)` differs from its module names — `swift-nio`/`NIOCore`,
+  `swift-collections`/`DequeModule`, `swift-atomics`/`Atomics`, i.e. the normal shape of a real SwiftPM
+  dependency — the chain was a NO-OP: the report was loaded, parsed, indexed and never consulted. The κ
+  coverage ledger and the per-fn `invisible` hedge had the identical confusion one direction over, so a
+  genuinely covered package kept being named a blind spot.
+
+  MEASURED, one variable — the dependency manifest's `Package(name:)` string; same sources, same
+  `.package(path:)` reference, same `.product(name:package:)`, same binary:
+
+      Package(name: "RatesDep"),  module RatesCore   go -> []       invisible:[RatesCore]   deny Fs exit 0
+      Package(name: "RatesCore"), module RatesCore   go -> ['Fs']                           deny Fs exit 1
+
+  AND ON REAL PACKAGES, 4 SwiftPM packages scanned against reports for their 16 resolved checkouts
+  (nio-http2, nio-ssl, swift-async-algorithms, swift-algorithms; 1,801 pre rows / 1,979 post):
+  **`dep:` join-provenance tokens 0 → 1,041** — the chain had never once been consulted — with
+  ADDED 362 / REMOVED 184 / CHANGED 779 on the unit key (wide value), **0 effects lost across all 779
+  changed rows** and Env +448, Unknown +105, Clock +15 gained. Of the 184 removals, 170 are
+  `interfaceUnion` entries re-keyed from a module name to the owning package (obligation 2's half of the
+  same defect: a key no producer's hash prefix can equal and no consumer can join) and the remaining 14
+  are `inferred: []` rows whose only content was an `invisible` hedge over a package a trusted chained
+  report now legitimately covers (§2 rule 3). Ground-truthed from SOURCE, not from candor's own report:
+  the +Env on nio-http2's `HTTP2StreamChannel.configure` traces through `swift-nio#EventLoop.execute` to
+  `getenv("SWIFTNIO_STRICT")` at `NIOPosix/SelectableEventLoop.swift:100`.
+
+  The map is built from **the DEPENDENCY's own manifest** (`CandorCore.dependencyModulePackages`), never
+  from the consumer's `.product(name:package:)`: that `package:` string is an SPM IDENTITY — case
+  insensitive, and for a path dependency the DIRECTORY name rather than `Package(name:)` (conformance
+  PART 92 writes `.product(name: "Iface", package: "iface")` against a `Package(name: "Iface")`) — so
+  resolving through it would need a case-folding guess this does not have to make. `parsePackageName` is
+  THE writer's parse, so the map's value and a chained report's prefix cannot drift (R559). Two packages
+  declaring one module name DROP it and the module falls back to ITSELF, which is exactly the pre-fix
+  key: every entry the map lacks is a no-change. PART 92's ten swift arms are byte-identical pre/post.
+
+  BOTH ⟨0.39⟩ PUBLISH SITES MOVE WITH THE ASK. Obligation 1's `dispatchesOn` and obligation 2's
+  `interfaceUnion` hash are ONE namespace — `applyDepEntry` feeds a `dispatchesOn` key straight to
+  `deps.lookup(k)` and to `unionOwnImplementors`, which compares it against `abstractionOwnerPkg` — so
+  package-qualifying one and not the other makes the join silently miss. 21 rows moved keys such as
+  `NIOEmbedded#EmbeddedChannel.finish` → `swift-nio#EmbeddedChannel.finish`. The map is built
+  UNCONDITIONALLY for the same reason: gating it on "some report is chained" would make
+  `candor-swift .` and `CANDOR_DEPS=… candor-swift .` publish different wire keys over one tree.
+
 - **SOUNDNESS R584 — THE CLASS HALF OF TYPE-RECEIVER DISPATCH WAS SILENT IN EVERY SPELLING, WHILE THE
   PROTOCOL TWIN OF EACH ALREADY RESOLVED.** [[R563]] closed the protocol half; the class half was never
   asked (§9 — an audit scoped to the shape in hand). Over a body that executes `URLSession.dataTask`,
