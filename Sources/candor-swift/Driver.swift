@@ -2100,6 +2100,45 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // this `merging` call never actually adjudicates a real collision, only documents which side wins.
         let effectiveGlobalTypes = (globalTypesByModule[fMod] ?? [:])
             .merging(crossModuleGlobalTypes(forFile: String(f.loc.prefix { $0 != ":" }), ownModule: fMod)) { own, _ in own }
+        // ── SOUNDNESS R584 — ONE PRECEDENCE, TWO MAPS ───────────────────────────────────────────────
+        // "What does a TYPE-POSITION receiver spelling denote" is ONE question with two answers: a local
+        // PROTOCOL (the bounded-CHA machinery R563 wired) and a local CONCRETE TYPE — a class bound, or
+        // the metatype of any declared type — which had NO wiring at all. `f<P: EffBase>(_ t: P.Type)
+        // { P.make() }`, its `t.make()` twin, the same inside `struct Box<P: EffBase>`, a concrete class
+        // metatype `f(_ t: CBase.Type) { t.validate() }` — every one ABSENT from `functions[]` over a
+        // body that executes `URLSession.dataTask`, while the PROTOCOL twin of each resolved `[Net]`.
+        // R563 closed the protocol half and the class half was never asked (§9 — an audit scoped to the
+        // shape in hand; the discriminating control is that `EffBase.make()` with the class named
+        // LITERALLY already resolves, so the variable is the receiver spelling, not the class).
+        //
+        // THE MAPS ARE BUILT FROM ONE `typeParamBounds`, SPLIT AFTERWARDS, and that ordering is R580's
+        // rule rather than a style: a filter that runs BEFORE a precedence silently reinstates whatever
+        // the precedence was there to remove. Function bound beats enclosing-type bound (a method may
+        // shadow its type's parameter name), then the two filters PARTITION the result — so
+        // `struct Box<P: Pr> { func shadowClass<P: EffBase>(_ t: P.Type) }` puts `P` in the class map and
+        // in NEITHER protocol's conformer set, which is what the call actually does.
+        var typeParamBounds: [String: String] = [:]
+        if let et = f.enclosingType, let tb = typeGenericBoundsAll[et] {
+            for (g, b) in tb { typeParamBounds[g] = b }
+        }
+        for (g, b) in f.genericBounds { typeParamBounds[g] = b }
+        var protoBoundParamsMap = typeParamBounds.filter { localProtocolNames.contains($0.value) }
+        // The CLASS half: `localTypes` MINUS `localProtocols`, the same partition every other consumer in
+        // this file uses — `pushType` puts a protocol in `localTypes` the moment anything extends it.
+        var typeBoundParamsMap = typeParamBounds.filter {
+            localTypes.contains($0.value) && !localProtocolNames.contains($0.value)
+        }
+        // …AND THE METATYPE PARAMETER THAT STANDS FOR ONE. `_ t: P.Type` makes `t` a second spelling of
+        // `P` in receiver position, so it is entered under the PARAMETER's name against the same bound —
+        // for a type PARAMETER (`P.Type` where `<P: EffBase>`) and, R584, for a CONCRETE type named
+        // directly (`_ t: CBase.Type`), which is swift-argument-parser's `ParsableCommand.Type` shape one
+        // kind over. Protocol first, so the two maps stay disjoint on every spelling.
+        for (pn, base) in f.metatypeParams {
+            if let b = protoBoundParamsMap[base] { protoBoundParamsMap[pn] = b }
+            else if let b = typeBoundParamsMap[base] { typeBoundParamsMap[pn] = b }
+            else if localProtocolNames.contains(base) { protoBoundParamsMap[pn] = base }
+            else if localTypes.contains(base) { typeBoundParamsMap[pn] = base }
+        }
         let cc = CallCollector(info: f, fields: fields, localTypes: localTypes,
                                globalTypes: effectiveGlobalTypes,
                                globalArrayElem: globalArrayElemByModule[swiftModuleOf(f.loc)] ?? [:],
@@ -2124,24 +2163,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                // applies the same precedence unconditionally and refuses afterwards; the
                                // comment above claimed these were "the same precedence" and they were
                                // not — §F1.3, twelve lines apart, again.
-                               protoBoundParams: {
-                                   var bounds: [String: String] = [:]
-                                   if let et = f.enclosingType, let tb = typeGenericBoundsAll[et] {
-                                       for (g, b) in tb { bounds[g] = b }
-                                   }
-                                   for (g, b) in f.genericBounds { bounds[g] = b }
-                                   var pb = bounds.filter { localProtocolNames.contains($0.value) }
-                                   // …AND THE METATYPE PARAMETER THAT STANDS FOR ONE. `_ t: P.Type` makes
-                                   // `t` a second spelling of `P` in receiver position, so it is entered
-                                   // under the PARAMETER's name against the same bound. Keyed off `pb`
-                                   // rather than off the bounds maps directly, so a metatype of something
-                                   // that is NOT a local-protocol-bound parameter contributes nothing.
-                                   for (pn, base) in f.metatypeParams {
-                                       if let b = pb[base] { pb[pn] = b }
-                                       else if localProtocolNames.contains(base) { pb[pn] = base }
-                                   }
-                                   return pb
-                               }(),
+                               // (both maps are built above, from ONE `typeParamBounds` — see R584)
+                               protoBoundParams: protoBoundParamsMap,
+                               typeBoundParams: typeBoundParamsMap,
                                protoFnTypedMembers: protocolFnTypedMembers,
                                returns: returnsIdx,
                                fieldArrayElem: fieldArrayElem, fieldArrayElemNested: fieldArrayElemNested,

@@ -348,6 +348,27 @@ final class CallCollector: SyntaxVisitor {
     /// the SAME bounded protocol CHA every other branch here defers to, over conformers declared in this
     /// scan, and a bound naming a dependency's protocol contributes nothing rather than a guessed union.
     let protoBoundParams: [String: String]
+    /// SOUNDNESS R584 — THE CLASS HALF OF THE SAME QUESTION: a type-position receiver spelling -> the
+    /// local CONCRETE type it denotes. A generic parameter whose bound is a local class
+    /// (`f<P: EffBase>(…) { P.make() }`, `struct Box<P: EffBase> { P.make() }`) and a METATYPE parameter
+    /// of either a bound type parameter or a concrete declared type (`_ t: CBase.Type` → `t.validate()`).
+    ///
+    /// **It resolves to exactly what the LITERAL spelling of the same call resolves to, and that is the
+    /// deliberate choice.** `EffBase.make()` written out already resolves here — to `EffBase.make` and,
+    /// through the Driver's `subtypesOf` fan-out, to every local subclass's override — so routing this
+    /// spelling to the same root makes the generic and concrete spellings of one call answer identically
+    /// (§G: ask the authority, never reimplement it). A CLASS HIERARCHY IS NOT A PROTOCOL CONFORMER SET
+    /// and the two are deliberately NOT unified: there is no `chaWithinBound` ≤12 cap and no `Unknown`
+    /// hedge on this path, because there is none on the literal spelling either, and introducing one HERE
+    /// would make the same program answer differently depending on how its receiver was written.
+    /// `final` needs no special case (a final class has no subtypes, so the fan-out is a no-op), and
+    /// neither does `static` vs `class` (a `static` member cannot be overridden, so no subclass declares
+    /// the same unit; one that shadows it by name is unioned, which is the over-approximating direction).
+    ///
+    /// The residual is stated rather than hedged: a subclass declared OUTSIDE the scan is not in
+    /// `subtypesOf` and its override is not charged — which is the pre-existing bounded-CHA contract the
+    /// literal spelling already carries, not something this map introduces.
+    let typeBoundParams: [String: String]
     /// SOUNDNESS R563 — `"<Proto>.<member>"` for protocol requirements of FUNCTION type (see
     /// `DeclCollector.protocolFnTypedMembers`). `P.maker(v)` INVOKES a stored closure; it does not
     /// dispatch to a witness body, so it takes the same honest `Unknown` the concrete spelling takes.
@@ -545,6 +566,7 @@ final class CallCollector: SyntaxVisitor {
          globalTypes: [String: String] = [:], globalArrayElem: [String: String] = [:],
          declaredTypes: Set<String>,
          localProtocols: Set<String>, protoBoundParams: [String: String] = [:],
+         typeBoundParams: [String: String] = [:],
          protoFnTypedMembers: Set<String> = [],
          returns: [String: String],
          fieldArrayElem: [String: [String: String]], fieldArrayElemNested: [String: [String: String]],
@@ -601,6 +623,7 @@ final class CallCollector: SyntaxVisitor {
         self.declaredTypes = declaredTypes
         self.localProtocols = localProtocols
         self.protoBoundParams = protoBoundParams
+        self.typeBoundParams = typeBoundParams
         self.protoFnTypedMembers = protoFnTypedMembers
         self.returns = returns
         self.enclosingType = info.enclosingType
@@ -628,6 +651,17 @@ final class CallCollector: SyntaxVisitor {
         // guard does not cost the `t: P.Type` spelling.
         guard vars[spelling] == nil else { return nil }
         return protoBoundParams[spelling]
+    }
+
+    /// SOUNDNESS R584 — THE CLASS TWIN of `typeReceiverProto`, for the ONE spelling that does not go
+    /// through `rootOf`: the CONSTRUCTION `P(…)` inside `f<P: EffBase>(…)`, whose callee is a bare
+    /// `DeclReference` naming a type parameter and so never reaches the receiver resolver at all. Same
+    /// `vars` shadow guard, same `localTypes` additive guard, and the caller emits the same UNQUALIFIED
+    /// call `EffBase(…)` written literally emits — so the Driver's `localTypes` ctor arm resolves
+    /// `EffBase.init` identically. Every other class-half spelling is answered in `rootOfUnaliased`.
+    private func typeReceiverType(_ spelling: String) -> String? {
+        guard !Self.r584Off, vars[spelling] == nil, !localTypes.contains(spelling) else { return nil }
+        return typeBoundParams[spelling]
     }
 
     /// The unit body this collector was handed, so `constructionEscapes`' ancestor walk STOPS there.
@@ -779,6 +813,30 @@ final class CallCollector: SyntaxVisitor {
             // a dead end and `Worker.doWork` disconnected: the caller's effects collapsed to empty and it
             // vanished from `functions[]` outright (SOUNDNESS.md R73).
             if let t = globalTypes[n] { return (t, true, [n], false) }
+            // SOUNDNESS R584 — A TYPE-PARAMETER OR METATYPE-PARAMETER SPELLING DENOTES THE LOCAL CLASS IT
+            // IS BOUND TO. `P.make()` inside `f<P: EffBase>` / `struct Box<P: EffBase>`, and `t.make()`
+            // for `_ t: P.Type` or `_ t: CBase.Type`. Answered HERE, at the one authority for "what type
+            // does this spelling denote", rather than in a new dispatch branch — so the ENTIRE member-call
+            // chain below (the function-typed-field hedge, the typed-local-receiver arm, the κ shadowing
+            // guards, the property-edge path, the operator arms) treats the generic spelling EXACTLY as it
+            // already treats `EffBase.make()` written out. A second branch would have answered the one
+            // spelling in hand more confidently than the literal does — `EffBase.maker(v)` for a
+            // function-typed `static let` hedges `Unknown` through `closurePropertyInvocation`, and only
+            // by resolving the ROOT does the generic spelling inherit that instead of certifying purity.
+            //
+            // POSITIONED AFTER locals/fields/globals AND GUARDED ON `!localTypes.contains(n)`, both
+            // deliberately. The first is Swift's own lookup order, so a `let P = something` shadowing the
+            // parameter name keeps winning (`typeReceiverProto`'s `vars` guard, extended to the two other
+            // binder kinds). The second keeps this change purely ADDITIVE: where a generic parameter is
+            // spelled the same as a real local type, today's answer is the local type, and while Swift
+            // really does bind the type PARAMETER there, changing it would REMOVE an existing edge — a
+            // different question, stated here rather than silently folded in.
+            if !Self.r584Off, !localTypes.contains(n), let bound = typeBoundParams[n] {
+                if Self.r584Probe {
+                    FileHandle.standardError.write("R584HIT \(n) -> \(bound)\n".data(using: .utf8)!)
+                }
+                return (bound, false, [n], false)
+            }
             // a bare TYPE/alias reference (`FM.default`, the base of a static-member chain). The
             // typealias resolution that used to be spelled HERE is now the wrapper's job — R97: this arm
             // having it, and the other arms not, is exactly how the bug was shaped.
@@ -833,6 +891,35 @@ final class CallCollector: SyntaxVisitor {
         if let call = expr.as(FunctionCallExprSyntax.self) {
             // `Svc().act()` — a constructor call types the chain; a FACTORY's unambiguous return
             // type does too (`db.makeStatement(...).execute()` — the GRDB shape).
+            // SOUNDNESS R584 — `type(of: x)` IS A TYPE-POSITION RECEIVER. `type(of: c).validate()` is the
+            // DYNAMIC-metatype spelling of the same dispatch the two parameter spellings above answer, and
+            // it resolved to NO ROOT AT ALL (the callee is a lowercase `DeclReference`, so the ctor arm
+            // below declines it and `returns["type"]` is nil) — so the call was dropped entirely.
+            // Resolving it to the ARGUMENT's static type is exactly the approximation `c.validate()`
+            // already gets: a local protocol reaches the bounded conformer CHA, a local class reaches its
+            // own unit plus the `subtypesOf` fan-out. `localFreeFns` is the shadow guard — a project that
+            // declares its own `type(of:)` keeps whatever answer it had.
+            //
+            // AND THE ARGUMENT'S TYPE IS MAPPED THROUGH ITS BOUND FIRST, which is not a refinement but a
+            // correctness requirement found by auditing this fix's own corpus diff. `vars` records the
+            // type AS DECLARED, so for `DAO<Record: MutablePersistableRecord>`'s `init(_ record: Record)`
+            // the inner root is the TYPE-PARAMETER NAME `Record` — and GRDB also declares a real
+            // `open class Record`, so without this the dispatch landed on the class by NAME COLLISION
+            // (§F1.7, a key two paths spell differently) instead of on the protocol the value is bounded
+            // by. Mapping through `protoBoundParams`/`typeBoundParams` sends it to the conformer CHA,
+            // which is the same answer `record.member()` gets one line away.
+            if let callee = call.calledExpression.as(DeclReferenceExprSyntax.self),
+               !Self.r584Off,
+               callee.baseName.text == "type", !localFreeFns.contains("type"), returns["type"] == nil,
+               call.arguments.count == 1, call.arguments.first?.label?.text == "of",
+               let inner = call.arguments.first.map({ rootOf($0.expression, depth + 1) }),
+               let innerRoot = inner.root {
+                let bound = protoBoundParams[innerRoot] ?? typeBoundParams[innerRoot] ?? innerRoot
+                if Self.r584Probe {
+                    FileHandle.standardError.write("R584HIT type(of:) -> \(bound)\n".data(using: .utf8)!)
+                }
+                return (bound, false, inner.path, inner.mono)
+            }
             if let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self) {
                 let n = ctor.baseName.text
                 // `Proc()` where `typealias Proc = Process` — the ctor types the value as the aliased
@@ -1344,6 +1431,18 @@ final class CallCollector: SyntaxVisitor {
     /// the two arms this fix ADDS, so an A/B over a corpus containing none of the shape says so out loud
     /// instead of reporting a flattering zero.
     static let r563Probe = ProcessInfo.processInfo.environment["CANDOR_R563_PROBE"] != nil
+    /// SOUNDNESS R584 REACH PROBE (§E1) — same reason as R563's, and this fix needs it MORE: its shape
+    /// could not be found in the corpus at all when the row was filed (199 metatype parameters declared,
+    /// 15 call sites dispatching on one, all 15 protocol-typed and already resolving), so a byte-identical
+    /// A/B is the EXPECTED outcome and must be reported as SAFETY-ONLY rather than as a cost of zero.
+    /// Prints one line per resolution this fix adds, on stderr, and only when the variable is set.
+    static let r584Probe = ProcessInfo.processInfo.environment["CANDOR_R584_PROBE"] != nil
+    /// SOUNDNESS R584 §1b KILL SWITCH — degrades `typeReceiverType` to `nil`, i.e. restores exactly the
+    /// pre-fix behaviour (every class-half spelling ABSENT). `R584CalibrationTests` asserts the fixture
+    /// resolves; running the suite with `CANDOR_R584_OFF=1` is what proves those assertions can FAIL, so
+    /// the calibration does not need a revert to reproduce and cannot rot into a test that passes either
+    /// way — the failure mode §A measured four times in one day.
+    private static let r584Off = ProcessInfo.processInfo.environment["CANDOR_R584_OFF"] != nil
     private static let r349Debug = ProcessInfo.processInfo.environment["CANDOR_R349_DEBUG"] != nil
 
     private func locatorNameIsStable(_ name: String, inert: Set<String>,
@@ -4531,6 +4630,18 @@ final class CallCollector: SyntaxVisitor {
                 protoDispatches.append(ProtoDispatch(proto: proto, member: "init",
                                                      argc: node.arguments.count,
                                                      argTypes: argTypesOf(node), args: argKinds(node)))
+            } else if let ty = typeReceiverType(name) {
+                // SOUNDNESS R584, THE INITIALIZER SPELLING OF THE CLASS HALF. `P(…)` inside
+                // `func f<P: EffBase>(…)` — a `required init` reached through a class bound. Emitted as
+                // the UNQUALIFIED call `EffBase(…)` written literally emits, not as a typed one, so the
+                // Driver's `localTypes` ctor arm resolves `EffBase.init` through the identical path
+                // (including `matchOverloads` when the init is overloaded). Same rule as the rest of this
+                // row: the generic spelling gets exactly the answer the literal spelling gets.
+                if Self.r584Probe {
+                    FileHandle.standardError.write("R584HIT init \(ty)\n".data(using: .utf8)!)
+                }
+                calls.append(Call(path: ty, leaf: ty, strArg: lit, typed: false,
+                                  args: argKinds(node), argTypes: argTypesOf(node), unqualified: true))
             } else if let target = fnValueAlias[name] {
                 // an INFERRED-type fn-value local invoked (`let g = eff; g()`): edge to the aliased local
                 // fn (the real unit). Emit as an unqualified free-call so the fixpoint resolver links it to

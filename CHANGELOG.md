@@ -11,6 +11,86 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R584 — THE CLASS HALF OF TYPE-RECEIVER DISPATCH WAS SILENT IN EVERY SPELLING, WHILE THE
+  PROTOCOL TWIN OF EACH ALREADY RESOLVED.** [[R563]] closed the protocol half; the class half was never
+  asked (§9 — an audit scoped to the shape in hand). Over a body that executes `URLSession.dataTask`,
+  with `deny Net <fn>` AND `pure <fn>` both exit 0 on all of them:
+
+      func f<P: EffBase>(_ t: P.Type) { P.make() }         ABSENT   →  [Net]  deny/pure rc 0 → 1
+      func f<P: EffBase>(_ t: P.Type) { t.make() }         ABSENT   →  [Net]  deny/pure rc 0 → 1
+      struct Box<P: EffBase> { func go() { P.make() } }    ABSENT   →  [Net]  deny/pure rc 0 → 1
+      func f(_ t: CBase.Type) { t.validate() }             ABSENT   →  [Net]  deny/pure rc 0 → 1
+      func f(_ c: Cmd) { type(of: c).validate() }          ABSENT   →  [Net]  deny/pure rc 0 → 1
+      ── the PROTOCOL twin of each ──                      [Net]                     ← the control
+      ── `EffBase.make()`, the class named LITERALLY ──    [Net]                     ← the control
+
+  **THE TWO CONTROLS ARE WHAT MAKE THIS A DEFECT RATHER THAN A DESIGN**, and they are what was held
+  constant: one package, one file, one class hierarchy, one sink, one call spelling per row; the only
+  variable is how the RECEIVER is written. Also closed by the same widening, because a fix for the
+  spelling in hand would draw the boundary around its own trigger: a `final` class, a STRUCT metatype
+  parameter, the INITIALIZER spelling `P()` through a class bound, and `type(of: x)` on a class-typed
+  value. Pre-existing at `6d7fd06`; not from this week's wave.
+
+  **THE RULING, STATED RATHER THAN INHERITED. A class hierarchy is not a protocol conformer set**, so
+  the two are deliberately NOT unified: the generic/metatype spelling resolves to exactly what the
+  LITERAL spelling of the same call resolves to — the statically-named class's own implementation
+  unioned with every local subclass override — with no `chaWithinBound` ≤12 cap and no `Unknown` hedge,
+  because the literal spelling has neither and introducing one here would make one program answer two
+  ways depending on how its receiver was spelled. ⟨0.35⟩ licenses completing the dispatch OR disclosing
+  it and forbids only silence; this completes it. `final` needs no case (no subtypes ⇒ the fan-out is a
+  no-op) and neither does `static` vs `class` (a `static` member cannot be overridden, and a subclass
+  that shadows it by NAME is unioned — the over-approximating direction). **The residual is stated, not
+  hedged: a subclass declared OUTSIDE the scan is not in `subtypesOf` and its override is not charged —
+  the pre-existing bounded-CHA contract the literal spelling already carries.**
+
+  MECHANISM. One `typeParamBounds` map is built in the Driver (function bound over enclosing-type bound
+  — R580's ordering, precedence FIRST and the filters after) and then PARTITIONED into
+  `protoBoundParams` and a new `typeBoundParams`; the metatype-parameter pass fills both. The resolution
+  lands in `rootOfUnaliased`, the one authority for "what type does this spelling denote", **not in a
+  dispatch branch of its own** — so the whole member-call chain (the function-typed-field hedge, the
+  typed-local-receiver arm, the κ shadowing guards, the property-edge path) treats `P.make()` exactly as
+  it already treats `EffBase.make()`. A separate branch would have answered the spelling in hand MORE
+  confidently than the literal does: `EffBase.maker(1)` for a function-typed `static let` hedges, and
+  only by resolving the ROOT does the generic spelling inherit that instead of certifying purity. It is
+  ordered after locals/fields/globals (Swift's own lookup order, so `let P = Holder()` still wins) and
+  guarded on `!localTypes.contains(n)`, which keeps it purely ADDITIVE.
+
+  **A/B OVER 15 SWIFT PACKAGES / 33,434 ROWS: `inferred` ADDED 0 REMOVED 0 CHANGED 0; wide ADDED 0
+  REMOVED 0 CHANGED 117 — and ALL 117 ROWS WERE AUDITED, NO SAMPLING, with ZERO values lost on ANY
+  field.** Every movement is a GAIN. REACH 469 hits across 10 of the 15 packages, so this is not a
+  flattering zero over a corpus that cannot reach the branch. The eight distinct added values were
+  ground-truthed FROM SOURCE, never from candor's own report: GRDB's `type(of: self).databaseTableName`
+  (`MutablePersistableRecord+Save.swift:376/400`, `+Update.swift:123/476/783`, `PersistableRecord+Save`,
+  `EncodableRecord`, `+DAO`) and `type(of: self).persistenceConflictPolicy` (`+Update.swift:940`,
+  `+Insert.swift:504`) — 115 and 98 rows gaining a ⟨0.39⟩ obligation-1 key a consumer had no other way
+  to join on; and swift-crypto's `self = try Self(bigEndianBytes: bytes)` inside
+  `extension ASN1IntegerRepresentable where Self: FixedWidthInteger`, which really does call the
+  package's own `extension FixedWidthInteger { init(bigEndianBytes:) }` and edged NOTHING before.
+
+  **ONE DEFECT WAS FOUND BY AUDITING THIS FIX'S OWN DIFF AND IS FIXED IN THE SAME COMMIT.** `type(of:)`
+  on a value whose declared type is a GENERIC PARAMETER was dispatching on the parameter's NAME — and
+  GRDB has exactly that collision, `DAO<Record: MutablePersistableRecord>` beside `open class Record`,
+  so the call landed on the class by name rather than on the bound (§F1.7, a key two paths spell
+  differently). The argument's type is now mapped through `protoBoundParams`/`typeBoundParams` first,
+  which sends it to the conformer CHA — the same answer `record.member()` gets one line away.
+
+  **§1b CALIBRATION.** `CANDOR_R584_OFF=1` degrades the resolution to the pre-fix answer (verified
+  byte-identical `functions[]` on both fixtures). `CANDOR_R584_OFF=1 swift test --filter
+  ClassTypeReceiverDispatch` → **`Executed 11 tests, with 42 failures`**; without it, 11/11 green. The
+  four CONTROL arms pass BOTH ways, which is what makes them controls: a local binding shadowing the
+  type-parameter spelling stays pure, a member no class declares floods no `Unknown`, an all-pure class
+  hierarchy gains nothing under `deny Net` or `deny Unknown`, and the protocol/literal spellings are
+  untouched. Every fixture `swift build`s as the library form the test renders AND runs as an executable
+  (§E3) — `cls 1 1 1 1 0 1 1 / meta 1 1 1 1 / attack 0 1 1 0 1 1 0 CtorBase 1 1 / pure 2 2 3 /
+  coll 1 0 / RAN`.
+
+  **REACH, STATED AS WHAT IT IS.** The corpus gains no new effect row, and that is expected rather than
+  disappointing: a source census over the same 15 packages (3,194 `.swift` files) found 1,119 metatype
+  parameters of which only **48** name a local class, 14 generic bounds naming a local class against 701
+  naming a local protocol, and 15 `type(of: x).member(` dispatches. **The shape is rare, not absent** —
+  and where it does occur it was completely silent. The evidence for this fix is the executing fixture;
+  the corpus is the over-charge control.
+
 - **SOUNDNESS R580 — R563's LOCAL-PROTOCOL FILTER RAN BEFORE THE SHADOWING PRECEDENCE, so an inner
   generic bound that is NOT a local protocol could not DISPLACE the enclosing type's, and the receiver
   was charged the outer protocol's conformers. A FABRICATION, introduced by R563 the day before.**

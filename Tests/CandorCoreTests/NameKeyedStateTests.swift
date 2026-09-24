@@ -253,6 +253,15 @@ final class NameKeyedStateTests: XCTestCase {
         // whenever `vars` already knows the spelling, so a shadowing local falls through to the ordinary
         // receiver paths. Same discipline as `globalTypes` two rows down.
         "protoBoundParams": .immutableIndex, "protoFnTypedMembers": .immutableIndex,
+        // SOUNDNESS R584 — the CLASS twin of the row above: the same key space (a generic-parameter name,
+        // or a metatype PARAMETER's name standing for one), the same Driver-supplied declaration indexes,
+        // so the same reasoning holds for the same reason. Its two readers both refuse a spelling that is
+        // already a binding — `rootOfUnaliased` consults it only AFTER `vars`, the implicit-self field
+        // walk and `globalTypes` have all missed, and `typeReceiverType` carries the `vars` guard
+        // explicitly. A rebind has nothing to say about it: `let P = Holder()` just means the earlier arms
+        // answer first, which is Swift's own lookup order, pinned by
+        // `ClassTypeReceiverDispatchProcessTests.testALocalBindingShadowsTheTypeParameterSpelling`.
+        "typeBoundParams": .immutableIndex,
         // R73 — module-scope GLOBAL name -> concrete type (and its array-element sibling), injected at
         // construction from the Driver's module-sliced merge (`globalTypesByModule`). Keyed by the
         // GLOBAL's own declaration name, not by any binding local to the walked function, and `rootOf`/
