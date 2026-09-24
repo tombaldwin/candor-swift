@@ -11,6 +11,40 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R580 — R563's LOCAL-PROTOCOL FILTER RAN BEFORE THE SHADOWING PRECEDENCE, so an inner
+  generic bound that is NOT a local protocol could not DISPLACE the enclosing type's, and the receiver
+  was charged the outer protocol's conformers. A FABRICATION, introduced by R563 the day before.**
+  `protoBoundParams` merged the enclosing type's bounds and then the function's with
+  `where localProtocolNames.contains(b)` applied AS IT MERGED, so a non-protocol function bound never
+  entered the map and therefore could not overwrite what the type had put there. **A filter that runs
+  before a precedence silently reinstates whatever the precedence was there to remove.**
+
+      struct Box<P: Pr> { func shadowByClass<P: Base>(_ t: P.Type) -> Int { P.make() } }
+
+  read `inferred ['Net']`, `dispatchesOn ['Sh#Pr.make']`, `calls ['EffPr.make']` — while the fixture,
+  which `swift build`s and RUNS, prints `SUB`: it executes `Sub.make`, and `EffPr` is not on the path at
+  all. R563's own comment claimed this was *"the same precedence `dispatchAbstraction` applies to the
+  wire key (R550)"*; `dispatchAbstraction` applies it UNCONDITIONALLY and refuses on `localTypes`
+  afterwards, which is the correct order and not what this did — §F1.3, twelve lines apart.
+
+  THREE CONTROLS, one variable each: a shadowing bound that IS a local protocol still resolves
+  (`shadowByProto` → `Solo#Pr2.make`), the function's own bound wins in the POSITIVE direction too
+  (`shadowByEffProto` → `[Net]`, `Solo#PrEff.make` — so this is a precedence, not an erasure), and the
+  non-shadowing arm is untouched (`plain` → `[Net]`, `Solo#Pr.make`, R550's own shape).
+
+  **THE A/B IS SAFETY-ONLY, AND THAT IS RECORDED HERE RATHER THAN DISCOVERED LATER (§E1).** Over the
+  same 7 Swift packages: `ADDED 0 REMOVED 0 CHANGED 0` with **0 reach hits** on the changed branch. An
+  independent SOURCE census (1,027 `.swift` files; 46 generic functions declared inside generic types)
+  found **0** that shadow a type parameter's name — so the zero is a property of the SHAPE, not of the
+  corpus: generic-parameter shadowing is a warning in Swift 5 and an error in Swift 6 language mode. The
+  evidence for this fix is the executing fixture.
+
+  **RESIDUAL, MEASURED AND NOT REPAIRED:** with the fabrication gone, a generic parameter bound to a
+  local CLASS used as a TYPE receiver resolves to nothing — `Box<P: Pr>.shadowClass<P: EffBase>` over an
+  effectful `EffBase` subclass is silent, while the CONCRETE spelling of the same call resolves to
+  `[Net]`. That silence is PRE-EXISTING: before this fix the same row also read `[]`, with the wrong
+  protocol's key attached. Filed separately rather than asserted away.
+
 - **SOUNDNESS R572 — AN OVERLOADED CONFORMER MEMBER PLUS A PROTOCOL-EXTENSION DEFAULT DROPPED EVERY
   CONFORMER'S EFFECTS SILENTLY: `inferred []`, `unresolved false`, and BOTH `pure <fn>` AND
   `deny Net <fn>` EXIT 0 over a function that executes `URLSession.dataTask`. A CARDINAL SIN, live in

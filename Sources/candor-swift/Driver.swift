@@ -2111,12 +2111,26 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                // VALUE does. Function bound FIRST, enclosing type second — a method may
                                // shadow its type's parameter name, which is the same precedence
                                // `dispatchAbstraction` applies to the wire key (R550).
+                               //
+                               // SOUNDNESS R580 — THE PRECEDENCE RUNS FIRST AND THE FILTER SECOND, and
+                               // the order is the whole bug. This built each map with
+                               // `where localProtocolNames.contains(b)` applied AS IT MERGED, so a
+                               // function bound that is NOT a local protocol never entered the map and
+                               // therefore could not DISPLACE the enclosing type's — `Box<P: Pr>` +
+                               // `func shadowed<P: Base>(_ t: P.Type) { P.make() }` charged the caller
+                               // `Pr`'s conformers and published `Sh#Pr.make`, over a call that executes
+                               // `Sub.make`. A filter that runs before a precedence silently reinstates
+                               // whatever the precedence was there to remove. `dispatchAbstraction`
+                               // applies the same precedence unconditionally and refuses afterwards; the
+                               // comment above claimed these were "the same precedence" and they were
+                               // not — §F1.3, twelve lines apart, again.
                                protoBoundParams: {
-                                   var pb: [String: String] = [:]
+                                   var bounds: [String: String] = [:]
                                    if let et = f.enclosingType, let tb = typeGenericBoundsAll[et] {
-                                       for (g, b) in tb where localProtocolNames.contains(b) { pb[g] = b }
+                                       for (g, b) in tb { bounds[g] = b }
                                    }
-                                   for (g, b) in f.genericBounds where localProtocolNames.contains(b) { pb[g] = b }
+                                   for (g, b) in f.genericBounds { bounds[g] = b }
+                                   var pb = bounds.filter { localProtocolNames.contains($0.value) }
                                    // …AND THE METATYPE PARAMETER THAT STANDS FOR ONE. `_ t: P.Type` makes
                                    // `t` a second spelling of `P` in receiver position, so it is entered
                                    // under the PARAMETER's name against the same bound. Keyed off `pb`
