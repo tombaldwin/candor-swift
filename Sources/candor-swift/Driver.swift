@@ -1261,6 +1261,36 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         return []
     }
 
+    /// SOUNDNESS R572 — THE ONE IMPLEMENTATION of "which project units can `<Type>.<member>` run at a
+    /// call site with this argument shape". An OVERLOADED declaration's qual carries a SIGNATURE SUFFIX
+    /// (`Impl.two(Int)` — see `overloads`/`overloadedBases` above), so a bare `resolveQual("Impl.two")`
+    /// is an exact-name miss and returns EMPTY for every overloaded member. Whatever folds that empty
+    /// set in has silently dropped the whole witness, which is the cardinal sin: R572 lost EVERY
+    /// conformer of an overloaded protocol requirement. `inheritedUnqualTargets` below had already been
+    /// repaired for exactly this at the R32/R44 provided-member class, and the typed-call path at the
+    /// `overloadedBases.contains(call.path)` arm too — three copies of one question (§F1.3), of which
+    /// the per-conformer CHA was the copy that never got it. This closure is now the only spelling.
+    ///
+    /// `argc < 0` means the site records no argument shape (an operator witness): union EVERY overload
+    /// rather than drop them all — the same sound over-approximation `matchOverloads` itself falls back
+    /// to when the argument types cannot discriminate.
+    ///
+    /// THE OVERLOAD SET IS UNIONED WITH `resolveQual`'S, NOT SUBSTITUTED FOR IT, and that is the one
+    /// place this differs from the two older copies. The signature-suffixing pass SKIPS accessor and
+    /// top-level units, so a base can be in `overloadedBases` and STILL have real units carrying the
+    /// bare name — a default-argument-expression accessor unit is the common one (`Argument.init`
+    /// beside `Argument.init(Decoder)` …, 45 of them in swift-argument-parser). Returning only the
+    /// matched overloads would have DROPPED those bodies: MEASURED on the 7-package corpus, 10 rows
+    /// lost a call edge that way. A fix whose direction is additive must not smuggle a removal in, so
+    /// the bare-name hit is kept and the overload set added to it.
+    let memberTargets: (String, Int, [String?], String) -> Set<String> = { base, argc, argTypes, callerModule in
+        var out = resolveQual(base)
+        guard overloadedBases.contains(base) else { return out }
+        out.formUnion(argc >= 0 ? Set(matchOverloads(base, argc, argTypes, callerModule))
+                                : Set((overloads[base] ?? []).map(\.qual)))
+        return out
+    }
+
     /// SOUNDNESS R266 — `matchOverloads` against the PATH-keyed table. Same body, same authority; the
     /// only difference is that `base` is a full nested path (`Outer.S.run`), so a same-short-named type
     /// elsewhere in the scan cannot answer. The free-function branch below is unreachable here (a path
@@ -2944,41 +2974,34 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             //
             // UNION, not either/or: a requirement WITH a default has both a `P.member` body and per-conformer
             // overrides, and a syntactic scan cannot say which one a given receiver runs.
-            // OVERLOADS RESOLVE HERE EXACTLY AS THEY DO ON THE TYPED-CALL PATH, and that is not a detail.
-            // The typed path routes an overloaded base through `matchOverloads`; answering it with a bare
-            // `resolveQual` (which cannot name an overloaded base) DROPPED every sibling-overload edge at
-            // such a site. MEASURED by the corpus A/B — swift-syntax `TokenConsumer.consume(_)` lost 5
-            // edges, swift-protobuf `Message.init(String,ExtensionMap)` lost 10, firebase `Storage.bucket`
-            // lost its only one — and by nothing else, because no fixture had an overloaded provided
-            // member. `callsiteArgs` is recorded for the same reason the typed path records it: it is what
-            // callback-flow resolves fn-typed parameters against.
+            // OVERLOADS RESOLVE IN **BOTH** HALVES EXACTLY AS THEY DO ON THE TYPED-CALL PATH — through
+            // `memberTargets`, which is now the single spelling of that question. The typed path routes an
+            // overloaded base through `matchOverloads`; answering it with a bare `resolveQual` (which
+            // cannot name an overloaded base, its qual carrying a signature suffix) DROPPED every
+            // sibling-overload edge at such a site. MEASURED by the corpus A/B — swift-syntax
+            // `TokenConsumer.consume(_)` lost 5 edges, swift-protobuf `Message.init(String,ExtensionMap)`
+            // lost 10, firebase `Storage.bucket` lost its only one — and by nothing else, because no
+            // fixture had an overloaded provided member. `callsiteArgs` is recorded for the same reason the
+            // typed path records it: it is what callback-flow resolves fn-typed parameters against.
+            //
+            // ⚠ THIS PARAGRAPH SAID "HERE" AND MEANT THE PROVIDED HALF ONLY — the per-conformer CHA below
+            // it kept the bare `resolveQual` for another month, and that is SOUNDNESS R572, a cardinal sin
+            // live in Alamofire. A comment that asserts a property of "this code" while one of the two
+            // implementations beneath it lacks the property is what stops the second one being measured:
+            // the 2×2 that found it (overloaded × defaulted) had never been written because this said it
+            // was covered. Both halves now go through one closure so the sentence cannot drift again.
             var providedEdged = false
             var frontier = [d.proto], seenProto = Set<String>()
             while let cur = frontier.popLast() {
                 guard seenProto.insert(cur).inserted else { continue }
                 // a SUPER-protocol's extension provides the member too (`protocol Sub: Sup`, `extension Sup`)
-                let base = "\(cur).\(d.member)"
-                if overloadedBases.contains(base) {
-                    // `argc < 0` — an operator witness, which records no argument shape: union every
-                    // overload rather than drop them all (the same sound over-approximation matchOverloads
-                    // itself falls back to when the argument types cannot discriminate).
-                    let targets = d.argc >= 0
-                        ? matchOverloads(base, d.argc, d.argTypes, swiftModuleOf(f.loc))
-                        : (overloads[base] ?? []).map(\.qual)
-                    for t in targets {
+                let ts = memberTargets("\(cur).\(d.member)", d.argc, d.argTypes, swiftModuleOf(f.loc))
+                if !ts.isEmpty {
+                    for t in ts {
                         edges[f.qual, default: []].insert(t)
                         callsiteArgs[t, default: []].append((f.qual, d.args))
-                        providedEdged = true
                     }
-                } else {
-                    let ts = resolveQual(base)
-                    if !ts.isEmpty {
-                        for t in ts {
-                            edges[f.qual, default: []].insert(t)
-                            callsiteArgs[t, default: []].append((f.qual, d.args))
-                        }
-                        providedEdged = true
-                    }
+                    providedEdged = true
                 }
                 frontier.append(contentsOf: protocolSupers[cur] ?? [])
             }
@@ -3010,7 +3033,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // per-conformer completeness count is over how many conformers resolved AT ALL, not how many
             // single quals came back.
             if chaWithinBound(conf.count, d.proto, d.member, f.qual) {
-                let implResults = conf.map { resolveQual("\($0).\(d.member)") }
+                // SOUNDNESS R572 — THROUGH `memberTargets`, the same authority the provided half above
+                // uses. This line was a bare `resolveQual`, which cannot name an overloaded base: an
+                // overloaded conformer member resolved to EMPTY for every conformer, `resolvedCount`
+                // went to 0, and `|| providedEdged` (true, because the extension default DID match
+                // through the overload table) took the union branch and unioned empty sets — no edge and
+                // no `Unknown`. The comment above claiming overloads resolve here exactly as on the
+                // typed-call path was true of the provided half and false of this one.
+                let implResults = conf.map {
+                    memberTargets("\($0).\(d.member)", d.argc, d.argTypes, swiftModuleOf(f.loc))
+                }
                 let resolvedCount = implResults.filter { !$0.isEmpty }.count
                 if resolvedCount == conf.count || providedEdged {
                     for ts in implResults { edges[f.qual, default: []].formUnion(ts) }

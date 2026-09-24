@@ -195,19 +195,46 @@ final class GenericTypeReceiverDispatchProcessTests: XCTestCase {
         }
     }
 
-    /// The two spellings whose witness the engine cannot NAME must still say so out loud. An `init`
-    /// requirement resolves to overloaded conformer initializers the CHA cannot pin, and a
-    /// function-typed requirement is INVOKED rather than dispatched — both are `Unknown`, never silence.
+    /// A spelling whose witness the engine cannot NAME must still say so out loud. A function-typed
+    /// requirement is INVOKED rather than dispatched — the CHA resolves the conformer's ACCESSOR unit
+    /// (`static let maker = sink`, real and PURE), so the dispatch alone would certify purity over a
+    /// closure that reaches the network. `Unknown`, never silence.
     /// **A row that is absent and a row that is pure are the same claim**, so both halves are asserted:
     /// present in `functions[]` AND carrying the disclosure.
+    ///
+    /// ⚠ `ctorFnLevel` WAS IN THIS LIST AND IS NOT ANY MORE, and the reason is a fix, not a
+    /// concession — SOUNDNESS R572. This arm's own doc said an `init` requirement "resolves to
+    /// overloaded conformer initializers the CHA cannot pin", and that was a statement about a DEFECT,
+    /// not a property of the language: `EffPrim` declares `init()` beside `init(sink:)`, so
+    /// `EffPrim.init` is an overloaded base whose quals carry a signature suffix, and the bare
+    /// `resolveQual("EffPrim.init")` the per-conformer CHA used could not name either. R572 routes that
+    /// lookup through `memberTargets`, the witness is pinned to `EffPrim.init(Int)` by the call's
+    /// argument shape, and the row now reads `[Net]` — the effect it actually performs — with no
+    /// `Unknown` left to disclose, because nothing is unresolved. It moved to the arm below.
     func testAnUnnameableWitnessDisclosesRatherThanVanishing() throws {
         let (by, root) = try scan(["solo": Self.soloSource])
-        for fn in ["ctorFnLevel", "staticVarFnLevel"] {
+        for fn in ["staticVarFnLevel"] {
             XCTAssertNotNil(by[fn], "\(fn) must not be ABSENT — under ⟨0.21⟩ that is a claim of purity")
             XCTAssertTrue(eff(by, fn).contains("Unknown"), "\(fn) must disclose; got \(eff(by, fn))")
             XCTAssertEqual(try gate(root, "deny Net Unknown \(fn)"), 1,
                            "`deny Net Unknown \(fn)` must catch the disclosed dispatch")
         }
+    }
+
+    /// SOUNDNESS R572 — THE INITIALIZER REQUIREMENT IS NOW NAMEABLE, and the assertion is the stronger
+    /// one: not "it discloses" but "it names the witness and charges what that witness does". The
+    /// fixture COMPILES AND RUNS and `EffPrim.init(sink:)` reaches `URLSession` (§E3), so `[Net]` is
+    /// ground truth and `deny Net ctorFnLevel` must be red on the effect itself rather than on an
+    /// `Unknown` standing in for it.
+    func testAnOverloadedInitializerRequirementResolvesToItsWitness() throws {
+        let (by, root) = try scan(["solo": Self.soloSource])
+        XCTAssertNotNil(by["ctorFnLevel"], "ctorFnLevel must not be ABSENT")
+        XCTAssertEqual(eff(by, "ctorFnLevel"), ["Net"],
+                       "P(sink: v) runs EffPrim.init(sink:), which reaches URLSession; got \(eff(by, "ctorFnLevel"))")
+        XCTAssertEqual(try gate(root, "deny Net ctorFnLevel"), 1, "`deny Net ctorFnLevel` must catch it")
+        XCTAssertTrue(Set(by["ctorFnLevel"]?["calls"] as? [String] ?? []).contains("EffPrim.init(Int)"),
+                      "the witness must be edged BY NAME; got "
+                      + "\(Set(by["ctorFnLevel"]?["calls"] as? [String] ?? []).sorted())")
     }
 
     /// ⟨0.39⟩ OBLIGATION 1 SURVIVES THE HEDGE, and this arm exists because the first cut of the fix

@@ -11,6 +11,72 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R572 — AN OVERLOADED CONFORMER MEMBER PLUS A PROTOCOL-EXTENSION DEFAULT DROPPED EVERY
+  CONFORMER'S EFFECTS SILENTLY: `inferred []`, `unresolved false`, and BOTH `pure <fn>` AND
+  `deny Net <fn>` EXIT 0 over a function that executes `URLSession.dataTask`. A CARDINAL SIN, live in
+  Alamofire.** The bounded CHA resolved each conformer's witness with a bare
+  `resolveQual("<conformer>.<member>")`. That is an EXACT-NAME lookup and an overloaded declaration's
+  qual carries a SIGNATURE SUFFIX (`Impl.two(Int)`), so it returned EMPTY for **every** conformer;
+  `resolvedCount` went to 0, and the `|| providedEdged` disjunct was TRUE — the protocol's extension
+  default HAD been matched, through the overload table, one loop above — so the union branch ran and
+  **unioned empty sets: no edge, and no `Unknown`.**
+
+  MEASURED on a fixture that `swift build`s and RUNS (§E3 — every arm reaches the sink and prints).
+  The 2×2 that isolates it, one variable per row:
+
+  | arm | member overloaded | extension default | before | `deny Net <fn>` |
+  |---|---|---|---|---|
+  | `Req.callTwoDefaulted` | **yes** | **yes** | **`[]`** | exit **0** |
+  | `Req.callOneDefaulted` | no  | yes | `[Net]`     | exit 1 |
+  | `Req.callOneBare`      | no  | no  | `[Net]`     | exit 1 |
+  | `Req.callTwoBare`      | yes | no  | `[Unknown]` | exit 1 |
+  | `Req2.callX` (the PROTOCOL's member overloaded, the conformer's not) | – | yes | `[Net]` | exit 1 |
+
+  **THE ARM THAT LOOKS BROKEN IS THE HEALTHY ONE**, which is why this survived: without a default the
+  same shape discloses `Unknown`, so the only silent cell is the one where Swift's commonest idiom —
+  a requirement with a default that most conformers override — meets an overload.
+
+  **AND THE COMMENT TWELVE LINES ABOVE IT SAID THE OPPOSITE WAS TRUE.** *"OVERLOADS RESOLVE HERE
+  EXACTLY AS THEY DO ON THE TYPED-CALL PATH"*, with a corpus A/B cited for it — true of the
+  extension-default half above, false of the conformer half beneath. §F1.3 (two implementations of one
+  question) and §K (a claim of correctness suppresses the measurement that would falsify it) in one
+  place; the 2×2 had never been written because that sentence said it was covered. Both halves now go
+  through one closure, `memberTargets`, and the comment names the failure instead of asserting the
+  property.
+
+  **THE BARE-NAME HIT IS UNIONED WITH THE OVERLOAD SET, NOT REPLACED BY IT.** The signature-suffixing
+  pass skips accessor units, so a base can be overloaded and still have real units carrying the bare
+  name — a DEFAULT-ARGUMENT EXPRESSION body is the common one (`Argument.init` beside
+  `Argument.init(Decoder)` …, 45 of them in swift-argument-parser). Substituting would have dropped
+  those bodies: measured, 10 corpus rows lost a call edge, and on the fixture `CallD.call` went from
+  `[Net]` to `[]` with `deny Net CallD.call` exit 0 — a fresh cardinal sin inside the fix for one. An
+  additive fix must not smuggle a removal in.
+
+  **CORPUS A/B — `bin/corpus-ab.py`, 7 real Swift packages** (alamofire, swift-nio, nio-http2, nio-ssl,
+  swift-algorithms, swift-async-algorithms, swift-argument-parser), 8,091 rows each arm, PRE = the
+  v0.39.2 build at `6d7fd06`, key `entry+package+fn+hash` over a multiset, value WIDE (every field):
+
+      ADDED 0    REMOVED 0    CHANGED 184    (inferred-only: 84)
+      REACH: 145 hits on the changed branch across 4 entries — alamofire 75, swift-nio 61,
+             swift-argument-parser 8, nio-http2 1
+
+  Audited in FULL, not sampled: **0 rows lost an effect, 0 rows lost a call edge**, 817 call edges
+  gained, 84 rows gained an effect. 16 rows lost a disclosure VALUE and every one either kept `Unknown`
+  in `inferred` or gained the concrete effect it stood for — `NIOClientTCPBootstrap.connect(String,Int)`
+  `['Unknown']` → `['Clock','Env','Net','Unknown']`, `FileSystemProtocol.openFile` → `+Fs` via
+  `FileSystem.openFile(…)`, `SocketOptionProvider.*` → `+Env` via `BaseSocketChannel.unsafe*SocketOption`,
+  Alamofire's `SessionDelegate.urlSession(…)` family → `+Net` via `CompositeEventMonitor`/
+  `ClosureEventMonitor`.
+
+  **THE OVER-CHARGE, NAMED RATHER THAN CLAIMED AWAY:** 49 of those 84 rows carry an undiscriminated
+  overload spread, because when a call's argument types are not recoverable `narrowByArgTypes` falls
+  back to the whole arity-compatible set (R537's never-zero rule, the same one the typed-call path has
+  always used). Most spreads are benign siblings of one operation; the clearest real over-charge is
+  Alamofire's `SessionDelegate.request(for:as:)`, which picks up 3 `Session.request(URLConvertible,…)`
+  overloads it cannot reach and so reads `[Net, Rand, Unknown]` over what is a dictionary lookup. Its
+  PRE value was `[]` — a silent certification of purity over a dispatch the engine could not resolve —
+  so the trade is an over-charge for a cardinal sin, in the one direction this family accepts.
+
 - **SOUNDNESS R563 — A GENERIC PARAMETER USED AS A *TYPE* RECEIVER OVER A LOCAL PROTOCOL LOST THE EFFECT
   ENTIRELY: FIVE SPELLINGS ABSENT FROM `functions[]`, `deny Net` EXIT 0 OVER A CONFORMER THAT REACHES
   `URLSession.dataTask`.** Every other protocol-dispatch path in this engine keys on a VALUE whose type
