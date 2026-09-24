@@ -2976,6 +2976,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // it tagged every function touching a stdlib method in a blind-importing file (rampant false
             // uncertainty, sweep [33]/[36]). The construction (`BlindClient()`) / free call into a blind lib is
             // the honest signal; a member-only blind receiver is covered by the scan-level κ-ledger.
+            if ProcessInfo.processInfo.environment["CANDOR_R548_PROBE"] != nil, !resolved {
+                let _pf = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                FileHandle.standardError.write(
+                    ("R548 fn=\(f.qual) leaf=\(call.leaf) unqual=\(call.unqualified) "
+                     + "extOwner=\(call.extOwner ?? "-") blind=\(blindModules(inFile: _pf).sorted()) "
+                     + "foreignOwner=\(foreignOwnerModule(inFile: _pf) ?? "-")\n").data(using: .utf8)!)
+            }
             if !resolved && call.unqualified {
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                 let blind = blindModules(inFile: file)
