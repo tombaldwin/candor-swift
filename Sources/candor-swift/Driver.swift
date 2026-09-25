@@ -2458,6 +2458,26 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // the per-fn `invisible` disclosure can name the blind modules in the fn's import scope. A call
             // that DOES resolve to a local unit is covered by transitive propagation of that unit's invisible.
             var resolved = false
+            /// SOUNDNESS R651 — **THE RECEIVER'S TYPE IS IN `localTypes` ONLY BECAUSE THIS PACKAGE
+            /// EXTENDS IT.** `CallCollector` sets `extOwner` on a TYPED call at exactly one site — the
+            /// typed-local-receiver branch, and only when `declaredTypes` does NOT hold the root — so
+            /// this marker IS the predicate, and no second copy of *"is this owner really ours?"* lives
+            /// here (§F1.3, the two-implementations-of-one-question rule).
+            ///
+            /// It unlocks the two arms below that ASK A DEPENDENCY — the ⟨0.39⟩ obligation-1 / CHA arm
+            /// and the §2 CANDOR_DEPS join — both of which were gated `!call.typed` and one of which is
+            /// additionally gated `!localTypes.contains(owner)`. Local resolution above keeps first
+            /// refusal untouched: these arms run only when it resolved NOTHING, so a member the
+            /// consumer's own extension really does provide still wins outright.
+            ///
+            /// FAILS TOWARD OVER-CHARGE, which is the safe direction here and is a change of direction
+            /// rather than of degree: the pre-fix behaviour was SILENCE (a ⟨0.21⟩ purity claim), and the
+            /// join it re-enables is the same one every unextended consumer of the same dependency
+            /// already gets — ONE hit across the file's covered imports or nothing (§2 rule 1), keyed
+            /// `<pkg>#<owner>.<leaf>` on a receiver type the source spells out. A wrong answer here is a
+            /// row with an effect too many, which a gate reads as a FAIL and a human then checks; the
+            /// behaviour it replaces was a gate that passed.
+            let r651Extended = call.typed && call.extOwner != nil
             // helper: edge to a resolved overload target (no callsiteArgs for sibling/init forms which don't
             // participate in callback-flow). For an overloaded base, matchOverloads returns 0 (drop), 1
             // (precise) or several (sound union) full quals.
@@ -2905,9 +2925,25 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // soundly, since every monomorphization must conform to P. An earlier version enforced the
             // distinction by withholding the receiver's TYPE, which took the dep join with it and made an
             // Fs-performing function read PURE.
-            if !resolved, !call.typed, !call.unqualified, !call.opaqueRecv, let owner = call.extOwner,
-               !localTypes.contains(owner), !STD_PURE_PROTOCOLS.contains(owner),
+            // SOUNDNESS R651 — `r651Extended` relaxes exactly two of these conjuncts, and only together:
+            // `!call.typed`, because the typed-local-receiver branch is where an extension-only owner is
+            // emitted; and `!localTypes.contains(owner)`, which asks *"is this type ours?"* and answers
+            // YES for a type this package merely extends. The fabrication carve-outs below
+            // (`STD_PURE_PROTOCOLS`, `RAW_VALUE_BASE_TYPES`) are NOT relaxed — they are what stops
+            // `extension String { … }` in a consumer publishing `Pkg#String.lowercased` and CHA-ing into
+            // every `enum Suit: String` in the package.
+            if !resolved, !call.typed || r651Extended, !call.unqualified, !call.opaqueRecv,
+               let owner = call.extOwner,
+               !localTypes.contains(owner) || r651Extended, !STD_PURE_PROTOCOLS.contains(owner),
                !RAW_VALUE_BASE_TYPES.contains(owner) {
+                // SOUNDNESS R651 REACH — the CHA/obligation-1 half, counted separately from the §2 join
+                // below because they move different fields (`inferred` via a local override vs
+                // `dispatchesOn`), and a diff keyed on effects alone cannot see the second.
+                if CallCollector.r651Probe, r651Extended {
+                    FileHandle.standardError.write(
+                        "R651CHA \(f.qual) -> \(owner).\(call.leaf) subs=\((subtypesOf[owner] ?? []).count)\n"
+                            .data(using: .utf8)!)
+                }
                 for sub in subtypesOf[owner] ?? [] {
                     edges[f.qual, default: []].formUnion(resolveQual("\(sub).\(call.leaf)"))
                 }
@@ -3089,7 +3125,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // hit across the file's covered imports joins — two candidates (or an index-ambiguous key) are
             // dropped, never picked from. A local resolution above is always authoritative (never guess
             // over project code), so this runs only when !resolved.
-            if !resolved, !deps.isEmpty, !call.typed {
+            // SOUNDNESS R651 — `!call.typed` was the conjunct an `extension Chan { }` in the consumer's
+            // own tree used to switch this whole join off. `r651Extended` re-admits exactly the calls
+            // whose receiver type this package only EXTENDS; the `!resolved` guard above it is unchanged,
+            // so a member the extension itself provides never reaches here.
+            if !resolved, !deps.isEmpty, !call.typed || r651Extended {
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                 var hits: [DepEntry] = []
                 // R565 — `m` was a MODULE and the key prefix is a PACKAGE. `mods` carries the modules
@@ -3117,6 +3157,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // inherit the dep fn's own honesty markers too, so the consumer's verdict stays
                     // qualified across the chain boundary (a benign literal HERE must not certify the
                     // dep's invisible runtime endpoint) — see applyDepEntry.
+                    // SOUNDNESS R651 REACH — the MARK IS THE JOIN THAT ANSWERED, not the branch that ran.
+                    // `R651HIT` counts every extension-only member call (a project with one
+                    // `extension String` produces thousands); this counts the ones where the dependency
+                    // actually had the answer, which is the only population the A/B can move.
+                    if CallCollector.r651Probe, r651Extended {
+                        FileHandle.standardError.write(
+                            "R651JOIN \(f.qual) -> \(call.extOwner ?? "?").\(call.leaf)\n".data(using: .utf8)!)
+                    }
                     applyDepEntry(de, to: f.qual)
                     resolved = true
                 }
@@ -3142,8 +3190,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 for m in fileImports[file] ?? [] where blind.contains(m) {
                     blindDirect[f.qual, default: []].insert(m)
                 }
-            } else if !resolved, let owner = call.extOwner,
+            } else if !resolved, !call.typed, let owner = call.extOwner,
                       blindModules(inFile: String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })).contains(owner) {
+                // SOUNDNESS R651 — `!call.typed` PINS THIS ARM'S POPULATION AND CHANGES NOTHING TODAY.
+                // Before R651 no typed call carried an `extOwner`, so this conjunct was implied; R651
+                // makes typed calls carry one and this arm is not a place that should follow. It fires on
+                // a receiver root that IS an imported blind MODULE name, and R651's owners are type names
+                // — the two coincide only where a project extends a type sharing a blind module's name,
+                // where the honest answer is the scan-level κ ledger's, not a per-fn `invisible`. Written
+                // as a guard rather than left implied because "no construction site sets that today" is
+                // exactly the kind of sentence that goes stale one commit later.
                 // ⟨0.15 staged⟩ a MODULE-QUALIFIED member call whose confidently-resolved receiver root IS
                 // a blind imported module (`SomeSDK.doThing()` — extOwner == the module name, in this file's
                 // import scope) demonstrably reaches that exact module. PRECISE, not file-granular — it names

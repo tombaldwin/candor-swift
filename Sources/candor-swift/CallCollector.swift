@@ -1645,6 +1645,14 @@ final class CallCollector: SyntaxVisitor {
     /// SOUNDNESS R610 §1b KILL SWITCH — stops the `opaqueHop` guess flag travelling into `vars`, i.e.
     /// restores the laundered binding, and the if-let arm of `ReceiverChainOwnerKeyProcessTests` reds.
     private static let r610Off = ProcessInfo.processInfo.environment["CANDOR_R610_OFF"] != nil
+    /// SOUNDNESS R651 §1b KILL SWITCH — stops the typed-local-receiver branch marking an EXTENSION-ONLY
+    /// owner, i.e. restores the silencing exactly, so `ExtensionOnDependencyTypeProcessTests` can be
+    /// SHOWN to fail rather than asserted to.
+    static let r651Off = ProcessInfo.processInfo.environment["CANDOR_R651_OFF"] != nil
+    /// SOUNDNESS R651 REACH PROBE — one stderr line per member call whose receiver type this package only
+    /// EXTENDS. "CHANGED 0 is not evidence until REACH is measured" (§E1): these are exactly the sites the
+    /// Driver's two R651 arms may now answer, so a corpus diff can be read against a hit count.
+    static let r651Probe = ProcessInfo.processInfo.environment["CANDOR_R651_PROBE"] != nil
     private static let r349Debug = ProcessInfo.processInfo.environment["CANDOR_R349_DEBUG"] != nil
 
     private func locatorNameIsStable(_ name: String, inert: Set<String>,
@@ -5362,7 +5370,48 @@ final class CallCollector: SyntaxVisitor {
                 // project's own `class Channel`/`HTTPClient` (common names) resolves to its real
                 // method instead of fabricating Net from the NIO tier (the GRDB `bind` lesson, for
                 // member calls). Under-report-don't-fabricate.
-                calls.append(Call(path: "\(rt).\(member)", leaf: member, strArg: lit, typed: true, args: argKinds(node), argTypes: argTypesOf(node)))
+                //
+                // SOUNDNESS R651 — **…BUT AN EXTENSION-ONLY OWNER IS NOT A LOCAL DECLARATION, AND `typed`
+                // IS WHAT SWITCHES THE §2 JOIN OFF.** `pushType` puts whatever an `extension` extends into
+                // `localTypes` and deliberately NOT into `declaredTypes`, so the `||` above lets this
+                // branch fire for a type whose REAL definition is in a dependency. The call then resolved
+                // locally, found no unit (the extension provides other members, not this one), and was
+                // DROPPED — and the Driver's cross-package join is gated `!call.typed`, so nothing was
+                // ever asked of the dependency. MEASURED, one variable (a sibling file existing at all;
+                // both arms compile, same call site, same dependency, same binary):
+                //
+                //     no sibling file          viaReceiver ['Env']   deny Env exit 1
+                //     + `extension Chan { }`   viaReceiver ABSENT    deny Env exit 0   ← the sin
+                //
+                // The row leaves `functions[]` entirely, so under ⟨0.21⟩ its absence is a positive claim
+                // of purity — and EVERY spelling fires, the empty extension included, which is why this
+                // cannot key on what the extension contains.
+                //
+                // THE MARK, NOT A NEW RESOLVER: `extOwner` already means "the resolved receiver root,
+                // carried ONLY for the §2 join key, never consulted by local resolution", so local
+                // resolution keeps first refusal exactly as before and the two Driver arms that ask a
+                // dependency get an owner to ask WITH. Carried ONLY when the owner is extension-only:
+                // for a genuinely DECLARED local type the shadow is the point (the GRDB `bind` lesson)
+                // and a same-named dependency type must not be reached for.
+                // AND R567(a)'s GUARD APPLIES HERE UNCHANGED — found by auditing this fix's OWN added
+                // rows, which is the only reason it is not shipping. `rootOf` KEEPS the outer base's type
+                // when a `.member` hop is unexplained, because the κ static-chain idiom rides on that
+                // convention; `opaqueHop` is the flag that says so, answered ONCE there rather than
+                // re-derived per consumer. This arm asks "what TYPE is this receiver", which is exactly
+                // the question that flag exists to qualify. Without it, vapor's
+                // `Request.Authentication.logout` — whose body is `self.storage.withLock { … }`, and
+                // whose `storage` is a hop this engine cannot type — published
+                // `swift-http-types#Request.Authentication.withLock`: a key naming a member the owner
+                // does not declare, in a package that owns neither. That is R532b's class and R567(a)'s
+                // shape at a NEW site, i.e. this fix creating the next defect, which is the measured rate
+                // for fabrication-adjacent fixes in this family.
+                let r651ForeignExtended = !Self.r651Off && !declaredTypes.contains(rt) && !base.opaqueHop
+                if Self.r651Probe, r651ForeignExtended {
+                    FileHandle.standardError.write("R651HIT \(rt).\(member)\n".data(using: .utf8)!)
+                }
+                calls.append(Call(path: "\(rt).\(member)", leaf: member, strArg: lit, typed: true,
+                                  args: argKinds(node), argTypes: argTypesOf(node),
+                                  extOwner: r651ForeignExtended ? rt : nil))
                 // SOUNDNESS R429 — …AND ONE EDGE PER REMAINING ARM. `rt` is the dealiased root, and
                 // `dealias` reads a map the Driver merges LAST-WRITER-WINS, so a `#if`/`#else` pair
                 // declaring one alias over two types resolved to whichever arm was written last and

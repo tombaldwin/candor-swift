@@ -11,6 +11,72 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R656 — A CONSUMER THAT WROTE AN `extension` ON A DEPENDENCY TYPE SILENCED EVERY MEMBER
+  CALL ON THAT TYPE.** `pushType` puts whatever an `extension` extends into `localTypes` (so the
+  extension's own members resolve) and deliberately NOT into `declaredTypes` (an extension does not
+  redefine the type). `CallCollector`'s typed-local-receiver branch then fired on `localTypes`
+  membership alone for any member κ does not know, emitting `typed: true` — and `typed` is the exact
+  conjunct the Driver's §2 CANDOR_DEPS join is gated on. So the call resolved LOCALLY, found no unit,
+  and was DROPPED with nothing asked of the dependency.
+
+  MEASURED, one variable — the presence of a sibling file; both arms compile, same call site, same
+  dependency, same binary, same policy:
+
+      no sibling file          viaReceiver -> ['Env']   deny Env exit 1
+      + `extension Chan { }`   viaReceiver ABSENT       deny Env exit 0     ← the cardinal sin
+
+  **The failure is TOTAL rather than partial**: with no effect left, the function leaves `functions[]`
+  entirely, and under ⟨0.21⟩ its absence from an `analyzed` scan is a positive claim of purity. The
+  trigger is a consumer adding code to its OWN tree, which deletes a disclosure about a dependency.
+  EVERY spelling fires — a method, a computed property, a `static let`, a nested type, a `typealias`,
+  `private`/`fileprivate`, same file or sibling file, and an EMPTY `extension Chan { }` — so the fix
+  cannot key on what the extension contains.
+
+  The fix marks the receiver root as the call's `extOwner` when, and only when, `declaredTypes` does
+  not hold it AND `rootOf` did not reach that root through an unexplained hop (R567(a)'s `opaqueHop`),
+  and re-admits exactly those calls to the two Driver arms that ASK a dependency (the §2 join and the
+  ⟨0.39⟩ obligation-1 / CHA arm). Local resolution keeps first refusal untouched — both arms run only
+  when it resolved nothing — so a member the consumer's own extension really does provide still wins
+  outright, and a genuinely DECLARED local type still shadows a same-named dependency type entirely
+  (the GRDB `bind` discipline).
+
+  **The `opaqueHop` conjunct was found by auditing this fix's own ADDED rows, not by reasoning.**
+  Without it, vapor's `Request.Authentication.logout` — body `self.storage.withLock { … }`, whose
+  `storage` is a hop this engine cannot type — published
+  `swift-http-types#Request.Authentication.withLock`, a key naming a member the owner does not
+  declare in a package that owns neither: R532b's class and R567(a)'s shape at a new site. Re-measured
+  with the guard, it costs 33 of the 203 added rows and 2 of 723 `R651JOIN` hits, and **every one of
+  the 33 carried NO effect** — the effect-bearing populations are byte-identical either way.
+
+  LIVE IN SHIPPED LIBRARIES. `swift-nio-transport-services` writes `extension SocketAddress` (swift-nio's
+  type) in `SocketAddress+NWEndpoint.swift`, and `NIOTSListenerBootstrap.bind(host:port:)` calls
+  `SocketAddress.makeAddressResolvingHost(host, port:)`, whose swift-nio entry is `['Net','Unknown']`
+  with `netClass: ['unknown-host']`. `deny Net NIOTSListenerBootstrap` went **exit 0 → exit 1** on that
+  tree, one variable. `RediStack`'s `extension ChannelPipeline` is the same shape: `deny Env
+  ChannelPipeline` **exit 0 → exit 1**.
+
+  A/B, `bin/corpus-ab.py`, 16 real chained SwiftPM packages (swift-nio-extras, swift-nio-http2,
+  swift-nio-ssl, vapor, async-http-client, postgres-nio, fluent-kit, jwt-kit, RediStack, websocket-kit,
+  console-kit, swift-certificates, swift-nio-transport-services, swift-openapi-runtime,
+  swift-algorithms, swift-async-algorithms), 16,261 analysed units, ONE binary with
+  `CANDOR_R651_OFF=1` as the PRE arm:
+
+      ADDED 170   REMOVED 0   CHANGED 1354 (wide) / 92 (inferred)      rows 9,903 -> 10,073
+
+  **REMOVED 0, and across all 1,354 changed rows ZERO lost any effect** — every `inferred` move is a
+  GAIN (Env 62, Unknown 26, Net 4 on changed rows; Env 11 on added rows). Of the 170 added rows, 123
+  are real source functions returning to the report and 47 are downstream ⟨0.39⟩ obligation-2 union
+  entries that stop being empty because their conformers' methods regained real effects. REACH on the
+  post arm (`CANDOR_R651_PROBE=1`): 721 `R651JOIN` (the dependency actually answered) across 11
+  entries, 1,049 `R651CHA` across 15, 3,161 `R651HIT` (branch reach) across 16.
+
+  Gate flips: four BLANKET policies over all 16 packages is 64 runs and 0 flips — these libraries
+  already trip every blanket gate in both arms, so that instrument is SATURATED and its zero says
+  nothing. The two scoped flips above are the real measure.
+
+  §1b: `CANDOR_R651_OFF=1` restores the silencing exactly — the two defect rows in
+  `ExtensionOnDependencyTypeProcessTests` go RED under it and the six controls pass in both arms.
+
 - **SOUNDNESS R649 — `depShadows` READ KEY EXISTENCE AS A DECLARATION, AND `pkg#<leaf>` IS MINTED FOR
   EVERY ENTRY, A METHOD'S LEAF INCLUDED.** The CANDOR_DEPS index publishes three key shapes per entry —
   `pkg#leaf`, `pkg#tail2`, `pkg#<full qual>` — as spellings a JOIN can ask on. A join reads the entry's
