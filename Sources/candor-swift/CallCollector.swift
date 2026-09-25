@@ -745,7 +745,7 @@ final class CallCollector: SyntaxVisitor {
     /// `monoNames`. It travels WITH the resolution rather than being re-derived at the call site,
     /// because the same receiver spelling can resolve through vars, a field, or a subscript element,
     /// and only the resolving branch knows which one answered.
-    private func rootOf(_ raw: ExprSyntax, _ depth: Int = 0) -> (root: String?, isVar: Bool, path: [String], mono: Bool) {
+    private func rootOf(_ raw: ExprSyntax, _ depth: Int = 0) -> (root: String?, isVar: Bool, path: [String], mono: Bool, opaqueHop: Bool) {
         // R97 — THE SINGLE PLACE A RESOLVED TYPE NAME IS DEALIASED. `dealias` used to be spelled by each
         // arm that felt like it: of the 23 sites that bind a name to a type, exactly ONE called it, and
         // the other 22 lost `typealias FM = FileManager` outright — thirteen binder spellings certifying
@@ -767,18 +767,37 @@ final class CallCollector: SyntaxVisitor {
         // Anything added later that reads a type map directly needs its own `dealias` or its own row.
         // `superMarker` is not a type spelling and cannot collide (`dealias` is a `typeAliases` lookup,
         // and no `typealias` can be named it).
+        //
+        // ── `opaqueHop` (SOUNDNESS R567) — "THE ROOT IS THE OUTER BASE, NOT THE RECEIVER'S TYPE" ──
+        //
+        // The MemberAccess arm below ends in a FALLBACK that keeps `inner.root` when the hop it just
+        // walked is not a known field, element accessor or tuple member. That fallback is load-bearing
+        // and stays: the entire κ static-chain idiom rides on it (`FileManager.default.removeItem`,
+        // `URLSession.shared.dataTask`, `ProcessInfo.processInfo.environment`), where the convention
+        // that `Type.singleton` has type `Type` makes the surviving root the right answer.
+        //
+        // It is a CONVENTION, not a resolution, and every consumer that asks "what type is this
+        // receiver" rather than "which κ chain is this" needs to know which of the two it got. This flag
+        // is that distinction, answered ONCE here instead of re-derived per consumer — the R97 rule that
+        // made `dealias` one authority, for the same reason: 22 sites that each decide separately is how
+        // 13 binder spellings came to disagree.
+        //
+        // TRUE COMPOSES FORWARD. A field walk, an element accessor or a `type(of:)` resolved ON a guessed
+        // root is itself a guess, so those arms INHERIT rather than clear it; a ternary takes the
+        // disjunction (either arm being a guess makes the join one). Only a binding this collector really
+        // recorded — a param, a local, a field of a known type, a global, a ctor, a cast — yields false.
         let r = rootOfUnaliased(raw, depth)
         guard let root = r.root else { return r }
-        return (dealias(root), r.isVar, r.path, r.mono)
+        return (dealias(root), r.isVar, r.path, r.mono, r.opaqueHop)
     }
 
-    private func rootOfUnaliased(_ raw: ExprSyntax, _ depth: Int = 0) -> (root: String?, isVar: Bool, path: [String], mono: Bool) {
+    private func rootOfUnaliased(_ raw: ExprSyntax, _ depth: Int = 0) -> (root: String?, isVar: Bool, path: [String], mono: Bool, opaqueHop: Bool) {
         // Receiver chains recurse with the syntactic nesting (`a.b.c…`, ternary arms, subscript bases —
         // the last via elementTypeOf/dictValueOf, which call back here). Real receivers nest <10 deep;
         // a pathological/generated expression could otherwise overflow the stack. Past a generous bound,
         // give up resolving the type (root = nil = untyped receiver) — the SAFE direction (the call may
         // under-report, never a crash), exactly what an unresolvable receiver already yields.
-        if depth > 200 { return (nil, false, [], false) }
+        if depth > 200 { return (nil, false, [], false, false) }
         let expr = Self.peel(raw)
         // `super.m()` — an explicit call to the SUPERCLASS's implementation. It is not a DeclReference, so it
         // fell through this resolver entirely and the call was dropped: `override func load() { super.load() }`
@@ -786,19 +805,19 @@ final class CallCollector: SyntaxVisitor {
         // effect two lines up. Resolving it to the ENCLOSING type would be wrong for the override case (the
         // edge would point at the overriding method itself and add nothing), so mark it and let the driver
         // walk the supertype chain, skipping the enclosing type.
-        if expr.is(SuperExprSyntax.self) { return (Self.superMarker, true, [], false) }
+        if expr.is(SuperExprSyntax.self) { return (Self.superMarker, true, [], false, false) }
         if let dr = expr.as(DeclReferenceExprSyntax.self) {
             let n = dr.baseName.text
             // `self` (instance) and `Self` (the enclosing TYPE, used for `Self.staticMethod()`) both resolve
             // to the enclosing type for member resolution — so `Self.decode(…)` is a precise typed call on the
             // type, not a guessed bare member that would either drop or mis-link to a same-named sibling.
-            if n == "self" || n == "Self" { return (enclosingType, true, [], false) }
-            if let t = vars[n] { return (t, true, [n], monoNames.contains(n)) }
+            if n == "self" || n == "Self" { return (enclosingType, true, [], false, false) }
+            if let t = vars[n] { return (t, true, [n], monoNames.contains(n), false) }
             // IMPLICIT SELF: a bare identifier inside a method body can be a FIELD of the
             // enclosing type (`handler.log(s)` ≡ `self.handler.log(s)`) — the protocol-field probe
             // found dispatchers resolving as raw names and missing the field index entirely.
             if let et = enclosingType, let f = fields[et]?[n], let ft = f.name {
-                return (ft, true, [n], opaqueFields[et]?.contains(n) == true)
+                return (ft, true, [n], opaqueFields[et]?.contains(n) == true, false)
             }
             // R73 — a MODULE-SCOPE GLOBAL `let`/`var` receiver (`worker.doWork()` where `let worker =
             // Worker()` sits at file scope). Checked after locals/params and implicit-self fields, which
@@ -812,7 +831,7 @@ final class CallCollector: SyntaxVisitor {
             // and the global itself has no effects. That produced `invoke -> ["worker"]` with `worker`
             // a dead end and `Worker.doWork` disconnected: the caller's effects collapsed to empty and it
             // vanished from `functions[]` outright (SOUNDNESS.md R73).
-            if let t = globalTypes[n] { return (t, true, [n], false) }
+            if let t = globalTypes[n] { return (t, true, [n], false, false) }
             // SOUNDNESS R584 — A TYPE-PARAMETER OR METATYPE-PARAMETER SPELLING DENOTES THE LOCAL CLASS IT
             // IS BOUND TO. `P.make()` inside `f<P: EffBase>` / `struct Box<P: EffBase>`, and `t.make()`
             // for `_ t: P.Type` or `_ t: CBase.Type`. Answered HERE, at the one authority for "what type
@@ -835,20 +854,20 @@ final class CallCollector: SyntaxVisitor {
                 if Self.r584Probe {
                     FileHandle.standardError.write("R584HIT \(n) -> \(bound)\n".data(using: .utf8)!)
                 }
-                return (bound, false, [n], false)
+                return (bound, false, [n], false, false)
             }
             // a bare TYPE/alias reference (`FM.default`, the base of a static-member chain). The
             // typealias resolution that used to be spelled HERE is now the wrapper's job — R97: this arm
             // having it, and the other arms not, is exactly how the bug was shaped.
-            return (n, false, [n], false)
+            return (n, false, [n], false, false)
         }
         if let ma = expr.as(MemberAccessExprSyntax.self) {
             // tuple element/member: `p.0` / `p.c` where p is a tuple-typed local/param
             if let baseDR = ma.base?.as(DeclReferenceExprSyntax.self),
                let elemType = tupleElem[baseDR.baseName.text]?[ma.declName.baseName.text] {
-                return (elemType, true, [], false)
+                return (elemType, true, [], false, false)
             }
-            let inner = ma.base.map { rootOf($0, depth + 1) } ?? (root: nil, isVar: false, path: [], mono: false)
+            let inner = ma.base.map { rootOf($0, depth + 1) } ?? (root: nil, isVar: false, path: [], mono: false, opaqueHop: false)
             let member = ma.declName.baseName.text
             // WALK THROUGH A FIELD: if the chain so far is a local type with `member` as a stored
             // field, the chain's type becomes the FIELD's type — so `self.client.send()` /
@@ -856,7 +875,7 @@ final class CallCollector: SyntaxVisitor {
             // (explicit `self.field.method()` and field-of-field chains otherwise resolved against the
             // wrong type and dropped to pure — the bare-identifier implicit-self path already did this).
             if let rt = inner.root, let f = fields[rt]?[member], let ft = f.name, !f.isFunction {
-                return (ft, true, inner.path + [member], opaqueFields[rt]?.contains(member) == true)
+                return (ft, true, inner.path + [member], opaqueFields[rt]?.contains(member) == true, inner.opaqueHop)
             }
             // SOUNDNESS R537 — AN ELEMENT ACCESSOR IS A TYPED RECEIVER: `hs.first?.emitN()`,
             // `hs.last?`, `d.values.first?`, `hs.dropFirst().first?`. The subscript arm below has
@@ -873,7 +892,7 @@ final class CallCollector: SyntaxVisitor {
             // reaches here, and it answers only when the RECEIVER is a recorded container, so this
             // can add a type and never replace a known one.
             if let e = elementAccessorType(ExprSyntax(ma), depth) {
-                return (e.name, true, [], e.mono)
+                return (e.name, true, [], e.mono, inner.opaqueHop)
             }
             // SOUNDNESS R537 — A DICTIONARY PAIR'S `.value`: `d.first?.value.emitN()`,
             // `d.popFirst()?.value`. A `[K: V]`'s ELEMENT is a `(key, value)` tuple, which has no type
@@ -884,9 +903,9 @@ final class CallCollector: SyntaxVisitor {
             // discovered.
             if member == "value", let container = Self.elementAccessorContainer(ma.base),
                let v = dictValueOf(container, depth + 1) {
-                return (v, true, [], false)
+                return (v, true, [], false, inner.opaqueHop)
             }
-            return (inner.root, inner.isVar, inner.path + [member], inner.mono)
+            return (inner.root, inner.isVar, inner.path + [member], inner.mono, true)
         }
         if let call = expr.as(FunctionCallExprSyntax.self) {
             // `Svc().act()` — a constructor call types the chain; a FACTORY's unambiguous return
@@ -918,14 +937,14 @@ final class CallCollector: SyntaxVisitor {
                 if Self.r584Probe {
                     FileHandle.standardError.write("R584HIT type(of:) -> \(bound)\n".data(using: .utf8)!)
                 }
-                return (bound, false, inner.path, inner.mono)
+                return (bound, false, inner.path, inner.mono, inner.opaqueHop)
             }
             if let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self) {
                 let n = ctor.baseName.text
                 // `Proc()` where `typealias Proc = Process` — the ctor types the value as the aliased
                 // type so its members classify (`p.run()`→Exec). Dealiased by the wrapper (R97).
-                if n.first?.isUppercase == true { return (n, true, [n], false) }
-                if let rt = returns[n] { return (rt, true, [n], false) }
+                if n.first?.isUppercase == true { return (n, true, [n], false, false) }
+                if let rt = returns[n] { return (rt, true, [n], false, false) }
             }
             // `AVAudioSession.sharedInstance()` — a SINGLETON FACTORY METHOD on a type, returning an
             // instance of that type by convention. `SINGLETON_ACCESSORS` already covers the PROPERTY
@@ -940,7 +959,7 @@ final class CallCollector: SyntaxVisitor {
                fb.baseName.text.first?.isUppercase == true,
                SINGLETON_FACTORY_METHODS.contains(fm.declName.baseName.text),
                returns[fm.declName.baseName.text] == nil {
-                return (dealias(fb.baseName.text), true, [fb.baseName.text], false)
+                return (dealias(fb.baseName.text), true, [fb.baseName.text], false, false)
             }
             // `Outer.Inner()` — a NESTED-TYPE constructor: the callee is a member-access spelling a dotted
             // TYPE path (`Outer.Inner`), not a factory member. When that dotted path is a known local type,
@@ -948,7 +967,7 @@ final class CallCollector: SyntaxVisitor {
             // BEFORE the factory-return path so a nested ctor isn't mistaken for a `.member`-named factory.
             if let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
                let dotted = dottedTypePath(Syntax(ma)), localTypes.contains(dealias(dotted)) {
-                return (dealias(dotted), true, [ma.declName.baseName.text], false)
+                return (dealias(dotted), true, [ma.declName.baseName.text], false, false)
             }
             // `Foundation.Process()` — a MODULE-QUALIFIED constructor. The qualifier is a SPELLING of the
             // bare name, so the value carries the same type the bare `Process()` gives it. Without this
@@ -959,11 +978,11 @@ final class CallCollector: SyntaxVisitor {
                let mod = ma.base?.as(DeclReferenceExprSyntax.self)?.baseName.text, isModuleQualifier(mod),
                ma.declName.baseName.text.first?.isUppercase == true {
                 let n = ma.declName.baseName.text
-                return (dealias(n), true, [n], false)
+                return (dealias(n), true, [n], false, false)
             }
             if let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
                let rt = returns[ma.declName.baseName.text] {
-                return (rt, true, [ma.declName.baseName.text], false)
+                return (rt, true, [ma.declName.baseName.text], false, false)
             }
             // SOUNDNESS R537 — the CALL-SHAPED element accessors: `v.popLast()?.emitN()`,
             // `v.removeFirst().emitN()`, `hs.randomElement()?`, `hs.first(where:)?`, `hs.min(by:)?`.
@@ -973,18 +992,18 @@ final class CallCollector: SyntaxVisitor {
             // reason `callableValue`'s twin of this arm already gives: the answer comes from the
             // RECEIVER's recorded element type, not from the callee's signature.
             if let e = elementAccessorType(expr, depth) {
-                return (e.name, true, [], e.mono)
+                return (e.name, true, [], e.mono, false)
             }
-            return (nil, false, [], false)
+            return (nil, false, [], false, false)
         }
         // `coll[i]` — an array subscript yields the element type, a dictionary subscript the value
         // type (`cs[0].send()` / `d["k"]?.send()` resolved against the bare base and dropped to pure).
         if let sub = expr.as(SubscriptCallExprSyntax.self) {
             if let e = elementTypeOf(sub.calledExpression, depth + 1) {
-                return (e.name, true, [], e.mono)
+                return (e.name, true, [], e.mono, false)
             }
             if let v = dictValueOf(sub.calledExpression, depth + 1) {
-                return (v, true, [], false)   // a `[K: V]` VALUE is never bound-resolved (see dictValueOf)
+                return (v, true, [], false, false)   // a `[K: V]` VALUE is never bound-resolved (see dictValueOf)
             }
         }
         // SwiftParser leaves operators UNFOLDED, so `x as! T` and `cond ? a : b` are SequenceExprs:
@@ -993,7 +1012,7 @@ final class CallCollector: SyntaxVisitor {
             // `x as! T` / `x as? T` → `[operand, unresolvedAsExpr, typeExpr]`: the type is the result.
             if elems.count == 3, elems[1].is(UnresolvedAsExprSyntax.self),
                let te = elems[2].as(TypeExprSyntax.self), let t = typeName(te.type).name {
-                return (t, true, [], isOpaqueParam(te.type))
+                return (t, true, [], isOpaqueParam(te.type), false)
             }
             // `cond ? a : b` → `[cond, unresolvedTernaryExpr(then), elseExpr]`: both arms one type.
             //
@@ -1015,11 +1034,11 @@ final class CallCollector: SyntaxVisitor {
                 // fixtures are. The probe is not shipped: `rootOf` is the hot path, and an env read
                 // here charged Env+Fs to 26 of candor's OWN functions in its self-scan.
                 if let ra = a.root, ra == b.root, a.isVar, b.isVar {
-                    return (ra, true, [], a.mono && b.mono)
+                    return (ra, true, [], a.mono && b.mono, a.opaqueHop || b.opaqueHop)
                 }
             }
         }
-        return (nil, false, [], false)
+        return (nil, false, [], false, false)
     }
 
     /// The Foundation file-write idiom `value.write(to: url)` — `Data.write(to:)` and
@@ -1443,6 +1462,14 @@ final class CallCollector: SyntaxVisitor {
     /// the calibration does not need a revert to reproduce and cannot rot into a test that passes either
     /// way — the failure mode §A measured four times in one day.
     private static let r584Off = ProcessInfo.processInfo.environment["CANDOR_R584_OFF"] != nil
+    /// SOUNDNESS R567(a) REACH PROBE — "CHANGED 0 is not evidence until REACH is measured" (R418's
+    /// lesson: 17,944 units said "inert" and the probe said the code never ran). One stderr line per
+    /// receiver chain whose last hop this engine could not type and which WOULD have become a §2 owner.
+    static let r567aProbe = ProcessInfo.processInfo.environment["CANDOR_R567A_PROBE"] != nil
+    /// SOUNDNESS R567(a) §1b KILL SWITCH — restores the pre-fix owner, i.e. the OUTER BASE's type for a
+    /// member-chain receiver. `R567CalibrationTests` asserts the wrong-member join is gone; running the
+    /// suite with `CANDOR_R567A_OFF=1` is what proves those assertions can FAIL.
+    private static let r567aOff = ProcessInfo.processInfo.environment["CANDOR_R567A_OFF"] != nil
     private static let r349Debug = ProcessInfo.processInfo.environment["CANDOR_R349_DEBUG"] != nil
 
     private func locatorNameIsStable(_ name: String, inert: Set<String>,
@@ -4884,7 +4911,7 @@ final class CallCollector: SyntaxVisitor {
             }
         } else if let ma = node.calledExpression.as(MemberAccessExprSyntax.self) {
             let member = ma.declName.baseName.text
-            let base = ma.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [], mono: false)
+            let base = ma.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [], mono: false, opaqueHop: false)
             // R429 — the WRITTEN receiver name, before `dealias` collapses a `#if`-duplicated
             // alias to whichever arm happened to be recorded last.
             let rawBaseRoot = ma.base.flatMap { rootOfUnaliased($0).root }
@@ -5354,8 +5381,62 @@ final class CallCollector: SyntaxVisitor {
                 // identifier that is just the receiver's own name) could only ever join by accident —
                 // dep quals lead with a type name — but keep the owner honest: only a tracked value
                 // (isVar) or a type-looking root qualifies.
-                let owner = base.root.flatMap { r in (base.isVar || r.first?.isUppercase == true) ? r : nil }
+                //
+                // SOUNDNESS R567(a) — AND A CHAIN THAT WALKED THROUGH A MEMBER THIS ENGINE COULD NOT TYPE
+                // HAS NO CONFIDENTLY-RESOLVED ROOT AT ALL. `rootOf` deliberately KEEPS the outer base's
+                // type when a `.member` hop is unexplained, because that is what the κ classifier reads
+                // (`FileManager.default.removeItem`, `ProcessInfo.processInfo.environment` — the whole
+                // static-chain idiom lives on that fallback, and κ has already had its turn above). What
+                // it is NOT is an answer to "what TYPE is this receiver", and this arm asks exactly that:
+                // for `channel.embeddedEventLoop.run()` it produced `swift-nio#EmbeddedChannel.run` — a
+                // member the OUTER BASE does not have. 13 of the 18 sites of the R533 measurement.
+                //
+                // MEASURED, one variable (the dependency's own source; same consumer text, same binary):
+                //
+                //     dep: Loop.spin -> Env,  Channel.spin -> Fs,  consumer `c.loop.spin()`
+                //       HEAD   inferred ['Fs']    deny Env exit 0    deny Fs exit 1
+                //       truth  inferred ['Env']
+                //
+                // So it is not merely an unjoinable key. When the outer base HAPPENS to declare the same
+                // leaf the join lands on the WRONG MEMBER, and the row is a fabrication and a silent
+                // under-report at once, in opposite directions: `deny Env` exits 0 over code that reads
+                // the environment, `deny Fs` exits 1 over code that opens no file.
+                //
+                // DROP, never guess — §2 rule 1, the same posture `dependencyModulePackages` takes for an
+                // ambiguous module and `localProtocolWirePath` takes for an ambiguous leaf. A key formed
+                // from a type the receiver is not is a decision, and refusing to decide must not be
+                // spelled as one.
+                //
+                // THE SIGNAL COMES FROM `rootOf` ITSELF (`opaqueHop`), not from re-inspecting the syntax
+                // here: that resolver is the one authority on what a spelling denotes (R97's rule), and a
+                // second copy of "did this hop resolve" is how two sites come to disagree (§F1.3).
+                //
+                // AND DROPPING ALONE IS NOT THE FIX — it trades a WRONG answer for SILENCE, which under
+                // ⟨0.21⟩ is still a positive claim of purity (measured: with the key dropped and nothing
+                // else, `chainWrong` leaves `functions[]` entirely and `deny Env` still exits 0). So the
+                // site emits the COULD-NOT-FORM-A-KEY marker the sibling arm below already uses, and
+                // lands on the SAME Driver disclosure with the SAME `unknownWhy` token — no second
+                // mechanism and no new wire vocabulary for what is the same fact one cause over: the
+                // receiver's type was not determined, so this engine did not ask.
+                let opaqueChain = !Self.r567aOff && base.opaqueHop
+                if Self.r567aProbe, base.opaqueHop, let r = base.root,
+                   base.isVar || r.first?.isUppercase == true {
+                    FileHandle.standardError.write("R567AHIT \(r).\(member)\n".data(using: .utf8)!)
+                }
+                let ownerPreR567 = base.root.flatMap { r in
+                    (base.isVar || r.first?.isUppercase == true) ? r : nil
+                }
+                let owner = opaqueChain ? nil : ownerPreR567
                 calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), opaqueRecv: base.mono, extOwner: owner))
+                // R567(a) — the disclosure, bounded to the sites that PREVIOUSLY formed a key. A chain
+                // whose root never qualified as an owner asked the index nothing before this change and
+                // must keep asking nothing: widening the disclosure to every opaque hop would charge
+                // Unknown for receivers the §2 join was never going to reach, which is false uncertainty
+                // rather than a recovered one (the sweep-[33]/[36] direction).
+                if opaqueChain, ownerPreR567 != nil {
+                    calls.append(Call(path: "<untyped>.\(member)", leaf: member, strArg: nil,
+                                      typed: false, args: [], argTypes: [], extOwner: nil))
+                }
                 // COULD-NOT-FORM-A-KEY: the receiver is a local bound from a dependency call we could not
                 // type, and nothing above resolved it. Emit a marker the Driver consumes into an honest
                 // `Unknown`; it resolves to NOTHING by design — it exists to say no key was formed, not to
@@ -5517,7 +5598,7 @@ final class CallCollector: SyntaxVisitor {
             // `let general: NSPasteboard`) would fabricate the effect (`self.now` → root "Date", path
             // ["now"] → a bogus Clock). The receiver-rooted path matches the genuine reads
             // (`ProcessInfo.processInfo.environment`, `Date.now`, `self.w.pinfo.environment`) without it.
-            let recv = node.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [], mono: false)
+            let recv = node.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [], mono: false, opaqueHop: false)
             var kappaClassified = false
             if let root = recv.root, !declaredTypes.contains(root),
                // a REAL local type named like a platform clock/env owner (`struct ContinuousClock { let now }`)
@@ -5726,7 +5807,7 @@ final class CallCollector: SyntaxVisitor {
             guard let op = elems[i + 1].as(BinaryOperatorExprSyntax.self) else { i += 1; continue }
             let opName = op.operator.text
             // resolve a local operand type from either side (the lhs first, then rhs)
-            let lt = rootOf(elems[i]), rt = i + 2 < elems.count ? rootOf(elems[i + 2]) : (root: nil, isVar: false, path: [], mono: false)
+            let lt = rootOf(elems[i]), rt = i + 2 < elems.count ? rootOf(elems[i + 2]) : (root: nil, isVar: false, path: [], mono: false, opaqueHop: false)
             // a binary operator takes two args — supply two opaque arg slots so overloaded operator
             // resolution (arity ≥ 2) keeps the edge.
             let opArgs: [ArgKind] = [.opaque, .opaque], opTypes: [String?] = [lt.isVar ? lt.root : nil, rt.isVar ? rt.root : nil]
