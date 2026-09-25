@@ -99,6 +99,18 @@ final class NameKeyedStateTests: XCTestCase {
         //    merely lossy outward, so the clear is enough; `typeScopes` restores them for a `for`
         //    binder, whose scope is strictly the loop, and that is the only place it is needed.
         "vars":              .clearedOnRebind(scoped: false),
+        // SOUNDNESS R610 — the GUESS FLAG that travels with `vars`. Not a second type index: it says
+        // that the type in `vars` came from `rootOf`'s outer-base CONVENTION (an unexplained `.member`
+        // hop) rather than from a resolution, so the §2 key site can refuse it the way it refuses the
+        // DIRECT spelling. Its disposition is `vars`'s, necessarily — it describes that entry and is
+        // dropped in the same `clearBindingTypeOnly` call, so the two can never disagree about which
+        // binding they are talking about.
+        //
+        // THE FAILURE DIRECTION IF A BINDER REBINDS WITHOUT THE CLEAR, stated because this file's own
+        // header says the derivation cannot see that: a stale entry makes the engine treat a
+        // RESOLVED binding as a guess, which refuses a §2 key and DISCLOSES. That is over-hedging —
+        // the safe side — where a stale `vars` entry is a fabrication. Same map, opposite exposure.
+        "opaqueVars":        .clearedOnRebind(scoped: false),
         "arrayElem":         .clearedOnRebind(scoped: false),
         // R278 — `[[T]]`'s INNER element, for a binder whose own element is a container. Keyed by the
         // binding name and cleared with `arrayElem` in the same call, for the same reason: a stale entry

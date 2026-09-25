@@ -11,6 +11,23 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R610 — A BINDING LAUNDERED THE GUESS R567(a) REFUSES.** R567(a) made the §2 key site
+  refuse a receiver whose chain walked through a member this engine could not type. `vars` records a
+  binder's NAME and its ANSWER and not the fact that the answer was `rootOf`'s outer-base CONVENTION,
+  so `if let l = c.maybeLoop { l.spin() }` resolved `l` straight out of `vars` with `opaqueHop` false,
+  the refusal was never asked, and the key was exactly the one R567(a) exists to stop.
+
+  **FOUND WHILE RE-PRICING ⟨0.40⟩, on real code:** nio-ssl's `NIOSSLHandler.swift:631` writes
+  `if let syncOptions = context.channel.syncOptions { syncOptions.getOption(…) }` and published
+  `swift-nio#ChannelHandlerContext.getOption` — a member `ChannelHandlerContext` does not declare —
+  through R567(a) untouched. One variable in the fixture: the SPELLING of the receiver, written out or
+  bound first. Pre-fix `['Fs']` (the decoy) with `deny Fs` **exit 1** over code that opens no file;
+  post-fix `['Unknown']`, no key, exit 0.
+
+  The flag now travels with the type through all six binder arms that derive one from `rootOf`, and is
+  dropped with it in `clearBindingTypeOnly`. `NameKeyedStateTests` — which caught the new property
+  unclassified on its first run — records the disposition and the direction it fails in.
+
 - **SOUNDNESS R567(a) — THE §2 DISPATCH KEY TOOK THE OUTER BASE'S TYPE FOR A MEMBER-CHAIN RECEIVER.**
   `rootOf` deliberately keeps the outer base's type when a `.member` hop is not a known field, element
   accessor or tuple member — the whole κ static-chain idiom rides on that fallback

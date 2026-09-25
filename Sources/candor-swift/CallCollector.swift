@@ -154,6 +154,14 @@ final class CallCollector: SyntaxVisitor {
     /// Receiver marker for `super.m()`; resolved against the supertype chain in the driver.
     static let superMarker = "<super>"
     var vars: [String: String]              // local/param -> concrete type
+    /// SOUNDNESS R610 — **THE NAMES WHOSE TYPE IS A `rootOf` GUESS RATHER THAN A RESOLUTION.**
+    /// `if let l = c.loop` types `l` from `rootOf(c.loop)`, which for an unexplained `.loop` hop on a
+    /// FOREIGN `c` answers the OUTER BASE's type (see `rootOf`'s `opaqueHop` note). `vars` records the
+    /// name and the answer and NOT the fact that the answer was a convention, so the very next
+    /// `l.spin()` reads the binding as a resolved type and R567(a)'s refusal — which fires on the
+    /// DIRECT spelling `c.loop.spin()` — is never asked. The guess is LAUNDERED THROUGH THE BINDING.
+    /// Carried here so `rootOf`'s `vars` arm can hand it back, rather than re-derived at each reader.
+    var opaqueVars: Set<String> = []
     var fnTyped: Set<String>                // function-typed locals/params
     var opaqueFnLocals: Set<String> = []    // fn-typed LOCALS whose value is opaque (not a visible
                                             // closure): invoking one is §4 Unknown — only fn-typed
@@ -812,7 +820,7 @@ final class CallCollector: SyntaxVisitor {
             // to the enclosing type for member resolution — so `Self.decode(…)` is a precise typed call on the
             // type, not a guessed bare member that would either drop or mis-link to a same-named sibling.
             if n == "self" || n == "Self" { return (enclosingType, true, [], false, false) }
-            if let t = vars[n] { return (t, true, [n], monoNames.contains(n), false) }
+            if let t = vars[n] { return (t, true, [n], monoNames.contains(n), opaqueVars.contains(n)) }   // R610
             // IMPLICIT SELF: a bare identifier inside a method body can be a FIELD of the
             // enclosing type (`handler.log(s)` ≡ `self.handler.log(s)`) — the protocol-field probe
             // found dispatchers resolving as raw names and missing the field index entirely.
@@ -1470,6 +1478,9 @@ final class CallCollector: SyntaxVisitor {
     /// member-chain receiver. `R567CalibrationTests` asserts the wrong-member join is gone; running the
     /// suite with `CANDOR_R567A_OFF=1` is what proves those assertions can FAIL.
     private static let r567aOff = ProcessInfo.processInfo.environment["CANDOR_R567A_OFF"] != nil
+    /// SOUNDNESS R610 §1b KILL SWITCH — stops the `opaqueHop` guess flag travelling into `vars`, i.e.
+    /// restores the laundered binding, and the if-let arm of `ReceiverChainOwnerKeyProcessTests` reds.
+    private static let r610Off = ProcessInfo.processInfo.environment["CANDOR_R610_OFF"] != nil
     private static let r349Debug = ProcessInfo.processInfo.environment["CANDOR_R349_DEBUG"] != nil
 
     private func locatorNameIsStable(_ name: String, inert: Set<String>,
@@ -2897,6 +2908,7 @@ final class CallCollector: SyntaxVisitor {
 
     private func clearBindingTypeOnly(_ name: String) {
         vars.removeValue(forKey: name)
+        opaqueVars.remove(name)          // R610 — the guess flag travels with the binding it describes
         protoTyped.removeValue(forKey: name)
         arrayElem.removeValue(forKey: name)
         opaqueElem.remove(name)
@@ -3655,7 +3667,11 @@ final class CallCollector: SyntaxVisitor {
                 if Self.isOptionalUnwrapPattern(node.pattern),
                    vars[bound] == nil, !opaqueFnLocals.contains(bound) {
                     let info = rootOf(subject)
-                    if info.isVar, let t = info.root { vars[bound] = t }
+                    // R610 — carry the GUESS flag with the type, or the binding launders it.
+                    if info.isVar, let t = info.root {
+                        vars[bound] = t
+                        if info.opaqueHop, !Self.r610Off { opaqueVars.insert(bound) }
+                    }
                 }
                 bindContainerIndex(bound, from: subject)
             }
@@ -3732,7 +3748,11 @@ final class CallCollector: SyntaxVisitor {
             if Self.isOptionalUnwrapPattern(node.pattern),
                vars[bound] == nil, !opaqueFnLocals.contains(bound) {
                 let info = rootOf(node.initializer.value)
-                if info.isVar, let t = info.root { vars[bound] = t }
+                // R610 — carry the GUESS flag with the type, or the binding launders it.
+                if info.isVar, let t = info.root {
+                    vars[bound] = t
+                    if info.opaqueHop, !Self.r610Off { opaqueVars.insert(bound) }
+                }
             }
         }
         if condBinders.count == 1, !casePayloadLocals.contains(condBinders[0].identifier.text) {
@@ -5579,7 +5599,11 @@ final class CallCollector: SyntaxVisitor {
                     return
                 }
                 let info = rootOf(initVal)
-                if info.isVar, let t = info.root { vars[name] = t }
+                // R610 — the GUESS flag travels with the type, or the binding launders it.
+                if info.isVar, let t = info.root {
+                    vars[name] = t
+                    if info.opaqueHop, !Self.r610Off { opaqueVars.insert(name) }
+                }
                 // R269 — through the ONE binder helper, so this site gains the two spellings it was
                 // missing: an `Optional(…)`-wrapped source, and a DICTIONARY (only `elementTypeOf` was
                 // asked here, so `guard let z = optDict` lost its value index and read silent-pure).
@@ -6786,7 +6810,10 @@ final class CallCollector: SyntaxVisitor {
                     if bindContainerIndex(n, from: ve.expression) { boundLocals.insert(n); literalLocals.insert(n) }
                     else {
                         let info = rootOf(ve.expression)
-                        if info.isVar, let t = info.root { vars[n] = t } else { clearBinding(n) }
+                        if info.isVar, let t = info.root {
+                            vars[n] = t
+                            if info.opaqueHop, !Self.r610Off { opaqueVars.insert(n) }   // R610
+                        } else { clearBinding(n) }
                     }
                 }
                 continue
@@ -7013,6 +7040,7 @@ final class CallCollector: SyntaxVisitor {
                         } else { depBoundLocals.removeValue(forKey: name) }
                         if let t = info.root, info.isVar {
                             vars[name] = t
+                            if info.opaqueHop, !Self.r610Off { opaqueVars.insert(name) }   // R610
                             // (R33's third and original call site stood here. The construction hook in
                             //  `visit(FunctionCallExprSyntax)` reaches this same initializer — this
                             //  visitor returns `.visitChildren` — so the charge is unchanged and the
@@ -7053,7 +7081,10 @@ final class CallCollector: SyntaxVisitor {
                 } else if v.is(SequenceExprSyntax.self) || v.is(SubscriptCallExprSyntax.self) {
                     // `let c = x as! T` / `let c = cond ? a : b` / `let c = cs[0]` — rootOf types these
                     let info = rootOf(v0)
-                    if info.isVar, let t = info.root { vars[name] = t }
+                    if info.isVar, let t = info.root {
+                        vars[name] = t
+                        if info.opaqueHop, !Self.r610Off { opaqueVars.insert(name) }   // R610
+                    }
                 } else if let tup = v.as(TupleExprSyntax.self) {
                     // R269 — `let t = (cbs, 1)` then `for c in t.0`. Record each SLOT that holds a
                     // container, under the slot's positional name (`0`, `1`, …) and its label when it
@@ -7162,6 +7193,7 @@ final class CallCollector: SyntaxVisitor {
                             let info = rootOf(v0)
                             if info.isVar, let t = info.root {
                                 vars[name] = t
+                                if info.opaqueHop, !Self.r610Off { opaqueVars.insert(name) }   // R610
                             }
                         }
                     }
