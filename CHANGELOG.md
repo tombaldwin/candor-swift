@@ -11,6 +11,46 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R592 — swift ATTRIBUTED ⟨0.39⟩ KEYS TO THE SCANNED PACKAGE'S OWN C TARGETS.**
+  `Driver.foreignOwnerModule` names the owner of a foreign abstraction as the file's one import that its
+  target DECLARES and that `importableByFile` does not hold. `importableByFile` is `declaredNames`
+  INTERSECTED WITH `analyzedTargets`, and that intersection answers *did this run read it*, not *is it
+  ours* — **a C target has no `.swift` files, so no run can ever read one**, leaving the package's own C
+  targets as the sole surviving "foreign" candidate. A target of the file's own package is now excluded,
+  analyzed or not.
+
+  BOTH ERROR DIRECTIONS WERE LIVE: **(a) MISATTRIBUTION** — keys like `CNIOLinux#Swift.type`, whose
+  package half no producer's hash can equal, so obligations 1 and 2 can never be joined; **(b)
+  SUPPRESSION** — a C target beside the genuine foreign import made `cands.count == 2`, the never-guess
+  rule fired, and the real owner's key was dropped outright. So keys APPEAR as well as disappear.
+
+  MEASURED at `96211f0`, 11 real packages, 16,428 analyzed units, one variable (this filter): 21,807
+  `dispatchesOn` occurrences, 4,952 foreign-prefixed, **4,880 of those (98.5%) prefixed with a C target
+  of the package being scanned** — CNIOLinux 3,071, CNIOWindows 1,205, CNIOBoringSSL 587, CNIOAtomics 14,
+  CNIOLLHTTP 3. After: **C-target-prefixed keys 0**, foreign-prefixed 1,412. File granularity: 43 files
+  published an owner and 40 named a target of their own package; 19 files were suppressed and **all 19 by
+  a C target**. `bin/corpus-ab.py` (unit key, wide value): **ADDED 203 REMOVED 862 CHANGED 617**, REACH
+  409 hits / 2 entries (`CANDOR_R592_PROBE`). Of the 862 removals, 825 are C-target-prefixed keys going
+  away; 5 are ordinary rows whose only content was such a key (`inferred` empty before and after).
+
+  CHAINED-ARM AUDIT, nio-ssl with its 6 resolved checkouts scanned into a dep index: `dispatchesOn`
+  769 → 1,522; **22 of 22 removed keys named `CNIOBoringSSL` for a type that target does not have**
+  (`ByteBuffer`, `EventLoop`, `Hasher`, `Unmanaged`, stdlib); **22 of 23 added keys are correct and
+  joinable** (`swift-nio#ChannelHandlerContext.fireChannelRead` and siblings, from the un-suppressed
+  `NIOSSL/NIOSSLHandler.swift`). The 23rd, `swift-nio#BufferedWrite.fail`, names a `private typealias`
+  local to that file — R567's class, pre-existing at the publish site and reported, not introduced here.
+
+  **AND THIS COMMIT ALONE OPENS A LOSS THE NEXT ONE CLOSES.** Un-suppressing that file gives obligation
+  2's owner vote two MODULES of one PACKAGE (`NIOTLS` + `NIOFoundationCompat`, both `swift-nio`), its
+  `mods.count == 1` gate refuses, and **36 correct `swift-nio#ChannelInboundHandler.*` union entries
+  carrying real effects disappear** in the chained arm. That is R565's module-vs-package confusion at the
+  one site R565 did not reach; it is filed and fixed as R603 in the following commit.
+
+  FIXTURE: `OwnPackageCTargetOwnerProcessTests` drives BOTH directions from one tree, because a test for
+  either alone passes with the other still broken (§A.2). Calibrated by reverting the one conjunct —
+  `describe -> ["CShim#Swift.type"]` vs `[]` and `useBackend -> []` vs `["RatesPkg#Backend.size"]`, both
+  RED pre-fix, both green after.
+
 - **SOUNDNESS R127 — ONE RESOLVED CALLER WAS ENOUGH TO LEAVE A HIGHER-ORDER FUNCTION'S OWN ROW
   SILENT.** The callback-flow deferral marked the HOF's own node only when NOT ONE of its callers
   resolved (`anyCallerResolved`). When SOME caller resolved and another did not, the HOF — a function

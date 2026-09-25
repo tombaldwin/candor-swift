@@ -724,6 +724,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
     var importableByFile: [String: Set<String>] = [:]                 // rel file -> importable modules
     var declaredByFile: [String: Set<String>] = [:]                   // …and what its target NAMES
+    /// SOUNDNESS R592 — …and EVERY TARGET ITS OWN PACKAGE DECLARES, analyzed or not. `importableByFile`
+    /// is intersected with `analyzedTargets`, so a target this run read nothing of is absent from it —
+    /// and a C target has no `.swift` files, so it is absent from it ALWAYS. That left the package's own
+    /// C targets as the only surviving "foreign" candidates in `foreignOwnerModule`. This index answers
+    /// the question that one actually asks — *is this name someone ELSE's module?* — from the manifest's
+    /// declarations rather than from what the run happened to parse.
+    ///
+    /// The FULL parsed declaration list, not `targetsIn`'s filtered one: a plugin, or a target whose
+    /// `path:` this run could not resolve to a directory, is still not a foreign package's module.
+    var ownTargetsByFile: [String: Set<String>] = [:]
     for raw in sourcePaths {
         let abs = candorAbsolutePath(raw)
         let rel = raw.hasPrefix(rootDir)
@@ -733,6 +743,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // BOTH conjuncts: the file's TARGET can import it, AND this run actually read it.
             importableByFile[rel] = importable(forTarget: own, in: pkg)
             declaredByFile[rel] = declaredNames(forTarget: own, in: pkg)
+            ownTargetsByFile[rel] = Set((declTargets[pkg] ?? []).map(\.name))   // R592
         } else if xcodeLinksByFile[abs] != nil || xcodeModulesByFile[abs] != nil {
             let deps = xcodeLinksByFile[abs] ?? []
             // AN XCODE TARGET'S FILE has no owning `Package.swift` — a folder in an Xcode target is not
@@ -1663,11 +1674,46 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// an import that its own target DECLARES as a dependency, is not a platform/κ module, and is not a
     /// target this run analyzed. Two candidates refuse — the never-guess rule the whole dep index runs on
     /// — which costs a disclosure the engine did not have before and can never mint a charge.
+    ///
+    let r592Probe = ProcessInfo.processInfo.environment["CANDOR_R592_PROBE"] != nil
+    /// SOUNDNESS R592 — AND A TARGET OF THE FILE'S OWN PACKAGE IS NOT A FOREIGN OWNER, ANALYZED OR NOT.
+    /// `importable` is `declaredNames` INTERSECTED WITH `analyzedTargets`, and that intersection is the
+    /// trap: it answers "did this run read it", not "is it ours". A C target has no `.swift` files, so no
+    /// run ever reads one — `declared` holds it, `importable` never can, and it therefore survived every
+    /// filter here as the file's sole "foreign" candidate.
+    ///
+    /// BOTH error directions were live, and the second is the one that costs a disclosure:
+    ///   (a) MISATTRIBUTION — one surviving C target publishes `CNIOLinux#Swift.type`, a key whose
+    ///       package half no producer's hash can equal, so obligations 1 and 2 can never be joined;
+    ///   (b) SUPPRESSION — a C target sitting BESIDE the genuine foreign import makes `cands.count == 2`,
+    ///       the never-guess rule fires, and the real owner's key is dropped outright.
+    ///
+    /// MEASURED at 96211f0 over 11 real packages, one variable — this filter — everything else held:
+    /// 21,807 `dispatchesOn` occurrences, 4,952 foreign-prefixed, **4,880 of those (98.5%) prefixed with
+    /// a C target of the package being scanned** (CNIOLinux 3,071, CNIOWindows 1,205, CNIOBoringSSL 587,
+    /// CNIOAtomics 14, CNIOLLHTTP 3). At file granularity: 43 files published an owner, 40 of them naming
+    /// a target of their own package; 19 files were suppressed, **every one of the 19 by a C target**, and
+    /// one of those (`NIOSSL/NIOSSLHandler.swift`, `[CNIOBoringSSL, NIOTLS]`) is a genuine foreign owner
+    /// this rule hands back.
+    ///
+    /// The exclusion cannot lose a real owner: if this package DECLARES a target of that name, SwiftPM
+    /// resolves the import to the local target, so the name was never the dependency's to begin with.
     func foreignOwnerModule(inFile file: String) -> String? {
         let declared = declaredByFile[file] ?? [], importable = importableByFile[file] ?? []
-        let cands = (fileImports[file] ?? []).filter {
+        let ownTargets = ownTargetsByFile[file] ?? []                              // R592
+        let base = (fileImports[file] ?? []).filter {
             declared.contains($0) && !importable.contains($0)
                 && !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0)
+        }
+        let cands = base.filter { !ownTargets.contains($0) }                      // R592
+        // REACH PROBE (§E1) — an unchanged row is not evidence the new filter ran. Prints only where
+        // the exclusion actually removed a candidate, with the verdict it changed FROM and TO.
+        if r592Probe, cands.count != base.count {
+            FileHandle.standardError.write(
+                ("R592HIT file=\(file) dropped=\(base.filter { ownTargets.contains($0) }.sorted()) "
+                 + "was=\(base.count == 1 ? "PUBLISH:" + base[0] : (base.isEmpty ? "NONE" : "SUPPRESS")) "
+                 + "now=\(cands.count == 1 ? "PUBLISH:" + cands[0] : (cands.isEmpty ? "NONE" : "SUPPRESS"))\n")
+                    .data(using: .utf8)!)
         }
         return cands.count == 1 ? cands.first : nil
     }
