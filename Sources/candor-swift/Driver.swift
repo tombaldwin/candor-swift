@@ -330,10 +330,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var allFns: [FnInfo] = []
     var fields: [String: [String: (name: String?, isFunction: Bool)]] = [:]
     var fieldArrayElem: [String: [String: String]] = [:]
+    /// SOUNDNESS R585 (b4/b6) — the metatype twins of `fields` / `fieldArrayElem`.
+    var fieldMetatypes: [String: [String: String]] = [:]
+    var fieldMetatypeArrayElem: [String: [String: String]] = [:]
     var fieldArrayElemNested: [String: [String: String]] = [:]   // R278
     var fieldDictValue: [String: [String: String]] = [:]
     var opaqueFields: [String: Set<String>] = [:]
     var caseAssocAll: [String: Set<String>] = [:]
+    var caseAssocMetatypeAll: [String: Set<String>] = [:]   // R585 (b10)
     var staticFactoryFields: [(type: String, field: String, leaf: String)] = []
     // R73 — module-scope global NAME -> its concrete type, scoped by MODULE (not merged flat like `fields`)
     // because a bare global name is not guaranteed unique project-wide the way a declared TYPE name is —
@@ -370,6 +374,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // R73's loop sibling — module-scope `[T]` global name -> its ELEMENT type, module-scoped for the
     // same reason `globalTypesByModule` is.
     var globalArrayElemByModule: [String: [String: String]] = [:]
+    /// SOUNDNESS R585 (b7/b6) — the metatype twins of `globalTypesByModule` / `globalArrayElemByModule`,
+    /// module-sliced for the same reason those are.
+    var globalMetatypesByModule: [String: [String: String]] = [:]
+    var globalMetatypeArrayElemByModule: [String: [String: String]] = [:]
     // (module, global name, factory leaf) for a global initialized by a bare lowercase call
     // (`let x = makeX()`) — the leaf's return type isn't known until `returnsIdx` is built, so resolution
     // is deferred exactly like `staticFactoryFields` above.
@@ -413,6 +421,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var typeMacroAttrs: [String: [String]] = [:]
     var wrappedProps: [String: [String: String]] = [:]
     var returnsIdx: [String: String] = [:]
+    /// SOUNDNESS R585 (b9) — the metatype half of `returnsIdx`: fn leaf -> the type whose METATYPE it
+    /// returns. Separate map for `globalMetatypes`' reason — `returnsIdx` answers "what VALUE type does
+    /// this factory vend", and a metatype answer there would make `mk().validate()` an instance call.
+    var metatypeReturnsIdx: [String: String] = [:]
+    var metatypeReturnsTmp: [String: String?] = [:]
     var importCounts: [String: Int] = [:]
     var fileImports: [String: [String]] = [:]   // file (rel path) -> modules it imports (per-fn blind disclosure)
     /// ⟨0.39⟩ spelled inherited-type path -> the FILES whose conformances named it. Obligation 2 keys a
@@ -863,13 +876,23 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 returnsTmp[k] = v
             }
         }
+        for (k, v) in c.metatypeReturnsTmp {   // R585 (b9) — same ambiguity rule as `returnsTmp`
+            if let existing = metatypeReturnsTmp[k] {
+                if existing != v { metatypeReturnsTmp[k] = String?.none }
+            } else {
+                metatypeReturnsTmp[k] = v
+            }
+        }
         allFns.append(contentsOf: c.fns)
         for (t, fs) in c.fields { fields[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.fieldArrayElem { fieldArrayElem[t, default: [:]].merge(fs) { a, _ in a } }
+        for (t, fs) in c.fieldMetatypes { fieldMetatypes[t, default: [:]].merge(fs) { a, _ in a } }   // R585
+        for (t, fs) in c.fieldMetatypeArrayElem { fieldMetatypeArrayElem[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.fieldArrayElemNested { fieldArrayElemNested[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.fieldDictValue { fieldDictValue[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.opaqueFields { opaqueFields[t, default: []].formUnion(fs) }
         for (cn, ts) in c.caseAssoc { caseAssocAll[cn, default: []].formUnion(ts) }
+        for (cn, ts) in c.caseAssocMetatype { caseAssocMetatypeAll[cn, default: []].formUnion(ts) }   // R585
         for (pn, ms) in c.protocolMethods { protocolMethods[pn, default: []].formUnion(ms) }
         protocolFnTypedMembers.formUnion(c.protocolFnTypedMembers)   // R563
         protocolPaths.formUnion(c.protocolPaths)   // ⟨0.39⟩
@@ -912,6 +935,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // R85 defect, not a style choice.
         globalPublicByModule[cMod, default: []].formUnion(c.globalPublic)
         globalArrayElemByModule[cMod, default: [:]].merge(c.globalArrayElem) { a, _ in a }
+        globalMetatypesByModule[cMod, default: [:]].merge(c.globalMetatypes) { a, _ in a }              // R585
+        globalMetatypeArrayElemByModule[cMod, default: [:]].merge(c.globalMetatypeArrayElem) { a, _ in a }
         globalFactories.append(contentsOf: c.globalFactories.map { (cMod, $0.name, $0.leaf) })
         for (t, bs) in c.typeGenericBounds { typeGenericBoundsAll[t, default: [:]].merge(bs) { a, _ in a } }
         for (t, ps) in c.typeGenericFnParams { typeGenericFnParamsAll[t, default: []].formUnion(ps) }   // R243
@@ -1435,6 +1460,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
 
     for (k, v) in returnsTmp { if let t = v { returnsIdx[k] = t } }
+    // R585 (b9) — and a leaf the ORDINARY returns index already answers is left to it: this map may
+    // add a resolution where there was none, never replace one (the R584 additive rule).
+    for (k, v) in metatypeReturnsTmp { if let t = v, returnsIdx[k] == nil { metatypeReturnsIdx[k] = t } }
     // `static let shared = factory()` — now that the returns index exists, resolve the factory's vended
     // type and record it as the field's type, so `let r = Type.shared` carries the REAL type (not the
     // static's own type — the review's free-factory singleton find). Only an UNAMBIGUOUS factory return
@@ -1556,6 +1584,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // the same "never guess on an ambiguous leaf" discipline as the returns index.
     var enumCaseValueType: [String: String] = [:]
     for (cn, ts) in caseAssocAll where ts.count == 1 { enumCaseValueType[cn] = ts.first! }
+    // SOUNDNESS R585 (b10) — the metatype twin, under the SAME unambiguity rule. A case name that is a
+    // metatype in one enum and an ordinary type in another is ambiguous ACROSS the two maps, so it is
+    // dropped from both rather than answered twice.
+    var metatypeEnumCaseValueType: [String: String] = [:]
+    for (cn, ts) in caseAssocMetatypeAll where ts.count == 1 && caseAssocAll[cn] == nil {
+        metatypeEnumCaseValueType[cn] = ts.first!
+    }
+    // STRICTLY ADDITIVE, and the discarded alternative is worth naming. A case name that is a metatype
+    // in one enum and an ordinary type in another is genuinely ambiguous, and POISONING BOTH maps is
+    // the more correct answer — but it REMOVES an existing resolution, which is a different question
+    // from the one R585 asks and the direction an A/B's removal column is where fixes go too far (§E1).
+    // Filed as the assumption it is rather than folded in.
 
     var direct: [String: Set<String>] = [:]
     var edges: [String: Set<String>] = [:]
@@ -2263,10 +2303,17 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                typeBoundParams: typeBoundParamsMap,
                                protoFnTypedMembers: protocolFnTypedMembers,
                                returns: returnsIdx,
+                               metatypeReturns: metatypeReturnsIdx,                                  // R585
+                               globalMetatypes: globalMetatypesByModule[swiftModuleOf(f.loc)] ?? [:], // R585
+                               globalMetatypeArrayElem: globalMetatypeArrayElemByModule[swiftModuleOf(f.loc)] ?? [:],
+                               fieldMetatypes: fieldMetatypes,                                        // R585
+                               fieldMetatypeArrayElem: fieldMetatypeArrayElem,
                                fieldArrayElem: fieldArrayElem, fieldArrayElemNested: fieldArrayElemNested,
                                fieldDictValue: fieldDictValue,
                                opaqueFields: opaqueFields,
-                               enumCaseValueType: enumCaseValueType, dynamicMemberTypes: dynamicMemberTypes,
+                               enumCaseValueType: enumCaseValueType,
+                               metatypeEnumCaseValueType: metatypeEnumCaseValueType,   // R585
+                               dynamicMemberTypes: dynamicMemberTypes,
                                propertyWrapperTypes: propertyWrapperTypes, wrappedProps: wrappedProps,
                                localFreeFns: localFreeFnNames.union(localFreeFnBaseNamesByModule[swiftModuleOf(f.loc)] ?? []),
                                conditionallyShadowedFreeFns: conditionalOnlyFreeFnNames.union(conditionalOnlyFreeFnNamesByModule[swiftModuleOf(f.loc)] ?? []),

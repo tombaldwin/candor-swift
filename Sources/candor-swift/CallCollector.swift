@@ -154,6 +154,28 @@ final class CallCollector: SyntaxVisitor {
     /// Receiver marker for `super.m()`; resolved against the supertype chain in the driver.
     static let superMarker = "<super>"
     var vars: [String: String]              // local/param -> concrete type
+    /// SOUNDNESS R585 — **THE NAME OF A BINDING THAT HOLDS A METATYPE, AND THE TYPE IT IS THE
+    /// METATYPE OF.** `let t: CBase.Type = CSub.self; t.validate()`.
+    ///
+    /// This is the SAME fact `FnInfo.metatypeParams` records for the PARAMETER binder, and the reason
+    /// it needs a second home rather than a second resolver is that the parameter clause is read in
+    /// `DeclCollector` (before the walk) and every other binder is discovered DURING it. The READ side
+    /// is shared: `typeReceiverProto` / `typeReceiverType` / `rootOfUnaliased` consult this map beside
+    /// `protoBoundParams`/`typeBoundParams` and nothing downstream can tell which binder produced the
+    /// name — so a metatype LOCAL gets exactly the answer a metatype PARAMETER gets, which is exactly
+    /// the answer the type written LITERALLY gets (§G, §F1.3).
+    ///
+    /// Keyed by BINDING name, so it is cleared on rebind and scoped with `vars` — see
+    /// `clearBindingTypeOnly` and `TypeBinding`. A stale entry here is a FABRICATION (it would charge
+    /// a rebound name the old type's hierarchy), which is why it rides with `vars` rather than with
+    /// the deliberately-kept hedges.
+    var metatypeBinders: [String: String] = [:]
+    /// SOUNDNESS R585 (b6) — **THE NAME OF A BINDING THAT HOLDS AN ARRAY OF METATYPES, AND THE TYPE
+    /// EACH ELEMENT IS THE METATYPE OF.** `let all: [CBase.Type]` / `_ ts: [CBase.Type]`, so that
+    /// `for t in ts { t.validate() }` can bind `t` into `metatypeBinders`. Exactly the relationship
+    /// `arrayElem` has to `vars`, and it rides the same lifecycle for the same reason: a stale entry
+    /// would give the NEXT loop over a same-named binding this one's element type.
+    var metatypeArrayElem: [String: String] = [:]
     /// SOUNDNESS R610 — **THE NAMES WHOSE TYPE IS A `rootOf` GUESS RATHER THAN A RESOLUTION.**
     /// `if let l = c.loop` types `l` from `rootOf(c.loop)`, which for an unexplained `.loop` hop on a
     /// FOREIGN `c` answers the OUTER BASE's type (see `rootOf`'s `opaqueHop` note). `vars` records the
@@ -382,6 +404,16 @@ final class CallCollector: SyntaxVisitor {
     /// dispatch to a witness body, so it takes the same honest `Unknown` the concrete spelling takes.
     let protoFnTypedMembers: Set<String>
     let returns: [String: String]   // unambiguous factory return types (the candor-scan move)
+    /// SOUNDNESS R585 — the four DECLARATION-side metatype indexes (b4 field, b6 array element,
+    /// b7 global, b9 return). Each is the metatype twin of an existing index that `typeName` cannot
+    /// fill, and each is separate from its twin because the twin answers "what type is the VALUE"
+    /// while these answer "what type does this name STAND FOR in receiver position" — merging them
+    /// would turn `gC.validate()` into an instance call on `CBase`, a different and wrong dispatch.
+    let metatypeReturns: [String: String]
+    let globalMetatypes: [String: String]
+    let globalMetatypeArrayElem: [String: String]
+    let fieldMetatypes: [String: [String: String]]
+    let fieldMetatypeArrayElem: [String: [String: String]]
     /// Locals bound from a CALL whose return type we could not determine, where the callee is not a local
     /// function — `let s = build()` with `build` living in a dependency. The value's PROVENANCE is known
     /// (a call out of this target) even though its TYPE is not, which is the "could-not-form-a-key" case:
@@ -390,6 +422,9 @@ final class CallCollector: SyntaxVisitor {
     /// which is where fileImports and the covered-package set live.
     var depBoundLocals: [String: String] = [:]
     let enumCaseValueType: [String: String]  // unambiguous enum case -> associated value type
+    /// SOUNDNESS R585 (b10) — the metatype twin: unambiguous enum case -> the type whose METATYPE its
+    /// single associated value holds. Additive only — a case name the ordinary map answers is absent here.
+    let metatypeEnumCaseValueType: [String: String]
     var enclosingType: String?
     var selfElementType: String?   // self's element bound in a collection extension (R28)
     var calls: [Call] = []
@@ -577,10 +612,17 @@ final class CallCollector: SyntaxVisitor {
          typeBoundParams: [String: String] = [:],
          protoFnTypedMembers: Set<String> = [],
          returns: [String: String],
+         metatypeReturns: [String: String] = [:],
+         globalMetatypes: [String: String] = [:],
+         globalMetatypeArrayElem: [String: String] = [:],
+         fieldMetatypes: [String: [String: String]] = [:],
+         fieldMetatypeArrayElem: [String: [String: String]] = [:],
          fieldArrayElem: [String: [String: String]], fieldArrayElemNested: [String: [String: String]],
          fieldDictValue: [String: [String: String]],
          opaqueFields: [String: Set<String>] = [:],
-         enumCaseValueType: [String: String], dynamicMemberTypes: Set<String>,
+         enumCaseValueType: [String: String],
+         metatypeEnumCaseValueType: [String: String] = [:],
+         dynamicMemberTypes: Set<String>,
          propertyWrapperTypes: Set<String>, wrappedProps: [String: [String: String]],
          localFreeFns: Set<String>, conditionallyShadowedFreeFns: Set<String> = [],
          conditionallyShadowedTypes: Set<String> = [], typeAliases: [String: String],
@@ -610,6 +652,7 @@ final class CallCollector: SyntaxVisitor {
         self.wrappedProps = wrappedProps
         self.dynamicMemberTypes = dynamicMemberTypes
         self.enumCaseValueType = enumCaseValueType
+        self.metatypeEnumCaseValueType = metatypeEnumCaseValueType   // R585 (b10)
         self.vars = info.params
         self.selfElementType = info.selfElementType
         self.fnTyped = info.fnTypedParams
@@ -617,12 +660,18 @@ final class CallCollector: SyntaxVisitor {
         self.monoNames = info.opaqueParams
         self.opaqueElem = info.opaqueArrayParams
         self.arrayElem = info.arrayParams
+        self.metatypeArrayElem = info.metatypeArrayParams   // R585 (b6) — seeded like `arrayParams`
         self.arrayElemNested = info.arrayParamsNested   // R278
         self.dictElem = info.dictParams
         self.tupleElem = info.tupleParams
         self.fields = fields
         self.globalTypes = globalTypes
         self.globalArrayElem = globalArrayElem
+        self.metatypeReturns = metatypeReturns                      // R585
+        self.globalMetatypes = globalMetatypes
+        self.globalMetatypeArrayElem = globalMetatypeArrayElem
+        self.fieldMetatypes = fieldMetatypes
+        self.fieldMetatypeArrayElem = fieldMetatypeArrayElem
         self.fieldArrayElem = fieldArrayElem
         self.fieldArrayElemNested = fieldArrayElemNested
         self.fieldDictValue = fieldDictValue
@@ -658,7 +707,75 @@ final class CallCollector: SyntaxVisitor {
         // reach. A metatype PARAMETER never lands in `vars` (`typeName` has no metatype case), so this
         // guard does not cost the `t: P.Type` spelling.
         guard vars[spelling] == nil else { return nil }
-        return protoBoundParams[spelling]
+        if let p = protoBoundParams[spelling] { return p }
+        // SOUNDNESS R585 — the PROTOCOL half of a metatype binder that is not a parameter. Same map,
+        // same guard, same answer: the binder's name is a second spelling of the protocol in receiver
+        // position, exactly as `_ t: P.Type` is.
+        if let b = metatypeBinder(spelling), localProtocols.contains(b) { return b }
+        return nil
+    }
+
+    /// SOUNDNESS R585 — the type a METATYPE BINDER's name denotes, or nil.
+    ///
+    /// The two guards are R584's, for R584's reasons, restated because they are load-bearing rather
+    /// than defensive. `vars[spelling] == nil` is Swift's own lookup order — a later `let t = value`
+    /// really does shadow the metatype binding, and answering the metatype there would charge a
+    /// hierarchy the call cannot reach. `!localTypes.contains(spelling)` keeps this purely ADDITIVE:
+    /// where a binder is spelled the same as a real local type, today's answer is the local type and
+    /// changing it would REMOVE an edge, which is a different question from the one this row asks.
+    private func metatypeBinder(_ spelling: String) -> String? {
+        guard !Self.r585Off, vars[spelling] == nil, !localTypes.contains(spelling) else { return nil }
+        // The SAME lookup order `rootOfUnaliased` uses for the ordinary type question — locals and
+        // parameters, then an implicit-`self` field, then a module-scope global — because it is Swift's
+        // own, and answering in a different order here would let a global shadow a local that shadows it.
+        if let b = metatypeBinders[spelling] { return b }                      // b2/b3/b5/b9/b10
+        if let et = enclosingType, let b = fieldMetatypes[et]?[spelling] { return b }   // b4
+        if let b = globalMetatypes[spelling] { return b }                      // b7
+        return nil
+    }
+
+    /// SOUNDNESS R585 (b6) — the type each element of a SEQUENCE expression is the metatype of, or nil.
+    ///
+    /// The NAME-shaped readings only — a local/param `[X.Type]`, an implicit-`self` field of that type,
+    /// a module-scope global of it — mirroring `elementTypeOf`'s own name arms in the same order.
+    /// A transform chain (`ts.filter { … }`) is deliberately NOT followed: `elementTypeOf` earns that
+    /// by recursing through an index this one does not have, and inventing a second, partial copy of
+    /// that walk is the two-implementations-of-one-question shape this register keeps paying for
+    /// (§F1.3). Stated as the residual it is rather than left to be discovered.
+    private func metatypeElementOf(_ seq: ExprSyntax) -> String? {
+        guard !Self.r585Off, let dr = Self.peel(seq).as(DeclReferenceExprSyntax.self) else { return nil }
+        let n = dr.baseName.text
+        guard vars[n] == nil, arrayElem[n] == nil else { return nil }   // an ordinary answer wins
+        if let e = metatypeArrayElem[n] { return e }
+        if let et = enclosingType, let e = fieldMetatypeArrayElem[et]?[n] { return e }
+        return globalMetatypeArrayElem[n]
+    }
+
+    /// SOUNDNESS R585 — the type an EXPRESSION's metatype value stands for, or nil. The binder-side
+    /// twin of `metatypeBinder`: what a `let`/`var` with no annotation is being given.
+    ///
+    /// Three readings, all exact rather than inferred — `X.self` names X; a call of a function DECLARED
+    /// to return `X.Type` returns X's metatype; and a copy of a name this collector already knows holds
+    /// one holds the same one. Anything else is nil, which is the pre-R585 answer.
+    private func metatypeOfExpr(_ e: ExprSyntax) -> String? {
+        guard !Self.r585Off else { return nil }
+        let v = Self.peel(e)
+        // `CSub.self` — the metatype LITERAL. Note this names the type WRITTEN, not its supertype: a
+        // `let t = CSub.self` is more precise than `let t: CBase.Type = CSub.self`, and correctly so.
+        if let ma = v.as(MemberAccessExprSyntax.self), ma.declName.baseName.text == "self",
+           let base = ma.base?.as(DeclReferenceExprSyntax.self)?.baseName.text,
+           localTypes.contains(base) || localProtocols.contains(base) {
+            return base
+        }
+        // `mkC()` where `func mkC() -> CBase.Type` (b9).
+        if let call = v.as(FunctionCallExprSyntax.self),
+           let leaf = call.calledExpression.as(DeclReferenceExprSyntax.self)?.baseName.text,
+           let mr = metatypeReturns[leaf] {
+            return mr
+        }
+        // `let u = t` — a copy of a binding that already holds one.
+        if let dr = v.as(DeclReferenceExprSyntax.self) { return metatypeBinder(dr.baseName.text) }
+        return nil
     }
 
     /// SOUNDNESS R584 — THE CLASS TWIN of `typeReceiverProto`, for the ONE spelling that does not go
@@ -668,8 +785,11 @@ final class CallCollector: SyntaxVisitor {
     /// call `EffBase(…)` written literally emits — so the Driver's `localTypes` ctor arm resolves
     /// `EffBase.init` identically. Every other class-half spelling is answered in `rootOfUnaliased`.
     private func typeReceiverType(_ spelling: String) -> String? {
-        guard !Self.r584Off, vars[spelling] == nil, !localTypes.contains(spelling) else { return nil }
-        return typeBoundParams[spelling]
+        guard vars[spelling] == nil, !localTypes.contains(spelling) else { return nil }
+        if !Self.r584Off, let t = typeBoundParams[spelling] { return t }
+        // SOUNDNESS R585 — the CLASS half of a metatype binder that is not a parameter.
+        if let b = metatypeBinder(spelling), localTypes.contains(b), !localProtocols.contains(b) { return b }
+        return nil
     }
 
     /// The unit body this collector was handed, so `constructionEscapes`' ancestor walk STOPS there.
@@ -864,6 +984,20 @@ final class CallCollector: SyntaxVisitor {
                 }
                 return (bound, false, [n], false, false)
             }
+            // SOUNDNESS R585 — …AND SO DOES EVERY OTHER BINDER OF A METATYPE. `typeName` has no
+            // metatype case, so `let t: CBase.Type = CSub.self`, a closure parameter, a stored
+            // property, a global, a for-in element and an enum payload all bind a name that resolves
+            // to NOTHING here and the call on it was dropped — eighteen arms measured ABSENT over a
+            // body that executes `URLSession.dataTask`, while the literal `CBase.validate()` and the
+            // PARAMETER spelling `_ t: CBase.Type` both resolve. Answered at the SAME authority as
+            // R584's, so the whole member-call chain below (the function-typed-field hedge, the
+            // κ shadowing guards, the property-edge path) treats it exactly as it treats the literal.
+            if let bound = metatypeBinder(n), localTypes.contains(bound) {
+                if Self.r585Probe {
+                    FileHandle.standardError.write("R585HIT \(n) -> \(bound)\n".data(using: .utf8)!)
+                }
+                return (bound, false, [n], false, false)
+            }
             // a bare TYPE/alias reference (`FM.default`, the base of a static-member chain). The
             // typealias resolution that used to be spelled HERE is now the wrapper's job — R97: this arm
             // having it, and the other arms not, is exactly how the bug was shaped.
@@ -884,6 +1018,16 @@ final class CallCollector: SyntaxVisitor {
             // wrong type and dropped to pure — the bare-identifier implicit-self path already did this).
             if let rt = inner.root, let f = fields[rt]?[member], let ft = f.name, !f.isFunction {
                 return (ft, true, inner.path + [member], opaqueFields[rt]?.contains(member) == true, inner.opaqueHop)
+            }
+            // SOUNDNESS R585 (b4) — …AND A STORED PROPERTY OF METATYPE TYPE, which `fields` records with
+            // a nil name (`typeName` has no metatype case) so the arm above declines it and the chain
+            // fell through to the ENCLOSING type. `box.t.validate()` / `self.t.validate()`, the explicit
+            // spellings of the implicit-self one `metatypeBinder` answers.
+            if !Self.r585Off, let rt = inner.root, let mb = fieldMetatypes[rt]?[member], localTypes.contains(mb) {
+                if Self.r585Probe {
+                    FileHandle.standardError.write("R585HIT field \(rt).\(member) -> \(mb)\n".data(using: .utf8)!)
+                }
+                return (mb, false, inner.path + [member], false, false)
             }
             // SOUNDNESS R537 — AN ELEMENT ACCESSOR IS A TYPED RECEIVER: `hs.first?.emitN()`,
             // `hs.last?`, `d.values.first?`, `hs.dropFirst().first?`. The subscript arm below has
@@ -953,6 +1097,16 @@ final class CallCollector: SyntaxVisitor {
                 // type so its members classify (`p.run()`→Exec). Dealiased by the wrapper (R97).
                 if n.first?.isUppercase == true { return (n, true, [n], false, false) }
                 if let rt = returns[n] { return (rt, true, [n], false, false) }
+                // SOUNDNESS R585 (b9) — a factory that vends a METATYPE. `returns` cannot hold it
+                // (`typeName` answers nil for `-> CBase.Type`), so `mkC().validate()` resolved to no
+                // root at all. `isVar: false` — this is a TYPE-position receiver, exactly like the
+                // metatype parameter and the literal `CBase.validate()`.
+                if !Self.r585Off, let mr = metatypeReturns[n], localTypes.contains(mr) {
+                    if Self.r585Probe {
+                        FileHandle.standardError.write("R585HIT return \(n) -> \(mr)\n".data(using: .utf8)!)
+                    }
+                    return (mr, false, [n], false, false)
+                }
             }
             // `AVAudioSession.sharedInstance()` — a SINGLETON FACTORY METHOD on a type, returning an
             // instance of that type by convention. `SINGLETON_ACCESSORS` already covers the PROPERTY
@@ -1470,6 +1624,16 @@ final class CallCollector: SyntaxVisitor {
     /// the calibration does not need a revert to reproduce and cannot rot into a test that passes either
     /// way — the failure mode §A measured four times in one day.
     private static let r584Off = ProcessInfo.processInfo.environment["CANDOR_R584_OFF"] != nil
+    /// SOUNDNESS R585 REACH PROBE (§E1) — "CHANGED 0 is not evidence until REACH is measured". One
+    /// stderr line per binder this row resolves that R563/R584 did not, so an A/B over a corpus that
+    /// contains none of the shape says so out loud instead of reporting a flattering zero.
+    static let r585Probe = ProcessInfo.processInfo.environment["CANDOR_R585_PROBE"] != nil
+    /// SOUNDNESS R585 §1b KILL SWITCH — degrades every metatype BINDER other than the parameter clause
+    /// back to nil, i.e. restores exactly the pre-fix behaviour (b2/b3/b5/b6/b7/b8/b9 ABSENT).
+    /// `R585CalibrationTests` asserts the fixture resolves; running the suite with `CANDOR_R585_OFF=1`
+    /// is what proves those assertions can FAIL, so the calibration cannot rot into a test that passes
+    /// either way — the failure mode §A measured four times in one day.
+    private static let r585Off = ProcessInfo.processInfo.environment["CANDOR_R585_OFF"] != nil
     /// SOUNDNESS R567(a) REACH PROBE — "CHANGED 0 is not evidence until REACH is measured" (R418's
     /// lesson: 17,944 units said "inert" and the probe said the code never ran). One stderr line per
     /// receiver chain whose last hop this engine could not type and which WOULD have become a §2 owner.
@@ -2908,6 +3072,11 @@ final class CallCollector: SyntaxVisitor {
 
     private func clearBindingTypeOnly(_ name: String) {
         vars.removeValue(forKey: name)
+        // R585 — a per-binding FACT, so it dies with the binding that set it. A stale entry is the
+        // FABRICATION direction: `let t: CBase.Type = …; …; let t = Calm(); t.validate()` would charge
+        // the second `t` the first one's hierarchy.
+        metatypeBinders.removeValue(forKey: name)
+        metatypeArrayElem.removeValue(forKey: name)   // R585 — moves with `metatypeBinders`, one binding
         opaqueVars.remove(name)          // R610 — the guess flag travels with the binding it describes
         protoTyped.removeValue(forKey: name)
         arrayElem.removeValue(forKey: name)
@@ -3056,11 +3225,12 @@ final class CallCollector: SyntaxVisitor {
     /// give the name back (see `visit(ForStmtSyntax)`). These four are exactly the maps
     /// `clearBindingTypeOnly` drops; `opaqueElem` is restored by the shadow scope with the other flags,
     /// and it is written only in lockstep with `arrayElem`, so the pair cannot come back inconsistent.
-    private typealias TypeBinding = (type: String?, arrayElem: String?, dictElem: String?, tupleElem: [String: String]?, arrayElemNested: String?)
+    private typealias TypeBinding = (type: String?, arrayElem: String?, dictElem: String?, tupleElem: [String: String]?, arrayElemNested: String?, metatype: String?, metatypeElem: String?)
     private var typeScopes: [SyntaxIdentifier: [(String, TypeBinding)]] = [:]
 
     private func snapshotType(_ name: String) -> TypeBinding {
-        (vars[name], arrayElem[name], dictElem[name], tupleElem[name], arrayElemNested[name])
+        (vars[name], arrayElem[name], dictElem[name], tupleElem[name], arrayElemNested[name],
+         metatypeBinders[name], metatypeArrayElem[name])   // R585 — saved and restored with its siblings
     }
 
     private func restoreType(_ name: String, _ b: TypeBinding) {
@@ -3069,6 +3239,8 @@ final class CallCollector: SyntaxVisitor {
         dictElem[name] = b.dictElem
         tupleElem[name] = b.tupleElem
         arrayElemNested[name] = b.arrayElemNested   // R278 — saved and restored with its siblings
+        metatypeBinders[name] = b.metatype          // R585 — ditto
+        metatypeArrayElem[name] = b.metatypeElem    // R585 — ditto
     }
 
     // A binder REBINDS `name`, so the name-keyed FLAGS carried by the signature or by an earlier
@@ -3826,6 +3998,19 @@ final class CallCollector: SyntaxVisitor {
             scopeBindingType(Syntax(node), p.name)
             vars[p.name] = p.annotated
         }
+        // SOUNDNESS R585 (b5) — the METATYPE annotation, typed through the SAME scoped binder. The
+        // scoping, and therefore R124's leak-past-the-closure property, is identical.
+        //
+        // A SEPARATE LOOP IS SAFE BECAUSE THE TWO INDEXES CANNOT BOTH ANSWER, and that is checkable
+        // rather than asserted: `elementSpelling` IS `typeName` (plus the function-type sentinel), and
+        // `typeName` has no `MetatypeTypeSyntax` case — which is the whole subject of this row. It is
+        // also MEASURED: `metatypeBinder`'s first guard is `vars[spelling] == nil`, so if the annotated
+        // loop above had recorded `t` this branch could never fire, and
+        // `MetatypeBinderProcessTests`'s b5p/b5c arms resolve.
+        for p in closureParamNames(node) where p.metatype != nil {
+            scopeBindingType(Syntax(node), p.name)
+            metatypeBinders[p.name] = p.metatype
+        }
         return .visitChildren
     }
     override func visitPost(_ node: ClosureExprSyntax) { leaveShadowScope(node) }
@@ -3897,6 +4082,15 @@ final class CallCollector: SyntaxVisitor {
                     vars[name] = elem.name
                     if elem.mono { monoNames.insert(name) }   // `for x in xs` over `[T]`/`[some P]` (shadowName ran above)
                 }
+            } else if let me = metatypeElementOf(node.sequence) {
+                // SOUNDNESS R585 (b6) — `for t in ts` over a `[CBase.Type]`. `elementTypeOf` answers nil
+                // (no index can hold a metatype element), so this landed on `clearBinding` and
+                // `t.validate()` resolved against nothing. The names are already cleared and saved
+                // above, so this writes into the loop's own scope exactly as the `vars` arms do.
+                if Self.r585Probe {
+                    FileHandle.standardError.write("R585HIT forin \(name) -> \(me)\n".data(using: .utf8)!)
+                }
+                metatypeBinders[name] = me
             } else { clearBinding(name) }
         } else if let tup = node.pattern.as(TuplePatternSyntax.self), tup.elements.count == 2,
                   let slots = zipElementSlots(node.sequence) {
@@ -4138,23 +4332,27 @@ final class CallCollector: SyntaxVisitor {
 
     // Names a closure binds: explicit `{ (a, b) in … }`/`{ a, b in … }` → those names; shorthand
     // `{ $0.… }` with no signature → `$0`/`$1`/`$2` (we can't tell arity, so clear the common few).
-    private func closureParamNames(_ closure: ClosureExprSyntax) -> [(name: String, annotated: String?)] {
+    private func closureParamNames(_ closure: ClosureExprSyntax) -> [(name: String, annotated: String?, metatype: String?)] {
         if let params = closure.signature?.parameterClause?.as(ClosureParameterClauseSyntax.self) {
             return params.parameters.map { p in
                 // R211 — `elementSpelling`, not `typeName(…).name`. A param annotated with a bare
                 // function type (`{ (f: () -> Void) in f() }`) has no NAME, so it read as UNANNOTATED
                 // and was cleared: the invocation resolved against nothing and the enclosing function
                 // went ABSENT, while its `(f: Cb)` alias twin one line away had at least a spelling.
-                (p.firstName.text, p.type.flatMap { elementSpelling($0) })
+                // SOUNDNESS R585 (b5) — …and the METATYPE spelling beside it, for the same reason:
+                // `ts.forEach { (t: CBase.Type) in t.validate() }` has no `elementSpelling`, so it read
+                // as UNANNOTATED and was cleared, and the call on it resolved against nothing.
+                (p.firstName.text, p.type.flatMap { elementSpelling($0) },
+                 p.type.flatMap { metatypeBaseName($0) })
             }
         }
         if let shorthand = closure.signature?.parameterClause?.as(ClosureShorthandParameterListSyntax.self) {
-            return shorthand.map { ($0.name.text, nil) }
+            return shorthand.map { ($0.name.text, nil, nil) }
         }
         if closure.signature == nil {
             // no signature → may use `$0`/`$1`/`$2` shorthand; clear the common few so a prior
             // same-named binding can't leak in
-            return [("$0", nil), ("$1", nil), ("$2", nil)]
+            return [("$0", nil, nil), ("$1", nil, nil), ("$2", nil, nil)]
         }
         return []
     }
@@ -4273,6 +4471,18 @@ final class CallCollector: SyntaxVisitor {
             if let slots = zipElementSlots(base) { return slots }
             return nil
         }()
+        // SOUNDNESS R585 (b6) — THE METATYPE ELEMENT of the same receiver, for the same eight iterator
+        // methods. MEASURED, not anticipated: swift-argument-parser's `let validators:
+        // [ParsableArgumentsValidator.Type] = […]` + `validators.compactMap { validator in
+        // validator.validate(…) }` is the idiom, and the `for t in ts` binder R585 closed first does not
+        // reach it — the corpus contains 34 `[X.Type]` declarations and ZERO were reached until this arm
+        // existed. Asked through the same `metatypeElementOf` the `for` binder uses (§F1.3: one question,
+        // one implementation).
+        let iteratorMetaElem: String? = {
+            guard let ma = node.calledExpression.as(MemberAccessExprSyntax.self),
+                  Self.isElementIterator(ma.declName.baseName.text), let base = ma.base else { return nil }
+            return metatypeElementOf(base)
+        }()
         // the TRAILING closure (or first positional) is the iterator's element closure
         let elemClosure = node.trailingClosure
             ?? node.arguments.lazy.compactMap { Self.peel($0.expression).as(ClosureExprSyntax.self) }.first
@@ -4316,6 +4526,16 @@ final class CallCollector: SyntaxVisitor {
                     if !bindCallableElement(p.name, annotated) {
                         vars[p.name] = annotated             // explicit `{ (x: Foo) in }` — precise
                     }
+                } else if isElementParam(i), iteratorElem == nil, let me = iteratorMetaElem,
+                          closure == elemClosure {
+                    // SOUNDNESS R585 (b6) — the element closure of an iterator over `[X.Type]`.
+                    // Guarded on `iteratorElem == nil` so it fires only where the ordinary element
+                    // index refuses: this may add a binding, never replace one. Registered against the
+                    // closure's node id by the snapshot above, exactly as the `vars` arms are.
+                    if Self.r585Probe {
+                        FileHandle.standardError.write("R585HIT closelem \(p.name) -> \(me)\n".data(using: .utf8)!)
+                    }
+                    metatypeBinders[p.name] = me
                 } else if isElementParam(i), iteratorElem == nil, let inner = nestedIterElem,
                           closure == elemClosure {
                     // R278 — the parameter is itself a container; give it its ELEMENT, not a type.
@@ -4413,6 +4633,12 @@ final class CallCollector: SyntaxVisitor {
         // identifier in a pattern node, so this cannot mistake a value being compared for a name being
         // bound.
         let singleAssoc = node.arguments.count == 1 ? enumCaseValueType[ma.declName.baseName.text] : nil
+        // SOUNDNESS R585 (b10) — the METATYPE payload, resolved from the metatype twin of the same
+        // index and under the same arity rule. `case .c(let t) = h` where `case c(CBase.Type)`: the
+        // ordinary map has nothing to say (`typeName` answers nil for a metatype), so the binder
+        // cleared the name and `t.validate()` resolved against nothing.
+        let singleAssocMeta = node.arguments.count == 1
+            ? metatypeEnumCaseValueType[ma.declName.baseName.text] : nil
         for arg in node.arguments {
             guard let pat = arg.expression.as(PatternExprSyntax.self) else { continue }
             // `.active(let c)` — the `let` inside the parens; the only spelling this types.
@@ -4444,6 +4670,12 @@ final class CallCollector: SyntaxVisitor {
                 scopeBindingType(Syntax(node), name)
                 clearBinding(name)
                 if let singleAssoc { vars[name] = singleAssoc }
+                else if let singleAssocMeta, !Self.r585Off {
+                    if Self.r585Probe {
+                        FileHandle.standardError.write("R585HIT case \(name) -> \(singleAssocMeta)\n".data(using: .utf8)!)
+                    }
+                    metatypeBinders[name] = singleAssocMeta   // R585 (b10) — after `clearBinding`
+                }
                 casePayloadLocals.insert(name)
                 markBinders(vb.pattern)
             } else if let ip = pat.pattern.as(IdentifierPatternSyntax.self) {
@@ -6967,6 +7199,13 @@ final class CallCollector: SyntaxVisitor {
                     }
                 }
                 else if let tn = t.name { vars[name] = tn }
+                // SOUNDNESS R585 (b2/b3) — `let t: CBase.Type = CSub.self` / the `var` twin. `typeName`
+                // answers nil for a metatype, so this binder recorded NOTHING and `t.validate()` read
+                // silent-pure. The annotation is WRITTEN IN THE SOURCE; nothing is inferred. Placed
+                // after the `t.name` arm so it can only fire where every existing arm refuses — this
+                // may add a binding, never replace one.
+                else if let mb = metatypeBaseName(ann.type) { metatypeBinders[name] = mb }
+                else if let me = metatypeArrayElementName(ann.type) { metatypeArrayElem[name] = me } // R585 (b6)
                 else if let inner = nestedArrayElementName(ann.type) {                    // R278 `let xs: [[T]]`
                     setArrayElemNested(name, inner)                                        // R351 — lockstep
                 }
@@ -6978,6 +7217,18 @@ final class CallCollector: SyntaxVisitor {
                 //  below. Both are gone: the annotation was never the question — the CONSTRUCTION is —
                 //  and keeping a binder-shaped copy beside the construction hook is what let the
                 //  annotated and unannotated spellings drift apart in the first place.)
+            } else if let v0 = binding.initializer?.value, let mb = metatypeOfExpr(v0) {
+                // SOUNDNESS R585 (b9) — AN UNANNOTATED BINDER OF A METATYPE. `let t = mkC()` where
+                // `func mkC() -> CBase.Type`, `let t = CSub.self`, `let u = t`. Asked FIRST, ahead of
+                // the callable/ctor/factory arms below, because `metatypeOfExpr` answers only for the
+                // three exact readings in its doc — a call of a function DECLARED to return a metatype,
+                // a `.self` literal on a local type, and a copy of a name already known to hold one —
+                // and each of those is a spelling the arms below either mis-type or drop entirely
+                // (`mkC()` has no `returns` entry, so it reached `depFactoryCallee`'s heuristic).
+                if Self.r585Probe {
+                    FileHandle.standardError.write("R585HIT bind \(name) -> \(mb)\n".data(using: .utf8)!)
+                }
+                metatypeBinders[name] = mb
             } else if let v0 = binding.initializer?.value {
                 let v = Self.peel(v0)
                 // R178 — an unannotated COPY of a callable: `let c = cb`, `let c = self.cb`,

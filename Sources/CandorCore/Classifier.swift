@@ -2497,6 +2497,49 @@ public func typeName(_ t: TypeSyntax) -> (name: String?, isFunction: Bool) {
     return (nil, false)
 }
 
+/// SOUNDNESS R585 — THE TYPE A `X.Type` SPELLING IS THE METATYPE OF, or nil.
+///
+/// `typeName` has no `MetatypeTypeSyntax` case, so `.Type` is the one type spelling that survives
+/// NOWHERE in this engine's indexes except `FnInfo.metatypeParams`, which is written from the
+/// parameter clause alone. That is why R563/R584 closed the parameter binder and every OTHER binder
+/// of the same value — a local `let`/`var`, a closure parameter, a stored property, a global, a
+/// for-in element, an enum payload — stayed ABSENT from `functions[]` over a body that executes the
+/// effect (R585, eighteen arms measured).
+///
+/// `.Type` ONLY. `P.Protocol` is the EXISTENTIAL metatype and a member call on it does not dispatch
+/// to a conformer, so recording it would charge effects no call performs — the same exclusion R563
+/// states at `metatypeParams`, spelled once here so the two cannot drift.
+///
+/// Peels the wrappers `typeName` peels (`Optional`, attributes, a one-element tuple) because an
+/// OPTIONAL metatype is still a metatype the moment it is unwrapped: `_ t: CBase.Type?` + `if let t`
+/// is the b8 binder, and refusing it there is a silent under-report, not caution.
+public func metatypeBaseName(_ t: TypeSyntax) -> String? {
+    if let opt = t.as(OptionalTypeSyntax.self) { return metatypeBaseName(opt.wrappedType) }
+    if let iuo = t.as(ImplicitlyUnwrappedOptionalTypeSyntax.self) { return metatypeBaseName(iuo.wrappedType) }
+    if let att = t.as(AttributedTypeSyntax.self) { return metatypeBaseName(att.baseType) }
+    if let tup = t.as(TupleTypeSyntax.self), tup.elements.count == 1, let only = tup.elements.first {
+        return metatypeBaseName(only.type)
+    }
+    if let mt = t.as(MetatypeTypeSyntax.self), mt.metatypeSpecifier.text == "Type" {
+        return typeName(mt.baseType).name
+    }
+    return nil
+}
+
+/// SOUNDNESS R585 — the ELEMENT of an array of metatypes (`[X.Type]`), or nil. The array spellings
+/// `arrayElementName` answers for ordinary types, asked of the metatype question instead.
+public func metatypeArrayElementName(_ t: TypeSyntax) -> String? {
+    if let opt = t.as(OptionalTypeSyntax.self) { return metatypeArrayElementName(opt.wrappedType) }
+    if let att = t.as(AttributedTypeSyntax.self) { return metatypeArrayElementName(att.baseType) }
+    if let arr = t.as(ArrayTypeSyntax.self) { return metatypeBaseName(arr.element) }
+    if let id = t.as(IdentifierTypeSyntax.self), id.name.text == "Array",
+       let args = id.genericArgumentClause?.arguments, args.count == 1,
+       let only = args.first?.argument.as(TypeSyntax.self) {
+        return metatypeBaseName(only)
+    }
+    return nil
+}
+
 /// The PLAIN NOMINAL spelling of a return type, or nil — the ⟨0.23⟩ `typeSurface.returns` producer
 /// predicate (SPEC §2, `DEP-RECEIVER-TYPING-DESIGN.md`).
 ///

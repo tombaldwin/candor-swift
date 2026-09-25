@@ -78,6 +78,9 @@ struct FnInfo {
     /// than by widening `typeName`, which would make `t` look like a `P`-typed value to seven other
     /// consumers and could union conformer instance methods onto a metatype receiver.
     var metatypeParams: [String: String] = [:]
+    /// SOUNDNESS R585 (b6) — a parameter typed `[X.Type]`, so a `for t in ts` binder over it can be
+    /// typed. The metatype twin of `arrayParams`.
+    var metatypeArrayParams: [String: String] = [:]
     var arrayParams: [String: String] = [:]  // param name -> ELEMENT type (a `[T]` param, for `for x in p`)
     var arrayParamsNested: [String: String] = [:]  // R278 — `[[T]]` param -> INNER element `T`
     var dictParams: [String: String] = [:]   // param name -> VALUE type (a `[K: V]` param, for `for (k,v)`)
@@ -195,6 +198,10 @@ final class DeclCollector: SyntaxVisitor {
     var converter: SourceLocationConverter
     var fns: [FnInfo] = []
     var fields: [String: [String: (name: String?, isFunction: Bool)]] = [:] // Type -> field -> info
+    /// SOUNDNESS R585 (b4) — `type -> field -> the type whose METATYPE the field holds`.
+    var fieldMetatypes: [String: [String: String]] = [:]
+    /// SOUNDNESS R585 (b6) — `type -> field -> the ELEMENT type of a `[X.Type]`-typed field.`
+    var fieldMetatypeArrayElem: [String: [String: String]] = [:]
     var typeGenericBounds: [String: [String: String]] = [:]  // Type -> its generic param -> protocol bound
     // Type -> the RAW generic parameter names its own declaration introduces (`struct Box<T>` -> {"Box":
     // {"T"}}), recorded regardless of whether a bound is known yet. A conditional-conformance extension
@@ -263,8 +270,19 @@ final class DeclCollector: SyntaxVisitor {
     var protocolPaths: Set<String> = []
     var protocolSupers: [String: Set<String>] = [:]    // protocol -> its DIRECT super-protocols (`Sub: Sup`)
     var returnsTmp: [String: String?] = [:]            // fn leaf -> return type (nil = ambiguous)
+    /// SOUNDNESS R585 (b9) — fn leaf -> the type whose METATYPE it returns (nil = ambiguous).
+    var metatypeReturnsTmp: [String: String?] = [:]
     var conformers: [String: [String]] = [:]           // protocol -> conforming local types
     var caseAssoc: [String: Set<String>] = [:]         // enum case -> single-associated-value type(s) seen
+    /// SOUNDNESS R585 (b10) — the METATYPE twin of `caseAssoc`: `case c(CBase.Type)`. Same
+    /// single-value, unambiguous-name discipline; separate map for `globalMetatypes`' reason.
+    var caseAssocMetatype: [String: Set<String>] = [:]
+    /// SOUNDNESS R585 §1b KILL SWITCH, the DECLARATION-side half. `CallCollector`'s switch degrades the
+    /// resolvers; this one degrades the one index change that is visible THROUGH an older resolver —
+    /// `metatypeParams` peeling an Optional (b8), which reaches R584's `typeBoundParams` arm and would
+    /// otherwise keep answering with R585 switched off. A kill switch that restores only part of a
+    /// change is a comment, not a switch.
+    static let r585Off = ProcessInfo.processInfo.environment["CANDOR_R585_OFF"] != nil
     // `static let shared = factory()` — Type.field -> factory leaf, resolved to the vended type AFTER
     // the returns index is built (a free factory's return type isn't known during this first pass).
     var staticFactoryFields: [(type: String, field: String, leaf: String)] = []
@@ -343,6 +361,13 @@ final class DeclCollector: SyntaxVisitor {
     // known on this first per-file pass, so it is deferred via `globalFactories`, mirroring
     // `staticFactoryFields` one scope up.
     var globalTypes: [String: String] = [:]
+    /// SOUNDNESS R585 (b7) — a module-scope global whose type is a METATYPE: `let gC: CBase.Type =
+    /// CSub.self`. A SEPARATE map from `globalTypes` rather than an entry in it, because everything
+    /// downstream of `globalTypes` reads it as "the type of the VALUE this name holds" — putting a
+    /// metatype there would make `gC.validate()` an INSTANCE call on `CBase`, which is a different
+    /// (and wrong) dispatch. This map answers the TYPE-POSITION question instead, and only
+    /// `CallCollector`'s type-receiver resolvers read it.
+    var globalMetatypes: [String: String] = [:]
     var globalFactories: [(name: String, leaf: String)] = []
     /// R79 — the SUBSET of `globalTypes`'/`globalFactories`' names declared `public`/`open`. Swift access
     /// control means a non-public global is genuinely invisible outside its own module; the Driver
@@ -358,6 +383,9 @@ final class DeclCollector: SyntaxVisitor {
     /// shape is recognised (mirrors the plain-type table above); an array-literal initializer with no
     /// annotation is left unresolved, same as before this fix.
     var globalArrayElem: [String: String] = [:]
+    /// SOUNDNESS R585 (b6) — a global array OF METATYPES: `let all: [CBase.Type] = […]`. The
+    /// `globalArrayElem` twin for the type-position question, for `globalMetatypes`' reason.
+    var globalMetatypeArrayElem: [String: String] = [:]
     // Capitalized @-attributes applied to a class/struct/enum/actor DECLARATION itself (`@Observable
     // class Store`), raw and unfiltered — the type-level companion to `FnInfo.uppercaseAttrs`. Swift
     // admits exactly two explanations for a capitalized custom attribute here: a global actor (excluded
@@ -595,6 +623,13 @@ final class DeclCollector: SyntaxVisitor {
                 if isPublicGlobal { globalPublic.insert(name) }
             } else if let elem = arrayElementName(ann) {
                 globalArrayElem[name] = elem
+            } else if let mb = metatypeBaseName(ann) {
+                // R585 (b7). NOT entered into `globalPublic`: cross-module visibility is derived from
+                // `globalTypesByModule`, which this map deliberately is not part of, so a public
+                // metatype global is answered within its own module only. Stated as the residual it is.
+                globalMetatypes[name] = mb
+            } else if let me = metatypeArrayElementName(ann) {
+                globalMetatypeArrayElem[name] = me  // R585 (b6), same residual
             }
             return
         }
@@ -720,8 +755,15 @@ final class DeclCollector: SyntaxVisitor {
     // is bindable, an ambiguous one (`.success(A)` vs `.success(B)`) is left unbound — never guess.
     override func visit(_ node: EnumCaseDeclSyntax) -> SyntaxVisitorContinueKind {
         for el in node.elements {
-            guard let params = el.parameterClause?.parameters, params.count == 1,
-                  let t = typeName(params.first!.type).name else { continue }
+            guard let params = el.parameterClause?.parameters, params.count == 1 else { continue }
+            // SOUNDNESS R585 (b10) — `case c(CBase.Type)`. `typeName` answers nil for a metatype, so the
+            // `guard` below dropped the case entirely and `if case .c(let t) = h { t.validate() }` bound
+            // an untyped name.
+            if let mb = metatypeBaseName(params.first!.type) {
+                caseAssocMetatype[el.name.text, default: []].insert(mb)
+                continue
+            }
+            guard let t = typeName(params.first!.type).name else { continue }
             caseAssoc[el.name.text, default: []].insert(t)
         }
         return .visitChildren
@@ -1132,6 +1174,15 @@ final class DeclCollector: SyntaxVisitor {
                         unresolvedGenericFields.append((ty, name, tn))
                     }
                     fields[ty, default: [:]][name] = info
+                    // SOUNDNESS R585 (b4/b6) — a stored property of METATYPE type, and of ARRAY-of-
+                    // metatype type. `fields` records "the type of the value", which for a metatype is
+                    // no answer at all (`typeName` returns nil), so `struct Box { let t: CBase.Type;
+                    // func go() { t.validate() } }` read silent-pure. Recorded beside `fields` rather
+                    // than inside it for `globalMetatypes`' reason: the two answer different questions.
+                    if let mb = metatypeBaseName(ann.type) { fieldMetatypes[ty, default: [:]][name] = mb }
+                    else if let me = metatypeArrayElementName(ann.type) {
+                        fieldMetatypeArrayElem[ty, default: [:]][name] = me
+                    }
                     if let inner = nestedArrayElementName(ann.type) {   // R278 — `[[T]]`, asked first
                         fieldArrayElemNested[ty, default: [:]][name] = inner
                     } else if let elem = arrayElementName(ann.type) { fieldArrayElem[ty, default: [:]][name] = elem }
@@ -1243,6 +1294,31 @@ final class DeclCollector: SyntaxVisitor {
     }
 
     private func recordReturn(_ name: String, _ sig: FunctionSignatureSyntax) {
+        // SOUNDNESS R585 (b9) — a function whose RETURN TYPE is a metatype (`func mkC() -> CBase.Type`).
+        // `typeName` answers nil, so `returnsTmp` had no entry and `let t = mkC(); t.validate()` — and
+        // the direct `mkC().validate()` — resolved against nothing. Same ambiguity rule as the ordinary
+        // returns index: a second declaration of the leaf with a DIFFERENT answer poisons the entry
+        // rather than guessing.
+        //
+        // WHERE THE TWO MAPS COULD DISAGREE ABOUT ONE LEAF, and it takes TWO guards rather than one,
+        // because this collector sees one FILE. Within the file, the line below poisons the metatype
+        // entry the moment an ordinary-typed declaration of the same leaf is seen. ACROSS files that
+        // line cannot fire at all, so the Driver carries the other half: `metatypeReturnsIdx` is built
+        // only where `returnsIdx[leaf] == nil`. Neither guard alone is enough, and saying so is the
+        // point — the single-file one is what a reader of this function would otherwise believe covers
+        // it.
+        if let rc = sig.returnClause, let mb = metatypeBaseName(rc.type) {
+            if let existing = metatypeReturnsTmp[name] {
+                if existing != mb { metatypeReturnsTmp[name] = String?.none }
+            } else {
+                metatypeReturnsTmp[name] = mb
+            }
+            return
+        }
+        // A leaf declared to return an ORDINARY type somewhere poisons the metatype answer for it — the
+        // metatype map may only ADD where nothing answered (see the Driver's build of
+        // `metatypeReturnsIdx`), so this is the conservative half of that rule, not a second authority.
+        if metatypeReturnsTmp[name] != nil { metatypeReturnsTmp[name] = String?.none }
         guard let rt = sig.returnClause.map({ typeName($0.type) }), let tn = rt.name else { return }
         if let existing = returnsTmp[name] {
             if existing != tn { returnsTmp[name] = String?.none } // ambiguous leaf — never guess
@@ -1364,9 +1440,20 @@ final class DeclCollector: SyntaxVisitor {
             // SOUNDNESS R563 — the METATYPE spelling, recorded beside the ordinary one. `.Type` only:
             // `P.Protocol` is the existential metatype and a member call on it does not dispatch to a
             // conformer, so it is deliberately not recorded.
-            if let mt = p.type.as(MetatypeTypeSyntax.self), mt.metatypeSpecifier.text == "Type",
-               let base = typeName(mt.baseType).name {
+            // SOUNDNESS R585 (b8) — …AND THE OPTIONAL SPELLING OF IT. This read `p.type.as(Metatype…)`
+            // directly, so `_ t: CBase.Type?` + `if let t = t { t.validate() }` — the idiomatic way a
+            // metatype reaches a function at all — was ABSENT from `functions[]` while the non-optional
+            // twin one character away resolved. `metatypeBaseName` peels exactly the wrappers `typeName`
+            // peels, and an Optional metatype IS a metatype once unwrapped: if it is nil the call does
+            // not happen, so the resolution is the same one, not a wider one. `.Type` only — the
+            // `P.Protocol` exclusion now lives in that one function rather than in this call site.
+            if let base = Self.r585Off
+                        ? p.type.as(MetatypeTypeSyntax.self).flatMap({
+                              $0.metatypeSpecifier.text == "Type" ? typeName($0.baseType).name : nil })
+                        : metatypeBaseName(p.type) {
                 info.metatypeParams[pname] = base
+            } else if let elem = metatypeArrayElementName(p.type) {
+                info.metatypeArrayParams[pname] = elem   // R585 (b6)
             }
             info.paramNames.insert(pname)
             info.paramIndex[pname] = idx        // R178 — see `paramIndex`

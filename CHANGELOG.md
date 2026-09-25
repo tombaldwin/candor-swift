@@ -11,6 +11,74 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R585 — EVERY BINDER OF A METATYPE EXCEPT THE PARAMETER CLAUSE WAS SILENT, AND THE
+  PARAMETER SPELLING OF THE IDENTICAL CALL ALREADY RESOLVED.** `CandorCore.typeName` has no
+  `MetatypeTypeSyntax` case, so `.Type` survived in exactly ONE index — `FnInfo.metatypeParams`,
+  written from the parameter clause alone — and every other way of binding the same value resolved to
+  nothing. R563 closed the protocol half and R584 the class half; both closed them for one binder.
+
+  **NINE BINDERS × BOTH HALVES = EIGHTEEN ARMS, every one ABSENT from `functions[]` over a body that
+  executes `URLSession.dataTask`, with `deny Net` and `pure` both exit 0**: a local `let` and a `var`
+  with an `X.Type` annotation; a stored or computed PROPERTY of metatype type; a closure parameter; a
+  for-in over `[X.Type]`; a module-scope global; an unwrapped `X.Type?`; a function RETURN bound to a
+  local; an enum payload via `case let`. The two controls that make this a binder gap rather than a
+  dispatch design are in the same file, one hierarchy and one sink away: the literal `CBase.validate()`
+  and the parameter `_ t: CBase.Type` both resolved before and after. A tenth spelling was found by the
+  corpus rather than by enumeration — the ITERATOR element of a metatype array
+  (`validators.map { v in v.validate() }`), which is swift-argument-parser's idiom and which the for-in
+  binder does not reach.
+
+  **A/B — 15 real packages, 3,194 Swift files, 32,764 pre-rows / 32,783 post-rows** (`bin/corpus-ab.py`,
+  key `entry+package+fn+hash` over a multiset, WIDE value): **ADDED 19, REMOVED 0, CHANGED 156**
+  (narrow `inferred` key: ADDED 19, REMOVED 0, CHANGED 2). **Zero removals in EVERY field** —
+  `dispatchesOn` +283/-0, `invisible` +125/-0, `calls` +18/-0, `inferred` +2/-0, `incomplete` +2/-0,
+  `fs` +2/-0, `direct` +1/-0, `unknownWhy` +1/-0. The ⟨0.39⟩ wire gained keys and lost none, which is
+  the regression R584's own A/B caught and this one was run to re-ask.
+
+  **REACH, measured with `CANDOR_R585_PROBE=1` rather than inferred from the diff: 81 hits across 3 of
+  the 15 packages** — swift-argument-parser 52, swift-syntax 28, swift-format 1. By resolution site:
+  48 through the bare-identifier resolver (a metatype PROPERTY read through implicit `self`, or a
+  binding a closure/`case` arm had already typed), 18 through the explicit `base.member` PROPERTY walk,
+  8 through the iterator ELEMENT of a metatype array, 5 through an enum PAYLOAD, 2 through a metatype
+  RETURN. **The local
+  `let`/`var`, the closure parameter, the for-in, the global and the optional parameter got ZERO hits
+  on this corpus and are SAFETY-ONLY there**, stated at the time of writing rather than discovered
+  later; a source census says why — the corpus declares 4 annotated metatype locals (all in a parser
+  TEST fixture), 0 closure-parameter spellings and 0 module-scope metatype globals.
+
+  **EVERY NEW CONCRETE EFFECT TRACED TO A BODY.** The only new effect in the whole A/B is `Fs read` on
+  `ParsableArguments.parse`/`parseOrExit`, and its first hop is
+  `internal static var asCommand: ParsableCommand.Type` + `self.asCommand.parseAsRoot(arguments)` —
+  written in the source, one hop, no new approximation: `ParsableCommand.parseAsRoot` was ALREADY
+  `['Fs','Unknown']` pre-fix, through the bounded CHA over `parsedCommand.validate()` reaching
+  `GenerateManual.validate`'s `FileManager.default.fileExists`. Everything else added is `Unknown`
+  (disclosure) or an empty effect set. The 13 swift-syntax rows are one mechanism —
+  `SyntaxKind.syntaxNodeType: SyntaxProtocol.Type` reached as `self.raw.kind.syntaxNodeType.init(self)!`
+  — and swift-format's are `RuleBasedFindingCategory.ruleType: Rule.Type`, both pure or `Unknown`.
+
+  **THE OVER-CHARGE CONTROL WAS THE DELIVERABLE, and there are three of them, all compiling and
+  RUNNING (§E3).** A PURE hierarchy driven through all nine binders gains nothing (20 arms, blanket
+  `deny Net Fs Env` exit 0 on each, with `NBase.reaches` caught on the same bytes so the gate is proven
+  able to fail). An EFFECTFUL neighbour type bound through the same binders, calling only its INERT
+  member, is not charged — so the fix charges the CALL, not the TYPE. And a rebind of the same NAME to
+  an ordinary value drops the metatype binding (`rebound` pure, `reallyFires` `['Net']` as the
+  discriminating control) — `metatypeBinders` is a per-binding fact and rides `clearBindingTypeOnly`
+  and `snapshotType`/`restoreType` with `vars`, which `NameKeyedStateTests` now requires in writing.
+
+  **§1b:** `CANDOR_R585_OFF=1` restores the pre-fix answer exactly — measured against a binary built at
+  `8067f4a`, both say 4 of the 22 fixture arms resolve and the same four. The switch is deliberately NOT
+  stripped from the test harness's child environment, so
+  `CANDOR_R585_OFF=1 swift test --filter MetatypeBinder` reds the file: **4 of 7 cases FAIL, 69
+  assertions.** The three that stay green are the three whose assertions are absence-shaped.
+
+  **TWO RESIDUALS, stated rather than hedged.** A metatype reached through a TRANSFORM CHAIN
+  (`ts.filter { … }.first`) is not followed — `elementTypeOf` earns that recursion through an index this
+  one does not have, and a second partial copy of that walk is the two-implementations-of-one-question
+  shape (§F1.3). And a function LEAF that returns a metatype in one declaration and an ordinary type in
+  another is refused in BOTH maps: ambiguous, never guessed, the ordinary returns index's own rule. It
+  takes two guards to hold, one per file in `DeclCollector.recordReturn` and one across files in the
+  Driver, because neither can see what the other sees.
+
 - **SOUNDNESS R610 — A BINDING LAUNDERED THE GUESS R567(a) REFUSES.** R567(a) made the §2 key site
   refuse a receiver whose chain walked through a member this engine could not type. `vars` records a
   binder's NAME and its ANSWER and not the fact that the answer was `rootOf`'s outer-base CONVENTION,
@@ -304,6 +372,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   and the class half — `let t: Base.Type = Sub.self; t.go()` is ABSENT from `functions[]` over a body
   that dials, with `deny Net` and `pure` both exit 0 (SOUNDNESS R585, measured, open). The paragraph now
   states the TYPE-receiver contract and names that residual instead of appearing to cover it.
+  **(R585 is CLOSED as of the entry at the top of this file; the paragraph now states the binders as
+  covered rather than as a residual. This entry is kept as the snapshot it was.)**
 
 - **SOUNDNESS R580 — R563's LOCAL-PROTOCOL FILTER RAN BEFORE THE SHADOWING PRECEDENCE, so an inner
   generic bound that is NOT a local protocol could not DISPLACE the enclosing type's, and the receiver

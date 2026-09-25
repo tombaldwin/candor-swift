@@ -277,13 +277,17 @@ over-approximation of the blind set (disclosed, never a silent-pure); a MODULE-Q
 - **…and the receiver can be the TYPE rather than a value — `P.make()`, `t.make()` for a `t: P.Type`,
   `type(of: x).make()` — with the SAME bounded CHA, for a protocol bound (R563) and a class bound
   (R584) alike.** A class bound resolves to exactly what the class named LITERALLY resolves to: its own
-  implementation unioned with every local subclass `override`. **THE ONE SENTENCE ABOVE THAT DOES NOT
-  CARRY OVER IS "however the receiver was bound".** For a TYPE receiver, only a function/initializer
-  PARAMETER is wired; a metatype held in a local `let`/`var`, a stored property, an array element or a
-  function's return is still DROPPED — silently, in both the protocol and the class half (SOUNDNESS
-  R585, measured, open). `t.go()` where `let t: Base.Type = Sub.self` is ABSENT from `functions[]` over
-  a body that dials, and `deny Net` and `pure` both exit 0 on it. Do not read this paragraph as covering
-  that shape.
+  implementation unioned with every local subclass `override`. **AND "however the receiver was bound"
+  NOW CARRIES OVER TO THE TYPE RECEIVER TOO (SOUNDNESS R585).** This paragraph used to end by excluding
+  it: only a function/initializer PARAMETER was wired, and a metatype held in a local `let` or `var`, a
+  stored or computed PROPERTY, a closure parameter, a for-in or iterator element over `[X.Type]`, a
+  module-scope global, an unwrapped `X.Type?`, a function's RETURN or an enum payload was DROPPED —
+  silently, in both halves. Nine binders, eighteen arms, every one ABSENT from `functions[]` over a body
+  that dials with `deny Net` and `pure` both exiting 0; all eighteen now resolve.
+  **TWO RESIDUALS, stated rather than implied.** A metatype reached through a TRANSFORM CHAIN
+  (`ts.filter { … }.first` rather than `ts` itself) is not followed, and a function LEAF that returns a
+  metatype in one declaration and an ordinary type in another is refused in both — ambiguous, never
+  guessed, which is the ordinary returns index's own rule.
 - **Constructors are edges**: `_ = C()` reaches `C.init` (the fuzzer's first catch — effects wired
   in an initializer were silently pure for one build).
 - The §7.13 soundness harness is `fuzz.py` (9 forms, deterministic seeds); run it after touching

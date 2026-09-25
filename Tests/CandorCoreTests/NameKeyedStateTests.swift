@@ -112,6 +112,20 @@ final class NameKeyedStateTests: XCTestCase {
         // the safe side — where a stale `vars` entry is a fabrication. Same map, opposite exposure.
         "opaqueVars":        .clearedOnRebind(scoped: false),
         "arrayElem":         .clearedOnRebind(scoped: false),
+        // SOUNDNESS R585 — THE METATYPE A BINDING HOLDS (`let t: CBase.Type = CSub.self`), and the
+        // ELEMENT of a binding that holds `[CBase.Type]`. These are `vars` and `arrayElem` for the ONE
+        // type spelling `typeName` cannot record, so they take `vars`'s and `arrayElem`'s disposition
+        // necessarily: both are per-BINDING facts, both are dropped in the same `clearBindingTypeOnly`
+        // call, and both ride `snapshotType`/`restoreType` so a closure parameter, a `for` binder and a
+        // `case let` payload give the name back when their scope closes.
+        //
+        // THE FAILURE DIRECTION IF A BINDER REBINDS WITHOUT THE CLEAR, stated because this file's own
+        // header says the derivation cannot see that: a stale entry charges a later same-named binding
+        // the EARLIER one's class hierarchy or conformer set — a fabrication over a call that never
+        // performs it. `MetatypeBinderProcessTests.testARebindDropsTheMetatypeBinding` is the
+        // behavioural gate, with the no-metatype-binder rename control beside it.
+        "metatypeBinders":   .clearedOnRebind(scoped: false),
+        "metatypeArrayElem": .clearedOnRebind(scoped: false),
         // R278 — `[[T]]`'s INNER element, for a binder whose own element is a container. Keyed by the
         // binding name and cleared with `arrayElem` in the same call, for the same reason: a stale entry
         // would hand a later binder over the same name somebody else's element type, which is the
@@ -290,6 +304,18 @@ final class NameKeyedStateTests: XCTestCase {
         // only by a `#if`-gated declaration, scan-wide/per-Driver, never per-binding.
         "conditionallyShadowedTypes": .immutableIndex,
         "returns": .immutableIndex, "enumCaseValueType": .immutableIndex,
+        // SOUNDNESS R585 — the METATYPE twins of `returns`, `enumCaseValueType`, `globalTypes`/
+        // `globalArrayElem` and `fields`/`fieldArrayElem`. Same disposition as each twin, for the twin's
+        // reason: every one is computed scan-wide in the Driver and keyed by a FUNCTION LEAF, a CASE
+        // name, a GLOBAL name or a TYPE+MEMBER pair — none of them by a binding this collector creates,
+        // so a rebind has nothing to say about any of them. The binding-keyed half of R585 is
+        // `metatypeBinders`/`metatypeArrayElem` above, and the read path (`metatypeBinder`) consults
+        // these ONLY after `vars` and the binding map have both missed — so a local shadowing a global
+        // or an implicit-self field is decided by that CHECK ORDER, exactly as it already is for
+        // `globalTypes`.
+        "metatypeReturns": .immutableIndex, "metatypeEnumCaseValueType": .immutableIndex,
+        "globalMetatypes": .immutableIndex, "globalMetatypeArrayElem": .immutableIndex,
+        "fieldMetatypes": .immutableIndex, "fieldMetatypeArrayElem": .immutableIndex,
         "dynamicMemberTypes": .immutableIndex, "propertyWrapperTypes": .immutableIndex,
         "wrappedProps": .immutableIndex, "typeAliases": .immutableIndex,
         "opaqueSeqBuilders": .immutableIndex, "seqBuilderConcrete": .immutableIndex,
