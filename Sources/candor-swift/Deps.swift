@@ -121,6 +121,56 @@ struct DepEntry: Equatable {
 /// covered-package set.
 struct DepIndex {
     var byKey: [String: DepEntry] = [:]
+    /// SOUNDNESS R649 — **THE FREE-NAME SET, BECAUSE `byKey` MEMBERSHIP IS NOT THE PREDICATE `depShadows`
+    /// MEANS.** `pkg#<leaf>` is one of three key shapes minted for EVERY entry (a method's leaf included),
+    /// and it exists so a JOIN has something to ask on: a join then takes the entry's VALUE, gated on a
+    /// unique hit, and an over-broad key costs an over-charge at worst. `depShadows` does not read a value
+    /// — it reads EXISTENCE as the proposition *"a chained dependency DECLARES this bare name"*, and on a
+    /// true answer it WITHDRAWS the platform κ classification of a free call. So the same key that is
+    /// harmlessly over-broad for a join is a silent under-report for the membership test, and every κ free
+    /// name that is also an ordinary method leaf — `connect`, `write`, `File`, `Folder`, `Date`, `UUID`,
+    /// `Process`, `Pipe`, `FileHandle`, `fopen`, `sendmsg` — is one `import` away from losing its effect.
+    ///
+    /// MEASURED, one variable (the dependency member's NAME; same consumer text, same binary, same policy
+    /// — a file importing a chained dep and calling the POSIX free `connect(fd, &addr, len)`):
+    ///
+    ///     dep declares `Chan.connectX`   posixClient -> ['Net']   deny Net exit 1
+    ///     dep declares `Chan.connect`    posixClient -> ['Env']   deny Net exit 0   ← the sin
+    ///
+    /// — and note the second row is not merely silent: the unqualified-call join one layer over finds the
+    /// SAME bare key and attaches the METHOD's effects, so a real `Net` is replaced by a fabricated `Env`.
+    /// That fabrication is a separate row (R650); it is an over-charge in every arm measured and it is
+    /// NOT what this set fixes. This set fixes the withdrawal.
+    ///
+    /// **THIS IS NOT R567(b)'s DOING, and the row that sent me here said it was.** `pkg#<leaf>` has been
+    /// minted for every entry since the three-shape key set existed; `8931087` only added the BARE
+    /// (de-suffixed) spelling, which widened the same hole to OVERLOADED members. Measured with that
+    /// commit's own `CANDOR_R567B_OFF=1` kill switch: the single-signature `Chan.connect` arm is exit 0 in
+    /// BOTH arms, the overloaded arm only with the switch off. Restricting the R567(b) widening — the
+    /// remedy proposed to me — would therefore have closed half of it and read as a fix.
+    ///
+    /// SO THE SET IS ADDITIVE AND STRICTLY NARROWER THAN `byKey`: `freeLeaves ⊂ keys(byKey)`, holding the
+    /// leaf key of a ONE-SEGMENT qual only — a free function or a global, which is exactly what a bare
+    /// unqualified call site can be. No key is withdrawn from `byKey`, so no JOIN changes; the only
+    /// behaviour that moves is the membership test, and it moves in the direction that RESTORES a κ
+    /// effect. A dep TYPE named `File` is deliberately NOT in here: it is published as `File.init`, a
+    /// two-segment qual, so `depShadows("File")` was already false for it before this change and making
+    /// it true would SUPPRESS a κ ctor — the silent direction, and not a gap this row may close on the way
+    /// past (it is R651).
+    var freeLeaves: Set<String> = []
+    /// Does a chained dependency DECLARE this bare name as a free function or global? The predicate
+    /// `depShadows` needs and `lookup(_:) != nil` is not. `CANDOR_R616_OFF=1` restores the membership
+    /// test this replaces, so the calibration fixture can be SHOWN to fail without a revert (§1b).
+    func declaresFreeName(_ key: String) -> Bool {
+        let free = freeLeaves.contains(key)
+        // REACH, not an assumption: an unchanged A/B row is not evidence the branch ran (§E1). This prints
+        // one line per call where the OLD membership test and the NEW predicate DISAGREE — i.e. exactly the
+        // sites R649 moves — so "CHANGED n" can be read against a hit count rather than hoped about.
+        if !free, byKey[key] != nil, ProcessInfo.processInfo.environment["CANDOR_R649_DEBUG"] != nil {
+            FileHandle.standardError.write("R649-HIT \(key)\n".data(using: .utf8)!)
+        }
+        return r616Off ? (byKey[key] != nil) : free
+    }
     // NOTE: there is no `ambiguous` set any more — the entry union withdraws nothing, so there is no
     // third state between "answered" and "absent" to remember. `returnsAmbiguous` below is the RETURN-TYPE
     // index, a different question: guessing a receiver type fabricates a call target, and its fallback is
@@ -462,6 +512,9 @@ private func depsFail(_ msg: String) -> Never {
 /// SOUNDNESS R567(b) §1b KILL SWITCH — restores the free-function-only overload-key widening, i.e. the
 /// exact pre-fix key set for a METHOD. See the widening site in `loadDepReports`.
 private let r567bOff = ProcessInfo.processInfo.environment["CANDOR_R567B_OFF"] != nil
+/// §1b KILL SWITCH for SOUNDNESS R649 — restores `depShadows`'s old `byKey` membership test, i.e. exactly
+/// the pre-fix behaviour, so `DepFreeNameShadowProcessTests` can be SHOWN to fail without a revert.
+private let r616Off = ProcessInfo.processInfo.environment["CANDOR_R616_OFF"] != nil
 
 private func qualSegments(_ qual: String) -> [String] {
     qual.split(whereSeparator: { $0 == "." || $0 == ":" }).map(String.init)
@@ -787,6 +840,17 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
                 }
                 bareKeys.append("\(pkg)#\(bareSegs.joined(separator: "."))")
                 for k in bareKeys where !keys.contains(k) { keys.append(k) }
+            }
+            // R649 — the FREE-NAME half of the key set, recorded beside it rather than derived from it.
+            // ONE SEGMENT ONLY: a free function or a global is the whole of what a bare unqualified name
+            // can DECLARE, and a method's leaf is not a declaration of that name. Both spellings, because
+            // an overloaded free function is published suffixed (`shellOut(String)`) and the call site
+            // spells it bare — the same reason the key list above carries both.
+            if segs.count == 1 {
+                idx.freeLeaves.insert("\(pkg)#\(leaf)")
+                if let paren = leaf.firstIndex(of: "("), paren != leaf.startIndex {
+                    idx.freeLeaves.insert("\(pkg)#\(String(leaf[..<paren]))")
+                }
             }
             for k in keys { idx.insert(key: k, entry) }
         }

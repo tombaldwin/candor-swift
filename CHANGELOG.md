@@ -11,6 +11,99 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R649 — `depShadows` READ KEY EXISTENCE AS A DECLARATION, AND `pkg#<leaf>` IS MINTED FOR
+  EVERY ENTRY, A METHOD'S LEAF INCLUDED.** The CANDOR_DEPS index publishes three key shapes per entry —
+  `pkg#leaf`, `pkg#tail2`, `pkg#<full qual>` — as spellings a JOIN can ask on. A join reads the entry's
+  VALUE and is gated on a unique hit, so a leaf key that over-matches costs an over-charge at worst.
+  `depShadows` read the SAME key's existence as the proposition *"a chained dependency declares this bare
+  name"*, and on a true answer it WITHDRAWS the platform κ classification of a free call. Same key,
+  opposite failure direction.
+
+  So a dependency that merely has a METHOD called `connect` silenced the POSIX free
+  `connect(fd, &addr, len)` in every file importing it. MEASURED, one variable — the dependency member's
+  NAME; same consumer text, same binary, same policy:
+
+      dep `Chan.connectX`   posixClient -> ['Net']   deny Net exit 1
+      dep `Chan.connect`    posixClient -> ['Env']   deny Net exit 0     ← the cardinal sin
+
+  and the second row is not merely silent: the unqualified-call join finds that same bare key and
+  attaches the METHOD's effects, so the real `Net` is replaced by a fabricated `Env`. The κ free names
+  that are also ordinary method leaves are `connect`, `write`, `File`, `Folder`, `Date`, `UUID`,
+  `Process`, `Pipe`, `FileHandle`, `fopen`, `sendmsg`.
+
+  **NOT INTRODUCED BY R567(b) (`8931087`), which is what the report that opened this said.** `pkg#<leaf>`
+  has been minted for every entry since the three-shape key set existed; `8931087` added only the BARE
+  (de-suffixed) spelling, which widened the same hole to OVERLOADED members. Run under that commit's own
+  `CANDOR_R567B_OFF=1` kill switch, the SINGLE-SIGNATURE arm is still exit 0 and only the overloaded arm
+  recovers — so the proposed remedy (restrict the R567(b) widening) would have closed half of it and read
+  as a fix.
+
+  **THE FIX IS A SECOND, NARROWER INDEX, NOT A WITHDRAWN KEY.** `DepIndex.freeLeaves` holds the leaf of a
+  ONE-SEGMENT qual only — a free function or a global, which is the whole of what a bare unqualified name
+  can DECLARE — and `depShadows` asks that. `byKey` is untouched, so no join changes and R567(b)'s
+  fixture still passes; only the membership test moves, and it moves in the direction that RESTORES a κ
+  effect. A dep TYPE named `File` is deliberately still not a shadow: it is published as `File.init`, a
+  two-segment qual, so `depShadows("File")` was already false for it and making it true would SUPPRESS a
+  κ ctor — the silent direction.
+
+  **EXPOSURE CENSUS — 29 real resolved SwiftPM dependency checkouts, 40,199 published entries (39,391
+  method-shaped).** Five κ free names are published as a dependency METHOD leaf, i.e. withdrawn from
+  every importer: `connect` (swift-nio, swift-nio-extras, swift-nio-transport-services), `sendmsg`,
+  `recvmsg`, `getenv` (swift-nio), `fopen` (swift-nio-ssl). swift-nio is the most-chained Swift server
+  dependency there is.
+
+  **A/B — `bin/corpus-ab.py` (never a fresh `ab.py` — R288), ONE BINARY for both arms via
+  `CANDOR_R616_OFF=1`, 6 SwiftPM packages scanned END TO END** (swift-nio-http2, swift-nio-ssl,
+  swift-nio-extras, swift-algorithms, swift-async-algorithms, vapor — each arm rescanning all 29 of its
+  own resolved checkouts to produce its own dep reports): **ADDED 0, REMOVED 0, CHANGED 0 over 4,142
+  rows**, on every key and on the wide value.
+
+  **REACH — 161 hits across 5 of the 6 packages** (`CANDOR_R649_DEBUG=1` prints one line per call where
+  the old membership test and the new predicate DISAGREE), so this is NOT an untested branch. The
+  zero-diff is explained rather than hoped: all 16 distinct disagreeing names (`preconditionFailure` 120,
+  `withUnsafeBytes` 13, `swap` 9, `writeInteger` 4, `inet_pton`/`inet_ntop`/`min` 2 each, and nine
+  singletons) are names `kappaFree` returns nil for, so the shadow it withdraws had nothing to withdraw.
+  None of the six consumers calls a κ-classified free name that a dependency also spells as a method.
+
+  **RECALL HUNT, because a corpus that reaches the branch and not the OUTCOME is not evidence about the
+  outcome (§E1).** A consumer package depending on the REAL swift-nio checkout — it compiles and runs —
+  with `import Darwin; import NIOCore` and a POSIX `connect(fd, sa, len)`:
+
+      UNCHAINED (ground truth)   rawConnect -> ['Net']
+      PRE-R649, swift-nio chained   rawConnect -> ['Clock','Env','Net','Unknown']  + 40 unknownWhy tokens
+      POST-R649                     rawConnect -> ['Net']
+
+  The pre-image is swift-nio's ~50-entry `connect` union — `ClientBootstrap.connect(String,Int)`,
+  `Socket.connect(SocketAddress)`, `Posix.connect` and the rest — fabricated wholesale onto a call to
+  connect(2). It kept `Net` only by accident (one `DatagramBootstrap.connect` overload carries it), which
+  is why the gate did not catch it. **This is the whole removal set of the change on real code: ONE row,
+  three effects (`Clock`, `Env`, `Unknown`), all traced by hand, all fabrications, and the unchained arm
+  is the independent ground truth that `['Net']` is the right answer.**
+
+  §1b CALIBRATION — `CANDOR_R616_OFF=1` restores the old membership test and
+  `DepFreeNameShadowProcessTests` goes RED, 2 tests / 4 assertions:
+
+      testADependencyMethodLeafIsNotAFreeNameAndMustNotShadowTheKappaTable FAILED
+        Optional(Set(["Env"])) is not equal to Optional(Set(["Net"]))   and   0 is not equal to 1
+      testAnOverloadedDependencyMethodLeafIsAlsoNotAFreeName FAILED       (same two)
+      testControlTheRenamedDependencyMemberLeavesTheKappaAnswerAlone PASSED   in both arms
+      testControlARealDependencyFreeFunctionStillShadowsTheKappaTable PASSED  in both arms
+      testControlADependencyFreeFunctionShadowingAKappaCtorName       PASSED  in both arms
+
+  …and with `CANDOR_R616_OFF=1 CANDOR_R567B_OFF=1` together (the pre-`8931087` key set AND the pre-R649
+  predicate) the single-signature test still FAILS while the overloaded one PASSES — which is the run
+  that dates the defect rather than reasoning about it.
+
+  **§K, THE LESSON.** `8931087`'s safety sentence — *"Purely ADDITIVE — `insert` UNIONS and never
+  withdraws, so no key that worked can stop working"* — is TRUE ABOUT THE INDEX and was read as true
+  about the behaviour. A consumer that reads key EXISTENCE as a predicate withdraws on a MEMBERSHIP
+  TEST, not on a value, so "additive to the index" says nothing about it. **Before widening a key, list
+  every consumer and ask which of them reads the VALUE and which reads the KEY'S EXISTENCE.**
+
+  GATES: swift test 1308 passed / 0 failures; smoke.sh 160 passed 0 failed; fuzz.py 25 seeds passed
+  0 failed; fabrication_probe.py OK — no fabrication, no lost control; ci/self-gate.sh OK. Four-way
+  conformance NOT run — shared instrument, another engine in flight.
+
 - **SOUNDNESS R585 — EVERY BINDER OF A METATYPE EXCEPT THE PARAMETER CLAUSE WAS SILENT, AND THE
   PARAMETER SPELLING OF THE IDENTICAL CALL ALREADY RESOLVED.** `CandorCore.typeName` has no
   `MetatypeTypeSyntax` case, so `.Type` survived in exactly ONE index — `FnInfo.metatypeParams`,

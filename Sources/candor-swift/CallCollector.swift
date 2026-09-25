@@ -1907,11 +1907,20 @@ final class CallCollector: SyntaxVisitor {
     /// loaded report actually chains — the §2 never-guess rule: an unimported/unchained module's same name
     /// never shadows, so an out-of-tree/unresolvable `shellOut` (no such package in scope) still reaches
     /// the heuristic, which is the one place it is still needed.
+    ///
+    /// **SOUNDNESS R649 — AND THE QUESTION IS "DOES A DEPENDENCY DECLARE THIS NAME", NOT "IS THIS KEY IN
+    /// THE INDEX".** This asked `deps.lookup("pkg#name") != nil` for two months, and `pkg#<leaf>` is minted
+    /// for EVERY entry — a method's leaf included — because it is a JOIN key, where an over-broad match
+    /// costs an over-charge. Here the match WITHDRAWS a κ classification, so a dependency that merely has
+    /// a METHOD called `connect` silenced the POSIX free `connect(fd, &addr, len)` in every file that
+    /// imports it: `deny Net` exit 1 -> exit 0, with the dep method's `Env` fabricated in place of the
+    /// lost `Net`. `declaresFreeName` holds the one-segment quals only — see `DepIndex.freeLeaves` for the
+    /// measurement, for why the same shape is harmless on the join, and for why R567(b) is not the cause.
     func depShadows(_ name: String) -> Bool {
         // R565 — the key is `<PACKAGE>#<name>` and `m` is a MODULE; `chainedPkgs` resolves the one to
         // the other and dedups, so a two-module dependency is asked once.
         for (p, _) in deps.chainedPkgs(importing: Array(importedModules)) {
-            if deps.lookup("\(p)#\(name)") != nil { return true }
+            if deps.declaresFreeName("\(p)#\(name)") { return true }
         }
         return false
     }
