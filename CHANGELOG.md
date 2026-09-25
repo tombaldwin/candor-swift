@@ -74,9 +74,13 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   MEASURED at `96211f0`, 11 real packages, 16,428 analyzed units, one variable (this filter): 21,807
   `dispatchesOn` occurrences, 4,952 foreign-prefixed, **4,880 of those (98.5%) prefixed with a C target
   of the package being scanned** — CNIOLinux 3,071, CNIOWindows 1,205, CNIOBoringSSL 587, CNIOAtomics 14,
-  CNIOLLHTTP 3. After: **C-target-prefixed keys 0**, foreign-prefixed 1,412. File granularity: 43 files
-  published an owner and 40 named a target of their own package; 19 files were suppressed and **all 19 by
-  a C target**. `bin/corpus-ab.py` (unit key, wide value): **ADDED 203 REMOVED 862 CHANGED 617**, REACH
+  CNIOLLHTTP 3. After: **C-target-prefixed keys 0**, foreign-prefixed 1,412. File granularity — CORRECTED
+  after this entry was first written, by classifying each name against the scanned package's own target
+  source roots instead of a `name:` regex over its manifest, which also matches `.product(name:)` and so
+  counted four genuinely foreign modules as local: **43 files published an owner, 36 of them naming a
+  target of their own package and 7 a genuine foreign module; 19 files were suppressed and 18 of the 19
+  by an own-package target** — the nineteenth (`NIOHTTP2/HTTP2StreamChannel.swift`, `[Atomics,
+  NIOConcurrencyHelpers]`) is a genuine two-package ambiguity this row does not touch. `bin/corpus-ab.py` (unit key, wide value): **ADDED 203 REMOVED 862 CHANGED 617**, REACH
   409 hits / 2 entries (`CANDOR_R592_PROBE`). Of the 862 removals, 825 are C-target-prefixed keys going
   away; 5 are ordinary rows whose only content was such a key (`inferred` empty before and after).
 
