@@ -11,6 +11,25 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R593 — ONE MODULE IMPORTED TWICE WAS COUNTED AS TWO CANDIDATES.**
+  `foreignOwnerModule` gates on `cands.count == 1` — the never-guess rule — over a filter of
+  `fileImports[file]`, which is a `[String: [String]]`: **a LIST.** So the rule refused on an ambiguity
+  that does not exist, and the cross-platform `#if` idiom produces that shape as a matter of course
+  (swift-nio's `NIOFileSystem/FileInfo.swift` imports `CNIOLinux` under both `canImport(Glibc)` and
+  `canImport(Musl)`). Deduped with a `Set`.
+
+  **THE ORDER IS THE MEASUREMENT, not a preference.** Landing this AFTER R592: 11 packages, probe
+  `R593HIT` **84 hits across 5 files**, A/B **ADDED 0 REMOVED 0 CHANGED 0** — reached and inert, because
+  after R592 every duplicated candidate on that corpus is a C target of the scanning package and the
+  verdict is `NONE` either way. Landing it FIRST would instead have turned 4 of those 5 files
+  (`FileInfo`, `FileDescriptor+Syscalls`, `Mocking`, `SystemFileHandle` — `["CNIOLinux","CNIOLinux"]` →
+  one candidate) into 4 MORE misattributed `CNIOLinux#…` keys.
+
+  The corpus therefore cannot demonstrate the gain, and the fixture is what does:
+  `DuplicatedImportOwnerVoteProcessTests` duplicates a GENUINE dependency import across two mutually
+  exclusive `#if` arms. Calibrated by reverting the `Set(...)` — `useBackend` publishes nothing pre-fix
+  and `["RatesPkg#Backend.size"]` after.
+
 - **SOUNDNESS R603 — ⟨0.39⟩ OBLIGATION 2's OWNER VOTE COUNTED MODULES WHERE THE THING IT ASSIGNS IS A
   PACKAGE.** `abstractionOwnerPkg` was filled from `Set(files.compactMap { foreignOwnerModule(...) })`
   under a `count == 1` never-guess gate. The gate is right; the unit was wrong. A consumer conforming to

@@ -1698,22 +1698,39 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     ///
     /// The exclusion cannot lose a real owner: if this package DECLARES a target of that name, SwiftPM
     /// resolves the import to the local target, so the name was never the dependency's to begin with.
+    ///
+    /// SOUNDNESS R593 — AND ONE MODULE IMPORTED TWICE IS ONE CANDIDATE. `fileImports` is a
+    /// `[String: [String]]` — a LIST — and `cands.count == 1` was applied to it without dedup, so the
+    /// never-guess rule fired on an ambiguity that does not exist. The cross-platform `#if` idiom
+    /// produces it as a matter of course: swift-nio's `NIOFileSystem/FileInfo.swift` imports `CNIOLinux`
+    /// under both `canImport(Glibc)` and `canImport(Musl)`, and **4 files in one corpus package were
+    /// suppressed for this reason alone** (`FileInfo`, `FileDescriptor+Syscalls`, `Mocking`,
+    /// `SystemFileHandle`). Deduping is a `Set`, and it must land AFTER R592 rather than before: on that
+    /// corpus every duplicate is a C target of the scanning package, so deduping first would have
+    /// published four MORE misattributed keys instead of none.
     func foreignOwnerModule(inFile file: String) -> String? {
         let declared = declaredByFile[file] ?? [], importable = importableByFile[file] ?? []
         let ownTargets = ownTargetsByFile[file] ?? []                              // R592
-        let base = (fileImports[file] ?? []).filter {
+        let raw = (fileImports[file] ?? []).filter {
             declared.contains($0) && !importable.contains($0)
                 && !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0)
         }
-        let cands = base.filter { !ownTargets.contains($0) }                      // R592
-        // REACH PROBE (§E1) — an unchanged row is not evidence the new filter ran. Prints only where
-        // the exclusion actually removed a candidate, with the verdict it changed FROM and TO.
+        let base = Set(raw)                                                        // R593
+        let cands = base.subtracting(ownTargets)                                    // R592
+        func verdict(_ s: Set<String>) -> String {
+            s.count == 1 ? "PUBLISH:" + (s.first ?? "") : (s.isEmpty ? "NONE" : "SUPPRESS")
+        }
+        // REACH PROBES (§E1) — an unchanged row is not evidence either filter ran. Each prints only
+        // where ITS OWN step changed the candidate set, with the verdict it changed FROM and TO.
         if r592Probe, cands.count != base.count {
             FileHandle.standardError.write(
-                ("R592HIT file=\(file) dropped=\(base.filter { ownTargets.contains($0) }.sorted()) "
-                 + "was=\(base.count == 1 ? "PUBLISH:" + base[0] : (base.isEmpty ? "NONE" : "SUPPRESS")) "
-                 + "now=\(cands.count == 1 ? "PUBLISH:" + cands[0] : (cands.isEmpty ? "NONE" : "SUPPRESS"))\n")
-                    .data(using: .utf8)!)
+                ("R592HIT file=\(file) dropped=\(base.intersection(ownTargets).sorted()) "
+                 + "was=\(verdict(base)) now=\(verdict(cands))\n").data(using: .utf8)!)
+        }
+        if r592Probe, raw.count != base.count {
+            FileHandle.standardError.write(
+                ("R593HIT file=\(file) raw=\(raw.sorted()) deduped=\(base.sorted()) "
+                 + "now=\(verdict(cands))\n").data(using: .utf8)!)
         }
         return cands.count == 1 ? cands.first : nil
     }
