@@ -459,6 +459,10 @@ private func depsFail(_ msg: String) -> Never {
 
 /// The qual's segments with the family separators normalized: `a.b.C.m` / `mod::fn` / `Owner.member`
 /// all split the same way, so a tail2 key reads `C.m` no matter which engine produced the report.
+/// SOUNDNESS R567(b) §1b KILL SWITCH — restores the free-function-only overload-key widening, i.e. the
+/// exact pre-fix key set for a METHOD. See the widening site in `loadDepReports`.
+private let r567bOff = ProcessInfo.processInfo.environment["CANDOR_R567B_OFF"] != nil
+
 private func qualSegments(_ qual: String) -> [String] {
     qual.split(whereSeparator: { $0 == "." || $0 == ":" }).map(String.init)
 }
@@ -735,8 +739,54 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
             // tail2/full keys are already reached through its OWNER type, which a cross-package member call
             // always names explicitly (`Owner.member`), so the ambiguity a bare spelling creates does not
             // arise there.
-            if segs.count == 1, let paren = leaf.firstIndex(of: "("), paren != leaf.startIndex {
-                keys.append("\(pkg)#\(leaf[..<paren])")
+            //
+            // SOUNDNESS R567(b) — **AND THE "FREE-FUNCTION ONLY" RESTRICTION DIRECTLY ABOVE WAS WRONG,
+            // FOR A METHOD.** Its reasoning — "an overloaded METHOD's tail2/full keys are already reached
+            // through its OWNER type" — conflates two different things. Naming the owner decides WHICH
+            // TYPE the member belongs to; it does nothing about how the member's own LEAF is spelled, and
+            // the suffix is on the leaf. The producer publishes `swift-nio#EmbeddedChannel.finish()` and
+            // `…finish(Bool)`; a Swift call site carries no signature, so the consumer can only ever form
+            // `swift-nio#EmbeddedChannel.finish`, and the owner is present and correct in all three.
+            // Measured, one variable — whether the dependency declares a SECOND overload of the member;
+            // same consumer text, same binary, both members `Env`:
+            //
+            //     dep `Chan.once`   (one signature)    consumer `c.once()`     inferred ['Env']
+            //     dep `Chan.finish` + `.finish(Bool)`  consumer `c.finish()`   inferred []
+            //
+            // So every OVERLOADED dependency METHOD was unreachable by a consumer's §2 key and the row
+            // fell silent — the same gate-level shape the free-function half closed in 0.33.0, on the
+            // half that half left open. 4 of swift's 18 measured R533 sites (`EmbeddedChannel.finish`,
+            // `MultiThreadedEventLoopGroup.syncShutdownGracefully`).
+            //
+            // THE BARE SPELLING OF ALL THREE SHAPES, not a fourth shape: the consumer derives leaf,
+            // tail2 and full qual, and with a suffixed leaf it derives the bare spelling of each. Purely
+            // ADDITIVE — `insert` UNIONS and never withdraws, so no key that worked can stop working, and
+            // the suffixed keys stay for a consumer that can spell them.
+            //
+            // UNION ACROSS THE OVERLOAD SET is the intended and only available answer, exactly as the
+            // free-function half says: the wire key records param TYPES and nothing else — not defaults,
+            // not labels — so `finish(Bool)` is the real callee of a zero-argument `finish()` call
+            // whenever that parameter has a default, and narrowing by the call's arity would DROP the
+            // real callee. It is the direction `matchOverloads` already takes in-tree when arg types
+            // cannot select one candidate, and the safe one: an over-charge discloses, a lost overload is
+            // a silent under-report. candor-java reached the same answer from the other side — its call
+            // sites DO carry a descriptor, and where the descriptor is not the one that runs (a SAM
+            // hand-off erasing `accept(String)` to `accept(Object)`) it falls back to `depFnsNamed(owner,
+            // name)`, the type's whole reported surface under that name.
+            //
+            // §1b KILL SWITCH — `CANDOR_R567B_OFF=1` restores the free-function-only restriction, i.e.
+            // exactly the pre-fix key set, so `OverloadedDepMemberKeyProcessTests` can be SHOWN to fail
+            // without a revert (a gate that has never failed has not been shown to be a gate).
+            if let paren = leaf.firstIndex(of: "("), paren != leaf.startIndex,
+               !(r567bOff && segs.count > 1) {
+                let bare = String(leaf[..<paren])
+                let bareSegs = segs.dropLast() + [bare]
+                var bareKeys: [String] = ["\(pkg)#\(bare)"]
+                if bareSegs.count >= 2 {
+                    bareKeys.append("\(pkg)#\(bareSegs[bareSegs.count - 2]).\(bare)")
+                }
+                bareKeys.append("\(pkg)#\(bareSegs.joined(separator: "."))")
+                for k in bareKeys where !keys.contains(k) { keys.append(k) }
             }
             for k in keys { idx.insert(key: k, entry) }
         }

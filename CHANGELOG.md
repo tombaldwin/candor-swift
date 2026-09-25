@@ -11,6 +11,40 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R567(a) — THE §2 DISPATCH KEY TOOK THE OUTER BASE'S TYPE FOR A MEMBER-CHAIN RECEIVER.**
+  `rootOf` deliberately keeps the outer base's type when a `.member` hop is not a known field, element
+  accessor or tuple member — the whole κ static-chain idiom rides on that fallback
+  (`FileManager.default.removeItem`, `ProcessInfo.processInfo.environment`). It is a CONVENTION about
+  singletons, not a resolution, and ⟨0.39⟩ obligation 1's publish site and the §2 join both read it as
+  one: `channel.embeddedEventLoop.run()` published `swift-nio#EmbeddedChannel.run`, a member the outer
+  base does not have. 13 of the 18 sites of swift's R533 measurement.
+
+  **AND IT IS NOT MERELY AN UNJOINABLE KEY.** Where the outer base happens to declare the same leaf the
+  join lands on the WRONG MEMBER. Measured, one variable — the dependency's own source; same consumer
+  text, same binary, `Loop.spin -> Env`, `Channel.spin -> Fs`, consumer `c.loop.spin()`:
+  pre-fix `inferred ['Fs']`, `deny Env` **exit 0** over code that reads the environment and `deny Fs`
+  **exit 1** over code that opens no file. A fabrication and a silent under-report at once.
+
+  DROPS the key (§2 rule 1: never guess) and emits the COULD-NOT-FORM-A-KEY marker the sibling arm
+  already uses, so the row discloses (`dispatch:untyped cross-package receiver`) instead of falling
+  silent — dropping alone trades a wrong answer for a ⟨0.21⟩ purity claim. The signal comes from
+  `rootOf` itself (`opaqueHop`), the one authority on what a spelling denotes, rather than a second
+  copy of "did this hop resolve".
+
+- **SOUNDNESS R567(b) — AN OVERLOADED DEPENDENCY METHOD WAS UNREACHABLE BY THE CONSUMER'S §2 KEY.**
+  This engine suffixes a unit name with its param types as soon as that name has two signatures
+  (`EmbeddedChannel.finish()` / `.finish(Bool)`), and the wire `hash` is that unit name. **A Swift call
+  site carries no signature**, so a consumer can only form the bare `pkg#Type.member` and matched
+  neither spelling. The free-function half of this was closed in 0.33.0 (`shellOut`); its comment
+  declined the METHOD case on the reasoning that an overloaded method "is already reached through its
+  OWNER type" — which conflates naming the TYPE with spelling the LEAF. The owner is present and
+  correct in all three keys and the join still missed. Fixed by publishing the BARE spelling of all
+  three key shapes, not a fourth shape; `insert` unions, so nothing that worked can stop working.
+
+  UNION, never narrowed by arity: the wire key records param TYPES and not DEFAULTS, so `finish(Bool)`
+  is the real callee of a zero-argument `finish()` call whenever that parameter has a default.
+  `testTheUnionOverchargesAPureOverloadAndThatIsTheDeclaredTrade` pins the stated cost.
+
 - **SOUNDNESS R593 — ONE MODULE IMPORTED TWICE WAS COUNTED AS TWO CANDIDATES.**
   `foreignOwnerModule` gates on `cands.count == 1` — the never-guess rule — over a filter of
   `fileImports[file]`, which is a `[String: [String]]`: **a LIST.** So the rule refused on an ambiguity
