@@ -11,6 +11,34 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R603 — ⟨0.39⟩ OBLIGATION 2's OWNER VOTE COUNTED MODULES WHERE THE THING IT ASSIGNS IS A
+  PACKAGE.** `abstractionOwnerPkg` was filled from `Set(files.compactMap { foreignOwnerModule(...) })`
+  under a `count == 1` never-guess gate. The gate is right; the unit was wrong. A consumer conforming to
+  ONE dependency's protocol across two files importing two modules **of that same package** —
+  `import NIOTLS` here, `import NIOFoundationCompat` there, both `swift-nio` — read as two owners and the
+  entry was dropped. `Deps.chainedPkgs` already carries this rationale for the join half; this is R565's
+  module-vs-package confusion at the one site R565 did not reach.
+
+  FOUND BY FIXING R592. Un-suppressing `NIOSSL/NIOSSLHandler.swift` gave the vote a second module of
+  `swift-nio`, and **36 `swift-nio#ChannelInboundHandler.*` union entries carrying `Env`/`Net`/`Fs`/
+  `Unknown` vanished**. Counting the vote in packages restores all 36.
+
+  MEASURED, nio-ssl + its 6 resolved checkouts as a dep index, HEAD → R592+R603:
+  `bin/corpus-ab.py` **ADDED 213 REMOVED 278 CHANGED 135**, REACH 1 hit (`R603HIT`, abstraction
+  `Backend`… `ChannelInboundHandler` on the real tree). **Every one of the 278 removals is a
+  `CNIOBoringSSL#` union entry** naming nio-ssl's own C shim as the owner of `Equatable`, `Hashable`,
+  `CustomStringConvertible` — unjoinable in both directions; 211 of the 213 additions are correct
+  `swift-nio#` entries. Union rows 334 → 267, and **0 `swift-nio#` entries are lost against HEAD**.
+
+  INERT WHERE THE INDEX IS EMPTY, and the probe is why that is stated rather than assumed: with no
+  readable dependency manifest `pkgOfModule` falls back to the module name, `pkgs == mods`, and the
+  verdict is unchanged — A/B over the 11 unresolved packages is **ADDED 0 REMOVED 0 CHANGED 0**.
+
+  FIXTURE: `UnionOwnerPackageVoteProcessTests`, two arms differing only in whether the two modules live
+  in one package or two. Calibrated by reverting the line — the defect arm goes RED (`[:]` vs
+  `["RatesPkg#Backend.size": ["Fs"]]`); **the never-guess CONTROL stays green in both**, which is what
+  proves the dedup did not collapse the rule it is counted under.
+
 - **SOUNDNESS R592 — swift ATTRIBUTED ⟨0.39⟩ KEYS TO THE SCANNED PACKAGE'S OWN C TARGETS.**
   `Driver.foreignOwnerModule` names the owner of a foreign abstraction as the file's one import that its
   target DECLARES and that `importableByFile` does not hold. `importableByFile` is `declaredNames`

@@ -1808,8 +1808,36 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // namespace, the same namespace that package's entry hashes use". `foreignOwnerModule`
             // answers with a MODULE, so every foreign union entry this engine published was keyed under
             // a name no producer's hash prefix can equal and no consumer could join.
+            // SOUNDNESS R603 — AND THE VOTE IS COUNTED IN PACKAGES, NOT MODULES. This gate is the
+            // never-guess rule: two owners for one abstraction refuse rather than pick. But it was
+            // counting MODULES while the thing it assigns is a PACKAGE, so a consumer conforming to one
+            // dependency's protocol across two files that import two modules OF THAT SAME PACKAGE —
+            // `import NIOTLS` here, `import NIOFoundationCompat` there, both `swift-nio` — read as two
+            // owners and dropped the entry. That is R565's module-vs-package confusion at the one site
+            // R565 did not reach, and `Deps.chainedPkgs` already carries the identical rationale for the
+            // join half ("a loss manufactured by the fix, on exactly the multi-module dependencies the
+            // fix exists for"). `pkgOfModule` is that same authority, not a second copy of it.
+            //
+            // MEASURED on nio-ssl + its 6 resolved checkouts, one variable — this line: R592 un-suppressed
+            // `NIOSSL/NIOSSLHandler.swift` to `NIOTLS`, its sibling conformance file already answered
+            // `NIOFoundationCompat`, and **36 `swift-nio#ChannelInboundHandler.*` union entries carrying
+            // real effects** (`Env`/`Net`/`Fs`/`Unknown`) vanished. Deduping by package restores all 36.
+            //
+            // NOTE WHERE THIS CANNOT FIRE, deliberately: in an UNCHAINED scan `pkgOfModule` falls back to
+            // the module name, so `pkgs == mods` and the verdict is unchanged. The fix moves only the arm
+            // where the index actually knows which package a module belongs to — which is the only arm in
+            // which the key it publishes could have been joined anyway.
             let mods = Set(files.compactMap { foreignOwnerModule(inFile: $0) })
-            if mods.count == 1, let m = mods.first { abstractionOwnerPkg[pn] = deps.pkgOfModule(m) }
+            let pkgs = Set(mods.map { deps.pkgOfModule($0) })
+            // REACH PROBE (§E1) — this line is INERT wherever `modulePkgs` is empty (no readable
+            // dependency manifest), so a 0-diff A/B over such a corpus proves nothing about it. Fires
+            // exactly where the module count and the package count disagree, which is the whole change.
+            if r592Probe, pkgs.count != mods.count {
+                FileHandle.standardError.write(
+                    ("R603HIT abstraction=\(pn) mods=\(mods.sorted()) pkgs=\(pkgs.sorted())\n")
+                        .data(using: .utf8)!)
+            }
+            if pkgs.count == 1, let p = pkgs.first { abstractionOwnerPkg[pn] = p }
         }
     }
     /// ⟨0.39⟩ OBLIGATION 3, HALF 2 — THIS CONSUMER'S OWN VISIBLE IMPLEMENTORS of the abstraction a
