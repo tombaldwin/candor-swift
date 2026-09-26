@@ -622,6 +622,17 @@ final class CallCollector: SyntaxVisitor {
          opaqueFields: [String: Set<String>] = [:],
          enumCaseValueType: [String: String],
          metatypeEnumCaseValueType: [String: String] = [:],
+         /// SOUNDNESS R704 (b1) — the unit's METATYPE PARAMETERS whose base neither bound map claimed,
+         /// i.e. the DEP-DECLARED ones. `FnInfo.metatypeParams` reaches this collector only through
+         /// `protoBoundParams`/`typeBoundParams`, and the Driver builds both by filtering on
+         /// `localProtocolNames`/`localTypes` — so `_ t: RBase.Type` for a dependency's `RBase` entered
+         /// NEITHER map and `t.go()` resolved to nothing, while R585's table lists this binder as a
+         /// passing control. SEEDED INTO `metatypeBinders` rather than kept in a sixth map, exactly as
+         /// `metatypeArrayElem` is seeded from `info.metatypeArrayParams`: the parameter binder and the
+         /// local binder are the same fact, and a separate immutable map would not ride
+         /// `clearBindingTypeOnly`/`snapshotType`, so a rebind of the parameter's NAME would keep the
+         /// metatype — the fabrication `testARebindDropsTheMetatypeBinding` exists to catch.
+         metatypeParamsForeign: [String: String] = [:],
          dynamicMemberTypes: Set<String>,
          propertyWrapperTypes: Set<String>, wrappedProps: [String: [String: String]],
          localFreeFns: Set<String>, conditionallyShadowedFreeFns: Set<String> = [],
@@ -661,6 +672,7 @@ final class CallCollector: SyntaxVisitor {
         self.opaqueElem = info.opaqueArrayParams
         self.arrayElem = info.arrayParams
         self.metatypeArrayElem = info.metatypeArrayParams   // R585 (b6) — seeded like `arrayParams`
+        self.metatypeBinders = Self.r704Off ? [:] : metatypeParamsForeign   // R704 (b1) — see the parameter
         self.arrayElemNested = info.arrayParamsNested   // R278
         self.dictElem = info.dictParams
         self.tupleElem = info.tupleParams
@@ -723,6 +735,47 @@ final class CallCollector: SyntaxVisitor {
     /// hierarchy the call cannot reach. `!localTypes.contains(spelling)` keeps this purely ADDITIVE:
     /// where a binder is spelled the same as a real local type, today's answer is the local type and
     /// changing it would REMOVE an edge, which is a different question from the one this row asks.
+    /// SOUNDNESS R704 — **MAY A METATYPE BASE BE RESOLVED WHEN THIS SCAN DID NOT DECLARE IT?**
+    ///
+    /// R585's nine binders each end at one of five READ sites, and every one of them asked
+    /// `localTypes.contains(base)`. That membership test IS the dep-declared/local axis, and the axis was
+    /// never a column in R585's enumeration — so a metatype over a type a CHAINED DEPENDENCY declares
+    /// resolved to NOTHING in all ten binders and both halves. Measured one-tree-vs-split on the same
+    /// bytes, `deny Env <fn>` 0 → 1 on every arm, and that includes **b1, the function PARAMETER, which
+    /// R585's own table lists as a passing CONTROL** (R563/R584): `metatypeParams` reaches this collector
+    /// only through `protoBoundParams`/`typeBoundParams`, and the Driver builds both by filtering on
+    /// `localProtocolNames`/`localTypes`, so a foreign base entered neither map.
+    ///
+    /// THE RULE IS R584/R585's OWN, stated there and then not applied across the scan boundary: **the
+    /// binder spelling gets exactly the answer the type named LITERALLY gets.** `RBase.go()` written out
+    /// resolves through the ordinary foreign-owner/§2 path and joins `RatesDep#RBase.go`; `t.go()` for
+    /// `let t: RBase.Type` must land on the same root.
+    ///
+    /// SO THERE IS NO MEMBERSHIP TEST LEFT TO MAKE **AT THESE FIVE SITES**, and the reason is a property of
+    /// their inputs rather than a hope about them: each base arrives from a type WRITTEN IN A DECLARATION —
+    /// `metatypeBaseName` / `metatypeArrayElementName` over a binding's annotation, a closure parameter's
+    /// annotation, an enum case payload's declared type, a declared return type, a stored property's or a
+    /// global's annotation, or (R704) a metatype PARAMETER's. A name this scan cannot place resolves
+    /// downstream to nothing, which is the pre-R704 answer.
+    ///
+    /// **THE ONE INPUT THAT IS NOT A DECLARED TYPE IS `metatypeOfExpr`'s `X.self` ARM**, which reads an
+    /// IDENTIFIER — and `x.self` on a VALUE is also legal Swift. That arm therefore carries its OWN guard,
+    /// `namesNoKnownValue`, rather than relying on this predicate; see it for why the guard is on the value
+    /// side. Stated here because "every base is a declared type" is the sentence a reader would otherwise
+    /// believe about all six, and it is true of five.
+    ///
+    /// **A LOCAL PROTOCOL IS STILL EXCLUDED, and that exclusion is the load-bearing half.** The protocol
+    /// base has its own read site — `typeReceiverProto`, which routes it into the in-scan bounded CHA
+    /// (`protoDispatches`) — so admitting it here too would answer one call at two sites and change an
+    /// answer that is already right. A FOREIGN protocol has no such site and correctly lands here, where
+    /// the receiver becomes the abstraction's NAME and R705's foreign-abstraction arm takes it.
+    ///
+    /// §1b: `CANDOR_R704_OFF=1` restores the `localTypes` gate exactly.
+    private func metatypeBaseResolvable(_ base: String) -> Bool {
+        if localTypes.contains(base) { return true }             // the pre-R704 answer, unchanged
+        return !Self.r704Off && !localProtocols.contains(base)
+    }
+
     private func metatypeBinder(_ spelling: String) -> String? {
         guard !Self.r585Off, vars[spelling] == nil, !localTypes.contains(spelling) else { return nil }
         // The SAME lookup order `rootOfUnaliased` uses for the ordinary type question — locals and
@@ -764,7 +817,10 @@ final class CallCollector: SyntaxVisitor {
         // `let t = CSub.self` is more precise than `let t: CBase.Type = CSub.self`, and correctly so.
         if let ma = v.as(MemberAccessExprSyntax.self), ma.declName.baseName.text == "self",
            let base = ma.base?.as(DeclReferenceExprSyntax.self)?.baseName.text,
-           localTypes.contains(base) || localProtocols.contains(base) {
+           localTypes.contains(base) || localProtocols.contains(base) || namesNoKnownValue(base) {
+            if Self.r704Probe, !localTypes.contains(base), !localProtocols.contains(base) {
+                FileHandle.standardError.write("R704HIT self \(base)\n".data(using: .utf8)!)
+            }
             return base
         }
         // `mkC()` where `func mkC() -> CBase.Type` (b9).
@@ -778,6 +834,27 @@ final class CallCollector: SyntaxVisitor {
         return nil
     }
 
+    /// SOUNDNESS R704 — `X.self` WHERE `X` IS NOT A TYPE THIS SCAN DECLARES, and the ONE metatype read
+    /// that cannot simply drop its membership test.
+    ///
+    /// The other four sites read a type WRITTEN IN AN ANNOTATION, so the base is a type by construction.
+    /// This one reads an IDENTIFIER, and `x.self` on a VALUE is also legal Swift (it returns `x`) — so
+    /// recording a value's name as a metatype base would divert the binding away from the callable/ctor/
+    /// factory arms that follow `metatypeOfExpr`, which is a REMOVAL, not an addition. The guard is
+    /// therefore the value side rather than the type side: answer only for a name this collector has NO
+    /// value reading for. A name it cannot place either way resolves downstream to nothing, which is the
+    /// pre-R704 answer; a name it CAN place as a value keeps the arm it had.
+    ///
+    /// Deliberately NOT an uppercase-initial test: Swift does not require it, and a convention is a guess.
+    private func namesNoKnownValue(_ name: String) -> Bool {
+        guard !Self.r704Off else { return false }
+        if vars[name] != nil || globalTypes[name] != nil { return false }
+        if fnTyped.contains(name) || opaqueFnLocals.contains(name) { return false }
+        if metatypeBinders[name] != nil || arrayElem[name] != nil { return false }
+        if let et = enclosingType, fields[et]?[name] != nil { return false }
+        return true
+    }
+
     /// SOUNDNESS R584 — THE CLASS TWIN of `typeReceiverProto`, for the ONE spelling that does not go
     /// through `rootOf`: the CONSTRUCTION `P(…)` inside `f<P: EffBase>(…)`, whose callee is a bare
     /// `DeclReference` naming a type parameter and so never reaches the receiver resolver at all. Same
@@ -788,7 +865,11 @@ final class CallCollector: SyntaxVisitor {
         guard vars[spelling] == nil, !localTypes.contains(spelling) else { return nil }
         if !Self.r584Off, let t = typeBoundParams[spelling] { return t }
         // SOUNDNESS R585 — the CLASS half of a metatype binder that is not a parameter.
-        if let b = metatypeBinder(spelling), localTypes.contains(b), !localProtocols.contains(b) { return b }
+        // SOUNDNESS R704 — …and the base need not be DECLARED HERE. `metatypeBaseResolvable` already
+        // excludes a local protocol (which has its own site), so this reads exactly as it did for a local
+        // class and additionally answers for a dependency's: the emitted call is the UNQUALIFIED one the
+        // literal `RBase(…)` emits, which is the whole rule.
+        if let b = metatypeBinder(spelling), metatypeBaseResolvable(b), !localProtocols.contains(b) { return b }
         return nil
     }
 
@@ -992,9 +1073,14 @@ final class CallCollector: SyntaxVisitor {
             // PARAMETER spelling `_ t: CBase.Type` both resolve. Answered at the SAME authority as
             // R584's, so the whole member-call chain below (the function-typed-field hedge, the
             // κ shadowing guards, the property-edge path) treats it exactly as it treats the literal.
-            if let bound = metatypeBinder(n), localTypes.contains(bound) {
+            if let bound = metatypeBinder(n), metatypeBaseResolvable(bound) {
                 if Self.r585Probe {
                     FileHandle.standardError.write("R585HIT \(n) -> \(bound)\n".data(using: .utf8)!)
+                }
+                // SOUNDNESS R704 REACH (§E1) — fires ONLY on the arm this row adds, so an A/B over a
+                // corpus with none of the shape says so out loud instead of reporting a flattering zero.
+                if Self.r704Probe, !localTypes.contains(bound) {
+                    FileHandle.standardError.write("R704HIT bind \(n) -> \(bound)\n".data(using: .utf8)!)
                 }
                 return (bound, false, [n], false, false)
             }
@@ -1023,9 +1109,13 @@ final class CallCollector: SyntaxVisitor {
             // a nil name (`typeName` has no metatype case) so the arm above declines it and the chain
             // fell through to the ENCLOSING type. `box.t.validate()` / `self.t.validate()`, the explicit
             // spellings of the implicit-self one `metatypeBinder` answers.
-            if !Self.r585Off, let rt = inner.root, let mb = fieldMetatypes[rt]?[member], localTypes.contains(mb) {
+            if !Self.r585Off, let rt = inner.root, let mb = fieldMetatypes[rt]?[member],
+               metatypeBaseResolvable(mb) {                                   // R704 — the dep-declared axis
                 if Self.r585Probe {
                     FileHandle.standardError.write("R585HIT field \(rt).\(member) -> \(mb)\n".data(using: .utf8)!)
+                }
+                if Self.r704Probe, !localTypes.contains(mb) {
+                    FileHandle.standardError.write("R704HIT field \(rt).\(member) -> \(mb)\n".data(using: .utf8)!)
                 }
                 return (mb, false, inner.path + [member], false, false)
             }
@@ -1101,9 +1191,12 @@ final class CallCollector: SyntaxVisitor {
                 // (`typeName` answers nil for `-> CBase.Type`), so `mkC().validate()` resolved to no
                 // root at all. `isVar: false` — this is a TYPE-position receiver, exactly like the
                 // metatype parameter and the literal `CBase.validate()`.
-                if !Self.r585Off, let mr = metatypeReturns[n], localTypes.contains(mr) {
+                if !Self.r585Off, let mr = metatypeReturns[n], metatypeBaseResolvable(mr) {   // R704
                     if Self.r585Probe {
                         FileHandle.standardError.write("R585HIT return \(n) -> \(mr)\n".data(using: .utf8)!)
+                    }
+                    if Self.r704Probe, !localTypes.contains(mr) {
+                        FileHandle.standardError.write("R704HIT return \(n) -> \(mr)\n".data(using: .utf8)!)
                     }
                     return (mr, false, [n], false, false)
                 }
@@ -1634,6 +1727,10 @@ final class CallCollector: SyntaxVisitor {
     /// is what proves those assertions can FAIL, so the calibration cannot rot into a test that passes
     /// either way — the failure mode §A measured four times in one day.
     private static let r585Off = ProcessInfo.processInfo.environment["CANDOR_R585_OFF"] != nil
+    /// SOUNDNESS R704 §1b — restores the pre-R704 `localTypes` gate at all five metatype read sites AND
+    /// the foreign metatype-parameter seeding, i.e. exactly the answer `709311c` gave.
+    static let r704Off = ProcessInfo.processInfo.environment["CANDOR_R704_OFF"] != nil
+    static let r704Probe = ProcessInfo.processInfo.environment["CANDOR_R704_PROBE"] != nil
     /// SOUNDNESS R567(a) REACH PROBE — "CHANGED 0 is not evidence until REACH is measured" (R418's
     /// lesson: 17,944 units said "inert" and the probe said the code never ran). One stderr line per
     /// receiver chain whose last hop this engine could not type and which WOULD have become a §2 owner.
@@ -5898,6 +5995,25 @@ final class CallCollector: SyntaxVisitor {
                 // missing: an `Optional(…)`-wrapped source, and a DICTIONARY (only `elementTypeOf` was
                 // asked here, so `guard let z = optDict` lost its value index and read silent-pure).
                 else if bindContainerIndex(name, from: initVal) { }
+                // SOUNDNESS R704 (b8) — AN UNWRAPPED OPTIONAL METATYPE, when the base is DEP-DECLARED.
+                // `rootOf` above answers for a metatype binder with `isVar: false` (it is a TYPE-position
+                // receiver), so the typing branch declines it and the chain lands on `clearBinding` —
+                // which is why R585's b8 arm rides `FnInfo.metatypeParams` → `typeBoundParams` instead: an
+                // IMMUTABLE map `clearBinding` cannot reach. A foreign base enters no bound map (R704's
+                // fourth arm in the Driver), so its seeding lives in the MUTABLE `metatypeBinders` and
+                // `if let t = t` erased it. Re-recorded here, through the same `metatypeOfExpr` the
+                // plain-`let` binder uses (§F1.3: one authority for "what metatype is this expression"),
+                // and `clearBinding` runs FIRST so no stale container/type index survives — the ordering
+                // the b10 `case let` arm already uses for the same reason.
+                //
+                // A LOCAL base is unaffected: `typeBoundParams` is consulted ahead of `metatypeBinder` in
+                // `rootOfUnaliased`, so this can add an answer and never replace one.
+                else if !Self.r585Off, let mb = metatypeOfExpr(initVal) {
+                    if Self.r704Probe { FileHandle.standardError.write(
+                        "R704HIT unwrap \(name) -> \(mb)\n".data(using: .utf8)!) }
+                    clearBinding(name)
+                    metatypeBinders[name] = mb
+                }
                 else { clearBinding(name) }  // can't type the unwrapped value → clear (don't leak a stale type)
             }
         }

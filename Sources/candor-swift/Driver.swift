@@ -2268,11 +2268,21 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // for a type PARAMETER (`P.Type` where `<P: EffBase>`) and, R584, for a CONCRETE type named
         // directly (`_ t: CBase.Type`), which is swift-argument-parser's `ParsableCommand.Type` shape one
         // kind over. Protocol first, so the two maps stay disjoint on every spelling.
+        // SOUNDNESS R704 — …AND A FOURTH ARM, because the three above ALL require the base to be declared
+        // in this scan and a metatype parameter over a DEPENDENCY's type therefore entered no map at all.
+        // `_ t: RBase.Type` for a chained `RBase` resolved to nothing while the literal `RBase.go()` in the
+        // same file joined `RatesDep#RBase.go` — and R585's own table lists this binder as the CONTROL that
+        // already worked, which is what stopped it being measured (§K). A local PROTOCOL base keeps going
+        // to `protoBoundParamsMap` above and is excluded here for the reason
+        // `metatypeBaseResolvable` states: it has its own read site, and answering it twice would change
+        // an answer that is already right.
+        var metatypeParamsForeign: [String: String] = [:]
         for (pn, base) in f.metatypeParams {
             if let b = protoBoundParamsMap[base] { protoBoundParamsMap[pn] = b }
             else if let b = typeBoundParamsMap[base] { typeBoundParamsMap[pn] = b }
             else if localProtocolNames.contains(base) { protoBoundParamsMap[pn] = base }
             else if localTypes.contains(base) { typeBoundParamsMap[pn] = base }
+            else { metatypeParamsForeign[pn] = base }   // R704
         }
         let cc = CallCollector(info: f, fields: fields, localTypes: localTypes,
                                globalTypes: effectiveGlobalTypes,
@@ -2313,6 +2323,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                opaqueFields: opaqueFields,
                                enumCaseValueType: enumCaseValueType,
                                metatypeEnumCaseValueType: metatypeEnumCaseValueType,   // R585
+                               metatypeParamsForeign: metatypeParamsForeign,            // R704 (b1)
                                dynamicMemberTypes: dynamicMemberTypes,
                                propertyWrapperTypes: propertyWrapperTypes, wrappedProps: wrappedProps,
                                localFreeFns: localFreeFnNames.union(localFreeFnBaseNamesByModule[swiftModuleOf(f.loc)] ?? []),
@@ -3016,6 +3027,68 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // (`STD_PURE_PROTOCOLS`, `RAW_VALUE_BASE_TYPES`) are NOT relaxed — they are what stops
             // `extension String { … }` in a consumer publishing `Pkg#String.lowercased` and CHA-ing into
             // every `enum Suit: String` in the package.
+            // SOUNDNESS R705 — **IS THIS CALL AN ERASED DISPATCH OVER AN ABSTRACTION THIS SCAN DOES NOT
+            // DECLARE?** Non-nil names the abstraction; nil means this row is not R705's population and
+            // nothing below may hedge. See the disclosure at the end of this call's processing.
+            //
+            // The two spellings are ONE question and both reach it here rather than at two sites:
+            //   · `_ t: some P`         — `opaqueRecv`, set from `isOpaqueParam` at the binding
+            //   · `<T: P>(_ t: T)`      — the spelled owner is a type PARAMETER, resolved through the SAME
+            //                             two indexes `dispatchAbstraction` reads (function bound first,
+            //                             then the enclosing type's), not a third copy of the question.
+            // `isOpaqueParam`'s own doc says these are the same thing under two spellings, so answering
+            // one and not the other would be §F1.3 again.
+            //
+            // THE FENCES ARE THIS ARM'S OWN, plus the third conjunct the `<untyped>` disclosure below
+            // already carries and for its reason: for an UNCHAINED package the κ ledger discloses
+            // `invisible: [M]`, so a second disclosure there would be pure false uncertainty — it is
+            // precisely when the package IS chained that the ledger correctly falls silent (§2 rule 3)
+            // and the silence becomes the claim worth spending a disclosure on. `STD_PURE_PROTOCOLS`
+            // matters most of all here: `Sendable`, `Collection`, `Sequence`, `Equatable`, `Hashable`
+            // are the commonest generic bounds in Swift, their requirements are synthesized and pure,
+            // and without that carve-out this would disclose over half the generic code in any package.
+            let r705Off = ProcessInfo.processInfo.environment["CANDOR_R705_OFF"] != nil
+            let erasedForeignDispatch: String? = {
+                guard !r705Off, !call.unqualified, let owner = call.extOwner else { return nil }
+                let bound = f.genericBounds[owner]
+                    ?? f.enclosingType.flatMap { et in typeGenericBoundsAll[et]?[owner] }
+                guard call.opaqueRecv || bound != nil else { return nil }
+                let abs = bound ?? owner
+                guard !localTypes.contains(abs), !localProtocolNames.contains(abs),
+                      !STD_PURE_PROTOCOLS.contains(abs), !RAW_VALUE_BASE_TYPES.contains(abs),
+                      !localTypes.contains(owner), !localProtocolNames.contains(owner) else { return nil }
+                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                guard !deps.chainedPkgs(importing: fileImports[file] ?? []).isEmpty else { return nil }
+                return abs
+            }()
+            // ── SOUNDNESS R705 — THE ERASED-FOREIGN DISPATCH IS PRECISE-OR-NOTHING, AND "NOTHING"
+            //    READS AS A POSITIVE PURITY CLAIM ────────────────────────────────────────────────────
+            //
+            // A dependency declares the abstraction; THIS package declares its ONLY implementor and
+            // dispatches through the bound. Measured one-tree-vs-split on the same bytes, one variable
+            // (the receiver's spelling), everything else identical, at `709311c`:
+            //
+            //     _ t: Sink / any Sink     split ['Env']   tree ['Env']        ← control, unchanged
+            //     <T: Sink>(_ t: T)        split  []       tree ['Env']   `unresolved: false`
+            //     _ t: some Sink           split ABSENT    tree ['Env']
+            //
+            // **THE FIRST READING OF THAT TABLE IS WRONG AND THE FIXTURE BELOW THIS FILE PROVES IT.**
+            // The obvious fix — make the erased spellings union the local conformers, like the
+            // existential — reverses `d62dd69` and reds SIXTEEN assertions in
+            // `ScanBoundaryVeinProcessTests`, which pins exactly that as a FABRICATION with call sites
+            // that pass only the PURE conformer: `some P` / `<T: P>` is monomorphized BY THE CALLER, so
+            // this package's conformers are not this receiver's witnesses, and candor-rust reached the
+            // same conclusion from the other side (see `isOpaqueParam`). Measured, not reasoned: the
+            // union was implemented, and those sixteen went red. The erasure carve-out stays.
+            //
+            // WHAT IS ACTUALLY WRONG IS THE OTHER CONJUNCT — the rust R693 shape, two locally-correct
+            // decisions whose INTERSECTION is silent. The carve-out withholds the edge (right), and this
+            // arm is PRECISE-OR-NOTHING with **no disclose-on-miss** (wrong), so the row comes out
+            // `inferred: []`, `unresolved: false` — an affirmative claim that the call reaches nothing —
+            // while the LOCAL protocol-CHA loop below answers the identical question with `Unknown` +
+            // `dispatch:<P>.<member>`. The fix is at the END of this call's processing, where whether
+            // anything ANSWERED is known; see the R705 disclosure there. `resolved` is what tells them
+            // apart, which is why the hedge cannot live in this arm.
             if !resolved, !call.typed || r651Extended, !call.unqualified, !call.opaqueRecv,
                let owner = call.extOwner,
                !localTypes.contains(owner) || r651Extended, !STD_PURE_PROTOCOLS.contains(owner),
@@ -3294,6 +3367,40 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if (fileImports[file] ?? []).contains(owner) {
                     blindDirect[f.qual, default: []].insert(owner)
                 }
+            }
+            // ── SOUNDNESS R705, THE DISCLOSURE ────────────────────────────────────────────────────────
+            //
+            // NOTHING ANSWERED AN ERASED DISPATCH OVER AN ABSTRACTION THIS SCAN DOES NOT OWN. The
+            // carve-out above correctly withheld the CHA edge (the caller monomorphizes `some P`/`<T: P>`,
+            // so our conformers are not this receiver's witnesses — `d62dd69`, sixteen assertions), the
+            // ⟨0.39⟩ obligation-1 KEY was published for a consumer to answer, and the §2 join found no
+            // entry for it. Three correct steps, and their intersection was a row reading `inferred: []`
+            // with `unresolved: false` — a POSITIVE claim that this call reaches nothing, over a call
+            // whose witness is simply not in anything the scan was given. The LOCAL protocol-CHA loop
+            // below answers this exact shape with `Unknown` + `dispatch:<P>.<member>`; this is the same
+            // answer for the foreign half, and it is the whole fix: the edge stays withheld.
+            //
+            // **PLACED HERE, AFTER THE JOIN, BECAUSE `resolved` IS THE DISCRIMINATOR.** A hedge inside the
+            // arm above could not tell "no witness anywhere" from "the dependency published the answer and
+            // the join is about to apply it" — measured: a dependency whose protocol EXTENSION provides
+            // the member publishes `Pkg#P.member`, the join hits, and hedging there would have put a false
+            // `Unknown` beside a correct effect on every such row. `resolved` is set by exactly the things
+            // that can answer (a local resolution, or the §2 join), which is why this reads it rather than
+            // re-deriving the question.
+            //
+            // THE DIRECTION THIS FAILS IN IS OVER-DISCLOSURE: it adds `Unknown` and removes no effect and
+            // no edge. `deny Unknown` / `deny <E> Unknown` therefore catch what was silent; a bare
+            // `deny <E> <fn>` still passes, and that is correct rather than a shortfall — the scan does not
+            // know WHICH effect, and claiming one would be the fabrication this arm's carve-out exists to
+            // prevent.
+            if !resolved, let abs = erasedForeignDispatch {
+                if ProcessInfo.processInfo.environment["CANDOR_R705_PROBE"] != nil {
+                    let line = "R705HIT \(f.qual) \(call.extOwner ?? "?")->\(abs).\(call.leaf) "
+                        + "opaque=\(call.opaqueRecv)\n"
+                    FileHandle.standardError.write(line.data(using: .utf8)!)
+                }
+                direct[f.qual, default: []].insert("Unknown")
+                whyMap[f.qual, default: []].insert("dispatch:\(abs).\(call.leaf)")
             }
         }
 

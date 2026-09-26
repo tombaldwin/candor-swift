@@ -11,6 +11,136 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R704 — R585 CLOSED NINE METATYPE BINDERS FOR *LOCALLY DECLARED* TYPES, AND THE
+  DEP-DECLARED/LOCAL AXIS WAS NEVER A COLUMN IN THAT TABLE.** A metatype receiver whose base type is
+  declared by a CHAINED DEPENDENCY resolved to nothing — in **all ten binders, both halves, twenty arms**,
+  the function PARAMETER (`b1`) included, **which R585's own table lists as a passing CONTROL** (R563/R584).
+  `FnInfo.metatypeParams` reaches the collector only through `protoBoundParams`/`typeBoundParams`, and the
+  Driver builds both by filtering on `localProtocolNames`/`localTypes`, so a foreign base entered neither
+  map; the other five read sites each asked `localTypes.contains(base)` directly.
+
+  MEASURED ONE TREE vs SPLIT on the same bytes (two SPM packages + `CANDOR_DEPS` against one package with
+  the same two source sets as two targets; both arms `swift build`-ed, exit 0):
+
+      let t: RBase.Type = RBase.self; t.go()    ONE TREE ['Env']   SPLIT  functions: []  analyzed.count 1
+      _ t: RBase.Type;  t.go()   (b1, the       ONE TREE ['Env']   SPLIT  ABSENT
+        parameter R585 calls a working control)
+      RBase.go()   (literal, the CONTROL)       ONE TREE ['Env']   SPLIT ['Env']  ← resolved before and after
+
+  `deny Env <fn>` 0 → 1 on every one of the twenty arms, and neither the blanket `deny Env` nor the hedged
+  `deny Env Unknown` caught the metatype case: the callee's row was independently absent from the
+  consumer's scope, so there was nothing for either form to see.
+
+  THE FIX IS R584/R585's OWN RULE, applied across the boundary: **the binder spelling gets exactly the
+  answer the type named LITERALLY gets.** One predicate — `metatypeBaseResolvable` — replaces the
+  `localTypes` test at the five read sites, a fourth arm in the Driver routes a foreign-based metatype
+  PARAMETER into `metatypeBinders` (seeded like `metatypeArrayParams`, so it rides the rebind/shadow
+  lifecycle rather than sitting in a sixth immutable map), and the `if let t = t` unwrap re-records it
+  through `metatypeOfExpr`. A LOCAL protocol base is deliberately EXCLUDED: it has its own read site
+  (`typeReceiverProto` → the in-scan bounded CHA), and answering it here as well would change an answer
+  that is already right.
+
+  A/B — 14 real packages, 3,239 Swift files, 32,215 pre-rows / 32,213 post-rows (`bin/corpus-ab.py`, key
+  entry+package+fn+hash over a multiset, WIDE value): **ADDED 0, REMOVED 2, CHANGED 1.** Verdict buckets:
+  bucket 1 (a concrete effect gained) 0; bucket 2 (disclosure only) 1 = 0.0031%; **bucket 3 (a concrete
+  effect LOST) 0.** REACH, measured with `CANDOR_R704_PROBE=1` rather than inferred from the diff: 45 hits
+  across 5 of the 14 (swift-nio 12, swift-syntax 11, swift-argument-parser 9, vapor 8,
+  swift-composable-architecture 5).
+
+  **THE TWO REMOVALS ARE THE CLAIM UNDER TEST AND BOTH ARE GROUND-TRUTHED FROM SOURCE, NOT FROM candor.**
+  swift-nio's `EmbeddedChannel.WrongTypeError.==` and `NIOAsyncTestingChannel.WrongTypeError.==` are
+  `return lhs.expected == rhs.expected && lhs.actual == rhs.actual` over two `public let … : Any.Type`
+  fields — stdlib metatype `==` and `Bool &&`, no effect. Pre-fix each carried `inferred: ['Unknown']`,
+  `unknownWhy: ['dispatch:Swift.Error.&&']` and a SELF-RECURSIVE `calls` entry, both artefacts of exactly
+  the fall-through this row fixes: `expected` had no type, so the chain landed on the ENCLOSING type and
+  read `lhs.expected == rhs.expected` as `WrongTypeError.==`. The rows are now absent because the
+  functions are pure. **That is a gate flip on real code and it is stated rather than buried:** scoped
+  `deny Unknown EmbeddedChannel.WrongTypeError.==` over swift-nio goes **1 → 0**, and the source says 0 is
+  right. The one CHANGED row (swift-composable-architecture `_EphemeralState.canSend`, whose protocol
+  declares `static var actionType: Any.Type`) GAINS `Unknown` + `dispatch:CasePathable.||` where the
+  function performs nothing — a false disclosure, 1 row, and its scoped gate goes 2 → 1. Both directions
+  of the `&&`/`||` operator-receiver approximation are pre-existing; this change nets −1 fabricated hedge.
+
+  ON THE LIVE CHAINED CORPUS R704 IS **SAFETY-ONLY, and that is written down now rather than discovered
+  later** (§E1): 5 consumers with `swift package resolve` run and every `.build/checkouts` member scanned
+  onto `CANDOR_DEPS` (nio-ssl, nio-http2, vapor, swift-async-algorithms, grpc-swift — 62 dependency
+  reports, 5,145 rows), **16 REACH hits and ADDED 0 / REMOVED 0 / CHANGED 0.**
+
+  §1b KILL SWITCH: `CANDOR_R704_OFF=1` restores the pre-fix answer, and that is MEASURED rather than
+  asserted — the A/B of the 709311c binary against this one with the switch set is **ADDED 0, REMOVED 0,
+  CHANGED 0 over 5,145 rows**. `CANDOR_R704_OFF=1 swift test --filter DepDeclaredAbstraction` reds the
+  file: 6 of 12 cases FAIL. The 6 that stay green are the over-charge controls, the §E3 typecheck and the
+  local-protocol discriminator — every one absence-shaped, so green under any degradation, and saying
+  which is the point (§J).
+
+- **SOUNDNESS R705 — AN ERASED DISPATCH OVER A DEPENDENCY'S ABSTRACTION WAS AN AFFIRMATIVE PURITY CLAIM.**
+  A dependency declares the abstraction, the consumer declares its ONLY implementor and calls through the
+  bound. Measured one tree vs split, one variable (the receiver's spelling):
+
+      _ t: Sink / any Sink   (existential)   SPLIT ['Env']   TREE ['Env']   ← control, unchanged
+      <T: Sink>(_ t: T)                      SPLIT  []       TREE ['Env']   `unresolved: false`
+      _ t: some Sink                         SPLIT ABSENT    TREE ['Env']
+
+  **THE OBVIOUS FIX IS WRONG, AND IT WAS MEASURED WRONG RATHER THAN ARGUED.** Making the erased spellings
+  union the local conformers like the existential one reverses `d62dd69` and reds SIXTEEN assertions in
+  `ScanBoundaryVeinProcessTests`, which pins that union as a FABRICATION with call sites that pass only the
+  PURE conformer: `some P` / `<T: P>` is monomorphized BY THE CALLER (candor-rust reached the same
+  conclusion from the other side — see `isOpaqueParam`). The union was implemented, those sixteen went
+  red, and the erasure carve-out stays.
+
+  WHAT IS WRONG IS THE OTHER CONJUNCT — the candor-rust R693 shape, two locally-correct decisions whose
+  INTERSECTION is silent. The carve-out withholds the CHA edge (right), the ⟨0.39⟩ obligation-1 KEY is
+  published for a consumer to answer (right), the §2 join finds no entry for it because a protocol
+  requirement has no body in the owning package (right) — and the row comes out `inferred: []`,
+  `unresolved: false`, while the LOCAL protocol-CHA loop answers the identical shape with `Unknown` +
+  `dispatch:<P>.<member>`. The fix is that disclosure and nothing else: same reason string, same field,
+  placed AFTER the join because `resolved` is the only thing that can tell "no witness anywhere" from "the
+  dependency published the answer and the join is about to apply it" (04e, a dep whose protocol EXTENSION
+  provides the member, still joins with no spurious `Unknown`). Fenced on ERASURE, on the abstraction
+  being FOREIGN and not `STD_PURE_PROTOCOLS`/`RAW_VALUE_BASE_TYPES`, and on the file importing a CHAINED
+  package — the third conjunct being the one the `<untyped>` disclosure beside it already carries, for its
+  reason: unchained, the κ ledger's `invisible: [M]` already says it.
+
+  `deny Env Unknown viaX` 0 → 1 and agreeing across the arms; a bare `deny Env viaX` still passes, which is
+  correct rather than a shortfall — the scan does not know WHICH effect the caller's monomorphization
+  performs. THE COST IN THE OTHER DIRECTION IS STATED: `deny Unknown` is now 1 on the split arm where the
+  one-tree arm is 0, which is fail-closed.
+
+  A/B on the LIVE chained corpus — 5 consumers, 62 dependency reports, `swift package resolve` run in each
+  and the arms PROVEN to differ before any number was read (R700: without `.build/checkouts` the chained
+  and unchained reports come back byte-identical; measured here 477,567 vs 356,225 bytes on nio-ssl) —
+  5,145 pre-rows / 5,179 post-rows: **ADDED 34, REMOVED 0, CHANGED 39** (narrow `inferred` key: +34 −0 ~0).
+  Verdict buckets: bucket 1 (a concrete effect gained) **0**; bucket 2 (disclosure only) **30 rows =
+  0.579%**; bucket 3 (a concrete effect LOST) **0**. REACH with `CANDOR_R705_PROBE=1`: 207 hits across 2
+  of the 5 (grpc-swift 204, vapor 3). On the 14 UNCHAINED packages REACH is **0 hits** — measured, not
+  assumed: the chained-package conjunct means this cannot fire on a standalone scan.
+
+  A DISCLOSURE-ONLY CHANGE — REMOVED 0, bucket 3 = 0, 30 rows of 5,179 — and the denominator is small, so
+  the absolute count is the one to read. The silence it closes is a SHIPPED CARDINAL SIN: a consumer's own
+  implementor of a dependency's abstraction, which is the case ⟨0.39⟩'s clause calls no longer acceptable.
+
+  §1b: `CANDOR_R705_OFF=1` restores the pre-fix answer exactly (the same 0/0/0 A/B as R704 above, both
+  switches set) and reds this file's R705 cases.
+
+  **R706 IS FILED AND NOT FIXED, AND IT CORRECTS R698's PREMISE.** With ZERO implementors anywhere the
+  one-tree arm discloses `Unknown` in all three spellings; after R705 the split arm does too — *except the
+  EXISTENTIAL one*, which still reads `inferred: []` / `unresolved: false` while publishing a key whose
+  owner has no body to answer it. So "the existential spelling is verifiably immune" is true of the
+  local-implementor half and false of this one. It is not fixed here because R705's population is fenced by
+  ERASURE, a property of the receiver's spelling; `any P` has no such fence — it is shaped exactly like an
+  ordinary dependency-typed receiver, where the join answers and a hedge would be a false `Unknown` on
+  every resolved dependency method call. `deny Unknown viaAny` is 0 / 1, and
+  `testNoImplementorAnywhereIsNotAPurityClaim` asserts it AS IT IS so the row cannot change unnoticed.
+
+  THE REMOVAL AUDIT, calibrated before it was believed (R701: a removal audit in this repo read
+  `detail.changed` as `[key, values]` when the records are `[key, PRE, POST]`, skipped every loss test and
+  printed a confident `0 losses`). This one asserts both record shapes, refuses the file if either is
+  wrong, prints how many records it can SEE a loss in, and selftests on an injected loss first: **3
+  records examined in the unchained arm, 2 carrying a loss (the two ground-truthed above); 39 records
+  examined in the chained arm, 0 carrying a loss in ANY field** — `inferred`, `direct`, `declared`,
+  `incomplete`, `invisible`, `unknownWhy`, `netClass`, `dispatchesOn`, `incompleteSurfaces`, `calls`, `fs`,
+  `paths`, and `unresolved: true → false`.
+
 - **SOUNDNESS R657 / R692 — A LOCAL ANSWER PREEMPTED THE CHAINED DEPENDENCY'S OWN ROW.** The
   external-supertype fallback mints `Unknown` + `dispatch:<sup>.<member>` for a member whose base candor
   cannot see, and sets `resolved = true` — the flag the §2 CANDOR_DEPS join ~380 lines down is gated on.

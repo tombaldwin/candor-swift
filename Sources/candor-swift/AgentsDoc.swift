@@ -284,10 +284,30 @@ over-approximation of the blind set (disclosed, never a silent-pure); a MODULE-Q
   module-scope global, an unwrapped `X.Type?`, a function's RETURN or an enum payload was DROPPED —
   silently, in both halves. Nine binders, eighteen arms, every one ABSENT from `functions[]` over a body
   that dials with `deny Net` and `pure` both exiting 0; all eighteen now resolve.
+  **AND THE TYPE NEED NOT BE DECLARED IN THE SCANNED TREE (SOUNDNESS R704).** R585 closed all nine
+  binders for LOCALLY-declared types and the dep-declared/local axis was never a column in its table, so
+  every one of them — **b1, the function PARAMETER, included, which R585 lists as a passing control** —
+  resolved to NOTHING for a metatype over a type a CHAINED DEPENDENCY declares, while the literal
+  `RBase.go()` in the same file joined `<pkg>#RBase.go`. Measured one tree vs split on the same bytes:
+  twenty arms silent, `deny Env <fn>` 0 → 1 on every one. The binder now gets the answer the type named
+  LITERALLY gets, which is the rule R584/R585 already stated; a LOCAL protocol base is deliberately
+  excluded because it has its own read site (the in-scan bounded CHA) and answering it twice would change
+  an answer that is already right.
   **TWO RESIDUALS, stated rather than implied.** A metatype reached through a TRANSFORM CHAIN
   (`ts.filter { … }.first` rather than `ts` itself) is not followed, and a function LEAF that returns a
   metatype in one declaration and an ordinary type in another is refused in both — ambiguous, never
   guessed, which is the ordinary returns index's own rule.
+- **AN ERASED DISPATCH OVER A DEPENDENCY'S ABSTRACTION DISCLOSES `Unknown` (SOUNDNESS R705).** `some P`
+  and `<T: P>` are monomorphized BY THE CALLER, so this package's conformers are not that receiver's
+  witnesses and candor does NOT union them — that suppression is deliberate (`d62dd69`) and unchanged.
+  What changed is the other half: where `P` belongs to a chained dependency and NOTHING answers the
+  member — no local witness the carve-out would let through, and no entry under the ⟨0.39⟩ obligation-1
+  key the row publishes — the row used to read `inferred: []` with `unresolved: false`, an affirmative
+  claim that the call reaches nothing. It now discloses `Unknown` + `dispatch:<P>.<member>`, the same
+  answer the in-scan protocol CHA gives for the same shape. A bare `deny <E> <fn>` still passes and that
+  is correct: the scan does not know WHICH effect a caller's monomorphization performs, and naming one
+  would be the fabrication the carve-out exists to prevent — read `unresolved`/`unknownWhy`, or deny the
+  hedged form `deny <E> Unknown`.
 - **Constructors are edges**: `_ = C()` reaches `C.init` (the fuzzer's first catch — effects wired
   in an initializer were silently pure for one build).
 - The §7.13 soundness harness is `fuzz.py` (9 forms, deterministic seeds); run it after touching
