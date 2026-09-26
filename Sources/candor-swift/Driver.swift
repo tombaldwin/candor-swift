@@ -2616,10 +2616,94 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         // it cost a false datapoint before anyone thought to run a report against itself.
                         // It also makes `gains` noisy between identical inputs, which is product-facing.
                         let extSupers = (supertypesOf[type] ?? []).filter { !localTypes.contains($0) }.sorted()
-                        if let eff = extSupers.compactMap({ FLUENT_MODEL_PROTOCOLS.contains($0) ? fluentModelEffect(member) : nil }).first {
+                        // SOUNDNESS R657 — ASK THE CHAINED DEPENDENCY BEFORE ANSWERING FROM LOCAL
+                        // KNOWLEDGE. This whole block exists because the member's body is INVISIBLE; a
+                        // chained report (SPEC §2) means it is not, and both answers below are guesses
+                        // about a body somebody already analysed. `resolved = true` on either of them
+                        // preempts the §2 join ~500 lines down, so the dependency's own row for exactly
+                        // this key was never read — the consumer ended up reading MORE CERTAINTY than the
+                        // report it was handed (R692, the cross-engine vein: candor-java's `crossDepJoin`
+                        // gated on `effect == null` is the identical shape one engine over).
+                        //
+                        // MEASURED, one variable — whether the dependency's sources sit inside the scanned
+                        // tree. `extension Chan: Marker { }` in the consumer, `Chan.poke` reading the
+                        // environment in the dependency:
+                        //     one tree            viaReceiver -> ['Env']      deny Env exit 1
+                        //     split + chained     viaReceiver -> ['Unknown']  deny Env exit 0
+                        // and the same pair for a dependency PROTOCOL-EXTENSION DEFAULT reached through a
+                        // consumer's own conformer (`struct Mine: Sink`, `m.emit()`), which is the second
+                        // trigger and is NOT a retroactive conformance — the row was filed from the first.
+                        //
+                        // TWO KEYS, MOST SPECIFIC FIRST, and both are keys this engine already publishes:
+                        //   `<pkg>#<type>.<member>`  — the receiver type IS the dependency's type. This is
+                        //     the key the ordinary §2 join would have formed had it not been preempted, so
+                        //     this arm is a REORDER and nothing more.
+                        //   `<pkg>#<sup>.<member>`   — the receiver is a LOCAL type conforming to the
+                        //     dependency's protocol and the body is that protocol's extension default. The
+                        //     ordinary join cannot reach it (its key names the local owner), and it is the
+                        //     EXACT member this block was about to blame in `dispatch:<sup>.<member>`.
+                        // Same never-guess discipline as every other join site: ONE hit or nothing, across
+                        // the file's chained imports, and `!resolved` above means no local unit answered —
+                        // a member the consumer really does provide still wins outright.
+                        //
+                        // IT FAILS TOWARD WITHDRAWING AN `Unknown` (or, above, a modeled `Db`) and
+                        // REPLACING IT with the dependency's published row — i.e. it can only move a row
+                        // from "this member is unanalysable" to "this member was analysed, here is what it
+                        // does". That IS a disclosure removal and it is audited by
+                        // `RetroactiveConformanceProcessTests`' control arms: an UNCHAINED consumer keeps
+                        // the `Unknown` byte for byte, a key the dependency does not publish keeps it, and
+                        // an AMBIGUOUS key keeps it. `CANDOR_R657_OFF=1` restores the preempting order so
+                        // the defect rows can be shown to fail without a revert (§1b).
+                        //
+                        // SCOPED TO THE CALLS THE LOCAL ARMS WOULD HAVE CLAIMED, and that scoping is the
+                        // whole of the removal audit's finding. A first cut asked the dependency whenever
+                        // this block was reached, i.e. also when `extSupers` is EMPTY and NEITHER arm below
+                        // would have fired. Those calls used to fall through to the ⟨0.39⟩ obligation-1
+                        // publish site (`!resolved`, ~380 lines down) and then to the ordinary §2 join;
+                        // answering them here produced the SAME effects by the SAME `applyDepEntry` and
+                        // skipped the publish site in between. MEASURED on nio-ssl + nio-http2 with a live
+                        // chain: 91 rows silently LOST a `dispatchesOn` key —
+                        // `swift-nio#EventLoopPromise.fail`, `swift-nio#ByteBuffer.setInteger`,
+                        // `swift-nio#ChannelPipeline.SynchronousOperations.addHandler` — because
+                        // `extension EventLoopPromise where …` puts a dependency type in `localTypes`
+                        // (R656) while adding no supertype. That is R656's own defect class reintroduced by
+                        // R656's neighbour: a consumer row that stops naming the abstraction breaks
+                        // obligation 3 one hop short. R657's row predicted exactly this — *"reordering a
+                        // `resolved` short-circuit can withdraw whatever the later arm would have
+                        // answered"* — so the lookup is gated on a local answer EXISTING, which makes this
+                        // change a REORDER of two arms and not a new claim on any call.
+                        let fluentEff = extSupers.compactMap({
+                            FLUENT_MODEL_PROTOCOLS.contains($0) ? fluentModelEffect(member) : nil }).first
+                        let unknownSup = extSupers.first(where: { !STD_PURE_PROTOCOLS.contains($0) })
+                        var depAnswer: DepEntry?
+                        if fluentEff != nil || unknownSup != nil, !deps.isEmpty,
+                           ProcessInfo.processInfo.environment["CANDOR_R657_OFF"] == nil {
+                            let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                            let pkgs = deps.chainedPkgs(importing: fileImports[file] ?? [])   // R565
+                            for keys in [[type], extSupers.filter { !STD_PURE_PROTOCOLS.contains($0) }] {
+                                var hits: [DepEntry] = []
+                                for (p, _) in pkgs {
+                                    for k in keys {
+                                        if let e = deps.lookup("\(p)#\(k).\(member)") { hits.append(e) }
+                                    }
+                                }
+                                if hits.count == 1 { depAnswer = hits[0]; break }
+                            }
+                        }
+                        if let de = depAnswer {
+                            // REACH, counted on the CHANGED BRANCH (brief §E1): an unchanged row is not
+                            // evidence the new code ran. `CANDOR_R657_PROBE=1` prints one line per call
+                            // site this arm actually answered from a chained report.
+                            if ProcessInfo.processInfo.environment["CANDOR_R657_PROBE"] != nil {
+                                FileHandle.standardError.write(
+                                    "R657HIT \(f.qual) -> \(type).\(member)\n".data(using: .utf8)!)
+                            }
+                            applyDepEntry(de, to: f.qual)
+                            resolved = true
+                        } else if let eff = fluentEff {
                             direct[f.qual, default: []].insert(eff)
                             resolved = true
-                        } else if let sup = extSupers.first(where: { !STD_PURE_PROTOCOLS.contains($0) }) {
+                        } else if let sup = unknownSup {
                             direct[f.qual, default: []].insert("Unknown")
                             whyMap[f.qual, default: []].insert("dispatch:\(sup).\(member)")
                             resolved = true

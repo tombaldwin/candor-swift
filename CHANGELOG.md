@@ -11,6 +11,38 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R657 / R692 — A LOCAL ANSWER PREEMPTED THE CHAINED DEPENDENCY'S OWN ROW.** The
+  external-supertype fallback mints `Unknown` + `dispatch:<sup>.<member>` for a member whose base candor
+  cannot see, and sets `resolved = true` — the flag the §2 CANDOR_DEPS join ~380 lines down is gated on.
+  So wherever it fired, **the dependency's published row for exactly that member was never read**, and the
+  consumer read MORE CERTAINTY than the report it was handed (R692's cross-engine statement; candor-java's
+  `crossDepJoin` gated on `effect == null` is the same shape one engine over).
+
+  MEASURED AS ONE TREE vs SPLIT ACROSS A SCAN BOUNDARY — one program, the consumer's bytes, binary and
+  policy held constant, the only variable being whether the dependency's sources sit inside the scanned
+  tree:
+
+      shape                                        ONE TREE          SPLIT + chained (pre-fix)
+      `extension Chan: Marker { }`, `c.poke()`     ['Env'] exit 1    ['Unknown'] exit 0
+      dep protocol-EXTENSION DEFAULT, `m.emit()`   ['Env'] exit 1    ['Unknown'] exit 0
+
+  The second shape is not a retroactive conformance — a consumer's own `struct Mine: Sink` reaching a
+  dependency's protocol-extension default hits the identical preemption — so the fix asks TWO keys, most
+  specific first: `<pkg>#<type>.<member>` (a reorder of the key the ordinary join already forms) and
+  `<pkg>#<sup>.<member>` (the member the fallback was about to blame, which the ordinary join cannot reach
+  because its key names the LOCAL owner). One hit or nothing, as at every other join site. `deny Env
+  Unknown` did catch both pre-fix, so this is a gate flip on the permissive side rather than silence.
+
+  A/B on nio-ssl + nio-http2 with a LIVE chain against swift-nio (1,654 rows both arms):
+  **ADDED 0, REMOVED 0, CHANGED 2 wide, CHANGED 0 on `inferred`, REACH 2 hits**; both changed rows trade
+  `dispatch:ChannelCore.removeHandlers` for `dep:swift-nio#ChannelCore.removeHandlers(Channel)` — a
+  disclosure reason improved, no effect gained or lost, no gate moved. The removal audit found and killed
+  a regression in the first cut: hoisting the lookup above the `extSupers` test made it claim calls the
+  old arm never claimed, and **91 rows silently lost a ⟨0.39⟩ `dispatchesOn` key** (R656's own class, via
+  `extension EventLoopPromise where …`). It is now gated on a local answer EXISTING, which makes the
+  change a reorder of two arms rather than a new claim on any call. `CANDOR_R657_OFF=1` restores the
+  preempting order: with it set, exactly the two defect fixtures fail and all three controls pass.
+
 - **SOUNDNESS R656 — A CONSUMER THAT WROTE AN `extension` ON A DEPENDENCY TYPE SILENCED EVERY MEMBER
   CALL ON THAT TYPE.** `pushType` puts whatever an `extension` extends into `localTypes` (so the
   extension's own members resolve) and deliberately NOT into `declaredTypes` (an extension does not
