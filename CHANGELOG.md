@@ -11,6 +11,93 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R725 (closing R721) — A FN-TYPED PARAMETER OF A NESTED `func` OR OF A CLOSURE REACHED NO
+  INVOCATION-SITE AUTHORITY, so invoking it read SILENT-PURE — plus the third arm R721 named and left
+  unprobed, the UNANNOTATED `var` twin of a visible closure literal.** Three spellings of one program
+  disagreed with the enclosing body held byte-identical:
+
+      func encl(_ cb: (String)->Void) { func inner(_ f: (String)->Void) { f("x") }; inner(cb) }   ABSENT
+      func encl(_ cb: (String)->Void) { let g = { (f: (String)->Void) in f("x") }; g(cb) }        ABSENT
+      func encl(_ cb: (String)->Void) { let g: ((String)->Void)->Void = { … }; g(cb) }            Unknown
+
+  and a fourth, `var g = { }; g = x; g()`, was silent while `var g: () -> Void = { }; g = x; g()` one
+  character away was honest. Every silent arm: `deny Unknown` **exit 0 → 1**, blanket AND scoped, over a
+  callback that really deletes a file (each fixture `swiftc`-compiled and RUN — it prints
+  `probe still exists == false`). Unlike R280/R720 the silence was **NOT call-site dependent** — identical
+  with and without a caller, because nothing ever reached `callbackInvoked`.
+
+  **TWO MECHANISMS, AND R721 STATED ONLY THE FIRST.** Measured by copying the parameter into a local
+  (`let h = f; h("x")`), which DISCLOSES `callback:h` for the closure arm and stays ABSENT for the nested
+  arm: a nested func's function-typed parameter was in **no index** (`parameterTypeNameForShadow`
+  returned nil for a function type), while a closure's function-typed parameter **is** in `vars` under
+  the reserved `FUNCTION_TYPE_ELEMENT` spelling and it was the BARE-INVOCATION chain that never asked —
+  as was the alias spelling of the nested arm (`_ f: Cb`, recorded as `"Cb"` and never read). So the fix
+  is `callableName`'s own third clause asked at the invocation site (§G — one authority, and
+  `callableValue` already had it), plus the one index write the nested arm was missing.
+
+  **`vars` AND NOT `fnTyped`, AND THE ORDER R721 PRICED WAS THE WRONG ONE.** That row proposed
+  `fnTyped.insert` behind an addition to `ShadowSave`; `fnTyped`'s own `NameKeyedStateTests` entry
+  classifies it `deliberatelyKept` *precisely so it is never scoped* ("an over-hedge on a shadowing
+  binder costs precision where the clear would cost soundness"), so scoping it globally trades a
+  documented hedge for a silence everywhere else. `vars` is already saved and restored per nested-func id
+  by R534's `nestedFuncSavedVars` — no new map, no new disposition. The LOSS-direction regression R721
+  predicted is real and gated: with an unscoped `fnTyped.insert` a same-named FREE function's `Env`
+  DISAPPEARS from the row while the `Unknown` stays, so nothing looks wrong
+  (`testASameNamedFreeFunctionSurvivesTheNestedParameterThatShadowedIt`, injected and measured red).
+
+  **ADD-ONLY BY CONSTRUCTION, and the first cut was not — the A/B is what said so.** Written as an
+  `else if` above the default arm it preempted that arm's call edge, and swift-nio's
+  `EmbeddedChannelCore.addToBuffer` (`if let consume = consumer.popFirst() { consume(data) }` over an
+  `inout Deque<(NIOAny) -> Void>`) kept its `Unknown` and its new `callback:consume` while **LOSING
+  `DequeModule` from `invisible`** — on that row and 4 more by propagation, a move toward silence on the
+  one channel that names what the scan could not see. Moved INSIDE the default arm: the edge is
+  untouched and only the reason is added. CHANGED 9 → 5.
+
+  **A/B, 25 real Swift packages, 53,037 rows: ADDED 0 / REMOVED 0 / CHANGED 5, buckets 1-2-3 all ZERO,
+  REACH 16 hits across 7 of 25 entries.** All 5 audited in FULL (not sampled) and ground-truthed from
+  SOURCE: swift-nio `CallbackList._run` (`while let f = pending.popFirst() { f() }`),
+  swift-nio `EmbeddedChannelCore.addToBuffer`, GRDB `Database.setupBusyMode` (invokes an arbitrary
+  `BusyCallback` inside the C busy handler), GRDB `FTS5RegisteredTokenizer.init` and swift-crypto
+  `BoringSSLRSAPublicKey.Backing.getKeyPrimitives` — **the last two are the R725 nested-func shape in
+  real third-party code** (`func withArrayOfCStrings(… _ accessor: (…) -> Result)` and
+  `func getPrimitive(_ getPointer: (OpaquePointer?) -> UnsafePointer<BIGNUM>?)`). Every one a TRUE
+  disclosure gain; no field lost a value at element level. **ONE REAL GATE FLIP, measured rather than
+  predicted:** `deny Unknown Database.setupBusyMode` on GRDB 0 → 1, a true positive; blanket
+  `deny Unknown` and `deny Db Unknown` were 1 on both arms. 1 row of 53,037 newly carries `Unknown`
+  (0.0019%). **Chained arm byte-IDENTICAL on swift-nio-ssl with R700's precondition PROVEN first** —
+  `swift package resolve`, 18 dep reports on `CANDOR_DEPS`, chained 534,975 bytes vs unchained 415,360,
+  so the join really ran: this fix does not touch the §2 join.
+
+  **THE `var` ARM'S COST IS RECALL-ONLY ON THIS CORPUS AND THAT IS WRITTEN DOWN RATHER THAN DISCOVERED
+  LATER (§E1):** the `varhedge` probe fired **zero** times across all 25 packages, so the A/B says
+  nothing about it. It is shipped because the annotated twin has charged exactly this hedge since before
+  the row, so the change removes a disagreement rather than adding a disposition, and because R720
+  DECLINED the mirror exemption on this very path with a measured counter-case. The narrowing that would
+  price it — "hedge only when something reassigns the name" — would assert a visible closure literal is
+  completely charged lexically, which this area has been wrong about twice (R97's residual, R124's type
+  leak).
+
+  **AND THE ADD-ONLY CLAIM IS NOW A TEST AND NOT ONLY AN A/B RESULT** —
+  `testTheDisclosureIsAddedBesideTheCallEdgeAndNotInsteadOfIt` asserts the blind-module attribution the
+  unresolved edge carries, so hoisting the arm back above `calls.append` goes red (`invisible` empties).
+  `assert-audit.sh` is what asked for it: the claim was asserted in a comment and gated only by a corpus
+  differential nobody re-runs.
+
+  **DIRECTION: PURE OVER-DISCLOSURE — adds `Unknown`, removes nothing.** The near-miss is stated too:
+  swift-crypto's `getPrimitive` is passed a named C function at BOTH its call sites, so its new hedge is
+  redundant in fact — candor cannot resolve a nested func's parameter by position, and that is a precision
+  cost, not an error.
+
+  **SOUNDNESS R726, found by this lane's own trap injection and filed rather than fixed here:** R534's
+  `nestedFuncSavedVars` RESTORE — which this fix's soundness argument rests on — had **no test**.
+  Deleting it left **all 1350 tests green**, R534's own `nestedFuncShadow` included, because that test
+  pins the INWARD direction and the restore is the OUTWARD one. Now gated by
+  `testTheNestedParameterSpellingDoesNotOutliveTheNestedFunc`, whose discriminator has to be a unit where
+  the nested parameter is bound and never invoked — every other arm carries a legitimate `Unknown` that
+  masks the leak. The first version of the loss fixture had the same disease and is recorded in the file:
+  written as ONE unit holding both the bare-call and argument positions it was VACUOUS, because the bare
+  call keeps resolving and its `Env` masked the argument position losing its own.
+
 - **SOUNDNESS R720 (closing R280, open since 2026-09-07) — CALLBACK-FLOW'S DISCHARGE TEST WAS VACUOUS
   FOR A DEFERRED NAME WITH NO PARAMETER POSITION, SO ONE CALL SITE DELETED THE DISCLOSURE.** A locally
   bound ANNOTATED closure variable — `let g: ([(String) -> Void]) -> Void = { … }; g(cbs)` — read

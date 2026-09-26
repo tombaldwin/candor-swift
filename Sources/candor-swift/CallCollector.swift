@@ -1751,6 +1751,11 @@ final class CallCollector: SyntaxVisitor {
     /// Driver's two R651 arms may now answer, so a corpus diff can be read against a hit count.
     static let r651Probe = ProcessInfo.processInfo.environment["CANDOR_R651_PROBE"] != nil
     private static let r349Debug = ProcessInfo.processInfo.environment["CANDOR_R349_DEBUG"] != nil
+    /// SOUNDNESS R725 — REACH. Printed at each of the three CHANGED decision sites, because an unchanged
+    /// row is not evidence the new code ran (§E1): `nested` = a nested func's fn-typed parameter now
+    /// indexed, `invoke` = the invocation-site arm that reads `isCallableTypeName(vars[name])`, `varhedge`
+    /// = an unannotated `var` over a visible closure literal keeping the hedge.
+    static let r725Probe = ProcessInfo.processInfo.environment["CANDOR_R725_PROBE"] != nil
 
     private func locatorNameIsStable(_ name: String, inert: Set<String>,
                                      inertCalls: Set<String>? = Set()) -> Bool {
@@ -5271,6 +5276,45 @@ final class CallCollector: SyntaxVisitor {
                     protoDispatches.append(ProtoDispatch(proto: et, member: name, argc: node.arguments.count,
                                                          argTypes: argTypesOf(node), args: argKinds(node)))
                 }
+                // SOUNDNESS R725 — A BINDING `vars` ALREADY KNOWS IS CALLABLE, INVOKED DIRECTLY, AND
+                // REACHING THIS DEFAULT ARM. Every arm above asks a SET (`opaqueFnLocals`, `fnTyped`, a
+                // field); `callableName` — the authority every OTHER consumer of "is this name a
+                // callable" goes through — has a third clause, `isCallableTypeName(vars[name])`, and
+                // this chain was the one place that never asked it. So a closure parameter annotated
+                // with a bare function type, which `visit(ClosureExprSyntax)` records under the reserved
+                // `FUNCTION_TYPE_ELEMENT` spelling, and an alias- or function-typed nested-func
+                // parameter, which lands here as "Cb" / that same spelling, were BOTH recorded and never
+                // read: `let g = { (f: (String)->Void) in f("x") }; g(cb)` and `func inner(_ f: Cb) {
+                // f("x") }` each left the enclosing function **ABSENT from `functions[]`** — the cardinal
+                // sin's signature — while `let h = f; h("x")` one line over, which DOES route through
+                // `callableValue`, disclosed `callback:h`. Two paths computing one fact and only one had
+                // the rule (§G/§F1.3).
+                //
+                // MEASURED, and it is why the mechanism R721 recorded is only half right: that row says
+                // the CLOSURE parameter is "in no index at all". It is in `vars`; the reader was missing.
+                // The NESTED-FUNC parameter really was in no index, which is the other half of this fix.
+                //
+                // **INSIDE THIS ARM AND NOT AS AN `else if` ABOVE IT — ADD-ONLY BY CONSTRUCTION, and
+                // that ordering was chosen by MEASUREMENT, not by taste.** As an `else if` it preempted
+                // the `calls.append` below, and the A/B said so: swift-nio's
+                // `EmbeddedChannelCore.addToBuffer` — `if let consume = consumer.popFirst() { consume(data) }`
+                // over an `inout Deque<(NIOAny) -> Void>` — kept its `Unknown` and its new
+                // `callback:consume`, and **LOST `DequeModule` from `invisible`** on that row and on 4
+                // more by propagation. Dropping the unresolved edge dropped the blind-module attribution
+                // with it, which is a move toward silence on the one channel that names what the scan
+                // could not see. So the edge stays exactly as it was and this only ADDS the reason:
+                // whatever the Driver made of the row before, it still makes, plus the disclosure.
+                //
+                // `callback:` and not `dispatch:` — SPEC §4 ⟨0.7⟩ reserves `dispatch:owner.member` for a
+                // resolvable OWNER, and a parameter or a container element has none. Not routed through
+                // `callbackInvoked` either: that defers to callback-flow resolution BY PARAMETER POSITION
+                // of THIS unit, and a nested func's or a closure's parameter has no position in this
+                // unit's signature — a deferral there is exactly the vacuous quantifier R720 closed.
+                if isCallableTypeName(vars[name]) {
+                    if Self.r725Probe { FileHandle.standardError.write("R725HIT invoke \(name)\n".data(using: .utf8)!) }
+                    unresolved = true
+                    why.insert("callback:\(name)")
+                }
                 calls.append(Call(path: name, leaf: name, strArg: lit, typed: false, args: argKinds(node),
                                   argTypes: argTypesOf(node), unqualified: true,
                                   argLabelled: node.arguments.contains { $0.label != nil }))
@@ -6710,6 +6754,9 @@ final class CallCollector: SyntaxVisitor {
             // inside and the enclosing one outside, which is what Swift's scoping says it means.
             nestedFuncSavedVars[node.id, default: [:]][name] = vars[name]
             if let tn = Self.parameterTypeNameForShadow(p.type) { vars[name] = tn } else { vars.removeValue(forKey: name) }
+            if Self.r725Probe, DeclCollector.parameterTypeName(p.type).isFunction {
+                FileHandle.standardError.write("R725HIT nested \(name)\n".data(using: .utf8)!)
+            }
             if isOpaqueParam(p.type) { monoNames.insert(name) }
             if arrayElementType(p.type).map(isOpaqueParam) == true { opaqueElem.insert(name) }
         }
@@ -6723,11 +6770,37 @@ final class CallCollector: SyntaxVisitor {
     /// The type a nested func's parameter gives its NAME for the body below it. `parameterTypeName`'s
     /// rules (`T?`/`T!`/`some P`/`any P` all collapse to the nominal) are DeclCollector's, and asking it
     /// here rather than re-spelling them is the point — two implementations of "what type is this
-    /// parameter" is the shape this engine keeps re-opening. A function type or an unresolvable spelling
-    /// yields nil, which UNTYPES the name for the nested body rather than leaving the enclosing type.
+    /// parameter" is the shape this engine keeps re-opening. An unresolvable spelling yields nil, which
+    /// UNTYPES the name for the nested body rather than leaving the enclosing type.
+    ///
+    /// SOUNDNESS R725 — A FUNCTION TYPE IS NOT AN UNRESOLVABLE SPELLING, IT IS A CALLABLE ONE, and this
+    /// returned nil for it. `func encl(_ cb: (String)->Void) { func inner(_ f: (String)->Void) { f("x") }
+    /// ; inner(cb) }` left `f` in NO INDEX AT ALL, so a bare `f("x")` matched no arm and `encl` went
+    /// **ABSENT from `functions[]`** — the cardinal sin's signature — with `deny Unknown encl` exit 0
+    /// over a callback that really deletes a file (compiled and RUN). The ALIAS spelling of the same
+    /// parameter (`_ f: Cb`) already returned "Cb" here and was ALSO silent, which is what proves this
+    /// half is not the whole fix: the invocation site had to learn to ask as well.
+    ///
+    /// `FUNCTION_TYPE_ELEMENT` rather than a new index, because that reserved spelling is ALREADY how
+    /// this collector records a callable in `vars` — `visit(ClosureExprSyntax)` writes exactly this for
+    /// `{ (f: () -> Void) in … }` via `elementSpelling`, and `isCallableTypeName` is its one reader. So
+    /// the nested parameter lands in the index the closure parameter is already in, which is the
+    /// property that let ONE invocation-site arm close both spellings (§G).
+    ///
+    /// AND THE SCOPE COMES FOR FREE, which is the reason this is `vars` and not `fnTyped`. R721 priced
+    /// the obvious `fnTyped.insert` and found it needs a scope first, because an unscoped insert leaks
+    /// past the nested func and the `!fnTyped.contains(n)` guard would then silence a same-named FREE
+    /// function — a LOSS-direction regression. It proposed `ShadowSave`; that map's own
+    /// `NameKeyedStateTests` entry classifies it `deliberatelyKept` **precisely so it is never scoped**
+    /// ("an over-hedge on a shadowing binder costs precision where the clear would cost soundness"), so
+    /// scoping it globally to fix one local hole trades a documented hedge for a silence everywhere
+    /// else. `vars` is `clearedOnRebind`, and R534 ALREADY saves and restores it per nested-func id in
+    /// `nestedFuncSavedVars` for this exact binder. No new map, no new disposition, and the leak is
+    /// impossible by construction. Pinned from the other side by
+    /// `NestedCallableParamProcessTests.testASameNamedFreeFunctionSurvivesTheNestedParameterThatShadowedIt`.
     private static func parameterTypeNameForShadow(_ t: TypeSyntax) -> String? {
         let n = DeclCollector.parameterTypeName(t)
-        return n.isFunction ? nil : n.name
+        return n.isFunction ? FUNCTION_TYPE_ELEMENT : n.name
     }
 
     override func visitPost(_ node: FunctionDeclSyntax) {
@@ -7414,7 +7487,40 @@ final class CallCollector: SyntaxVisitor {
                     markOpaqueCallableBinding(name, origin: cv.origin)
                 } else if v.is(ClosureExprSyntax.self) {
                     // visible local closure: body walks lexically; calling it adds nothing
-                    fnTyped.remove(name)
+                    //
+                    // SOUNDNESS R725 — …AND THAT IS TRUE OF A `let` AND FALSE OF A `var`. Swift forbids
+                    // reassigning a `let` that already has an initializer, so for a `let` the visible
+                    // literal IS the whole story and the exact lexical charge is right. A `var` may be
+                    // handed any other closure afterwards: `var g = { }; g = x; g()` invokes a
+                    // caller-supplied value, and this line's unconditional `remove` left `g` in NO index,
+                    // so the invocation matched no arm and the enclosing function went **ABSENT** —
+                    // `deny Unknown` exit 0 over a real file deletion (compiled and RUN). The ANNOTATED
+                    // twin one character away, `var g: () -> Void = { }`, takes the `t.isFunction` arm
+                    // above, keeps `fnTyped`, and has been honest all along: two spellings of one
+                    // question that drifted (§F1.3), and R720's row named this exact program as "a real
+                    // soundness case that currently depends on this path" without probing the
+                    // unannotated half. It was silent.
+                    //
+                    // SO THE `var` KEEPS THE HEDGE, WHICH IS EXACTLY WHAT THE ANNOTATED TWIN ALREADY
+                    // CHARGES — this adds no new disposition, it removes a disagreement. `fnTyped` only
+                    // (never `opaqueFnLocals`), so the closure body still walks lexically and the answer
+                    // is the UNION of what this scan can see and `callback:<name>` for what it cannot —
+                    // R96's `var` rule for a stored closure property, one binder shape over, and the
+                    // same answer `var cb: Cb? = { … }` already gives.
+                    //
+                    // THE PRICE IS PAID RATHER THAN EXEMPTED, for R720's reason, which DECLINED the
+                    // mirror exemption on this very path: narrowing it to "only when something actually
+                    // reassigns the name" would assert that a visible closure literal is COMPLETELY
+                    // charged lexically, and this area has been wrong about that twice (R97's residual,
+                    // R124's type leak) — a `var` captured and reassigned by a nested closure is not a
+                    // shape a syntactic stability scan settles. Measured cost on the corpus: see the
+                    // A/B in the commit message. Pinned by
+                    // `NestedCallableParamProcessTests.testAnUnreassignedClosureVarPaysTheSameHedgeItsAnnotatedTwinAlreadyPaid`,
+                    // which asserts the two spellings agree rather than asserting a number.
+                    if node.bindingSpecifier.text == "var" {
+                        if Self.r725Probe { FileHandle.standardError.write("R725HIT varhedge \(name)\n".data(using: .utf8)!) }
+                        fnTyped.insert(name)
+                    } else { fnTyped.remove(name) }
                     opaqueFnLocals.remove(name); opaqueCallableOrigin.removeValue(forKey: name)
                     vars.removeValue(forKey: name)
                 } else if v.is(FunctionCallExprSyntax.self) {
