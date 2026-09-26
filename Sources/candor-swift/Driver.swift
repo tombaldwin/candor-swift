@@ -1707,6 +1707,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var callsiteArgs: [String: [(caller: String, args: [ArgKind])]] = [:]
     var deferredCallbacks: [String: (indexes: Set<Int>, names: Set<String>)] = [:]
 
+    /// SOUNDNESS R720 — the subset of `deferredCallbacks[fq].names` that has NO PARAMETER POSITION in
+    /// `fq`'s own signature, so no call site of `fq` can ever address it: an annotated fn-typed LOCAL,
+    /// or a fn-typed parameter of a NESTED function/closure collected into `fq`. Kept BESIDE `names`
+    /// rather than taken out of it, because `names` is what the per-caller branch writes and the caller
+    /// side must not move (see the note where this is filled). Read once, at the mark site.
+    var undischargeableCallbacks: [String: Set<String>] = [:]
+
     /// ⟨0.39⟩ Which DEPENDENCY package owns an external type named in `file`, when that can be decided
     /// without guessing. Swift spells neither the owner at the type (`b: Backend`, not rust's
     /// `&dyn iface::Backend` or java's `iface.Backend b`) nor the module at the import (`import Iface`
@@ -2448,12 +2455,58 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         if cc.unreadableAliasArm { unreadableAliasArmFns.insert(f.qual) }   // R429 — expanded after propagate
 
         // fn-typed params INVOKED: defer to callback-flow (resolved after all call sites are known)
+        //
+        // SOUNDNESS R720 — AND A NAME WITH NO PARAMETER POSITION CAN NEVER BE DISCHARGED BY CALL-SITE
+        // FLOW, SO POOLING IT INTO THE INDEX JUDGMENT MADE THAT JUDGMENT VACUOUS. `callbackInvoked` is
+        // named for fn-typed PARAMS but the invocation site that fills it reads `fnTyped`, which also
+        // holds names that are not parameters of THIS unit:
+        //   · an ANNOTATED fn-typed LOCAL — `let g: ([(String) -> Void]) -> Void = { … }; g(cbs)`.
+        //     CallCollector's annotated-binder arm inserts it into `fnTyped`; the UNANNOTATED twin
+        //     REMOVES the name there, which is why only the annotated spelling was affected.
+        //   · a fn-typed parameter of a NESTED function or closure (`func inner(_ f: (String) -> Void)
+        //     { f("x") }`) — collected into the ENCLOSING unit, whose signature never declared `f`.
+        //   · in principle an alias-typed param whose `paramIndex` lookup above (~:1578) came back nil.
+        // For any of those `fnTypedParamIndex` yields nothing, `idxs` stayed EMPTY, and the discharge
+        // test downstream — `for idx in info.indexes { … }` over an initial `resolved =
+        // !argLists.isEmpty` — iterated ZERO times. So `resolved` was TRUE for any caller at all,
+        // `allCallersResolved` stayed true, and the `Unknown` was written to NEITHER the caller NOR
+        // `fq`: a function that provably invokes an unaddressable value dropped out of `functions`,
+        // which under ⟨0.21⟩ is an affirmative purity claim. With NO caller the `byCaller.isEmpty`
+        // fallback still marked the row — which is exactly why the symptom was "the disclosure vanishes
+        // the moment the enclosing function has a call site", and why two BYTE-IDENTICAL bodies in one
+        // scan disagreed. Measured on `796700a`: `deny Unknown runAllWithCaller` exit 0,
+        // `deny Unknown runAllNoCaller` exit 1 (UndischargeableCallbackNameProcessTests).
+        //
+        // THE FIX IS RECORDED HERE AND APPLIED AT THE JUDGMENT, and it is deliberately ADDITIVE-ONLY:
+        // `deferredCallbacks` still carries the FULL `callbackInvoked` set, so every caller-side write
+        // below stays byte-identical, and the undischargeable names are recorded ALONGSIDE it so the
+        // judgment can refuse to let a vacuous verdict stand for `fq` itself.
+        //
+        // THE FIRST ATTEMPT WAS NOT ADDITIVE AND THE LOSS AUDIT CAUGHT IT. It removed the
+        // undischargeable names from `info.names` and wrote their Unknown straight onto `f.qual`. That
+        // fixed `fq`, and it took the reason AWAY from the callers `callsiteArgs` never tracked: a
+        // caller with no recorded site takes the `resolved = !argLists.isEmpty` = FALSE branch below and
+        // pre-fix received `Unknown` + `callback:<n>` DIRECTLY. Measured over 16 real packages: 4 rows
+        // lost their whole `unknownWhy` (`EventLoopFuture._wait`, `ErrorMessageGenerator.makeErrorMessage`,
+        // two `DetailViewController` members) while keeping `inferred: Unknown` by propagation. The
+        // effect never moved and no gate flipped — but "the gate still fires" is a measurement of one
+        // corpus, and recording the names instead of moving them makes REMOVED 0 a property of the code
+        // rather than a result. The narrow write is per-name at the mark site below.
         if !cc.callbackInvoked.isEmpty {
             var idxs = Set<Int>()
+            var undischargeable: Set<String> = []
             for n in cc.callbackInvoked {
                 if let i = f.fnTypedParamIndex[n] { idxs.insert(i) }
+                else {
+                    undischargeable.insert(n)
+                    if ProcessInfo.processInfo.environment["CANDOR_R720_PROBE"] != nil {
+                        FileHandle.standardError.write(
+                            "R720 undischargeable \(f.qual) :: \(n)\n".data(using: .utf8)!)
+                    }
+                }
             }
             deferredCallbacks[f.qual] = (idxs, cc.callbackInvoked)
+            if !undischargeable.isEmpty { undischargeableCallbacks[f.qual] = undischargeable }
         }
         for call in cc.calls {
             // SHADOW GUARD: an UNQUALIFIED bare-name call (`helper()`) whose name is a NESTED func or a
@@ -3764,6 +3817,36 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         if !allCallersResolved {
             direct[fq, default: []].insert("Unknown")
             for n in info.names { whyMap[fq, default: []].insert("callback:\(n)") }
+        }
+        // SOUNDNESS R720 — …AND `allCallersResolved` IS A VACUOUS VERDICT FOR A NAME WITH NO PARAMETER
+        // POSITION. `info.indexes` collects only the names `fnTypedParamIndex` could place, so for an
+        // annotated fn-typed LOCAL (`let g: ([(String) -> Void]) -> Void = { … }; g(cbs)`) or a nested
+        // function's own fn-typed parameter the loop above ran ZERO times per call site and `resolved`
+        // kept its initial `!argLists.isEmpty`. ONE TRACKED CALLER therefore "discharged" a deferral no
+        // call site can address, `allCallersResolved` stayed true, and the branch above did not fire:
+        // `fq` dropped out of `functions` entirely, which under ⟨0.21⟩ is an affirmative purity claim.
+        // With NO caller the `byCaller.isEmpty` fallback still marked it — which is why the symptom was
+        // "the disclosure vanishes the moment the enclosing function has a call site", and why two
+        // BYTE-IDENTICAL bodies in one scan disagreed. That differential is what R280 was filed on
+        // (2026-09-07) and it still reproduced at `796700a`: `deny Unknown runAllWithCaller` exit 0
+        // against `deny Unknown runAllNoCaller` exit 1, over a fixture whose callback was EXECUTED and
+        // really deleted a file through that value (UndischargeableCallbackNameProcessTests, §E3).
+        //
+        // ONLY THE UNDISCHARGEABLE NAMES ARE WRITTEN, not `info.names`: in the MIXED shape — a real
+        // fn-typed param plus an annotated local — the param genuinely resolved, and naming it here
+        // would be the ⟨0.34⟩ fabrication this lineage already priced. `deny Unknown` reads `inferred`,
+        // so every caller of `fq` inherits this over the ordinary call edge; nothing is written to a
+        // caller, which is what keeps the change additive (the caller branch above is untouched).
+        //
+        // FAILURE DIRECTION: ADD-ONLY, by construction rather than by measurement. This block can
+        // insert an `Unknown` and a `callback:<n>`; there is no path through it that removes either, and
+        // every other write in this loop is unchanged. The price is a false hedge on a `let` bound to a
+        // VISIBLE closure literal whose body is pure — its honest answer is no hedge, since the body is
+        // charged lexically and a `let` cannot be reassigned — and `callbackInvoked` does not record
+        // which kind an entry came from. The A/B in the commit message prices that; this sentence does not.
+        if let un = undischargeableCallbacks[fq] {
+            direct[fq, default: []].insert("Unknown")
+            for n in un { whyMap[fq, default: []].insert("callback:\(n)") }
         }
     }
 

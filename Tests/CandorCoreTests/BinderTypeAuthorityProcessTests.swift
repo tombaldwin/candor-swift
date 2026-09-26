@@ -117,11 +117,25 @@ final class BinderTypeAuthorityProcessTests: XCTestCase {
     func testEveryAliasedBinderSpellingResolves() throws {
         let by = try scan(Self.src, "R97")
         let fsArms = ["a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10",
-                      "a11", "a12", "a13", "a14", "a15", "a16", "a17", "a18"]
+                      "a11", "a12", "a13", "a14", "a15", "a16", "a18"]
         for a in fsArms {
             XCTAssertEqual((by[a]?["inferred"] as? [String]).map(Set.init), ["Fs"],
                            "\(a): aliased binder lost its type — the deletion it performs is silent")
         }
+        // a17 IS PRICED SEPARATELY — SOUNDNESS R720's measured cost, and it keeps the teeth this arm was
+        // written with. The subject here is that the ALIASED BINDER RESOLVES, i.e. that `Fs` is PRESENT;
+        // the arm is `let c: (FM) -> Void = { (fm: FM) in fm.removeItem(…) }; c(FM.default)`, an
+        // annotated fn-typed LOCAL, so R720 now hedges the invocation of `c` with `Unknown` beside that
+        // Fs. `Fs` is still asserted, so losing the alias resolution still fails this test.
+        //
+        // THE HEDGE IS A FALSE DISCLOSURE ON THIS ARM and it was shipped deliberately rather than
+        // exempted: the exemption would have to assert that a `let` bound to a VISIBLE closure literal is
+        // COMPLETELY charged lexically, which narrows a sound over-approximation on a property this very
+        // file has been wrong about twice (R97's own residual below, and R124's leak) — §F1 q5. Priced:
+        // 3 arms in this repo's fixtures, and 0 of 13,021 rows over 16 real Swift packages.
+        XCTAssertEqual((by["a17"]?["inferred"] as? [String]).map(Set.init), ["Fs", "Unknown"],
+                       "a17: the aliased binder must still resolve its Fs; the Unknown beside it is "
+                       + "R720's priced hedge on invoking an annotated fn-typed local")
         XCTAssertEqual((by["a19"]?["inferred"] as? [String]).map(Set.init), ["Env"],
                        "a19: a SECOND effect class through the same mechanism, so `Fs` cannot be the only thing measured")
     }
@@ -131,9 +145,13 @@ final class BinderTypeAuthorityProcessTests: XCTestCase {
     func testPlainSpelledTwinsAreUnchanged() throws {
         let by = try scan(Self.src, "R97")
         for a in ["a1c", "a2c", "a3c", "a4c", "a5c", "a6c", "a7c", "a8c", "a9c", "a10c",
-                  "a16c", "a17d", "a18c"] {
+                  "a16c", "a18c"] {
             XCTAssertEqual((by[a]?["inferred"] as? [String]).map(Set.init), ["Fs"], "\(a): control moved")
         }
+        // a17d — `let fm = …; let c: () -> Void = { fm.removeItem(…) }; c()`. Same R720 hedge as a17
+        // above, same reason, and the `Fs` it was written to protect is still asserted.
+        XCTAssertEqual((by["a17d"]?["inferred"] as? [String]).map(Set.init), ["Fs", "Unknown"],
+                       "a17d: control keeps its Fs; the Unknown is R720's priced hedge")
         XCTAssertEqual((by["a19c"]?["inferred"] as? [String]).map(Set.init), ["Env"], "a19c: control moved")
     }
 
@@ -142,10 +160,13 @@ final class BinderTypeAuthorityProcessTests: XCTestCase {
     /// `a18c`) that is pinned above.
     func testPlainSpelledSiblingsThatNeverHadATypeAtAll() throws {
         let by = try scan(Self.src, "R97")
-        for a in ["a14c", "a15c", "a17c"] {
+        for a in ["a14c", "a15c"] {
             XCTAssertEqual((by[a]?["inferred"] as? [String]).map(Set.init), ["Fs"],
                            "\(a): plain-spelled and silent — no typealias is involved in this arm")
         }
+        // a17c — the plain-spelled twin of a17, so it carries R720's hedge for the identical reason.
+        XCTAssertEqual((by["a17c"]?["inferred"] as? [String]).map(Set.init), ["Fs", "Unknown"],
+                       "a17c: plain-spelled, and its Fs must still be there; the Unknown is R720's hedge")
     }
 
     /// A TYPE MUST NOT LEAK PAST THE CONSTRUCT THAT BOUND IT. The new binders write `vars`, which is
@@ -241,20 +262,29 @@ final class BinderTypeAuthorityProcessTests: XCTestCase {
         }
     }
 
-    /// A MEASURED RESIDUAL, stated as a residual. `{ fm in … }` with the type only on the closure
-    /// VARIABLE is still silent — executed ground truth, so it is a real under-report and not a
-    /// theoretical one. Written as an expectation so that closing it turns this row red and forces the
-    /// note to be updated, instead of the gap quietly outliving its own comment.
-    func testKnownResidualUnannotatedClosureParamIsStillSilent() throws {
+    /// A MEASURED RESIDUAL, NO LONGER SILENT — and this is the assertion that says so.
+    ///
+    /// `{ fm in … }` with the type only on the closure VARIABLE still does not RESOLVE: the closure
+    /// parameter is unannotated, so `fm.removeItem` is not typed and the `Fs` is not found. That half of
+    /// R97's residual stands and this test is still its pin.
+    ///
+    /// WHAT CHANGED IS THAT IT IS NO LONGER A CARDINAL SIN. At `796700a` this row was ABSENT — a ⟨0.21⟩
+    /// affirmative purity claim over a real `FileManager.removeItem`, with `deny Unknown r` exiting 0.
+    /// SOUNDNESS R720 hedges the invocation of `c`, so the same program now exits 1 and the row names
+    /// `callback:c`. A disclosed imprecision and a silent under-report are not the same defect, and the
+    /// distance between them is the whole subject of the register.
+    func testKnownResidualUnannotatedClosureParamIsDisclosedNotSilent() throws {
         let src = """
         import Foundation
         func r() { let c: (FileManager) -> Void = { fm in try? fm.removeItem(atPath: "/tmp/r97-a17e") }; c(FileManager.default) }
         r()
         """
         let by = try scan(src, "R97Res")
-        XCTAssertNil(by["r"], """
-            RESIDUAL CLOSED — `let c: (FileManager) -> Void = { fm in … }` now resolves. \
-            Good news: delete this test, and update the note in this file's doc comment and SOUNDNESS R97.
+        XCTAssertEqual((by["r"]?["inferred"] as? [String]).map(Set.init), ["Unknown"], """
+            R720: this must be DISCLOSED, never absent. If `Fs` appears here the RESOLUTION residual is \
+            closed too — good news: update the note in this file's doc comment and SOUNDNESS R97.
             """)
+        XCTAssertEqual(by["r"]?["unknownWhy"] as? [String], ["callback:c"],
+                       "…naming the binder whose invocation could not be addressed")
     }
 }

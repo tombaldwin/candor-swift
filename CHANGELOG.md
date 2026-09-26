@@ -11,6 +11,70 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### ⚠ Fixed
 
+- **SOUNDNESS R720 (closing R280, open since 2026-09-07) — CALLBACK-FLOW'S DISCHARGE TEST WAS VACUOUS
+  FOR A DEFERRED NAME WITH NO PARAMETER POSITION, SO ONE CALL SITE DELETED THE DISCLOSURE.** A locally
+  bound ANNOTATED closure variable — `let g: ([(String) -> Void]) -> Void = { … }; g(cbs)` — read
+  `Unknown`/`callback:g` while its enclosing function had no caller and went **ABSENT the moment any
+  call site existed**, which under ⟨0.21⟩ is an affirmative purity claim. Two BYTE-IDENTICAL bodies in
+  one scan disagreed, so it is a measurement and not an inference.
+
+  THE MECHANISM, measured at `796700a` and not taken from the 2026-09-07 row. `callbackInvoked` is named
+  for fn-typed PARAMS, but the invocation site that fills it reads `fnTyped`, which also holds an
+  ANNOTATED fn-typed LOCAL (the UNANNOTATED twin `remove`s the name at the binder, which is why only the
+  annotated spelling was affected) and a nested function's or closure's own fn-typed parameter. For those
+  `fnTypedParamIndex` yields nothing, so `deferredCallbacks[fq].indexes` was EMPTY and the per-caller
+  discharge loop `for idx in info.indexes { … }` ran **zero times** over an initial
+  `resolved = !argLists.isEmpty`. One tracked caller therefore discharged a deferral no call site can
+  address; `allCallersResolved` stayed true, R125's `!allCallersResolved` branch never fired, and the
+  `Unknown` reached neither the caller nor `fq`. With NO caller the `byCaller.isEmpty` fallback still
+  marked the row, which is exactly why the trigger looked like "has a call site".
+
+  Verified by `CANDOR_R127_PROBE`, which prints the verdict at the decision site:
+  `runAllWithCaller callers=1 anyResolved=true allResolved=true` for the fixture, against
+  `SelectableEventLoop._preconditionSafeToWait callers=1 anyResolved=false allResolved=false` and five
+  more real-code siblings where an UNTRACKED caller had already made R125 fire and mask the hole.
+
+  FIXED by recording the undischargeable names beside `deferredCallbacks` (`undischargeableCallbacks`)
+  and marking `fq` from them after the per-caller judgment — only those names, never `info.names`, so the
+  MIXED shape does not fabricate a `callback:` for the param that genuinely resolved.
+  **FAILURE DIRECTION: ADD-ONLY BY CONSTRUCTION.** The block can insert an `Unknown` and a
+  `callback:<n>`; no path through it removes either, and every caller-side write is untouched.
+
+  THE FIRST ATTEMPT WAS NOT ADDITIVE AND THE LOSS AUDIT CAUGHT IT: taking the names OUT of `info.names`
+  fixed `fq` and took the reason away from callers `callsiteArgs` never tracked — 4 rows lost their whole
+  `unknownWhy` (`EventLoopFuture._wait`, `ErrorMessageGenerator.makeErrorMessage`, two
+  `DetailViewController` members) while keeping `inferred: Unknown` by propagation. No gate flipped, and
+  "the gate still fires" is a measurement of one corpus; the shipped form makes REMOVED 0 a property of
+  the code.
+
+  A/B — `bin/corpus-ab.py`, PRE `796700a` release binary vs POST, 16 Swift packages (alamofire,
+  Kingfisher, SwiftyJSON, swift-algorithms, -argument-parser, -async-algorithms, -collections, -crypto,
+  -http-types, -log, -metrics, -nio, -nio-http2, -nio-ssl, -numerics, candor-swift itself),
+  **13,021 rows: ADDED 0  REMOVED 0  CHANGED 1** on the wide multiset key; `inferred` CHANGED 0;
+  verdict buckets 1/2/3 all **0**. REACH **18 hits across 4 entries** (`CANDOR_R720_PROBE`), so the
+  branch demonstrably ran: full audit of all 18 — 0 gate flips, 10 reason-gains (all on candor-swift's
+  own `analyze`), 8 already-disclosed. A loss audit over the detail, CALIBRATED by injecting a POST
+  `inferred` loss and a synthetic removed row and requiring both to be reported, found **0 losses**.
+
+  ALSO CLOSES A SECOND SILENT UNDER-REPORT, which is where the value is: R97's own documented residual,
+  `func r() { let c: (FileManager) -> Void = { fm in try? fm.removeItem(…) }; c(…) }`, was ABSENT with
+  `deny Unknown r` exit **0** over a real file deletion. It now reads `Unknown`/`callback:c`, exit **1**.
+  The `Fs` is still not RESOLVED (the closure parameter is unannotated) — a disclosed imprecision rather
+  than a certified purity claim, which is the distinction the register exists for.
+
+  THE CONTROL FOR THE LOSS DIRECTION IS CALIBRATED, not merely present:
+  `testAnUntrackedCallerKeepsTheReasonItAlreadyReceived` pins an unqualified sibling-method caller and a
+  CHA/protocol-union caller, both untracked by `callsiteArgs`. Re-applying the non-additive first attempt
+  makes both read `unknownWhy: nil` while the two owner assertions beside them stay green, so a failure is
+  attributable. That is the test the first attempt would have needed and did not have.
+
+  THE PRICE, priced and shipped rather than exempted: a `let` bound to a VISIBLE closure literal with a
+  pure body now carries a hedge whose honest answer is none. 3 arms in this repo's fixtures move
+  (`BinderTypeAuthorityProcessTests` a17/a17c/a17d, each keeping the `Fs` it was written to protect) and
+  **0 of 13,021 real rows**. The exemption was declined deliberately: it would assert that a visible
+  closure literal is COMPLETELY charged lexically, narrowing a sound over-approximation on a property
+  this area has been wrong about twice already (R97's residual, R124's type leak) — §F1 q5.
+
 - **SOUNDNESS R704 — R585 CLOSED NINE METATYPE BINDERS FOR *LOCALLY DECLARED* TYPES, AND THE
   DEP-DECLARED/LOCAL AXIS WAS NEVER A COLUMN IN THAT TABLE.** A metatype receiver whose base type is
   declared by a CHAINED DEPENDENCY resolved to nothing — in **all ten binders, both halves, twenty arms**,

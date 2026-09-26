@@ -162,22 +162,29 @@ final class ContainerBinderElementIndexProcessTests: XCTestCase {
                            "\(fn): an annotated closure parameter carrying the container was ALREADY "
                            + "disclosed — the row's third claim, not reproduced: \(r.out)")
         }
-        XCTAssertNil(r.fns["T.named"],
-                     "the FOURTH spelling — a closure bound to a local ANNOTATED VARIABLE — is silent "
-                     + "here, and NOT for the reason this row is about: see case 6, where the trigger is "
-                     + "isolated to the enclosing function HAVING A CALL SITE, not to the binder: \(r.out)")
+        // WAS `XCTAssertNil` — the FOURTH spelling, a closure bound to a local ANNOTATED VARIABLE, was
+        // silent here for a reason this row is NOT about: callback-flow's discharge test was VACUOUS for
+        // a name with no parameter position, so any caller "resolved" it. SOUNDNESS R720 closed that and
+        // this assertion inverted, which is what the note in case 6 said it would do.
+        XCTAssertEqual(r.fns["T.named"], ["Unknown"],
+                       "the FOURTH spelling now discloses too — R720: the binder has no parameter "
+                       + "position, so no call site can discharge its deferral: \(r.out)")
         XCTAssertEqual(r.code, 1, "`deny Fs Unknown T.iife` must FAIL: \(r.out)")
     }
 
-    // ── 6. A SEPARATE SILENCE FOUND WHILE PINNING CASE 4, isolated and NOT fixed here ─────────────
-    // `let g: ([Cb]) -> Void = { … }; g(cbs)` is disclosed `Unknown` while the enclosing function has NO
-    // caller, and goes ABSENT the moment ANY call site exists — including one that passes a plain
+    // ── 6. THE SEPARATE SILENCE FOUND WHILE PINNING CASE 4 — SOUNDNESS R280, NOW CLOSED ──────────
+    // `let g: ([Cb]) -> Void = { … }; g(cbs)` was disclosed `Unknown` while the enclosing function had
+    // NO caller, and went ABSENT the moment ANY call site existed — including one passing a plain
     // String, which cannot have re-resolved anything. Two functions, byte-identical bodies, one scan:
-    // the ONLY difference is the call site, which is what makes this a measurement rather than a guess.
-    // Deliberately left OPEN: it is callback-flow's deferred resolution rather than a binder index, a
-    // different vein with a much wider blast radius, and it is filed as its own row. Asserted as SILENT
-    // so that closing that row turns this red and names itself.
-    func testAnAnnotatedClosureVariableLosesItsDisclosureOnceItsFunctionIsCalled() throws {
+    // the ONLY difference was the call site, which is what made it a measurement rather than a guess.
+    //
+    // THE PIN DID ITS JOB. It was asserted as SILENT "so that closing that row turns this red and names
+    // itself", and that is exactly how the fix was verified: R280 was filed 2026-09-07, still reproduced
+    // at `796700a` on 2026-09-26, and closed as R720 — callback-flow's discharge test iterated over
+    // `info.indexes`, which is EMPTY for a name with no parameter position, so `resolved` kept its
+    // initial `!argLists.isEmpty` and one tracked caller vacuously discharged a deferral no call site can
+    // address. The two arms now agree, which is the whole content of the row.
+    func testAnAnnotatedClosureVariableKeepsItsDisclosureOnceItsFunctionIsCalled() throws {
         let src = Self.head + """
         class T {
             let cbs: [(String) -> Void] = [bomb]
@@ -195,10 +202,10 @@ final class ContainerBinderElementIndexProcessTests: XCTestCase {
         let r = try scan(src, name: "BindCalledVsNot", policy: "deny Fs Unknown T.uncalled\n")
         XCTAssertEqual(r.fns["T.uncalled"], ["Unknown"],
                        "THE DISCRIMINATOR: the identical body with NO call site discloses: \(r.out)")
-        XCTAssertNil(r.fns["T.called"],
-                     "KNOWN-SILENT, filed as its own row: the same body goes ABSENT once a call site "
-                     + "exists — the call passes a String and cannot have resolved the closure, so the "
-                     + "trigger is the existence of the caller, not its argument: \(r.out)")
+        XCTAssertEqual(r.fns["T.called"], ["Unknown"],
+                       "R280/R720 CLOSED: the byte-identical body must read the SAME whether or not a "
+                       + "call site exists. It was ABSENT here — a ⟨0.21⟩ purity claim, and `deny "
+                       + "Unknown T.called` exited 0 over it: \(r.out)")
         XCTAssertEqual(r.code, 1, "`deny Fs Unknown T.uncalled` must FAIL: \(r.out)")
     }
 
