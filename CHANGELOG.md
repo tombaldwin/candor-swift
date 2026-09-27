@@ -11,6 +11,52 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### Fixed
 
+- **SOUNDNESS R620 (WIDENED FROM TWO ARMS TO FOUR) — A METATYPE BINDER IS INERT *PRECISELY UNDER
+  SHADOWING*, so a receiver whose name collides with an enclosing one resolved against the OUTER type and
+  went silent.** `metatypeBinders[name]` is a SIDE index: unlike `vars[name] = …` it does not displace an
+  enclosing binding of the same name, and `metatypeBinder`'s very first guard is `vars[spelling] == nil`.
+  Measured at `1656d0b`, one variable per pair (whether an enclosing parameter shares the binder's name),
+  with the outer type carrying a HARMLESS same-named member so the failure is a silence rather than a
+  swapped effect:
+
+      func f(_ t: Deleter) { xs.forEach { (t: CBase.Type) in t.validate() } }   ABSENT   b5
+      func f(_ t: Deleter) { xs.forEach { t in t.validate() } }                 ABSENT   b6, closure
+      func f(_ t: Deleter) { let t: CBase.Type = CImpl.self; t.validate() }     ABSENT   b2/b3
+      func f(_ t: Deleter) { let t = mkC(); t.validate() }                      ABSENT   b9
+
+  `deny Net <fn>` **exit 0** on every one, **exit 1** on its rename control (`_ z: Deleter`) in the same
+  scan, over a body that dials out.
+
+  **R620 NAMES THE TWO CLOSURE ARMS; THERE ARE FOUR.** The two LOCAL-binder arms have the identical
+  mechanism and are the worse pair — the metatype is written in the source, or returned by a function
+  declared to return one, and `t.validate()` still resolved against `Deleter`. They were found by grepping
+  ALL SEVEN `metatypeBinders` write sites rather than the two the row handed over (§9 — an audit's
+  boundary must not be drawn around its own trigger). The three that were already safe say so in their own
+  comments, which is what makes the boundary checkable rather than asserted: the `for`-in arm, the
+  `case let` payload arm and the `if let` unwrap arm — and `forInShadowed`/`caseLetShadowed` are in the
+  fixture as PASSING controls so the boundary is measured in both directions.
+
+  The clear is **`vars` and nothing else**, on purpose: it is the entry the guard reads and the one this
+  was measured on, and widening to `clearBindingTypeOnly` would also drop `arrayElem`/`tupleElem`/
+  `protoTyped` for the name — possibly right, definitely unpriced, and at the annotated-binder site a
+  `tupleElem` write already happened earlier in the same chain. In the two closure arms the removal sits
+  inside a registered snapshot (`scopeBindingType` / `typeScopes[closure.id]`) so it is given back when the
+  closure closes; `testTheClearDoesNotOutliveTheBindingOrWidenPastVars` is that loss direction, and it
+  fails pre-fix in the OTHER direction too (`['Env']` instead of `['Env','Net']`).
+
+  A/B — 25 real Swift packages, 53,069 rows, `bin/corpus-ab.py`, arms proven different binaries by content
+  hash: **ADDED 0 REMOVED 0 CHANGED 0**, buckets all zero, **REACH 0**. This is a **SAFETY-ONLY** change
+  with an explicitly zero corpus reach — R620 already priced both closure arms as zero-hit and the two
+  local arms are zero here too — so the fixtures are the whole evidence and the corpus is only the
+  fabrication control. The probe is calibrated in BOTH directions rather than trusted: `CANDOR_R620_PROBE`
+  fires 4× on the shadowing fixture and 0× on a rename-control-only file, and the `CANDOR_R620_OFF` kill
+  switch restores the old ABSENT on all four arms — so the zero is a real absence and not a broken probe.
+  CHAINED arm byte-identical on swift-nio-ssl with R700's precondition proven (chained 472,847 bytes vs
+  unchained 353,232).
+
+  Gates: `swift test` 1360 passed / 0 failed; `smoke.sh` 160 passed / 0 failed; `ci/self-gate.sh` OK;
+  `fuzz.py` 25 seeds passed; `fabrication_probe.py` OK.
+
 - **SOUNDNESS R589 (PARTIAL, and the ROW'S STATED MECHANISM WAS WRONG) — A TERNARY-VALUED RECEIVER WAS
   SILENTLY PURE BECAUSE `rootOf`'s TERNARY ARM REQUIRED THE WHOLE UNFOLDED SEQUENCE TO BE EXACTLY THREE
   ELEMENTS, NOT BECAUSE "THE TWO ARMS RESOLVE DIFFERENTLY".** SwiftParser does not nest a ternary's

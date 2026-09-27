@@ -776,6 +776,40 @@ final class CallCollector: SyntaxVisitor {
         return !Self.r704Off && !localProtocols.contains(base)
     }
 
+    /// SOUNDNESS R620 — THE ONE ENTRY `metatypeBinder`'s FIRST GUARD READS, dropped by the binders that
+    /// record a metatype. `metatypeBinders[name]` is a SIDE index, so a write to it does not displace an
+    /// ENCLOSING binding of the same name in `vars` the way `vars[name] = …` does — and the guard below
+    /// then refuses, so the metatype arm is inert PRECISELY UNDER SHADOWING and the receiver resolves
+    /// against the outer type instead. Four of the seven `metatypeBinders` write sites had no clear:
+    ///
+    ///     func f(_ t: Deleter) { xs.forEach { (t: CBase.Type) in t.validate() } }   ABSENT (b5)
+    ///     func f(_ t: Deleter) { xs.forEach { t in t.validate() } }                 ABSENT (b6 closure)
+    ///     func f(_ t: Deleter) { let t: CBase.Type = CImpl.self; t.validate() }     ABSENT (b2/b3)
+    ///     func f(_ t: Deleter) { let t = mkC(); t.validate() }                      ABSENT (b9)
+    ///
+    /// each against a rename control (`_ z: Deleter`) that charges `Net` in the same scan. **R620 named
+    /// only the two CLOSURE arms; the two LOCAL-binder arms were found by grepping every write site
+    /// rather than the two the row handed over**, and they are the worse pair — the annotation is
+    /// written in the source and `t.validate()` still resolved against `Deleter`. The three sites that
+    /// were already safe say so in their own comments: the `for`-in arm ("already cleared and saved
+    /// above"), the `case let` arm ("after `clearBinding`") and the `if let` unwrap arm.
+    ///
+    /// NARROW ON PURPOSE: `vars` and nothing else. It is the entry the guard reads and the one this was
+    /// measured on; widening to `clearBindingTypeOnly` would also drop `arrayElem`/`tupleElem`/
+    /// `protoTyped` for the name, which may well be right and is UNPRICED — and at the annotated-binder
+    /// site a `tupleElem` write already happened earlier in the same chain. In the two closure arms the
+    /// removal is inside a registered snapshot (`scopeBindingType` / `typeScopes[closure.id]`) so it is
+    /// given back when the closure closes; in the two local-binder arms the binding lasts to the end of
+    /// the function, which is exactly the scope `vars` has.
+    private func clearShadowedVarForMetatypeBinder(_ name: String) {
+        guard !Self.r620Off else { return }
+        if Self.r620Probe, vars[name] != nil {
+            FileHandle.standardError.write(
+                "R620HIT \(name) shadowed \(vars[name] ?? "-")\n".data(using: .utf8)!)
+        }
+        vars.removeValue(forKey: name)
+    }
+
     private func metatypeBinder(_ spelling: String) -> String? {
         guard !Self.r585Off, vars[spelling] == nil, !localTypes.contains(spelling) else { return nil }
         // The SAME lookup order `rootOfUnaliased` uses for the ordinary type question — locals and
@@ -1772,6 +1806,11 @@ final class CallCollector: SyntaxVisitor {
     /// SOUNDNESS R589 REACH PROBE (§E1) — the ternary arm of an UNFOLDED sequence whose shape the old
     /// `count == 3` guard excluded. Hoisted for the same reason as the others: `rootOf` is the hot path.
     static let r589Probe = ProcessInfo.processInfo.environment["CANDOR_R589_PROBE"] != nil
+    /// SOUNDNESS R620 REACH PROBE (§E1) + its KILL SWITCH (§1b). The probe fires only where a metatype
+    /// binder REALLY shadowed an enclosing `vars` entry, which is the population the fix can move — the
+    /// write sites themselves are common and counting those would overstate it.
+    static let r620Probe = ProcessInfo.processInfo.environment["CANDOR_R620_PROBE"] != nil
+    private static let r620Off = ProcessInfo.processInfo.environment["CANDOR_R620_OFF"] != nil
     /// SOUNDNESS R584 REACH PROBE (§E1) — same reason as R563's, and this fix needs it MORE: its shape
     /// could not be found in the corpus at all when the row was filed (199 metatype parameters declared,
     /// 15 call sites dispatching on one, all 15 protocol-typed and already resolving), so a byte-identical
@@ -4195,6 +4234,7 @@ final class CallCollector: SyntaxVisitor {
         // `MetatypeBinderProcessTests`'s b5p/b5c arms resolve.
         for p in closureParamNames(node) where p.metatype != nil {
             scopeBindingType(Syntax(node), p.name)
+            clearShadowedVarForMetatypeBinder(p.name)   // SOUNDNESS R620
             metatypeBinders[p.name] = p.metatype
         }
         return .visitChildren
@@ -4721,6 +4761,7 @@ final class CallCollector: SyntaxVisitor {
                     if Self.r585Probe {
                         FileHandle.standardError.write("R585HIT closelem \(p.name) -> \(me)\n".data(using: .utf8)!)
                     }
+                    clearShadowedVarForMetatypeBinder(p.name)   // SOUNDNESS R620
                     metatypeBinders[p.name] = me
                 } else if isElementParam(i), iteratorElem == nil, let inner = nestedIterElem,
                           closure == elemClosure {
@@ -7518,7 +7559,10 @@ final class CallCollector: SyntaxVisitor {
                 // silent-pure. The annotation is WRITTEN IN THE SOURCE; nothing is inferred. Placed
                 // after the `t.name` arm so it can only fire where every existing arm refuses — this
                 // may add a binding, never replace one.
-                else if let mb = metatypeBaseName(ann.type) { metatypeBinders[name] = mb }
+                else if let mb = metatypeBaseName(ann.type) {
+                    clearShadowedVarForMetatypeBinder(name)   // SOUNDNESS R620 — b2/b3, the LOCAL binder
+                    metatypeBinders[name] = mb
+                }
                 else if let me = metatypeArrayElementName(ann.type) { metatypeArrayElem[name] = me } // R585 (b6)
                 else if let inner = nestedArrayElementName(ann.type) {                    // R278 `let xs: [[T]]`
                     setArrayElemNested(name, inner)                                        // R351 — lockstep
@@ -7542,6 +7586,7 @@ final class CallCollector: SyntaxVisitor {
                 if Self.r585Probe {
                     FileHandle.standardError.write("R585HIT bind \(name) -> \(mb)\n".data(using: .utf8)!)
                 }
+                clearShadowedVarForMetatypeBinder(name)   // SOUNDNESS R620 — b9, the LOCAL binder
                 metatypeBinders[name] = mb
             } else if let v0 = binding.initializer?.value {
                 let v = Self.peel(v0)
