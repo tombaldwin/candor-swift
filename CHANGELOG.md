@@ -9,6 +9,56 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### Fixed
+
+- **SOUNDNESS R589 (PARTIAL, and the ROW'S STATED MECHANISM WAS WRONG) — A TERNARY-VALUED RECEIVER WAS
+  SILENTLY PURE BECAUSE `rootOf`'s TERNARY ARM REQUIRED THE WHOLE UNFOLDED SEQUENCE TO BE EXACTLY THREE
+  ELEMENTS, NOT BECAUSE "THE TWO ARMS RESOLVE DIFFERENTLY".** SwiftParser does not nest a ternary's
+  condition or its else-arm: every operator in the expression is flattened into ONE element list, so
+  `x > 1 ? A() : A()` arrives as FIVE elements (`x`, `>`, `1`, UnresolvedTernary, `A()`) and the arm was
+  never entered at all. `rootOf` then returned no root and the receiver's member call was dropped
+  **entirely** — no edge, no `Unknown`, no row, `pure` exit 0 over a function that dials out.
+
+  **THE ONE-CHARACTER CONTROL THAT NAMES THE MECHANISM**, both arms holding the SAME two branches and the
+  same sink in the same scan:
+
+      (x > 1 ? CT() : CT()).emitT()      ABSENT   — `pure` and `deny Net` both exit 0
+      ((x > 1) ? CT() : CT()).emitT()    ['Net']  — `deny Net` exit 1
+
+  Parenthesising the condition removes it from the ternary's own sequence and the count falls back to 3.
+  Nothing about the two branches changed, so the row's discriminator cannot be the cause. R589's own two
+  repro spellings are both of this kind — `c ? CT() as PT : DT() as PT` flattens the else-arm's `as`, and
+  `h != nil ? h! : CT()` flattens the condition's `!=` — which is why its three "controls", all
+  three-element ternaries, could not separate the two hypotheses.
+
+  The fix locates the `UnresolvedTernaryExpr` at ANY index, treats everything before it as the condition
+  (irrelevant to the value's type) and everything after it as the else expression, re-wrapping a
+  multi-element tail as its own `SequenceExpr` so the SAME arms answer it rather than a second partial copy
+  of the walk (§G). **The agreement test is unchanged** — both arms must resolve, both `isVar`, both to the
+  SAME root — so `mono` still composes by conjunction and `opaqueHop` by disjunction.
+
+  **WHAT IS NOT CLOSED, asserted as it is rather than left to be rediscovered:** a three-element ternary
+  whose arms resolve to DIFFERENT roots (`c ? CT() : DT()`) is still dropped. That is a control-flow MERGE
+  needing a union or a hedge — a separate charge with a separate over-charge control;
+  `testDifferingRootsStaysSilentAndIsNotClosedByThisFix` pins it so this file cannot read as covering it.
+
+  A/B — 25 real Swift packages, 53,069 rows, `bin/corpus-ab.py` (never a fresh `ab.py`), arms proven to be
+  different binaries by content hash: **ADDED 0 REMOVED 0 CHANGED 0** on all five key/value combinations,
+  all four verdict buckets zero, no field lost a value in any row. **REACH, and BOTH halves of it, because
+  entering the arm is not answering it:** `R589HIT` (the new sequence shape reaches the arm) **169 hits
+  across 16 of 25 entries**; `R589RESOLVE` (the agreement test then passed and a root came back) **9 hits
+  across 5 entries** — swift-nio 3, swift-collections 2, swift-syntax 2, kingfisher 1, swift-format 1. The
+  nine roots are `Int`, `AbsolutePosition`, `TokenSyntax`, `TimeInterval`, `NIODeadline`, `ByteBuffer`,
+  `_DequeSlot` — value types with no effectful members, which is *why* the zero is a zero rather than a
+  mystery. So the corpus is the fabrication CONTROL here and the fixtures are the evidence: this is a
+  SAFETY-ONLY A/B and is labelled one. CHAINED arm byte-identical on swift-nio-ssl with R700's precondition
+  proven FIRST (6 resolved checkouts; chained 472,847 bytes vs unchained 353,232, so the join really ran).
+
+  Not marked ⚠: no report byte and no verdict moved anywhere on the corpus.
+
+  Gates: `swift test` 1357 passed / 0 failed (1352 before, +5 here); `smoke.sh` 160 passed / 0 failed;
+  `ci/self-gate.sh` OK; `fuzz.py` 25 seeds passed; `fabrication_probe.py` OK.
+
 ### ⚠ Fixed
 
 - **SOUNDNESS R725 (closing R721) — A FN-TYPED PARAMETER OF A NESTED `func` OR OF A CLOSURE REACHED NO

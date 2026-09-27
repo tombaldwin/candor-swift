@@ -1281,19 +1281,83 @@ final class CallCollector: SyntaxVisitor {
             // a function that performs the conformer's effect whenever `c` is false. The mirror is
             // asserted beside it: an ALL-monomorphized ternary must stay suppressed, or this re-opens
             // the fabrication d62dd69/02fb0ad closed.
-            if elems.count == 3, let tern = elems[1].as(UnresolvedTernaryExprSyntax.self) {
-                let a = rootOf(tern.thenExpression, depth + 1), b = rootOf(elems[2], depth + 1)
+            // SOUNDNESS R589 — AND `count == 3` WAS A CLAIM ABOUT THE WHOLE SEQUENCE, not about the
+            // ternary. SwiftParser does not nest a ternary's condition or its else-arm: every operator
+            // in the expression is flattened into ONE element list, so `x > 1 ? A() : A()` arrives as
+            // FIVE elements and this arm was never entered — `rootOf` returned no root and the
+            // receiver's member call was dropped ENTIRELY (no edge, no `Unknown`, no row, `pure`
+            // exit 0). The one-character control that names the mechanism: parenthesising the
+            // condition — which changes NOTHING about the two branches — restores the answer.
+            // R589's own two repro spellings are both of this kind (`c ? CT() as PT : DT() as PT`
+            // flattens the else-arm's `as`; `h != nil ? h! : CT()` flattens the condition's `!=`), so
+            // its stated discriminator, "the two arms resolve to different things", is not the cause.
+            //
+            // The ternary can sit at any index: everything BEFORE it is the condition, whose type is
+            // irrelevant to the value, and everything AFTER it is the else expression. A multi-element
+            // else tail is re-wrapped as its own `SequenceExpr` so the SAME arms above answer it (an
+            // `as` cast, a nested ternary) rather than a second partial copy of this walk — §G, the
+            // reason `dealias` and `opaqueHop` each have one authority.
+            //
+            // THE AGREEMENT TEST IS UNCHANGED, and that is what bounds this. Both arms must resolve,
+            // both must be `isVar`, and both to the SAME root; a three-element ternary whose arms
+            // resolve DIFFERENTLY is still dropped, deliberately — that is a control-flow MERGE needing
+            // a union or a hedge, priced separately and pinned as this row's residual by
+            // `testDifferingRootsStaysSilentAndIsNotClosedByThisFix`.
+            //
+            // OPACITY COMPOSES BY CONJUNCTION, and it is the only join in this resolver that has to
+            // decide. `mono` is a claim that the value is caller-MONOMORPHIZED, which is what licenses
+            // SUPPRESSING the local-conformer CHA; the receiver of `(c ? m : e).speak()` is `m` on one
+            // branch and `e` on the other, so the claim holds of the expression only if it holds of
+            // EVERY arm. Disjunction let one monomorphized arm speak for an ERASED sibling: with
+            // `m: some Speaker` and `e: any Speaker` both arms resolve to the root `Speaker`, the guard
+            // below passes, and the CHA was skipped for the erased arm too — a positive purity claim on
+            // a function that performs the conformer's effect whenever `c` is false. The mirror is
+            // asserted beside it: an ALL-monomorphized ternary must stay suppressed, or this re-opens
+            // the fabrication d62dd69/02fb0ad closed.
+            if let ti = elems.firstIndex(where: { $0.is(UnresolvedTernaryExprSyntax.self) }),
+               let tern = elems[ti].as(UnresolvedTernaryExprSyntax.self),
+               let elseExpr = Self.sequenceTail(elems, after: ti) {
+                // R589 REACH PROBE (§E1) — "an unchanged row is not evidence the new code ran". Fires on
+                // exactly the population this fix ADDS: a ternary whose enclosing sequence is NOT the
+                // three-element shape the old guard required. A corpus with none of it says so out loud
+                // instead of reporting a flattering zero.
+                if Self.r589Probe, ti != 1 || elems.count != 3 {
+                    FileHandle.standardError.write(
+                        "R589HIT elems=\(elems.count) ti=\(ti)\n".data(using: .utf8)!)
+                }
+                let a = rootOf(tern.thenExpression, depth + 1), b = rootOf(elseExpr, depth + 1)
                 // MEASURED rather than assumed (standing bar item 8): instrumented over 14 real Swift
                 // targets the join fires 12 times and every one is ERASED/ERASED, so the corpus cannot
                 // tell `&&` from `||` and is the fabrication CONTROL here, not the evidence — the
                 // fixtures are. The probe is not shipped: `rootOf` is the hot path, and an env read
                 // here charged Env+Fs to 26 of candor's OWN functions in its self-scan.
                 if let ra = a.root, ra == b.root, a.isVar, b.isVar {
+                    // …AND THE SECOND HALF OF THE REACH QUESTION, because `R589HIT` alone would have
+                    // overstated it: entering the arm is not answering it. The agreement test still
+                    // refuses a ternary whose arms resolve differently, so the population that can move
+                    // a row is the one that gets HERE with the new shape — reported separately.
+                    if Self.r589Probe, ti != 1 || elems.count != 3 {
+                        FileHandle.standardError.write(
+                            "R589RESOLVE \(ra) elems=\(elems.count)\n".data(using: .utf8)!)
+                    }
                     return (ra, true, [], a.mono && b.mono, a.opaqueHop || b.opaqueHop)
                 }
             }
         }
         return (nil, false, [], false, false)
+    }
+
+    /// SOUNDNESS R589 — the ELSE tail of an UNFOLDED ternary, as ONE expression the `rootOf` arms can
+    /// read. A single trailing element is returned AS ITSELF: re-wrapping it would hand the
+    /// `SequenceExpr` arm a one-element list, which every arm there declines. Two or more are re-wrapped
+    /// so the `as`-cast and nested-ternary arms answer the tail exactly as they answer a whole
+    /// expression — one walk, not a second partial copy of it (§G, the `dealias`/`opaqueHop` rule).
+    /// Nil for an empty tail: the grammar cannot produce one, and this must not assume that.
+    private static func sequenceTail(_ elems: [ExprSyntax], after i: Int) -> ExprSyntax? {
+        let tail = elems[(i + 1)...]
+        if tail.isEmpty { return nil }
+        if tail.count == 1 { return tail.first }
+        return ExprSyntax(SequenceExprSyntax(elements: ExprListSyntax(Array(tail))))
     }
 
     /// The Foundation file-write idiom `value.write(to: url)` — `Data.write(to:)` and
@@ -1705,6 +1769,9 @@ final class CallCollector: SyntaxVisitor {
     /// the two arms this fix ADDS, so an A/B over a corpus containing none of the shape says so out loud
     /// instead of reporting a flattering zero.
     static let r563Probe = ProcessInfo.processInfo.environment["CANDOR_R563_PROBE"] != nil
+    /// SOUNDNESS R589 REACH PROBE (§E1) — the ternary arm of an UNFOLDED sequence whose shape the old
+    /// `count == 3` guard excluded. Hoisted for the same reason as the others: `rootOf` is the hot path.
+    static let r589Probe = ProcessInfo.processInfo.environment["CANDOR_R589_PROBE"] != nil
     /// SOUNDNESS R584 REACH PROBE (§E1) — same reason as R563's, and this fix needs it MORE: its shape
     /// could not be found in the corpus at all when the row was filed (199 metatype parameters declared,
     /// 15 call sites dispatching on one, all 15 protocol-typed and already resolving), so a byte-identical
