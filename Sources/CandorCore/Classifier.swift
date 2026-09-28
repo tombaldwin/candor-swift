@@ -98,30 +98,86 @@ public func fnv1aHex(_ sortedQuals: [String]) -> String {
 /// different failures. Deliberately the same shape and vocabulary as candor-java's `fsKind` — the surface
 /// is spec'd four-way, so two engines inventing two verb tables for one field is how a shared field stops
 /// meaning one thing.
-public func fsKind(root: String, member: String) -> [String] {
+/// **SOUNDNESS R787 — ONE TABLE. `FS_MEMBERS` IS DERIVED FROM THIS ONE, AND THAT IS THE FIX.**
+///
+/// There used to be two: `fsKind`'s verb switch (which direction does this member move bytes in) and
+/// `FS_MEMBERS` (is a `FileManager`/`FileHandle` member call `Fs` at all). They answer ONE question —
+/// *is this name a filesystem verb* — from two hand-maintained lists, and only one was ever updated.
+/// MEASURED at `8b28b7e`: `setAttributes`, `trashItem`, `isExecutableFile` and `isDeletableFile` were
+/// classified by `fsKind` and absent from `FS_MEMBERS`, so `FileManager.default.setAttributes(
+/// [.posixPermissions: 0o777], ofItemAtPath: p)` produced **no function row at all** and exited 0 under
+/// `deny Fs <unit>`, `deny Fs <caller>`, a blanket `deny Fs` and `deny Unknown` alike — while really
+/// taking a file from mode 600 to 777 (executed).
+///
+/// **A CHECK THAT TWO LISTS AGREE IS WEAKER THAN ONE LIST**, so this is a derivation rather than a gate:
+/// `FS_MEMBERS = Set(FS_MEMBER_KINDS.keys)`. A member added here cannot fail to be classified, and a
+/// member classified here cannot fail to be a member. The divergence is not detected, it is impossible.
+///
+/// THE VALUE IS THE DIRECTION, AND `[]` IS A REAL ANSWER. §2: *"when `Fs` is reached but its kind is
+/// unknown … the field MUST be omitted rather than guessed. An empty or partial `fs` would be read as a
+/// positive claim ('reads but never writes'), which is the §4 trust contract's forbidden direction."*
+/// So `[]` here means **"a filesystem verb whose direction this table does not claim"** — it is still a
+/// member, it just contributes no `fs`. `temporaryDirectory`/`urls`/`url`/`homeDirectoryForCurrentUser`
+/// are the four that were in `FS_MEMBERS` and never in `fsKind`, and they keep exactly that answer.
+///
+/// WHAT IS DELIBERATELY *NOT* IN HERE: `fsKind`'s trailing PREFIX rules (`write*`, `read*`, `append`,
+/// and `FileHandle`'s `forReading`/`forWriting` initializer labels). Those are a direction REFINEMENT
+/// over a name this table need not know, not a membership claim, and folding them in would make
+/// `FS_MEMBERS` contain `append` and `copy` — and `copy()` is an `NSObject` member every Foundation
+/// class carries, so `someFileHandle.copy()` would fabricate `Fs`. Membership is by NAME; direction may
+/// additionally be by SHAPE. Keeping that asymmetry is why `FILES_MEMBERS`' `delete`/`move`/`copy` stay
+/// in their own table too (they reach `fsKind` through a `File`/`Folder` root and get `[]`).
+public let FS_MEMBER_KINDS: [String: [String]] = [
     // Two-locator copies/moves read the source and write the destination — both, in one call.
-    if member == "copyItem" || member == "moveItem" || member == "replaceItem" || member == "replaceItemAt"
-        || member == "linkItem" { return ["read", "write"] }
-    switch member {
+    "copyItem": ["read", "write"], "moveItem": ["read", "write"], "replaceItem": ["read", "write"],
+    "replaceItemAt": ["read", "write"], "linkItem": ["read", "write"],
+    // R787 — an iCloud evacuation is a two-locator MOVE; it gets an `FS_TWO_PATH_MEMBERS` entry too.
+    "setUbiquitous": ["read", "write"],
     // WRITE — mutates the disk.
-    case "createFile", "removeItem", "createDirectory", "createSymbolicLink", "write", "writeToFile",
-         "changeCurrentDirectoryPath", "setAttributes", "setResourceValues", "trashItem", "unlinkItem", "truncate",
-         "createTempFile", "createTempDirectory", "SecItemAdd", "SecItemUpdate", "SecItemDelete":
-        return ["write"]
+    "createFile": ["write"], "removeItem": ["write"], "createDirectory": ["write"],
+    "createSymbolicLink": ["write"], "write": ["write"], "writeToFile": ["write"],
+    "changeCurrentDirectoryPath": ["write"], "setAttributes": ["write"], "setResourceValues": ["write"],
+    "trashItem": ["write"], "unlinkItem": ["write"], "truncate": ["write"],
+    "createTempFile": ["write"], "createTempDirectory": ["write"],
+    "SecItemAdd": ["write"], "SecItemUpdate": ["write"], "SecItemDelete": ["write"],
     // READ — observes the disk without mutating it. Metadata probes are reads: `fileExists` is an I/O
     // syscall that leaks whether a path is there, which is the detail the surface exists to expose.
-    case "contents", "contentsOfDirectory", "attributesOfItem", "fileExists", "subpathsOfDirectory",
-         "isReadableFile", "isWritableFile", "isExecutableFile", "isDeletableFile",
-         "destinationOfSymbolicLink", "enumerator", "subpaths", "currentDirectoryPath",
-         "contentsEqual", "attributesOfFileSystem", "read", "readToEnd", "readData", "readDataToEndOfFile",
-         "SecItemCopyMatching",
-         // R130 — `URL`'s stat-shaped members (see `URL_FS_MEMBERS`). `setResourceValues` is the one
-         // WRITE in that set and is handled by the `write`-prefix rule below.
-         "checkResourceIsReachable", "checkPromisedItemIsReachable", "resourceValues", "bookmarkData",
-         "resolvingSymlinksInPath":
-        return ["read"]
-    default: break
-    }
+    "contents": ["read"], "contentsOfDirectory": ["read"], "attributesOfItem": ["read"],
+    "fileExists": ["read"], "subpathsOfDirectory": ["read"],
+    "isReadableFile": ["read"], "isWritableFile": ["read"],
+    "isExecutableFile": ["read"], "isDeletableFile": ["read"],
+    "destinationOfSymbolicLink": ["read"], "enumerator": ["read"], "subpaths": ["read"],
+    "currentDirectoryPath": ["read"], "contentsEqual": ["read"], "attributesOfFileSystem": ["read"],
+    "read": ["read"], "readToEnd": ["read"], "readData": ["read"], "readDataToEndOfFile": ["read"],
+    "SecItemCopyMatching": ["read"],
+    // R787 — the three FileManager verbs the R787 sweep found in NEITHER table. `mountedVolumeURLs`
+    // statfs's every mounted volume; `displayName(atPath:)` resolves a path's localized name off disk.
+    "mountedVolumeURLs": ["read"], "displayName": ["read"],
+    // R130 — `URL`'s stat-shaped members (see `URL_FS_MEMBERS`). `setResourceValues` is the one WRITE
+    // in that set and is listed above.
+    "checkResourceIsReachable": ["read"], "checkPromisedItemIsReachable": ["read"],
+    "resourceValues": ["read"], "bookmarkData": ["read"], "resolvingSymlinksInPath": ["read"],
+    // DIRECTION NOT CLAIMED (`[]`) — a filesystem verb whose direction the verb name does not settle.
+    // These four were `FS_MEMBERS`-only before the merge and this preserves their answer exactly:
+    // a well-known-directory lookup stats the container without saying what the caller will do next.
+    "temporaryDirectory": [], "urls": [], "url": [], "homeDirectoryForCurrentUser": [],
+]
+
+/// SPEC §2 `fs` — for a call ALREADY classified `Fs`, the read/write direction its verb implies.
+/// Returns `["read"]`, `["write"]`, `["read","write"]`, or `[]` when the verb does not say.
+///
+/// THE EMPTY CASE IS THE WHOLE DISCIPLINE — see `FS_MEMBER_KINDS` above, which is now the single table
+/// this function and `FS_MEMBERS` both read.
+///
+/// This is a syntactic refinement of an effect candor already proved, NOT a soundness claim: getting the
+/// direction wrong misreports a detail, getting the EFFECT wrong is the cardinal sin, and these are
+/// different failures. Deliberately the same shape and vocabulary as candor-java's `fsKind` — the surface
+/// is spec'd four-way, so two engines inventing two verb tables for one field is how a shared field stops
+/// meaning one thing.
+public func fsKind(root: String, member: String) -> [String] {
+    // A NAMED member answers from the one table — including with `[]`, which is an answer ("member, yes;
+    // direction, not claimed") and must NOT fall through to the shape rules below.
+    if let k = FS_MEMBER_KINDS[member] { return k }
     // A FileHandle OPENED for one direction reveals it by the initializer label; a bare `FileHandle(...)`
     // does not, and gets no claim. Same shape as java's `<init>` arm.
     if root == "FileHandle" {
@@ -133,14 +189,34 @@ public func fsKind(root: String, member: String) -> [String] {
     return []   // the verb does not say — make NO claim (§2)
 }
 
-public let FS_MEMBERS: Set<String> = ["contents", "contentsOfDirectory", "createFile", "removeItem", "copyItem",
-    "moveItem", "attributesOfItem", "fileExists", "createDirectory", "subpathsOfDirectory", "isReadableFile",
-    "isWritableFile", "replaceItem", "linkItem", "destinationOfSymbolicLink", "createSymbolicLink",
-    "enumerator", "subpaths", "changeCurrentDirectoryPath", "currentDirectoryPath", "temporaryDirectory",
-    "urls", "url", "homeDirectoryForCurrentUser",
-    // contentsEqual reads BOTH files byte-by-byte; attributesOfFileSystem statfs's the live volume —
-    // real Fs I/O that read silent-pure under the covered-module floor (model the member, not drop coverage).
-    "contentsEqual", "attributesOfFileSystem", "replaceItemAt"]
+/// DERIVED, NOT MAINTAINED — R787. See `FS_MEMBER_KINDS`.
+public let FS_MEMBERS: Set<String> = Set(FS_MEMBER_KINDS.keys)
+
+/// **SOUNDNESS R789 — THE ONLY INHERITANCE A SOURCE-PARSING ENGINE CAN PROVE WITHOUT A TYPE CHECKER.**
+///
+/// A κ table keyed on TYPE NAMES cannot see that `NSMutableDictionary` has no `init(contentsOfFile:)`
+/// of its own — it inherits `NSDictionary`'s. candor-swift parses source and asks no type checker, so
+/// "does this receiver descend from a known type" is in general unanswerable here. Foundation's class
+/// clusters are the one case where it IS answerable, because Apple's naming convention is the
+/// inheritance: `NSMutableString: NSString`, `NSMutableData: NSData`, `NSMutableArray: NSArray`,
+/// `NSMutableDictionary: NSDictionary`, `NSMutableSet`, `NSMutableOrderedSet`, `NSMutableIndexSet`,
+/// `NSMutableAttributedString`, `NSMutableCharacterSet`, `NSMutableURLRequest`, `NSMutableParagraphStyle`
+/// — every one of them.
+///
+/// **DIRECTION: it fails toward OVER-CHARGE and that is deliberate.** A hypothetical `NSMutableFoo` that
+/// is not an `NSFoo` would be read as one; the opposite default is the silence R789 measured. What it
+/// does NOT reach is a PROJECT subclass (`class Config: NSDictionary`) — that needs inheritance the
+/// scan does not record, and it is a NAMED residue rather than a silent one. For the one arm where a
+/// stronger answer exists, the argument LABEL is used instead of the type entirely (see
+/// `chargeContentsCtor`'s `contentsOfFile:` rule).
+public func foundationMutableBase(_ name: String) -> String? {
+    let p = "NSMutable"
+    guard name.hasPrefix(p), name.count > p.count else { return nil }
+    return "NS" + name.dropFirst(p.count)
+}
+/// The name a Foundation-keyed κ list should be consulted with: the mutable subclass's immutable base
+/// when there is one, otherwise the name itself.
+public func foundationClassKey(_ name: String) -> String { foundationMutableBase(name) ?? name }
 
 // The FileManager members that take TWO (or more) path locators — a SOURCE and a DESTINATION — each
 // conceptually an argument of THIS call. The single-path establishing guard (capture the FIRST literal,
@@ -158,9 +234,61 @@ public let FS_TWO_PATH_MEMBERS: [String: [Set<String>]] = [
     "contentsEqual":      [["atPath"], ["andPath"]],
     "replaceItem":        [["at"], ["withItemAt"]],
     "replaceItemAt":      [[""], ["withItemAt"]],
+    // R787 — `setUbiquitous(_:itemAt:destinationURL:)` moves a file INTO or OUT OF iCloud: source and
+    // destination, both locators, exactly `moveItem`'s shape. It arrived with the `FS_MEMBER_KINDS`
+    // merge, and arriving WITHOUT this entry would have been the AS-EFF-008 hole in a new spelling —
+    // a literal `itemAt:` masking a runtime `destinationURL:`.
+    "setUbiquitous":      [["itemAt"], ["destinationURL"]],
 ]
+/// **SOUNDNESS R788 — `dataTaskPublisher(for:)`, COMBINE'S SPELLING OF A VERB ALREADY IN THE LIST.**
+/// MEASURED at `8b28b7e` on an isolated file: `URLSession.shared.dataTaskPublisher(for: u)` produced
+/// **no function row at all** and exited 0 under `deny Net <unit>`, `deny Net <caller>`, a blanket
+/// `deny Net` and `deny Unknown`, while the `dataTask(with:)` control beside it exits 1 on all three.
+/// Executed: a real GET reached a local listener (`SERVER GOT /candor-dataTaskPublisher`, 200, 2 bytes).
+///
+/// **THE DENYLIST INVERSION WAS BUILT, A/B'd AND REFUSED — BY THIS CORPUS, NOT BY REASONING.** The
+/// obvious fix, and the one [[candor-denylist-over-allowlist]] and `NWConnection`'s own case two entries
+/// down in `kappaMember` both recommend, is to make `URLSession` a whole-type denylist: a single-purpose
+/// networking type, everything on it a request unless proven inert. It was implemented in full, with the
+/// lifecycle/configuration/introspection carve-outs enumerated, and measured over 21 real Swift
+/// packages. **It over-charges, and the mechanism is specific to this engine: `kappaMember`'s `root` is
+/// the CHAIN ROOT, not the immediate receiver's type.** So every member reached through a value that
+/// merely STARTS at a `URLSession` inherits the classification:
+///
+///     s.configuration.urlCredentialStorage?.defaultCredential(for: sp)   // root URLSession, member
+///     s.delegateQueue.addOperation(op)                                   //   `defaultCredential` /
+///     URLSession.rx.shouldLogRequest(request)                            //   `addOperation` / …
+///
+/// all three read `Net` under the denylist — measured on a fixture, and then found in real code:
+/// Alamofire's `Session.credential` (a credential-store lookup), Nuke's `_DataLoader.loadData` (an
+/// `OperationQueue` enqueue) and nine RxCocoa `URLSession+Rx` units. **That is R381's own warning
+/// exactly, one level down: a whole-X classification makes every member carry the effect, and there the
+/// X was a crate while here it is a chain root. R381 says "may not apply is reasoning, not a
+/// measurement" — this is the measurement, and it says the inversion does not apply here either.**
+///
+/// **SO IT STAYS AN ALLOWLIST, AND THE FIX IS A RULE OVER APPLE'S NAMING RATHER THAN FOUR MORE NAMES.**
+/// Every request-creating member of `URLSession` is spelled `<noun>Task…`: `dataTask(with:)`,
+/// `dataTaskPublisher(for:)`, `uploadTask(withStreamedRequest:)`, `downloadTask(withResumeData:)`,
+/// `webSocketTask(with:)`, `streamTask(withHostName:port:)`. Keying on the FAMILY PREFIX covers the
+/// Combine spellings that caused this row and any future `…TaskPublisher` / `…TaskAsync` sibling without
+/// anybody touching candor. The four label-free async members (`data`/`upload`/`download`/`bytes`) do
+/// not fit the pattern and stay named. **DIRECTION, stated: this still under-reports a future verb that
+/// is neither in the list nor in the family — that is the residue an allowlist has, it is named here
+/// rather than discovered, and the denylist that would close it costs more than it saves (above).**
+public let URLSESSION_TASK_FAMILIES = ["dataTask", "uploadTask", "downloadTask", "webSocketTask", "streamTask"]
+/// The `URLSession` verbs that create or issue a request. The `…Task` families are matched by PREFIX, so
+/// this set is the label-free async quartet plus the bare family heads for documentation and for the
+/// parity test.
 public let NET_MEMBERS: Set<String> = ["dataTask", "data", "upload", "download", "bytes", "webSocketTask",
-    "uploadTask", "downloadTask", "streamTask"]
+    "uploadTask", "downloadTask", "streamTask",
+    // R788 — Combine's spellings, and the reason the prefix rule below exists rather than these three
+    // names alone: the next framework generation will add a fourth.
+    "dataTaskPublisher", "uploadTaskPublisher", "downloadTaskPublisher"]
+/// R788 — the ONE predicate both `kappaMember` and `isNetEstablishingMember` ask. Two tables answering
+/// one question is the vein this row belongs to; they read one function.
+public func isURLSessionRequestMember(_ member: String) -> Bool {
+    NET_MEMBERS.contains(member) || URLSESSION_TASK_FAMILIES.contains { member.hasPrefix($0) }
+}
 /// R130 — the members of `URL` that issue a filesystem syscall, as opposed to the (much larger) pure path
 /// algebra the type is mostly made of. Kept as a NAMED SET beside `FS_MEMBERS` rather than inline in
 /// `kappaMember`, so `fsKind` and the classifier read one list.
@@ -244,9 +372,39 @@ public let RAND_ROOTS: Set<String> = ["Int", "UInt", "Int8", "Int16", "Int32", "
 // the DENYLIST SPEC §1 ⟨0.32⟩ requires. Kept because removing it could only lose charges this engine
 // already made, and extended with `suspend`/`resume` — the two live-child control verbs nobody had
 // enumerated, which is precisely the failure mode an allowlist has.
-public let PROCESS_MEMBERS: Set<String> = ["run", "launch", "waitUntilExit", "terminate", "interrupt",
-                                           "suspend", "resume",
-                                           "launchedProcess", "launchedTaskWithExecutableURL"]
+/// **SOUNDNESS R786 — WHERE A `Process` VERB'S COMMAND COMES FROM, IN ONE TABLE.**
+///
+/// Three places needed this fact and each had its own answer: `PROCESS_MEMBERS` (is the verb `Exec`),
+/// a literal `["run", "launch"]` in `CallCollector` (does the command come from an earlier property
+/// write), and `isEstablishingMember` (is the command an ARGUMENT of this call — which had **no `Exec`
+/// arm at all**, `default: return false`). MEASURED at `8b28b7e` on an isolated fixture:
+/// `Process.launchedProcess(launchPath: "/bin/ls", …)` beside `Process.launchedProcess(launchPath: c, …)`
+/// published `cmds: ["/bin/ls"]`, `incomplete: NONE`, and **`allow Exec in <unit> /bin/ls` exited 0 on
+/// the unit AND on its caller** over a caller-chosen program (executed: the same form really ran
+/// `/usr/bin/touch` and created its marker). Crossed controls: drop the benign literal and it flips to 1;
+/// keep the runtime command and change only the SPELLING to `p.launchPath = c; p.run()` and it flips to
+/// 1 with `incomplete: ['Exec']`.
+///
+/// So the three consumers now read one table and the role IS the answer:
+///   * `.argLocator`   — the program is an argument of THIS call → ESTABLISHING; a missing literal is
+///                       structurally invisible and the surface is `incomplete`.
+///   * `.priorLocator` — the program was fixed by an earlier property write → `recordProcessRun` reads
+///                       it from `execLocatorWrites`, and a missing one is incomplete there instead.
+///   * `.control`      — wait/teardown/live-child control. It names no program, so it claims none and
+///                       demands none.
+public enum ProcessMemberRole: Sendable { case argLocator, priorLocator, control }
+public let PROCESS_MEMBER_ROLES: [String: ProcessMemberRole] = [
+    // The command is an ARGUMENT of this call (`launchPath:` / the leading executable URL).
+    "launchedProcess": .argLocator, "launchedTaskWithExecutableURL": .argLocator,
+    // The command was armed earlier by a property write; the launch is where it is read.
+    "run": .priorLocator, "launch": .priorLocator,
+    // Wait, teardown and live-child control — `suspend`/`resume` are the two nobody had enumerated,
+    // which is precisely the failure mode an allowlist has.
+    "waitUntilExit": .control, "terminate": .control, "interrupt": .control,
+    "suspend": .control, "resume": .control,
+]
+/// DERIVED, NOT MAINTAINED — R786. See `PROCESS_MEMBER_ROLES`.
+public let PROCESS_MEMBERS: Set<String> = Set(PROCESS_MEMBER_ROLES.keys)
 /// SPEC §1 ⟨0.32⟩ — the members of a `Process` handle that arm, launch or control NOTHING, stated as the
 /// DENYLIST the clause requires. Everything else on the type is `Exec`.
 ///
@@ -1309,9 +1467,12 @@ public func kappaMember(root: String, member: String) -> String? {
     // that touches a step count. Gate on the member, which is what actually names the resource.
     if let priv = PRIVACY_MEMBER_TYPES[root]?[member] { return priv }
     switch root {
-    case "FileManager", "FileHandle": return FS_MEMBERS.contains(member) || member == "readToEnd"
-        || member == "write" || member == "read" ? "Fs" : nil
-    case "URLSession": return NET_MEMBERS.contains(member) ? "Net" : nil
+    // R787 — ONE table. `readToEnd`/`write`/`read` used to be bolted on here because they were in
+    // `fsKind` and not in `FS_MEMBERS`; they are in `FS_MEMBER_KINDS`, so `FS_MEMBERS` now has them and
+    // the bolt-on is gone. That is the divergence this row is about, in its smallest form.
+    case "FileManager", "FileHandle": return FS_MEMBERS.contains(member) ? "Fs" : nil
+    // R788 — DENYLIST, not the nine-name allowlist this used to be. See `URLSESSION_PURE_VERBS`.
+    case "URLSession": return isURLSessionRequestMember(member) ? "Net" : nil
     // R130 — `URL`'s FEW disk-touching members. Almost all of URL is pure path algebra
     // (`appendingPathComponent`, `lastPathComponent`, `pathComponents`, `standardized`), which is why
     // the type had no entry at all — and why the five verbs that DO issue a syscall read silent-pure:
@@ -1391,7 +1552,7 @@ public func kappaMember(root: String, member: String) -> String? {
 // missing literal at the use-site is the legitimate split-construct/use shape, never the masking signal.
 public func isNetEstablishingMember(root: String, member: String) -> Bool {
     switch root {
-    case "URLSession": return NET_MEMBERS.contains(member)
+    case "URLSession": return isURLSessionRequestMember(member)   // R788 — the SAME predicate κ uses
     case "ClientBootstrap", "ServerBootstrap", "DatagramBootstrap", "NIOTSConnectionBootstrap":
         return ["connect", "bind", "withConnectedSocket"].contains(member)
     case "Channel", "ChannelHandlerContext": return ["connect", "bind"].contains(member) // write/read/flush = USE
@@ -1711,6 +1872,23 @@ public func isEstablishingMember(effect: String, root: String, member: String) -
     case "Fs":  return root == "FileManager" && FS_MEMBERS.contains(member) // atPath:/at:/to: is an arg;
         // FileHandle.read/write are USE (the path was fixed at the FileHandle(for…:) ctor) — not establishing.
         || isReceiverLocatorMember(effect: "Fs", root: root, member: member)   // R414 — the locator IS the receiver
+    // SOUNDNESS R786 — THERE WAS NO `Exec` ARM. The switch answered `Net` and `Fs` and fell to
+    // `default: return false`, so every `Process` member form was treated as a USE-verb whose command
+    // had been fixed elsewhere — including `Process.launchedProcess(launchPath:)`, which takes the
+    // program as an ARGUMENT. A benign literal sibling therefore masked a caller-chosen command and
+    // `allow Exec in <unit> /bin/ls` passed over it, on the unit and on its caller alike.
+    //
+    // **DIRECTION: THIS FAILS CLOSED, and it is a DENYLIST for the reason `processCapabilityEffect` is
+    // one.** ⟨0.32⟩ already rules that the subprocess capability belongs to the TYPE, not to a list of
+    // verbs, so a `Process` member this engine has never heard of is `Exec`; asking "is it establishing"
+    // with an ALLOWLIST would answer NO for that same unknown member and put it straight back in the
+    // silent hole this row records. So: a `Process` member is establishing UNLESS its role says the
+    // locator came from somewhere this analysis already saw — `.priorLocator` (an earlier property
+    // write, read by `recordProcessRun`) or `.control` (wait/teardown/live-child, which names no
+    // program at all). The cost of the default is a loud `incomplete: ['Exec']` on a verb nobody has
+    // modelled; the cost of the other default is a green gate over a runtime command.
+    case "Exec": return root == "Process" && !(PROCESS_MEMBER_ROLES[member].map {
+        $0 == .priorLocator || $0 == .control } ?? false)
     default:    return false
     }
 }

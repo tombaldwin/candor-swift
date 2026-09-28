@@ -2282,7 +2282,65 @@ final class CallCollector: SyntaxVisitor {
             unionConditionalTypeEdge(name, node, lit: lit)
             return true
         }
-        guard ["Data", "NSData", "String", "NSString", "NSDictionary", "NSArray"].contains(name) else { return false }
+        // ── SOUNDNESS R789 ────────────────────────────────────────────────────────────────────────
+        // **A LIST OF TYPE NAMES CANNOT EXPRESS INHERITANCE, WHICH IS THE ACTUAL DEFECT.** The list
+        // below knew six spellings and not `NSMutableDictionary`/`NSMutableArray`/`NSMutableData`/
+        // `NSMutableString`, which do not have their own `init(contentsOfFile:)` — they INHERIT the
+        // identical one. MEASURED at `8b28b7e`, one variable (the class name): `NSDictionary(
+        // contentsOfFile: p)` charges `Fs`, captures the path and gates 1 on unit and caller; all four
+        // mutable subclasses produce **no function row at all** and gate 0 on unit, caller and blanket,
+        // while really reading a file back (executed). Adding four names would be a patch: the next
+        // subclass, and every project subclass, is the same hole again.
+        //
+        // **THE DERIVATION IS THE ARGUMENT LABEL, NOT THE TYPE.** `contentsOfFile:` is a Cocoa label
+        // that names ONE operation — read this path off the disk — and it names it identically for
+        // every type that inherits the initializer, including types this engine has never heard of.
+        // So the label answers, and the type list is no longer asked. **DIRECTION, stated per
+        // `candor-denylist-over-allowlist`: this fails toward OVER-CHARGE.** A hypothetical type with
+        // an `init(contentsOfFile:)` that reads nothing would be charged `Fs` here; the alternative
+        // default is the silence this row measured. The shadow fences are unchanged, so a project's own
+        // type still wins, and the name must LOOK like a type (leading uppercase) — `f(contentsOfFile:)`
+        // as a free function is not a constructor and is left to the ordinary call edge.
+        //
+        // **REACH: ZERO OVER THE ANALYSED UNITS OF A 21-PACKAGE CORPUS, AND THAT IS STATED RATHER THAN
+        // BLENDED.** The A/B changed no row through this branch, so over that corpus it is SAFETY-ONLY
+        // and its evidence is the executed fixture, not recall. The near-miss is worth recording because
+        // it is what a careless reading of the same grep would have claimed: `FirebaseOptions(
+        // contentsOfFile:)` appears SIX times in firebase-ios-sdk — every one of them in a `Tests/`
+        // target the scan excludes — and the four other non-modelled `contentsOfFile:` sites are in
+        // `ReleaseTooling/`, a nested package the root scan does not reach. Present in the tree is not
+        // present in the report.
+        //
+        // WHAT THIS STILL CANNOT DO, said here rather than discovered later: the `contentsOf:` (URL)
+        // arm below CANNOT use the label, because that label is scheme-ambiguous (file or network) and
+        // the type is what decides which. For that arm the inheritance question is answered by
+        // Foundation's own naming convention — `foundationClassKey` maps `NSMutableX` to `NSX` — which
+        // covers every Foundation class cluster and does NOT cover a project subclass of `NSDictionary`.
+        // candor-swift parses source with no type checker, so a project subclass is out of reach here;
+        // it is a named residue, not a silent one.
+        if node.arguments.first?.label?.text == "contentsOfFile",
+           let f = name.first, f.isUppercase {
+            if shadowable, localFreeFns.contains(name) { return false }
+            if shadowable, declaredTypes.contains(name), !conditionallyShadowedTypes.contains(name) { return false }
+            directEffects.insert("Fs")
+            fsKinds.insert("read")
+            recordSurfaces(effect: "Fs", lit: lit)
+            if lit == nil {
+                let resolved = node.arguments.lazy.compactMap { self.homeAnchoredPath($0.expression) }.first
+                if let r = resolved, !pathClasses(r).isEmpty {
+                    for c in pathClasses(r) { directEffects.insert(c) }
+                } else {
+                    incompleteSurfaces.insert("Fs")
+                }
+            }
+            unionConditionalTypeEdge(name, node, lit: lit)
+            return true
+        }
+        // R789 — `NSMutableX` IS an `NSX` (Foundation's class-cluster naming convention, universal and
+        // Apple-documented). The list is consulted with the base name so the mutable subclasses answer
+        // identically to the immutable ones they inherit from.
+        guard ["Data", "NSData", "String", "NSString", "NSDictionary", "NSArray"]
+                .contains(foundationClassKey(name)) else { return false }
         if shadowable, localFreeFns.contains(name) { return false }
         // ⟨0.33.1⟩ the SAME conditional-only carve-out the other four bare-ctor arms got: a name whose
         // ONLY local declaration(s) sit inside a `#if` (`conditionallyShadowedTypes`) does not bail this
@@ -5696,7 +5754,10 @@ final class CallCollector: SyntaxVisitor {
                         // same syscall through the same label and was silent-pure; `NSString` has the
                         // same `write(toFile:atomically:encoding:)`. Same list as `chargeContentsCtor`'s
                         // read half, for the same reason.
-                        || base.root == "NSData" || base.root == "NSString")
+                        // R789 — via `foundationClassKey`, so `NSMutableData`/`NSMutableString`
+                        // answer identically to the `NSData`/`NSString` write they inherit.
+                        || foundationClassKey(base.root ?? "") == "NSData"
+                        || foundationClassKey(base.root ?? "") == "NSString")
                        // a STRING-LITERAL receiver IS a String (`"data".write(toFile:…)`): rootOf can't type a
                        // literal (no var/decl), so the `Data`/`String` branch missed it and the file write read
                        // silent-pure. A literal base has the same write(toFile:)/write(to:) surface as a typed
@@ -5911,12 +5972,16 @@ final class CallCollector: SyntaxVisitor {
                 } else if eff == "Fs", ["File", "Folder", "Storage"].contains(rt),
                           recordFilesTwoPath(member: member, receiver: ma.base, node.arguments) {
                     // R418 — handled: receiver IS one of the two locators (see `recordFilesTwoPath`)
-                } else if rt == "Process", ["run", "launch"].contains(member) {
+                } else if rt == "Process", PROCESS_MEMBER_ROLES[member] == .priorLocator {
                     // The LAUNCHING verb on a Process handle. Its command was fixed by an earlier property
                     // write, not by an argument here, so the locator comes from `execLocatorWrites` —
                     // or the surface is marked incomplete. Every other member (waitUntilExit, terminate,
                     // interrupt, suspend, resume, and the whole-type ⟨0.32⟩ tail) is teardown, wait or
                     // configuration: it names no program, so no command surface is claimed for it.
+                    // R786 — the `["run", "launch"]` literal that used to select this branch is gone:
+                    // it is `PROCESS_MEMBER_ROLES[member] == .priorLocator`, the same table that answers
+                    // `PROCESS_MEMBERS` and the new `Exec` arm of `isEstablishingMember`. Three
+                    // consumers, one fact, no way to update one and not the others.
                     // CONSEQUENCE, stated rather than left to be discovered: a function that ARMS a
                     // handle and hands it on carries `Exec` with an EMPTY `cmds`, which `allow Exec
                     // <list>` reads as uncertifiable — fail-CLOSED. The literal is recorded at the

@@ -11,6 +11,65 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ### Fixed
 
+- **⚠ SOUNDNESS R786/R787/R788/R789 — FOUR SILENT UNDER-REPORTS WITH ONE SHAPE: A GUARD KEYED ON A
+  MEMBERSHIP TABLE WHERE THE ENGINE ANSWERS THAT SAME QUESTION WITH A RULE, OR A SECOND TABLE,
+  SOMEWHERE ELSE.** All four are closed by DERIVATION, not by adding names — *the next member added to
+  one table would have diverged again the same day*. Every claim below is measured on an ISOLATED
+  fixture with EXECUTED ground truth and gate exits on the unit AND its caller.
+
+  - **R787 — `fsKind` and `FS_MEMBERS` were two hand-maintained lists answering one question.**
+    `setAttributes`, `trashItem`, `isExecutableFile` and `isDeletableFile` were classified by the first
+    and absent from the second, so `FileManager.default.setAttributes([.posixPermissions: 0o777],
+    ofItemAtPath: p)` produced **no function row at all** and exited **0** under `deny Fs <unit>`,
+    `deny Fs <caller>`, a blanket `deny Fs` and `deny Unknown` alike, while really taking a file from
+    mode 600 to 777 (executed: `384 -> 511`). Fixed by `FS_MEMBERS = Set(FS_MEMBER_KINDS.keys)` — one
+    table, two derived readers. `mountedVolumeURLs`/`setUbiquitous`/`displayName`, which the sweep found
+    in NEITHER table, arrive with it, and `setUbiquitous` arrives with its `FS_TWO_PATH_MEMBERS` entry
+    because a literal source masking a runtime destination is the AS-EFF-008 hole in a new spelling.
+  - **R786 — `isEstablishingMember` had `Net` and `Fs` arms and `default: return false`, so there was
+    no `Exec` arm at all.** `Process.launchedProcess(launchPath:)` takes the program as an ARGUMENT, so
+    a benign literal sibling masked a caller-chosen command: `allow Exec in <unit> /bin/ls` exited **0**
+    on the unit and on its caller (executed: the same form really ran `/usr/bin/touch`). Fixed with
+    `PROCESS_MEMBER_ROLES`, read by all three consumers — `PROCESS_MEMBERS`, the `run`/`launch` branch
+    in `CallCollector`, and the new `Exec` arm — whose default is FAIL-CLOSED, matching ⟨0.32⟩'s ruling
+    that an unmodelled `Process` member is `Exec`.
+  - **R788 — `NET_MEMBERS` did not know `dataTaskPublisher(for:)`, Combine's spelling of a verb already
+    in it.** `deny Net` exited **0** on unit, caller, blanket and `deny Unknown` (executed: a real GET
+    reached a local listener, 200, 2 bytes). **THE DENYLIST INVERSION WAS BUILT, A/B'd AND REFUSED BY
+    THE CORPUS** — `kappaMember`'s `root` is the CHAIN ROOT, so a whole-type rule charged
+    `s.configuration.urlCredentialStorage?.defaultCredential(…)`, `s.delegateQueue.addOperation(…)` and
+    `URLSession.rx.shouldLogRequest(…)` as `Net`: 13 over-charged rows in Alamofire, Nuke and RxCocoa.
+    That is R381's own warning one level down, and it is now a measurement rather than a worry. The
+    shipped fix keys on Apple's uniform `<noun>Task…` naming, so every `…TaskPublisher` sibling is
+    covered without another edit; the residue an allowlist still has is named in the source.
+  - **R789 — a list of TYPE NAMES cannot express inheritance.** `NSMutableDictionary`/`NSMutableArray`/
+    `NSMutableData`/`NSMutableString(contentsOfFile:)` have no initializer of their own — they inherit
+    `NSDictionary`'s — and all four produced no row and gated **0** on unit, caller and blanket while
+    really reading a file back. Fixed by deriving from the ARGUMENT LABEL: `contentsOfFile:` names one
+    operation for every type that inherits the initializer, including types this engine has never heard
+    of. The `contentsOf:` (URL) arm cannot use the label — it is scheme-ambiguous — and uses Foundation's
+    class-cluster naming (`foundationClassKey`) instead. **A project subclass of `NSDictionary` is still
+    out of reach and is named as a residue**: candor-swift parses source and has no type checker.
+
+  **A/B over 21 real Swift packages, 28,804 common rows, wide key (every field): ADDED 0, REMOVED 0,
+  CHANGED 7, and 0 effects lost on any field.** All 7 ground-truthed from source: Kingfisher's
+  `DiskStorage.FileMeta.extendExpiration` (a real `fileManager.setAttributes(…, ofItemAtPath: url.path)`)
+  plus its 4 transitive callers gaining `fs: ["write"]`, SwiftPM's `PluginContext.tool` (a real
+  `FileManager.default.isExecutableFile(atPath:)`), and SwiftLint's `Configuration.getFiles` gaining a
+  `direct` Fs for `FileHandle.standardInput.readDataToEndOfFile()`. **THE INSTRUMENT WAS CALIBRATED
+  BEFORE THE `REMOVED 0` WAS BELIEVED**: the same A/B against a build with ONE name (`fileExists`)
+  removed from the table reports REMOVED 7 rows, CHANGED 57, 39 `inferred` values lost — so it can find
+  a hedge gone with nothing replacing it. Gate flips: **0 of 105** blanket (21 packages x 5 policies);
+  **2 scoped**, both `deny Fs <qual>` moving 2 (INCOMPLETE, for an unrelated out-of-scope reason) to 1.
+  Newly marked `incomplete`: **2 of 28,804 rows (0.0069%)**, both a genuine unresolved locator verified
+  from source, **0 over-marks, 0 `Unknown`-only rows**. Reach is stated rather than blended: the
+  `setAttributes`, `isExecutableFile` and `readDataToEndOfFile` arms are RECALL-measured on real code;
+  `trashItem`, `isDeletableFile`, `mountedVolumeURLs`, `setUbiquitous`, `displayName`, `readData`,
+  `truncate`, the `…Task` prefix rule, the `Exec` arm and every R789 arm have **zero reach over this
+  corpus and are safety-only there**, resting on their executed fixtures. Revert-tested BY REVERTING:
+  4 of 5 behavioural tests go red at the parent (30 assertion failures); the 5th is the over-charge
+  control and passes in both arms, which is stated rather than counted as coverage.
+
 - **SOUNDNESS R620 (WIDENED FROM TWO ARMS TO FOUR) — A METATYPE BINDER IS INERT *PRECISELY UNDER
   SHADOWING*, so a receiver whose name collides with an enclosing one resolved against the OUTER type and
   went silent.** `metatypeBinders[name]` is a SIDE index: unlike `vars[name] = …` it does not displace an
