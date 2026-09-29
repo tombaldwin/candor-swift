@@ -712,7 +712,7 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   so `if let l = c.maybeLoop { l.spin() }` resolved `l` straight out of `vars` with `opaqueHop` false,
   the refusal was never asked, and the key was exactly the one R567(a) exists to stop.
 
-  **FOUND WHILE RE-PRICING ⟨0.40⟩, on real code:** nio-ssl's `NIOSSLHandler.swift:631` writes
+  **FOUND WHILE RE-PRICING THE ⟨0.39⟩ DISPATCH-UNION FOLLOW-UP, on real code:** nio-ssl's `NIOSSLHandler.swift:631` writes
   `if let syncOptions = context.channel.syncOptions { syncOptions.getOption(…) }` and published
   `swift-nio#ChannelHandlerContext.getOption` — a member `ChannelHandlerContext` does not declare —
   through R567(a) untouched. One variable in the fixture: the SPELLING of the receiver, written out or
