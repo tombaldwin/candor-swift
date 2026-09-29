@@ -1,13 +1,22 @@
 # Changelog
 
 All notable changes to candor-swift are recorded here. Format loosely follows
-[Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0, so minor versions may include
-behavioural changes (always in the soundness-increasing direction — see the §4 trust contract).
+[Keep a Changelog](https://keepachangelog.com/); candor is pre-1.0 and the version tracks the spec:
+X.Y is the spec rung, and a **patch (X.Y.Z) adds no rung but can and routinely does change gate verdicts**
+— read every ⚠ entry before bumping a pin. Behavioural changes are (always in the soundness-increasing direction — see the §4 trust contract).
 A **⚠** heading marks a report- or verdict-affecting change: it changes report bytes or gate
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
 ## Unreleased
+
+**Upgrading from 0.39.2 — gates that can flip (all STRICTER; each is a ⚠ entry below):**
+- `FileManager.setAttributes`, `trashItem`, `isExecutableFile`, `isDeletableFile`, `URLSession`'s
+  `dataTaskPublisher`, and the `NSMutable*` `contentsOfFile:` initialisers now charge their effect, and
+  `Process.launchedProcess(launchPath:)` now masks — so `deny Fs`/`deny Net` and masking `allow` rules
+  can go 0 → 1 (R786–R789).
+- A metatype binder shadowing an enclosing name, and a ternary-valued receiver, now resolve to the
+  receiver they really name, so `deny Net`/`pure` over code that dials out can go 0 → 1 (R620, R589).
 
 ### Fixed
 
@@ -70,7 +79,7 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   4 of 5 behavioural tests go red at the parent (30 assertion failures); the 5th is the over-charge
   control and passes in both arms, which is stated rather than counted as coverage.
 
-- **SOUNDNESS R620 (WIDENED FROM TWO ARMS TO FOUR) — A METATYPE BINDER IS INERT *PRECISELY UNDER
+- ⚠ **SOUNDNESS R620 (WIDENED FROM TWO ARMS TO FOUR) — A METATYPE BINDER IS INERT *PRECISELY UNDER
   SHADOWING*, so a receiver whose name collides with an enclosing one resolved against the OUTER type and
   went silent.** `metatypeBinders[name]` is a SIDE index: unlike `vars[name] = …` it does not displace an
   enclosing binding of the same name, and `metatypeBinder`'s very first guard is `vars[spelling] == nil`.
@@ -116,7 +125,7 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   Gates: `swift test` 1360 passed / 0 failed; `smoke.sh` 160 passed / 0 failed; `ci/self-gate.sh` OK;
   `fuzz.py` 25 seeds passed; `fabrication_probe.py` OK.
 
-- **SOUNDNESS R589 (PARTIAL, and the ROW'S STATED MECHANISM WAS WRONG) — A TERNARY-VALUED RECEIVER WAS
+- ⚠ **SOUNDNESS R589 (PARTIAL, and the ROW'S STATED MECHANISM WAS WRONG) — A TERNARY-VALUED RECEIVER WAS
   SILENTLY PURE BECAUSE `rootOf`'s TERNARY ARM REQUIRED THE WHOLE UNFOLDED SEQUENCE TO BE EXACTLY THREE
   ELEMENTS, NOT BECAUSE "THE TWO ARMS RESOLVE DIFFERENTLY".** SwiftParser does not nest a ternary's
   condition or its else-arm: every operator in the expression is flattened into ONE element list, so
@@ -159,7 +168,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   SAFETY-ONLY A/B and is labelled one. CHAINED arm byte-identical on swift-nio-ssl with R700's precondition
   proven FIRST (6 resolved checkouts; chained 472,847 bytes vs unchained 353,232, so the join really ran).
 
-  Not marked ⚠: no report byte and no verdict moved anywhere on the corpus.
+  ⚠ because a user whose code has this shape gains `Net` where it read pure. The corpus had no instance,
+  so the corpus A/B here is only the fabrication control — it cannot see a silence either way.
 
   Gates: `swift test` 1357 passed / 0 failed (1352 before, +5 here); `smoke.sh` 160 passed / 0 failed;
   `ci/self-gate.sh` OK; `fuzz.py` 25 seeds passed; `fabrication_probe.py` OK.

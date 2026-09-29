@@ -42,7 +42,8 @@ never a host.
 ## The trust contract (§4), Swift edition
 
 - A **function-typed value invoked** (`let f: () -> Void` param, a closure-typed field `d.f()`) reads
-  `Unknown` — never silent purity. `unknownWhy` names each origin (`callback:f`, `dispatch:Dyn.f`).
+  `Unknown` — designed never to read as silent purity (known open gaps, e.g. R792, are in candor-spec's
+  SOUNDNESS.md). `unknownWhy` names each origin (`callback:f`, `dispatch:Dyn.f`).
 - **Dispatch through a local protocol** resolves to the visible conformers when narrow (≤12, the family's
   shared CHA bound) and reads disclosed `Unknown` otherwise.
 - A **`pure` policy rule forbids every effect, not `Unknown`** — the §4 trust marker is AS-EFF-003's
