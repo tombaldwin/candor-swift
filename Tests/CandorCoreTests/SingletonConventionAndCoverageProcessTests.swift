@@ -172,15 +172,20 @@ final class SingletonConventionAndCoverageProcessTests: XCTestCase {
 
     /// The half of the convention the release did NOT have: a key the dependency does not answer
     /// discloses rather than certifying purity, because a miss cannot tell "pure" from "`.shared` is not a
-    /// `Client`". And R567(a)'s own population — a hop that is NOT a singleton accessor — keeps its refusal.
-    func testAMissDisclosesAndTheR567aPopulationKeepsItsRefusal() throws {
+    /// `Client`". And a hop that is NOT a singleton accessor (`Client.other`, `Client.shared.inner`) is a
+    /// GUESS: it keeps the release's key as a floor (R836) and discloses beside it.
+    func testAMissDisclosesAndAGuessedOwnerDisclosesBesideTheReleaseKey() throws {
         let (rows, _) = try run(singletonFiles(), label: "miss")
         for fn in ["aPure", "aNsMiss", "aOtherPing", "aInnerPing"] {
-            XCTAssertEqual(rows[fn]?.inferred, ["Unknown"], "\(fn): got \(String(describing: rows[fn]))")
+            XCTAssertTrue(rows[fn]?.inferred.contains("Unknown") ?? false, "\(fn): got \(String(describing: rows[fn]))")
             XCTAssertTrue(rows[fn]?.unknownWhy.contains("dispatch:untyped cross-package receiver") ?? false, fn)
         }
-        XCTAssertTrue(rows["aOtherPing"]?.dispatchesOn.isEmpty ?? false,
-                      "`Client.other` is not a singleton accessor: no key is formed from the outer base")
+        XCTAssertTrue(rows["aOtherPing"]?.dispatchesOn.contains("RatesDep#Client.ping") ?? false,
+                      "`Client.other` is not a singleton accessor: the release keyed it on the outer base, "
+                      + "and that key is the floor; got \(String(describing: rows["aOtherPing"]))")
+        XCTAssertTrue(rows["aPure"]?.dispatchesOn.contains("RatesDep#Client.pureFn") ?? false,
+                      "a convention owner's key is published on a MISS too, as v0.39.2 published it — "
+                      + "withholding it left a consumer's own implementors nothing to answer (R836)")
     }
 
     /// THE RESIDUAL, stated as the property it has rather than as a value it should have. `Wrong.shared` is
@@ -309,5 +314,29 @@ final class SingletonConventionAndCoverageProcessTests: XCTestCase {
         XCTAssertEqual(o.notSwiftCoverable, ["CShim", "Mixed", "Lost", "Sys", "Bin"],
                        "C, mixed, unreadable (`Lost` — no sources found is not 'no sources'), systemLibrary, binaryTarget")
         XCTAssertEqual(o.reexports["ReCore"], ["CShim", "RatesCore"])
+    }
+
+    // MARK: - R837
+
+    /// SOUNDNESS R837 — the re-export reader is the PARSER, so every spelling Swift accepts is one
+    /// spelling. The regex it replaced missed `@_exported` on its own line (the consumer's caller of the
+    /// re-exported C function went `invisible ['ReCore']` on v0.39.2 -> ABSENT at `6938f8b`).
+    func testReexportsAreReadByTheParserInEverySpelling() {
+        let src = """
+        @_exported
+        import CShimA
+        @_exported /* keep */ import CShimB
+        @preconcurrency
+          @_exported import struct CShimC.Thing
+        #if os(Linux)
+        @_exported import CShimD
+        #else
+        @_exported import CShimE
+        #endif
+        import NotExported
+        // @_exported import InAComment
+        let s = "@_exported import InAString"
+        """
+        XCTAssertEqual(reexportedModules(source: src), ["CShimA", "CShimB", "CShimC", "CShimD", "CShimE"])
     }
 }

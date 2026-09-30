@@ -1880,6 +1880,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// the publish site's R555 comment. This function keeps one job: name the abstraction.
     let r550Probe = ProcessInfo.processInfo.environment["CANDOR_R550_PROBE"] != nil
     let r555Probe = ProcessInfo.processInfo.environment["CANDOR_R555_PROBE"] != nil
+    /// SOUNDNESS R836 §1b KILL SWITCH — restores the chained-only gate on a guessed owner's disclosure, so
+    /// a standalone producer's row falls silent again and the three-package-chain tests go red.
+    let r836Off = ProcessInfo.processInfo.environment["CANDOR_R836_OFF"] != nil
+    let r836Probe = ProcessInfo.processInfo.environment["CANDOR_R836_PROBE"] != nil
+    /// SPEC ⟨0.25⟩ at the cross-package join: §1b kill switch (restores drop-on-ambiguity) and reach probe.
+    let joinUnionOff = ProcessInfo.processInfo.environment["CANDOR_JOIN_UNION_OFF"] != nil
+    let joinUnionProbe = ProcessInfo.processInfo.environment["CANDOR_JOIN_UNION_PROBE"] != nil
     func dispatchAbstraction(_ owner: String, _ f: FnInfo) -> String? {
         let typeBound = f.enclosingType.flatMap { typeGenericBoundsAll[$0]?[owner] }
         // REACH PROBE (§E1) — "CHANGED 0 is not evidence until REACH is measured". Fires only on the arm
@@ -2479,7 +2486,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {
                     if let e = deps.lookup("\(p)#\(name)") { hits.append(e) }
                 }
-                if hits.count == 1, let de = hits.first { applyDepEntry(de, to: f.qual) }
+                // SPEC §2 rule 1 ⟨0.25⟩ — two packages answering is an AMBIGUOUS key: UNION, never drop
+                // (see the member-call join's note below; this is the same rule at the global-read site).
+                if hits.count == 1 || (!joinUnionOff && hits.count > 1) {
+                    if hits.count > 1, joinUnionProbe {
+                        FileHandle.standardError.write("JOINUNION global \(f.qual) \(name) n=\(hits.count)\n".data(using: .utf8)!)
+                    }
+                    for de in hits { applyDepEntry(de, to: f.qual) }
+                }
             }
         }
         cc.resolveAmbiguousCapture()   // the function is fully walked by here — see `ambiguousCapture`
@@ -3266,8 +3280,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // ANSWERED it (see there). Published unconditionally it re-mints the keys R567(a) removed
                 // for platform singletons — `Alamofire#DispatchQueue.async`, `…#NotificationCenter.addObserver`
                 // — a type the named package does not declare, which no consumer can join.
-                if !call.conventionOwner,
-                   let m = foreignOwnerModule(inFile: file), let abs = dispatchAbstraction(owner, f) {
+                // (R836: a convention owner's key is published unconditionally again, as v0.39.2 published
+                // it. Withholding it until the chained join hit made a STANDALONE producer publish nothing,
+                // and a chained producer's miss publish only `Unknown` where v0.39.2 let a consumer's own
+                // implementors answer the key under obligation 3.)
+                if let m = foreignOwnerModule(inFile: file), let abs = dispatchAbstraction(owner, f) {
                     let localPath = localProtocolWirePath(abs)
                     // REACH PROBE (§E1) — an unchanged row is not evidence the branch ran.
                     if r555Probe, localPath != nil {
@@ -3366,7 +3383,39 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // entries share (§2 rule 1), so a miss cannot distinguish "no such method" from "I
                 // withdrew the answer", and a refusal to answer is not a purity claim. rust shipped that
                 // `continue` and reverted it.
-                if !deps.chainedPkgs(importing: fileImports[file] ?? []).isEmpty {   // R565
+                //
+                // SOUNDNESS R836 — AND A GUESSED OWNER DISCLOSES IN A STANDALONE SCAN TOO. The chained
+                // gate below rests on "for an UNCHAINED package the κ ledger already discloses", and for a
+                // MEMBER call that is not so: the ledger is report-level (`coverage.uncovered`), per-row
+                // `invisible` fires only for unqualified calls, and a consumer that later chains this
+                // report reads neither. So the row's silence became a purity claim one package
+                // downstream — `deny Env` and `deny Env Unknown` both 1 -> 0 across a three-package chain
+                // against v0.39.2. For a `guessedOwner` marker the gate is therefore "did the release publish
+                // a key a consumer will join" — chained OR not — rather than "is it chained". The
+                // release's key for the same call is still published (the floor), so a consumer that CAN
+                // answer it still does; this only stops the answer being read as certain.
+                let fileImps = fileImports[file] ?? []
+                let chainedHere = !deps.chainedPkgs(importing: fileImps).isEmpty   // R565
+                // BOUNDED TO WHERE THE RELEASE PUBLISHED A KEY — the same conjuncts as obligation 1's publish
+                // arm, asked of the guessed owner. That is exactly the population whose downstream answer a
+                // guess can make wrong (a consumer joins the floor key and reads a miss as purity); anywhere
+                // else the release published nothing for a consumer to misread, and a hedge there is new
+                // uncertainty with no silence behind it. MEASURED the wider way first ("the file sees any
+                // uncovered module"): it charged `Unknown` to Bitwarden's `session.outputs.forEach {…}` on an
+                // `AVCaptureSession` (`PrivacyEffectsTests`), 291 corpus sites dominated by UIKit, `Self` and
+                // stdlib roots.
+                let r836Standalone: Bool = {
+                    guard !chainedHere, !r836Off, let g = call.guessedOwner, !call.opaqueRecv,
+                          !localTypes.contains(g), !STD_PURE_PROTOCOLS.contains(g),
+                          !RAW_VALUE_BASE_TYPES.contains(g) else { return false }
+                    return foreignOwnerModule(inFile: file) != nil && dispatchAbstraction(g, f) != nil
+                }()
+                // REACH PROBE (§E1) — only the arm this change ADDS: a guessed owner disclosed WITHOUT a chain.
+                if r836Standalone, r836Probe {
+                    FileHandle.standardError.write(
+                        "R836HIT \(f.qual) \(call.guessedOwner ?? "?").\(call.leaf)\n".data(using: .utf8)!)
+                }
+                if chainedHere || r836Standalone {
                     direct[f.qual, default: []].insert("Unknown")
                     whyMap[f.qual, default: []].insert("dispatch:untyped cross-package receiver")
                 }
@@ -3411,7 +3460,26 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         }
                     }
                 }
-                if hits.count == 1, let de = hits.first {
+                // SPEC §2 rule 1 ⟨0.25⟩ — AN AMBIGUOUS KEY IS UNIONED; IT MUST NOT BE PICKED FROM AND MUST NOT
+                // BE DROPPED. This arm dropped it: two chained packages both answering the key read as "no
+                // answer", the row fell out of `functions[]`, and under ⟨0.21⟩ that is a purity claim. It
+                // was latent until R567(b) (`8931087`) published the BARE spelling of every overloaded
+                // dependency member — which made keys collide ACROSS packages where they had not: measured
+                // on RxAlamofire, `map { $0.validate() }` inside `extension ObservableType` was answered by
+                // Alamofire's `DataResponse.map` alone on v0.39.2 (`['Unknown']`), and by Alamofire AND
+                // RxSwift's newly-bare `map` after R567(b) — 2 hits, dropped, and four
+                // `ObservableType.validate` rows went from `['Unknown']` to ABSENT. The union is what
+                // SPEC ⟨0.25⟩ has required since that rung; it over-charges (both packages' members) and
+                // never under-reports, and it is monotone against the release by construction: whatever
+                // the release's single hit charged is one of the union's contributors.
+                if hits.count > 1, joinUnionProbe {
+                    FileHandle.standardError.write(
+                        "JOINUNION member \(f.qual) \(call.extOwner ?? "-").\(call.leaf) n=\(hits.count)\n".data(using: .utf8)!)
+                }
+                if hits.count > 1, !joinUnionOff {
+                    for de in hits.dropFirst() { applyDepEntry(de, to: f.qual) }
+                }
+                if hits.count == 1 || (!joinUnionOff && hits.count > 1), let de = hits.first {
                     // inherit the dep fn's own honesty markers too, so the consumer's verdict stays
                     // qualified across the chain boundary (a benign literal HERE must not certify the
                     // dep's invisible runtime endpoint) — see applyDepEntry.

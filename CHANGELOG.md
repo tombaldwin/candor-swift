@@ -31,15 +31,21 @@ a flip, and a baseline or a CI gate pinned across it will move. Directions are a
 - New `Unknown` disclosures: a callback invoked through a nested `func`'s or closure's parameter (R725), a
   deferred callback no call site can discharge (R720), a higher-order function with one resolved and one
   unresolved caller (R127), an erased dispatch over a dependency's abstraction (R705), a member chain
-  through a hop the engine cannot type (R567(a), R610), and a singleton-accessor key the dependency does
-  not answer (R826) — `deny Unknown` / `deny <E> Unknown`.
+  through a hop the engine cannot type — in a chained report AND in a report scanned without a chain,
+  beside the key v0.39.2 published for it (R567(a), R610, R836) — and a singleton-accessor key the
+  dependency does not answer (R826) — `deny Unknown` / `deny <E> Unknown`.
+- A singleton or static call on a NESTED, module-qualified or generic dependency type
+  (`Outer.Inner.shared.fetch()`, `RatesCore.Outer.Inner.shared.fetch()`, `Box<Int>.shared.fetch()`), and
+  on a dependency type the package only EXTENDS (`extension Svc {}` + `Svc.shared.fetch()`, direct or
+  bound), now reaches the dependency's member — `deny <E>` (R838, R839; all silent or wrongly keyed on
+  0.39.2).
+- A call whose key TWO chained packages answer now takes the union of both answers, as SPEC ⟨0.25⟩
+  requires; 0.39.2 dropped it and the row read pure. It over-charges where the two members differ —
+  `deny <E>` may rise.
 - For a DOWNSTREAM consumer of this engine's reports: ⟨0.39⟩ keys that were misattributed, suppressed or
   spelled under a module now name the owning package and can be joined (R555, R565, R592, R593, R603).
 
 *Can go 1 → 0 (0.39.2 charged something the code does not do):*
-- A member-chain receiver was keyed to the OUTER base's type and joined its same-named member —
-  `c.loop.spin()` charged `Channel.spin`'s effect; that decoy charge is gone (R567(a)), including through
-  a binding (R610). The real effect becomes `Unknown`, so `deny <real E> Unknown` still fires.
 - A generic bound that shadows the enclosing type's charged the OUTER protocol's conformers (R580).
 - A POSIX free call (`connect`, `getenv`, `fopen`, …) in a file importing a dependency with a same-named
   METHOD took that method's effects instead of its own: `deny Env`/`deny Clock`/`deny Unknown` can fall
@@ -50,12 +56,90 @@ a flip, and a baseline or a CI gate pinned across it will move. Directions are a
 - A report registered under another package's name (the first `name:` in its manifest) no longer claims
   coverage of, or answers joins for, that package (R559).
 
-*Not a flip against 0.39.2, stated because the pre-release build had one:* R567(a) as first written also
-refused the singleton accessor (`Client.shared.fetch()`), turning a correct concrete charge into `Unknown`
-and moving `deny Env <fn>` 1 → 0. R826 restores it before release; the net change against 0.39.2 there
-is that a singleton key the dependency does NOT answer now discloses `Unknown` instead of reading pure.
+*Kept exactly as 0.39.2 had it, stated because a pre-release build removed it:* a member-chain receiver
+through a hop the engine cannot type is still keyed to the OUTER base's type, so `c.loop.spin()` still
+joins `Channel.spin` where both types declare `spin` — the decoy charge v0.39.2 shipped. What is new is
+that the row also discloses `Unknown`, so the effect it really reaches is no longer silent. Telling the
+decoy from a correct charge (`n.parent.visit()` on a self-typed hop) needs the hop's declared type from
+the dependency, which no report carries. See R836.
+
+*Not flips against 0.39.2, stated because pre-release builds had them:* R567(a) as first written refused
+every such key, and removed correct charges with the wrong ones; R826 re-admitted the singleton accessor
+in chained scans only. Three regressions against the release survived that and are closed before release
+(R836): a middle library scanned without a chain published neither key nor disclosure, so a three-package
+chain went silent (`deny Env` and `deny Env Unknown` 1 → 0) on every such spelling; `Theme.dark.apply()`,
+`n.parent.visit()`, `RatesCore.Outer.Inner.shared.fetch()` and RxAlamofire's
+`Alamofire.Session.default.rx.responseData(…)` lost concrete charges to `Unknown` (`deny Net` 1 → 0 over
+68 RxAlamofire rows); and R567(b)'s new bare keys made two chained packages answer one key, which the
+join dropped. On every executed panel shape (the release panel's and both re-reviews', three- and
+four-package chains with the middle scanned standalone and chained) no gate is lower than on 0.39.2.
 
 ### Fixed
+
+- **⚠ SOUNDNESS R836 — A MIDDLE LIBRARY SCANNED WITHOUT A CHAIN PUBLISHED NEITHER KEY NOR DISCLOSURE, SO A
+  THREE-PACKAGE CHAIN WENT SILENT AGAINST v0.39.2 — AND NOT ONLY FOR THE SINGLETON.** Dependency
+  `RatesCore`; library `LibA` with `public func viaShared() { Client.shared.fetch() }`, scanned on its own
+  (the ordinary workflow); application `topShared() { viaShared() }` chained on both, built and RUN
+  (prints the variable). v0.39.2: `LibA` publishes `RatesCore#Client.fetch`, `deny Env topShared` and
+  `deny Env Unknown topShared` both exit 1. The pre-release build: `viaShared` ABSENT from `LibA`'s report,
+  both gates exit **0**. R567(a) refused the key; R826 withheld the convention key until a chained join
+  hit, which a standalone producer never has; and the refusal's disclosure was gated on being chained, on
+  the premise that an unchained package's κ ledger discloses. For a MEMBER call it does not — the ledger
+  is report-level, per-row `invisible` fires only for unqualified calls, and a consumer that chains the
+  report reads neither. The same silence held for `n.parent.visit()` (a self-typed hop) and
+  `Theme.dark.apply()` (a static not in `SINGLETON_ACCESSORS`), which R826's re-admission did not reach.
+
+  **THE STRUCTURAL ANSWER, NOT A TENTH SPELLING.** Refusing a guessed owner cannot be made monotone
+  against the release: where the outer base's member IS the callee the refusal removes a correct charge,
+  and nothing on the wire says which case a hop is. So the owner v0.39.2 formed is kept as a FLOOR — its
+  key published and joined in both modes — and the guess is DISCLOSED beside it
+  (`dispatch:untyped cross-package receiver`) in a chained scan and, where v0.39.2 published a key, in a
+  standalone one. A hop whose type IS established is resolved instead (R838/R839 below). The cost is
+  named rather than hidden: R567(a)'s decoy charge (`c.loop.spin()` joining `Channel.spin`) comes back
+  exactly as v0.39.2 shipped it; its SILENT half stays closed.
+
+  **SOUNDNESS R838 — REAL EFFECTS THE RELEASE CHARGED WERE LEFT AS `Unknown`.**
+  `RatesCore.Outer.Inner.shared.fetch()` (`deny Env` 1 → 0) and 68 RxAlamofire rows spelled
+  `Alamofire.Session.default.rx.responseData(…)` (`deny Net` 1 → 0) are charged again: the first through
+  `conventionTypePath`, one authority for every spelling of a type reference — bare, `Self`,
+  module-qualified, NESTED (`Outer.Inner`) and generic-specialized (`Box<Int>`), keyed as the dependency's
+  own hash spells the path — and the second through the floor. Nested and generic singletons
+  (`Outer.Inner.shared.fetch()`, `Box<Int>.shared.fetch()`) were silent on v0.39.2 too; they now resolve.
+
+  **SOUNDNESS R839 — A CONSUMER `extension Svc {}` ON A DEPENDENCY TYPE SILENCED `Svc.shared.fetch()` AND
+  `let s = Svc.shared; s.fetch()`** (EXECUTED Env; silent on v0.39.2 as well). Both the convention and
+  the let binder refused anything in `localTypes`, which holds EXTENDED types; the fence is now
+  `declaredTypes`, as R656's is. Another unexplained hop on an extension-only type (`s.other.ping()`)
+  stays silent, as on v0.39.2: disclosing there was measured at 1,026 corpus sites, dominated by stdlib
+  and platform types a package extends, where the release never asked a dependency anything.
+
+  **SPEC ⟨0.25⟩ AT THE CROSS-PACKAGE JOIN — AN AMBIGUOUS KEY IS UNIONED, NEVER DROPPED.** Two chained
+  packages answering one key read as "no answer" (`hits.count == 1`), at the member join and the
+  global-read join. Latent until R567(b) published the bare spelling of every overloaded member: then
+  RxAlamofire's `map { $0.validate() }` was answered by Alamofire AND RxSwift, the join dropped it, and
+  four `ObservableType.validate` rows went `['Unknown']` → ABSENT (bisected to `8931087`). Unioned now;
+  it over-charges where the two members differ and never under-reports.
+
+  **SOUNDNESS R837 — `@_exported` ON ITS OWN LINE DEFEATED R827's RE-EXPORT FIX.** The re-exports are read
+  by the parser (`reexportedModules`), so a newline, a comment, several attributes or a `#if` arm are one
+  spelling; the regex also matched `@_exported import` inside comments and string literals.
+
+  EVIDENCE. Executed one-variable fixtures across v0.39.2 `eae95e9`, the pre-release `6938f8b` and this
+  build: the release panel's and both re-reviews' fixtures (t1, c2–c9, the 21 singleton spellings, the
+  R827 set, and the first reviewer's nine), plus new three- and four-package chains with the middle
+  scanned standalone AND chained — 33 case-modes, 1,748 gates. **No gate is lower than on v0.39.2**
+  (`6938f8b`: 30 lower); 284 are higher. Corpus, `bin/corpus-ab.py`, dependency reports diffed as well as
+  entries: 41 packages scanned standalone (67,995 analysed units) and 9 entries chained. Against
+  `6938f8b`: REMOVED 0 in both; no row lost an effect; 35 rows newly carry `Unknown` (0.05% of units;
+  REACH `R836HIT` 42), 0 packages flip an unscoped `deny Unknown`; 68 RxAlamofire rows regain Net (with
+  the Fs/Clock/Rand the release's leaf-keyed lookup over-charged); 33 distinct unjoinable ⟨0.39⟩ keys come
+  back (`swift-nio#ChannelHandlerContext.makePromise` and kin — no concrete charge in the corpus reaches
+  through them). Against `eae95e9`: no row lost a concrete effect; of the rows that lost `Unknown`, 111
+  gained resolved call edges in its place (one bisected to R572; the rest classified by their edges, not
+  individually traced), 2 are union rows that keep `Clock`, and 4 are a `==` over `Any.Type` fields proven
+  pure from source. §1b: `CANDOR_R836_OFF`, `CANDOR_R839_OFF`, `CANDOR_JOIN_UNION_OFF`, `CANDOR_R826_OFF`
+  and `CANDOR_R567A_OFF` (the release's owner only, no disclosure) each red `StandaloneProducerChainProcessTests` /
+  `AmbiguousCrossPackageJoinProcessTests`; the old regex reds the R837 parser test.
 
 - **⚠ SOUNDNESS R826 — R567(a) REFUSED THE SINGLETON ACCESSOR TOO, SO A CORRECT CONCRETE CHARGE ON A
   CHAINED DEPENDENCY BECAME A HEDGE AND A SCOPED GATE WENT 1 → 0 AGAINST v0.39.2.** Dependency `Client`
@@ -70,15 +154,19 @@ is that a singleton key the dependency does NOT answer now discloses `Unknown` i
   `SINGLETON_ACCESSORS` member (`shared`, `default`, `current`, `main`, `standard`, …) on a type this scan
   does not declare — and it does so at the let binder. `singletonConventionOwner` now answers that for the
   direct spelling: a bare type, `Self`, or a module-qualified type (`RatesCore.Client.shared`), with a
-  trailing `.self` stripped. A LOCAL type is refused, exactly as the binder refuses it. Every other opaque
-  hop keeps R567(a)'s refusal (`c.loop.spin()`, `Client.other.ping()`, `Client.shared.inner.ping()`).
+  trailing `.self` stripped — and, since R838/R839 below, nested and generic type paths and a type the package
+  only extends, through one `conventionTypePath`. A DECLARED local type is refused, exactly as the binder
+  refuses it. Every other opaque hop is a guess (`c.loop.spin()`, `Client.other.ping()`,
+  `Client.shared.inner.ping()`): as shipped, it keeps the key v0.39.2 formed and discloses beside it (R836).
 
   **A MISS DISCLOSES, WHICH v0.39.2 DID NOT.** The convention key is formed, and if the dependency answers
   it the row takes that answer and no hedge. If it does not, the row reads `Unknown` with R567(a)'s own
   token: a miss cannot tell "the member is pure" from "`.shared` is not a `Client`". The ⟨0.39⟩
-  obligation-1 key for a convention owner is published only when the join answered it, so the platform
-  singletons R567(a) cleaned out of the wire (`Alamofire#DispatchQueue.async`,
-  `…#NotificationCenter.addObserver`) are not re-minted.
+  obligation-1 key for a convention owner is published whether or not the join answered it, as v0.39.2
+  published it. (This entry's first cut withheld it until the join hit; a middle library scanned without
+  a chain then had nothing to publish, and a three-package chain went silent — R836. The platform-singleton
+  keys R567(a) had cleaned out, `Alamofire#DispatchQueue.async`, are back as on v0.39.2: unjoinable noise,
+  not a charge.)
 
   A sibling found on the same fixture and closed with it: `RatesCore.Client.sfetch()` — a module-qualified
   TYPE, no singleton at all — was also an "opaque hop" and went `['Env']` → `['Unknown']`, `deny Env`
@@ -88,8 +176,11 @@ is that a singleton key the dependency does NOT answer now discloses `Unknown` i
   `viaShared`, `.default`, `.current`, `.main`, a struct singleton, an optional singleton
   (`Opt.shared?.fetch()`), `.shared.self`, `RatesCore.Client.shared` and `RatesCore.Client.sfetch()` are
   **1 / 0 / 1** under `deny Env <fn>`; the bound spelling, the parameter, the ctor and the static call are
-  1 / 1 / 1. No `deny Env <fn>` is lower than on v0.39.2. The release also over-charged
-  `RatesCore.Client.shared.fetch()` as `['Env','Fs']` (a leaf-keyed lookup); this build reads `['Env']`.
+  1 / 1 / 1. On that two-package fixture no `deny Env <fn>` was lower than on v0.39.2; a three-package
+  chain with the middle scanned standalone, and the nested and module-qualified-nested spellings, WERE
+  lower in that build — closed by R836/R838. The release over-charged `RatesCore.Client.shared.fetch()` as
+  `['Env','Fs']` (a leaf-keyed union over the module); as shipped that union is kept as a floor beside the
+  resolved `Client.fetch` key, so the row reads `['Env','Fs']` exactly as on v0.39.2.
 
   **THE RESIDUAL, STATED:** a singleton-named static whose type is NOT its declaring type, where the
   declaring type also has a member of the called name (`Wrong.shared` is an `Other`; both declare `ping`),
@@ -129,7 +220,10 @@ is that a singleton key the dependency does NOT answer now discloses `Unknown` i
   **AND A RE-EXPORT.** A covered Swift module that `@_exported import`s a C module (`ReCore` re-exporting
   `CShim`) put `shim_getenv` in scope with only the covered import in view: silent pre-fix, `invisible:
   ['ReCore']` on v0.39.2. The ownership walk records each Swift target's re-exports, and the ledger and
-  the per-function hedge name the re-exported module no report covers.
+  the per-function hedge name the re-exported module no report covers. The re-exports are read by the
+  PARSER (R837): this entry's first cut used a regex that missed `@_exported` on its own line — the
+  caller of the re-exported C function went ABSENT, a purity claim — and also matched the text inside a
+  comment or a string literal.
 
   EXECUTED fixtures, every caller present with `invisible` naming the right module on this build: C
   target, Objective-C target, `.systemLibrary`, `.binaryTarget` (a real `.xcframework`), C re-export, a
@@ -848,8 +942,9 @@ is that a singleton key the dependency does NOT answer now discloses `Unknown` i
   `if let syncOptions = context.channel.syncOptions { syncOptions.getOption(…) }` and published
   `swift-nio#ChannelHandlerContext.getOption` — a member `ChannelHandlerContext` does not declare —
   through R567(a) untouched. One variable in the fixture: the SPELLING of the receiver, written out or
-  bound first. Pre-fix `['Fs']` (the decoy) with `deny Fs` **exit 1** over code that opens no file;
-  post-fix `['Unknown']`, no key, exit 0.
+  bound first. Pre-fix the bound spelling answered with confidence where the direct spelling disclosed.
+  As shipped (R836) both spellings keep the release's key and both disclose, so they AGREE — which is the
+  property this entry protects; the decoy `Fs` itself is the release's, kept in both.
 
   The flag now travels with the type through all six binder arms that derive one from `rootOf`, and is
   dropped with it in `clearBindingTypeOnly`. `NameKeyedStateTests` — which caught the new property
@@ -869,11 +964,14 @@ is that a singleton key the dependency does NOT answer now discloses `Unknown` i
   pre-fix `inferred ['Fs']`, `deny Env` **exit 0** over code that reads the environment and `deny Fs`
   **exit 1** over code that opens no file. A fabrication and a silent under-report at once.
 
-  DROPS the key (§2 rule 1: never guess) and emits the COULD-NOT-FORM-A-KEY marker the sibling arm
-  already uses, so the row discloses (`dispatch:untyped cross-package receiver`) instead of falling
-  silent — dropping alone trades a wrong answer for a ⟨0.21⟩ purity claim. The signal comes from
-  `rootOf` itself (`opaqueHop`), the one authority on what a spelling denotes, rather than a second
-  copy of "did this hop resolve".
+  AS SHIPPED, THE ROW DISCLOSES AND THE KEY STAYS (R836). The first cut DROPPED the key and disclosed
+  only in a chained scan; that removed correct charges along with the decoy (`n.parent.visit()` on a
+  self-typed hop, `Theme.dark.apply()`) and left a standalone producer silent. Nothing on the wire says
+  which a hop is, so the release's key is kept as a floor and the row carries `Unknown`
+  (`dispatch:untyped cross-package receiver`) beside it: `deny Env Unknown` now fires over
+  `c.loop.spin()` (exit 0 on v0.39.2), and `deny Fs` still exits 1 there, as on v0.39.2 — the decoy is
+  the named residual. The signal comes from `rootOf` itself (`opaqueHop`), the one authority on what a
+  spelling denotes.
 
 - **SOUNDNESS R567(b) — AN OVERLOADED DEPENDENCY METHOD WAS UNREACHABLE BY THE CONSUMER'S §2 KEY.**
   This engine suffixes a unit name with its param types as soon as that name has two signatures
@@ -883,7 +981,10 @@ is that a singleton key the dependency does NOT answer now discloses `Unknown` i
   declined the METHOD case on the reasoning that an overloaded method "is already reached through its
   OWNER type" — which conflates naming the TYPE with spelling the LEAF. The owner is present and
   correct in all three keys and the join still missed. Fixed by publishing the BARE spelling of all
-  three key shapes, not a fourth shape; `insert` unions, so nothing that worked can stop working.
+  three key shapes, not a fourth shape. `insert` unions WITHIN a report, but "nothing that worked can stop
+  working", as first written here, was false ACROSS reports: the new bare keys made two chained packages
+  answer one key, and the join dropped an ambiguous key instead of unioning it (RxAlamofire's four
+  `ObservableType.validate` rows went from `['Unknown']` to absent). Closed below, per SPEC ⟨0.25⟩.
 
   UNION, never narrowed by arity: the wire key records param TYPES and not DEFAULTS, so `finish(Bool)`
   is the real callee of a zero-argument `finish()` call whenever that parameter has a default.

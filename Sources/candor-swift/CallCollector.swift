@@ -151,6 +151,10 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// reading silence as purity, because a miss cannot tell "pure" from "`.shared` is not a
               /// `Client`". Read only by the Driver's §2 join. DEFAULTS TO FALSE.
               var conventionOwner: Bool = false
+              /// SOUNDNESS R836 — on a `<untyped>.` marker: the owner the release keyed this call on, which
+              /// `rootOf` reached through a hop it could not type. Its presence is what makes the Driver
+              /// disclose in a STANDALONE scan too (see there). nil on every other marker and call.
+              var guessedOwner: String? = nil
               var extOwner: String? = nil }    // the RESOLVED receiver root of an otherwise-unmatched member
                                                // call (`c.fetch()` where c: RatesClient, an external type) —
                                                // carried ONLY for the §2 CANDOR_DEPS join key (`pkg#Owner.leaf`);
@@ -1848,13 +1852,19 @@ final class CallCollector: SyntaxVisitor {
     /// lesson: 17,944 units said "inert" and the probe said the code never ran). One stderr line per
     /// receiver chain whose last hop this engine could not type and which WOULD have become a §2 owner.
     static let r567aProbe = ProcessInfo.processInfo.environment["CANDOR_R567A_PROBE"] != nil
-    /// SOUNDNESS R567(a) §1b KILL SWITCH — restores the pre-fix owner, i.e. the OUTER BASE's type for a
-    /// member-chain receiver. `R567CalibrationTests` asserts the wrong-member join is gone; running the
-    /// suite with `CANDOR_R567A_OFF=1` is what proves those assertions can FAIL.
+    /// SOUNDNESS R567(a) §1b KILL SWITCH — the RELEASE'S owner at the untyped-member site and nothing else:
+    /// no type-path resolution beyond it, no floor duplicate, no disclosure of the guess. Since R836 the
+    /// fix keeps that owner as a floor and adds a disclosure; running `ReceiverChainOwnerKeyProcessTests`
+    /// and `StandaloneProducerChainProcessTests` under `CANDOR_R567A_OFF=1` is what proves they can FAIL.
     private static let r567aOff = ProcessInfo.processInfo.environment["CANDOR_R567A_OFF"] != nil
-    /// SOUNDNESS R826 §1b KILL SWITCH — restores HEAD-before-R826: every opaque hop refuses, the singleton
-    /// accessor included. `SingletonConventionOwnerProcessTests` goes red under it.
+    /// SOUNDNESS R826 §1b KILL SWITCH — no type-path or singleton resolution of an opaque hop: every such hop
+    /// is a GUESS (the release's owner as a floor, plus the disclosure). `SingletonConventionAndCoverage-`
+    /// and `StandaloneProducerChainProcessTests` go red under it.
     private static let r826Off = ProcessInfo.processInfo.environment["CANDOR_R826_OFF"] != nil
+    /// SOUNDNESS R839 §1b KILL SWITCH — an extension-only dependency type's singleton spelling falls
+    /// silent again (typed branch with no owner; the let binder clears it as a LOCAL type).
+    static let r839Off = ProcessInfo.processInfo.environment["CANDOR_R839_OFF"] != nil
+    static let r836Probe = ProcessInfo.processInfo.environment["CANDOR_R836_PROBE"] != nil
     /// SOUNDNESS R826 REACH PROBE — one stderr line per call site the convention re-keys.
     static let r826Probe = ProcessInfo.processInfo.environment["CANDOR_R826_PROBE"] != nil
 
@@ -1869,35 +1879,86 @@ final class CallCollector: SyntaxVisitor {
     /// A LOCAL type is refused, as the binder refuses it: for a type this scan declares the field index is
     /// the authority, and a `.shared` it did not record is one it could not type (the free-factory
     /// singleton fabrication the binder's own comment records).
-    /// `Mod.Type` where `Mod` is an imported module this project does not define (`isModuleQualifier`)
-    /// -> `Type`, dealiased; nil for anything else. A LOCAL type is refused: its own resolution paths
-    /// already answer the qualified spelling.
-    func moduleQualifiedTypeName(_ expr: ExprSyntax?) -> String? {
-        guard let qm = expr.map(Self.peel)?.as(MemberAccessExprSyntax.self),
-              let mod = qm.base?.as(DeclReferenceExprSyntax.self)?.baseName.text, isModuleQualifier(mod),
-              qm.declName.baseName.text.first?.isUppercase == true else { return nil }
-        let t = dealias(qm.declName.baseName.text)
-        return localTypes.contains(t) ? nil : t
+    /// SOUNDNESS R838/R839 — THE TYPE A TYPE-REFERENCE EXPRESSION NAMES, answered ONCE for every spelling
+    /// of one: bare (`Client`, a typealias of one), `Self`, module-qualified (`RatesCore.Client`), NESTED
+    /// (`Outer.Inner`, `RatesCore.Outer.Inner`) and generic-specialized (`Box<Int>`). Returns the type PATH
+    /// in the owning package's namespace (`Outer.Inner`) — the spelling the dependency's own entry hashes
+    /// use, so a key formed from it is one the ordinary §2 join can answer — or nil when the expression is
+    /// not a type reference this collector can vouch for.
+    ///
+    /// Why one function: R826's first cut accepted `T`, `Self` and `Mod.T` at the singleton site and
+    /// `Mod.T` at the static-call site, and every spelling it did not list fell back to R567(a)'s refusal —
+    /// `RatesCore.Outer.Inner.shared.fetch()` went `deny Env` 1 -> 0 against v0.39.2 (R838), and
+    /// `Box<Int>.shared.fetch()` was silent on the release too. A list of accepted spellings is an
+    /// allowlist over the language's syntax; the STRUCTURE (every segment a type name, the head a type or
+    /// an imported module) is the rule the spellings were instances of.
+    ///
+    /// A type this scan DECLARES is refused, and so is a nested path whose head it declares: for those the
+    /// field index is the authority, and a member it did not record is one it could not type (the
+    /// free-factory singleton fabrication `let s = T.shared`'s binder records). A type this scan only
+    /// EXTENDS is NOT refused (R839): `extension Svc {}` puts `Svc` in `localTypes`, but the declaration —
+    /// and so the convention's answer — is the dependency's. The fence is `declaredTypes`, as R656's is.
+    func conventionTypePath(_ expr: ExprSyntax?) -> String? {
+        guard var e = expr.map(Self.peel) else { return nil }
+        func unspecialize(_ x: ExprSyntax) -> ExprSyntax {
+            if let g = x.as(GenericSpecializationExprSyntax.self) { return Self.peel(g.expression) }
+            return x
+        }
+        e = unspecialize(e)
+        var segs: [String] = []
+        while let ma = e.as(MemberAccessExprSyntax.self), let b = ma.base {
+            let n = ma.declName.baseName.text
+            guard n.first?.isUppercase == true else { return nil }
+            segs.insert(n, at: 0)
+            e = unspecialize(Self.peel(b))
+        }
+        guard let dr = e.as(DeclReferenceExprSyntax.self) else { return nil }
+        let head = dr.baseName.text
+        if head == "Self" {
+            guard let et = enclosingType else { return nil }
+            segs.insert(et, at: 0)
+        } else if !segs.isEmpty, isModuleQualifier(head) {
+            // `RatesCore.Client` spells `Client`: a module qualifier is a SPELLING, never a receiver.
+        } else {
+            guard head.first?.isUppercase == true else { return nil }
+            let r = rootOf(ExprSyntax(dr))
+            guard let root = r.root, !r.isVar, !r.opaqueHop else { return nil }
+            segs.insert(root, at: 0)
+        }
+        guard let first = segs.first, let last = segs.last, first.first?.isUppercase == true else { return nil }
+        if segs.count == 1 {
+            let t = dealias(first)
+            return declaredTypes.contains(t) ? nil : t
+        }
+        // a nested path whose HEAD or LEAF this scan declares is a local type path — local resolution's
+        // question, not the convention's.
+        guard !declaredTypes.contains(first), !declaredTypes.contains(last) else { return nil }
+        return segs.joined(separator: ".")
     }
 
+    /// SOUNDNESS R826 — the static-call receiver that `rootOf` walks as an opaque hop although it is a TYPE:
+    /// `RatesCore.Client.sfetch()`, `Outer.Inner.sfetch()`, `Box<Int>.sfetch()`. Non-nil only for the
+    /// spellings `rootOf` does not already answer as a type (a bare `Client` it does), so this can add an
+    /// owner and never replace one.
+    func moduleQualifiedTypeName(_ expr: ExprSyntax?) -> String? {
+        guard let e = expr.map(Self.peel), !e.is(DeclReferenceExprSyntax.self) else { return nil }
+        return conventionTypePath(e)
+    }
+
+    /// SOUNDNESS R826 — THE SINGLETON CONVENTION, ANSWERED IN ONE PLACE FOR THE DIRECT SPELLING.
+    ///
+    /// Returns the type a receiver `T.<accessor>` is taken to have when `<accessor>` is one of
+    /// `SINGLETON_ACCESSORS` and `T` is a type reference (`conventionTypePath`) this scan does not declare
+    /// — the same rule the let binder applies to `let s = T.shared` (its "PLATFORM accessor" arm). A
+    /// trailing `.self` is identity and is stripped.
     func singletonConventionOwner(_ recv: ExprSyntax?) -> String? {
         guard var e = recv.map(Self.peel) else { return nil }
         while let ma = e.as(MemberAccessExprSyntax.self), ma.declName.baseName.text == "self",
               let b = ma.base { e = Self.peel(b) }
         guard let ma = e.as(MemberAccessExprSyntax.self),
               SINGLETON_ACCESSORS.contains(ma.declName.baseName.text),
-              let rawBase = ma.base.map(Self.peel) else { return nil }
-        var t: String? = moduleQualifiedTypeName(rawBase)
-        if t == nil, let dr = rawBase.as(DeclReferenceExprSyntax.self) {
-            let n = dr.baseName.text
-            if n == "Self" { t = enclosingType }
-            else if n.first?.isUppercase == true {
-                let r = rootOf(rawBase)
-                if let root = r.root, !r.isVar, !r.opaqueHop { t = root }
-            }
-        }
-        guard let ty = t, ty.first?.isUppercase == true, !localTypes.contains(ty) else { return nil }
-        return ty
+              let rawBase = ma.base else { return nil }
+        return conventionTypePath(rawBase)
     }
     /// SOUNDNESS R610 §1b KILL SWITCH — stops the `opaqueHop` guess flag travelling into `vars`, i.e.
     /// restores the laundered binding, and the if-let arm of `ReceiverChainOwnerKeyProcessTests` reds.
@@ -5766,13 +5827,34 @@ final class CallCollector: SyntaxVisitor {
                 // does not declare, in a package that owns neither. That is R532b's class and R567(a)'s
                 // shape at a NEW site, i.e. this fix creating the next defect, which is the measured rate
                 // for fabrication-adjacent fixes in this family.
-                let r651ForeignExtended = !Self.r651Off && !declaredTypes.contains(rt) && !base.opaqueHop
+                //
+                // SOUNDNESS R839 — …EXCEPT A HOP THE CONVENTION TYPES. `Svc.shared.fetch()` with an
+                // `extension Svc { }` anywhere in the package reached this branch with `opaqueHop` set (the
+                // `.shared` hop), so the guard above left it with no owner, local resolution found no
+                // `Svc.fetch`, and the row was SILENT — on v0.39.2 too. A singleton accessor on the
+                // extended type is the same convention `singletonConventionOwner` answers for a type the
+                // package does not touch at all, so it gets the same owner and the same R826 policy (a
+                // chained MISS discloses). Any OTHER unexplained hop on an extension-only type stays
+                // keyless AND undisclosed, exactly as on v0.39.2 — the vapor `withLock` key above is why
+                // it gets no key, and a disclosure here was MEASURED as a flood rather than a recovery:
+                // 1,026 sites over 9 corpus packages, dominated by stdlib/platform types a package
+                // extends (`extension String`), where the release never asked a dependency anything.
+                // The residual (`s.other.ping()` on an extension-only dependency type) is pre-existing
+                // and stays silent; it is named in the CHANGELOG rather than hedged here.
+                let extOnly = !declaredTypes.contains(rt)
+                let r839Convention = !Self.r839Off && extOnly && base.opaqueHop
+                    && singletonConventionOwner(ma.base) == rt
+                let r651ForeignExtended = !Self.r651Off && extOnly && (!base.opaqueHop || r839Convention)
                 if Self.r651Probe, r651ForeignExtended {
                     FileHandle.standardError.write("R651HIT \(rt).\(member)\n".data(using: .utf8)!)
                 }
                 calls.append(Call(path: "\(rt).\(member)", leaf: member, strArg: lit, typed: true,
                                   args: argKinds(node), argTypes: argTypesOf(node),
+                                  conventionOwner: r839Convention,
                                   extOwner: r651ForeignExtended ? rt : nil))
+                if Self.r836Probe, r839Convention {
+                    FileHandle.standardError.write("R839HIT \(rt).\(member)\n".data(using: .utf8)!)
+                }
                 // SOUNDNESS R429 — …AND ONE EDGE PER REMAINING ARM. `rt` is the dealiased root, and
                 // `dealias` reads a map the Driver merges LAST-WRITER-WINS, so a `#if`/`#else` pair
                 // declaring one alias over two types resolved to whichever arm was written last and
@@ -6060,85 +6142,73 @@ final class CallCollector: SyntaxVisitor {
                 // dep quals lead with a type name — but keep the owner honest: only a tracked value
                 // (isVar) or a type-looking root qualifies.
                 //
-                // SOUNDNESS R567(a) — AND A CHAIN THAT WALKED THROUGH A MEMBER THIS ENGINE COULD NOT TYPE
-                // HAS NO CONFIDENTLY-RESOLVED ROOT AT ALL. `rootOf` deliberately KEEPS the outer base's
-                // type when a `.member` hop is unexplained, because that is what the κ classifier reads
-                // (`FileManager.default.removeItem`, `ProcessInfo.processInfo.environment` — the whole
-                // static-chain idiom lives on that fallback, and κ has already had its turn above). What
-                // it is NOT is an answer to "what TYPE is this receiver", and this arm asks exactly that:
-                // for `channel.embeddedEventLoop.run()` it produced `swift-nio#EmbeddedChannel.run` — a
-                // member the OUTER BASE does not have. 13 of the 18 sites of the R533 measurement.
+                // ── SOUNDNESS R567(a) / R826 / R836 / R838 — THE RELEASE'S OWNER IS A FLOOR; A GUESS DISCLOSES ──
                 //
-                // MEASURED, one variable (the dependency's own source; same consumer text, same binary):
+                // `rootOf` keeps the OUTER BASE's type when a `.member` hop is not a known field, element
+                // accessor or tuple member (`opaqueHop`). That is right for the κ static-chain idiom and a
+                // GUESS for everything else: `c.loop.spin()` keys `Chan.spin`, a member the receiver may
+                // not be. R567(a) (`dbe3f68`) REFUSED the key and disclosed — but only where the package was
+                // chained, so a middle library scanned standalone (the ordinary workflow) published neither
+                // key nor disclosure, and a three-package chain fell SILENT (R836) on every such spelling:
+                // `Client.shared`, `n.parent`, `Theme.dark` alike (measured, `fx/g1`). And refusing cannot be
+                // made monotone against v0.39.2 here: where the outer base's same-named member IS the real
+                // callee (`n.parent.visit()` on a self-typed hop, `Theme.dark.apply()`), the refusal
+                // removes a correct charge, and nothing on the wire says which case a hop is. Telling them
+                // apart needs the hop's declared TYPE from the dependency, which no report publishes.
                 //
-                //     dep: Loop.spin -> Env,  Channel.spin -> Fs,  consumer `c.loop.spin()`
-                //       HEAD   inferred ['Fs']    deny Env exit 0    deny Fs exit 1
-                //       truth  inferred ['Env']
+                // So the release's owner is kept as a FLOOR — every key and join v0.39.2 formed is formed
+                // again, in both modes — and the guess is DISCLOSED instead of acted on, with R567(a)'s own
+                // token, in chained AND standalone scans (the Driver's `<untyped>` arm, keyed on
+                // `guessedOwner`). The wrong-member charge R567(a) removed (`c.loop.spin()` -> `Fs`) comes
+                // back as it shipped in v0.39.2; its SILENT half (`deny Env` 0 over code that reads env)
+                // stays closed, because the row now also says `Unknown`.
                 //
-                // So it is not merely an unjoinable key. When the outer base HAPPENS to declare the same
-                // leaf the join lands on the WRONG MEMBER, and the row is a fabrication and a silent
-                // under-report at once, in opposite directions: `deny Env` exits 0 over code that reads
-                // the environment, `deny Fs` exits 1 over code that opens no file.
-                //
-                // DROP, never guess — §2 rule 1, the same posture `dependencyModulePackages` takes for an
-                // ambiguous module and `localProtocolWirePath` takes for an ambiguous leaf. A key formed
-                // from a type the receiver is not is a decision, and refusing to decide must not be
-                // spelled as one.
-                //
-                // THE SIGNAL COMES FROM `rootOf` ITSELF (`opaqueHop`), not from re-inspecting the syntax
-                // here: that resolver is the one authority on what a spelling denotes (R97's rule), and a
-                // second copy of "did this hop resolve" is how two sites come to disagree (§F1.3).
-                //
-                // AND DROPPING ALONE IS NOT THE FIX — it trades a WRONG answer for SILENCE, which under
-                // ⟨0.21⟩ is still a positive claim of purity (measured: with the key dropped and nothing
-                // else, `chainWrong` leaves `functions[]` entirely and `deny Env` still exits 0). So the
-                // site emits the COULD-NOT-FORM-A-KEY marker the sibling arm below already uses, and
-                // lands on the SAME Driver disclosure with the SAME `unknownWhy` token — no second
-                // mechanism and no new wire vocabulary for what is the same fact one cause over: the
-                // receiver's type was not determined, so this engine did not ask.
-                // SOUNDNESS R826 (sibling) — A MODULE-QUALIFIED TYPE IS NOT AN OPAQUE HOP. `RatesCore.Client`
-                // spells `Client`; `rootOf` answers the qualifier (`RatesCore`) and marks `.Client` opaque,
-                // so `RatesCore.Client.sfetch()` lost the key `Client.sfetch()` forms one spelling over
-                // (`deny Env` 1 -> 0 against v0.39.2). The same rule as `chargeModuleQualifiedSpelling`:
-                // a module qualifier is a SPELLING, never a different receiver.
+                // A hop whose type IS established — a nested / module-qualified / generic type path
+                // (`conventionTypePath`) or a singleton accessor on one — is a RESOLUTION, not a guess: its
+                // owner is joined and published as well as the floor (when the two differ), and it
+                // discloses only on a chained MISS (R826). A module qualifier is a SPELLING, never a
+                // different receiver (`chargeModuleQualifiedSpelling`'s rule).
                 let qualifiedOwner = Self.r826Off ? nil : moduleQualifiedTypeName(ma.base)
                 if Self.r826Probe, let q = qualifiedOwner, base.opaqueHop {
                     FileHandle.standardError.write("R826QHIT \(q).\(member)\n".data(using: .utf8)!)
                 }
-                let opaqueChain = !Self.r567aOff && base.opaqueHop && qualifiedOwner == nil
                 if Self.r567aProbe, base.opaqueHop, let r = base.root,
                    base.isVar || r.first?.isUppercase == true {
                     FileHandle.standardError.write("R567AHIT \(r).\(member)\n".data(using: .utf8)!)
                 }
-                let ownerPreR567 = qualifiedOwner ?? base.root.flatMap { r in
+                // The owner v0.39.2 formed, unchanged: the floor.
+                let releaseOwner = base.root.flatMap { r in
                     (base.isVar || r.first?.isUppercase == true) ? r : nil
                 }
-                // SOUNDNESS R826 — …EXCEPT THE ONE HOP WHOSE TYPE THE ENGINE ALREADY TAKES ON CONVENTION
-                // ELSEWHERE. `Client.shared` on a type this scan does not declare is exactly what the let
-                // binder types `s` as in `let s = Client.shared; s.fetch()` (`SINGLETON_ACCESSORS`), and
-                // what v0.39.2 keyed the direct spelling on. Refusing it here turned a correct concrete
-                // charge into a hedge (`['Env']` -> `['Unknown']`, `deny Env viaShared` 1 -> 0 against the
-                // release) and made the two spellings of one program disagree. So the key is formed again
-                // — and `conventionOwner` makes a MISS disclose, which neither the release nor the binder
-                // does: a hit charges what the dependency answered, a miss cannot certify purity. The
-                // R567(a) population proper — `c.loop.spin()`, `channel.embeddedEventLoop.run()`, any hop
-                // that is not a singleton accessor on a bare type — keeps its refusal.
-                let conventionOwner = opaqueChain && ownerPreR567 != nil && !Self.r826Off
+                let conventionOwner = base.opaqueHop && qualifiedOwner == nil && !Self.r826Off
                     ? singletonConventionOwner(ma.base) : nil
                 if Self.r826Probe, let c = conventionOwner {
                     FileHandle.standardError.write("R826HIT \(c).\(member)\n".data(using: .utf8)!)
                 }
-                let owner = opaqueChain ? conventionOwner : ownerPreR567
-                calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), opaqueRecv: base.mono, conventionOwner: conventionOwner != nil, extOwner: owner))
-                // R567(a) — the disclosure, bounded to the sites that PREVIOUSLY formed a key. A chain
-                // whose root never qualified as an owner asked the index nothing before this change and
-                // must keep asking nothing: widening the disclosure to every opaque hop would charge
-                // Unknown for receivers the §2 join was never going to reach, which is false uncertainty
-                // rather than a recovered one (the sweep-[33]/[36] direction).
-                if opaqueChain, ownerPreR567 != nil, conventionOwner == nil {
-                    calls.append(Call(path: "<untyped>.\(member)", leaf: member, strArg: nil,
-                                      typed: false, args: [], argTypes: [], extOwner: nil))
+                // The type a hop is ESTABLISHED to have, when one is.
+                let resolvedOwner = qualifiedOwner ?? conventionOwner
+                // `CANDOR_R567A_OFF=1` restores the release's owner at this site: no resolution beyond it and
+                // no disclosure (R839's typed-branch convention and the ⟨0.25⟩ join union have their own switches).
+                let guessedOwner: String? = Self.r567aOff ? nil
+                    : (base.opaqueHop && resolvedOwner == nil ? releaseOwner : nil)
+                let primary = Self.r567aOff ? releaseOwner : (resolvedOwner ?? releaseOwner)
+                calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), opaqueRecv: base.mono, conventionOwner: !Self.r567aOff && conventionOwner != nil && conventionOwner == primary, extOwner: primary))
+                // THE FLOOR, where the resolution differs from what the release keyed (`RatesCore.Client`
+                // was keyed on the MODULE and joined its leaf union; `Outer.Inner.shared` on `Outer`).
+                // Kept so nothing the release answered stops being answered; it is the release's own
+                // over-approximation, not a new one.
+                if !Self.r567aOff, let r = releaseOwner, let p = primary, r != p {
+                    calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), opaqueRecv: base.mono, extOwner: r))
                 }
+                // The disclosure for a GUESSED owner — bounded, as R567(a) bounded it, to sites where the
+                // release formed an owner: a chain whose root never qualified asked nothing then and must
+                // not start hedging now (the sweep-[33]/[36] direction).
+                if let g = guessedOwner {
+                    calls.append(Call(path: "<untyped>.\(member)", leaf: member, strArg: nil,
+                                      typed: false, args: [], argTypes: [], opaqueRecv: base.mono,
+                                      guessedOwner: g, extOwner: nil))
+                }
+                let owner = primary
                 // COULD-NOT-FORM-A-KEY: the receiver is a local bound from a dependency call we could not
                 // type, and nothing above resolved it. Emit a marker the Driver consumes into an honest
                 // `Unknown`; it resolves to NOTHING by design — it exists to say no key was formed, not to
@@ -7853,7 +7923,9 @@ final class CallCollector: SyntaxVisitor {
                         // the type RECORDS the accessor's vended type (an explicit annotation, a ctor
                         // init, or a resolved free factory) — use THAT, the real instance type.
                         vars[name] = ft
-                    } else if localTypes.contains(base) {
+                    } else if Self.r839Off ? localTypes.contains(base) : declaredTypes.contains(base) {
+                        // (R839: `declaredTypes`, not `localTypes` — a type the package only EXTENDS is
+                        //  declared by the dependency, and its convention is the dependency's.)
                         // a LOCAL type whose `.shared`/`.default` vended type is NOT recorded: the
                         // factory leaf was ambiguous/unknown, so we can't prove it vends Self. Binding
                         // to `base` here would FABRICATE the static's own-type methods on the value (the

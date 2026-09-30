@@ -782,9 +782,32 @@ public func defaultTargetSources(_ packageRoot: String, _ target: PackageTarget)
 /// Swift report can cover in full.
 private let clangSourceExtensions: Set<String> = ["c", "m", "mm", "cc", "cpp", "cxx", "c++", "C", "s", "S"]
 
-/// `@_exported import M` / `@_exported import struct M.T` / `@preconcurrency @_exported import M`.
-private let reexportPattern = try! NSRegularExpression(
-    pattern: #"@_exported\b[^\n]*?\bimport\s+(?:(?:typealias|struct|class|enum|protocol|let|var|func)\s+)?([A-Za-z_][A-Za-z0-9_]*)"#)
+/// `@_exported import M` / `@_exported import struct M.T` / `@preconcurrency @_exported import M` — the
+/// modules a Swift file RE-EXPORTS, read by the PARSER rather than by a pattern over the text.
+///
+/// SOUNDNESS R837 — the regex this replaced (`@_exported\b[^\n]*?\bimport…`) could not see the
+/// attribute on its own line (`@_exported` ⏎ `import CShim`), which is ordinary Swift: the consumer's
+/// caller of the re-exported C function went from `invisible ['ReCore']` on v0.39.2 to ABSENT from
+/// `functions[]` — a purity claim. Every spelling the language accepts (a newline, a comment, several
+/// attributes, `#if` arms) is one `ImportDeclSyntax` with an `_exported` attribute; asking the parser is
+/// §G's "ask the authority" rather than a fourth hand-written grammar. Every `#if` arm is walked, so a
+/// re-export in any arm counts — the disclosing direction.
+public func reexportedModules(source: String) -> Set<String> {
+    final class V: SyntaxVisitor {
+        var out: Set<String> = []
+        init() { super.init(viewMode: .sourceAccurate) }
+        override func visit(_ node: ImportDeclSyntax) -> SyntaxVisitorContinueKind {
+            let exported = node.attributes.contains {
+                $0.as(AttributeSyntax.self)?.attributeName.trimmedDescription == "_exported"
+            }
+            if exported, let m = node.path.first?.name.text { out.insert(m) }
+            return .skipChildren
+        }
+    }
+    let v = V()
+    v.walk(Parser.parse(source: source))
+    return v.out
+}
 
 /// `.binaryTarget(name:)` / `.systemLibrary(name:)` — declarations `TargetFinder` deliberately does not
 /// read (they contribute no sources to a scan scope), and exactly the modules a Swift report can never hold.
@@ -899,11 +922,9 @@ public func dependencyModuleOwnership(rootDir: String,
             }
             claims[t.name, default: []].insert(pkg)
             for f in swiftFiles {
-                guard let text = readSource(f), text.contains("@_exported") else { continue }
-                let ns = text as NSString
-                for m in reexportPattern.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
-                    let r = ns.substring(with: m.range(at: 1))
-                    if r != t.name { out.reexports[t.name, default: []].insert(r) }
+                guard let text = readSource(f), text.contains("_exported") else { continue }
+                for r in reexportedModules(source: text) where r != t.name {
+                    out.reexports[t.name, default: []].insert(r)
                 }
             }
         }

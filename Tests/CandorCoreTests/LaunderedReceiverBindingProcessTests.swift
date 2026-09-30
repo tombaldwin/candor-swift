@@ -23,8 +23,13 @@ import Foundation
 ///       laundered       `if let l = c.maybeLoop { l.spin() }`      ['Fs']   <- the decoy
 ///       laundered       `guard let l = c.maybeLoop else {…}; l.spin()`  ['Fs']
 ///
-/// §1b: every assertion FAILS under `CANDOR_R610_OFF=1`, which stops the flag travelling into `vars`.
-/// The CONTROL (`l.spin()` on a `Loop`-typed parameter) passes in both.
+/// R836 (2026-09-30) changed what the flag BUYS, not what it is: an untyped hop no longer refuses the key,
+/// it keeps the release's key as a floor and DISCLOSES (see `ReceiverChainOwnerKeyProcessTests`). What
+/// R610 protects is unchanged — the bound spelling must answer exactly as the direct one does, so a
+/// binding cannot turn a disclosed guess back into a confident one.
+///
+/// §1b: the disclosure assertions FAIL under `CANDOR_R610_OFF=1`, which stops the flag travelling into
+/// `vars`. The CONTROL (`l.spin()` on a `Loop`-typed parameter) passes in both.
 final class LaunderedReceiverBindingProcessTests: XCTestCase {
 
     private static let dep = """
@@ -113,22 +118,22 @@ final class LaunderedReceiverBindingProcessTests: XCTestCase {
         import RatesCore
         public func launderedIfLet(_ c: Channel) { if let l = c.maybeLoop { l.spin() } }
         public func launderedGuard(_ c: Channel) { guard let l = c.maybeLoop else { return }; l.spin() }
+        public func direct(_ c: Channel) { c.maybeLoop?.spin() }
         public func controlDirect(_ l: Loop) { l.spin() }
         """)
 
+        XCTAssertTrue(r.rows["direct"]?.inferred.contains("Unknown") ?? false,
+                      "the DIRECT spelling discloses its guessed owner; got \(String(describing: r.rows["direct"]))")
         for fn in ["launderedIfLet", "launderedGuard"] {
             let row = r.rows[fn]
-            XCTAssertNotNil(row, "\(fn) must still have a row — see R567(a): dropping without disclosing "
-                            + "is a ⟨0.21⟩ purity claim")
-            XCTAssertFalse(row?.inferred.contains("Fs") ?? true,
-                           "\(fn): `Channel.spin` is Fs and is NOT what `l.spin()` reaches. The binding "
-                           + "carried the OUTER BASE's type out of `rootOf` and `vars` forgot it was a "
-                           + "convention, so R567(a)'s refusal was never asked; got \(row?.inferred ?? [])")
-            XCTAssertTrue(row?.keys.isEmpty ?? false,
-                          "\(fn): obligation 1 must publish no key — `RatesDep#Channel.spin` names a "
-                          + "member the receiver's real type does not have; got \(row?.keys ?? [])")
-            XCTAssertEqual(row?.inferred, ["Unknown"],
-                           "\(fn): and it must DISCLOSE, the same way the direct spelling does")
+            XCTAssertNotNil(row, "\(fn) must still have a row — absence is a ⟨0.21⟩ purity claim")
+            XCTAssertTrue(row?.inferred.contains("Unknown") ?? false,
+                          "\(fn): the binding carried the OUTER BASE's type out of `rootOf`; unless `vars` "
+                          + "remembers it was a guess, the row answers with confidence the direct spelling "
+                          + "does not have; got \(row?.inferred ?? [])")
+            XCTAssertEqual(row?.inferred, r.rows["direct"]?.inferred,
+                           "\(fn): the bound and direct spellings of one program must AGREE")
+            XCTAssertEqual(row?.keys, r.rows["direct"]?.keys, "\(fn): …key for key (the release's floor)")
         }
 
         XCTAssertEqual(r.rows["controlDirect"]?.inferred, ["Env"],
@@ -136,8 +141,8 @@ final class LaunderedReceiverBindingProcessTests: XCTestCase {
                        + "A fix that marked every `vars` entry opaque would red here and pass above")
         XCTAssertEqual(r.rows["controlDirect"]?.keys, ["RatesDep#Loop.spin"],
                        "…including its published key; got \(r.rows["controlDirect"]?.keys ?? [])")
-        XCTAssertEqual(r.denyFs, 0,
-                       "GATE LEVEL: `deny Fs` over a consumer that opens no file exited 1 before this "
-                       + "fix — the decoy's effect reaching a policy through a binding")
+        XCTAssertEqual(r.denyFs, 1,
+                       "the release's fabricated `deny Fs` through the floor key — the named residual of "
+                       + "R836's design (see `ReceiverChainOwnerKeyProcessTests`), not a goal")
     }
 }

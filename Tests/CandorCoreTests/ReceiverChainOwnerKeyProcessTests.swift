@@ -21,13 +21,21 @@ import Foundation
 ///       PRE-FIX   inferred ['Fs']     deny Env exit 0     deny Fs exit 1
 ///       TRUTH     inferred ['Env']
 ///
-/// The fix DROPS the key (§2 rule 1: never guess) and emits the COULD-NOT-FORM-A-KEY marker the sibling
-/// arm already uses, so the row discloses rather than falling silent — dropping alone trades a wrong
-/// answer for a positive purity claim, which is the same defect wearing a different face.
+/// `dbe3f68` DROPPED the key and disclosed, but only in a CHAINED scan — and a standalone producer (the
+/// ordinary workflow for a middle library) then published neither key nor disclosure, so a three-package
+/// chain fell silent against v0.39.2 (R836). Refusing also removed CORRECT charges wherever the outer
+/// base's member IS the callee (a self-typed hop, `n.parent.visit()`), and nothing on the wire says which
+/// case a hop is. So the release's owner is now a FLOOR — its key is published and joined exactly as
+/// v0.39.2 did — and the guess is DISCLOSED instead of acted on, in chained and standalone scans alike.
 ///
-/// §1b: every assertion here FAILS under `CANDOR_R567A_OFF=1`, which restores the pre-fix owner. The
-/// CONTROL arm (`l.run()` on a directly-typed receiver) passes in BOTH, or a "fix" that dropped every
-/// foreign key would read green.
+/// **What that costs, pinned here rather than left to be rediscovered:** the fabrication half comes back
+/// as v0.39.2 shipped it (`deny Fs` exits 1 over `c.loop.spin()`); the SILENT half stays closed — the row
+/// carries `Unknown[dispatch:untyped cross-package receiver]`, so `deny Env Unknown` exits 1 over code
+/// that reads the environment through a receiver the engine could not type. Closing the fabrication
+/// without re-opening a silence needs the hop's declared type from the dependency (contract work).
+///
+/// §1b: the disclosure assertions FAIL under `CANDOR_R567A_OFF=1`, which restores the release exactly.
+/// The CONTROL arm (`l.spin()` on a directly-typed receiver) passes in both.
 final class ReceiverChainOwnerKeyProcessTests: XCTestCase {
 
     private struct Row {
@@ -41,7 +49,8 @@ final class ReceiverChainOwnerKeyProcessTests: XCTestCase {
     /// the two gate exits. The dependency report is produced BY THE SAME BINARY, so the producer half of
     /// any key change is inside the measurement rather than held out of it.
     private func run(depSource: String, appSource: String, label: String)
-        throws -> (rows: [String: Row], denyEnv: Int32, denyFs: Int32, depFns: [String: [String]]) {
+        throws -> (rows: [String: Row], denyEnv: Int32, denyFs: Int32, denyEnvUnknown: Int32,
+                   depFns: [String: [String]]) {
         let bin = try ProcessHarness.binaryURL(for: Self.self)
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("candor-r567a-\(label)-\(UUID().uuidString)")
@@ -70,6 +79,7 @@ final class ReceiverChainOwnerKeyProcessTests: XCTestCase {
         try write("app/Sources/App/app.swift", appSource)
         try write("envdeny.policy", "deny Env\n")
         try write("fsdeny.policy", "deny Fs\n")
+        try write("envunk.policy", "deny Env Unknown\n")
 
         let depDir = root.appendingPathComponent("depR")
         try FileManager.default.createDirectory(at: depDir, withIntermediateDirectories: true)
@@ -110,7 +120,11 @@ final class ReceiverChainOwnerKeyProcessTests: XCTestCase {
                                               "--policy", root.appendingPathComponent("fsdeny.policy").path,
                                               "--out", root.appendingPathComponent("gf").path],
                                         env: ["CANDOR_DEPS": depDir.path])
-        return (rows, ge.code, gf.code, depFns)
+        let gu = try ProcessHarness.run(bin, [root.appendingPathComponent("app").path,
+                                              "--policy", root.appendingPathComponent("envunk.policy").path,
+                                              "--out", root.appendingPathComponent("gu").path],
+                                        env: ["CANDOR_DEPS": depDir.path])
+        return (rows, ge.code, gf.code, gu.code, depFns)
     }
 
     /// The dependency: `Channel.loop` is a `Loop`, and BOTH types declare `spin`. Only `Loop.spin` is
@@ -128,7 +142,7 @@ final class ReceiverChainOwnerKeyProcessTests: XCTestCase {
     }
     """
 
-    func testAMemberChainReceiverDoesNotInheritTheOuterBasesSameNamedMember() throws {
+    func testAMemberChainReceiverThroughAnUntypedHopDisclosesBesideTheReleaseKey() throws {
         let r = try run(depSource: Self.twoTypesOneLeaf, appSource: """
         import RatesCore
         public func chainWrong(_ c: Channel) { c.loop.spin() }
@@ -140,42 +154,35 @@ final class ReceiverChainOwnerKeyProcessTests: XCTestCase {
         XCTAssertEqual(r.depFns["Channel.spin"], ["Fs"], "dep fns: \(r.depFns)")
 
         let wrong = r.rows["chainWrong"]
-        XCTAssertNotNil(wrong,
-                        "the row must EXIST: dropping the key without disclosing trades a wrong answer "
-                        + "for a positive purity claim, and a fn absent from `functions[]` while counted "
-                        + "in `analyzed` is exactly that under ⟨0.21⟩")
-        XCTAssertFalse(wrong?.inferred.contains("Fs") ?? true,
-                       "`Channel.spin` is Fs and is NOT what `c.loop.spin()` reaches. Keying the chain to "
-                       + "the OUTER BASE charged it anyway — a fabrication; got \(wrong?.inferred ?? [])")
+        XCTAssertNotNil(wrong, "the row must EXIST — absence is a purity claim under ⟨0.21⟩")
         XCTAssertTrue(wrong?.unknownWhy.contains("dispatch:untyped cross-package receiver") ?? false,
-                      "…and the Env it DOES reach is not recoverable by this engine, so the row must "
-                      + "DISCLOSE rather than fall silent — the same marker and the same token the "
-                      + "sibling could-not-form-a-key arm uses; got \(wrong?.unknownWhy ?? [])")
-        XCTAssertTrue(wrong?.dispatchesOn.isEmpty ?? false,
-                      "obligation 1 must publish NO key here: `RatesDep#Channel.spin` names a member the "
-                      + "receiver's real type does not have, and a consumer joining it inherits the "
-                      + "decoy's effects; got \(wrong?.dispatchesOn ?? [])")
+                      "the Env `c.loop.spin()` really reaches is not recoverable by this engine, so the row "
+                      + "must DISCLOSE — the silent half of the release's defect; got \(wrong?.unknownWhy ?? [])")
+        XCTAssertTrue(wrong?.inferred.contains("Unknown") ?? false, "got \(wrong?.inferred ?? [])")
+        XCTAssertEqual(wrong?.dispatchesOn, ["RatesDep#Channel.spin"],
+                       "THE FLOOR — the key v0.39.2 published for this call is published again, so no "
+                       + "consumer that answered it on the release stops answering it; got \(wrong?.dispatchesOn ?? [])")
+        XCTAssertTrue(wrong?.inferred.contains("Fs") ?? false,
+                      "THE NAMED RESIDUAL — the decoy's Fs, exactly as v0.39.2 charged it. If this starts "
+                      + "failing, the fabrication was closed: re-check that no correct charge went with it")
 
         // THE CONTROL — a directly-typed receiver, one line away, must be untouched in BOTH directions.
         XCTAssertEqual(r.rows["controlDirect"]?.inferred, ["Env"],
-                       "CONTROL: `l.spin()` on a `Loop`-typed parameter resolves as it always did. A fix "
-                       + "that dropped every foreign key would read green on the arm above and red here")
+                       "CONTROL: `l.spin()` on a `Loop`-typed parameter resolves as it always did")
         XCTAssertEqual(r.rows["controlDirect"]?.dispatchesOn, ["RatesDep#Loop.spin"],
                        "…including its published key; got \(r.rows["controlDirect"]?.dispatchesOn ?? [])")
+        XCTAssertTrue(r.rows["controlDirect"]?.unknownWhy.isEmpty ?? false, "…and is not hedged")
 
-        XCTAssertEqual(r.denyFs, 0,
-                       "GATE LEVEL, the fabrication half: `deny Fs` over a consumer that opens no file "
-                       + "exited 1 before this fix — the decoy's effect reaching a policy")
-        XCTAssertEqual(r.denyEnv, 1,
-                       "GATE LEVEL, the silence half: `deny Env` over code that reads the environment "
-                       + "exited 0 before this fix. It passes now through the CONTROL's real Env, and "
-                       + "the disclosed row is what makes `deny Env Unknown` fire on the chain itself")
+        XCTAssertEqual(r.denyEnvUnknown, 1,
+                       "GATE LEVEL, the silence half: `deny Env Unknown` over code that reads the "
+                       + "environment through an untyped hop exited 0 on v0.39.2 (the key named the decoy)")
+        XCTAssertEqual(r.denyEnv, 1, "`deny Env` passes through the CONTROL's real Env")
+        XCTAssertEqual(r.denyFs, 1, "the release's fabricated `deny Fs` — the named residual, not a goal")
     }
 
-    /// The row's own shape: a leaf the outer base does not declare at all (`EmbeddedChannel.run`). No
-    /// decoy, so nothing is fabricated either way — what is measured is that the unjoinable key is not
-    /// PUBLISHED, and that the call discloses instead of vanishing.
-    func testAChainLeafTheOuterBaseDoesNotDeclarePublishesNoKey() throws {
+    /// A leaf the outer base does not declare at all (`EmbeddedChannel.run`): the release keyed it on the
+    /// outer base, missed, and read the miss as purity. The key is kept (the floor) and the row discloses.
+    func testAChainLeafTheOuterBaseDoesNotDeclareDisclosesInsteadOfReadingPure() throws {
         let r = try run(depSource: """
         import Foundation
         public final class Loop {
@@ -193,12 +200,10 @@ final class ReceiverChainOwnerKeyProcessTests: XCTestCase {
 
         XCTAssertEqual(r.depFns["Loop.run"], ["Env"], "dep fns: \(r.depFns)")
         let miss = r.rows["chainMiss"]
-        XCTAssertTrue(miss?.dispatchesOn.isEmpty ?? false,
-                      "`RatesDep#Channel.run` is obligation 1's key for a member `Channel` does not have "
-                      + "— unjoinable by construction, and additive noise in every consumer's index; "
-                      + "got \(miss?.dispatchesOn ?? [])")
+        XCTAssertNotNil(miss, "ABSENT on v0.39.2 — a purity claim over a call that reads the environment")
         XCTAssertTrue(miss?.unknownWhy.contains("dispatch:untyped cross-package receiver") ?? false,
-                      "got \(miss?.unknownWhy ?? [])")
+                      "got \(String(describing: miss))")
+        XCTAssertEqual(r.denyEnvUnknown, 1, "GATE LEVEL: 0 on v0.39.2")
     }
 
     /// **THE NARROWING, asserted rather than left to be discovered.** The κ static-chain idiom is the
