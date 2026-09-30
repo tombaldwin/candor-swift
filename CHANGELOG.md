@@ -10,6 +10,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.39.3] — 2026-09-30
+
 **Upgrading from 0.39.2 — gates that can flip, in BOTH directions (each is an entry below).** A patch
 that removes a fabricated charge moves a gate from 1 to 0, and that is the correct answer — but it is still
 a flip, and a baseline or a CI gate pinned across it will move. Directions are as each entry measured them; the entries carry the fixtures.
