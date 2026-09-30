@@ -64,14 +64,8 @@ a flip, and a baseline or a CI gate pinned across it will move. Directions are a
   / `OtherKit`) was UNCHAINED on 0.39.2, so a call on its type joined whichever same-named type WAS
   chained: `c: OtherKit.Client; c.token` read RatesCore's `Env` (the program reads a file). It now reads
   the package the source names — `deny Env` 1 → 0, `deny Fs` 0 → 1 (R565, R846).
-- A bare name that a BINDER holds in the current scope (`let`/`var`, `if`/`guard`/`while let`, `for`,
-  `catch`, a closure parameter, an enum-case payload) — the one "is a local" test that is a proof under
-  Swift's lookup — was joined against a dependency method sharing its leaf (`pkg#<leaf>` is minted for every
-  method): `while let next = it.next() { … next.count … }` read `BufferedStream.Iterator.next()`'s `Env`;
-  RxAlamofire's `case let .success(result)` read `MultipartUpload.result`'s `Fs`/`Rand`. Measured against
-  0.39.2 on the 9 chained corpus entries: 11 RxAlamofire rows lose `Rand` and 1 AlamofireImage row
-  (`AFIError.errorDescription`, a `case let .alamofireError(error)` payload) loses a hedge that came that way
-  (R847). Every other bare name keeps v0.39.2's join, false charges included (R850).
+- *Not in this list, on purpose:* R847's removal of a bare-name join a binder holds in scope ships **OFF BY
+  DEFAULT** (opt-in `CANDOR_R847_ON=1`), so no gate moves for it — see "False charges that stay" below.
 
 *Kept exactly as 0.39.2 had it, stated because a pre-release build removed it:* a member-chain receiver
 through a hop the engine cannot type is still keyed to the OUTER base's type, so `c.loop.spin()` still
@@ -104,13 +98,27 @@ charges it has always carried (Moya's `adapt` reading Alamofire's example-app
 `MasterViewController.prepare`; RxAlamofire's `DataResponse.error` reading `MultipartUpload.result` through
 an implicit-`self` read of the extended type's stored `result`).
 
+*FALSE CHARGES THAT STAY — R847 IS OFF BY DEFAULT (R853).* A bare name that a LOCAL binding holds (`while
+let next = …`, `case let .success(result)`, a closure or `catch` binder) is still joined against a dependency
+method sharing its leaf (`pkg#<leaf>` is minted for every method), exactly as v0.39.2 joined it. Six review
+rounds found each removal rule tried for it one hop short (R836, R844, R848, R849, R850, and R853: the binder's
+scope modelled to cover an `if`'s and a `guard`'s own `else`), so the release default holds R847 out:
+monotone against v0.39.2 by construction. Measured in the default on the 9 chained corpus entries, these
+false charges ship: nio-http2's HPACK iterators (`HPACKHeaders.Values.Iterator.process`, `._values`,
+`.hash`, …) read `Env` via `BufferedStream.Iterator.next()`; 11 RxAlamofire rows read `MultipartUpload.result`'s
+`Rand`; `DataResponse.error`/`DownloadResponse.error` read its `Fs`/`Rand`; Moya's `adapt` reads Alamofire's
+example-app `MasterViewController.prepare` (`Fs`/`Net`/`Rand`). Against the opt-in, the default differs on the
+entries by REMOVED 17 / CHANGED 286 rows, all binder-held joins. `CANDOR_R847_ON=1` removes them, with the
+binder's scope corrected (R853: an `else` is not in the scope of its statement's binders).
+
 *What "no gate lower than 0.39.2" was measured on, and nothing more:* the first panel (33 case-modes,
 1,748 gates: the release panel's and both re-reviews' fixtures, three- and four-package chains with the
 middle scanned standalone and chained) — 0 lower; the third review's fixtures plus the R846/R847 shapes
-(16 case-modes, 187 functions × 4 gates) — lower ONLY on the fabrications listed above (4 gates, each
-executed: the program performs no such effect); the fourth review's fixtures (p4a–p4e, 34 functions ×
-4 gates) and the fifth's (24 cases, 41 functions × 4 gates) — 0 lower. It is not a claim about shapes nobody
-built.
+(16 case-modes, 187 functions × 4 gates) — lower ONLY on `otherTok`'s plain `deny Env` (R565/R846: the
+source names `OtherKit.Client`, whose `token` reads a file; 0.39.2 charged RatesCore's `Env`; the other
+package's answer is disclosed via R849, so `deny Env Unknown` stays 1); the fourth review's fixtures (p4a–p4e,
+34 functions × 4 gates), the fifth's (24 cases, 41 functions × 4 gates) and the sixth's (7 cases, 96
+functions × 4 gates) — 0 lower. It is not a claim about shapes nobody built.
 
 ### Fixed
 
@@ -133,14 +141,19 @@ built.
     declared-vs-extended types, so the join cannot choose; it now DISCLOSES another package's answer to the
     same key (`dispatch:Client.fetch`). The cost: every access to a type name two chained packages both
     declare gains that hedge.
-  EVIDENCE, across `eae95e9` / this, and `CANDOR_R847_OFF=1` (R847 held out entirely) as the second arm:
+  - **R853** — the binder rule's scope covered an `if`'s `else` and a `guard`'s own `else`, where Swift reads
+    the member or the global (executed 1/1 → 0/0). As a result R847 SHIPS OFF (opt-in `CANDOR_R847_ON=1`);
+    under the opt-in the `else` branch is walked with the binders as they stood before the statement's
+    conditions (`if let`, `guard let`, `else if`, `if case`/`guard case` payloads).
+  EVIDENCE (as measured at `8762f7c`, R847 then on; the shipped default is its `CANDOR_R847_OFF=1` arm):
   fifth review's fixtures (41 functions × 4 gates) 0 lower in both arms; fourth review's 0 lower in both;
   third review's plus `r846x`/`r847b` lower only on the binder-proven fabrications (`argRef`, `baseRead`,
   executed pure; 3 gates) and `otherTok`'s plain `deny Env` (R846, executed file read; disclosed via R849)
   — held-out arm: `otherTok` only; first panel's 1,748 gates 0 lower in both. Corpus against `eae95e9`
   (9 entries chained, 41 packages standalone, dependency reports diffed): the only losses the R847 rule adds
   are the 11 RxAlamofire `Rand` rows and 1 `AFIError.errorDescription` hedge named above; between the two
-  arms, REMOVED 17, CHANGED 286, all binder-proven. §1b: `CANDOR_R847_OFF` and `CANDOR_R849_OFF` each red
+  arms, REMOVED 17, CHANGED 286, all binder-held. §1b: the default (R847 off) against `CANDOR_R847_ON=1`, and
+  `CANDOR_R849_OFF`, each red
   `AmbiguousChainKeyProcessTests`.
 
 - **⚠ SOUNDNESS R844 / R845 / R846 / R847 — THE JOINS THAT STILL ASSUMED ONE CHAINED PACKAGE ANSWERS, AND
@@ -175,23 +188,21 @@ built.
   - **R847** — nio-http2's HPACK iterators carried `Env` through `BufferedStream.Iterator.next()` into
     `EventLoop.execute` over array iteration. Mechanism: a LOCAL binding (`while let next`, a closure or
     `catch` binder) read as a bare name, or passed by reference, was joined against `pkg#<leaf>` — minted for
-    every METHOD. As shipped (after R848/R850 above), a bare name is never joined while a binder holds it in
-    scope (`binderShadow`, scoped like `literalLocals`); every other bare name keeps the release's leaf join. The LOCAL edge the same shape makes is left as it was, deliberately:
+    every METHOD. **As shipped this removal is OFF** (see R848–R853 above and "False charges that stay"); the
+    opt-in `CANDOR_R847_ON=1` skips a bare name a binder holds in scope (`binderShadow`, scoped like
+    `literalLocals`, the `else` excluded) and every other bare name keeps the release's leaf join. The LOCAL edge the same shape makes is left as it was, deliberately:
     RxAlamofire's closure parameter `response` reaches the module's own `response(_:…)` free function that
     way, which is the only path carrying its real `Net` — wrong in mechanism, named, not removed here.
   - Also: a dependency's NESTED type constructed by name (`var i = Stream.Iterator(); i.next()`) types the
     binding (R838's constructor spelling) — silent on v0.39.2 over a body that reads the environment.
 
-  EVIDENCE. Third review's fixtures (a1, a1b, a1c, a2, a3, a3b, b1, c1, e1; b1 and c1 in solo, chain and
-  mixed modes) plus `r846x` and `r847b`, across `eae95e9` / `a79a351` / this build: lower than v0.39.2 only
-  on `argRef`/`baseRead` (R847, executed: no environment read) and `otherTok` (R565/R846, executed: reads a
-  file, not the environment). The first panel's 1,748 gates: 0 lower, unchanged from `a79a351`. Corpus
-  (`bin/corpus-ab.py`, 41 packages standalone + 9 entries chained, dependency reports diffed): producers
-  unchanged; entries REMOVED 33, CHANGED 331, **all attributable to R847** (the same A/B with
-  `CANDOR_R847_OFF=1` is byte-identical to `a79a351`), and all through 327 removed bare-name joins onto 47
-  distinct targets — 292 matched to a local binder mechanically, 35 read by hand (a field of the enclosing
-  LOCAL type, a top-level script variable, a `catch let … where` binder): none a name Swift resolves to the
-  joined member. §1b: `CANDOR_R846_OFF`, `CANDOR_R847_OFF`, `CANDOR_JOIN_UNION_OFF` each red
+  EVIDENCE — SUPERSEDED FOR R847, kept for R844–R846. That round's figures (entries REMOVED 33 / CHANGED 331
+  against `a79a351`, all R847, through 327 removed bare-name joins) describe R847's first rule, which R848,
+  R850 and R853 found unsound in turn; R847 now ships OFF, and with it off `bin/corpus-ab.py` (every field) shows no row change against
+  `a79a351` from this round's R844/R845/R846 changes (0 corpus reach). For R844–R846: the
+  third review's fixtures (a1, a1b, a1c, a2, a3, a3b, b1, c1, e1; b1 and c1 in solo, chain and mixed modes)
+  and `r846x` are lower than v0.39.2 only on `otherTok`'s plain `deny Env` (R565/R846, executed: reads a
+  file, not the environment). §1b: `CANDOR_R846_OFF` and `CANDOR_JOIN_UNION_OFF` each red
   `AmbiguousChainKeyProcessTests`.
 
 - **⚠ SOUNDNESS R836 — A MIDDLE LIBRARY SCANNED WITHOUT A CHAIN PUBLISHED NEITHER KEY NOR DISCLOSURE, SO A

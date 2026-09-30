@@ -383,6 +383,10 @@ final class NameKeyedStateTests: XCTestCase {
         "stringifyDispatches": .notPerBinding, "stringifyExternal": .notPerBinding,
         "deinitExternal": .notPerBinding, "propertyExternal": .notPerBinding,
         "globalReads": .notPerBinding, "depGlobalReads": .notPerBinding,
+        // R853 — scope bookkeeping: `binderShadow` before a statement's conditions, keyed by the statement
+        "binderSnapshots": .notPerBinding, "caseSnapshots": .notPerBinding,
+        // R853 — payload names bound by an enclosing `if`/`guard` whose `else` this is: scope bookkeeping
+        "caseElseOut": .lexicallyScoped("the payload names an `if case`/`guard case` bound, inside that statement's `else`, where they are out of scope; saved and restored with the block"),
         // R844/R846 — output: each external member candidate with the module(s) the source spelled
         "externalCandidateModules": .notPerBinding, "externalCandidateOpen": .notPerBinding,
         "propertyEdges": .notPerBinding, "callbackInvoked": .notPerBinding,

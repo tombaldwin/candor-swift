@@ -198,15 +198,22 @@ final class AmbiguousChainKeyProcessTests: XCTestCase {
                                           targetDeps: #".target(name: "App", dependencies: [.product(name: "RatesCore", package: "RatesCore")])"#),
             "app/Sources/App/app.swift": app,
         ]
-        let r = try run(files, label: "r847")
+        // R847 is OPT-IN (`CANDOR_R847_ON=1`); these are its removals, asserted under the flag.
+        let r = try run(files, env: ["CANDOR_R847_ON": "1"], label: "r847")
         XCTAssertFalse(r["argRef"]?.inferred.contains("Env") ?? false,
                        "`String(next)` passes a LOCAL; `Stream.Iterator.next` is not what it names; got \(String(describing: r["argRef"]))")
         XCTAssertNil(r["baseRead"], "`next.count` reads a LOCAL; executed, it reads no environment")
         for fn in ["tSelfProp", "tInherited", "tRefLen", "depGlobal", "realNext"] {
             XCTAssertEqual(r[fn]?.inferred, ["Env"], "\(fn): a genuine reach must survive; got \(String(describing: r[fn]))")
         }
-        let off = try run(files, env: ["CANDOR_R847_OFF": "1"], label: "r847-off")
-        XCTAssertTrue(off["baseRead"]?.inferred.contains("Env") ?? false, "§1b: the leaf join restored fabricates")
+        // THE DEFAULT IS v0.39.2's JOIN, false charges included — pinned, so a change of default is a red test.
+        let dflt = try run(files, label: "r847-default")
+        XCTAssertTrue(dflt["baseRead"]?.inferred.contains("Env") ?? false,
+                      "DEFAULT = R847 held out: v0.39.2's leaf join, and its false `Env`, stand")
+        XCTAssertTrue(dflt["argRef"]?.inferred.contains("Env") ?? false, "…and the function-reference spelling too")
+        for fn in ["tSelfProp", "tInherited", "tRefLen", "depGlobal", "realNext"] {
+            XCTAssertEqual(dflt[fn]?.inferred, ["Env"], "default \(fn); got \(String(describing: dflt[fn]))")
+        }
     }
 
     /// SOUNDNESS R848 / R850 — a bare name keeps v0.39.2's `pkg#<leaf>` join unless a BINDER holds it in scope;
@@ -249,15 +256,19 @@ final class AmbiguousChainKeyProcessTests: XCTestCase {
                                           targetDeps: #".target(name: "App", dependencies: [.product(name: "RatesCore", package: "RatesCore")])"#),
             "app/Sources/App/app.swift": app,
         ]
-        let r = try run(files, label: "r850")
+        let r = try run(files, env: ["CANDOR_R847_ON": "1"], label: "r850")
         for fn in ["Sub3.viaGrand", "Sub3.refGrand", "S.viaPSub", "S.refPSub", "SC.viaLocalP", "Mid.extReadInherited",
                    "B1.v", "B2.v", "B2.r", "B3.v"] {
             XCTAssertTrue(r[fn]?.inferred.contains("Env") ?? false,
                           "\(fn): 1 on v0.39.2; a name-based removal took it to ABSENT (R848/R850); got \(String(describing: r[fn]))")
         }
         XCTAssertNil(r["binderHeld"], "the ONE proof kept: a binder holds `grandTok` in scope, so it is that local")
-        let off = try run(files, env: ["CANDOR_R847_OFF": "1"], label: "r850-off")
-        XCTAssertTrue(off["binderHeld"]?.inferred.contains("Env") ?? false, "§1b: without the binder proof the leaf join fabricates")
+        let dflt = try run(files, label: "r850-default")
+        XCTAssertTrue(dflt["binderHeld"]?.inferred.contains("Env") ?? false,
+                      "DEFAULT = R847 held out: the binder proof is not applied and the leaf join's false charge stands")
+        for fn in ["Sub3.viaGrand", "B1.v", "B2.v", "B2.r", "B3.v"] {
+            XCTAssertTrue(dflt[fn]?.inferred.contains("Env") ?? false, "default \(fn)")
+        }
     }
 
     /// SOUNDNESS R849 — ThirdKit's `extension RatesCore.Client { func fetch(_:) }` beside RatesCore's own
@@ -295,5 +306,49 @@ final class AmbiguousChainKeyProcessTests: XCTestCase {
                       "the other package's `Client.fetch` must be disclosed, not dropped; got \(String(describing: r["annot"]))")
         let off = try run(files, env: ["CANDOR_R849_OFF": "1"], label: "r849-off")
         XCTAssertFalse(off["annot"]?.inferred.contains("Unknown") ?? true, "§1b")
+    }
+
+    /// SOUNDNESS R853 (under the opt-in) — the names an `if`/`guard` statement's conditions bind are NOT in scope
+    /// in that statement's `else`: there Swift means the member, the global or an outer local. EXECUTED shapes
+    /// from the sixth review (`panel6-swift/fx/g3`, `g4`): `if let`, `guard let`, `else if`, `if case`, and a
+    /// plain dependency GLOBAL with no class involved.
+    func testAnElseBranchIsNotInTheBindersScope() throws {
+        let dep = """
+        import Foundation
+        @inline(never) func envRead(_ t: String) -> String { ProcessInfo.processInfo.environment["Y"] ?? t }
+        open class Grand { public init() {}; public func grandFn(_ s: String) -> Int { envRead("F").count } }
+        public var globalTok: String { envRead("T") }
+        public func globalFn(_ s: String) -> Int { envRead("G").count }
+        """
+        let app = """
+        import RatesCore
+        func opaqueFn() -> ((String) -> Int)? { Int.random(in: 0..<2) > 5 ? { _ in 0 } : nil }
+        let table: [String: String] = [:]
+        final class Sub: Grand {
+            func ifElse() -> Int { if let grandFn = opaqueFn() { _ = grandFn } else { return ["a"].map(grandFn).first! }; return 0 }
+            func guardElse() -> Int { guard let grandFn = opaqueFn() else { return ["a"].map(grandFn).first! }; return grandFn("x") }
+            func elseIf() -> Int { if let grandFn = opaqueFn() { _ = grandFn } else if true { return ["a"].map(grandFn).first! }; return 0 }
+            func caseElse() -> Int { if case let grandFn? = opaqueFn() { _ = grandFn } else { return ["a"].map(grandFn).first! }; return 0 }
+            func thenOnly() -> Int { if let grandFn = opaqueFn() { return ["a"].map(grandFn).first! }; return 0 }
+        }
+        func gRead() -> String { guard let globalTok = table["k"] else { return globalTok }; return globalTok }
+        func gRef() -> Int { if let globalFn = Optional({ (s: String) in 0 }) , false { return globalFn("a") } else { return ["a"].map(globalFn).first! } }
+        """
+        let files = [
+            "deps/RatesCore/Package.swift": Self.pkg("RatesCore", #".library(name: "RatesCore", targets: ["RatesCore"])"#,
+                                                    targetDeps: #".target(name: "RatesCore")"#),
+            "deps/RatesCore/Sources/RatesCore/lib.swift": dep,
+            "app/Package.swift": Self.pkg("App", #".library(name: "App", targets: ["App"])"#,
+                                          deps: #".package(path: "../deps/RatesCore")"#,
+                                          targetDeps: #".target(name: "App", dependencies: [.product(name: "RatesCore", package: "RatesCore")])"#),
+            "app/Sources/App/app.swift": app,
+        ]
+        let r = try run(files, env: ["CANDOR_R847_ON": "1"], label: "r853")
+        for fn in ["Sub.ifElse", "Sub.guardElse", "Sub.elseIf", "Sub.caseElse", "gRead", "gRef"] {
+            XCTAssertTrue(r[fn]?.inferred.contains("Env") ?? false,
+                          "\(fn): the `else` reads the member / global (1/1 on v0.39.2); got \(String(describing: r[fn]))")
+        }
+        XCTAssertFalse(r["Sub.thenOnly"]?.inferred.contains("Env") ?? false,
+                       "the then-branch reference IS the binder — the proof still applies there")
     }
 }

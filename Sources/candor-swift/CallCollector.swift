@@ -604,6 +604,14 @@ final class CallCollector: SyntaxVisitor {
     /// closure parameter `response` reaches the module's own `response(_:…)` free function that way —
     /// wrong in mechanism, and the only thing carrying its real `Net`; not this row's to remove).
     private var binderShadow: Set<String> = []
+    /// R853 — `binderShadow` as it stood before an `if`/`guard` statement's conditions, keyed by the
+    /// statement; the `else` branch is walked with it (see `visit(CodeBlockSyntax)`).
+    private var binderSnapshots: [SyntaxIdentifier: Set<String>] = [:]
+    /// R853 — the same for `casePayloadLocals` (`if case .some(let x) = …`): the snapshot, and, inside the
+    /// statement's `else`, the payload names its conditions bound — out of scope there, so NOT a proof the
+    /// bare name is local. Read only by the R847 dependency-join test; local resolution is untouched.
+    private var caseSnapshots: [SyntaxIdentifier: Set<String>] = [:]
+    private var caseElseOut: Set<String> = []
     /// R847 — the bare reads that were NOT bound locally at the point of reading: the only ones the chained
     /// global-read join may answer from a dependency.
     var depGlobalReads: Set<String> = []
@@ -1899,7 +1907,11 @@ final class CallCollector: SyntaxVisitor {
     static let r836Probe = ProcessInfo.processInfo.environment["CANDOR_R836_PROBE"] != nil
     /// SOUNDNESS R846 / R847 §1b kill switches — see `ownerModule` and the Driver's `bareNameDepEntry`.
     static let r846Off = ProcessInfo.processInfo.environment["CANDOR_R846_OFF"] != nil
-    static let r847Off = ProcessInfo.processInfo.environment["CANDOR_R847_OFF"] != nil
+    /// SOUNDNESS R847 is OPT-IN (`CANDOR_R847_ON=1`), after six review rounds on its removal rules: the
+    /// default is the release's bare-name join with no removal at all — monotone against v0.39.2 by
+    /// construction, keeping its false charges. `CANDOR_R847_OFF=1` still forces it off.
+    static let r847Off = ProcessInfo.processInfo.environment["CANDOR_R847_ON"] == nil
+        || ProcessInfo.processInfo.environment["CANDOR_R847_OFF"] != nil
 
     /// SOUNDNESS R846 — the dependency MODULE a receiver's type spelling names, or nil. Two sources, both
     /// the source's own words, never an inference: a module qualifier written IN the expression
@@ -4157,6 +4169,7 @@ final class CallCollector: SyntaxVisitor {
         // R362 — see `literalLocals`. Scoped for the same reason `casePayload` is.
         var literalLocals: Set<String>
         var binderShadow: Set<String>   // R847 — see `binderShadow`
+        var caseElseOut: Set<String>    // R853 — see `caseElseOut`
     }
     private var shadowScopes: [SyntaxIdentifier: ShadowSave] = [:]
 
@@ -4209,7 +4222,8 @@ final class CallCollector: SyntaxVisitor {
                                            depBound: depBoundLocals, protoTyped: protoTyped,
                                            constStrings: localConstStrings, fnValueAlias: fnValueAlias,
                                            casePayload: casePayloadLocals,
-                                           literalLocals: literalLocals, binderShadow: binderShadow)
+                                           literalLocals: literalLocals, binderShadow: binderShadow,
+                                           caseElseOut: caseElseOut)
     }
 
     private func leaveShadowScope(_ node: some SyntaxProtocol) {
@@ -4229,6 +4243,7 @@ final class CallCollector: SyntaxVisitor {
         casePayloadLocals = saved.casePayload
         literalLocals = saved.literalLocals
         binderShadow = saved.binderShadow
+        caseElseOut = saved.caseElseOut
     }
 
     /// THE CATCH-ALL BINDER, and it exists to invert a failure mode rather than to add a case.
@@ -4260,9 +4275,40 @@ final class CallCollector: SyntaxVisitor {
     // THE SCOPES. A brace-delimited block covers `let`/`guard let` shadows; the statement/expression
     // nodes cover binders written OUTSIDE their block (a `for` pattern, an `if let`/`while let`
     // condition, a `case let`, a `catch let`), which are visited before the block is entered.
-    override func visit(_ node: CodeBlockSyntax) -> SyntaxVisitorContinueKind { enterShadowScope(node); return .visitChildren }
+    override func visit(_ node: CodeBlockSyntax) -> SyntaxVisitorContinueKind {
+        enterShadowScope(node)
+        // SOUNDNESS R853 — an `if`'s `else`, and a `guard`'s own `else`, are NOT in the scope of the names the
+        // statement's conditions bind: there Swift means the member, the global or an OUTER local. The binder
+        // set is put back to what it was before those conditions for the length of this block (the block's own
+        // shadow scope restores it on exit).
+        if let parent = node.parent {
+            var stmt: SyntaxIdentifier? = nil
+            if let ifx = parent.as(IfExprSyntax.self), ifx.elseBody?.id == node.id { stmt = ifx.id }
+            if let g = parent.as(GuardStmtSyntax.self), g.body.id == node.id { stmt = g.id }
+            if let st = stmt {
+                if let before = binderSnapshots[st] { binderShadow = before }
+                if let before = caseSnapshots[st] { caseElseOut.formUnion(casePayloadLocals.subtracting(before)) }
+            }
+        }
+        return .visitChildren
+    }
+    override func visit(_ node: GuardStmtSyntax) -> SyntaxVisitorContinueKind {
+        binderSnapshots[node.id] = binderShadow   // R853 — before the conditions bind anything
+        caseSnapshots[node.id] = casePayloadLocals
+        return .visitChildren
+    }
     override func visitPost(_ node: CodeBlockSyntax) { leaveShadowScope(node) }
-    override func visit(_ node: IfExprSyntax) -> SyntaxVisitorContinueKind { enterShadowScope(node); return .visitChildren }
+    override func visit(_ node: IfExprSyntax) -> SyntaxVisitorContinueKind {
+        // R853 — `else if`: the outer statement's binders are out of scope here too.
+        if let outer = node.parent?.as(IfExprSyntax.self), outer.elseBody?.id == node.id {
+            if let before = binderSnapshots[outer.id] { binderShadow = before }
+            if let before = caseSnapshots[outer.id] { caseElseOut.formUnion(casePayloadLocals.subtracting(before)) }
+        }
+        enterShadowScope(node)
+        binderSnapshots[node.id] = binderShadow   // R853 — before this statement's conditions bind anything
+        caseSnapshots[node.id] = casePayloadLocals
+        return .visitChildren
+    }
     override func visitPost(_ node: IfExprSyntax) { leaveShadowScope(node) }
     override func visit(_ node: WhileStmtSyntax) -> SyntaxVisitorContinueKind { enterShadowScope(node); return .visitChildren }
     override func visitPost(_ node: WhileStmtSyntax) { leaveShadowScope(node) }
@@ -5308,7 +5354,8 @@ final class CallCollector: SyntaxVisitor {
                         unresolved = true; why.insert("dispatch:\(et).\(n)")
                     } else {
                         calls.append(Call(path: n, leaf: n, strArg: nil, typed: false, unqualified: true, argRef: true,
-                                          argBoundLocal: binderShadow.contains(n) || casePayloadLocals.contains(n)))
+                                          argBoundLocal: binderShadow.contains(n)
+                                              || (casePayloadLocals.contains(n) && !caseElseOut.contains(n))))
                     }
                 }
             } else if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base {
@@ -6665,7 +6712,7 @@ final class CallCollector: SyntaxVisitor {
             if isReadBase {
                 if let et = enclosingType, fields[et]?[n] != nil { return .skipChildren }
                 globalReads.insert(n)
-                if !binderShadow.contains(n), !casePayloadLocals.contains(n) { depGlobalReads.insert(n) }
+                if !binderShadow.contains(n), !(casePayloadLocals.contains(n) && !caseElseOut.contains(n)) { depGlobalReads.insert(n) }
                 return .skipChildren
             }
             if p.is(FunctionCallExprSyntax.self) || p.is(MemberAccessExprSyntax.self)
@@ -6685,7 +6732,7 @@ final class CallCollector: SyntaxVisitor {
             propertyEdges.insert("\(et).\(n)")
         }
         globalReads.insert(n)
-        if !binderShadow.contains(n), !casePayloadLocals.contains(n) { depGlobalReads.insert(n) }
+        if !binderShadow.contains(n), !(casePayloadLocals.contains(n) && !caseElseOut.contains(n)) { depGlobalReads.insert(n) }
         return .skipChildren
     }
 
