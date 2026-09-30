@@ -39,9 +39,11 @@ a flip, and a baseline or a CI gate pinned across it will move. Directions are a
   on a dependency type the package only EXTENDS (`extension Svc {}` + `Svc.shared.fetch()`, direct or
   bound), now reaches the dependency's member — `deny <E>` (R838, R839; all silent or wrongly keyed on
   0.39.2).
-- A call whose key TWO chained packages answer now takes the union of both answers, as SPEC ⟨0.25⟩
-  requires; 0.39.2 dropped it and the row read pure. It over-charges where the two members differ —
-  `deny <E>` may rise.
+- A key TWO chained packages answer now takes the union of both answers, as SPEC ⟨0.25⟩ requires — at
+  every join site: a member call, a global read, a property read, a stringification, a `deinit`, a
+  factory's return type (R842, R844, R845). 0.39.2 dropped it (the row read pure) or, for a factory,
+  hedged. It over-charges where the two members differ — `deny <E>` may rise — EXCEPT where the source
+  names the module (`c: RatesCore.Client`, `RatesCore.Client()`), which is asked first (R846).
 - For a DOWNSTREAM consumer of this engine's reports: ⟨0.39⟩ keys that were misattributed, suppressed or
   spelled under a module now name the owning package and can be joined (R555, R565, R592, R593, R603).
 
@@ -55,6 +57,17 @@ a flip, and a baseline or a CI gate pinned across it will move. Directions are a
   gate rises and `deny Unknown` on that function can fall (R657/R692).
 - A report registered under another package's name (the first `name:` in its manifest) no longer claims
   coverage of, or answers joins for, that package (R559).
+- **R565 drives flips here too.** A dependency whose `Package(name:)` differs from its module (`other-kit`
+  / `OtherKit`) was UNCHAINED on 0.39.2, so a call on its type joined whichever same-named type WAS
+  chained: `c: OtherKit.Client; c.token` read RatesCore's `Env` (the program reads a file). It now reads
+  the package the source names — `deny Env` 1 → 0, `deny Fs` 0 → 1 (R565, R846).
+- A bare name that is a LOCAL binding, or that no Swift name lookup could resolve to the member, was
+  joined against a dependency method sharing its leaf (`pkg#<leaf>` is minted for every method):
+  `while let next = it.next() { … next.count … }` read `BufferedStream.Iterator.next()`'s `Env`;
+  RxAlamofire's `case let .success(result)` read `MultipartUpload.result`'s `Fs`/`Rand`; Moya's
+  `prepare?(urlRequest)` read Alamofire's example-app `MasterViewController.prepare` (`Fs`/`Net`/`Rand`).
+  Measured against 0.39.2 on the 9 chained corpus entries: 13 rows lose such a charge (11 RxAlamofire
+  `Rand`, 2 Moya `adapt` `Fs`/`Net`/`Rand`) and 3 rows lose a hedge that came the same way (R847).
 
 *Kept exactly as 0.39.2 had it, stated because a pre-release build removed it:* a member-chain receiver
 through a hop the engine cannot type is still keyed to the OUTER base's type, so `c.loop.spin()` still
@@ -71,10 +84,70 @@ chain went silent (`deny Env` and `deny Env Unknown` 1 → 0) on every such spel
 `n.parent.visit()`, `RatesCore.Outer.Inner.shared.fetch()` and RxAlamofire's
 `Alamofire.Session.default.rx.responseData(…)` lost concrete charges to `Unknown` (`deny Net` 1 → 0 over
 68 RxAlamofire rows); and R567(b)'s new bare keys made two chained packages answer one key, which the
-join dropped. On every executed panel shape (the release panel's and both re-reviews', three- and
-four-package chains with the middle scanned standalone and chained) no gate is lower than on 0.39.2.
+join dropped. The third review then found R565 made a second hit reachable at the joins that still assumed
+one (R844, R845), and that the union fabricated where the source named the module (R846); closed below.
+
+*What "no gate lower than 0.39.2" was measured on, and nothing more:* the first panel (33 case-modes,
+1,748 gates: the release panel's and both re-reviews' fixtures, three- and four-package chains with the
+middle scanned standalone and chained) — 0 lower; the third review's fixtures plus the R846/R847 shapes
+(16 case-modes, 187 functions × 4 gates) — lower ONLY on the fabrications listed above (5 gates, each
+executed: the program performs no such effect). It is not a claim about shapes nobody built.
 
 ### Fixed
+
+- **⚠ SOUNDNESS R844 / R845 / R846 / R847 — THE JOINS THAT STILL ASSUMED ONE CHAINED PACKAGE ANSWERS, AND
+  THE ONES THAT ANSWERED A BARE NAME WITH ANY MEMBER SHARING IT.** Found by the third review of the R836
+  change; every consumer below built and RUN. R565 chains every ordinary SwiftPM dependency, so an app
+  importing `RatesCore` and `OtherKit` — each declaring `Client` with `token`, `description`, `deinit` —
+  has two chained reports answering `Client.token`.
+
+  EVERY SITE THAT LOOKS A KEY UP ACROSS CHAINED PACKAGES, and what each assumed (the audit the review asked
+  for, rather than the two it found): the member / unqualified-call join (unioned, R842); the global-read
+  join (unioned, R842); the `super.` chain join (always unioned); the R657 extension-local answer (took
+  one hit, fell back to its local hedge on two — now unions and keeps the hedge); the `typeSurface`
+  factory join (refused two answers — **R845**); the property / `deinit` / stringification join (`guard
+  hits.count == 1`, DROPPED — **R844**); the ⟨0.39⟩ obligation-3 key join and the dependency index itself
+  (union by construction). Two producer-side votes still refuse on two owners rather than join anything:
+  `foreignOwnerModule` (no key when a file imports two dependency modules — R843's contract gap) and the
+  obligation-2 owner vote; neither reads a consumer's answer.
+
+  - **R844** — `c.token`, `"\(c)"` and `RatesCore.Client()`'s `deinit` went ABSENT (`deny Env` and
+    `deny Env Unknown` 1/1 → 0/0 against v0.39.2). Unioned.
+  - **R845** — `makeClient().fetch()` with a second package declaring `makeClient(_:)` went `['Env']` →
+    `['Unknown']` (`deny Env` 1 → 0). Every answered type is applied; an answered type whose member the
+    report does not answer still discloses. **This reverses a pinned rule** (`TypeSurfaceProcessTests`,
+    which refused so as not to charge the other package's `Client.fetch` beside Beta's pure `Stub.fetch`):
+    a Swift call site carries its arity and the report does not, so the union over-charges exactly there —
+    now the pinned residual.
+  - **R846** — the union charged BOTH packages' `Client.fetch` to `c: RatesCore.Client; c.fetch()`
+    (`deny Fs` 0 → 1 over code that opens no file). The module the source spells — in the expression, in the
+    receiver's declared or annotated type, or in the constructor a `let` is bound from — is asked FIRST
+    (`joinTiers`); only if it does not answer is every chained package asked, because a member another
+    package adds by `extension RatesCore.Client` lives in THAT package (executed: `c.extra()` → `Fs`).
+  - **R847** — nio-http2's HPACK iterators carried `Env` through `BufferedStream.Iterator.next()` into
+    `EventLoop.execute` over array iteration. Mechanism: a LOCAL binding (`while let next`, a closure or
+    `catch` binder) read as a bare name, or passed by reference, was joined against `pkg#<leaf>` — minted for
+    every METHOD. A bare name now reaches a dependency only as a FREE declaration (R649's
+    `declaresFreeName`) or an implicit-`self` member of the enclosing type's chain (transitively; a
+    member the chain declares locally ends it), and never when a binder holds it in scope
+    (`binderShadow`, scoped like `literalLocals`). Operators passed by reference keep the leaf lookup (their
+    overload is chosen by operand type). The LOCAL edge the same shape makes is left as it was, deliberately:
+    RxAlamofire's closure parameter `response` reaches the module's own `response(_:…)` free function that
+    way, which is the only path carrying its real `Net` — wrong in mechanism, named, not removed here.
+  - Also: a dependency's NESTED type constructed by name (`var i = Stream.Iterator(); i.next()`) types the
+    binding (R838's constructor spelling) — silent on v0.39.2 over a body that reads the environment.
+
+  EVIDENCE. Third review's fixtures (a1, a1b, a1c, a2, a3, a3b, b1, c1, e1; b1 and c1 in solo, chain and
+  mixed modes) plus `r846x` and `r847b`, across `eae95e9` / `a79a351` / this build: lower than v0.39.2 only
+  on `argRef`/`baseRead` (R847, executed: no environment read) and `otherTok` (R565/R846, executed: reads a
+  file, not the environment). The first panel's 1,748 gates: 0 lower, unchanged from `a79a351`. Corpus
+  (`bin/corpus-ab.py`, 41 packages standalone + 9 entries chained, dependency reports diffed): producers
+  unchanged; entries REMOVED 33, CHANGED 331, **all attributable to R847** (the same A/B with
+  `CANDOR_R847_OFF=1` is byte-identical to `a79a351`), and all through 327 removed bare-name joins onto 47
+  distinct targets — 292 matched to a local binder mechanically, 35 read by hand (a field of the enclosing
+  LOCAL type, a top-level script variable, a `catch let … where` binder): none a name Swift resolves to the
+  joined member. §1b: `CANDOR_R846_OFF`, `CANDOR_R847_OFF`, `CANDOR_JOIN_UNION_OFF` each red
+  `AmbiguousChainKeyProcessTests`.
 
 - **⚠ SOUNDNESS R836 — A MIDDLE LIBRARY SCANNED WITHOUT A CHAIN PUBLISHED NEITHER KEY NOR DISCLOSURE, SO A
   THREE-PACKAGE CHAIN WENT SILENT AGAINST v0.39.2 — AND NOT ONLY FOR THE SINGLETON.** Dependency
@@ -103,7 +176,9 @@ four-package chains with the middle scanned standalone and chained) no gate is l
   `Alamofire.Session.default.rx.responseData(…)` (`deny Net` 1 → 0) are charged again: the first through
   `conventionTypePath`, one authority for every spelling of a type reference — bare, `Self`,
   module-qualified, NESTED (`Outer.Inner`) and generic-specialized (`Box<Int>`), keyed as the dependency's
-  own hash spells the path — and the second through the floor. Nested and generic singletons
+  own hash spells the path — and the second through the floor. (Traced later, under R847: RxAlamofire's
+  `Net` reaches those rows through a closure parameter `response` read as the module's own `response(_:…)`
+  free function, whose body the floor answers — right in effect, wrong in mechanism, and 0.39.2's own path.) Nested and generic singletons
   (`Outer.Inner.shared.fetch()`, `Box<Int>.shared.fetch()`) were silent on v0.39.2 too; they now resolve.
 
   **SOUNDNESS R839 — A CONSUMER `extension Svc {}` ON A DEPENDENCY TYPE SILENCED `Svc.shared.fetch()` AND

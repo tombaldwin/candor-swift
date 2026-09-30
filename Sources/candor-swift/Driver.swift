@@ -1887,6 +1887,55 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// SPEC ⟨0.25⟩ at the cross-package join: §1b kill switch (restores drop-on-ambiguity) and reach probe.
     let joinUnionOff = ProcessInfo.processInfo.environment["CANDOR_JOIN_UNION_OFF"] != nil
     let joinUnionProbe = ProcessInfo.processInfo.environment["CANDOR_JOIN_UNION_PROBE"] != nil
+    let joinDebug = ProcessInfo.processInfo.environment["CANDOR_JOIN_DEBUG"] != nil
+    /// SOUNDNESS R847 — WHAT A BARE NAME CAN DENOTE IN A DEPENDENCY: a FREE function or global of that name
+    /// (R649's `declaresFreeName` — the one-segment quals), or, through implicit `self`, a member of the
+    /// enclosing type or one of its supertypes (`token` inside `extension Client`, a property inherited
+    /// from a dependency base class). NOT any member of any type that happens to share the leaf: the index
+    /// mints `pkg#<leaf>` for every METHOD as well, and the bare-read and function-reference joins asked
+    /// that key. nio-http2's `while let next = iterator.next() { … next.name … }` read `next` — an untyped
+    /// LOCAL — as a global, the join answered `swift-nio#next` with `BufferedStream.Iterator.next()`, and
+    /// `EventLoop.execute`'s `Env` reached array iteration that reads no environment; RxAlamofire's `case
+    /// let .success(result)` reached `Alamofire#MultipartUpload.result` (`Fs`, `Rand`) the same way.
+    /// `CANDOR_R847_OFF=1` restores the leaf lookup.
+    func bareNameDepEntry(_ p: String, _ name: String, _ f: FnInfo) -> DepEntry? {
+        // An OPERATOR passed by reference (`xs.reduce(z, +)`) is overload-resolved against the OPERAND
+        // types, which can be any type — a dependency's `static func +` included — so its leaf lookup is
+        // not a name-lookup question and is left exactly as it was.
+        if CallCollector.r847Off || !(name.first.map { $0 == "_" || $0.isLetter } ?? false) {
+            return deps.lookup("\(p)#\(name)")
+        }
+        if deps.declaresFreeName("\(p)#\(name)") { return deps.lookup("\(p)#\(name)") }
+        guard let et = f.enclosingType else { return nil }
+        // Implicit `self`: the enclosing type, then its supertypes TRANSITIVELY (a property inherited
+        // from a grandparent is still `self.x`). A type in the chain that declares the name ITSELF — a
+        // stored field or a unit of this scan — answers it locally and ends the walk on that branch
+        // (NIOSSLHandler's own `state` must not reach `ChannelInboundHandler.state`). Every dependency
+        // owner that answers is a contributor (⟨0.25⟩ union), in a stable order.
+        var out: DepEntry? = nil
+        var queue = [et], seen: Set<String> = [et]
+        while !queue.isEmpty {
+            let owner = queue.removeFirst()
+            if fields[owner]?[name] != nil || !resolveQual("\(owner).\(name)").isEmpty { continue }
+            if owner != et || !declaredTypes.contains(et), let e = deps.lookup("\(p)#\(owner).\(name)") {
+                if out == nil { out = e } else { out!.unionWith(e) }
+            }
+            for sup in (supertypesOf[owner] ?? []).sorted() where seen.insert(sup).inserted { queue.append(sup) }
+        }
+        return out
+    }
+    /// SOUNDNESS R846 — the chained packages a key is asked of, PREFERRING the one the source named. When
+    /// the receiver's type was spelled `RatesCore.Client`, `RatesCore`'s package is asked first; if it
+    /// ANSWERS, that answer stands alone (the source said which `Client`). If it does not, every chained
+    /// package is asked, because a member can live in a DIFFERENT module than its type — an `extension
+    /// RatesCore.Client` in a third package publishes under that package's name — and restricting there
+    /// would be the silent direction. Two tiers; the caller stops at the first that answers.
+    func joinTiers(_ file: String, module: String?) -> [[(p: String, mods: [String])]] {
+        let all = deps.chainedPkgs(importing: fileImports[file] ?? []).map { (p: $0.0, mods: $0.1) }
+        guard let m = module else { return [all] }
+        let named = all.filter { $0.mods.contains(m) || deps.pkgOfModule(m) == $0.p }
+        return named.isEmpty || named.count == all.count ? [all] : [named, all]
+    }
     func dispatchAbstraction(_ owner: String, _ f: FnInfo) -> String? {
         let typeBound = f.enclosingType.flatMap { typeGenericBoundsAll[$0]?[owner] }
         // REACH PROBE (§E1) — "CHANGED 0 is not evidence until REACH is measured". Fires only on the arm
@@ -2011,7 +2060,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             tablesD[qual, default: []].formUnion(cur.tables)
             if !cur.invisible.isEmpty { blindDirect[qual, default: []].formUnion(cur.invisible) }
             if !cur.incomplete.isEmpty { incompleteD[qual, default: []].formUnion(cur.incomplete) }
+            if joinDebug {   // REACH/diagnosis (§E1): which entry, reached through which key, charged whom
+                FileHandle.standardError.write("JOINAPPLY \(qual) why=\(cur.whyReason ?? "-") eff=\(cur.effects.sorted())\n".data(using: .utf8)!)
+            }
             for k in cur.dispatchesOn where seenKeys.insert(k).inserted {
+                if joinDebug { FileHandle.standardError.write("JOINKEY \(qual) \(k) hit=\(deps.lookup(k) != nil)\n".data(using: .utf8)!) }
                 // (a) EVERY CHAINED ENTRY CARRYING THAT KEY. One `lookup`, because the index has already
                 // UNIONED the contributors filed under it — which is precisely the ⟨0.25⟩ ambiguous-key
                 // rule ⟨0.39⟩ says it is reusing: this adds a contributor, not a resolution rule.
@@ -2468,11 +2521,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // global still reaches a uniquely-named one elsewhere exactly as before.
         let readerModule = swiftModuleOf(f.loc)
         for name in cc.globalReads where name != f.qual {
+            // R847 — a bare read a binder holds locally is never a dependency declaration; only the
+            // chained arm below consults this (the local arms above see every read, as before).
+            let depReadable = CallCollector.r847Off || cc.depGlobalReads.contains(name)
             if let inMod = globalsByModule[readerModule]?[name], inMod.count == 1 {
                 edges[f.qual, default: []].insert(inMod[0])
             } else if globalUnitNames.contains(name) {
                 edges[f.qual, default: []].insert(name)
-            } else if !deps.isEmpty {
+            } else if !deps.isEmpty, depReadable {
                 // The global may belong to a chained DEPENDENCY module. Reading it still forces its
                 // initializer — swift globals are lazy — and the dep's report records that unit under
                 // `<Module>#<name>`, but nothing looked for it, so a consumer of an effectful dependency
@@ -2484,7 +2540,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 var hits: [DepEntry] = []
                 // R565 — the key is `<PACKAGE>#<name>`, and this loop used to spell a MODULE there.
                 for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {
-                    if let e = deps.lookup("\(p)#\(name)") { hits.append(e) }
+                    // R847 — a bare READ denotes a dependency global, or an implicit-self member of the
+                    // enclosing type's chain — never an arbitrary method sharing the leaf.
+                    if let e = bareNameDepEntry(p, name, f) {
+                        if joinDebug { FileHandle.standardError.write("JOINSITE global \(f.qual) \(p)#\(name) -> \(e.whyReason ?? "-")\n".data(using: .utf8)!) }
+                        hits.append(e)
+                    }
                 }
                 // SPEC §2 rule 1 ⟨0.25⟩ — two packages answering is an AMBIGUOUS key: UNION, never drop
                 // (see the member-call join's note below; this is the same rule at the global-read site).
@@ -2653,6 +2714,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         for sup in supertypesOf[et] ?? [] where sup != et {
                             for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {   // R565
                                 if let de = deps.lookup("\(p)#\(sup).\(member)") {
+                                    if joinDebug { FileHandle.standardError.write("JOINSITE super \(f.qual) \(p)#\(sup).\(member)\n".data(using: .utf8)!) }
                                     applyDepEntry(de, to: f.qual)
                                     resolved = true
                                 }
@@ -2807,6 +2869,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                     }
                                 }
                                 if hits.count == 1 { depAnswer = hits[0]; break }
+                                // ⟨0.25⟩ — two packages answering is a UNION, never a drop; the local
+                                // fallback below still runs (its hedge or modeled effect is what v0.39.2 said).
+                                if hits.count > 1, !joinUnionOff {
+                                    for de in hits { applyDepEntry(de, to: f.qual) }
+                                    break
+                                }
                             }
                         }
                         if let de = depAnswer {
@@ -3330,10 +3398,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if let callee = call.depCallee {
                     var hits: [DepEntry] = []
                     var surfaced: [String] = []
+                    var missedAnswer = false   // R845 — an answered type whose member is not in the report
                     for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {   // R565
                         guard let ty = deps.boundType("\(p)#\(callee)") else { continue }
                         surfaced.append(ty)
-                        if let e = deps.lookup("\(ty).\(call.leaf)") { hits.append(e) }
+                        if let e = deps.lookup("\(ty).\(call.leaf)") { hits.append(e) } else { missedAnswer = true }
                     }
                     // THE ANSWER MUST BE UNAMBIGUOUS TOO, not only the entry lookup that follows it.
                     // `depCallee` is a BARE name (`build`) — an idiomatic Swift call into a dependency
@@ -3361,6 +3430,21 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             + "\(surfaced.isEmpty ? "<no returns entry>" : surfaced.sorted().joined(separator: "|"))"
                             + " :: .\(call.leaf)()\n"
                         FileHandle.standardError.write(line.data(using: .utf8)!)
+                    }
+                    // SOUNDNESS R845 — TWO CHAINED PACKAGES ANSWERING THE FACTORY is an ambiguous key, and SPEC
+                    // ⟨0.25⟩ UNIONS it (the rule the paragraph above predates). R565 made it reachable: a
+                    // second package whose `Package(name:)` differs from its module now chains, and
+                    // `makeClient().fetch()` went `['Env']` -> `['Unknown']` (`deny Env` 1 -> 0) the moment
+                    // it also declared a `makeClient`. Every answered type's entry is applied; a type whose
+                    // member the report does NOT answer still falls through to the disclosure below, as the
+                    // single-answer case always has.
+                    if !joinUnionOff, answers.count > 1, !hits.isEmpty {
+                        if joinUnionProbe {
+                            FileHandle.standardError.write("JOINUNION typesurface \(f.qual) \(callee) n=\(answers.count)\n".data(using: .utf8)!)
+                        }
+                        for de in hits { applyDepEntry(de, to: f.qual) }
+                        for ty in answers { unionOwnImplementors(forKey: "\(ty).\(call.leaf)", to: f.qual) }
+                        if !missedAnswer { continue }
                     }
                     if answers.count == 1, hits.count == 1, let de = hits.first,
                        let ty = answers.first {
@@ -3441,9 +3525,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // that resolved to this package, because the `owner == m` arm below asks about the
                 // MODULE spelling, not the package.
                 var hitKey: String? = nil   // R826 — the key that answered, for a convention owner's publish
-                for (p, mods) in deps.chainedPkgs(importing: fileImports[file] ?? []) {
+                for tier in joinTiers(file, module: call.unqualified ? nil : call.ownerModule) where hits.isEmpty {
+                for (p, mods) in tier {
                     if call.unqualified {
-                        if let e = deps.lookup("\(p)#\(call.path)") ?? deps.lookup("\(p)#\(call.path).init") {
+                        // R847 — a bare identifier passed as an ARGUMENT (`String(next)`) is a function
+                        // REFERENCE; the only dependency declaration a bare name can reference is a FREE
+                        // function (`declaresFreeName`, R649's predicate) or a type's `init`. `pkg#<leaf>`
+                        // is minted for every METHOD too, so the unrestricted lookup handed a local's name
+                        // to whichever method shared it.
+                        let bare = !call.argRef ? deps.lookup("\(p)#\(call.path)")
+                            : ((call.argBoundLocal && !CallCollector.r847Off) ? nil : bareNameDepEntry(p, call.path, f))
+                        if let e = bare ?? deps.lookup("\(p)#\(call.path).init") {
+                            if joinDebug { FileHandle.standardError.write("JOINSITE unqual\(call.argRef ? "-argref" : "") \(f.qual) \(p)#\(call.path) -> \(e.whyReason ?? "-")\n".data(using: .utf8)!) }
                             hits.append(e)
                         }
                     } else if let owner = call.extOwner {
@@ -3454,11 +3547,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         // IS the module name and no generic bound can apply.
                         let key = dispatchAbstraction(owner, f) ?? owner
                         if let e = deps.lookup("\(p)#\(key).\(call.leaf)") {
+                            if joinDebug { FileHandle.standardError.write("JOINSITE member \(f.qual) \(p)#\(key).\(call.leaf) typed=\(call.typed)\n".data(using: .utf8)!) }
                             hits.append(e); hitKey = "\(p)#\(key).\(call.leaf)"
                         } else if mods.contains(owner), let e = deps.lookup("\(p)#\(call.leaf)") {
+                            if joinDebug { FileHandle.standardError.write("JOINSITE modleaf \(f.qual) \(p)#\(call.leaf) owner=\(owner)\n".data(using: .utf8)!) }
                             hits.append(e)
                         }
                     }
+                }
                 }
                 // SPEC §2 rule 1 ⟨0.25⟩ — AN AMBIGUOUS KEY IS UNIONED; IT MUST NOT BE PICKED FROM AND MUST NOT
                 // BE DROPPED. This arm dropped it: two chained packages both answering the key read as "no
@@ -3803,8 +3899,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
             for cand in cc.stringifyExternal.union(cc.deinitExternal).union(cc.propertyExternal) {
                 var hits: [DepEntry] = []
-                for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {   // R565
-                    if let e = deps.lookup("\(p)#\(cand)") { hits.append(e) }
+                // R846 — the module the source spelled, when every recording of this candidate spelled one
+                // and they agree; otherwise every chained package.
+                let cmods = cc.externalCandidateOpen.contains(cand) ? [] : (cc.externalCandidateModules[cand] ?? [])
+                for tier in joinTiers(file, module: cmods.count == 1 ? cmods.first : nil) where hits.isEmpty {
+                    for (p, _) in tier {   // R565
+                        if let e = deps.lookup("\(p)#\(cand)") { hits.append(e) }
+                    }
                 }
                 // An A/B diff shows which FUNCTIONS moved, never which KEY moved them — and the one
                 // over-fire this join has had (`String.init`, see `METATYPE_MEMBERS`) was invisible in
@@ -3816,8 +3917,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         "DEPMEMBER-\(hits.count == 1 ? "HIT " : "MISS") \(kind) \(f.qual) :: \(cand)\n"
                             .data(using: .utf8)!)
                 }
-                guard hits.count == 1, let de = hits.first else { continue }
-                applyDepEntry(de, to: f.qual)
+                // SOUNDNESS R844 — SPEC ⟨0.25⟩: an ambiguous key is UNIONED. This site kept `hits.count == 1`
+                // after R842 unioned the member and global joins, and R565 made a second hit reachable:
+                // `RatesCore.Client` and `OtherKit.Client` both publishing `Client.token` dropped the
+                // read, the stringification and the `deinit` to ABSENT (1/1 -> 0/0 against v0.39.2).
+                if hits.count > 1, joinUnionProbe {
+                    FileHandle.standardError.write("JOINUNION depmember \(f.qual) \(cand) n=\(hits.count)\n".data(using: .utf8)!)
+                }
+                guard hits.count == 1 || (!joinUnionOff && hits.count > 1) else { continue }
+                for de in hits { applyDepEntry(de, to: f.qual) }
             }
         }
     }

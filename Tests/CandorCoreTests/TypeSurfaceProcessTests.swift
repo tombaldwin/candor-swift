@@ -657,17 +657,21 @@ final class TypeSurfaceProcessTests: XCTestCase {
                       + "kill every real recovery in a multi-dependency file; got \(by["viaUnique"] ?? [:])")
 
         let colliding = by["viaColliding"]
-        XCTAssertFalse(Set(colliding?["inferred"] as? [String] ?? []).contains("Fs"),
-                       "viaColliding calls BETA's `build`, whose `Stub.fetch` is pure. Charging Alpha's "
-                       + "Fs is a leaf-keyed collapse of two distinct types across packages — §2 rule 1 "
-                       + "says a key two entries share is DROPPED, never picked from; got \(colliding ?? [:])")
-        XCTAssertFalse((colliding?["paths"] as? [String] ?? []).contains("/etc/secrets"),
-                       "…and the literal SURFACE travels with the effect, so the fabrication put another "
-                       + "package's path literal on this function too; got \(colliding ?? [:])")
+        // SOUNDNESS R845 (2026-09-30) REVERSED THIS ARM'S REFUSAL. Two packages answering one factory key
+        // is an AMBIGUOUS key, and SPEC ⟨0.25⟩ unions it: refusing turned a correct charge into a hedge
+        // (`makeClient().fetch()`, `deny Env` 1 -> 0 against v0.39.2) the moment R565 chained a second
+        // package declaring the name. The price is exactly what this fixture was written to show — Beta's
+        // `build("x")` is the callee, a Swift call site carries its ARITY and the report does not, so
+        // Alpha's `Client.fetch` (`Fs`, `/etc/secrets`) is charged beside it. That over-charge is now the
+        // PINNED residual, not a defect: closing it needs the factory's signature on the wire.
+        XCTAssertTrue(Set(colliding?["inferred"] as? [String] ?? []).contains("Fs"),
+                      "the union's named over-charge (R845): Alpha's `Fs` rides with Beta's answer; if this "
+                      + "narrows, say which contributor was dropped and why that is not a pick; got \(colliding ?? [:])")
         XCTAssertNotNil(colliding, "viaColliding must not be ABSENT — under the ⟨0.21⟩ manifest that is a "
                         + "positive purity claim, and refusing to answer licenses no such claim")
         XCTAssertTrue(Set(colliding?["inferred"] as? [String] ?? []).contains("Unknown"),
-                      "refusing an ambiguous answer falls back to half 1's DISCLOSURE, never to silence; "
+                      "Beta's `Stub.fetch` is PURE, so its answer is a MISS and half 1's DISCLOSURE still "
+                      + "fires beside the union — never silence; "
                       + "got \(colliding ?? [:])")
         XCTAssertTrue((colliding?["unknownWhy"] as? [String] ?? [])
                         .contains("dispatch:untyped cross-package receiver"),

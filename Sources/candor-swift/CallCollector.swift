@@ -144,6 +144,9 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// the DISCLOSING direction — a construction site that forgets to set it over-discloses,
               /// never silently drops a raw C call.
               var argLabelled: Bool = false
+              /// SOUNDNESS R847 — on an `argRef` call: the name is a binder's local in scope, so it can be
+              /// no dependency declaration (the chained join skips it). Local resolution is unaffected.
+              var argBoundLocal: Bool = false
               /// SOUNDNESS R826 — `extOwner` came from the SINGLETON CONVENTION (`Client.shared.fetch()`
               /// keyed on `Client`), not from a recorded binding. A §2 join that ANSWERS is taken as the
               /// answer — the same answer the bound spelling `let s = Client.shared; s.fetch()` gets — and a
@@ -155,6 +158,11 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// `rootOf` reached through a hop it could not type. Its presence is what makes the Driver
               /// disclose in a STANDALONE scan too (see there). nil on every other marker and call.
               var guessedOwner: String? = nil
+              /// SOUNDNESS R846 — the MODULE the source spells for this call's receiver type
+              /// (`c: RatesCore.Client`, `RatesCore.Client.shared`, `RatesCore.Client()`), or nil when the
+              /// spelling names none. The Driver's joins PREFER that module's package: two chained packages
+              /// both answering `Client.fetch` must not be unioned where the source already said which one.
+              var ownerModule: String? = nil
               var extOwner: String? = nil }    // the RESOLVED receiver root of an otherwise-unmatched member
                                                // call (`c.fetch()` where c: RatesClient, an external type) —
                                                // carried ONLY for the §2 CANDOR_DEPS join key (`pkg#Owner.leaf`);
@@ -586,6 +594,19 @@ final class CallCollector: SyntaxVisitor {
     /// `boundLocals` keeps its function-wide spelling and its Driver consumer untouched: this is a second
     /// set, for the same reason `casePayloadLocals` is one, and neither depends on the other's scoping.
     private var literalLocals: Set<String> = []
+    /// SOUNDNESS R847 — EVERY name a binder has rebound in the current lexical scope (written by
+    /// `shadowName`, which every binder calls — `let`/`var`, `if`/`guard`/`while let`, `for`, `catch` and
+    /// its implicit `error`, closure parameters), SAVED AND RESTORED with the shadow scope exactly as
+    /// `literalLocals` is. Read ONLY by the chained-dependency question "may this bare name be a
+    /// dependency's declaration?" — a name a binder holds in scope is a local, whatever it is called.
+    /// Deliberately NOT added to the global-read guard that feeds LOCAL edges: that would change which
+    /// local units a bare read reaches, which is a different claim with its own measurement (RxAlamofire's
+    /// closure parameter `response` reaches the module's own `response(_:…)` free function that way —
+    /// wrong in mechanism, and the only thing carrying its real `Net`; not this row's to remove).
+    private var binderShadow: Set<String> = []
+    /// R847 — the bare reads that were NOT bound locally at the point of reading: the only ones the chained
+    /// global-read join may answer from a dependency.
+    var depGlobalReads: Set<String> = []
     var localFuncs: Set<String> = []      // NESTED `func` names declared in this unit's body. Their bodies
                                           // attribute lexically (DeclCollector skips them; we walk them here),
                                           // so a bare `helper()` call to a local func must NOT also edge to a
@@ -1280,6 +1301,17 @@ final class CallCollector: SyntaxVisitor {
                 let n = ma.declName.baseName.text
                 return (dealias(n), true, [n], false, false)
             }
+            // SOUNDNESS R838 (the constructor spelling) — `Stream.Iterator()` / `BufferedStream<Int>.Iterator()`
+            // constructs a NESTED type a dependency declares. The arm above answers only a LOCAL nested
+            // type, so the binding stayed untyped and `var i = Stream.Iterator(); i.next()` was silent on
+            // v0.39.2 over a body that reads the environment. `conventionTypePath` is the one authority for
+            // a type-reference spelling (declared local types refused); only a DOTTED path is taken here,
+            // since a bare or module-qualified ctor is answered by the arms around this one.
+            if !Self.r846Off, let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
+               ma.declName.baseName.text.first?.isUppercase == true,
+               let tp = conventionTypePath(ExprSyntax(ma)), tp.contains(".") {
+                return (tp, true, [ma.declName.baseName.text], false, false)
+            }
             if let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
                let rt = returns[ma.declName.baseName.text] {
                 return (rt, true, [ma.declName.baseName.text], false, false)
@@ -1865,6 +1897,65 @@ final class CallCollector: SyntaxVisitor {
     /// silent again (typed branch with no owner; the let binder clears it as a LOCAL type).
     static let r839Off = ProcessInfo.processInfo.environment["CANDOR_R839_OFF"] != nil
     static let r836Probe = ProcessInfo.processInfo.environment["CANDOR_R836_PROBE"] != nil
+    /// SOUNDNESS R846 / R847 §1b kill switches — see `ownerModule` and the Driver's `bareNameDepEntry`.
+    static let r846Off = ProcessInfo.processInfo.environment["CANDOR_R846_OFF"] != nil
+    static let r847Off = ProcessInfo.processInfo.environment["CANDOR_R847_OFF"] != nil
+
+    /// SOUNDNESS R846 — the dependency MODULE a receiver's type spelling names, or nil. Two sources, both
+    /// the source's own words, never an inference: a module qualifier written IN the expression
+    /// (`RatesCore.Client.shared`, `RatesCore.Client()`), or one written in the TYPE the receiver was
+    /// bound with (`c: RatesCore.Client`, a field or `typealias` of one) — read from the RAW spelling
+    /// `rootOfUnaliased` answers, before `dealias` strips the qualifier. A platform module (`Foundation.`)
+    /// is not a dependency and names nothing here.
+    /// R846 — only the module qualifier written IN the expression (`RatesCore.Client()`,
+    /// `RatesCore.Client.shared`), never one read off a binding.
+    func explicitModule(of expr: ExprSyntax?) -> String? {
+        guard !Self.r846Off, let e0 = expr.map(Self.peel) else { return nil }
+        var e = e0, descended = false
+        while true {
+            if let ma = e.as(MemberAccessExprSyntax.self), let b = ma.base { e = Self.peel(b); descended = true; continue }
+            if let c = e.as(FunctionCallExprSyntax.self) { e = Self.peel(c.calledExpression); descended = true; continue }
+            if let g = e.as(GenericSpecializationExprSyntax.self) { e = Self.peel(g.expression); descended = true; continue }
+            break
+        }
+        guard descended, let h = e.as(DeclReferenceExprSyntax.self)?.baseName.text, isModuleQualifier(h),
+              !PLATFORM_MODULES.contains(h) else { return nil }
+        return h
+    }
+
+    func spelledModule(of expr: ExprSyntax?) -> String? {
+        guard !Self.r846Off, let e0 = expr.map(Self.peel) else { return nil }
+        var e = e0, descended = false
+        while true {
+            if let ma = e.as(MemberAccessExprSyntax.self), let b = ma.base { e = Self.peel(b); descended = true; continue }
+            if let c = e.as(FunctionCallExprSyntax.self) { e = Self.peel(c.calledExpression); descended = true; continue }
+            if let g = e.as(GenericSpecializationExprSyntax.self) { e = Self.peel(g.expression); descended = true; continue }
+            break
+        }
+        if descended, let h = e.as(DeclReferenceExprSyntax.self)?.baseName.text, isModuleQualifier(h),
+           !PLATFORM_MODULES.contains(h) { return h }
+        return typeSpellingModule(rootOfUnaliased(e0).root)
+    }
+    func typeSpellingModule(_ raw: String?) -> String? {
+        var n = raw, hops = 0
+        while let x = n, hops < 16 {
+            if let dot = x.firstIndex(of: ".") {
+                let h = String(x[x.startIndex..<dot])
+                if isModuleQualifier(h), !PLATFORM_MODULES.contains(h) { return h }
+            }
+            guard !localTypes.contains(x), let u = typeAliases[x], u != x else { return nil }
+            n = u; hops += 1
+        }
+        return nil
+    }
+    /// R844/R846 — the external member candidates (`Type.member`) with the module(s) the source spelled for
+    /// the type. A candidate recorded even once WITHOUT a module is OPEN (every chained package is asked).
+    var externalCandidateModules: [String: Set<String>] = [:]
+    var externalCandidateOpen: Set<String> = []
+    func noteExternalCandidate(_ cand: String, module: String?) {
+        if let m = module { externalCandidateModules[cand, default: []].insert(m) }
+        else { externalCandidateOpen.insert(cand) }
+    }
     /// SOUNDNESS R826 REACH PROBE — one stderr line per call site the convention re-keys.
     static let r826Probe = ProcessInfo.processInfo.environment["CANDOR_R826_PROBE"] != nil
 
@@ -3687,6 +3778,7 @@ final class CallCollector: SyntaxVisitor {
     // deliberately kept, or not per-binding — so a map added without that decision fails a test, and a
     // map classified as cleared without the clear being written fails a different one.
     private func shadowName(_ name: String) {
+        binderShadow.insert(name)   // R847
         monoNames.remove(name)
         depBoundLocals.removeValue(forKey: name)
         localConstStrings.removeValue(forKey: name)
@@ -4064,6 +4156,7 @@ final class CallCollector: SyntaxVisitor {
         var fnValueAlias: [String: String], casePayload: Set<String>
         // R362 — see `literalLocals`. Scoped for the same reason `casePayload` is.
         var literalLocals: Set<String>
+        var binderShadow: Set<String>   // R847 — see `binderShadow`
     }
     private var shadowScopes: [SyntaxIdentifier: ShadowSave] = [:]
 
@@ -4116,7 +4209,7 @@ final class CallCollector: SyntaxVisitor {
                                            depBound: depBoundLocals, protoTyped: protoTyped,
                                            constStrings: localConstStrings, fnValueAlias: fnValueAlias,
                                            casePayload: casePayloadLocals,
-                                           literalLocals: literalLocals)
+                                           literalLocals: literalLocals, binderShadow: binderShadow)
     }
 
     private func leaveShadowScope(_ node: some SyntaxProtocol) {
@@ -4135,6 +4228,7 @@ final class CallCollector: SyntaxVisitor {
         fnValueAlias = saved.fnValueAlias
         casePayloadLocals = saved.casePayload
         literalLocals = saved.literalLocals
+        binderShadow = saved.binderShadow
     }
 
     /// THE CATCH-ALL BINDER, and it exists to invert a failure mode rather than to add a case.
@@ -5213,7 +5307,8 @@ final class CallCollector: SyntaxVisitor {
                         // (assigned in init / no initializer) — the invoked value is unaddressable → Unknown.
                         unresolved = true; why.insert("dispatch:\(et).\(n)")
                     } else {
-                        calls.append(Call(path: n, leaf: n, strArg: nil, typed: false, unqualified: true, argRef: true))
+                        calls.append(Call(path: n, leaf: n, strArg: nil, typed: false, unqualified: true, argRef: true,
+                                          argBoundLocal: binderShadow.contains(n) || casePayloadLocals.contains(n)))
                     }
                 }
             } else if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base {
@@ -5850,7 +5945,7 @@ final class CallCollector: SyntaxVisitor {
                 }
                 calls.append(Call(path: "\(rt).\(member)", leaf: member, strArg: lit, typed: true,
                                   args: argKinds(node), argTypes: argTypesOf(node),
-                                  conventionOwner: r839Convention,
+                                  conventionOwner: r839Convention, ownerModule: spelledModule(of: ma.base),
                                   extOwner: r651ForeignExtended ? rt : nil))
                 if Self.r836Probe, r839Convention {
                     FileHandle.standardError.write("R839HIT \(rt).\(member)\n".data(using: .utf8)!)
@@ -6192,13 +6287,14 @@ final class CallCollector: SyntaxVisitor {
                 let guessedOwner: String? = Self.r567aOff ? nil
                     : (base.opaqueHop && resolvedOwner == nil ? releaseOwner : nil)
                 let primary = Self.r567aOff ? releaseOwner : (resolvedOwner ?? releaseOwner)
-                calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), opaqueRecv: base.mono, conventionOwner: !Self.r567aOff && conventionOwner != nil && conventionOwner == primary, extOwner: primary))
+                let recvModule = spelledModule(of: ma.base)
+                calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), opaqueRecv: base.mono, conventionOwner: !Self.r567aOff && conventionOwner != nil && conventionOwner == primary, ownerModule: recvModule, extOwner: primary))
                 // THE FLOOR, where the resolution differs from what the release keyed (`RatesCore.Client`
                 // was keyed on the MODULE and joined its leaf union; `Outer.Inner.shared` on `Outer`).
                 // Kept so nothing the release answered stops being answered; it is the release's own
                 // over-approximation, not a new one.
                 if !Self.r567aOff, let r = releaseOwner, let p = primary, r != p {
-                    calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), opaqueRecv: base.mono, extOwner: r))
+                    calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), opaqueRecv: base.mono, ownerModule: recvModule, extOwner: r))
                 }
                 // The disclosure for a GUESSED owner — bounded, as R567(a) bounded it, to sites where the
                 // release formed an owner: a chain whose root never qualified asked nothing then and must
@@ -6497,6 +6593,7 @@ final class CallCollector: SyntaxVisitor {
                 // accessor unit can legitimately answer them; excluding them removes the whole class
                 // rather than the one collision that surfaced.
                 propertyExternal.insert("\(root).\(prop)")
+                noteExternalCandidate("\(root).\(prop)", module: spelledModule(of: node.base))
             }
         }
         return .visitChildren
@@ -6568,6 +6665,7 @@ final class CallCollector: SyntaxVisitor {
             if isReadBase {
                 if let et = enclosingType, fields[et]?[n] != nil { return .skipChildren }
                 globalReads.insert(n)
+                if !binderShadow.contains(n), !casePayloadLocals.contains(n) { depGlobalReads.insert(n) }
                 return .skipChildren
             }
             if p.is(FunctionCallExprSyntax.self) || p.is(MemberAccessExprSyntax.self)
@@ -6583,8 +6681,11 @@ final class CallCollector: SyntaxVisitor {
         // ...unless `n` is a LOCAL binding (a literal/arithmetic-bound `let n = …` that `vars` drops
         // because its type didn't resolve) — then the bare read is the local, NOT `self.n`; edging to the
         // enclosing type's `n` accessor would FABRICATE its effect (regression). boundLocals tracks these.
-        if let et = enclosingType, !isBoundLocal(n) { propertyEdges.insert("\(et).\(n)") }
+        if let et = enclosingType, !isBoundLocal(n) {
+            propertyEdges.insert("\(et).\(n)")
+        }
         globalReads.insert(n)
+        if !binderShadow.contains(n), !casePayloadLocals.contains(n) { depGlobalReads.insert(n) }
         return .skipChildren
     }
 
@@ -6892,6 +6993,7 @@ final class CallCollector: SyntaxVisitor {
             // a sibling report only (`<Module>#<Type>.<member>`) and drops it otherwise, so a stdlib or
             // unchained operand contributes exactly nothing, as today.
             stringifyExternal.insert("\(x).\(member)")
+            noteExternalCandidate("\(x).\(member)", module: spelledModule(of: operand))
         }
     }
 
@@ -7545,6 +7647,9 @@ final class CallCollector: SyntaxVisitor {
     private func noteConstructionForDeinitGlue(_ node: FunctionCallExprSyntax) {
         guard let t = constructedTypeOf(node), !constructionEscapes(Syntax(node)) else { return }
         applyDeinitGlue(root: t)
+        if !localTypes.contains(t), !t.hasPrefix("<") {
+            noteExternalCandidate("\(t).deinit", module: spelledModule(of: ExprSyntax(node)))
+        }
     }
 
     override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
@@ -7895,7 +8000,12 @@ final class CallCollector: SyntaxVisitor {
                             depBoundLocals[name] = callee
                         } else { depBoundLocals.removeValue(forKey: name) }
                         if let t = info.root, info.isVar {
-                            vars[name] = t
+                            // R846 — `let c = RatesCore.Client()`: keep the module the initializer SPELLS,
+                            // in the raw form an annotated `let c: RatesCore.Client` already stores, so the
+                            // joins can prefer that module's package. `rootOf` dealiases on every read, so
+                            // every other consumer of `vars` sees the bare type exactly as before.
+                            if let m = explicitModule(of: v), !t.hasPrefix(m + ".") { vars[name] = "\(m).\(t)" }
+                            else { vars[name] = t }
                             if info.opaqueHop, !Self.r610Off { opaqueVars.insert(name) }   // R610
                             // (R33's third and original call site stood here. The construction hook in
                             //  `visit(FunctionCallExprSyntax)` reaches this same initializer — this

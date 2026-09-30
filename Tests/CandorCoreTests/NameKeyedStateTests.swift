@@ -182,6 +182,15 @@ final class NameKeyedStateTests: XCTestCase {
             + "(`if c { let h = 1 }; return h` goes ABSENT). Both directions are pinned by "
             + "`testTheShadowGuardKnowsTupleElemAndAScopedLiteralLocalButNotFunctionWideBoundLocals`, "
             + "and neither is safe to assert alone."),
+        // ── SOUNDNESS R847: the same lexical existence claim, written by EVERY binder (via `shadowName`)
+        "binderShadow": .lexicallyScoped(
+            "every name a binder has rebound in the current scope — `let`/`var`, `if`/`guard`/`while let`, "
+            + "`for`, `catch` (and its implicit `error`), closure parameters — saved and restored exactly as "
+            + "`literalLocals` is. Read ONLY to decide whether a bare name may be a chained DEPENDENCY's "
+            + "declaration: nio-http2's `while let next = it.next() { … next.count … }` read `next` as a "
+            + "global and joined `swift-nio#next`, a method leaf, charging `Env` to array iteration. Not "
+            + "consulted by the LOCAL global-read guard, deliberately: that changes which local units a "
+            + "bare read reaches, a separate claim with its own measurement."),
         // ── the locator-move PRE-PASS: kept, and kept for the OPPOSITE reason to the two hedges above
         "movedNames": .deliberatelyKept(
             "the flow-insensitive move set behind locator provenance, computed over the WHOLE body "
@@ -373,7 +382,9 @@ final class NameKeyedStateTests: XCTestCase {
         "protoDispatches": .notPerBinding, "protoPropReads": .notPerBinding,
         "stringifyDispatches": .notPerBinding, "stringifyExternal": .notPerBinding,
         "deinitExternal": .notPerBinding, "propertyExternal": .notPerBinding,
-        "globalReads": .notPerBinding,
+        "globalReads": .notPerBinding, "depGlobalReads": .notPerBinding,
+        // R844/R846 — output: each external member candidate with the module(s) the source spelled
+        "externalCandidateModules": .notPerBinding, "externalCandidateOpen": .notPerBinding,
         "propertyEdges": .notPerBinding, "callbackInvoked": .notPerBinding,
         // `localFuncs` is a DECLARATION set, not a binding fact: a nested `func` name suppresses the
         // same-named module-level free fn for the whole unit. Its leak direction is SUPPRESSION (a
