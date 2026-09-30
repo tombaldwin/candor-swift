@@ -10,15 +10,137 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
-**Upgrading from 0.39.2 — gates that can flip (all STRICTER; each is a ⚠ entry below):**
+**Upgrading from 0.39.2 — gates that can flip, in BOTH directions (each is an entry below).** A patch
+that removes a fabricated charge moves a gate from 1 to 0, and that is the correct answer — but it is still
+a flip, and a baseline or a CI gate pinned across it will move. Directions are as each entry measured them; the entries carry the fixtures.
+
+*Can go 0 → 1 (a real effect, or a disclosure, that 0.39.2 did not report):*
 - `FileManager.setAttributes`, `trashItem`, `isExecutableFile`, `isDeletableFile`, `URLSession`'s
   `dataTaskPublisher`, and the `NSMutable*` `contentsOfFile:` initialisers now charge their effect, and
-  `Process.launchedProcess(launchPath:)` now masks — so `deny Fs`/`deny Net` and masking `allow` rules
-  can go 0 → 1 (R786–R789).
-- A metatype binder shadowing an enclosing name, and a ternary-valued receiver, now resolve to the
-  receiver they really name, so `deny Net`/`pure` over code that dials out can go 0 → 1 (R620, R589).
+  `Process.launchedProcess(launchPath:)` now masks — `deny Fs`/`deny Net` and masking `allow` rules
+  (R786–R789).
+- A metatype binder shadowing an enclosing name, and a ternary-valued receiver, resolve to the receiver
+  they really name — `deny Net`/`pure` (R620, R589).
+- Metatype and generic TYPE receivers over local classes and protocols, in every binder, and over a
+  dependency-declared type — `deny Net`/`deny Env`/`pure` (R563, R584, R585, R704, R550).
+- The §2 chain is consulted for a dependency whose `Package(name:)` differs from its module names, i.e.
+  every ordinary SwiftPM package — its effects now reach your rows (R565); an overloaded dependency
+  method is reachable by its bare name (R567(b)); a consumer `extension` on a dependency type no longer
+  silences calls on that type (R656); an overloaded conformer member beside a protocol-extension default
+  is no longer dropped (R572, which also over-charges an undiscriminated overload spread — stated there).
+- New `Unknown` disclosures: a callback invoked through a nested `func`'s or closure's parameter (R725), a
+  deferred callback no call site can discharge (R720), a higher-order function with one resolved and one
+  unresolved caller (R127), an erased dispatch over a dependency's abstraction (R705), a member chain
+  through a hop the engine cannot type (R567(a), R610), and a singleton-accessor key the dependency does
+  not answer (R826) — `deny Unknown` / `deny <E> Unknown`.
+- For a DOWNSTREAM consumer of this engine's reports: ⟨0.39⟩ keys that were misattributed, suppressed or
+  spelled under a module now name the owning package and can be joined (R555, R565, R592, R593, R603).
+
+*Can go 1 → 0 (0.39.2 charged something the code does not do):*
+- A member-chain receiver was keyed to the OUTER base's type and joined its same-named member —
+  `c.loop.spin()` charged `Channel.spin`'s effect; that decoy charge is gone (R567(a)), including through
+  a binding (R610). The real effect becomes `Unknown`, so `deny <real E> Unknown` still fires.
+- A generic bound that shadows the enclosing type's charged the OUTER protocol's conformers (R580).
+- A POSIX free call (`connect`, `getenv`, `fopen`, …) in a file importing a dependency with a same-named
+  METHOD took that method's effects instead of its own: `deny Env`/`deny Clock`/`deny Unknown` can fall
+  while `deny Net` rises (R649).
+- A fabricated `dispatch:` hedge on a `==` over `Any.Type` fields is gone — scoped `deny Unknown` (R704).
+- A local fallback's `Unknown` is replaced by the chained dependency's OWN row for that member: the effect
+  gate rises and `deny Unknown` on that function can fall (R657/R692).
+- A report registered under another package's name (the first `name:` in its manifest) no longer claims
+  coverage of, or answers joins for, that package (R559).
+
+*Not a flip against 0.39.2, stated because the pre-release build had one:* R567(a) as first written also
+refused the singleton accessor (`Client.shared.fetch()`), turning a correct concrete charge into `Unknown`
+and moving `deny Env <fn>` 1 → 0. R826 restores it before release; the net change against 0.39.2 there
+is that a singleton key the dependency does NOT answer now discloses `Unknown` instead of reading pure.
 
 ### Fixed
+
+- **⚠ SOUNDNESS R826 — R567(a) REFUSED THE SINGLETON ACCESSOR TOO, SO A CORRECT CONCRETE CHARGE ON A
+  CHAINED DEPENDENCY BECAME A HEDGE AND A SCOPED GATE WENT 1 → 0 AGAINST v0.39.2.** Dependency `Client`
+  with `public static let shared = Client()` and `fetch()` reading the environment; consumer
+  `func viaShared() { Client.shared.fetch() }`, built and RUN (prints the variable). v0.39.2 reported
+  `['Env']`; the pre-release build reported `['Unknown']` (`dispatch:untyped cross-package receiver`) and
+  `deny Env viaShared` exited **0**, while `let s = Client.shared; s.fetch()` still read `['Env']` — one
+  program, two answers.
+
+  `rootOf` keeps the outer base's type across a `.member` hop it cannot type; R567(a) correctly stopped
+  treating that as a resolution. But for ONE hop the engine already takes the type on convention — a
+  `SINGLETON_ACCESSORS` member (`shared`, `default`, `current`, `main`, `standard`, …) on a type this scan
+  does not declare — and it does so at the let binder. `singletonConventionOwner` now answers that for the
+  direct spelling: a bare type, `Self`, or a module-qualified type (`RatesCore.Client.shared`), with a
+  trailing `.self` stripped. A LOCAL type is refused, exactly as the binder refuses it. Every other opaque
+  hop keeps R567(a)'s refusal (`c.loop.spin()`, `Client.other.ping()`, `Client.shared.inner.ping()`).
+
+  **A MISS DISCLOSES, WHICH v0.39.2 DID NOT.** The convention key is formed, and if the dependency answers
+  it the row takes that answer and no hedge. If it does not, the row reads `Unknown` with R567(a)'s own
+  token: a miss cannot tell "the member is pure" from "`.shared` is not a `Client`". The ⟨0.39⟩
+  obligation-1 key for a convention owner is published only when the join answered it, so the platform
+  singletons R567(a) cleaned out of the wire (`Alamofire#DispatchQueue.async`,
+  `…#NotificationCenter.addObserver`) are not re-minted.
+
+  A sibling found on the same fixture and closed with it: `RatesCore.Client.sfetch()` — a module-qualified
+  TYPE, no singleton at all — was also an "opaque hop" and went `['Env']` → `['Unknown']`, `deny Env`
+  1 → 0. A module qualifier is a spelling (`moduleQualifiedTypeName`), not a receiver.
+
+  EXECUTED fixture, 21 consumer functions, gates on v0.39.2 `eae95e9` / pre-fix / this build:
+  `viaShared`, `.default`, `.current`, `.main`, a struct singleton, an optional singleton
+  (`Opt.shared?.fetch()`), `.shared.self`, `RatesCore.Client.shared` and `RatesCore.Client.sfetch()` are
+  **1 / 0 / 1** under `deny Env <fn>`; the bound spelling, the parameter, the ctor and the static call are
+  1 / 1 / 1. No `deny Env <fn>` is lower than on v0.39.2. The release also over-charged
+  `RatesCore.Client.shared.fetch()` as `['Env','Fs']` (a leaf-keyed lookup); this build reads `['Env']`.
+
+  **THE RESIDUAL, STATED:** a singleton-named static whose type is NOT its declaring type, where the
+  declaring type also has a member of the called name (`Wrong.shared` is an `Other`; both declare `ping`),
+  joins the wrong member — `['Fs']` over code that reads `Env`, exactly as v0.39.2 and as the BOUND
+  spelling at every version (R617). The pre-release build hedged it. Closing it needs the static's
+  declared type, which no report carries; `testTheDirectAndBoundSpellingsAgreeEvenWhereTheConventionIsWrong`
+  pins that the two spellings agree so the direct one is never the looser. `Client.make().fetch()` (a
+  static FACTORY) is silent in all three builds and is a separate, pre-existing gap.
+
+  A/B, `bin/corpus-ab.py`, 9 real SwiftPM packages END TO END (each arm scans the package's own resolved
+  checkouts with its own binary): 4,808 → 4,817 rows, **ADDED 9 REMOVED 0 CHANGED 5**, `inferred` CHANGED
+  0. REACH `R826HIT` 64 across 4 entries (KingfisherWebP 34, Moya 20, AlamofireImage 7, RxAlamofire 3).
+  Every R826 change ground-truthed from Kingfisher's source: `DefaultCacheSerializer.default` and
+  `DefaultImageProcessor.default` are `static let \`default\` = <Self>()`, the two joins hit, and
+  `WebPProcessor.process` trades `dispatch:untyped cross-package receiver` for
+  `dep:Kingfisher#DefaultImageProcessor.process` (it keeps `Unknown` from other calls; no gate moves).
+  `CANDOR_R826_OFF=1` restores the pre-fix answer and reds `SingletonConventionAndCoverageProcessTests`
+  (23 assertions).
+
+- **⚠ SOUNDNESS R827 — R565 MAPPED EVERY TARGET OF A DEPENDENCY'S MANIFEST TO ITS PACKAGE, A C TARGET
+  INCLUDED, SO A CHAINED SWIFT REPORT WAS TAKEN AS COVERING A MODULE IT CAN NEVER CONTAIN.** Dependency
+  `RatesDep` with Swift target `RatesCore` and C target `CShim` (`shim_getenv()` calls `getenv`);
+  consumer `import CShim; func callShim() { shim_getenv() }`, built and RUN. v0.39.2: `callShim` present
+  with `invisible: ['CShim']`. Pre-fix: `callShim` ABSENT from `functions[]` — the ⟨0.21⟩ purity claim —
+  and stderr "nothing hidden". No gate flips (`invisible` gates nothing), which is why it needed a fixture.
+
+  `dependencyModuleOwnership` now maps a module only when a Swift report can hold its bodies: it has
+  `.swift` sources and no clang-compiled ones. A C, Objective-C or C++ target, a mixed target, a
+  `.systemLibrary`, a `.binaryTarget`, and a declared target whose sources cannot be located go into
+  `notSwiftCoverable`, which the chain gates read before the package lookup — never covered, never
+  joined, whatever their package. That also closes the shape v0.39.2 had when the C module's name EQUALS
+  its package name (silent there too). A module whose name is its package's and whose sources cannot be
+  located is left as v0.39.2 left it rather than withdrawn. Product names are asked about as
+  conventionally laid-out targets, because real manifests declare targets through helpers no syntactic
+  walk reads (RxSwift's `.rxTarget(name: "RxRelay")`); a first cut that dropped them un-chained `RxRelay`.
+
+  **AND A RE-EXPORT.** A covered Swift module that `@_exported import`s a C module (`ReCore` re-exporting
+  `CShim`) put `shim_getenv` in scope with only the covered import in view: silent pre-fix, `invisible:
+  ['ReCore']` on v0.39.2. The ownership walk records each Swift target's re-exports, and the ledger and
+  the per-function hedge name the re-exported module no report covers.
+
+  EXECUTED fixtures, every caller present with `invisible` naming the right module on this build: C
+  target, Objective-C target, `.systemLibrary`, `.binaryTarget` (a real `.xcframework`), C re-export, a
+  C module named like its own package, and the consumer's OWN C target (unchanged, and correct, in all
+  three builds). The Swift half of the same package stays chained: `callKnown` keeps `['Env']`, which
+  v0.39.2 reported as `invisible` — R565's gain, kept.
+
+  Same A/B: the 9 ADDED rows and 1 of the 5 CHANGED are one mechanism — swift-nio-ssl's
+  `IdentityVerification.swift` imports `CNIOLinux`, a C target of swift-nio, and its functions regain
+  `invisible: ['CNIOLinux']` (REACH `R827HIT` 1). REMOVED 0. Revert-tested: the process tests go red on the
+  pre-fix tree (12 assertions across the six callers).
 
 - **⚠ SOUNDNESS R786/R787/R788/R789 — FOUR SILENT UNDER-REPORTS WITH ONE SHAPE: A GUARD KEYED ON A
   MEMBERSHIP TABLE WHERE THE ENGINE ANSWERS THAT SAME QUESTION WITH A RULE, OR A SECOND TABLE,

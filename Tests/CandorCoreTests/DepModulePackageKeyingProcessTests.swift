@@ -57,7 +57,8 @@ final class DepModulePackageKeyingProcessTests: XCTestCase {
                 targets: [.target(name: "NIOCore"), .target(name: "NIOPosix")])
             """,
         ], ["/root/.build/checkouts": ["swift-nio"]])
-        let map = dependencyModulePackages(rootDir: "/root", readManifest: read, listDir: list)
+        let map = dependencyModulePackages(rootDir: "/root", readManifest: read, listDir: list,
+                                           targetSources: { _, _ in ["/src/a.swift"] })
 
         XCTAssertEqual(map["RatesCore"], "RatesDep",
                        "a local path dependency whose `Package(name:)` differs from its target name is "
@@ -90,7 +91,8 @@ final class DepModulePackageKeyingProcessTests: XCTestCase {
             let package = Package(name: "PkgB", targets: [.target(name: "Shared")])
             """,
         ], [:])
-        let map = dependencyModulePackages(rootDir: "/root", readManifest: read, listDir: list)
+        let map = dependencyModulePackages(rootDir: "/root", readManifest: read, listDir: list,
+                                           targetSources: { _, _ in ["/src/a.swift"] })
         XCTAssertNil(map["Shared"],
                      "two packages declaring one module name is the §2 rule-1 posture: DROP, never pick. "
                      + "An unmapped module falls back to ITSELF, which is exactly the pre-fix key — so "
@@ -112,7 +114,8 @@ final class DepModulePackageKeyingProcessTests: XCTestCase {
             let package = Package(name: "Alamofire", targets: [.target(name: "Alamofire")])
             """,
         ], [:])
-        let map = dependencyModulePackages(rootDir: "/root", readManifest: read, listDir: list)
+        let map = dependencyModulePackages(rootDir: "/root", readManifest: read, listDir: list,
+                                           targetSources: { _, _ in ["/src/a.swift"] })
         XCTAssertTrue(map.isEmpty, "nothing to resolve; got \(map)")
     }
 

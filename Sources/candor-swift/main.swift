@@ -1722,7 +1722,14 @@ var depsIndex = loadDepReports(spec: depsSpec, engineVersion: engineVersion)
 // hash. Under the gate, `candor-swift .` and `CANDOR_DEPS=… candor-swift .` over the SAME tree emit
 // different wire keys for the same abstraction, so whether a downstream consumer can join a report would
 // depend on how the producer happened to be invoked. It reads a handful of `Package.swift` files.
-depsIndex.modulePkgs = dependencyModulePackages(rootDir: rootDir)
+do {
+    // R827 — one walk, three answers: the map, the modules no Swift report can cover, and the re-exports.
+    let ownership = dependencyModuleOwnership(rootDir: rootDir)
+    depsIndex.modulePkgs = ownership.packages
+    depsIndex.notSwiftCoverable = ownership.notSwiftCoverable
+    depsIndex.moduleReexports = ownership.reexports
+    depsIndex.notSwiftOwner = ownership.notSwiftOwner
+}
 
 // R73/R74 FOLLOW-ON (Driver.swift `analyze`'s `nestedManifestDirs` doc has the full mechanism/enumeration):
 // every NESTED `Package.swift` this walk found — the outer scan's own root manifest excluded (its rel

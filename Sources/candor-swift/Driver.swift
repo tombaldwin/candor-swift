@@ -1649,9 +1649,31 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // site actually asks is "is it invisible to THIS file", and those differ the moment a scan holds
     // more than one package. `importableByFile` carries the dependency-graph answer; a file with no
     // owning package gets an empty set, so nothing is claimed and everything it imports stays named.
+    /// SOUNDNESS R827 — the modules a file can NAME: its own imports, plus whatever a COVERED dependency
+    /// module re-exports (`@_exported import CShim` inside a chained Swift target). The report of the
+    /// importing module covers its Swift bodies and none of the re-exported names, so an unqualified call
+    /// that resolves to nothing may land in the re-exported module — and with only the covered import in
+    /// view, the ledger read that silence as purity. Before R565 that dependency was UNCHAINED whenever
+    /// its package name differed from the module, so the hedge named the importing module instead; this
+    /// restores the hedge, on the module it belongs to, without unchaining the Swift half.
+    ///
+    /// Transitive, and only through COVERED modules: an uncovered import is already named itself.
+    func effectiveImports(_ file: String) -> [String] {
+        var out = fileImports[file] ?? []
+        guard !deps.moduleReexports.isEmpty else { return out }
+        var seen = Set(out)
+        var queue = out.filter { deps.coversModule($0) }
+        while let m = queue.popLast() {
+            for r in (deps.moduleReexports[m] ?? []).sorted() where seen.insert(r).inserted {
+                out.append(r)
+                if deps.coversModule(r) { queue.append(r) }
+            }
+        }
+        return out
+    }
     func blindModules(inFile file: String) -> Set<String> {
         let importable = importableByFile[file] ?? []
-        return Set((fileImports[file] ?? []).filter {
+        return Set(effectiveImports(file).filter {
             !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !importable.contains($0)
                 && !deps.coversModule($0) })      // R565 — the ledger asked a MODULE of a PACKAGE set
     }
@@ -1683,12 +1705,31 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// `swift-log`, and warning about it would be the false disclosure this note exists to avoid.
     var coverageNotDeclared: [String: Set<String>] = [:]   // module -> files importing it
     var uncoveredCounts: [String: Int] = [:]
-    for (file, imports) in fileImports {
+    // SOUNDNESS R827 REACH PROBE (§E1) — one line per (file, module) the R827 gates CHANGE: an import the
+    // chain would have taken as covered (its owner is chained) but no Swift report can contain, and a
+    // re-exported module the file never names. An unchanged A/B row is not evidence the branch ran.
+    if ProcessInfo.processInfo.environment["CANDOR_R827_PROBE"] != nil {
+        for (file, imports) in fileImports.sorted(by: { $0.key < $1.key }) {
+            for m in imports where deps.notSwiftCoverable.contains(m)
+                                   && deps.isChained(deps.notSwiftOwner[m] ?? deps.pkgOfModule(m)) {
+                FileHandle.standardError.write("R827HIT \(file) \(m)\n".data(using: .utf8)!)
+            }
+            for m in effectiveImports(file).dropFirst(imports.count)
+            where !deps.coversModule(m) && !PLATFORM_MODULES.contains(m) && !KAPPA_MODULES.contains(m) {
+                FileHandle.standardError.write("R827RHIT \(file) \(m)\n".data(using: .utf8)!)
+            }
+        }
+    }
+    for file in fileImports.keys {
+        let imports = effectiveImports(file)   // R827 — re-exported modules count too
         let importable = importableByFile[file] ?? []
         for m in imports where !PLATFORM_MODULES.contains(m) && !KAPPA_MODULES.contains(m)
                                 && !importable.contains(m) {
             guard !deps.coversModule(m) else {   // R565
-                if let declared = declaredByFile[file], !declared.contains(m) {
+                // only a module the file ITSELF imports: a re-exported one is reached through a module
+                // the target does declare, which is the ordinary case this note must not fire on.
+                if let declared = declaredByFile[file], !declared.contains(m),
+                   (fileImports[file] ?? []).contains(m) {
                     coverageNotDeclared[m, default: []].insert(file)
                 }
                 continue
@@ -3221,7 +3262,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // question) and its own removal audit. Keeping the trigger makes this change exactly one
                 // thing — the OWNER of a key that was already published — and the A/B says so: ADDED 0.
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
-                if let m = foreignOwnerModule(inFile: file), let abs = dispatchAbstraction(owner, f) {
+                // SOUNDNESS R826 — a CONVENTION owner publishes its key only where the §2 join below
+                // ANSWERED it (see there). Published unconditionally it re-mints the keys R567(a) removed
+                // for platform singletons — `Alamofire#DispatchQueue.async`, `…#NotificationCenter.addObserver`
+                // — a type the named package does not declare, which no consumer can join.
+                if !call.conventionOwner,
+                   let m = foreignOwnerModule(inFile: file), let abs = dispatchAbstraction(owner, f) {
                     let localPath = localProtocolWirePath(abs)
                     // REACH PROBE (§E1) — an unchanged row is not evidence the branch ran.
                     if r555Probe, localPath != nil {
@@ -3345,6 +3391,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // R565 — `m` was a MODULE and the key prefix is a PACKAGE. `mods` carries the modules
                 // that resolved to this package, because the `owner == m` arm below asks about the
                 // MODULE spelling, not the package.
+                var hitKey: String? = nil   // R826 — the key that answered, for a convention owner's publish
                 for (p, mods) in deps.chainedPkgs(importing: fileImports[file] ?? []) {
                     if call.unqualified {
                         if let e = deps.lookup("\(p)#\(call.path)") ?? deps.lookup("\(p)#\(call.path).init") {
@@ -3357,8 +3404,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         // that arm is the module-qualified free call (`RatesDep.hit()`), where the owner
                         // IS the module name and no generic bound can apply.
                         let key = dispatchAbstraction(owner, f) ?? owner
-                        if let e = deps.lookup("\(p)#\(key).\(call.leaf)")
-                            ?? (mods.contains(owner) ? deps.lookup("\(p)#\(call.leaf)") : nil) {
+                        if let e = deps.lookup("\(p)#\(key).\(call.leaf)") {
+                            hits.append(e); hitKey = "\(p)#\(key).\(call.leaf)"
+                        } else if mods.contains(owner), let e = deps.lookup("\(p)#\(call.leaf)") {
                             hits.append(e)
                         }
                     }
@@ -3377,6 +3425,21 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     }
                     applyDepEntry(de, to: f.qual)
                     resolved = true
+                    // R826 — the convention owner's ⟨0.39⟩ obligation-1 key, published now that the
+                    // dependency has answered it (withheld above until this point).
+                    if call.conventionOwner, let k = hitKey { dispatchDirect[f.qual, default: []].insert(k) }
+                }
+            }
+            // SOUNDNESS R826 — A SINGLETON-CONVENTION KEY THAT NOTHING ANSWERED. The owner was taken on
+            // convention (`Client.shared` is a `Client`), not from a recorded binding, so a miss cannot
+            // tell "the member is pure" from "`.shared` vends some other type". Disclose, with the SAME
+            // token and the SAME chained gate R567(a)'s refusal uses — this is that refusal, deferred to
+            // the one point where it is known whether the dependency answered. A HIT never reaches here.
+            if !resolved, call.conventionOwner {
+                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                if !deps.chainedPkgs(importing: fileImports[file] ?? []).isEmpty {
+                    direct[f.qual, default: []].insert("Unknown")
+                    whyMap[f.qual, default: []].insert("dispatch:untyped cross-package receiver")
                 }
             }
             // A call that resolved to no local edge AND is an UNQUALIFIED free-call/ctor reaches a blind module
@@ -3397,7 +3460,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             if !resolved && call.unqualified {
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                 let blind = blindModules(inFile: file)
-                for m in fileImports[file] ?? [] where blind.contains(m) {
+                for m in effectiveImports(file) where blind.contains(m) {   // R827
                     blindDirect[f.qual, default: []].insert(m)
                 }
             } else if !resolved, !call.typed, let owner = call.extOwner,

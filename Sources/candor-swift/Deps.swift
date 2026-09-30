@@ -293,6 +293,7 @@ struct DepIndex {
         var order: [String] = []
         var mods: [String: [String]] = [:]
         for m in modules {
+            guard !notSwiftCoverable.contains(m) else { continue }   // R827
             let p = pkgOfModule(m)
             guard isChained(p) else { continue }
             if mods[p] == nil { order.append(p) }
@@ -305,7 +306,25 @@ struct DepIndex {
     /// join half, and it fails in the opposite direction: a covered dependency kept being named a blind
     /// spot. Both halves must move together or the two voices contradict — a call whose effects the join
     /// now inherits while the ledger still calls the module invisible.
-    func coversModule(_ m: String) -> Bool { coveredPkgs.contains(pkgOfModule(m)) }
+    func coversModule(_ m: String) -> Bool {
+        !notSwiftCoverable.contains(m) && coveredPkgs.contains(pkgOfModule(m))   // R827
+    }
+    /// SOUNDNESS R827 — dependency modules NO Swift report can contain (a C/ObjC/C++ target, a
+    /// `.systemLibrary`, a `.binaryTarget`, or a target whose sources could not be read), from
+    /// `CandorCore.dependencyModuleOwnership`. R565's map sent every target of a dependency's manifest to its
+    /// package, so a chained Swift report was taken as COVERING the package's C module: the κ ledger and
+    /// the per-function `invisible` hedge both fell silent over a caller of a C function that really calls
+    /// `getenv`, and the caller left `functions[]`. The two gates above read this before `pkgOfModule`, so
+    /// the module is never covered and never joined, whatever its package — and `pkgOfModule` itself (the
+    /// PUBLISH spelling) is untouched. Empty by default: every construction site that predates it is
+    /// byte-identical.
+    var notSwiftCoverable: Set<String> = []
+    /// SOUNDNESS R827 — a Swift dependency module -> the modules its sources `@_exported import`. Read by
+    /// the consumer's ledger so a re-exported module no report covers is still named (see `Driver`'s
+    /// `effectiveImports`).
+    var moduleReexports: [String: Set<String>] = [:]
+    /// Diagnostic only — the package declaring each `notSwiftCoverable` module (the R827 reach probe).
+    var notSwiftOwner: [String: String] = [:]
     /// ⟨0.23⟩ `typeSurface.returns` (SPEC §2): `<pkg>#<fn qual>` -> `<pkg>#<type qual>`, exactly as the
     /// producer published it. Same never-guess discipline as `byKey`: two reports publishing the same fn
     /// key with DIFFERENT types drop the key rather than pick one.

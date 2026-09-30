@@ -734,7 +734,106 @@ public func dependencyModulePackages(rootDir: String,
                                      },
                                      listDir: (String) -> [String]? = {
                                          try? FileManager.default.contentsOfDirectory(atPath: $0)
-                                     }) -> [String: String] {
+                                     },
+                                     targetSources: (String, PackageTarget) -> [String]? = defaultTargetSources)
+    -> [String: String] {
+    dependencyModuleOwnership(rootDir: rootDir, readManifest: readManifest, listDir: listDir,
+                              targetSources: targetSources).packages
+}
+
+/// What the §2 chain may and may not claim about each dependency MODULE. See
+/// `dependencyModuleOwnership`.
+public struct DependencyModuleOwnership: Equatable, Sendable {
+    /// module -> its owning `Package(name:)`, for the modules a Swift report of that package COVERS.
+    public var packages: [String: String] = [:]
+    /// SOUNDNESS R827 — dependency modules NO Swift report can contain: a C / C++ / Objective-C target, a
+    /// `.systemLibrary`, a `.binaryTarget`, or a target whose sources could not be read. A chained report
+    /// for their package must never be taken as covering them.
+    public var notSwiftCoverable: Set<String> = []
+    /// The package that declares each `notSwiftCoverable` module — diagnostic only (the R827 reach probe).
+    public var notSwiftOwner: [String: String] = [:]
+    /// SOUNDNESS R827 — a Swift dependency module -> the modules its sources `@_exported import`. Those
+    /// names are in scope for anyone importing the Swift module, and the Swift module's report covers
+    /// none of them.
+    public var reexports: [String: Set<String>] = [:]
+    public init() {}
+}
+
+/// The default `targetSources`: every file under the target's source directory, or nil when that
+/// directory cannot be located (`targetSourceDirs`' own conventions — `path:`, `Sources/<name>`,
+/// `Source/<name>`, `<name>/`). nil is read as "cannot prove this is Swift", never as "no sources".
+public func defaultTargetSources(_ packageRoot: String, _ target: PackageTarget) -> [String]? {
+    let fm = FileManager.default
+    func isDir(_ p: String) -> Bool { var d: ObjCBool = false; return fm.fileExists(atPath: p, isDirectory: &d) && d.boolValue }
+    // `targetSourceDirs` knows `path:`, `Sources/`, `Source/` and a bare `<name>/`; SwiftPM also accepts
+    // `src/` and `srcs/` as predefined source directories.
+    let extra = ["src", "srcs"].map { (packageRoot as NSString).appendingPathComponent("\($0)/\(target.name)") }
+    guard let dirs = (try? targetSourceDirs([target], packageRoot: packageRoot, exists: isDir))
+            ?? (target.path == nil ? extra.first(where: isDir).map { [$0] } : nil) else { return nil }
+    var out: [String] = []
+    for d in dirs {
+        guard let e = fm.enumerator(atPath: d) else { return nil }
+        while let rel = e.nextObject() as? String { out.append((d as NSString).appendingPathComponent(rel)) }
+    }
+    return out
+}
+
+/// C-family source extensions SwiftPM compiles with clang. A target holding any of them is not one a
+/// Swift report can cover in full.
+private let clangSourceExtensions: Set<String> = ["c", "m", "mm", "cc", "cpp", "cxx", "c++", "C", "s", "S"]
+
+/// `@_exported import M` / `@_exported import struct M.T` / `@preconcurrency @_exported import M`.
+private let reexportPattern = try! NSRegularExpression(
+    pattern: #"@_exported\b[^\n]*?\bimport\s+(?:(?:typealias|struct|class|enum|protocol|let|var|func)\s+)?([A-Za-z_][A-Za-z0-9_]*)"#)
+
+/// `.binaryTarget(name:)` / `.systemLibrary(name:)` — declarations `TargetFinder` deliberately does not
+/// read (they contribute no sources to a scan scope), and exactly the modules a Swift report can never hold.
+private final class OpaqueTargetFinder: SyntaxVisitor {
+    var names: [String] = []
+    init() { super.init(viewMode: .sourceAccurate) }
+    override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
+        guard let member = node.calledExpression.as(MemberAccessExprSyntax.self),
+              member.base == nil
+                || member.base?.as(DeclReferenceExprSyntax.self)?.baseName.text == "Target",
+              ["binaryTarget", "systemLibrary"].contains(member.declName.baseName.text) else { return .visitChildren }
+        if let n = node.arguments.first(where: { $0.label?.text == "name" })
+            .flatMap({ TargetFinder.literal($0.expression) }) { names.append(n) }
+        return .skipChildren
+    }
+}
+
+/// SOUNDNESS R565 + R827 — the module -> owning-package map, and the two things that map must NOT claim.
+///
+/// R565 made a chained report reachable for a dependency whose `Package(name:)` differs from its module
+/// names. It mapped EVERY target and product of that manifest, and a chained report is a claim about the
+/// package's SWIFT bodies only — this engine reads nothing else. So a C target in the same package
+/// (`CShim`, `shim_getenv()` calling `getenv`) was taken as covered: the κ ledger dropped it, the
+/// per-function `invisible: [CShim]` hedge disappeared, and a caller of a C function that really reads
+/// the environment left `functions[]` — the ⟨0.21⟩ purity claim (R827, executed ground truth).
+///
+/// So a module is mapped only when its target is one a Swift report can contain: it has `.swift` sources
+/// and no clang-compiled ones. Everything else — a C/ObjC/C++ target, a `.systemLibrary`, a
+/// `.binaryTarget`, a target whose sources cannot be located — goes in `notSwiftCoverable`, which the
+/// chain gates read as "never covered, whatever its package". That set also closes the pre-R565 hole the
+/// same shape had when the C module's name happened to EQUAL the package name.
+///
+/// Product names are no longer mapped. A product is not a module — `import` names a TARGET — and a
+/// product name could only ever stand in for one of its targets, including a C one.
+///
+/// Re-exports: a Swift target that `@_exported import`s a module puts that module's names in scope for
+/// every importer. Recorded here so the consumer can name the re-exported module in its ledger when the
+/// Swift report cannot cover it.
+public func dependencyModuleOwnership(rootDir: String,
+                                      readManifest: (String) -> String? = {
+                                          try? String(contentsOfFile: $0, encoding: .utf8)
+                                      },
+                                      listDir: (String) -> [String]? = {
+                                          try? FileManager.default.contentsOfDirectory(atPath: $0)
+                                      },
+                                      targetSources: (String, PackageTarget) -> [String]? = defaultTargetSources,
+                                      readSource: (String) -> String? = {
+                                          try? String(contentsOfFile: $0, encoding: .utf8)
+                                      }) -> DependencyModuleOwnership {
     func manifestPath(_ dir: String) -> String { (dir as NSString).appendingPathComponent("Package.swift") }
 
     // The dependency package ROOTS to read: every local `.package(path:)` reachable transitively from the
@@ -764,26 +863,60 @@ public func dependencyModulePackages(rootDir: String,
     let rootStd = (rootDir as NSString).standardizingPath
     depRoots.removeAll { $0 == rootDir || ($0 as NSString).standardizingPath == rootStd }
 
-    var claims: [String: Set<String>] = [:]     // module -> the packages declaring a target/product of that name
+    var out = DependencyModuleOwnership()
+    var claims: [String: Set<String>] = [:]     // module -> the packages declaring a SWIFT target of that name
     for dir in depRoots {
         guard let src = readManifest(manifestPath(dir)) else { continue }
         guard let pkg = parsePackageName(manifestSource: src), !pkg.isEmpty else { continue }
-        var modules = Set<String>()
-        // The STRICT declaration parses first — they refuse rather than under-read — with the loose walks
-        // as the fallback for a manifest whose lists are not literal arrays. Under-reading here is a
-        // missing map entry, i.e. the pre-fix behaviour, so the fallback can only ever recover reach.
-        for t in parsePackageTargetDeclarations(manifestSource: src) ?? parsePackageTargets(manifestSource: src)
-        where !t.isTest && !t.isPlugin { modules.insert(t.name) }
-        for p in parsePackageProductDeclarations(manifestSource: src) ?? parsePackageProducts(manifestSource: src) {
-            modules.insert(p.name)
+        // The STRICT declaration parse first — it refuses rather than under-reads — with the loose walk as
+        // the fallback for a manifest whose list is not a literal array of target calls (which includes
+        // every manifest declaring a `.systemLibrary`/`.binaryTarget`).
+        let declared = (parsePackageTargetDeclarations(manifestSource: src) ?? parsePackageTargets(manifestSource: src))
+            .filter { !$0.isTest && !$0.isPlugin && !$0.name.isEmpty }
+        // A PRODUCT name that no parsed declaration explains is still asked about, as a conventionally laid
+        // out target of that name: real manifests declare targets through helpers (`.rxTarget(name:
+        // "RxRelay", …)` in RxSwift) that no syntactic walk reads, and R565 reached those modules only
+        // through the product name. Dropping them would REMOVE reach R565 legitimately added.
+        let declaredNames = Set(declared.map(\.name))
+        let viaProduct = (parsePackageProductDeclarations(manifestSource: src) ?? parsePackageProducts(manifestSource: src))
+            .map(\.name).filter { !$0.isEmpty && !declaredNames.contains($0) }
+        let candidates = declared.map { ($0, false) }
+            + Set(viaProduct).sorted().map { (PackageTarget(name: $0, dependencies: [], path: nil, isTest: false), true) }
+        for (t, fromProduct) in candidates {
+            // R827 — COVERABLE ONLY IF A SWIFT REPORT CAN HOLD ITS BODIES. nil sources = cannot prove it.
+            // Where the name IS the package name, v0.39.2 already chained it by identity, so "cannot prove"
+            // keeps that (neither mapped nor refused) rather than withdrawing a coverage the release had;
+            // a product name we cannot locate is likewise left exactly as it was before R565.
+            guard let files = targetSources(dir, t) else {
+                if !fromProduct, t.name != pkg { out.notSwiftCoverable.insert(t.name); out.notSwiftOwner[t.name] = pkg }
+                continue
+            }
+            let exts = files.map { ($0 as NSString).pathExtension }
+            let swiftFiles = files.filter { ($0 as NSString).pathExtension == "swift" }
+            if swiftFiles.isEmpty || exts.contains(where: clangSourceExtensions.contains) {
+                out.notSwiftCoverable.insert(t.name); out.notSwiftOwner[t.name] = pkg
+                continue
+            }
+            claims[t.name, default: []].insert(pkg)
+            for f in swiftFiles {
+                guard let text = readSource(f), text.contains("@_exported") else { continue }
+                let ns = text as NSString
+                for m in reexportPattern.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+                    let r = ns.substring(with: m.range(at: 1))
+                    if r != t.name { out.reexports[t.name, default: []].insert(r) }
+                }
+            }
         }
-        for m in modules where !m.isEmpty { claims[m, default: []].insert(pkg) }
+        let opaque = OpaqueTargetFinder()
+        opaque.walk(Parser.parse(source: src))
+        for n in opaque.names where !n.isEmpty { out.notSwiftCoverable.insert(n); out.notSwiftOwner[n] = pkg }
     }
 
-    var out: [String: String] = [:]
     for (m, pkgs) in claims where pkgs.count == 1 {
         guard let p = pkgs.first, p != m else { continue }
-        out[m] = p
+        out.packages[m] = p
     }
+    // A name some package declares as Swift and another as C is ambiguous twice over; it stays unmapped
+    // (above, if two packages claim it) and uncoverable (here), which is the disclosing direction.
     return out
 }
