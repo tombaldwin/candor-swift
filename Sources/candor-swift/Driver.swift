@@ -1888,6 +1888,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     let joinUnionOff = ProcessInfo.processInfo.environment["CANDOR_JOIN_UNION_OFF"] != nil
     let joinUnionProbe = ProcessInfo.processInfo.environment["CANDOR_JOIN_UNION_PROBE"] != nil
     let joinDebug = ProcessInfo.processInfo.environment["CANDOR_JOIN_DEBUG"] != nil
+    /// SOUNDNESS R848 §1b kill switch — no leaf floor under `bareNameDepEntry` (the `4814c39` behaviour).
+    let r848Off = ProcessInfo.processInfo.environment["CANDOR_R848_OFF"] != nil
+    let r849Off = ProcessInfo.processInfo.environment["CANDOR_R849_OFF"] != nil
     /// SOUNDNESS R847 — WHAT A BARE NAME CAN DENOTE IN A DEPENDENCY: a FREE function or global of that name
     /// (R649's `declaresFreeName` — the one-segment quals), or, through implicit `self`, a member of the
     /// enclosing type or one of its supertypes (`token` inside `extension Client`, a property inherited
@@ -1906,23 +1909,51 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             return deps.lookup("\(p)#\(name)")
         }
         if deps.declaresFreeName("\(p)#\(name)") { return deps.lookup("\(p)#\(name)") }
-        guard let et = f.enclosingType else { return nil }
+        // SOUNDNESS R848 — THE RELEASE'S LEAF IS THE FLOOR WHEREVER THE NAME IS NOT PROVABLY OURS. The walk
+        // below sees only the CONSUMER's supertype edges; a dependency's own edges (`Mid: Grand`, `PSub:
+        // PBase`) are in no report, so a member one hop up inside the dependency is unreachable by it, and
+        // answering "nothing" there went ABSENT over executed env reads (1/1 -> 0/0 against v0.39.2). What
+        // R847 may REMOVE is only what it can PROVE the source does not name: a binder-held local (the
+        // callers skip those before asking), a member a LOCAL type of the chain declares itself, or a global
+        // or free function of this scan. Anything else keeps `pkg#<leaf>`, exactly as v0.39.2 joined it.
+        let floor: () -> DepEntry? = {
+            (globalUnitNames.contains(name) || freeFnByName[name] != nil) ? nil : deps.lookup("\(p)#\(name)")
+        }
+        guard let et = f.enclosingType else { return r848Off ? nil : floor() }
         // Implicit `self`: the enclosing type, then its supertypes TRANSITIVELY (a property inherited
         // from a grandparent is still `self.x`). A type in the chain that declares the name ITSELF — a
-        // stored field or a unit of this scan — answers it locally and ends the walk on that branch
+        // stored field or a unit of this scan — answers it locally: proof that the dependency is not asked
         // (NIOSSLHandler's own `state` must not reach `ChannelInboundHandler.state`). Every dependency
-        // owner that answers is a contributor (⟨0.25⟩ union), in a stable order.
+        // owner that answers is a contributor (⟨0.25⟩ union), in a stable order; a precise hit is Swift's
+        // own answer and stands without the leaf.
         var out: DepEntry? = nil
+        var localDeclared = false
         var queue = [et], seen: Set<String> = [et]
         while !queue.isEmpty {
             let owner = queue.removeFirst()
-            if fields[owner]?[name] != nil || !resolveQual("\(owner).\(name)").isEmpty { continue }
+            if fields[owner]?[name] != nil || !resolveQual("\(owner).\(name)").isEmpty { localDeclared = true; continue }
             if owner != et || !declaredTypes.contains(et), let e = deps.lookup("\(p)#\(owner).\(name)") {
                 if out == nil { out = e } else { out!.unionWith(e) }
             }
             for sup in (supertypesOf[owner] ?? []).sorted() where seen.insert(sup).inserted { queue.append(sup) }
         }
-        return out
+        if out != nil || localDeclared || r848Off { return out }
+        return floor()
+    }
+    /// SOUNDNESS R849 — the named module's package ANSWERED (R846) and another chained package answers the
+    /// SAME key. The report cannot say whether that other entry is a member of the other package's own
+    /// same-named type (R846's fabrication, not to be charged) or an `extension` of the named type — an
+    /// overload the source may be calling (ThirdKit's `extension RatesCore.Client { func fetch(_:) }`,
+    /// executed Fs, silent). Neither the dependency's overload signatures nor its declared-vs-extended types
+    /// reach the consumer, so it DISCLOSES rather than choose, naming the member.
+    func discloseOtherAnswers(_ key: String, tiers: [[(p: String, mods: [String])]], why: String, _ qual: String) {
+        guard !r849Off, tiers.count == 2 else { return }
+        let named = Set(tiers[0].map { $0.p })
+        for (p, _) in tiers[1] where !named.contains(p) && deps.lookup("\(p)#\(key)") != nil {
+            direct[qual, default: []].insert("Unknown")
+            whyMap[qual, default: []].insert(why)
+            return
+        }
     }
     /// SOUNDNESS R846 — the chained packages a key is asked of, PREFERRING the one the source named. When
     /// the receiver's type was spelled `RatesCore.Client`, `RatesCore`'s package is asked first; if it
@@ -3525,7 +3556,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // that resolved to this package, because the `owner == m` arm below asks about the
                 // MODULE spelling, not the package.
                 var hitKey: String? = nil   // R826 — the key that answered, for a convention owner's publish
-                for tier in joinTiers(file, module: call.unqualified ? nil : call.ownerModule) where hits.isEmpty {
+                let memberTiers = joinTiers(file, module: call.unqualified ? nil : call.ownerModule)
+                for (ti, tier) in memberTiers.enumerated() where hits.isEmpty {
                 for (p, mods) in tier {
                     if call.unqualified {
                         // R847 — a bare identifier passed as an ARGUMENT (`String(next)`) is a function
@@ -3554,6 +3586,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             hits.append(e)
                         }
                     }
+                }
+                if ti == 0, !hits.isEmpty, !call.unqualified, let owner = call.extOwner {
+                    let key = "\(dispatchAbstraction(owner, f) ?? owner).\(call.leaf)"
+                    discloseOtherAnswers(key, tiers: memberTiers, why: "dispatch:\(key)", f.qual)
                 }
                 }
                 // SPEC §2 rule 1 ⟨0.25⟩ — AN AMBIGUOUS KEY IS UNIONED; IT MUST NOT BE PICKED FROM AND MUST NOT
@@ -3902,10 +3938,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // R846 — the module the source spelled, when every recording of this candidate spelled one
                 // and they agree; otherwise every chained package.
                 let cmods = cc.externalCandidateOpen.contains(cand) ? [] : (cc.externalCandidateModules[cand] ?? [])
-                for tier in joinTiers(file, module: cmods.count == 1 ? cmods.first : nil) where hits.isEmpty {
+                let candTiers = joinTiers(file, module: cmods.count == 1 ? cmods.first : nil)
+                for (ti, tier) in candTiers.enumerated() where hits.isEmpty {
                     for (p, _) in tier {   // R565
                         if let e = deps.lookup("\(p)#\(cand)") { hits.append(e) }
                     }
+                    if ti == 0, !hits.isEmpty { discloseOtherAnswers(cand, tiers: candTiers, why: "dispatch:\(cand)", f.qual) }
                 }
                 // An A/B diff shows which FUNCTIONS moved, never which KEY moved them — and the one
                 // over-fire this join has had (`String.init`, see `METATYPE_MEMBERS`) was invisible in

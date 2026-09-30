@@ -43,7 +43,10 @@ a flip, and a baseline or a CI gate pinned across it will move. Directions are a
   every join site: a member call, a global read, a property read, a stringification, a `deinit`, a
   factory's return type (R842, R844, R845). 0.39.2 dropped it (the row read pure) or, for a factory,
   hedged. It over-charges where the two members differ — `deny <E>` may rise — EXCEPT where the source
-  names the module (`c: RatesCore.Client`, `RatesCore.Client()`), which is asked first (R846).
+  names the module (`c: RatesCore.Client`, `RatesCore.Client()`), which is asked first (R846); and when
+  another package ALSO answers that key, the row discloses `Unknown[dispatch:<Type>.<member>]`, because
+  the report cannot say whether that entry is the other package's own type or an `extension` overload of
+  the named one (R849) — `deny Unknown` / `deny <E> Unknown` may rise.
 - For a DOWNSTREAM consumer of this engine's reports: ⟨0.39⟩ keys that were misattributed, suppressed or
   spelled under a module now name the owning package and can be joined (R555, R565, R592, R593, R603).
 
@@ -61,8 +64,9 @@ a flip, and a baseline or a CI gate pinned across it will move. Directions are a
   / `OtherKit`) was UNCHAINED on 0.39.2, so a call on its type joined whichever same-named type WAS
   chained: `c: OtherKit.Client; c.token` read RatesCore's `Env` (the program reads a file). It now reads
   the package the source names — `deny Env` 1 → 0, `deny Fs` 0 → 1 (R565, R846).
-- A bare name that is a LOCAL binding, or that no Swift name lookup could resolve to the member, was
-  joined against a dependency method sharing its leaf (`pkg#<leaf>` is minted for every method):
+- A bare name that is PROVABLY a local — held by a binder in scope, a member a local type of the enclosing
+  chain declares, or a global or free function of the scan — was joined against a dependency method
+  sharing its leaf (`pkg#<leaf>` is minted for every method):
   `while let next = it.next() { … next.count … }` read `BufferedStream.Iterator.next()`'s `Env`;
   RxAlamofire's `case let .success(result)` read `MultipartUpload.result`'s `Fs`/`Rand`; Moya's
   `prepare?(urlRequest)` read Alamofire's example-app `MasterViewController.prepare` (`Fs`/`Net`/`Rand`).
@@ -87,13 +91,45 @@ chain went silent (`deny Env` and `deny Env Unknown` 1 → 0) on every such spel
 join dropped. The third review then found R565 made a second hit reachable at the joins that still assumed
 one (R844, R845), and that the union fabricated where the source named the module (R846); closed below.
 
+*A REMOVAL MUST BE PROVEN, AND WHERE IT CANNOT BE THE RELEASE'S JOIN STAYS (R848).* R847's first cut
+answered a bare name only from the consumer's own supertype edges; a dependency's edges (`Mid: Grand`,
+`PSub: PBase`) are in no report, so a member one hop up inside the dependency went ABSENT (executed env
+reads, 1/1 → 0/0). v0.39.2's `pkg#<leaf>` join is now the floor wherever the name is not provably local —
+which also keeps some of 0.39.2's leaf fabrications (RxAlamofire's `DataResponse.error` reading
+`MultipartUpload.result`'s `Fs`/`Rand`, and 5 more rows measured). Telling those apart needs the dependency's
+type surface (its supertypes, its members) on the wire: SOUNDNESS R843's contract gap.
+
 *What "no gate lower than 0.39.2" was measured on, and nothing more:* the first panel (33 case-modes,
 1,748 gates: the release panel's and both re-reviews' fixtures, three- and four-package chains with the
 middle scanned standalone and chained) — 0 lower; the third review's fixtures plus the R846/R847 shapes
-(16 case-modes, 187 functions × 4 gates) — lower ONLY on the fabrications listed above (5 gates, each
-executed: the program performs no such effect). It is not a claim about shapes nobody built.
+(16 case-modes, 187 functions × 4 gates) — lower ONLY on the fabrications listed above (4 gates, each
+executed: the program performs no such effect); the fourth review's fixtures (p4a–p4e, 34 functions × 4 gates) — 0
+lower. It is not a claim about shapes nobody built.
 
 ### Fixed
+
+- **⚠ SOUNDNESS R848 / R849 — TWO REMOVAL RULES THAT DECIDED "DON'T JOIN" WITHOUT THE INFORMATION TO PROVE IT.**
+  Found by the fourth review; every consumer built and RUN.
+  - **R848** (blocking; a regression against 0.39.2) — R847 answered a bare name from the enclosing type's
+    supertype chain using `supertypesOf`, which holds only the CONSUMER's edges. `final class Sub3: Mid {
+    grandTok }` with `Mid: Grand` in the dependency, `struct S: PSub { pTok }` with `PSub: PBase`, their
+    function-reference spellings, a local protocol refining a dependency protocol, and `extension Mid {
+    grandTok }` all went ABSENT (1/1 → 0/0). No report carries the dependency's supertype edges, so the
+    walk cannot be completed; instead `bareNameDepEntry` now keeps v0.39.2's `pkg#<leaf>` join as the FLOOR
+    unless the name is PROVABLY not the dependency's (a binder-held local, a member a local type of the chain
+    declares, a global or free function of the scan). All five spellings are back to 1/1.
+  - **R849** (not lower than 0.39.2; `a79a351` had closed it) — R846 asked the named module's package first
+    and stopped on a hit, so ThirdKit's `extension RatesCore.Client { func fetch(_:) }` (reads a file) was
+    never asked beside RatesCore's `fetch()` (reads env). The report carries neither overload signatures nor
+    declared-vs-extended types, so the join cannot choose; it now DISCLOSES another package's answer to the
+    same key (`dispatch:Client.fetch`). The cost: every access to a type name two chained packages both
+    declare gains that hedge.
+  EVIDENCE. Fourth review's fixtures (p4a–p4e) across `eae95e9` / `4814c39` / this: 0 gates lower than
+  v0.39.2 (4814c39: 10). Third review's fixtures: lower only on the executed R847 fabrications, as before;
+  the first panel's 1,748 gates: 0 lower. Corpus, 9 entries chained against `4814c39`: ADDED 6, REMOVED 0,
+  CHANGED 30 — the floor restoring 0.39.2-style leaf joins the new rule could not prove local (named
+  above); producers unchanged. §1b: `CANDOR_R848_OFF` and `CANDOR_R849_OFF` each red
+  `AmbiguousChainKeyProcessTests`.
 
 - **⚠ SOUNDNESS R844 / R845 / R846 / R847 — THE JOINS THAT STILL ASSUMED ONE CHAINED PACKAGE ANSWERS, AND
   THE ONES THAT ANSWERED A BARE NAME WITH ANY MEMBER SHARING IT.** Found by the third review of the R836

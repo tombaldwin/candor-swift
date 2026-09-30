@@ -121,8 +121,10 @@ final class AmbiguousChainKeyProcessTests: XCTestCase {
     /// extension is still reached; nothing drops.
     func testTwoPackagesDeclaringOneTypeNameJoinTheOneTheSourceNames() throws {
         let r = try run(twoClients(Self.a1App), label: "a1")
+        // R849 — every one also DISCLOSES: OtherKit answers the same key, and the report cannot say whether that
+        // entry is OtherKit's own `Client` or an `extension RatesCore.Client` overload the call may reach.
         for fn in ["propTok", "strTok", "ctorDrop", "methTok", "inferredLocal"] {
-            XCTAssertEqual(r[fn]?.inferred, ["Env"],
+            XCTAssertEqual(r[fn]?.inferred, ["Env", "Unknown"],
                            "\(fn): RatesCore's Client reads the environment and nothing else — ABSENT is R844 "
                            + "(0/0 against v0.39.2), `Fs` is R846 (the union over a module the source named); "
                            + "got \(String(describing: r[fn]))")
@@ -130,7 +132,7 @@ final class AmbiguousChainKeyProcessTests: XCTestCase {
         XCTAssertEqual(r["extraTok"]?.inferred, ["Fs"],
                        "a member ANOTHER package adds to `RatesCore.Client` by extension lives in that package: "
                        + "preferring the named module must fall back, or this is silent")
-        XCTAssertEqual(r["otherTok"]?.inferred, ["Fs"],
+        XCTAssertEqual(r["otherTok"]?.inferred, ["Fs", "Unknown"],
                        "`OtherKit.Client.token` reads a file; v0.39.2 charged RatesCore's `Env` here (only one "
                        + "package was chained) — a fabrication, removed")
     }
@@ -205,5 +207,82 @@ final class AmbiguousChainKeyProcessTests: XCTestCase {
         }
         let off = try run(files, env: ["CANDOR_R847_OFF": "1"], label: "r847-off")
         XCTAssertTrue(off["baseRead"]?.inferred.contains("Env") ?? false, "§1b: the leaf join restored fabricates")
+    }
+
+    /// SOUNDNESS R848 — the implicit-`self` walk sees only the CONSUMER's supertype edges; the dependency's own
+    /// (`Mid: Grand`, `PSub: PBase`) are in no report. Where the walk cannot PROVE the bare name is not the
+    /// dependency's, v0.39.2's `pkg#<leaf>` join is the floor. EXECUTED (the fourth review's `p4a`/`p4b`/`p4d`).
+    func testAMemberOneHopUpInsideTheDependencyIsStillReached() throws {
+        let dep = """
+        import Foundation
+        @inline(never) func envRead(_ t: String) -> String { ProcessInfo.processInfo.environment["Y"] ?? t }
+        open class Grand { public init() {}; public var grandTok: String { envRead("G") }
+            public func grandFn(_ s: String) -> Int { envRead("F").count } }
+        open class Mid: Grand {}
+        public protocol PBase {}
+        extension PBase { public var pTok: String { envRead("P") }; public func pFn(_ s: String) -> Int { envRead("Q").count } }
+        public protocol PSub: PBase {}
+        """
+        let app = """
+        import RatesCore
+        final class Sub3: Mid { func viaGrand() -> String { grandTok }; func refGrand() -> [Int] { ["a"].map(grandFn) } }
+        struct S: PSub { func viaPSub() -> String { pTok }; func refPSub() -> [Int] { ["a"].map(pFn) } }
+        protocol LocalP: PBase {}
+        struct SC: LocalP { func viaLocalP() -> String { pTok } }
+        extension Mid { func extReadInherited() -> String { grandTok } }
+        """
+        let files = [
+            "deps/RatesCore/Package.swift": Self.pkg("RatesCore", #".library(name: "RatesCore", targets: ["RatesCore"])"#,
+                                                    targetDeps: #".target(name: "RatesCore")"#),
+            "deps/RatesCore/Sources/RatesCore/lib.swift": dep,
+            "app/Package.swift": Self.pkg("App", #".library(name: "App", targets: ["App"])"#,
+                                          deps: #".package(path: "../deps/RatesCore")"#,
+                                          targetDeps: #".target(name: "App", dependencies: [.product(name: "RatesCore", package: "RatesCore")])"#),
+            "app/Sources/App/app.swift": app,
+        ]
+        let r = try run(files, label: "r848")
+        for fn in ["Sub3.viaGrand", "Sub3.refGrand", "S.viaPSub", "S.refPSub", "SC.viaLocalP", "Mid.extReadInherited"] {
+            XCTAssertTrue(r[fn]?.inferred.contains("Env") ?? false,
+                          "\(fn): 1 on v0.39.2, ABSENT at 4814c39 (R848); got \(String(describing: r[fn]))")
+        }
+        let off = try run(files, env: ["CANDOR_R848_OFF": "1"], label: "r848-off")
+        XCTAssertNil(off["Sub3.viaGrand"], "§1b: without the floor the grandparent's member is lost")
+    }
+
+    /// SOUNDNESS R849 — ThirdKit's `extension RatesCore.Client { func fetch(_:) }` beside RatesCore's own
+    /// `fetch()`: the named module answers, and the other package's same key is DISCLOSED, not dropped
+    /// (EXECUTED `FS_READ`; `deny Fs` 0 on v0.39.2 and at 4814c39).
+    func testAnotherPackagesAnswerBesideTheNamedModuleIsDisclosed() throws {
+        let files = [
+            "deps/RatesCore/Package.swift": Self.pkg("RatesCore", #".library(name: "RatesCore", targets: ["RatesCore"])"#,
+                                                    targetDeps: #".target(name: "RatesCore")"#),
+            "deps/RatesCore/Sources/RatesCore/lib.swift": """
+            import Foundation
+            public final class Client { public init() {}
+              public func fetch() -> String { ProcessInfo.processInfo.environment["Y"] ?? "" } }
+            """,
+            "deps/ThirdKit/Package.swift": Self.pkg("ThirdKit", #".library(name: "ThirdKit", targets: ["ThirdKit"])"#,
+                                                   deps: #".package(path: "../RatesCore")"#,
+                                                   targetDeps: #".target(name: "ThirdKit", dependencies: [.product(name: "RatesCore", package: "RatesCore")])"#),
+            "deps/ThirdKit/Sources/ThirdKit/lib.swift": """
+            import Foundation
+            import RatesCore
+            extension RatesCore.Client {
+              public func fetch(_ path: String) -> Int { (try? String(contentsOfFile: path))?.count ?? -1 } }
+            """,
+            "app/Package.swift": Self.pkg("App", #".library(name: "App", targets: ["App"])"#,
+                                          deps: #".package(path: "../deps/RatesCore"), .package(path: "../deps/ThirdKit")"#,
+                                          targetDeps: #".target(name: "App", dependencies: [.product(name: "RatesCore", package: "RatesCore"), .product(name: "ThirdKit", package: "ThirdKit")])"#),
+            "app/Sources/App/app.swift": """
+            import RatesCore
+            import ThirdKit
+            func annot(_ c: RatesCore.Client) -> Int { c.fetch("/etc/hosts") }
+            """,
+        ]
+        let r = try run(files, label: "r849")
+        XCTAssertTrue(r["annot"]?.inferred.contains("Unknown") ?? false,
+                      "the other package's `Client.fetch` must be disclosed, not dropped; got \(String(describing: r["annot"]))")
+        let off = try run(files, env: ["CANDOR_R849_OFF": "1"], label: "r849-off")
+        XCTAssertFalse(off["annot"]?.inferred.contains("Unknown") ?? true, "§1b")
     }
 }
