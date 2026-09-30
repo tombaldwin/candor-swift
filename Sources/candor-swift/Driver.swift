@@ -1888,57 +1888,24 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     let joinUnionOff = ProcessInfo.processInfo.environment["CANDOR_JOIN_UNION_OFF"] != nil
     let joinUnionProbe = ProcessInfo.processInfo.environment["CANDOR_JOIN_UNION_PROBE"] != nil
     let joinDebug = ProcessInfo.processInfo.environment["CANDOR_JOIN_DEBUG"] != nil
-    /// SOUNDNESS R848 §1b kill switch — no leaf floor under `bareNameDepEntry` (the `4814c39` behaviour).
-    let r848Off = ProcessInfo.processInfo.environment["CANDOR_R848_OFF"] != nil
     let r849Off = ProcessInfo.processInfo.environment["CANDOR_R849_OFF"] != nil
-    /// SOUNDNESS R847 — WHAT A BARE NAME CAN DENOTE IN A DEPENDENCY: a FREE function or global of that name
-    /// (R649's `declaresFreeName` — the one-segment quals), or, through implicit `self`, a member of the
-    /// enclosing type or one of its supertypes (`token` inside `extension Client`, a property inherited
-    /// from a dependency base class). NOT any member of any type that happens to share the leaf: the index
-    /// mints `pkg#<leaf>` for every METHOD as well, and the bare-read and function-reference joins asked
-    /// that key. nio-http2's `while let next = iterator.next() { … next.name … }` read `next` — an untyped
-    /// LOCAL — as a global, the join answered `swift-nio#next` with `BufferedStream.Iterator.next()`, and
-    /// `EventLoop.execute`'s `Env` reached array iteration that reads no environment; RxAlamofire's `case
-    /// let .success(result)` reached `Alamofire#MultipartUpload.result` (`Fs`, `Rand`) the same way.
-    /// `CANDOR_R847_OFF=1` restores the leaf lookup.
+    /// SOUNDNESS R847 / R850 — THE BARE-NAME DEPENDENCY JOIN KEEPS v0.39.2'S `pkg#<leaf>` LOOKUP, AND THE
+    /// ONLY REMOVAL IS ONE THAT IS A PROOF UNDER SWIFT'S OWN LOOKUP: a name a BINDER holds in the current
+    /// lexical scope (`binderShadow`, a case payload) is that local and nothing else — the callers skip it
+    /// (`depGlobalReads`, `argBoundLocal`) before this is asked. nio-http2's `while let next = it.next() {
+    /// … next.count … }` joined `swift-nio#next` (`BufferedStream.Iterator.next()`, `Env`) that way.
+    ///
+    /// EVERY OTHER CONDITION TRIED WAS A DECISION BY NAME, AND NONE IS A PROOF. R847's supertype walk saw
+    /// only the CONSUMER's edges (R848: a member one hop up inside the dependency went ABSENT); `ad95c22`'s
+    /// "a local type declares a member of that name" and "the scan has a global or free function of that
+    /// name" are defeated by Swift itself — member lookup gathers EVERY overload of a base name across the
+    /// hierarchy (a local `grandTok(_ x: Int)` does not hide the inherited `grandTok`), a member always
+    /// shadows a module-level name, and a local protocol-extension default is one more candidate, not a
+    /// replacement (R850, all executed 1/1 -> 0/0). The consumer has neither the dependency's signatures
+    /// nor its supertype edges (SOUNDNESS R843), so a name-based removal cannot meet the bar. The leaf is
+    /// kept, with the false charges it has always carried.
     func bareNameDepEntry(_ p: String, _ name: String, _ f: FnInfo) -> DepEntry? {
-        // An OPERATOR passed by reference (`xs.reduce(z, +)`) is overload-resolved against the OPERAND
-        // types, which can be any type — a dependency's `static func +` included — so its leaf lookup is
-        // not a name-lookup question and is left exactly as it was.
-        if CallCollector.r847Off || !(name.first.map { $0 == "_" || $0.isLetter } ?? false) {
-            return deps.lookup("\(p)#\(name)")
-        }
-        if deps.declaresFreeName("\(p)#\(name)") { return deps.lookup("\(p)#\(name)") }
-        // SOUNDNESS R848 — THE RELEASE'S LEAF IS THE FLOOR WHEREVER THE NAME IS NOT PROVABLY OURS. The walk
-        // below sees only the CONSUMER's supertype edges; a dependency's own edges (`Mid: Grand`, `PSub:
-        // PBase`) are in no report, so a member one hop up inside the dependency is unreachable by it, and
-        // answering "nothing" there went ABSENT over executed env reads (1/1 -> 0/0 against v0.39.2). What
-        // R847 may REMOVE is only what it can PROVE the source does not name: a binder-held local (the
-        // callers skip those before asking), a member a LOCAL type of the chain declares itself, or a global
-        // or free function of this scan. Anything else keeps `pkg#<leaf>`, exactly as v0.39.2 joined it.
-        let floor: () -> DepEntry? = {
-            (globalUnitNames.contains(name) || freeFnByName[name] != nil) ? nil : deps.lookup("\(p)#\(name)")
-        }
-        guard let et = f.enclosingType else { return r848Off ? nil : floor() }
-        // Implicit `self`: the enclosing type, then its supertypes TRANSITIVELY (a property inherited
-        // from a grandparent is still `self.x`). A type in the chain that declares the name ITSELF — a
-        // stored field or a unit of this scan — answers it locally: proof that the dependency is not asked
-        // (NIOSSLHandler's own `state` must not reach `ChannelInboundHandler.state`). Every dependency
-        // owner that answers is a contributor (⟨0.25⟩ union), in a stable order; a precise hit is Swift's
-        // own answer and stands without the leaf.
-        var out: DepEntry? = nil
-        var localDeclared = false
-        var queue = [et], seen: Set<String> = [et]
-        while !queue.isEmpty {
-            let owner = queue.removeFirst()
-            if fields[owner]?[name] != nil || !resolveQual("\(owner).\(name)").isEmpty { localDeclared = true; continue }
-            if owner != et || !declaredTypes.contains(et), let e = deps.lookup("\(p)#\(owner).\(name)") {
-                if out == nil { out = e } else { out!.unionWith(e) }
-            }
-            for sup in (supertypesOf[owner] ?? []).sorted() where seen.insert(sup).inserted { queue.append(sup) }
-        }
-        if out != nil || localDeclared || r848Off { return out }
-        return floor()
+        deps.lookup("\(p)#\(name)")
     }
     /// SOUNDNESS R849 — the named module's package ANSWERED (R846) and another chained package answers the
     /// SAME key. The report cannot say whether that other entry is a member of the other package's own

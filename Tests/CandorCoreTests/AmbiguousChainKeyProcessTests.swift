@@ -209,10 +209,12 @@ final class AmbiguousChainKeyProcessTests: XCTestCase {
         XCTAssertTrue(off["baseRead"]?.inferred.contains("Env") ?? false, "§1b: the leaf join restored fabricates")
     }
 
-    /// SOUNDNESS R848 — the implicit-`self` walk sees only the CONSUMER's supertype edges; the dependency's own
-    /// (`Mid: Grand`, `PSub: PBase`) are in no report. Where the walk cannot PROVE the bare name is not the
-    /// dependency's, v0.39.2's `pkg#<leaf>` join is the floor. EXECUTED (the fourth review's `p4a`/`p4b`/`p4d`).
-    func testAMemberOneHopUpInsideTheDependencyIsStillReached() throws {
+    /// SOUNDNESS R848 / R850 — a bare name keeps v0.39.2's `pkg#<leaf>` join unless a BINDER holds it in scope;
+    /// every name-based "provably local" rule tried was defeated by Swift's own lookup. EXECUTED shapes from the
+    /// fourth and fifth reviews: a member one hop up inside the dependency (R848), a scan-wide free function of
+    /// the same name (R850 B1), a local overload with another signature beside a DIRECT dependency superclass
+    /// (B2, method and function-reference spellings), a local protocol's same-named requirement default (B2).
+    func testABareNameIsJoinedUnlessABinderHoldsIt() throws {
         let dep = """
         import Foundation
         @inline(never) func envRead(_ t: String) -> String { ProcessInfo.processInfo.environment["Y"] ?? t }
@@ -230,6 +232,13 @@ final class AmbiguousChainKeyProcessTests: XCTestCase {
         protocol LocalP: PBase {}
         struct SC: LocalP { func viaLocalP() -> String { pTok } }
         extension Mid { func extReadInherited() -> String { grandTok } }
+        func grandTok() -> String { "free" }
+        final class B1: Mid { func v() -> String { grandTok } }
+        final class B2: Grand { func grandTok(_ x: Int) -> String { "m" }; func v() -> String { grandTok }
+            func grandFn(_ a: Int, _ b: Int) -> Int { a + b }; func r() -> [Int] { ["a"].map(grandFn) } }
+        struct B3: PBase { func pTok(_ x: Int) -> String { "x" }; func v() -> String { pTok } }
+        func binderHeld(_ xs: [String]) -> Int { var it = xs.makeIterator(); var n = 0
+            while let grandTok = it.next() { n += grandTok.count }; return n }
         """
         let files = [
             "deps/RatesCore/Package.swift": Self.pkg("RatesCore", #".library(name: "RatesCore", targets: ["RatesCore"])"#,
@@ -240,13 +249,15 @@ final class AmbiguousChainKeyProcessTests: XCTestCase {
                                           targetDeps: #".target(name: "App", dependencies: [.product(name: "RatesCore", package: "RatesCore")])"#),
             "app/Sources/App/app.swift": app,
         ]
-        let r = try run(files, label: "r848")
-        for fn in ["Sub3.viaGrand", "Sub3.refGrand", "S.viaPSub", "S.refPSub", "SC.viaLocalP", "Mid.extReadInherited"] {
+        let r = try run(files, label: "r850")
+        for fn in ["Sub3.viaGrand", "Sub3.refGrand", "S.viaPSub", "S.refPSub", "SC.viaLocalP", "Mid.extReadInherited",
+                   "B1.v", "B2.v", "B2.r", "B3.v"] {
             XCTAssertTrue(r[fn]?.inferred.contains("Env") ?? false,
-                          "\(fn): 1 on v0.39.2, ABSENT at 4814c39 (R848); got \(String(describing: r[fn]))")
+                          "\(fn): 1 on v0.39.2; a name-based removal took it to ABSENT (R848/R850); got \(String(describing: r[fn]))")
         }
-        let off = try run(files, env: ["CANDOR_R848_OFF": "1"], label: "r848-off")
-        XCTAssertNil(off["Sub3.viaGrand"], "§1b: without the floor the grandparent's member is lost")
+        XCTAssertNil(r["binderHeld"], "the ONE proof kept: a binder holds `grandTok` in scope, so it is that local")
+        let off = try run(files, env: ["CANDOR_R847_OFF": "1"], label: "r850-off")
+        XCTAssertTrue(off["binderHeld"]?.inferred.contains("Env") ?? false, "§1b: without the binder proof the leaf join fabricates")
     }
 
     /// SOUNDNESS R849 — ThirdKit's `extension RatesCore.Client { func fetch(_:) }` beside RatesCore's own

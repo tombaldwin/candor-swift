@@ -64,14 +64,14 @@ a flip, and a baseline or a CI gate pinned across it will move. Directions are a
   / `OtherKit`) was UNCHAINED on 0.39.2, so a call on its type joined whichever same-named type WAS
   chained: `c: OtherKit.Client; c.token` read RatesCore's `Env` (the program reads a file). It now reads
   the package the source names — `deny Env` 1 → 0, `deny Fs` 0 → 1 (R565, R846).
-- A bare name that is PROVABLY a local — held by a binder in scope, a member a local type of the enclosing
-  chain declares, or a global or free function of the scan — was joined against a dependency method
-  sharing its leaf (`pkg#<leaf>` is minted for every method):
-  `while let next = it.next() { … next.count … }` read `BufferedStream.Iterator.next()`'s `Env`;
-  RxAlamofire's `case let .success(result)` read `MultipartUpload.result`'s `Fs`/`Rand`; Moya's
-  `prepare?(urlRequest)` read Alamofire's example-app `MasterViewController.prepare` (`Fs`/`Net`/`Rand`).
-  Measured against 0.39.2 on the 9 chained corpus entries: 13 rows lose such a charge (11 RxAlamofire
-  `Rand`, 2 Moya `adapt` `Fs`/`Net`/`Rand`) and 3 rows lose a hedge that came the same way (R847).
+- A bare name that a BINDER holds in the current scope (`let`/`var`, `if`/`guard`/`while let`, `for`,
+  `catch`, a closure parameter, an enum-case payload) — the one "is a local" test that is a proof under
+  Swift's lookup — was joined against a dependency method sharing its leaf (`pkg#<leaf>` is minted for every
+  method): `while let next = it.next() { … next.count … }` read `BufferedStream.Iterator.next()`'s `Env`;
+  RxAlamofire's `case let .success(result)` read `MultipartUpload.result`'s `Fs`/`Rand`. Measured against
+  0.39.2 on the 9 chained corpus entries: 11 RxAlamofire rows lose `Rand` and 1 AlamofireImage row
+  (`AFIError.errorDescription`, a `case let .alamofireError(error)` payload) loses a hedge that came that way
+  (R847). Every other bare name keeps v0.39.2's join, false charges included (R850).
 
 *Kept exactly as 0.39.2 had it, stated because a pre-release build removed it:* a member-chain receiver
 through a hop the engine cannot type is still keyed to the OUTER base's type, so `c.loop.spin()` still
@@ -91,44 +91,56 @@ chain went silent (`deny Env` and `deny Env Unknown` 1 → 0) on every such spel
 join dropped. The third review then found R565 made a second hit reachable at the joins that still assumed
 one (R844, R845), and that the union fabricated where the source named the module (R846); closed below.
 
-*A REMOVAL MUST BE PROVEN, AND WHERE IT CANNOT BE THE RELEASE'S JOIN STAYS (R848).* R847's first cut
-answered a bare name only from the consumer's own supertype edges; a dependency's edges (`Mid: Grand`,
-`PSub: PBase`) are in no report, so a member one hop up inside the dependency went ABSENT (executed env
-reads, 1/1 → 0/0). v0.39.2's `pkg#<leaf>` join is now the floor wherever the name is not provably local —
-which also keeps some of 0.39.2's leaf fabrications (RxAlamofire's `DataResponse.error` reading
-`MultipartUpload.result`'s `Fs`/`Rand`, and 5 more rows measured). Telling those apart needs the dependency's
-type surface (its supertypes, its members) on the wire: SOUNDNESS R843's contract gap.
+*A REMOVAL MUST BE A PROOF UNDER SWIFT'S LOOKUP, AND ONLY ONE IS (R848, R850).* R847 tried to decide by
+NAME whether a bare name could be a dependency's member — an implicit-`self` walk over the consumer's
+supertype edges, then "a local type declares a member of that name" and "the scan has a global of that
+name". Each was defeated by Swift itself: a dependency's supertype edges are in no report (a member one hop
+up inside the dependency went ABSENT, R848); member lookup gathers EVERY overload of a base name across the
+hierarchy, so a local `grandTok(_ x: Int)` does not hide an inherited `grandTok`, and a member always
+shadows a module-level name (R850 — all executed, 1/1 → 0/0). The consumer has neither the dependency's
+signatures nor its supertype edges (SOUNDNESS R843's contract gap), so no name-based rule can be a proof.
+What remains is the binder rule, and everywhere else v0.39.2's `pkg#<leaf>` join stands — with the false
+charges it has always carried (Moya's `adapt` reading Alamofire's example-app
+`MasterViewController.prepare`; RxAlamofire's `DataResponse.error` reading `MultipartUpload.result` through
+an implicit-`self` read of the extended type's stored `result`).
 
 *What "no gate lower than 0.39.2" was measured on, and nothing more:* the first panel (33 case-modes,
 1,748 gates: the release panel's and both re-reviews' fixtures, three- and four-package chains with the
 middle scanned standalone and chained) — 0 lower; the third review's fixtures plus the R846/R847 shapes
 (16 case-modes, 187 functions × 4 gates) — lower ONLY on the fabrications listed above (4 gates, each
-executed: the program performs no such effect); the fourth review's fixtures (p4a–p4e, 34 functions × 4 gates) — 0
-lower. It is not a claim about shapes nobody built.
+executed: the program performs no such effect); the fourth review's fixtures (p4a–p4e, 34 functions ×
+4 gates) and the fifth's (24 cases, 41 functions × 4 gates) — 0 lower. It is not a claim about shapes nobody
+built.
 
 ### Fixed
 
-- **⚠ SOUNDNESS R848 / R849 — TWO REMOVAL RULES THAT DECIDED "DON'T JOIN" WITHOUT THE INFORMATION TO PROVE IT.**
-  Found by the fourth review; every consumer built and RUN.
-  - **R848** (blocking; a regression against 0.39.2) — R847 answered a bare name from the enclosing type's
-    supertype chain using `supertypesOf`, which holds only the CONSUMER's edges. `final class Sub3: Mid {
-    grandTok }` with `Mid: Grand` in the dependency, `struct S: PSub { pTok }` with `PSub: PBase`, their
-    function-reference spellings, a local protocol refining a dependency protocol, and `extension Mid {
-    grandTok }` all went ABSENT (1/1 → 0/0). No report carries the dependency's supertype edges, so the
-    walk cannot be completed; instead `bareNameDepEntry` now keeps v0.39.2's `pkg#<leaf>` join as the FLOOR
-    unless the name is PROVABLY not the dependency's (a binder-held local, a member a local type of the chain
-    declares, a global or free function of the scan). All five spellings are back to 1/1.
+- **⚠ SOUNDNESS R848 / R849 / R850 — REMOVAL RULES THAT DECIDED "DON'T JOIN" WITHOUT A PROOF.** Found by the
+  fourth and fifth reviews; every consumer built and RUN. Five reviews in a row (R836, R844, R848, R849, R850)
+  found a rule deciding when NOT to join that was one hop short; the finding is the pattern, and the answer
+  is to keep only removals that are proofs.
+  - **R848** (a regression against 0.39.2) — R847's implicit-`self` walk used the CONSUMER's supertype edges
+    only; `Sub3: Mid` with `Mid: Grand` in the dependency, `S: PSub` with `PSub: PBase`, their
+    function-reference spellings, a local protocol refining a dependency protocol and `extension Mid {
+    grandTok }` went ABSENT (1/1 → 0/0).
+  - **R850** (a regression against 0.39.2) — the replacement's "provably local" tests decided by name: a
+    scan-wide free function of the same name, a local overload with another signature (also beside a DIRECT
+    dependency superclass), and a local protocol-extension default all went ABSENT (1/1 → 0/0).
+  - Both closed the same way: `bareNameDepEntry` is v0.39.2's `pkg#<leaf>` lookup again, and the only
+    removal left is the binder rule, which the fifth review found holding on every shape it tried.
   - **R849** (not lower than 0.39.2; `a79a351` had closed it) — R846 asked the named module's package first
     and stopped on a hit, so ThirdKit's `extension RatesCore.Client { func fetch(_:) }` (reads a file) was
     never asked beside RatesCore's `fetch()` (reads env). The report carries neither overload signatures nor
     declared-vs-extended types, so the join cannot choose; it now DISCLOSES another package's answer to the
     same key (`dispatch:Client.fetch`). The cost: every access to a type name two chained packages both
     declare gains that hedge.
-  EVIDENCE. Fourth review's fixtures (p4a–p4e) across `eae95e9` / `4814c39` / this: 0 gates lower than
-  v0.39.2 (4814c39: 10). Third review's fixtures: lower only on the executed R847 fabrications, as before;
-  the first panel's 1,748 gates: 0 lower. Corpus, 9 entries chained against `4814c39`: ADDED 6, REMOVED 0,
-  CHANGED 30 — the floor restoring 0.39.2-style leaf joins the new rule could not prove local (named
-  above); producers unchanged. §1b: `CANDOR_R848_OFF` and `CANDOR_R849_OFF` each red
+  EVIDENCE, across `eae95e9` / this, and `CANDOR_R847_OFF=1` (R847 held out entirely) as the second arm:
+  fifth review's fixtures (41 functions × 4 gates) 0 lower in both arms; fourth review's 0 lower in both;
+  third review's plus `r846x`/`r847b` lower only on the binder-proven fabrications (`argRef`, `baseRead`,
+  executed pure; 3 gates) and `otherTok`'s plain `deny Env` (R846, executed file read; disclosed via R849)
+  — held-out arm: `otherTok` only; first panel's 1,748 gates 0 lower in both. Corpus against `eae95e9`
+  (9 entries chained, 41 packages standalone, dependency reports diffed): the only losses the R847 rule adds
+  are the 11 RxAlamofire `Rand` rows and 1 `AFIError.errorDescription` hedge named above; between the two
+  arms, REMOVED 17, CHANGED 286, all binder-proven. §1b: `CANDOR_R847_OFF` and `CANDOR_R849_OFF` each red
   `AmbiguousChainKeyProcessTests`.
 
 - **⚠ SOUNDNESS R844 / R845 / R846 / R847 — THE JOINS THAT STILL ASSUMED ONE CHAINED PACKAGE ANSWERS, AND
@@ -163,11 +175,8 @@ lower. It is not a claim about shapes nobody built.
   - **R847** — nio-http2's HPACK iterators carried `Env` through `BufferedStream.Iterator.next()` into
     `EventLoop.execute` over array iteration. Mechanism: a LOCAL binding (`while let next`, a closure or
     `catch` binder) read as a bare name, or passed by reference, was joined against `pkg#<leaf>` — minted for
-    every METHOD. A bare name now reaches a dependency only as a FREE declaration (R649's
-    `declaresFreeName`) or an implicit-`self` member of the enclosing type's chain (transitively; a
-    member the chain declares locally ends it), and never when a binder holds it in scope
-    (`binderShadow`, scoped like `literalLocals`). Operators passed by reference keep the leaf lookup (their
-    overload is chosen by operand type). The LOCAL edge the same shape makes is left as it was, deliberately:
+    every METHOD. As shipped (after R848/R850 above), a bare name is never joined while a binder holds it in
+    scope (`binderShadow`, scoped like `literalLocals`); every other bare name keeps the release's leaf join. The LOCAL edge the same shape makes is left as it was, deliberately:
     RxAlamofire's closure parameter `response` reaches the module's own `response(_:…)` free function that
     way, which is the only path carrying its real `Net` — wrong in mechanism, named, not removed here.
   - Also: a dependency's NESTED type constructed by name (`var i = Stream.Iterator(); i.next()`) types the
