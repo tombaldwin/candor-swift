@@ -1890,6 +1890,9 @@ for qual in reportQuals.sorted() {
 // entry under the OWNER (`Iface#Backend.size`), because that is the key a consumer of the OWNER forms.
 // Keyed under the implementor, as this loop did, the entry names a key nobody asks on and the measured
 // real-world instance is missed entirely. `abstractionOwnerPkg` decides, and OMITS what it cannot decide.
+/// SOUNDNESS R867 §1b KILL SWITCH and REACH PROBE (see the emission site below).
+let r867Off = ProcessInfo.processInfo.environment["CANDOR_R867_OFF"] != nil
+let r867Probe = ProcessInfo.processInfo.environment["CANDOR_R867_PROBE"] != nil
 do {
     // index: bare owner-type -> the (method, qual) pairs it owns (built once from the report quals);
     // ownersByTail tracks the DISTINCT full owner paths per bare tail, for the ambiguity guard below.
@@ -1903,7 +1906,29 @@ do {
         ownerMethods[tail, default: []].append((method, qual))
         ownersByTail[tail, default: []].insert(owner)
     }
-    let emitted = Set(effectors.map { $0.hash })
+    // SOUNDNESS R867 — what each REAL entry already carries, by hash, so a union entry is emitted beside
+    // it exactly when the union says something the real entry does not (see the emission site below).
+    var realByHash: [String: (inf: Set<String>, inv: Set<String>)] = [:]
+    for ef in effectors {
+        var cur = realByHash[ef.hash] ?? (inf: [], inv: [])
+        cur.inf.formUnion(ef.inferred.toNames()); cur.inv.formUnion(ef.invisible ?? [])
+        realByHash[ef.hash] = cur
+    }
+    // SOUNDNESS R867 — THE TRANSITIVE implementor set. `conformers[P]` lists only the types that SPELL
+    // `: P`, so a class two levels down (`SubSub: Sub: Base`) — which overrides `Base.m` exactly as `Sub`
+    // does — was never in the union for `Base.m`, and neither was a subclass of a class conforming to a
+    // protocol. The in-scan dispatch already walks `subtypesOf`, the transitive form (Driver.swift), so
+    // the published union was narrower than the producer's own answer. ADDITIVE: the direct set is a
+    // subset of this one, so no conformer that contributed before can stop contributing.
+    var transitiveImplementors: [String: Set<String>] = [:]
+    for (sup, subs) in conformers {
+        var seen = Set<String>(), frontier = subs
+        while let s = frontier.popLast() {
+            if !seen.insert(s).inserted { continue }
+            if !r867Off, let more = conformers[s] { frontier.append(contentsOf: more) }
+        }
+        transitiveImplementors[sup] = seen
+    }
     // COLLECTED, THEN SORTED BY HASH — never appended straight into `effectors`. `conformers` is a
     // `[String: [String]]` and `byMethod` a `[String: …]`, and Swift seeds Dictionary hashing PER
     // PROCESS, so appending inside those two loops made the emission ORDER of the union entries differ
@@ -1926,26 +1951,97 @@ do {
     // The hash is a total order here: it is `pkg#proto.method` and (proto, method) is a key pair.
     var unionEntries: [Effector] = []
     for (proto, conformerTypes) in conformers {
-        var byMethod: [String: (inf: Set<String>, inv: Set<String>)] = [:]
-        for t in Set(conformerTypes) {
-            // AMBIGUOUS bare type name: two DISTINCT types share tail `t` (e.g. `A.Foo` and `B.Foo`), so
-            // `ownerMethods[t]` merges both — the union would pull an unrelated same-named type's method (a
-            // fabrication). `conformers` holds only the bare name, so we cannot tell which `Foo` conforms;
-            // the family's never-guess rule (Driver.swift) says SKIP it rather than guess.
-            if (ownersByTail[t]?.count ?? 0) > 1 { continue }
-            for (method, qual) in ownerMethods[t] ?? [] {
-                var cur = byMethod[method] ?? (inf: [], inv: [])
-                cur.inf.formUnion(inferred[qual] ?? [])
-                cur.inv.formUnion(invisibleAcc[qual] ?? [])
-                byMethod[method] = cur
+        // TWO UNIONS, and the first is v0.39.3's exactly: over the DIRECT conformers. The second (R867) is
+        // over the TRANSITIVE implementor set, and it is used only for a member that is DYNAMICALLY
+        // DISPATCHED — every member of a class (a `final` one has no override to contribute) and the
+        // REQUIREMENTS of a local protocol. For an extension-only protocol member the v0.39.3 union is
+        // kept byte-for-byte, so this change can add to it nowhere it was not already asked to speak.
+        func unionOver(_ types: Set<String>) -> [String: (inf: Set<String>, inv: Set<String>)] {
+            var byMethod: [String: (inf: Set<String>, inv: Set<String>)] = [:]
+            for t in types {
+                // AMBIGUOUS bare type name: two DISTINCT types share tail `t` (e.g. `A.Foo` and `B.Foo`), so
+                // `ownerMethods[t]` merges both — the union would pull an unrelated same-named type's method (a
+                // fabrication). `conformers` holds only the bare name, so we cannot tell which `Foo` conforms;
+                // the family's never-guess rule (Driver.swift) says SKIP it rather than guess.
+                if (ownersByTail[t]?.count ?? 0) > 1 { continue }
+                for (method, qual) in ownerMethods[t] ?? [] {
+                    var cur = byMethod[method] ?? (inf: [], inv: [])
+                    cur.inf.formUnion(inferred[qual] ?? [])
+                    cur.inv.formUnion(invisibleAcc[qual] ?? [])
+                    byMethod[method] = cur
+                }
             }
+            return byMethod
+        }
+        let directUnion = unionOver(Set(conformerTypes))
+        let transitiveUnion = r867Off ? directUnion : unionOver(transitiveImplementors[proto] ?? [])
+        // A LOCAL PROTOCOL's member is dispatched only if it is a requirement (of it or a super-protocol);
+        // anything else in `conformers` is a class (local or a dependency's), whose members all dispatch.
+        func dispatches(_ method: String) -> Bool {
+            guard analysis.protocolNames.contains(proto) else { return true }
+            let bare = method.firstIndex(of: "(").map { String(method[..<$0]) } ?? method
+            var seen = Set<String>(), frontier = [proto]
+            while let cur = frontier.popLast() {
+                if !seen.insert(cur).inserted { continue }
+                if let ms = analysis.protocolMethods[cur], ms.contains(method) || ms.contains(bare) { return true }
+                frontier.append(contentsOf: protocolSupers[cur] ?? [])
+            }
+            return false
+        }
+        var byMethod: [String: (inf: Set<String>, inv: Set<String>, dyn: Bool)] = [:]
+        for (method, eff) in directUnion { byMethod[method] = (eff.inf, eff.inv, false) }
+        for (method, eff) in transitiveUnion where dispatches(method) {
+            let old = directUnion[method] ?? (inf: [], inv: [])
+            byMethod[method] = (eff.inf.union(old.inf), eff.inv.union(old.inv), true)
         }
         // ⟨0.39⟩ obligation 2 — whose namespace this entry belongs in. UNDECIDABLE OWNER ⇒ NO ENTRY.
         guard let ownerPkg = analysis.abstractionOwnerPkg[proto] else { continue }
         for (method, eff) in byMethod {
             if eff.inf.isEmpty && eff.inv.isEmpty { continue }   // pure across all conformers — silence = purity
             let hash = "\(ownerPkg)#\(proto).\(method)"
-            if emitted.contains(hash) { continue }               // a real entry already claims this hash
+            // SOUNDNESS R867 — A REAL ENTRY UNDER THE SAME HASH IS NOT THE UNION, AND MUST NOT SUPPRESS IT.
+            // This line read `if emitted.contains(hash) { continue }`: "a real entry already claims this
+            // hash". A real `Base.m` entry is `Base.m`'s OWN BODY — and for a non-final class (or a protocol
+            // whose extension supplies a default) that body is ONE of the implementors a `b.m()` on a
+            // `Base`-typed value can run, not all of them. So the union was published only while the base
+            // body was PURE (no real entry), and the moment the base did anything at all the overrides
+            // vanished from the wire. MEASURED, one variable — the base body; dep `open class BaseO`,
+            // `final class SubO: BaseO { override func m() { <env> } }`, consumer `f(_ b: BaseO) { b.m() }`,
+            // same consumer text, same binary:
+            //
+            //     BaseO.m {}            union entry emitted      f -> ['Env']        deny Env exit 1
+            //     BaseO.m { <fs> }      union entry SUPPRESSED   f -> ['Fs']         deny Env exit 0
+            //
+            // — and the same source scanned as ONE package reads ['Env','Fs'] (R584's in-scan CHA), so
+            // chaining DELETED an effect the engine's own unchained analysis attributes (PART 94).
+            //
+            // NOW: the union entry is emitted BESIDE the real one, under the SAME hash — the shape SPEC §2
+            // gives it (`hash: pkg#Iface.method`) — whenever it carries something the real entry does not.
+            // The consumer's index already UNIONS every entry filed under one key (the family-wide
+            // ENTRY-COLLISION rule, `DepIndex.insert`), so the join reads base ∪ overrides with no consumer
+            // change. Readers that treat entries as UNITS: `gate --report` and `fix` already skip
+            // `interfaceUnion` rows; the peek attribution (it TRAPPED on the duplicate `fn`) and the
+            // AS-EFF-005 baseline prior (it NARROWED the real entry's prior) are made to by this change, and
+            // each has a test that fails without it. When the union adds nothing, nothing is emitted, so a
+            // package with no effectful override is byte-identical to before.
+            //
+            // ONLY FOR A DYNAMICALLY DISPATCHED MEMBER (`eff.dyn`): an extension-only protocol member is
+            // dispatched statically, so a conformer's same-named method never runs through `p.m()`. And a
+            // consumer's `super.m()` is static too — it reads `DepIndex.lookupStatic`, which holds every
+            // entry except these, i.e. exactly what it read on v0.39.3.
+            //
+            // A `final` class has no subclass and a `final` member no override — the compiler forbids both
+            // — so neither ever has a contributor here; the union is over overrides that EXIST.
+            //
+            // §1b KILL SWITCH — `CANDOR_R867_OFF=1` restores the suppression (and the direct-only
+            // implementor set above), i.e. exactly v0.39.3, so the fixtures can be SHOWN to fail.
+            if let real = realByHash[hash] {
+                if r867Off || !eff.dyn || (eff.inf.isSubset(of: real.inf) && eff.inv.isSubset(of: real.inv)) { continue }
+                if r867Probe {
+                    FileHandle.standardError.write("R867HIT \(hash) union=\(eff.inf.sorted()) real=\(real.inf.sorted())\n"
+                        .data(using: .utf8)!)
+                }
+            }
             var ef = Effector(fn: "\(proto).\(method)", loc: "",
                 inferred: EffectSet(names: eff.inf), direct: EffectSet(names: [String]()),
                 unresolved: eff.inf.contains("Unknown"), hash: hash, calls: [String]())
@@ -2270,8 +2366,18 @@ if peekListPath == nil, let pp = policyPath {
                 // `effectors` (built long before this peek block, never mutated after) keyed by qualified
                 // name, so "was this effect already on this exact function" is answered from the same
                 // analysis the primary gate itself ran on, not a proxy for it.
-                let primaryInferredByQual: [String: Set<String>] = Dictionary(
-                    uniqueKeysWithValues: effectors.map { ($0.fn, Set($0.inferred.toNames())) })
+                //
+                // SOUNDNESS R867 — NOT `uniqueKeysWithValues`, which TRAPS on a duplicate key: a class-override
+                // union entry is published BESIDE the real entry it extends, under the same `fn`. The real
+                // unit's own set is what "already on this exact function" means, so it wins; a union entry
+                // contributes only where no real unit holds the name, which is exactly what it did before.
+                var primaryInferredByQual: [String: Set<String>] = [:]
+                for e in effectors where !e.interfaceUnion {
+                    primaryInferredByQual[e.fn, default: []].formUnion(e.inferred.toNames())
+                }
+                for e in effectors where e.interfaceUnion && primaryInferredByQual[e.fn] == nil {
+                    primaryInferredByQual[e.fn] = Set(e.inferred.toNames())
+                }
                 // The child's OWN function list, indexed by qual, so a NEW effect on a context function can
                 // be traced to WHICH call target explains it — the same array this loop already reads,
                 // just keyed once instead of re-scanned per candidate.

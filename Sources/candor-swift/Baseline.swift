@@ -46,8 +46,18 @@ func loadBaseline(_ path: String) -> BaselinePriors? {
     else { arr = root as? [Any] }
     guard let arr else { return nil }
     var out = BaselinePriors()
+    // SOUNDNESS R867 — a class-override UNION entry is published beside the real entry it extends, under
+    // the SAME hash (`interfaceUnion: true`). It is not a unit and holds no prior for one: intersected with
+    // the real entry below it would NARROW the real unit's prior (`[Fs] ∩ [Env] = []`) and the guard would
+    // then report the unit as having GAINED its own unchanged effects. Skipped only where a real entry
+    // holds the hash, so a union-only hash keeps exactly the prior it had before.
+    let realHashes: Set<String> = Set(arr.compactMap { item -> String? in
+        guard let e = item as? [String: Any], (e["interfaceUnion"] as? Bool) != true else { return nil }
+        return e["hash"] as? String
+    })
     for case let e as [String: Any] in arr {
         guard let fn = e["fn"] as? String, !fn.isEmpty else { continue }
+        if (e["interfaceUnion"] as? Bool) == true, let h = e["hash"] as? String, realHashes.contains(h) { continue }
         var effs: Set<String> = []
         for case let name as String in (e["inferred"] as? [Any]) ?? [] { effs.insert(name) }
         // ⟨0.32⟩ INTERSECT a repeated `fn`, never overwrite — and note this is the OPPOSITE direction to

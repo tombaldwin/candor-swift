@@ -354,6 +354,18 @@ struct DepIndex {
     /// nil for an unknown key only. NOTHING IS WITHDRAWN ANY MORE — a key two reports both answer carries
     /// the union of their answers, so there is no third state between "answered" and "absent" to check.
     func lookup(_ key: String) -> DepEntry? { byKey[key] }
+    /// SOUNDNESS R867 — the index WITHOUT the override-union entries a producer publishes BESIDE a real
+    /// entry under the same hash. Those entries say "a `b.m()` on a `Base`-typed value may also run these
+    /// overrides", which is the answer for a DYNAMICALLY dispatched call and the wrong one for `super.m()`:
+    /// Swift dispatches a `super.` call statically to the superclass's own implementation, so an override in
+    /// a sibling subclass never runs through it. MEASURED on the executed fixture (consumer
+    /// `final class Mine: B { override func m() { super.m() } }`, dep `S: B` overriding `m` with a file
+    /// write): the file is never written, and reading `lookup` here charged `Mine.m` with `Fs`.
+    ///
+    /// Everything else is in it, so a `super.` call reads exactly what it read on v0.39.3, whose producer
+    /// never emitted such an entry: this is a FLOOR, not a narrowing.
+    func lookupStatic(_ key: String) -> DepEntry? { byKeyStatic[key] }
+    var byKeyStatic: [String: DepEntry] = [:]
     /// SOUNDNESS R859 — does ANY chained package publish an entry whose LEAF is `leaf` (under whatever
     /// owner)? Every entry is keyed `pkg#<leaf>` as well as by its qualified spellings, so this is the
     /// existence question "is there a body named `leaf` with something to say anywhere in the chain".
@@ -404,8 +416,9 @@ struct DepIndex {
     /// recoverable-vs-permanent distinction between `staleAmbiguous` and `ambiguous` existed only to let a
     /// trusted report rescue a key two stale ones had withdrawn; nothing is withdrawn, so nothing needs
     /// rescuing. All three sets are gone, and with them the ordering hazard of maintaining them.
-    mutating func insert(key: String, _ entry: DepEntry) {
+    mutating func insert(key: String, _ entry: DepEntry, overrideUnion: Bool = false) {
         byKey[key, default: DepEntry()].unionWith(entry)
+        if !overrideUnion { byKeyStatic[key, default: DepEntry()].unionWith(entry) }
     }
 }
 
@@ -690,6 +703,12 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
             let out = arr.compactMap { $0 as? String }
             return out.count == arr.count ? out : nil
         }
+        // SOUNDNESS R867 — the hashes this report's REAL entries hold. A union entry under one of them is
+        // an override union published beside the base's own body (see `DepIndex.lookupStatic`).
+        let realHashesInReport: Set<String> = Set(fns.compactMap { item -> String? in
+            guard let e = item as? [String: Any], (e["interfaceUnion"] as? Bool) != true else { return nil }
+            return e["hash"] as? String
+        })
         for case let e as [String: Any] in fns {
             // NOT `continue`. MEASURED on the two-tree fixture (dep `hit()` reads /etc/hosts, app `go()`
             // calls it, `deny Fs`), with the dep entry's `fn` key deleted and with its `inferred` set to
@@ -895,7 +914,8 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
                     idx.freeLeaves.insert("\(pkg)#\(String(leaf[..<paren]))")
                 }
             }
-            for k in keys { idx.insert(key: k, entry) }
+            let overrideUnion = isUnionEntry && hash.map { realHashesInReport.contains($0) } == true
+            for k in keys { idx.insert(key: k, entry, overrideUnion: overrideUnion) }
         }
     }
     // A PACKAGE CHAINED TWICE, ONCE COMPLETE AND ONCE NOT, IS **NOT** COVERED — INCOMPLETENESS WINS.

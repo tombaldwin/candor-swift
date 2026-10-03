@@ -15,6 +15,8 @@ import CandorCore
 // name SAFE, never by trusting an unproven one) — the over-approximation is "any unexplained capitalized
 // decl-attribute might be an attached macro"; only a name on this list, or a locally-declared
 // `@resultBuilder`/`@globalActor` type (handled separately, see their own tables), is exempted.
+/// SOUNDNESS R867 §1b KILL SWITCH (the in-scan twin; main.swift reads the same variable for the producer).
+private let driverR867Off = ProcessInfo.processInfo.environment["CANDOR_R867_OFF"] != nil
 private let KNOWN_BUILTIN_DECL_ATTRS: Set<String> = [
     "MainActor", "UIApplicationMain", "NSApplicationMain",
     "IBAction", "IBSegueAction", "IBOutlet", "IBInspectable", "IBDesignable",
@@ -40,6 +42,11 @@ struct Analysis {
     /// writing them there cannot reach CHA.
     var protocolSupers: [String: Set<String>]
     var protocolNames: Set<String>
+    /// SOUNDNESS R867 — local protocol -> its REQUIREMENTS (the members a call on an existential or a bound
+    /// DISPATCHES on). The producer's union entry is published beside a real `P.m` only for these: an
+    /// extension-only member is dispatched statically to the extension body, so a conformer's same-named
+    /// method never runs through `p.m()` and unioning it would charge an effect no execution performs.
+    var protocolMethods: [String: Set<String>]
     var importCounts: [String: Int]
     /// module -> how many analyzed FILES import it while their own package cannot. The κ ledger, computed
     /// where the per-file answer lives rather than reconstructed from a scan-global set that could not
@@ -2730,7 +2737,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                         for sup in supertypesOf[et] ?? [] where sup != et {
                             for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {   // R565
-                                if let de = deps.lookup("\(p)#\(sup).\(member)") {
+                                // R867 — `lookupStatic`: a `super.` call is statically dispatched, so the
+                                // override union published beside the base's body is not its answer.
+                                if let de = deps.lookupStatic("\(p)#\(sup).\(member)") {
                                     if joinDebug { FileHandle.standardError.write("JOINSITE super \(f.qual) \(p)#\(sup).\(member)\n".data(using: .utf8)!) }
                                     applyDepEntry(de, to: f.qual)
                                     resolved = true
@@ -3910,6 +3919,23 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     whyMap[f.qual, default: []].insert("dispatch:\(d.proto).\(d.member)")
                 }
             }
+            // SOUNDNESS R867, THE IN-SCAN TWIN — A SUBCLASS OF A CONFORMING CLASS OVERRIDES THE WITNESS.
+            // `conformers[P]` holds only the types that SPELL `: P`, so `protocol D { func dispose() }`,
+            // `open class Sink: D`, `final class DebugSink: Sink { override func dispose() { <fs> } }` and
+            // `f(_ d: D) { d.dispose() }` edged `Sink.dispose` alone and `f` read PURE while a `DebugSink`
+            // passed to it writes the file — and the chained consumer of the same package, reading the
+            // producer's (now transitive) union entry, was charged correctly: the package's own answer was
+            // weaker than its consumer's. Found in the corpus A/B (RxSwift `Disposable` / `Sink` /
+            // `DebugSink.dispose`, Clock). PRECISE-OR-NOTHING and ADDITIVE, the class-CHA arm's rule: only
+            // real `<sub>.<member>` units are edged, and nothing above is changed or bounded by it.
+            if !driverR867Off {
+                for c in conf.sorted() {
+                    for sub in (subtypesOf[c] ?? []).sorted() where sub != c && !conf.contains(sub) {
+                        edges[f.qual, default: []].formUnion(
+                            memberTargets("\(sub).\(d.member)", d.argc, d.argTypes, swiftModuleOf(f.loc)))
+                    }
+                }
+            }
         }
         // CHA for protocol PROPERTY/subscript reads — identical bounded resolution to method dispatch,
         // but the conformer units are accessor units (`Type.payload` / `Type.subscript`). A conformer
@@ -4278,7 +4304,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
     return Analysis(
         allFns: allFns, conformers: conformers, declaredTypes: declaredTypes,
-        protocolSupers: protocolSupers, protocolNames: Set(protocolMethods.keys), importCounts: importCounts,
+        protocolSupers: protocolSupers, protocolNames: Set(protocolMethods.keys), protocolMethods: protocolMethods,
+        importCounts: importCounts,
         uncoveredCounts: uncoveredCounts, coverageNotDeclared: coverageNotDeclared,
         direct: direct, edges: edges, whyMap: whyMap,
         locOf: locOf, entryPoints: entryPoints, inferred: inferred, hostsAcc: hostsAcc, fsD: fsAcc, privKindD: privKindD,

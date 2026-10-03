@@ -18,6 +18,26 @@ below. Nothing 0.39.3 reports is weakened: every arm adds an entry, a key or a d
 nothing (corpus, 9 chained entries + 41 producers against 0.39.3: ADDED 0, REMOVED 0, rows losing any
 value 0).
 
+- **⚠ SOUNDNESS R867 — A CALL ON A CHAINED DEPENDENCY'S NON-FINAL CLASS MISSED THAT DEPENDENCY'S OWN
+  SUBCLASS OVERRIDES** (conformance PART 94). `func f(_ b: BaseO) { b.m() }`, executed with the
+  dependency's `SubO` (whose `m` reads the environment), reported only `BaseO.m`'s own effect, and
+  `deny Env` / `deny Env Unknown` both exited 0; the same source as one package charged `Env`. The
+  producer already published a class-override union entry, but only while the base body was PURE: any
+  real `BaseO.m` entry suppressed it. The union is now published BESIDE the real entry (same hash,
+  `interfaceUnion: true`) for every dynamically dispatched member — class members, and a protocol's
+  REQUIREMENTS — and over the TRANSITIVE implementor set (`Leaf: Mid: Base`, a subclass of a conforming
+  class). The real entry is unchanged. Also fixed with it: a protocol requirement whose extension default
+  is effectful hid its conformers' overrides the same way; and the package's OWN protocol dispatch now
+  reaches a subclass's override of a conformer's witness (found in the corpus: RxSwift `Disposable` /
+  `Sink` / `DebugSink.dispose`). Not unioned, by construction or by rule: a `final` member, an
+  extension-only protocol member (statically dispatched), and a consumer's `super.m()` (it reads the
+  index without the new entries — exactly what it read on 0.39.3). A union entry no longer narrows the
+  AS-EFF-005 baseline prior of the real entry beside it.
+  **Gates that can flip: 0 → 1 only.** Corpus (9 chained entries, dependency reports diffed too) against
+  0.39.3: ADDED 256 (union entries), REMOVED 0, no row loses any value; 2,459 rows gain `Clock`, all
+  already `Unknown` (so `deny Clock Unknown` does not move), all from one genuine root — RxSwift
+  `DebugSink`'s timestamped logging, reached through `Disposable.dispose()` dispatch. Kill switch for
+  calibration: `CANDOR_R867_OFF=1`.
 - **SOUNDNESS R832 — A CALL THROUGH A CHAINED DEPENDENCY'S STATIC FACTORY WAS SILENT.**
   `Client.make().fetch()` and `let c = Client.make(); c.fetch()` were absent from `functions[]` on 0.39.2
   and 0.39.3, while the producer already published `typeSurface.returns
