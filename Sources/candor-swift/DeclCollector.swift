@@ -193,6 +193,30 @@ func compositionTypeNames(_ t: TypeSyntax) -> [String]? {
     return names.count == comp.elements.count ? names : nil
 }
 
+/// SOUNDNESS R859 — the names a file spells after `any` (each element of an `any A & B` composition too).
+/// Swift admits only a protocol there, so membership is the source's own word that the name is an
+/// abstraction. Function BODIES are walked as well as signatures (`let xs: [any P] = …`), which is why
+/// this is its own full-tree visitor rather than a DeclCollector hook — that one skips bodies.
+final class ExistentialSpellingCollector: SyntaxVisitor {
+    private(set) var found: Set<String> = []
+    static func names(in tree: some SyntaxProtocol) -> Set<String> {
+        let v = ExistentialSpellingCollector(viewMode: .sourceAccurate)
+        v.walk(tree)
+        return v.found
+    }
+    override func visit(_ node: SomeOrAnyTypeSyntax) -> SyntaxVisitorContinueKind {
+        guard node.someOrAnySpecifier.text == "any" else { return .visitChildren }
+        let elems: [TypeSyntax] = node.constraint.as(CompositionTypeSyntax.self)
+            .map { $0.elements.map { $0.type } } ?? [node.constraint]
+        for t in elems {
+            guard let n = typeName(t).name else { continue }
+            found.insert(n)
+            if let last = n.split(separator: ".").last { found.insert(String(last)) }
+        }
+        return .visitChildren
+    }
+}
+
 final class DeclCollector: SyntaxVisitor {
     var file: String
     var converter: SourceLocationConverter

@@ -330,6 +330,12 @@ struct DepIndex {
     /// key with DIFFERENT types drop the key rather than pick one.
     var returnsIdx: [String: String] = [:]
     var returnsAmbiguous: Set<String> = []
+    /// SOUNDNESS R832 — `<pkg>#<type path>` for every type a TRUSTED chained report names: an entry's owner,
+    /// a `typeSurface.returns` factory's owner, and a `returns` answer. Evidence that a static-call
+    /// receiver `T.make()` is a DEPENDENCY's type rather than the platform's (`Unmanaged.passRetained`,
+    /// `UnsafeMutablePointer.allocate`), read only to decide whether a missed `returns` key is worth a
+    /// disclosure — never to join. A dependency type this set lacks keeps the release's answer.
+    var mentionedTypes: Set<String> = []
     var isEmpty: Bool {
         byKey.isEmpty && coveredPkgs.isEmpty && stalePkgs.isEmpty && incompletePkgs.isEmpty
             && unjudgedPkgs.isEmpty
@@ -348,6 +354,16 @@ struct DepIndex {
     /// nil for an unknown key only. NOTHING IS WITHDRAWN ANY MORE — a key two reports both answer carries
     /// the union of their answers, so there is no third state between "answered" and "absent" to check.
     func lookup(_ key: String) -> DepEntry? { byKey[key] }
+    /// SOUNDNESS R859 — does ANY chained package publish an entry whose LEAF is `leaf` (under whatever
+    /// owner)? Every entry is keyed `pkg#<leaf>` as well as by its qualified spellings, so this is the
+    /// existence question "is there a body named `leaf` with something to say anywhere in the chain".
+    /// Read only to decide whether a MISSED owner key may be a member inherited from somewhere the wire
+    /// does not record (R843) — i.e. to ADD a disclosure, never to join or to withdraw one.
+    func anyChainedPackagePublishesLeaf(_ leaf: String) -> Bool {
+        for p in coveredPkgs.union(stalePkgs).union(incompletePkgs).union(unjudgedPkgs)
+            where byKey["\(p)#\(leaf)"] != nil { return true }
+        return false
+    }
 
     /// TWO ENTRIES UNDER ONE KEY ARE UNIONED — never withdrawn, never picked between, and NOT ranked by
     /// trust either. The family-wide rule (candor-spec/ENTRY-COLLISION-DECISION.md), whose open item 4 was
@@ -653,6 +669,11 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
             for (fnKey, ty) in ts {
                 guard let ty = ty as? String, fnKey.contains("#"), ty.contains("#") else { continue }
                 idx.insertReturn(key: fnKey, ty)
+                // R832 — both ends name a type the producer declares: the factory's owner and its answer.
+                idx.mentionedTypes.insert(ty)
+                if let dot = fnKey.lastIndex(of: "."), fnKey[..<dot].contains("#") {
+                    idx.mentionedTypes.insert(String(fnKey[..<dot]))
+                }
             }
         }
         for pkg in (obj?["packages"] as? [String]) ?? [] where !pkg.isEmpty { register(pkg) }
@@ -691,6 +712,9 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
             let pkg = hash.flatMap { $0.contains("#") ? String($0.split(separator: "#", maxSplits: 1)[0]) : nil }
                 ?? (obj?["package"] as? String)
             guard let pkg, !pkg.isEmpty else { continue }
+            // R832 — the entry's OWNER type is a type this package's report speaks about.
+            let ownerSegs = qualSegments(qual).dropLast()
+            if !ownerSegs.isEmpty { idx.mentionedTypes.insert("\(pkg)#\(ownerSegs.joined(separator: "."))") }
             // ⟨0.39⟩ A FOREIGN UNION ENTRY IS NOT COVERAGE OF THE PACKAGE IT NAMES — and this line is the
             // one place ⟨0.39⟩'s own fix could manufacture ⟨0.39⟩'s own defect. Obligation 2 makes a
             // package publish `Iface#Backend.size` from EffImpl's report; `register` is the single

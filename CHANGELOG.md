@@ -10,6 +10,60 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed
+
+**Gates that can flip: 0 → 1 only.** `deny <E>` on code reaching a dependency through a static factory
+whose return type the dependency publishes; `deny Unknown` / `deny <E> Unknown` on the disclosed spellings
+below. Nothing 0.39.3 reports is weakened: every arm adds an entry, a key or a disclosure and removes
+nothing (corpus, 9 chained entries + 41 producers against 0.39.3: ADDED 0, REMOVED 0, rows losing any
+value 0).
+
+- **SOUNDNESS R832 — A CALL THROUGH A CHAINED DEPENDENCY'S STATIC FACTORY WAS SILENT.**
+  `Client.make().fetch()` and `let c = Client.make(); c.fetch()` were absent from `functions[]` on 0.39.2
+  and 0.39.3, while the producer already published `typeSurface.returns
+  {"RatesCore#Client.make": "RatesCore#Client"}`. The consumer asked `returns` only for a BARE factory
+  (`build().fetch()`). The static spelling now goes through the same marker and join: bare,
+  module-qualified, nested (`Outer.Inner.make()`), generic-specialized, generic-method (`makeG(1)`),
+  extension-declared, `try`/`await`, a factory on another type (`Factory.client()`), inside a closure,
+  and the `let`, `if let` and `guard let` binders (the `if let`/`guard let` binders also gain the BARE
+  factory, `if let c = mkOpt()`, which was absent too). A second mechanism hid it even after that: a
+  consumer that declares any `make()` of its own typed the dependency's `Client.make()` by that LEAF and
+  keyed a member of the wrong type. That leaf typing is kept, and the dependency is now also asked beside
+  it whenever the receiver type is one this package neither declares nor extends.
+  - **Resolved** (`deny Env` 0 → 1 on the unit and its caller) when the producer publishes the return
+    type. **Disclosed** (`Unknown`, `dispatch:untyped cross-package receiver`; `deny Env Unknown` 0 → 1)
+    when it does not, e.g. a factory returning `any P`, `some P` or `C?`. A static call on a type that
+    no chained report names keeps 0.39.3's answer, so `Unmanaged.passUnretained(x).toOpaque()`,
+    `UnsafeMutablePointer.allocate(…)` and the like gain no hedge.
+  - **Residual, stated:** a factory returning a non-nominal type, on a dependency type that has no
+    effectful member and no published factory (`enum Maker { static func make() -> any P }`), is still
+    silent. The resolution is for the producer to publish `-> any P` / `-> some P` returns, a wire
+    change left for a conformance run. A pure member reached through a factory
+    (`Client.make().pureM()`) is disclosed rather than read as pure. That is the bare spelling's existing
+    rule, now applied to the static one.
+  - §1b: `CANDOR_R832_OFF=1` restores 0.39.3. Reach probe `CANDOR_R832_PROBE=1`.
+
+- **SOUNDNESS R859 — A DEPENDENCY MEMBER INHERITED THROUGH A PROTOCOL READ AS PURE.**
+  `func f(_ t: any PSub) { t.pTok() }`, where the dependency declares `protocol PSub: PBase` and
+  `extension PBase { func pTok() }` reads env, gave `[]` with `deny Env Unknown` 0. The producer keys the
+  body `PBase.pTok`, reports carry no supertypes (R843), and the consumer's `PSub.pTok` miss was read as
+  purity. The generic spelling already disclosed (R705). The existential, the bare spelling with a local
+  conformer, a protocol refined twice and a dependency-only conformer now disclose too, with R705's token
+  `dispatch:<P>.<member>`. The bound is that the receiver's type is an abstraction this package does not
+  declare (spelled `any P` here, or adopted by a local type), the file imports a chained package, and some
+  chained report publishes a body under that member's name at all. Without such a body the miss stays a
+  purity claim, so a pure inherited member gains no hedge.
+  - **A LOCAL protocol refining the dependency's** (`protocol LSub: PBase {}`, `t.pTok()` on `any LSub`)
+    was dropped outright on 0.39.2 and 0.39.3. It is now **resolved**: the dependency is asked by the
+    foreign protocol's own key and the local conformers' members are unioned beside it, so `deny Env`
+    goes 0 → 1. A deeper chain (`LSub2: PSub`) discloses.
+  - **Residual, stated:** a BARE dependency protocol with only dependency conformers and no `any`
+    spelling anywhere in the package (`func f(_ t: PSubD)`) is still silent, because nothing in the
+    consumer says `PSubD` is a protocol. A composition `any PSub & Sendable` was silent on 0.39.2 and
+    0.39.3 and still is. Typing it was tried and REMOVED edges and an `invisible` disclosure on
+    swift-nio and swift-certificates, so it was withdrawn.
+  - §1b: `CANDOR_R859_OFF=1` restores 0.39.3. Reach probe `CANDOR_R859_PROBE=1`.
+
 ## [0.39.3] — 2026-09-30
 
 **Upgrading from 0.39.2 — gates that can flip, in BOTH directions (each is an entry below).** A patch

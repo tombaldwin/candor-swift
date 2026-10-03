@@ -5277,6 +5277,7 @@ final class CallCollector: SyntaxVisitor {
     /// spelling read silent-pure while the bound one resolved or disclosed — a shipped guard whose
     /// fixture had picked one spelling (candor-spec `SCAN-BOUNDARY-WORK-QUEUE.md` §3c).
     func depFactoryCallee(_ expr: ExprSyntax) -> String? {
+        if let s = depStaticFactoryCallee(expr) { return s }
         guard let callee = Self.peel(expr).as(FunctionCallExprSyntax.self)?.calledExpression
                             .as(DeclReferenceExprSyntax.self)?.baseName.text,
               callee.first?.isUppercase == false, returns[callee] == nil,
@@ -5285,6 +5286,55 @@ final class CallCollector: SyntaxVisitor {
               !Self.PURE_STDLIB_FREE_FNS.contains(callee) else { return nil }
         return callee
     }
+
+    /// SOUNDNESS R832 — THE STATIC SPELLING OF A DEPENDENCY FACTORY: `Client.make()`, not `build()`.
+    ///
+    /// `depFactoryCallee` answered only a BARE callee (`DeclReferenceExprSyntax`), so a factory reached
+    /// through its TYPE — the commoner Swift spelling — produced no marker at all: `rootOf` cannot type
+    /// `Client.make()` (the return type lives in the dependency), the member call on it had no owner, and
+    /// the row read silent-pure on every build, direct and bound alike. The producer was already
+    /// publishing the answer (`typeSurface.returns {"RatesCore#Client.make": "RatesCore#Client"}`); the
+    /// consumer never asked.
+    ///
+    /// Returns `<type path>.<member>` — the producer's own fn-qual spelling, so the Driver asks
+    /// `<pkg>#Client.make` exactly as it asks `<pkg>#build`, through the same arm and the same
+    /// never-guess and disclose-on-miss rules. The TYPE half is `conventionTypePath`, the one existing
+    /// answer to "which type does this type-reference expression name" (bare, `Self`, module-qualified,
+    /// nested, generic-specialized), which already REFUSES a type this scan declares: a local type's
+    /// static factory is local resolution's question, never a dependency reach.
+    ///
+    /// Only reached where `rootOf` gave NO root (both call sites guard on it), so it can add a marker and
+    /// never replace a typing — `Client.shared()` / `Client.default()`, which the singleton convention
+    /// already types, never get here. `init` is a constructor, typed elsewhere; an uppercase member is
+    /// a nested type or an enum case, not a factory call.
+    func depStaticFactoryCallee(_ expr: ExprSyntax) -> String? {
+        guard !Self.r832Off, let call = Self.peel(expr).as(FunctionCallExprSyntax.self) else { return nil }
+        var ce = Self.peel(call.calledExpression)
+        if let g = ce.as(GenericSpecializationExprSyntax.self) { ce = Self.peel(g.expression) }
+        guard let ma = ce.as(MemberAccessExprSyntax.self), let base = ma.base else { return nil }
+        let member = ma.declName.baseName.text
+        guard member != "init", member != "self", member.first?.isUppercase == false,
+              let tp = conventionTypePath(base) else { return nil }
+        if Self.r832Probe { FileHandle.standardError.write("R832SITE \(tp).\(member)\n".data(using: .utf8)!) }
+        return "\(tp).\(member)"
+    }
+    /// SOUNDNESS R832 — `T.member(…)` whose result `rootOf` typed by the LEAF `member` in this package's
+    /// own `returns`, although `T` is a type this package neither declares nor extends — so no local
+    /// function can be what Swift calls there. Returns the static callee to ask the dependency about, or
+    /// nil. A type this package EXTENDS is refused (`localTypes` holds it): its `make` may be ours.
+    func leafTypedForeignStaticFactory(_ expr: ExprSyntax) -> String? {
+        guard !Self.r832Off, let call = Self.peel(expr).as(FunctionCallExprSyntax.self) else { return nil }
+        var ce = Self.peel(call.calledExpression)
+        if let g = ce.as(GenericSpecializationExprSyntax.self) { ce = Self.peel(g.expression) }
+        guard let ma = ce.as(MemberAccessExprSyntax.self), let base = ma.base,
+              returns[ma.declName.baseName.text] != nil,
+              let tp = conventionTypePath(base), !localTypes.contains(tp) else { return nil }
+        return depStaticFactoryCallee(expr)
+    }
+    /// SOUNDNESS R832 §1b KILL SWITCH — no static-factory marker: the release's silence on
+    /// `Client.make().fetch()`, so `StaticDepFactoryProcessTests` can be SHOWN to fail without a revert.
+    static let r832Off = ProcessInfo.processInfo.environment["CANDOR_R832_OFF"] != nil
+    static let r832Probe = ProcessInfo.processInfo.environment["CANDOR_R832_PROBE"] != nil
 
     override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
         // R33 — deinit-glue, asked of the CONSTRUCTION rather than of a binder. See `applyDeinitGlue`
@@ -5748,6 +5798,26 @@ final class CallCollector: SyntaxVisitor {
             // R429 — the WRITTEN receiver name, before `dealias` collapses a `#if`-duplicated
             // alias to whichever arm happened to be recorded last.
             let rawBaseRoot = ma.base.flatMap { rootOfUnaliased($0).root }
+            // SOUNDNESS R832 — THE STATIC FACTORY THAT A LOCAL LEAF MIS-TYPED. `rootOf` types
+            // `Client.make()` by the LEAF `make` in this package's own `returns` (its `returns[member]`
+            // arm), so a consumer that declares any `make()` of its own — `LocalT.make() -> LocalT` —
+            // types a DEPENDENCY's factory as `LocalT`, the member call keys `LocalT.fetch`, nothing
+            // answers, and the row is silent exactly as when nothing typed it. Measured: the R832
+            // fixture's fix went `deny Env` 1 -> 0 on five spellings the moment one local `make`
+            // appeared. The leaf typing is kept (it is the release's answer, and where this package
+            // extends the type it is the right one — `leafTypedForeignStaticFactory` refuses those);
+            // the dependency's own answer is ASKED for beside it, through the same marker.
+            if base.root != nil, let recvExpr = ma.base, let callee = leafTypedForeignStaticFactory(recvExpr) {
+                calls.append(Call(path: "<untyped>.\(member)", leaf: member, strArg: nil,
+                                  typed: false, args: [], argTypes: [], depCallee: callee, extOwner: nil))
+            }
+            // …and its BOUND spelling: `let c = Client.make()` typed `LocalT` by the same leaf, with the
+            // factory's provenance recorded beside the type by the binder (static callees only).
+            if let n = ma.base.map(Self.peel)?.as(DeclReferenceExprSyntax.self)?.baseName.text,
+               vars[n] != nil, let callee = depBoundLocals[n], callee.contains(".") {
+                calls.append(Call(path: "<untyped>.\(member)", leaf: member, strArg: nil,
+                                  typed: false, args: [], argTypes: [], depCallee: callee, extOwner: nil))
+            }
             // ── SOUNDNESS R429, THE MIXED ARM SET — BEFORE THE DISPATCH CHAIN, NOT INSIDE IT ──
             // This union used to sit inside the typed-local-receiver branch below, which is entered only
             // when the DEALIASED root is a project type. `dealias` reads a last-writer-wins map, so for
@@ -6494,6 +6564,15 @@ final class CallCollector: SyntaxVisitor {
                     return
                 }
                 let info = rootOf(initVal)
+                // SOUNDNESS R832 — `if let c = Client.makeOpt()` / `guard let c = mkOpt()`: the unwrapping
+                // binder records a dependency factory's provenance exactly as the `let` binder does (the
+                // same `depFactoryCallee` guard, both spellings), so a `c.fetch()` below asks the dependency
+                // (`typeSurface.returns`) or discloses on a miss instead of reading silent — ABSENT on
+                // v0.39.2 and HEAD for the bare and the static factory alike. Recorded AFTER the chain
+                // below, whose `clearBinding` would otherwise wipe it.
+                let staticFactory: String? = info.root == nil
+                    ? depFactoryCallee(initVal) : leafTypedForeignStaticFactory(initVal)
+                defer { if let sf = staticFactory { depBoundLocals[name] = sf } }
                 // R610 — the GUESS flag travels with the type, or the binding launders it.
                 if info.isVar, let t = info.root {
                     vars[name] = t
@@ -8045,6 +8124,8 @@ final class CallCollector: SyntaxVisitor {
                         // function and not the inline condition it used to be.
                         if info.root == nil, let callee = depFactoryCallee(v) {
                             depBoundLocals[name] = callee
+                        } else if info.root != nil, let callee = leafTypedForeignStaticFactory(v) {
+                            depBoundLocals[name] = callee   // R832 — beside the leaf's type, not instead
                         } else { depBoundLocals.removeValue(forKey: name) }
                         if let t = info.root, info.isVar {
                             // R846 — `let c = RatesCore.Client()`: keep the module the initializer SPELLS,

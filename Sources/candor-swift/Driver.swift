@@ -240,6 +240,16 @@ let SWIFT_OPERATOR_HEAD_SCALARS: [ClosedRange<UInt32>] = [
     0x3001...0x3003, 0x3008...0x3020, 0x3030...0x3030,
 ]
 
+/// SOUNDNESS R832 — the producer's spelling of a fn qual whose LEAF it declared with backticks
+/// (`static func \`default\`()` is published as `Client.\`default\``), from the call site's spelling,
+/// which never carries them. nil when the leaf already has them.
+func backtickedLeafKey(_ qual: String) -> String? {
+    var segs = qual.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+    guard let leaf = segs.last, !leaf.isEmpty, !leaf.hasPrefix("`") else { return nil }
+    segs[segs.count - 1] = "`\(leaf)`"
+    return segs.joined(separator: ".")
+}
+
 func swiftModuleOf(_ loc: String) -> String {
     let filePath = loc.split(separator: ":").first.map(String.init) ?? loc
     return swiftModuleSegment(filePath)
@@ -793,6 +803,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
     }
     var collectors: [DeclCollector] = []
+    // SOUNDNESS R859 — every name this package spells as an EXISTENTIAL (`any P`), package-wide. Swift
+    // admits only a protocol after `any`, so this is the source's own statement that `P` is an
+    // abstraction — the one fact about a DEPENDENCY's type the consumer can read without the dependency
+    // publishing it (R843: reports carry no supertypes). See the R859 arm in the call loop.
+    var existentialSpelled: Set<String> = []
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a file that fails to read used to be SILENTLY skipped by the
     // `guard…else { continue }` — a green report would then hide the code candor never saw. Track it.
     var unanalyzed: [(path: String, reason: String)] = []
@@ -840,6 +855,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         let c = DeclCollector(file: rel, tree: tree)
         c.walk(tree)
+        existentialSpelled.formUnion(ExistentialSpellingCollector.names(in: tree))   // R859
         // R532 — the type declarations found inside func/init/subscript/deinit bodies, which the four
         // `.skipChildren` sites cannot walk in place. Drained HERE, after the file pass, rather than by a
         // nested `walk` from inside a visit: `SyntaxVisitor.walk` is not re-entrant.
@@ -1884,6 +1900,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// a standalone producer's row falls silent again and the three-package-chain tests go red.
     let r836Off = ProcessInfo.processInfo.environment["CANDOR_R836_OFF"] != nil
     let r836Probe = ProcessInfo.processInfo.environment["CANDOR_R836_PROBE"] != nil
+    /// SOUNDNESS R859 §1b KILL SWITCH and reach probe — see the R859 arm after the R705 disclosure.
+    let r859Off = ProcessInfo.processInfo.environment["CANDOR_R859_OFF"] != nil
+    let r859Probe = ProcessInfo.processInfo.environment["CANDOR_R859_PROBE"] != nil
     /// SPEC ⟨0.25⟩ at the cross-package join: §1b kill switch (restores drop-on-ambiguity) and reach probe.
     let joinUnionOff = ProcessInfo.processInfo.environment["CANDOR_JOIN_UNION_OFF"] != nil
     let joinUnionProbe = ProcessInfo.processInfo.environment["CANDOR_JOIN_UNION_PROBE"] != nil
@@ -3398,7 +3417,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     var surfaced: [String] = []
                     var missedAnswer = false   // R845 — an answered type whose member is not in the report
                     for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {   // R565
-                        guard let ty = deps.boundType("\(p)#\(callee)") else { continue }
+                        // R832 — a static factory whose name is a keyword is published as the producer
+                        // DECLARED it (`Client.\`default\``) and spelled at the call site without the
+                        // backticks; ask both, the second only when the first misses.
+                        guard let ty = deps.boundType("\(p)#\(callee)")
+                                ?? backtickedLeafKey(callee).flatMap({ deps.boundType("\(p)#\($0)") })
+                        else { continue }
                         surfaced.append(ty)
                         if let e = deps.lookup("\(ty).\(call.leaf)") { hits.append(e) } else { missedAnswer = true }
                     }
@@ -3457,6 +3481,23 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         // extension of an old one.
                         unionOwnImplementors(forKey: "\(ty).\(call.leaf)", to: f.qual)
                         continue
+                    }
+                    // SOUNDNESS R832 — A STATIC RECEIVER NO CHAINED REPORT SPEAKS ABOUT KEEPS THE RELEASE'S
+                    // ANSWER. `Type.factory()` is spelled identically for a dependency's type and the
+                    // platform's, and on the corpus the platform dominated: `Unmanaged.passUnretained(x)
+                    // .toOpaque()`, `UnsafeMutablePointer.allocate(…).deallocate()`, `DispatchSource.make…`,
+                    // a generic parameter's `C.H.hash(…)` — 200+ sites on nine entries, none a dependency
+                    // reach. The free-function spelling settles that with a carve-out list of stdlib names;
+                    // for a TYPE the evidence is on the wire instead: the type is the dependency's when a
+                    // report the file imports names it (`mentionedTypes`). A `returns` MISS on a type no
+                    // report names is the release's silence, unchanged; a MISS on a named type — a factory
+                    // returning `any P`, `some P`, `C?` — discloses as the bare spelling always has; and a
+                    // `returns` HIT never reaches here.
+                    if surfaced.isEmpty, callee.contains("."), let dot = callee.lastIndex(of: ".") {
+                        let ty = String(callee[..<dot])
+                        let named = deps.chainedPkgs(importing: fileImports[file] ?? [])
+                            .contains { deps.mentionedTypes.contains("\($0.pkg)#\(ty)") }
+                        if !named { continue }
                     }
                 }
                 // A MISS — on `returns` OR on the entry lookup that follows a `returns` HIT — falls back
@@ -3685,6 +3726,47 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 direct[f.qual, default: []].insert("Unknown")
                 whyMap[f.qual, default: []].insert("dispatch:\(abs).\(call.leaf)")
             }
+            // ── SOUNDNESS R859 — THE ERASED SPELLING OF THE SAME QUESTION, WHERE A MEMBER IS INHERITED ──
+            //
+            // `func f(_ t: any PSub) { t.pTok() }`, dependency `protocol PSub: PBase` with
+            // `extension PBase { func pTok() }` reading env. The generic spelling `<T: PSub>` discloses
+            // through R705 above; the existential is not R705's population (the CHA arm runs for it,
+            // because an existential's local conformers ARE candidate witnesses), and so the row read
+            // `[]` — `deny Env` and `deny Env Unknown` both 0 — over code that reads env (executed).
+            //
+            // The chain is three correct steps again: the local CHA finds no `SConf.pTok` (the body is
+            // the dependency's, inherited through a protocol the wire does not record — R843); the ⟨0.39⟩
+            // key `RatesCore#PSub.pTok` is published; the §2 join MISSES it, because the producer keys the
+            // body `PBase.pTok`. A miss on a type's own key is a purity claim only if that key could have
+            // had the body, and for an abstraction whose supertypes are unpublished it could not.
+            //
+            // So, after the join, where `resolved` says nothing answered: DISCLOSE — `Unknown` with
+            // R705's own `dispatch:<P>.<member>` token, adding nothing else and removing nothing. Bounded
+            // by three conjuncts, each the source's or the chain's own evidence rather than a guess:
+            //   · the receiver's type is an ABSTRACTION this package does not declare — spelled `any P`
+            //     somewhere in it (Swift admits only a protocol there), or adopted by a local type
+            //     (`subtypesOf`); a dependency CLASS used concretely is not this population;
+            //   · the file imports a chained package (the κ ledger speaks for an unchained one);
+            //   · some chained report publishes a body under this LEAF at all (`pkg#<leaf>`). If none
+            //     does, no inherited body with an effect exists anywhere in the chain, and the miss is
+            //     the purity claim it reads as — which keeps this off every pure protocol member.
+            if !resolved, !r859Off, erasedForeignDispatch == nil, !call.unqualified,
+               let owner = call.extOwner, !call.path.hasPrefix("<"),
+               !localTypes.contains(owner), !localProtocolNames.contains(owner),
+               !STD_PURE_PROTOCOLS.contains(owner), !RAW_VALUE_BASE_TYPES.contains(owner),
+               existentialSpelled.contains(owner) || !(subtypesOf[owner] ?? []).isEmpty {
+                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                if !deps.chainedPkgs(importing: fileImports[file] ?? []).isEmpty,
+                   deps.anyChainedPackagePublishesLeaf(call.leaf) {
+                    if r859Probe {
+                        FileHandle.standardError.write(
+                            "R859HIT \(f.qual) \(owner).\(call.leaf) any=\(existentialSpelled.contains(owner))\n"
+                                .data(using: .utf8)!)
+                    }
+                    direct[f.qual, default: []].insert("Unknown")
+                    whyMap[f.qual, default: []].insert("dispatch:\(owner).\(call.leaf)")
+                }
+            }
         }
 
         // Bounded CHA over local protocols (SPEC §4, 0.5): the protocol is local and declares the
@@ -3733,9 +3815,58 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 }
                 frontier.append(contentsOf: protocolSupers[cur] ?? [])
             }
+            // SOUNDNESS R859, THE LOCAL-REFINEMENT SPELLING — `protocol LSub: PBase {}` declared HERE over a
+            // DEPENDENCY's `PBase`, whose `extension PBase { func pTok() }` reads env, and `t.pTok()` on
+            // `any LSub`. The walk above reaches `PBase` (it is in `protocolSupers`) but can only ask LOCAL
+            // resolution about it, and `protoOrSuperDeclares` below knows local declarations only, so the
+            // call was dropped: ABSENT on v0.39.2 and HEAD, executed. The "inherited external member"
+            // the next comment names is exactly this case, and "silent drop" is the defect, not the design.
+            //
+            // So a FOREIGN protocol the walk reached is asked of the dependency by its own key
+            // (`<pkg>#PBase.pTok` — the producer keys an extension body by the protocol that declares it),
+            // with this package's conformers' own members unioned beside it, as the foreign-abstraction
+            // CHA arm does. A hit is a RESOLUTION. A miss where some chained report still publishes a body
+            // under this leaf is the R859 disclosure (the member may sit further up a chain the wire does
+            // not record); a miss with no such body anywhere is the purity claim it reads as. Additive:
+            // nothing the walk or the CHA below does is changed.
+            if !r859Off, !providedEdged, !protoOrSuperDeclares(d.proto, d.member) {
+                let foreignSupers = seenProto.filter {
+                    !localProtocolNames.contains($0) && !localTypes.contains($0) && !STD_PURE_PROTOCOLS.contains($0)
+                }
+                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                let chained = deps.chainedPkgs(importing: fileImports[file] ?? [])
+                if !foreignSupers.isEmpty, !chained.isEmpty {
+                    var answered = false
+                    for s in foreignSupers.sorted() {
+                        for (p, _) in chained {
+                            if let e = deps.lookup("\(p)#\(s).\(d.member)") { applyDepEntry(e, to: f.qual); answered = true }
+                        }
+                    }
+                    // This package's conformers' own members, unioned whether or not the dependency
+                    // answered: for a REQUIREMENT the foreign protocol declares, they are witnesses the
+                    // dependency's report cannot know about (the obligation-3 half of ⟨0.39⟩).
+                    // A local witness does NOT stand in for the disclosure below: for a member an EXTENSION
+                    // provides, Swift dispatches statically to the extension and a conformer's same-named
+                    // method never runs, so it cannot certify the call.
+                    for c in conformers[d.proto] ?? [] {
+                        edges[f.qual, default: []].formUnion(
+                            memberTargets("\(c).\(d.member)", d.argc, d.argTypes, swiftModuleOf(f.loc)))
+                    }
+                    if !answered, deps.anyChainedPackagePublishesLeaf(d.member) {
+                        direct[f.qual, default: []].insert("Unknown")
+                        whyMap[f.qual, default: []].insert("dispatch:\(d.proto).\(d.member)")
+                    }
+                    if r859Probe {
+                        FileHandle.standardError.write(
+                            "R859LOCAL \(f.qual) \(d.proto).\(d.member) supers=\(foreignSupers.sorted()) answered=\(answered)\n"
+                                .data(using: .utf8)!)
+                    }
+                }
+            }
             // Not a requirement: the extension body edged above IS the answer. If neither half knows the
-            // member it stays a silent drop, exactly as before (an inherited external member, a κ call on a
-            // protocol-named receiver) — never a guess, never a new Unknown flood.
+            // member it stays a silent drop, exactly as before (a κ call on a protocol-named receiver) —
+            // never a guess, never a new Unknown flood. (An inherited member of a DEPENDENCY's protocol is
+            // asked of the dependency just above — R859.)
             guard protoOrSuperDeclares(d.proto, d.member) else { continue }
             // ⟨0.39⟩ OBLIGATION 1. RECORDED WHATEVER THE CHA BELOW ANSWERS, and that is the whole point:
             // the toggle this rung closes runs between ZERO implementors (disclosed `Unknown`) and ONE
