@@ -224,8 +224,13 @@ final class StaticFactoryAndInheritedMemberProcessTests: XCTestCase {
                  "env-gLocalRefine": "deny Env gLocalRefine\n"]
         let r832Off = try run(p, env: ["CANDOR_R832_OFF": "1"], label: "r832off")
         XCTAssertEqual(r832Off.gates["env-fDirect"], 0, "CANDOR_R832_OFF=1 is v0.39.3: fDirect silent")
-        let r859Off = try run(p, env: ["CANDOR_R859_OFF": "1"], label: "r859off")
-        XCTAssertEqual(r859Off.gates["envunk-gAny"], 0, "CANDOR_R859_OFF=1 is v0.39.3: gAny silent")
+        // ⟨0.40⟩ the R843 walk reaches the same inherited member through the dependency's published
+        // `types`, independently of R859's disclosure — so v0.39.3 is BOTH switches off, and R859's alone
+        // must still leave gAny gated (by the resolution rather than the hedge).
+        let r859Only = try run(p, env: ["CANDOR_R859_OFF": "1"], label: "r859only")
+        XCTAssertEqual(r859Only.gates["envunk-gAny"], 1, "CANDOR_R859_OFF=1 alone: the ⟨0.40⟩ walk still answers gAny")
+        let r859Off = try run(p, env: ["CANDOR_R859_OFF": "1", "CANDOR_R843_OFF": "1"], label: "r859off")
+        XCTAssertEqual(r859Off.gates["envunk-gAny"], 0, "CANDOR_R859_OFF=1 + CANDOR_R843_OFF=1 is v0.39.3: gAny silent")
         XCTAssertEqual(r859Off.gates["env-gLocalRefine"], 0, "CANDOR_R859_OFF=1: the local refinement drops")
         XCTAssertEqual(r859Off.gates["env-fDirect"], 1, "…and leaves R832 alone")
     }

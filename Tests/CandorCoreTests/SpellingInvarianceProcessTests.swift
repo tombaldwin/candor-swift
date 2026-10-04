@@ -194,7 +194,7 @@ final class SpellingInvarianceProcessTests: XCTestCase {
 
     /// Both arms, each written to a FRESH output path that is deleted first — a stale artifact from a
     /// crashed run otherwise reads as a flattering result (standing bar item 7).
-    private func scanBothArms() throws -> (dep: [String: [String: Any]],
+    private func scanBothArms(appEnv: [String: String] = [:]) throws -> (dep: [String: [String: Any]],
                                            chained: [String: [String: Any]],
                                            control: [String: [String: Any]],
                                            root: URL) {
@@ -209,7 +209,7 @@ final class SpellingInvarianceProcessTests: XCTestCase {
         let appOut = root.appendingPathComponent("app-r.App.Swift.json")
         try? fm.removeItem(at: appOut)
         XCTAssertEqual(try ProcessHarness.run(bin, [app.path, "--out", root.appendingPathComponent("app-r").path],
-                                             env: ["CANDOR_DEPS": depOut.path]).code, 0)
+                                             env: appEnv.merging(["CANDOR_DEPS": depOut.path]) { a, _ in a }).code, 0)
 
         let ctlOut = root.appendingPathComponent("ctl-r.Ctl.Swift.json")
         try? fm.removeItem(at: ctlOut)
@@ -301,15 +301,24 @@ final class SpellingInvarianceProcessTests: XCTestCase {
         XCTAssertEqual(eff(chained, "unboundFactory"), eff(chained, "boundFactory"),
                        "the intermediate binding is not part of the program's meaning")
 
-        // DISCLOSED: `getDyn` returns an existential, so no key can be formed and PART 21's ruling
-        // applies to BOTH spellings — a hedge, never silence.
+        // ⟨0.40⟩ RESOLVED, where it used to be DISCLOSED. `getDyn` returns an existential; before ⟨0.40⟩ no
+        // key could be formed and PART 21's ruling — disclose it or resolve it, never claim purity — was met
+        // by the hedge. The dependency now publishes `returnsProtocol` (`getDyn` -> `Tsk`), the member
+        // dispatches through ⟨0.39⟩'s implementor union, and BOTH spellings land on the one-package
+        // CONTROL's answer. This is the one disclosure the rung withdraws (SPEC §2 ⟨0.40⟩ permits it where
+        // every walk path hits); `CANDOR_R843_OFF=1` restores the hedge, asserted below.
         XCTAssertTrue(eff(control, "unboundDyn").contains("Fs"),
                       "CONTROL (one package): `getDyn().run()` reaches T0.run; got \(control["unboundDyn"] ?? [:])")
-        XCTAssertTrue(eff(chained, "unboundDyn").contains("Unknown"),
-                      "`getDyn().run()` could not form a key, so it must DISCLOSE — being absent is a "
-                      + "⟨0.21⟩ purity claim about a function that performs Fs; got \(chained["unboundDyn"] ?? [:])")
+        XCTAssertEqual(eff(chained, "unboundDyn"), eff(control, "unboundDyn"),
+                       "⟨0.40⟩: `getDyn().run()` resolves through `returnsProtocol` to the control's answer; "
+                       + "got \(chained["unboundDyn"] ?? [:])")
         XCTAssertEqual(eff(chained, "unboundDyn"), eff(chained, "boundDyn"),
-                       "the bound spelling has disclosed since PART 21; the unbound one must match")
+                       "the bound and unbound spellings agree, as they have since PART 21")
+        // §1b: the switch puts the pre-⟨0.40⟩ answer back — the hedge, on both spellings.
+        let (_, off, _, offRoot) = try scanBothArms(appEnv: ["CANDOR_R843_OFF": "1"])
+        defer { try? FileManager.default.removeItem(at: offRoot) }
+        XCTAssertTrue(eff(off, "unboundDyn").contains("Unknown") && eff(off, "boundDyn").contains("Unknown"),
+                      "CANDOR_R843_OFF=1: `getDyn().run()` discloses as it did before ⟨0.40⟩; got \(off["unboundDyn"] ?? [:])")
         XCTAssertEqual(Set((chained["unboundDyn"]?["unknownWhy"] as? [String]) ?? []),
                        Set((chained["boundDyn"]?["unknownWhy"] as? [String]) ?? []),
                        "…including the REASON, so a `deny E Unknown[<class>]` gate treats the two "

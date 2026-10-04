@@ -2119,6 +2119,9 @@ if !analysis.typeSurfaceReturns.isEmpty {
     for (fn, ty) in analysis.typeSurfaceReturns { ts["\(pkgName)#\(fn)"] = "\(pkgName)#\(ty)" }
     report.typeSurfaceReturns = ts
 }
+// ⟨0.40⟩ `holds` / `returnsProtocol` / `types` / `adds` — computed for every scan, so each is listed in
+// `resolves` and emitted even when empty (an empty `types` is the claim "this package declares no type").
+report.typeSurface040 = analysis.typeSurface040
 // ── ⟨0.29⟩ THE SCOPE, AND THE PEEK ────────────────────────────────────────────────────────────────
 // The reason strings say WHY and what the exclusion COSTS, because a consumer reads them to decide
 // whether the exclusion matches the question they are asking. Paraphrasing the engine's own rationale

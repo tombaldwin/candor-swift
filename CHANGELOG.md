@@ -10,6 +10,48 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Added — the ⟨0.40⟩ declared-type surface, both halves (SOUNDNESS R843; conformance PART 95)
+
+**The engine still declares spec `0.39`.** ⟨0.40⟩ is authored but unreleased and not yet the floor; the
+declaration moves at the floor bump (`spec-bump.sh`), as ⟨0.38⟩'s did.
+
+- **⚠ Producer: every report now carries `typeSurface.holds` / `returnsProtocol` / `types` / `adds`, and
+  `resolves` lists all four.** `holds` maps a static, stored or computed property, or top-level value to
+  its DECLARED type (an annotation, or a construction `T()` of a declared non-protocol type); a wrapper
+  (`T?`, `[T]`, a generic, `any P & Q`) publishes nothing. `types` is a MANIFEST of every type the package
+  declares — kind (`protocol` / `final` / `class` / `open` / `value`; an actor is `final`) and its COMPLETE
+  direct supertypes, or no `supers` at all where the producer cannot close them (an attribute that may be an
+  attached macro, a protocol `where Self:` clause, a supertype spelled through a typealias or one it cannot
+  attribute to a package). `adds` records conformances this package adds to another package's type.
+  **A bare `-> P` protocol result moved from `returns` to `returnsProtocol`** (⟨0.40⟩: `returns` never
+  names a protocol). `typeSurface` is therefore always present — report bytes change for every scan.
+- **⚠ Consumer: a declared type ADDS a resolution and never removes one.** A `holds` hit joins the declared
+  target beside whatever the release charged (`Wrong.shared.ping()` with `shared: Other` now charges
+  `Other.ping`'s `Env` AND keeps `Wrong.ping`'s `Fs` — R831/R617); a member absent on a type is looked for
+  through its `supers` and any chained `adds` (inherited members, R858/R859/R865; `Tok().pTok()` through a
+  dependency's `extension Tok: PBase`, which was SILENT); a protocol or class target keeps ⟨0.39⟩'s
+  implementor/override union; an EXACT (`final`/`value`) receiver joins only an ancestor's own body,
+  never a sibling implementor's. Every miss ADDS `Unknown`: a hop the surface does not answer, a kind-only or
+  unkeyed node (never read as `[]`), an unknown kind, a disagreeing or distrusted copy, and — new — a
+  lookup on a GUESSED owner (the singleton convention, an unexplained hop, a local bound from either) that
+  HITS over a producer with no surface for it.
+  **Gates that can flip: 0 → 1** (`deny <E>` where a declared type resolves the hop; `deny Unknown` where
+  the miss rule hedges), **and 1 → 0 at one site shape only**: a `-> any P` / `-> some P` factory whose
+  `returnsProtocol` walk hits on every path no longer adds the "could not form a key" disclosure — the
+  bare `-> P` spelling never had it (SPEC §2 ⟨0.40⟩ permits it; measured 0 corpus rows). No other
+  disclosure is withdrawn: the clause's MAY-withdrawal of an untyped-hop `Unknown` is not taken.
+  Executed one-variable fixture (static hop, bound hop, `adds`, refined protocol; plus a right-typed
+  control): `deny Env` 0 → 1 on each unit AND on its caller, the control stays 0, the guess's `deny Fs`
+  stays 1, and `CANDOR_R843_OFF=1` restores 0.39.3's verdicts exactly.
+  Corpus (9 chained entries, dependency reports re-scanned chained and diffed, 41 reports, 67,995
+  analysed units) against HEAD `3c4d252`: ADDED 5, REMOVED 0, CHANGED 85, no row loses any value.
+  15 rows gain a concrete effect, every one already `Unknown` and every charge traced to a body that runs
+  (swift-nio `Channel.pipeline: ChannelPipeline`, `ChannelHandlerContext.eventLoop: EventLoop`; Alamofire's
+  inherited `Request.cancel`; RxSwift's `ObservableType.flatMap` default). 5 rows newly carry `Unknown`
+  (0.0074%), all in swift-nio-http2, all a member reached only through a standard-library `Collection`
+  default on swift-nio's `CircularBuffer`, which the manifest omits as permitted. Against 0.39.3
+  (`2111a54`): REMOVED 0, no row loses any value. Kill switch for calibration: `CANDOR_R843_OFF=1`.
+
 ### ⚠ Fixed
 
 **Gates that can flip: 0 → 1 only.** `deny <E>` on code reaching a dependency through a static factory

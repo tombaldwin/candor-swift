@@ -28,6 +28,10 @@ struct FnInfo {
     /// (`Client` inside `enum Sync` means `Sync.Client`), so the Driver resolves it against the declared
     /// type paths with `enclosingTypePath` as the lookup scope.
     var retBoundTypeSpelling: String? = nil
+    /// ⟨0.40⟩ `typeSurface.returnsProtocol`: the ONE protocol a declared `-> any P` / `-> some P` (`& Sendable`
+    /// allowed) result names, as spelled. A bare `-> P` arrives through `retBoundTypeSpelling` and is moved
+    /// here by the Driver once it is known to resolve to a protocol.
+    var retProtocolSpelling: String? = nil
     var paramSig: [(type: String?, hasDefault: Bool, variadic: Bool)] = []  // ordered param signature for
                                       // PARAM-TYPE overload resolution: distinguishes same-name overloads
                                       // (`compare(_:Date)` vs `compare(_:DateComparisonType)`), including the
@@ -1418,6 +1422,7 @@ final class DeclCollector: SyntaxVisitor {
         // ⟨0.23⟩ `typeSurface.returns`: what a binding bound from THIS function actually holds. See
         // `plainNominalTypeName` for why this is not `typeName` — a wrapper return must publish nothing.
         info.retBoundTypeSpelling = sig.returnClause.flatMap { plainNominalTypeName($0.type) }
+        info.retProtocolSpelling = sig.returnClause.flatMap { oneProtocolSpelling($0.type) }
         info.selfElementType = selfElementStack.last ?? nil   // collection-extension element bound, if any
         info.body = body.map { Syntax($0) }
         info.isMain = name == "main"

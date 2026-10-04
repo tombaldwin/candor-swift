@@ -97,6 +97,8 @@ struct Analysis {
     /// drops. Empty when there is nothing to say, and the field is then omitted so the report stays
     /// byte-identical to a pre-rung one.
     var typeSurfaceReturns: [String: String]
+    /// ⟨0.40⟩ `typeSurface.holds` / `returnsProtocol` / `types` / `adds`, already `<pkg>#`-qualified.
+    var typeSurface040 = TypeSurfaceOut()
 }
 
 /// ⟨0.23⟩ THE `typeSurface.returns` PRODUCER (SPEC §2, `DEP-RECEIVER-TYPING-DESIGN.md`).
@@ -810,6 +812,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
     }
     var collectors: [DeclCollector] = []
+    var surfaceCollectors: [TypeSurfaceCollector] = []   // ⟨0.40⟩ the declared-type surface producer
+    var surfaceAliases: Set<String> = []
+    var surfaceExported: Set<String> = []                // `@_exported import`s anywhere in the package
     // SOUNDNESS R859 — every name this package spells as an EXISTENTIAL (`any P`), package-wide. Swift
     // admits only a protocol after `any`, so this is the source's own statement that `P` is an
     // abstraction — the one fact about a DEPENDENCY's type the consumer can read without the dependency
@@ -868,6 +873,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // nested `walk` from inside a visit: `SyntaxVisitor.walk` is not re-entrant.
         c.finishBodyLocalTypes()
         collectors.append(c)
+        let tsc = TypeSurfaceCollector(file: rel)   // ⟨0.40⟩
+        tsc.walk(tree)
+        surfaceCollectors.append(tsc)
+        surfaceAliases.formUnion(TypeSurfaceCollector.aliasNames(in: tree))
+        for item in tree.statements {
+            if let imp = item.item.as(ImportDeclSyntax.self),
+               imp.attributes.contains(where: { $0.as(AttributeSyntax.self)?.attributeName.trimmedDescription == "_exported" }),
+               let m = imp.path.first?.name.text { surfaceExported.insert(m) }
+        }
     }
     var returnsTmp: [String: String?] = [:]
     // FINDING 1 — aggregate the opaque/erased Sequence builder indexes across files.
@@ -2099,6 +2113,82 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
     }
 
+    // ── ⟨0.40⟩ THE CONSUMER (SPEC §2 ⟨0.40⟩; SOUNDNESS R843; PART 95). Everything below ADDS: an entry the
+    // surface resolves is applied beside whatever the site already charged, and a hop the surface does not
+    // fully answer adds `Unknown`. Nothing here sets `resolved`, so every disclosure the release made at a
+    // site still fires — the clause's MAY-withdrawal is deliberately not taken. ──
+    let r843Off = ProcessInfo.processInfo.environment["CANDOR_R843_OFF"] != nil
+    let r843Probe = ProcessInfo.processInfo.environment["CANDOR_R843_PROBE"] != nil
+    /// The walk from a declared target `start` for `leaf`: `<T>.<leaf>` where the index has it (and stop
+    /// on that path), else every supertype in `T`'s COMPLETE `supers` plus every `adds` a chained report
+    /// records for `T`. A type with no key or a KIND-ONLY key ends its path as a MISS — never as "no
+    /// supertypes" — and so does a type whose package has a distrusted copy. No path reaching the member at
+    /// all is ⟨0.23⟩'s member miss. `forcedProtocol`: a `returnsProtocol` target is a protocol whatever
+    /// `types` says (PART 95 o12), so its kind is never the unknown one.
+    func surfaceAnswer(_ start: String, _ leaf: String, forcedProtocol: Bool)
+        -> (hits: [String], visited: [String], answered: Bool, exactFrom: String?, structural: Bool, pkgs: Set<String>)
+    {
+        var hits: [String] = [], visited: [String] = []
+        let startKind = forcedProtocol ? "protocol" : deps.surface.knownKind(start)
+        var miss = startKind == nil   // an unknown kind is open
+        // An EXACT receiver (`final` / `value`) runs its own body or an inherited one, never a sibling
+        // implementor's: past the start node, only a body the ancestor itself carries is joined.
+        let exact = startKind == "final" || startKind == "value"
+        var structural = miss   // a miss the MANIFEST caused (no key, kind-only, distrusted, unknown kind)
+        var pkgs = Set<String>()
+        var stack = [start], seen = Set<String>()
+        while let t = stack.popLast() {
+            guard seen.insert(t).inserted else { continue }
+            if let h = t.firstIndex(of: "#") {
+                pkgs.insert(String(t[..<h]))
+                if deps.surface.distrustedPkgs.contains(String(t[..<h])) { miss = true; structural = true }
+            }
+            let k = "\(t).\(leaf)"
+            visited.append(k)
+            let present = (exact && t != start) ? deps.lookupOwn(k) != nil : deps.lookup(k) != nil
+            if present { hits.append(k); continue }
+            stack.append(contentsOf: (deps.surface.adds[t] ?? []).sorted())
+            guard case .full(_, let sups) = deps.surface.state(t) else { miss = true; structural = true; continue }
+            stack.append(contentsOf: sups)
+        }
+        if hits.isEmpty { miss = true }
+        return (hits, visited, !miss, exact ? start : nil, structural, pkgs)
+    }
+    func applySurface(_ a: (hits: [String], visited: [String], answered: Bool, exactFrom: String?,
+                            structural: Bool, pkgs: Set<String>),
+                      to qual: String) {
+        for k in a.hits {
+            let own = a.exactFrom.map { !k.hasPrefix("\($0).") } ?? false
+            if let e = own ? deps.lookupOwn(k) : deps.lookup(k) { applyDepEntry(e, to: qual) }
+        }
+        // ⟨0.39⟩'s route for each key the walk asked: this package's own implementors / subclasses — except
+        // past the start of an EXACT receiver, where they are siblings whose witnesses never run.
+        for k in a.visited where a.exactFrom.map({ k.hasPrefix("\($0).") }) ?? true {
+            unionOwnImplementors(forKey: k, to: qual)
+        }
+    }
+    /// The declared targets a chained `holds` gives `hop`, the module-named tier first (as the member join
+    /// asks), and whether any package asked carries a distrusted copy.
+    func holdsTargets(_ hop: String, _ file: String, _ module: String?) -> (targets: [String], distrusted: Bool) {
+        var distrusted = false
+        for tier in joinTiers(file, module: module) {
+            var t = Set<String>()
+            for (p, _) in tier {
+                if let s = deps.surface.holds["\(p)#\(hop)"] { t.formUnion(s) }
+                if deps.surface.distrustedPkgs.contains(p) { distrusted = true }
+            }
+            if !t.isEmpty { return (t.sorted(), distrusted) }
+        }
+        return ([], distrusted)
+    }
+    /// Did a TRUSTED surface answer this hop completely — a `holds` hit, every target's walk hitting, no
+    /// unknown kind, no distrusted copy? Only then is a guessed owner's lookup exempt from the miss rule.
+    func holdsAnswered(_ hop: String, _ leaf: String, _ file: String, _ module: String?) -> Bool {
+        let (ts, distrusted) = holdsTargets(hop, file, module)
+        guard !ts.isEmpty, !distrusted else { return false }
+        return ts.allSatisfy { surfaceAnswer($0, leaf, forcedProtocol: false).answered }
+    }
+
     let localProtocolNames = Set(protocolMethods.keys)  // loop-invariant: build once, not per fn
     // SOUNDNESS R534 — BACKFILL `protoParams`, THE HALF DeclCollector STRUCTURALLY CANNOT SEE.
     // `DeclCollector.protocolMethods` is per-FILE and filled as that file's walk descends, so the test it
@@ -2649,6 +2739,26 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             if !undischargeable.isEmpty { undischargeableCallbacks[f.qual] = undischargeable }
         }
         for call in cc.calls {
+            // ⟨0.40⟩ the `<holds>` marker: a receiver hop whose DECLARED type a chained `holds` may give.
+            // A hit joins the declared target (ADDED to whatever the guess beside it charges); a hit whose
+            // join misses, or whose kind is unknown, ADDS `Unknown` (⟨0.23⟩'s miss rule, word for word).
+            if call.path.hasPrefix("<holds>.") {
+                guard !r843Off, let hop = call.holdsHop, !deps.isEmpty else { continue }
+                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                let (targets, distrusted) = holdsTargets(hop, file, call.ownerModule)
+                for t in targets {
+                    let a = surfaceAnswer(t, call.leaf, forcedProtocol: false)
+                    applySurface(a, to: f.qual)
+                    if !a.answered || distrusted {
+                        direct[f.qual, default: []].insert("Unknown")
+                        whyMap[f.qual, default: []].insert("dispatch:\(hop).\(call.leaf)")
+                    }
+                }
+                if r843Probe, !targets.isEmpty {
+                    FileHandle.standardError.write("R843HOLDS \(f.qual) \(hop).\(call.leaf) -> \(targets)\n".data(using: .utf8)!)
+                }
+                continue
+            }
             // SHADOW GUARD: an UNQUALIFIED bare-name call (`helper()`) whose name is a NESTED func or a
             // closure-bound local in THIS unit resolves to that local — whose body already attributes
             // lexically here. Edging it ALSO to a same-named module-level/sibling free fn would FABRICATE
@@ -3422,6 +3532,27 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // Same never-guess discipline as every other join on this path: only the file's OWN
                 // imports, only packages a loaded report COVERS, and only an unambiguous SINGLE hit.
                 if let callee = call.depCallee {
+                    // ⟨0.40⟩ `returnsProtocol`: the factory's result is ONE protocol, so the member dispatches
+                    // through ⟨0.39⟩'s union whatever `types` says (PART 95 r6, o12). ADDED; the disclosure
+                    // below still fires exactly as it did.
+                    var rpTargets = 0, rpAnswered = true
+                    if !r843Off {
+                        for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {
+                            let keys = ["\(p)#\(callee)"] + (backtickedLeafKey(callee).map { ["\(p)#\($0)"] } ?? [])
+                            for key in keys {
+                                for t in (deps.surface.returnsProtocol[key] ?? []).sorted() {
+                                    let a = surfaceAnswer(t, call.leaf, forcedProtocol: true)
+                                    applySurface(a, to: f.qual)
+                                    rpTargets += 1
+                                    if !a.answered { rpAnswered = false }
+                                    if !a.answered {
+                                        direct[f.qual, default: []].insert("Unknown")
+                                        whyMap[f.qual, default: []].insert("dispatch:\(callee).\(call.leaf)")
+                                    }
+                                }
+                            }
+                        }
+                    }
                     var hits: [DepEntry] = []
                     var surfaced: [String] = []
                     var missedAnswer = false   // R845 — an answered type whose member is not in the report
@@ -3502,6 +3633,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // report names is the release's silence, unchanged; a MISS on a named type — a factory
                     // returning `any P`, `some P`, `C?` — discloses as the bare spelling always has; and a
                     // `returns` HIT never reaches here.
+                    // ⟨0.40⟩ A `returnsProtocol` answer that EVERY path hit is the protocol twin of the `returns`
+                    // hit above, and ends the site the same way: a bare `-> P` factory sat in `returns` until
+                    // ⟨0.40⟩ forbade it, and was joined there with no disclosure — so this keeps that site
+                    // exactly as it was. For an `any P` / `some P` factory it is the one disclosure this rung
+                    // withdraws (SPEC §2 ⟨0.40⟩ permits it where a trusted `returnsProtocol` resolves the hop and
+                    // every walk path hits); the join it rests on is ⟨0.39⟩'s implementor union.
+                    if !r843Off, rpTargets > 0, rpAnswered, surfaced.isEmpty { continue }
                     if surfaced.isEmpty, callee.contains("."), let dot = callee.lastIndex(of: ".") {
                         let ty = String(callee[..<dot])
                         let named = deps.chainedPkgs(importing: fileImports[file] ?? [])
@@ -3621,6 +3759,65 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // SPEC ⟨0.25⟩ has required since that rung; it over-charges (both packages' members) and
                 // never under-reports, and it is monotone against the release by construction: whatever
                 // the release's single hit charged is one of the union's contributors.
+                // ⟨0.40⟩ THE WALK, for an owner whose own key missed: the member may be INHERITED inside the
+                // dependency (a superclass method, a protocol-extension default — R858/R859/R865), or come from
+                // a conformance a chained package ADDS to a type it does not own (`extension Tok: PBase`,
+                // r8). Entries the walk reaches are ADDED; `resolved` is left as it was, so whatever the
+                // release disclosed here still fires. `adds` is never complete, so a walk that misses
+                // discloses — bounded, as R859 bounds it, to a leaf some chained package publishes a body for.
+                if !r843Off, hits.isEmpty, !call.unqualified, let owner = call.extOwner {
+                    let key = dispatchAbstraction(owner, f) ?? owner
+                    var starts: [String] = []
+                    for tier in memberTiers where starts.isEmpty {
+                        for (p, _) in tier where deps.surface.typeKeysSeen.contains("\(p)#\(key)")
+                                                 || deps.surface.adds["\(p)#\(key)"] != nil {
+                            starts.append("\(p)#\(key)")
+                        }
+                    }
+                    var walkMiss = false
+                    for st in starts {
+                        let a = surfaceAnswer(st, call.leaf, forcedProtocol: false)
+                        applySurface(a, to: f.qual)
+                        // A miss the manifest CAUSED discloses whenever any chained body has this leaf; a
+                        // miss over complete manifests only when a package the walk did not visit has one —
+                        // the only place an unrecorded `adds` could hide it (o10_adds_partial).
+                        if !a.answered, a.structural ? deps.anyChainedPackagePublishesLeaf(call.leaf)
+                                        : deps.anyChainedPackagePublishesLeaf(call.leaf, excluding: a.pkgs) {
+                            walkMiss = true
+                        }
+                        if r843Probe {
+                            FileHandle.standardError.write("R843WALK \(f.qual) \(st).\(call.leaf) hits=\(a.hits) answered=\(a.answered)\n".data(using: .utf8)!)
+                        }
+                    }
+                    // A GUESSED owner's walk ADDS what the guess inherits (the guess is kept), and its hedge is
+                    // the miss rule's below — which a trusted `holds` answer exempts. Hedging here as well would
+                    // disclose the release's over-approximate floor owner (`Outer` for `Outer.Inner.shared`)
+                    // beside a hop the surface resolved exactly.
+                    if walkMiss, !call.guessHop {
+                        direct[f.qual, default: []].insert("Unknown")
+                        whyMap[f.qual, default: []].insert("dispatch:\(key).\(call.leaf)")
+                    }
+                }
+                // ⟨0.40⟩ EVERY LOOKUP ON A GUESSED OWNER THAT NO TRUSTED SURFACE ANSWERS KEEPS THE GUESS AND
+                // ADDS `Unknown` — a HIT included: `Wrong.shared.ping()` joining `Wrong.ping` is a guess that the
+                // value is a `Wrong`, and over an older producer nothing says otherwise (PART 95 o1, o1b). A
+                // miss counts when a chained report names the owner type, so a PLATFORM singleton the
+                // convention types correctly (`FileManager.default`) is not swept in.
+                if !r843Off, call.guessHop, !call.unqualified, let owner = call.extOwner {
+                    let chained = deps.chainedPkgs(importing: fileImports[file] ?? [])
+                    let named = chained.contains {
+                        deps.mentionedTypes.contains("\($0.pkg)#\(owner)")
+                            || deps.surface.typeKeysSeen.contains("\($0.pkg)#\(owner)")
+                    }
+                    if !chained.isEmpty, !hits.isEmpty || named,
+                       !(call.holdsHop.map { holdsAnswered($0, call.leaf, file, call.ownerModule) } ?? false) {
+                        if r843Probe {
+                            FileHandle.standardError.write("R843GUESS \(f.qual) \(owner).\(call.leaf) hit=\(!hits.isEmpty) hop=\(call.holdsHop ?? "-")\n".data(using: .utf8)!)
+                        }
+                        direct[f.qual, default: []].insert("Unknown")
+                        whyMap[f.qual, default: []].insert("dispatch:untyped cross-package receiver")
+                    }
+                }
                 if hits.count > 1, joinUnionProbe {
                     FileHandle.standardError.write(
                         "JOINUNION member \(f.qual) \(call.extOwner ?? "-").\(call.leaf) n=\(hits.count)\n".data(using: .utf8)!)
@@ -4302,6 +4499,63 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             "candor-swift: \(unanalyzed.count) source file(s) could not be read or parsed — NOT analyzed (their effects are unseen, not pure); see `unanalyzed` in the report for the reason on each\n"
                 .data(using: .utf8)!)
     }
+    // ⟨0.40⟩ THE PRODUCER (SPEC §2 ⟨0.40⟩). ⟨0.23⟩'s `returns` is PLAIN NOMINAL AND NEVER NAMES A PROTOCOL:
+    // a bare `-> P` resolving to a protocol moves to `returnsProtocol`, because a shipped consumer joins a
+    // `returns` value EXACTLY and would take `P`'s default body alone (SPEC §2 ⟨0.40⟩, measured on v0.39.3).
+    let returnsAll = buildTypeSurfaceReturns(allFns, localTypePaths)
+    var returnsNonProtocol: [String: String] = [:]
+    var protocolResults: [(qual: String, spelled: String, scope: String?, file: String)] = []
+    var protoQualCount: [String: Int] = [:]
+    for f in allFns { protoQualCount[f.qual, default: 0] += 1 }
+    for (q, ty) in returnsAll {
+        if protocolPaths.contains(ty) {
+            let file = String((allFns.first { $0.qual == q }?.loc ?? "").prefix { $0 != ":" })
+            protocolResults.append((q, ty, nil, file))
+        } else { returnsNonProtocol[q] = ty }
+    }
+    for f in allFns where protoQualCount[f.qual] == 1 {
+        guard let sp = f.retProtocolSpelling else { continue }
+        protocolResults.append((f.qual, sp, f.enclosingTypePath, String(f.loc.prefix { $0 != ":" })))
+    }
+    func surfaceImports(_ file: String) -> [String] { (fileImports[file] ?? []) + surfaceExported.sorted() }
+    func surfaceOwnModules(_ file: String) -> Set<String> {
+        (importableByFile[file] ?? []).union(ownTargetsByFile[file] ?? [])
+    }
+    let surface040 = buildTypeSurface040(
+        pkg: pkgName, collectors: surfaceCollectors, aliases: surfaceAliases,
+        isProtocolKey: { key in
+            if key.hasPrefix("\(pkgName)#") { return protocolPaths.contains(String(key.dropFirst(pkgName.count + 1))) }
+            return deps.surface.types[key]?.kind == "protocol"
+        },
+        isModuleName: { name, file in
+            surfaceImports(file).contains(name) || surfaceOwnModules(file).contains(name) || deps.modulePkgs[name] != nil
+        },
+        resolveForeign: { spelled, file, fallback in
+            let imports = surfaceImports(file)
+            let own = surfaceOwnModules(file)
+            let segs = spelled.split(separator: ".").map(String.init)
+            if segs.count > 1, imports.contains(segs[0]) || own.contains(segs[0]) || deps.modulePkgs[segs[0]] != nil {
+                let m = segs[0], rest = segs.dropFirst().joined(separator: ".")
+                if PLATFORM_MODULES.contains(m) || KAPPA_MODULES.contains(m) { return .platform }
+                if own.contains(m) { return .unresolved }
+                return .foreign("\(deps.pkgOfModule(m))#\(rest)")
+            }
+            var cands = Set<String>()
+            for (p, _) in deps.chainedPkgs(importing: imports)
+            where deps.surface.typeKeysSeen.contains("\(p)#\(spelled)") { cands.insert("\(p)#\(spelled)") }
+            if cands.count == 1, let c = cands.first { return .foreign(c) }
+            if cands.count > 1 { return .unresolved }
+            if STD_SUPERS_PUBLIC.contains(spelled) || PLATFORM_MODULES.contains(spelled) { return .platform }
+            let foreignMods = Set(imports.filter {
+                !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !own.contains($0)
+            })
+            if foreignMods.isEmpty { return .platform }
+            if fallback, foreignMods.count == 1, let m = foreignMods.first {
+                return .foreign("\(deps.pkgOfModule(m))#\(spelled)")
+            }
+            return .unresolved
+        },
+        protocolResults: protocolResults)
     return Analysis(
         allFns: allFns, conformers: conformers, declaredTypes: declaredTypes,
         protocolSupers: protocolSupers, protocolNames: Set(protocolMethods.keys), protocolMethods: protocolMethods,
@@ -4313,5 +4567,6 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         incompleteDirect: incompleteD,
         invisibleAcc: invisibleAcc, dispatchAcc: dispatchAcc,
         abstractionOwnerPkg: abstractionOwnerPkg, unanalyzed: unanalyzed,
-        typeSurfaceReturns: buildTypeSurfaceReturns(allFns, localTypePaths))
+        typeSurfaceReturns: returnsNonProtocol,
+        typeSurface040: surface040)
 }

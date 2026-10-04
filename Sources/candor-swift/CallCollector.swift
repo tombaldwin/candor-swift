@@ -163,7 +163,17 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// spelling names none. The Driver's joins PREFER that module's package: two chained packages
               /// both answering `Client.fetch` must not be unioned where the source already said which one.
               var ownerModule: String? = nil
-              var extOwner: String? = nil }    // the RESOLVED receiver root of an otherwise-unmatched member
+              var extOwner: String? = nil      // the RESOLVED receiver root (see below)
+              /// ⟨0.40⟩ the receiver HOP a dependency's `typeSurface.holds` may answer, as `<Owner>.<member>`
+              /// (`Wrong.shared`, `Node.parent`, or a local bound from one). Set on the `<holds>` marker the
+              /// Driver resolves, and on a guessed-owner call so its miss rule can ask whether a trusted
+              /// surface answered the hop.
+              var holdsHop: String? = nil
+              /// ⟨0.40⟩ THE OWNER WAS GUESSED: a naming convention (`X.shared` is an `X`), an unexplained
+              /// hop that kept the outer base's type, or a local laundered from either. A lookup on such an
+              /// owner — hit or miss — that no trusted surface answers keeps the guess and ADDS `Unknown`.
+              var guessHop: Bool = false }
+                                               // the RESOLVED receiver root of an otherwise-unmatched member
                                                // call (`c.fetch()` where c: RatesClient, an external type) —
                                                // carried ONLY for the §2 CANDOR_DEPS join key (`pkg#Owner.leaf`);
                                                // never consulted by local resolution, so behaviour without a
@@ -203,6 +213,12 @@ final class CallCollector: SyntaxVisitor {
     /// DIRECT spelling `c.loop.spin()` — is never asked. The guess is LAUNDERED THROUGH THE BINDING.
     /// Carried here so `rootOf`'s `vars` arm can hand it back, rather than re-derived at each reader.
     var opaqueVars: Set<String> = []
+    /// ⟨0.40⟩ a local bound from a receiver hop (`let s = Wrong.shared`) -> that hop, so `s.ping()` asks the
+    /// dependency's `holds` exactly as the unbound spelling does (R617 is the bound twin of R831).
+    var holdsVars: [String: String] = [:]
+    /// ⟨0.40⟩ a local typed by the SINGLETON CONVENTION alone (`let s = Wrong.shared` -> `Wrong`): its type is
+    /// a guess, and a dependency lookup through it is the miss rule's business.
+    var conventionVars: Set<String> = []
     var fnTyped: Set<String>                // function-typed locals/params
     var opaqueFnLocals: Set<String> = []    // fn-typed LOCALS whose value is opaque (not a visible
                                             // closure): invoking one is §4 Unknown — only fn-typed
@@ -2054,6 +2070,32 @@ final class CallCollector: SyntaxVisitor {
     /// `SINGLETON_ACCESSORS` and `T` is a type reference (`conventionTypePath`) this scan does not declare
     /// — the same rule the let binder applies to `let s = T.shared` (its "PLATFORM accessor" arm). A
     /// trailing `.self` is identity and is stripped.
+    static let r843Off = ProcessInfo.processInfo.environment["CANDOR_R843_OFF"] != nil
+    /// ⟨0.40⟩ `<Owner>.<member>` for a receiver that is ONE declared-value hop off a type or a typed value:
+    /// `Wrong.shared`, `Dep.Client.shared` (module qualifier dropped), `n.parent` with `n: Node`, or a local
+    /// bound from one. nil when the owner is a type this package DECLARES — its own declarations already
+    /// type the hop, and no dependency's `holds` can speak for it. `CANDOR_R843_OFF=1` is the §1b switch.
+    func holdsHopOf(_ recv: ExprSyntax?) -> String? {
+        guard !Self.r843Off, var e = recv.map(Self.peel) else { return nil }
+        // `x.self` is `x` (the R826 `Client.shared.self` spelling).
+        while let ma = e.as(MemberAccessExprSyntax.self), ma.declName.baseName.text == "self", let b = ma.base {
+            e = Self.peel(b)
+        }
+        if let dr = e.as(DeclReferenceExprSyntax.self) { return holdsVars[dr.baseName.text] }
+        guard let ma = e.as(MemberAccessExprSyntax.self), let b = ma.base else { return nil }
+        let member = ma.declName.baseName.text.trimmingCharacters(in: CharacterSet(charactersIn: "`"))
+        guard let c = member.first, c.isLetter || c == "_", member != "init" else { return nil }
+        // A TYPE PATH is not a value hop: `RatesCore.Client.sfetch()` / `Outer.Inner.make()` name a type.
+        if c.isUppercase, conventionTypePath(ExprSyntax(ma)) != nil { return nil }
+        if let t = conventionTypePath(b) { return "\(t).\(member)" }
+        if Self.peel(b).is(DeclReferenceExprSyntax.self) {
+            let r = rootOf(b)
+            if r.isVar, let t = r.root, !r.opaqueHop, !t.hasPrefix("<"), t.first?.isUppercase == true,
+               !declaredTypes.contains(t) { return "\(t).\(member)" }
+        }
+        return nil
+    }
+
     func singletonConventionOwner(_ recv: ExprSyntax?) -> String? {
         guard var e = recv.map(Self.peel) else { return nil }
         while let ma = e.as(MemberAccessExprSyntax.self), ma.declName.baseName.text == "self",
@@ -3791,6 +3833,8 @@ final class CallCollector: SyntaxVisitor {
     // map classified as cleared without the clear being written fails a different one.
     private func shadowName(_ name: String) {
         binderShadow.insert(name)   // R847
+        holdsVars.removeValue(forKey: name)     // ⟨0.40⟩
+        conventionVars.remove(name)             // ⟨0.40⟩
         monoNames.remove(name)
         depBoundLocals.removeValue(forKey: name)
         localConstStrings.removeValue(forKey: name)
@@ -5798,6 +5842,17 @@ final class CallCollector: SyntaxVisitor {
             // R429 — the WRITTEN receiver name, before `dealias` collapses a `#if`-duplicated
             // alias to whichever arm happened to be recorded last.
             let rawBaseRoot = ma.base.flatMap { rootOfUnaliased($0).root }
+            // ⟨0.40⟩ THE HOP A DEPENDENCY'S `holds` MAY ANSWER. Emitted as its own marker beside whatever the
+            // chain below records, so a declared type ADDS its join and never displaces what this site
+            // already charges (SPEC §2 ⟨0.40⟩ "a hit ADDS"). Angle-bracketed like `<untyped>`, so nothing but
+            // the Driver's ⟨0.40⟩ arm can read it.
+            let holdsHop = holdsHopOf(ma.base)
+            if let hop = holdsHop {
+                calls.append(Call(path: "<holds>.\(member)", leaf: member, strArg: nil, typed: false,
+                                  args: [], argTypes: [], ownerModule: spelledModule(of: ma.base), holdsHop: hop))
+            }
+            let baseIsConventionVar = ma.base.map(Self.peel)?.as(DeclReferenceExprSyntax.self)
+                .map { conventionVars.contains($0.baseName.text) } ?? false
             // SOUNDNESS R832 — THE STATIC FACTORY THAT A LOCAL LEAF MIS-TYPED. `rootOf` types
             // `Client.make()` by the LEAF `make` in this package's own `returns` (its `returns[member]`
             // arm), so a consumer that declares any `make()` of its own — `LocalT.make() -> LocalT` —
@@ -6063,7 +6118,8 @@ final class CallCollector: SyntaxVisitor {
                 calls.append(Call(path: "\(rt).\(member)", leaf: member, strArg: lit, typed: true,
                                   args: argKinds(node), argTypes: argTypesOf(node),
                                   conventionOwner: r839Convention, ownerModule: spelledModule(of: ma.base),
-                                  extOwner: r651ForeignExtended ? rt : nil))
+                                  extOwner: r651ForeignExtended ? rt : nil,
+                                  holdsHop: holdsHop, guessHop: r839Convention))
                 if Self.r836Probe, r839Convention {
                     FileHandle.standardError.write("R839HIT \(rt).\(member)\n".data(using: .utf8)!)
                 }
@@ -6405,13 +6461,18 @@ final class CallCollector: SyntaxVisitor {
                     : (base.opaqueHop && resolvedOwner == nil ? releaseOwner : nil)
                 let primary = Self.r567aOff ? releaseOwner : (resolvedOwner ?? releaseOwner)
                 let recvModule = spelledModule(of: ma.base)
-                calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), opaqueRecv: base.mono, conventionOwner: !Self.r567aOff && conventionOwner != nil && conventionOwner == primary, ownerModule: recvModule, extOwner: primary))
+                // ⟨0.40⟩ a GUESS is an owner the hop did not establish: an unexplained hop that kept the outer
+                // base's type, the singleton convention, or a local typed by either. A pure TYPE PATH
+                // (`RatesCore.Client`, `Outer.Inner` — `qualifiedOwner`) is established, not guessed, and so
+                // is the floor's module-keyed join beside it (the precise owner answers the call).
+                let guessed = (base.opaqueHop && qualifiedOwner == nil) || baseIsConventionVar
+                calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), opaqueRecv: base.mono, conventionOwner: !Self.r567aOff && conventionOwner != nil && conventionOwner == primary, ownerModule: recvModule, extOwner: primary, holdsHop: holdsHop, guessHop: guessed))
                 // THE FLOOR, where the resolution differs from what the release keyed (`RatesCore.Client`
                 // was keyed on the MODULE and joined its leaf union; `Outer.Inner.shared` on `Outer`).
                 // Kept so nothing the release answered stops being answered; it is the release's own
                 // over-approximation, not a new one.
                 if !Self.r567aOff, let r = releaseOwner, let p = primary, r != p {
-                    calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), opaqueRecv: base.mono, ownerModule: recvModule, extOwner: r))
+                    calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), opaqueRecv: base.mono, ownerModule: recvModule, extOwner: r, holdsHop: holdsHop, guessHop: guessed))
                 }
                 // The disclosure for a GUESSED owner — bounded, as R567(a) bounded it, to sites where the
                 // release formed an owner: a chain whose root never qualified asked nothing then and must
@@ -7980,6 +8041,9 @@ final class CallCollector: SyntaxVisitor {
             } else {
                 localConstStrings.removeValue(forKey: name)
             }
+            if binding.typeAnnotation == nil, let iv = binding.initializer?.value, let hop = holdsHopOf(iv) {
+                holdsVars[name] = hop   // ⟨0.40⟩ (cleared by `shadowName` above on every rebind)
+            }
             if let ann = binding.typeAnnotation {
                 if !tupleElements(ann.type).isEmpty { tupleElem[name] = tupleElements(ann.type) }  // `let p: (A, B)`
                 let t = typeName(ann.type)
@@ -8173,6 +8237,7 @@ final class CallCollector: SyntaxVisitor {
                         // a PLATFORM accessor (`URLSession.shared`, `FileManager.default`) — these vend
                         // Self by convention, so the var carries the base type (resolves its κ members).
                         vars[name] = base
+                        conventionVars.insert(name)   // ⟨0.40⟩ the type is the convention's guess
                     }
                 } else if v.is(SequenceExprSyntax.self) || v.is(SubscriptCallExprSyntax.self) {
                     // `let c = x as! T` / `let c = cond ? a : b` / `let c = cs[0]` — rootOf types these

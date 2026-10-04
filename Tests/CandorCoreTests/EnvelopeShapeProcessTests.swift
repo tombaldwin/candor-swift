@@ -39,7 +39,11 @@ final class EnvelopeShapeProcessTests: XCTestCase {
         // would mean "this producer cannot answer" (⟨0.26⟩). This pin firing on the rung's first build is
         // the row doing its job. `outOfScope` is NOT here — this scan configures no policy, so nothing was
         // asked and the key is correctly absent.
-        XCTAssertEqual(Set(env.keys), ["candor", "package", "functions", "analyzed", "resolves", "excluded"],
+        // ⟨0.40⟩ `typeSurface` joined the ALWAYS-emitted keys: `types` is a MANIFEST of every type the package
+        // declares, so an empty one is the statement "this package declares no type" — not an absent key
+        // (SPEC §2 ⟨0.40⟩). `returns` inside it stays omitted when empty, exactly as ⟨0.23⟩ wrote it.
+        XCTAssertEqual(Set(env.keys), ["candor", "package", "functions", "analyzed", "resolves", "excluded",
+                                       "typeSurface"],
                        "envelope top level drifted — update SPEC §2 and this pin TOGETHER, never silently")
 
         let hdr = try XCTUnwrap(env["candor"] as? [String: Any], "the provenance header must be an object")
@@ -51,7 +55,12 @@ final class EnvelopeShapeProcessTests: XCTestCase {
         // the inversion the field exists to prevent.
         // ⟨0.29⟩ `incomplete` joined the declaration: its absence is overloaded the same way `fs`'s was
         // — "does not compute undetermined locators" vs "computed them and found none".
-        XCTAssertEqual(env["resolves"] as? [String], ["fs", "incomplete"],
-                       "the engine resolves `fs` kinds and undetermined locators, and must say so (§2.1)")
+        // ⟨0.40⟩ the four declared-type keys: computed by every scan, so listed (SPEC §2 ⟨0.40⟩ "A ⟨0.40⟩
+        // PRODUCER … LISTS EACH ONE IT COMPUTES IN `resolves`").
+        XCTAssertEqual(env["resolves"] as? [String], ["fs", "incomplete", "holds", "returnsProtocol", "types", "adds"],
+                       "the engine resolves `fs` kinds, undetermined locators and the ⟨0.40⟩ surface, and must say so (§2.1)")
+        let ts = try XCTUnwrap(env["typeSurface"] as? [String: Any], "⟨0.40⟩ typeSurface is always present")
+        XCTAssertEqual(Set(ts.keys), ["holds", "returnsProtocol", "types", "adds"],
+                       "⟨0.40⟩: no factory here, so `returns` is omitted and the four rung keys are present")
     }
 }

@@ -110,6 +110,8 @@ struct Report {
     // lookup. OMITTED when empty, so a report with nothing to say is byte-identical to a pre-rung one and
     // a 0.22 consumer is unaffected. Set in main.swift from `analysis.typeSurfaceReturns`.
     var typeSurfaceReturns: [String: String] = [:]
+    /// ⟨0.40⟩ SPEC §2: the declared-type surface. `nil` only for a report model built outside a scan.
+    var typeSurface040: TypeSurfaceOut? = nil
     // ⟨0.29⟩ THE SCOPE — what this scan chose NOT to open, by class (candor-spec/FILE-SET-DESIGN.md).
     // `analyzed.count` is a NUMERATOR; the file selection that produced it appeared nowhere, so a consumer
     // could not tell whether the answer was to the question they asked. Every exclusion this engine makes
@@ -196,6 +198,9 @@ struct Report {
         // ⟨0.29⟩ `incomplete` joins the list — an optional per-function refinement surface whose absence
         // is overloaded exactly the way `fs`'s was. This engine computes it, so it declares it.
         env["resolves"] = ["fs", "incomplete"]
+        // ⟨0.40⟩ the four declared-type keys, each COMPUTED by every scan and therefore listed (SPEC §2 ⟨0.40⟩
+        // "A ⟨0.40⟩ PRODUCER … LISTS EACH ONE IT COMPUTES IN `resolves`").
+        if typeSurface040 != nil { env["resolves"] = ["fs", "incomplete", "holds", "returnsProtocol", "types", "adds"] }
         // ⟨scope travels⟩ see `scope` above. `entitlements` is present only when the target's
         // `CODE_SIGN_ENTITLEMENTS` named a file that EXISTS — absent means "not determined", never
         // "this target has none", which is the distinction a consumer has to be able to make.
@@ -220,7 +225,19 @@ struct Report {
             env["unanalyzed"] = unanalyzed.map { ["path": $0.path, "reason": $0.reason] as [String: Any] }
         }
         // ⟨0.23⟩ the factory-bound receiver's type surface — omitted when empty (see above).
-        if !typeSurfaceReturns.isEmpty { env["typeSurface"] = ["returns": typeSurfaceReturns] }
+        var tsurf: [String: Any] = [:]
+        if !typeSurfaceReturns.isEmpty { tsurf["returns"] = typeSurfaceReturns }
+        if let t = typeSurface040 {
+            tsurf["holds"] = t.holds
+            tsurf["returnsProtocol"] = t.returnsProtocol
+            tsurf["adds"] = t.adds
+            tsurf["types"] = t.types.mapValues { info -> [String: Any] in
+                var e: [String: Any] = ["kind": info.kind]
+                if let s = info.supers { e["supers"] = s }   // ABSENT for a kind-only key — never `[]`
+                return e
+            }
+        }
+        if !tsurf.isEmpty { env["typeSurface"] = tsurf }
         // ⟨0.29⟩ THE SCOPE — ALWAYS emitted, `[]` included (see `excluded`). The one field in this
         // envelope whose EMPTY form is load-bearing: it says "I looked, and excluded nothing".
         env["excluded"] = excluded.map {

@@ -158,10 +158,16 @@ final class SingletonConventionAndCoverageProcessTests: XCTestCase {
                                     policies: ["shared": "deny Env aShared\n", "qualStatic": "deny Env aQualStatic\n"],
                                     label: "charge")
         for fn in ["aShared", "aBound", "aDefault", "aCurrent", "aMain", "aStruct", "aQualified",
-                   "aQualStatic", "aDotSelf", "aOptional"] {
+                   "aQualStatic", "aDotSelf"] {
             XCTAssertEqual(rows[fn]?.inferred, ["Env"], "\(fn): the dependency's answer, not a hedge; got \(String(describing: rows[fn]))")
             XCTAssertTrue(rows[fn]?.unknownWhy.isEmpty ?? false, "\(fn): a join that ANSWERED is not disclosed")
         }
+        // ⟨0.40⟩ (SPEC §2 ⟨0.40⟩, R843) — `Opt.shared: Opt?` is a WRAPPER, and a wrapper's payload MUST NOT be
+        // published in `holds`. So nothing the dependency says confirms that `Opt.shared?` holds an `Opt`: the
+        // convention's join is KEPT (the `Env`) and the guess is DISCLOSED beside it. Every other row above is
+        // answered by the dependency's own `holds`, which is why it alone carries no hedge.
+        XCTAssertEqual(rows["aOptional"]?.inferred, ["Env", "Unknown"],
+                       "aOptional: the guess kept AND hedged; got \(String(describing: rows["aOptional"]))")
         XCTAssertEqual(rows["aShared"]?.inferred, rows["aBound"]?.inferred,
                        "the direct and bound spellings of one program agree (R617's property, on a hit)")
         XCTAssertTrue(rows["aShared"]?.dispatchesOn.contains("RatesDep#Client.fetch") ?? false,

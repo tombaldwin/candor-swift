@@ -336,6 +336,8 @@ struct DepIndex {
     /// `UnsafeMutablePointer.allocate`), read only to decide whether a missed `returns` key is worth a
     /// disclosure — never to join. A dependency type this set lacks keeps the release's answer.
     var mentionedTypes: Set<String> = []
+    /// ⟨0.40⟩ `typeSurface.holds` / `returnsProtocol` / `types` / `adds` (SPEC §2 ⟨0.40⟩; see TypeSurface.swift).
+    var surface = TypeSurfaceIndex()
     var isEmpty: Bool {
         byKey.isEmpty && coveredPkgs.isEmpty && stalePkgs.isEmpty && incompletePkgs.isEmpty
             && unjudgedPkgs.isEmpty
@@ -374,6 +376,15 @@ struct DepIndex {
     func anyChainedPackagePublishesLeaf(_ leaf: String) -> Bool {
         for p in coveredPkgs.union(stalePkgs).union(incompletePkgs).union(unjudgedPkgs)
             where byKey["\(p)#\(leaf)"] != nil { return true }
+        return false
+    }
+    /// ⟨0.40⟩ the same question restricted to packages NOT in `excluding`. A typed walk over COMPLETE
+    /// manifests that reached no body can only be short a conformance some OTHER package adds without
+    /// recording it (`adds` is never complete), and that package publishes the member's body under its own
+    /// prefix — so only its leaf is evidence; the walked packages' own leaves were already asked.
+    func anyChainedPackagePublishesLeaf(_ leaf: String, excluding: Set<String>) -> Bool {
+        for p in coveredPkgs.union(stalePkgs).union(incompletePkgs).union(unjudgedPkgs)
+            where !excluding.contains(p) && byKey["\(p)#\(leaf)"] != nil { return true }
         return false
     }
 
@@ -416,10 +427,18 @@ struct DepIndex {
     /// recoverable-vs-permanent distinction between `staleAmbiguous` and `ambiguous` existed only to let a
     /// trusted report rescue a key two stale ones had withdrawn; nothing is withdrawn, so nothing needs
     /// rescuing. All three sets are gone, and with them the ordering hazard of maintaining them.
-    mutating func insert(key: String, _ entry: DepEntry, overrideUnion: Bool = false) {
+    mutating func insert(key: String, _ entry: DepEntry, overrideUnion: Bool = false, interfaceUnion: Bool = false) {
         byKey[key, default: DepEntry()].unionWith(entry)
         if !overrideUnion { byKeyStatic[key, default: DepEntry()].unionWith(entry) }
+        if !interfaceUnion { byKeyOwn[key, default: DepEntry()].unionWith(entry) }
     }
+    /// ⟨0.40⟩ the index WITHOUT any `interfaceUnion` entry: only bodies a type DECLARES (or a protocol
+    /// extension's default). Read by the ⟨0.40⟩ walk at an INHERITED node when the receiver's type is EXACT
+    /// (`final` / `value`): the value is that type, so another implementor's witness under the ancestor's key
+    /// can never run, and joining the union there would charge a sibling's effects to a body that never
+    /// calls them. A node with no own body is a MISS — disclosed — never a silent stop.
+    func lookupOwn(_ key: String) -> DepEntry? { byKeyOwn[key] }
+    var byKeyOwn: [String: DepEntry] = [:]
 }
 
 /// ⟨0.24⟩ **DOES THIS REPORT SAY IT JUDGED NOTHING?** SPEC §2's three-row table plus the two fail-closed
@@ -690,6 +709,17 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
             }
         }
         for pkg in (obj?["packages"] as? [String]) ?? [] where !pkg.isEmpty { register(pkg) }
+        // ⟨0.40⟩ the declared-type surface. A STALE or JUDGED-NOTHING report's surface is no more trusted than
+        // its entries, so it contributes only a MISS for its package (SPEC §2 ⟨0.40⟩ "a distrusted copy is
+        // a miss"). R832's evidence set learns every type the surface names, which can only ADD a disclosure.
+        idx.surface.ingest(obj, package: obj?["package"] as? String, trusted: !stale && judged)
+        if !stale, judged, let ts = obj?["typeSurface"] as? [String: Any] {
+            for k in ((ts["types"] as? [String: Any]) ?? [:]).keys where k.contains("#") { idx.mentionedTypes.insert(k) }
+            for (k, v) in (ts["returnsProtocol"] as? [String: Any]) ?? [:] {
+                if let v = v as? String, v.contains("#") { idx.mentionedTypes.insert(v) }
+                if let dot = k.lastIndex(of: "."), k[..<dot].contains("#") { idx.mentionedTypes.insert(String(k[..<dot])) }
+            }
+        }
 
         // ⟨0.24⟩ A LIST KEY THAT IS PRESENT BUT UNPARSEABLE IS CORRUPT INPUT (SPEC §2, candor-spec
         // `38ba3e2`), and on this path the coercion is the header's own care undone one entry down: the
@@ -915,7 +945,7 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
                 }
             }
             let overrideUnion = isUnionEntry && hash.map { realHashesInReport.contains($0) } == true
-            for k in keys { idx.insert(key: k, entry, overrideUnion: overrideUnion) }
+            for k in keys { idx.insert(key: k, entry, overrideUnion: overrideUnion, interfaceUnion: isUnionEntry) }
         }
     }
     // A PACKAGE CHAINED TWICE, ONCE COMPLETE AND ONCE NOT, IS **NOT** COVERED — INCOMPLETENESS WINS.
@@ -952,6 +982,7 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
     // ORDER MATTERS: completeness first, so the staleness reconciliation below sees the FINAL covered
     // set. A package that is covered, stale and incomplete at once then keeps BOTH disclosures rather
     // than losing the stale one to a coverage claim that has just been withdrawn.
+    idx.surface.finalize()   // ⟨0.40⟩ merge the per-copy `types` manifests (disagreement reads ABSENT)
     idx.coveredPkgs.subtract(idx.incompletePkgs)
     // ⟨0.24⟩ …AND A PACKAGE CHAINED TWICE, ONCE JUDGED AND ONCE NOT, **IS** COVERED — the opposite
     // reconciliation to the line above, and the direction follows from what the second report SAYS.

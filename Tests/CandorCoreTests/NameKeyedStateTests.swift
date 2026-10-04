@@ -111,6 +111,15 @@ final class NameKeyedStateTests: XCTestCase {
         // RESOLVED binding as a guess, which refuses a §2 key and DISCLOSES. That is over-hedging —
         // the safe side — where a stale `vars` entry is a fabrication. Same map, opposite exposure.
         "opaqueVars":        .clearedOnRebind(scoped: false),
+        // ⟨0.40⟩ (SPEC §2 ⟨0.40⟩, R843) the HOP a binding was bound from (`let s = Wrong.shared` -> `Wrong.shared`)
+        // and the flag that its `vars` type is the singleton convention's GUESS. Both describe the `vars`
+        // entry of the same binding and take its disposition, dropped in `shadowName` on every rebind.
+        // FAILURE DIRECTION IF A REBIND SKIPPED THE CLEAR: a stale hop would ask the dependency's `holds` for
+        // an earlier binding's declared type — a fabrication; a stale guess flag would hedge a resolved
+        // binding — an over-disclosure. Not scoped, as `vars` is not: a hop lost at an inner block's close
+        // only loses the resolution, and the guess beside it is still charged AND hedged.
+        "holdsVars":         .clearedOnRebind(scoped: false),
+        "conventionVars":    .clearedOnRebind(scoped: false),
         "arrayElem":         .clearedOnRebind(scoped: false),
         // SOUNDNESS R585 — THE METATYPE A BINDING HOLDS (`let t: CBase.Type = CSub.self`), and the
         // ELEMENT of a binding that holds `[CBase.Type]`. These are `vars` and `arrayElem` for the ONE

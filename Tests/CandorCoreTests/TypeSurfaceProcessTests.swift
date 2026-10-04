@@ -206,10 +206,18 @@ final class TypeSurfaceProcessTests: XCTestCase {
         XCTAssertEqual(ts["DepLib#openMock"], "DepLib#Mock.Conn",
                        "the NESTED type must publish its FULL path — the leaf `DepLib#Conn` is the "
                        + "reverted defect, and it is the real client's key; got \(ts)")
-        XCTAssertEqual(ts["DepLib#openSink"], "DepLib#Sink",
-                       "a PROTOCOL return publishes its name: `func make() -> SomeProtocol` is the "
-                       + "commonest Swift factory, and the key it forms is answerable by the producer's "
-                       + "`interfaceUnion` entry; got \(ts["DepLib#openSink"] ?? "nil")")
+        // ⟨0.40⟩ A PROTOCOL RESULT MOVED OUT OF `returns`. `returns` is plain nominal and never names a
+        // protocol, because a shipped ⟨0.23⟩ consumer joins a `returns` value EXACTLY — measured, SPEC §2
+        // ⟨0.40⟩: candor-swift v0.39.3 handed `returns` naming a protocol joined the default's `Fs` alone and
+        // dropped the `Unknown` it gives when the key is absent. The name now travels in
+        // `returnsProtocol`, which the consumer dispatches through ⟨0.39⟩'s union.
+        XCTAssertNil(ts["DepLib#openSink"],
+                     "⟨0.40⟩: `returns` must never name a protocol; got \(ts["DepLib#openSink"] ?? "nil")")
+        let rp = try XCTUnwrap((try report(root.appendingPathComponent("dep-r.DepLib.Swift.json"))["typeSurface"]
+                                  as? [String: Any])?["returnsProtocol"] as? [String: String])
+        XCTAssertEqual(rp["DepLib#openSink"], "DepLib#Sink",
+                       "a PROTOCOL return publishes its name in `returnsProtocol`: `func make() -> "
+                       + "SomeProtocol` is the commonest Swift factory; got \(rp)")
         XCTAssertEqual(ts["DepLib#Mock.open"], "DepLib#Mock.Conn",
                        "a BARE `-> Conn` written INSIDE `enum Mock` means `Mock.Conn`. Resolving it "
                        + "outward-only finds the top-level `Conn` — the real client — which is rust's "
@@ -224,9 +232,10 @@ final class TypeSurfaceProcessTests: XCTestCase {
         }
     }
 
-    /// An empty surface OMITS the field, so a report with nothing to say is byte-identical to a
-    /// pre-rung one and a ⟨0.22⟩ consumer is unaffected.
-    func testEmptySurfaceOmitsTheField() throws {
+    /// An empty `returns` is OMITTED, so a ⟨0.23⟩ consumer reads exactly what it read before. ⟨0.40⟩ changed
+    /// what surrounds it: `typeSurface` now always carries the four declared-type keys, because `types` is
+    /// a MANIFEST and an empty one is a claim ("this package declares no type"), not an absent key.
+    func testEmptyReturnsIsOmittedAndTheRungKeysArePresent() throws {
         let bin = try binaryURL()
         let root = try ProcessHarness.makePackage("""
         import Foundation
@@ -238,9 +247,12 @@ final class TypeSurfaceProcessTests: XCTestCase {
         let r = try ProcessHarness.run(bin, [root.path, "--out", out.path])
         XCTAssertEqual(r.code, 0, r.err)
         let env = try report(root.appendingPathComponent("r.App.Swift.json"))
-        XCTAssertNil(env["typeSurface"],
-                     "a package with no publishable return must not emit the key at all — an empty "
+        let ts = try XCTUnwrap(env["typeSurface"] as? [String: Any], "⟨0.40⟩: the surface is always present")
+        XCTAssertNil(ts["returns"],
+                     "a package with no publishable return must not emit `returns` at all — an empty "
                      + "object is a wire change for a report with nothing to say")
+        XCTAssertEqual(Set(ts.keys), ["holds", "returnsProtocol", "types", "adds"],
+                       "⟨0.40⟩: the four declared-type keys, each computed and listed in `resolves`")
     }
 
     // ── THE CONSUMER ────────────────────────────────────────────────────────────────────────────
