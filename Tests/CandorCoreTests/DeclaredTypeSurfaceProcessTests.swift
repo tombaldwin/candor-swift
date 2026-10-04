@@ -47,6 +47,22 @@ final class DeclaredTypeSurfaceProcessTests: XCTestCase {
         public init() {}
         public func m2() { _ = FileManager.default.fileExists(atPath: "/tmp") }
     }
+    extension Equatable {
+        public func eqLeak() { _ = ProcessInfo.processInfo.environment["HOME"] }
+    }
+    public struct EqT: Equatable { public init() {} }
+    public struct HashT: Hashable { public init() {} }
+    public struct Plain { public init() {}; public func quiet() {} }
+    public struct InnerS {
+        public init() {}
+        public var leakv: Int { _ = ProcessInfo.processInfo.environment["HOME"]; return 1 }
+    }
+    @dynamicMemberLookup
+    public struct DynW {
+        public init() {}
+        var inner = InnerS()
+        public subscript<T>(dynamicMember kp: KeyPath<InnerS, T>) -> T { inner[keyPath: kp] }
+    }
     """
     static let app = """
     import Base
@@ -55,6 +71,12 @@ final class DeclaredTypeSurfaceProcessTests: XCTestCase {
     func callsStatic() { viaStatic() }
     func viaAdds() { Tok().pTok() }
     func viaKindOnly() { HolderK.shared.m2() }
+    func viaEq(_ e: EqT) { e.eqLeak() }
+    func callsEq() { viaEq(EqT()) }
+    func viaHash(_ h: HashT) { h.eqLeak() }
+    func viaPlain(_ p: Plain) { p.quiet() }
+    func viaDyn(_ w: DynW) { _ = w.leakv }
+    func callsDyn() { viaDyn(DynW()) }
     """
 
     static func pkg(_ name: String, deps: [(String, String)]) -> String {
@@ -194,5 +216,40 @@ final class DeclaredTypeSurfaceProcessTests: XCTestCase {
         XCTAssertTrue(ko.rows["viaKindOnly"]?.inferred.contains("Unknown") ?? false,
                       "a kind-only PM2 must end its path as a MISS; got \(String(describing: ko.rows["viaKindOnly"]))")
         XCTAssertEqual(ko.gates["envunk"], 1, "`deny Env Unknown` must fire over the PQ2.m2 that runs")
+    }
+
+    /// SOUNDNESS R889 — A PLATFORM PROTOCOL THE DEPENDENCY EXTENDS WITH A MEMBER IS A SUPERTYPE (SPEC §2 ⟨0.40⟩;
+    /// PART 95 r17_platform_ext). `e.eqLeak()` with `e: EqT` runs the dependency's `extension Equatable`
+    /// default; 0.39.3 and 2a3ddc6 read `[]`. The producer lists `Dep#Equatable` in the supers of every
+    /// type that conforms — directly, or through `Hashable`'s refinement — and the walk reaches it. The
+    /// control (`Plain`, no conformance, a pure member) gains neither the effect nor a hedge.
+    func testAPlatformProtocolTheDependencyExtendsIsASupertype() throws {
+        var dep: [String: Any] = [:]
+        let g = ["unit": "deny Env viaEq\n", "caller": "deny Env callsEq\n", "refined": "deny Env viaHash\n",
+                 "control": "deny Env Unknown viaPlain\n"]
+        let r = try run(doctor: { dep = $0 }, gates: g, label: "platext")
+        let types = try XCTUnwrap(Self.surface(&dep)["types"] as? [String: [String: Any]])
+        XCTAssertEqual(types["Dep#EqT"]?["supers"] as? [String], ["Dep#Equatable"])
+        XCTAssertEqual(types["Dep#HashT"]?["supers"] as? [String], ["Dep#Equatable"], "through Hashable: Equatable")
+        XCTAssertEqual(types["Dep#Plain"]?["supers"] as? [String], [])
+        XCTAssertEqual(r.gates, ["unit": 1, "caller": 1, "refined": 1, "control": 0])
+        let off = try run(env: ["CANDOR_R843_OFF": "1"], gates: ["unit": "deny Env viaEq\n"], label: "platextoff")
+        XCTAssertEqual(off.gates["unit"], 0, "CANDOR_R843_OFF=1 is 0.39.3's silence")
+    }
+
+    /// SOUNDNESS R890 — A `@dynamicMemberLookup` TYPE IS NEVER CLOSED (SPEC §2 ⟨0.40⟩; PART 95 o16_dyn_member).
+    /// `w.leakv` forwards through `subscript(dynamicMember:)` to `InnerS.leakv`, which reads the environment;
+    /// 0.39.3 and 2a3ddc6 read `[]`. `DynW` is published KIND-ONLY, so the walk's path ends in a structural
+    /// miss and the read DISCLOSES — on the unit and on its caller.
+    func testADynamicMemberTypeIsNeverClosed() throws {
+        var dep: [String: Any] = [:]
+        let r = try run(doctor: { dep = $0 },
+                        gates: ["unit": "deny Env Unknown viaDyn\n", "caller": "deny Env Unknown callsDyn\n"],
+                        label: "dyn")
+        let types = try XCTUnwrap(Self.surface(&dep)["types"] as? [String: [String: Any]])
+        XCTAssertNotNil(types["Dep#DynW"], "keyed")
+        XCTAssertNil(types["Dep#DynW"]?["supers"], "a dynamic-member type carries no `supers`")
+        XCTAssertEqual(r.gates, ["unit": 1, "caller": 1])
+        XCTAssertTrue(r.rows["viaDyn"]?.inferred.contains("Unknown") ?? false)
     }
 }

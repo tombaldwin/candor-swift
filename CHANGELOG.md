@@ -10,6 +10,30 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — two ⟨0.40⟩ walk edges the manifest left out (SOUNDNESS R889, R890; PART 95 `r17_platform_ext`, `o16_dyn_member`)
+
+- **⚠ R889 — a platform protocol the dependency EXTENDS with a member is now a supertype.** `e.eqLeak()` with
+  `e: EqT`, `EqT: Equatable`, over a dependency's `extension Equatable { func eqLeak() }` read `[]` on 0.39.3
+  and on the ⟨0.40⟩ port, executed `Env`. The producer now lists `<pkg>#<P>` in the `supers` of every type it
+  declares that conforms to a platform type it extends with a member — directly, by extension, implicitly
+  (an enum's `Equatable`/`Hashable`, an actor's `Actor`), or through a standard refinement (`Hashable` →
+  `Equatable`) — and publishes a closed `<pkg>#<P>` protocol key; a type whose platform supertype has
+  refinements the producer does not know is left KIND-ONLY rather than listed short.
+- **⚠ R890 — a `@dynamicMemberLookup` type is never closed.** `_ = w.leakv` forwarding through
+  `subscript(dynamicMember:)` to a getter that reads `Env` read `[]`. Such a type (and any local subtype of
+  one) is now kind-only, so the walk discloses.
+- **⚠ Consumer:** for a receiver typed from the consumer's own source, EVERY structural miss on the walk now
+  adds `Unknown` (Swift has no language-scoped permission); a property read on a dependency type walks as a
+  member call does; a receiver typed as a platform protocol is not hedged on a member only the standard
+  library has.
+  **Gates that can flip: 0 → 1 only.** Executed fixture: `deny Env` 0 → 1 on `e.eqLeak()` and
+  `h.eqLeak()` (`HashT: Hashable`) and on their callers; `deny Env Unknown` 0 → 1 on `w.leakv` and its
+  caller; the non-conforming control stays 0 on every gate; `CANDOR_R843_OFF=1` restores 0.39.3.
+  Corpus (9 chained entries, dependency reports diffed) against `2a3ddc6`: ADDED 0, REMOVED 0, CHANGED 7,
+  no row loses a value, no `inferred` change and no new reason class — 7 rows already `Unknown[dispatch]`
+  gain further `dispatch:` reasons, so no gate moves. Producer reach: 565 types now list a platform-extension
+  supertype, 86 `<pkg>#<P>` keys, kind-only keys 349 → 401. Against 0.39.3: REMOVED 0, no value lost.
+
 ### ⚠ Added — the ⟨0.40⟩ declared-type surface, both halves (SOUNDNESS R843; conformance PART 95)
 
 **The engine still declares spec `0.39`.** ⟨0.40⟩ is authored but unreleased and not yet the floor; the

@@ -246,6 +246,10 @@ private func nominalStrippingGenerics(_ t: TypeSyntax) -> String? {
     return nil
 }
 
+private func hasDynamicMemberAttribute(_ attrs: AttributeListSyntax) -> Bool {
+    attrs.contains { $0.as(AttributeSyntax.self)?.attributeName.trimmedDescription == "dynamicMemberLookup" }
+}
+
 private func hasMacroCandidateAttribute(_ attrs: AttributeListSyntax) -> Bool {
     for a in attrs {
         guard let attr = a.as(AttributeSyntax.self) else { return true }   // an `#if` inside attributes
@@ -256,8 +260,14 @@ private func hasMacroCandidateAttribute(_ attrs: AttributeListSyntax) -> Bool {
 }
 
 final class TypeSurfaceCollector: SyntaxVisitor {
-    struct TypeDecl { var path: String; var kind: String; var inherits: [String?]; var unclosable: Bool; var scope: String? }
-    struct ExtDecl { var spelled: String; var scope: String?; var inherits: [String?]; var macro: Bool }
+    struct TypeDecl { var path: String; var kind: String; var inherits: [String?]; var unclosable: Bool; var scope: String?
+                      /// conformances the language supplies without an inheritance clause (an enum's
+                      /// `Equatable`/`Hashable`, an actor's `Actor`), read only against `extendedPlatform`
+                      var implicit: [String] = []
+                      /// `@dynamicMemberLookup` or a `subscript(dynamicMember:)`: forwards members no manifest lists
+                      var dynMember: Bool = false }
+    struct ExtDecl { var spelled: String; var scope: String?; var inherits: [String?]; var macro: Bool
+                     var hasMembers: Bool = false; var dynMember: Bool = false }
     struct ValueDecl { var owner: String?; var ownerIsExtension: Bool; var member: String; var type: SurfaceValueType; var scope: String?; var fromCtor: Bool }
 
     let file: String
@@ -265,7 +275,7 @@ final class TypeSurfaceCollector: SyntaxVisitor {
     var exts: [ExtDecl] = []
     var values: [ValueDecl] = []
     /// The lexical type path; an extension pushes its EXTENDED type's spelling.
-    private var stack: [(name: String, isExtension: Bool)] = []
+    private var stack: [(name: String, isExtension: Bool, rec: Int)] = []
 
     init(file: String) {
         self.file = file
@@ -276,12 +286,13 @@ final class TypeSurfaceCollector: SyntaxVisitor {
     private var inExtension: Bool { stack.contains { $0.isExtension } }
 
     private func pushType(_ name: String, kind: String, inherits: InheritanceClauseSyntax?,
-                          attrs: AttributeListSyntax, extraUnclosable: Bool = false) {
+                          attrs: AttributeListSyntax, extraUnclosable: Bool = false, implicit: [String] = []) {
         let scope = path
         let full = scope.map { "\($0).\(name)" } ?? name
         types.append(TypeDecl(path: full, kind: kind, inherits: inheritedSpellings(inherits),
-                              unclosable: hasMacroCandidateAttribute(attrs) || extraUnclosable, scope: scope))
-        stack.append((name, false))
+                              unclosable: hasMacroCandidateAttribute(attrs) || extraUnclosable, scope: scope,
+                              implicit: implicit, dynMember: hasDynamicMemberAttribute(attrs)))
+        stack.append((name, false, types.count - 1))
     }
 
     private func classKind(_ mods: DeclModifierListSyntax) -> String {
@@ -302,13 +313,17 @@ final class TypeSurfaceCollector: SyntaxVisitor {
     }
     override func visitPost(_ node: StructDeclSyntax) { stack.removeLast() }
     override func visit(_ node: EnumDeclSyntax) -> SyntaxVisitorContinueKind {
-        pushType(node.name.text, kind: "value", inherits: node.inheritanceClause, attrs: node.attributes)
+        // An enum is `Equatable`/`Hashable` with no clause when its cases carry no payload — listed for every
+        // enum, over-approximating in the direction that can only add a supertype.
+        pushType(node.name.text, kind: "value", inherits: node.inheritanceClause, attrs: node.attributes,
+                 implicit: ["Equatable", "Hashable"])
         return .visitChildren
     }
     override func visitPost(_ node: EnumDeclSyntax) { stack.removeLast() }
     /// An actor cannot be subclassed, so `final` is exact for it.
     override func visit(_ node: ActorDeclSyntax) -> SyntaxVisitorContinueKind {
-        pushType(node.name.text, kind: "final", inherits: node.inheritanceClause, attrs: node.attributes)
+        pushType(node.name.text, kind: "final", inherits: node.inheritanceClause, attrs: node.attributes,
+                 implicit: ["Actor", "AnyActor", "Sendable"])
         return .visitChildren
     }
     override func visitPost(_ node: ActorDeclSyntax) { stack.removeLast() }
@@ -322,9 +337,15 @@ final class TypeSurfaceCollector: SyntaxVisitor {
     override func visitPost(_ node: ProtocolDeclSyntax) { stack.removeLast() }
     override func visit(_ node: ExtensionDeclSyntax) -> SyntaxVisitorContinueKind {
         let spelled = nominalStrippingGenerics(node.extendedType) ?? node.extendedType.trimmedDescription
+        let hasMembers = node.memberBlock.members.contains {
+            let d = $0.decl
+            return d.is(FunctionDeclSyntax.self) || d.is(VariableDeclSyntax.self) || d.is(SubscriptDeclSyntax.self)
+                || d.is(InitializerDeclSyntax.self)
+        }
         exts.append(ExtDecl(spelled: spelled, scope: path, inherits: inheritedSpellings(node.inheritanceClause),
-                            macro: hasMacroCandidateAttribute(node.attributes)))
-        stack.append((spelled, true))
+                            macro: hasMacroCandidateAttribute(node.attributes), hasMembers: hasMembers,
+                            dynMember: hasDynamicMemberAttribute(node.attributes)))
+        stack.append((spelled, true, exts.count - 1))
         return .visitChildren
     }
     override func visitPost(_ node: ExtensionDeclSyntax) { stack.removeLast() }
@@ -333,7 +354,15 @@ final class TypeSurfaceCollector: SyntaxVisitor {
     override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind { .skipChildren }
     override func visit(_ node: InitializerDeclSyntax) -> SyntaxVisitorContinueKind { .skipChildren }
     override func visit(_ node: DeinitializerDeclSyntax) -> SyntaxVisitorContinueKind { .skipChildren }
-    override func visit(_ node: SubscriptDeclSyntax) -> SyntaxVisitorContinueKind { .skipChildren }
+    /// `subscript(dynamicMember:)` makes its owner forward members no manifest lists (SPEC §2 ⟨0.40⟩: such a
+    /// type is never closed; PART 95 o16_dyn_member, SOUNDNESS R890).
+    override func visit(_ node: SubscriptDeclSyntax) -> SyntaxVisitorContinueKind {
+        if node.parameterClause.parameters.contains(where: { $0.firstName.text == "dynamicMember" }),
+           let top = stack.last {
+            if top.isExtension { exts[top.rec].dynMember = true } else { types[top.rec].dynMember = true }
+        }
+        return .skipChildren
+    }
     override func visit(_ node: ClosureExprSyntax) -> SyntaxVisitorContinueKind { .skipChildren }
 
     override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
@@ -442,46 +471,104 @@ func buildTypeSurface040(pkg: String, collectors: [TypeSurfaceCollector], aliase
     // ── `types`: EVERY declared type, its kind, and its COMPLETE direct supertypes or none ──
     var supersOf: [String: Set<String>] = [:]
     var unclosable: Set<String> = []
+    // ⟨0.40⟩ (SPEC §2 ⟨0.40⟩, R889) the PLATFORM supertypes each type names or is given implicitly — omitted
+    // from `supers` as permitted, EXCEPT where this package extends one with a member (below).
+    var platformOf: [String: Set<String>] = [:]
+    func platformName(_ s: String) -> String {
+        let segs = s.split(separator: ".").map(String.init)
+        return segs.count > 1 && (PLATFORM_MODULES.contains(segs[0]) || KAPPA_MODULES.contains(segs[0]))
+            ? segs.dropFirst().joined(separator: ".") : s
+    }
     for (path, decls) in declared {
         if Set(decls.map { $0.0.kind }).count != 1 { continue }   // two arms disagree on the kind: no key
         for (d, file) in decls {
-            if d.unclosable { unclosable.insert(path) }
+            if d.unclosable || d.dynMember { unclosable.insert(path) }
+            platformOf[path, default: []].formUnion(d.implicit)
             for s in d.inherits {
                 guard let s else { unclosable.insert(path); continue }
                 if LAYOUT_SUPERS_PUBLIC.contains(s) { continue }
                 let r = resolve(s, scope: d.scope, file: file, fallback: true)
                 switch r {
-                case .platform: continue
+                case .platform: platformOf[path, default: []].insert(platformName(s)); continue
                 case .unresolved: unclosable.insert(path)
                 default: if let q = qualified(r) { supersOf[path, default: []].insert(q) }
                 }
             }
         }
     }
+    // The platform types this package EXTENDS WITH A MEMBER — the member it publishes under `<pkg>#<P>`.
+    var extendedPlatform: Set<String> = []
     for (ci, c) in collectors.enumerated() {
         for (ei, e) in c.exts.enumerated() {
             let tgt = extTarget[ci]?[ei] ?? .unresolved
+            if case .platform = tgt, e.hasMembers { extendedPlatform.insert(platformName(e.spelled)) }
             var sups: [String] = []
+            var plats: [String] = []
             var short = false
             for s in e.inherits {
                 guard let s else { short = true; continue }
                 if LAYOUT_SUPERS_PUBLIC.contains(s) { continue }
                 let r = resolve(s, scope: e.scope, file: c.file, fallback: true)
                 switch r {
-                case .platform: continue
+                case .platform: plats.append(platformName(s)); continue
                 case .unresolved: short = true
                 default: if let q = qualified(r) { sups.append(q) }
                 }
             }
             switch tgt {
             case .local(let p):
-                if e.macro || short { unclosable.insert(p) }
+                if e.macro || short || e.dynMember { unclosable.insert(p) }
                 supersOf[p, default: []].formUnion(sups)
+                platformOf[p, default: []].formUnion(plats)
             case .foreign(let k):
                 // `adds` is never complete, so an unresolvable supertype is simply not published.
                 if !sups.isEmpty { out.adds[k, default: []].append(contentsOf: sups) }
             default: break
             }
+        }
+    }
+    // ⟨0.40⟩ R890: a type that forwards through `@dynamicMemberLookup` is never closed — nor is any type
+    // that inherits it from a local superclass or protocol (fixpoint over local supertypes).
+    var dyn = Set(declared.compactMap { p, ds in ds.contains { $0.0.dynMember } ? p : nil })
+    for c in collectors { for e in c.exts where e.dynMember { if let p = resolveLocal(e.spelled, scope: nil) { dyn.insert(p) } } }
+    var changed = true
+    while changed {
+        changed = false
+        for (path, sups) in supersOf where !dyn.contains(path) {
+            if sups.contains(where: { $0.hasPrefix("\(pkg)#") && dyn.contains(String($0.dropFirst(pkg.count + 1))) }) {
+                dyn.insert(path); changed = true
+            }
+        }
+    }
+    unclosable.formUnion(dyn)
+    // ⟨0.40⟩ R889: a PLATFORM type this package extends with a member MUST be in the `supers` of every type it
+    // declares that conforms to it — directly, implicitly, through a standard refinement, or through a local
+    // supertype — spelled `<pkg>#<P>`, where this package's own entries spell the extension. A platform
+    // supertype whose refinements this producer does not know could reach one of them unseen, so it leaves
+    // the type unclosed instead of listing short.
+    if !extendedPlatform.isEmpty {
+        for (path, direct) in platformOf {
+            var closure = Set<String>(), stack = Array(direct)
+            var unknown: [String] = []
+            while let n = stack.popLast() {
+                guard closure.insert(n).inserted else { continue }
+                if let r = PLATFORM_REFINES[n] { stack.append(contentsOf: r) }
+                else if !PLATFORM_LEAVES.contains(n), !extendedPlatform.contains(n) { unknown.append(n) }
+            }
+            if !unknown.isEmpty {
+                unclosable.insert(path)
+                if ProcessInfo.processInfo.environment["CANDOR_R843_PROBE"] != nil {
+                    FileHandle.standardError.write("R843UNCLOSED \(pkg)#\(path) unknown=\(unknown.sorted()) extended=\(extendedPlatform.sorted())\n".data(using: .utf8)!)
+                }
+            }
+            for p in closure.intersection(extendedPlatform) { supersOf[path, default: []].insert("\(pkg)#\(p)") }
+        }
+        // A platform VALUE type (`String`, `Array`) is never anyone's supertype, so it needs no key: its
+        // added members are reached by the ordinary `<pkg>#String.<member>` join, as before.
+        for p in extendedPlatform where declared[p] == nil && !PLATFORM_VALUE_TYPES.contains(p) {
+            let sups = (PLATFORM_REFINES[p] ?? []).filter { extendedPlatform.contains($0) }.map { "\(pkg)#\($0)" }
+            out.types["\(pkg)#\(p)"] = DeclaredTypeInfo(
+                kind: PLATFORM_VALUE_TYPES.contains(p) ? "value" : "protocol", supers: sups.sorted())
         }
     }
     for (path, decls) in declared {
@@ -556,4 +643,63 @@ let STD_SUPERS_PUBLIC: Set<String> = STD_PURE_PROTOCOLS.union(RAW_VALUE_BASE_TYP
     "UnkeyedEncodingContainer", "UnkeyedDecodingContainer", "SingleValueEncodingContainer",
     "SingleValueDecodingContainer", "URLSessionDelegate", "URLSessionTaskDelegate", "URLSessionDataDelegate",
     "URLSessionDownloadDelegate", "URLSessionStreamDelegate", "URLSessionWebSocketDelegate",
+])
+
+/// ⟨0.40⟩ R889 — the standard library's refinement edges among the platform supertypes a Swift type commonly
+/// names, so a type conforming to `Hashable` is known to conform to an `Equatable` this package extends.
+/// A platform supertype NOT in this table or in `PLATFORM_LEAVES` leaves its type unclosed (kind-only) when
+/// the package extends any platform type with a member: a refinement this table does not know could be
+/// the edge to it. The table can only ADD supertypes; a missing edge costs a disclosure, never a silence.
+let PLATFORM_REFINES: [String: [String]] = [
+    "Hashable": ["Equatable"], "Comparable": ["Equatable"], "Strideable": ["Comparable"],
+    "Identifiable": [], "CaseIterable": [], "RawRepresentable": [], "Error": ["Sendable"],
+    "LocalizedError": ["Error"], "CustomNSError": ["Error"], "Codable": ["Encodable", "Decodable"],
+    "Sequence": [], "IteratorProtocol": [], "Collection": ["Sequence"],
+    "BidirectionalCollection": ["Collection"], "RandomAccessCollection": ["BidirectionalCollection"],
+    "MutableCollection": ["Collection"], "RangeReplaceableCollection": ["Collection"],
+    "LazySequenceProtocol": ["Sequence"], "LazyCollectionProtocol": ["Collection", "LazySequenceProtocol"],
+    "AsyncSequence": [], "AsyncIteratorProtocol": [], "SetAlgebra": ["Equatable", "ExpressibleByArrayLiteral"],
+    "OptionSet": ["SetAlgebra", "RawRepresentable"], "AdditiveArithmetic": ["Equatable"],
+    "Numeric": ["AdditiveArithmetic", "ExpressibleByIntegerLiteral"], "SignedNumeric": ["Numeric"],
+    "BinaryInteger": ["Hashable", "Numeric", "Strideable", "CustomStringConvertible"],
+    "FixedWidthInteger": ["BinaryInteger"], "SignedInteger": ["BinaryInteger", "SignedNumeric"],
+    "UnsignedInteger": ["BinaryInteger"], "FloatingPoint": ["Hashable", "SignedNumeric", "Strideable"],
+    "BinaryFloatingPoint": ["FloatingPoint"],
+    "StringProtocol": ["BidirectionalCollection", "Comparable", "Hashable", "TextOutputStream",
+                       "TextOutputStreamable", "LosslessStringConvertible", "ExpressibleByStringInterpolation"],
+    "ExpressibleByStringInterpolation": ["ExpressibleByStringLiteral"],
+    "ExpressibleByStringLiteral": ["ExpressibleByExtendedGraphemeClusterLiteral"],
+    "ExpressibleByExtendedGraphemeClusterLiteral": ["ExpressibleByUnicodeScalarLiteral"],
+    "LosslessStringConvertible": ["CustomStringConvertible"],
+    "DataProtocol": ["RandomAccessCollection"], "MutableDataProtocol": ["DataProtocol", "MutableCollection", "RangeReplaceableCollection"],
+    "Actor": ["AnyActor", "Sendable"], "AnyActor": [], "GlobalActor": [], "DistributedActor": ["AnyActor", "Sendable"],
+    "NSObject": ["NSObjectProtocol", "Equatable", "Hashable", "CustomStringConvertible", "CustomDebugStringConvertible"],
+    "NSObjectProtocol": [], "NSCoding": [], "NSSecureCoding": ["NSCoding"], "NSCopying": [],
+    "ObservableObject": ["AnyObject"], "Observable": [],
+    // A raw-value enum's "supertype" `String` / `Int` is its RAW TYPE: it makes the enum RawRepresentable.
+    "String": ["RawRepresentable"], "Character": ["RawRepresentable"], "Bool": ["RawRepresentable"],
+    "Double": ["RawRepresentable"], "Float": ["RawRepresentable"], "Int": ["RawRepresentable"],
+    "Int8": ["RawRepresentable"], "Int16": ["RawRepresentable"], "Int32": ["RawRepresentable"],
+    "Int64": ["RawRepresentable"], "UInt": ["RawRepresentable"], "UInt8": ["RawRepresentable"],
+    "UInt16": ["RawRepresentable"], "UInt32": ["RawRepresentable"], "UInt64": ["RawRepresentable"],
+    "URLSessionDelegate": ["NSObjectProtocol"], "URLSessionTaskDelegate": ["URLSessionDelegate"],
+    "URLSessionDataDelegate": ["URLSessionTaskDelegate"], "URLSessionDownloadDelegate": ["URLSessionTaskDelegate"],
+    "URLSessionStreamDelegate": ["URLSessionTaskDelegate"], "URLSessionWebSocketDelegate": ["URLSessionTaskDelegate"],
+    "ManagedBuffer": [],
+]
+/// Platform supertypes with no refinement edge worth knowing (no supertype a package would extend).
+let PLATFORM_LEAVES: Set<String> = [
+    "Equatable", "Encodable", "Decodable", "Sendable", "Copyable", "Escapable", "BitwiseCopyable",
+    "CustomStringConvertible", "CustomDebugStringConvertible", "CustomReflectable",
+    "CustomPlaygroundDisplayConvertible", "TextOutputStream", "TextOutputStreamable",
+    "ExpressibleByIntegerLiteral", "ExpressibleByArrayLiteral", "ExpressibleByDictionaryLiteral",
+    "ExpressibleByBooleanLiteral", "ExpressibleByFloatLiteral", "ExpressibleByNilLiteral",
+    "ExpressibleByUnicodeScalarLiteral", "RangeExpression", "ContiguousBytes", "NSFastEnumeration",
+    "CodingKey", "Encoder", "Decoder", "AnyObject", "KeyedEncodingContainerProtocol",
+    "KeyedDecodingContainerProtocol", "UnkeyedEncodingContainer", "UnkeyedDecodingContainer",
+    "SingleValueEncodingContainer", "SingleValueDecodingContainer", "Hasher",
+]
+/// Platform nominal types that are VALUES (an extension of one gets `kind: value` on its `<pkg>#<T>` key).
+let PLATFORM_VALUE_TYPES: Set<String> = RAW_VALUE_BASE_TYPES.union([
+    "Array", "Dictionary", "Set", "Optional", "Result", "Data", "URL", "Date", "UUID", "Substring",
 ])

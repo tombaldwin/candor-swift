@@ -2189,6 +2189,59 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         return ts.allSatisfy { surfaceAnswer($0, leaf, forcedProtocol: false).answered }
     }
 
+    /// ⟨0.40⟩ THE WALK FOR A RECEIVER TYPED FROM THE CONSUMER'S OWN SOURCE whose own key missed (SPEC §2
+    /// ⟨0.40⟩): entries the walk reaches are ADDED; EVERY STRUCTURAL MISS on the way (an unkeyed or kind-only
+    /// node — a `@dynamicMemberLookup` type is always kind-only, R890 — a distrusted copy, an unknown kind)
+    /// ADDS `Unknown`, because Swift has no language-scoped permission: a member a protocol extension adds is
+    /// in scope wherever its module is imported. A walk whose every node is keyed and closed is the
+    /// producer's purity claim, except that `adds` is never complete: a member some package the walk did
+    /// not visit publishes may come from a conformance it adds unseen (o10_adds_partial). A GUESSED owner's
+    /// hedge is the miss rule's (below), which a trusted `holds` exempts, so it is not hedged here.
+    func isPlatformTypeName(_ n: String) -> Bool {
+        PLATFORM_REFINES[n] != nil || PLATFORM_LEAVES.contains(n) || PLATFORM_VALUE_TYPES.contains(n)
+            || STD_SUPERS_PUBLIC.contains(n)
+    }
+    /// `<pkg>#<P>` for a platform PROTOCOL the package extends (R889): a platform name, kind `protocol`, and
+    /// every super another such node of the same package. A dependency's OWN type that happens to share a
+    /// platform name (RxSwift's `Observable` class) is not one, and keeps every hedge it had.
+    func isPlatformExtensionNode(_ key: String) -> Bool {
+        guard let h = key.firstIndex(of: "#") else { return false }
+        let pkg = String(key[..<h]), name = String(key[key.index(after: h)...])
+        guard isPlatformTypeName(name), case .full(let kind, let sups) = deps.surface.state(key), kind == "protocol"
+        else { return false }
+        return sups.allSatisfy { $0.hasPrefix("\(pkg)#") && isPlatformTypeName(String($0.dropFirst(pkg.count + 1))) }
+    }
+    func sourceTypedWalk(_ key: String, _ leaf: String, tiers: [[(p: String, mods: [String])]],
+                         to qual: String, guessed: Bool) {
+        var starts: [String] = []
+        for tier in tiers where starts.isEmpty {
+            for (p, _) in tier where deps.surface.typeKeysSeen.contains("\(p)#\(key)")
+                                     || deps.surface.adds["\(p)#\(key)"] != nil {
+                starts.append("\(p)#\(key)")
+            }
+        }
+        var walkMiss = false
+        for st in starts {
+            let a = surfaceAnswer(st, leaf, forcedProtocol: false)
+            applySurface(a, to: qual)
+            // A receiver typed as a PLATFORM type (`some Sequence`) whose `<pkg>#<P>` node exists only because a
+            // package extends it: a member no package publishes is the standard library's own, classified
+            // as it always was — the `adds` hedge is for a DEPENDENCY type a conformance may be added to.
+            let platformStart = isPlatformExtensionNode(st)
+            if !a.answered, a.structural
+                || (!platformStart && deps.anyChainedPackagePublishesLeaf(leaf, excluding: a.pkgs)) {
+                walkMiss = true
+            }
+            if r843Probe {
+                FileHandle.standardError.write("R843WALK \(qual) \(st).\(leaf) hits=\(a.hits) answered=\(a.answered) structural=\(a.structural)\n".data(using: .utf8)!)
+            }
+        }
+        if walkMiss, !guessed {
+            direct[qual, default: []].insert("Unknown")
+            whyMap[qual, default: []].insert("dispatch:\(key).\(leaf)")
+        }
+    }
+
     let localProtocolNames = Set(protocolMethods.keys)  // loop-invariant: build once, not per fn
     // SOUNDNESS R534 — BACKFILL `protoParams`, THE HALF DeclCollector STRUCTURALLY CANNOT SEE.
     // `DeclCollector.protocolMethods` is per-FILE and filled as that file's walk descends, so the test it
@@ -3766,37 +3819,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // release disclosed here still fires. `adds` is never complete, so a walk that misses
                 // discloses — bounded, as R859 bounds it, to a leaf some chained package publishes a body for.
                 if !r843Off, hits.isEmpty, !call.unqualified, let owner = call.extOwner {
-                    let key = dispatchAbstraction(owner, f) ?? owner
-                    var starts: [String] = []
-                    for tier in memberTiers where starts.isEmpty {
-                        for (p, _) in tier where deps.surface.typeKeysSeen.contains("\(p)#\(key)")
-                                                 || deps.surface.adds["\(p)#\(key)"] != nil {
-                            starts.append("\(p)#\(key)")
-                        }
-                    }
-                    var walkMiss = false
-                    for st in starts {
-                        let a = surfaceAnswer(st, call.leaf, forcedProtocol: false)
-                        applySurface(a, to: f.qual)
-                        // A miss the manifest CAUSED discloses whenever any chained body has this leaf; a
-                        // miss over complete manifests only when a package the walk did not visit has one —
-                        // the only place an unrecorded `adds` could hide it (o10_adds_partial).
-                        if !a.answered, a.structural ? deps.anyChainedPackagePublishesLeaf(call.leaf)
-                                        : deps.anyChainedPackagePublishesLeaf(call.leaf, excluding: a.pkgs) {
-                            walkMiss = true
-                        }
-                        if r843Probe {
-                            FileHandle.standardError.write("R843WALK \(f.qual) \(st).\(call.leaf) hits=\(a.hits) answered=\(a.answered)\n".data(using: .utf8)!)
-                        }
-                    }
-                    // A GUESSED owner's walk ADDS what the guess inherits (the guess is kept), and its hedge is
-                    // the miss rule's below — which a trusted `holds` answer exempts. Hedging here as well would
-                    // disclose the release's over-approximate floor owner (`Outer` for `Outer.Inner.shared`)
-                    // beside a hop the surface resolved exactly.
-                    if walkMiss, !call.guessHop {
-                        direct[f.qual, default: []].insert("Unknown")
-                        whyMap[f.qual, default: []].insert("dispatch:\(key).\(call.leaf)")
-                    }
+                    sourceTypedWalk(dispatchAbstraction(owner, f) ?? owner, call.leaf, tiers: memberTiers,
+                                    to: f.qual, guessed: call.guessHop)
                 }
                 // ⟨0.40⟩ EVERY LOOKUP ON A GUESSED OWNER THAT NO TRUSTED SURFACE ANSWERS KEEPS THE GUESS AND
                 // ADDS `Unknown` — a HIT included: `Wrong.shared.ping()` joining `Wrong.ping` is a guess that the
@@ -4282,6 +4306,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // read, the stringification and the `deinit` to ABSENT (1/1 -> 0/0 against v0.39.2).
                 if hits.count > 1, joinUnionProbe {
                     FileHandle.standardError.write("JOINUNION depmember \(f.qual) \(cand) n=\(hits.count)\n".data(using: .utf8)!)
+                }
+                // ⟨0.40⟩ a PROPERTY read on a dependency type walks as a member call does: an inherited
+                // computed property, or one forwarded through `@dynamicMemberLookup` (R890), is not a
+                // purity claim.
+                if !r843Off, hits.isEmpty, cc.propertyExternal.contains(cand), let dot = cand.lastIndex(of: ".") {
+                    sourceTypedWalk(String(cand[..<dot]), String(cand[cand.index(after: dot)...]),
+                                    tiers: candTiers, to: f.qual, guessed: false)
                 }
                 guard hits.count == 1 || (!joinUnionOff && hits.count > 1) else { continue }
                 for de in hits { applyDepEntry(de, to: f.qual) }
