@@ -422,6 +422,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var unresolvedGenericFields: [(ty: String, field: String, param: String)] = []
     var protocolMethods: [String: Set<String>] = [:]
     var protocolFnTypedMembers: Set<String> = []   // SOUNDNESS R563 — see DeclCollector
+    var protocolPropTypesAll: [String: [String: String]] = [:]   // SOUNDNESS R578 — see DeclCollector
+    var protocolPropNamesAll: [String: Set<String>] = [:]          // SOUNDNESS R904 — see DeclCollector
     var protocolPaths: Set<String> = []           // ⟨0.39⟩ see DeclCollector.protocolPaths
     var protocolSupers: [String: Set<String>] = [:]
     var conformers: [String: [String]] = [:]
@@ -938,6 +940,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (cn, ts) in c.caseAssocMetatype { caseAssocMetatypeAll[cn, default: []].formUnion(ts) }   // R585
         for (pn, ms) in c.protocolMethods { protocolMethods[pn, default: []].formUnion(ms) }
         protocolFnTypedMembers.formUnion(c.protocolFnTypedMembers)   // R563
+        for (pn, ps) in c.protocolPropTypes { protocolPropTypesAll[pn, default: [:]].merge(ps) { a, _ in a } }   // R578
+        for (pn, ps) in c.protocolPropNames { protocolPropNamesAll[pn, default: []].formUnion(ps) }   // R904
         protocolPaths.formUnion(c.protocolPaths)   // ⟨0.39⟩
         for (pn, ss) in c.protocolSupers { protocolSupers[pn, default: []].formUnion(ss) }
         for (pn, ts) in c.conformers {
@@ -1186,6 +1190,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // `Job.emit` doesn't resolve and the call read pure — fall back to the default body on a conformed super.
     var supertypesOf: [String: Set<String>] = [:]
     for (sup, subs) in subtypesOf { for s in subs { supertypesOf[s, default: []].insert(sup) } }
+    // SOUNDNESS R906 — the CLASS part of that map, for a ternary's common-superclass join.
+    var classSupertypesR906: [String: Set<String>] = [:]
+    let protocolNamesR906 = Set(protocolMethods.keys)
+    for (t, sups) in supertypesOf where declaredTypes.contains(t) && !protocolNamesR906.contains(t) {
+        let cls = sups.filter { declaredTypes.contains($0) && !protocolNamesR906.contains($0) && $0 != t }
+        if !cls.isEmpty { classSupertypesR906[t] = cls }
+    }
     // Match a call (arg count + inferred arg types) to overload target qual(s). Empty ⇒ confident no local
     // overload matches ⇒ DROP. Non-empty ⇒ edge to all (one hit precise; several = sound union). A closure so
     // it captures `overloads`/`subtypesOf`.
@@ -1543,10 +1554,37 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // .greet2()` under `extension Box: Greeter2 where T: Greeter2 { func greet2() { value.greet2() } }`
     // left `value` typed `"T"` forever (a name nothing declares), so the call inside never dispatched to
     // `Greeter2`'s conformers and a caller charged only via that field read silent-pure.
+    // SOUNDNESS R578 — each protocol's PROPERTY requirements with their declared types, INHERITED ones
+    // included (a `protocol Sub: Sup` receiver reads `Sup`'s requirements too); the protocol's own
+    // declaration wins over an inherited one of the same name.
+    var protoReqFieldTypesFlat: [String: [String: String]] = [:]
+    for p in Set(protocolPropTypesAll.keys).union(protocolSupers.keys) {
+        var out: [String: String] = [:], seen: Set<String> = [], frontier = [p]
+        while let cur = frontier.popLast() {
+            guard seen.insert(cur).inserted else { continue }
+            for (m, t) in protocolPropTypesAll[cur] ?? [:] where out[m] == nil { out[m] = t }
+            frontier.append(contentsOf: protocolSupers[cur] ?? [])
+        }
+        if !out.isEmpty { protoReqFieldTypesFlat[p] = out }
+    }
+    // SOUNDNESS R904 — the same walk for the requirement NAMES.
+    var protoReqPropsFlat: [String: Set<String>] = [:]
+    for p in Set(protocolPropNamesAll.keys).union(protocolSupers.keys) {
+        var out: Set<String> = [], seen: Set<String> = [], frontier = [p]
+        while let cur = frontier.popLast() {
+            guard seen.insert(cur).inserted else { continue }
+            out.formUnion(protocolPropNamesAll[cur] ?? [])
+            frontier.append(contentsOf: protocolSupers[cur] ?? [])
+        }
+        if !out.isEmpty { protoReqPropsFlat[p] = out }
+    }
+    // SOUNDNESS R256 — fields whose param is bound BOTH ways; see CallCollector.genericCallableFields.
+    var genericCallableFields: [String: Set<String>] = [:]
     for (ty, field, param) in unresolvedGenericFields where fields[ty]?[field]?.name == param {
         if let bound = typeGenericBoundsAll[ty]?[param] {
             fields[ty, default: [:]][field] = (bound, false)
             opaqueFields[ty, default: []].insert(field)
+            if typeGenericFnParamsAll[ty]?.contains(param) == true { genericCallableFields[ty, default: []].insert(field) }
         } else if typeGenericFnParamsAll[ty]?.contains(param) == true {
             // R243 — the param is bound to a FUNCTION TYPE by a same-type requirement
             // (`extension Gen where F == (Int) -> Bool`), so the field HOLDS A CALLABLE. `(nil, true)` is
@@ -2752,6 +2790,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                protoBoundParams: protoBoundParamsMap,
                                typeBoundParams: typeBoundParamsMap,
                                protoFnTypedMembers: protocolFnTypedMembers,
+                               protoReqFieldTypes: protoReqFieldTypesFlat,   // R578
+                               protoReqProps: protoReqPropsFlat,             // R904
+                               genericCallableFields: genericCallableFields, // R256
+                               classSupertypes: classSupertypesR906,         // R906
                                returns: returnsIdx,
                                metatypeReturns: metatypeReturnsIdx,                                  // R585
                                globalMetatypes: globalMetatypesByModule[swiftModuleOf(f.loc)] ?? [:], // R585
@@ -2786,6 +2828,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // parameter names go with it: a body binder that SHADOWS a parameter is the same hazard, and the
         // signature is the one binder site the body walk cannot see.
         cc.prescanLocatorMoves(body, params: f.paramNames)
+        if CallCollector.veinBProbe { FileHandle.standardError.write("VBFN\t\(f.qual)\n".data(using: .utf8)!) }
         cc.walk(body)
         // accessor units: a property READ/WRITE of a known accessor unit is an edge (the reader inherits
         // the getter/observer/subscript's effects — `c.data` reaching the Fs inside `var data: Data { … }`).

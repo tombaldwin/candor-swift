@@ -135,6 +135,12 @@ final class NameKeyedStateTests: XCTestCase {
         // behavioural gate, with the no-metatype-binder rename control beside it.
         "metatypeBinders":   .clearedOnRebind(scoped: false),
         "metatypeArrayElem": .clearedOnRebind(scoped: false),
+        // VEIN B (R615) — `metatypeArrayElem`'s dictionary twin, on its lifecycle.
+        "metatypeDictValue": .clearedOnRebind(scoped: false),
+        // VEIN B (R618) — "this container's element was read off a guessed root", moving with `arrayElem`; and
+        // "this binding's type came from such an element", moving with `vars` (as `opaqueVars` does).
+        "guessElem": .clearedOnRebind(scoped: false),
+        "elemGuessVars": .clearedOnRebind(scoped: false),
         // R278 — `[[T]]`'s INNER element, for a binder whose own element is a container. Keyed by the
         // binding name and cleared with `arrayElem` in the same call, for the same reason: a stale entry
         // would hand a later binder over the same name somebody else's element type, which is the
@@ -297,6 +303,10 @@ final class NameKeyedStateTests: XCTestCase {
         // whenever `vars` already knows the spelling, so a shadowing local falls through to the ordinary
         // receiver paths. Same discipline as `globalTypes` two rows down.
         "protoBoundParams": .immutableIndex, "protoFnTypedMembers": .immutableIndex,
+        // VEIN B — program-wide or per-unit indexes injected at construction, keyed by a type, a protocol or a
+        // parameter name; a rebind is answered by `vars`/`binderShadow` at the one reader of each.
+        "compositionParams": .immutableIndex, "protoReqFieldTypes": .immutableIndex, "protoReqProps": .immutableIndex,
+        "genericCallableFields": .immutableIndex, "classSupertypes": .immutableIndex, "paramNamesR851": .immutableIndex,
         // SOUNDNESS R584 — the CLASS twin of the row above: the same key space (a generic-parameter name,
         // or a metatype PARAMETER's name standing for one), the same Driver-supplied declaration indexes,
         // so the same reasoning holds for the same reason. Its two readers both refuse a spelling that is
@@ -394,6 +404,9 @@ final class NameKeyedStateTests: XCTestCase {
         "globalReads": .notPerBinding, "depGlobalReads": .notPerBinding,
         // R853 — scope bookkeeping: `binderShadow` before a statement's conditions, keyed by the statement
         "binderSnapshots": .notPerBinding, "caseSnapshots": .notPerBinding,
+        // VEIN B — scope and walk bookkeeping keyed by syntax node, or a flag read around one call.
+        "elseTypeSnapshots": .notPerBinding, "reqFloor": .notPerBinding, "elemGuessRecv": .notPerBinding,
+        "elementWalkedGuess": .notPerBinding, "forElemGuess": .notPerBinding,
         // R853 — payload names bound by an enclosing `if`/`guard` whose `else` this is: scope bookkeeping
         "caseElseOut": .lexicallyScoped("the payload names an `if case`/`guard case` bound, inside that statement's `else`, where they are out of scope; saved and restored with the block"),
         // R844/R846 — output: each external member candidate with the module(s) the source spelled

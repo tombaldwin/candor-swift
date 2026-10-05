@@ -89,9 +89,10 @@ public func readBaseM(_ b: BaseM) -> Int { b.tk }
                   "deny Fs callUseHelperN", "deny Fs PlainN.useHelperN"] {   // extension-only: static
             XCTAssertNotEqual(try gate(root, p), 1, "`\(p)` must stay clean — the effect never executes")
         }
-        // RECORDED, NOT CHANGED HERE (a different mechanism, priced separately): an implicit-self read of a
-        // requirement inside `extension CtxN`, used as the BASE of a member access, still reaches no
-        // conformer. Asserted as it is so a change is seen.
-        XCTAssertNotEqual(try gate(root, "deny Env CtxN.ddfN"), 1, "N2 is out of this change's scope")
+        // N2 — an implicit-self read of a requirement inside `extension CtxN`, used as the BASE of a member
+        // access: closed by vein B's R904 (the read dispatches to the conformers' getters as `self.envN` does).
+        // Recorded here because this fixture was its first executed instance; `CANDOR_R904_OFF=1` restores 113e5b4.
+        XCTAssertEqual(try gate(root, "deny Env CtxN.ddfN"), 1, "N2 / R904: the conformer's getter reads env (executed)")
+        XCTAssertNotEqual(try gate(root, "deny Env CtxN.ddfN", env: ["CANDOR_R904_OFF": "1"]), 1, "N2 under R904's switch")
     }
 }

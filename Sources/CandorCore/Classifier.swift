@@ -2897,6 +2897,12 @@ public func tupleElements(_ t: TypeSyntax) -> [String: String] {
 
 /// The VALUE type name of a dictionary type: `[K: V]`/`Dictionary<K, V>` → `V` (peeling wrappers).
 /// `for (k, v) in dict { v.method() }` iterates (key, value) pairs, so the value carries the type.
+/// SOUNDNESS R615 — the type each VALUE of a dictionary of metatypes (`[K: X.Type]`) is the metatype of, or
+/// nil. The dictionary twin of `metatypeArrayElementName`, through the same `dictValueType` peeling.
+public func metatypeDictValueName(_ t: TypeSyntax) -> String? {
+    dictValueType(t).flatMap { metatypeBaseName($0) }
+}
+
 public func dictValueName(_ t: TypeSyntax) -> String? {
     dictValueType(t).flatMap { elementSpelling($0) }
 }

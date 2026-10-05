@@ -10,6 +10,68 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — vein B, local expression typing: a receiver whose type is DECLARED is typed, and a guessed one discloses (SOUNDNESS R256, R578, R579, R589/R906, R615, R618/R907, R619, R738, R851, R866, R904, R905 ctor half)
+
+A member call on a receiver this engine could not type was dropped with no key and no `Unknown`, so its caller
+was ABSENT and `deny <E>` passed. Each row below is a declared fact `rootOf` (the one receiver resolver) or a
+binder did not read; each is answered from that fact, at the site that lacked it, and only where the release
+answered nothing — except where noted, the release's answer is kept beside the new one (a floor).
+
+- **⚠ R578 / R904.** A protocol's PROPERTY requirement has a declared type: `self.body.go()`, `body.go()` and
+  `let t = body; t.go()` inside `extension P` now type `body` as `Body` (the release kept `P` and keyed `P.go`,
+  which `P` does not declare — re-emitted as a floor). A bare requirement read there (`env.count`) dispatches to
+  the conformers' getters, as `self.env.count` already did. Real code: swift-nio `extension Channel { close() {
+  pipeline.close() } }` (Env), SwiftShell `ReadableStream.read`/`WritableStream.write` (Fs),
+  `Context.debugDescription` (Env, Fs), Rocket `NoVerifyParameterInserting` (Fs), RxSwift
+  `PrimitiveSequenceType` operators (Clock).
+- **⚠ R579.** `let page = "hello"` (and interpolated) and `let page = xs.joined(separator: "…")` bind a
+  `String`; `page.write(toFile:)` is `Fs`. Binder only — typed as an OPERAND the literal hedged 50 rows on
+  `+` through an operator-witness CHA, so it is not.
+- **⚠ R905 (constructor half).** `let b = Box<Int>(); b.m()` and `Box<Int>().m()` type `Box`. Resolves RxSwift's
+  `let sink = MergeLimitedBasicSink<…>(…); sink.run(…)` and ReactiveSwift's `AggregateBuilder<…>().add(…)`
+  (27 rows gain `Clock`). The `callback:computed` the specialised constructor already carried is kept.
+- **⚠ R615 / R619 / R738.** Metatypes out of a container (`ts.first`, `ts[0]`, `d[k]`, `ts.filter{…}`) are read
+  by `elementTypeOf` itself in a metatype mode — one walk, two index families — and a `[K: X.Type]` local or
+  parameter is indexed. A local-protocol metatype read through a field or a direct call (`b.p.validate()`,
+  `mkP().validate()`) reaches the conformer CHA. `let u = b.t` binds the metatype.
+- **⚠ R866.** `_ t: any DepProto & Sendable` asks each dependency-declared member as the owner, as
+  `_ t: any DepProto` does (chained: `Dep#PSubD.go`).
+- **⚠ R906 (R589's residue).** `(c ? CC() : CD()).m()` and `let b = c ? CC() : CD()` join two local classes to
+  their unique nearest common superclass — Swift's own type for the expression — and take its `subtypesOf` fan-out.
+- **⚠ R851.** In the `else` of `if let x = …` / `guard let x = …`, `x` is the OUTER binding; where that is an
+  implicit-`self` field or a global, the else block is typed from it (the condition's type comes back after the
+  block). A shadowed local/parameter is NOT re-typed: that moved overload selection on swift-collections and
+  dropped two `invisible` entries on swift-certificates, a removal this row does not need.
+- **⚠ R256.** A field whose generic parameter one same-type requirement binds to a nominal type and another to a
+  function type: invoking it (`f(1)`, `self.f(1)`) adds `Unknown dispatch:Gen.f` beside whatever the release
+  answered; the nominal cell keeps its precise effect.
+- **⚠ R618 / R907 (disclosed, not resolved).** An element read off a container whose base is a GUESSED root
+  (`o.dep.items[0]`, `.first`, `let ws = o.dep.items; for w in ws`) carries the guess: chained, the foreign
+  call discloses through R567(a)'s marker; locally, the release's join is kept and `Unknown dispatch:T.m` added.
+  Resolving it needs a typer for unannotated stored-property initialisers — not here.
+- **R912 is OPT-IN (`CANDOR_R912_ON=1`).** The class-typed implicit-`self` base read (`compO.count` reaching
+  `compO`'s getter, as `self.compO.count` does) is built and pinned, and OFF: on the corpus it adds 557 rows that
+  gain only the `Unknown` their getters carry (1.75% of 31,867 analysed units), inside the band that goes to a
+  person, and one row trades `dispatch:` for `dep:` (a reason-class change).
+
+EVIDENCE — `Tests/…/VeinBExpressionTypingProcessTests`: the fixture was compiled with `swiftc` and RUN (every
+defect cell performed its effect); 44 defect gates on unit and caller go 0 → 1 against 113e5b4 and v0.39.3, and
+every one reads 0 again with all twelve `CANDOR_<ROW>_OFF` switches set; controls keep their answer (then-branch
+and after-guard binders, the nominal R256 cell unhedged, non-guessed receivers unhedged). Chained R866/R618
+executed as SwiftPM packages.
+CORPUS (`bin/corpus-ab.py`, 22 entries / 31,867 analysed units standalone; 9 chained entries with dependency
+reports diffed), vs 113e5b4: standalone ADDED 128 REMOVED 0 CHANGED 1387, chained ADDED 85 REMOVED 0 CHANGED
+1236; vs v0.39.3 REMOVED 0 both arms. No `inferred` element lost, no `unknownWhy` reason retracted, no
+`invisible` module lost. Element-level removals: 54 call edges (9 are overloads a now-typed constructor argument
+excludes — e.g. swift-nio `and(value:)` → `and(_: EventLoopFuture)`, which Swift calls; the rest move with
+those) and 4 rows whose synthetic `interfaceUnion` entry became the real unit's row with the same effects.
+New charges, every one through a new edge into a real unit: standalone 83 rows gain a concrete effect (bucket 1),
+87 gain only `Unknown` (0.27%); chained 42 and 62. With every switch set the A/B is 0/0/0 both arms.
+NOT HERE: typing unannotated stored properties from their initialiser (measured: the generic-constructor field arm
+retracted 32 `dispatch:` hedges on swift-nio — a removal needing its own lane), the `Foo<T>.static()` type
+reference (retracted a reason), Kingfisher `NSCache` element typing (needs a platform signature), and the 8,193
+untyped member-call drops whose receivers are closure parameters and locals of untyped calls.
+
 ### ⚠ Fixed — a property or subscript read reaches a subclass's override, as a method call does (SOUNDNESS R903, R876)
 
 - **⚠ R903.** `b.pv` with `b: BaseP` (and `b[0]` on a class subscript) runs `SubP`'s `override` when the

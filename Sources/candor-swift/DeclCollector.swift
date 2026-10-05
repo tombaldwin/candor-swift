@@ -73,6 +73,12 @@ struct FnInfo {
     /// because no producer can publish under a key spelled from the CONSUMER's type-parameter name.
     var genericBounds: [String: String] = [:]
     var protoParams: [String: String] = [:]  // param name -> local protocol name
+    /// SOUNDNESS R866 — a parameter spelled as a protocol COMPOSITION (`_ t: any PSub & Sendable`) -> EVERY
+    /// member the composition names, local or not. `typeName` answers nil for a composition, and
+    /// `protoParams` keeps only the LOCALLY-declared members, so a composition whose callee lives on a
+    /// DEPENDENCY's protocol bound nothing and `t.go()` was dropped with no key and no `Unknown`. Read only
+    /// by CallCollector's additive composition arm (see `compositionParams` there).
+    var compositionParams: [String: [String]] = [:]
     /// SOUNDNESS R563 — a METATYPE parameter (`_ t: P.Type`) -> the type it is a metatype OF (`P`).
     ///
     /// `typeName`/`parameterTypeName` have no `MetatypeTypeSyntax` case, so `t` reaches `params` as
@@ -85,6 +91,9 @@ struct FnInfo {
     /// SOUNDNESS R585 (b6) — a parameter typed `[X.Type]`, so a `for t in ts` binder over it can be
     /// typed. The metatype twin of `arrayParams`.
     var metatypeArrayParams: [String: String] = [:]
+    /// SOUNDNESS R615 — a parameter typed `[K: X.Type]`, so `if let t = d[k] { t.m() }` can be typed. The
+    /// metatype twin of `dictParams`.
+    var metatypeDictParams: [String: String] = [:]
     var arrayParams: [String: String] = [:]  // param name -> ELEMENT type (a `[T]` param, for `for x in p`)
     var arrayParamsNested: [String: String] = [:]  // R278 — `[[T]]` param -> INNER element `T`
     var dictParams: [String: String] = [:]   // param name -> VALUE type (a `[K: V]` param, for `for (k,v)`)
@@ -287,6 +296,13 @@ final class DeclCollector: SyntaxVisitor {
     /// SOUNDNESS R563 — `"<Proto>.<member>"` for every protocol requirement whose declared type is a
     /// FUNCTION type. See the fill site for why an invocation of one must hedge rather than dispatch.
     var protocolFnTypedMembers: Set<String> = []
+    /// SOUNDNESS R578 — a protocol's PROPERTY requirement -> its declared NOMINAL type (`var body: Body { get }`
+    /// -> `Body`). Not a `fields` entry: a requirement has no storage and no body, and `fields` is read by
+    /// readers that assume both. An associated type, `Self` and a function type are not recorded — none of
+    /// them names a type a receiver can be resolved against.
+    var protocolPropTypes: [String: [String: String]] = [:]
+    /// SOUNDNESS R904 — a protocol's PROPERTY requirement names, whatever their type.
+    var protocolPropNames: [String: Set<String>] = [:]
     /// ⟨0.39⟩ Every locally-declared protocol's FULLY QUALIFIED path (`Backend`, `Term.Backend`) — the
     /// ⟨0.23⟩ `typeSurface` spelling, which SPEC §4 ⟨0.39⟩ makes the ONE wire spelling for a dispatched
     /// abstraction (obligation 2's key and `dispatchesOn`'s value take the same rule, and the clause
@@ -976,6 +992,12 @@ final class DeclCollector: SyntaxVisitor {
         localTypePaths.insert(protoPath)
         protocolPaths.insert(protoPath)       // ⟨0.39⟩ the wire spelling — see `protocolPaths`
         var methods = Set<String>()
+        // R578 — the protocol's ASSOCIATED TYPES and primary associated types: names that are not types.
+        var assocTypes = Set<String>()
+        for member in node.memberBlock.members {
+            if let a = member.decl.as(AssociatedTypeDeclSyntax.self) { assocTypes.insert(a.name.text) }
+        }
+        for p in node.primaryAssociatedTypeClause?.primaryAssociatedTypes ?? [] { assocTypes.insert(p.name.text) }
         for member in node.memberBlock.members {
             if let f = member.decl.as(FunctionDeclSyntax.self) { methods.insert(f.name.text) }
             // PROPERTY requirements (`var payload: Int { get }`) and SUBSCRIPT requirements — recorded
@@ -985,6 +1007,7 @@ final class DeclCollector: SyntaxVisitor {
                 for b in v.bindings {
                     if let n = b.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
                         protocolMethods[node.name.text, default: []].insert(n)
+                        protocolPropNames[node.name.text, default: []].insert(n)   // R904
                         // SOUNDNESS R563 — …and whether that requirement is FUNCTION-TYPED. `static var
                         // maker: (Int) -> Int { get }` is INVOKED (`P.maker(v)`), not dispatched: what
                         // runs is whatever closure the conformer stored, and a conformer satisfying it
@@ -996,6 +1019,11 @@ final class DeclCollector: SyntaxVisitor {
                         // give the SAME answer rather than a second, more confident one (§F1.3).
                         if let ann = b.typeAnnotation, typeName(ann.type).isFunction {
                             protocolFnTypedMembers.insert("\(node.name.text).\(n)")
+                        }
+                        // SOUNDNESS R578 — the requirement's declared type, for the receiver resolver.
+                        if let ann = b.typeAnnotation, let tn = typeName(ann.type).name, !typeName(ann.type).isFunction,
+                           tn != "Self", !assocTypes.contains(tn), !tn.hasPrefix("Self.") {
+                            protocolPropTypes[node.name.text, default: [:]][n] = tn
                         }
                     }
                 }
@@ -1483,9 +1511,12 @@ final class DeclCollector: SyntaxVisitor {
                 info.metatypeParams[pname] = base
             } else if let elem = metatypeArrayElementName(p.type) {
                 info.metatypeArrayParams[pname] = elem   // R585 (b6)
+            } else if let mv = metatypeDictValueName(p.type) {
+                info.metatypeDictParams[pname] = mv      // R615
             }
             info.paramNames.insert(pname)
             info.paramIndex[pname] = idx        // R178 — see `paramIndex`
+            if let comps = compositionTypeNames(p.type) { info.compositionParams[pname] = comps }   // R866
             // ordered signature for overload resolution: the param's simple type name (nil if unresolvable)
             // and whether it has a default (so a call may legitimately omit it).
             info.paramSig.append((t.name, p.defaultValue != nil, p.ellipsis != nil))

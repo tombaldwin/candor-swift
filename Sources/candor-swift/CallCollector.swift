@@ -205,6 +205,10 @@ final class CallCollector: SyntaxVisitor {
     /// `arrayElem` has to `vars`, and it rides the same lifecycle for the same reason: a stale entry
     /// would give the NEXT loop over a same-named binding this one's element type.
     var metatypeArrayElem: [String: String] = [:]
+    /// SOUNDNESS R615 — THE NAME OF A BINDING THAT HOLDS A DICTIONARY OF METATYPES, AND THE TYPE EACH VALUE
+    /// IS THE METATYPE OF (`let d: [String: CBase.Type]`). `metatypeArrayElem`'s dictionary twin, on the same
+    /// lifecycle for the same reason.
+    var metatypeDictValue: [String: String] = [:]
     /// SOUNDNESS R610 — **THE NAMES WHOSE TYPE IS A `rootOf` GUESS RATHER THAN A RESOLUTION.**
     /// `if let l = c.loop` types `l` from `rootOf(c.loop)`, which for an unexplained `.loop` hop on a
     /// FOREIGN `c` answers the OUTER BASE's type (see `rootOf`'s `opaqueHop` note). `vars` records the
@@ -438,6 +442,48 @@ final class CallCollector: SyntaxVisitor {
     /// `DeclCollector.protocolFnTypedMembers`). `P.maker(v)` INVOKES a stored closure; it does not
     /// dispatch to a witness body, so it takes the same honest `Unknown` the concrete spelling takes.
     let protoFnTypedMembers: Set<String>
+    /// SOUNDNESS R866 — this unit's COMPOSITION parameters (`_ t: any PSub & Sendable`) -> every member
+    /// the composition names. Read ONLY by the additive composition arm of the member-call and
+    /// property-read visitors, which asks each NON-local member as a dependency owner — the one question
+    /// no other index can ask, because `typeName` answers nil for a composition and `protoTyped` keeps the
+    /// local members only. Immutable: a binder that rebinds the name is detected through `binderShadow` and
+    /// `vars`, the two facts every other parameter-seeded reader already consults.
+    let compositionParams: [String: [String]]
+    /// SOUNDNESS R256 — Type -> stored fields typed by a generic parameter that one same-type requirement binds
+    /// to a NOMINAL type and another to a FUNCTION type. `fields` keeps the nominal reading (the member calls on
+    /// it resolve); this set says an invocation of the field may run a closure, which only the hedge answers.
+    let genericCallableFields: [String: Set<String>]
+    /// SOUNDNESS R906 — local declared CLASS -> its transitive local superclasses (the Driver's `supertypesOf`,
+    /// protocols removed). Read only by `nearestCommonClass`.
+    let classSupertypes: [String: Set<String>]
+    /// SOUNDNESS R578 — a LOCAL protocol's property requirements (own and inherited) -> declared type. Read
+    /// by `rootOf`'s two receiver arms: an explicit `self.body` / `p.body` whose root is the protocol, and an
+    /// implicit `body` inside `extension P`. Both answered NOTHING before — the protocol has no stored field
+    /// to walk, so the chain kept the PROTOCOL as the root (and keyed `P.go`, which `P` does not declare) or
+    /// dropped the bare name outright.
+    let protoReqFieldTypes: [String: [String: String]]
+    /// SOUNDNESS R904 — a LOCAL protocol -> every PROPERTY requirement it declares or inherits, whatever its type.
+    let protoReqProps: [String: Set<String>]
+    /// R851 — this unit's parameter names (a parameter is a local binding the `else` would revert to).
+    let paramNamesR851: Set<String>
+    /// SOUNDNESS R578 — THE FLOOR. For a member-access receiver the requirement arm typed, the protocol the
+    /// release keyed it on. The member-call site re-emits that release dispatch beside the new one, so a
+    /// protocol that ALSO declares the called member keeps the answer it had (§0.39.3 monotone floor).
+    private var reqFloor: [SyntaxIdentifier: String] = [:]
+    /// SOUNDNESS R618 — set by `elementTypeOf`'s field arm when the container it read hangs off a GUESSED root
+    /// (`rootOf(base).opaqueHop`): the element type it then answers is a guess too. `elementTypeOf` returns
+    /// `(name, mono)` and has no channel for that, so the three `rootOf` element arms read this flag around
+    /// their call (saved and OR-ed back, so a nested walk cannot clear an outer one).
+    private var elementWalkedGuess = false
+    private var forElemGuess = false
+    /// SOUNDNESS R618 — container BINDINGS whose element type was read off a GUESSED root (`let ws =
+    /// o.dep.items`), so iterating them stays a guess. Moves with `arrayElem` (`setArrayElem` clears it).
+    private var guessElem: Set<String> = []
+    /// SOUNDNESS R618/R907 — receiver EXPRESSIONS and NAMES typed by an element walk over a guessed root. Read by
+    /// the typed LOCAL receiver branch, which for these discloses beside the release's (wrong) join: a guessed
+    /// root on a local type joins `Outer.member` whatever `.dep` really holds (R907, executed).
+    private var elemGuessRecv: Set<SyntaxIdentifier> = []
+    private var elemGuessVars: Set<String> = []
     let returns: [String: String]   // unambiguous factory return types (the candor-scan move)
     /// SOUNDNESS R585 — the four DECLARATION-side metatype indexes (b4 field, b6 array element,
     /// b7 global, b9 return). Each is the metatype twin of an existing index that `typeName` cannot
@@ -628,6 +674,10 @@ final class CallCollector: SyntaxVisitor {
     /// bare name is local. Read only by the R847 dependency-join test; local resolution is untouched.
     private var caseSnapshots: [SyntaxIdentifier: Set<String>] = [:]
     private var caseElseOut: Set<String> = []
+    /// SOUNDNESS R851 — for an `if`/`guard` statement, the TYPE bindings (and protocol type) of every name its
+    /// conditions bind, as they stood BEFORE the conditions ran. The statement's `else` is outside those
+    /// binders' scope — there Swift reads the OUTER binding — so the else block is walked with these put back.
+    private var elseTypeSnapshots: [SyntaxIdentifier: [(name: String, type: TypeBinding, proto: String?)]] = [:]
     /// R847 — the bare reads that were NOT bound locally at the point of reading: the only ones the chained
     /// global-read join may answer from a dependency.
     var depGlobalReads: Set<String> = []
@@ -667,6 +717,10 @@ final class CallCollector: SyntaxVisitor {
          localProtocols: Set<String>, protoBoundParams: [String: String] = [:],
          typeBoundParams: [String: String] = [:],
          protoFnTypedMembers: Set<String> = [],
+         protoReqFieldTypes: [String: [String: String]] = [:],
+         protoReqProps: [String: Set<String>] = [:],
+         genericCallableFields: [String: Set<String>] = [:],
+         classSupertypes: [String: Set<String>] = [:],
          returns: [String: String],
          metatypeReturns: [String: String] = [:],
          globalMetatypes: [String: String] = [:],
@@ -728,6 +782,7 @@ final class CallCollector: SyntaxVisitor {
         self.opaqueElem = info.opaqueArrayParams
         self.arrayElem = info.arrayParams
         self.metatypeArrayElem = info.metatypeArrayParams   // R585 (b6) — seeded like `arrayParams`
+        self.metatypeDictValue = Self.r615Off ? [:] : info.metatypeDictParams   // R615 — seeded like `dictParams`
         self.metatypeBinders = Self.r704Off ? [:] : metatypeParamsForeign   // R704 (b1) — see the parameter
         self.arrayElemNested = info.arrayParamsNested   // R278
         self.dictElem = info.dictParams
@@ -750,6 +805,12 @@ final class CallCollector: SyntaxVisitor {
         self.protoBoundParams = protoBoundParams
         self.typeBoundParams = typeBoundParams
         self.protoFnTypedMembers = protoFnTypedMembers
+        self.compositionParams = Self.r866Off ? [:] : info.compositionParams   // R866
+        self.protoReqFieldTypes = Self.r578Off ? [:] : protoReqFieldTypes      // R578
+        self.protoReqProps = protoReqProps                                      // R904
+        self.paramNamesR851 = info.paramNames                                   // R851
+        self.genericCallableFields = Self.r256Off ? [:] : genericCallableFields // R256
+        self.classSupertypes = classSupertypes                                  // R906
         self.returns = returns
         self.enclosingType = info.enclosingType
         self.bodyRootID = info.body?.id
@@ -885,13 +946,59 @@ final class CallCollector: SyntaxVisitor {
     /// by recursing through an index this one does not have, and inventing a second, partial copy of
     /// that walk is the two-implementations-of-one-question shape this register keeps paying for
     /// (§F1.3). Stated as the residual it is rather than left to be discovered.
+    ///
+    /// SOUNDNESS R615 — …AND IT NOW IS FOLLOWED, by the walk itself rather than by a copy of it: this asks
+    /// `elementTypeOf` in its metatype mode, whose leaf arms are exactly the three name arms that used to
+    /// live here and whose structural arms are the instance walk's own. `CANDOR_R615_OFF=1` restores the
+    /// name-shaped answer.
     private func metatypeElementOf(_ seq: ExprSyntax) -> String? {
-        guard !Self.r585Off, let dr = Self.peel(seq).as(DeclReferenceExprSyntax.self) else { return nil }
+        guard !Self.r585Off else { return nil }
+        if !Self.r615Off { return elementTypeOf(seq, metatype: true)?.name }
+        guard let dr = Self.peel(seq).as(DeclReferenceExprSyntax.self) else { return nil }
         let n = dr.baseName.text
         guard vars[n] == nil, arrayElem[n] == nil else { return nil }   // an ordinary answer wins
         if let e = metatypeArrayElem[n] { return e }
         if let et = enclosingType, let e = fieldMetatypeArrayElem[et]?[n] { return e }
         return globalMetatypeArrayElem[n]
+    }
+
+    /// SOUNDNESS R615 — the type each VALUE of a dictionary-of-metatypes EXPRESSION is the metatype of. The
+    /// name-shaped readings only (a local or parameter `[K: X.Type]`), behind the same "an ordinary answer
+    /// wins" guard the array twin has.
+    private func metatypeDictValueOf(_ expr: ExprSyntax, _ depth: Int = 0) -> String? {
+        guard !Self.r615Off, depth <= 200, let dr = Self.peel(expr).as(DeclReferenceExprSyntax.self) else { return nil }
+        let n = dr.baseName.text
+        guard vars[n] == nil, dictElem[n] == nil else { return nil }
+        return metatypeDictValue[n]
+    }
+
+    /// SOUNDNESS R615 — the metatype ONE element of a container-of-metatypes expression yields: `ts.first`,
+    /// `ts.popLast()`, `ts[0]`, `d[k]`. The metatype twin of `elementAccessorType` plus `rootOf`'s subscript
+    /// arm, through the same container recogniser (`elementAccessorContainer`) and the same walk.
+    private func metatypeElementAccess(_ expr: ExprSyntax, _ depth: Int = 0) -> String? {
+        guard !Self.r615Off, !Self.r585Off, depth <= 200 else { return nil }
+        let e = Self.peel(expr)
+        var r: String? = nil
+        if let container = Self.elementAccessorContainer(e) {
+            r = elementTypeOf(container, depth + 1, metatype: true)?.name
+        } else if let sub = e.as(SubscriptCallExprSyntax.self) {
+            r = elementTypeOf(sub.calledExpression, depth + 1, metatype: true)?.name
+                ?? metatypeDictValueOf(sub.calledExpression, depth + 1)
+        }
+        if let r { vbHit("R615", "\(e.trimmedDescription.prefix(50)) -> \(r)") }
+        return r
+    }
+
+    /// SOUNDNESS R619 — may a metatype base resolved at an EXPLICIT-receiver or DIRECT-call site be a LOCAL
+    /// PROTOCOL? `metatypeBaseResolvable` excludes it because the BINDER spelling has its own site
+    /// (`typeReceiverProto`); the field read `b.p` and the call `mkP()` have no such site, so excluding the
+    /// protocol there left no site at all. The answer routes through `rootOf` to the `localProtocols` receiver
+    /// branch, the same bounded CHA a protocol-typed value takes.
+    private func metatypeBaseAnswerable(_ base: String) -> Bool {
+        if metatypeBaseResolvable(base) { return true }
+        guard !Self.r619Off, localProtocols.contains(base) else { return false }
+        vbHit("R619", base)
+        return true
     }
 
     /// SOUNDNESS R585 — the type an EXPRESSION's metatype value stands for, or nil. The binder-side
@@ -921,6 +1028,18 @@ final class CallCollector: SyntaxVisitor {
         }
         // `let u = t` — a copy of a binding that already holds one.
         if let dr = v.as(DeclReferenceExprSyntax.self) { return metatypeBinder(dr.baseName.text) }
+        // SOUNDNESS R738 — `let u = b.t`: a stored property of METATYPE type, read through an explicit
+        // receiver. The inline `b.t.validate()` resolves through `rootOf`'s field-metatype arm; the bound
+        // spelling reached none of the three readings above and the copy was untyped. Same index, same
+        // answer.
+        if !Self.r738Off, let ma = v.as(MemberAccessExprSyntax.self), let base = ma.base,
+           let rt = rootOf(base).root, let mb = fieldMetatypes[rt]?[ma.declName.baseName.text] {
+            vbHit("R738", "\(rt).\(ma.declName.baseName.text) -> \(mb)")
+            return mb
+        }
+        // SOUNDNESS R615 — `if let t = ts.first`, `let t = ts[0]`, `if let t = d[k]`: one element of a
+        // container of metatypes.
+        if let mb = metatypeElementAccess(v) { return mb }
         return nil
     }
 
@@ -1174,6 +1293,15 @@ final class CallCollector: SyntaxVisitor {
                 }
                 return (bound, false, [n], false, false)
             }
+            // SOUNDNESS R578 — an IMPLICIT-`self` read of a PROPERTY REQUIREMENT inside `extension P`: `body`
+            // there is `self.body`, whose declared type the protocol states. Asked after every binding a name
+            // can have (a local — typed or not — a field, a global, a generic or metatype binder), so it can
+            // only answer where the release answered nothing at all.
+            if let et = enclosingType, localProtocols.contains(et), !isBoundLocal(n),
+               let t = protoReqFieldTypes[et]?[n] {
+                vbHit("R578", "implicit \(et).\(n) -> \(t)")
+                return (t, true, [n], false, false)
+            }
             // a bare TYPE/alias reference (`FM.default`, the base of a static-member chain). The
             // typealias resolution that used to be spelled HERE is now the wrapper's job — R97: this arm
             // having it, and the other arms not, is exactly how the bug was shaped.
@@ -1200,7 +1328,7 @@ final class CallCollector: SyntaxVisitor {
             // fell through to the ENCLOSING type. `box.t.validate()` / `self.t.validate()`, the explicit
             // spellings of the implicit-self one `metatypeBinder` answers.
             if !Self.r585Off, let rt = inner.root, let mb = fieldMetatypes[rt]?[member],
-               metatypeBaseResolvable(mb) {                                   // R704 — the dep-declared axis
+               metatypeBaseAnswerable(mb) {                                   // R704 — the dep-declared axis; R619
                 if Self.r585Probe {
                     FileHandle.standardError.write("R585HIT field \(rt).\(member) -> \(mb)\n".data(using: .utf8)!)
                 }
@@ -1223,8 +1351,16 @@ final class CallCollector: SyntaxVisitor {
             // established by `fields` — must win. Only a member the field index cannot explain
             // reaches here, and it answers only when the RECEIVER is a recorded container, so this
             // can add a type and never replace a known one.
-            if let e = elementAccessorType(ExprSyntax(ma), depth) {
+            let savedPG = elementWalkedGuess; elementWalkedGuess = false
+            let pacc = elementAccessorType(ExprSyntax(ma), depth)
+            let paccGuess = elementWalkedGuess; elementWalkedGuess = savedPG || paccGuess
+            if let e = pacc {
+                if paccGuess { vbHit("R618", "property-accessor \(e.name)"); elemGuessRecv.insert(ExprSyntax(ma).id) }
                 return (e.name, true, [], e.mono, inner.opaqueHop)
+            }
+            // SOUNDNESS R615 — the same accessor on a container of METATYPES: a TYPE-position receiver.
+            if let mb = metatypeElementAccess(ExprSyntax(ma), depth), metatypeBaseAnswerable(mb) {
+                return (mb, false, [], false, inner.opaqueHop)
             }
             // SOUNDNESS R537 — A DICTIONARY PAIR'S `.value`: `d.first?.value.emitN()`,
             // `d.popFirst()?.value`. A `[K: V]`'s ELEMENT is a `(key, value)` tuple, which has no type
@@ -1236,6 +1372,15 @@ final class CallCollector: SyntaxVisitor {
             if member == "value", let container = Self.elementAccessorContainer(ma.base),
                let v = dictValueOf(container, depth + 1) {
                 return (v, true, [], false, inner.opaqueHop)
+            }
+            // SOUNDNESS R578 — `self.body` / `p.body` where the root is a LOCAL PROTOCOL declaring `body` as a
+            // property requirement: the hop's type is the requirement's declared type, not the protocol. The
+            // release kept the protocol (a guess) and keyed `P.go`, which `P` does not declare; the floor for
+            // that is re-emitted at the call site through `reqFloor`.
+            if let rt = inner.root, localProtocols.contains(rt), let t = protoReqFieldTypes[rt]?[member] {
+                vbHit("R578", "explicit \(rt).\(member) -> \(t)")
+                reqFloor[ExprSyntax(ma).id] = rt
+                return (t, true, inner.path + [member], false, inner.opaqueHop)
             }
             return (inner.root, inner.isVar, inner.path + [member], inner.mono, true)
         }
@@ -1271,6 +1416,15 @@ final class CallCollector: SyntaxVisitor {
                 }
                 return (bound, false, inner.path, inner.mono, inner.opaqueHop)
             }
+            // SOUNDNESS R905 — `GenBox<Int>()` CONSTRUCTS a `GenBox`, as `GenBox()` does. The callee is a
+            // `GenericSpecializationExpr` rather than a `DeclReference`, so the ctor arm below never saw it and
+            // the value was untyped — Kingfisher's `let storage = NSCache<NSString, StorageObject<T>>()`.
+            if !Self.r905Off, let g = call.calledExpression.as(GenericSpecializationExprSyntax.self),
+               let tp = dottedTypePath(Syntax(Self.peel(g.expression))),
+               tp.split(separator: ".").last?.first?.isUppercase == true {
+                vbHit("R905", "ctor \(tp)")
+                return (tp, true, [tp], false, false)
+            }
             if let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self) {
                 let n = ctor.baseName.text
                 // `Proc()` where `typealias Proc = Process` — the ctor types the value as the aliased
@@ -1281,7 +1435,7 @@ final class CallCollector: SyntaxVisitor {
                 // (`typeName` answers nil for `-> CBase.Type`), so `mkC().validate()` resolved to no
                 // root at all. `isVar: false` — this is a TYPE-position receiver, exactly like the
                 // metatype parameter and the literal `CBase.validate()`.
-                if !Self.r585Off, let mr = metatypeReturns[n], metatypeBaseResolvable(mr) {   // R704
+                if !Self.r585Off, let mr = metatypeReturns[n], metatypeBaseAnswerable(mr) {   // R704; R619
                     if Self.r585Probe {
                         FileHandle.standardError.write("R585HIT return \(n) -> \(mr)\n".data(using: .utf8)!)
                     }
@@ -1347,19 +1501,33 @@ final class CallCollector: SyntaxVisitor {
             // breach the "never guess from a call's return" rule the resolver is built on, for the
             // reason `callableValue`'s twin of this arm already gives: the answer comes from the
             // RECEIVER's recorded element type, not from the callee's signature.
-            if let e = elementAccessorType(expr, depth) {
-                return (e.name, true, [], e.mono, false)
+            let savedGuess = elementWalkedGuess; elementWalkedGuess = false
+            let acc = elementAccessorType(expr, depth)
+            let accGuess = elementWalkedGuess; elementWalkedGuess = savedGuess || accGuess
+            if let e = acc {
+                if accGuess { vbHit("R618", "accessor \(e.name)"); elemGuessRecv.insert(expr.id) }
+                return (e.name, true, [], e.mono, accGuess)   // R618 — was hard-coded `false`
+            }
+            if let mb = metatypeElementAccess(expr, depth), metatypeBaseAnswerable(mb) {   // R615
+                return (mb, false, [], false, false)
             }
             return (nil, false, [], false, false)
         }
         // `coll[i]` — an array subscript yields the element type, a dictionary subscript the value
         // type (`cs[0].send()` / `d["k"]?.send()` resolved against the bare base and dropped to pure).
         if let sub = expr.as(SubscriptCallExprSyntax.self) {
-            if let e = elementTypeOf(sub.calledExpression, depth + 1) {
-                return (e.name, true, [], e.mono, false)
+            let savedGuess = elementWalkedGuess; elementWalkedGuess = false
+            let el = elementTypeOf(sub.calledExpression, depth + 1)
+            let elGuess = elementWalkedGuess; elementWalkedGuess = savedGuess || elGuess
+            if let e = el {
+                if elGuess { vbHit("R618", "subscript \(e.name)"); elemGuessRecv.insert(expr.id) }
+                return (e.name, true, [], e.mono, elGuess)   // R618 — was hard-coded `false`
             }
             if let v = dictValueOf(sub.calledExpression, depth + 1) {
                 return (v, true, [], false, false)   // a `[K: V]` VALUE is never bound-resolved (see dictValueOf)
+            }
+            if let mb = metatypeElementAccess(ExprSyntax(sub), depth), metatypeBaseAnswerable(mb) {   // R615
+                return (mb, false, [], false, false)
             }
         }
         // SwiftParser leaves operators UNFOLDED, so `x as! T` and `cond ? a : b` are SequenceExprs:
@@ -1443,9 +1611,48 @@ final class CallCollector: SyntaxVisitor {
                     }
                     return (ra, true, [], a.mono && b.mono, a.opaqueHop || b.opaqueHop)
                 }
+                // SOUNDNESS R906 (R589's live residue) — TWO DIFFERENT LOCAL CLASSES join to their NEAREST COMMON
+                // SUPERCLASS, which is the type Swift itself gives `c ? CC() : CD()` (two structs, or two classes
+                // with no common superclass, do not compile without a contextual type). The member call then
+                // takes the class path the literal `CB` spelling takes: `CB.emitT` plus the `subtypesOf`
+                // fan-out, which reaches both arms' overrides. Answers only where the agreement test above
+                // refused — a ternary it typed keeps its answer — and only for a UNIQUE nearest ancestor.
+                if !Self.r906Off, let ra = a.root, let rb = b.root, ra != rb, a.isVar, b.isVar,
+                   let j = nearestCommonClass(ra, rb) {
+                    vbHit("R906", "\(ra)|\(rb) -> \(j)")
+                    return (j, true, [], false, a.opaqueHop || b.opaqueHop)
+                }
             }
         }
         return (nil, false, [], false, false)
+    }
+
+    /// SOUNDNESS R904 — does local protocol `p` (or a protocol it inherits) declare `member` as a PROPERTY
+    /// requirement? Only those dispatch to a conformer's getter; a member the protocol does not name is the
+    /// extension's own, statically bound, and already edged as `P.member`.
+    private func protoReqDeclares(_ p: String, _ member: String) -> Bool {
+        protoReqProps[p]?.contains(member) == true
+    }
+
+    /// SOUNDNESS R579 — `<expr>.joined(separator: "<string literal>")`, a project-declared `joined` excepted.
+    private static func isStringJoin(_ v: ExprSyntax) -> Bool {
+        guard let call = peel(v).as(FunctionCallExprSyntax.self),
+              let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
+              ma.declName.baseName.text == "joined", call.arguments.count == 1,
+              let only = call.arguments.first, only.label?.text == "separator" else { return false }
+        return peel(only.expression).is(StringLiteralExprSyntax.self)
+    }
+
+    /// SOUNDNESS R906 — the nearest common SUPERCLASS of two local classes (either may be the other's
+    /// ancestor), or nil when there is none or no single nearest one. `classSupertypes` is the Driver's
+    /// transitive `supertypesOf` restricted to declared, non-protocol types.
+    private func nearestCommonClass(_ x: String, _ y: String) -> String? {
+        let sx = classSupertypes[x] ?? [], sy = classSupertypes[y] ?? []
+        if sx.contains(y) { return y }
+        if sy.contains(x) { return x }
+        let common = sx.intersection(sy)
+        let nearest = common.filter { c in !common.contains { d in d != c && (classSupertypes[d]?.contains(c) ?? false) } }
+        return nearest.count == 1 ? nearest.first : nil
     }
 
     /// SOUNDNESS R589 — the ELSE tail of an UNFOLDED ternary, as ONE expression the `rootOf` arms can
@@ -1894,6 +2101,90 @@ final class CallCollector: SyntaxVisitor {
     /// stderr line per binder this row resolves that R563/R584 did not, so an A/B over a corpus that
     /// contains none of the shape says so out loud instead of reporting a flattering zero.
     static let r585Probe = ProcessInfo.processInfo.environment["CANDOR_R585_PROBE"] != nil
+    /// §1b kill switches for vein B (SOUNDNESS R866 and siblings): each restores 113e5b4's answer at its site.
+    static let r866Off = ProcessInfo.processInfo.environment["CANDOR_R866_OFF"] != nil
+    static let r615Off = ProcessInfo.processInfo.environment["CANDOR_R615_OFF"] != nil
+    static let r619Off = ProcessInfo.processInfo.environment["CANDOR_R619_OFF"] != nil
+    static let r738Off = ProcessInfo.processInfo.environment["CANDOR_R738_OFF"] != nil
+    static let r579Off = ProcessInfo.processInfo.environment["CANDOR_R579_OFF"] != nil
+    static let r578Off = ProcessInfo.processInfo.environment["CANDOR_R578_OFF"] != nil
+    static let r256Off = ProcessInfo.processInfo.environment["CANDOR_R256_OFF"] != nil
+    static let r906Off = ProcessInfo.processInfo.environment["CANDOR_R906_OFF"] != nil
+    static let r851Off = ProcessInfo.processInfo.environment["CANDOR_R851_OFF"] != nil
+    static let r618Off = ProcessInfo.processInfo.environment["CANDOR_R618_OFF"] != nil
+    /// SOUNDNESS R912 is OPT-IN (`CANDOR_R912_ON=1`), and that is a pricing decision, not a doubt about the
+    /// mechanism: measured over the 22-entry corpus it adds the accessor edge on 947 rows, 557 of which gain
+    /// ONLY the `Unknown` their getter already carries (1.75% of 31,867 analysed units), inside the band the
+    /// disclosure ruling sends to a person rather than shipping. Its R904 half — the protocol-requirement read
+    /// inside `extension P` — is priced separately and ships (`CANDOR_R904_OFF=1` reverts it).
+    static let r912Off = ProcessInfo.processInfo.environment["CANDOR_R912_ON"] == nil
+    static let r904Off = ProcessInfo.processInfo.environment["CANDOR_R904_OFF"] != nil
+    static let r905Off = ProcessInfo.processInfo.environment["CANDOR_R905_OFF"] != nil
+    /// SOUNDNESS R866 — the NON-local members of the composition a receiver NAME is typed by, when that
+    /// name is still the parameter (no binder has rebound it and nothing typed it). Each is asked as a
+    /// dependency OWNER, exactly as `_ t: any PSub` asks `PSub`; a local member is already answered by
+    /// `protoTyped`'s bounded CHA and is not asked twice.
+    private func foreignCompositionMembers(_ base: ExprSyntax?) -> [String] {
+        guard let n = base.map(Self.peel)?.as(DeclReferenceExprSyntax.self)?.baseName.text,
+              let comps = compositionParams[n], vars[n] == nil, !binderShadow.contains(n) else { return [] }
+        let out = comps.filter { !localProtocols.contains($0) && !localTypes.contains($0) }
+        if !out.isEmpty { vbHit("R866", "\(n): \(out)") }
+        return out
+    }
+
+    /// VEIN B REACH — the receiver shape of every member call the terminal arm drops with no owner, no
+    /// marker and no disclosure. Classification only; never changes an answer.
+    static let veinBProbe = ProcessInfo.processInfo.environment["CANDOR_VEINB_PROBE"] != nil
+    /// VEIN B REACH — one stderr line each time a vein-B arm ANSWERS, so an A/B over a corpus with none of
+    /// the shape says so instead of reading as a safely-inert change.
+    func vbHit(_ row: String, _ detail: @autoclosure () -> String) {
+        guard Self.veinBProbe else { return }
+        FileHandle.standardError.write("VBHIT\t\(row)\t\(detail())\n".data(using: .utf8)!)
+    }
+    /// VEIN B REACH — why a member-access receiver's root is a GUESS: the last hop names a field this
+    /// scan RECORDED with no usable type (`field-nil`: a container or an unannotated non-ctor initializer), a
+    /// name the type does not record at all (`unrecorded`), or something else.
+    func guessHopKind(_ raw: ExprSyntax) -> String {
+        let e = Self.peel(raw)
+        guard let ma = e.as(MemberAccessExprSyntax.self) else { return "other:\(e.kind)" }
+        let r = ma.base.map { rootOf($0) }
+        guard let rt = r?.root else { return "noinner" }
+        if r?.opaqueHop == true { return "chained-guess" }
+        let m = ma.declName.baseName.text
+        if let f = fields[rt]?[m] { return f.name == nil ? (f.isFunction ? "field-fn" : "field-nil") : "field-typed" }
+        return rt.first?.isUppercase == true && (ma.base.map { Self.peel($0).is(DeclReferenceExprSyntax.self) } ?? false) && r?.isVar == false ? "static-or-case" : "unrecorded"
+    }
+    func probeShape(_ raw: ExprSyntax) -> String {
+        let e = Self.peel(raw)
+        if let dr = e.as(DeclReferenceExprSyntax.self) {
+            let n = dr.baseName.text
+            if n == "self" || n == "Self" { return "self" }
+            if literalLocals.contains(n) || boundLocals.contains(n) { return "local" }
+            if let et = enclosingType, let f = fields[et]?[n] { return f.isFunction ? "field-fn" : "field-untyped" }
+            if localProtocols.contains(enclosingType ?? "") { return "name-in-proto-ext" }
+            if n.first?.isUppercase == true { return "Name" }
+            return "name"
+        }
+        if let ma = e.as(MemberAccessExprSyntax.self) {
+            guard ma.base != nil else { return "implicit-member" }
+            let r = rootOf(e)
+            return "member(\(r.root == nil ? "noroot" : (r.isVar ? "var" : "lower")))"
+        }
+        if let c = e.as(FunctionCallExprSyntax.self) {
+            if let ma = c.calledExpression.as(MemberAccessExprSyntax.self) {
+                return "call.\(ma.declName.baseName.text)"
+            }
+            if let dr = c.calledExpression.as(DeclReferenceExprSyntax.self) {
+                return dr.baseName.text.first?.isUppercase == true ? "ctor" : "freecall"
+            }
+            return "call-other"
+        }
+        if e.is(SubscriptCallExprSyntax.self) { return "subscript" }
+        if e.is(StringLiteralExprSyntax.self) { return "strlit" }
+        if e.is(SequenceExprSyntax.self) { return "sequence" }
+        if e.is(ArrayExprSyntax.self) || e.is(DictionaryExprSyntax.self) { return "collit" }
+        return "\(e.kind)"
+    }
     /// SOUNDNESS R585 §1b KILL SWITCH — degrades every metatype BINDER other than the parameter clause
     /// back to nil, i.e. restores exactly the pre-fix behaviour (b2/b3/b5/b6/b7/b8/b9 ABSENT).
     /// `R585CalibrationTests` asserts the fixture resolves; running the suite with `CANDOR_R585_OFF=1`
@@ -3418,12 +3709,36 @@ final class CallCollector: SyntaxVisitor {
         return nil
     }
 
-    private func elementTypeOf(_ expr: ExprSyntax, _ depth: Int = 0) -> (name: String, mono: Bool)? {
+    ///
+    /// SOUNDNESS R615 — `metatype: true` ASKS THE SAME WALK OF THE METATYPE INDEXES. One resolver, two
+    /// index families: every STRUCTURAL arm below (a transform, a conversion, `lazy`, a `[E]` field of a typed
+    /// receiver, an array literal) is the same fact for `[CBase.Type]` as for `[CBase]`, and only the LEAF
+    /// lookups differ — `metatypeArrayElem`/`fieldMetatypeArrayElem`/`globalMetatypeArrayElem` in place of
+    /// their instance twins, and `X.self` literals in place of instances. A second, partial copy of this walk
+    /// for metatypes is what R585 declined to write, and what left R615's four spellings silent. Arms with no
+    /// metatype twin (`.values` of an instance dictionary, a tuple slot, the nested-container arms) answer nil
+    /// in metatype mode. The answer is the METATYPE's base; the caller decides what a metatype receiver means.
+    private func elementTypeOf(_ expr: ExprSyntax, _ depth: Int = 0, metatype: Bool = false) -> (name: String, mono: Bool)? {
         if depth > 200 { return nil }   // bounds the rootOf ⇄ elementTypeOf recursion (see rootOf)
         let e = Self.peel(expr)
+        if metatype, let dr = e.as(DeclReferenceExprSyntax.self) {
+            let n = dr.baseName.text
+            guard vars[n] == nil, arrayElem[n] == nil else { return nil }   // an ordinary answer wins
+            if let t = metatypeArrayElem[n] { return (t, false) }
+            if let et = enclosingType, let t = fieldMetatypeArrayElem[et]?[n] { return (t, false) }
+            if let t = globalMetatypeArrayElem[n] { return (t, false) }
+            return nil
+        }
+        if metatype, let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base,
+           ma.declName.baseName.text == "values", let v = metatypeDictValueOf(base, depth + 1) {
+            return (v, false)
+        }
         if let dr = e.as(DeclReferenceExprSyntax.self) {
             let n = dr.baseName.text
-            if let t = arrayElem[n] { return (t, opaqueElem.contains(n)) }
+            if let t = arrayElem[n] {
+                if guessElem.contains(n) { elementWalkedGuess = true }   // R618 — the copy carries the guess
+                return (t, opaqueElem.contains(n))
+            }
             // implicit-self field. `fieldArrayElem` records the element SPELLING and never resolves it
             // through `typeGenericBounds`, so a `[T]` field's element is `T` (resolves to nothing) and
             // there is no monomorphized protocol name to guard — hence `false`, not an omission.
@@ -3445,19 +3760,21 @@ final class CallCollector: SyntaxVisitor {
         // container sibling of the `for (k, v)` pair form. Without this the loop var was untyped and a
         // `v.go()` over `[K: any Doer]`/`[K: T where T: Doer]` read silent-pure. `.keys` is the KEY type
         // (dispatch-irrelevant for the value payload) so only `.values` carries.
-        if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base,
+        if !metatype, let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base,
            ma.declName.baseName.text == "values", let v = dictValueOf(base, depth + 1) {
             return (v, false)
         }
         // R269 — a LOCAL TUPLE's slot: `let t = (cbs, 1); for c in t.0`. Asked before the field arm
         // below, which resolves `t` to a TYPE and would answer about a member of that type instead.
-        if let ma = e.as(MemberAccessExprSyntax.self),
+        if !metatype, let ma = e.as(MemberAccessExprSyntax.self),
            let baseDR = ma.base?.as(DeclReferenceExprSyntax.self),
            let slot = tupleArrayElem[baseDR.baseName.text]?[ma.declName.baseName.text] {
             return slot
         }
         if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base,
-           let bt = rootOf(base, depth + 1).root, let t = fieldArrayElem[bt]?[ma.declName.baseName.text] {
+           case let br = rootOf(base, depth + 1), let bt = br.root,
+           let t = (metatype ? fieldMetatypeArrayElem : fieldArrayElem)[bt]?[ma.declName.baseName.text] {
+            if br.opaqueHop, !Self.r618Off { elementWalkedGuess = true }   // R618 — a field of a GUESSED root
             return (t, false)  // a `[E]` field of ANY typed receiver: `self.items` / `pool.clients` / `ps[0].items`
         }
         if let call = e.as(FunctionCallExprSyntax.self),
@@ -3469,7 +3786,7 @@ final class CallCollector: SyntaxVisitor {
            // rule: when a name on a list is wrong, the FAMILY goes into one fixture, not the name.
            ["filter", "sorted", "reversed", "shuffled", "prefix", "suffix", "dropFirst", "dropLast", "drop"]
                .contains(ma.declName.baseName.text), let base = ma.base {
-            return elementTypeOf(base, depth + 1)  // element-preserving transform → same element type
+            return elementTypeOf(base, depth + 1, metatype: metatype)  // element-preserving transform → same element type
         }
         // SOUNDNESS R537 — A CONTAINER CONVERSION: `Array(hs)`, `Array(d.values)`, `Set(hs)`. The
         // conversion preserves the element, and the element index is exactly what it lost: `for g in
@@ -3481,12 +3798,12 @@ final class CallCollector: SyntaxVisitor {
            let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self),
            Self.CONTAINER_CONVERSIONS.contains(ctor.baseName.text),
            call.arguments.count == 1, let only = call.arguments.first, only.label == nil {
-            return elementTypeOf(only.expression, depth + 1)
+            return elementTypeOf(only.expression, depth + 1, metatype: metatype)
         }
         // SOUNDNESS R537 — `joined()` FLATTENS ONE LEVEL, so a `[[T]]`'s flattening yields `T` — the
         // INNER element, which is what `nestedElementOf` answers. Zero-argument only: `joined(separator:)`
         // over `[String]` yields a String, not an element.
-        if let call = e.as(FunctionCallExprSyntax.self),
+        if !metatype, let call = e.as(FunctionCallExprSyntax.self),
            let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
            ma.declName.baseName.text == "joined", call.arguments.isEmpty, let base = ma.base,
            let inner = nestedElementOf(base, depth + 1) {
@@ -3505,15 +3822,26 @@ final class CallCollector: SyntaxVisitor {
         // `.lazy` reaches here, so this arm can add element types and never replace a known one.
         if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base,
            ma.declName.baseName.text == "lazy" {
-            return elementTypeOf(base, depth + 1)
+            return elementTypeOf(base, depth + 1, metatype: metatype)
         }
         // SOUNDNESS R537 — ONE ELEMENT OF A CONTAINER OF CONTAINERS, taken by an accessor rather than
         // by a loop: `n.first?.first?.run()`, `for g in n.first! { … }` where `n: [[P]]`. The element of
         // `n.first` is the INNER element of `n`, which is the fact `nestedElementOf` owns — R278's
         // resolver, asked at the one spelling that reaches an element without a binder. Ordered after
         // every arm above so a container this resolver can already type keeps its own answer.
-        if let container = Self.elementAccessorContainer(e), let inner = nestedElementOf(container, depth + 1) {
+        if !metatype, let container = Self.elementAccessorContainer(e), let inner = nestedElementOf(container, depth + 1) {
             return (inner, false)
+        }
+        // R615 — an array literal of METATYPE values (`[RS.self]`), unanimously one base.
+        if metatype, let arr = e.as(ArrayExprSyntax.self) {
+            var only: String?
+            for el in arr.elements {
+                guard let r = metatypeOfExpr(el.expression) else { return nil }
+                if let o = only, o != r { return nil }
+                only = r
+            }
+            if let o = only { return (o, false) }
+            return nil
         }
         // R97 — AN INLINE ARRAY LITERAL. `for fm in [FileManager.default] { fm.removeItem(…) }` read
         // silent-pure while the identical loop over a named `let fms: [FileManager]` was charged: the
@@ -3620,6 +3948,9 @@ final class CallCollector: SyntaxVisitor {
         // the second `t` the first one's hierarchy.
         metatypeBinders.removeValue(forKey: name)
         metatypeArrayElem.removeValue(forKey: name)   // R585 — moves with `metatypeBinders`, one binding
+        metatypeDictValue.removeValue(forKey: name)   // R615 — ditto
+        guessElem.remove(name)        // R618 — moves with `arrayElem`
+        elemGuessVars.remove(name)    // R618 — moves with `vars`
         opaqueVars.remove(name)          // R610 — the guess flag travels with the binding it describes
         protoTyped.removeValue(forKey: name)
         arrayElem.removeValue(forKey: name)
@@ -3656,6 +3987,7 @@ final class CallCollector: SyntaxVisitor {
     // initializer is walked kills self-referential rebinds like `let u = u.asURL()`. The lockstep
     // belongs in the WRITERS, which is what the comment above already said and what R278 did not do.
     private func setArrayElem(_ name: String, _ elem: (name: String, mono: Bool)) {
+        guessElem.remove(name)   // R618 — a fresh element type is not a guess unless the caller says so
         arrayElem[name] = elem.name
         if elem.mono { opaqueElem.insert(name) } else { opaqueElem.remove(name) }
         arrayElemNested.removeValue(forKey: name)
@@ -3768,12 +4100,12 @@ final class CallCollector: SyntaxVisitor {
     /// give the name back (see `visit(ForStmtSyntax)`). These four are exactly the maps
     /// `clearBindingTypeOnly` drops; `opaqueElem` is restored by the shadow scope with the other flags,
     /// and it is written only in lockstep with `arrayElem`, so the pair cannot come back inconsistent.
-    private typealias TypeBinding = (type: String?, arrayElem: String?, dictElem: String?, tupleElem: [String: String]?, arrayElemNested: String?, metatype: String?, metatypeElem: String?)
+    private typealias TypeBinding = (type: String?, arrayElem: String?, dictElem: String?, tupleElem: [String: String]?, arrayElemNested: String?, metatype: String?, metatypeElem: String?, metatypeDict: String?)
     private var typeScopes: [SyntaxIdentifier: [(String, TypeBinding)]] = [:]
 
     private func snapshotType(_ name: String) -> TypeBinding {
         (vars[name], arrayElem[name], dictElem[name], tupleElem[name], arrayElemNested[name],
-         metatypeBinders[name], metatypeArrayElem[name])   // R585 — saved and restored with its siblings
+         metatypeBinders[name], metatypeArrayElem[name], metatypeDictValue[name])   // R585, R615 — saved and restored with their siblings
     }
 
     private func restoreType(_ name: String, _ b: TypeBinding) {
@@ -3784,6 +4116,7 @@ final class CallCollector: SyntaxVisitor {
         arrayElemNested[name] = b.arrayElemNested   // R278 — saved and restored with its siblings
         metatypeBinders[name] = b.metatype          // R585 — ditto
         metatypeArrayElem[name] = b.metatypeElem    // R585 — ditto
+        metatypeDictValue[name] = b.metatypeDict    // R615 — ditto
     }
 
     // A binder REBINDS `name`, so the name-keyed FLAGS carried by the signature or by an earlier
@@ -4332,11 +4665,73 @@ final class CallCollector: SyntaxVisitor {
             if let st = stmt {
                 if let before = binderSnapshots[st] { binderShadow = before }
                 if let before = caseSnapshots[st] { caseElseOut.formUnion(casePayloadLocals.subtracting(before)) }
+                restoreOuterTypesForElse(st, scope: node)   // R851
             }
         }
         return .visitChildren
     }
+
+    /// SOUNDNESS R851 — THE `else` READS THE OUTER BINDING, AND `vars` WAS NOT TOLD. R853 put `binderShadow`
+    /// back for the else block and left the TYPE maps where the conditions set them, so in
+    /// `if let x = o { … } else { x.go() }` the `x` — which Swift resolves to the FIELD `x: Loud` — was typed
+    /// `Quiet` from the condition, joined `Quiet.go`, and the caller read pure while `Loud.go` read the
+    /// environment (executed). The outer binding's type is given back for the length of the block, and the
+    /// condition binder's is given back when the block closes (`typeScopes`, so a `guard`'s binding is live
+    /// again below it). ONLY where the outer binding HAD a type: with no outer type there is nothing more
+    /// precise to put back, and the release's reading stays as the floor.
+    private func restoreOuterTypesForElse(_ stmt: SyntaxIdentifier, scope: CodeBlockSyntax) {
+        guard !Self.r851Off, let snaps = elseTypeSnapshots[stmt] else { return }
+        for s in snaps {
+            let b = s.type
+            // SCOPED TO THE ROW'S SHAPE: the outer meaning is an implicit-`self` FIELD or a module GLOBAL — no
+            // LOCAL binding of the name stood before the condition. A shadowed local/parameter also reverts in
+            // Swift, but re-typing it moves overload selection on real code (swift-collections' `BigString`
+            // `else` arm lost 45 init edges, swift-certificates two `invisible` entries, measured) — a
+            // removal this change does not need for R851 and has not partitioned; stated, not taken.
+            let localTyped = b.type != nil || b.arrayElem != nil || b.dictElem != nil || b.tupleElem != nil
+                || b.arrayElemNested != nil || b.metatype != nil || b.metatypeElem != nil || b.metatypeDict != nil
+                || s.proto != nil
+            guard !localTyped, !isBoundLocalBefore(stmt, s.name), outerNameHasType(s.name) else { continue }
+            let cur = snapshotType(s.name)
+            if cur.type == b.type && cur.arrayElem == b.arrayElem && cur.dictElem == b.dictElem
+                && cur.metatype == b.metatype && protoTyped[s.name] == s.proto { continue }
+            vbHit("R851", "\(s.name): \(cur.type ?? "-") -> \(b.type ?? s.proto ?? "-")")
+            typeScopes[scope.id, default: []].append((s.name, cur))   // the condition's binding comes back after
+            restoreType(s.name, b)
+            if let p = s.proto { protoTyped[s.name] = p }   // `protoTyped` rides `ShadowSave`: restored on exit
+        }
+    }
+
+    /// SOUNDNESS R851 — the names an `if`/`guard`/`while` condition list binds (`let x = …`, `let x`,
+    /// `case let .some(x) = …`), read structurally from the patterns.
+    private static func conditionBinderNames(_ conds: ConditionElementListSyntax) -> [String] {
+        var out: [String] = []
+        for c in conds {
+            if let ob = c.condition.as(OptionalBindingConditionSyntax.self) { out += patternNames(ob.pattern) }
+            if let mp = c.condition.as(MatchingPatternConditionSyntax.self) { out += patternNames(mp.pattern) }
+        }
+        return out
+    }
+
+    /// R851 — with no LOCAL binding, the outer `x` is the implicit-`self` field or the module global, which
+    /// `rootOf` answers from `fields`/`globalTypes` once the condition's `vars` entry is out of the way.
+    private func outerNameHasType(_ n: String) -> Bool {
+        if let et = enclosingType, fields[et]?[n]?.name != nil { return true }
+        return globalTypes[n] != nil
+    }
+
+    /// R851 — was the name bound by a LOCAL binder (typed or not, parameters included) before the statement?
+    /// `binderShadow` as the statement found it, plus the unit's parameters.
+    private func isBoundLocalBefore(_ stmt: SyntaxIdentifier, _ n: String) -> Bool {
+        (binderSnapshots[stmt]?.contains(n) ?? false) || paramNamesR851.contains(n) || literalLocals.contains(n)
+    }
+
+    private func snapshotElseTypes(_ stmt: SyntaxIdentifier, _ conds: ConditionElementListSyntax) {
+        guard !Self.r851Off else { return }
+        elseTypeSnapshots[stmt] = Self.conditionBinderNames(conds).map { ($0, snapshotType($0), protoTyped[$0]) }
+    }
     override func visit(_ node: GuardStmtSyntax) -> SyntaxVisitorContinueKind {
+        snapshotElseTypes(node.id, node.conditions)   // R851
         binderSnapshots[node.id] = binderShadow   // R853 — before the conditions bind anything
         caseSnapshots[node.id] = casePayloadLocals
         return .visitChildren
@@ -4349,6 +4744,20 @@ final class CallCollector: SyntaxVisitor {
             if let before = caseSnapshots[outer.id] { caseElseOut.formUnion(casePayloadLocals.subtracting(before)) }
         }
         enterShadowScope(node)
+        // R851 — `else if`: the outer statement's binders are out of scope for this whole nested `if` (it is the
+        // outer statement's last child, and the outer scope's own restore runs right after it).
+        if let outer = node.parent?.as(IfExprSyntax.self), outer.elseBody?.id == node.id,
+           let snaps = elseTypeSnapshots[outer.id], !Self.r851Off {
+            for s in snaps {
+                let b = s.type
+                guard b.type == nil, b.arrayElem == nil, b.dictElem == nil, b.metatype == nil, s.proto == nil,
+                      !isBoundLocalBefore(outer.id, s.name), outerNameHasType(s.name) else { continue }
+                typeScopes[node.id, default: []].append((s.name, snapshotType(s.name)))
+                restoreType(s.name, b)
+                if let p = s.proto { protoTyped[s.name] = p }
+            }
+        }
+        snapshotElseTypes(node.id, node.conditions)   // R851 — before this statement's conditions bind anything
         binderSnapshots[node.id] = binderShadow   // R853 — before this statement's conditions bind anything
         caseSnapshots[node.id] = casePayloadLocals
         return .visitChildren
@@ -4660,10 +5069,18 @@ final class CallCollector: SyntaxVisitor {
                 // SPELLING and never resolves it through `typeGenericBounds`, so there is no
                 // monomorphized protocol name to guard.
                 setArrayElem(name, (inner, false))
-            } else if let elem = elementTypeOf(node.sequence) {
+            } else if let elem = { () -> (name: String, mono: Bool)? in
+                          let sv = elementWalkedGuess; elementWalkedGuess = false
+                          let r = elementTypeOf(node.sequence); forElemGuess = elementWalkedGuess
+                          elementWalkedGuess = sv || forElemGuess; return r }() {
                 if !bindCallableElement(name, elem.name) {              // R211 — `for f in handlers { f() }`
                     vars[name] = elem.name
                     if elem.mono { monoNames.insert(name) }   // `for x in xs` over `[T]`/`[some P]` (shadowName ran above)
+                    // R618 — an element of a container read off a GUESSED root is itself a guess (R610's flag).
+                    if forElemGuess, !Self.r618Off {
+                        vbHit("R618", "for \(name) -> \(elem.name)")
+                        opaqueVars.insert(name); elemGuessVars.insert(name)
+                    }
                 }
             } else if let me = metatypeElementOf(node.sequence) {
                 // SOUNDNESS R585 (b6) — `for t in ts` over a `[CBase.Type]`. `elementTypeOf` answers nil
@@ -5531,6 +5948,16 @@ final class CallCollector: SyntaxVisitor {
             ?? firstStringLiteral(node.arguments)
         if let dr = node.calledExpression.as(DeclReferenceExprSyntax.self) {
             let name = dr.baseName.text
+            // SOUNDNESS R256 — a bare invocation of a stored field whose generic parameter a same-type
+            // requirement ALSO binds to a function type (`extension Gen where F == (Int) -> Bool`) while another
+            // binds it to a nominal one (`where F == Wiper`). `fields` holds the nominal reading, so every arm
+            // below treats `f(1)` as a non-callable and the call is dropped. The hedge is ADDED here, before
+            // the chain and independent of it: whatever the release answered for the call it still answers.
+            if let et = enclosingType, !isBoundLocal(name), genericCallableFields[et]?.contains(name) == true {
+                vbHit("R256", "\(et).\(name)")
+                unresolved = true
+                why.insert("dispatch:\(et).\(name)")
+            }
             if chargeContentsCtor(name, node, lit: lit, shadowable: true) {
                 // `Data`/`String(contentsOfFile:|contentsOf:)` — classified by the SHARED family function
                 // so the module-qualified spelling of the same ctor answers identically (see it).
@@ -5851,6 +6278,19 @@ final class CallCollector: SyntaxVisitor {
                 calls.append(Call(path: "<holds>.\(member)", leaf: member, strArg: nil, typed: false,
                                   args: [], argTypes: [], ownerModule: spelledModule(of: ma.base), holdsHop: hop))
             }
+            // SOUNDNESS R866 — A COMPOSITION-TYPED PARAMETER asks each of its dependency-declared members as the
+            // owner, BESIDE whatever the chain below records (which, for a composition, is nothing: the name
+            // has no `vars` type). `_ t: any PSubD & Sendable` then joins `Dep#PSubD.go` exactly as
+            // `_ t: any PSubD` does; a member no report declares (`Sendable.go`) answers nothing. Additive.
+            // SOUNDNESS R578 — THE FLOOR: the release's dispatch on the protocol the requirement arm replaced.
+            if let b = ma.base, let p = reqFloor[Self.peel(b).id] ?? reqFloor[b.id] {
+                protoDispatches.append(ProtoDispatch(proto: p, member: member, argc: node.arguments.count,
+                                                     argTypes: argTypesOf(node), args: argKinds(node)))
+            }
+            for c in foreignCompositionMembers(ma.base) {
+                calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node),
+                                  argTypes: argTypesOf(node), extOwner: c))
+            }
             let baseIsConventionVar = ma.base.map(Self.peel)?.as(DeclReferenceExprSyntax.self)
                 .map { conventionVars.contains($0.baseName.text) } ?? false
             // SOUNDNESS R832 — THE STATIC FACTORY THAT A LOCAL LEAF MIS-TYPED. `rootOf` types
@@ -5953,6 +6393,13 @@ final class CallCollector: SyntaxVisitor {
                         unreadableAliasArm = true
                     }
                 }
+            }
+            // SOUNDNESS R256 — the explicit-receiver twin of the bare `f(1)` hedge (`self.f(1)`, `g.f(1)`): a field
+            // a same-type requirement may bind to a FUNCTION type while `fields` holds its nominal reading.
+            if let rt = base.root, genericCallableFields[rt]?.contains(member) == true {
+                vbHit("R256", "\(rt).\(member)")
+                unresolved = true
+                why.insert("dispatch:\(rt).\(member)")
             }
             // a function-typed FIELD invoked (`d.f()` where f: () -> Void) — the unknown_dyn case
             if let rt = base.root, let f = fields[rt]?[member], f.isFunction {
@@ -6109,6 +6556,19 @@ final class CallCollector: SyntaxVisitor {
                 // The residual (`s.other.ping()` on an extension-only dependency type) is pre-existing
                 // and stays silent; it is named in the CHANGELOG rather than hedged here.
                 let extOnly = !declaredTypes.contains(rt)
+                // SOUNDNESS R907 — the LOCAL twin of R618: an element walked off a GUESSED root names a local
+                // type the release joins (`Quiet.go`) whatever the hop really holds. The join is kept (the
+                // floor); the call is disclosed beside it.
+                if !Self.r618Off, let b = ma.base,
+                   elemGuessRecv.contains(Self.peel(b).id)
+                    || (Self.peel(b).as(DeclReferenceExprSyntax.self).map { elemGuessVars.contains($0.baseName.text) } ?? false) {
+                    vbHit("R907", "\(rt).\(member)")
+                    unresolved = true
+                    why.insert("dispatch:\(rt).\(member)")
+                }
+                if Self.veinBProbe, base.opaqueHop, let b = ma.base {
+                    vbHit("GUESSLOCAL", "\(extOnly ? "ext" : "decl")\t\(guessHopKind(b))\t\(rt).\(member)\t\(b.trimmedDescription.prefix(50))")
+                }
                 let r839Convention = !Self.r839Off && extOnly && base.opaqueHop
                     && singletonConventionOwner(ma.base) == rt
                 let r651ForeignExtended = !Self.r651Off && extOnly && (!base.opaqueHop || r839Convention)
@@ -6507,6 +6967,10 @@ final class CallCollector: SyntaxVisitor {
                                       typed: false, args: [], argTypes: [],
                                       depCallee: callee, extOwner: nil))
                 }
+                else if owner == nil, guessedOwner == nil, Self.veinBProbe, let b = ma.base {
+                    FileHandle.standardError.write(
+                        "VBDROP\t\(probeShape(b))\t\(member)\t\(String(b.trimmedDescription.prefix(60)).replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\t", with: " "))\n".data(using: .utf8)!)
+                }
             }
         } else if node.calledExpression.is(ClosureExprSyntax.self) {
             // immediately-invoked closure: body walks lexically below — nothing to record
@@ -6705,6 +7169,13 @@ final class CallCollector: SyntaxVisitor {
             // …AND ITS `Self.peel` TOO (R534): `h?.payload` / `h!.payload` are the property siblings of
             // the unwrap spellings that branch missed, and leaving one of a mirrored pair unpeeled is how
             // the pair drifts apart again.
+            // SOUNDNESS R578 — the property-read twin of the call-site floor.
+            if let b = node.base, let p = reqFloor[Self.peel(b).id] ?? reqFloor[b.id] { protoPropReads.append((p, node.declName.baseName.text)) }
+            // SOUNDNESS R866 — the property-read twin of the composition arm in the member-call visitor.
+            for c in foreignCompositionMembers(node.base) where !Self.METATYPE_MEMBERS.contains(prop) {
+                propertyExternal.insert("\(c).\(prop)")
+                noteExternalCandidate("\(c).\(prop)", module: nil)
+            }
             if let baseDR = node.base.map({ Self.peel($0) })?.as(DeclReferenceExprSyntax.self),
                let proto = protoTyped[baseDR.baseName.text] {
                 protoPropReads.append((proto, prop))
@@ -6850,6 +7321,23 @@ final class CallCollector: SyntaxVisitor {
             let isReadBase = (p.as(MemberAccessExprSyntax.self)?.base?.id == node.id)
                 || (p.as(SubscriptCallExprSyntax.self)?.calledExpression.id == node.id)
             if isReadBase {
+                // SOUNDNESS R912 — AN IMPLICIT-`self` PROPERTY READ IS A READ WHEN IT IS A BASE TOO. `compO.count`
+                // runs `compO`'s getter exactly as a bare `compO` (the arm below edges it) and as `self.compO.count`
+                // (the member-access visitor edges it) do, and this branch alone formed no accessor edge — so the
+                // spelling in the middle of the three was ABSENT over a getter that reads the environment (executed).
+                // The edge is the same soft `Type.member` key the other two spellings form; a stored property has
+                // no accessor unit and adds nothing.
+                if !Self.r912Off, let et = enclosingType, !isBoundLocal(n), !localProtocols.contains(et) {
+                    vbHit("R912", "\(et).\(n)")
+                    propertyEdges.insert("\(et).\(n)")
+                }
+                // SOUNDNESS R904 — …AND INSIDE `extension P` THE READ IS A REQUIREMENT DISPATCH, as the explicit
+                // `self.env.count` already is (`protoPropReads`, the conformers' getters by bounded CHA).
+                if !Self.r904Off, let et = enclosingType, localProtocols.contains(et), !isBoundLocal(n),
+                   protoReqDeclares(et, n) {
+                    vbHit("R904", "\(et).\(n)")
+                    protoPropReads.append((et, n))
+                }
                 if let et = enclosingType, fields[et]?[n] != nil { return .skipChildren }
                 globalReads.insert(n)
                 if !binderShadow.contains(n), !(casePayloadLocals.contains(n) && !caseElseOut.contains(n)) { depGlobalReads.insert(n) }
@@ -6870,6 +7358,11 @@ final class CallCollector: SyntaxVisitor {
         // enclosing type's `n` accessor would FABRICATE its effect (regression). boundLocals tracks these.
         if let et = enclosingType, !isBoundLocal(n) {
             propertyEdges.insert("\(et).\(n)")
+            // SOUNDNESS R904 — the bare (non-base) read inside `extension P` dispatches as `self.n` does.
+            if !Self.r904Off, localProtocols.contains(et), protoReqDeclares(et, n) {
+                vbHit("R904", "bare \(et).\(n)")
+                protoPropReads.append((et, n))
+            }
         }
         globalReads.insert(n)
         if !binderShadow.contains(n), !(casePayloadLocals.contains(n) && !caseElseOut.contains(n)) { depGlobalReads.insert(n) }
@@ -8072,6 +8565,7 @@ final class CallCollector: SyntaxVisitor {
                     metatypeBinders[name] = mb
                 }
                 else if let me = metatypeArrayElementName(ann.type) { metatypeArrayElem[name] = me } // R585 (b6)
+                else if !Self.r615Off, let mv = metatypeDictValueName(ann.type) { metatypeDictValue[name] = mv } // R615
                 else if let inner = nestedArrayElementName(ann.type) {                    // R278 `let xs: [[T]]`
                     setArrayElemNested(name, inner)                                        // R351 — lockstep
                 }
@@ -8173,6 +8667,15 @@ final class CallCollector: SyntaxVisitor {
                         vars.removeValue(forKey: name)
                         depBoundLocals.removeValue(forKey: name)
                     }
+                    else if !Self.r579Off, returns["joined"] == nil, Self.isStringJoin(v) {
+                        // SOUNDNESS R579 — `let page = xs.joined(separator: "\n")` HAS TYPE `String`: a string-literal
+                        // separator selects the `Element: StringProtocol` overload, declared `-> String` (the other
+                        // overload's `JoinedSequence` has no `write(to:)`/`write(toFile:)`, so no compiling program
+                        // spends the type wrongly). Binder only, for the operand reason the literal arm gives.
+                        vbHit("R579", "joined \(name)")
+                        vars[name] = "String"
+                        depBoundLocals.removeValue(forKey: name)
+                    }
                     else {
                         // ctor or unambiguous factory — one resolver for both (rootOf handles peeling)
                         let info = rootOf(v)
@@ -8246,6 +8749,16 @@ final class CallCollector: SyntaxVisitor {
                         vars[name] = t
                         if info.opaqueHop, !Self.r610Off { opaqueVars.insert(name) }   // R610
                     }
+                } else if !Self.r579Off, v.is(StringLiteralExprSyntax.self) {
+                    // SOUNDNESS R579 — `let page = "hello"` (or an interpolated literal) HAS TYPE `String`: the
+                    // default literal type, the language's own rule rather than an inference. No branch here
+                    // typed it, so `page.write(toFile:)` was dropped with no key and no `Unknown` while the
+                    // annotated twin `let page: String = "hello"` charged. The binder records exactly what the
+                    // annotation would — and nothing else does: the literal is NOT typed as an operand or an
+                    // argument (`"a" + x`), where an operator-witness CHA would read it, which the first cut of
+                    // this did and which hedged 50 rows on `+` over protocols the code never names.
+                    vbHit("R579", "literal \(name)")
+                    vars[name] = "String"
                 } else if let tup = v.as(TupleExprSyntax.self) {
                     // R269 — `let t = (cbs, 1)` then `for c in t.0`. Record each SLOT that holds a
                     // container, under the slot's positional name (`0`, `1`, …) and its label when it
@@ -8325,7 +8838,13 @@ final class CallCollector: SyntaxVisitor {
                     // and `isVar: false` for a name it did not find — so the cheap half is taken and the
                     // speculative half is not. `let ys = self.plain` therefore gets its ELEMENT type here
                     // and `let a = self.one` does NOT get its scalar one; that half is filed, not fixed.
-                    if let elem = elementTypeOf(v0) { setArrayElem(name, elem) }
+                    let savedCG = elementWalkedGuess; elementWalkedGuess = false
+                    let copyElem = elementTypeOf(v0)
+                    let copyGuess = elementWalkedGuess; elementWalkedGuess = savedCG
+                    if let elem = copyElem {
+                        setArrayElem(name, elem)
+                        if copyGuess, !Self.r618Off { guessElem.insert(name) }   // R618
+                    }
                     else if let dv = dictValueOf(v0) { dictElem[name] = dv }
                     else if let dr = v.as(DeclReferenceExprSyntax.self) {
                         // THE `monoNames` OPACITY FLAG IS DELIBERATELY NOT CARRIED TO THE COPY, and the
