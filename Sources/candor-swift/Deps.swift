@@ -323,6 +323,9 @@ struct DepIndex {
     /// the consumer's ledger so a re-exported module no report covers is still named (see `Driver`'s
     /// `effectiveImports`).
     var moduleReexports: [String: Set<String>] = [:]
+    /// VEIN D — a Swift dependency module -> its source files (`DependencyModuleOwnership.swiftSources`):
+    /// what lets an UNCHAINED scan ask a dependency which module DECLARES a name. Empty by default.
+    var moduleSwiftSources: [String: [String]] = [:]
     /// Diagnostic only — the package declaring each `notSwiftCoverable` module (the R827 reach probe).
     var notSwiftOwner: [String: String] = [:]
     /// ⟨0.23⟩ `typeSurface.returns` (SPEC §2): `<pkg>#<fn qual>` -> `<pkg>#<type qual>`, exactly as the

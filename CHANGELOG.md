@@ -10,6 +10,43 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — a file importing two dependencies no longer drops the owner of every foreign name (SOUNDNESS R774, R548 two-import half, R843(ii) member half)
+
+`foreignOwnerModule` answered "which dependency declares `X`" from the FILE's imports and refused whenever
+there were two, which deleted three things with nothing disclosed: obligation 1's `dispatchesOn` key, the
+obligation-2 union entry, and the ⟨0.40⟩ `supers`. Executed (five SwiftPM packages built and run; the
+conformer writes a file, the leaf reads env): one added `import` turned `deny Fs` on the consumer's dispatch
+and its caller, and `deny Env` on a relay through a standalone middle package, from 1 to 0 — on v0.39.3 and
+on 344b57b.
+
+- **The release's answer is the floor.** Every site asks `foreignOwnerModule` first and keeps its answer;
+  only where it refused is the owner taken from a PROOF: the candidates are one package; or the
+  dependency's own SOURCES (now located through `dependencyModuleOwnership`) show exactly one candidate
+  module — re-exports followed — declaring the name publicly at file scope, every other one read in full
+  and declaring nothing of that name; or exactly one candidate's trusted ⟨0.40⟩ `types` manifest declares
+  it with every other candidate's manifest silent. A judged-nothing, stale or pre-⟨0.40⟩ report never
+  excludes its package (a judged-nothing protocol package is not indexed, and reading its silence as "not
+  here" named the WRONG owner — measured, and pinned).
+- **Undecided is disclosed, never keyed.** Where a candidate is proven to declare the name but which one
+  owns it is not (an internal same-named twin; a candidate this run cannot read), the member call carries
+  `Unknown` (`dispatch:<T>.<member>`) after the §2 join if nothing answered, and the abstraction gets an
+  `Unknown`-only union entry under each package that may own it — no concrete effect under any of them.
+- **⚠ Gates that can flip: 0 → 1 only.** Fixtures: `deny Fs` on the dispatching unit and its caller,
+  `deny Env` on the relay's caller and one hop further, 0 → 1 (v0.39.3 and 344b57b), resolved in both a
+  standalone and a chained producer; undecided arms `deny Fs Unknown` / `deny Env Unknown` 0 → 1.
+  `CANDOR_VEIND_OFF=1` restores 344b57b byte for byte (fixtures and corpus); `CANDOR_VEIND_PROBE=1` prints
+  each verdict.
+- **Corpus** (22 entries, 24,955 rows; dependency checkouts linked to the corpus siblings), 344b57b → this:
+  standalone ADDED 10 REMOVED 0 CHANGED 103, chained (9 entries, dependency reports per arm) ADDED 0
+  REMOVED 0 CHANGED 93 — every change is a NEW `dispatchesOn` key (the shape the one-import floor already
+  publishes), no `inferred` change, no new reason class, no value lost. ⟨0.40⟩: 2 `types` keys
+  kind-only → full, 3 `holds` added, none removed. Reach: 189 proofs across swift-certificates and Rocket.
+- **Residual, unchanged from the release:** two candidates whose sources are not on disk and whose reports
+  are not chained (an unresolved checkout) give no evidence that the name is a dependency's at all — it
+  may be a platform type — so the release's refusal stands there (swift-certificates with no checkouts:
+  122 member-call sites). A consumer that does not chain the abstraction's OWNER still misses the union
+  entry with one import or two (separate from this change).
+
 ### ⚠ Fixed — two ⟨0.40⟩ walk edges the manifest left out (SOUNDNESS R889, R890; PART 95 `r17_platform_ext`, `o16_dyn_member`)
 
 - **⚠ R889 — a platform protocol the dependency EXTENDS with a member is now a supertype.** `e.eqLeak()` with

@@ -1728,6 +1728,7 @@ do {
     depsIndex.modulePkgs = ownership.packages
     depsIndex.notSwiftCoverable = ownership.notSwiftCoverable
     depsIndex.moduleReexports = ownership.reexports
+    depsIndex.moduleSwiftSources = ownership.swiftSources   // vein D
     depsIndex.notSwiftOwner = ownership.notSwiftOwner
 }
 
@@ -1995,7 +1996,23 @@ do {
             byMethod[method] = (eff.inf.union(old.inf), eff.inv.union(old.inv), true)
         }
         // ⟨0.39⟩ obligation 2 — whose namespace this entry belongs in. UNDECIDABLE OWNER ⇒ NO ENTRY.
-        guard let ownerPkg = analysis.abstractionOwnerPkg[proto] else { continue }
+        // VEIN D — …except where the owner is proven to be one of a few DEPENDENCY packages (a candidate's
+        // sources or chained `types` declare the name) and not which: each of them gets an entry carrying
+        // `Unknown` alone. The consumer that joins the true key is told the call is undetermined, where
+        // it used to read the miss as purity; no concrete effect is keyed under a package it may not own.
+        guard let ownerPkg = analysis.abstractionOwnerPkg[proto] else {
+            guard let possible = analysis.abstractionUndecidedPkgs[proto] else { continue }
+            for (method, eff) in byMethod where !(eff.inf.isEmpty && eff.inv.isEmpty) {
+                for p in possible.sorted() {
+                    var ef = Effector(fn: "\(proto).\(method)", loc: "",
+                        inferred: EffectSet(names: ["Unknown"]), direct: EffectSet(names: [String]()),
+                        unresolved: true, hash: "\(p)#\(proto).\(method)", calls: [String]())
+                    ef.interfaceUnion = true
+                    unionEntries.append(ef)
+                }
+            }
+            continue
+        }
         for (method, eff) in byMethod {
             if eff.inf.isEmpty && eff.inv.isEmpty { continue }   // pure across all conformers — silence = purity
             let hash = "\(ownerPkg)#\(proto).\(method)"

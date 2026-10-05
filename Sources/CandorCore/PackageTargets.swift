@@ -756,7 +756,56 @@ public struct DependencyModuleOwnership: Equatable, Sendable {
     /// names are in scope for anyone importing the Swift module, and the Swift module's report covers
     /// none of them.
     public var reexports: [String: Set<String>] = [:]
+    /// VEIN D (SOUNDNESS R774/R548/R843(ii)) — a Swift dependency module -> the `.swift` files of the ONE
+    /// package that declares it. Absent for a module two packages claim, for a C/opaque module, and for a
+    /// target whose sources could not be located: the reader (`Driver`'s declaring-module proof) treats
+    /// absence as "cannot exclude this module", never as "declares nothing".
+    public var swiftSources: [String: [String]] = [:]
     public init() {}
+}
+
+/// VEIN D — the TYPE NAMES one Swift source file declares at FILE SCOPE (the only declarations a bare
+/// type spelling in an importing file can name), each with whether it is visible to an importer
+/// (`public`/`open`). `opaque` is true when the file holds a top-level freestanding macro expansion,
+/// which may declare names no syntactic walk sees — a reader must then treat the module as able to
+/// declare anything. `#if` clauses are walked in EVERY branch: for the exclusion half of the proof
+/// ("this module does not declare `X`") the union over branches is the conservative reading.
+public func topLevelTypeDeclarations(source: String) -> (names: [String: Bool], opaque: Bool) {
+    var names: [String: Bool] = [:]
+    var opaque = false
+    func note(_ name: String, _ mods: DeclModifierListSyntax) {
+        let vis = mods.contains { ["public", "open"].contains($0.name.text) }
+        let hidden = mods.contains { ["private", "fileprivate"].contains($0.name.text) }
+        if hidden { return }
+        names[name] = (names[name] ?? false) || vis
+    }
+    func walk(_ items: CodeBlockItemListSyntax) {
+        for item in items {
+            guard let d = item.item.as(DeclSyntax.self) else { continue }
+            walkDecl(d)
+        }
+    }
+    func walkDecl(_ d: DeclSyntax) {
+        if let x = d.as(StructDeclSyntax.self) { note(x.name.text, x.modifiers) }
+        else if let x = d.as(ClassDeclSyntax.self) { note(x.name.text, x.modifiers) }
+        else if let x = d.as(EnumDeclSyntax.self) { note(x.name.text, x.modifiers) }
+        else if let x = d.as(ProtocolDeclSyntax.self) { note(x.name.text, x.modifiers) }
+        else if let x = d.as(ActorDeclSyntax.self) { note(x.name.text, x.modifiers) }
+        else if let x = d.as(TypeAliasDeclSyntax.self) { note(x.name.text, x.modifiers) }
+        else if d.is(MacroExpansionDeclSyntax.self) { opaque = true }
+        else if let x = d.as(IfConfigDeclSyntax.self) {
+            for clause in x.clauses {
+                switch clause.elements {
+                case .statements(let st)?: walk(st)
+                case .decls(let ds)?: for m in ds { walkDecl(m.decl) }
+                case nil: break
+                default: opaque = true   // an `#if` around something this walk does not read
+                }
+            }
+        }
+    }
+    walk(Parser.parse(source: source).statements)
+    return (names, opaque)
 }
 
 /// The default `targetSources`: every file under the target's source directory, or nil when that
@@ -888,6 +937,7 @@ public func dependencyModuleOwnership(rootDir: String,
 
     var out = DependencyModuleOwnership()
     var claims: [String: Set<String>] = [:]     // module -> the packages declaring a SWIFT target of that name
+    var claimFiles: [String: [String]] = [:]    // VEIN D — module -> its Swift files (read only when one package claims it)
     for dir in depRoots {
         guard let src = readManifest(manifestPath(dir)) else { continue }
         guard let pkg = parsePackageName(manifestSource: src), !pkg.isEmpty else { continue }
@@ -921,6 +971,7 @@ public func dependencyModuleOwnership(rootDir: String,
                 continue
             }
             claims[t.name, default: []].insert(pkg)
+            claimFiles[t.name, default: []].append(contentsOf: swiftFiles)
             for f in swiftFiles {
                 guard let text = readSource(f), text.contains("_exported") else { continue }
                 for r in reexportedModules(source: text) where r != t.name {
@@ -934,6 +985,7 @@ public func dependencyModuleOwnership(rootDir: String,
     }
 
     for (m, pkgs) in claims where pkgs.count == 1 {
+        if let files = claimFiles[m] { out.swiftSources[m] = files.sorted() }
         guard let p = pkgs.first, p != m else { continue }
         out.packages[m] = p
     }

@@ -57,6 +57,10 @@ struct TypeSurfaceIndex {
     /// Packages one of whose copies is stale (§2.1), judged nothing (⟨0.24⟩) or carries a malformed surface:
     /// any hop into them is a MISS, whatever a trusted copy resolves beside it (o9_stale_beside).
     var distrustedPkgs: Set<String> = []
+    /// VEIN D — packages with at least one TRUSTED copy that publishes a readable `types` manifest. Only
+    /// such a package's SILENCE about a type name is evidence that it does not declare it; an older
+    /// producer, a judged-nothing copy or a malformed one says nothing either way.
+    var typesPublishedPkgs: Set<String> = []
     /// per report package: one element per TRUSTED copy. `nil` = the copy publishes no readable `types`
     /// (an older producer, `types` not in `resolves`, or not an object); an inner `nil` = that key is
     /// malformed in that copy (read as absent, never as `[]` and never as `final`).
@@ -129,6 +133,7 @@ struct TypeSurfaceIndex {
         }
         if let pkg, !pkg.isEmpty {
             typeCopies[pkg, default: []].append(copy)
+            if copy != nil { typesPublishedPkgs.insert(pkg) }
             if malformed { distrustedPkgs.insert(pkg) }
         }
     }

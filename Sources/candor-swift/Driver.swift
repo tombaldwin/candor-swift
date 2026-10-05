@@ -82,6 +82,8 @@ struct Analysis {
     /// A name absent from this map is one whose owner could not be decided; its union entry is not
     /// published at all, because a key keyed under the wrong package is worse than an absent one.
     var abstractionOwnerPkg: [String: String]
+    /// VEIN D — an abstraction whose owner is proven to be ONE OF these packages but not which.
+    var abstractionUndecidedPkgs: [String: Set<String>] = [:]
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): the TARGET's own .swift source candor could NOT read/parse —
     // a file whose `String(contentsOfFile:)` returned nil (unreadable: EACCES, invalid UTF-8, gone).
     // (SwiftSyntax's Parser.parse is error-TOLERANT — always returns a tree, never throws — so the
@@ -1859,6 +1861,129 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         return cands.count == 1 ? cands.first : nil
     }
+    // ── VEIN D (SOUNDNESS R774, R548's two-import half, R843(ii)'s member half) ──────────────────────────
+    //
+    // `foreignOwnerModule` answers "which module owns a foreign name" from the FILE alone, so a file that
+    // imports two dependency modules refuses for EVERY name in it — and three things then go missing at
+    // once with nothing disclosed: obligation 1's dispatch key, obligation 2's union entry, and ⟨0.40⟩'s
+    // `supers`. Swift's own lookup is never ambiguous there (a bare type name two imported modules both
+    // declare does not compile), so the refusal is a fact about this engine's evidence, not about the code.
+    //
+    // THE RELEASE ANSWER IS THE FLOOR. Every site below asks `foreignOwnerModule` first and keeps its
+    // answer byte for byte; this is consulted only where that refused, and it answers only on a PROOF:
+    //   · the candidates are ONE PACKAGE (R603's own rule, applied per file — the key is package-prefixed);
+    //   · the PUBLISHED SURFACE: exactly one candidate package's chained report declares `<pkg>#<name>` in
+    //     its ⟨0.40⟩ `types` — the authority `resolveForeign` already uses for `supers` (§F1.3);
+    //   · the DEPENDENCY'S OWN SOURCES (an unchained scan): exactly one candidate module (re-exports
+    //     followed) declares the name at file scope, it declares it `public`/`open`, and EVERY other
+    //     candidate's sources were read in full and declare no such name. A candidate that cannot be read,
+    //     is a C module, or holds a top-level macro expansion cannot be excluded, so it refuses.
+    // Anything else stays refused — no key is ever minted from a guess.
+    let veinDOff = ProcessInfo.processInfo.environment["CANDOR_VEIND_OFF"] != nil
+    let veinDProbe = ProcessInfo.processInfo.environment["CANDOR_VEIND_PROBE"] != nil
+    var moduleDeclCache: [String: (names: [String: Bool], opaque: Bool)?] = [:]
+    func moduleDeclarations(_ m: String) -> (names: [String: Bool], opaque: Bool)? {
+        if let c = moduleDeclCache[m] { return c }
+        var out: (names: [String: Bool], opaque: Bool)? = nil
+        if let files = deps.moduleSwiftSources[m], !files.isEmpty {
+            var names: [String: Bool] = [:], opaque = false, ok = true
+            for path in files {
+                guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { ok = false; break }
+                let r = topLevelTypeDeclarations(source: text)
+                for (n, v) in r.names { names[n] = (names[n] ?? false) || v }
+                if r.opaque { opaque = true }
+            }
+            if ok { out = (names, opaque) }
+        }
+        moduleDeclCache[m] = out
+        return out
+    }
+    /// The verdict of the owner proof. `proven` keys a wire entry; `undecided` carries every package that
+    /// may own the name and is reached ONLY on evidence that the name IS a dependency's (some candidate
+    /// declares it) — it is what the sites below DISCLOSE on; `none` is the release's refusal, unchanged.
+    enum OwnerProof { case proven(String), undecided(Set<String>), none }
+    /// The owning PACKAGE of the foreign type spelled `spelled` in `file`, for a file whose release vote
+    /// refused (two or more candidate modules). Callers ask `foreignOwnerModule` first.
+    ///
+    /// Each candidate module (and every module it `@_exported import`s) is classified DECLARES / EXCLUDED /
+    /// UNKNOWN for the spelling's leading name — from its sources when they are readable (which also says
+    /// whether the declaration is `public`/`open`), else from its package's chained ⟨0.40⟩ `types`, else
+    /// UNKNOWN. A C module, an unreadable target and a top-level macro expansion are UNKNOWN. PROVEN needs
+    /// exactly one declaring package, nothing unknown, and — where the sources answered — a public
+    /// declaration (an internal one is invisible to this file, so it can be a declarer for EXCLUSION
+    /// purposes but never the proof). A chained report carries no access level, so a `types` key is
+    /// accepted as the proof only where every candidate is accounted for.
+    func ownerProof(of spelled: String, inFile file: String, site: String) -> OwnerProof {
+        guard !veinDOff else { return .none }
+        let declared = declaredByFile[file] ?? [], importable = importableByFile[file] ?? []
+        let cands = Set((fileImports[file] ?? []).filter {
+            declared.contains($0) && !importable.contains($0)
+                && !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0)
+        }).subtracting(ownTargetsByFile[file] ?? [])
+        guard cands.count > 1 else { return .none }
+        let segs = spelled.split(separator: ".").map(String.init)
+        // A module-qualified spelling (`Dep.Type`) is not this proof's question: the release's handling
+        // of it is left exactly as it was.
+        guard let top = segs.first, !top.isEmpty, !(fileImports[file] ?? []).contains(top) else { return .none }
+        var verdict: OwnerProof = .none
+        var via = "-"
+        let pkgs = Set(cands.map { deps.pkgOfModule($0) })
+        let platformName = PLATFORM_REFINES[top] != nil || PLATFORM_LEAVES.contains(top)
+            || PLATFORM_VALUE_TYPES.contains(top) || STD_SUPERS_PUBLIC.contains(top)
+        if pkgs.count == 1, let p = pkgs.first {
+            verdict = .proven(p); via = "onepkg"   // R603's rule, per file: the key is package-prefixed
+        } else if !platformName {
+            var closure = Set<String>(), queue = Array(cands)
+            while let m = queue.popLast() {
+                guard closure.insert(m).inserted else { continue }
+                queue.append(contentsOf: deps.moduleReexports[m] ?? [])
+            }
+            var declares: [String: Bool] = [:]     // package -> declared PUBLICLY (nil access = from `types`)
+            var unknown = Set<String>()
+            var fromSurface = Set<String>()
+            for m in closure.sorted() where !PLATFORM_MODULES.contains(m) && !KAPPA_MODULES.contains(m) {
+                let p = deps.pkgOfModule(m)
+                if !deps.notSwiftCoverable.contains(m), let d = moduleDeclarations(m), !d.opaque {
+                    if let pub = d.names[top] { declares[p] = (declares[p] ?? false) || pub }
+                } else if !deps.notSwiftCoverable.contains(m), deps.surface.typesPublishedPkgs.contains(p),
+                          !deps.surface.distrustedPkgs.contains(p) {
+                    // A trusted ⟨0.40⟩ manifest lists every type its package declares, so its silence
+                    // EXCLUDES; a judged-nothing, stale or pre-⟨0.40⟩ copy is UNKNOWN (below), never a "no".
+                    if deps.surface.typeKeysSeen.contains("\(p)#\(spelled)")
+                        || deps.mentionedTypes.contains("\(p)#\(spelled)") {
+                        declares[p] = declares[p] ?? false; fromSurface.insert(p)
+                    }
+                } else {
+                    unknown.insert(p)
+                }
+            }
+            if declares.count == 1, unknown.subtracting(declares.keys).isEmpty, let (p, pub) = declares.first,
+               pub || fromSurface.contains(p) {
+                verdict = .proven(p); via = fromSurface.contains(p) ? "surface" : "source"
+            } else if !declares.isEmpty {
+                verdict = .undecided(Set(declares.keys).union(unknown)); via = "evidence"
+            } else if !unknown.isEmpty {
+                // NO EVIDENCE the name is a dependency's at all (it may be a platform type), and a
+                // candidate this run cannot see into: the release's refusal stands. Named for the probe.
+                via = "unknown:\(unknown.sorted().joined(separator: ","))"
+            }
+        }
+        if veinDProbe {
+            let v: String
+            switch verdict {
+            case .proven(let p): v = "-> \(p)"
+            case .undecided(let ps): v = "UNDECIDED \(ps.sorted())"
+            case .none: v = "NONE"
+            }
+            FileHandle.standardError.write(
+                ("VEIND \(site) file=\(file) name=\(spelled) cands=\(cands.sorted()) \(v) via=\(via)\n").data(using: .utf8)!)
+        }
+        return verdict
+    }
+    func provenOwnerPackage(of spelled: String, inFile file: String, site: String) -> String? {
+        if case .proven(let p) = ownerProof(of: spelled, inFile: file, site: site) { return p }
+        return nil
+    }
     /// SOUNDNESS R532 — THE ABSTRACTION A RECEIVER SPELLING NAMES, once a GENERIC PARAMETER has been
     /// resolved to its bound. `nil` means "publish nothing for this receiver".
     ///
@@ -1995,6 +2120,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// naming a package that does not exist before it added the manifest filter, and a key no consumer can
     /// join is worse than an absent one because it looks like an answer.
     var abstractionOwnerPkg: [String: String] = [:]
+    var abstractionUndecidedPkgs: [String: Set<String>] = [:]   // VEIN D — see the obligation-2 vote below
     for (pn, files) in conformanceFiles {
         // LOCAL WINS, and on three indexes rather than one. The two error directions cost differently:
         // keying a genuinely local abstraction under a DEPENDENCY would publish a union entry into
@@ -2027,7 +2153,27 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // where the index actually knows which package a module belongs to — which is the only arm in
             // which the key it publishes could have been joined anyway.
             let mods = Set(files.compactMap { foreignOwnerModule(inFile: $0) })
-            let pkgs = Set(mods.map { deps.pkgOfModule($0) })
+            var pkgs = Set(mods.map { deps.pkgOfModule($0) })
+            // VEIN D (R774) — ONLY where the release refused in EVERY conformance file: the per-file proof.
+            // A file the release answered is never re-asked, so no package the release assigned can move.
+            // Every file must PROVE the same one package; a file left UNDECIDED (on evidence that the name
+            // is a dependency's) makes the abstraction undecided, and main.swift then publishes an
+            // `Unknown` union entry under each package that may own it — a disclosure where the release
+            // published nothing and the chained consumer's join read the miss as purity.
+            if pkgs.isEmpty, !veinDOff {
+                var proven = Set<String>(), possible = Set<String>()
+                for file in files.sorted() {
+                    switch ownerProof(of: pn, inFile: file, site: "obl2") {
+                    case .proven(let p): proven.insert(p)
+                    case .undecided(let ps): possible.formUnion(ps)
+                    case .none: break
+                    }
+                }
+                if possible.isEmpty, proven.count == 1 { pkgs = proven }
+                else if !possible.isEmpty || proven.count > 1 {
+                    abstractionUndecidedPkgs[pn] = possible.union(proven)
+                }
+            }
             // REACH PROBE (§E1) — this line is INERT wherever `modulePkgs` is empty (no readable
             // dependency manifest), so a 0-diff A/B over such a corpus proves nothing about it. Fires
             // exactly where the module count and the package count disagree, which is the whole change.
@@ -3413,6 +3559,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // are the commonest generic bounds in Swift, their requirements are synthesized and pure,
             // and without that carve-out this would disclose over half the generic code in any package.
             let r705Off = ProcessInfo.processInfo.environment["CANDOR_R705_OFF"] != nil
+            var veinDUndecided: String? = nil   // VEIN D — set at the obligation-1 site, disclosed after the join
             let erasedForeignDispatch: String? = {
                 guard !r705Off, !call.unqualified, let owner = call.extOwner else { return nil }
                 let bound = f.genericBounds[owner]
@@ -3541,7 +3688,21 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // it. Withholding it until the chained join hit made a STANDALONE producer publish nothing,
                 // and a chained producer's miss publish only `Unknown` where v0.39.2 let a consumer's own
                 // implementors answer the key under obligation 3.)
-                if let m = foreignOwnerModule(inFile: file), let abs = dispatchAbstraction(owner, f) {
+                let floorOwner = foreignOwnerModule(inFile: file)
+                // VEIN D (R548, R843(ii)) — the release refused this FILE; publish where the OWNER is proven.
+                // A local protocol's key stays where R555 left it (the trigger is the release's), so this
+                // adds dependency-owned keys only.
+                // An UNDECIDED owner (the name IS a dependency's, which one is not proven) publishes no key
+                // and is DISCLOSED after the §2 join below, if nothing there answered the call.
+                if floorOwner == nil, !veinDOff, let abs = dispatchAbstraction(owner, f),
+                   localProtocolWirePath(abs) == nil {
+                    switch ownerProof(of: abs, inFile: file, site: "obl1") {
+                    case .proven(let p): dispatchDirect[f.qual, default: []].insert("\(p)#\(abs).\(call.leaf)")
+                    case .undecided: veinDUndecided = "dispatch:\(abs).\(call.leaf)"
+                    case .none: break
+                    }
+                }
+                if let m = floorOwner, let abs = dispatchAbstraction(owner, f) {
                     let localPath = localProtocolWirePath(abs)
                     // REACH PROBE (§E1) — an unchanged row is not evidence the branch ran.
                     if r555Probe, localPath != nil {
@@ -3731,7 +3892,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     guard !chainedHere, !r836Off, let g = call.guessedOwner, !call.opaqueRecv,
                           !localTypes.contains(g), !STD_PURE_PROTOCOLS.contains(g),
                           !RAW_VALUE_BASE_TYPES.contains(g) else { return false }
-                    return foreignOwnerModule(inFile: file) != nil && dispatchAbstraction(g, f) != nil
+                    if foreignOwnerModule(inFile: file) != nil { return dispatchAbstraction(g, f) != nil }
+                    // VEIN D — and wherever the proof above published the same key for a guessed owner.
+                    guard !veinDOff, let abs = dispatchAbstraction(g, f), localProtocolWirePath(abs) == nil
+                    else { return false }
+                    return provenOwnerPackage(of: abs, inFile: file, site: "r836") != nil
                 }()
                 // REACH PROBE (§E1) — only the arm this change ADDS: a guessed owner disclosed WITHOUT a chain.
                 if r836Standalone, r836Probe {
@@ -3947,6 +4112,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // `deny <E> <fn>` still passes, and that is correct rather than a shortfall — the scan does not
             // know WHICH effect, and claiming one would be the fabrication this arm's carve-out exists to
             // prevent.
+            // VEIN D — THE UNDECIDED OWNER, DISCLOSED. The release refused this file's owner vote and so
+            // published no key; the name is proven to be a dependency's (a candidate declares it) but not
+            // WHICH one's, so no key may be minted. Placed after the join for R705's reason: `resolved`
+            // says whether anything answered, and a hedge beside a real answer is false uncertainty.
+            if !resolved, let why = veinDUndecided {
+                direct[f.qual, default: []].insert("Unknown")
+                whyMap[f.qual, default: []].insert(why)
+            }
             if !resolved, let abs = erasedForeignDispatch {
                 if ProcessInfo.processInfo.environment["CANDOR_R705_PROBE"] != nil {
                     let line = "R705HIT \(f.qual) \(call.extOwner ?? "?")->\(abs).\(call.leaf) "
@@ -4584,6 +4757,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             if fallback, foreignMods.count == 1, let m = foreignMods.first {
                 return .foreign("\(deps.pkgOfModule(m))#\(spelled)")
             }
+            // VEIN D — two foreign imports: the same owner proof the obligation sites use. Only a PROOF
+            // resolves; an undecided name stays kind-only, which is ⟨0.40⟩'s own disclosure.
+            if !veinDOff, foreignMods.count > 1, let p = provenOwnerPackage(of: spelled, inFile: file, site: "supers") {
+                return .foreign("\(p)#\(spelled)")
+            }
             return .unresolved
         },
         protocolResults: protocolResults)
@@ -4597,7 +4775,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         cmdsAcc: cmdsAcc, pathsAcc: pathsAcc, tablesAcc: tablesAcc, incompleteAcc: incompleteAcc,
         incompleteDirect: incompleteD,
         invisibleAcc: invisibleAcc, dispatchAcc: dispatchAcc,
-        abstractionOwnerPkg: abstractionOwnerPkg, unanalyzed: unanalyzed,
+        abstractionOwnerPkg: abstractionOwnerPkg, abstractionUndecidedPkgs: abstractionUndecidedPkgs,
+        unanalyzed: unanalyzed,
         typeSurfaceReturns: returnsNonProtocol,
         typeSurface040: surface040)
 }
