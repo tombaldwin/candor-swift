@@ -10,6 +10,35 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — a property or subscript read reaches a subclass's override, as a method call does (SOUNDNESS R903, R876)
+
+- **⚠ R903.** `b.pv` with `b: BaseP` (and `b[0]` on a class subscript) runs `SubP`'s `override` when the
+  value is a `SubP`; the accessor edge climbed UP to supertypes only, so the read was ABSENT while its
+  method twin was charged. It now also edges every subclass's override — precise-or-nothing, additive, the
+  method arm's rule — for owners DECLARED here that are not protocols (a foreign protocol this package only
+  extends is not walked: that edged swift-numerics' `DoubleWidth.high` from a read no requirement names).
+- **⚠ R876.** A protocol property/subscript REQUIREMENT read (`h.qv`, `h: HasQ`) edged the direct
+  conformers only; a subclass of a conformer that overrides the getter was missed — R867's in-scan twin,
+  one member kind over.
+- Only ACCESSOR units are edged: a subclass METHOD sharing the name (`func tk(_:)` beside `var tk`) never
+  runs on a read, and a method's default-argument units — which carry the method's qual — are not
+  accessors (Alamofire's `func response(queue: = .main, …)` was being reached from `request.response`).
+- **⚠ Gates that can flip: 0 → 1 only.** Executed fixture (`swiftc`-built and run; each override writes a
+  marker): `deny Fs` 0 → 1 on 4 reads and their 4 callers (class property, class subscript, protocol
+  property, protocol subscript); 6 controls — a non-overriding sibling, `super.pv`, a same-named subclass
+  method, an extension-only protocol member — stay 0, executed without the effect. `CANDOR_VEINC_OFF=1`
+  restores the previous answer; `CANDOR_VEINC_PROBE=1` prints each edge added.
+- **Corpus** (22 entries, 31,867 analysed units), previous commit → this: standalone ADDED 0 REMOVED 0
+  CHANGED 24, chained ADDED 2 REMOVED 0 CHANGED 20; no value lost, no new reason class. Every new edge was
+  traced to a real override (`DatagramChannel.isOpen`/`BaseStreamSocketChannel.isOpen`,
+  `FlatMapFirstSink.subscribeNext`, the four NIO channels' `description` reached by `"\(self)"`,
+  `UnaryAsyncOperator.deinit`). 3 rows gain a concrete effect (swift-nio `BaseSocketChannel.writeEOF` and
+  its two union entries, `Env` through those `description` getters), all already `Unknown`: `deny Env`
+  flips on them, `deny Env Unknown` does not.
+- **Not in this change (a different mechanism):** an implicit-self property read used as the BASE of a
+  member access (`compO.count` inside the declaring type; `envN.count` inside `extension CtxN`) reaches no
+  accessor at all — the bare form does. Measured, not shipped.
+
 ### ⚠ Fixed — a file importing two dependencies no longer drops the owner of every foreign name (SOUNDNESS R774, R548 two-import half, R843(ii) member half)
 
 `foreignOwnerModule` answered "which dependency declares `X`" from the FILE's imports and refused whenever

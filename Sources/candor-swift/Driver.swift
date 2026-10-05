@@ -17,6 +17,10 @@ import CandorCore
 // `@resultBuilder`/`@globalActor` type (handled separately, see their own tables), is exempted.
 /// SOUNDNESS R867 §1b KILL SWITCH (the in-scan twin; main.swift reads the same variable for the producer).
 private let driverR867Off = ProcessInfo.processInfo.environment["CANDOR_R867_OFF"] != nil
+/// VEIN C §1b KILL SWITCH (R903, R876).
+private let veinCOff = ProcessInfo.processInfo.environment["CANDOR_VEINC_OFF"] != nil
+/// VEIN C REACH PROBE (§E1): one stderr line per down-walk edge actually added.
+private let veinCProbe = ProcessInfo.processInfo.environment["CANDOR_VEINC_PROBE"] != nil
 private let KNOWN_BUILTIN_DECL_ATTRS: Set<String> = [
     "MainActor", "UIApplicationMain", "NSApplicationMain",
     "IBAction", "IBSegueAction", "IBOutlet", "IBInspectable", "IBDesignable",
@@ -2389,6 +2393,21 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
 
     let localProtocolNames = Set(protocolMethods.keys)  // loop-invariant: build once, not per fn
+    /// VEIN C — the accessor units (computed property / observer / lazy init / subscript bodies). The two
+    /// down-walks below edge ONLY these: `resolveQual("Sub.task")` also answers a METHOD named `task`
+    /// (`override func task(for:using:)`), and a property read never runs a method. Measured: without
+    /// this filter Alamofire `Request.urlSessionTasks` gained a fabricated `Net` from `DataRequest.task(…)`.
+    /// …MINUS every qual a non-accessor unit also holds: a method's DEFAULT-ARGUMENT bodies are emitted as
+    /// `isAccessor` units under the METHOD's own qual (`DeclCollector`, default values), so Alamofire's
+    /// `func response(queue: DispatchQueue = .main, …)` looked like an accessor named `response` and was
+    /// edged from `request.response` (measured on the corpus; no effect moved, still a wrong edge). The
+    /// method's own qual is overload-suffixed while its default-argument units keep the bare one, so the
+    /// comparison is on the base name.
+    let veinCAccessorQuals = Set(allFns.filter { $0.isAccessor }.map { $0.qual })
+        .subtracting(allFns.filter { !$0.isAccessor }.map { f in
+            // an OVERLOADED method's qual carries a signature suffix its default-argument units do not
+            String(f.qual.prefix { $0 != "(" && $0 != "#" })
+        })
     // SOUNDNESS R534 — BACKFILL `protoParams`, THE HALF DeclCollector STRUCTURALLY CANNOT SEE.
     // `DeclCollector.protocolMethods` is per-FILE and filled as that file's walk descends, so the test it
     // can run at parameter-collection time is "is this protocol declared EARLIER, in THIS file?" — a
@@ -2785,6 +2804,33 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 let type = String(pe[..<dot]), member = String(pe[pe.index(after: dot)...])
                 for sup in supertypesOf[type] ?? [] {
                     edges[f.qual, default: []].formUnion(resolveQual("\(sup).\(member)"))
+                }
+            }
+            // ── VEIN C (SOUNDNESS R903) — …AND DOWN, as a method call does. `b.pv` with `b: BaseP` runs
+            // `SubP.pv` when the value is a `SubP` (`override var pv`), exactly as `b.m()` runs `SubP.m`; the
+            // method arm (`subtypesOf[owner]`, the class-CHA rule) edged the override and this loop climbed
+            // UP only, so the read was ABSENT while its method twin was charged (executed: the override
+            // wrote its file, `deny Fs` 0). PRECISE-OR-NOTHING and ADDITIVE, the method arm's rule: only
+            // real `<sub>.<member>` accessor units are edged, nothing above is changed. A PROTOCOL owner is
+            // not walked here — an extension-only member is statically dispatched, so a conformer's
+            // same-named property never runs through it; a REQUIREMENT read goes through `protoPropReads`.
+            // A `super.` read does not walk down (pinned by `readSuperP`), and only ACCESSOR units are edged
+            // (pinned by `readBaseM`: a subclass METHOD sharing the property's name never runs on a read).
+            if !veinCOff, let dot = pe.lastIndex(of: ".") {
+                let type = String(pe[..<dot]), member = String(pe[pe.index(after: dot)...])
+                // A type DECLARED here and not a protocol: only a class has subtypes. NOT `localTypes`, which
+                // also holds a FOREIGN protocol this package merely extends (`extension FixedWidthInteger`):
+                // walking its conformers edged swift-numerics' `DoubleWidth.high` from a read no
+                // `FixedWidthInteger` requirement names (measured on the corpus; Unknown-only, still wrong).
+                if declaredTypes.contains(type), !localProtocolNames.contains(type),
+                   !STD_PURE_PROTOCOLS.contains(type), !RAW_VALUE_BASE_TYPES.contains(type) {
+                    for sub in (subtypesOf[type] ?? []).sorted() where sub != type {
+                        let vcHits = resolveQual("\(sub).\(member)").filter { veinCAccessorQuals.contains($0) }
+                        if veinCProbe, !vcHits.isEmpty {
+                            FileHandle.standardError.write("VEINC \(f.qual) \(type).\(member) -> \(vcHits.sorted()) locs=\(vcHits.sorted().map { locOf[$0] ?? "?" })\n".data(using: .utf8)!)
+                        }
+                        edges[f.qual, default: []].formUnion(vcHits)
+                    }
                 }
             }
         }
@@ -4388,6 +4434,22 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             } else {
                 direct[f.qual, default: []].insert("Unknown")
                 whyMap[f.qual, default: []].insert("dispatch:\(d.proto).\(d.member)")
+            }
+            // VEIN C (SOUNDNESS R876) — R867's in-scan twin, for a PROPERTY/subscript requirement. `conf`
+            // holds only the types that SPELL `: P`, so `open class BaseQ: HasQ { open var qv }` and
+            // `final class SubQ: BaseQ { override var qv { <fs> } }` edged `BaseQ.qv` alone and `h.qv` on
+            // `h: HasQ` read pure while a `SubQ` wrote the file (executed). Same rule as the method loop:
+            // precise-or-nothing, additive, real accessor units only.
+            if !veinCOff {
+                for c in conf.sorted() {
+                    for sub in (subtypesOf[c] ?? []).sorted() where sub != c && !conf.contains(sub) {
+                        let vcHits = resolveQual("\(sub).\(d.member)").filter { veinCAccessorQuals.contains($0) }
+                        if veinCProbe, !vcHits.isEmpty {
+                            FileHandle.standardError.write("VEINC-CONF \(f.qual) \(d.proto).\(d.member) -> \(vcHits.sorted())\n".data(using: .utf8)!)
+                        }
+                        edges[f.qual, default: []].formUnion(vcHits)
+                    }
+                }
             }
         }
         // IMPLICIT STRINGIFICATION over a PROTOCOL-typed operand — `"\(e)"` / `String(describing: e)` /
