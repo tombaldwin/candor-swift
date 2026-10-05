@@ -52,7 +52,15 @@ answered nothing — except where noted, the release's answer is kept beside the
 - **R912 is OPT-IN (`CANDOR_R912_ON=1`).** The class-typed implicit-`self` base read (`compO.count` reaching
   `compO`'s getter, as `self.compO.count` does) is built and pinned, and OFF: on the corpus it adds 557 rows that
   gain only the `Unknown` their getters carry (1.75% of 31,867 analysed units), inside the band that goes to a
-  person, and one row trades `dispatch:` for `dep:` (a reason-class change).
+  person. Gate flips with it ON, against this branch with it OFF (ADDING direction): FUNCTION scope standalone
+  565 `deny Unknown`, 5 `deny Env`, 5 `deny Net`, 4 `deny Fs`, 2 `deny Rand`; chained consumers 13 `deny Unknown`,
+  5 `deny Env`; MODULE (target), TYPE-prefix and PACKAGE scope: 0 in both arms (each already carried the effect).
+  Its one reason-class change is a RESOLUTION, not a retraction: swift-system's own
+  `FilePath.debugDescription { description.debugDescription }` is an implicit-`self` base read, ABSENT from that
+  dependency's report with R912 off, so swift-nio's chained `NIOFilePath.debugDescription` join MISSED and
+  disclosed `dispatch:FilePath.debugDescription`; with it on the dependency's row exists (`Unknown`, via
+  `FilePath.description`) and the join HITS with `dep:swift-system#FilePath.debugDescription` — the answer its
+  `description` sibling already got. The row keeps `Unknown` either way.
 
 EVIDENCE — `Tests/…/VeinBExpressionTypingProcessTests`: the fixture was compiled with `swiftc` and RUN (every
 defect cell performed its effect); 44 defect gates on unit and caller go 0 → 1 against 113e5b4 and v0.39.3, and
@@ -62,9 +70,15 @@ executed as SwiftPM packages.
 CORPUS (`bin/corpus-ab.py`, 22 entries / 31,867 analysed units standalone; 9 chained entries with dependency
 reports diffed), vs 113e5b4: standalone ADDED 128 REMOVED 0 CHANGED 1387, chained ADDED 85 REMOVED 0 CHANGED
 1236; vs v0.39.3 REMOVED 0 both arms. No `inferred` element lost, no `unknownWhy` reason retracted, no
-`invisible` module lost. Element-level removals: 54 call edges (9 are overloads a now-typed constructor argument
-excludes — e.g. swift-nio `and(value:)` → `and(_: EventLoopFuture)`, which Swift calls; the rest move with
-those) and 4 rows whose synthetic `interfaceUnion` entry became the real unit's row with the same effects.
+`invisible` module lost. Element-level removals (measured on the COMMITTED tree; an earlier draft of this
+entry said 54, which counted R851's withdrawn wider form): 9 call edges in 3 rows, each traced to source as an
+overload Swift does not call — swift-nio `EventLoopFuture.and(value:)` drops `and(value:)` and the deprecated
+`and(value:file:line:)` (both LABELLED `value:`; the unlabelled `EventLoopFuture<T>(…)` argument binds `and(_:)`,
+whose two edges stay); ReactiveSwift `wait()` drops the six generic `then<Replacement: SignalProducerConvertible>`
+overloads (the concrete `then(SignalProducer<U, Error>)` is more specialised and is the one chosen; its six edges
+stay); `observeConcurrent` drops `AnyDisposable.init(_: Disposable)` (the argument `producerState.deinitialize` is
+a METHOD VALUE, which binds `init(_ action:)`, kept). Plus 4 rows whose synthetic `interfaceUnion` entry became
+the real unit's row with the same effects.
 New charges, every one through a new edge into a real unit: standalone 83 rows gain a concrete effect (bucket 1),
 87 gain only `Unknown` (0.27%); chained 42 and 62. With every switch set the A/B is 0/0/0 both arms.
 NOT HERE: typing unannotated stored properties from their initialiser (measured: the generic-constructor field arm
