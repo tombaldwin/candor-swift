@@ -12,7 +12,7 @@ import Foundation
 /// (`swiftagent-veinB/fx/vb` + `vb.driver.swift`); every defect cell performed its effect (13 markers written,
 /// four env reads returned the set value). v0.39.3 (2111a54) and 113e5b4 read every defect cell 0.
 ///
-/// Rows: R256, R578, R579, R589/R906, R615, R618/R907, R619, R738, R851, R904 (+ R912 opt-in), R905 (the
+/// Rows: R256, R578, R579, R589/R906, R615, R618/R907, R619, R738, R851, R904, R912, R905 (the
 /// generic-constructor half). R866 is chained-only and pinned in its own test below.
 final class VeinBExpressionTypingProcessTests: XCTestCase {
     static let source = #"""
@@ -155,7 +155,7 @@ public func callElseGuard851() -> String? { S851().elseGuard851(nil) }
 
     /// Every vein-B switch: with all of them set the engine is 113e5b4 on every cell (calibration, §1b).
     static let allOff: [String: String] = Dictionary(uniqueKeysWithValues:
-        ["R866", "R615", "R619", "R738", "R579", "R905", "R578", "R256", "R906", "R851", "R618", "R904"]
+        ["R866", "R615", "R619", "R738", "R579", "R905", "R578", "R256", "R906", "R851", "R618", "R904", "R912"]
             .map { ("CANDOR_\($0)_OFF", "1") })
 
     private func gate(_ root: URL, _ policy: String, env: [String: String] = [:]) throws -> Int32 {
@@ -221,14 +221,14 @@ public func callElseGuard851() -> String? { S851().elseGuard851(nil) }
         }
     }
 
-    /// SOUNDNESS R912 — the class-typed implicit-`self` base read is OPT-IN (priced at 1.75% inherited `Unknown`
-    /// on the corpus, inside the band that goes to a person). Pinned both ways so the default is a decision.
-    func testR912BaseReadIsOptIn() throws {
+    /// SOUNDNESS R912 — the class-typed implicit-`self` base read reaches the getter, as `self.comp912.count`
+    /// always did (a consistency resolution, ON by default); `CANDOR_R912_OFF=1` restores 113e5b4.
+    func testR912BaseReadReachesTheGetter() throws {
         let root = try ProcessHarness.makeFilesPackage(["a.swift": Self.source], name: "T")
         defer { try? FileManager.default.removeItem(at: root) }
-        XCTAssertNotEqual(try gate(root, "deny Env Own912.ownBaseRead"), 1, "R912 is off by default")
-        XCTAssertEqual(try gate(root, "deny Env Own912.ownBaseRead", env: ["CANDOR_R912_ON": "1"]), 1,
-                       "R912 on: the getter reads the environment (executed)")
+        XCTAssertEqual(try gate(root, "deny Env Own912.ownBaseRead"), 1, "the getter reads the environment (executed)")
+        XCTAssertNotEqual(try gate(root, "deny Env Own912.ownBaseRead", env: ["CANDOR_R912_OFF": "1"]), 1,
+                          "R912 under its switch is 113e5b4")
         XCTAssertEqual(try gate(root, "deny Env Own912.ownSelfRead"), 1, "the explicit `self.` twin was always charged")
     }
 

@@ -2112,12 +2112,11 @@ final class CallCollector: SyntaxVisitor {
     static let r906Off = ProcessInfo.processInfo.environment["CANDOR_R906_OFF"] != nil
     static let r851Off = ProcessInfo.processInfo.environment["CANDOR_R851_OFF"] != nil
     static let r618Off = ProcessInfo.processInfo.environment["CANDOR_R618_OFF"] != nil
-    /// SOUNDNESS R912 is OPT-IN (`CANDOR_R912_ON=1`), and that is a pricing decision, not a doubt about the
-    /// mechanism: measured over the 22-entry corpus it adds the accessor edge on 947 rows, 557 of which gain
-    /// ONLY the `Unknown` their getter already carries (1.75% of 31,867 analysed units), inside the band the
-    /// disclosure ruling sends to a person rather than shipping. Its R904 half — the protocol-requirement read
-    /// inside `extension P` — is priced separately and ships (`CANDOR_R904_OFF=1` reverts it).
-    static let r912Off = ProcessInfo.processInfo.environment["CANDOR_R912_ON"] == nil
+    /// SOUNDNESS R912 — the class-typed implicit-`self` base read. ON by default as a CONSISTENCY RESOLUTION
+    /// (vein C's R570 precedent): the explicit `self.x.y` spelling already formed these exact accessor edges.
+    /// Priced by gate flips against the branch with it off, additions only: function scope `deny Unknown` 565
+    /// standalone / 13 chained consumers, module, type-prefix and package scope 0. `CANDOR_R912_OFF=1` reverts.
+    static let r912Off = ProcessInfo.processInfo.environment["CANDOR_R912_OFF"] != nil
     static let r904Off = ProcessInfo.processInfo.environment["CANDOR_R904_OFF"] != nil
     static let r905Off = ProcessInfo.processInfo.environment["CANDOR_R905_OFF"] != nil
     /// SOUNDNESS R866 — the NON-local members of the composition a receiver NAME is typed by, when that
