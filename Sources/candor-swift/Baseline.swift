@@ -8,8 +8,10 @@
 //     WITHOUT evaluating: a baseline is comparable only to its OWN producing build (§2.1) —
 //     evaluating a cross-build baseline yields a bogus AS-EFF-005 wave (coverage batches change
 //     reports), and silently skipping is an unbounded fail-open window.
-//   · Valid + same build → per-fn compare: an EXISTING fn gaining an effect not in the baseline is
-//     [AS-EFF-005] (exit 1); a NEW fn is exempt (reviewed as new code, not a regression).
+//   · Valid + same build → per-fn compare against prior(key) = baseline[key] ?? ∅ (⟨0.40⟩): any fn whose
+//     current REAL effects (inferred minus Unknown) are not in its prior is [AS-EFF-005] (exit 1) — an
+//     existing fn that widened, AND a fn ABSENT from the baseline that performs anything. Nothing is exempt
+//     for reading as new; a new PURE fn gains nothing and passes. Each row carries ⟨0.12⟩'s `origin`.
 //
 // Surfaced by CANDOR_BASELINE (env) and the `.candor/config` `baseline` key (relative value anchored
 // to the config's home dir, like `policy`). Violations join the same list as the §6.2 gate's, so the
@@ -146,6 +148,8 @@ func loadBaselineCallgraph(reportPath: String) -> BaselineSidecar {
 /// a corrupt callgraph sidecar); returns [] with a stderr note when the file is absent (guard not yet
 /// adopted). ⟨0.16⟩ Existence is keyed on the baseline callgraph sidecar when present, so a
 /// formerly-PURE fn (omitted from the report) turning effectful is caught, not exempted as "new code".
+/// ⟨0.40⟩ …and a fn absent from BOTH is compared against ∅ too (no exemption at all); the sidecar now
+/// decides only the row's `origin` label. A whole baseline FILE absent keeps its posture (note, exit 0).
 /// ⟨0.16⟩ A fn that gains ONLY Unknown (an unresolved call, no real effect) is ADVISORY, not a
 /// violation: Unknown is the §4 trust marker (`pure` policies exclude it) and on version bumps it is
 /// dominated by resolution noise — a single stderr note discloses it and the exit code is unchanged.
@@ -204,6 +208,7 @@ func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion:
     // supply-chain shape. The sidecar lists pure leaves, so a fn present there (baseline effect set ∅)
     // that now performs ANY effect is a GAIN. See loadBaselineCallgraph for the fail modes.
     let sidecarNodes: Set<String>
+    var sidecarLoaded = true
     switch loadBaselineCallgraph(reportPath: path) {
     case .loaded(let nodes):
         sidecarNodes = nodes
@@ -213,14 +218,16 @@ func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion:
             + "not silently narrow the guard to report-only existence (§6.2). Regenerate the baseline "
             + "with this build: candor-swift <target> --out <prefix>")
     case .absent:
-        // Pre-⟨0.16⟩ degradation: no sidecar → report-only existence (a formerly-pure fn reads as new
-        // and escapes). Still catches an EXISTING fn widening its effect set. DISCLOSED, never silent.
+        // ⟨0.40⟩ The sidecar no longer decides whether the guard FIRES — an absent key has prior ∅ either
+        // way — only how a firing is LABELLED: without it, a function absent from the report cannot be told
+        // apart from a formerly-pure one, so its `origin` is "unknown". DISCLOSED, never silent.
         FileHandle.standardError.write(("candor-swift: note — no baseline callgraph sidecar next to "
-            + "\(path); the AS-EFF-005 guard falls back to report-only existence, so a formerly-PURE "
-            + "function turning effectful reads as new code and is NOT caught. Record the baseline with "
-            + "`candor-swift <target> --out <prefix>` (writes the .callgraph.json sidecar) to close it.\n")
-            .data(using: .utf8)!)
+            + "\(path); a function absent from the baseline report is still compared against nothing, but "
+            + "the guard cannot tell new code from a formerly-PURE function, so its AS-EFF-005 rows carry "
+            + "origin \"unknown\". Record the baseline with `candor-swift <target> --out <prefix>` (writes "
+            + "the .callgraph.json sidecar) to label them.\n").data(using: .utf8)!)
         sidecarNodes = []
+        sidecarLoaded = false
     }
 
     // A BASELINE WHOSE PACKAGES DO NOT INCLUDE OURS IS DISCLOSED, NOT REFUSED — and the refusal was
@@ -240,27 +247,38 @@ func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion:
             + "package(s) \(basePkgRoots.sorted().joined(separator: ", ")) but this scan is package "
             + "`\(ourPkg)`. The AS-EFF-005 guard joins on the §2 `<package>#<fn>` key, so NONE of those "
             + "entries supplies a prior here — every effectful function that the baseline's callgraph "
-            + "sidecar knows will read as a gain, and one recorded WITHOUT a sidecar leaves the guard "
-            + "with nothing to compare at all. Point CANDOR_BASELINE at this package's own report: "
+            + "sidecar knows will read as a gain, and (⟨0.40⟩) every other effectful function as ABSENT "
+            + "from the baseline — compared against nothing. Point CANDOR_BASELINE at this package's own report: "
             + "candor-swift <target> --out <prefix>\n").data(using: .utf8)!)
     }
     var violations: [GateViolation] = []
+    // ⟨0.40⟩ REVIEW BEFORE RE-RECORDING (SPEC §3): `candor diff` takes the CURRENT report first (§3.1), and its
+    // rows carry `status:"new"`; re-recording re-blesses everything else that moved, so it comes second.
+    let remedy = "`candor diff <this run's report> \(path)`, then re-record: candor-swift <target> --out <prefix>"
     var unknownOnly: [String] = []   // ⟨0.16⟩ advisory: fns that gained ONLY Unknown, no real effect
+    var newUnknownOnly: [String] = []   // ⟨0.40⟩ …of which ABSENT from the baseline: named separately
     var foreignPriorsIgnored: [String] = []   // names the baseline holds ONLY under another package
     for qual in inferred.keys.sorted() {
         // ⟨0.16⟩ The baseline effect set: the report entry when present, else ∅ for a fn that is a
         // baseline callgraph node (it existed and was PURE — reports omit pure fns). A fn in NEITHER is
-        // genuinely new code (an added function), still exempt.
+        // absent from the baseline — before ⟨0.40⟩ exempt as "new code"; now compared against ∅ (below).
         //
         // ⟨0.32⟩ Keyed on the §2 `<package>#<fn>` hash first — see BaselinePriors. A bare-`fn` prior is
         // used ONLY for an entry that carries no hash at all (a legacy report), never for one whose hash
         // names a DIFFERENT package: that entry describes another package's function that merely shares a
         // name, and letting it stand as the prior is what silently suppressed the regression.
+        //
+        // ⟨0.40⟩ AND A FUNCTION IN NEITHER IS COMPARED AGAINST ∅ — the "new code" exemption is gone (SPEC §3
+        // baseline guard ⟨0.40⟩). `origin` is ⟨0.12⟩'s existence rule: "existing" — in the baseline report or
+        // a node of its sidecar; "new" — in neither, with the sidecar loaded; "unknown" — absent from the
+        // report with no sidecar. "new" means ABSENT UNDER THIS KEY (`<package>#<qual>`): a renamed function,
+        // an added overload's `#1`, or a baseline recorded under another package spelling reads the same.
         let prior: Set<String>
-        if let reported = base.byHash["\(package)#\(qual)"] { prior = reported }
-        else if let reported = base.byFnOnly[qual] { prior = reported }
-        else if sidecarNodes.contains(qual) { prior = [] }   // existed at baseline, and was pure
-        else { continue }                                    // new function — new code, not a regression
+        let origin: String
+        if let reported = base.byHash["\(package)#\(qual)"] { prior = reported; origin = "existing" }
+        else if let reported = base.byFnOnly[qual] { prior = reported; origin = "existing" }
+        else if sidecarNodes.contains(qual) { prior = []; origin = "existing" }   // existed at baseline, and was pure
+        else { prior = []; origin = sidecarLoaded ? "new" : "unknown" }           // absent: compared against ∅
         if base.byHash["\(package)#\(qual)"] == nil, base.fnsUnderOtherPackages.contains(qual) {
             foreignPriorsIgnored.append(qual)
         }
@@ -283,15 +301,25 @@ func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion:
                 // the SAME `<package>#<qual>` key this guard already joins the baseline on (above), so
                 // the row's identity and the join key cannot spell the unit two ways.
                 violations.append((rule: "AS-EFF-005", fn: qual, hash: "\(package)#\(qual)", effects: ["Unknown"],
-                    detail: "`\(qual)` gained an unresolved call (Unknown) not in the baseline — a NEW blind spot "
-                        + "(unknown-ratchet); resolve it, or regenerate the baseline to grandfather it", reasonClass: [], netClass: []))
+                    detail: origin != "existing"
+                        ? "`\(qual)` is absent from the baseline (new, or its key changed) and makes an unresolved "
+                            + "call (Unknown) — a NEW blind spot (unknown-ratchet); review it: \(remedy)"
+                        : "`\(qual)` gained an unresolved call (Unknown) not in the baseline — a NEW blind spot "
+                            + "(unknown-ratchet); resolve it, or regenerate the baseline to grandfather it",
+                    reasonClass: [], netClass: [], origin: origin))
                 continue
             }
-            unknownOnly.append(qual)
+            if origin == "existing" { unknownOnly.append(qual) } else { newUnknownOnly.append(qual) }
             continue
         }
+        // ⟨0.40⟩ An absent function is NOT said to have "gained" anything: under a renamed key that would be a
+        // false statement about code that may not have changed at all. It is said to be absent.
+        let detail = origin == "existing"
+            ? "`\(qual)` gained effect { \(real.joined(separator: ", ")) } not present in the baseline"
+            : "`\(qual)` is absent from the baseline (new, or its key changed) and performs { "
+                + "\(real.joined(separator: ", ")) } — review it: \(remedy)"
         violations.append((rule: "AS-EFF-005", fn: qual, hash: "\(package)#\(qual)", effects: real,
-            detail: "`\(qual)` gained effect { \(real.joined(separator: ", ")) } not present in the baseline", reasonClass: [], netClass: []))
+            detail: detail, reasonClass: [], netClass: [], origin: origin))
     }
     if !foreignPriorsIgnored.isEmpty {
         let shown = foreignPriorsIgnored.prefix(3).joined(separator: ", ")
@@ -300,6 +328,13 @@ func checkBaseline(inferred: [String: Set<String>], path: String, engineVersion:
             + "appear in the baseline ONLY under a different package, so their effect sets were NOT used as "
             + "a prior here (the guard joins on the §2 `<package>#<fn>` key, not on the bare name): "
             + "\(shown)\(more)\n").data(using: .utf8)!)
+    }
+    if !newUnknownOnly.isEmpty {
+        // ⟨0.40⟩ NAMED, ALL OF THEM, apart from the existing functions' Unknown-only gains: before this rung a
+        // new function carrying only Unknown was not mentioned at all.
+        FileHandle.standardError.write(("candor-swift: note — \(newUnknownOnly.count) new function(s) carry only "
+            + "Unknown (absent from the baseline; an unresolved call, no real effect — advisory): "
+            + "\(newUnknownOnly.joined(separator: ", "))\n").data(using: .utf8)!)
     }
     if !unknownOnly.isEmpty {
         let shown = unknownOnly.prefix(3).joined(separator: ", ")

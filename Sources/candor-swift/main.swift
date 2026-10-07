@@ -494,8 +494,9 @@ while let a = argIter.next() {
         ENVIRONMENT
           CANDOR_POLICY=<file>      the policy gate when --policy is absent; .candor/config `policy` is the floor
           CANDOR_BASELINE=<report>  the baseline regression guard (or a .candor/config `baseline` line):
-                                    an existing function GAINING an effect vs the saved report fails (exit 1);
-                                    new functions are exempt; a corrupt or cross-build baseline refuses to
+                                    a function GAINING an effect vs the saved report fails (exit 1) — and
+                                    one ABSENT from it is compared against nothing (a new pure one passes);
+                                    a corrupt or cross-build baseline refuses to
                                     evaluate (exit 2); an absent file is a note
 
         EXAMPLES

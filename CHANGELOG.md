@@ -33,6 +33,24 @@ declaration, and where none answers the release's reading stands (a floor):
 `CANDOR_R915_OFF=1` restores 519f62d (per arm: `CANDOR_R915{A,B,C,D}_OFF`). Known over-charge: a
 protocol-extension property returning a generic wrapper unions same-named members of its constrained
 extensions (Alamofire `trust.af.publicKeys` also reaches the `Bundle` extension's `Fs`; 3 rows).
+### ⚠ Changed — ⟨0.40⟩ second half (SOUNDNESS R932): a function ABSENT from the baseline is compared against nothing, not exempted
+
+The AS-EFF-005 guard skipped every function its baseline did not hold as "new code, reviewed normally" —
+and review does not read effects. Measured on 519f62d: a same-build baseline of `keep` (Fs) and a tree
+adding `fresh` (Net) exited 0 with `violations: []`. Now `prior(key) = baseline[key] ?? ∅` under the
+`<package>#<fn>` key (the byHash / foreign-package join is unchanged):
+
+- **⚠ a new function performing a real effect fails, exit 1**, and the message says it is ABSENT from the
+  baseline (a renamed key reads the same), with the remedy `candor diff <this run's report> <baseline>`
+  first, re-recording second. A new pure function passes.
+- **a new `Unknown`-only function stays advisory but is NAMED**, in its own note line ("N new function(s)
+  carry only Unknown: …"); under `unknown-ratchet` its Unknown is newly introduced and fails.
+- **every AS-EFF-005 `--gate-json` row carries `origin`** (`existing` / `new` / `unknown`, ⟨0.12⟩'s rule). The
+  callgraph sidecar now decides only that label: without it, a formerly-pure function turning effectful
+  FIRES (it used to read as new and escape) with `origin:"unknown"`.
+- Unchanged: a whole baseline FILE absent is a note and exit 0 (a `.candor/config`-declared one, exit 2);
+  a corrupt sidecar or a cross-build baseline is exit 2. One-way, 0 → 1; no flip at upgrade, because a
+  different-build baseline already exits 2 and the re-recorded one holds every function.
 
 ### ⚠ Fixed — vein B, local expression typing: a receiver whose type is DECLARED is typed, and a guessed one discloses (SOUNDNESS R256, R578, R579, R589/R906, R615, R618/R907, R619, R738, R851, R866, R904, R905 ctor half)
 

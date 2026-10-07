@@ -4,8 +4,9 @@ import Foundation
 /// Process-level pins for the AS-EFF-005 baseline regression guard (SPEC §7 item 5, Baseline.swift) —
 /// semantics mirror candor-java's Policy.checkBaseline exactly. The full exit-code matrix (TESTING.md
 /// §2.5): gain → 1, clean → 0, absent → 0 + note, doctored/versionless → 2 WITHOUT evaluating,
-/// unparseable → 2, config `baseline` key with a config-home-anchored relative value, the new-fn
-/// exemption, and the AS-EFF-005 records joining the --gate-json verdict.
+/// unparseable → 2, config `baseline` key with a config-home-anchored relative value, ⟨0.40⟩ a fn absent
+/// from the baseline compared against ∅ (PART 15d n1–n4), and the AS-EFF-005 records joining the
+/// --gate-json verdict.
 final class BaselineProcessTests: XCTestCase {
 
     /// A `Billing.charge` that reaches Clock only — the "before" state a baseline is recorded from.
@@ -66,8 +67,10 @@ final class BaselineProcessTests: XCTestCase {
         XCTAssertFalse(r.err.contains("[AS-EFF-005]"), "no violation may be reported: \(r.err)")
     }
 
-    // ── a NEW function is exempt (reviewed as new code, not a regression) ──────────────────────────
-    func testNewFunctionIsExempt() throws {
+    // ── ⟨0.40⟩ a NEW function is NOT exempt: absent from the baseline, its prior is ∅ ─────────────────
+    // (Until ⟨0.40⟩ this test pinned the opposite — `wipe` exempt, exit 0. Inverted, not deleted, so the
+    // `--json` (no sidecar) recording keeps a pin: the row fires with origin "unknown".)
+    func testNewEffectfulFunctionIsComparedAgainstNothing() throws {
         let bin = try ProcessHarness.binaryURL(for: Self.self)
         let base = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("candor-swift-base-\(UUID().uuidString).json")
@@ -77,7 +80,7 @@ final class BaselineProcessTests: XCTestCase {
         // `charge` unchanged; `wipe` is NEW (absent from the baseline) and effectful. `wipe` is NOT
         // invoked at the top level — the top-level `<main>` unit must stay identical to the baseline's
         // (calling `wipe()` there would make `<main>` itself gain Fs, a genuine top-level regression the
-        // ratchet SHOULD catch — a different property than "a new function is exempt").
+        // ratchet SHOULD catch — a different property from "a new function is compared against ∅").
         let root = try ProcessHarness.makePackage("""
         import Foundation
         struct Billing { func charge() { _ = Date() } }
@@ -86,11 +89,9 @@ final class BaselineProcessTests: XCTestCase {
         """)
         defer { try? FileManager.default.removeItem(at: root) }
         let r = try ProcessHarness.run(bin, [root.path, "--json"], env: ["CANDOR_BASELINE": base.path])
-        XCTAssertEqual(r.code, 0, "a new fn is exempt from the ratchet — stderr: \(r.err)")
-        // Match the bracketed violation FORM: the ⟨0.16⟩ absent-sidecar note (--json baseline, no
-        // sidecar) names the rule in prose. `wipe` is genuinely absent from BOTH report and (absent)
-        // sidecar, so it stays exempt regardless.
-        XCTAssertFalse(r.err.contains("[AS-EFF-005]"), "no violation for a new fn: \(r.err)")
+        XCTAssertEqual(r.code, 1, "a new effectful fn is compared against ∅ and fails — stderr: \(r.err)")
+        XCTAssertTrue(r.err.contains("[AS-EFF-005] `wipe` is absent from the baseline"), "\(r.err)")
+        XCTAssertFalse(r.err.contains("Billing.charge"), "the unchanged existing fn is not flagged: \(r.err)")
     }
 
     // ── absent baseline file → stderr note, guard inactive, exit 0 ─────────────────────────────────
@@ -271,8 +272,8 @@ final class BaselineProcessTests: XCTestCase {
                       "the pure→effectful leaf `fmt` is the flagged gain: \(r.err)")
     }
 
-    /// (2) Sidecar ABSENT: degrade to report-only existence (the formerly-pure fn reads as new and is
-    ///     NOT caught) — exit 0 — WITH a stderr note. Deleting the sidecar must not fail.
+    /// (2) Sidecar ABSENT: ⟨0.40⟩ the formerly-pure fn still FIRES (an absent key's prior is ∅); the
+    ///     sidecar decides only the label, so it reads `origin:"unknown"` — WITH a stderr note.
     func testSidecarAbsentDegradesWithNote() throws {
         let bin = try ProcessHarness.binaryURL(for: Self.self)
         let (dir, report) = try recordBaselineWithSidecar(bin, src: Self.pureLeafSrc)
@@ -282,8 +283,9 @@ final class BaselineProcessTests: XCTestCase {
         let root = try ProcessHarness.makePackage(Self.pureLeafGainsFsSrc)
         defer { try? FileManager.default.removeItem(at: root) }
         let r = try ProcessHarness.run(bin, [root.path, "--json"], env: ["CANDOR_BASELINE": report.path])
-        XCTAssertEqual(r.code, 0, "no sidecar → report-only existence, the pure leaf reads as new: \(r.err)")
-        XCTAssertFalse(r.err.contains("[AS-EFF-005]"), "the pure leaf is NOT flagged without the sidecar: \(r.err)")
+        XCTAssertEqual(r.code, 1, "⟨0.40⟩ no sidecar still fires — the pure leaf's prior is ∅: \(r.err)")
+        XCTAssertTrue(r.err.contains("[AS-EFF-005] `fmt` is absent from the baseline"),
+                      "without the sidecar it cannot be called a GAIN, only absent: \(r.err)")
         XCTAssertTrue(r.err.contains("no baseline callgraph sidecar"),
                       "the degradation is DISCLOSED on stderr, never silent: \(r.err)")
     }
@@ -472,5 +474,94 @@ final class BaselineProcessTests: XCTestCase {
                        "…and must NOT be reported as a package mismatch: \(r2.err)")
         let r3 = try ProcessHarness.run(bin, [ownRoot.path, "--json"], env: ["CANDOR_BASELINE": ownBase.path])
         XCTAssertEqual(r3.code, 0, "an unchanged package against its own baseline stays green — stderr: \(r3.err)")
+    }
+
+    // ── ⟨0.40⟩ A FUNCTION ABSENT FROM THE BASELINE IS COMPARED AGAINST ∅ (SPEC §3 baseline guard, PART 15d) ──
+    //
+    // Until ⟨0.40⟩ a key absent from a present baseline was skipped as "new code" — and code review does not
+    // read effects, which is the reason the ratchet exists. Measured on 519f62d: a same-build baseline of
+    // `keep` (Fs) and a tree adding `fresh` (Net) exited 0 with `violations: []`. These four are PART 15d's
+    // n1..n4 in this engine's own suite; each was run against 519f62d first and failed there (n2 passed for
+    // the wrong reason — nothing absent fired — and is the control only once the rule exists).
+
+    private static let nfKeep = "func keep() { _ = FileManager.default.contents(atPath: \"/x\") }"
+    private static let nfBase = "import Foundation\n" + nfKeep + "\n"
+
+    /// Scan `src` (one non-main file) against a sidecar-backed baseline of `nfBase`, with `--gate-json`.
+    private func newFnCell(_ src: String, env: [String: String] = [:], dropSidecar: Bool = false)
+        throws -> (code: Int32, err: String, viols: [[String: Any]]) {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let broot = try ProcessHarness.makeFilesPackage(["a.swift": Self.nfBase], name: "nf")
+        defer { try? FileManager.default.removeItem(at: broot) }
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("candor-swift-nf-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let rec = try ProcessHarness.run(bin, [broot.path, "--out", dir.appendingPathComponent("b").path])
+        XCTAssertEqual(rec.code, 0, "baseline recording must be clean — stderr: \(rec.err)")
+        let report = dir.appendingPathComponent("b.nf.Swift.json")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: report.path), "the --out scan wrote \(report.path)")
+        if dropSidecar { try FileManager.default.removeItem(atPath: sidecarPath(for: report)) }
+        let root = try ProcessHarness.makeFilesPackage(["a.swift": src], name: "nf")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let verdict = dir.appendingPathComponent("verdict.json")
+        var e = env; e["CANDOR_BASELINE"] = report.path
+        let r = try ProcessHarness.run(bin, [root.path, "--out", dir.appendingPathComponent("a").path,
+                                             "--gate-json", verdict.path], env: e)
+        let obj = try JSONSerialization.jsonObject(with: Data(contentsOf: verdict)) as? [String: Any]
+        XCTAssertEqual(obj?["ok"] as? Bool, r.code == 0, "the verdict agrees with the exit code")
+        let viols = (obj?["violations"] as? [[String: Any]] ?? []).filter { $0["rule"] as? String == "AS-EFF-005" }
+        return (r.code, r.err, viols)
+    }
+
+    /// n1 — a NEW effectful function fires: exit 1, row {fn: fresh, effects: [Net], origin: "new"}, and the
+    /// message says it is ABSENT FROM THE BASELINE (a renamed key reads as absent too), never "gained".
+    func testNewEffectfulFunctionFiresWithOriginNew() throws {
+        let c = try newFnCell(Self.nfBase + "func fresh() { _ = URLSession.shared.dataTask(with: URL(string: \"https://h.example.com/\")!) }\n")
+        XCTAssertEqual(c.code, 1, "a new function performing Net must fail the guard — stderr: \(c.err)")
+        XCTAssertTrue(c.err.contains("[AS-EFF-005]"), c.err)
+        let row = c.viols.first { $0["fn"] as? String == "fresh" }
+        XCTAssertEqual(row?["effects"] as? [String], ["Net"], "\(c.viols)")
+        XCTAssertEqual(row?["origin"] as? String, "new", "\(c.viols)")
+        XCTAssertTrue(c.err.contains("`fresh` is absent from the baseline"), "the message names absence: \(c.err)")
+        XCTAssertTrue(c.err.contains("candor diff"), "the remedy leads with review (candor diff): \(c.err)")
+    }
+
+    /// n1 without the sidecar — still fires (the sidecar decides only the LABEL): origin "unknown".
+    func testNewEffectfulFunctionWithoutSidecarFiresWithOriginUnknown() throws {
+        let c = try newFnCell(Self.nfBase + "func fresh() { _ = URLSession.shared.dataTask(with: URL(string: \"https://h.example.com/\")!) }\n",
+                              dropSidecar: true)
+        XCTAssertEqual(c.code, 1, c.err)
+        XCTAssertEqual(c.viols.first { $0["fn"] as? String == "fresh" }?["origin"] as? String, "unknown", "\(c.viols)")
+    }
+
+    /// n2 — CONTROL: a new PURE function gains nothing and passes.
+    func testNewPureFunctionPasses() throws {
+        let c = try newFnCell(Self.nfBase + "func tidy(_ a: Int) -> Int { a + 1 }\n")
+        XCTAssertEqual(c.code, 0, "a new pure function passes — stderr: \(c.err)")
+        XCTAssertFalse(c.err.contains("[AS-EFF-005]"), c.err)
+        XCTAssertTrue(c.viols.isEmpty, "\(c.viols)")
+    }
+
+    /// n3 — a new Unknown-only function is advisory (exit 0) but NAMED, separately from existing ones;
+    /// under `unknown-ratchet` its prior is ∅, so its Unknown is newly introduced and fails.
+    func testNewUnknownOnlyFunctionIsNamedNotFailed() throws {
+        let src = Self.nfBase + "func opaquenew(_ f: () -> Void) { f() }\n"
+        let c = try newFnCell(src)
+        XCTAssertEqual(c.code, 0, "Unknown-only stays advisory — stderr: \(c.err)")
+        XCTAssertFalse(c.err.contains("[AS-EFF-005]"), c.err)
+        XCTAssertTrue(c.err.split(separator: "\n").contains { $0.contains("new function(s) carry only Unknown") && $0.contains("opaquenew") },
+                      "a note line names the new Unknown-only function: \(c.err)")
+        let on = try newFnCell(src, env: ["CANDOR_UNKNOWN_RATCHET": "1"])
+        XCTAssertEqual(on.code, 1, "unknown-ratchet: a new function's Unknown is newly introduced — \(on.err)")
+        XCTAssertEqual(on.viols.first { $0["fn"] as? String == "opaquenew" }?["origin"] as? String, "new", "\(on.viols)")
+    }
+
+    /// n4 — an EXISTING function gaining Net carries origin "existing".
+    func testExistingFunctionGainCarriesOriginExisting() throws {
+        let c = try newFnCell("import Foundation\nfunc keep() { _ = FileManager.default.contents(atPath: \"/x\"); _ = URLSession.shared.dataTask(with: URL(string: \"https://h.example.com/\")!) }\n")
+        XCTAssertEqual(c.code, 1, c.err)
+        let row = c.viols.first { $0["fn"] as? String == "keep" }
+        XCTAssertEqual(row?["effects"] as? [String], ["Net"], "\(c.viols)")
+        XCTAssertEqual(row?["origin"] as? String, "existing", "\(c.viols)")
     }
 }
