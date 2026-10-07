@@ -10,6 +10,12 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **Declares spec 0.40** (was 0.39) — the family floor bump; the `AgentsDocDriftTests` floor pin moves with
+  it. candor-swift implements all three ⟨0.40⟩ halves: the type surface (`holds`/`returnsProtocol`/`types`/
+  `adds`), the AS-EFF-005 new-function baseline rule (SOUNDNESS R932) and bind/listen for `Net`
+  (R817/R949). **A gate that passed on 0.39.x can exit 1 on identical bytes, and one can go 1 → 0 over
+  a NIO `bind(to:)` that was hedged** — see candor-spec SPEC §8 ⟨0.40⟩.
+
 ### ⚠ Fixed — SOUNDNESS R951: a comparison reaches the witness of the type it actually compares
 
 `Equatable`/`Comparable` are treated as pure protocols, so a comparison reached a user-defined `==`/`<` only
