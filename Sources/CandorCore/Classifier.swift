@@ -2655,7 +2655,71 @@ public func tablesInSql(_ sql: String) -> [String] {
 // SwiftSyntax TYPE helpers — Pass A's local type inference (name / array-element / tuple / dict-value)
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
+/// SOUNDNESS R976 — ONE CANONICAL SPELLING FOR THE STANDARD LIBRARY'S GENERIC SUGAR.
+///
+/// `Optional<T>`, `Array<T>` and `Dictionary<K, V>` are the SAME types as `T?`, `[T]` and `[K: V]`, and
+/// `Swift.`-qualified spellings of all of them (and of `Set<T>` & co.) are the same again. But every type
+/// helper below switches on the SYNTAX NODE KIND, and the generic spelling is an `IdentifierTypeSyntax`
+/// (or a `MemberTypeSyntax` for `Swift.`), not an `OptionalTypeSyntax`/`ArrayTypeSyntax`. So `typeName`
+/// answered `"Optional"` for `Optional<Ctx>` — a WRONG type rather than a refusal — and a receiver declared
+/// with it resolved against the stdlib's `Optional`: `self.next?.invokeChannelRead(data)` over swift-nio's
+/// `var next: Optional<ChannelHandlerContext>` left `functions[]` silently while the `Ctx?` twin charged.
+/// The census (`swiftagent-rel/census`, 319 executed fns) found the same drop for `Swift.Optional<T>`,
+/// `Swift.Array<T>`, `Swift.Dictionary<K,V>`, `Swift.Set<T>`, `Array<T>?`, `Optional<[T]>`, `Array<T?>`
+/// and `Dictionary<K, Optional<V>>` at every position the sugar spelling already worked in.
+///
+/// The fix is a REWRITE TO THE SUGAR NODE, asked at the head of every helper that inspects a type's node
+/// kind, so each helper keeps exactly one arm per shape and the generic spellings cannot drift from the
+/// sugar ones again. Only the outermost node is rewritten; the helpers recurse, and each recursion asks
+/// again. Nothing else is rewritten: an unrelated generic (`Box<T>`) is returned unchanged. A project type
+/// that SHADOWS `Optional`/`Array`/`Dictionary` by name would be misread — not reachable from a module that
+/// also uses the stdlib one unqualified, and named here rather than guarded.
+public func desugaredType(_ t: TypeSyntax) -> TypeSyntax {
+    if R976_OFF { return t }
+    let name: String, clause: GenericArgumentClauseSyntax?
+    if let id = t.as(IdentifierTypeSyntax.self) {
+        name = id.name.text; clause = id.genericArgumentClause
+    } else if let mem = t.as(MemberTypeSyntax.self), let base = mem.baseType.as(IdentifierTypeSyntax.self),
+              base.name.text == "Swift", base.genericArgumentClause == nil {
+        name = mem.name.text; clause = mem.genericArgumentClause
+        // `Swift.Set<T>` / `Swift.ContiguousArray<T>` / … — strip the module, keep the generic spelling the
+        // helpers already read for the bare name.
+        if !["Optional", "Array", "Dictionary"].contains(name), STDLIB_GENERIC_CONTAINERS.contains(name),
+           let clause {
+            return TypeSyntax(IdentifierTypeSyntax(name: .identifier(name), genericArgumentClause: clause))
+        }
+    } else {
+        return t
+    }
+    guard let args = clause?.arguments else { return t }
+    let tys = args.compactMap { $0.argument.as(TypeSyntax.self) }
+    guard tys.count == args.count else { return t }
+    switch (name, tys.count) {
+    case ("Optional", 1): return TypeSyntax(OptionalTypeSyntax(wrappedType: tys[0]))
+    case ("Array", 1): return TypeSyntax(ArrayTypeSyntax(element: tys[0]))
+    case ("Dictionary", 2): return TypeSyntax(DictionaryTypeSyntax(key: tys[0], value: tys[1]))
+    default: return t
+    }
+}
+
+/// SOUNDNESS R976 §1b KILL SWITCH — restores the release's node-kind-only reading of every type spelling.
+public let R976_OFF = ProcessInfo.processInfo.environment["CANDOR_R976_OFF"] != nil
+
+/// The stdlib generic containers whose `Swift.`-qualified spelling `desugaredType` strips to the bare name.
+public let STDLIB_GENERIC_CONTAINERS: Set<String> =
+    ["Optional", "Array", "Dictionary", "Set", "ContiguousArray", "ArraySlice",
+     "AsyncStream", "AsyncThrowingStream", "TaskGroup", "ThrowingTaskGroup"]
+
 public func typeName(_ t: TypeSyntax) -> (name: String?, isFunction: Bool) {
+    typeName(t, desugar: true)
+}
+
+/// `desugar: false` is asked ONLY for the BASE of a member type path. `Dictionary<K, V>.Keys` names the nested
+/// type `Dictionary.Keys` — a nested type is named by its declaring type's NAME, not by the shape of a value of
+/// it — so the base is not rewritten to `[K: V]` (which has no name, and would have collapsed the path to the
+/// bare leaf `Keys`; measured on swift-collections' `OrderedSet.init(Dictionary.Keys)` key).
+private func typeName(_ t: TypeSyntax, desugar: Bool) -> (name: String?, isFunction: Bool) {
+    let t = desugar ? desugaredType(t) : t
     if let id = t.as(IdentifierTypeSyntax.self) { return (id.name.text, false) }
     if let opt = t.as(OptionalTypeSyntax.self) { return typeName(opt.wrappedType) }
     if let att = t.as(AttributedTypeSyntax.self) { return typeName(att.baseType) }
@@ -2665,7 +2729,7 @@ public func typeName(_ t: TypeSyntax) -> (name: String?, isFunction: Bool) {
     // keys an `extension Outer.Inner` under that same trimmed dotted name). A module-qualified stdlib type
     // (`Foundation.Date`) also yields a dotted name the κ table doesn't know → under-report, never a guess.
     if let mem = t.as(MemberTypeSyntax.self) {
-        let head = typeName(mem.baseType).name
+        let head = typeName(mem.baseType, desugar: false).name   // R976 — see `typeName(_:desugar:)`
         return (head.map { "\($0).\(mem.name.text)" } ?? mem.name.text, false)
     }
     if let tup = t.as(TupleTypeSyntax.self), tup.elements.count == 1, let only = tup.elements.first {
@@ -2692,6 +2756,7 @@ public func typeName(_ t: TypeSyntax) -> (name: String?, isFunction: Bool) {
 /// OPTIONAL metatype is still a metatype the moment it is unwrapped: `_ t: CBase.Type?` + `if let t`
 /// is the b8 binder, and refusing it there is a silent under-report, not caution.
 public func metatypeBaseName(_ t: TypeSyntax) -> String? {
+    let t = desugaredType(t)   // R976
     if let opt = t.as(OptionalTypeSyntax.self) { return metatypeBaseName(opt.wrappedType) }
     if let iuo = t.as(ImplicitlyUnwrappedOptionalTypeSyntax.self) { return metatypeBaseName(iuo.wrappedType) }
     if let att = t.as(AttributedTypeSyntax.self) { return metatypeBaseName(att.baseType) }
@@ -2707,6 +2772,7 @@ public func metatypeBaseName(_ t: TypeSyntax) -> String? {
 /// SOUNDNESS R585 — the ELEMENT of an array of metatypes (`[X.Type]`), or nil. The array spellings
 /// `arrayElementName` answers for ordinary types, asked of the metatype question instead.
 public func metatypeArrayElementName(_ t: TypeSyntax) -> String? {
+    let t = desugaredType(t)   // R976
     if let opt = t.as(OptionalTypeSyntax.self) { return metatypeArrayElementName(opt.wrappedType) }
     if let att = t.as(AttributedTypeSyntax.self) { return metatypeArrayElementName(att.baseType) }
     if let arr = t.as(ArrayTypeSyntax.self) { return metatypeBaseName(arr.element) }
@@ -2757,6 +2823,7 @@ public func plainNominalTypeName(_ t: TypeSyntax) -> String? {
 /// on PROVENANCE alone put 32 spurious Unknowns on serde_json, and erasure was the discriminator that
 /// fixed it. Peels the wrappers `typeName` peels, so `some P?` and `@escaping some P` are caught too.
 public func isOpaqueParam(_ t: TypeSyntax) -> Bool {
+    let t = desugaredType(t)   // R976
     if let opt = t.as(OptionalTypeSyntax.self) { return isOpaqueParam(opt.wrappedType) }
     if let att = t.as(AttributedTypeSyntax.self) { return isOpaqueParam(att.baseType) }
     if let tup = t.as(TupleTypeSyntax.self), tup.elements.count == 1, let only = tup.elements.first {
@@ -2833,6 +2900,7 @@ public func nestedArrayElementName(_ t: TypeSyntax) -> String? {
 /// caller that needs to inspect the element's SPELLING (is it `some P`? — `isOpaqueParam`) can, rather
 /// than re-deriving the same peeling and drifting from it.
 public func arrayElementType(_ t: TypeSyntax) -> TypeSyntax? {
+    let t = desugaredType(t)   // R976
     if let arr = t.as(ArrayTypeSyntax.self) { return arr.element }
     if let opt = t.as(OptionalTypeSyntax.self) { return arrayElementType(opt.wrappedType) }
     if let att = t.as(AttributedTypeSyntax.self) { return arrayElementType(att.baseType) }
@@ -2867,6 +2935,7 @@ public let ERASED_ITERABLES: Set<String> =
 /// a value of this type can be pinned to a concrete local `next`/`makeIterator` unit (precise) or must be
 /// honest Unknown. Peels Optional/Attributed wrappers so `(some Sequence)?` still classifies.
 public func opaqueIterableName(_ t: TypeSyntax) -> String? {
+    let t = desugaredType(t)   // R976
     if let opt = t.as(OptionalTypeSyntax.self) { return opaqueIterableName(opt.wrappedType) }
     if let att = t.as(AttributedTypeSyntax.self) { return opaqueIterableName(att.baseType) }
     if let some = t.as(SomeOrAnyTypeSyntax.self) {
@@ -2882,7 +2951,7 @@ public func opaqueIterableName(_ t: TypeSyntax) -> String? {
 /// A tuple type's element types keyed by BOTH position (`"0"`, `"1"`) and label (`"c"`): `(c: C, n: Int)`
 /// → `["0": "C", "c": "C", "1": "Int", "n": "Int"]`. Types `p.0` / `p.c` member accesses on a tuple.
 public func tupleElements(_ t: TypeSyntax) -> [String: String] {
-    var e = t
+    var e = desugaredType(t)   // R976
     if let opt = e.as(OptionalTypeSyntax.self) { e = opt.wrappedType }
     if let att = e.as(AttributedTypeSyntax.self) { e = att.baseType }
     guard let tup = e.as(TupleTypeSyntax.self), tup.elements.count >= 2 else { return [:] }
@@ -2912,6 +2981,7 @@ public func dictValueName(_ t: TypeSyntax) -> String? {
 /// "is it a function") cannot drift the way the array and dictionary peelings would have if each
 /// grew its own copy of the wrapper-stripping.
 public func dictValueType(_ t: TypeSyntax) -> TypeSyntax? {
+    let t = desugaredType(t)   // R976
     if let d = t.as(DictionaryTypeSyntax.self) { return d.value }
     if let opt = t.as(OptionalTypeSyntax.self) { return dictValueType(opt.wrappedType) }
     if let att = t.as(AttributedTypeSyntax.self) { return dictValueType(att.baseType) }
