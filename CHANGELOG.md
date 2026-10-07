@@ -8,6 +8,8 @@ A **⚠** heading marks a report- or verdict-affecting change: it changes report
 verdicts, so an engine upgrade across it is baseline-invalidating (regenerate any saved baseline
 with the new build — the AS-EFF-005 guard refuses a cross-build baseline by design).
 
+## Unreleased
+
 ## [0.40.0] — 2026-10-07
 
 - ⚠ **Declares spec 0.40** (was 0.39) — the family floor bump; the `AgentsDocDriftTests` floor pin moves with
