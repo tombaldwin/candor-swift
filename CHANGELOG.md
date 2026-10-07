@@ -10,6 +10,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.40.0] — 2026-10-07
+
 - ⚠ **Declares spec 0.40** (was 0.39) — the family floor bump; the `AgentsDocDriftTests` floor pin moves with
   it. candor-swift implements all three ⟨0.40⟩ halves: the type surface (`holds`/`returnsProtocol`/`types`/
   `adds`), the AS-EFF-005 new-function baseline rule (SOUNDNESS R932) and bind/listen for `Net`
