@@ -527,8 +527,25 @@ final class CallCollector: SyntaxVisitor {
     /// root on a local type joins `Outer.member` whatever `.dep` really holds (R907, executed).
     private var elemGuessRecv: Set<SyntaxIdentifier> = []
     /// SOUNDNESS R915 (A) — a nested-type receiver expression -> its DOTTED spelling, where an extension keys
-    /// units that way. Read at the typed local call site only.
+    /// units that way. Read through `nestedDottedKey` by the typed local call site and (R983) the property read.
     private var r915NestedDotted: [SyntaxIdentifier: String] = [:]
+    /// SOUNDNESS R983 — THE DOTTED OWNER KEY OF A TYPE-POSITION RECEIVER, or nil. A member written in
+    /// `extension Outer.Inner { … }` is keyed `Outer.Inner.member`; written inline it is keyed `Inner.member`, the
+    /// simple spelling every receiver resolves to. The R915 (A) call site emits the dotted key beside the simple
+    /// one; nothing else did, so a STATIC PROPERTY of such an extension (`NS.AF.unix`, a computed `var` or a
+    /// `let`), any member reached through a TWO-LEVEL path, and a bare `Inner` written inside `Outer` all keyed
+    /// only `Inner.member` and reached nothing — ABSENT over a getter that reads the environment (executed,
+    /// v0.39.3 and 0.40.0). The answer is EXACT, never a leaf union: the recorded R915 path, or the lexical
+    /// resolution of a bare type name from the enclosing type outward, and only where the scan holds that
+    /// dotted spelling as a type. Adding it beside the simple key edges only a unit that really exists.
+    private func nestedDottedKey(_ base: ExprSyntax) -> String? {
+        if let d = r915NestedDotted[Self.peel(base).id] ?? r915NestedDotted[base.id] { return d }
+        guard !Self.r983Off, let dr = Self.peel(base).as(DeclReferenceExprSyntax.self) else { return nil }
+        let name = dr.baseName.text
+        guard name.first?.isUppercase == true, vars[name] == nil, !isBoundLocal(name),
+              let full = resolveLexical(name), full.contains("."), localTypes.contains(full) else { return nil }
+        return full
+    }
     /// SOUNDNESS R915 (B) — the unit's variadic parameter names (see `rootOf`).
     let variadicParamsR915: Set<String>
     private var elemGuessVars: Set<String> = []
@@ -1722,7 +1739,18 @@ final class CallCollector: SyntaxVisitor {
                     // Keyed by the SIMPLE name, as a nested declaration's units are (`Event.map`). Where an
                     // `extension Outer.Inner { … }` also exists its units are keyed DOTTED (`Signal.Event.delay`),
                     // so the call site emits that spelling too — both are the one Swift type.
-                    let dotted = "\(rt).\(member)"
+                    var dotted = "\(rt).\(member)"
+                    // SOUNDNESS R983 — the key is the WHOLE spelled path. `rt` is the previous hop's answer, which
+                    // for `A.Mid.Inner` is already the leaf `Mid`, so a two-level path formed `Mid.Inner` while
+                    // `extension A.Mid.Inner { … }` keys its units `A.Mid.Inner.member` (executed: ABSENT).
+                    if !Self.r983Off, !localTypes.contains(dotted) {
+                        if let b = ma.base, let inner = r915NestedDotted[Self.peel(b).id] ?? r915NestedDotted[b.id],
+                           localTypes.contains("\(inner).\(member)") {
+                            dotted = "\(inner).\(member)"
+                        } else if let full = dottedTypePath(Syntax(ma)), localTypes.contains(full) {
+                            dotted = full
+                        }
+                    }
                     if localTypes.contains(dotted) { r915NestedDotted[ExprSyntax(ma).id] = dotted }
                     vbHit("R915A", "\(rt).\(member)")
                     return (member, false, [member], false, inner.opaqueHop)
@@ -2476,6 +2504,8 @@ final class CallCollector: SyntaxVisitor {
     /// Priced by gate flips against the branch with it off, additions only: function scope `deny Unknown` 565
     /// standalone / 13 chained consumers, module, type-prefix and package scope 0. `CANDOR_R912_OFF=1` reverts.
     static let r912Off = ProcessInfo.processInfo.environment["CANDOR_R912_OFF"] != nil
+    /// SOUNDNESS R983 §1b KILL SWITCH — restores the release's nested-extension member keys.
+    static let r983Off = ProcessInfo.processInfo.environment["CANDOR_R983_OFF"] != nil
     static let r904Off = ProcessInfo.processInfo.environment["CANDOR_R904_OFF"] != nil
     static let r905Off = ProcessInfo.processInfo.environment["CANDOR_R905_OFF"] != nil
     /// SOUNDNESS R866 — the NON-local members of the composition a receiver NAME is typed by, when that
@@ -6985,7 +7015,7 @@ final class CallCollector: SyntaxVisitor {
                                   holdsHop: holdsHop, guessHop: r839Convention,
                                   r915Site: Self.veinBProbe && base.opaqueHop
                                     ? "\(extOnly ? "ext" : "decl")\t\(ma.base.map { guessHopKind($0) } ?? "nobase")\t\(ma.base.map { String($0.trimmedDescription.prefix(60)) } ?? "")" : nil))
-                if let b = ma.base, let dotted = r915NestedDotted[Self.peel(b).id] ?? r915NestedDotted[b.id] {
+                if let b = ma.base, let dotted = nestedDottedKey(b) {
                     calls.append(Call(path: "\(dotted).\(member)", leaf: member, strArg: lit, typed: true,
                                       args: argKinds(node), argTypes: argTypesOf(node)))
                 }
@@ -7574,6 +7604,10 @@ final class CallCollector: SyntaxVisitor {
             // property read here wants the type the property is read FROM.
             let recvRoot = recv.root
             let prop = node.declName.baseName.text
+            // SOUNDNESS R983 — the dotted twin of the simple `Inner.prop` edge below (see `nestedDottedKey`).
+            if !Self.r983Off, let b = node.base, let dotted = nestedDottedKey(b) {
+                propertyEdges.insert("\(dotted).\(prop)")
+            }
             // a protocol-typed PARAM base (`p.payload` where `p: HasPayload`) — `protoTyped` holds the
             // protocol, not `rootOf` (which leaves a proto param's root the bare name). Mirror the
             // method-dispatch path's `protoTyped[…]` lookup before the localTypes/localProtocols checks.
