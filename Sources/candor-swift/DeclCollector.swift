@@ -202,6 +202,7 @@ let protoCompositionSep: Character = "\u{1}"
 /// guessed at (the safe direction: the caller falls through to the existing, unchanged silent-pure path
 /// for a type this cannot parse the way it can already parse `A & B`).
 func compositionTypeNames(_ t: TypeSyntax) -> [String]? {
+    let t = desugaredType(t)   // R976
     if let opt = t.as(OptionalTypeSyntax.self) { return compositionTypeNames(opt.wrappedType) }
     if let att = t.as(AttributedTypeSyntax.self) { return compositionTypeNames(att.baseType) }
     if let some = t.as(SomeOrAnyTypeSyntax.self) { return compositionTypeNames(some.constraint) }
@@ -317,6 +318,7 @@ final class DeclCollector: SyntaxVisitor {
     /// `T!` is therefore still open and deliberately unfixed here; it needs its own resolution work, not a
     /// wider `typeName`.
     static func parameterTypeName(_ t: TypeSyntax) -> (name: String?, isFunction: Bool) {
+    let t = desugaredType(t)   // R976
         if let iuo = t.as(ImplicitlyUnwrappedOptionalTypeSyntax.self) { return typeName(iuo.wrappedType) }
         return typeName(t)
     }
@@ -944,7 +946,7 @@ final class DeclCollector: SyntaxVisitor {
                 if l.isFunction != r.isFunction {
                     if let p = (l.isFunction ? r.name : l.name) { typeGenericFnParams[name, default: []].insert(p) }
                 } else if !memberLevel, !l.isFunction, let p = l.name, let o = r.name, o != p,
-                          rt.is(IdentifierTypeSyntax.self),
+                          desugaredType(rt).is(IdentifierTypeSyntax.self),   // R976: `Optional<X>` is `X?`
                           typeGenericParamNames[name]?.contains(p) == true,
                           typeGenericParamNames[name]?.contains(o) != true {
                     // `F == SomeConcreteType` — an EXACT type, strictly more precise than a protocol
@@ -1920,6 +1922,7 @@ func genericArgumentNames(_ t: TypeSyntax) -> [String] {
         walk(x)
     }
     func walk(_ x: TypeSyntax) {
+        let x = desugaredType(x)   // R976 — `Optional<Noisy>` walks as `Noisy?`
         if let id = x.as(IdentifierTypeSyntax.self) {
             for a in id.genericArgumentClause?.arguments ?? [] {
                 if let at = a.argument.as(TypeSyntax.self) { add(at) }

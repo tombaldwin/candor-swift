@@ -18,6 +18,28 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   (R817/R949). **A gate that passed on 0.39.x can exit 1 on identical bytes, and one can go 1 → 0 over
   a NIO `bind(to:)` that was hedged** — see candor-spec SPEC §8 ⟨0.40⟩.
 
+### ⚠ Fixed — SOUNDNESS R976: `Optional<T>`, `Array<T>`, `Dictionary<K, V>` and `Swift.`-qualified spellings drop no call
+
+The generic spelling of a sugared stdlib type was read as a type NAMED `Optional` (or `Swift.Array`, …), so
+a receiver declared with it resolved against the standard library and the call left `functions[]` with
+nothing said. swift-nio's `ChannelHandlerContext.fireChannelRead` is `self.next?.invokeChannelRead(data)`
+over `var next: Optional<ChannelHandlerContext>`, so every `context.fire…` reached nothing; the 0.40.0
+monotone check saw it when `deny Env Unknown EventCounterHandler.channelRead` went 1 → 0. Every type helper
+now rewrites `Optional<T>`/`Array<T>`/`Dictionary<K, V>` (and `Swift.`-qualified forms, `Swift.Set<T>` too)
+to the sugar node first, so each spelling answers exactly as `T?`/`[T]`/`[K: V]` does. Census: 319 executed
+cells (spelling × field/param/local/return/global/typealias/closure/computed × use form); every cell where
+the sugar spelling charged and a generic spelling was ABSENT — 111 of them — now charges.
+
+- **Gates go 0 → 1** on code that really performs the effect: `deny Env EventCounterHandler.channelRead` on
+  swift-nio was 0 in v0.39.3 and in this release before the fix, 1 after; the `Unknown` gate is 1 → 0 → 1.
+- **Wire keys of some overloaded functions change** where a parameter was spelled generically:
+  `atomicCompareExchange(Optional,…)` is now `atomicCompareExchange(Wrapped,…)`, the key its `Wrapped?`
+  twin always had. A baseline keyed on the old spelling sees a rename.
+- `CANDOR_R976_OFF=1` restores the release's reading.
+- **Still open, deliberately:** `T!` outside a parameter (R534's boundary). Typing it reaches a pre-existing
+  drop of `x?.kf.cancelDownloadTask()` on a platform-typed receiver that the `T?` spelling already has, and
+  would remove four `Unknown` rows on Kingfisher.
+
 ### ⚠ Fixed — SOUNDNESS R951: a comparison reaches the witness of the type it actually compares
 
 `Equatable`/`Comparable` are treated as pure protocols, so a comparison reached a user-defined `==`/`<` only
