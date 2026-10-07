@@ -2128,6 +2128,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     let joinUnionOff = ProcessInfo.processInfo.environment["CANDOR_JOIN_UNION_OFF"] != nil
     let joinUnionProbe = ProcessInfo.processInfo.environment["CANDOR_JOIN_UNION_PROBE"] != nil
     let joinDebug = ProcessInfo.processInfo.environment["CANDOR_JOIN_DEBUG"] != nil
+    /// SOUNDNESS R910 §1b KILL SWITCH and reach probe — see `askOwnKey`.
+    let r910Off = ProcessInfo.processInfo.environment["CANDOR_R910_OFF"] != nil
+    let r910Probe = ProcessInfo.processInfo.environment["CANDOR_R910_PROBE"] != nil
     let r849Off = ProcessInfo.processInfo.environment["CANDOR_R849_OFF"] != nil
     /// SOUNDNESS R847 / R850 — THE BARE-NAME DEPENDENCY JOIN KEEPS v0.39.2'S `pkg#<leaf>` LOOKUP, AND THE
     /// ONLY REMOVAL IS ONE THAT IS A PROOF UNDER SWIFT'S OWN LOOKUP: a name a BINDER holds in the current
@@ -2332,6 +2335,58 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 unionOwnImplementors(forKey: k, to: qual)
             }
         }
+    }
+
+    /// SOUNDNESS R910 — THE §2 JOIN ASKS THE KEY UNDER ITS OWNER'S PACKAGE, NOT ONLY UNDER THE CHAINED ONES.
+    ///
+    /// `joinTiers` forms `<p>#<owner>.<member>` only for packages that are chained AND imported. A protocol
+    /// requirement's answer is the `interfaceUnion` entry a CONFORMER's report publishes under the
+    /// PROTOCOL OWNER's prefix (obligation 2) — so where the owner's package is not chained, that entry
+    /// (`ProtoPkg#Backend774.run`, from IfaceDep's report) sat in the index and nothing asked for it.
+    /// Measured: App importing ProtoPkg + IfaceDep, chained on IfaceDep only — `useBackend774` `[]`,
+    /// `deny Fs` and `deny Unknown` exit 0, executed writing the file; chained on both, `['Fs']`, exit 1.
+    /// The asymmetry is the tell: `applyDepEntry` already asks a DEPENDENCY entry's `dispatchesOn` key by
+    /// exact string, wherever its package sits; the consumer's own call, which PUBLISHES that same key
+    /// (obligation 1), never asked it.
+    ///
+    /// THE OWNER IS THE ONE OBLIGATION 1 ALREADY DECIDES — `foreignOwnerModule`, else vein D's
+    /// `ownerProof` — never a new guess, and nil for anything this package declares. A `<pkg>#` key is in
+    /// the index only if a chained report published it, so a hit names this type's own abstraction.
+    ///
+    /// TWO REFUSALS THE PUBLISH SITE DOES NOT MAKE, because a published key no one can join costs nothing
+    /// and an ASKED one charges the row. (1) A platform name is never a dependency's: the one-import floor
+    /// keys a platform conformance under the file's sole dependency (`DProto#CustomStringConvertible
+    /// .description`, pinned in `ForeignOwnerProofProcessTests`), and asking that key would charge every
+    /// `description` read in a file with one import. (2) Where the floor module's own sources are readable
+    /// and do not declare the name, the floor's guess is refuted and nothing is asked (a re-exported owner
+    /// lands here too — the release's silence, not a new charge).
+    func ownerKeyPkg(_ abs: String, inFile file: String) -> String? {
+        guard !r910Off, !abs.isEmpty, !localTypes.contains(abs), localProtocolWirePath(abs) == nil else { return nil }
+        let top = String(abs.prefix { $0 != "." })
+        guard !localTypes.contains(top), PLATFORM_REFINES[top] == nil, !PLATFORM_LEAVES.contains(top),
+              !PLATFORM_VALUE_TYPES.contains(top), !STD_SUPERS_PUBLIC.contains(top) else { return nil }
+        if let m = foreignOwnerModule(inFile: file) {
+            if let d = moduleDeclarations(m), !d.opaque, d.names[top] == nil { return nil }
+            return deps.pkgOfModule(m)
+        }
+        return provenOwnerPackage(of: abs, inFile: file, site: "r910")
+    }
+    /// …and applies what it answers ADDITIVELY: beside whatever the site charges, without setting the
+    /// caller's `resolved`, so every disclosure the miss path fires (R705, R859, vein D, R826, the κ
+    /// ledger) still fires. A RESOLUTION that can remove nothing. Skipped where the owner's package was
+    /// already in `asked` — the §2 join asked that identical string and missed.
+    @discardableResult
+    func askOwnKey(_ ownerPkg: String, _ path: String, asked: Set<String>, to qual: String) -> Bool {
+        guard ownerPkg != pkgName, !asked.contains(ownerPkg) else { return false }
+        // REACH PROBE (§E1) — two lines: ASK counts the population this arm runs on, HIT the subset it moves.
+        if r910Probe { FileHandle.standardError.write("R910ASK \(qual) \(ownerPkg)#\(path)\n".data(using: .utf8)!) }
+        guard let e = deps.lookup("\(ownerPkg)#\(path)") else { return false }
+        if r910Probe {
+            FileHandle.standardError.write(
+                "R910HIT \(qual) \(ownerPkg)#\(path) eff=\(e.effects.sorted())\n".data(using: .utf8)!)
+        }
+        applyDepEntry(e, to: qual)
+        return true
     }
 
     // ── ⟨0.40⟩ THE CONSUMER (SPEC §2 ⟨0.40⟩; SOUNDNESS R843; PART 95). Everything below ADDS: an entry the
@@ -4135,6 +4190,17 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     sourceTypedWalk(dispatchAbstraction(owner, f) ?? owner, call.leaf, tiers: memberTiers,
                                     to: f.qual, guessed: call.guessHop)
                 }
+                // SOUNDNESS R910 — see `ownerKeyPkg`. After the walk, so nothing it decides is changed.
+                if hits.isEmpty, !call.unqualified, let owner = call.extOwner {
+                    let abs = dispatchAbstraction(owner, f) ?? owner
+                    if let op = ownerKeyPkg(abs, inFile: file),
+                       askOwnKey(op, "\(abs).\(call.leaf)", asked: Set(memberTiers.flatMap { $0.map { $0.p } }), to: f.qual),
+                       call.guessHop {
+                        // ⟨0.40⟩ a hit on a GUESSED owner keeps the guess's `Unknown` (PART 95 o1).
+                        direct[f.qual, default: []].insert("Unknown")
+                        whyMap[f.qual, default: []].insert("dispatch:untyped cross-package receiver")
+                    }
+                }
                 // ⟨0.40⟩ EVERY LOOKUP ON A GUESSED OWNER THAT NO TRUSTED SURFACE ANSWERS KEEPS THE GUESS AND
                 // ADDS `Unknown` — a HIT included: `Wrong.shared.ping()` joining `Wrong.ping` is a guess that the
                 // value is a `Wrong`, and over an older producer nothing says otherwise (PART 95 o1, o1b). A
@@ -4650,6 +4716,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if !r843Off, hits.isEmpty, cc.propertyExternal.contains(cand), let dot = cand.lastIndex(of: ".") {
                     sourceTypedWalk(String(cand[..<dot]), String(cand[cand.index(after: dot)...]),
                                     tiers: candTiers, to: f.qual, guessed: false)
+                }
+                // SOUNDNESS R910 — a property read / `deinit` / stringification on a dependency type asks its
+                // owner's package too (`viaProp910`: `s.level` on a protocol-typed parameter was ABSENT).
+                if hits.isEmpty, let dot = cand.lastIndex(of: ".") {
+                    let owner = String(cand[..<dot])
+                    if let op = ownerKeyPkg(owner, inFile: file) {
+                        askOwnKey(op, cand, asked: Set(candTiers.flatMap { $0.map { $0.p } }), to: f.qual)
+                    }
                 }
                 guard hits.count == 1 || (!joinUnionOff && hits.count > 1) else { continue }
                 for de in hits { applyDepEntry(de, to: f.qual) }

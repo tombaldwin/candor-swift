@@ -10,6 +10,27 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — R910: a consumer that chains a CONFORMER's package but not the protocol OWNER's now asks the owner's key
+
+The §2 join formed `<p>#<owner>.<member>` only for packages that are chained AND imported. A protocol
+requirement's answer is the `interfaceUnion` entry the conformer's report publishes under the OWNER's
+prefix, so with the owner unchained (`App` importing `ProtoPkg` + `IfaceDep`, chained on `IfaceDep` only)
+that entry sat in the index unasked and `useBackend774(_ b: Backend774) { b.run() }` read `[]` —
+`deny Fs` / `deny Unknown` exit 0 over a body that writes a file (executed). The member join and the
+property / `deinit` / stringification candidate join now also ask the key under the owner's package, as
+obligation 1 already decides it (`foreignOwnerModule`, else vein D's `ownerProof`).
+
+- **⚠ a row gains the conformers' effects** in that shape: `deny <E> <fn>` can go from exit 0 to exit 1.
+  Executed fixture: 8 rows gain a concrete effect (`Fs`, `Env`), including a property read that was ABSENT.
+- Additive by construction: the entry is applied beside whatever the site charges and `resolved` is not
+  set, so no disclosure that fired before stops firing; with the owner chained nothing changes (the join
+  already asked that string). A platform protocol is never asked under a dependency's prefix, and where
+  the one-import floor's module sources do not declare the name the floor's guess is not asked either.
+- Corpus (8 chained arms over swift-certificates / swift-crypto / swift-nio, partial and full chains):
+  371 asks, 0 hits, ADDED 0 / REMOVED 0 / CHANGED 0; standalone corpus (23 entries): byte-identical.
+
+`CANDOR_R910_OFF=1` restores the previous join; `CANDOR_R910_PROBE=1` prints `R910ASK` / `R910HIT`.
+
 ### ⚠ Fixed — R915: a member hop the receiver's type does not record no longer keeps the OUTER type, where a declaration answers it
 
 `rootOf` kept the outer base's type when a `.member` hop was not a recorded field (the κ static-chain
