@@ -22,6 +22,10 @@ struct FnInfo {
     var simpleQual: String = ""   // the immediate "Type.name" form — receivers resolve to SIMPLE type
                                   // names, so call edges are matched simple→full through `qualBySimple`.
     var enclosingTypePath: String?    // FULL nested path of the enclosing type (for precise sibling edges)
+    /// SOUNDNESS R951 — the GENERIC ARGUMENTS spelled in each parameter's type, flattened (`Tiny<Noisy>`,
+    /// `Tiny<Noisy>.Storage`, `[Noisy]`, `Noisy?`, `[K: Noisy]` all give `Noisy`): the instantiation a
+    /// comparison operator on that parameter runs the witnesses of. See `genericArgumentNames`.
+    var paramTypeArgs: [String: [String]] = [:]
     /// ⟨0.23⟩ `typeSurface.returns` — the PLAIN NOMINAL return type AS SPELLED (`Client`, `Sync.Client`),
     /// or nil for a wrapper/tuple/function/opaque return, which must not publish its payload. Left
     /// UNRESOLVED here: turning the spelling into a fully-qualified type is a module-wide question
@@ -1574,6 +1578,8 @@ final class DeclCollector: SyntaxVisitor {
             }
             info.paramNames.insert(pname)
             info.paramIndex[pname] = idx        // R178 — see `paramIndex`
+            let targs = genericArgumentNames(p.type)
+            if !targs.isEmpty { info.paramTypeArgs[pname] = targs }       // R951
             if let comps = compositionTypeNames(p.type) { info.compositionParams[pname] = comps }   // R866
             // ordered signature for overload resolution: the param's simple type name (nil if unresolvable)
             // and whether it has a default (so a call may legitimately omit it).
@@ -1901,4 +1907,35 @@ private final class BodyLocalTypeFinder: SyntaxVisitor {
     override func visit(_ n: ClassDeclSyntax) -> SyntaxVisitorContinueKind { take(n, n.inheritanceClause) }
     override func visit(_ n: EnumDeclSyntax) -> SyntaxVisitorContinueKind { take(n, n.inheritanceClause) }
     override func visit(_ n: ActorDeclSyntax) -> SyntaxVisitorContinueKind { take(n, n.inheritanceClause) }
+}
+
+/// SOUNDNESS R951 — the type names appearing as GENERIC ARGUMENTS of a spelled type, recursively, in source
+/// order and de-duplicated: `Tiny<Noisy>.Storage` -> [Noisy]; `[Pair<A, B>]` -> [Pair, A, B]; `Noisy?` and
+/// `[Noisy]` -> [Noisy] (an Optional / Array / Dictionary spelling IS a generic argument). The outermost
+/// nominal type itself is not included.
+func genericArgumentNames(_ t: TypeSyntax) -> [String] {
+    var out: [String] = []
+    func add(_ x: TypeSyntax) {
+        if let n = typeName(x).name, !out.contains(n) { out.append(n) }
+        walk(x)
+    }
+    func walk(_ x: TypeSyntax) {
+        if let id = x.as(IdentifierTypeSyntax.self) {
+            for a in id.genericArgumentClause?.arguments ?? [] {
+                if let at = a.argument.as(TypeSyntax.self) { add(at) }
+            }
+        } else if let m = x.as(MemberTypeSyntax.self) {
+            walk(m.baseType)
+            for a in m.genericArgumentClause?.arguments ?? [] {
+                if let at = a.argument.as(TypeSyntax.self) { add(at) }
+            }
+        } else if let a = x.as(ArrayTypeSyntax.self) { add(a.element)
+        } else if let d = x.as(DictionaryTypeSyntax.self) { add(d.key); add(d.value)
+        } else if let o = x.as(OptionalTypeSyntax.self) { add(o.wrappedType)
+        } else if let o = x.as(ImplicitlyUnwrappedOptionalTypeSyntax.self) { add(o.wrappedType)
+        } else if let at = x.as(AttributedTypeSyntax.self) { walk(at.baseType)
+        } else if let tu = x.as(TupleTypeSyntax.self) { for e in tu.elements { add(e.type) } }
+    }
+    walk(t)
+    return out
 }

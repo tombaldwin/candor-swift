@@ -1866,6 +1866,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // one HOF each inherited the OTHER's effect too. Resolution below is grouped by `caller` so each
     // caller is judged only against the sites IT makes.
     var callsiteArgs: [String: [(caller: String, args: [ArgKind])]] = [:]
+    /// SOUNDNESS R951 — the argument TYPES at each resolved call site, beside `callsiteArgs`; and the
+    /// comparison witnesses each unit needs from its caller's instantiation (`CallCollector.genericWitnessReqs`).
+    var callsiteArgTypes: [String: [(caller: String, types: [String?])]] = [:]
+    var genericWitnessReqsByUnit: [String: Set<String>] = [:]
     var deferredCallbacks: [String: (indexes: Set<Int>, names: Set<String>)] = [:]
 
     /// SOUNDNESS R720 — the subset of `deferredCallbacks[fq].names` that has NO PARAMETER POSITION in
@@ -2786,6 +2790,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // `declaredTypes` because those are the spellings the canonicaliser hands on for it (R266/R132): the
     // unit keys' own prefixes, never a guessed leaf. Protocols keep their leaf (the dispatch machinery is
     // keyed by it). Nothing here moves under `CANDOR_AI_OFF=1`.
+    // SOUNDNESS R951 — op -> the local types declaring that comparison witness as a static member.
+    var opWitnessTypesR951: [String: Set<String>] = [:]
+    for f in allFns {
+        guard let et = f.enclosingType else { continue }
+        let leaf = String((f.simpleQual.split(separator: ".").last.map(String.init) ?? "").prefix { $0 != "(" && $0 != "#" })
+        if leaf == "==" || leaf == "<" { opWitnessTypesR951[leaf, default: []].insert(et) }
+    }
     var aiBase = AiTypeIndex()
     var aiSharedPaths = Set<String>()      // the FULL paths added above — the canonicaliser's precise spellings
     if !CallCollector.aiOff {
@@ -2955,15 +2966,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                    }
                                    a.genericNames = g
                                    return a
-                               }())
+                               }(),
+                               opWitnessTypes: opWitnessTypesR951)
         // The locator-move set is flow-INSENSITIVE and must be complete before the first call is collected
         // (a rebind later in the text, or earlier in time inside a loop, still invalidates the claim). The
         // parameter names go with it: a body binder that SHADOWS a parameter is the same hazard, and the
         // signature is the one binder site the body walk cannot see.
         cc.prescanLocatorMoves(body, params: f.paramNames)
         cc.prescanBodyAliases(Syntax(body))                                   // VEIN A(i) / R790
+        cc.prescanLocalTypeArgs(Syntax(body))                                 // R951
         if CallCollector.veinBProbe { FileHandle.standardError.write("VBFN\t\(f.qual)\n".data(using: .utf8)!) }
         cc.walk(body)
+        if !cc.genericWitnessReqs.isEmpty { genericWitnessReqsByUnit[f.qual] = cc.genericWitnessReqs }   // R951
         // accessor units: a property READ/WRITE of a known accessor unit is an edge (the reader inherits
         // the getter/observer/subscript's effects — `c.data` reaching the Fs inside `var data: Data { … }`).
         // resolveQual matches the OWN type's `Type.member` unit; when the accessor is INHERITED (the body
@@ -3266,7 +3280,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                !localTypes.contains(modName),                       // a real type shadows a module name
                let inMod = freeFnByModule[modName]?[call.leaf], inMod.count == 1 {
                 edges[f.qual, default: []].insert(inMod[0])
-                callsiteArgs[inMod[0], default: []].append((f.qual, call.args))
+                callsiteArgs[inMod[0], default: []].append((f.qual, call.args)); callsiteArgTypes[inMod[0], default: []].append((f.qual, call.argTypes))
                 resolved = true
             } else if call.extOwner == CallCollector.superMarker {
                 // `super.m()` — resolve on the SUPERTYPE chain, never on the enclosing type: for an
@@ -3280,7 +3294,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     for sup in supertypesOf[et] ?? [] where sup != et {
                         for t in resolveQual("\(sup).\(member)") {
                             edges[f.qual, default: []].insert(t)
-                            callsiteArgs[t, default: []].append((f.qual, call.args))
+                            callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
                             resolved = true
                         }
                     }
@@ -3324,19 +3338,19 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // VEIN A(i) — the exact overload set of a canonical FULL path (see the loop head).
                     for t in matchOverloadsPath(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append((f.qual, call.args))
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
                         resolved = true
                     }
                 } else if overloadedBases.contains(call.path) {
                     for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append((f.qual, call.args))
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
                         resolved = true
                     }
                 } else if !typedTargets.isEmpty {
                     for t in typedTargets {
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append((f.qual, call.args))
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
                     }
                     resolved = true
                 } else if let dot = call.path.lastIndex(of: "."),
@@ -3366,13 +3380,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         if overloadedBases.contains(base) {
                             for t in matchOverloads(base, argc, call.argTypes, swiftModuleOf(f.loc)) {
                                 edges[f.qual, default: []].insert(t)
-                                callsiteArgs[t, default: []].append((f.qual, call.args))
+                                callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
                                 resolved = true
                             }
                         } else {
                             for t in resolveQual(base) {
                                 edges[f.qual, default: []].insert(t)
-                                callsiteArgs[t, default: []].append((f.qual, call.args))
+                                callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
                                 resolved = true
                             }
                         }
@@ -3682,18 +3696,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // covers the whole chain.
                     for t in inheritedTargets.sorted() {
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append((f.qual, call.args))
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
                         resolved = true
                     }
                 } else if overloadedBases.contains(call.path) {            // an overloaded FREE function
                     for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append((f.qual, call.args))
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
                         resolved = true
                     }
                 } else if let targets = freeFnByName[call.path], targets.count == 1 {
                     edges[f.qual, default: []].insert(targets[0])
-                    callsiteArgs[targets[0], default: []].append((f.qual, call.args))
+                    callsiteArgs[targets[0], default: []].append((f.qual, call.args)); callsiteArgTypes[targets[0], default: []].append((f.qual, call.argTypes))
                     resolved = true
                 } else if localTypes.contains(call.path), overloadedBases.contains("\(call.path).init") {
                     for t in matchOverloads("\(call.path).init", argc, call.argTypes, swiftModuleOf(f.loc)) {
@@ -4956,6 +4970,28 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
 
     // fixpoint: effects + literal surfaces propagate over edges (the pure `propagate` lives in CandorCore)
+    // SOUNDNESS R951 — a comparison on a FUNCTION generic parameter runs the witness of whatever type the
+    // CALLER instantiated it with: `eq(Noisy(v: 3), Noisy(v: 3))` runs `Noisy.==` inside `eq`. The edge is the
+    // caller's (its instantiation), resolved from the argument type each resolved call site recorded; a call
+    // site whose argument type is unknown or not local resolves nothing (no union of every witness).
+    if !CallCollector.r951Off {
+        for (callee, reqs) in genericWitnessReqsByUnit {
+            for site in callsiteArgTypes[callee] ?? [] {
+                for req in reqs {
+                    let parts = req.split(separator: ":", maxSplits: 1).map(String.init)
+                    guard parts.count == 2, let idx = Int(parts[0]), idx < site.types.count,
+                          let x = site.types[idx], localTypes.contains(x) else { continue }
+                    let base = "\(x).\(parts[1])"
+                    let module = swiftModuleOf(locOf[site.caller] ?? "")
+                    let ts = overloadedBases.contains(base) ? Set(matchOverloads(base, 2, [x, x], module)) : resolveQual(base)
+                    if CallCollector.r951Probe, !ts.isEmpty {
+                        FileHandle.standardError.write("R951CALLER \(site.caller) -> \(callee) \(base)\n".data(using: .utf8)!)
+                    }
+                    edges[site.caller, default: []].formUnion(ts)
+                }
+            }
+        }
+    }
     let inferred = propagate(direct, over: edges)
     let hostsAcc = propagate(hostsD, over: edges), cmdsAcc = propagate(cmdsD, over: edges)
     // `fs` kinds TRAVEL the call graph — a caller that transitively only writes IS a writer — and the "?"

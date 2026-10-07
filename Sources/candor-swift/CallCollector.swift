@@ -291,6 +291,22 @@ final class CallCollector: SyntaxVisitor {
     /// the PROJECT's own type, not Foundation's, so the κ table must not answer for it.
     let importedModules: Set<String>
     let projectModules: Set<String>
+    /// SOUNDNESS R951 — op -> the local types that DECLARE that comparison witness (`static func ==`),
+    /// from the Driver. A local `Equatable` type NOT in it has a SYNTHESIZED witness, which compares its
+    /// stored properties.
+    let opWitnessTypes: [String: Set<String>]
+    /// R951 — `let x: [Noisy] = …` / `var t: Tiny<Noisy>`: the generic arguments of annotated locals.
+    var localTypeArgs: [String: [String]] = [:]
+    /// R951 — "paramIndex:op": a comparison on a parameter typed by this FUNCTION's generic parameter. The
+    /// instantiation is the caller's, so the Driver resolves it at every call site from the argument type.
+    var genericWitnessReqs: Set<String> = []
+    /// R951 — copied from the unit's `FnInfo` (this collector keeps no reference to it).
+    let paramTypeArgsR951: [String: [String]]
+    let paramIndexR951: [String: Int]
+    let paramTypesR951: [String: String]
+    let genericBoundsR951: [String: String]
+    static let r951Off = ProcessInfo.processInfo.environment["CANDOR_R951_OFF"] != nil
+    static let r951Probe = ProcessInfo.processInfo.environment["CANDOR_R951_PROBE"] != nil
     /// VEIN A(i) — the scope `canonicalTypeRef` resolves a type spelling in. See `AiTypeIndex`.
     let ai: AiTypeIndex
     /// VEIN A(i) / SOUNDNESS R790 — `typealias` declarations written INSIDE this unit's body. DeclCollector
@@ -789,7 +805,12 @@ final class CallCollector: SyntaxVisitor {
          closureFields: [String: Set<String>], mutableClosureFields: [String: Set<String>] = [:],
          moduleConstStrings: [String: String] = [:],
          importedModules: Set<String> = [], projectModules: Set<String> = [], deps: DepIndex = DepIndex(),
-         ai: AiTypeIndex = AiTypeIndex()) {
+         ai: AiTypeIndex = AiTypeIndex(), opWitnessTypes: [String: Set<String>] = [:]) {
+        self.opWitnessTypes = opWitnessTypes
+        self.paramTypeArgsR951 = info.paramTypeArgs
+        self.paramIndexR951 = info.paramIndex
+        self.paramTypesR951 = info.params
+        self.genericBoundsR951 = info.genericBounds
         self.importedModules = importedModules
         self.projectModules = projectModules
         self.ai = ai
@@ -7809,9 +7830,96 @@ final class CallCollector: SyntaxVisitor {
                     }
                 }
             }
+            // `x == nil` / `x != nil` compares against `_OptionalNilComparisonType` and runs no witness of
+            // the wrapped type (measured: swift-nio's `self.trailers == nil` gained `ByteBuffer.==` on the
+            // first cut of this change).
+            let nilOperand = Self.peel(elems[i]).is(NilLiteralExprSyntax.self)
+                || (i + 2 < elems.count && Self.peel(elems[i + 2]).is(NilLiteralExprSyntax.self))
+            if !Self.r951Off, !nilOperand, let w = Self.witnessOp(opName) {
+                for operandExpr in [elems[i], (i + 2 < elems.count ? elems[i + 2] : nil)].compactMap({ $0 }) {
+                    comparisonWitnesses(w, operandExpr)
+                }
+            }
             i += 2
         }
         return .visitChildren
+    }
+
+    // ── SOUNDNESS R951 — A COMPARISON RUNS THE WITNESS OF THE TYPE ACTUALLY COMPARED ─────────────────────────
+    //
+    // `Equatable`/`Comparable` are `STD_PURE_PROTOCOLS`, so a comparison reached a user-defined witness only
+    // when an operand was typed by that exact local type. Every generic or synthesized spelling of the same
+    // comparison was silent (executed, `swiftagent-verify/genA`/`genC`: the witness writes a file):
+    //   · `Tiny<Noisy> == Tiny<Noisy>` — the synthesized `==` compares the stored properties, down to `Noisy`;
+    //   · `Tiny<Noisy>.Storage == …`   — the conditional `Storage.==` compares its `Element`, i.e. `Noisy`;
+    //   · `[Noisy] == [Noisy]`, `Noisy? == …` — the container's `==` is its element's;
+    //   · `eq<T: Equatable>(Noisy(), Noisy())` — `a == b` inside `eq` runs the CALLER's `T`.
+    // The release charged one of these (`Tiny.Storage.==`) only through the module-wide alias table turning
+    // the generic parameter `Element` into an unrelated `typealias Element = Noisy` — the coincidence vein
+    // A(i)'s N-d fix removed, and the same mechanism that charged swift-nio's `_TinyArray` `ByteBuffer.==`.
+    //
+    // A RESOLUTION, NOT A HEDGE: the witnesses edged are those of the types the comparison is spelled over —
+    // the operand's generic ARGUMENTS (`genericArgumentNames`), a synthesized type's stored-property types,
+    // and, for a function generic parameter, the argument type at each CALL SITE (the Driver, from
+    // `genericWitnessReqs`). A generic parameter with no instantiation in sight resolves NOTHING — never a
+    // union of every witness in the package, which is what re-admitted `ByteBuffer.==` in the first design.
+    static func witnessOp(_ op: String) -> String? {
+        if op == "==" || op == "!=" { return "==" }
+        if ["<", ">", "<=", ">="].contains(op) { return "<" }
+        return nil
+    }
+    private func comparisonWitnesses(_ w: String, _ operand: ExprSyntax) {
+        var targets: [String] = []
+        if let dr = Self.peel(operand).as(DeclReferenceExprSyntax.self) {
+            let n = dr.baseName.text
+            for x in paramTypeArgsR951[n] ?? localTypeArgs[n] ?? [] { targets.append(dealias(x)) }
+            if let idx = paramIndexR951[n], let t = paramTypesR951[n] ?? vars[n], !localTypes.contains(t),
+               genericBoundsR951[t] != nil {
+                genericWitnessReqs.insert("\(idx):\(w)")
+            }
+        }
+        let r = rootOf(operand)
+        // `opaqueHop`: the root is the OUTER base kept by convention (`self.registrations.count` -> the
+        // enclosing type), not the operand's type — walking ITS fields charged swift-nio's `Selector.deinit`
+        // with `NIODeadline.==` on this change's first cut.
+        if let t = r.root, r.isVar, !r.opaqueHop, localTypes.contains(t), !(opWitnessTypes[w]?.contains(t) ?? false) {
+            targets.append(t)   // synthesized: walked into its stored properties below
+        }
+        var seen = Set<String>(), queue = targets
+        while let x = queue.popLast() {
+            guard seen.insert(x).inserted, seen.count < 32, localTypes.contains(x) else { continue }
+            // A SHARED simple name (`Index`, `Storage`) names several types and the spelling here does not say
+            // which; edging `Index.<` would union every `*.Index.<` in the package — the over-charge measured on
+            // swift-nio's `BetterHTTPParser.validateHeaderLength` in this change's first A/B. Followed only when
+            // the name is one type (or already a full path the canonicaliser handed on).
+            if !x.contains("."), (ai.pathsByLeaf[x]?.count ?? 0) > 1 { continue }
+            if opWitnessTypes[w]?.contains(x) ?? false {
+                if Self.r951Probe { FileHandle.standardError.write("R951HIT \(x).\(w)\n".data(using: .utf8)!) }
+                calls.append(Call(path: "\(x).\(w)", leaf: w, strArg: nil, typed: true,
+                                  args: [.opaque, .opaque], argTypes: [x, x]))
+            } else {
+                // a synthesized witness compares every stored property (an enum: every payload)
+                for (_, fi) in fields[x] ?? [:] { if let fn = fi.name, !fi.isFunction { queue.append(dealias(fn)) } }
+            }
+        }
+    }
+    /// R951 — the generic arguments of annotated locals, flow-insensitively (a re-annotation only widens).
+    func prescanLocalTypeArgs(_ body: Syntax) {
+        guard !Self.r951Off else { return }
+        final class V: SyntaxVisitor {
+            var out: [String: [String]] = [:]
+            override func visit(_ node: PatternBindingSyntax) -> SyntaxVisitorContinueKind {
+                if let n = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text,
+                   let t = node.typeAnnotation?.type {
+                    let a = genericArgumentNames(t)
+                    if !a.isEmpty { out[n, default: []].append(contentsOf: a) }
+                }
+                return .visitChildren
+            }
+        }
+        let v = V(viewMode: .sourceAccurate)
+        v.walk(body)
+        localTypeArgs = v.out
     }
 
     // PREFIX (`~>x`) / POSTFIX (`x<!>`) operator overloads — SwiftParser leaves these as their own

@@ -10,6 +10,35 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — SOUNDNESS R951: a comparison reaches the witness of the type it actually compares
+
+`Equatable`/`Comparable` are treated as pure protocols, so a comparison reached a user-defined `==`/`<` only
+when an operand was typed by that exact local type. Every other spelling of the same comparison was silent.
+Executed (the witness writes a file each time):
+- `Tiny<Noisy> == Tiny<Noisy>`, which is synthesized;
+- `Tiny<Noisy>.Storage == …`, a conditional `==` over `Element`;
+- `[Noisy] == [Noisy]` and `Noisy? != Noisy?`;
+- a synthesized struct containing a `Noisy`;
+- `eq<T: Equatable>(Noisy(), Noisy())`.
+
+The release charged one of these, `Tiny.Storage.==`, only by coincidence: the module-wide alias table turned
+the generic parameter `Element` into an unrelated `typealias Element = Noisy`. Vein A(i)'s N-d fix removed
+that coincidence.
+
+The comparison now edges to the witnesses of:
+- the operand's generic ARGUMENTS (`[Noisy]`, `Tiny<Noisy>.Storage`, `Noisy?`, annotated locals);
+- a synthesized local type's stored properties;
+- for a function generic parameter, the argument type at each call site. The edge belongs to the caller,
+  whose instantiation it is.
+
+Nothing is unioned over the package's witnesses. These are skipped:
+- a comparison against `nil`;
+- a convention-guessed root;
+- a shared simple name such as `Index`.
+
+That keeps swift-nio's `_TinyArray.Storage.==` free of `ByteBuffer.==`.
+`CANDOR_R951_OFF=1` restores the release; `CANDOR_R951_PROBE=1` prints `R951HIT` / `R951CALLER`.
+
 ### ⚠ Changed — ⟨0.40⟩ bind/listen (SOUNDNESS R817, R949): a NIO bootstrap `bind` is not a destination
 
 `DatagramBootstrap(group: g).bind(host: "10.0.0.5", port: 9)` published `hosts: ["10.0.0.5:9"]` COMPLETE, so
@@ -121,6 +150,7 @@ declaration, and where none answers the release's reading stands (a floor):
 `CANDOR_R915_OFF=1` restores 519f62d (per arm: `CANDOR_R915{A,B,C,D}_OFF`). Known over-charge: a
 protocol-extension property returning a generic wrapper unions same-named members of its constrained
 extensions (Alamofire `trust.af.publicKeys` also reaches the `Bundle` extension's `Fs`; 3 rows).
+
 ### ⚠ Changed — ⟨0.40⟩ second half (SOUNDNESS R932): a function ABSENT from the baseline is compared against nothing, not exempted
 
 The AS-EFF-005 guard skipped every function its baseline did not hold as "new code, reviewed normally" —

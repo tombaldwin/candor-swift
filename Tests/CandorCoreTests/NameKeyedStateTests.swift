@@ -449,6 +449,16 @@ final class NameKeyedStateTests: XCTestCase {
         "ai": .notPerBinding,
         "bodyAliases": .notPerBinding,
         "aliasScopeOwners": .notPerBinding,
+        // SOUNDNESS R951. The two maps keyed by a BINDING name feed only `comparisonWitnesses`, which ADDS
+        // witness edges; a stale entry after a rebind can only over-charge (a witness of the old type's
+        // arguments), never silence, so they are kept rather than cleared — the hedge direction.
+        "localTypeArgs": .deliberatelyKept("R951: a stale entry adds a witness edge, never removes one"),
+        "paramTypeArgsR951": .deliberatelyKept("R951: a shadowed parameter's type arguments can only over-charge"),
+        "paramIndexR951": .deliberatelyKept("R951: a shadowed generic parameter name can only add a caller-side witness"),
+        "paramTypesR951": .deliberatelyKept("R951: a shadowed parameter type can only add a caller-side witness edge"),
+        "genericBoundsR951": .immutableIndex,
+        "opWitnessTypes": .immutableIndex,
+        "genericWitnessReqs": .notPerBinding,
     ]
 
     // ── the DERIVATION ──────────────────────────────────────────────────────────────────────────────
