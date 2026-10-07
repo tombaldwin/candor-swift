@@ -172,7 +172,11 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// ⟨0.40⟩ THE OWNER WAS GUESSED: a naming convention (`X.shared` is an `X`), an unexplained
               /// hop that kept the outer base's type, or a local laundered from either. A lookup on such an
               /// owner — hit or miss — that no trusted surface answers keeps the guess and ADDS `Unknown`.
-              var guessHop: Bool = false }
+              var guessHop: Bool = false
+              /// SOUNDNESS R915 REACH — set only under `CANDOR_VEINB_PROBE` on a typed local call whose
+              /// receiver root is a `rootOf` guess (`opaqueHop`): `<hop kind>\t<receiver spelling>`. The Driver
+              /// prints what that call resolved to. Never read for an answer.
+              var r915Site: String? = nil }
                                                // the RESOLVED receiver root of an otherwise-unmatched member
                                                // call (`c.fetch()` where c: RatesClient, an external type) —
                                                // carried ONLY for the §2 CANDOR_DEPS join key (`pkg#Owner.leaf`);
@@ -287,6 +291,37 @@ final class CallCollector: SyntaxVisitor {
     /// the PROJECT's own type, not Foundation's, so the κ table must not answer for it.
     let importedModules: Set<String>
     let projectModules: Set<String>
+    /// SOUNDNESS R951 — op -> the local types that DECLARE that comparison witness (`static func ==`),
+    /// from the Driver. A local `Equatable` type NOT in it has a SYNTHESIZED witness, which compares its
+    /// stored properties.
+    let opWitnessTypes: [String: Set<String>]
+    /// R951 — `let x: [Noisy] = …` / `var t: Tiny<Noisy>`: the generic arguments of annotated locals.
+    var localTypeArgs: [String: [String]] = [:]
+    /// R951 — "paramIndex:op": a comparison on a parameter typed by this FUNCTION's generic parameter. The
+    /// instantiation is the caller's, so the Driver resolves it at every call site from the argument type.
+    var genericWitnessReqs: Set<String> = []
+    /// R951 — copied from the unit's `FnInfo` (this collector keeps no reference to it).
+    let paramTypeArgsR951: [String: [String]]
+    let paramIndexR951: [String: Int]
+    let paramTypesR951: [String: String]
+    let genericBoundsR951: [String: String]
+    static let r951Off = ProcessInfo.processInfo.environment["CANDOR_R951_OFF"] != nil
+    static let r951Probe = ProcessInfo.processInfo.environment["CANDOR_R951_PROBE"] != nil
+    /// VEIN A(i) — the scope `canonicalTypeRef` resolves a type spelling in. See `AiTypeIndex`.
+    let ai: AiTypeIndex
+    /// VEIN A(i) / SOUNDNESS R790 — `typealias` declarations written INSIDE this unit's body. DeclCollector
+    /// skips function bodies, so the module-wide alias table never held them; `prescanBodyAliases` fills this.
+    var bodyAliases: [String: String] = [:]
+    /// VEIN A(i) §1b KILL SWITCH — restores the release's `dealias` and every arm this vein added.
+    static let aiOff = ProcessInfo.processInfo.environment["CANDOR_AI_OFF"] != nil
+    /// The SEEDED C3 (partition calibration ONLY): the plausible half-fix — a STRICTLY scoped alias lookup,
+    /// no supertypes and no last-writer floor — which loses an INHERITED member alias. Never set outside
+    /// the calibration run and its pinning test.
+    static let aiSeedNoSupers = ProcessInfo.processInfo.environment["CANDOR_AI_SEED_NOSUPERS"] != nil
+    static let aiProbe = ProcessInfo.processInfo.environment["CANDOR_AI_PROBE"] != nil
+    /// N-d §1b — restores the release's GLOBAL alias reading (no generic-parameter guard, last writer wins)
+    /// while leaving the rest of the canonicaliser on, so the alias-scope half is separately falsifiable.
+    static let aiNdOff = ProcessInfo.processInfo.environment["CANDOR_AI_ND_OFF"] != nil
     /// The CANDOR_DEPS/--workspace chain, so a bare free-call name can be shadowed by a CHAINED
     /// dependency's REAL declaration exactly as `localFreeFns` shadows a local one — see `depShadows`.
     /// Defaults to empty so every construction site that predates this field (tests, an unchained scan)
@@ -456,6 +491,14 @@ final class CallCollector: SyntaxVisitor {
     /// SOUNDNESS R906 — local declared CLASS -> its transitive local superclasses (the Driver's `supertypesOf`,
     /// protocols removed). Read only by `nearestCommonClass`.
     let classSupertypes: [String: Set<String>]
+    /// SOUNDNESS R915 (C) — every TRANSITIVE local supertype (classes and protocols) of a type: where a
+    /// member hop the type does not record is declared (an inherited stored field, a protocol-extension
+    /// property such as Kingfisher's `kf`).
+    let supertypesAll: [String: Set<String>]
+    /// SOUNDNESS R915 (A) — adjacent `Outer.Inner` pairs of declared type paths.
+    let nestedTypePairs: Set<String>
+    /// SOUNDNESS R915 (B) — type -> member alias -> its one underlying type.
+    let memberTypeAliases: [String: [String: String]]
     /// SOUNDNESS R578 — a LOCAL protocol's property requirements (own and inherited) -> declared type. Read
     /// by `rootOf`'s two receiver arms: an explicit `self.body` / `p.body` whose root is the protocol, and an
     /// implicit `body` inside `extension P`. Both answered NOTHING before — the protocol has no stored field
@@ -483,6 +526,11 @@ final class CallCollector: SyntaxVisitor {
     /// the typed LOCAL receiver branch, which for these discloses beside the release's (wrong) join: a guessed
     /// root on a local type joins `Outer.member` whatever `.dep` really holds (R907, executed).
     private var elemGuessRecv: Set<SyntaxIdentifier> = []
+    /// SOUNDNESS R915 (A) — a nested-type receiver expression -> its DOTTED spelling, where an extension keys
+    /// units that way. Read at the typed local call site only.
+    private var r915NestedDotted: [SyntaxIdentifier: String] = [:]
+    /// SOUNDNESS R915 (B) — the unit's variadic parameter names (see `rootOf`).
+    let variadicParamsR915: Set<String>
     private var elemGuessVars: Set<String> = []
     let returns: [String: String]   // unambiguous factory return types (the candor-scan move)
     /// SOUNDNESS R585 — the four DECLARATION-side metatype indexes (b4 field, b6 array element,
@@ -721,6 +769,9 @@ final class CallCollector: SyntaxVisitor {
          protoReqProps: [String: Set<String>] = [:],
          genericCallableFields: [String: Set<String>] = [:],
          classSupertypes: [String: Set<String>] = [:],
+         supertypesAll: [String: Set<String>] = [:],
+         nestedTypePairs: Set<String> = [],
+         memberTypeAliases: [String: [String: String]] = [:],
          returns: [String: String],
          metatypeReturns: [String: String] = [:],
          globalMetatypes: [String: String] = [:],
@@ -753,9 +804,16 @@ final class CallCollector: SyntaxVisitor {
          opaqueSeqBuilders: Set<String>, seqBuilderConcrete: [String: String],
          closureFields: [String: Set<String>], mutableClosureFields: [String: Set<String>] = [:],
          moduleConstStrings: [String: String] = [:],
-         importedModules: Set<String> = [], projectModules: Set<String> = [], deps: DepIndex = DepIndex()) {
+         importedModules: Set<String> = [], projectModules: Set<String> = [], deps: DepIndex = DepIndex(),
+         ai: AiTypeIndex = AiTypeIndex(), opWitnessTypes: [String: Set<String>] = [:]) {
+        self.opWitnessTypes = opWitnessTypes
+        self.paramTypeArgsR951 = info.paramTypeArgs
+        self.paramIndexR951 = info.paramIndex
+        self.paramTypesR951 = info.params
+        self.genericBoundsR951 = info.genericBounds
         self.importedModules = importedModules
         self.projectModules = projectModules
+        self.ai = ai
         self.deps = deps
         self.moduleConstStrings = moduleConstStrings
         self.opaqueSeqBuilders = opaqueSeqBuilders
@@ -811,6 +869,11 @@ final class CallCollector: SyntaxVisitor {
         self.paramNamesR851 = info.paramNames                                   // R851
         self.genericCallableFields = Self.r256Off ? [:] : genericCallableFields // R256
         self.classSupertypes = classSupertypes                                  // R906
+        self.supertypesAll = supertypesAll                                      // R915 (C)
+        self.nestedTypePairs = nestedTypePairs                                  // R915 (A)
+        self.memberTypeAliases = memberTypeAliases                              // R915 (B)
+        self.variadicParamsR915 = Set(info.paramIndex.compactMap { (n, i) in
+            i < info.paramSig.count && info.paramSig[i].variadic ? n : nil })
         self.returns = returns
         self.enclosingType = info.enclosingType
         self.bodyRootID = info.body?.id
@@ -1119,13 +1182,199 @@ final class CallCollector: SyntaxVisitor {
     /// Resolve a type spelling through LOCAL typealiases (`Proc` → `Process`), bounded against a cycle.
     /// A LOCAL type shadows an alias of the same name (the never-fabricate discipline: the project's own
     /// type wins, exactly as the κ shadow rules do). A non-alias name returns unchanged.
-    private func dealias(_ name: String) -> String {
+    private func dealias(_ name: String, scopedMembers: Bool = true) -> String {
+        if !Self.aiOff, ai.enabled { return canonicalTypeRef(name, scopedMembers: scopedMembers).spelling }
+        return dealiasRelease(name)
+    }
+    private func dealiasRelease(_ name: String) -> String {
         var n = name, hops = 0
         while !localTypes.contains(n), let u = typeAliases[n], u != n, hops < 16 {
             n = u; hops += 1
             n = Self.stripModuleQualifier(n, isModule: isModuleQualifier)
         }
         return Self.stripModuleQualifier(n, isModule: isModuleQualifier)
+    }
+
+    // ── VEIN A(i) — ONE TYPE IDENTITY, ONE CANONICALISER ─────────────────────────────────────────────────
+    //
+    // A local type was "local" to this collector only under the spelling `DeclCollector.pushType` happened
+    // to insert into `localTypes`: the SIMPLE name of a declaration. Units are keyed by the FULL path, so
+    // every other spelling of the SAME type — `Yard.Crane`, `M.Yard.Crane` (the scan's own module), a file
+    // alias onto a nested type, a dotted member alias, a body-local alias — failed `localTypes.contains`,
+    // was read as a FOREIGN owner or not typed at all, and the call was dropped with no disclosure.
+    // Measured (`swiftagent-r910/ai-matrix`, 118 executed cells): every non-simple spelling ABSENT at every
+    // site, on 0.38.2 and on the pending stack alike. Nine canonicalisers each answered a subset of the
+    // question at a subset of the 21 consumers; this is the one answer they all now ask.
+    //
+    // THE OUTPUT IS THE SPELLING THE REST OF THE ENGINE ALREADY UNDERSTANDS, NOT A NEW KEY: the type's
+    // SIMPLE name when exactly one declared path carries it (so every simple-keyed side map — `fields`,
+    // `conformers`, `memberTypeAliases`, `qualBySimple` — answers exactly as it does for the bare
+    // spelling), and its FULL path only when the simple name is shared (R266/R132: `Outer.S` beside a
+    // top-level `S`, Kingfisher's two `Backend`s), where the full path is the unit key's own prefix. The
+    // bare spelling of a local type is returned UNCHANGED, so whatever the release made of `Crane` it
+    // still makes: this only ever ANSWERS spellings the release left unanswered, plus N-d below.
+    //
+    // ALIASES ARE SCOPED (N-d). The module-wide `typeAliases` map flattened every type-nested alias into
+    // one last-writer-wins table, so `struct Owner { typealias Kind = Danger }` turned the GENERIC PARAMETER
+    // `Kind` of an unrelated `Box<Kind: Goer>` into `Danger` and charged `Danger.go`'s Fs to a method that
+    // executes `Safe.go` (fixture `swiftagent-r910/nd`, executed pure, `deny Fs Box.runParam` exit 1). The
+    // lookup now runs Swift's order: body-local, then the enclosing types and their SUPERTYPES (member
+    // aliases are inherited — the seeded C3), then file-level, and a type-nested alias outside its owners
+    // only when every owner declares it onto the same target. A generic parameter in scope is never an alias.
+    func canonicalTypeRef(_ spelled: String, scopedMembers: Bool = true) -> (spelling: String, local: Bool) {
+        var s = spelled, hops = 0
+        while hops < 16 {
+            hops += 1
+            if let u = bodyAliases[s], u != s { s = u; continue }
+            // An IMPORTED module qualifier is stripped FIRST, as the release's `dealias` always did: an
+            // `extension SystemPackage.FilePath` puts that dotted spelling in `localTypes`, but the type is
+            // the dependency's `FilePath`, and the §2 join keys it bare (swift-nio's NIOFilePath, measured).
+            if let dot = s.firstIndex(of: "."), isModuleQualifier(String(s[..<dot])) {
+                s = String(s[s.index(after: dot)...]); continue
+            }
+            if localTypes.contains(s) { return aiReport(spelled, (s, true)) }
+            if !Self.aiNdOff, !s.contains("."), ai.genericNames.contains(s) { return aiReport(spelled, (s, false)) }
+            if let dot = s.firstIndex(of: ".") {
+                let head = String(s[..<dot]), tail = String(s[s.index(after: dot)...])
+                if isModuleQualifier(head) { s = tail; continue }          // R97/R773 — an imported module
+                // N-a — the scan's OWN module (`M.Yard.Crane`). Stripped only where the rest lands on a type
+                // this scan declares: `App.Process()` naming the PLATFORM type would not compile, and the
+                // κ table must never answer for a project-module spelling (`projectModules`' own rule).
+                if projectModules.contains(head), !localTypes.contains(head), vars[head] == nil {
+                    let t = canonicalTypeRef(tail)
+                    if t.local { return aiReport(spelled, t) }
+                }
+                if let c = resolveDottedLocal(s) { return aiReport(spelled, (c, true)) }
+                return aiReport(spelled, (s, false))
+            }
+            if let u = aliasInScope(s, scopedMembers: scopedMembers), u != s { s = u; continue }
+            return aiReport(spelled, (s, false))
+        }
+        return aiReport(spelled, (s, localTypes.contains(s)))
+    }
+    private func aiReport(_ spelled: String, _ r: (spelling: String, local: Bool)) -> (spelling: String, local: Bool) {
+        if Self.aiProbe, r.spelling != dealiasRelease(spelled) {
+            FileHandle.standardError.write("AIHIT \(spelled) -> \(r.spelling) local=\(r.local) rel=\(dealiasRelease(spelled))\n".data(using: .utf8)!)
+        }
+        return r
+    }
+    /// The owners whose member aliases are in scope here, innermost first: the enclosing type path's
+    /// segments, then each one's supertypes (an alias declared in a superclass or a protocol is a member).
+    private lazy var aliasScopeOwners: [String] = {
+        var out: [String] = []
+        let chain = ai.enclosingTypePath.map { $0.split(separator: ".").map(String.init).reversed() }
+            .map(Array.init) ?? (enclosingType.map { [$0] } ?? [])
+        for o in chain where !out.contains(o) { out.append(o) }
+        if !Self.aiSeedNoSupers {
+            for o in chain {
+                for sup in (ai.supertypes[o] ?? []).sorted() where !out.contains(sup) { out.append(sup) }
+            }
+        }
+        return out
+    }()
+    private func aliasInScope(_ s: String, scopedMembers: Bool = true) -> String? {
+        if Self.aiNdOff { return typeAliases[s] }
+        if scopedMembers { for owner in aliasScopeOwners { if let u = ai.memberAliases[owner]?[s] { return u } } }
+        if let u = ai.fileAliases[s] { return u }
+        if let ts = ai.nestedAliasTargets[s] {
+            if ts.count == 1 { return ts.first }
+            // Owners disagree and none is in scope: the release's last-writer answer is kept as the FLOOR.
+            // It is a guess, but refusing it MOVED joins the release made (swift-nio's variadic
+            // `ByteBufferView.init(arrayLiteral:)` lost its only `Unknown`), and a generic parameter — the
+            // one place the guess is provably wrong (N-d) — never reaches here.
+            return Self.aiSeedNoSupers ? nil : typeAliases[s]
+        }
+        return nil
+    }
+    /// Swift's lexical lookup of a type NAME from this unit: the enclosing path outward, then top level,
+    /// then — for a name declared nested exactly once (reached through inheritance or a conformance) — that.
+    private func resolveLexical(_ name: String) -> String? {
+        var segs = ai.enclosingTypePath.map { $0.split(separator: ".").map(String.init) } ?? []
+        while !segs.isEmpty {
+            let cand = segs.joined(separator: ".") + "." + name
+            if ai.localTypePaths.contains(cand) { return cand }
+            segs.removeLast()
+        }
+        if ai.localTypePaths.contains(name) { return name }
+        if let ps = ai.pathsByLeaf[name], ps.count == 1 { return ps.first }
+        return nil
+    }
+    /// The FULL path of a dotted spelling whose head is a local type, walking nested types and member
+    /// aliases segment by segment; nil the moment a segment is not a type this scan declares.
+    private func resolveDottedLocal(_ s: String) -> String? {
+        let segs = s.split(separator: ".").map(String.init)
+        guard let head = segs.first, var cur = resolveLexical(head)
+                ?? aliasInScope(head).flatMap({ fullPathOf(canonicalTypeRef($0).spelling) }) else { return nil }
+        for seg in segs.dropFirst() {
+            if ai.localTypePaths.contains(cur + "." + seg) { cur += "." + seg; continue }
+            let owner = cur.split(separator: ".").last.map(String.init) ?? cur
+            guard let u = ai.memberAliases[owner]?[seg] else { return nil }
+            if ai.localTypePaths.contains(cur + "." + u) { cur += "." + u; continue }
+            let t = canonicalTypeRef(u)
+            guard t.local, let p = fullPathOf(t.spelling) else { return nil }
+            cur = p
+        }
+        return spellingFor(cur)
+    }
+    private func fullPathOf(_ spelling: String) -> String? {
+        if spelling.contains("."), ai.localTypePaths.contains(spelling) { return spelling }
+        if let ps = ai.pathsByLeaf[spelling], ps.count == 1 { return ps.first }
+        return ai.localTypePaths.contains(spelling) ? spelling : nil
+    }
+    /// The spelling a resolved full path is HANDED ON as (see the block comment above).
+    private func spellingFor(_ full: String) -> String? {
+        let leaf = full.split(separator: ".").last.map(String.init) ?? full
+        if !full.contains(".") { return localTypes.contains(full) ? full : nil }
+        // A full path the release ALREADY held (`extension Outer.Inner` pushes the dotted spelling) is kept:
+        // it is the release's own key for this type, and handing on the leaf instead would move its joins.
+        if localTypes.contains(full) { return full }
+        if localTypes.contains(leaf), (ai.pathsByLeaf[leaf]?.count ?? 0) == 1 || ai.protocolPaths.contains(full) {
+            return leaf
+        }
+        return localTypes.contains(full) ? full : nil
+    }
+    /// SOUNDNESS R790 / VEIN A(i) — record the `typealias` declarations written in this unit's body (not
+    /// inside a type declared there, whose aliases are that type's members).
+    func prescanBodyAliases(_ body: Syntax) {
+        guard !Self.aiOff, ai.enabled else { return }
+        final class V: SyntaxVisitor {
+            var out: [String: String] = [:]
+            override func visit(_ node: TypeAliasDeclSyntax) -> SyntaxVisitorContinueKind {
+                if let u = typeName(node.initializer.value).name { out[node.name.text] = u }
+                return .skipChildren
+            }
+            override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind { .skipChildren }
+            override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind { .skipChildren }
+            override func visit(_ node: EnumDeclSyntax) -> SyntaxVisitorContinueKind { .skipChildren }
+            override func visit(_ node: ActorDeclSyntax) -> SyntaxVisitorContinueKind { .skipChildren }
+            override func visit(_ node: ProtocolDeclSyntax) -> SyntaxVisitorContinueKind { .skipChildren }
+        }
+        let v = V(viewMode: .sourceAccurate)
+        v.walk(body)
+        bodyAliases = v.out
+    }
+    /// R153(d) / VEIN A(i) — a κ shadow guard asks whether the NAME, or the local type it is an alias of,
+    /// is declared here. A project's own `class Process` aliased `Proc` is that project's type.
+    /// VEIN A(i) — emit the constructor call a canonical LOCAL type spelling stands for, exactly as the bare
+    /// `Boom()` is emitted, when the spelling differs from the canonical one (else the release's call is it).
+    private func aiCtorCall(_ spelled: String, _ node: FunctionCallExprSyntax, lit: String?) {
+        guard !Self.aiOff, ai.enabled else { return }
+        let c = canonicalTypeRef(spelled)
+        guard c.local, c.spelling != spelled, !localProtocols.contains(c.spelling) else { return }
+        calls.append(Call(path: c.spelling, leaf: c.spelling, strArg: lit, typed: false, args: argKinds(node),
+                          argTypes: argTypesOf(node), unqualified: true,
+                          argLabelled: node.arguments.contains { $0.label != nil }))
+    }
+    /// A TYPE-shaped identifier: its first character after any leading underscores is uppercase
+    /// (`Crane`, `_Word`, `__Storage`). The release's `.first?.isUppercase` reads `_Word` as a value.
+    static func typeLikeName(_ n: String) -> Bool {
+        n.first(where: { $0 != "_" })?.isUppercase == true
+    }
+    private func declaredShadow(_ name: String) -> Bool {
+        if declaredTypes.contains(name) { return true }
+        guard !Self.aiOff, ai.enabled else { return false }
+        let c = canonicalTypeRef(name)
+        return c.local && c.spelling != name && declaredTypes.contains(c.spelling)
     }
 
     /// R97 — `Foundation.FileManager` names the SAME type as `FileManager`, and the κ tables are keyed
@@ -1206,7 +1455,55 @@ final class CallCollector: SyntaxVisitor {
         // recorded — a param, a local, a field of a known type, a global, a ctor, a cast — yields false.
         let r = rootOfUnaliased(raw, depth)
         guard let root = r.root else { return r }
-        return (dealias(root), r.isVar, r.path, r.mono, r.opaqueHop)
+        // A VARIADIC parameter (`_ elements: Element...`) is recorded under its ELEMENT type, which is the
+        // wrong type for the binding itself (an array); resolving the element's member alias would make that
+        // wrong answer more confident and re-route the overload match — measured: swift-nio's
+        // `ByteBufferView.init(arrayLiteral:)` lost the release's `Unknown`. Leave it as the release read it.
+        if let dr = Self.peel(raw).as(DeclReferenceExprSyntax.self), variadicParamsR915.contains(dr.baseName.text) {
+            return (dealias(root, scopedMembers: false), r.isVar, r.path, r.mono, r.opaqueHop)
+        }
+        return (dealias(memberAliasScoped(root)), r.isVar, r.path, r.mono, r.opaqueHop)
+    }
+
+    /// SOUNDNESS R915 (B) — Swift resolves a type spelling in the ENCLOSING type's scope before the module's:
+    /// `Parent` inside `ObserveOnSink` is `ObserveOnSink.Parent`. A real local type of that name wins, as in
+    /// `dealias`.
+    private func memberAliasScoped(_ name: String) -> String {
+        guard !DeclCollector.r915Off, !localTypes.contains(name), let et = enclosingType,
+              let u0 = memberTypeAliases[et]?[name] else { return name }
+        guard let u = memberAliasRecordable(resolveMemberAliasChain(u0, memberTypeAliases), localTypes) else {
+            return name   // not an answer: the release's reading stands
+        }
+        vbHit("R915B", "\(et).\(name) -> \(u)")
+        return u
+    }
+
+    /// SOUNDNESS R915 (C) — the declared type of a member hop `rt` does not record itself but a LOCAL
+    /// SUPERTYPE does: an inherited stored field, or a protocol-extension property (Kingfisher's `kf`).
+    /// Answers only when every supertype that records the member agrees on ONE type that this scan
+    /// declares (a local type or protocol); anything else — a callable entry, a container (`nil` name), two
+    /// different answers, a foreign or generic-parameter spelling — returns nil and the release's answer
+    /// stands.
+    private func inheritedFieldType(_ rt: String, _ member: String) -> (name: String, mono: Bool)? {
+        guard !DeclCollector.r915Off, fields[rt]?[member] == nil else { return nil }
+        var names: Set<String> = []
+        let mono = false
+        for sup in (supertypesAll[rt] ?? []).sorted() where sup != rt {
+            guard let f = fields[sup]?[member] else { continue }
+            if f.isFunction { return nil }
+            guard let n = f.name else { return nil }
+            // A field the supertype types by its GENERIC PARAMETER's bound (`let socket: SocketType`, with
+            // `SocketType: BaseSocketProtocol`) is re-specialised by the subtype (`BaseStreamSocketChannel<Socket>`),
+            // so the bound is not the type the subtype holds: swift-nio's `self.socket.finishConnect()` went
+            // to the protocol, which does not declare it, and the row lost `Socket.finishConnect`'s `Unknown`
+            // (measured, REMOVED). The release's answer stands there.
+            if opaqueFields[sup]?.contains(member) == true { return nil }
+            names.insert(n)
+        }
+        guard names.count == 1, let n = names.first,
+              localTypes.contains(dealias(n)) || localProtocols.contains(dealias(n)) else { return nil }
+        vbHit("R915C", "\(rt).\(member) -> \(n)")
+        return (n, mono)
     }
 
     private func rootOfUnaliased(_ raw: ExprSyntax, _ depth: Int = 0) -> (root: String?, isVar: Bool, path: [String], mono: Bool, opaqueHop: Bool) {
@@ -1236,6 +1533,16 @@ final class CallCollector: SyntaxVisitor {
             // found dispatchers resolving as raw names and missing the field index entirely.
             if let et = enclosingType, let f = fields[et]?[n], let ft = f.name {
                 return (ft, true, [n], opaqueFields[et]?.contains(n) == true, false)
+            }
+            // SOUNDNESS R915 (C) — …or a field the enclosing type INHERITS (Swift's member lookup includes
+            // supertypes before it reaches module scope).
+            // A closure parameter, a local or a parameter of that name SHADOWS the member (Swift's lookup
+            // order): Alamofire's `mutableState.write { mutableState in … }` binds the closure's own
+            // `MutableState`, not the inherited `Protected` field — typing it as the field dropped the
+            // body's `task.resume()` (Net), measured in this change's own A/B.
+            if let et = enclosingType, !binderShadow.contains(n), !isBoundLocal(n), !paramNamesR851.contains(n),
+               let h = inheritedFieldType(et, n) {
+                return (h.name, true, [n], h.mono, false)
             }
             // R73 — a MODULE-SCOPE GLOBAL `let`/`var` receiver (`worker.doWork()` where `let worker =
             // Worker()` sits at file scope). Checked after locals/params and implicit-self fields, which
@@ -1306,6 +1613,25 @@ final class CallCollector: SyntaxVisitor {
             // typealias resolution that used to be spelled HERE is now the wrapper's job — R97: this arm
             // having it, and the other arms not, is exactly how the bug was shaped.
             return (n, false, [n], false, false)
+        }
+        // VEIN A(i) — a DOTTED TYPE PATH used as a receiver (`M.Yard.Crane.sweep()`, `Yard.MA_Crane.sweep()`)
+        // is a TYPE-position root. Answered only where the canonicaliser lands on a type this scan declares;
+        // anything else (a value chain, a dependency's nested type) falls through to the arms below unchanged.
+        if !Self.aiOff, ai.enabled, let ma = expr.as(MemberAccessExprSyntax.self),
+           Self.typeLikeName(ma.declName.baseName.text),
+           let tp = dottedTypePath(Syntax(ma)), tp.contains("."), vars[String(tp.prefix { $0 != "." })] == nil {
+            let c = canonicalTypeRef(tp)
+            // …except where the canonical spelling IS the written one (`_HashNode.Storage`, held by an
+            // `extension _HashNode.Storage`): the arms below already answer that spelling as the release
+            // did (R915's nested-type hop), and pre-empting them dropped the supertype hedge
+            // (`dispatch:ManagedBuffer.self` on swift-collections' `_HashNode.Storage.allocate`, measured).
+            if c.local, c.spelling != tp { return (c.spelling, false, [tp], false, false) }
+            // R773 — `Foundation.ProcessInfo.processInfo…`: an IMPORTED module qualifier on a type root is a
+            // spelling of the bare root, which this resolver answers `(n, false)` for a few lines up.
+            let head = String(tp.prefix { $0 != "." })
+            if isModuleQualifier(head), !c.spelling.contains("."), Self.typeLikeName(c.spelling) {
+                return (c.spelling, false, [tp], false, false)
+            }
         }
         if let ma = expr.as(MemberAccessExprSyntax.self) {
             // tuple element/member: `p.0` / `p.c` where p is a tuple-typed local/param
@@ -1381,6 +1707,29 @@ final class CallCollector: SyntaxVisitor {
                 vbHit("R578", "explicit \(rt).\(member) -> \(t)")
                 reqFloor[ExprSyntax(ma).id] = rt
                 return (t, true, inner.path + [member], false, inner.opaqueHop)
+            }
+            // SOUNDNESS R915 — THE HOP NAMES SOMETHING THIS SCAN DECLARED, so the outer base is not kept.
+            // (A) `Outer.Inner` in TYPE position, where `Inner` is a type declared inside `Outer`: the receiver
+            //     is `Inner` (`Signal.Event.map`, `_RSA.Signing.PublicKey(…)`), not a value hop on `Outer`.
+            // (C) a member a local SUPERTYPE declares with one local type.
+            if !DeclCollector.r915Off, let rt = inner.root {
+                let rtLeaf = rt.split(separator: ".").last.map(String.init) ?? rt
+                if !inner.isVar, member.first?.isUppercase == true, localTypes.contains(member),
+                   nestedTypePairs.contains("\(rtLeaf).\(member)") {
+                    // The DOTTED spelling where the scan knows it as a type (`extension Signal.Event { … }`
+                    // names its units `Signal.Event.delay`, which `Event.delay` does not reach); the simple
+                    // name otherwise, which is how a nested declaration is keyed.
+                    // Keyed by the SIMPLE name, as a nested declaration's units are (`Event.map`). Where an
+                    // `extension Outer.Inner { … }` also exists its units are keyed DOTTED (`Signal.Event.delay`),
+                    // so the call site emits that spelling too — both are the one Swift type.
+                    let dotted = "\(rt).\(member)"
+                    if localTypes.contains(dotted) { r915NestedDotted[ExprSyntax(ma).id] = dotted }
+                    vbHit("R915A", "\(rt).\(member)")
+                    return (member, false, [member], false, inner.opaqueHop)
+                }
+                if inner.isVar, let h = inheritedFieldType(rt, member) {
+                    return (h.name, true, inner.path + [member], h.mono, inner.opaqueHop)
+                }
             }
             return (inner.root, inner.isVar, inner.path + [member], inner.mono, true)
         }
@@ -1478,6 +1827,16 @@ final class CallCollector: SyntaxVisitor {
                ma.declName.baseName.text.first?.isUppercase == true {
                 let n = ma.declName.baseName.text
                 return (dealias(n), true, [n], false, false)
+            }
+            // VEIN A(i) N-c — `T.init(…)` CONSTRUCTS a `T`, as `T(…)` does. No arm read the explicit `.init`
+            // spelling, so `let c = TopCrane.init(); c.lift()` was ABSENT for every spelling of every type.
+            // The base is typed exactly as the bare constructor arm types its callee (any uppercase type
+            // spelling; `rootOf` canonicalises it).
+            if !Self.aiOff, let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
+               ma.declName.baseName.text == "init", let b = ma.base,
+               let tp = dottedTypePath(Syntax(Self.peel(b))),
+               Self.typeLikeName(tp.split(separator: ".").last.map(String.init) ?? "") {
+                return (tp, true, [tp], false, false)
             }
             // SOUNDNESS R838 (the constructor spelling) — `Stream.Iterator()` / `BufferedStream<Int>.Iterator()`
             // constructs a NESTED type a dependency declares. The arm above answers only a LOCAL nested
@@ -2824,7 +3183,7 @@ final class CallCollector: SyntaxVisitor {
         // three of the six TYPE spellings of the same constructor.
         if let e = fileStreamCtorEffect(name, node) {
             if shadowable, localFreeFns.contains(name) { return false }
-            if shadowable, declaredTypes.contains(name), !conditionallyShadowedTypes.contains(name) { return false }
+            if shadowable, declaredShadow(name), !conditionallyShadowedTypes.contains(name) { return false }
             directEffects.insert("Fs")
             fsKinds.insert(e)
             recordSurfaces(effect: "Fs", lit: lit)
@@ -2871,7 +3230,7 @@ final class CallCollector: SyntaxVisitor {
         if node.arguments.first?.label?.text == "contentsOfFile",
            let f = name.first, f.isUppercase {
             if shadowable, localFreeFns.contains(name) { return false }
-            if shadowable, declaredTypes.contains(name), !conditionallyShadowedTypes.contains(name) { return false }
+            if shadowable, declaredShadow(name), !conditionallyShadowedTypes.contains(name) { return false }
             directEffects.insert("Fs")
             fsKinds.insert("read")
             recordSurfaces(effect: "Fs", lit: lit)
@@ -2899,7 +3258,7 @@ final class CallCollector: SyntaxVisitor {
         // the WHOLE `Fs` charge here (not even `Unknown`) — worse than the other four arms, which at
         // least fall through to an ordinary (if unresolved) call edge; this one returned `false` all the
         // way out with no side effect at all, so the caller charged nothing whatsoever.
-        if shadowable, declaredTypes.contains(name), !conditionallyShadowedTypes.contains(name) { return false }
+        if shadowable, declaredShadow(name), !conditionallyShadowedTypes.contains(name) { return false }
         let label = node.arguments.first?.label?.text
         if label == "contentsOfFile" {
             // `String(contentsOfFile: path, …)` / `Data(contentsOfFile:)` take a FILE PATH, not a
@@ -3200,7 +3559,7 @@ final class CallCollector: SyntaxVisitor {
         guard let call = Self.peel(raw).as(FunctionCallExprSyntax.self),
               let callee = call.calledExpression.as(DeclReferenceExprSyntax.self) else { return nil }
         let name = dealias(callee.baseName.text)
-        guard !declaredTypes.contains(name), !localFreeFns.contains(name) else { return nil }
+        guard !declaredShadow(name), !localFreeFns.contains(name) else { return nil }
         var locatorArg: ExprSyntax? = nil
         for a in call.arguments {
             let lab = a.label?.text ?? ""
@@ -3583,6 +3942,43 @@ final class CallCollector: SyntaxVisitor {
     // destination — capturing it minted a bogus host that could trip `allow Net` on data (found by the
     // 2026-07-10 coverage wave; candor-java and candor-ts capture only at establishing forms). Fs/Exec/Db
     // arms are unaffected: their shape guards (path chars, SQL statement keyword) already reject payloads.
+    // ── SPEC §2 ⟨0.40⟩ (SOUNDNESS R817 / R949) — A NIO BOOTSTRAP `bind` ─────────────────────────────────────
+    //
+    // The address handed to a bind is where the process LISTENS, never a destination it reaches, so it MUST
+    // NOT enter `hosts`. Measured on the pending stack: `DatagramBootstrap(group: g).bind(host: "10.0.0.5",
+    // port: 9)` published `hosts: ["10.0.0.5:9"]` COMPLETE and `allow Net 10.0.0.5` exited 0 — an allow over a
+    // destination the program never reaches (R809's fabrication, swift's spelling). The bind used to be an
+    // ESTABLISHING member read like `connect`; it is now its own case:
+    //   · `host:` a LITERAL   — nothing captured, nothing marked (its host CLASS still charges `LocalNetwork`:
+    //                           binding a LAN or multicast address is local-network use, not a destination);
+    //   · `host:` a RUNTIME string — NIO resolves it before binding: a reach of a computed name, `incomplete:
+    //                           Net` (R949). KEPT from the establishing reading, deliberately: java's first cut
+    //                           of this clause turned a discarded literal into a lost capture, and the mark
+    //                           for a computed name is the half that must survive the removal;
+    //   · `to:` a `SocketAddress`, a UNIX path, a port, a handle — already resolved, marks NOTHING (an
+    //                           ephemeral client's `connect`/`send` carries its own locator);
+    //   · `ServerBootstrap`   — the bind begins ACCEPTING: whoever connects is a peer no literal names, so
+    //                           `incomplete: Net` whatever the address (`bind(host: "0.0.0.0", port: 8080)`
+    //                           beside a benign literal used to publish `0.0.0.0:8080` and fail only because that
+    //                           fabricated host was off the allowlist).
+    // `CANDOR_R817_OFF=1` restores the establishing reading.
+    static let r817Off = ProcessInfo.processInfo.environment["CANDOR_R817_OFF"] != nil
+    static let NIO_BIND_ROOTS: Set<String> = ["ClientBootstrap", "ServerBootstrap", "DatagramBootstrap",
+                                              "NIOTSConnectionBootstrap"]
+    static let r817Probe = ProcessInfo.processInfo.environment["CANDOR_R817_PROBE"] != nil
+    private func recordNIOBind(root: String, args: LabeledExprListSyntax) {
+        if Self.r817Probe {
+            FileHandle.standardError.write("R817HIT \(root).bind \(args.map { $0.label?.text ?? "_" })\n".data(using: .utf8)!)
+        }
+        if root == "ServerBootstrap" { incompleteSurfaces.insert("Net") }
+        guard let h = args.first(where: { $0.label?.text == "host" }) else { return }
+        if let s = plainStringLiteralValue(h.expression) {
+            for c in hostClasses(s) { directEffects.insert(c) }
+        } else {
+            incompleteSurfaces.insert("Net")
+        }
+    }
+
     private func recordSurfaces(effect: String, lit: String?, args: LabeledExprListSyntax? = nil,
                                 netEstablishing: Bool = true) {
         // CONSTANT PROVENANCE rung 4, in the ONE place every Fs surface passes through. The literal was
@@ -6040,7 +6436,7 @@ final class CallCollector: SyntaxVisitor {
                 // (assigned in init / no initializer) — the value is unaddressable → honest Unknown.
                 unresolved = true
                 why.insert("dispatch:\(et).\(name)")
-            } else if let t = vars[name].map(dealias), localTypes.contains(t) {
+            } else if let t = vars[name].map({ dealias($0) }), localTypes.contains(t) {
                 // R97 — THE LAST RAW `vars` READ, and it was the one place the `rootOf` wrapper does not
                 // cover: this arm asks about the BINDING, not about a receiver chain. `typealias C =
                 // Caller; func b(_ c: C) { c() }` was ABSENT (executed: the deletion really happens) while
@@ -6080,7 +6476,7 @@ final class CallCollector: SyntaxVisitor {
                                           argLit: lit, args: node.arguments)
                 recordSurfaces(effect: eff, lit: loc.lit, args: loc.args, netEstablishing: est)
                 if loc.lit == nil, est, !(eff == "Fs" && lastResolvedHomePath) { incompleteSurfaces.insert(eff) }
-            } else if (!declaredTypes.contains(name) || conditionallyShadowedTypes.contains(name)),
+            } else if (!declaredShadow(name) || conditionallyShadowedTypes.contains(name)),
                       !localFreeFns.contains(name),
                       PRIVACY_CAPTURE_TYPES.contains(dealias(name)) {
                 keepExtensionCtorEdge(name, node, lit: lit)
@@ -6109,7 +6505,7 @@ final class CallCollector: SyntaxVisitor {
                     ambiguousCapture = true
                 }
                 unionConditionalTypeEdge(name, node, lit: lit)
-            } else if (!declaredTypes.contains(name) || conditionallyShadowedTypes.contains(name)),
+            } else if (!declaredShadow(name) || conditionallyShadowedTypes.contains(name)),
                       !localFreeFns.contains(name),
                       isBonjourRoot(dealias(name)) {   // R391 — ONE authority for the root set
                 keepExtensionCtorEdge(name, node, lit: lit)
@@ -6149,7 +6545,7 @@ final class CallCollector: SyntaxVisitor {
                     if eff == "Net" { incompleteSurfaces.insert("Net") }
                 }
                 unionConditionalTypeEdge(name, node, lit: lit)
-            } else if (!declaredTypes.contains(name) || conditionallyShadowedTypes.contains(name)),
+            } else if (!declaredShadow(name) || conditionallyShadowedTypes.contains(name)),
                       !localFreeFns.contains(name),
                       PRIVACY_EVENTKIT_TYPES.contains(dealias(name)) {
                 keepExtensionCtorEdge(name, node, lit: lit)
@@ -6158,7 +6554,7 @@ final class CallCollector: SyntaxVisitor {
                 // reasoning as the capture ctor directly above.
                 for e in privacyEventKitEffects(entityType: entityTypeArg(node.arguments)) { directEffects.insert(e) }
                 unionConditionalTypeEdge(name, node, lit: lit)
-            } else if (!declaredTypes.contains(name) || conditionallyShadowedTypes.contains(name)),
+            } else if (!declaredShadow(name) || conditionallyShadowedTypes.contains(name)),
                       !localFreeFns.contains(name), !depShadows(name),
                       let eff = kappaFree(name: dealias(name), argCount: node.arguments.count) {
                 // A LOCALLY-DECLARED type ctor (`Pipe()` where `class Pipe`) or free fn (`NSLog(...)` where
@@ -6261,9 +6657,17 @@ final class CallCollector: SyntaxVisitor {
                 calls.append(Call(path: name, leaf: name, strArg: lit, typed: false, args: argKinds(node),
                                   argTypes: argTypesOf(node), unqualified: true,
                                   argLabelled: node.arguments.contains { $0.label != nil }))
+                // VEIN A(i) N-b — `FT_Boom()` where `typealias FT_Boom = TopBoom`: the Driver's ctor edge
+                // tests the RAW name, so the init never ran. ADDED beside the release's call, the type's own.
+                aiCtorCall(name, node, lit: lit)
             }
         } else if let ma = node.calledExpression.as(MemberAccessExprSyntax.self) {
             let member = ma.declName.baseName.text
+            // VEIN A(i) — `Yard.Boom()` / `M.TopBoom()`: a DOTTED constructor of a local type was recorded only
+            // as the member `Boom` of `Yard` (no such unit), so the init's effect was dropped. Additive.
+            if Self.typeLikeName(member), let tp = dottedTypePath(Syntax(ma)), tp.contains(".") {
+                aiCtorCall(tp, node, lit: lit)
+            }
             let base = ma.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [], mono: false, opaqueHop: false)
             // R429 — the WRITTEN receiver name, before `dealias` collapses a `#if`-duplicated
             // alias to whichever arm happened to be recorded last.
@@ -6578,7 +6982,13 @@ final class CallCollector: SyntaxVisitor {
                                   args: argKinds(node), argTypes: argTypesOf(node),
                                   conventionOwner: r839Convention, ownerModule: spelledModule(of: ma.base),
                                   extOwner: r651ForeignExtended ? rt : nil,
-                                  holdsHop: holdsHop, guessHop: r839Convention))
+                                  holdsHop: holdsHop, guessHop: r839Convention,
+                                  r915Site: Self.veinBProbe && base.opaqueHop
+                                    ? "\(extOnly ? "ext" : "decl")\t\(ma.base.map { guessHopKind($0) } ?? "nobase")\t\(ma.base.map { String($0.trimmedDescription.prefix(60)) } ?? "")" : nil))
+                if let b = ma.base, let dotted = r915NestedDotted[Self.peel(b).id] ?? r915NestedDotted[b.id] {
+                    calls.append(Call(path: "\(dotted).\(member)", leaf: member, strArg: lit, typed: true,
+                                      args: argKinds(node), argTypes: argTypesOf(node)))
+                }
                 if Self.r836Probe, r839Convention {
                     FileHandle.standardError.write("R839HIT \(rt).\(member)\n".data(using: .utf8)!)
                 }
@@ -6852,6 +7262,8 @@ final class CallCollector: SyntaxVisitor {
                     // write survives; claiming it at the write would claim a program for an execution
                     // that may never happen with that value.
                     recordProcessRun(receiver: ma.base)
+                } else if eff == "Net", !Self.r817Off, member == "bind", Self.NIO_BIND_ROOTS.contains(rt) {
+                    recordNIOBind(root: rt, args: node.arguments)
                 } else {
                     let est = isEstablishingMember(effect: eff, root: rt, member: member)
                     // R414 — `u.checkResourceIsReachable()`. The locator is the RECEIVER, so it is read
@@ -7418,9 +7830,96 @@ final class CallCollector: SyntaxVisitor {
                     }
                 }
             }
+            // `x == nil` / `x != nil` compares against `_OptionalNilComparisonType` and runs no witness of
+            // the wrapped type (measured: swift-nio's `self.trailers == nil` gained `ByteBuffer.==` on the
+            // first cut of this change).
+            let nilOperand = Self.peel(elems[i]).is(NilLiteralExprSyntax.self)
+                || (i + 2 < elems.count && Self.peel(elems[i + 2]).is(NilLiteralExprSyntax.self))
+            if !Self.r951Off, !nilOperand, let w = Self.witnessOp(opName) {
+                for operandExpr in [elems[i], (i + 2 < elems.count ? elems[i + 2] : nil)].compactMap({ $0 }) {
+                    comparisonWitnesses(w, operandExpr)
+                }
+            }
             i += 2
         }
         return .visitChildren
+    }
+
+    // ── SOUNDNESS R951 — A COMPARISON RUNS THE WITNESS OF THE TYPE ACTUALLY COMPARED ─────────────────────────
+    //
+    // `Equatable`/`Comparable` are `STD_PURE_PROTOCOLS`, so a comparison reached a user-defined witness only
+    // when an operand was typed by that exact local type. Every generic or synthesized spelling of the same
+    // comparison was silent (executed, `swiftagent-verify/genA`/`genC`: the witness writes a file):
+    //   · `Tiny<Noisy> == Tiny<Noisy>` — the synthesized `==` compares the stored properties, down to `Noisy`;
+    //   · `Tiny<Noisy>.Storage == …`   — the conditional `Storage.==` compares its `Element`, i.e. `Noisy`;
+    //   · `[Noisy] == [Noisy]`, `Noisy? == …` — the container's `==` is its element's;
+    //   · `eq<T: Equatable>(Noisy(), Noisy())` — `a == b` inside `eq` runs the CALLER's `T`.
+    // The release charged one of these (`Tiny.Storage.==`) only through the module-wide alias table turning
+    // the generic parameter `Element` into an unrelated `typealias Element = Noisy` — the coincidence vein
+    // A(i)'s N-d fix removed, and the same mechanism that charged swift-nio's `_TinyArray` `ByteBuffer.==`.
+    //
+    // A RESOLUTION, NOT A HEDGE: the witnesses edged are those of the types the comparison is spelled over —
+    // the operand's generic ARGUMENTS (`genericArgumentNames`), a synthesized type's stored-property types,
+    // and, for a function generic parameter, the argument type at each CALL SITE (the Driver, from
+    // `genericWitnessReqs`). A generic parameter with no instantiation in sight resolves NOTHING — never a
+    // union of every witness in the package, which is what re-admitted `ByteBuffer.==` in the first design.
+    static func witnessOp(_ op: String) -> String? {
+        if op == "==" || op == "!=" { return "==" }
+        if ["<", ">", "<=", ">="].contains(op) { return "<" }
+        return nil
+    }
+    private func comparisonWitnesses(_ w: String, _ operand: ExprSyntax) {
+        var targets: [String] = []
+        if let dr = Self.peel(operand).as(DeclReferenceExprSyntax.self) {
+            let n = dr.baseName.text
+            for x in paramTypeArgsR951[n] ?? localTypeArgs[n] ?? [] { targets.append(dealias(x)) }
+            if let idx = paramIndexR951[n], let t = paramTypesR951[n] ?? vars[n], !localTypes.contains(t),
+               genericBoundsR951[t] != nil {
+                genericWitnessReqs.insert("\(idx):\(w)")
+            }
+        }
+        let r = rootOf(operand)
+        // `opaqueHop`: the root is the OUTER base kept by convention (`self.registrations.count` -> the
+        // enclosing type), not the operand's type — walking ITS fields charged swift-nio's `Selector.deinit`
+        // with `NIODeadline.==` on this change's first cut.
+        if let t = r.root, r.isVar, !r.opaqueHop, localTypes.contains(t), !(opWitnessTypes[w]?.contains(t) ?? false) {
+            targets.append(t)   // synthesized: walked into its stored properties below
+        }
+        var seen = Set<String>(), queue = targets
+        while let x = queue.popLast() {
+            guard seen.insert(x).inserted, seen.count < 32, localTypes.contains(x) else { continue }
+            // A SHARED simple name (`Index`, `Storage`) names several types and the spelling here does not say
+            // which; edging `Index.<` would union every `*.Index.<` in the package — the over-charge measured on
+            // swift-nio's `BetterHTTPParser.validateHeaderLength` in this change's first A/B. Followed only when
+            // the name is one type (or already a full path the canonicaliser handed on).
+            if !x.contains("."), (ai.pathsByLeaf[x]?.count ?? 0) > 1 { continue }
+            if opWitnessTypes[w]?.contains(x) ?? false {
+                if Self.r951Probe { FileHandle.standardError.write("R951HIT \(x).\(w)\n".data(using: .utf8)!) }
+                calls.append(Call(path: "\(x).\(w)", leaf: w, strArg: nil, typed: true,
+                                  args: [.opaque, .opaque], argTypes: [x, x]))
+            } else {
+                // a synthesized witness compares every stored property (an enum: every payload)
+                for (_, fi) in fields[x] ?? [:] { if let fn = fi.name, !fi.isFunction { queue.append(dealias(fn)) } }
+            }
+        }
+    }
+    /// R951 — the generic arguments of annotated locals, flow-insensitively (a re-annotation only widens).
+    func prescanLocalTypeArgs(_ body: Syntax) {
+        guard !Self.r951Off else { return }
+        final class V: SyntaxVisitor {
+            var out: [String: [String]] = [:]
+            override func visit(_ node: PatternBindingSyntax) -> SyntaxVisitorContinueKind {
+                if let n = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text,
+                   let t = node.typeAnnotation?.type {
+                    let a = genericArgumentNames(t)
+                    if !a.isEmpty { out[n, default: []].append(contentsOf: a) }
+                }
+                return .visitChildren
+            }
+        }
+        let v = V(viewMode: .sourceAccurate)
+        v.walk(body)
+        localTypeArgs = v.out
     }
 
     // PREFIX (`~>x`) / POSTFIX (`x<!>`) operator overloads — SwiftParser leaves these as their own
@@ -7540,6 +8039,19 @@ final class CallCollector: SyntaxVisitor {
                       let ma = call.calledExpression.as(MemberAccessExprSyntax.self), let base = ma.base {
                 rootType = elementTypeOf(base)?.name
             }
+        }
+        // VEIN A(i) / R153(b) — the explicit root (`\\WA.heavy`) and the element type are TYPE spellings and
+        // were the two un-dealiased readers left; both go through the one canonicaliser now.
+        if !Self.aiOff, ai.enabled, let rt0 = rootType {
+            // `\\Yard.Crane.load` parses as root `Yard` + components `.Crane.load`: a leading component that
+            // continues a LOCAL type path is part of the root, not a property.
+            var prefix = rt0
+            let names = node.components.compactMap { $0.component.as(KeyPathPropertyComponentSyntax.self)?.declName.baseName.text }
+            for n in names.dropLast() {
+                guard Self.typeLikeName(n), canonicalTypeRef(prefix + "." + n).local else { break }
+                prefix += "." + n
+            }
+            rootType = dealias(prefix)
         }
         if let rt = rootType, localTypes.contains(rt) { propertyEdges.insert("\(rt).\(lastProp)") }
         return .visitChildren
@@ -7768,7 +8280,9 @@ final class CallCollector: SyntaxVisitor {
         // a `(by:)`/`(into:)` etc. closure form supplies its own comparator — no implicit `<` runs.
         if node.arguments.contains(where: { Self.peel($0.expression).is(ClosureExprSyntax.self) })
             || node.trailingClosure != nil { return }
-        guard let elem = elementTypeOf(base)?.name, localTypes.contains(elem) else { return }
+        guard let elem0 = elementTypeOf(base)?.name else { return }
+        let elem = (!Self.aiOff && ai.enabled) ? dealias(elem0) : elem0     // R153(c) / VEIN A(i)
+        guard localTypes.contains(elem) else { return }
         // the `<` witness is EITHER a `static func <` member (`Element.<`) OR a top-level free
         // `func <(a: Element, b: Element)` — emit both forms, exactly as the binary-operator visitor does.
         // The free form is gated on a CONFIDENT local element type (argTypes), so matchOverloads routes by
@@ -8891,4 +9405,19 @@ final class CallCollector: SyntaxVisitor {
 
 private extension TokenKind {
     var isIdentifier: Bool { if case .identifier = self { return true }; return false }
+}
+
+/// VEIN A(i) — the type-identity scope a `CallCollector` resolves a spelling in. Built once by the Driver
+/// (indexes) and per unit (`enclosingTypePath`, `genericNames`). `enabled` false = the release's `dealias`.
+struct AiTypeIndex {
+    var enabled = false
+    var localTypePaths: Set<String> = []
+    var pathsByLeaf: [String: Set<String>] = [:]
+    var protocolPaths: Set<String> = []
+    var fileAliases: [String: String] = [:]
+    var memberAliases: [String: [String: String]] = [:]
+    var nestedAliasTargets: [String: Set<String>] = [:]
+    var supertypes: [String: Set<String>] = [:]
+    var enclosingTypePath: String? = nil
+    var genericNames: Set<String> = []
 }

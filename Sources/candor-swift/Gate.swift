@@ -37,7 +37,10 @@ import CandorCore
 // green introduced by fixing a false green. Empty when the producer has none to give (a hand-authored
 // report with no `hash`, which §3.1 says `gate --report` serves), and empty is OMITTED from the wire:
 // ⟨0.26⟩'s *this producer cannot answer* beats a fabricated id.
-typealias GateViolation = (rule: String, fn: String, hash: String, effects: [String], detail: String, reasonClass: [String], netClass: [String])
+// ⟨0.40⟩ `origin` — AS-EFF-005 only (SPEC §3.3: every 005 entry carries it): `"existing"` / `"new"` /
+// `"unknown"`, the ⟨0.12⟩ closed vocabulary under its existence rule (see Baseline.swift). Empty on every
+// other rule, and empty is OMITTED from the wire, so no other verdict row changes a byte.
+typealias GateViolation = (rule: String, fn: String, hash: String, effects: [String], detail: String, reasonClass: [String], netClass: [String], origin: String)
 
 /// ⟨0.24⟩ ONE POLICY RULE THIS RUN COULD NOT DECIDE (SPEC §3.1, candor-spec `fc4b5f6`).
 ///
@@ -141,6 +144,7 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
             if !v.hash.isEmpty { m["hash"] = v.hash }        // ⟨0.32⟩ omitted when the producer has none
             if !v.reasonClass.isEmpty { m["reasonClass"] = v.reasonClass }  // omitted when empty (byte-compat)
             if !v.netClass.isEmpty { m["netClass"] = v.netClass }           // ⟨0.20⟩ omitted when empty
+            if !v.origin.isEmpty { m["origin"] = v.origin }                 // ⟨0.40⟩ AS-EFF-005 only
             return m
         },
     ]
@@ -734,7 +738,7 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
                     let nc = hits.contains("Net") ? (gi.netClasses[qual] ?? []) : []
                     gateViolations.append((rule: "AS-EFF-006", fn: nameOf(qual), hash: unitOf(qual), effects: hits,
                         detail: "`\(nameOf(qual))` performs { \(hits.joined(separator: ", ")) }, forbidden by policy: `\(r.raw)`",
-                        reasonClass: rc, netClass: nc))
+                        reasonClass: rc, netClass: nc, origin: ""))
                 }
             }
             for r in pol.allow where scopeMatches(nameOf(qual), r.scope) && inf.contains(r.effect) {
@@ -762,12 +766,12 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
                     let why = surface.isEmpty
                         ? "performs \(r.effect) with no visible literal — the surface cannot be certified"
                         : "reaches a structurally-invisible \(r.effect) endpoint a visible literal cannot mask"
-                    gateViolations.append((rule: "AS-EFF-008", fn: nameOf(qual), hash: unitOf(qual), effects: [r.effect], detail: "`\(nameOf(qual))` \(why): `\(r.raw)`", reasonClass: [], netClass: []))
+                    gateViolations.append((rule: "AS-EFF-008", fn: nameOf(qual), hash: unitOf(qual), effects: [r.effect], detail: "`\(nameOf(qual))` \(why): `\(r.raw)`", reasonClass: [], netClass: [], origin: ""))
                 } else {
                     let bad = surface.filter { !literalAllowed(r.effect, $0, r.values) }.sorted()
                     if !bad.isEmpty {
                         gateViolations.append((rule: "AS-EFF-008", fn: nameOf(qual), hash: unitOf(qual), effects: [r.effect],
-                            detail: "`\(nameOf(qual))` reaches { \(bad.joined(separator: ", ")) } outside the allowlist: `\(r.raw)`", reasonClass: [], netClass: []))
+                            detail: "`\(nameOf(qual))` reaches { \(bad.joined(separator: ", ")) } outside the allowlist: `\(r.raw)`", reasonClass: [], netClass: [], origin: ""))
                     }
                 }
             }
@@ -780,7 +784,7 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
                     if scopeMatches(nameOf(cur), r.to) {
                         gateViolations.append((rule: "AS-EFF-009", fn: nameOf(fn), hash: unitOf(fn), effects: [],
                             detail: "`\(nameOf(fn))` (scope `\(r.from)`) transitively reaches `\(nameOf(cur))` in forbidden scope `\(r.to)`: `\(r.raw)`",
-                            reasonClass: [], netClass: []))
+                            reasonClass: [], netClass: [], origin: ""))
                         break
                     }
                     stack.append(contentsOf: cg[cur] ?? [])
@@ -808,7 +812,7 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
                         // existing `forbid` suppression silently mute `only` violations nobody accepted.
                         gateViolations.append((rule: "AS-EFF-011", fn: nameOf(fn), hash: unitOf(fn), effects: [],
                             detail: "`\(nameOf(fn))` reaches `\(nameOf(cur))`, which this permission rule does not permit: `\(r.raw)`",
-                            reasonClass: [], netClass: []))
+                            reasonClass: [], netClass: [], origin: ""))
                         break
                     }
                     stack.append(contentsOf: cg[cur] ?? [])

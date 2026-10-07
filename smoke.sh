@@ -1477,11 +1477,12 @@ CANDOR_BASELINE="$CGREP" "$BIN" "$W/cg/a0/pkg" --json >/dev/null 2>"$W/cg/g1.err
 { [ $RC -eq 1 ] && grep -q 'AS-EFF-005.*`fmt` gained effect { Fs }' "$W/cg/g1.err"; } \
   && ok "baseline ⟨0.16⟩: sidecar present, a formerly-pure fn turning effectful -> AS-EFF-005 + exit 1" \
   || bad "baseline ⟨0.16⟩ pure→effectful: rc=$RC $(cat "$W/cg/g1.err")"
-# (2) sidecar ABSENT: degrade to report-only (fmt reads as new) -> exit 0 + note.
+# (2) sidecar ABSENT: ⟨0.40⟩ fmt still fires (absent key, prior ∅) — the sidecar decides only the LABEL,
+#     so it reads as ABSENT (origin "unknown"), not as a gain -> exit 1 + note. (Until ⟨0.40⟩: exit 0.)
 cp "$CGSIDE" "$W/cg/saved.callgraph.json"; rm "$CGSIDE"
 CANDOR_BASELINE="$CGREP" "$BIN" "$W/cg/a0/pkg" --json >/dev/null 2>"$W/cg/g2.err"; RC=$?
-{ [ $RC -eq 0 ] && grep -q 'no baseline callgraph sidecar' "$W/cg/g2.err" && ! grep -q '\[AS-EFF-005\]' "$W/cg/g2.err"; } \
-  && ok "baseline ⟨0.16⟩: sidecar absent -> degrade to report-only existence + stderr note (exit 0)" \
+{ [ $RC -eq 1 ] && grep -q 'no baseline callgraph sidecar' "$W/cg/g2.err" && grep -q '\[AS-EFF-005\] `fmt` is absent from the baseline' "$W/cg/g2.err"; } \
+  && ok "baseline ⟨0.40⟩: sidecar absent -> a formerly-pure fn still fires (prior ∅, labelled absent) + stderr note" \
   || bad "baseline ⟨0.16⟩ degrade: rc=$RC $(cat "$W/cg/g2.err")"
 # (3) sidecar PRESENT-but-corrupt: fail closed (exit 2), no AS-EFF-005 wave.
 cp "$W/cg/saved.callgraph.json" "$CGSIDE"   # restore the sidecar removed by (2)

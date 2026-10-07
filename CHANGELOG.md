@@ -10,6 +10,166 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — SOUNDNESS R951: a comparison reaches the witness of the type it actually compares
+
+`Equatable`/`Comparable` are treated as pure protocols, so a comparison reached a user-defined `==`/`<` only
+when an operand was typed by that exact local type. Every other spelling of the same comparison was silent.
+Executed (the witness writes a file each time):
+- `Tiny<Noisy> == Tiny<Noisy>`, which is synthesized;
+- `Tiny<Noisy>.Storage == …`, a conditional `==` over `Element`;
+- `[Noisy] == [Noisy]` and `Noisy? != Noisy?`;
+- a synthesized struct containing a `Noisy`;
+- `eq<T: Equatable>(Noisy(), Noisy())`.
+
+The release charged one of these, `Tiny.Storage.==`, only by coincidence: the module-wide alias table turned
+the generic parameter `Element` into an unrelated `typealias Element = Noisy`. Vein A(i)'s N-d fix removed
+that coincidence.
+
+The comparison now edges to the witnesses of:
+- the operand's generic ARGUMENTS (`[Noisy]`, `Tiny<Noisy>.Storage`, `Noisy?`, annotated locals);
+- a synthesized local type's stored properties;
+- for a function generic parameter, the argument type at each call site. The edge belongs to the caller,
+  whose instantiation it is.
+
+Nothing is unioned over the package's witnesses. These are skipped:
+- a comparison against `nil`;
+- a convention-guessed root;
+- a shared simple name such as `Index`.
+
+That keeps swift-nio's `_TinyArray.Storage.==` free of `ByteBuffer.==`.
+`CANDOR_R951_OFF=1` restores the release; `CANDOR_R951_PROBE=1` prints `R951HIT` / `R951CALLER`.
+
+### ⚠ Changed — ⟨0.40⟩ bind/listen (SOUNDNESS R817, R949): a NIO bootstrap `bind` is not a destination
+
+`DatagramBootstrap(group: g).bind(host: "10.0.0.5", port: 9)` published `hosts: ["10.0.0.5:9"]` COMPLETE, so
+`allow Net 10.0.0.5` exited 0 over an address the program only listens on. Every bootstrap `bind` was read
+as an establishing call, like `connect`. It is now its own case:
+
+- **⚠ a literal bind address never enters `hosts`.** Its host class still charges `LocalNetwork`. A literal
+  bind alone fails `allow Net` closed through the empty surface (0 → 1).
+- **⚠ a bind over an already-resolved address marks nothing.** This covers `bind(to: SocketAddress)`, a
+  UNIX path and a port. An ephemeral client's `connect` carries the locator, so
+  `allow Net <benign>` / `allow Net <dest>` can now certify it (1 → 0).
+- a bind handed a runtime `host:` string still marks `incomplete: Net`: NIO resolves the name (R949; kept).
+- **⚠ a `ServerBootstrap` bind ACCEPTS, so it is `incomplete: Net` whatever its address.**
+  `bind(host: "0.0.0.0", port: 8080)` beside a benign literal used to publish `0.0.0.0:8080`.
+
+Network.framework (`NWListener`, `requiredLocalEndpoint`) was already conformant and is unchanged.
+`CANDOR_R817_OFF=1` restores the establishing reading; `CANDOR_R817_PROBE=1` prints `R817HIT`.
+
+### ⚠ Fixed — vein A(i): every spelling of a local type is that type (one canonicaliser, `canonicalTypeRef`)
+
+A local type counted as local only under its SIMPLE name. Every other spelling was read as a foreign owner or
+left untyped, and the call fell out of `functions[]` with no disclosure. The spellings were `Yard.Crane`,
+`M.Yard.Crane` (the scan's own module), a file alias onto a nested type, a dotted member alias and a
+body-local alias. Executed matrix: 127 cells, 9 spellings × 15 sites, every effect runs. The release charged
+41 of them; this build charges 127. One function, `CallCollector.canonicalTypeRef`, now answers "which
+declaration does this type spelling name" for every consumer that asks:
+- `dealias` and therefore `rootOf`: every binder, field, return, element and optional;
+- the constructor and `.init` binders;
+- dotted type roots (static calls and static properties);
+- the KeyPath root and the Comparable witness (R153 b/c);
+- the κ shadow guards (R153 d);
+- the constructor edge.
+
+It hands on the spelling the rest of the engine already keys on. That is the simple name when exactly one
+declared path carries it. It is the full path when the name is shared (R266/R132), and the Driver then asks
+the exact unit or overload set first and falls back to the release's simple spelling.
+
+- **⚠ rows gain real effects**, for example Kingfisher `ImageCache.storeToDisk` / `syncStoreToDisk` /
+  `calculateDiskStorageSize` through a `DiskStorage.Backend<Data>` field. Executed: a file written and read
+  back. `deny Fs` goes from 0 to 1 on all three.
+- **N-a** `T.TopCrane()`: the scan's own module is a qualifier when the rest lands on a local type.
+- **N-b** a constructor through an alias of a local type (`FTBoom()`).
+- **N-c** the explicit `T.init()` binder, which was untyped for every spelling.
+- **R773** `Foundation.ProcessInfo.processInfo…` / `Foundation.FileManager.default…`.
+- **R790** body-local `typealias`.
+- **⚠ N-d (a fabrication)**: type-nested aliases no longer leak through the module-wide last-writer table into
+  a GENERIC PARAMETER. `Box<Kind: Goer>.runParam` was charged `Danger.go`'s Fs from an unrelated
+  `Owner.Kind`; executed, nothing writes. Aliases resolve in Swift's order: body, then the enclosing types and
+  their supertypes, then file level. The release's answer is kept as the floor where owners disagree out of
+  scope.
+- **⚠ R153(d)**: a project `class Process` aliased `Proc` no longer fabricates `Exec`.
+
+Corpus (23 standalone entries + 8 chained arms), every REMOVED value partitioned:
+- 462 C1, where RxSwift's `RxSwift.Resources.incrementTotal()` wrapper now resolves to the real unit and
+  drops the `invisible: RxSwift` that named it.
+- 13 audited:
+  - one N-d fabricated edge;
+  - one foreign hedge on a LOCAL type that now equals the bare spelling's reading.
+- 0 unexplained C3.
+
+Gains: 429 new concrete charges, each traced to a body that performs it.
+
+`CANDOR_AI_OFF=1` restores the release; `CANDOR_AI_ND_OFF=1` restores only the global alias reading;
+`CANDOR_AI_PROBE=1` prints `AIHIT`.
+Not covered: `Darwin.getenv(…)`, a module-qualified FREE function and not a type spelling (R773's free-call
+half).
+
+### ⚠ Fixed — R910: a consumer that chains a CONFORMER's package but not the protocol OWNER's now asks the owner's key
+
+The §2 join formed `<p>#<owner>.<member>` only for packages that are chained AND imported. A protocol
+requirement's answer is the `interfaceUnion` entry the conformer's report publishes under the OWNER's
+prefix, so with the owner unchained (`App` importing `ProtoPkg` + `IfaceDep`, chained on `IfaceDep` only)
+that entry sat in the index unasked and `useBackend774(_ b: Backend774) { b.run() }` read `[]` —
+`deny Fs` / `deny Unknown` exit 0 over a body that writes a file (executed). The member join and the
+property / `deinit` / stringification candidate join now also ask the key under the owner's package, as
+obligation 1 already decides it (`foreignOwnerModule`, else vein D's `ownerProof`).
+
+- **⚠ a row gains the conformers' effects** in that shape: `deny <E> <fn>` can go from exit 0 to exit 1.
+  Executed fixture: 8 rows gain a concrete effect (`Fs`, `Env`), including a property read that was ABSENT.
+- Additive by construction: the entry is applied beside whatever the site charges and `resolved` is not
+  set, so no disclosure that fired before stops firing; with the owner chained nothing changes (the join
+  already asked that string). A platform protocol is never asked under a dependency's prefix, and where
+  the one-import floor's module sources do not declare the name the floor's guess is not asked either.
+- Corpus (8 chained arms over swift-certificates / swift-crypto / swift-nio, partial and full chains):
+  371 asks, 0 hits, ADDED 0 / REMOVED 0 / CHANGED 0; standalone corpus (23 entries): byte-identical.
+
+`CANDOR_R910_OFF=1` restores the previous join; `CANDOR_R910_PROBE=1` prints `R910ASK` / `R910HIT`.
+
+### ⚠ Fixed — R915: a member hop the receiver's type does not record no longer keeps the OUTER type, where a declaration answers it
+
+`rootOf` kept the outer base's type when a `.member` hop was not a recorded field (the κ static-chain
+convention), so `self.x.m()` was keyed `Outer.m`: a WRONG JOIN where `Outer` declares an `m` (a fabrication)
+and a silent drop where it does not. The fallback stays; four index gaps that fed it are closed, each from a
+declaration, and where none answers the release's reading stands (a floor):
+
+- **⚠ (A) a nested type path** `Outer.Inner.m()` is `Inner` (also keyed `Outer.Inner.m` where an
+  `extension Outer.Inner` declares units that way). ReactiveSwift's `SignalProducer` operators now reach
+  `Signal.Event.*`, not `Signal.*`; executed, the operator call reads no clock, so their fabricated `Clock`
+  is gone (`Unknown` kept).
+- **⚠ (B) a member `typealias`** resolves in the type that declares it, not by bare name last-writer-wins:
+  RxSwift's seventy-five `typealias Parent` all read `Zip8`. Dotted chains (`AnyObserver<E>.s` -> `Bag`)
+  are followed; a variadic parameter's element type is left as the release read it.
+- **⚠ (C) a field a local SUPERTYPE declares** (inherited stored field, protocol-extension property such as
+  Kingfisher's `kf`): `imageView.kf.setImage(with:)` now reaches `KingfisherWrapper.setImage` (Net). Only a
+  single agreeing local type; not a generic-parameter field (re-specialised by the subtype) and not a name a
+  closure parameter, local or parameter shadows — both measured as losses in this change's own A/B.
+- **⚠ (D) `private var sm = Machine<Void>()`** types the stored property, as `Machine()` did.
+
+`CANDOR_R915_OFF=1` restores 519f62d (per arm: `CANDOR_R915{A,B,C,D}_OFF`). Known over-charge: a
+protocol-extension property returning a generic wrapper unions same-named members of its constrained
+extensions (Alamofire `trust.af.publicKeys` also reaches the `Bundle` extension's `Fs`; 3 rows).
+
+### ⚠ Changed — ⟨0.40⟩ second half (SOUNDNESS R932): a function ABSENT from the baseline is compared against nothing, not exempted
+
+The AS-EFF-005 guard skipped every function its baseline did not hold as "new code, reviewed normally" —
+and review does not read effects. Measured on 519f62d: a same-build baseline of `keep` (Fs) and a tree
+adding `fresh` (Net) exited 0 with `violations: []`. Now `prior(key) = baseline[key] ?? ∅` under the
+`<package>#<fn>` key (the byHash / foreign-package join is unchanged):
+
+- **⚠ a new function performing a real effect fails, exit 1**, and the message says it is ABSENT from the
+  baseline (a renamed key reads the same), with the remedy `candor diff <this run's report> <baseline>`
+  first, re-recording second. A new pure function passes.
+- **a new `Unknown`-only function stays advisory but is NAMED**, in its own note line ("N new function(s)
+  carry only Unknown: …"); under `unknown-ratchet` its Unknown is newly introduced and fails.
+- **every AS-EFF-005 `--gate-json` row carries `origin`** (`existing` / `new` / `unknown`, ⟨0.12⟩'s rule). The
+  callgraph sidecar now decides only that label: without it, a formerly-pure function turning effectful
+  FIRES (it used to read as new and escape) with `origin:"unknown"`.
+- Unchanged: a whole baseline FILE absent is a note and exit 0 (a `.candor/config`-declared one, exit 2);
+  a corrupt sidecar or a cross-build baseline is exit 2. One-way, 0 → 1; no flip at upgrade, because a
+  different-build baseline already exits 2 and the re-recorded one holds every function.
+
 ### ⚠ Fixed — vein B, local expression typing: a receiver whose type is DECLARED is typed, and a guessed one discloses (SOUNDNESS R256, R578, R579, R589/R906, R615, R618/R907, R619, R738, R851, R866, R904, R905 ctor half)
 
 A member call on a receiver this engine could not type was dropped with no key and no `Unknown`, so its caller

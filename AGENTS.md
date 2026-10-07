@@ -71,9 +71,13 @@ claim (the package is covered, not blind); a deps token naming no readable file 
 report — exits 2, fail-closed (a configured dep must never silently read pure).
 
 **Ratchet regressions** with `CANDOR_BASELINE=<saved report>` (or a checked-in config `baseline`
-line — a relative value anchors to the config's home dir): an existing function GAINING an effect
-versus the baseline is `[AS-EFF-005]`, exit 1 (new functions are exempt — reviewed as new code);
-the records join the `--gate-json` verdict. A baseline is comparable only to its PRODUCING build
+line — a relative value anchors to the config's home dir): a function whose real effects are not in
+its baseline entry is `[AS-EFF-005]`, exit 1 — an existing one that GAINED an effect, and (⟨0.40⟩) one
+ABSENT from the baseline that performs any real effect, compared against nothing (no "new code"
+exemption; a new PURE function passes; a new `Unknown`-only one is advisory but named). The records
+join the `--gate-json` verdict, each with `origin` `existing`/`new`/`unknown`; `new` means absent under
+the `<package>#<fn>` key, so a renamed function reads as new. Review before re-recording:
+`candor diff <this run's report> <baseline>`. A baseline is comparable only to its PRODUCING build
 (§2.1): a corrupt, versionless, or cross-build baseline refuses to evaluate (exit 2, loud — never
 a silent skip, never a bogus violation wave); an absent file is a stderr note and the guard is
 inactive. Record one: `candor-swift <dir> --json > baseline.json`.

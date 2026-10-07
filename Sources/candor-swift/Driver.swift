@@ -435,7 +435,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // ⟨0.33.1⟩ scan-wide aggregate of `DeclCollector.declaredTypesUnconditional` — see that field's doc.
     var declaredTypesUnconditional: Set<String> = []
     var typeAliases: [String: String] = [:]
+    var declaredTypePathsAI: Set<String> = []                    // VEIN A(i)
+    var fileTypeAliasesAI: [String: String] = [:]                // VEIN A(i) N-d
+    var typeGenericParamNamesAI: [String: Set<String>] = [:]     // VEIN A(i) N-d
     var typeAliasArms: [String: Set<String>] = [:]   // R429 — every arm of a `#if`-duplicated alias
+    var memberTypeAliasesAll: [String: [String: Set<String>]] = [:]   // R915 (B) — see DeclCollector
     // R178 — function-typed aliases (`typealias Cb = () -> Void`), unioned across files and then
     // closed transitively below. See `DeclCollector.fnTypeAliases`.
     var fnTypeAliasesRaw: Set<String> = []
@@ -954,12 +958,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         declaredTypes.formUnion(c.declaredTypes)
         declaredTypesUnconditional.formUnion(c.declaredTypesUnconditional)
         for (a, u) in c.typeAliases { typeAliases[a] = u }   // last-writer-wins (a redeclared alias is rare)
+        declaredTypePathsAI.formUnion(c.declaredTypePaths)
+        for (a, u) in c.fileTypeAliases { fileTypeAliasesAI[a] = u }
+        for (t, ns) in c.typeGenericParamNames { typeGenericParamNamesAI[t, default: []].formUnion(ns) }
         // R429 — …and the ARMS, unioned. The line above is the last-writer-wins the row was filed
         // against; it stays because 26 call sites read `dealias` as single-valued and a multi-valued
         // resolution there would be a large mechanical refactor, which this project's own history
         // prices above the defect it prevents. The arm SET is what the call-edge site reads instead:
         // an edge per arm makes the effects union through the propagation that already exists.
         for (a, u) in c.typeAliasArms { typeAliasArms[a, default: []].formUnion(u) }
+        for (t, m) in c.memberTypeAliases {                                  // R915 (B)
+            for (a, u) in m { memberTypeAliasesAll[t, default: [:]][a, default: []].formUnion(u) }
+        }
         fnTypeAliasesRaw.formUnion(c.fnTypeAliases)          // R178
         dynamicMemberTypes.formUnion(c.dynamicMemberTypes)
         propertyWrapperTypes.formUnion(c.propertyWrapperTypes)
@@ -1190,6 +1200,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // `Job.emit` doesn't resolve and the call read pure — fall back to the default body on a conformed super.
     var supertypesOf: [String: Set<String>] = [:]
     for (sup, subs) in subtypesOf { for s in subs { supertypesOf[s, default: []].insert(sup) } }
+    // SOUNDNESS R915 (A) — every `Outer.Inner` ADJACENT pair of a declared type path (`A.B.C` gives
+    // `A.B` and `B.C`), so a member hop that names a NESTED TYPE (`Outer.Inner.make()`) is read as that
+    // type rather than as a value hop that keeps `Outer`.
+    var nestedTypePairsR915: Set<String> = []
+    if !DeclCollector.r915AOff {
+        for p in localTypePaths {
+            let c = p.split(separator: ".").map(String.init)
+            if c.count >= 2 { for i in 0..<(c.count - 1) { nestedTypePairsR915.insert("\(c[i]).\(c[i + 1])") } }
+        }
+    }
     // SOUNDNESS R906 — the CLASS part of that map, for a ternary's common-superclass join.
     var classSupertypesR906: [String: Set<String>] = [:]
     let protocolNamesR906 = Set(protocolMethods.keys)
@@ -1524,6 +1544,25 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     for (ty, field, leaf) in staticFactoryFields where fields[ty]?[field] == nil {
         if let vended = returnsIdx[leaf] { fields[ty, default: [:]][field] = (vended, false) }
     }
+    // SOUNDNESS R915 (B) — A MEMBER ALIAS, RESOLVED IN THE SCOPE THAT DECLARED IT. `let parent: Parent`
+    // inside `ObserveOnSink` names `ObserveOnSink.Parent`, and `fields` stores the spelling `Parent`, which
+    // every reader then dealiased through the bare-name, last-writer-wins `typeAliases` — `Zip8` for all
+    // seventy-five RxSwift sinks. Only an alias the owner declares ONE way is applied (two same-named
+    // nested owners declaring it differently keep the release's answer), and only to a field whose
+    // spelling is exactly that alias.
+    let memberTypeAliasesR915: [String: [String: String]] = DeclCollector.r915BOff ? [:]
+        : memberTypeAliasesAll.mapValues { $0.compactMapValues { $0.count == 1 ? $0.first : nil } }
+    for (ty, aliases) in memberTypeAliasesR915 {
+        for (fname, f) in fields[ty] ?? [:] {
+            // A chain that ends on a dotted spelling nothing here declares (`Observers.KeyType`) is not
+            // an answer; the release's bare-name reading stands.
+            if let n = f.name, let u0 = aliases[n], u0 != n {
+                if let u = memberAliasRecordable(resolveMemberAliasChain(u0, memberTypeAliasesR915), localTypes), u != n {
+                    fields[ty]![fname] = (u, f.isFunction)
+                }
+            }
+        }
+    }
     // R73 — same deferred resolution for a module-scope global initialized by a bare factory call
     // (`let worker = makeWorker()`). Only an UNAMBIGUOUS project-wide factory return types it — an
     // ambiguous/unknown leaf leaves the global untyped, same "never guess" discipline as every other
@@ -1827,6 +1866,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // one HOF each inherited the OTHER's effect too. Resolution below is grouped by `caller` so each
     // caller is judged only against the sites IT makes.
     var callsiteArgs: [String: [(caller: String, args: [ArgKind])]] = [:]
+    /// SOUNDNESS R951 — the argument TYPES at each resolved call site, beside `callsiteArgs`; and the
+    /// comparison witnesses each unit needs from its caller's instantiation (`CallCollector.genericWitnessReqs`).
+    var callsiteArgTypes: [String: [(caller: String, types: [String?])]] = [:]
+    var genericWitnessReqsByUnit: [String: Set<String>] = [:]
     var deferredCallbacks: [String: (indexes: Set<Int>, names: Set<String>)] = [:]
 
     /// SOUNDNESS R720 — the subset of `deferredCallbacks[fq].names` that has NO PARAMETER POSITION in
@@ -2095,6 +2138,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     let joinUnionOff = ProcessInfo.processInfo.environment["CANDOR_JOIN_UNION_OFF"] != nil
     let joinUnionProbe = ProcessInfo.processInfo.environment["CANDOR_JOIN_UNION_PROBE"] != nil
     let joinDebug = ProcessInfo.processInfo.environment["CANDOR_JOIN_DEBUG"] != nil
+    /// SOUNDNESS R910 §1b KILL SWITCH and reach probe — see `askOwnKey`.
+    let r910Off = ProcessInfo.processInfo.environment["CANDOR_R910_OFF"] != nil
+    let r910Probe = ProcessInfo.processInfo.environment["CANDOR_R910_PROBE"] != nil
     let r849Off = ProcessInfo.processInfo.environment["CANDOR_R849_OFF"] != nil
     /// SOUNDNESS R847 / R850 — THE BARE-NAME DEPENDENCY JOIN KEEPS v0.39.2'S `pkg#<leaf>` LOOKUP, AND THE
     /// ONLY REMOVAL IS ONE THAT IS A PROOF UNDER SWIFT'S OWN LOOKUP: a name a BINDER holds in the current
@@ -2299,6 +2345,58 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 unionOwnImplementors(forKey: k, to: qual)
             }
         }
+    }
+
+    /// SOUNDNESS R910 — THE §2 JOIN ASKS THE KEY UNDER ITS OWNER'S PACKAGE, NOT ONLY UNDER THE CHAINED ONES.
+    ///
+    /// `joinTiers` forms `<p>#<owner>.<member>` only for packages that are chained AND imported. A protocol
+    /// requirement's answer is the `interfaceUnion` entry a CONFORMER's report publishes under the
+    /// PROTOCOL OWNER's prefix (obligation 2) — so where the owner's package is not chained, that entry
+    /// (`ProtoPkg#Backend774.run`, from IfaceDep's report) sat in the index and nothing asked for it.
+    /// Measured: App importing ProtoPkg + IfaceDep, chained on IfaceDep only — `useBackend774` `[]`,
+    /// `deny Fs` and `deny Unknown` exit 0, executed writing the file; chained on both, `['Fs']`, exit 1.
+    /// The asymmetry is the tell: `applyDepEntry` already asks a DEPENDENCY entry's `dispatchesOn` key by
+    /// exact string, wherever its package sits; the consumer's own call, which PUBLISHES that same key
+    /// (obligation 1), never asked it.
+    ///
+    /// THE OWNER IS THE ONE OBLIGATION 1 ALREADY DECIDES — `foreignOwnerModule`, else vein D's
+    /// `ownerProof` — never a new guess, and nil for anything this package declares. A `<pkg>#` key is in
+    /// the index only if a chained report published it, so a hit names this type's own abstraction.
+    ///
+    /// TWO REFUSALS THE PUBLISH SITE DOES NOT MAKE, because a published key no one can join costs nothing
+    /// and an ASKED one charges the row. (1) A platform name is never a dependency's: the one-import floor
+    /// keys a platform conformance under the file's sole dependency (`DProto#CustomStringConvertible
+    /// .description`, pinned in `ForeignOwnerProofProcessTests`), and asking that key would charge every
+    /// `description` read in a file with one import. (2) Where the floor module's own sources are readable
+    /// and do not declare the name, the floor's guess is refuted and nothing is asked (a re-exported owner
+    /// lands here too — the release's silence, not a new charge).
+    func ownerKeyPkg(_ abs: String, inFile file: String) -> String? {
+        guard !r910Off, !abs.isEmpty, !localTypes.contains(abs), localProtocolWirePath(abs) == nil else { return nil }
+        let top = String(abs.prefix { $0 != "." })
+        guard !localTypes.contains(top), PLATFORM_REFINES[top] == nil, !PLATFORM_LEAVES.contains(top),
+              !PLATFORM_VALUE_TYPES.contains(top), !STD_SUPERS_PUBLIC.contains(top) else { return nil }
+        if let m = foreignOwnerModule(inFile: file) {
+            if let d = moduleDeclarations(m), !d.opaque, d.names[top] == nil { return nil }
+            return deps.pkgOfModule(m)
+        }
+        return provenOwnerPackage(of: abs, inFile: file, site: "r910")
+    }
+    /// …and applies what it answers ADDITIVELY: beside whatever the site charges, without setting the
+    /// caller's `resolved`, so every disclosure the miss path fires (R705, R859, vein D, R826, the κ
+    /// ledger) still fires. A RESOLUTION that can remove nothing. Skipped where the owner's package was
+    /// already in `asked` — the §2 join asked that identical string and missed.
+    @discardableResult
+    func askOwnKey(_ ownerPkg: String, _ path: String, asked: Set<String>, to qual: String) -> Bool {
+        guard ownerPkg != pkgName, !asked.contains(ownerPkg) else { return false }
+        // REACH PROBE (§E1) — two lines: ASK counts the population this arm runs on, HIT the subset it moves.
+        if r910Probe { FileHandle.standardError.write("R910ASK \(qual) \(ownerPkg)#\(path)\n".data(using: .utf8)!) }
+        guard let e = deps.lookup("\(ownerPkg)#\(path)") else { return false }
+        if r910Probe {
+            FileHandle.standardError.write(
+                "R910HIT \(qual) \(ownerPkg)#\(path) eff=\(e.effects.sorted())\n".data(using: .utf8)!)
+        }
+        applyDepEntry(e, to: qual)
+        return true
     }
 
     // ── ⟨0.40⟩ THE CONSUMER (SPEC §2 ⟨0.40⟩; SOUNDNESS R843; PART 95). Everything below ADDS: an entry the
@@ -2687,6 +2785,37 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         crossModuleGlobalTypesCache[file] = extra
         return extra
     }
+    // VEIN A(i) — the type-identity scope every CallCollector resolves a spelling in (see
+    // `CallCollector.canonicalTypeRef`). A SHARED simple name's full paths join `localTypes` /
+    // `declaredTypes` because those are the spellings the canonicaliser hands on for it (R266/R132): the
+    // unit keys' own prefixes, never a guessed leaf. Protocols keep their leaf (the dispatch machinery is
+    // keyed by it). Nothing here moves under `CANDOR_AI_OFF=1`.
+    // SOUNDNESS R951 — op -> the local types declaring that comparison witness as a static member.
+    var opWitnessTypesR951: [String: Set<String>] = [:]
+    for f in allFns {
+        guard let et = f.enclosingType else { continue }
+        let leaf = String((f.simpleQual.split(separator: ".").last.map(String.init) ?? "").prefix { $0 != "(" && $0 != "#" })
+        if leaf == "==" || leaf == "<" { opWitnessTypesR951[leaf, default: []].insert(et) }
+    }
+    var aiBase = AiTypeIndex()
+    var aiSharedPaths = Set<String>()      // the FULL paths added above — the canonicaliser's precise spellings
+    if !CallCollector.aiOff {
+        aiBase.enabled = true
+        aiBase.localTypePaths = localTypePaths
+        aiBase.pathsByLeaf = typePathsBySimple
+        aiBase.protocolPaths = protocolPaths
+        aiBase.fileAliases = fileTypeAliasesAI
+        aiBase.memberAliases = memberTypeAliasesAll.mapValues { $0.compactMapValues { $0.count == 1 ? $0.first : nil } }
+        for (_, m) in memberTypeAliasesAll { for (a, u) in m { aiBase.nestedAliasTargets[a, default: []].formUnion(u) } }
+        aiBase.supertypes = supertypesOf
+        for (_, ps) in typePathsBySimple where ps.count > 1 {
+            for p in ps where p.contains(".") && !protocolPaths.contains(p) && !localTypes.contains(p) {
+                localTypes.insert(p)
+                aiSharedPaths.insert(p)
+                if declaredTypePathsAI.contains(p) { declaredTypes.insert(p) }
+            }
+        }
+    }
     for f in allFns {
         locOf[f.qual] = f.loc
         if f.isMain { entryPoints.insert(f.qual) }
@@ -2794,6 +2923,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                protoReqProps: protoReqPropsFlat,             // R904
                                genericCallableFields: genericCallableFields, // R256
                                classSupertypes: classSupertypesR906,         // R906
+                               supertypesAll: DeclCollector.r915COff ? [:] : supertypesOf,   // R915 (C)
+                               nestedTypePairs: nestedTypePairsR915,                          // R915 (A)
+                               memberTypeAliases: memberTypeAliasesR915,                      // R915 (B)
                                returns: returnsIdx,
                                metatypeReturns: metatypeReturnsIdx,                                  // R585
                                globalMetatypes: globalMetatypesByModule[swiftModuleOf(f.loc)] ?? [:], // R585
@@ -2822,14 +2954,30 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                closureFields: closureFields, mutableClosureFields: mutableClosureFields,
                                moduleConstStrings: globalConstStrings,
                                importedModules: Set(fileImports[String(f.loc.prefix { $0 != ":" })] ?? []),
-                               projectModules: projectModules, deps: deps)
+                               projectModules: projectModules, deps: deps,
+                               ai: {
+                                   guard aiBase.enabled else { return aiBase }
+                                   var a = aiBase
+                                   let path = f.enclosingTypePath ?? f.enclosingType
+                                   a.enclosingTypePath = path
+                                   var g = Set(f.genericBounds.keys)
+                                   for seg in (path ?? "").split(separator: ".") {
+                                       g.formUnion(typeGenericParamNamesAI[String(seg)] ?? [])
+                                   }
+                                   a.genericNames = g
+                                   return a
+                               }(),
+                               opWitnessTypes: opWitnessTypesR951)
         // The locator-move set is flow-INSENSITIVE and must be complete before the first call is collected
         // (a rebind later in the text, or earlier in time inside a loop, still invalidates the claim). The
         // parameter names go with it: a body binder that SHADOWS a parameter is the same hazard, and the
         // signature is the one binder site the body walk cannot see.
         cc.prescanLocatorMoves(body, params: f.paramNames)
+        cc.prescanBodyAliases(Syntax(body))                                   // VEIN A(i) / R790
+        cc.prescanLocalTypeArgs(Syntax(body))                                 // R951
         if CallCollector.veinBProbe { FileHandle.standardError.write("VBFN\t\(f.qual)\n".data(using: .utf8)!) }
         cc.walk(body)
+        if !cc.genericWitnessReqs.isEmpty { genericWitnessReqsByUnit[f.qual] = cc.genericWitnessReqs }   // R951
         // accessor units: a property READ/WRITE of a known accessor unit is an edge (the reader inherits
         // the getter/observer/subscript's effects — `c.data` reaching the Fs inside `var data: Data { … }`).
         // resolveQual matches the OWN type's `Type.member` unit; when the accessor is INHERITED (the body
@@ -3026,7 +3174,45 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             deferredCallbacks[f.qual] = (idxs, cc.callbackInvoked)
             if !undischargeable.isEmpty { undischargeableCallbacks[f.qual] = undischargeable }
         }
-        for call in cc.calls {
+        for var call in cc.calls {
+            // VEIN A(i) — A CANONICAL FULL PATH (a shared simple name) IS ASKED PRECISELY FIRST, AND THE
+            // RELEASE'S SPELLING IS THE FLOOR. The exact unit or the exact overload set answers it (R266/
+            // R132: the namesake's member is not reached); where neither exists — an inherited member, a
+            // protocol-extension default, a property the overload index keys short — the call is handed
+            // on as the simple `Leaf.member` the release would have formed, so every arm keyed on simple
+            // names answers it as before. Not where the leaf is ALSO a top-level type: there the simple
+            // spelling is an EXACT key for the namesake, a wrong join, and the release left the dotted
+            // spelling unanswered anyway.
+            if !CallCollector.aiOff, call.typed, let dot = call.path.lastIndex(of: "."),
+               aiSharedPaths.contains(String(call.path[..<dot])),
+               !byQual.contains(call.path), !overloadedBasesPath.contains(call.path) {
+                let type = String(call.path[..<dot]), member = String(call.path[call.path.index(after: dot)...])
+                let leafType = type.split(separator: ".").last.map(String.init) ?? type
+                if !localTypePaths.contains(leafType) { call.path = "\(leafType).\(member)" }
+            }
+            // SOUNDNESS R915 REACH — what a guessed-root typed local call resolved to (probe only).
+            let r915Before = call.r915Site == nil ? nil
+                : (edges[f.qual] ?? [], direct[f.qual] ?? [], whyMap[f.qual] ?? [])
+            defer {
+                if let site = call.r915Site, let b = r915Before {
+                    let e = (edges[f.qual] ?? []).subtracting(b.0).sorted()
+                    let d = (direct[f.qual] ?? []).subtracting(b.1).sorted()
+                    let w = (whyMap[f.qual] ?? []).subtracting(b.2).sorted()
+                    // classification of the hop (probe only): the hop member is the last `.x` of the receiver text
+                    let recvText = site.split(separator: "\t").last.map(String.init) ?? ""
+                    let hopMember = String(recvText.split(separator: ".").last ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "?!"))
+                    let rt915 = call.path.lastIndex(of: ".").map { String(call.path[..<$0]) } ?? call.path
+                    var cls: [String] = []
+                    if hopMember.first?.isUppercase == true, localTypes.contains(hopMember) { cls.append("nested") }
+                    let sups = (supertypesOf[rt915] ?? []).sorted()
+                    for sp in sups { if let fi = fields[sp]?[hopMember] { cls.append("inh:\(sp)=\(fi.name ?? "nil")") } }
+                    if let fi = fields[rt915]?[hopMember] { cls.append("own=\(fi.name ?? "nil")\(fi.isFunction ? "fn" : "")") }
+                    let ext = sups.filter { !localTypes.contains($0) }
+                    if !ext.isEmpty { cls.append("extsup:\(ext.joined(separator: "+"))") }
+                    let selfEdge = e.contains(f.qual) ? "SELF" : ""
+                    FileHandle.standardError.write("R915SITE\t\(f.qual)\t\(call.path)\t\(site)\tedges=\(e.joined(separator: ","))\tdirect=\(d.joined(separator: ","))\twhy=\(w.joined(separator: ","))\tcls=\(cls.joined(separator: ";"))\t\(selfEdge)\n".data(using: .utf8)!)
+                }
+            }
             // ⟨0.40⟩ the `<holds>` marker: a receiver hop whose DECLARED type a chained `holds` may give.
             // A hit joins the declared target (ADDED to whatever the guess beside it charges); a hit whose
             // join misses, or whose kind is unknown, ADDS `Unknown` (⟨0.23⟩'s miss rule, word for word).
@@ -3094,7 +3280,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                !localTypes.contains(modName),                       // a real type shadows a module name
                let inMod = freeFnByModule[modName]?[call.leaf], inMod.count == 1 {
                 edges[f.qual, default: []].insert(inMod[0])
-                callsiteArgs[inMod[0], default: []].append((f.qual, call.args))
+                callsiteArgs[inMod[0], default: []].append((f.qual, call.args)); callsiteArgTypes[inMod[0], default: []].append((f.qual, call.argTypes))
                 resolved = true
             } else if call.extOwner == CallCollector.superMarker {
                 // `super.m()` — resolve on the SUPERTYPE chain, never on the enclosing type: for an
@@ -3108,7 +3294,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     for sup in supertypesOf[et] ?? [] where sup != et {
                         for t in resolveQual("\(sup).\(member)") {
                             edges[f.qual, default: []].insert(t)
-                            callsiteArgs[t, default: []].append((f.qual, call.args))
+                            callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
                             resolved = true
                         }
                     }
@@ -3148,16 +3334,23 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 }
             } else if call.typed {
                 let typedTargets = resolveQual(call.path)   // hoisted: the else-if chain below reads it once
-                if overloadedBases.contains(call.path) {
+                if !CallCollector.aiOff, !overloadedBases.contains(call.path), overloadedBasesPath.contains(call.path) {
+                    // VEIN A(i) — the exact overload set of a canonical FULL path (see the loop head).
+                    for t in matchOverloadsPath(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
+                        edges[f.qual, default: []].insert(t)
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
+                        resolved = true
+                    }
+                } else if overloadedBases.contains(call.path) {
                     for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append((f.qual, call.args))
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
                         resolved = true
                     }
                 } else if !typedTargets.isEmpty {
                     for t in typedTargets {
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append((f.qual, call.args))
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
                     }
                     resolved = true
                 } else if let dot = call.path.lastIndex(of: "."),
@@ -3187,13 +3380,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         if overloadedBases.contains(base) {
                             for t in matchOverloads(base, argc, call.argTypes, swiftModuleOf(f.loc)) {
                                 edges[f.qual, default: []].insert(t)
-                                callsiteArgs[t, default: []].append((f.qual, call.args))
+                                callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
                                 resolved = true
                             }
                         } else {
                             for t in resolveQual(base) {
                                 edges[f.qual, default: []].insert(t)
-                                callsiteArgs[t, default: []].append((f.qual, call.args))
+                                callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
                                 resolved = true
                             }
                         }
@@ -3503,18 +3696,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // covers the whole chain.
                     for t in inheritedTargets.sorted() {
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append((f.qual, call.args))
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
                         resolved = true
                     }
                 } else if overloadedBases.contains(call.path) {            // an overloaded FREE function
                     for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append((f.qual, call.args))
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
                         resolved = true
                     }
                 } else if let targets = freeFnByName[call.path], targets.count == 1 {
                     edges[f.qual, default: []].insert(targets[0])
-                    callsiteArgs[targets[0], default: []].append((f.qual, call.args))
+                    callsiteArgs[targets[0], default: []].append((f.qual, call.args)); callsiteArgTypes[targets[0], default: []].append((f.qual, call.argTypes))
                     resolved = true
                 } else if localTypes.contains(call.path), overloadedBases.contains("\(call.path).init") {
                     for t in matchOverloads("\(call.path).init", argc, call.argTypes, swiftModuleOf(f.loc)) {
@@ -4076,6 +4269,17 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     sourceTypedWalk(dispatchAbstraction(owner, f) ?? owner, call.leaf, tiers: memberTiers,
                                     to: f.qual, guessed: call.guessHop)
                 }
+                // SOUNDNESS R910 — see `ownerKeyPkg`. After the walk, so nothing it decides is changed.
+                if hits.isEmpty, !call.unqualified, let owner = call.extOwner {
+                    let abs = dispatchAbstraction(owner, f) ?? owner
+                    if let op = ownerKeyPkg(abs, inFile: file),
+                       askOwnKey(op, "\(abs).\(call.leaf)", asked: Set(memberTiers.flatMap { $0.map { $0.p } }), to: f.qual),
+                       call.guessHop {
+                        // ⟨0.40⟩ a hit on a GUESSED owner keeps the guess's `Unknown` (PART 95 o1).
+                        direct[f.qual, default: []].insert("Unknown")
+                        whyMap[f.qual, default: []].insert("dispatch:untyped cross-package receiver")
+                    }
+                }
                 // ⟨0.40⟩ EVERY LOOKUP ON A GUESSED OWNER THAT NO TRUSTED SURFACE ANSWERS KEEPS THE GUESS AND
                 // ADDS `Unknown` — a HIT included: `Wrong.shared.ping()` joining `Wrong.ping` is a guess that the
                 // value is a `Wrong`, and over an older producer nothing says otherwise (PART 95 o1, o1b). A
@@ -4592,6 +4796,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     sourceTypedWalk(String(cand[..<dot]), String(cand[cand.index(after: dot)...]),
                                     tiers: candTiers, to: f.qual, guessed: false)
                 }
+                // SOUNDNESS R910 — a property read / `deinit` / stringification on a dependency type asks its
+                // owner's package too (`viaProp910`: `s.level` on a protocol-typed parameter was ABSENT).
+                if hits.isEmpty, let dot = cand.lastIndex(of: ".") {
+                    let owner = String(cand[..<dot])
+                    if let op = ownerKeyPkg(owner, inFile: file) {
+                        askOwnKey(op, cand, asked: Set(candTiers.flatMap { $0.map { $0.p } }), to: f.qual)
+                    }
+                }
                 guard hits.count == 1 || (!joinUnionOff && hits.count > 1) else { continue }
                 for de in hits { applyDepEntry(de, to: f.qual) }
             }
@@ -4758,6 +4970,28 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
 
     // fixpoint: effects + literal surfaces propagate over edges (the pure `propagate` lives in CandorCore)
+    // SOUNDNESS R951 — a comparison on a FUNCTION generic parameter runs the witness of whatever type the
+    // CALLER instantiated it with: `eq(Noisy(v: 3), Noisy(v: 3))` runs `Noisy.==` inside `eq`. The edge is the
+    // caller's (its instantiation), resolved from the argument type each resolved call site recorded; a call
+    // site whose argument type is unknown or not local resolves nothing (no union of every witness).
+    if !CallCollector.r951Off {
+        for (callee, reqs) in genericWitnessReqsByUnit {
+            for site in callsiteArgTypes[callee] ?? [] {
+                for req in reqs {
+                    let parts = req.split(separator: ":", maxSplits: 1).map(String.init)
+                    guard parts.count == 2, let idx = Int(parts[0]), idx < site.types.count,
+                          let x = site.types[idx], localTypes.contains(x) else { continue }
+                    let base = "\(x).\(parts[1])"
+                    let module = swiftModuleOf(locOf[site.caller] ?? "")
+                    let ts = overloadedBases.contains(base) ? Set(matchOverloads(base, 2, [x, x], module)) : resolveQual(base)
+                    if CallCollector.r951Probe, !ts.isEmpty {
+                        FileHandle.standardError.write("R951CALLER \(site.caller) -> \(callee) \(base)\n".data(using: .utf8)!)
+                    }
+                    edges[site.caller, default: []].formUnion(ts)
+                }
+            }
+        }
+    }
     let inferred = propagate(direct, over: edges)
     let hostsAcc = propagate(hostsD, over: edges), cmdsAcc = propagate(cmdsD, over: edges)
     // `fs` kinds TRAVEL the call graph — a caller that transitively only writes IS a writer — and the "?"

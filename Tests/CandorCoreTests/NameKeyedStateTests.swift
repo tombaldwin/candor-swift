@@ -306,7 +306,9 @@ final class NameKeyedStateTests: XCTestCase {
         // VEIN B — program-wide or per-unit indexes injected at construction, keyed by a type, a protocol or a
         // parameter name; a rebind is answered by `vars`/`binderShadow` at the one reader of each.
         "compositionParams": .immutableIndex, "protoReqFieldTypes": .immutableIndex, "protoReqProps": .immutableIndex,
-        "genericCallableFields": .immutableIndex, "classSupertypes": .immutableIndex, "paramNamesR851": .immutableIndex,
+        "genericCallableFields": .immutableIndex, "classSupertypes": .immutableIndex,
+        "supertypesAll": .immutableIndex, "nestedTypePairs": .immutableIndex, "memberTypeAliases": .immutableIndex,   // R915
+        "paramNamesR851": .immutableIndex, "variadicParamsR915": .immutableIndex,
         // SOUNDNESS R584 — the CLASS twin of the row above: the same key space (a generic-parameter name,
         // or a metatype PARAMETER's name standing for one), the same Driver-supplied declaration indexes,
         // so the same reasoning holds for the same reason. Its two readers both refuse a spelling that is
@@ -406,6 +408,7 @@ final class NameKeyedStateTests: XCTestCase {
         "binderSnapshots": .notPerBinding, "caseSnapshots": .notPerBinding,
         // VEIN B — scope and walk bookkeeping keyed by syntax node, or a flag read around one call.
         "elseTypeSnapshots": .notPerBinding, "reqFloor": .notPerBinding, "elemGuessRecv": .notPerBinding,
+        "r915NestedDotted": .notPerBinding,
         "elementWalkedGuess": .notPerBinding, "forElemGuess": .notPerBinding,
         // R853 — payload names bound by an enclosing `if`/`guard` whose `else` this is: scope bookkeeping
         "caseElseOut": .lexicallyScoped("the payload names an `if case`/`guard case` bound, inside that statement's `else`, where they are out of scope; saved and restored with the block"),
@@ -440,6 +443,22 @@ final class NameKeyedStateTests: XCTestCase {
         // `.clearedOnRebind(scoped: false)` above: this adds ONE scope, a nested func's parameter list,
         // and does not make `vars` block-scoped in general.)
         "nestedFuncSavedVars": .notPerBinding,
+        // VEIN A(i). `ai` is the Driver's type-identity scope (immutable). `bodyAliases` is keyed by a
+        // `typealias` NAME — a type spelling, not a value binding: no `let`/`var` can rebind it, and it is
+        // filled once by `prescanBodyAliases` before the walk. `aliasScopeOwners` is derived from `ai` once.
+        "ai": .notPerBinding,
+        "bodyAliases": .notPerBinding,
+        "aliasScopeOwners": .notPerBinding,
+        // SOUNDNESS R951. The two maps keyed by a BINDING name feed only `comparisonWitnesses`, which ADDS
+        // witness edges; a stale entry after a rebind can only over-charge (a witness of the old type's
+        // arguments), never silence, so they are kept rather than cleared — the hedge direction.
+        "localTypeArgs": .deliberatelyKept("R951: a stale entry adds a witness edge, never removes one"),
+        "paramTypeArgsR951": .deliberatelyKept("R951: a shadowed parameter's type arguments can only over-charge"),
+        "paramIndexR951": .deliberatelyKept("R951: a shadowed generic parameter name can only add a caller-side witness"),
+        "paramTypesR951": .deliberatelyKept("R951: a shadowed parameter type can only add a caller-side witness edge"),
+        "genericBoundsR951": .immutableIndex,
+        "opWitnessTypes": .immutableIndex,
+        "genericWitnessReqs": .notPerBinding,
     ]
 
     // ── the DERIVATION ──────────────────────────────────────────────────────────────────────────────
