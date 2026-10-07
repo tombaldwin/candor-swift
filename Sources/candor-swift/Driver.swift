@@ -435,6 +435,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // ⟨0.33.1⟩ scan-wide aggregate of `DeclCollector.declaredTypesUnconditional` — see that field's doc.
     var declaredTypesUnconditional: Set<String> = []
     var typeAliases: [String: String] = [:]
+    var declaredTypePathsAI: Set<String> = []                    // VEIN A(i)
+    var fileTypeAliasesAI: [String: String] = [:]                // VEIN A(i) N-d
+    var typeGenericParamNamesAI: [String: Set<String>] = [:]     // VEIN A(i) N-d
     var typeAliasArms: [String: Set<String>] = [:]   // R429 — every arm of a `#if`-duplicated alias
     var memberTypeAliasesAll: [String: [String: Set<String>]] = [:]   // R915 (B) — see DeclCollector
     // R178 — function-typed aliases (`typealias Cb = () -> Void`), unioned across files and then
@@ -955,6 +958,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         declaredTypes.formUnion(c.declaredTypes)
         declaredTypesUnconditional.formUnion(c.declaredTypesUnconditional)
         for (a, u) in c.typeAliases { typeAliases[a] = u }   // last-writer-wins (a redeclared alias is rare)
+        declaredTypePathsAI.formUnion(c.declaredTypePaths)
+        for (a, u) in c.fileTypeAliases { fileTypeAliasesAI[a] = u }
+        for (t, ns) in c.typeGenericParamNames { typeGenericParamNamesAI[t, default: []].formUnion(ns) }
         // R429 — …and the ARMS, unioned. The line above is the last-writer-wins the row was filed
         // against; it stays because 26 call sites read `dealias` as single-valued and a multi-valued
         // resolution there would be a large mechanical refactor, which this project's own history
@@ -2775,6 +2781,30 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         crossModuleGlobalTypesCache[file] = extra
         return extra
     }
+    // VEIN A(i) — the type-identity scope every CallCollector resolves a spelling in (see
+    // `CallCollector.canonicalTypeRef`). A SHARED simple name's full paths join `localTypes` /
+    // `declaredTypes` because those are the spellings the canonicaliser hands on for it (R266/R132): the
+    // unit keys' own prefixes, never a guessed leaf. Protocols keep their leaf (the dispatch machinery is
+    // keyed by it). Nothing here moves under `CANDOR_AI_OFF=1`.
+    var aiBase = AiTypeIndex()
+    var aiSharedPaths = Set<String>()      // the FULL paths added above — the canonicaliser's precise spellings
+    if !CallCollector.aiOff {
+        aiBase.enabled = true
+        aiBase.localTypePaths = localTypePaths
+        aiBase.pathsByLeaf = typePathsBySimple
+        aiBase.protocolPaths = protocolPaths
+        aiBase.fileAliases = fileTypeAliasesAI
+        aiBase.memberAliases = memberTypeAliasesAll.mapValues { $0.compactMapValues { $0.count == 1 ? $0.first : nil } }
+        for (_, m) in memberTypeAliasesAll { for (a, u) in m { aiBase.nestedAliasTargets[a, default: []].formUnion(u) } }
+        aiBase.supertypes = supertypesOf
+        for (_, ps) in typePathsBySimple where ps.count > 1 {
+            for p in ps where p.contains(".") && !protocolPaths.contains(p) && !localTypes.contains(p) {
+                localTypes.insert(p)
+                aiSharedPaths.insert(p)
+                if declaredTypePathsAI.contains(p) { declaredTypes.insert(p) }
+            }
+        }
+    }
     for f in allFns {
         locOf[f.qual] = f.loc
         if f.isMain { entryPoints.insert(f.qual) }
@@ -2913,12 +2943,25 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                closureFields: closureFields, mutableClosureFields: mutableClosureFields,
                                moduleConstStrings: globalConstStrings,
                                importedModules: Set(fileImports[String(f.loc.prefix { $0 != ":" })] ?? []),
-                               projectModules: projectModules, deps: deps)
+                               projectModules: projectModules, deps: deps,
+                               ai: {
+                                   guard aiBase.enabled else { return aiBase }
+                                   var a = aiBase
+                                   let path = f.enclosingTypePath ?? f.enclosingType
+                                   a.enclosingTypePath = path
+                                   var g = Set(f.genericBounds.keys)
+                                   for seg in (path ?? "").split(separator: ".") {
+                                       g.formUnion(typeGenericParamNamesAI[String(seg)] ?? [])
+                                   }
+                                   a.genericNames = g
+                                   return a
+                               }())
         // The locator-move set is flow-INSENSITIVE and must be complete before the first call is collected
         // (a rebind later in the text, or earlier in time inside a loop, still invalidates the claim). The
         // parameter names go with it: a body binder that SHADOWS a parameter is the same hazard, and the
         // signature is the one binder site the body walk cannot see.
         cc.prescanLocatorMoves(body, params: f.paramNames)
+        cc.prescanBodyAliases(Syntax(body))                                   // VEIN A(i) / R790
         if CallCollector.veinBProbe { FileHandle.standardError.write("VBFN\t\(f.qual)\n".data(using: .utf8)!) }
         cc.walk(body)
         // accessor units: a property READ/WRITE of a known accessor unit is an edge (the reader inherits
@@ -3117,7 +3160,22 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             deferredCallbacks[f.qual] = (idxs, cc.callbackInvoked)
             if !undischargeable.isEmpty { undischargeableCallbacks[f.qual] = undischargeable }
         }
-        for call in cc.calls {
+        for var call in cc.calls {
+            // VEIN A(i) — A CANONICAL FULL PATH (a shared simple name) IS ASKED PRECISELY FIRST, AND THE
+            // RELEASE'S SPELLING IS THE FLOOR. The exact unit or the exact overload set answers it (R266/
+            // R132: the namesake's member is not reached); where neither exists — an inherited member, a
+            // protocol-extension default, a property the overload index keys short — the call is handed
+            // on as the simple `Leaf.member` the release would have formed, so every arm keyed on simple
+            // names answers it as before. Not where the leaf is ALSO a top-level type: there the simple
+            // spelling is an EXACT key for the namesake, a wrong join, and the release left the dotted
+            // spelling unanswered anyway.
+            if !CallCollector.aiOff, call.typed, let dot = call.path.lastIndex(of: "."),
+               aiSharedPaths.contains(String(call.path[..<dot])),
+               !byQual.contains(call.path), !overloadedBasesPath.contains(call.path) {
+                let type = String(call.path[..<dot]), member = String(call.path[call.path.index(after: dot)...])
+                let leafType = type.split(separator: ".").last.map(String.init) ?? type
+                if !localTypePaths.contains(leafType) { call.path = "\(leafType).\(member)" }
+            }
             // SOUNDNESS R915 REACH — what a guessed-root typed local call resolved to (probe only).
             let r915Before = call.r915Site == nil ? nil
                 : (edges[f.qual] ?? [], direct[f.qual] ?? [], whyMap[f.qual] ?? [])
@@ -3262,7 +3320,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 }
             } else if call.typed {
                 let typedTargets = resolveQual(call.path)   // hoisted: the else-if chain below reads it once
-                if overloadedBases.contains(call.path) {
+                if !CallCollector.aiOff, !overloadedBases.contains(call.path), overloadedBasesPath.contains(call.path) {
+                    // VEIN A(i) — the exact overload set of a canonical FULL path (see the loop head).
+                    for t in matchOverloadsPath(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
+                        edges[f.qual, default: []].insert(t)
+                        callsiteArgs[t, default: []].append((f.qual, call.args))
+                        resolved = true
+                    }
+                } else if overloadedBases.contains(call.path) {
                     for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
                         edges[f.qual, default: []].insert(t)
                         callsiteArgs[t, default: []].append((f.qual, call.args))

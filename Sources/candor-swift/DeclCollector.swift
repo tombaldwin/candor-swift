@@ -368,6 +368,10 @@ final class DeclCollector: SyntaxVisitor {
     /// the simple name, which is exactly the collision `typeSurface` must not publish through: two
     /// `Client`s under `enum Sync` and `enum Mock` are ONE string there and two strings here.
     var localTypePaths: Set<String> = []
+    /// VEIN A(i) — the FULL paths of REAL definitions (the full-path twin of `declaredTypes`), and the
+    /// FILE-LEVEL aliases alone (N-d: `typeAliases` flattens type-nested ones into the same table).
+    var declaredTypePaths: Set<String> = []
+    var fileTypeAliases: [String: String] = [:]
     /// SOUNDNESS R266 — declared supertypes keyed on the SUBTYPE'S FULL NESTED PATH, the precise twin of
     /// `conformers` (which is keyed on SHORT names on both sides). Two same-short-named types —
     /// `enum Outer { class S: Base }` beside an unrelated top-level `class S: Other` — merge in
@@ -783,6 +787,7 @@ final class DeclCollector: SyntaxVisitor {
         // exists. Only a real definition shadows the κ table (see declaredTypes' note).
         if !isExtension {
             declaredTypes.insert(name)
+            declaredTypePaths.insert(typeStack.joined(separator: "."))
             // ⟨0.33.1⟩ `ifConfigDepth == 0` means THIS declaration is not `#if`-gated — see
             // `declaredTypesUnconditional`'s doc. A name declared BOTH unconditionally (here or
             // elsewhere) and conditionally still ends up in this set (Driver unions per-file), which is
@@ -863,6 +868,7 @@ final class DeclCollector: SyntaxVisitor {
         let t = typeName(node.initializer.value)
         if let underlying = t.name {
             typeAliases[node.name.text] = underlying
+            if typeStack.isEmpty { fileTypeAliases[node.name.text] = underlying }   // VEIN A(i) N-d
             if let owner = typeStack.last { memberTypeAliases[owner, default: [:]][node.name.text, default: []].insert(underlying) }
             // ONLY INSIDE A `#if`, and the corpus is why. The first cut recorded every declaration, and
             // `typeAliasArms` is keyed by the BARE name and unioned across files — so two UNRELATED

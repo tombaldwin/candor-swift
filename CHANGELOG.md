@@ -10,6 +10,55 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — vein A(i): every spelling of a local type is that type (one canonicaliser, `canonicalTypeRef`)
+
+A local type counted as local only under its SIMPLE name. Every other spelling was read as a foreign owner or
+left untyped, and the call fell out of `functions[]` with no disclosure. The spellings were `Yard.Crane`,
+`M.Yard.Crane` (the scan's own module), a file alias onto a nested type, a dotted member alias and a
+body-local alias. Executed matrix: 127 cells, 9 spellings × 15 sites, every effect runs. The release charged
+41 of them; this build charges 127. One function, `CallCollector.canonicalTypeRef`, now answers "which
+declaration does this type spelling name" for every consumer that asks:
+- `dealias` and therefore `rootOf`: every binder, field, return, element and optional;
+- the constructor and `.init` binders;
+- dotted type roots (static calls and static properties);
+- the KeyPath root and the Comparable witness (R153 b/c);
+- the κ shadow guards (R153 d);
+- the constructor edge.
+
+It hands on the spelling the rest of the engine already keys on. That is the simple name when exactly one
+declared path carries it. It is the full path when the name is shared (R266/R132), and the Driver then asks
+the exact unit or overload set first and falls back to the release's simple spelling.
+
+- **⚠ rows gain real effects**, for example Kingfisher `ImageCache.storeToDisk` / `syncStoreToDisk` /
+  `calculateDiskStorageSize` through a `DiskStorage.Backend<Data>` field. Executed: a file written and read
+  back. `deny Fs` goes from 0 to 1 on all three.
+- **N-a** `T.TopCrane()`: the scan's own module is a qualifier when the rest lands on a local type.
+- **N-b** a constructor through an alias of a local type (`FTBoom()`).
+- **N-c** the explicit `T.init()` binder, which was untyped for every spelling.
+- **R773** `Foundation.ProcessInfo.processInfo…` / `Foundation.FileManager.default…`.
+- **R790** body-local `typealias`.
+- **⚠ N-d (a fabrication)**: type-nested aliases no longer leak through the module-wide last-writer table into
+  a GENERIC PARAMETER. `Box<Kind: Goer>.runParam` was charged `Danger.go`'s Fs from an unrelated
+  `Owner.Kind`; executed, nothing writes. Aliases resolve in Swift's order: body, then the enclosing types and
+  their supertypes, then file level. The release's answer is kept as the floor where owners disagree out of
+  scope.
+- **⚠ R153(d)**: a project `class Process` aliased `Proc` no longer fabricates `Exec`.
+
+Corpus (23 standalone entries + 8 chained arms), every REMOVED value partitioned:
+- 462 C1, where RxSwift's `RxSwift.Resources.incrementTotal()` wrapper now resolves to the real unit and
+  drops the `invisible: RxSwift` that named it.
+- 13 audited:
+  - one N-d fabricated edge;
+  - one foreign hedge on a LOCAL type that now equals the bare spelling's reading.
+- 0 unexplained C3.
+
+Gains: 429 new concrete charges, each traced to a body that performs it.
+
+`CANDOR_AI_OFF=1` restores the release; `CANDOR_AI_ND_OFF=1` restores only the global alias reading;
+`CANDOR_AI_PROBE=1` prints `AIHIT`.
+Not covered: `Darwin.getenv(…)`, a module-qualified FREE function and not a type spelling (R773's free-call
+half).
+
 ### ⚠ Fixed — R910: a consumer that chains a CONFORMER's package but not the protocol OWNER's now asks the owner's key
 
 The §2 join formed `<p>#<owner>.<member>` only for packages that are chained AND imported. A protocol

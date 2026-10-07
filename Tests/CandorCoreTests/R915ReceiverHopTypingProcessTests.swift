@@ -111,7 +111,9 @@ public func callS05genctor() -> String? { Holder5().s05genctor() }
         try (policy + "\n").write(to: pf, atomically: true, encoding: .utf8)
         return try ProcessHarness.run(bin, [root.path, "--policy", pf.path, "--json"], env: env).code
     }
-    static let off = ["CANDOR_R915_OFF": "1"]
+    // VEIN A(i) answers the same spellings (`Parent` through a member alias, `Outer4.Inner4` as a dotted
+    // type root) through the one canonicaliser, so the release is reproduced only with BOTH switches off.
+    static let off = ["CANDOR_R915_OFF": "1", "CANDOR_AI_OFF": "1"]
 
     /// Silences: the effect happens (executed); 0 -> 1, and the switch restores the release's 0.
     static let defects = [

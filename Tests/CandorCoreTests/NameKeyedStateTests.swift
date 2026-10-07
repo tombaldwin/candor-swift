@@ -443,6 +443,12 @@ final class NameKeyedStateTests: XCTestCase {
         // `.clearedOnRebind(scoped: false)` above: this adds ONE scope, a nested func's parameter list,
         // and does not make `vars` block-scoped in general.)
         "nestedFuncSavedVars": .notPerBinding,
+        // VEIN A(i). `ai` is the Driver's type-identity scope (immutable). `bodyAliases` is keyed by a
+        // `typealias` NAME — a type spelling, not a value binding: no `let`/`var` can rebind it, and it is
+        // filled once by `prescanBodyAliases` before the walk. `aliasScopeOwners` is derived from `ai` once.
+        "ai": .notPerBinding,
+        "bodyAliases": .notPerBinding,
+        "aliasScopeOwners": .notPerBinding,
     ]
 
     // ── the DERIVATION ──────────────────────────────────────────────────────────────────────────────
