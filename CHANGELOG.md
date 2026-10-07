@@ -10,6 +10,30 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — R915: a member hop the receiver's type does not record no longer keeps the OUTER type, where a declaration answers it
+
+`rootOf` kept the outer base's type when a `.member` hop was not a recorded field (the κ static-chain
+convention), so `self.x.m()` was keyed `Outer.m`: a WRONG JOIN where `Outer` declares an `m` (a fabrication)
+and a silent drop where it does not. The fallback stays; four index gaps that fed it are closed, each from a
+declaration, and where none answers the release's reading stands (a floor):
+
+- **⚠ (A) a nested type path** `Outer.Inner.m()` is `Inner` (also keyed `Outer.Inner.m` where an
+  `extension Outer.Inner` declares units that way). ReactiveSwift's `SignalProducer` operators now reach
+  `Signal.Event.*`, not `Signal.*`; executed, the operator call reads no clock, so their fabricated `Clock`
+  is gone (`Unknown` kept).
+- **⚠ (B) a member `typealias`** resolves in the type that declares it, not by bare name last-writer-wins:
+  RxSwift's seventy-five `typealias Parent` all read `Zip8`. Dotted chains (`AnyObserver<E>.s` -> `Bag`)
+  are followed; a variadic parameter's element type is left as the release read it.
+- **⚠ (C) a field a local SUPERTYPE declares** (inherited stored field, protocol-extension property such as
+  Kingfisher's `kf`): `imageView.kf.setImage(with:)` now reaches `KingfisherWrapper.setImage` (Net). Only a
+  single agreeing local type; not a generic-parameter field (re-specialised by the subtype) and not a name a
+  closure parameter, local or parameter shadows — both measured as losses in this change's own A/B.
+- **⚠ (D) `private var sm = Machine<Void>()`** types the stored property, as `Machine()` did.
+
+`CANDOR_R915_OFF=1` restores 519f62d (per arm: `CANDOR_R915{A,B,C,D}_OFF`). Known over-charge: a
+protocol-extension property returning a generic wrapper unions same-named members of its constrained
+extensions (Alamofire `trust.af.publicKeys` also reaches the `Bundle` extension's `Fs`; 3 rows).
+
 ### ⚠ Fixed — vein B, local expression typing: a receiver whose type is DECLARED is typed, and a guessed one discloses (SOUNDNESS R256, R578, R579, R589/R906, R615, R618/R907, R619, R738, R851, R866, R904, R905 ctor half)
 
 A member call on a receiver this engine could not type was dropped with no key and no `Unknown`, so its caller

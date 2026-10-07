@@ -172,7 +172,11 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// ⟨0.40⟩ THE OWNER WAS GUESSED: a naming convention (`X.shared` is an `X`), an unexplained
               /// hop that kept the outer base's type, or a local laundered from either. A lookup on such an
               /// owner — hit or miss — that no trusted surface answers keeps the guess and ADDS `Unknown`.
-              var guessHop: Bool = false }
+              var guessHop: Bool = false
+              /// SOUNDNESS R915 REACH — set only under `CANDOR_VEINB_PROBE` on a typed local call whose
+              /// receiver root is a `rootOf` guess (`opaqueHop`): `<hop kind>\t<receiver spelling>`. The Driver
+              /// prints what that call resolved to. Never read for an answer.
+              var r915Site: String? = nil }
                                                // the RESOLVED receiver root of an otherwise-unmatched member
                                                // call (`c.fetch()` where c: RatesClient, an external type) —
                                                // carried ONLY for the §2 CANDOR_DEPS join key (`pkg#Owner.leaf`);
@@ -456,6 +460,14 @@ final class CallCollector: SyntaxVisitor {
     /// SOUNDNESS R906 — local declared CLASS -> its transitive local superclasses (the Driver's `supertypesOf`,
     /// protocols removed). Read only by `nearestCommonClass`.
     let classSupertypes: [String: Set<String>]
+    /// SOUNDNESS R915 (C) — every TRANSITIVE local supertype (classes and protocols) of a type: where a
+    /// member hop the type does not record is declared (an inherited stored field, a protocol-extension
+    /// property such as Kingfisher's `kf`).
+    let supertypesAll: [String: Set<String>]
+    /// SOUNDNESS R915 (A) — adjacent `Outer.Inner` pairs of declared type paths.
+    let nestedTypePairs: Set<String>
+    /// SOUNDNESS R915 (B) — type -> member alias -> its one underlying type.
+    let memberTypeAliases: [String: [String: String]]
     /// SOUNDNESS R578 — a LOCAL protocol's property requirements (own and inherited) -> declared type. Read
     /// by `rootOf`'s two receiver arms: an explicit `self.body` / `p.body` whose root is the protocol, and an
     /// implicit `body` inside `extension P`. Both answered NOTHING before — the protocol has no stored field
@@ -483,6 +495,11 @@ final class CallCollector: SyntaxVisitor {
     /// the typed LOCAL receiver branch, which for these discloses beside the release's (wrong) join: a guessed
     /// root on a local type joins `Outer.member` whatever `.dep` really holds (R907, executed).
     private var elemGuessRecv: Set<SyntaxIdentifier> = []
+    /// SOUNDNESS R915 (A) — a nested-type receiver expression -> its DOTTED spelling, where an extension keys
+    /// units that way. Read at the typed local call site only.
+    private var r915NestedDotted: [SyntaxIdentifier: String] = [:]
+    /// SOUNDNESS R915 (B) — the unit's variadic parameter names (see `rootOf`).
+    let variadicParamsR915: Set<String>
     private var elemGuessVars: Set<String> = []
     let returns: [String: String]   // unambiguous factory return types (the candor-scan move)
     /// SOUNDNESS R585 — the four DECLARATION-side metatype indexes (b4 field, b6 array element,
@@ -721,6 +738,9 @@ final class CallCollector: SyntaxVisitor {
          protoReqProps: [String: Set<String>] = [:],
          genericCallableFields: [String: Set<String>] = [:],
          classSupertypes: [String: Set<String>] = [:],
+         supertypesAll: [String: Set<String>] = [:],
+         nestedTypePairs: Set<String> = [],
+         memberTypeAliases: [String: [String: String]] = [:],
          returns: [String: String],
          metatypeReturns: [String: String] = [:],
          globalMetatypes: [String: String] = [:],
@@ -811,6 +831,11 @@ final class CallCollector: SyntaxVisitor {
         self.paramNamesR851 = info.paramNames                                   // R851
         self.genericCallableFields = Self.r256Off ? [:] : genericCallableFields // R256
         self.classSupertypes = classSupertypes                                  // R906
+        self.supertypesAll = supertypesAll                                      // R915 (C)
+        self.nestedTypePairs = nestedTypePairs                                  // R915 (A)
+        self.memberTypeAliases = memberTypeAliases                              // R915 (B)
+        self.variadicParamsR915 = Set(info.paramIndex.compactMap { (n, i) in
+            i < info.paramSig.count && info.paramSig[i].variadic ? n : nil })
         self.returns = returns
         self.enclosingType = info.enclosingType
         self.bodyRootID = info.body?.id
@@ -1206,7 +1231,55 @@ final class CallCollector: SyntaxVisitor {
         // recorded — a param, a local, a field of a known type, a global, a ctor, a cast — yields false.
         let r = rootOfUnaliased(raw, depth)
         guard let root = r.root else { return r }
-        return (dealias(root), r.isVar, r.path, r.mono, r.opaqueHop)
+        // A VARIADIC parameter (`_ elements: Element...`) is recorded under its ELEMENT type, which is the
+        // wrong type for the binding itself (an array); resolving the element's member alias would make that
+        // wrong answer more confident and re-route the overload match — measured: swift-nio's
+        // `ByteBufferView.init(arrayLiteral:)` lost the release's `Unknown`. Leave it as the release read it.
+        if let dr = Self.peel(raw).as(DeclReferenceExprSyntax.self), variadicParamsR915.contains(dr.baseName.text) {
+            return (dealias(root), r.isVar, r.path, r.mono, r.opaqueHop)
+        }
+        return (dealias(memberAliasScoped(root)), r.isVar, r.path, r.mono, r.opaqueHop)
+    }
+
+    /// SOUNDNESS R915 (B) — Swift resolves a type spelling in the ENCLOSING type's scope before the module's:
+    /// `Parent` inside `ObserveOnSink` is `ObserveOnSink.Parent`. A real local type of that name wins, as in
+    /// `dealias`.
+    private func memberAliasScoped(_ name: String) -> String {
+        guard !DeclCollector.r915Off, !localTypes.contains(name), let et = enclosingType,
+              let u0 = memberTypeAliases[et]?[name] else { return name }
+        guard let u = memberAliasRecordable(resolveMemberAliasChain(u0, memberTypeAliases), localTypes) else {
+            return name   // not an answer: the release's reading stands
+        }
+        vbHit("R915B", "\(et).\(name) -> \(u)")
+        return u
+    }
+
+    /// SOUNDNESS R915 (C) — the declared type of a member hop `rt` does not record itself but a LOCAL
+    /// SUPERTYPE does: an inherited stored field, or a protocol-extension property (Kingfisher's `kf`).
+    /// Answers only when every supertype that records the member agrees on ONE type that this scan
+    /// declares (a local type or protocol); anything else — a callable entry, a container (`nil` name), two
+    /// different answers, a foreign or generic-parameter spelling — returns nil and the release's answer
+    /// stands.
+    private func inheritedFieldType(_ rt: String, _ member: String) -> (name: String, mono: Bool)? {
+        guard !DeclCollector.r915Off, fields[rt]?[member] == nil else { return nil }
+        var names: Set<String> = []
+        let mono = false
+        for sup in (supertypesAll[rt] ?? []).sorted() where sup != rt {
+            guard let f = fields[sup]?[member] else { continue }
+            if f.isFunction { return nil }
+            guard let n = f.name else { return nil }
+            // A field the supertype types by its GENERIC PARAMETER's bound (`let socket: SocketType`, with
+            // `SocketType: BaseSocketProtocol`) is re-specialised by the subtype (`BaseStreamSocketChannel<Socket>`),
+            // so the bound is not the type the subtype holds: swift-nio's `self.socket.finishConnect()` went
+            // to the protocol, which does not declare it, and the row lost `Socket.finishConnect`'s `Unknown`
+            // (measured, REMOVED). The release's answer stands there.
+            if opaqueFields[sup]?.contains(member) == true { return nil }
+            names.insert(n)
+        }
+        guard names.count == 1, let n = names.first,
+              localTypes.contains(dealias(n)) || localProtocols.contains(dealias(n)) else { return nil }
+        vbHit("R915C", "\(rt).\(member) -> \(n)")
+        return (n, mono)
     }
 
     private func rootOfUnaliased(_ raw: ExprSyntax, _ depth: Int = 0) -> (root: String?, isVar: Bool, path: [String], mono: Bool, opaqueHop: Bool) {
@@ -1236,6 +1309,16 @@ final class CallCollector: SyntaxVisitor {
             // found dispatchers resolving as raw names and missing the field index entirely.
             if let et = enclosingType, let f = fields[et]?[n], let ft = f.name {
                 return (ft, true, [n], opaqueFields[et]?.contains(n) == true, false)
+            }
+            // SOUNDNESS R915 (C) — …or a field the enclosing type INHERITS (Swift's member lookup includes
+            // supertypes before it reaches module scope).
+            // A closure parameter, a local or a parameter of that name SHADOWS the member (Swift's lookup
+            // order): Alamofire's `mutableState.write { mutableState in … }` binds the closure's own
+            // `MutableState`, not the inherited `Protected` field — typing it as the field dropped the
+            // body's `task.resume()` (Net), measured in this change's own A/B.
+            if let et = enclosingType, !binderShadow.contains(n), !isBoundLocal(n), !paramNamesR851.contains(n),
+               let h = inheritedFieldType(et, n) {
+                return (h.name, true, [n], h.mono, false)
             }
             // R73 — a MODULE-SCOPE GLOBAL `let`/`var` receiver (`worker.doWork()` where `let worker =
             // Worker()` sits at file scope). Checked after locals/params and implicit-self fields, which
@@ -1381,6 +1464,29 @@ final class CallCollector: SyntaxVisitor {
                 vbHit("R578", "explicit \(rt).\(member) -> \(t)")
                 reqFloor[ExprSyntax(ma).id] = rt
                 return (t, true, inner.path + [member], false, inner.opaqueHop)
+            }
+            // SOUNDNESS R915 — THE HOP NAMES SOMETHING THIS SCAN DECLARED, so the outer base is not kept.
+            // (A) `Outer.Inner` in TYPE position, where `Inner` is a type declared inside `Outer`: the receiver
+            //     is `Inner` (`Signal.Event.map`, `_RSA.Signing.PublicKey(…)`), not a value hop on `Outer`.
+            // (C) a member a local SUPERTYPE declares with one local type.
+            if !DeclCollector.r915Off, let rt = inner.root {
+                let rtLeaf = rt.split(separator: ".").last.map(String.init) ?? rt
+                if !inner.isVar, member.first?.isUppercase == true, localTypes.contains(member),
+                   nestedTypePairs.contains("\(rtLeaf).\(member)") {
+                    // The DOTTED spelling where the scan knows it as a type (`extension Signal.Event { … }`
+                    // names its units `Signal.Event.delay`, which `Event.delay` does not reach); the simple
+                    // name otherwise, which is how a nested declaration is keyed.
+                    // Keyed by the SIMPLE name, as a nested declaration's units are (`Event.map`). Where an
+                    // `extension Outer.Inner { … }` also exists its units are keyed DOTTED (`Signal.Event.delay`),
+                    // so the call site emits that spelling too — both are the one Swift type.
+                    let dotted = "\(rt).\(member)"
+                    if localTypes.contains(dotted) { r915NestedDotted[ExprSyntax(ma).id] = dotted }
+                    vbHit("R915A", "\(rt).\(member)")
+                    return (member, false, [member], false, inner.opaqueHop)
+                }
+                if inner.isVar, let h = inheritedFieldType(rt, member) {
+                    return (h.name, true, inner.path + [member], h.mono, inner.opaqueHop)
+                }
             }
             return (inner.root, inner.isVar, inner.path + [member], inner.mono, true)
         }
@@ -6578,7 +6684,13 @@ final class CallCollector: SyntaxVisitor {
                                   args: argKinds(node), argTypes: argTypesOf(node),
                                   conventionOwner: r839Convention, ownerModule: spelledModule(of: ma.base),
                                   extOwner: r651ForeignExtended ? rt : nil,
-                                  holdsHop: holdsHop, guessHop: r839Convention))
+                                  holdsHop: holdsHop, guessHop: r839Convention,
+                                  r915Site: Self.veinBProbe && base.opaqueHop
+                                    ? "\(extOnly ? "ext" : "decl")\t\(ma.base.map { guessHopKind($0) } ?? "nobase")\t\(ma.base.map { String($0.trimmedDescription.prefix(60)) } ?? "")" : nil))
+                if let b = ma.base, let dotted = r915NestedDotted[Self.peel(b).id] ?? r915NestedDotted[b.id] {
+                    calls.append(Call(path: "\(dotted).\(member)", leaf: member, strArg: lit, typed: true,
+                                      args: argKinds(node), argTypes: argTypesOf(node)))
+                }
                 if Self.r836Probe, r839Convention {
                     FileHandle.standardError.write("R839HIT \(rt).\(member)\n".data(using: .utf8)!)
                 }

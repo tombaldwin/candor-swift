@@ -230,6 +230,31 @@ final class ExistentialSpellingCollector: SyntaxVisitor {
     }
 }
 
+/// SOUNDNESS R915 (B) — follow a DOTTED member-alias spelling to what it names: `typealias Observers =
+/// AnyObserver<Element>.s` gives `AnyObserver.s`, and `s` is itself `AnyObserver`'s member alias for `Bag`.
+/// Stops at the first spelling that is not an `Owner.alias` pair; bounded.
+func resolveMemberAliasChain(_ u: String, _ aliases: [String: [String: String]]) -> String {
+    var cur = u, hops = 0
+    while hops < 8, let dot = cur.lastIndex(of: ".") {
+        let owner = String(cur[..<dot]), leaf = String(cur[cur.index(after: dot)...])
+        let ownerLeaf = owner.split(separator: ".").last.map(String.init) ?? owner
+        guard let next = aliases[ownerLeaf]?[leaf], next != cur else { break }
+        cur = next; hops += 1
+    }
+    return cur
+}
+
+/// SOUNDNESS R915 (B) — the spelling a resolved member alias is RECORDED under, in this engine's convention:
+/// a type declared nested is keyed by its SIMPLE name (`Source`, whose units are `Source.yield`), so a dotted
+/// result whose leaf is a local type is recorded as the leaf — the spelling the release reached it by. A
+/// dotted spelling only an `extension A.B` declares stays dotted; anything else is not an answer (nil).
+func memberAliasRecordable(_ u: String, _ localTypes: Set<String>) -> String? {
+    guard u.contains(".") else { return u }
+    let leaf = u.split(separator: ".").last.map(String.init) ?? u
+    if localTypes.contains(leaf) { return leaf }
+    return localTypes.contains(u) ? u : nil
+}
+
 final class DeclCollector: SyntaxVisitor {
     var file: String
     var converter: SourceLocationConverter
@@ -327,6 +352,14 @@ final class DeclCollector: SyntaxVisitor {
     /// otherwise keep answering with R585 switched off. A kill switch that restores only part of a
     /// change is a comment, not a switch.
     static let r585Off = ProcessInfo.processInfo.environment["CANDOR_R585_OFF"] != nil
+    /// SOUNDNESS R915 §1b KILL SWITCH — restores 519f62d's receiver typing (member aliases, the specialised-ctor
+    /// field, inherited fields, nested type paths). Read by DeclCollector, the Driver and CallCollector alike.
+    static let r915Off = ProcessInfo.processInfo.environment["CANDOR_R915_OFF"] != nil
+    /// Per-arm switches (attribution only): A nested type path, B member alias, C inherited field, D specialised ctor.
+    static let r915AOff = r915Off || ProcessInfo.processInfo.environment["CANDOR_R915A_OFF"] != nil
+    static let r915BOff = r915Off || ProcessInfo.processInfo.environment["CANDOR_R915B_OFF"] != nil
+    static let r915COff = r915Off || ProcessInfo.processInfo.environment["CANDOR_R915C_OFF"] != nil
+    static let r915DOff = r915Off || ProcessInfo.processInfo.environment["CANDOR_R915D_OFF"] != nil
     // `static let shared = factory()` — Type.field -> factory leaf, resolved to the vended type AFTER
     // the returns index is built (a free factory's return type isn't known during this first pass).
     var staticFactoryFields: [(type: String, field: String, leaf: String)] = []
@@ -444,6 +477,12 @@ final class DeclCollector: SyntaxVisitor {
     // table and type resolution so `Proc`→`Process`→Exec, `FM`→`FileManager`→Fs. Only a simple-identifier
     // underlying type is recorded (a function-type/generic/tuple alias has no κ-relevant single name).
     var typeAliases: [String: String] = [:]
+    /// SOUNDNESS R915 (B) — a `typealias` declared INSIDE a type, keyed by that type's simple name (the key
+    /// every type index here uses). `typeAliases` is keyed by the bare alias name and merged
+    /// last-writer-wins, so RxSwift's seventy-five `typealias Parent = <Op>` collapsed to ONE operator
+    /// (`Zip8`) and every sink's `parent.scheduler` was typed as that operator. Swift's lookup finds the
+    /// member alias of the enclosing type first; this is that scope.
+    var memberTypeAliases: [String: [String: Set<String>]] = [:]
     /// SOUNDNESS R429 — EVERY underlying type recorded for an alias NAME, not just the last one written.
     /// `typeAliases` is a plain map and the Driver merges it last-writer-wins, so a `#if`/`#else` pair
     /// declaring one alias over two different types kept only the arm written LAST — and the losing
@@ -824,6 +863,7 @@ final class DeclCollector: SyntaxVisitor {
         let t = typeName(node.initializer.value)
         if let underlying = t.name {
             typeAliases[node.name.text] = underlying
+            if let owner = typeStack.last { memberTypeAliases[owner, default: [:]][node.name.text, default: []].insert(underlying) }
             // ONLY INSIDE A `#if`, and the corpus is why. The first cut recorded every declaration, and
             // `typeAliasArms` is keyed by the BARE name and unioned across files — so two UNRELATED
             // aliases sharing a name in different scopes (`extension A { typealias Value = … }` beside
@@ -1255,6 +1295,18 @@ final class DeclCollector: SyntaxVisitor {
                         // review's free-factory singleton find).
                         staticFactoryFields.append((ty, name, ctor.baseName.text))
                     }
+                } else if !Self.r915DOff, let initVal = binding.initializer?.value,
+                          let call = initVal.as(FunctionCallExprSyntax.self),
+                          let g = call.calledExpression.as(GenericSpecializationExprSyntax.self),
+                          let ctor = g.expression.as(DeclReferenceExprSyntax.self),
+                          ctor.baseName.text.first?.isUppercase == true {
+                    // SOUNDNESS R915 (D) — `private var stateMachine = Machine<Void>()`: the constructor arm
+                    // above reads a `DeclReference` callee, and a SPECIALISED one is a
+                    // `GenericSpecializationExpr`, so the field was never recorded and every
+                    // `self.stateMachine.x()` kept the OUTER type (swift-nio's negotiation handlers joined
+                    // their own `channelRead` instead of the state machine's). The value IS a `Machine` —
+                    // R905's rule for a local binder, applied to the stored property.
+                    fields[ty, default: [:]][name] = (ctor.baseName.text, false)
                 } else if let initVal = binding.initializer?.value,
                           let ma = initVal.as(MemberAccessExprSyntax.self),
                           let base = ma.base?.as(DeclReferenceExprSyntax.self),

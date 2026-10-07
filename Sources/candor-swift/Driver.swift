@@ -436,6 +436,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var declaredTypesUnconditional: Set<String> = []
     var typeAliases: [String: String] = [:]
     var typeAliasArms: [String: Set<String>] = [:]   // R429 — every arm of a `#if`-duplicated alias
+    var memberTypeAliasesAll: [String: [String: Set<String>]] = [:]   // R915 (B) — see DeclCollector
     // R178 — function-typed aliases (`typealias Cb = () -> Void`), unioned across files and then
     // closed transitively below. See `DeclCollector.fnTypeAliases`.
     var fnTypeAliasesRaw: Set<String> = []
@@ -960,6 +961,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // prices above the defect it prevents. The arm SET is what the call-edge site reads instead:
         // an edge per arm makes the effects union through the propagation that already exists.
         for (a, u) in c.typeAliasArms { typeAliasArms[a, default: []].formUnion(u) }
+        for (t, m) in c.memberTypeAliases {                                  // R915 (B)
+            for (a, u) in m { memberTypeAliasesAll[t, default: [:]][a, default: []].formUnion(u) }
+        }
         fnTypeAliasesRaw.formUnion(c.fnTypeAliases)          // R178
         dynamicMemberTypes.formUnion(c.dynamicMemberTypes)
         propertyWrapperTypes.formUnion(c.propertyWrapperTypes)
@@ -1190,6 +1194,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // `Job.emit` doesn't resolve and the call read pure — fall back to the default body on a conformed super.
     var supertypesOf: [String: Set<String>] = [:]
     for (sup, subs) in subtypesOf { for s in subs { supertypesOf[s, default: []].insert(sup) } }
+    // SOUNDNESS R915 (A) — every `Outer.Inner` ADJACENT pair of a declared type path (`A.B.C` gives
+    // `A.B` and `B.C`), so a member hop that names a NESTED TYPE (`Outer.Inner.make()`) is read as that
+    // type rather than as a value hop that keeps `Outer`.
+    var nestedTypePairsR915: Set<String> = []
+    if !DeclCollector.r915AOff {
+        for p in localTypePaths {
+            let c = p.split(separator: ".").map(String.init)
+            if c.count >= 2 { for i in 0..<(c.count - 1) { nestedTypePairsR915.insert("\(c[i]).\(c[i + 1])") } }
+        }
+    }
     // SOUNDNESS R906 — the CLASS part of that map, for a ternary's common-superclass join.
     var classSupertypesR906: [String: Set<String>] = [:]
     let protocolNamesR906 = Set(protocolMethods.keys)
@@ -1523,6 +1537,25 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // types it; an unknown leaf leaves the field unrecorded (the binder then clears rather than guessing).
     for (ty, field, leaf) in staticFactoryFields where fields[ty]?[field] == nil {
         if let vended = returnsIdx[leaf] { fields[ty, default: [:]][field] = (vended, false) }
+    }
+    // SOUNDNESS R915 (B) — A MEMBER ALIAS, RESOLVED IN THE SCOPE THAT DECLARED IT. `let parent: Parent`
+    // inside `ObserveOnSink` names `ObserveOnSink.Parent`, and `fields` stores the spelling `Parent`, which
+    // every reader then dealiased through the bare-name, last-writer-wins `typeAliases` — `Zip8` for all
+    // seventy-five RxSwift sinks. Only an alias the owner declares ONE way is applied (two same-named
+    // nested owners declaring it differently keep the release's answer), and only to a field whose
+    // spelling is exactly that alias.
+    let memberTypeAliasesR915: [String: [String: String]] = DeclCollector.r915BOff ? [:]
+        : memberTypeAliasesAll.mapValues { $0.compactMapValues { $0.count == 1 ? $0.first : nil } }
+    for (ty, aliases) in memberTypeAliasesR915 {
+        for (fname, f) in fields[ty] ?? [:] {
+            // A chain that ends on a dotted spelling nothing here declares (`Observers.KeyType`) is not
+            // an answer; the release's bare-name reading stands.
+            if let n = f.name, let u0 = aliases[n], u0 != n {
+                if let u = memberAliasRecordable(resolveMemberAliasChain(u0, memberTypeAliasesR915), localTypes), u != n {
+                    fields[ty]![fname] = (u, f.isFunction)
+                }
+            }
+        }
     }
     // R73 — same deferred resolution for a module-scope global initialized by a bare factory call
     // (`let worker = makeWorker()`). Only an UNAMBIGUOUS project-wide factory return types it — an
@@ -2794,6 +2827,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                protoReqProps: protoReqPropsFlat,             // R904
                                genericCallableFields: genericCallableFields, // R256
                                classSupertypes: classSupertypesR906,         // R906
+                               supertypesAll: DeclCollector.r915COff ? [:] : supertypesOf,   // R915 (C)
+                               nestedTypePairs: nestedTypePairsR915,                          // R915 (A)
+                               memberTypeAliases: memberTypeAliasesR915,                      // R915 (B)
                                returns: returnsIdx,
                                metatypeReturns: metatypeReturnsIdx,                                  // R585
                                globalMetatypes: globalMetatypesByModule[swiftModuleOf(f.loc)] ?? [:], // R585
@@ -3027,6 +3063,29 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             if !undischargeable.isEmpty { undischargeableCallbacks[f.qual] = undischargeable }
         }
         for call in cc.calls {
+            // SOUNDNESS R915 REACH — what a guessed-root typed local call resolved to (probe only).
+            let r915Before = call.r915Site == nil ? nil
+                : (edges[f.qual] ?? [], direct[f.qual] ?? [], whyMap[f.qual] ?? [])
+            defer {
+                if let site = call.r915Site, let b = r915Before {
+                    let e = (edges[f.qual] ?? []).subtracting(b.0).sorted()
+                    let d = (direct[f.qual] ?? []).subtracting(b.1).sorted()
+                    let w = (whyMap[f.qual] ?? []).subtracting(b.2).sorted()
+                    // classification of the hop (probe only): the hop member is the last `.x` of the receiver text
+                    let recvText = site.split(separator: "\t").last.map(String.init) ?? ""
+                    let hopMember = String(recvText.split(separator: ".").last ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "?!"))
+                    let rt915 = call.path.lastIndex(of: ".").map { String(call.path[..<$0]) } ?? call.path
+                    var cls: [String] = []
+                    if hopMember.first?.isUppercase == true, localTypes.contains(hopMember) { cls.append("nested") }
+                    let sups = (supertypesOf[rt915] ?? []).sorted()
+                    for sp in sups { if let fi = fields[sp]?[hopMember] { cls.append("inh:\(sp)=\(fi.name ?? "nil")") } }
+                    if let fi = fields[rt915]?[hopMember] { cls.append("own=\(fi.name ?? "nil")\(fi.isFunction ? "fn" : "")") }
+                    let ext = sups.filter { !localTypes.contains($0) }
+                    if !ext.isEmpty { cls.append("extsup:\(ext.joined(separator: "+"))") }
+                    let selfEdge = e.contains(f.qual) ? "SELF" : ""
+                    FileHandle.standardError.write("R915SITE\t\(f.qual)\t\(call.path)\t\(site)\tedges=\(e.joined(separator: ","))\tdirect=\(d.joined(separator: ","))\twhy=\(w.joined(separator: ","))\tcls=\(cls.joined(separator: ";"))\t\(selfEdge)\n".data(using: .utf8)!)
+                }
+            }
             // ⟨0.40⟩ the `<holds>` marker: a receiver hop whose DECLARED type a chained `holds` may give.
             // A hit joins the declared target (ADDED to whatever the guess beside it charges); a hit whose
             // join misses, or whose kind is unknown, ADDS `Unknown` (⟨0.23⟩'s miss rule, word for word).
