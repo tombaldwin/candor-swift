@@ -10,6 +10,24 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Changed — ⟨0.40⟩ bind/listen (SOUNDNESS R817, R949): a NIO bootstrap `bind` is not a destination
+
+`DatagramBootstrap(group: g).bind(host: "10.0.0.5", port: 9)` published `hosts: ["10.0.0.5:9"]` COMPLETE, so
+`allow Net 10.0.0.5` exited 0 over an address the program only listens on. Every bootstrap `bind` was read
+as an establishing call, like `connect`. It is now its own case:
+
+- **⚠ a literal bind address never enters `hosts`.** Its host class still charges `LocalNetwork`. A literal
+  bind alone fails `allow Net` closed through the empty surface (0 → 1).
+- **⚠ a bind over an already-resolved address marks nothing.** This covers `bind(to: SocketAddress)`, a
+  UNIX path and a port. An ephemeral client's `connect` carries the locator, so
+  `allow Net <benign>` / `allow Net <dest>` can now certify it (1 → 0).
+- a bind handed a runtime `host:` string still marks `incomplete: Net`: NIO resolves the name (R949; kept).
+- **⚠ a `ServerBootstrap` bind ACCEPTS, so it is `incomplete: Net` whatever its address.**
+  `bind(host: "0.0.0.0", port: 8080)` beside a benign literal used to publish `0.0.0.0:8080`.
+
+Network.framework (`NWListener`, `requiredLocalEndpoint`) was already conformant and is unchanged.
+`CANDOR_R817_OFF=1` restores the establishing reading; `CANDOR_R817_PROBE=1` prints `R817HIT`.
+
 ### ⚠ Fixed — vein A(i): every spelling of a local type is that type (one canonicaliser, `canonicalTypeRef`)
 
 A local type counted as local only under its SIMPLE name. Every other spelling was read as a foreign owner or

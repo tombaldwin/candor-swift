@@ -3921,6 +3921,43 @@ final class CallCollector: SyntaxVisitor {
     // destination — capturing it minted a bogus host that could trip `allow Net` on data (found by the
     // 2026-07-10 coverage wave; candor-java and candor-ts capture only at establishing forms). Fs/Exec/Db
     // arms are unaffected: their shape guards (path chars, SQL statement keyword) already reject payloads.
+    // ── SPEC §2 ⟨0.40⟩ (SOUNDNESS R817 / R949) — A NIO BOOTSTRAP `bind` ─────────────────────────────────────
+    //
+    // The address handed to a bind is where the process LISTENS, never a destination it reaches, so it MUST
+    // NOT enter `hosts`. Measured on the pending stack: `DatagramBootstrap(group: g).bind(host: "10.0.0.5",
+    // port: 9)` published `hosts: ["10.0.0.5:9"]` COMPLETE and `allow Net 10.0.0.5` exited 0 — an allow over a
+    // destination the program never reaches (R809's fabrication, swift's spelling). The bind used to be an
+    // ESTABLISHING member read like `connect`; it is now its own case:
+    //   · `host:` a LITERAL   — nothing captured, nothing marked (its host CLASS still charges `LocalNetwork`:
+    //                           binding a LAN or multicast address is local-network use, not a destination);
+    //   · `host:` a RUNTIME string — NIO resolves it before binding: a reach of a computed name, `incomplete:
+    //                           Net` (R949). KEPT from the establishing reading, deliberately: java's first cut
+    //                           of this clause turned a discarded literal into a lost capture, and the mark
+    //                           for a computed name is the half that must survive the removal;
+    //   · `to:` a `SocketAddress`, a UNIX path, a port, a handle — already resolved, marks NOTHING (an
+    //                           ephemeral client's `connect`/`send` carries its own locator);
+    //   · `ServerBootstrap`   — the bind begins ACCEPTING: whoever connects is a peer no literal names, so
+    //                           `incomplete: Net` whatever the address (`bind(host: "0.0.0.0", port: 8080)`
+    //                           beside a benign literal used to publish `0.0.0.0:8080` and fail only because that
+    //                           fabricated host was off the allowlist).
+    // `CANDOR_R817_OFF=1` restores the establishing reading.
+    static let r817Off = ProcessInfo.processInfo.environment["CANDOR_R817_OFF"] != nil
+    static let NIO_BIND_ROOTS: Set<String> = ["ClientBootstrap", "ServerBootstrap", "DatagramBootstrap",
+                                              "NIOTSConnectionBootstrap"]
+    static let r817Probe = ProcessInfo.processInfo.environment["CANDOR_R817_PROBE"] != nil
+    private func recordNIOBind(root: String, args: LabeledExprListSyntax) {
+        if Self.r817Probe {
+            FileHandle.standardError.write("R817HIT \(root).bind \(args.map { $0.label?.text ?? "_" })\n".data(using: .utf8)!)
+        }
+        if root == "ServerBootstrap" { incompleteSurfaces.insert("Net") }
+        guard let h = args.first(where: { $0.label?.text == "host" }) else { return }
+        if let s = plainStringLiteralValue(h.expression) {
+            for c in hostClasses(s) { directEffects.insert(c) }
+        } else {
+            incompleteSurfaces.insert("Net")
+        }
+    }
+
     private func recordSurfaces(effect: String, lit: String?, args: LabeledExprListSyntax? = nil,
                                 netEstablishing: Bool = true) {
         // CONSTANT PROVENANCE rung 4, in the ONE place every Fs surface passes through. The literal was
@@ -7204,6 +7241,8 @@ final class CallCollector: SyntaxVisitor {
                     // write survives; claiming it at the write would claim a program for an execution
                     // that may never happen with that value.
                     recordProcessRun(receiver: ma.base)
+                } else if eff == "Net", !Self.r817Off, member == "bind", Self.NIO_BIND_ROOTS.contains(rt) {
+                    recordNIOBind(root: rt, args: node.arguments)
                 } else {
                     let est = isEstablishingMember(effect: eff, root: rt, member: member)
                     // R414 — `u.checkResourceIsReachable()`. The locator is the RECEIVER, so it is read
