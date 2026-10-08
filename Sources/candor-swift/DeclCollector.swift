@@ -316,6 +316,14 @@ final class DeclCollector: SyntaxVisitor {
     // (same file, later; or a different file, any order) have contributed their `where` clauses to the
     // merged `typeGenericBounds`. Mirrors `staticFactoryFields`'s exact two-phase shape one level down.
     var unresolvedGenericFields: [(ty: String, field: String, param: String)] = []
+    /// SOUNDNESS R1044 residual — THE INSTANTIATION OF A LOCAL GENERIC TYPE (see `LocalGenericFacts`). Per file;
+    /// merged, and poisoned where two declarations disagree, by the Driver.
+    var lgOrder: [String: [String]?] = [:]                                  // Type -> its generic params, in order
+    var lgMemberReturns: [(ty: String, leaf: String, param: String?)] = []  // every member's bare-generic return
+    var lgFieldParams: [(ty: String, field: String, param: String)] = []    // `let v: V` / `var v: V?`
+    var lgInits: [(ty: String, shape: LocalGenericInit)] = []               // explicit and memberwise inits
+    var lgReturnArgs: [String: [String]?] = [:]                             // leaf -> `-> Box<E>`'s direct args
+    var lgAssocNames: Set<String> = []                                      // every protocol's associated types
     /// Fields whose recorded type is MONOMORPHIZED rather than erased: a field typed as the enclosing
     /// type's generic param (`struct Pipe<T: Saver> { var item: T }` — resolved to `Saver` below), or one
     /// spelled `some P`. Whoever instantiates `Pipe` picks the single conforming type, so the conformers
@@ -395,6 +403,7 @@ final class DeclCollector: SyntaxVisitor {
     static let r905HOff = ProcessInfo.processInfo.environment["CANDOR_R905H_OFF"] != nil   // SOUNDNESS R905 residual
     static let r1010Off = ProcessInfo.processInfo.environment["CANDOR_R1010_OFF"] != nil   // SOUNDNESS R1010
     static let r1044Off = ProcessInfo.processInfo.environment["CANDOR_R1044_OFF"] != nil   // SOUNDNESS R1044
+    static let r1044bOff = ProcessInfo.processInfo.environment["CANDOR_R1044B_OFF"] != nil // SOUNDNESS R1044 residual
     static let r991Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R991_OFF"] != nil
     static let r992Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R992_OFF"] != nil
     static let r993Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R993_OFF"] != nil
@@ -1056,24 +1065,29 @@ final class DeclCollector: SyntaxVisitor {
     }
     override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {
         recordTypeGenerics(node.name.text, node.genericParameterClause, node.genericWhereClause)
+        recordLocalGenericOrder(node.name.text, node.genericParameterClause)   // R1044 residual
         pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes,
                  modifiers: node.modifiers); return .visitChildren
     }
     override func visitPost(_ node: ClassDeclSyntax) { typeStack.removeLast(); accessStack.removeLast(); selfElementStack.removeLast() }
     override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind {
         recordTypeGenerics(node.name.text, node.genericParameterClause, node.genericWhereClause)
+        recordLocalGenericOrder(node.name.text, node.genericParameterClause)   // R1044 residual
+        recordMemberwiseInit(node)                                              // R1044 residual
         pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes,
                  modifiers: node.modifiers); return .visitChildren
     }
     override func visitPost(_ node: StructDeclSyntax) { typeStack.removeLast(); accessStack.removeLast(); selfElementStack.removeLast() }
     override func visit(_ node: EnumDeclSyntax) -> SyntaxVisitorContinueKind {
         recordTypeGenerics(node.name.text, node.genericParameterClause, node.genericWhereClause)
+        recordLocalGenericOrder(node.name.text, node.genericParameterClause)   // R1044 residual
         pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes,
                  modifiers: node.modifiers); return .visitChildren
     }
     override func visitPost(_ node: EnumDeclSyntax) { typeStack.removeLast(); accessStack.removeLast(); selfElementStack.removeLast() }
     override func visit(_ node: ActorDeclSyntax) -> SyntaxVisitorContinueKind {
         recordTypeGenerics(node.name.text, node.genericParameterClause, node.genericWhereClause)
+        recordLocalGenericOrder(node.name.text, node.genericParameterClause)   // R1044 residual
         pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes,
                  modifiers: node.modifiers); return .visitChildren
     }
@@ -1127,6 +1141,7 @@ final class DeclCollector: SyntaxVisitor {
             if let a = member.decl.as(AssociatedTypeDeclSyntax.self) { assocTypes.insert(a.name.text) }
         }
         for p in node.primaryAssociatedTypeClause?.primaryAssociatedTypes ?? [] { assocTypes.insert(p.name.text) }
+        lgAssocNames.formUnion(assocTypes)   // SOUNDNESS R1044 residual — see `LocalGenericFacts.nonTypeNames`
         for member in node.memberBlock.members {
             if let f = member.decl.as(FunctionDeclSyntax.self) { methods.insert(f.name.text) }
             // PROPERTY requirements (`var payload: Int { get }`) and SUBSCRIPT requirements — recorded
@@ -1338,6 +1353,9 @@ final class DeclCollector: SyntaxVisitor {
                 }
                 if let ann = binding.typeAnnotation {
                     var info = typeName(ann.type)
+                    if !Self.r1044bOff, let g = bareGenericName(ann.type), typeGenericParamNames[ty]?.contains(g) == true {
+                        lgFieldParams.append((ty, name, g))   // SOUNDNESS R1044 residual
+                    }
                     // a field typed as the enclosing type's GENERIC PARAM resolves to its bound, so a
                     // protocol-typed field dispatches (`Pipe<T: Saver>.item` → Saver → `item.save()` fires).
                     // …and that resolution is MONOMORPHIZED — the instantiator of `Pipe` picks one
@@ -1511,6 +1529,46 @@ final class DeclCollector: SyntaxVisitor {
             }
         }
         return .visitChildren
+    }
+
+    /// SOUNDNESS R1044 residual — a type's own generic parameters, IN ORDER; a second declaration of the same
+    /// simple name with a different list poisons it.
+    private func recordLocalGenericOrder(_ name: String, _ clause: GenericParameterClauseSyntax?) {
+        guard !Self.r1044bOff, let c = clause else { return }
+        let o = c.parameters.map { $0.name.text }
+        if let e = lgOrder[name] { if e != o { lgOrder[name] = [String]?.none } } else { lgOrder[name] = o }
+    }
+    /// SOUNDNESS R1044 residual — a generic STRUCT's synthesized memberwise initializer: every stored property in
+    /// order (a `var` with an initial value is a defaulted parameter, a `let` with one is not a parameter). Not
+    /// synthesized when the primary declaration writes an `init`; refused outright when a member sits under
+    /// `#if` or a stored property's shape cannot be read, since a wrong parameter list would misalign labels.
+    private func recordMemberwiseInit(_ node: StructDeclSyntax) {
+        guard !Self.r1044bOff, node.genericParameterClause != nil else { return }
+        let gens = Set(node.genericParameterClause?.parameters.map { $0.name.text } ?? [])
+        var shape = LocalGenericInit(labels: [], sig: [], bind: [:])
+        for m in node.memberBlock.members {
+            let d = m.decl
+            if d.is(InitializerDeclSyntax.self) || d.is(IfConfigDeclSyntax.self) || d.is(MacroExpansionDeclSyntax.self) { return }
+            guard let v = d.as(VariableDeclSyntax.self) else { continue }
+            if v.modifiers.contains(where: { ["static", "class", "lazy"].contains($0.name.text) }) { continue }
+            if !v.attributes.isEmpty { return }   // a property wrapper changes the parameter's type and label
+            let isLet = v.bindingSpecifier.text == "let"
+            for b in v.bindings {
+                if let ab = b.accessorBlock {
+                    if case .getter = ab.accessors { continue }
+                    if case .accessors(let l) = ab.accessors,
+                       l.contains(where: { ["get", "set", "_read", "_modify"].contains($0.accessorSpecifier.text) }) { continue }
+                }
+                guard let n = b.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { return }
+                if isLet, b.initializer != nil { continue }
+                let i = shape.labels.count
+                shape.labels.append(n)
+                shape.sig.append((nil, b.initializer != nil, false))
+                if let t = b.typeAnnotation?.type, let g = bareGenericName(t), gens.contains(g) { shape.bind[i] = g }
+                else if b.typeAnnotation == nil, b.initializer == nil { return }   // `let a, b: V` — not read here
+            }
+        }
+        lgInits.append((node.name.text, shape))
     }
 
     private func recordReturn(_ name: String, _ sig: FunctionSignatureSyntax, generics: Set<String> = []) {
@@ -1877,6 +1935,17 @@ final class DeclCollector: SyntaxVisitor {
         }
         recordReturn(node.name.text, node.signature,
                      generics: Set(node.genericParameterClause?.parameters.map { $0.name.text } ?? []))
+        if !Self.r1044bOff {   // SOUNDNESS R1044 residual
+            let own = Set(node.genericParameterClause?.parameters.map { $0.name.text } ?? [])
+            if let ty = typeStack.last {
+                let g = node.signature.returnClause.flatMap { bareGenericName($0.type) }.flatMap { own.contains($0) ? nil : $0 }
+                lgMemberReturns.append((ty, node.name.text, g))
+            }
+            let ra: [String]? = node.signature.returnClause.flatMap { rc -> [String]? in
+                let a = directGenericArgumentNames(rc.type); return a.isEmpty || a.contains(where: own.contains) ? nil : a }
+            if let e = lgReturnArgs[node.name.text] { if e != ra { lgReturnArgs[node.name.text] = [String]?.none } }
+            else { lgReturnArgs[node.name.text] = ra }
+        }
         if let rc = node.signature.returnClause {   // SOUNDNESS R990/R991 — see `returnDecls`
             // The function's OWN generic parameters travel with the type: `-> T` names no type at all, and
             // a local type that happens to be called `T`/`Value`/`Element` must not answer for it. The
@@ -1894,6 +1963,16 @@ final class DeclCollector: SyntaxVisitor {
         return .skipChildren // nested decls attribute lexically via the body walk (documented)
     }
     override func visit(_ node: InitializerDeclSyntax) -> SyntaxVisitorContinueKind {
+        if !Self.r1044bOff, let ty = typeStack.last {   // SOUNDNESS R1044 residual
+            let own = Set(node.genericParameterClause?.parameters.map { $0.name.text } ?? [])
+            var shape = LocalGenericInit(labels: [], sig: [], bind: [:])
+            for (i, p) in node.signature.parameterClause.parameters.enumerated() {
+                shape.labels.append(p.firstName.text)
+                shape.sig.append((nil, p.defaultValue != nil, p.ellipsis != nil))
+                if let g = bareGenericName(p.type), !own.contains(g), p.ellipsis == nil { shape.bind[i] = g }
+            }
+            lgInits.append((ty, shape))
+        }
         collect("init", sig: node.signature, body: node.body, node: node)
         queueBodyLocalTypes(node.body)   // R532
         return .skipChildren
@@ -2072,6 +2151,44 @@ private final class BodyLocalTypeFinder: SyntaxVisitor {
 /// nominal type itself is not included.
 /// SOUNDNESS R905 — the DIRECT generic arguments of a nominal type spelling, in order, or `[]` when any of them
 /// has no name (a function type, a tuple) — a partial list would misalign the positions a caller indexes.
+/// SOUNDNESS R1044 residual — one initializer of a local generic type: its argument labels (`_` = none), the
+/// default/variadic shape `alignWitnessArgs` needs, and which parameter positions are written as exactly one of
+/// the type's generic parameters (`v: V`, `_ v: V?`).
+struct LocalGenericInit {
+    var labels: [String]
+    var sig: [(type: String?, hasDefault: Bool, variadic: Bool)]
+    var bind: [Int: String]
+}
+
+/// SOUNDNESS R1044 residual — THE INSTANTIATION OF A LOCAL GENERIC TYPE, which no fact carried: `rootOf` types a
+/// value by a bare name, so `Box(v: E())` was a `Box` and `get() -> V` / `.v` answered nothing (`V` names no type,
+/// R1010). The value's generic ARGUMENTS are read off the expression that made it (CallCollector
+/// `localGenericArgs`), and these facts say which argument a member's return or a field's type is.
+struct LocalGenericFacts {
+    var order: [String: [String]] = [:]          // Type -> generic params in order
+    var memberReturns: [String: Int] = [:]       // "Type.leaf" -> index of the param its return is
+    var fieldParams: [String: Int] = [:]         // "Type.field" -> index of the param its type is
+    var inits: [String: [LocalGenericInit]] = [:]
+    var returnArgs: [String: [String]] = [:]     // factory leaf -> its return type's direct generic arguments
+    var memberLeaves: Set<String> = []
+    var fieldNames: Set<String> = []
+    /// Names that are NOT types anywhere in the scan — every type's and function's generic parameters and every
+    /// protocol's associated types. A generic argument spelled with one (`DLEQProof<GE.Scalar>`, a factory's
+    /// `-> InputSpan<Element>`) names the DECLARATION's parameter, not a type at the use site, so it answers
+    /// nothing (R1010's rule, which a local type that happens to share the name must not defeat).
+    var nonTypeNames: Set<String> = ["Self"]
+}
+
+/// SOUNDNESS R1044 residual — `V`, `V?`, `V!`, `Optional<V>` written as a bare identifier with no arguments.
+func bareGenericName(_ t: TypeSyntax) -> String? {
+    var x = desugaredType(t)
+    if let a = x.as(AttributedTypeSyntax.self) { x = a.baseType }
+    if let o = x.as(OptionalTypeSyntax.self) { x = o.wrappedType }
+    else if let o = x.as(ImplicitlyUnwrappedOptionalTypeSyntax.self) { x = o.wrappedType }
+    guard let id = x.as(IdentifierTypeSyntax.self), id.genericArgumentClause == nil else { return nil }
+    return id.name.text
+}
+
 func directGenericArgumentNames(_ t: TypeSyntax) -> [String] {
     var x = desugaredType(t)
     if let o = x.as(OptionalTypeSyntax.self) { x = o.wrappedType }
