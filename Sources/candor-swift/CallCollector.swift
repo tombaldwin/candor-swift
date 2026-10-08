@@ -5042,8 +5042,20 @@ final class CallCollector: SyntaxVisitor {
     /// stays a free-function reference, so what it refuses costs precision and never soundness: an
     /// unresolved deferral falls to the honest `Unknown`, which is the direction a callback whose
     /// identity is not established has to fail in.
+    ///
+    /// SOUNDNESS R1011 — …AND A NAME A BINDER IN SCOPE HAS CLAIMED IS NOT A FREE FUNCTION EITHER. `isBoundLocal`
+    /// is filled by `let`/`var` declarations only, so an UNTYPED `if let`/`guard let`/`for` binder, a closure
+    /// parameter or `$0`, and an untyped parameter of this unit passed as a bare argument were read as a
+    /// reference to a free function of that name: a fake unqualified call that attributed the file's blind
+    /// modules as `invisible` (`Unmanaged…fromOpaque(raw)` in swift-nio, `cacheBookmark(bookmark, …)` in pollen)
+    /// and EDGED to any unit sharing the name (`for line in …; print(line)` → swift-nio's unit `line`). Swift
+    /// resolves a name to the innermost binding, so `binderShadow` — the scoped set every binder writes through
+    /// `shadowName` — is exact here; `$N` is never a function; a parameter name is this unit's own value.
+    static let r1011Off = ProcessInfo.processInfo.environment["CANDOR_R1011_OFF"] != nil
     private func namesAFreeFunctionReference(_ name: String) -> Bool {
         vars[name] == nil && !fnTyped.contains(name) && !isBoundLocal(name)
+            && (Self.r1011Off || (!binderShadow.contains(name) && !name.hasPrefix("$")
+                                  && !paramNamesR851.contains(name)))
     }
 
     // R96 — THE SINGLE AUTHORITY for "what does invoking the stored closure property `<type>.<name>`

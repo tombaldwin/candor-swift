@@ -10,6 +10,21 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — SOUNDNESS R1011: a name a binder in scope has claimed is not a free-function reference
+
+An untyped `for` variable, closure parameter, `$0`, `if`/`guard let` binder or parameter passed as a bare argument
+was read as a REFERENCE to a free function or member of the same name. `for line in xs { consume(line) }` beside a
+`func line(_:)` that deletes a file was charged `Fs` (executed: it never calls `line`); Alamofire's
+`setAnchorCertificates(_ certificates:)` was charged the `certificates` property's `Fs`; and every such fake call
+into nothing attributed the file's blind imports as `invisible`. A name in the scoped binder set, a parameter of the
+unit, or `$N` is now never a function reference — Swift resolves it to the binding.
+- Corpus A/B (one variable, the previous commit vs this one, 23 standalone + 8 chained): 1 `Fs` and 13 `Unknown`
+  removed (standalone), every one traced to a fake call named after a parameter or binder — an edge to a same-named
+  member (`CompositeEventMonitor.init` → its `monitors` property, `Session.init` → `eventMonitors`, …) or a `$0`
+  read as a call (`RxScrollViewDelegateProxy.registerKnownImplementations`); 430 rows (234
+  chained) lose a false `invisible` entry, 90 rows (58 chained) that carried nothing else leave `functions[]`.
+- `CANDOR_R1011_OFF=1` restores the release.
+
 ### ⚠ Fixed — SOUNDNESS R952 (swift half): a scoped `allow` that binds no function is a disclosed zero-match
 
 `allow Net in zzz.nomatch h` bound no function and passed — exit 0, no "matched NO function" line, no `zeroMatch`:
