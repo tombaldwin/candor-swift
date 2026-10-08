@@ -337,6 +337,7 @@ final class NameKeyedStateTests: XCTestCase {
         // shown not to be a local binding (`implicitArgumentType`).
         "implicitParams": .immutableIndex, "implicitMemberUnits": .immutableIndex,
         "memberUnitKeys": .immutableIndex, "genericReturnArgs": .immutableIndex,   // R1032 / R1044
+        "iterableLocalTypes": .immutableIndex,                                     // R1048
         "autoclosureParams": .deliberatelyKept(
             "R1009: read only together with `fnTyped`, and only where `isBoundLocal`/`binderShadow` say no binder "
             + "has claimed the name — a rebind falls back to the general callback arm"),

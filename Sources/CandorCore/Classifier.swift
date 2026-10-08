@@ -375,6 +375,36 @@ public let RAND_ROOTS: Set<String> = ["Int", "UInt", "Int8", "Int16", "Int32", "
 /// `SystemRandomNumberGenerator` unless handed a generator. Executed: `[1, 2, 3].shuffled()` prints a
 /// different order run to run, and all four spellings were ABSENT while `Int.random(in:)` read `Rand`.
 public let STDLIB_RAND_MEMBERS: Set<String> = ["randomElement", "shuffled", "shuffle"]
+/// SOUNDNESS R1048 — the stdlib iteration protocols. A local type conforming to one is ITERATED by the stdlib's
+/// own algorithms (`reduce`, `map`, `contains`, `Array(_:)`, a generic `for x in s`), each of which runs its
+/// `makeIterator()`/`next()` — bodies this scan has. `STD_PURE_PROTOCOLS` lists several of these as pure for
+/// the external-super FALLBACK only; that is a statement about a SYNTHESIZED requirement, never about a
+/// hand-written `next()`, and SPEC §4 forbids extending the pure set to iterators.
+/// SOUNDNESS R706 (residual) — protocols a Swift file commonly spells `any P` / `some P` / `<T: P>` that the
+/// PLATFORM owns. A member call through one of them is never attributed to the file's blind dependency module
+/// (the reverted R548 widening tagged a platform receiver; this is the guard that keeps that from recurring).
+/// A DENYLIST in the over-disclosure direction: a platform protocol missing from it costs a false `invisible`
+/// (non-gating), never a silence.
+public let PLATFORM_PROTOCOL_NAMES: Set<String> = [
+    "View", "App", "Scene", "Shape", "ViewModifier", "ObservableObject", "Observable", "NSObjectProtocol",
+    "Error", "LocalizedError", "Actor", "AnyObject", "AnyActor", "Sendable", "Decoder", "Encoder", "CodingKey",
+    "Publisher", "Subscriber", "Cancellable", "Subject", "Scheduler", "TextOutputStream", "Numeric",
+    "BinaryInteger", "FixedWidthInteger", "FloatingPoint", "BinaryFloatingPoint", "StringProtocol",
+    "RandomNumberGenerator", "Clock", "InstantProtocol", "DurationProtocol", "Executor", "SerialExecutor",
+    "ExpressibleByStringLiteral", "ExpressibleByIntegerLiteral", "ExpressibleByArrayLiteral",
+    "ExpressibleByDictionaryLiteral", "UIApplicationDelegate", "NSApplicationDelegate", "URLSessionDelegate",
+    "URLSessionTaskDelegate", "URLSessionDataDelegate"]
+public let STDLIB_ITERATION_PROTOCOLS: Set<String> = [
+    "Sequence", "IteratorProtocol", "Collection", "BidirectionalCollection", "RandomAccessCollection",
+    "MutableCollection", "RangeReplaceableCollection", "LazySequenceProtocol", "LazyCollectionProtocol",
+    "AsyncSequence", "AsyncIteratorProtocol"]
+/// SOUNDNESS R1048 — the `Sequence`/`Collection` algorithms that ITERATE their receiver when it is a value of an
+/// unknown (generic, `some`, `any`) type: the caller's instantiation answers which `next()` runs. Used only for a
+/// PARAMETER receiver; a LOCAL iterable receiver takes every member it does not declare itself (a denylist).
+public let STDLIB_ITERATING_MEMBERS: Set<String> = STDLIB_ELEMENT_CLOSURE_FIRST.union(STDLIB_ELEMENT_CLOSURE_PAIR)
+    .union(STDLIB_ELEMENT_CLOSURE_INDEX.keys).union(["contains", "min", "max", "sorted", "joined", "reversed",
+    "elementsEqual", "starts", "dropFirst", "dropLast", "suffix", "prefix", "shuffled", "randomElement",
+    "makeIterator", "next", "makeAsyncIterator", "enumerated", "flatMap", "compactMap", "forEach", "count"])
 // The `Process` verbs recognised on a receiver this engine could NOT prove is a subprocess handle — an
 // `extension Process`'s implicit `self`, or a member chain whose root is a stale `Process` two hops up.
 // It is a FLOOR, not the rule: a PROVEN handle is answered by `processCapabilityEffect` below, which is
@@ -2578,6 +2608,11 @@ public let STD_PURE_PROTOCOLS: Set<String> = [
     // Iteration protocols: their default requirement (`makeIterator`) is pure; an EFFECTFUL `next()` is a
     // project body captured by the dedicated iterator-forcing path, so the external-super fallback must
     // not disclose Unknown for them (it false-flagged a pure custom Sequence — the S1 smoke case).
+    // SOUNDNESS R1048 — THE "DEDICATED PATH" COVERED ONE SPELLING. Executed: only `for x in Loud()` was
+    // charged; a generic/`some`/`any` parameter iterated by a project function, `Loud().reduce`, `.map`,
+    // `.contains` and `Array(Loud())` were ABSENT over a `next()` that deletes a file. They are charged now
+    // (`iterateLocal`, the `#iter` caller-witness requirement). This list stays a FALLBACK rule only —
+    // SPEC §4 forbids treating iterators as resolved-pure, and nothing here does.
     "Sequence", "IteratorProtocol", "Collection", "BidirectionalCollection", "RandomAccessCollection",
     "MutableCollection", "RangeReplaceableCollection", "AsyncSequence", "AsyncIteratorProtocol",
 ]

@@ -230,6 +230,90 @@ final class StdlibReturnAndWitnessProcessTests: XCTestCase {
         XCTAssertFalse(inf(off, "viaCString").isEmpty, "kill switch restores the release fabrication")
     }
 
+    // ── R1048 — a hand-written `next()` runs wherever the stdlib iterates the value ─────────────────────
+    static let iteration = """
+    import Foundation
+    struct Loud: Sequence, IteratorProtocol {
+        var n = 0
+        mutating func next() -> Int? { \(FS); n += 1; return n > 2 ? nil : n }
+    }
+    struct LoudColl: Sequence { func makeIterator() -> Loud { Loud() } }
+    struct Quiet: Sequence, IteratorProtocol { var n = 0; mutating func next() -> Int? { n += 1; return n > 2 ? nil : n } }
+    struct OwnMap: Sequence, IteratorProtocol {
+        mutating func next() -> Int? { \(FS); return nil }
+        func map(_ f: (Int) -> Int) -> [Int] { [] }
+    }
+    func genericSum<S: Sequence>(_ s: S) -> Int where S.Element == Int { var t = 0; for x in s { t += x }; return t }
+    func someSum(_ s: some Sequence<Int>) -> Int { var t = 0; for x in s { t += x }; return t }
+    func anySum(_ s: any Sequence<Int>) -> Int { var t = 0; for x in s { t += x }; return t }
+    func viaGeneric() -> Int { genericSum(Loud()) }
+    func viaSome() -> Int { someSum(LoudColl()) }
+    func viaAny() -> Int { anySum(Loud()) }
+    func viaForInColl() -> Int { var t = 0; for x in LoudColl() { t += x }; return t }
+    func viaReduce() -> Int { Loud().reduce(0, +) }
+    func viaMap() -> [Int] { Loud().map { $0 } }
+    func viaArrayInit() -> [Int] { Array(Loud()) }
+    func viaContains() -> Bool { Loud().contains(2) }
+    func quietGeneric() -> Int { genericSum(Quiet()) }
+    func quietReduce() -> Int { Quiet().reduce(0, +) }
+    func arraySum() -> Int { genericSum([1, 2, 3]) }
+    func ownMap() -> [Int] { OwnMap().map { $0 } }
+    """
+    func testAHandWrittenIteratorRunsWhereverTheStdlibIterates() throws {
+        let by = try scan(Self.iteration)
+        for f in ["viaGeneric", "viaSome", "viaAny", "viaForInColl", "viaReduce", "viaMap", "viaArrayInit", "viaContains"] {
+            XCTAssertEqual(inf(by, f), ["Fs"], "R1048: \(f) iterates Loud.next; got \(by[f] ?? [:])")
+        }
+        // THE OVER-CHARGE CONTROLS: a pure iterator, a stdlib array through the same generic, and a type whose
+        // OWN `map` answers (it never iterates) — none is charged.
+        for f in ["quietGeneric", "quietReduce", "arraySum", "ownMap"] {
+            XCTAssertNil(ProcessHarness.chargedNothing(by, f), "R1048: \(f) runs no effectful next(); got \(by[f] ?? [:])")
+        }
+        XCTAssertEqual(try gate(Self.iteration, "deny Fs viaGeneric"), 1, "R1048: the gate must flip")
+        let off = try scan(Self.iteration, env: ["CANDOR_R1048_OFF": "1"])
+        XCTAssertNil(ProcessHarness.chargedNothing(off, "viaGeneric"), "kill switch restores the release silence")
+    }
+
+    // ── R706 (residual) — a member call through an explicit protocol spelling of a BLIND dependency ─────
+    // One package whose manifest declares a dependency it has not fetched, so `Iface` is uncovered. The free
+    // call is the control the member call must now match.
+    func testAProtocolSpelledReceiverOfABlindDependencyIsAttributed() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("candor-r706i-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let src = root.appendingPathComponent("Sources/Mid")
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        try """
+        // swift-tools-version:5.7
+        import PackageDescription
+        let package = Package(name: "Mid", dependencies: [.package(path: "../Iface")],
+            targets: [.target(name: "Mid", dependencies: ["Iface"])])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try """
+        import Foundation
+        import Iface
+        public func viaAny(_ s: any Sink) { s.emit() }
+        public func viaGen<T: Sink>(_ s: T) { s.emit() }
+        public func viaSome(_ s: some Sink) { s.emit() }
+        public func viaFree() { sinkAll() }
+        public func viaEncoder(_ e: any Encoder) { _ = e.singleValueContainer() }
+        public func viaClock() -> Date { Date() }
+        """.write(to: src.appendingPathComponent("Mid.swift"), atomically: true, encoding: .utf8)
+        func run(_ env: [String: String]) throws -> [String: [String: Any]] {
+            try ProcessHarness.fns(ofJson: ProcessHarness.run(bin, [root.path, "--json"], env: env).out)
+        }
+        let by = try run([:])
+        XCTAssertEqual(by["viaFree"]?["invisible"] as? [String], ["Iface"], "the free-call CONTROL")
+        for f in ["viaAny", "viaGen", "viaSome"] {
+            XCTAssertEqual(by[f]?["invisible"] as? [String], ["Iface"],
+                           "R706: \(f) dispatches into the blind module, attributed like the free call; got \(by[f] ?? [:])")
+        }
+        XCTAssertNil(by["viaEncoder"]?["invisible"], "a PLATFORM protocol receiver is never attributed to Iface")
+        XCTAssertNil(by["viaClock"]?["invisible"], "a platform call in the same file is never attributed to Iface")
+        let off = try run(["CANDOR_R706I_OFF": "1"])
+        XCTAssertNil(off["viaAny"]?["invisible"], "kill switch restores the release silence")
+    }
+
     // ── §E3 — every fixture compiles, and the platform tables are the SDK's, not this file's ───────────
     func testEveryFixtureAndPlatformTableTypechecks() throws {
         var probes = ""
@@ -255,7 +339,7 @@ final class StdlibReturnAndWitnessProcessTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         for (name, src) in [("rand", Self.rand), ("autoclosure", Self.autoclosure), ("pickFab", Self.pickFab),
                             ("pickSilent", Self.pickSilent), ("hashing", Self.hashing),
-                            ("specialised", Self.specialised), ("platform", Self.platform), ("extInit", Self.extInit),
+                            ("specialised", Self.specialised), ("platform", Self.platform), ("extInit", Self.extInit), ("iteration", Self.iteration),
                             ("tables", tables)] {
             let f = root.appendingPathComponent("\(name).swift")
             try src.write(to: f, atomically: true, encoding: .utf8)

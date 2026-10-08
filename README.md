@@ -90,10 +90,17 @@ abstraction's owner, an effectful conformer, a consumer):
   consumer that dispatches directly on the value (`b.size()`) carries none, and where the owning module
   cannot be decided its row is **absent from `functions[]` entirely** — under the ⟨0.21⟩ manifest that
   is a positive claim of purity, not a gap. (SOUNDNESS R548, open, PART 92 `c10_unchained_direct`. The
-  obvious widening — treat such a member call as a blind reach — was tried and **reverted**: it tagged
+  obvious widening — treat EVERY such member call as a blind reach — was tried and **reverted**: it tagged
   a `NSPasteboard` receiver in a file that merely imports a blind module, which is false uncertainty in
-  every such file, and this engine's own smoke gate rejects it. No narrower predicate exists today,
-  because deciding it needs to know which module declares the receiver's type.)
+  every such file, and this engine's own smoke gate rejects it.)
+  **The narrower predicate now exists for one shape (SOUNDNESS R706, residual):** when the source SPELLS
+  the receiver's owner as a protocol — `any P`, `some P` or a generic bound `<T: P>` — and `P` is neither
+  declared in this package nor a platform/stdlib protocol (`PLATFORM_PROTOCOL_NAMES`,
+  `STD_PURE_PROTOCOLS`, `STDLIB_ITERATION_PROTOCOLS`), the row carries `invisible: [<the file's one
+  dependency module>]` — the same module a free call into that dependency names, and the same owner the
+  ⟨0.39⟩ `dispatchesOn` key publishes. A judged-nothing chained report covers nothing (⟨0.24⟩), so that arm
+  answers identically. Non-gating by design: `deny`/`pure` do not move. A BARE class-or-protocol spelling
+  (`_ b: Backend`) is still undecided and keeps the row above.
 - **The `dispatchesOn` key names an owner this engine GUESSES from the file's imports.** It is the
   file's single declared, non-platform dependency import; a file with zero or two such imports
   publishes no key at all, and a bound that is a protocol the scanned package declares *itself* is
@@ -103,6 +110,38 @@ abstraction's owner, an effectful conformer, a consumer):
 `CANDOR_DEPS` narrows the first of these — chaining the implementor's report lets the effect cross —
 but it does not remove it: a chained abstraction with no implementor in *any* chained report still
 reads pure.
+
+### Documented resolved-pure dispatch: equality, hashing, coding and friends (SPEC §4)
+
+SPEC §4 permits an engine to treat dispatch over a curated set of conventionally-pure standard-library
+protocols as resolved-pure, and requires it to say WHICH. This engine's set is `STD_PURE_PROTOCOLS`
+(`Sources/CandorCore/Classifier.swift`):
+
+`Codable`, `Encodable`, `Decodable`, `Equatable`, `Hashable`, `Sendable`, `Comparable`, `Identifiable`,
+`CaseIterable`, `RawRepresentable`, `CustomStringConvertible`, `CustomDebugStringConvertible`, `Error`,
+`Strideable`, `OptionSet`, `AdditiveArithmetic` — and nine iteration protocols (`Sequence`,
+`IteratorProtocol`, the five `Collection` refinements, `AsyncSequence`, `AsyncIteratorProtocol`), see below.
+
+What "resolved-pure" means here, precisely, because it is narrower than it sounds:
+
+- **It is a FALLBACK rule, not a pass.** It is consulted only where a project type conforms to one of
+  these and an inherited requirement resolves to NO project body (a synthesized `==`, `hash(into:)`,
+  `encode(to:)`): that call reads pure instead of disclosing `Unknown`. A HAND-WRITTEN witness is a
+  project body and is charged normally — including when it is reached through a generic or a container:
+  `a == b` inside `<T: Equatable>` (R951), `Set`/`Dictionary` operations (R974 b), and
+  `a.hash(into:)` / `Hasher.combine(a)` inside `<T: Hashable>` (R1045) all reach the caller's witness.
+- **Across a chain, equality and hashing ARE treated as resolved-pure (R974 a).** A dependency's
+  `func same<T: Equatable>(_ a: T, _ b: T) -> Bool { a == b }` publishes no row, so a consumer calling it
+  with its own effectful `==` is not charged. The one-tree scan charges it. This is the §4 permission
+  exercised for `Equatable`/`Hashable` requirements reached in ANOTHER package; closing it needs a ⟨0.39⟩
+  `dispatchesOn` key for a stdlib-owned requirement, which the spec does not yet spell.
+- **The iteration protocols are in the
+  set ONLY for the synthesized-requirement fallback.** SPEC §4 forbids extending resolved-pure to
+  iterators, and this engine does not: a hand-written `next()`/`makeIterator()` is charged wherever the
+  stdlib iterates the value — `for x in s`, a generic `<S: Sequence>` / `some` / `any` parameter iterated
+  by a project function (answered at the caller's argument), stdlib algorithms (`reduce`, `map`,
+  `contains`, …) on a local iterable, and `Array(s)`/`Set(s)`/`zip` (SOUNDNESS R1048). Residual: a
+  generic iteration whose argument is passed with a LABEL or `inout` is not aligned to its parameter.
 
 ## Development
 

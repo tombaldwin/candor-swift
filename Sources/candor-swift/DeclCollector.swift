@@ -239,13 +239,15 @@ func compositionTypeNames(_ t: TypeSyntax) -> [String]? {
 /// this is its own full-tree visitor rather than a DeclCollector hook — that one skips bodies.
 final class ExistentialSpellingCollector: SyntaxVisitor {
     private(set) var found: Set<String> = []
-    static func names(in tree: some SyntaxProtocol) -> Set<String> {
+    var specifier = "any"
+    static func names(in tree: some SyntaxProtocol, specifier: String = "any") -> Set<String> {
         let v = ExistentialSpellingCollector(viewMode: .sourceAccurate)
+        v.specifier = specifier   // SOUNDNESS R706 (residual) — `some P` is the same explicit protocol spelling
         v.walk(tree)
         return v.found
     }
     override func visit(_ node: SomeOrAnyTypeSyntax) -> SyntaxVisitorContinueKind {
-        guard node.someOrAnySpecifier.text == "any" else { return .visitChildren }
+        guard node.someOrAnySpecifier.text == specifier else { return .visitChildren }
         let elems: [TypeSyntax] = node.constraint.as(CompositionTypeSyntax.self)
             .map { $0.elements.map { $0.type } } ?? [node.constraint]
         for t in elems {

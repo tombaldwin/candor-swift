@@ -292,6 +292,9 @@ final class CallCollector: SyntaxVisitor {
     /// SOUNDNESS R1032 — the same `<type leaf>.<member>` keys as `implicitMemberUnits`, built whatever R999's
     /// switch says: "does this scan have a body for `Owner.member`".
     let memberUnitKeys: Set<String>
+    /// SOUNDNESS R1048 — local types that conform (transitively) to a stdlib iteration protocol, or declare a
+    /// `next`/`makeIterator`/`makeAsyncIterator` body.
+    let iterableLocalTypes: Set<String>
     let fieldArrayElem: [String: [String: String]]  // Type -> field -> [T] element (self.field loops)
     let fieldArrayElemNested: [String: [String: String]]  // R278 — Type -> field -> INNER element of `[[T]]`
     /// R278 — LOCALS and PARAMETERS whose type is a container OF containers, mapped to the INNER
@@ -814,6 +817,7 @@ final class CallCollector: SyntaxVisitor {
          implicitParams: [String: [[(label: String, type: String?)]]] = [:],
          implicitMemberUnits: Set<String> = [],
          memberUnitKeys: Set<String> = [],
+         iterableLocalTypes: Set<String> = [],
          declaredTypes: Set<String>,
          localProtocols: Set<String>, protoBoundParams: [String: String] = [:],
          typeBoundParams: [String: String] = [:],
@@ -912,6 +916,7 @@ final class CallCollector: SyntaxVisitor {
         self.implicitParams = implicitParams        // R999
         self.implicitMemberUnits = implicitMemberUnits
         self.memberUnitKeys = memberUnitKeys
+        self.iterableLocalTypes = iterableLocalTypes
         self.metatypeReturns = metatypeReturns                      // R585
         self.genericReturnArgs = genericReturnArgs                  // R1044
         self.globalMetatypes = globalMetatypes
@@ -6112,11 +6117,16 @@ final class CallCollector: SyntaxVisitor {
     private func modelImplicitIteration(_ sequence: ExprSyntax) {
         let r = rootOf(sequence)
         if let t = r.root, r.isVar, localTypes.contains(t) {
-            for m in ["makeIterator", "next"] {
-                calls.append(Call(path: "\(t).\(m)", leaf: m, strArg: nil, typed: true, args: [], argTypes: []))
-            }
+            if Self.r1048Off {
+                for m in ["makeIterator", "next"] {
+                    calls.append(Call(path: "\(t).\(m)", leaf: m, strArg: nil, typed: true, args: [], argTypes: []))
+                }
+            } else { iterateLocal(t, releaseForIn: true) }
             return
         }
+        // SOUNDNESS R1048 — `for x in s` over a PARAMETER whose type the caller decides (`<S: Sequence>`,
+        // `some Sequence`, `any Sequence`): the iterator that runs is the caller's argument's.
+        if !Self.r1048Off, iterationReqOnParam(sequence) { return }
         // FINDING 1 — iterating the RESULT of an opaque/erased Sequence builder (`for _ in b.build(…)` where
         // `build() -> some Sequence`). The opaque return hid the concrete iterator from rootOf (it peels to
         // the bare protocol name, not a local type), so the loop read silent-pure. Identify the builder by
@@ -6805,6 +6815,52 @@ final class CallCollector: SyntaxVisitor {
     static let r1045Off = ProcessInfo.processInfo.environment["CANDOR_R1045_OFF"] != nil
     /// SOUNDNESS R1046 — §1b kill switch.
     static let r1046Off = ProcessInfo.processInfo.environment["CANDOR_R1046_OFF"] != nil
+    /// SOUNDNESS R1048 — §1b kill switch.
+    static let r1048Off = ProcessInfo.processInfo.environment["CANDOR_R1048_OFF"] != nil
+    /// SOUNDNESS R1048 — the implicit calls iterating a LOCAL iterable makes: its own `makeIterator`/`next`/
+    /// `makeAsyncIterator`, and the `next` of the iterator type its `makeIterator` is declared to return
+    /// (`struct Coll: Sequence { func makeIterator() -> Loud }` iterates `Loud.next`, which the release missed).
+    /// `resolveQual` drops a key the type does not declare, so a synthesized member edges nothing.
+    ///
+    /// ONLY MEMBERS A TYPE DECLARES ARE EDGED (`memberUnitKeys`), except the release's own for-in pair: a typed
+    /// call to a member the type lacks falls to the external-supertype fallback, which DISCLOSES
+    /// `dispatch:<Super>.next` — the first cut of this added that `Unknown` to 105 swift-collections rows over
+    /// types whose iterator is a synthesized or stdlib one.
+    private func iterateLocal(_ t: String, releaseForIn: Bool = false) {
+        vbHit("R1048", "iterate \(t)")
+        var owners = [t]
+        for m in ["makeIterator", "makeAsyncIterator"] {
+            if let it = returnFacts["\(t).\(m)"]?.scalar, localTypes.contains(it), !owners.contains(it) { owners.append(it) }
+        }
+        for o in owners {
+            for m in ["makeIterator", "next", "makeAsyncIterator"] {
+                let floor = releaseForIn && o == t && (m == "makeIterator" || m == "next")
+                guard floor || memberUnitKeys.contains("\(o).\(m)") else { continue }
+                calls.append(Call(path: "\(o).\(m)", leaf: m, strArg: nil, typed: true, args: [], argTypes: []))
+            }
+        }
+    }
+    /// SOUNDNESS R1048 — a PARAMETER whose type is not a local concrete type is iterated with the CALLER's
+    /// instantiation: recorded as R951's caller-witness requirement `<idx>:#iter`, which the Driver answers at
+    /// every call site whose argument is a local iterable type.
+    private func iterationReqOnParam(_ e: ExprSyntax) -> Bool {
+        guard let dr = Self.peel(e).as(DeclReferenceExprSyntax.self) else { return false }
+        let n = dr.baseName.text
+        guard let idx = paramIndexR951[n], !isBoundLocal(n), !binderShadow.contains(n) else { return false }
+        if let t = rootOf(e).root, declaredTypes.contains(t) { return false }
+        if genericWitnessReqs.insert("\(idx):#iter").inserted { vbHit("R1048", "param \(n)") }
+        return true
+    }
+    /// SOUNDNESS R1048 — a LOCAL iterable passed to code this scan does not own (a stdlib/platform constructor or
+    /// free function, `Array(seq)`, `zip(a, b)`, `Set(seq)`, or a member of a non-local receiver) is iterated there.
+    private func iterateLocalArguments(_ node: FunctionCallExprSyntax, calleeIsForeign: Bool) {
+        guard !Self.r1048Off, calleeIsForeign else { return }
+        for a in node.arguments {
+            if let t = rootOf(a.expression).root, iterableLocalTypes.contains(t),
+               !Self.peel(a.expression).is(ClosureExprSyntax.self) { iterateLocal(t) }
+        }
+    }
+
     /// SOUNDNESS R1009 — §1b kill switch.
     static let r1009Off = ProcessInfo.processInfo.environment["CANDOR_R1009_OFF"] != nil
     /// SOUNDNESS R1032 — §1b kill switch.
@@ -7016,6 +7072,10 @@ final class CallCollector: SyntaxVisitor {
             ?? firstStringLiteral(node.arguments)
         if let dr = node.calledExpression.as(DeclReferenceExprSyntax.self) {
             let name = dr.baseName.text
+            // SOUNDNESS R1048 — `Array(seq)`, `Set(seq)`, `zip(a, b)`: a local iterable handed to a constructor or
+            // free function this scan does not declare is iterated there.
+            iterateLocalArguments(node, calleeIsForeign: !localFreeFns.contains(name) && !localTypes.contains(name)
+                                    && !fnTyped.contains(name) && !isBoundLocal(name))
             // SOUNDNESS R256 — a bare invocation of a stored field whose generic parameter a same-type
             // requirement ALSO binds to a function type (`extension Gen where F == (Int) -> Bool`) while another
             // binds it to a nominal one (`where F == Wiper`). `fields` holds the nominal reading, so every arm
@@ -7379,6 +7439,22 @@ final class CallCollector: SyntaxVisitor {
                !receiverDeclaresOwnMember(base.root, member) {
                 vbHit("R1032", "\(base.root ?? "?").\(member)")
                 directEffects.insert("Rand")
+            }
+            // SOUNDNESS R1048 — a stdlib algorithm on a LOCAL iterable (`Loud().reduce(0, +)`, `seq.map { … }`,
+            // `seq.contains(2)`) iterates it through the type's own `next()`. Every member the type does not declare
+            // itself is a stdlib/extension member and is charged the iteration (a denylist: the type's own members
+            // answer for themselves). On a PARAMETER of a caller-decided type, the iterating stdlib algorithms
+            // defer to the caller's instantiation.
+            if !Self.r1048Off, let b = ma.base {
+                if let t = base.root, iterableLocalTypes.contains(t), !["makeIterator", "next", "makeAsyncIterator"].contains(member),
+                   !receiverDeclaresOwnMember(t, member) {
+                    iterateLocal(t)
+                } else if STDLIB_ITERATING_MEMBERS.contains(member) {
+                    _ = iterationReqOnParam(b)
+                }
+                // a local iterable handed to a member of a receiver this scan does not own
+                let foreignRecv = base.root.map { !localTypes.contains($0) } ?? true
+                iterateLocalArguments(node, calleeIsForeign: foreignRecv)
             }
             // SOUNDNESS R1045 — `a.hash(into: &h)` and `h.combine(a)` run `a`'s `Hashable` witness. R951/R974 (b)
             // reached it only through an operator or a container operation, so inside `func bucket<T: Hashable>(_ a:

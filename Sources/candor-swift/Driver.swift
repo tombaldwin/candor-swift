@@ -835,6 +835,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // abstraction — the one fact about a DEPENDENCY's type the consumer can read without the dependency
     // publishing it (R843: reports carry no supertypes). See the R859 arm in the call loop.
     var existentialSpelled: Set<String> = []
+    var someSpelled: Set<String> = []   // SOUNDNESS R706 (residual)
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a file that fails to read used to be SILENTLY skipped by the
     // `guard…else { continue }` — a green report would then hide the code candor never saw. Track it.
     var unanalyzed: [(path: String, reason: String)] = []
@@ -883,6 +884,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         let c = DeclCollector(file: rel, tree: tree)
         c.walk(tree)
         existentialSpelled.formUnion(ExistentialSpellingCollector.names(in: tree))   // R859
+        someSpelled.formUnion(ExistentialSpellingCollector.names(in: tree, specifier: "some"))   // R706 residual
         // R532 — the type declarations found inside func/init/subscript/deinit bodies, which the four
         // `.skipChildren` sites cannot walk in place. Drained HERE, after the file pass, rather than by a
         // nested `walk` from inside a visit: `SyntaxVisitor.walk` is not re-entrant.
@@ -1793,6 +1795,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         memberUnitKeys.insert(parts.suffix(2).joined(separator: "."))
     }
     if !CallCollector.r999Off { implicitMemberUnits = memberUnitKeys }
+    // SOUNDNESS R1048 — local types the stdlib can ITERATE: a (transitive) conformance to an iteration protocol, or
+    // a declared `next`/`makeIterator`/`makeAsyncIterator` body.
+    var iterableLocalTypes: Set<String> = []
+    for proto in STDLIB_ITERATION_PROTOCOLS { for t in subtypesOf[proto] ?? [] where localTypes.contains(t) { iterableLocalTypes.insert(t) } }
+    for k in memberUnitKeys {
+        let parts = k.split(separator: ".").map(String.init)
+        if parts.count == 2, ["next", "makeIterator", "makeAsyncIterator"].contains(parts[1]), localTypes.contains(parts[0]) {
+            iterableLocalTypes.insert(parts[0])
+        }
+    }
     // R73 — same deferred resolution for a module-scope global initialized by a bare factory call
     // (`let worker = makeWorker()`). Only an UNAMBIGUOUS project-wide factory return types it — an
     // ambiguous/unknown leaf leaves the global untyped, same "never guess" discipline as every other
@@ -2366,6 +2378,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     let r859Probe = ProcessInfo.processInfo.environment["CANDOR_R859_PROBE"] != nil
     /// SOUNDNESS R706 §1b KILL SWITCH (and `CANDOR_VT_OFF`) and reach probe (under `CANDOR_VEINB_PROBE`).
     let r706Off = DeclCollector.vtOff || ProcessInfo.processInfo.environment["CANDOR_R706_OFF"] != nil
+    let r706iOff = ProcessInfo.processInfo.environment["CANDOR_R706I_OFF"] != nil   // SOUNDNESS R706 residual
+    let r706iProbe = CallCollector.veinBProbe
     let r706Probe = CallCollector.veinBProbe
     /// SPEC ⟨0.25⟩ at the cross-package join: §1b kill switch (restores drop-on-ambiguity) and reach probe.
     let joinUnionOff = ProcessInfo.processInfo.environment["CANDOR_JOIN_UNION_OFF"] != nil
@@ -3157,6 +3171,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                implicitParams: implicitParamIdx,                                       // R999
                                implicitMemberUnits: implicitMemberUnits,                               // R999
                                memberUnitKeys: memberUnitKeys,                                         // R1032
+                               iterableLocalTypes: iterableLocalTypes,                                 // R1048
                                declaredTypes: declaredTypes,
                                localProtocols: localProtocolNames,
                                // SOUNDNESS R563 — the unit's GENERIC PARAMETERS that are bound to a LOCAL
@@ -4627,6 +4642,28 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 for m in effectiveImports(file) where blind.contains(m) {   // R827
                     blindDirect[f.qual, default: []].insert(m)
                 }
+            } else if !r706iOff, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
+                      case let owner = f.genericBounds[raw] ?? raw,
+                      existentialSpelled.contains(owner) || someSpelled.contains(owner)
+                        || f.genericBounds[raw] != nil,
+                      !localTypes.contains(owner), !localProtocolNames.contains(owner),
+                      !STD_PURE_PROTOCOLS.contains(owner), !STDLIB_ITERATION_PROTOCOLS.contains(owner),
+                      !PLATFORM_PROTOCOL_NAMES.contains(owner),
+                      case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                      let module = foreignOwnerModule(inFile: file), blindModules(inFile: file).contains(module) {
+                // SOUNDNESS R706 (residual) — A MEMBER CALL THROUGH AN EXPLICIT PROTOCOL SPELLING (`any P`, `some P`,
+                // `<T: P>`) WHOSE OWNER IS A BLIND DEPENDENCY. SPEC §2 (`invisible`): the per-function attribution of
+                // the coverage ledger, and an engine MUST disclose at least one of `invisible`/`Unknown`, "never
+                // silently pure". The arm below this one (and the general member-call rule above) withholds it for a
+                // member call because a bare receiver's module cannot be decided — the reverted widening tagged an
+                // `NSPasteboard` receiver. The predicate here is narrower than that one by construction: the source
+                // SPELLS the owner as a protocol, the owner is neither declared here nor a platform/stdlib protocol
+                // this engine names, and the value is the file's ONE dependency module (`foreignOwnerModule`, the
+                // same owner the ⟨0.39⟩ `dispatchesOn` key already publishes) — so the attribution is the module the
+                // free-call rows name. ⟨0.24⟩: a judged-nothing chained copy covers nothing, so this fires in that
+                // arm exactly as unchained. Non-gating by design (R133): `deny`/`pure` do not move.
+                if r706iProbe { FileHandle.standardError.write("VBHIT\tR706I\t\(f.qual) \(owner).\(call.leaf) -> \(module)\n".data(using: .utf8)!) }
+                blindDirect[f.qual, default: []].insert(module)
             } else if !resolved, !call.typed, let owner = call.extOwner,
                       blindModules(inFile: String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })).contains(owner) {
                 // SOUNDNESS R651 — `!call.typed` PINS THIS ARM'S POPULATION AND CHANGES NOTHING TODAY.
@@ -5295,6 +5332,21 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     let parts = req.split(separator: ":", maxSplits: 1).map(String.init)
                     guard parts.count == 2, let idx = Int(parts[0]), idx < site.types.count,
                           let x = site.types[idx], localTypes.contains(x) else { continue }
+                    // SOUNDNESS R1048 — the iteration requirement: the argument's own iterator bodies, and the
+                    // iterator type its `makeIterator` is declared to return.
+                    if parts[1] == "#iter" {
+                        guard iterableLocalTypes.contains(x) else { continue }
+                        var owners = [x]
+                        for m in ["makeIterator", "makeAsyncIterator"] {
+                            if let it = returnFactsIdx["\(x).\(m)"]?.scalar, localTypes.contains(it) { owners.append(it) }
+                        }
+                        for o in owners {
+                            for m in ["makeIterator", "next", "makeAsyncIterator"] {
+                                edges[site.caller, default: []].formUnion(resolveQual("\(o).\(m)"))
+                            }
+                        }
+                        continue
+                    }
                     let base = "\(x).\(parts[1])"
                     let module = swiftModuleOf(locOf[site.caller] ?? "")
                     let ts = overloadedBases.contains(base) ? Set(matchOverloads(base, 2, [x, x], module)) : resolveQual(base)

@@ -10,6 +10,32 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — SOUNDNESS R1048: a hand-written `next()` runs wherever the stdlib iterates the value
+
+Executed: of nine spellings that run a custom `Sequence`'s `next()` (which deletes a file), only `for x in Loud()`
+was charged. A generic `<S: Sequence>`, `some Sequence` or `any Sequence` parameter iterated by a project function,
+`Loud().reduce`/`.map`/`.contains`, `Array(Loud())`, and `for x in coll` where `coll.makeIterator()` returns a
+different iterator type were all ABSENT, `deny Fs` exit 0. `STD_PURE_PROTOCOLS` lists the iteration protocols as
+resolved-pure for the synthesized-requirement FALLBACK only; SPEC §4 forbids extending that to iterators, and this
+fix makes the engine's behaviour match. A caller-decided parameter records R951's caller-witness requirement
+(`<idx>:#iter`), answered at each call site whose argument is a local iterable. Only members a type declares are
+edged. Residual: an argument passed with a label or `inout` is not aligned to its parameter.
+- Corpus A/B (one variable vs the previous commit; 23 standalone + 8 chained): REMOVED 0, no concrete effect added
+  or lost, 1,457 / 1,211 reach hits. 44 standalone rows (0.17%; 57 entries) and 4 chained newly carry `Unknown`,
+  each inherited through a real new iteration edge to a type whose own `makeIterator` already carried it.
+- `CANDOR_R1048_OFF=1` restores the release.
+
+### Fixed — SOUNDNESS R706 (residual): a member call through an explicit protocol spelling of a blind dependency is disclosed
+
+`func f(_ s: any Sink) { s.emit() }`, `<T: Sink>` and `some Sink`, over a dependency module this scan does not
+cover, read `inferred: []` with no `invisible` — chained-but-judged-nothing and unchained alike — where a FREE call
+into the same module carries `invisible: [Iface]`. SPEC §2 requires `invisible` or `Unknown`, never silently pure.
+Such a row now carries `invisible: [<the file's one dependency module>]`. It fires only when the owner is spelled
+as a protocol, is not declared in this package, and is not a platform or stdlib protocol (`PLATFORM_PROTOCOL_NAMES`
+and the stdlib lists): the reverted R548 widening tagged an `NSPasteboard` receiver, and this does not. Non-gating
+by design. Corpus: REMOVED 0, REACH 0. README now documents `STD_PURE_PROTOCOLS` (SPEC §4 "MUST document which")
+and R974 (a) as that permission exercised across a chain. `CANDOR_R706I_OFF=1` restores the release.
+
 ### ⚠ Fixed — SOUNDNESS R1032, R1044, R1045, R1046, R905 (residual): five returns and witnesses the stdlib or platform answers
 
 Each was ABSENT on 0.40.0 over code that performs the effect (every fixture executed: the effectful arm deleted
