@@ -4192,6 +4192,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // are the commonest generic bounds in Swift, their requirements are synthesized and pure,
             // and without that carve-out this would disclose over half the generic code in any package.
             let r705Off = ProcessInfo.processInfo.environment["CANDOR_R705_OFF"] != nil
+            let r705UOff = ProcessInfo.processInfo.environment["CANDOR_R705U_OFF"] != nil   // §1b, the unchained arm
             var veinDUndecided: String? = nil   // VEIN D — set at the obligation-1 site, disclosed after the join
             let erasedForeignDispatch: String? = {
                 guard !r705Off, !call.unqualified, let owner = call.extOwner else { return nil }
@@ -4203,7 +4204,19 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                       !STD_PURE_PROTOCOLS.contains(abs), !RAW_VALUE_BASE_TYPES.contains(abs),
                       !localTypes.contains(owner), !localProtocolNames.contains(owner) else { return nil }
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
-                guard !deps.chainedPkgs(importing: fileImports[file] ?? []).isEmpty else { return nil }
+                // SOUNDNESS R705 (unchained arm) — the κ ledger's `invisible: [M]` is NOT a sufficient disclosure here,
+                // which the paragraph above assumed: it names the dependency that DECLARES the abstraction, while the
+                // witness the caller passes may be a LOCAL conformer. Executed (`swiftagent-v043/fx/r705u`): a local
+                // `Mine: Sink` deleting a file through `viaGen<T: Sink>` read `[]` + `invisible: [Iface]`, `deny Fs
+                // Unknown viaGen` exit 0, while the count-0 and one-tree arms said `Unknown`. Fenced exactly as R706's
+                // residual is — the file's ONE dependency module, uncovered, and not a platform/stdlib protocol —
+                // because the wider fence ("any blind import") measured 7 false rows over platform protocols
+                // (`UIGestureRecognizer`, `NSTextInputClient`, `Escapable`) and 0 true ones.
+                if deps.chainedPkgs(importing: fileImports[file] ?? []).isEmpty {
+                    guard !r705UOff, !PLATFORM_PROTOCOL_NAMES.contains(abs), !STDLIB_ITERATION_PROTOCOLS.contains(abs),
+                          let m = foreignOwnerModule(inFile: file), blindModules(inFile: file).contains(m) else { return nil }
+                    if r706iProbe { FileHandle.standardError.write("VBHIT\tR705U\t\(f.qual) \(abs).\(call.leaf)\n".data(using: .utf8)!) }
+                }
                 return abs
             }()
             // ── SOUNDNESS R705 — THE ERASED-FOREIGN DISPATCH IS PRECISE-OR-NOTHING, AND "NOTHING"

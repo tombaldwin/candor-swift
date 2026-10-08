@@ -206,6 +206,57 @@ final class GenericInstantiationProcessTests: XCTestCase {
         XCTAssertTrue(inf(off, "viaDepBoxGet").isEmpty, "kill switch restores the release silence")
     }
 
+    // ── R705 (unchained arm) — an erased dispatch over an uncovered dependency's protocol ────────────────────
+    // One package whose manifest declares a dependency it has not fetched. `viaGen`/`viaSome` dispatch through the
+    // dependency's protocol to a LOCAL conformer that deletes a file (executed, `swiftagent-v043/fx/r705u`); the
+    // unchained arm read `[]` + `invisible: [Iface]`, `deny Fs Unknown viaGen` 0, while the count-0 and one-tree arms
+    // said `Unknown`. CONTROLS: a platform-protocol bound stays unhedged.
+    func testAnUnchainedDependencyAbstractionDiscloses() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("candor-v043-r705u-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let src = root.appendingPathComponent("Sources/Mid")
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        try """
+        // swift-tools-version:5.7
+        import PackageDescription
+        let package = Package(name: "Mid", dependencies: [.package(path: "../Iface")],
+            targets: [.target(name: "Mid", dependencies: ["Iface"])])
+        """.write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try """
+        import Foundation
+        import Iface
+        struct Mine: Sink { func emit() { \(Self.FS) } }
+        func viaGen<T: Sink>(_ s: T) { s.emit() }
+        func viaSome(_ s: some Sink) { s.emit() }
+        func ctlEncoder<T: Encoder>(_ e: T) { _ = e.singleValueContainer() }
+        func ctlEncoderSome(_ e: some Encoder) { _ = e.singleValueContainer() }
+        func caller() { viaGen(Mine()) }
+        """.write(to: src.appendingPathComponent("Mid.swift"), atomically: true, encoding: .utf8)
+        func run(_ env: [String: String], _ policy: String? = nil) throws -> (by: [String: [String: Any]], code: Int32) {
+            var args = [root.path, "--json"]
+            if let p = policy {
+                let pf = root.appendingPathComponent("p.policy")
+                try (p + "\n").write(to: pf, atomically: true, encoding: .utf8)
+                args += ["--policy", pf.path]
+            }
+            let r = try ProcessHarness.run(bin, args, env: env)
+            return (try ProcessHarness.fns(ofJson: r.out), r.code)
+        }
+        let by = try run([:]).by
+        for f in ["viaGen", "viaSome"] {
+            XCTAssertEqual(inf(by, f), ["Unknown"], "R705 unchained: \(f); got \(by[f] ?? [:])")
+            XCTAssertEqual(by[f]?["invisible"] as? [String], ["Iface"], "the ledger's attribution is kept")
+        }
+        for f in ["ctlEncoder", "ctlEncoderSome"] {
+            XCTAssertFalse(inf(by, f).contains("Unknown"), "a PLATFORM protocol bound is not hedged; got \(by[f] ?? [:])")
+        }
+        XCTAssertEqual(try run([:], "deny Fs Unknown viaGen").code, 1, "the gate must flip")
+        XCTAssertNotEqual(try run([:], "deny Fs Unknown ctlEncoder").code, 1, "the platform control passes")
+        let off = try run(["CANDOR_R705U_OFF": "1"]).by
+        XCTAssertTrue(inf(off, "viaGen").isEmpty, "R705U kill switch restores the release reading")
+    }
+
     // ── §E3 — every fixture compiles ────────────────────────────────────────────────────────────────────
     func testEveryFixtureTypechecks() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("candor-v043-tc-\(UUID().uuidString)")

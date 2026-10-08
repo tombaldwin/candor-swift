@@ -10,6 +10,17 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — SOUNDNESS R705 (unchained arm): an erased dispatch over an uncovered dependency's protocol discloses
+
+Executed: a local `Mine: Sink` (where `Sink` is an UNCHAINED dependency's protocol) deleted a file through
+`viaGen<T: Sink>` / `viaSome(_: some Sink)`, and the rows read `inferred: []` with only `invisible: [Iface]` — `deny Fs
+Unknown viaGen` exit 0 — while the count-0 chained arm and the one-tree arm both disclose `Unknown` +
+`dispatch:Sink.emit`. The κ ledger's `invisible` names the module that DECLARES the abstraction; the witness the
+caller passes may be local, so it is not the disclosure R705 assumed. Now disclosed, fenced as R706's residual is: the
+file's ONE dependency module, uncovered, and not a platform/stdlib protocol (`some Encoder` stays unhedged). A wider
+fence (any blind import) measured 7 false rows over platform protocols and 0 true ones and was not taken. Gate
+`deny Fs Unknown viaGen` 0 → 1. Kill switch `CANDOR_R705U_OFF`.
+
 ### ⚠ Fixed — SOUNDNESS R1065: an instance member's result on a dependency's type is asked, not dropped
 
 Executed: `Box(v: E()).get().go()`, `b.get().go()` (`b: Box<E>`) and `Ref(E()).get().go()` over a CHAINED
