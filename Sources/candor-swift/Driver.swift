@@ -458,6 +458,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// returns. Separate map for `globalMetatypes`' reason — `returnsIdx` answers "what VALUE type does
     /// this factory vend", and a metatype answer there would make `mk().validate()` an instance call.
     var metatypeReturnsIdx: [String: String] = [:]
+    var genericReturnArgIdx: [String: GenericReturnArg] = [:]   // SOUNDNESS R1044
     var metatypeReturnsTmp: [String: String?] = [:]
     var importCounts: [String: Int] = [:]
     var fileImports: [String: [String]] = [:]   // file (rel path) -> modules it imports (per-fn blind disclosure)
@@ -898,6 +899,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
     }
     var returnsTmp: [String: String?] = [:]
+    var genericReturnArgTmp: [String: GenericReturnArg?] = [:]                 // SOUNDNESS R1044
+    var memberReturnNamesAll: [(leaf: String, owner: String, name: String)] = []   // SOUNDNESS R1010
     // FINDING 1 — aggregate the opaque/erased Sequence builder indexes across files.
     var opaqueSeqLeaves: Set<String> = []
     var seqConcreteTmp: [String: String?] = [:]
@@ -927,6 +930,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 returnsTmp[k] = v
             }
         }
+        for (k, v) in c.genericReturnArgTmp {   // SOUNDNESS R1044 — same ambiguity rule as `returnsTmp`
+            if let existing = genericReturnArgTmp[k] {
+                if existing != v { genericReturnArgTmp[k] = GenericReturnArg?.none }
+            } else {
+                genericReturnArgTmp[k] = v
+            }
+        }
+        memberReturnNamesAll.append(contentsOf: c.memberReturnNames)   // SOUNDNESS R1010
         for (k, v) in c.metatypeReturnsTmp {   // R585 (b9) — same ambiguity rule as `returnsTmp`
             if let existing = metatypeReturnsTmp[k] {
                 if existing != v { metatypeReturnsTmp[k] = String?.none }
@@ -1375,6 +1386,47 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         return []
     }
 
+    // SOUNDNESS R1047 — AN `extension String { init(randomAlphaNumericOfLength:) }` IS NOT EVERY `String(…)`.
+    // The constructor arm edged a call `T(…)` to EVERY init this scan declares on `T`, whatever the call's argument
+    // labels. For a type the scan DECLARES that over-approximation only unions the type's own inits; for a type it
+    // merely EXTENDS (the stdlib's `String`, Foundation's `Data`), the platform owns the other initialisers, and
+    // `String(cString: p)` / `String(describing: x)` / `String(x)` were all charged the extension's body —
+    // swift-nio's `String(randomAlphaNumericOfLength:)` reached ~3,000 rows through it once that body was
+    // (correctly) charged `Rand` (R1032). Swift's own rule decides: an init whose labels the call's labels cannot
+    // satisfy (in order, a defaulted parameter skippable, a variadic one absorbing unlabelled arguments) is not
+    // the one that runs. Applied ONLY to an extension-only owner and only where the call recorded its labels.
+    // A qual more than one unit shares (an init and a synthesized unit of the same name) is not filtered: only a
+    // qual with exactly ONE recorded signature can say which labels it takes.
+    var initSigByQual: [String: [(label: String?, hasDefault: Bool, variadic: Bool)]] = [:]
+    var initSigQualSeen: [String: Int] = [:]
+    for f in allFns { initSigQualSeen[f.qual, default: 0] += 1 }
+    for f in allFns where f.paramLabels.count == f.paramSig.count && initSigQualSeen[f.qual] == 1 {
+        initSigByQual[f.qual] = zip(f.paramLabels, f.paramSig).map {
+            ($0.0 == "_" ? nil : $0.0, $0.1.hasDefault, $0.1.variadic) }
+    }
+    let r1047Off = ProcessInfo.processInfo.environment["CANDOR_R1047_OFF"] != nil
+    func extensionInitLabelsAdmit(_ call: Call, _ target: String) -> Bool {
+        // The OWNER: an unqualified ctor's path is the type (`String`); a typed call's is `String.init`.
+        let owner = call.path.hasSuffix(".init") ? String(call.path.dropLast(5)) : call.path
+        // A NESTED owner (`BigString.UnicodeScalarView`) is keyed by its leaf in `declaredTypes`, so a dotted path
+        // can not be proved extension-only here: it is left unfiltered (the release's union).
+        guard !r1047Off, let labels = call.argLabels, !owner.contains("."), !declaredTypes.contains(owner),
+              let sig = initSigByQual[target], target.contains(".init") else { return true }
+        if ProcessInfo.processInfo.environment["CANDOR_R1047_PROBE"] != nil {
+            FileHandle.standardError.write("R1047 \(target) labels=\(labels) sig=\(sig)\n".data(using: .utf8)!)
+        }
+        var j = 0
+        for p in sig {
+            if j < labels.count, labels[j] == p.label {
+                j += 1
+                if p.variadic { while j < labels.count, labels[j] == nil { j += 1 } }
+            } else if !p.hasDefault && !p.variadic {
+                return false
+            }
+        }
+        return j == labels.count
+    }
+
     /// SOUNDNESS R572 — THE ONE IMPLEMENTATION of "which project units can `<Type>.<member>` run at a
     /// call site with this argument shape". An OVERLOADED declaration's qual carries a SIGNATURE SUFFIX
     /// (`Impl.two(Int)` — see `overloads`/`overloadedBases` above), so a bare `resolveQual("Impl.two")`
@@ -1537,7 +1589,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         return out
     }
 
+    // SOUNDNESS R1010 — a member's `-> T` where `T` is its OWNER's generic parameter (declared in whichever file
+    // declares the type, so only known here) names no type: poison the leaf, as `recordReturn` does for the
+    // function's own generic parameters.
+    for (leaf, owner, name) in memberReturnNamesAll where typeGenericParamNamesAI[owner]?.contains(name) == true {
+        returnsTmp[leaf] = String?.none
+    }
     for (k, v) in returnsTmp { if let t = v { returnsIdx[k] = t } }
+    // SOUNDNESS R1044 — a leaf whose ONLY declarations return their argument's generic type, and that no ordinary
+    // return also answers (a leaf both indexes speak for is ambiguous and neither may answer).
+    for (k, v) in genericReturnArgTmp { if let g = v, returnsIdx[k] == nil { genericReturnArgIdx[k] = g } }
     // SOUNDNESS R990–R992 — THE DECLARED-TYPE FACTS, resolved once every file's aliases are known.
     // A container alias declared twice with different right-hand sides (two `#if` arms, two scopes sharing a
     // simple owner name) is POISONED rather than chosen: the same never-guess rule `returnsTmp` applies.
@@ -1724,14 +1785,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // charge, and walking its qualified spelling only reaches the engine's missed-member fallback — which, in the
     // first corpus run, hedged `dispatch:` Unknowns over protocols the type merely conforms to.
     var implicitMemberUnits: Set<String> = []
-    if !CallCollector.r999Off {
-        for f in allFns {
-            // keyed `<type leaf>.<member>`: a member written in `extension Outer.Inner` has the simpleQual
-            // `Outer.Inner.member`, and the context type is resolved to its leaf `Inner`
-            let parts = String(f.simpleQual.prefix { $0 != "(" && $0 != "#" }).split(separator: ".").map(String.init)
-            implicitMemberUnits.insert(parts.suffix(2).joined(separator: "."))
-        }
+    var memberUnitKeys: Set<String> = []   // SOUNDNESS R1032 — the same keys, unconditionally
+    for f in allFns {
+        // keyed `<type leaf>.<member>`: a member written in `extension Outer.Inner` has the simpleQual
+        // `Outer.Inner.member`, and the context type is resolved to its leaf `Inner`
+        let parts = String(f.simpleQual.prefix { $0 != "(" && $0 != "#" }).split(separator: ".").map(String.init)
+        memberUnitKeys.insert(parts.suffix(2).joined(separator: "."))
     }
+    if !CallCollector.r999Off { implicitMemberUnits = memberUnitKeys }
     // R73 — same deferred resolution for a module-scope global initialized by a bare factory call
     // (`let worker = makeWorker()`). Only an UNAMBIGUOUS project-wide factory return types it — an
     // ambiguous/unknown leaf leaves the global untyped, same "never guess" discipline as every other
@@ -3095,6 +3156,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                returnFacts: returnFactsIdx,                                            // R990/R991
                                implicitParams: implicitParamIdx,                                       // R999
                                implicitMemberUnits: implicitMemberUnits,                               // R999
+                               memberUnitKeys: memberUnitKeys,                                         // R1032
                                declaredTypes: declaredTypes,
                                localProtocols: localProtocolNames,
                                // SOUNDNESS R563 — the unit's GENERIC PARAMETERS that are bound to a LOCAL
@@ -3129,6 +3191,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                memberTypeAliases: memberTypeAliasesR915,                      // R915 (B)
                                returns: returnsIdx,
                                metatypeReturns: metatypeReturnsIdx,                                  // R585
+                               genericReturnArgs: genericReturnArgIdx,                               // R1044
                                globalMetatypes: globalMetatypesByModule[swiftModuleOf(f.loc)] ?? [:], // R585
                                globalMetatypeArrayElem: globalMetatypeArrayElemByModule[swiftModuleOf(f.loc)] ?? [:],
                                fieldMetatypes: fieldMetatypes,                                        // R585
@@ -3177,6 +3240,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         cc.prescanLocatorMoves(body, params: f.paramNames)
         cc.prescanBodyAliases(Syntax(body))                                   // VEIN A(i) / R790
         cc.prescanLocalTypeArgs(Syntax(body))                                 // R951
+        cc.prescanLocalPlatformGenerics(Syntax(body))                         // R905 (residual)
         if CallCollector.veinBProbe { FileHandle.standardError.write("VBFN\t\(f.qual)\n".data(using: .utf8)!) }
         cc.walk(body)
         if !cc.genericWitnessReqs.isEmpty { genericWitnessReqsByUnit[f.qual] = cc.genericWitnessReqs }   // R951
@@ -3545,12 +3609,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     }
                 } else if overloadedBases.contains(call.path) {
                     for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
+                        resolved = true
+                        guard extensionInitLabelsAdmit(call, t) else { continue }   // R1047
                         edges[f.qual, default: []].insert(t)
                         callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward))
-                        resolved = true
                     }
                 } else if !typedTargets.isEmpty {
-                    for t in typedTargets {
+                    for t in typedTargets where extensionInitLabelsAdmit(call, t) {   // R1047
                         edges[f.qual, default: []].insert(t)
                         callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward))
                     }
@@ -3912,8 +3977,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     callsiteArgs[targets[0], default: []].append((f.qual, call.args)); callsiteArgTypes[targets[0], default: []].append((f.qual, call.argTypes, call.genericForward))
                     resolved = true
                 } else if localTypes.contains(call.path), overloadedBases.contains("\(call.path).init") {
+                    // R1047 — `resolved` keeps the release's answer (a matched overload); only the EDGE is filtered.
                     for t in matchOverloads("\(call.path).init", argc, call.argTypes, swiftModuleOf(f.loc)) {
-                        edges[f.qual, default: []].insert(t)
+                        if extensionInitLabelsAdmit(call, t) { edges[f.qual, default: []].insert(t) }
                         resolved = true
                     }
                 } else if localTypes.contains(call.path) {
@@ -3924,7 +3990,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // so mark resolved REGARDLESS of whether an explicit `init` unit exists — a synthesized
                     // init has no unit to edge to but the construction is still local; without this the caller
                     // was falsely tagged `invisible` (the over-disclosure regression, sweep [36]).
-                    edges[f.qual, default: []].formUnion(resolveQual("\(call.path).init"))
+                    edges[f.qual, default: []].formUnion(resolveQual("\(call.path).init").filter { extensionInitLabelsAdmit(call, $0) })
                     resolved = true
                 } else if !call.argRef, !call.argLabelled,
                           NATIVE_DISCLOSURE_C_FREE_FNS.contains(call.path),

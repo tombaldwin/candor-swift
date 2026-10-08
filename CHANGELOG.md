@@ -10,6 +10,42 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — SOUNDNESS R1032, R1044, R1045, R1046, R905 (residual): five returns and witnesses the stdlib or platform answers
+
+Each was ABSENT on 0.40.0 over code that performs the effect (every fixture executed: the effectful arm deleted
+its victim file, the control kept it), and each closes with a resolution, not a hedge.
+- **R1032** — `xs.randomElement()`, `xs.shuffled()`, `xs.shuffle()` (and their `using:` forms) are `Rand`. κ keyed
+  `Rand` on `<numeric>.random` only. Keyed on the member, so a literal, untyped or range receiver is covered; a type
+  this scan declares its own `shuffle()` on keeps its own body.
+- **R1044** — `func pick<T>(_ x: T) -> T` returns its ARGUMENT's type: `pick(E()).go()` resolves to `E.go`.
+- **R1045** — `a.hash(into:)` / `h.combine(a)` on a generic parameter run the caller's `Hashable` witness (R951's
+  mechanism, which reached it only through operators and container operations).
+- **R1046** — an explicitly specialised constructor (`Box<Int>(v: 1)`, `Array<Int>()`, `NSCache<K, V>()`) is walked
+  as the constructor it is. It used to fall to the computed-callee arm and publish `callback:computed` `Unknown`
+  while dropping the edge to a local `init`.
+- **R905 (residual)** — `NSHashTable.anyObject` / `member(_:)`, a field built by a platform class factory
+  (`NSHashTable<G>.weakObjects()`, `NSMapTable<K, G>.strongToStrongObjects()`), and a LOCAL bound to any platform
+  generic container now reach the element. The tables are pinned to the SDK by `swiftc -typecheck`.
+
+### ⚠ Fixed — SOUNDNESS R1009, R1010, R1047: three answers that charged code which cannot run
+
+- **R1009** — an `@autoclosure` parameter is the CALLER's expression, which the caller's walk already charges; it
+  no longer publishes `callback:<param>` `Unknown` on the callee and every caller (`failing(reason: "x")`).
+- **R1010** — a generic function's `-> T` no longer types its result as a local type spelled `T`: such a leaf is
+  poisoned in the returns index (the owner's generic parameters too, applied once every file's are known).
+- **R1047** — a constructor call on a type this scan only EXTENDS (`String`, `Data`, `Int`) reaches an extension
+  `init` only when the call's argument labels can bind to it. `String(cString: p)` was charged the body of
+  swift-nio's `String(randomAlphaNumericOfLength:)` — about 3,000 swift-nio rows gained a false `Rand` through
+  that edge once R1032 charged the body. ⚠ `ExtensionShadowConstructorProcessTests` pinned the old reading for
+  the BARE spelling (`Process()` reaching `init(inheritingEnv:)`); it now asserts the platform init.
+- Corpus A/B, one variable (the previous commit vs this one; 23 standalone + 8 chained entries, reach counted):
+  standalone ADDED 4 / REMOVED 659 / CHANGED 5571, no concrete effect lost; 244 rows gain a concrete effect
+  (`Rand` 152 from seven read-and-confirmed draws, `Clock`/`Env` 95 through R1046's resolved constructor edges).
+  Every one of 1,351 units that lost `Unknown` is accounted for through the call-graph sidecar (R1046 397,
+  R1009 152, R1047 306, union rows over those 567; a seeded silent loss is found by the same classifier).
+- Kill switches: `CANDOR_R1032_OFF`, `CANDOR_R1044_OFF`, `CANDOR_R1045_OFF`, `CANDOR_R1046_OFF`, `CANDOR_R905H_OFF`,
+  `CANDOR_R1009_OFF`, `CANDOR_R1010_OFF`, `CANDOR_R1047_OFF`.
+
 ### ⚠ Fixed — SOUNDNESS R1011: a name a binder in scope has claimed is not a free-function reference
 
 An untyped `for` variable, closure parameter, `$0`, `if`/`guard let` binder or parameter passed as a bare argument

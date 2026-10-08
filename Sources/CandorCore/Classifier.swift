@@ -366,6 +366,15 @@ public let FILES_NON_MOVING_MEMBERS: Set<String> =
 public let LOG_MEMBERS: Set<String> = ["trace", "debug", "info", "notice", "warning", "error", "critical", "fault", "log"]
 public let RAND_ROOTS: Set<String> = ["Int", "UInt", "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16",
     "UInt32", "UInt64", "Double", "Float", "Bool", "CGFloat"]
+/// SOUNDNESS R1032 — the stdlib's OTHER entropy draws. `RAND_ROOTS` answers `Int.random(in:)`, which is keyed on
+/// the receiver TYPE; these are `Collection`/`MutableCollection`/`Sequence` members, so they are keyed on the
+/// MEMBER (with no argument, or `using:` — the same draw `Int.random(in:using:)` is charged for), and their
+/// receiver is any collection at all, a literal included. From the toolchain's own `Swift.swiftinterface`:
+/// `randomElement()`/`randomElement(using:)` on `Collection`, `shuffled()`/`shuffled(using:)` on `Sequence`,
+/// `shuffle()`/`shuffle(using:)` on `MutableCollection & RandomAccessCollection`. Each draws from
+/// `SystemRandomNumberGenerator` unless handed a generator. Executed: `[1, 2, 3].shuffled()` prints a
+/// different order run to run, and all four spellings were ABSENT while `Int.random(in:)` read `Rand`.
+public let STDLIB_RAND_MEMBERS: Set<String> = ["randomElement", "shuffled", "shuffle"]
 // The `Process` verbs recognised on a receiver this engine could NOT prove is a subprocess handle — an
 // `extension Process`'s implicit `self`, or a member chain whose root is a stale `Process` two hops up.
 // It is a FLOOR, not the rule: a PROVEN handle is answered by `processCapabilityEffect` below, which is
@@ -3095,4 +3104,18 @@ public let STDLIB_DICT_VALUE_CLOSURE: [String: Set<Int>] =
 /// SOUNDNESS R905 — a PLATFORM generic container member whose return is one of the receiver's generic arguments,
 /// and which one (0-based). From the platform's own declarations: `NSCache<KeyType, ObjectType>.object(forKey:)
 /// -> ObjectType?`, `NSMapTable<KeyType, ObjectType>.object(forKey:) -> ObjectType?`.
-public let PLATFORM_GENERIC_MEMBER_RETURNS: [String: Int] = ["NSCache.object": 1, "NSMapTable.object": 1]
+public let PLATFORM_GENERIC_MEMBER_RETURNS: [String: Int] = ["NSCache.object": 1, "NSMapTable.object": 1,
+    // SOUNDNESS R905 (residual) — `NSHashTable<ObjectType>`'s `- (nullable ObjectType)member:(nullable ObjectType)object`.
+    "NSHashTable.member": 0]
+/// SOUNDNESS R905 (residual) — the PROPERTY half of the same fact: `NSHashTable<ObjectType>`'s
+/// `@property (nullable, nonatomic, readonly) ObjectType anyObject`. (`allObjects` is `NSArray<ObjectType>` and
+/// `setRepresentation` imports as `Set<AnyHashable>`, so neither is a scalar return of the argument.)
+public let PLATFORM_GENERIC_PROPERTY_RETURNS: [String: Int] = ["NSHashTable.anyObject": 0]
+/// SOUNDNESS R905 (residual) — the platform generic containers' class FACTORIES that vend the receiver's own
+/// specialisation (`+ (NSHashTable<ObjectType> *)weakObjectsHashTable`, imported as `weakObjects()`), so
+/// `let table = NSHashTable<G>.weakObjects()` is an `NSHashTable<G>` exactly as `NSHashTable<G>()` is. Each
+/// entry is pinned by `swiftc -typecheck` in `PlatformGenericTablesTests` — the SDK, not this list, decides.
+public let PLATFORM_GENERIC_SELF_FACTORIES: [String: Set<String>] = [
+    "NSHashTable": ["weakObjects"],
+    "NSMapTable": ["strongToStrongObjects", "weakToStrongObjects", "strongToWeakObjects", "weakToWeakObjects"],
+]
