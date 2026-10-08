@@ -337,10 +337,16 @@ final class StdlibReturnAndWitnessProcessTests: XCTestCase {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("candor-v042-tc-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        for (name, src) in [("rand", Self.rand), ("autoclosure", Self.autoclosure), ("pickFab", Self.pickFab),
-                            ("pickSilent", Self.pickSilent), ("hashing", Self.hashing),
-                            ("specialised", Self.specialised), ("platform", Self.platform), ("extInit", Self.extInit), ("iteration", Self.iteration),
-                            ("tables", tables)] {
+        var fixtures = [("rand", Self.rand), ("autoclosure", Self.autoclosure), ("pickFab", Self.pickFab),
+                        ("pickSilent", Self.pickSilent), ("hashing", Self.hashing),
+                        ("specialised", Self.specialised), ("extInit", Self.extInit), ("iteration", Self.iteration)]
+        // `NSHashTable`/`NSMapTable` exist only in Apple's Foundation — swift-corelibs-foundation on Linux
+        // has neither, so the platform fixture and the SDK-pinned tables can only be typechecked against
+        // the SDK the tables were derived from. Measured: the linux CI leg failed on exactly these two.
+        #if canImport(Darwin)
+        fixtures += [("platform", Self.platform), ("tables", tables)]
+        #endif
+        for (name, src) in fixtures {
             let f = root.appendingPathComponent("\(name).swift")
             try src.write(to: f, atomically: true, encoding: .utf8)
             let r = try ProcessHarness.run(URL(fileURLWithPath: "/usr/bin/env"), ["swiftc", "-typecheck", f.path])
