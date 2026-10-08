@@ -160,6 +160,9 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// labelled or `inout` argument answers R951/R1048's `<idx>:<req>` the way a positional one does.
               /// `nil` = not recorded; read ONLY by the caller-witness answering.
               var witnessArgs: (labels: [String?], types: [String?])? = nil
+              /// SOUNDNESS R1065 — a `<untyped>.` marker from `depInstanceMemberCallee`: its MISS discloses only where
+              /// the member's leaf could have a body someone answers (a local type's member, or a chained package's).
+              var instanceHop: Bool = false
               /// SOUNDNESS R847 — on an `argRef` call: the name is a binder's local in scope, so it can be
               /// no dependency declaration (the chained join skips it). Local resolution is unaffected.
               var argBoundLocal: Bool = false
@@ -6887,6 +6890,23 @@ final class CallCollector: SyntaxVisitor {
         return callee
     }
 
+    /// SOUNDNESS R1065 — `recv.member(…)` where `recv` is a VALUE whose type is not this scan's (neither declared
+    /// nor extended here, not a generic parameter or associated type): `<Type>.<member>`, the producer's fn-qual
+    /// spelling, for the Driver's `typeSurface.returns` ask. nil for anything local or untyped.
+    static let r1065Off = ProcessInfo.processInfo.environment["CANDOR_R1065_OFF"] != nil
+    func depInstanceMemberCallee(_ expr: ExprSyntax) -> String? {
+        guard !Self.r1065Off, let call = Self.peel(expr).as(FunctionCallExprSyntax.self),
+              let ma = Self.peel(call.calledExpression).as(MemberAccessExprSyntax.self), let base = ma.base else { return nil }
+        let member = ma.declName.baseName.text
+        guard member != "init", member.first?.isUppercase == false else { return nil }
+        let r = rootOf(base)
+        guard r.isVar, let t = r.root, t != Self.superMarker, t.first?.isUppercase == true,
+              !localTypes.contains(t), !declaredTypes.contains(t), !localProtocols.contains(t),
+              !t.split(separator: ".").contains(where: { localGenerics.nonTypeNames.contains(String($0)) })
+        else { return nil }
+        return "\(t).\(member)"
+    }
+
     /// SOUNDNESS R832 — THE STATIC SPELLING OF A DEPENDENCY FACTORY: `Client.make()`, not `build()`.
     ///
     /// `depFactoryCallee` answered only a BARE callee (`DeclReferenceExprSyntax`), so a factory reached
@@ -8330,6 +8350,19 @@ final class CallCollector: SyntaxVisitor {
                     calls.append(Call(path: "<untyped>.\(member)", leaf: member, strArg: nil,
                                       typed: false, args: [], argTypes: [],
                                       depCallee: callee, extOwner: nil))
+                }
+                // SOUNDNESS R1065 — …AND THE INSTANCE SPELLING: `Box(v: E()).get().go()` / `b.get().go()` where the
+                // receiver of `get` is a value of a type this scan neither declares nor extends. `rootOf` cannot
+                // type the result (a dependency's `-> V` names the declaration's parameter, and the wire carries no
+                // generic parameters), so the call was dropped while the FIELD spelling `.v.go()` disclosed. The
+                // same marker asks `typeSurface.returns` for `<Type>.<member>`; a miss on a type a chained report
+                // names discloses, exactly as the static and bare factory spellings do.
+                else if base.root == nil, let recvExpr = ma.base, let callee = depInstanceMemberCallee(recvExpr) {
+                    vbHit("R1065", callee)
+                    var c = Call(path: "<untyped>.\(member)", leaf: member, strArg: nil,
+                                 typed: false, args: [], argTypes: [], depCallee: callee, extOwner: nil)
+                    c.instanceHop = true
+                    calls.append(c)
                 }
                 else if owner == nil, guessedOwner == nil, Self.veinBProbe, let b = ma.base {
                     FileHandle.standardError.write(

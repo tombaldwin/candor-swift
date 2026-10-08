@@ -2977,6 +2977,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         let member = String(f.simpleQual[f.simpleQual.index(after: dot)...])
         localTypeMembers[owner, default: []].insert(member.split(separator: "(").first.map(String.init) ?? member)
     }
+    let localMemberLeaves = Set(localTypeMembers.values.joined())   // SOUNDNESS R1065
     /// `t`'s own members plus every LOCAL supertype's, transitively — an inherited method is callable
     /// bare too. Walked with the same sorted, seen-guarded traversal the dispatch paths use.
     func membersVisibleOn(_ t: String) -> Set<String> {
@@ -4534,6 +4535,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if r836Standalone, r836Probe {
                     FileHandle.standardError.write(
                         "R836HIT \(f.qual) \(call.guessedOwner ?? "?").\(call.leaf)\n".data(using: .utf8)!)
+                }
+                // SOUNDNESS R1065 — an INSTANCE member's result (`dep.label().uppercased()`) is untyped because
+                // the producer publishes `returns` only for its OWN types: `-> String` and `-> V` look alike
+                // here. Disclose only where the next member's leaf could be a body someone answers — declared
+                // by a local type (the generic-argument case: `Box(v: E()).get().go()` runs `E.go`) or published
+                // by a chained package. A leaf only the platform declares (`uppercased`) stays as it was.
+                if call.instanceHop,
+                   !(localMemberLeaves.contains(call.leaf) || deps.anyChainedPackagePublishesLeaf(call.leaf)) {
+                    continue
                 }
                 if chainedHere || r836Standalone {
                     direct[f.qual, default: []].insert("Unknown")

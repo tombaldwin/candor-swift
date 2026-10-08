@@ -151,6 +151,61 @@ final class GenericInstantiationProcessTests: XCTestCase {
         XCTAssertNil(ProcessHarness.chargedNothing(off, "viaBoxGet"), "kill switch restores the release silence")
     }
 
+    // ── R1065 — an INSTANCE member's result on a chained dependency's type is not silence ─────────────────
+    // `Box(v: E()).get().go()` over a dependency's `Box<V>` was `inferred: []` with no disclosure while the field
+    // spelling `.v.go()` disclosed `Unknown[dispatch:untyped cross-package receiver]`, and a dependency member
+    // returning one of its OWN types (`Cli().mk().run()`) was dropped although `typeSurface.returns` answers it.
+    // Executed: `swiftagent-v043/fx/xpkg`.
+    func testAnInstanceMemberResultOnADependencyTypeIsAsked() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("candor-v043-r1065-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fm = FileManager.default
+        for d in ["Gen/Sources/Gen", "App/Sources/App", "deps"] {
+            try fm.createDirectory(at: root.appendingPathComponent(d), withIntermediateDirectories: true)
+        }
+        try """
+        // swift-tools-version:5.7
+        import PackageDescription
+        let package = Package(name: "Gen", products: [.library(name: "Gen", targets: ["Gen"])], targets: [.target(name: "Gen")])
+        """.write(to: root.appendingPathComponent("Gen/Package.swift"), atomically: true, encoding: .utf8)
+        try """
+        import Foundation
+        public struct Box<V> { public let v: V; public init(v: V) { self.v = v }; public func get() -> V { v } }
+        public struct Tool { public init() {}; public func run() -> String? { ProcessInfo.processInfo.environment["HOME"] } }
+        public struct Cli { public init() {}; public func mk() -> Tool { Tool() }; public func label() -> String { "x" } }
+        """.write(to: root.appendingPathComponent("Gen/Sources/Gen/Gen.swift"), atomically: true, encoding: .utf8)
+        try """
+        // swift-tools-version:5.7
+        import PackageDescription
+        let package = Package(name: "App", dependencies: [.package(path: "../Gen")],
+            targets: [.target(name: "App", dependencies: ["Gen"])])
+        """.write(to: root.appendingPathComponent("App/Package.swift"), atomically: true, encoding: .utf8)
+        try """
+        import Foundation
+        import Gen
+        struct E { func go() { \(Self.FS) } }
+        func viaDepBoxGet() { Box(v: E()).get().go() }
+        func viaDepBoxParam(_ b: Box<E>) { b.get().go() }
+        func viaDepConcrete() { _ = Cli().mk().run() }
+        func ctlDepString() { _ = Cli().label().uppercased() }
+        """.write(to: root.appendingPathComponent("App/Sources/App/App.swift"), atomically: true, encoding: .utf8)
+        let rep = try ProcessHarness.run(bin, [root.appendingPathComponent("Gen").path, "--json"])
+        try Data(rep.out.utf8).write(to: root.appendingPathComponent("deps/gen.json"))
+        let deps = root.appendingPathComponent("deps").path, app = root.appendingPathComponent("App").path
+        func scanApp(_ env: [String: String]) throws -> [String: [String: Any]] {
+            try ProcessHarness.fns(ofJson: ProcessHarness.run(bin, [app, "--json"], env: env).out)
+        }
+        let by = try scanApp(["CANDOR_DEPS": deps])
+        for f in ["viaDepBoxGet", "viaDepBoxParam"] {
+            XCTAssertEqual(inf(by, f), ["Unknown"], "R1065: \(f) discloses like the field spelling; got \(by[f] ?? [:])")
+        }
+        XCTAssertEqual(inf(by, "viaDepConcrete"), ["Env"], "R1065: the dependency's `returns` answers the hop")
+        XCTAssertTrue(inf(by, "ctlDepString").isEmpty, "a platform-only leaf is not hedged; got \(by["ctlDepString"] ?? [:])")
+        let off = try scanApp(["CANDOR_DEPS": deps, "CANDOR_R1065_OFF": "1"])
+        XCTAssertTrue(inf(off, "viaDepBoxGet").isEmpty, "kill switch restores the release silence")
+    }
+
     // ── §E3 — every fixture compiles ────────────────────────────────────────────────────────────────────
     func testEveryFixtureTypechecks() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("candor-v043-tc-\(UUID().uuidString)")

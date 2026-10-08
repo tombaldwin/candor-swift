@@ -10,6 +10,19 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — SOUNDNESS R1065: an instance member's result on a dependency's type is asked, not dropped
+
+Executed: `Box(v: E()).get().go()`, `b.get().go()` (`b: Box<E>`) and `Ref(E()).get().go()` over a CHAINED
+dependency's generic type deleted a file while the row read `inferred: []` with no disclosure — `deny Fs Unknown`
+exit 0 — although the field spelling `.v.go()` already disclosed `Unknown[dispatch:untyped cross-package receiver]`.
+The receiver of `get` is a value of a type this scan neither declares nor extends, so `rootOf` could not type the
+result and the call was dropped. It now emits the same `<untyped>.` marker the bare and static factory spellings do,
+keyed `<Type>.<member>`: a `typeSurface.returns` hit resolves it (`Cli().mk().run()` → `Env`, silent on v0.40.1),
+and a miss on a type a chained report names discloses — bounded to a next-member leaf a local type declares or a
+chained package publishes, so `dep.label().uppercased()` (a platform-only leaf) is not hedged. `deny Fs Unknown
+viaDepBoxGet` 0 → 1; `deny Env` on the concrete-return spelling 0 → 1. Kill switch `CANDOR_R1065_OFF`. A RESOLUTION
+of the generic case needs the producer to publish a member's return as a generic-parameter position (a wire rung).
+
 ### ⚠ Fixed — SOUNDNESS R1048 residual: a caller-witness argument is aligned by LABEL, not by position
 
 Executed: `iterL(seq: Loud())` (a generic `<S: Sequence>` parameter iterated by a project function), the same through
@@ -35,7 +48,7 @@ local, or a stored field whose type writes them (`let b: Box<E>`) — and a memb
 with any generic parameter or associated-type name in the scan answers nothing (it names the declaration's
 parameter, not a type; a measured mutant without that filter charged a local type of the same name). Gate
 `deny Fs viaBoxGet` 0 → 1. Kill switch `CANDOR_R1044B_OFF`. Not covered: a dependency's generic type (the wire
-carries no generic parameters — SOUNDNESS R1065) and nested instantiations (`Box(v: Box(v: E())).get().get()`).
+carries no generic parameters; SOUNDNESS R1065 discloses it) and nested instantiations (`Box(v: Box(v: E())).get().get()`).
 - Corpus A/B against the published v0.40.1 binary (23 standalone + 8 chained): REMOVED 0 rows, no concrete effect
   lost; standalone ADDED 6 / CHANGED 33, chained CHANGED 28. Every lost field value is accounted for in the commit.
 
