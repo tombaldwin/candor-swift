@@ -65,7 +65,11 @@ public func s14caller() { Link().s01field() }
         try (policy + "\n").write(to: pf, atomically: true, encoding: .utf8)
         return try ProcessHarness.run(bin, [root.path, "--policy", pf.path, "--json"], env: env).code
     }
-    static let off = ["CANDOR_R976_OFF": "1"]
+    /// …AND `CANDOR_VT_OFF`: since SOUNDNESS R990–R998, the container facts of a declared type are asked
+    /// of ONE authority (`declaredFacts`) whose element helper reads the generic `Array<T>`/`Set<T>` heads
+    /// on its own, so `s03optarr` and `s06arrlocal` charge by that second route with R976 alone switched
+    /// off. "The release" is both switches.
+    static let off = ["CANDOR_R976_OFF": "1", "CANDOR_VT_OFF": "1"]
 
     static let silences = [
         "deny Env Link.s01field", "deny Env Link.s02swfield", "deny Env Link.s03optarr", "deny Env Link.s04dictopt",

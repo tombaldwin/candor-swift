@@ -43,6 +43,9 @@ struct FnInfo {
                                       // `T...`) lifts the arg-count upper bound (`run(_:String,_:Binding?...)`).
     var loc: String
     var params: [String: String] = [:]       // param name -> type name (concrete)
+    var paramDeclTypes: [String: TypeSyntax] = [:]   // SOUNDNESS R992 — each parameter's written type
+    var paramLabels: [String] = []                   // SOUNDNESS R999 — external label per position (`_` = none)
+    var genericParamNames: Set<String> = []          // SOUNDNESS R999 — the function's OWN generic parameters
     var paramNames: Set<String> = []         // EVERY parameter name, whatever its type resolved to. `params`
                                              // and its five siblings each hold the subset they could type, so
                                              // none of them — nor their union — is the signature. A body
@@ -300,6 +303,9 @@ final class DeclCollector: SyntaxVisitor {
     var fieldArrayElem: [String: [String: String]] = [:]  // Type -> field -> ELEMENT type (`[T]` field)
     var fieldArrayElemNested: [String: [String: String]] = [:]  // R278 — `[[T]]` field -> INNER element `T`
     var fieldDictValue: [String: [String: String]] = [:]  // Type -> field -> VALUE type (`[K: V]` field)
+    /// SOUNDNESS R905 (the platform-element half) — Type -> field -> the field type's DIRECT generic arguments
+    /// (`NSCache<NSString, StorageObject<T>>` -> `["NSString", "StorageObject"]`), annotated or constructed.
+    var fieldTypeArgs: [String: [String: [String]]] = [:]
     /// SOUNDNESS R534 — A PARAMETER'S DECLARED TYPE, SEEING THROUGH `T!`.
     ///
     /// `ImplicitlyUnwrappedOptionalTypeSyntax` is its own node kind, NOT an `OptionalTypeSyntax`, and the
@@ -352,6 +358,18 @@ final class DeclCollector: SyntaxVisitor {
     /// SOUNDNESS R585 (b10) — the METATYPE twin of `caseAssoc`: `case c(CBase.Type)`. Same
     /// single-value, unambiguous-name discipline; separate map for `globalMetatypes`' reason.
     var caseAssocMetatype: [String: Set<String>] = [:]
+    /// SOUNDNESS R990–R998 §1b KILL SWITCHES — each restores the release's reading of one binder, so the
+    /// value-typing fixtures can be SHOWN to fail without a revert. `CANDOR_VT_OFF` turns every one off.
+    static let vtOff = ProcessInfo.processInfo.environment["CANDOR_VT_OFF"] != nil
+    static let r990Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R990_OFF"] != nil
+    static let r991Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R991_OFF"] != nil
+    static let r992Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R992_OFF"] != nil
+    static let r993Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R993_OFF"] != nil
+    static let r994Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R994_OFF"] != nil
+    static let r995Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R995_OFF"] != nil
+    static let r996Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R996_OFF"] != nil
+    static let r997Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R997_OFF"] != nil
+    static let r998Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R998_OFF"] != nil
     /// SOUNDNESS R585 §1b KILL SWITCH, the DECLARATION-side half. `CallCollector`'s switch degrades the
     /// resolvers; this one degrades the one index change that is visible THROUGH an older resolver —
     /// `metatypeParams` peeling an Optional (b8), which reaches R584's `typeBoundParams` arm and would
@@ -473,6 +491,18 @@ final class DeclCollector: SyntaxVisitor {
     /// SOUNDNESS R585 (b6) — a global array OF METATYPES: `let all: [CBase.Type] = […]`. The
     /// `globalArrayElem` twin for the type-position question, for `globalMetatypes`' reason.
     var globalMetatypeArrayElem: [String: String] = [:]
+    /// SOUNDNESS R994 — a module-scope DICTIONARY global (`var g: [String: Ctx]`), its VALUE type: the
+    /// `fieldDictValue`/`dictParams` twin this binder never had, so `g["k"]?.invoke()` reached nothing.
+    var globalDictValue: [String: String] = [:]
+    /// SOUNDNESS R992 — a `typealias` whose right-hand side is a CONTAINER (`typealias A = [Ctx]`), kept as
+    /// SYNTAX because `typeAliases` holds a NAME and a container has none. Keyed `Owner.Name` for a member
+    /// alias and bare for a file-scope one; resolved after every file is read (`DeclaredFacts`' `expand`).
+    var containerAliasDecls: [String: [TypeSyntax]] = [:]
+    /// SOUNDNESS R990/R991 — every declared RETURN CLAUSE, as syntax, keyed by the leaf AND by
+    /// `Owner.leaf`. `returnsTmp` keeps only a NAMED return under the bare leaf, so a collection return had
+    /// no entry and a method name shared by two types with different returns had a POISONED one — the
+    /// census's `M_*.use` (`let x = mk(); …`) read nothing for every type, `Ctx?` included.
+    var returnDecls: [String: [(type: TypeSyntax, generics: Set<String>, scope: String?)]] = [:]
     // Capitalized @-attributes applied to a class/struct/enum/actor DECLARATION itself (`@Observable
     // class Store`), raw and unfiltered — the type-level companion to `FnInfo.uppercaseAttrs`. Swift
     // admits exactly two explanations for a capitalized custom attribute here: a global actor (excluded
@@ -711,6 +741,15 @@ final class DeclCollector: SyntaxVisitor {
     private func inferGlobalType(name: String, annotation: TypeSyntax?, initExpr: ExprSyntax?, isPublicGlobal: Bool) {
         if let ann = annotation {
             let info = typeName(ann)
+            // SOUNDNESS R994 — THE CONTAINER FACTS ARE NOT AN ALTERNATIVE TO THE NAME. `Set<Ctx>` has the
+            // name `Set`, so the `else` below never asked for its element, and no arm here asked for a
+            // dictionary's value at all — `for y in g` / `g["k"]?.invoke()` over a global reached nothing
+            // while the identical parameter charged. The stored-property binder records both; so does this.
+            if !Self.r994Off {
+                let f = declaredFacts(ann)
+                if info.name != nil, !info.isFunction, let e = f.arrayElem { globalArrayElem[name] = e }
+                if let v = f.dictValue { globalDictValue[name] = v }
+            }
             if let tn = info.name, !info.isFunction {
                 globalTypes[name] = tn
                 if isPublicGlobal { globalPublic.insert(name) }
@@ -872,6 +911,11 @@ final class DeclCollector: SyntaxVisitor {
     // out (no single κ-relevant type). The CallCollector resolves a receiver/type spelling through these.
     override func visit(_ node: TypeAliasDeclSyntax) -> SyntaxVisitorContinueKind {
         let t = typeName(node.initializer.value)
+        // SOUNDNESS R992 — a CONTAINER alias, recorded beside (never instead of) the name table below.
+        if !Self.r992Off, declaredFacts(node.initializer.value).hasContainerFact {
+            let key = typeStack.last.map { "\($0).\(node.name.text)" } ?? node.name.text
+            containerAliasDecls[key, default: []].append(node.initializer.value)
+        }
         if let underlying = t.name {
             typeAliases[node.name.text] = underlying
             if typeStack.isEmpty { fileTypeAliases[node.name.text] = underlying }   // VEIN A(i) N-d
@@ -1295,6 +1339,8 @@ final class DeclCollector: SyntaxVisitor {
                         fieldArrayElemNested[ty, default: [:]][name] = inner
                     } else if let elem = arrayElementName(ann.type) { fieldArrayElem[ty, default: [:]][name] = elem }
                     if let val = dictValueName(ann.type) { fieldDictValue[ty, default: [:]][name] = val }
+                    let targs = directGenericArgumentNames(ann.type)
+                    if !targs.isEmpty { fieldTypeArgs[ty, default: [:]][name] = targs }   // R905
                 } else if let initVal = binding.initializer?.value,
                           let call = initVal.as(FunctionCallExprSyntax.self),
                           let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self) {
@@ -1319,6 +1365,11 @@ final class DeclCollector: SyntaxVisitor {
                     // their own `channelRead` instead of the state machine's). The value IS a `Machine` —
                     // R905's rule for a local binder, applied to the stored property.
                     fields[ty, default: [:]][name] = (ctor.baseName.text, false)
+                    let targs = g.genericArgumentClause.arguments.compactMap {
+                        $0.argument.as(TypeSyntax.self).flatMap { typeName($0).name } }
+                    if targs.count == g.genericArgumentClause.arguments.count {
+                        fieldTypeArgs[ty, default: [:]][name] = targs   // R905
+                    }
                 } else if let initVal = binding.initializer?.value,
                           let ma = initVal.as(MemberAccessExprSyntax.self),
                           let base = ma.base?.as(DeclReferenceExprSyntax.self),
@@ -1542,6 +1593,7 @@ final class DeclCollector: SyntaxVisitor {
             ?? Syntax(node).as(InitializerDeclSyntax.self)?.genericParameterClause
         for gp in genClause?.parameters ?? [] {
             if let it = gp.inheritedType, let bound = typeName(it).name { genericBounds[gp.name.text] = bound }
+            info.genericParamNames.insert(gp.name.text)   // R999
         }
         let whereClause = Syntax(node).as(FunctionDeclSyntax.self)?.genericWhereClause
             ?? Syntax(node).as(InitializerDeclSyntax.self)?.genericWhereClause
@@ -1579,6 +1631,7 @@ final class DeclCollector: SyntaxVisitor {
                 info.metatypeDictParams[pname] = mv      // R615
             }
             info.paramNames.insert(pname)
+            info.paramDeclTypes[pname] = p.type   // SOUNDNESS R992 — re-read once every alias is known
             info.paramIndex[pname] = idx        // R178 — see `paramIndex`
             let targs = genericArgumentNames(p.type)
             if !targs.isEmpty { info.paramTypeArgs[pname] = targs }       // R951
@@ -1586,6 +1639,7 @@ final class DeclCollector: SyntaxVisitor {
             // ordered signature for overload resolution: the param's simple type name (nil if unresolvable)
             // and whether it has a default (so a call may legitimately omit it).
             info.paramSig.append((t.name, p.defaultValue != nil, p.ellipsis != nil))
+            info.paramLabels.append(p.firstName.text)   // SOUNDNESS R999 — the argument LABEL at this position
             if t.isFunction { info.fnTypedParams.insert(pname); info.fnTypedParamIndex[pname] = idx }
             // Container ELEMENT extraction runs before the plain-typed-param branch: a generic container
             // (`Array<T>`/`Set<T>`/`AsyncStream<T>`/`TaskGroup<T>`) has a non-nil simple name, so without
@@ -1733,6 +1787,17 @@ final class DeclCollector: SyntaxVisitor {
             recordTypeGenerics(ty, nil, node.genericWhereClause, memberLevel: true)
         }
         recordReturn(node.name.text, node.signature)
+        if let rc = node.signature.returnClause {   // SOUNDNESS R990/R991 — see `returnDecls`
+            // The function's OWN generic parameters travel with the type: `-> T` names no type at all, and
+            // a local type that happens to be called `T`/`Value`/`Element` must not answer for it. The
+            // owner's generic parameters are added in the Driver, once every file's are known.
+            let gens = Set(node.genericParameterClause?.parameters.map { $0.name.text } ?? [])
+            let scope = typeStack.isEmpty ? nil : typeStack.joined(separator: ".")
+            returnDecls[node.name.text, default: []].append((rc.type, gens, scope))
+            if let owner = typeStack.last {
+                returnDecls["\(owner).\(node.name.text)", default: []].append((rc.type, gens, scope))
+            }
+        }
         recordOpaqueSeqReturn(node.name.text, node.signature, body: node.body)
         collect(node.name.text, sig: node.signature, body: node.body, node: node)
         queueBodyLocalTypes(node.body)   // R532 — the conformance the lexical walk does NOT carry
@@ -1915,6 +1980,16 @@ private final class BodyLocalTypeFinder: SyntaxVisitor {
 /// order and de-duplicated: `Tiny<Noisy>.Storage` -> [Noisy]; `[Pair<A, B>]` -> [Pair, A, B]; `Noisy?` and
 /// `[Noisy]` -> [Noisy] (an Optional / Array / Dictionary spelling IS a generic argument). The outermost
 /// nominal type itself is not included.
+/// SOUNDNESS R905 — the DIRECT generic arguments of a nominal type spelling, in order, or `[]` when any of them
+/// has no name (a function type, a tuple) — a partial list would misalign the positions a caller indexes.
+func directGenericArgumentNames(_ t: TypeSyntax) -> [String] {
+    var x = desugaredType(t)
+    if let o = x.as(OptionalTypeSyntax.self) { x = o.wrappedType }
+    guard let id = x.as(IdentifierTypeSyntax.self), let clause = id.genericArgumentClause else { return [] }
+    let names = clause.arguments.compactMap { $0.argument.as(TypeSyntax.self).flatMap { typeName($0).name } }
+    return names.count == clause.arguments.count ? names : []
+}
+
 func genericArgumentNames(_ t: TypeSyntax) -> [String] {
     var out: [String] = []
     func add(_ x: TypeSyntax) {

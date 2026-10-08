@@ -39,11 +39,11 @@ import Foundation
 ///   one, because `rootOf`'s member arm falls through to the BASE's type for a member it cannot place.
 final class CopiedContainerBinderTests: XCTestCase {
 
-    private func scan(_ src: String, _ name: String) throws -> [String: [String: Any]] {
+    private func scan(_ src: String, _ name: String, env: [String: String] = [:]) throws -> [String: [String: Any]] {
         let bin = try ProcessHarness.binaryURL(for: Self.self)
         let root = try ProcessHarness.makePackage(src, name: name)
         defer { try? FileManager.default.removeItem(at: root) }
-        let r = try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path])
+        let r = try ProcessHarness.run(bin, [root.path, "--out", root.appendingPathComponent("r").path], env: env)
         XCTAssertEqual(r.code, 0, r.err)
         let d = try JSONSerialization.jsonObject(
             with: Data(contentsOf: root.appendingPathComponent("r.\(name).Swift.json"))) as? [String: Any]
@@ -185,11 +185,47 @@ final class CopiedContainerBinderTests: XCTestCase {
     /// because `elementTypeOf` will not guess an element type from a call return, which is what keeps
     /// Alamofire's `finishHandlers` from being guessed at. If this ever starts passing, the fix has
     /// grown past the boundary this row drew and the guess needs its own evidence.
+    ///
+    /// SOUNDNESS R991 MOVED THE BOUNDARY, WITH ITS OWN EVIDENCE: the element is now READ from the callee's
+    /// DECLARED return clause (`makeStores() -> [Store]`), keyed the way Swift resolves the call — a member
+    /// of the enclosing type first, a project free function by its leaf — and never from a guess. What stays
+    /// out is exactly what this test was protecting: Alamofire's `finishHandlers` is the result of a GENERIC
+    /// `write<U>(_:) -> U`, whose return names no type, and a fact naming a generic parameter poisons its key
+    /// (the `generic*StaysUntyped` controls below). With `CANDOR_R991_OFF` the release's absence is restored.
     func testAnElementTypeIsNotGuessedFromACallReturn() throws {
         let by = try scan(Self.copyFixture, "Copy")
-        XCTAssertNil(by["H.ctlCallReturn"],
-                     "a call return must not be given an element type; this is an ACCEPTED under-report, "
-                     + "not a claim of purity — see the type doc")
+        XCTAssertEqual(ProcessHarness.inferred(by, "H.ctlCallReturn"), ["Fs"],
+                       "R991 — `makeStores() -> [Store]` DECLARES its element; the forEach really writes the file")
+        let off = try scan(Self.copyFixture, "Copy", env: ["CANDOR_R991_OFF": "1"])
+        XCTAssertNil(off["H.ctlCallReturn"], "§1b — the release's accepted under-report, restored by the switch")
+        // THE FABRICATION CONTROL: a local type NAMED like a generic parameter, with an effectful method
+        // of the name the program calls. Typing `t` as that local `T` would charge `Fs` to a call that
+        // really runs the PURE `Q.eff`. Compiles; `t.eff()` is `Q.eff`.
+        let gen = try scan("""
+        import Foundation
+        protocol P { func eff() }
+        struct Q: P { func eff() { } }
+        struct T { func eff() { try? "x".write(toFile: "/tmp/r991-T.txt", atomically: true, encoding: .utf8) } }
+        struct U { func eff() { try? "x".write(toFile: "/tmp/r991-U.txt", atomically: true, encoding: .utf8) } }
+        final class Box<U: P> { var v: U; init(_ v: U) { self.v = v }; func get() -> U { v }; func all() -> [U] { [v] } }
+        func pass<T: P>(_ x: T) -> T { x }
+        // Each leaf is POISONED by a second, differently-typed declaration, so the release's leaf index
+        // cannot answer and only R990/R991's qualified keys could — which is the arm under test. (With an
+        // UNPOISONED leaf the release's own `returns` index types `-> T` as the local `T`: pre-existing,
+        // filed separately, and not this change's to move.)
+        struct Z { func pass() -> Int { 1 }; func get() -> Int { 1 }; func all() -> Int { 1 } }
+        final class H {
+          let box = Box(Q())
+          func genericLeafStaysUntyped() { let t = pass(Q()); t.eff() }
+          func genericOwnerStaysUntyped() { let u = box.get(); u.eff() }
+          func genericElementStaysUntyped() { for u in box.all() { u.eff() } }
+        }
+        """, "Gen")
+        for fn in ["H.genericLeafStaysUntyped", "H.genericOwnerStaysUntyped", "H.genericElementStaysUntyped"] {
+            XCTAssertFalse(ProcessHarness.inferred(gen, fn)?.contains("Fs") ?? false,
+                           "\(fn): a generic return names no type — `Fs` would be the local namesake's; got \(gen[fn] ?? [:])")
+        }
+        XCTAssertNil(gen["H.genericLeafStaysUntyped"], "`-> T` must not resolve to the local type `T`")
     }
 
     // ────────────────────────────────────────────────────────────────────────────────────────────────

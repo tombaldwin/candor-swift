@@ -360,6 +360,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var fieldMetatypeArrayElem: [String: [String: String]] = [:]
     var fieldArrayElemNested: [String: [String: String]] = [:]   // R278
     var fieldDictValue: [String: [String: String]] = [:]
+    var fieldTypeArgs: [String: [String: [String]]] = [:]   // SOUNDNESS R905
     var opaqueFields: [String: Set<String>] = [:]
     var caseAssocAll: [String: Set<String>] = [:]
     var caseAssocMetatypeAll: [String: Set<String>] = [:]   // R585 (b10)
@@ -403,6 +404,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// module-sliced for the same reason those are.
     var globalMetatypesByModule: [String: [String: String]] = [:]
     var globalMetatypeArrayElemByModule: [String: [String: String]] = [:]
+    var globalDictValueByModule: [String: [String: String]] = [:]   // SOUNDNESS R994
     // (module, global name, factory leaf) for a global initialized by a bare lowercase call
     // (`let x = makeX()`) — the leaf's return type isn't known until `returnsIdx` is built, so resolution
     // is deferred exactly like `staticFactoryFields` above.
@@ -939,6 +941,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (t, fs) in c.fieldMetatypeArrayElem { fieldMetatypeArrayElem[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.fieldArrayElemNested { fieldArrayElemNested[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.fieldDictValue { fieldDictValue[t, default: [:]].merge(fs) { a, _ in a } }
+        for (t, fs) in c.fieldTypeArgs { fieldTypeArgs[t, default: [:]].merge(fs) { a, _ in a } }   // R905
         for (t, fs) in c.opaqueFields { opaqueFields[t, default: []].formUnion(fs) }
         for (cn, ts) in c.caseAssoc { caseAssocAll[cn, default: []].formUnion(ts) }
         for (cn, ts) in c.caseAssocMetatype { caseAssocMetatypeAll[cn, default: []].formUnion(ts) }   // R585
@@ -992,6 +995,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // R85 defect, not a style choice.
         globalPublicByModule[cMod, default: []].formUnion(c.globalPublic)
         globalArrayElemByModule[cMod, default: [:]].merge(c.globalArrayElem) { a, _ in a }
+        globalDictValueByModule[cMod, default: [:]].merge(c.globalDictValue) { a, _ in a }   // R994
         globalMetatypesByModule[cMod, default: [:]].merge(c.globalMetatypes) { a, _ in a }              // R585
         globalMetatypeArrayElemByModule[cMod, default: [:]].merge(c.globalMetatypeArrayElem) { a, _ in a }
         globalFactories.append(contentsOf: c.globalFactories.map { (cMod, $0.name, $0.leaf) })
@@ -1534,6 +1538,81 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
 
     for (k, v) in returnsTmp { if let t = v { returnsIdx[k] = t } }
+    // SOUNDNESS R990–R992 — THE DECLARED-TYPE FACTS, resolved once every file's aliases are known.
+    // A container alias declared twice with different right-hand sides (two `#if` arms, two scopes sharing a
+    // simple owner name) is POISONED rather than chosen: the same never-guess rule `returnsTmp` applies.
+    var containerAliasTmp: [String: TypeSyntax?] = [:]
+    for c in collectors {
+        for (k, ts) in c.containerAliasDecls {
+            for t in ts {
+                if let existing = containerAliasTmp[k] {
+                    if existing?.trimmedDescription != t.trimmedDescription { containerAliasTmp[k] = TypeSyntax?.none }
+                } else { containerAliasTmp[k] = t }
+            }
+        }
+    }
+    var containerAliasIdx: [String: TypeSyntax] = [:]
+    for (k, v) in containerAliasTmp { if let t = v { containerAliasIdx[k] = t } }
+    // A name this scan DECLARES as a type is that type, never an alias — `dealias`'s shadow rule.
+    let aliasExpander: (String?) -> ((String) -> TypeSyntax?) = { owner in
+        { name in
+            if localTypes.contains(name) { return nil }
+            if let o = owner, let t = containerAliasIdx["\(o).\(name)"] { return t }
+            return containerAliasIdx[name]
+        }
+    }
+    // `returnFactsIdx` — leaf AND `Owner.leaf` -> the facts of the declared return clause. Every declaration
+    // under one key must agree, or the key answers nothing: the leaf `mk` declared `-> [Ctx]` on one type
+    // and `-> Int` on another is poisoned exactly as `returnsTmp` poisons it, and the `Owner.mk` keys are
+    // what then still answer for each type.
+    var returnFactsTmp: [String: DeclaredFacts?] = [:]
+    if !DeclCollector.r991Off || !DeclCollector.r990Off {
+        for c in collectors {
+            for (k, ts) in c.returnDecls {
+                let owner = k.contains(".") ? String(k.split(separator: ".").first!) : nil
+                for (t, fnGens, scope) in ts {
+                    var f = declaredFacts(t, expand: DeclCollector.r992Off ? nil : aliasExpander(owner))
+                    // A fact that names a GENERIC PARAMETER (the function's, or — for a member — any type's
+                    // of that simple name, since an extension does not repeat them) or `Self` describes no
+                    // type: the key is POISONED, so it can neither answer nor be answered by a sibling.
+                    var gens = fnGens.union(["Self"])
+                    if let o = owner { gens.formUnion(typeGenericParamNamesAI[o] ?? []) }
+                    else { for (_, ns) in typeGenericParamNamesAI { gens.formUnion(ns) } }
+                    let named = [f.scalar, f.arrayElem, f.arrayElemNested, f.dictValue].compactMap { $0 }
+                    if named.contains(where: { gens.contains($0) || gens.contains(String($0.split(separator: ".").first ?? "")) }) {
+                        returnFactsTmp[k] = DeclaredFacts?.none
+                        continue
+                    }
+                    // A SHARED simple type name is resolved in the DECLARING scope — `-> Builder` inside
+                    // `extension _HashNode` is `_HashNode.Builder`, not swift-collections' `Rope.Builder` (the
+                    // fabricated `Rand` this change's own A/B found on `TreeDictionary.filter`). The innermost
+                    // enclosing type that nests the name wins; a unique name stays as written; an ambiguous one
+                    // with no match in scope POISONS the key rather than choosing.
+                    var unresolvable = false
+                    func scoped(_ n: String?) -> String? {
+                        guard let n, !n.contains("."), let paths = typePathsBySimple[n], paths.count > 1 else { return n }
+                        var parts = (scope ?? "").split(separator: ".").map(String.init)
+                        while !parts.isEmpty {
+                            let cand = parts.joined(separator: ".") + "." + n
+                            if localTypePaths.contains(cand) { return cand }
+                            parts.removeLast()
+                        }
+                        if localTypePaths.contains(n) { return n }   // a top-level declaration of the name
+                        unresolvable = true; return n
+                    }
+                    f.scalar = scoped(f.scalar); f.arrayElem = scoped(f.arrayElem)
+                    f.arrayElemNested = scoped(f.arrayElemNested); f.dictValue = scoped(f.dictValue)
+                    if unresolvable { returnFactsTmp[k] = DeclaredFacts?.none; continue }
+                    if let existing = returnFactsTmp[k] {
+                        if existing != f { returnFactsTmp[k] = DeclaredFacts?.none }
+                    } else { returnFactsTmp[k] = f }
+                }
+            }
+        }
+    }
+    var returnFactsIdx: [String: DeclaredFacts] = [:]
+    for (k, v) in returnFactsTmp { if let f = v { returnFactsIdx[k] = f } }
+    // (member-alias canonicalisation of `returnFactsIdx` happens below, once `memberTypeAliasesR915` exists)
     // R585 (b9) — and a leaf the ORDINARY returns index already answers is left to it: this map may
     // add a resolution where there was none, never replace one (the R584 additive rule).
     for (k, v) in metatypeReturnsTmp { if let t = v, returnsIdx[k] == nil { metatypeReturnsIdx[k] = t } }
@@ -1561,6 +1640,96 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     fields[ty]![fname] = (u, f.isFunction)
                 }
             }
+        }
+    }
+    // SOUNDNESS R990 — A RETURN SPELLED WITH THE OWNER'S MEMBER ALIAS IS RESOLVED IN THE OWNER'S SCOPE, exactly
+    // as R915 (B) resolves a field above. `func synchronized_subscribe() -> Connection` inside RxSwift's
+    // `ShareReplay1WhileConnected` names `ShareReplay1WhileConnected.Connection`; handed to the caller as the bare
+    // spelling `Connection`, the caller dealiased it through the last-writer-wins name table — another class's
+    // `Connection` — and the binding's member calls went to the wrong type (measured: `subscribe` lost `Clock`).
+    // An alias the owner declares that does not resolve to a recordable type POISONS the key: a bare member
+    // alias name is never an answer outside the scope that declared it.
+    for k in Array(returnFactsIdx.keys) where k.contains(".") {
+        let owner = String(k.split(separator: ".").first!)
+        guard let aliases = memberTypeAliasesAll[owner], var f = returnFactsIdx[k] else { continue }
+        var poisoned = false
+        func canon(_ n: String?) -> String? {
+            guard let n, aliases[n] != nil else { return n }
+            if let u0 = memberTypeAliasesR915[owner]?[n],
+               let u = memberAliasRecordable(resolveMemberAliasChain(u0, memberTypeAliasesR915), localTypes) { return u }
+            poisoned = true; return n
+        }
+        f.scalar = canon(f.scalar); f.arrayElem = canon(f.arrayElem)
+        f.arrayElemNested = canon(f.arrayElemNested); f.dictValue = canon(f.dictValue)
+        if poisoned { returnFactsIdx.removeValue(forKey: k) } else { returnFactsIdx[k] = f }
+    }
+    // SOUNDNESS R999 — EACH FUNCTION'S PARAMETER TYPES BY ARGUMENT LABEL, the contextual type an implicit member
+    // argument (`f(domain: .unix)`) is resolved against. Keyed by `simpleQual` (`f`, `T.f`, `T.init`); one entry
+    // per overload. A parameter typed by a GENERIC parameter (the function's own, or its owner's) or `Self` has
+    // no contextual type to give, and an owner's member alias is resolved in the owner's scope (as above).
+    var implicitParamIdx: [String: [[(label: String, type: String?)]]] = [:]
+    // A parameter's type NAME is resolved in the CALLEE's scope, the way Swift resolves it there: the innermost
+    // enclosing type that nests a type of that name, else the one declared type of that name. A simple name
+    // several types nest with none in scope is AMBIGUOUS and gives no context; a PROTOCOL gives none either (the
+    // first corpus run's fabricated `dispatch:` hedges were nested `State`/`Error` spellings resolved out of
+    // scope); a name no local type declares is a platform/dependency type and is kept as written.
+    func scopedContextType(_ n: String, scope: String?, generics: Set<String>) -> String? {
+        if generics.contains(n) || n == "Self" { return nil }
+        if n.contains(".") { return protocolPaths.contains(n) ? nil : n }
+        let paths = typePathsBySimple[n] ?? []
+        if paths.isEmpty { return n }
+        if let sc = scope {
+            var parts = sc.split(separator: ".").map(String.init)
+            while !parts.isEmpty {
+                let cand = parts.joined(separator: ".") + "." + n
+                if localTypePaths.contains(cand) {
+                    return protocolPaths.contains(cand) ? nil : (paths.count == 1 ? n : cand)
+                }
+                parts.removeLast()
+            }
+        }
+        guard paths.count == 1, let only = paths.first, !protocolPaths.contains(only) else { return nil }
+        return n
+    }
+    if !CallCollector.r999Off {
+        for f in allFns where !f.isAccessor && !f.paramLabels.isEmpty {
+            var gens = f.genericParamNames.union(["Self"])
+            if let o = f.enclosingType { gens.formUnion(typeGenericParamNamesAI[o] ?? []) }
+            let byIndex = Dictionary(f.paramIndex.map { ($0.value, $0.key) }, uniquingKeysWith: { a, _ in a })
+            var sig: [(label: String, type: String?)] = []
+            for (i, label) in f.paramLabels.enumerated() {
+                var t: String? = nil
+                if let pn = byIndex[i], let ty = f.paramDeclTypes[pn] {
+                    let facts = declaredFacts(ty)
+                    if let sc = facts.scalar, !facts.isFunction, !gens.contains(sc),
+                       !gens.contains(String(sc.split(separator: ".").first ?? "")) {
+                        t = sc
+                        if let o = f.enclosingType, let al = memberTypeAliasesAll[o], al[sc] != nil {
+                            t = memberTypeAliasesR915[o]?[sc].flatMap {
+                                memberAliasRecordable(resolveMemberAliasChain($0, memberTypeAliasesR915), localTypes) }
+                        }
+                        t = t.flatMap { scopedContextType($0, scope: f.enclosingTypePath ?? f.enclosingType, generics: gens) }
+                    }
+                }
+                sig.append((label, t))
+            }
+            // An OVERLOAD's `simpleQual` carries its disambiguation (`pick(Top)`, `bind(…)#1`); the call site
+            // spells only the name, and every overload under it must be asked.
+            let key = String(f.simpleQual.prefix { $0 != "(" && $0 != "#" })
+            implicitParamIdx[key, default: []].append(sig)
+        }
+    }
+    // SOUNDNESS R999 — the `Type.member` keys this scan has a BODY for. An implicit member on a LOCAL type with
+    // no such body is an enum case or a synthesized (memberwise) initialiser: nothing runs that the scan could
+    // charge, and walking its qualified spelling only reaches the engine's missed-member fallback — which, in the
+    // first corpus run, hedged `dispatch:` Unknowns over protocols the type merely conforms to.
+    var implicitMemberUnits: Set<String> = []
+    if !CallCollector.r999Off {
+        for f in allFns {
+            // keyed `<type leaf>.<member>`: a member written in `extension Outer.Inner` has the simpleQual
+            // `Outer.Inner.member`, and the context type is resolved to its leaf `Inner`
+            let parts = String(f.simpleQual.prefix { $0 != "(" && $0 != "#" }).split(separator: ".").map(String.init)
+            implicitMemberUnits.insert(parts.suffix(2).joined(separator: "."))
         }
     }
     // R73 — same deferred resolution for a module-scope global initialized by a bare factory call
@@ -1868,7 +2037,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var callsiteArgs: [String: [(caller: String, args: [ArgKind])]] = [:]
     /// SOUNDNESS R951 — the argument TYPES at each resolved call site, beside `callsiteArgs`; and the
     /// comparison witnesses each unit needs from its caller's instantiation (`CallCollector.genericWitnessReqs`).
-    var callsiteArgTypes: [String: [(caller: String, types: [String?])]] = [:]
+    var callsiteArgTypes: [String: [(caller: String, types: [String?], forward: [Int: Int])]] = [:]
     var genericWitnessReqsByUnit: [String: Set<String>] = [:]
     var deferredCallbacks: [String: (indexes: Set<Int>, names: Set<String>)] = [:]
 
@@ -2134,6 +2303,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// SOUNDNESS R859 §1b KILL SWITCH and reach probe — see the R859 arm after the R705 disclosure.
     let r859Off = ProcessInfo.processInfo.environment["CANDOR_R859_OFF"] != nil
     let r859Probe = ProcessInfo.processInfo.environment["CANDOR_R859_PROBE"] != nil
+    /// SOUNDNESS R706 §1b KILL SWITCH (and `CANDOR_VT_OFF`) and reach probe (under `CANDOR_VEINB_PROBE`).
+    let r706Off = DeclCollector.vtOff || ProcessInfo.processInfo.environment["CANDOR_R706_OFF"] != nil
+    let r706Probe = CallCollector.veinBProbe
     /// SPEC ⟨0.25⟩ at the cross-package join: §1b kill switch (restores drop-on-ambiguity) and reach probe.
     let joinUnionOff = ProcessInfo.processInfo.environment["CANDOR_JOIN_UNION_OFF"] != nil
     let joinUnionProbe = ProcessInfo.processInfo.environment["CANDOR_JOIN_UNION_PROBE"] != nil
@@ -2796,6 +2968,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         guard let et = f.enclosingType else { continue }
         let leaf = String((f.simpleQual.split(separator: ".").last.map(String.init) ?? "").prefix { $0 != "(" && $0 != "#" })
         if leaf == "==" || leaf == "<" { opWitnessTypesR951[leaf, default: []].insert(et) }
+        // SOUNDNESS R974 (b) — a declared `hash(into:)` is the Hashable witness container operations run.
+        if leaf == "hash", f.paramLabels == ["into"] { opWitnessTypesR951["hash", default: []].insert(et) }
     }
     var aiBase = AiTypeIndex()
     var aiSharedPaths = Set<String>()      // the FULL paths added above — the canonicaliser's precise spellings
@@ -2891,9 +3065,36 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             else if localTypes.contains(base) { typeBoundParamsMap[pn] = base }
             else { metatypeParamsForeign[pn] = base }   // R704
         }
+        // SOUNDNESS R992 — a parameter whose written type is a CONTAINER ALIAS (`_ x: A` where `typealias
+        // A = [Ctx]`) gets the facts the spelled-out `[Ctx]` gets. DeclCollector reads one file and the
+        // alias may live in another, so this is asked here, once all are known. ADDITIVE: a parameter
+        // DeclCollector already gave a container record keeps it.
+        var f = f
+        if !DeclCollector.r992Off {
+            for (pn, t) in f.paramDeclTypes where f.arrayParams[pn] == nil && f.dictParams[pn] == nil
+                && f.arrayParamsNested[pn] == nil {
+                let x = expandTypeAliasHead(t, aliasExpander(f.enclosingType))
+                guard x.trimmedDescription != t.trimmedDescription else { continue }
+                let facts = declaredFacts(x)
+                if CallCollector.veinBProbe, facts.hasContainerFact {
+                    FileHandle.standardError.write("VBHIT\tR992\tparam \(f.qual) \(pn)\n".data(using: .utf8)!)
+                }
+                if let inner = facts.arrayElemNested { f.arrayParamsNested[pn] = inner }
+                else if let e = facts.arrayElem {
+                    f.arrayParams[pn] = e
+                    if facts.arrayElemOpaque { f.opaqueArrayParams.insert(pn) }
+                }
+                if let v = facts.dictValue { f.dictParams[pn] = v }
+            }
+        }
         let cc = CallCollector(info: f, fields: fields, localTypes: localTypes,
                                globalTypes: effectiveGlobalTypes,
                                globalArrayElem: globalArrayElemByModule[swiftModuleOf(f.loc)] ?? [:],
+                               globalDictValue: globalDictValueByModule[swiftModuleOf(f.loc)] ?? [:],   // R994
+                               containerAliases: containerAliasIdx,                                    // R992
+                               returnFacts: returnFactsIdx,                                            // R990/R991
+                               implicitParams: implicitParamIdx,                                       // R999
+                               implicitMemberUnits: implicitMemberUnits,                               // R999
                                declaredTypes: declaredTypes,
                                localProtocols: localProtocolNames,
                                // SOUNDNESS R563 — the unit's GENERIC PARAMETERS that are bound to a LOCAL
@@ -2934,6 +3135,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                fieldMetatypeArrayElem: fieldMetatypeArrayElem,
                                fieldArrayElem: fieldArrayElem, fieldArrayElemNested: fieldArrayElemNested,
                                fieldDictValue: fieldDictValue,
+                               fieldTypeArgs: fieldTypeArgs,                                           // R905
                                opaqueFields: opaqueFields,
                                enumCaseValueType: enumCaseValueType,
                                metatypeEnumCaseValueType: metatypeEnumCaseValueType,   // R585
@@ -3280,7 +3482,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                !localTypes.contains(modName),                       // a real type shadows a module name
                let inMod = freeFnByModule[modName]?[call.leaf], inMod.count == 1 {
                 edges[f.qual, default: []].insert(inMod[0])
-                callsiteArgs[inMod[0], default: []].append((f.qual, call.args)); callsiteArgTypes[inMod[0], default: []].append((f.qual, call.argTypes))
+                callsiteArgs[inMod[0], default: []].append((f.qual, call.args)); callsiteArgTypes[inMod[0], default: []].append((f.qual, call.argTypes, call.genericForward))
                 resolved = true
             } else if call.extOwner == CallCollector.superMarker {
                 // `super.m()` — resolve on the SUPERTYPE chain, never on the enclosing type: for an
@@ -3294,7 +3496,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     for sup in supertypesOf[et] ?? [] where sup != et {
                         for t in resolveQual("\(sup).\(member)") {
                             edges[f.qual, default: []].insert(t)
-                            callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
+                            callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward))
                             resolved = true
                         }
                     }
@@ -3338,19 +3540,19 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // VEIN A(i) — the exact overload set of a canonical FULL path (see the loop head).
                     for t in matchOverloadsPath(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward))
                         resolved = true
                     }
                 } else if overloadedBases.contains(call.path) {
                     for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward))
                         resolved = true
                     }
                 } else if !typedTargets.isEmpty {
                     for t in typedTargets {
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward))
                     }
                     resolved = true
                 } else if let dot = call.path.lastIndex(of: "."),
@@ -3380,13 +3582,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         if overloadedBases.contains(base) {
                             for t in matchOverloads(base, argc, call.argTypes, swiftModuleOf(f.loc)) {
                                 edges[f.qual, default: []].insert(t)
-                                callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
+                                callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward))
                                 resolved = true
                             }
                         } else {
                             for t in resolveQual(base) {
                                 edges[f.qual, default: []].insert(t)
-                                callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
+                                callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward))
                                 resolved = true
                             }
                         }
@@ -3696,18 +3898,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // covers the whole chain.
                     for t in inheritedTargets.sorted() {
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward))
                         resolved = true
                     }
                 } else if overloadedBases.contains(call.path) {            // an overloaded FREE function
                     for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes))
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward))
                         resolved = true
                     }
                 } else if let targets = freeFnByName[call.path], targets.count == 1 {
                     edges[f.qual, default: []].insert(targets[0])
-                    callsiteArgs[targets[0], default: []].append((f.qual, call.args)); callsiteArgTypes[targets[0], default: []].append((f.qual, call.argTypes))
+                    callsiteArgs[targets[0], default: []].append((f.qual, call.args)); callsiteArgTypes[targets[0], default: []].append((f.qual, call.argTypes, call.genericForward))
                     resolved = true
                 } else if localTypes.contains(call.path), overloadedBases.contains("\(call.path).init") {
                     for t in matchOverloads("\(call.path).init", argc, call.argTypes, swiftModuleOf(f.loc)) {
@@ -4450,10 +4652,35 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                let owner = call.extOwner, !call.path.hasPrefix("<"),
                !localTypes.contains(owner), !localProtocolNames.contains(owner),
                !STD_PURE_PROTOCOLS.contains(owner), !RAW_VALUE_BASE_TYPES.contains(owner),
-               existentialSpelled.contains(owner) || !(subtypesOf[owner] ?? []).isEmpty {
-                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
-                if !deps.chainedPkgs(importing: fileImports[file] ?? []).isEmpty,
-                   deps.anyChainedPackagePublishesLeaf(call.leaf) {
+               case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+               case let chained = deps.chainedPkgs(importing: fileImports[file] ?? []),
+               existentialSpelled.contains(owner) || !(subtypesOf[owner] ?? []).isEmpty
+                || (!r706Off && chained.contains { deps.surface.knownKind("\($0.pkg)#\(owner)") == "protocol" }
+                    && (subtypesOf[owner] ?? []).isEmpty) {
+                // (R706: a bare `_ t: Sink` IS the existential when the chain says `Sink` is a protocol — Swift
+                // admits only that reading — so the attested kind is a third way into this arm, beside an
+                // `any P` spelling and a local adopter.)
+                // SOUNDNESS R706 — …OR THE CHAIN SAYS THE OWNER IS A PROTOCOL. The leaf conjunct keeps this off
+                // pure protocol members, and it is right while SOME chained package has a body to be inherited;
+                // with ZERO implementors anywhere it made `any DepProto` read pure across the boundary (the tree
+                // arm discloses), and an UNRELATED `OtherL.put` in the dependency flipped the verdict. ⟨0.40⟩'s
+                // `types` surface publishes each declared type's `kind`, so the dependency now SAYS the owner is
+                // a protocol: an `any P` receiver over a protocol requirement no visible package implements has
+                // an unknown witness, which is a disclosure, not a purity claim. A dependency CLASS (the
+                // `_ c: DepClient` shape the leaf conjunct also guards) has kind `class` and is untouched.
+                // …AND THE CHAIN DECLARES NO SUBTYPE OF IT. A pure implementor in the dependency publishes no row,
+                // so "no body under this leaf" cannot tell ZERO implementors from PURE ones — the over-charge the
+                // first cut of this put on a pure dependency hierarchy (`testAMetatypeBinderOverAPureDepHierarchy
+                // GainsNothing`). The `types` surface lists every declared type's `supers`, pure ones included:
+                // only a protocol NOTHING visible conforms to (here or in the chain) has an unknown witness.
+                let ownerIsChainedProtocol = !r706Off && (subtypesOf[owner] ?? []).isEmpty && chained.contains {
+                    deps.surface.knownKind("\($0.pkg)#\(owner)") == "protocol"
+                        && !deps.surface.hasDeclaredSubtype("\($0.pkg)#\(owner)")
+                }
+                if !chained.isEmpty, deps.anyChainedPackagePublishesLeaf(call.leaf) || ownerIsChainedProtocol {
+                    if r706Probe, ownerIsChainedProtocol, !deps.anyChainedPackagePublishesLeaf(call.leaf) {
+                        FileHandle.standardError.write("VBHIT\tR706\t\(f.qual) \(owner).\(call.leaf)\n".data(using: .utf8)!)
+                    }
                     if r859Probe {
                         FileHandle.standardError.write(
                             "R859HIT \(f.qual) \(owner).\(call.leaf) any=\(existentialSpelled.contains(owner))\n"
@@ -4974,6 +5201,27 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // CALLER instantiated it with: `eq(Noisy(v: 3), Noisy(v: 3))` runs `Noisy.==` inside `eq`. The edge is the
     // caller's (its instantiation), resolved from the argument type each resolved call site recorded; a call
     // site whose argument type is unknown or not local resolves nothing (no union of every witness).
+    // SOUNDNESS R974 (c) — A GENERIC CALLER PASSING ITS OWN `T` ALONG INHERITS THE CALLEE'S REQUIREMENT, to a fixpoint:
+    // `g<T: Equatable>(_ a: T, _ b: T) { eq(a, b) }` requires of ITS callers exactly what `eq` requires of `g`, at
+    // the position `a` arrives in. The release resolved the requirement only at a call site whose argument TYPE
+    // was known, so `g(Noisy(), Noisy())` reached `Noisy.==` through `eq` and reported nothing.
+    if !CallCollector.r951Off, !CallCollector.r974Off {
+        var changed = true, rounds = 0
+        while changed, rounds < 32 {
+            changed = false; rounds += 1
+            for (callee, reqs) in genericWitnessReqsByUnit {
+                for site in callsiteArgTypes[callee] ?? [] where !site.forward.isEmpty {
+                    for req in reqs {
+                        let parts = req.split(separator: ":", maxSplits: 1).map(String.init)
+                        guard parts.count == 2, let idx = Int(parts[0]), let k = site.forward[idx] else { continue }
+                        if genericWitnessReqsByUnit[site.caller, default: []].insert("\(k):\(parts[1])").inserted {
+                            changed = true
+                        }
+                    }
+                }
+            }
+        }
+    }
     if !CallCollector.r951Off {
         for (callee, reqs) in genericWitnessReqsByUnit {
             for site in callsiteArgTypes[callee] ?? [] {

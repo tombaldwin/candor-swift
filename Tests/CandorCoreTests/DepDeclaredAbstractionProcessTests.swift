@@ -642,13 +642,30 @@ final class DepDeclaredAbstractionProcessTests: XCTestCase {
                                "\(name): R705 — the erased spellings disclose across the boundary too; "
                                + "got \(eff(r.split, "viaX"))")
             } else {
-                // R706, OPEN. Asserted as it IS so the row cannot silently change under us, and named so
-                // nobody reads this file as covering it.
+                // R706 — STILL PURE HERE, AND NOW FOR A STATED REASON: this dependency declares ONLY the
+                // protocol, so its report judged nothing (`analyzed.count` 0) and SPEC §2 ⟨0.40⟩ distrusts a
+                // judged-nothing report's `types` surface — nothing attests that `Sink` is a protocol. The
+                // closing arm is `testAJudgedDependencyAttestsTheProtocolAndTheExistentialDiscloses` below.
                 XCTAssertTrue(eff(r.split, "viaX").isEmpty,
-                              "R706 (OPEN): the existential spelling still reads pure across the boundary "
-                              + "with zero implementors. If this ever gains Unknown, R706 is CLOSED and "
-                              + "this branch is the thing to update; got \(eff(r.split, "viaX"))")
+                              "R706: a judged-nothing dependency attests no kind; got \(eff(r.split, "viaX"))")
             }
+        }
+    }
+
+    /// SOUNDNESS R706 — CLOSED for a dependency whose report JUDGED something. The ⟨0.40⟩ `types` surface
+    /// publishes `Iface#Sink` with `kind: protocol`, so an `any Sink` receiver over a requirement no visible
+    /// package implements has an unknown witness: `Unknown` + `dispatch:Sink.emit`, the tree arm's own answer.
+    /// The leaf conjunct alone made this verdict depend on whether an UNRELATED `put`/`emit` existed in the
+    /// dependency (`swiftagent-veins2/fx2/cZ` vs `cZ2`); the kind conjunct is stable under that.
+    /// `CANDOR_R706_OFF` restores the release.
+    func testAJudgedDependencyAttestsTheProtocolAndTheExistentialDiscloses() throws {
+        let dep = Self.depProtoOnly + "public func version() -> Int { 1 }\n"
+        for (name, decl) in Self.spellings where name == "existential" || name == "any Sink" {
+            let app = "import Foundation\nimport Iface\n" + decl + "\n"
+            let (r, _) = try arms(dep: dep, app: app)
+            defer { try? FileManager.default.removeItem(at: r.root) }
+            XCTAssertEqual(eff(r.split, "viaX"), ["Unknown"], "\(name): R706 — got \(eff(r.split, "viaX"))")
+            XCTAssertEqual(why(r.split, "viaX"), ["dispatch:Sink.emit"], "\(name): the tree arm's reason")
         }
     }
 

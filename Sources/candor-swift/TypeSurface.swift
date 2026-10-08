@@ -73,6 +73,12 @@ struct TypeSurfaceIndex {
         if let s = t.supers { return .full(t.kind, s) }
         return .kindOnly(t.kind)
     }
+    /// SOUNDNESS R706 — does ANY trusted copy declare a type that names `key` among its `supers` (a conformer,
+    /// a subclass, or a refining protocol)? A PURE implementor publishes no function row, so its absence from
+    /// the entries says nothing; its `types` entry is the only evidence a witness exists at all.
+    func hasDeclaredSubtype(_ key: String) -> Bool {
+        types.values.contains { $0.supers?.contains(key) ?? true }
+    }
     /// The kind, only when it is one of the five; `nil` is an UNKNOWN kind.
     func knownKind(_ key: String) -> String? {
         guard let k = types[key]?.kind, TYPE_SURFACE_KINDS.contains(k) else { return nil }
