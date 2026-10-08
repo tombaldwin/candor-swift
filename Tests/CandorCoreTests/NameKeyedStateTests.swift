@@ -326,6 +326,19 @@ final class NameKeyedStateTests: XCTestCase {
         // an implicit-self field shadow already is, never by clearing this table. A rebind has nothing to
         // say about it, same as `fields` immediately above.
         "globalTypes": .immutableIndex, "globalArrayElem": .immutableIndex,
+        // SOUNDNESS R990–R996 — the dictionary twin of `globalArrayElem` (a GLOBAL name, read after a
+        // local binding is excluded), the container-alias table (keyed by an ALIAS name), the declared
+        // return facts (keyed by a FUNCTION leaf / `Owner.leaf`) and each PARAMETER's written type (keyed by
+        // the signature, read only while the name is bound nowhere else in the body —
+        // `multiplyBoundNames`). All computed before the walk; a rebind has nothing to say about any.
+        "globalDictValue": .immutableIndex, "containerAliases": .immutableIndex,
+        "returnFacts": .immutableIndex, "paramDeclTypesR996": .immutableIndex,
+        // SOUNDNESS R999 — keyed by a callee's `simpleQual`, consulted only after the callee NAME has been
+        // shown not to be a local binding (`implicitArgumentType`).
+        "implicitParams": .immutableIndex, "implicitMemberUnits": .immutableIndex,
+        // SOUNDNESS R905 — Type -> field -> written generic arguments (the `fieldArrayElem` twin); R974 (c) —
+        // this function's OWN generic parameter names, a signature fact.
+        "fieldTypeArgs": .immutableIndex, "genericParamNamesFn": .immutableIndex,
         // ⟨0.33.1⟩ the SIBLING of `localFreeFns`, injected at construction the same way: bare free-fn
         // names shadowed only by a `#if`-gated declaration (no unconditional one exists). A rebind has
         // nothing to say about it — it is computed scan-wide/per-module in the Driver, not per-binding.

@@ -622,6 +622,9 @@ func gateInputFromScan(inferred: [String: Set<String>],
 /// same verdict from the same signature" a property of the code rather than of two consistent authors.
 /// Returns the violations AND the rules whose scope bound no function. The second is a DISCLOSURE
 /// beside the verdict, not a new verdict field — the verdict shape is spec-pinned.
+/// SOUNDNESS R952 §1b KILL SWITCH — restores the release's exemption of every `allow` from the zero-match pass.
+let r952Off = ProcessInfo.processInfo.environment["CANDOR_R952_OFF"] != nil
+
 func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateViolation], zeroMatch: [String]) {
     let inferred = gi.inferred
     let hostsAcc = gi.hosts, cmdsAcc = gi.cmds, pathsAcc = gi.paths, tablesAcc = gi.tables
@@ -653,7 +656,17 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
         for r in pol.deny where !r.scope.isEmpty { scopeMatchCount[r.raw] = 0 }
         for r in pol.forbid { scopeMatchCount[r.raw] = 0 }
         for r in pol.only { scopeMatchCount[r.raw] = 0 }
+        // SOUNDNESS R952 — …AND A SCOPED `allow`. `allow Net in zzz.nomatch h` bound no function and passed,
+        // exit 0, with no "matched NO" line and no `zeroMatch`: an allowlist over a typo'd layer is a gate that
+        // cannot fail. Enrolled with the SAME scope test the allow arm below applies, as rust/ts/java do. A
+        // SCOPELESS `allow` binds every function and stays exempt, exactly as a scopeless `deny` does.
+        if !r952Off { for r in pol.allow where !r.scope.isEmpty { scopeMatchCount[r.raw] = 0 } }
         for qual in inferred.keys {
+            if !r952Off {
+                for r in pol.allow where !r.scope.isEmpty && scopeMatches(nameOf(qual), r.scope) {
+                    scopeMatchCount[r.raw, default: 0] += 1
+                }
+            }
             for r in pol.deny where !r.scope.isEmpty && scopeMatches(nameOf(qual), r.scope) {
                 scopeMatchCount[r.raw, default: 0] += 1
             }

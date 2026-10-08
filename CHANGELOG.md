@@ -10,6 +10,63 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — SOUNDNESS R1011: a name a binder in scope has claimed is not a free-function reference
+
+An untyped `for` variable, closure parameter, `$0`, `if`/`guard let` binder or parameter passed as a bare argument
+was read as a REFERENCE to a free function or member of the same name. `for line in xs { consume(line) }` beside a
+`func line(_:)` that deletes a file was charged `Fs` (executed: it never calls `line`); Alamofire's
+`setAnchorCertificates(_ certificates:)` was charged the `certificates` property's `Fs`; and every such fake call
+into nothing attributed the file's blind imports as `invisible`. A name in the scoped binder set, a parameter of the
+unit, or `$N` is now never a function reference — Swift resolves it to the binding.
+- Corpus A/B (one variable, the previous commit vs this one, 23 standalone + 8 chained): 1 `Fs` and 13 `Unknown`
+  removed (standalone), every one traced to a fake call named after a parameter or binder — an edge to a same-named
+  member (`CompositeEventMonitor.init` → its `monitors` property, `Session.init` → `eventMonitors`, …) or a `$0`
+  read as a call (`RxScrollViewDelegateProxy.registerKnownImplementations`); 430 rows (234
+  chained) lose a false `invisible` entry, 90 rows (58 chained) that carried nothing else leave `functions[]`.
+- `CANDOR_R1011_OFF=1` restores the release.
+
+### ⚠ Fixed — SOUNDNESS R952 (swift half): a scoped `allow` that binds no function is a disclosed zero-match
+
+`allow Net in zzz.nomatch h` bound no function and passed — exit 0, no "matched NO function" line, no `zeroMatch`:
+an allowlist over a typo'd layer was a gate that could not fail. The zero-match pass now enrolls every SCOPED
+`allow` with the same scope test the allow arm applies, prints the same line and carries it in `zeroMatch`, as
+candor-scan (396f182), candor-ts (a742c85) and candor-java (c3a8afc) already do. A SCOPELESS `allow` stays exempt;
+exit codes are unchanged; `gate --report` still refuses `allow` (exit 2). Conformance PART 36 (c5)–(c7) are
+reproduced in `AllowZeroMatchProcessTests`; `CANDOR_R952_OFF=1` restores the release.
+
+### ⚠ Fixed — SOUNDNESS R990–R1000, R791, R792, R773, R905, R974, R706: how a binding or a collection gets its type
+
+One question — *what type does this value have?* — was answered by five binder sites that each answered a different
+subset of it, and several value shapes were answered nowhere. Every shape below was ABSENT on 0.40.0 over code that
+really performs the effect (an executed fixture of 69 cells, `ValueTypingAuthorityProcessTests`; the sugar census
+`swiftagent-v041/census` goes 205 → 309 of 319, the R983 implicit-member census 48 → 84 of 84).
+- **One authority for a declared type's facts** (`declaredFacts`, CandorCore): a local `let x: Set<T>` (R995), a global
+  `[K: V]`/`Set<T>` (R994), a container-annotated closure parameter (R993) and a container `typealias` (R992) now
+  record what a parameter of the same type records — the name AND the element, not one or the other.
+- **A call's declared return** types `let x = f()` and `for y in f()` — collections included (R991) — keyed the way
+  Swift resolves the call (`Owner.f` first), so a method name two types share no longer types nothing (R990). A
+  generic return names no type; a member alias and a shared nested type name are resolved in the declaring scope.
+- `opt.map { $0.m() }` on an `Optional` parameter (R996); `dict.forEach { $0.value.m() }` and `{ k, v in }` (R997);
+  `if let a = self.f` / `x ?? []` over `[T]?` (R998); implicit member syntax `.unix`, `.mk()`, `.init(…)` against
+  an annotation, a parameter type, a return type or a typed assignment target (R999); `let t = Outer.Inner.self; t.x`
+  (R1000); `Darwin.getenv` with only `import Foundation` (R773); `NSCache<K, V>.object(forKey:)` (R905); a `Set`/
+  `Dictionary`/`Array` operation running the element's `==`/`hash(into:)`, and a generic caller passing `T` along
+  (R974 b, c).
+- The element-closure table is now DERIVED from the stdlib interface (R791: `count(where:)`, `sort(by:)`,
+  `mapValues`, `merging`, …; `DerivedElementClosureTablesTests` re-derives it from the SDK), and an opaque callable
+  handed to a callee the scan cannot see is deferred as the listed invokers already defer it (R792).
+- `any P` over a dependency protocol that the chain attests (⟨0.40⟩ `types`) has NO conformer now discloses
+  `Unknown dispatch:P.m` instead of reading pure (R706).
+- **Gates go 0 → 1** on every positive cell (`deny Env <fn>`; `deny Env Unknown` for R792). Corpus A/B against the
+  published v0.40.0 (23 standalone + 8 chained packages): no row loses an effect element; 1 row is removed and 8
+  rows (4 chained) lose an `invisible` entry — every one from a call that does not exist (an untyped binder name
+  read as a free-function reference, gone once the binder is typed).
+- `CANDOR_VT_OFF=1` restores the release; per-row switches `CANDOR_R990_OFF` … `CANDOR_R998_OFF`, `CANDOR_R999_OFF`,
+  `CANDOR_R1000_OFF`, `CANDOR_R791_OFF`, `CANDOR_R792_OFF`, `CANDOR_R773_OFF`, `CANDOR_R905P_OFF`, `CANDOR_R974_OFF`,
+  `CANDOR_R706_OFF`.
+- **Still open:** `Ctx!` outside a parameter (R534's boundary, ten census cells); R974 (a) needs a wire field; a
+  dependency report that judged nothing attests no `types`, so R706 stays open for a protocol-only dependency.
+
 ## [0.40.0] — 2026-10-07
 
 - ⚠ **Declares spec 0.40** (was 0.39) — the family floor bump; the `AgentsDocDriftTests` floor pin moves with

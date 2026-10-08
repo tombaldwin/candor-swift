@@ -34,11 +34,11 @@ import Foundation
 /// **0**, while `deny Unknown runAllNoCaller` exited 1.
 final class UndischargeableCallbackNameProcessTests: XCTestCase {
 
-    private func scan(_ src: String) throws -> [String: [String: Any]] {
+    private func scan(_ src: String, env: [String: String] = [:]) throws -> [String: [String: Any]] {
         let bin = try ProcessHarness.binaryURL(for: UndischargeableCallbackNameProcessTests.self)
         let root = try ProcessHarness.makePackage(src)
         defer { try? FileManager.default.removeItem(at: root) }
-        let r = try ProcessHarness.run(bin, [root.path, "--json"])
+        let r = try ProcessHarness.run(bin, [root.path, "--json"], env: env)
         XCTAssertEqual(r.code, 0, "scan must succeed — stderr: \(r.err)")
         return try ProcessHarness.fns(ofJson: r.out)
     }
@@ -172,18 +172,29 @@ final class UndischargeableCallbackNameProcessTests: XCTestCase {
     /// The UNANNOTATED binding of the same program. `CallCollector` removes it from `fnTyped` at the
     /// binder ("visible local closure: body walks lexically; calling it adds nothing"), so it never
     /// enters `callbackInvoked` and this fix cannot reach it. Pinned so the fix is measured to leave
-    /// the spelling it is NOT about exactly where it was.
+    /// the spelling it is NOT about exactly where it was — which, with SOUNDNESS R993 switched off, is
+    /// still ABSENT.
+    ///
+    /// SOUNDNESS R993 then CLOSED that absence by a different route: the closure parameter `list` is
+    /// annotated `[(String) -> Void]`, a container of callables, and the closure-parameter binder now
+    /// records its element, so `c("x")` is the honest `Unknown callback:` the direct spelling already
+    /// gives. ABSENT was a silent under-report — a caller passing `[wipe]` deletes a file through it.
     func testTheUnannotatedTwinIsUnchanged() throws {
-        let by = try scan("""
+        let src = """
         import Foundation
         func unannotated(_ cbs: [(String) -> Void]) {
             let g = { (list: [(String) -> Void]) in for c in list { c("x") } }
             g(cbs)
         }
         func driver() { unannotated([]) }
-        """)
-        XCTAssertNil(by["unannotated"], "the unannotated spelling is unchanged by this fix "
-                     + "(ABSENT before and after) — got \(by["unannotated"] ?? [:])")
+        """
+        let off = try scan(src, env: ["CANDOR_R993_OFF": "1"])
+        XCTAssertNil(off["unannotated"], "the unannotated spelling is unchanged by this fix "
+                     + "(ABSENT before and after) — got \(off["unannotated"] ?? [:])")
+        let by = try scan(src)
+        XCTAssertEqual(ProcessHarness.inferred(by, "unannotated"), ["Unknown"],
+                       "R993 — the container-annotated closure parameter discloses its callable elements; "
+                       + "got \(by["unannotated"] ?? [:])")
     }
 
     /// THE CONTROL FOR THE DIRECTION THIS FIX MUST NOT FAIL IN, and the only one written from a fix that

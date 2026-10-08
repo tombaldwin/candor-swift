@@ -184,7 +184,10 @@ final class PrivacyEffectsTests: XCTestCase {
         }
         S().teardown()
         """)
-        XCTAssertEqual(ProcessHarness.inferred(by, "S.teardown"), [])
+        // SOUNDNESS R1011: the row used to EXIST with `[]` only because `$0` was read as a call into the blind
+        // AVFoundation import (`invisible`); with that fake call gone the function is simply pure and absent.
+        // The property under test — no capture medium charged — is the same either way.
+        XCTAssertEqual(ProcessHarness.inferred(by, "S.teardown") ?? [], [])
     }
 
     func testAVideoOnlySessionIsNotChargedMic() throws {

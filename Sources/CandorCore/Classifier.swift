@@ -2993,3 +2993,106 @@ public func dictValueType(_ t: TypeSyntax) -> TypeSyntax? {
     }
     return nil
 }
+
+/// SOUNDNESS R990–R995 — EVERY FACT A DECLARED TYPE SUPPORTS, computed ONCE, for every binder that has a
+/// declared type to read: a parameter, a local `let x: T`, a closure parameter `{ (x: T) in }`, a global,
+/// and a function's RETURN clause (the type a `let x = f()` binding receives).
+///
+/// THE DEFECT THIS EXISTS FOR WAS FIVE COPIES OF ONE QUESTION, EACH ANSWERING A DIFFERENT SUBSET. Measured
+/// on the executed census (`swiftagent-v041/census`, 319 public fns, each really reaching an env read):
+/// the parameter binder asked the container question FIRST and answered `Set<Ctx>` with its element; the
+/// local binder asked `typeName` first, got `"Set"`, and never asked the container question (R995); the
+/// global binder had no dictionary arm at all and the same scalar-first order (R994); the closure-parameter
+/// binder projected through `elementSpelling` and recorded NOTHING for any container (R993); a
+/// `typealias` of a container was recorded nowhere, because the alias table holds names and `[T]` has none
+/// (R992); and a function's return type was kept only when it had a NAME, so `let x = mk()` over
+/// `-> [Ctx]` lost the element (R991). Each was the same fact read off the same syntax.
+///
+/// So the facts are computed TOGETHER and NOT EXCLUSIVELY — the stored-property binder's rule, the one
+/// copy that already recorded `fields` AND `fieldArrayElem` for the same declaration. A `Set<Ctx>` is a
+/// value named `Set` (its own extension members resolve) AND a container of `Ctx`; reporting only one is
+/// what silenced the other. Nothing here is inferred: every fact is read from the written declaration.
+///
+/// `expand` resolves a typealias NAME to its declared right-hand side, for aliases the name tables cannot
+/// carry (a container, an optional container). It is applied to the HEAD of the type and through an
+/// `Optional`, bounded against a cycle; a name it does not know is left as written.
+public struct DeclaredFacts: Equatable {
+    public var scalar: String? = nil          // `typeName(t).name` — the nominal a receiver resolves against
+    public var isFunction = false
+    public var arrayElem: String? = nil       // `[T]`/`Set<T>`/`Array<T>`/`AsyncStream<T>`/… → `T`
+    public var arrayElemOpaque = false        // the element is spelled `some P`
+    public var arrayElemNested: String? = nil // `[[T]]` → `T` (and then `arrayElem` is nil, R278's order)
+    public var dictValue: String? = nil       // `[K: V]` → `V`
+    public var metatype: String? = nil
+    public var metatypeArrayElem: String? = nil
+    public var metatypeDictValue: String? = nil
+    public var tuple: [String: String] = [:]
+    public init() {}
+    /// Does this declaration carry anything a CONTAINER binder records?
+    public var hasContainerFact: Bool {
+        arrayElem != nil || arrayElemNested != nil || dictValue != nil || metatypeArrayElem != nil
+            || metatypeDictValue != nil
+    }
+}
+
+public func expandTypeAliasHead(_ t: TypeSyntax, _ expand: ((String) -> TypeSyntax?)?, _ hops: Int = 0) -> TypeSyntax {
+    guard let expand, hops < 8 else { return t }
+    let d = desugaredType(t)
+    if let id = d.as(IdentifierTypeSyntax.self), id.genericArgumentClause == nil, let rhs = expand(id.name.text) {
+        return expandTypeAliasHead(rhs, expand, hops + 1)
+    }
+    if let opt = d.as(OptionalTypeSyntax.self) {
+        let inner = expandTypeAliasHead(opt.wrappedType, expand, hops + 1)
+        if inner.description != opt.wrappedType.description {
+            return TypeSyntax(OptionalTypeSyntax(wrappedType: inner))
+        }
+    }
+    return t
+}
+
+public func declaredFacts(_ raw: TypeSyntax, expand: ((String) -> TypeSyntax?)? = nil) -> DeclaredFacts {
+    let t = expandTypeAliasHead(raw, expand)
+    var f = DeclaredFacts()
+    let tn = typeName(t)
+    f.isFunction = tn.isFunction
+    f.scalar = tn.isFunction ? nil : tn.name
+    f.tuple = tupleElements(t)
+    if let mb = metatypeBaseName(t) { f.metatype = mb }
+    else if let me = metatypeArrayElementName(t) { f.metatypeArrayElem = me }
+    else if let mv = metatypeDictValueName(t) { f.metatypeDictValue = mv }
+    if let inner = nestedArrayElementName(t) { f.arrayElemNested = inner }
+    else if let elem = arrayElementName(t) {
+        f.arrayElem = elem
+        f.arrayElemOpaque = arrayElementType(t).map(isOpaqueParam) ?? false
+    }
+    if let v = dictValueName(t) { f.dictValue = v }
+    return f
+}
+
+/// SOUNDNESS R791 — WHICH CLOSURE PARAMETER OF A STDLIB HIGHER-ORDER METHOD IS THE RECEIVER'S ELEMENT, read
+/// off the authority rather than remembered.
+///
+/// `ELEMENT_ITERATORS` was a hand-written inclusion list of 16 names, and a name off it CLEARED the closure
+/// parameter: `v.count(where: { $0.run() })` over a `[Guard]` whose `run()` deletes a file was ABSENT while the
+/// `filter` twin charged (executed). An inclusion list for a TYPING fact fails SILENT for every method it
+/// forgets, so the list is now the stdlib's own: every `public func` in the toolchain's
+/// `Swift.swiftinterface` whose closure parameter takes `Element`/`Self.Element` (and, for a dictionary,
+/// `Value`), with the POSITION it takes it at. `DerivedElementClosureTablesTests` re-derives it from the SDK
+/// on the machine running the suite and fails on any method the tables below do not cover.
+///
+/// `first`: the element is closure parameter 0 (`forEach`, `count(where:)`, `elementsEqual(_:by:)`'s own
+/// side …). `pair`: every closure parameter is an element (`sorted(by:)`). `index`: the element is at a fixed
+/// non-zero position (`reduce`'s accumulator is 0). `dictValue`: a dictionary's VALUE at those positions.
+public let STDLIB_ELEMENT_CLOSURE_FIRST: Set<String> =
+    ["forEach", "map", "filter", "compactMap", "flatMap", "first", "contains", "allSatisfy",
+     "drop", "prefix", "firstIndex", "lastIndex", "last", "partition", "removeAll", "split",
+     "count", "indices", "index", "elementsEqual", "starts"]
+public let STDLIB_ELEMENT_CLOSURE_PAIR: Set<String> = ["sorted", "min", "max", "sort", "lexicographicallyPrecedes"]
+public let STDLIB_ELEMENT_CLOSURE_INDEX: [String: Int] = ["reduce": 1, "difference": 1]
+public let STDLIB_DICT_VALUE_CLOSURE: [String: Set<Int>] =
+    ["mapValues": [0], "compactMapValues": [0], "merge": [0, 1], "merging": [0, 1]]
+
+/// SOUNDNESS R905 — a PLATFORM generic container member whose return is one of the receiver's generic arguments,
+/// and which one (0-based). From the platform's own declarations: `NSCache<KeyType, ObjectType>.object(forKey:)
+/// -> ObjectType?`, `NSMapTable<KeyType, ObjectType>.object(forKey:) -> ObjectType?`.
+public let PLATFORM_GENERIC_MEMBER_RETURNS: [String: Int] = ["NSCache.object": 1, "NSMapTable.object": 1]
