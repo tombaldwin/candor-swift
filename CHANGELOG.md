@@ -10,6 +10,59 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — SOUNDNESS R705 (unchained arm): an erased dispatch over an uncovered dependency's protocol discloses
+
+Executed: a local `Mine: Sink` (where `Sink` is an UNCHAINED dependency's protocol) deleted a file through
+`viaGen<T: Sink>` / `viaSome(_: some Sink)`, and the rows read `inferred: []` with only `invisible: [Iface]` — `deny Fs
+Unknown viaGen` exit 0 — while the count-0 chained arm and the one-tree arm both disclose `Unknown` +
+`dispatch:Sink.emit`. The κ ledger's `invisible` names the module that DECLARES the abstraction; the witness the
+caller passes may be local, so it is not the disclosure R705 assumed. Now disclosed, fenced as R706's residual is: the
+file's ONE dependency module, uncovered, and not a platform/stdlib protocol (`some Encoder` stays unhedged). A wider
+fence (any blind import) measured 7 false rows over platform protocols and 0 true ones and was not taken. Gate
+`deny Fs Unknown viaGen` 0 → 1. Kill switch `CANDOR_R705U_OFF`.
+
+### ⚠ Fixed — SOUNDNESS R1065: an instance member's result on a dependency's type is asked, not dropped
+
+Executed: `Box(v: E()).get().go()`, `b.get().go()` (`b: Box<E>`) and `Ref(E()).get().go()` over a CHAINED
+dependency's generic type deleted a file while the row read `inferred: []` with no disclosure — `deny Fs Unknown`
+exit 0 — although the field spelling `.v.go()` already disclosed `Unknown[dispatch:untyped cross-package receiver]`.
+The receiver of `get` is a value of a type this scan neither declares nor extends, so `rootOf` could not type the
+result and the call was dropped. It now emits the same `<untyped>.` marker the bare and static factory spellings do,
+keyed `<Type>.<member>`: a `typeSurface.returns` hit resolves it (`Cli().mk().run()` → `Env`, silent on v0.40.1),
+and a miss on a type a chained report names discloses — bounded to a next-member leaf a local type declares or a
+chained package publishes, so `dep.label().uppercased()` (a platform-only leaf) is not hedged. `deny Fs Unknown
+viaDepBoxGet` 0 → 1; `deny Env` on the concrete-return spelling 0 → 1. Kill switch `CANDOR_R1065_OFF`. A RESOLUTION
+of the generic case needs the producer to publish a member's return as a generic-parameter position (a wire rung).
+
+### ⚠ Fixed — SOUNDNESS R1048 residual: a caller-witness argument is aligned by LABEL, not by position
+
+Executed: `iterL(seq: Loud())` (a generic `<S: Sequence>` parameter iterated by a project function), the same through
+a skipped defaulted parameter, `iterIO(&l)` / `iterLIO(seq: &l)` (`inout`), `eqL(lhs: Noisy(), rhs: Noisy())` (R951's
+comparison witness), a labelled forward through another generic (R974 (c)) and a labelled member call were all ABSENT
+while the program deleted a file through the custom `next()` / `==`; `deny Fs viaLabelled` exit 0. The requirement
+`<idx>:<req>` names the callee's PARAMETER index and was answered from the call's ARGUMENT position, which agree only
+on a fully positional call (`argTypes` is blanked once any argument is labelled, and `&x` was never typed). The
+argument is now aligned to the callee's declared labels (Swift's rule: in order, a defaulted parameter may be
+skipped); declarations that fit the labels but place the parameter differently answer nothing. The positional
+answer is kept unchanged as the floor. Gate `deny Fs viaLabelled` 0 → 1. Kill switch `CANDOR_R1048L_OFF`.
+
+### ⚠ Fixed — SOUNDNESS R1044 residual: a member typed by its owner's generic parameter is the receiver's argument
+
+Executed: `Box(v: E()).get().go()` with `struct Box<V> { let v: V; func get() -> V }` and `E.go` deleting a file was
+ABSENT, `deny Fs` exit 0 — and so were `.v.go()`, `let b = Box(v: E()); b.get().go()`, `Box<E>(…)`, `let b: Box<E>`,
+`getOpt()?.go()`, an explicit `init(_ v: V)`, the second parameter of `Pair<A, B>`, a factory `-> Box<E>`, and a
+parameter `_ b: Box<E>`. A value of a local generic type was typed by its bare name, so `-> V` / `: V` answered
+nothing (R1010). The value's generic arguments are now read off the expression that made it — a written
+specialisation, the constructor's arguments aligned by label to an init (memberwise or explicit) whose parameter is
+written as the type's generic parameter, a factory's written return type, or the one binding of a parameter or
+local, or a stored field whose type writes them (`let b: Box<E>`) — and a member or field declared as one of the owner's parameters takes that argument. An argument spelled
+with any generic parameter or associated-type name in the scan answers nothing (it names the declaration's
+parameter, not a type; a measured mutant without that filter charged a local type of the same name). Gate
+`deny Fs viaBoxGet` 0 → 1. Kill switch `CANDOR_R1044B_OFF`. Not covered: a dependency's generic type (the wire
+carries no generic parameters; SOUNDNESS R1065 discloses it) and nested instantiations (`Box(v: Box(v: E())).get().get()`).
+- Corpus A/B against the published v0.40.1 binary (23 standalone + 8 chained): REMOVED 0 rows, no concrete effect
+  lost; standalone ADDED 6 / CHANGED 33, chained CHANGED 28. Every lost field value is accounted for in the commit.
+
 ## [0.40.1] — 2026-10-08
 
 ### ⚠ Fixed — SOUNDNESS R1048: a hand-written `next()` runs wherever the stdlib iterates the value

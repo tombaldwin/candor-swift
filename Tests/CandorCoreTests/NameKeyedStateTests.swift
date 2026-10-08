@@ -341,6 +341,10 @@ final class NameKeyedStateTests: XCTestCase {
         "autoclosureParams": .deliberatelyKept(
             "R1009: read only together with `fnTyped`, and only where `isBoundLocal`/`binderShadow` say no binder "
             + "has claimed the name — a rebind falls back to the general callback arm"),
+        "localGenerics": .immutableIndex,                                          // R1044 residual
+        "lgBindings": .deliberatelyKept(
+            "R1044 residual: built flow-insensitively by a prescan that DROPS any name bound twice or by a closure/"
+            + "pattern binder, and read only where `multiplyBoundNames` says the name has one binder in the unit"),
         "localPlatformGenerics": .deliberatelyKept(
             "R905: built flow-insensitively by a prescan that DROPS any name bound twice, by a closure parameter, "
             + "or by a non-`let` binder, so no rebind can leave a stale entry behind"),

@@ -152,6 +152,17 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// call with no trailing closure. Read only by the Driver's constructor arm for a type this scan
               /// only EXTENDS. `nil` (the default) means "not recorded" and filters nothing.
               var argLabels: [String?]? = nil
+              /// SOUNDNESS R1048 residual — the caller-witness ARGUMENTS, recorded for every call regardless of
+              /// labels: the LABEL of each parenthesised argument (`nil` = unlabelled) and its confident type
+              /// (`argType`, with `&x` peeled). `argTypes` blanks every type the moment ONE argument is labelled,
+              /// because a positional OVERLOAD match cannot tell an omitted defaulted parameter from a mismatch;
+              /// the Driver aligns these to the callee's parameters BY LABEL instead (`alignWitnessArgs`), so a
+              /// labelled or `inout` argument answers R951/R1048's `<idx>:<req>` the way a positional one does.
+              /// `nil` = not recorded; read ONLY by the caller-witness answering.
+              var witnessArgs: (labels: [String?], types: [String?])? = nil
+              /// SOUNDNESS R1065 — a `<untyped>.` marker from `depInstanceMemberCallee`: its MISS discloses only where
+              /// the member's leaf could have a body someone answers (a local type's member, or a chained package's).
+              var instanceHop: Bool = false
               /// SOUNDNESS R847 — on an `argRef` call: the name is a binder's local in scope, so it can be
               /// no dependency declaration (the chained join skips it). Local resolution is unaffected.
               var argBoundLocal: Bool = false
@@ -589,6 +600,10 @@ final class CallCollector: SyntaxVisitor {
     /// would turn `gC.validate()` into an instance call on `CBase`, a different and wrong dispatch.
     let metatypeReturns: [String: String]
     let genericReturnArgs: [String: GenericReturnArg]   // SOUNDNESS R1044 — see DeclCollector.genericReturnArg
+    let localGenerics: LocalGenericFacts                 // SOUNDNESS R1044 residual — see `localGenericArgs`
+    /// SOUNDNESS R1044 residual — each local name's ONE binding (annotation and/or initializer), from
+    /// `prescanLocalGenericBindings`; a name bound twice anywhere in the unit is absent.
+    var lgBindings: [String: (type: TypeSyntax?, initializer: ExprSyntax?)] = [:]
     let globalMetatypes: [String: String]
     let globalMetatypeArrayElem: [String: String]
     let fieldMetatypes: [String: [String: String]]
@@ -832,6 +847,7 @@ final class CallCollector: SyntaxVisitor {
          returns: [String: String],
          metatypeReturns: [String: String] = [:],
          genericReturnArgs: [String: GenericReturnArg] = [:],
+         localGenerics: LocalGenericFacts = LocalGenericFacts(),
          globalMetatypes: [String: String] = [:],
          globalMetatypeArrayElem: [String: String] = [:],
          fieldMetatypes: [String: [String: String]] = [:],
@@ -919,6 +935,7 @@ final class CallCollector: SyntaxVisitor {
         self.iterableLocalTypes = iterableLocalTypes
         self.metatypeReturns = metatypeReturns                      // R585
         self.genericReturnArgs = genericReturnArgs                  // R1044
+        self.localGenerics = localGenerics                          // R1044 residual
         self.globalMetatypes = globalMetatypes
         self.globalMetatypeArrayElem = globalMetatypeArrayElem
         self.fieldMetatypes = fieldMetatypes
@@ -1588,6 +1605,131 @@ final class CallCollector: SyntaxVisitor {
         return (n, mono)
     }
 
+    /// SOUNDNESS R1044 residual — the type a member call (`field: false`) or field read (`field: true`) on `base`
+    /// yields when the member is declared as one of its owner's generic parameters, read off the instantiation.
+    private func localGenericMemberType(_ base: ExprSyntax, _ member: String, field: Bool, _ depth: Int) -> String? {
+        guard !DeclCollector.r1044bOff, depth < 24,
+              field ? localGenerics.fieldNames.contains(member) : localGenerics.memberLeaves.contains(member),
+              let (owner, args) = localGenericArgs(base, depth + 1),
+              let idx = field ? localGenerics.fieldParams["\(owner).\(member)"] : localGenerics.memberReturns["\(owner).\(member)"],
+              idx < args.count, let x = args[idx],
+              !x.split(separator: ".").contains(where: { localGenerics.nonTypeNames.contains(String($0)) }) else { return nil }
+        vbHit("R1044B", "\(owner).\(member) -> \(x)")
+        return x
+    }
+
+    /// SOUNDNESS R1044 residual — the generic ARGUMENTS of a value of a local generic type, from the expression
+    /// that made it: a written specialisation (`Box<E>(…)`), the constructor's own arguments aligned by label to
+    /// an init whose parameter is written as the type's generic parameter (`Box(v: E())`, memberwise or
+    /// explicit — every init that fits the labels must agree), a factory whose return type writes them
+    /// (`func mk() -> Box<E>`), or a parameter / local whose ONE binding annotates or initialises it. `nil` per
+    /// argument where this cannot be read; `nil` overall where the owner is not a local generic type.
+    private func localGenericArgs(_ raw: ExprSyntax, _ depth: Int) -> (String, [String?])? {
+        guard depth < 24 else { return nil }
+        let e = Self.peel(raw)
+        func simple(_ t: String) -> String { t.split(separator: ".").last.map(String.init) ?? t }
+        func fromType(_ t: TypeSyntax) -> (String, [String?])? {
+            var x = desugaredType(t)
+            if let a = x.as(AttributedTypeSyntax.self) { x = a.baseType }
+            if let o = x.as(OptionalTypeSyntax.self) { x = o.wrappedType }
+            else if let o = x.as(ImplicitlyUnwrappedOptionalTypeSyntax.self) { x = o.wrappedType }
+            guard let id = x.as(IdentifierTypeSyntax.self), let gac = id.genericArgumentClause,
+                  let order = localGenerics.order[id.name.text], order.count == gac.arguments.count else { return nil }
+            return (id.name.text, gac.arguments.map { $0.argument.as(TypeSyntax.self).flatMap { typeName($0).name } })
+        }
+        // A stored field whose type WRITES its arguments (`let b: Box<E>`), read off `fieldTypeArgs` (R905's index).
+        func fromField(_ owner: String, _ f: String) -> (String, [String?])? {
+            guard let ft = fields[owner]?[f]?.name, let targs = fieldTypeArgs[owner]?[f],
+                  let order = localGenerics.order[simple(ft)], order.count == targs.count else { return nil }
+            return (simple(ft), targs.map { Optional($0) })
+        }
+        if let dr = e.as(DeclReferenceExprSyntax.self) {
+            let n = dr.baseName.text
+            guard !multiplyBoundNames.contains(n) else { return nil }
+            if paramNamesR851.contains(n) { return paramDeclTypesR996[n].flatMap(fromType) }
+            guard let b = lgBindings[n] else {
+                // implicit self: a field of the enclosing type no binder in this unit claims
+                guard vars[n] == nil, !isBoundLocal(n), !binderShadow.contains(n), let et = enclosingType else { return nil }
+                return fromField(et, n)
+            }
+            if let t = b.type { return fromType(t) }
+            return b.initializer.flatMap { localGenericArgs($0, depth + 1) }
+        }
+        if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base {
+            let r = rootOf(base, depth + 1)
+            guard r.isVar || Self.peel(base).as(DeclReferenceExprSyntax.self)?.baseName.text == "self",
+                  let owner = r.root else { return nil }
+            return fromField(simple(owner), ma.declName.baseName.text) ?? fromField(owner, ma.declName.baseName.text)
+        }
+        guard let call = e.as(FunctionCallExprSyntax.self) else { return nil }
+        let callee = Self.peel(call.calledExpression)
+        if let g = callee.as(GenericSpecializationExprSyntax.self),
+           let n = g.expression.as(DeclReferenceExprSyntax.self)?.baseName.text,
+           let order = localGenerics.order[n], order.count == g.genericArgumentClause.arguments.count {
+            return (n, g.genericArgumentClause.arguments.map { $0.argument.as(TypeSyntax.self).flatMap { typeName($0).name } })
+        }
+        var ctorName: String? = nil
+        if let dr = callee.as(DeclReferenceExprSyntax.self), dr.baseName.text.first?.isUppercase == true {
+            ctorName = dr.baseName.text
+        } else if let ma = callee.as(MemberAccessExprSyntax.self), ma.declName.baseName.text == "init",
+                  let b = ma.base.map(Self.peel)?.as(DeclReferenceExprSyntax.self) {
+            ctorName = b.baseName.text
+        }
+        if let n = ctorName {
+            guard let order = localGenerics.order[n], let shapes = localGenerics.inits[n] else { return nil }
+            let labels = call.arguments.map { $0.label?.text }
+            var out: [String?]? = nil
+            for sh in shapes {
+                guard let m = alignWitnessArgs(labels, sh.labels, sh.sig) else { continue }
+                var a = [String?](repeating: nil, count: order.count), clash = Set<Int>()
+                for (pi, g) in sh.bind {
+                    guard let gi = order.firstIndex(of: g), let ai = m[pi] else { continue }
+                    let r = rootOf(Array(call.arguments)[ai].expression, depth + 1)
+                    guard r.isVar, let t = r.root else { continue }
+                    if let prev = a[gi], prev != t { clash.insert(gi) } else { a[gi] = t }
+                }
+                for gi in clash { a[gi] = nil }
+                if let o = out { out = zip(o, a).map { $0 == $1 ? $0 : nil } } else { out = a }
+            }
+            return out.map { (n, $0) }
+        }
+        let leaf: String? = callee.as(DeclReferenceExprSyntax.self)?.baseName.text
+            ?? callee.as(MemberAccessExprSyntax.self)?.declName.baseName.text
+        if let l = leaf, let rt = returns[l], let args = localGenerics.returnArgs[l],
+           let order = localGenerics.order[simple(rt)], order.count == args.count {
+            return (simple(rt), args.map { Optional($0) })
+        }
+        return nil
+    }
+
+    /// R1044 residual — fills `lgBindings`: a name with exactly one `let`/`var` binding and no other binder.
+    func prescanLocalGenericBindings(_ body: Syntax) {
+        guard !DeclCollector.r1044bOff, !localGenerics.order.isEmpty else { return }
+        final class V: SyntaxVisitor {
+            var out: [String: (type: TypeSyntax?, initializer: ExprSyntax?)] = [:], poisoned: Set<String> = []
+            override func visit(_ node: PatternBindingSyntax) -> SyntaxVisitorContinueKind {
+                if let n = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
+                    if out[n] != nil { poisoned.insert(n) }
+                    out[n] = (node.typeAnnotation?.type, node.initializer?.value)
+                }
+                return .visitChildren
+            }
+            override func visit(_ node: ClosureShorthandParameterSyntax) -> SyntaxVisitorContinueKind {
+                poisoned.insert(node.name.text); return .visitChildren
+            }
+            override func visit(_ node: ClosureParameterSyntax) -> SyntaxVisitorContinueKind {
+                poisoned.insert((node.secondName ?? node.firstName).text); return .visitChildren
+            }
+            override func visit(_ node: IdentifierPatternSyntax) -> SyntaxVisitorContinueKind {
+                if node.parent?.is(PatternBindingSyntax.self) != true { poisoned.insert(node.identifier.text) }
+                return .visitChildren
+            }
+        }
+        let v = V(viewMode: .sourceAccurate)
+        v.walk(body)
+        lgBindings = v.out.filter { !v.poisoned.contains($0.key) }
+    }
+
     /// SOUNDNESS R1044 — `pick(E())` where every declaration of `pick` is `func pick<T>(_ x: T) -> T`: the value is
     /// the ARGUMENT's type, read off the argument with the same resolver. Refused unless the call's arguments align
     /// with the declaration one for one (count and labels — a defaulted or variadic declaration was not recorded),
@@ -1760,6 +1902,11 @@ final class CallCollector: SyntaxVisitor {
             // `outer.inner.save()` resolve the method on the field's type, not the enclosing type
             // (explicit `self.field.method()` and field-of-field chains otherwise resolved against the
             // wrong type and dropped to pure — the bare-identifier implicit-self path already did this).
+            // SOUNDNESS R1044 residual — `Box(v: E()).v` where `Box<V>.v: V`: the receiver's generic argument, which
+            // the field index cannot hold (it records `V`, or `V`'s bound, for every instantiation at once).
+            if let b = ma.base, let x = localGenericMemberType(b, member, field: true, depth) {
+                return (x, true, inner.path + [member], false, inner.opaqueHop)
+            }
             if let rt = inner.root, let f = fields[rt]?[member], let ft = f.name, !f.isFunction {
                 return (ft, true, inner.path + [member], opaqueFields[rt]?.contains(member) == true, inner.opaqueHop)
             }
@@ -1989,6 +2136,11 @@ final class CallCollector: SyntaxVisitor {
             }
             if let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
                let b = genericReturnBinding(call, leaf: ma.declName.baseName.text, depth) { return b }   // R1044
+            // SOUNDNESS R1044 residual — `Box(v: E()).get()` where `Box<V>.get() -> V`: the RECEIVER's generic argument.
+            if let ma = call.calledExpression.as(MemberAccessExprSyntax.self), let base = ma.base,
+               let x = localGenericMemberType(base, ma.declName.baseName.text, field: false, depth) {
+                return (x, true, [ma.declName.baseName.text], false, false)
+            }
             // SOUNDNESS R905 — a PLATFORM generic container's element accessor: `storage.object(forKey:)` over
             // `NSCache<NSString, StorageObject<T>>` returns `StorageObject?`. The release typed the field
             // `NSCache` (R915 D) and stopped there, so Kingfisher's `if let object = storage.object(…) {
@@ -6738,6 +6890,23 @@ final class CallCollector: SyntaxVisitor {
         return callee
     }
 
+    /// SOUNDNESS R1065 — `recv.member(…)` where `recv` is a VALUE whose type is not this scan's (neither declared
+    /// nor extended here, not a generic parameter or associated type): `<Type>.<member>`, the producer's fn-qual
+    /// spelling, for the Driver's `typeSurface.returns` ask. nil for anything local or untyped.
+    static let r1065Off = ProcessInfo.processInfo.environment["CANDOR_R1065_OFF"] != nil
+    func depInstanceMemberCallee(_ expr: ExprSyntax) -> String? {
+        guard !Self.r1065Off, let call = Self.peel(expr).as(FunctionCallExprSyntax.self),
+              let ma = Self.peel(call.calledExpression).as(MemberAccessExprSyntax.self), let base = ma.base else { return nil }
+        let member = ma.declName.baseName.text
+        guard member != "init", member.first?.isUppercase == false else { return nil }
+        let r = rootOf(base)
+        guard r.isVar, let t = r.root, t != Self.superMarker, t.first?.isUppercase == true,
+              !localTypes.contains(t), !declaredTypes.contains(t), !localProtocols.contains(t),
+              !t.split(separator: ".").contains(where: { localGenerics.nonTypeNames.contains(String($0)) })
+        else { return nil }
+        return "\(t).\(member)"
+    }
+
     /// SOUNDNESS R832 — THE STATIC SPELLING OF A DEPENDENCY FACTORY: `Client.make()`, not `build()`.
     ///
     /// `depFactoryCallee` answered only a BARE callee (`DeclReferenceExprSyntax`), so a factory reached
@@ -6817,6 +6986,8 @@ final class CallCollector: SyntaxVisitor {
     static let r1046Off = ProcessInfo.processInfo.environment["CANDOR_R1046_OFF"] != nil
     /// SOUNDNESS R1048 — §1b kill switch.
     static let r1048Off = ProcessInfo.processInfo.environment["CANDOR_R1048_OFF"] != nil
+    /// SOUNDNESS R1048 residual — §1b kill switch for the LABEL-aligned caller-witness arguments.
+    static let r1048LabelOff = ProcessInfo.processInfo.environment["CANDOR_R1048L_OFF"] != nil
     /// SOUNDNESS R1048 — the implicit calls iterating a LOCAL iterable makes: its own `makeIterator`/`next`/
     /// `makeAsyncIterator`, and the `next` of the iterator type its `makeIterator` is declared to return
     /// (`struct Coll: Sequence { func makeIterator() -> Loud }` iterates `Loud.next`, which the release missed).
@@ -6887,6 +7058,15 @@ final class CallCollector: SyntaxVisitor {
         let callsBefore = calls.count
         defer {
             if !Self.r974Off { annotateGenericForwards(node, from: callsBefore) }
+            // SOUNDNESS R1048 residual — the label-aligned caller-witness arguments (see `Call.witnessArgs`).
+            if !Self.r1048LabelOff, callsBefore < calls.count {
+                let w = (labels: node.arguments.map { $0.label?.text }, types: node.arguments.map { a -> String? in
+                    var e = Self.peel(a.expression)
+                    if let io = e.as(InOutExprSyntax.self) { e = Self.peel(io.expression) }
+                    return self.argType(e)
+                })
+                for j in callsBefore..<calls.count where calls[j].witnessArgs == nil { calls[j].witnessArgs = w }
+            }
             // SOUNDNESS R1047 — every unqualified call this node produced carries its argument labels.
             if node.trailingClosure == nil, node.additionalTrailingClosures.isEmpty, callsBefore < calls.count {
                 let labels = node.arguments.map { $0.label?.text }
@@ -8170,6 +8350,19 @@ final class CallCollector: SyntaxVisitor {
                     calls.append(Call(path: "<untyped>.\(member)", leaf: member, strArg: nil,
                                       typed: false, args: [], argTypes: [],
                                       depCallee: callee, extOwner: nil))
+                }
+                // SOUNDNESS R1065 — …AND THE INSTANCE SPELLING: `Box(v: E()).get().go()` / `b.get().go()` where the
+                // receiver of `get` is a value of a type this scan neither declares nor extends. `rootOf` cannot
+                // type the result (a dependency's `-> V` names the declaration's parameter, and the wire carries no
+                // generic parameters), so the call was dropped while the FIELD spelling `.v.go()` disclosed. The
+                // same marker asks `typeSurface.returns` for `<Type>.<member>`; a miss on a type a chained report
+                // names discloses, exactly as the static and bare factory spellings do.
+                else if base.root == nil, let recvExpr = ma.base, let callee = depInstanceMemberCallee(recvExpr) {
+                    vbHit("R1065", callee)
+                    var c = Call(path: "<untyped>.\(member)", leaf: member, strArg: nil,
+                                 typed: false, args: [], argTypes: [], depCallee: callee, extOwner: nil)
+                    c.instanceHop = true
+                    calls.append(c)
                 }
                 else if owner == nil, guessedOwner == nil, Self.veinBProbe, let b = ma.base {
                     FileHandle.standardError.write(

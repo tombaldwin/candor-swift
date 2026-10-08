@@ -140,8 +140,9 @@ What "resolved-pure" means here, precisely, because it is narrower than it sound
   iterators, and this engine does not: a hand-written `next()`/`makeIterator()` is charged wherever the
   stdlib iterates the value — `for x in s`, a generic `<S: Sequence>` / `some` / `any` parameter iterated
   by a project function (answered at the caller's argument), stdlib algorithms (`reduce`, `map`,
-  `contains`, …) on a local iterable, and `Array(s)`/`Set(s)`/`zip` (SOUNDNESS R1048). Residual: a
-  generic iteration whose argument is passed with a LABEL or `inout` is not aligned to its parameter.
+  `contains`, …) on a local iterable, and `Array(s)`/`Set(s)`/`zip` (SOUNDNESS R1048). The caller's
+  argument is aligned to the parameter BY LABEL (a labelled, defaulted-skip or `inout` argument answers like a
+  positional one), and the same alignment serves R951's comparison witnesses and R974 (c)'s forwarding.
 
 ## Development
 
