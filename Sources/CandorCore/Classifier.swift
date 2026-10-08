@@ -366,6 +366,45 @@ public let FILES_NON_MOVING_MEMBERS: Set<String> =
 public let LOG_MEMBERS: Set<String> = ["trace", "debug", "info", "notice", "warning", "error", "critical", "fault", "log"]
 public let RAND_ROOTS: Set<String> = ["Int", "UInt", "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16",
     "UInt32", "UInt64", "Double", "Float", "Bool", "CGFloat"]
+/// SOUNDNESS R1032 — the stdlib's OTHER entropy draws. `RAND_ROOTS` answers `Int.random(in:)`, which is keyed on
+/// the receiver TYPE; these are `Collection`/`MutableCollection`/`Sequence` members, so they are keyed on the
+/// MEMBER (with no argument, or `using:` — the same draw `Int.random(in:using:)` is charged for), and their
+/// receiver is any collection at all, a literal included. From the toolchain's own `Swift.swiftinterface`:
+/// `randomElement()`/`randomElement(using:)` on `Collection`, `shuffled()`/`shuffled(using:)` on `Sequence`,
+/// `shuffle()`/`shuffle(using:)` on `MutableCollection & RandomAccessCollection`. Each draws from
+/// `SystemRandomNumberGenerator` unless handed a generator. Executed: `[1, 2, 3].shuffled()` prints a
+/// different order run to run, and all four spellings were ABSENT while `Int.random(in:)` read `Rand`.
+public let STDLIB_RAND_MEMBERS: Set<String> = ["randomElement", "shuffled", "shuffle"]
+/// SOUNDNESS R1048 — the stdlib iteration protocols. A local type conforming to one is ITERATED by the stdlib's
+/// own algorithms (`reduce`, `map`, `contains`, `Array(_:)`, a generic `for x in s`), each of which runs its
+/// `makeIterator()`/`next()` — bodies this scan has. `STD_PURE_PROTOCOLS` lists several of these as pure for
+/// the external-super FALLBACK only; that is a statement about a SYNTHESIZED requirement, never about a
+/// hand-written `next()`, and SPEC §4 forbids extending the pure set to iterators.
+/// SOUNDNESS R706 (residual) — protocols a Swift file commonly spells `any P` / `some P` / `<T: P>` that the
+/// PLATFORM owns. A member call through one of them is never attributed to the file's blind dependency module
+/// (the reverted R548 widening tagged a platform receiver; this is the guard that keeps that from recurring).
+/// A DENYLIST in the over-disclosure direction: a platform protocol missing from it costs a false `invisible`
+/// (non-gating), never a silence.
+public let PLATFORM_PROTOCOL_NAMES: Set<String> = [
+    "View", "App", "Scene", "Shape", "ViewModifier", "ObservableObject", "Observable", "NSObjectProtocol",
+    "Error", "LocalizedError", "Actor", "AnyObject", "AnyActor", "Sendable", "Decoder", "Encoder", "CodingKey",
+    "Publisher", "Subscriber", "Cancellable", "Subject", "Scheduler", "TextOutputStream", "Numeric",
+    "BinaryInteger", "FixedWidthInteger", "FloatingPoint", "BinaryFloatingPoint", "StringProtocol",
+    "RandomNumberGenerator", "Clock", "InstantProtocol", "DurationProtocol", "Executor", "SerialExecutor",
+    "ExpressibleByStringLiteral", "ExpressibleByIntegerLiteral", "ExpressibleByArrayLiteral",
+    "ExpressibleByDictionaryLiteral", "UIApplicationDelegate", "NSApplicationDelegate", "URLSessionDelegate",
+    "URLSessionTaskDelegate", "URLSessionDataDelegate"]
+public let STDLIB_ITERATION_PROTOCOLS: Set<String> = [
+    "Sequence", "IteratorProtocol", "Collection", "BidirectionalCollection", "RandomAccessCollection",
+    "MutableCollection", "RangeReplaceableCollection", "LazySequenceProtocol", "LazyCollectionProtocol",
+    "AsyncSequence", "AsyncIteratorProtocol"]
+/// SOUNDNESS R1048 — the `Sequence`/`Collection` algorithms that ITERATE their receiver when it is a value of an
+/// unknown (generic, `some`, `any`) type: the caller's instantiation answers which `next()` runs. Used only for a
+/// PARAMETER receiver; a LOCAL iterable receiver takes every member it does not declare itself (a denylist).
+public let STDLIB_ITERATING_MEMBERS: Set<String> = STDLIB_ELEMENT_CLOSURE_FIRST.union(STDLIB_ELEMENT_CLOSURE_PAIR)
+    .union(STDLIB_ELEMENT_CLOSURE_INDEX.keys).union(["contains", "min", "max", "sorted", "joined", "reversed",
+    "elementsEqual", "starts", "dropFirst", "dropLast", "suffix", "prefix", "shuffled", "randomElement",
+    "makeIterator", "next", "makeAsyncIterator", "enumerated", "flatMap", "compactMap", "forEach", "count"])
 // The `Process` verbs recognised on a receiver this engine could NOT prove is a subprocess handle — an
 // `extension Process`'s implicit `self`, or a member chain whose root is a stale `Process` two hops up.
 // It is a FLOOR, not the rule: a PROVEN handle is answered by `processCapabilityEffect` below, which is
@@ -2569,6 +2608,11 @@ public let STD_PURE_PROTOCOLS: Set<String> = [
     // Iteration protocols: their default requirement (`makeIterator`) is pure; an EFFECTFUL `next()` is a
     // project body captured by the dedicated iterator-forcing path, so the external-super fallback must
     // not disclose Unknown for them (it false-flagged a pure custom Sequence — the S1 smoke case).
+    // SOUNDNESS R1048 — THE "DEDICATED PATH" COVERED ONE SPELLING. Executed: only `for x in Loud()` was
+    // charged; a generic/`some`/`any` parameter iterated by a project function, `Loud().reduce`, `.map`,
+    // `.contains` and `Array(Loud())` were ABSENT over a `next()` that deletes a file. They are charged now
+    // (`iterateLocal`, the `#iter` caller-witness requirement). This list stays a FALLBACK rule only —
+    // SPEC §4 forbids treating iterators as resolved-pure, and nothing here does.
     "Sequence", "IteratorProtocol", "Collection", "BidirectionalCollection", "RandomAccessCollection",
     "MutableCollection", "RangeReplaceableCollection", "AsyncSequence", "AsyncIteratorProtocol",
 ]
@@ -3095,4 +3139,18 @@ public let STDLIB_DICT_VALUE_CLOSURE: [String: Set<Int>] =
 /// SOUNDNESS R905 — a PLATFORM generic container member whose return is one of the receiver's generic arguments,
 /// and which one (0-based). From the platform's own declarations: `NSCache<KeyType, ObjectType>.object(forKey:)
 /// -> ObjectType?`, `NSMapTable<KeyType, ObjectType>.object(forKey:) -> ObjectType?`.
-public let PLATFORM_GENERIC_MEMBER_RETURNS: [String: Int] = ["NSCache.object": 1, "NSMapTable.object": 1]
+public let PLATFORM_GENERIC_MEMBER_RETURNS: [String: Int] = ["NSCache.object": 1, "NSMapTable.object": 1,
+    // SOUNDNESS R905 (residual) — `NSHashTable<ObjectType>`'s `- (nullable ObjectType)member:(nullable ObjectType)object`.
+    "NSHashTable.member": 0]
+/// SOUNDNESS R905 (residual) — the PROPERTY half of the same fact: `NSHashTable<ObjectType>`'s
+/// `@property (nullable, nonatomic, readonly) ObjectType anyObject`. (`allObjects` is `NSArray<ObjectType>` and
+/// `setRepresentation` imports as `Set<AnyHashable>`, so neither is a scalar return of the argument.)
+public let PLATFORM_GENERIC_PROPERTY_RETURNS: [String: Int] = ["NSHashTable.anyObject": 0]
+/// SOUNDNESS R905 (residual) — the platform generic containers' class FACTORIES that vend the receiver's own
+/// specialisation (`+ (NSHashTable<ObjectType> *)weakObjectsHashTable`, imported as `weakObjects()`), so
+/// `let table = NSHashTable<G>.weakObjects()` is an `NSHashTable<G>` exactly as `NSHashTable<G>()` is. Each
+/// entry is pinned by `swiftc -typecheck` in `PlatformGenericTablesTests` — the SDK, not this list, decides.
+public let PLATFORM_GENERIC_SELF_FACTORIES: [String: Set<String>] = [
+    "NSHashTable": ["weakObjects"],
+    "NSMapTable": ["strongToStrongObjects", "weakToStrongObjects", "strongToWeakObjects", "weakToWeakObjects"],
+]

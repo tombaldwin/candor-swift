@@ -179,11 +179,15 @@ final class ElementAccessorReceiverProcessTests: XCTestCase {
         func ovrRemoveFirstCount(_ v: inout [PN]) { v.removeFirst(2) }
         func ovrRemoveLastCount(_ v: inout [PN]) { v.removeLast(2) }
         """)
-        for a in ["ovrFirst", "ovrPopLast", "ovrRandom", "ovrDropWhile", "ovrArrayCtor", "ovrSet",
+        for a in ["ovrFirst", "ovrPopLast", "ovrDropWhile", "ovrArrayCtor", "ovrSet",
                   "ovrRemoveFirstCount", "ovrRemoveLastCount"] {
             XCTAssertNil(ProcessHarness.chargedNothing(by, a),
                          "R537 over-charge: \(a) touches nothing effectful and must carry no effect/hedge")
         }
+        // SOUNDNESS R1032 — `randomElement()` DRAWS ENTROPY, so `ovrRandom` reads exactly `Rand`: the stdlib's
+        // own draw, and still nothing from the pure element.
+        XCTAssertEqual(by["ovrRandom"]?["inferred"] as? [String], ["Rand"],
+                       "R1032: randomElement() is Rand and the pure element adds nothing; got \(by["ovrRandom"] ?? [:])")
     }
 
     // ── 4. WHAT THIS ROW DELIBERATELY DOES NOT CLOSE ─────────────────────────────────────────────

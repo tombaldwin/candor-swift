@@ -148,6 +148,10 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// the DISCLOSING direction — a construction site that forgets to set it over-discloses,
               /// never silently drops a raw C call.
               var argLabelled: Bool = false
+              /// SOUNDNESS R1047 — the call's argument LABELS, in order (`nil` = unlabelled), on an UNQUALIFIED
+              /// call with no trailing closure. Read only by the Driver's constructor arm for a type this scan
+              /// only EXTENDS. `nil` (the default) means "not recorded" and filters nothing.
+              var argLabels: [String?]? = nil
               /// SOUNDNESS R847 — on an `argRef` call: the name is a binder's local in scope, so it can be
               /// no dependency declaration (the chained join skips it). Local resolution is unaffected.
               var argBoundLocal: Bool = false
@@ -232,6 +236,7 @@ final class CallCollector: SyntaxVisitor {
     /// a guess, and a dependency lookup through it is the miss rule's business.
     var conventionVars: Set<String> = []
     var fnTyped: Set<String>                // function-typed locals/params
+    let autoclosureParams: Set<String>      // SOUNDNESS R1009 — the `@autoclosure` params (see DeclCollector)
     var opaqueFnLocals: Set<String> = []    // fn-typed LOCALS whose value is opaque (not a visible
                                             // closure): invoking one is §4 Unknown — only fn-typed
                                             // PARAMS can defer to call-site flow (callers pass them).
@@ -284,6 +289,12 @@ final class CallCollector: SyntaxVisitor {
     let implicitParams: [String: [[(label: String, type: String?)]]]
     /// SOUNDNESS R999 — `Type.member` keys (simple owner) this scan has a body for; see the Driver.
     let implicitMemberUnits: Set<String>
+    /// SOUNDNESS R1032 — the same `<type leaf>.<member>` keys as `implicitMemberUnits`, built whatever R999's
+    /// switch says: "does this scan have a body for `Owner.member`".
+    let memberUnitKeys: Set<String>
+    /// SOUNDNESS R1048 — local types that conform (transitively) to a stdlib iteration protocol, or declare a
+    /// `next`/`makeIterator`/`makeAsyncIterator` body.
+    let iterableLocalTypes: Set<String>
     let fieldArrayElem: [String: [String: String]]  // Type -> field -> [T] element (self.field loops)
     let fieldArrayElemNested: [String: [String: String]]  // R278 — Type -> field -> INNER element of `[[T]]`
     /// R278 — LOCALS and PARAMETERS whose type is a container OF containers, mapped to the INNER
@@ -312,6 +323,10 @@ final class CallCollector: SyntaxVisitor {
     let opWitnessTypes: [String: Set<String>]
     /// R951 — `let x: [Noisy] = …` / `var t: Tiny<Noisy>`: the generic arguments of annotated locals.
     var localTypeArgs: [String: [String]] = [:]
+    /// SOUNDNESS R905 (residual) — local name -> (platform generic owner, its written generic arguments), for a
+    /// binding initialised by `Owner<A…>(…)` or `Owner<A…>.<self-factory>()`; a name bound twice to different
+    /// answers is dropped (flow-insensitive, so it must not choose).
+    var localPlatformGenerics: [String: (String, [String])] = [:]
     /// R951 — "paramIndex:op": a comparison on a parameter typed by this FUNCTION's generic parameter. The
     /// instantiation is the caller's, so the Driver resolves it at every call site from the argument type.
     var genericWitnessReqs: Set<String> = []
@@ -573,6 +588,7 @@ final class CallCollector: SyntaxVisitor {
     /// while these answer "what type does this name STAND FOR in receiver position" — merging them
     /// would turn `gC.validate()` into an instance call on `CBase`, a different and wrong dispatch.
     let metatypeReturns: [String: String]
+    let genericReturnArgs: [String: GenericReturnArg]   // SOUNDNESS R1044 — see DeclCollector.genericReturnArg
     let globalMetatypes: [String: String]
     let globalMetatypeArrayElem: [String: String]
     let fieldMetatypes: [String: [String: String]]
@@ -800,6 +816,8 @@ final class CallCollector: SyntaxVisitor {
          returnFacts: [String: DeclaredFacts] = [:],
          implicitParams: [String: [[(label: String, type: String?)]]] = [:],
          implicitMemberUnits: Set<String> = [],
+         memberUnitKeys: Set<String> = [],
+         iterableLocalTypes: Set<String> = [],
          declaredTypes: Set<String>,
          localProtocols: Set<String>, protoBoundParams: [String: String] = [:],
          typeBoundParams: [String: String] = [:],
@@ -813,6 +831,7 @@ final class CallCollector: SyntaxVisitor {
          memberTypeAliases: [String: [String: String]] = [:],
          returns: [String: String],
          metatypeReturns: [String: String] = [:],
+         genericReturnArgs: [String: GenericReturnArg] = [:],
          globalMetatypes: [String: String] = [:],
          globalMetatypeArrayElem: [String: String] = [:],
          fieldMetatypes: [String: [String: String]] = [:],
@@ -877,6 +896,7 @@ final class CallCollector: SyntaxVisitor {
         self.vars = info.params
         self.selfElementType = info.selfElementType
         self.fnTyped = info.fnTypedParams
+        self.autoclosureParams = info.autoclosureParams   // R1009
         self.protoTyped = info.protoParams
         self.monoNames = info.opaqueParams
         self.opaqueElem = info.opaqueArrayParams
@@ -895,7 +915,10 @@ final class CallCollector: SyntaxVisitor {
         self.returnFacts = returnFacts              // R990/R991
         self.implicitParams = implicitParams        // R999
         self.implicitMemberUnits = implicitMemberUnits
+        self.memberUnitKeys = memberUnitKeys
+        self.iterableLocalTypes = iterableLocalTypes
         self.metatypeReturns = metatypeReturns                      // R585
+        self.genericReturnArgs = genericReturnArgs                  // R1044
         self.globalMetatypes = globalMetatypes
         self.globalMetatypeArrayElem = globalMetatypeArrayElem
         self.fieldMetatypes = fieldMetatypes
@@ -1565,6 +1588,30 @@ final class CallCollector: SyntaxVisitor {
         return (n, mono)
     }
 
+    /// SOUNDNESS R1044 — `pick(E())` where every declaration of `pick` is `func pick<T>(_ x: T) -> T`: the value is
+    /// the ARGUMENT's type, read off the argument with the same resolver. Refused unless the call's arguments align
+    /// with the declaration one for one (count and labels — a defaulted or variadic declaration was not recorded),
+    /// and unless every position the generic parameter binds agrees. `T` names no type, so before this the leaf
+    /// typed the value as a type spelled `T` (R1010) or as nothing, and `pick(E()).go()` was ABSENT over a body
+    /// that deletes a file (executed).
+    private func genericReturnBinding(_ call: FunctionCallExprSyntax, leaf: String, _ depth: Int)
+        -> (root: String?, isVar: Bool, path: [String], mono: Bool, opaqueHop: Bool)? {
+        guard !DeclCollector.r1044Off, depth < 12, returns[leaf] == nil, let g = genericReturnArgs[leaf],
+              call.trailingClosure == nil, call.additionalTrailingClosures.isEmpty else { return nil }
+        let args = Array(call.arguments)
+        guard args.count == g.labels.count,
+              zip(args, g.labels).allSatisfy({ $0.0.label?.text == $0.1 }) else { return nil }
+        var answer: (root: String?, isVar: Bool, path: [String], mono: Bool, opaqueHop: Bool)? = nil
+        for p in g.positions where p < args.count {
+            let r = rootOfUnaliased(args[p].expression, depth + 1)
+            guard let root = r.root, r.isVar else { return nil }
+            if let a = answer, a.root != root { return nil }
+            answer = r
+        }
+        if let a = answer { vbHit("R1044", "\(leaf) -> \(a.root ?? "?")") }
+        return answer
+    }
+
     private func rootOfUnaliased(_ raw: ExprSyntax, _ depth: Int = 0) -> (root: String?, isVar: Bool, path: [String], mono: Bool, opaqueHop: Bool) {
         // Receiver chains recurse with the syntactic nesting (`a.b.c…`, ternary arms, subscript bases —
         // the last via elementTypeOf/dictValueOf, which call back here). Real receivers nest <10 deep;
@@ -1693,6 +1740,14 @@ final class CallCollector: SyntaxVisitor {
             }
         }
         if let ma = expr.as(MemberAccessExprSyntax.self) {
+            // SOUNDNESS R905 (residual) — a platform generic container's element PROPERTY (`table.anyObject`
+            // over `NSHashTable<G>`) is the receiver's generic argument, read off the platform's declaration
+            // (`PLATFORM_GENERIC_PROPERTY_RETURNS`) exactly as the method twin below reads `object(forKey:)`.
+            if !DeclCollector.r905HOff, let b = ma.base, let (owner, targs) = platformGenericReceiver(b),
+               let idx = PLATFORM_GENERIC_PROPERTY_RETURNS["\(owner).\(ma.declName.baseName.text)"], idx < targs.count {
+                vbHit("R905H", "\(owner).\(ma.declName.baseName.text) -> \(targs[idx])")
+                return (targs[idx], true, [ma.declName.baseName.text], false, false)
+            }
             // tuple element/member: `p.0` / `p.c` where p is a tuple-typed local/param
             if let baseDR = ma.base?.as(DeclReferenceExprSyntax.self),
                let elemType = tupleElem[baseDR.baseName.text]?[ma.declName.baseName.text] {
@@ -1850,6 +1905,7 @@ final class CallCollector: SyntaxVisitor {
                 // type so its members classify (`p.run()`→Exec). Dealiased by the wrapper (R97).
                 if n.first?.isUppercase == true { return (n, true, [n], false, false) }
                 if let rt = returns[n] { return (rt, true, [n], false, false) }
+                if let b = genericReturnBinding(call, leaf: n, depth) { return b }   // SOUNDNESS R1044
                 // SOUNDNESS R585 (b9) — a factory that vends a METATYPE. `returns` cannot hold it
                 // (`typeName` answers nil for `-> CBase.Type`), so `mkC().validate()` resolved to no
                 // root at all. `isVar: false` — this is a TYPE-position receiver, exactly like the
@@ -1931,6 +1987,8 @@ final class CallCollector: SyntaxVisitor {
                let rt = returns[ma.declName.baseName.text] {
                 return (rt, true, [ma.declName.baseName.text], false, false)
             }
+            if let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
+               let b = genericReturnBinding(call, leaf: ma.declName.baseName.text, depth) { return b }   // R1044
             // SOUNDNESS R905 — a PLATFORM generic container's element accessor: `storage.object(forKey:)` over
             // `NSCache<NSString, StorageObject<T>>` returns `StorageObject?`. The release typed the field
             // `NSCache` (R915 D) and stopped there, so Kingfisher's `if let object = storage.object(…) {
@@ -6059,11 +6117,16 @@ final class CallCollector: SyntaxVisitor {
     private func modelImplicitIteration(_ sequence: ExprSyntax) {
         let r = rootOf(sequence)
         if let t = r.root, r.isVar, localTypes.contains(t) {
-            for m in ["makeIterator", "next"] {
-                calls.append(Call(path: "\(t).\(m)", leaf: m, strArg: nil, typed: true, args: [], argTypes: []))
-            }
+            if Self.r1048Off {
+                for m in ["makeIterator", "next"] {
+                    calls.append(Call(path: "\(t).\(m)", leaf: m, strArg: nil, typed: true, args: [], argTypes: []))
+                }
+            } else { iterateLocal(t, releaseForIn: true) }
             return
         }
+        // SOUNDNESS R1048 — `for x in s` over a PARAMETER whose type the caller decides (`<S: Sequence>`,
+        // `some Sequence`, `any Sequence`): the iterator that runs is the caller's argument's.
+        if !Self.r1048Off, iterationReqOnParam(sequence) { return }
         // FINDING 1 — iterating the RESULT of an opaque/erased Sequence builder (`for _ in b.build(…)` where
         // `build() -> some Sequence`). The opaque return hid the concrete iterator from rootOf (it peels to
         // the bare protocol name, not a local type), so the loop read silent-pure. Identify the builder by
@@ -6730,6 +6793,12 @@ final class CallCollector: SyntaxVisitor {
         var owner: String?, field: String?
         if let dr = b.as(DeclReferenceExprSyntax.self) {
             let n = dr.baseName.text
+            // SOUNDNESS R905 (residual) — a LOCAL bound to a platform generic container (`let c = NSCache<K, G>()`,
+            // `let t = NSHashTable<G>.weakObjects()`), recorded by `prescanLocalPlatformGenerics`. Asked before
+            // the field arm, whose guard refuses every bound local.
+            if !DeclCollector.r905HOff, isBoundLocal(n) || vars[n] != nil, let lp = localPlatformGenerics[n] {
+                return lp
+            }
             guard vars[n] == nil, !isBoundLocal(n), !paramNamesR851.contains(n) else { return nil }
             owner = enclosingType; field = n
         } else if let ma = b.as(MemberAccessExprSyntax.self), let mb = ma.base {
@@ -6742,6 +6811,73 @@ final class CallCollector: SyntaxVisitor {
         return (ft, targs)
     }
 
+    /// SOUNDNESS R1045 — §1b kill switch.
+    static let r1045Off = ProcessInfo.processInfo.environment["CANDOR_R1045_OFF"] != nil
+    /// SOUNDNESS R1046 — §1b kill switch.
+    static let r1046Off = ProcessInfo.processInfo.environment["CANDOR_R1046_OFF"] != nil
+    /// SOUNDNESS R1048 — §1b kill switch.
+    static let r1048Off = ProcessInfo.processInfo.environment["CANDOR_R1048_OFF"] != nil
+    /// SOUNDNESS R1048 — the implicit calls iterating a LOCAL iterable makes: its own `makeIterator`/`next`/
+    /// `makeAsyncIterator`, and the `next` of the iterator type its `makeIterator` is declared to return
+    /// (`struct Coll: Sequence { func makeIterator() -> Loud }` iterates `Loud.next`, which the release missed).
+    /// `resolveQual` drops a key the type does not declare, so a synthesized member edges nothing.
+    ///
+    /// ONLY MEMBERS A TYPE DECLARES ARE EDGED (`memberUnitKeys`), except the release's own for-in pair: a typed
+    /// call to a member the type lacks falls to the external-supertype fallback, which DISCLOSES
+    /// `dispatch:<Super>.next` — the first cut of this added that `Unknown` to 105 swift-collections rows over
+    /// types whose iterator is a synthesized or stdlib one.
+    private func iterateLocal(_ t: String, releaseForIn: Bool = false) {
+        vbHit("R1048", "iterate \(t)")
+        var owners = [t]
+        for m in ["makeIterator", "makeAsyncIterator"] {
+            if let it = returnFacts["\(t).\(m)"]?.scalar, localTypes.contains(it), !owners.contains(it) { owners.append(it) }
+        }
+        for o in owners {
+            for m in ["makeIterator", "next", "makeAsyncIterator"] {
+                let floor = releaseForIn && o == t && (m == "makeIterator" || m == "next")
+                guard floor || memberUnitKeys.contains("\(o).\(m)") else { continue }
+                calls.append(Call(path: "\(o).\(m)", leaf: m, strArg: nil, typed: true, args: [], argTypes: []))
+            }
+        }
+    }
+    /// SOUNDNESS R1048 — a PARAMETER whose type is not a local concrete type is iterated with the CALLER's
+    /// instantiation: recorded as R951's caller-witness requirement `<idx>:#iter`, which the Driver answers at
+    /// every call site whose argument is a local iterable type.
+    private func iterationReqOnParam(_ e: ExprSyntax) -> Bool {
+        guard let dr = Self.peel(e).as(DeclReferenceExprSyntax.self) else { return false }
+        let n = dr.baseName.text
+        guard let idx = paramIndexR951[n], !isBoundLocal(n), !binderShadow.contains(n) else { return false }
+        if let t = rootOf(e).root, declaredTypes.contains(t) { return false }
+        if genericWitnessReqs.insert("\(idx):#iter").inserted { vbHit("R1048", "param \(n)") }
+        return true
+    }
+    /// SOUNDNESS R1048 — a LOCAL iterable passed to code this scan does not own (a stdlib/platform constructor or
+    /// free function, `Array(seq)`, `zip(a, b)`, `Set(seq)`, or a member of a non-local receiver) is iterated there.
+    private func iterateLocalArguments(_ node: FunctionCallExprSyntax, calleeIsForeign: Bool) {
+        guard !Self.r1048Off, calleeIsForeign else { return }
+        for a in node.arguments {
+            if let t = rootOf(a.expression).root, iterableLocalTypes.contains(t),
+               !Self.peel(a.expression).is(ClosureExprSyntax.self) { iterateLocal(t) }
+        }
+    }
+
+    /// SOUNDNESS R1009 — §1b kill switch.
+    static let r1009Off = ProcessInfo.processInfo.environment["CANDOR_R1009_OFF"] != nil
+    /// SOUNDNESS R1032 — §1b kill switch.
+    static let r1032Off = ProcessInfo.processInfo.environment["CANDOR_R1032_OFF"] != nil
+    /// SOUNDNESS R1032 — does a type THIS scan declares (or one of its local supertypes) carry its own body for
+    /// `member`? Only then does the receiver's own member answer instead of the stdlib's. A LOCAL PROTOCOL
+    /// receiver is left to its dispatch (a requirement named `shuffle` is answered by the conformers, and this
+    /// scan does not record requirement names here) — the one spelling this arm declines to speak for. An
+    /// untyped receiver (`nil`) or a platform/stdlib type answers no.
+    private func receiverDeclaresOwnMember(_ root: String?, _ member: String) -> Bool {
+        guard let r = root else { return false }
+        if localProtocols.contains(r) { return true }
+        guard localTypes.contains(r) else { return false }
+        let owners = [r] + Array(supertypesAll[r] ?? []) + Array(classSupertypes[r] ?? [])
+        return owners.contains { memberUnitKeys.contains("\($0).\(member)") }
+    }
+
     /// SOUNDNESS R1000/R999 §1b KILL SWITCHES (also off under `CANDOR_VT_OFF`).
     static let r1000Off = DeclCollector.vtOff || ProcessInfo.processInfo.environment["CANDOR_R1000_OFF"] != nil
     static let r999Off = DeclCollector.vtOff || ProcessInfo.processInfo.environment["CANDOR_R999_OFF"] != nil
@@ -6749,13 +6885,36 @@ final class CallCollector: SyntaxVisitor {
 
     override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
         let callsBefore = calls.count
-        defer { if !Self.r974Off { annotateGenericForwards(node, from: callsBefore) } }
+        defer {
+            if !Self.r974Off { annotateGenericForwards(node, from: callsBefore) }
+            // SOUNDNESS R1047 — every unqualified call this node produced carries its argument labels.
+            if node.trailingClosure == nil, node.additionalTrailingClosures.isEmpty, callsBefore < calls.count {
+                let labels = node.arguments.map { $0.label?.text }
+                for j in callsBefore..<calls.count
+                    where (calls[j].unqualified || calls[j].leaf == "init") && calls[j].argLabels == nil {
+                    calls[j].argLabels = labels
+                }
+            }
+        }
         // SOUNDNESS R999 — `.mk()` / `.init(…)` called with a contextual type: walk the qualified call instead.
         if let ma = node.calledExpression.as(MemberAccessExprSyntax.self), ma.base == nil,
            let t = implicitMemberContext(Syntax(node)), implicitMemberHasBody(t, ma.declName.baseName.text),
            let b = Self.typeExpression(t) {
             vbHit("R999", "call \(t).\(ma.declName.baseName.text)")
             walk(node.with(\.calledExpression, ExprSyntax(ma.with(\.base, b))))
+            return .skipChildren
+        }
+        // SOUNDNESS R1046 — `Array<Int>()`, `Box<Int>(v: 1)`, `NSCache<NSString, G>()`: an EXPLICITLY SPECIALISED
+        // constructor. The callee is a `GenericSpecializationExpr`, which no arm below reads, so it fell to the
+        // computed-callee arm and published `callback:computed` `Unknown` — over a constructor whose type is
+        // written in full, and while `rootOf` already types the value it builds (R905). The generic argument
+        // clause holds only TYPES, so the call is the unspecialised one: walk it as `Box(v: 1)`, which reaches
+        // the constructor arms (κ, the local `init` edge, deinit glue) exactly as the bare spelling does.
+        if !Self.r1046Off, let g = node.calledExpression.as(GenericSpecializationExprSyntax.self),
+           let tp = dottedTypePath(Syntax(Self.peel(g.expression))),
+           Self.typeLikeName(tp.split(separator: ".").last.map(String.init) ?? "") {
+            vbHit("R1046", "ctor \(tp)")
+            walk(node.with(\.calledExpression, g.expression))
             return .skipChildren
         }
         // R33 — deinit-glue, asked of the CONSTRUCTION rather than of a binder. See `applyDeinitGlue`
@@ -6913,6 +7072,10 @@ final class CallCollector: SyntaxVisitor {
             ?? firstStringLiteral(node.arguments)
         if let dr = node.calledExpression.as(DeclReferenceExprSyntax.self) {
             let name = dr.baseName.text
+            // SOUNDNESS R1048 — `Array(seq)`, `Set(seq)`, `zip(a, b)`: a local iterable handed to a constructor or
+            // free function this scan does not declare is iterated there.
+            iterateLocalArguments(node, calleeIsForeign: !localFreeFns.contains(name) && !localTypes.contains(name)
+                                    && !fnTyped.contains(name) && !isBoundLocal(name))
             // SOUNDNESS R256 — a bare invocation of a stored field whose generic parameter a same-type
             // requirement ALSO binds to a function type (`extension Gen where F == (Int) -> Bool`) while another
             // binds it to a nominal one (`where F == Wiper`). `fields` holds the nominal reading, so every arm
@@ -6986,6 +7149,18 @@ final class CallCollector: SyntaxVisitor {
                     unresolved = true
                     why.insert(opaqueCallableReason(name))
                 }
+            } else if !Self.r1009Off, autoclosureParams.contains(name), fnTyped.contains(name),
+                      !isBoundLocal(name), !binderShadow.contains(name) {
+                // SOUNDNESS R1009 — an `@autoclosure` PARAMETER invoked. Its argument is not a function value
+                // but an EXPRESSION written at the call site (`failing(reason: "x")`), which the CALLER's own
+                // walk already charges lexically — the same rule as a closure literal passed to a fn-typed
+                // parameter, and it holds for EVERY caller, a caller in another package included, because no
+                // spelling can hand an autoclosure parameter anything but an expression in the caller's own
+                // source. Deferring it to callback-flow found no closure and no named function at any call
+                // site and so published `callback:<name>` `Unknown` on the callee AND on every caller, over a
+                // string literal. Nothing is recorded: the invocation runs the caller's expression, and that
+                // expression is the caller's row. A binder that shadows the name is a different value and
+                // keeps the general arm below.
             } else if fnTyped.contains(name) {
                 // a function-typed PARAM invoked — DEFERRED to callback-flow resolution: when
                 // every visible call site passes a closure (already charged to its passer
@@ -7250,6 +7425,54 @@ final class CallCollector: SyntaxVisitor {
             if let hop = holdsHop {
                 calls.append(Call(path: "<holds>.\(member)", leaf: member, strArg: nil, typed: false,
                                   args: [], argTypes: [], ownerModule: spelledModule(of: ma.base), holdsHop: hop))
+            }
+            // SOUNDNESS R1032 — `xs.randomElement()` / `xs.shuffled()` / `xs.shuffle()` draw entropy, and the κ
+            // table keyed `Rand` on `<numeric>.random` only, so every collection spelling was ABSENT (executed:
+            // `[1, 2, 3].shuffled()` differs run to run). Keyed on the MEMBER, because the receiver is any
+            // collection — a literal, an untyped binding, a range — and ADDED beside whatever the chain below
+            // records, so it removes no edge. The one receiver it must not speak for is a type this scan
+            // DECLARES a same-named member on (its own `Deck.shuffle()`): that body is the answer, and the
+            // typed-local branch below edges to it. A local type WITHOUT such a member (`struct Deck:
+            // RandomAccessCollection`) inherits the stdlib's, and is charged.
+            if !Self.r1032Off, STDLIB_RAND_MEMBERS.contains(member),
+               node.arguments.isEmpty || (node.arguments.count == 1 && node.arguments.first?.label?.text == "using"),
+               !receiverDeclaresOwnMember(base.root, member) {
+                vbHit("R1032", "\(base.root ?? "?").\(member)")
+                directEffects.insert("Rand")
+            }
+            // SOUNDNESS R1048 — a stdlib algorithm on a LOCAL iterable (`Loud().reduce(0, +)`, `seq.map { … }`,
+            // `seq.contains(2)`) iterates it through the type's own `next()`. Every member the type does not declare
+            // itself is a stdlib/extension member and is charged the iteration (a denylist: the type's own members
+            // answer for themselves). On a PARAMETER of a caller-decided type, the iterating stdlib algorithms
+            // defer to the caller's instantiation.
+            if !Self.r1048Off, let b = ma.base {
+                if let t = base.root, iterableLocalTypes.contains(t), !["makeIterator", "next", "makeAsyncIterator"].contains(member),
+                   !receiverDeclaresOwnMember(t, member) {
+                    iterateLocal(t)
+                } else if STDLIB_ITERATING_MEMBERS.contains(member) {
+                    _ = iterationReqOnParam(b)
+                }
+                // a local iterable handed to a member of a receiver this scan does not own
+                let foreignRecv = base.root.map { !localTypes.contains($0) } ?? true
+                iterateLocalArguments(node, calleeIsForeign: foreignRecv)
+            }
+            // SOUNDNESS R1045 — `a.hash(into: &h)` and `h.combine(a)` run `a`'s `Hashable` witness. R951/R974 (b)
+            // reached it only through an operator or a container operation, so inside `func bucket<T: Hashable>(_ a:
+            // T)` the call was ABSENT over a user `hash(into:)` that deletes a file (executed, one tree). The
+            // witness question is R951's own (`comparisonWitnesses`): a generic parameter defers to the CALLER's
+            // instantiation, a local type edges its declared witness or walks a synthesized one's stored
+            // properties. A concrete receiver also resolves through the ordinary member arm below; the duplicate
+            // edge dedupes.
+            if !Self.r1045Off, !Self.r974Off, let b = ma.base, node.arguments.count == 1 {
+                if member == "hash", node.arguments.first?.label?.text == "into" {
+                    vbHit("R1045", "hash(into:)")
+                    comparisonWitnesses("hash", b, arity: 1)
+                } else if member == "combine", node.arguments.first?.label == nil,
+                          rootOf(b).root == "Hasher", !declaredTypes.contains("Hasher"),
+                          let a = node.arguments.first?.expression {
+                    vbHit("R1045", "combine")
+                    comparisonWitnesses("hash", a, arity: 1)
+                }
             }
             // SOUNDNESS R866 — A COMPOSITION-TYPED PARAMETER asks each of its dependency-declared members as the
             // owner, BESIDE whatever the chain below records (which, for a composition, is nothing: the name
@@ -8465,7 +8688,9 @@ final class CallCollector: SyntaxVisitor {
             for (i, x) in targs.enumerated() where argIndex == nil || i == argIndex { targets.append(dealias(x)) }
             if let idx = paramIndexR951[n], let t = paramTypesR951[n] ?? vars[n], !localTypes.contains(t),
                genericBoundsR951[t] != nil {
-                genericWitnessReqs.insert("\(idx):\(w)")
+                // R974 (a) REACH — a unit whose own body needs its CALLER's witness: the population a cross-package
+                // answer (a wire field, or a hedge) would have to speak for.
+                if genericWitnessReqs.insert("\(idx):\(w)").inserted { vbHit("R974A", "\(idx):\(w)") }
             }
         }
         let r = rootOf(operand)
@@ -8582,6 +8807,56 @@ final class CallCollector: SyntaxVisitor {
         let v = V(viewMode: .sourceAccurate)
         v.walk(body)
         localTypeArgs = v.out
+    }
+
+    /// SOUNDNESS R905 (residual) — fills `localPlatformGenerics`. Only owners the platform tables name, so this
+    /// can type nothing the tables do not already answer for a field.
+    func prescanLocalPlatformGenerics(_ body: Syntax) {
+        guard !DeclCollector.r905HOff else { return }
+        final class V: SyntaxVisitor {
+            var out: [String: (String, [String])] = [:], poisoned: Set<String> = []
+            static let owners: Set<String> = Set(PLATFORM_GENERIC_MEMBER_RETURNS.keys.map { String($0.prefix { $0 != "." }) })
+                .union(PLATFORM_GENERIC_PROPERTY_RETURNS.keys.map { String($0.prefix { $0 != "." }) })
+            override func visit(_ node: PatternBindingSyntax) -> SyntaxVisitorContinueKind {
+                guard let n = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { return .visitChildren }
+                var ans: (String, [String])? = nil
+                if let t = node.typeAnnotation?.type, let id = desugaredType(t).as(IdentifierTypeSyntax.self),
+                   Self.owners.contains(id.name.text), let gac = id.genericArgumentClause {
+                    let a = gac.arguments.compactMap { $0.argument.as(TypeSyntax.self).flatMap { typeName($0).name } }
+                    if a.count == gac.arguments.count { ans = (id.name.text, a) }
+                } else if let call = node.initializer.map({ CallCollector.peel($0.value) })?.as(FunctionCallExprSyntax.self) {
+                    var g = call.calledExpression.as(GenericSpecializationExprSyntax.self)
+                    if g == nil, let fm = call.calledExpression.as(MemberAccessExprSyntax.self),
+                       let gb = fm.base?.as(GenericSpecializationExprSyntax.self),
+                       let o = gb.expression.as(DeclReferenceExprSyntax.self)?.baseName.text,
+                       PLATFORM_GENERIC_SELF_FACTORIES[o]?.contains(fm.declName.baseName.text) == true { g = gb }
+                    if let g, let o = g.expression.as(DeclReferenceExprSyntax.self)?.baseName.text, Self.owners.contains(o) {
+                        let a = g.genericArgumentClause.arguments.compactMap {
+                            $0.argument.as(TypeSyntax.self).flatMap { typeName($0).name } }
+                        if a.count == g.genericArgumentClause.arguments.count { ans = (o, a) }
+                    }
+                }
+                if let a = ans {
+                    if let e = out[n], e.0 != a.0 || e.1 != a.1 { poisoned.insert(n) } else { out[n] = a }
+                } else { poisoned.insert(n) }   // any OTHER binding of the name: never choose between them
+                return .visitChildren
+            }
+            // A closure parameter or an `if let`/`for` binder of the same name is another value.
+            override func visit(_ node: ClosureShorthandParameterSyntax) -> SyntaxVisitorContinueKind {
+                poisoned.insert(node.name.text); return .visitChildren
+            }
+            override func visit(_ node: ClosureParameterSyntax) -> SyntaxVisitorContinueKind {
+                poisoned.insert((node.secondName ?? node.firstName).text); return .visitChildren
+            }
+            override func visit(_ node: IdentifierPatternSyntax) -> SyntaxVisitorContinueKind {
+                if node.parent?.is(PatternBindingSyntax.self) != true { poisoned.insert(node.identifier.text) }
+                return .visitChildren
+            }
+        }
+        let v = V(viewMode: .sourceAccurate)
+        v.walk(body)
+        for n in v.poisoned { v.out.removeValue(forKey: n) }
+        localPlatformGenerics = v.out
     }
 
     // PREFIX (`~>x`) / POSTFIX (`x<!>`) operator overloads — SwiftParser leaves these as their own
@@ -8920,8 +9195,12 @@ final class CallCollector: SyntaxVisitor {
         let lt = literalKind(Self.peel(value))
         guard lt != nil else { return }
         let ty = dealias(t)
+        // SOUNDNESS R1047 — the init a literal coerces through is the `ExpressibleBy*Literal` one, so the edge
+        // carries that LABEL: on a type this scan only extends, no other extension init can be the one that runs.
+        let literalLabel: [String: String] = ["String": "stringLiteral", "Int": "integerLiteral",
+            "Double": "floatLiteral", "Bool": "booleanLiteral", "Array": "arrayLiteral", "Dictionary": "dictionaryLiteral"]
         calls.append(Call(path: "\(ty).init", leaf: "init", strArg: nil, typed: true,
-                          args: [.opaque], argTypes: [lt]))
+                          args: [.opaque], argTypes: [lt], argLabels: literalLabel[lt!].map { [$0] }))
     }
     /// The synthetic operand type of a coercible LITERAL expression (`"x"`→String, `42`→Int, …), or nil
     /// if the value is not a bare literal (a call/identifier is an ordinary init, not a literal coercion).

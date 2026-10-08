@@ -96,12 +96,16 @@ final class ExtensionShadowConstructorProcessTests: XCTestCase {
         XCTAssertTrue((r.fns["makesViaConvenience"] ?? []).contains("Env"),
                       "THE EDGE THE REVERTED FIX DROPPED: the call resolves to the extension's init and "
                       + "carries its `Env`. Got \(r.fns["makesViaConvenience"] ?? []).")
-        XCTAssertTrue((r.fns["makesPlain"] ?? []).contains("Env"),
-                      "…and so does the bare spelling, which is how the resolver has always read a ctor "
-                      + "call on a locally-extended type. Got \(r.fns["makesPlain"] ?? []).")
+        // SOUNDNESS R1047 — THE BARE SPELLING NO LONGER REACHES IT, deliberately. `Process()` passes no
+        // `inheritingEnv:` label, so Swift cannot bind it to that init: it runs the platform's own `init()`. The
+        // release read every ctor call on an extended type as reaching every extension init, which charged this
+        // row an `Env` its code does not perform (and, at corpus scale, charged ~3,000 swift-nio rows the `Rand`
+        // of `String(randomAlphaNumericOfLength:)` through `String(cString:)`). The LABELLED call above keeps
+        // its edge — that is the edge the reverted fix dropped, and it is the one this row exists to protect.
         XCTAssertEqual(r.fns["makesViaConvenience"], ["Clock", "Env", "Exec"],
                        "the fix is a UNION, not a swap: the local edge AND the platform capability")
-        XCTAssertEqual(r.fns["makesPlain"], ["Clock", "Env", "Exec"], "same for the bare ctor")
+        XCTAssertEqual(r.fns["makesPlain"], ["Clock", "Exec"],
+                       "R1047: `Process()` runs the platform init, not `init(inheritingEnv:)`")
     }
 
     /// THE LOOKALIKE, which the fence must still stop. A project that DECLARES its own `Process` — and
@@ -156,8 +160,9 @@ final class ExtensionShadowConstructorProcessTests: XCTestCase {
         XCTAssertEqual(r.fns["makesFormatter"], ["Clock", "Env"],
                        "κ knows nothing about NumberFormatter, so the only effect is the one the "
                        + "project's own init actually performs")
-        XCTAssertEqual(r.fns["makesPlainFormatter"], ["Clock", "Env"],
-                       "…and the bare ctor resolves to the same local init, as it always has")
+        XCTAssertEqual(r.fns["makesPlainFormatter"], ["Clock"],
+                       "R1047: the bare ctor passes no `readingLocaleFrom:` label, so it runs the platform's "
+                       + "own init — the release edged it to the extension's and charged a false `Env`")
     }
 
     /// THE OTHER κ CTOR FAMILIES take the same fence, so they get the same row: an

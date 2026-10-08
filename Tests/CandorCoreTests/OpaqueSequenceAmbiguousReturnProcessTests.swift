@@ -23,11 +23,16 @@ import Foundation
 /// what makes weakening it RED.
 final class OpaqueSequenceAmbiguousReturnProcessTests: XCTestCase {
 
-    private func scan(_ src: String) throws -> [String: [String: Any]] {
+    // SOUNDNESS R1048 — these rows pin the OPAQUE-RETURN guard, so they run with R1048's iteration model off:
+    // `AnySequence(FileEater())` now charges FileEater's iterator where the local iterable is handed to the
+    // stdlib (a genuine reach — the caller does run it when `flag` is false), which reaches `caller` through its
+    // edge to `Builder.build` by a route this guard is not about. `testR1048ChargesTheWrappedIteratorBesideTheGuard`
+    // pins the combined reading.
+    private func scan(_ src: String, env: [String: String] = ["CANDOR_R1048_OFF": "1"]) throws -> [String: [String: Any]] {
         let bin = try ProcessHarness.binaryURL(for: OpaqueSequenceAmbiguousReturnProcessTests.self)
         let root = try ProcessHarness.makePackage(src)
         defer { try? FileManager.default.removeItem(at: root) }
-        let r = try ProcessHarness.run(bin, [root.path, "--json"])
+        let r = try ProcessHarness.run(bin, [root.path, "--json"], env: env)
         XCTAssertEqual(r.code, 0, "scan must succeed — stderr: \(r.err)")
         return try ProcessHarness.fns(ofJson: r.out)
     }
@@ -92,6 +97,34 @@ final class OpaqueSequenceAmbiguousReturnProcessTests: XCTestCase {
                        "the site must be marked genuinely unresolved, not silently pure nor silently precise")
         XCTAssertFalse((ProcessHarness.inferred(by, "caller") ?? []).contains("Exec"),
                        "the resolvable FileEater branch must not be guessed as the answer for the whole call")
+    }
+
+    /// SOUNDNESS R1048 — with the iteration model ON, the guard still holds (the site stays `Unknown` and
+    /// unresolved), and FileEater's `Exec` arrives through `AnySequence(FileEater())` in `Builder.build`.
+    func testR1048ChargesTheWrappedIteratorBesideTheGuard() throws {
+        let by = try scan("""
+        import Foundation
+        final class FileEater: Sequence {
+            func makeIterator() -> AnyIterator<Int> {
+                let t = Process()
+                t.launchPath = "/bin/sh"
+                try? t.run()
+                return AnyIterator { nil }
+            }
+        }
+        final class Builder {
+            func build(other: AnySequence<Int>, flag: Bool) -> AnySequence<Int> {
+                if flag { return other }
+                return AnySequence(FileEater())
+            }
+        }
+        func caller(flag: Bool, o: AnySequence<Int>) {
+            let b = Builder()
+            for _ in b.build(other: o, flag: flag) { }
+        }
+        """, env: [:])
+        XCTAssertEqual(ProcessHarness.inferred(by, "caller"), ["Exec", "Unknown"])
+        XCTAssertEqual(by["caller"]?["unresolved"] as? Bool, true, "the opaque-return guard still discloses")
     }
 
     /// The sibling mirror already covered by the SAME line's second condition (`c != t`): TWO DIFFERENT

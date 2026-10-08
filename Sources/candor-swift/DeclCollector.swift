@@ -53,6 +53,10 @@ struct FnInfo {
                                              // pre-pass needs the WHOLE list (see prescanLocatorMoves).
     var fnTypedParams: Set<String> = []      // params of function type
     var fnTypedParamIndex: [String: Int] = [:] // fn-typed param name -> position
+    /// SOUNDNESS R1009 — the `@autoclosure` subset of `fnTypedParams`. Its argument is an EXPRESSION written at
+    /// the call site, so the caller's own walk already charges it lexically; invoking the parameter is not an
+    /// opaque callback (see CallCollector's fn-typed invocation arm).
+    var autoclosureParams: Set<String> = []
     /// R178 — EVERY parameter's position, not just the fn-typed ones. `fnTypedParamIndex` is what
     /// callback-flow resolves a deferred invocation with, and the Driver has to be able to move an
     /// ALIAS-typed param (`_ c: Cb`) into `fnTypedParams` after the cross-file alias closure is known.
@@ -199,6 +203,21 @@ final class ReturnExprWalker: SyntaxVisitor {
 /// protocol) — an inert no-op, not a fabrication, and a named residual rather than a silent gap.
 let protoCompositionSep: Character = "\u{1}"
 
+/// SOUNDNESS R1044 — see `DeclCollector.genericReturnArg`.
+struct GenericReturnArg: Equatable {
+    let positions: [Int]
+    let labels: [String?]
+}
+
+/// SOUNDNESS R1009 — is a parameter's written type `@autoclosure …` (through any other attribute or specifier)?
+func isAutoclosureType(_ t: TypeSyntax) -> Bool {
+    guard let att = t.as(AttributedTypeSyntax.self) else { return false }
+    if att.attributes.contains(where: { $0.as(AttributeSyntax.self)?.attributeName.trimmedDescription == "autoclosure" }) {
+        return true
+    }
+    return isAutoclosureType(att.baseType)
+}
+
 /// The composed protocol names of a param typed `A & B` / `any A & B` / `(A & B)?` (peeling the same
 /// Optional/attribute/`some`/`any` wrappers `typeName` peels), or nil for anything else — including a
 /// composition where SOME element doesn't resolve to a plain name, which is left alone rather than
@@ -220,13 +239,15 @@ func compositionTypeNames(_ t: TypeSyntax) -> [String]? {
 /// this is its own full-tree visitor rather than a DeclCollector hook — that one skips bodies.
 final class ExistentialSpellingCollector: SyntaxVisitor {
     private(set) var found: Set<String> = []
-    static func names(in tree: some SyntaxProtocol) -> Set<String> {
+    var specifier = "any"
+    static func names(in tree: some SyntaxProtocol, specifier: String = "any") -> Set<String> {
         let v = ExistentialSpellingCollector(viewMode: .sourceAccurate)
+        v.specifier = specifier   // SOUNDNESS R706 (residual) — `some P` is the same explicit protocol spelling
         v.walk(tree)
         return v.found
     }
     override func visit(_ node: SomeOrAnyTypeSyntax) -> SyntaxVisitorContinueKind {
-        guard node.someOrAnySpecifier.text == "any" else { return .visitChildren }
+        guard node.someOrAnySpecifier.text == specifier else { return .visitChildren }
         let elems: [TypeSyntax] = node.constraint.as(CompositionTypeSyntax.self)
             .map { $0.elements.map { $0.type } } ?? [node.constraint]
         for t in elems {
@@ -353,6 +374,15 @@ final class DeclCollector: SyntaxVisitor {
     var returnsTmp: [String: String?] = [:]            // fn leaf -> return type (nil = ambiguous)
     /// SOUNDNESS R585 (b9) — fn leaf -> the type whose METATYPE it returns (nil = ambiguous).
     var metatypeReturnsTmp: [String: String?] = [:]
+    /// SOUNDNESS R1010 — `(leaf, owner, written return name)` for every MEMBER whose return is a bare name, so the
+    /// Driver can poison `returnsTmp[leaf]` when that name is a generic parameter of the OWNER (declared in a file
+    /// this collector may not see — an extension does not repeat them).
+    var memberReturnNames: [(leaf: String, owner: String, name: String)] = []
+    /// SOUNDNESS R1044 — leaf -> how a call's return type is BOUND BY ONE OF ITS ARGUMENTS: `func pick<T>(_ x: T)
+    /// -> T` returns the type of its argument 0. Every declaration of the leaf records an entry (`nil` = "this
+    /// declaration is not of that shape"), so a sibling declaration with any other return poisons it, exactly as
+    /// `returnsTmp` poisons a leaf two declarations disagree on.
+    var genericReturnArgTmp: [String: GenericReturnArg?] = [:]
     var conformers: [String: [String]] = [:]           // protocol -> conforming local types
     var caseAssoc: [String: Set<String>] = [:]         // enum case -> single-associated-value type(s) seen
     /// SOUNDNESS R585 (b10) — the METATYPE twin of `caseAssoc`: `case c(CBase.Type)`. Same
@@ -362,6 +392,9 @@ final class DeclCollector: SyntaxVisitor {
     /// value-typing fixtures can be SHOWN to fail without a revert. `CANDOR_VT_OFF` turns every one off.
     static let vtOff = ProcessInfo.processInfo.environment["CANDOR_VT_OFF"] != nil
     static let r990Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R990_OFF"] != nil
+    static let r905HOff = ProcessInfo.processInfo.environment["CANDOR_R905H_OFF"] != nil   // SOUNDNESS R905 residual
+    static let r1010Off = ProcessInfo.processInfo.environment["CANDOR_R1010_OFF"] != nil   // SOUNDNESS R1010
+    static let r1044Off = ProcessInfo.processInfo.environment["CANDOR_R1044_OFF"] != nil   // SOUNDNESS R1044
     static let r991Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R991_OFF"] != nil
     static let r992Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R992_OFF"] != nil
     static let r993Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R993_OFF"] != nil
@@ -1370,6 +1403,22 @@ final class DeclCollector: SyntaxVisitor {
                     if targs.count == g.genericArgumentClause.arguments.count {
                         fieldTypeArgs[ty, default: [:]][name] = targs   // R905
                     }
+                } else if !Self.r905HOff, let initVal = binding.initializer?.value,
+                          let call = initVal.as(FunctionCallExprSyntax.self),
+                          let fm = call.calledExpression.as(MemberAccessExprSyntax.self),
+                          let g = fm.base?.as(GenericSpecializationExprSyntax.self),
+                          let owner = g.expression.as(DeclReferenceExprSyntax.self)?.baseName.text,
+                          PLATFORM_GENERIC_SELF_FACTORIES[owner]?.contains(fm.declName.baseName.text) == true {
+                    // SOUNDNESS R905 (residual) — `let table = NSHashTable<G>.weakObjects()`: a platform class
+                    // FACTORY that vends its receiver's own specialisation (the SDK's declaration, pinned by
+                    // `swiftc -typecheck`). The R915 (D) arm above reads only the constructor spelling, so the
+                    // field stayed untyped and `table.anyObject?.go()` / `map.object(forKey:)?.go()` read nothing.
+                    fields[ty, default: [:]][name] = (owner, false)
+                    let targs = g.genericArgumentClause.arguments.compactMap {
+                        $0.argument.as(TypeSyntax.self).flatMap { typeName($0).name } }
+                    if targs.count == g.genericArgumentClause.arguments.count {
+                        fieldTypeArgs[ty, default: [:]][name] = targs
+                    }
                 } else if let initVal = binding.initializer?.value,
                           let ma = initVal.as(MemberAccessExprSyntax.self),
                           let base = ma.base?.as(DeclReferenceExprSyntax.self),
@@ -1464,7 +1513,14 @@ final class DeclCollector: SyntaxVisitor {
         return .visitChildren
     }
 
-    private func recordReturn(_ name: String, _ sig: FunctionSignatureSyntax) {
+    private func recordReturn(_ name: String, _ sig: FunctionSignatureSyntax, generics: Set<String> = []) {
+        // SOUNDNESS R1044 — the return's binding argument, recorded (or recorded as ABSENT) for every declaration.
+        let gra: GenericReturnArg? = Self.r1044Off ? nil : genericReturnArg(sig, generics: generics)
+        if let existing = genericReturnArgTmp[name] {
+            if existing != gra { genericReturnArgTmp[name] = GenericReturnArg?.none }
+        } else {
+            genericReturnArgTmp[name] = gra
+        }
         // SOUNDNESS R585 (b9) — a function whose RETURN TYPE is a metatype (`func mkC() -> CBase.Type`).
         // `typeName` answers nil, so `returnsTmp` had no entry and `let t = mkC(); t.validate()` — and
         // the direct `mkC().validate()` — resolved against nothing. Same ambiguity rule as the ordinary
@@ -1491,11 +1547,43 @@ final class DeclCollector: SyntaxVisitor {
         // `metatypeReturnsIdx`), so this is the conservative half of that rule, not a second authority.
         if metatypeReturnsTmp[name] != nil { metatypeReturnsTmp[name] = String?.none }
         guard let rt = sig.returnClause.map({ typeName($0.type) }), let tn = rt.name else { return }
+        // SOUNDNESS R1010 — `-> T` where `T` is the function's OWN generic parameter names no type: the leaf is
+        // POISONED (never typed), not typed as whatever local declaration happens to be spelled `T`. The owner's
+        // generic parameters are applied by the Driver (`memberReturnNames`), once every file's are known —
+        // the same split `returnDecls` makes for R990.
+        if !Self.r1010Off, generics.contains(tn) || typeStack.last.map({ typeGenericParamNames[$0]?.contains(tn) == true }) == true {
+            returnsTmp[name] = String?.none
+            return
+        }
+        if !Self.r1010Off, let owner = typeStack.last { memberReturnNames.append((name, owner, tn)) }
         if let existing = returnsTmp[name] {
             if existing != tn { returnsTmp[name] = String?.none } // ambiguous leaf — never guess
         } else {
             returnsTmp[name] = tn
         }
+    }
+
+    /// SOUNDNESS R1044 — `func pick<T>(_ x: T) -> T` (or `-> T?`, or `_ x: T?`): the return is the type of the
+    /// argument at the ONE parameter whose written type is exactly that generic parameter. Two such parameters
+    /// (`func max<T>(_ a: T, _ b: T) -> T`) answer only when the CALL SITE agrees (see CallCollector), so both
+    /// positions are kept. A variadic or defaulted parameter list is recorded with its shape so the call site can
+    /// refuse an argument list it cannot align.
+    private func genericReturnArg(_ sig: FunctionSignatureSyntax, generics: Set<String>) -> GenericReturnArg? {
+        guard !generics.isEmpty, let rc = sig.returnClause else { return nil }
+        func bare(_ t: TypeSyntax) -> String? {
+            var t = desugaredType(t)
+            if let att = t.as(AttributedTypeSyntax.self) { t = att.baseType }
+            if let o = t.as(OptionalTypeSyntax.self) { t = o.wrappedType }
+            else if let o = t.as(ImplicitlyUnwrappedOptionalTypeSyntax.self) { t = o.wrappedType }
+            guard let id = t.as(IdentifierTypeSyntax.self), id.genericArgumentClause == nil else { return nil }
+            return id.name.text
+        }
+        guard let g = bare(rc.type), generics.contains(g) else { return nil }
+        let ps = Array(sig.parameterClause.parameters)
+        guard !ps.contains(where: { $0.defaultValue != nil || $0.ellipsis != nil }) else { return nil }
+        let at = ps.indices.filter { bare(ps[$0].type) == g }
+        guard !at.isEmpty else { return nil }
+        return GenericReturnArg(positions: at, labels: ps.map { $0.firstName.text == "_" ? nil : $0.firstName.text })
     }
 
     // FINDING 1 — a function returning an OPAQUE/ERASED iterable (`some Sequence` / `AnySequence`). Record
@@ -1641,6 +1729,7 @@ final class DeclCollector: SyntaxVisitor {
             info.paramSig.append((t.name, p.defaultValue != nil, p.ellipsis != nil))
             info.paramLabels.append(p.firstName.text)   // SOUNDNESS R999 — the argument LABEL at this position
             if t.isFunction { info.fnTypedParams.insert(pname); info.fnTypedParamIndex[pname] = idx }
+            if isAutoclosureType(p.type) { info.autoclosureParams.insert(pname) }   // R1009
             // Container ELEMENT extraction runs before the plain-typed-param branch: a generic container
             // (`Array<T>`/`Set<T>`/`AsyncStream<T>`/`TaskGroup<T>`) has a non-nil simple name, so without
             // this it landed in `params` as the useless container name and `for x in p` left the loop var
@@ -1786,7 +1875,8 @@ final class DeclCollector: SyntaxVisitor {
         if let ty = typeStack.last, node.genericWhereClause != nil {
             recordTypeGenerics(ty, nil, node.genericWhereClause, memberLevel: true)
         }
-        recordReturn(node.name.text, node.signature)
+        recordReturn(node.name.text, node.signature,
+                     generics: Set(node.genericParameterClause?.parameters.map { $0.name.text } ?? []))
         if let rc = node.signature.returnClause {   // SOUNDNESS R990/R991 — see `returnDecls`
             // The function's OWN generic parameters travel with the type: `-> T` names no type at all, and
             // a local type that happens to be called `T`/`Value`/`Element` must not answer for it. The

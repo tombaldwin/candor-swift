@@ -336,6 +336,14 @@ final class NameKeyedStateTests: XCTestCase {
         // SOUNDNESS R999 — keyed by a callee's `simpleQual`, consulted only after the callee NAME has been
         // shown not to be a local binding (`implicitArgumentType`).
         "implicitParams": .immutableIndex, "implicitMemberUnits": .immutableIndex,
+        "memberUnitKeys": .immutableIndex, "genericReturnArgs": .immutableIndex,   // R1032 / R1044
+        "iterableLocalTypes": .immutableIndex,                                     // R1048
+        "autoclosureParams": .deliberatelyKept(
+            "R1009: read only together with `fnTyped`, and only where `isBoundLocal`/`binderShadow` say no binder "
+            + "has claimed the name — a rebind falls back to the general callback arm"),
+        "localPlatformGenerics": .deliberatelyKept(
+            "R905: built flow-insensitively by a prescan that DROPS any name bound twice, by a closure parameter, "
+            + "or by a non-`let` binder, so no rebind can leave a stale entry behind"),
         // SOUNDNESS R905 — Type -> field -> written generic arguments (the `fieldArrayElem` twin); R974 (c) —
         // this function's OWN generic parameter names, a signature fact.
         "fieldTypeArgs": .immutableIndex, "genericParamNamesFn": .immutableIndex,
