@@ -10,6 +10,15 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — SOUNDNESS R952 (swift half): a scoped `allow` that binds no function is a disclosed zero-match
+
+`allow Net in zzz.nomatch h` bound no function and passed — exit 0, no "matched NO function" line, no `zeroMatch`:
+an allowlist over a typo'd layer was a gate that could not fail. The zero-match pass now enrolls every SCOPED
+`allow` with the same scope test the allow arm applies, prints the same line and carries it in `zeroMatch`, as
+candor-scan (396f182), candor-ts (a742c85) and candor-java (c3a8afc) already do. A SCOPELESS `allow` stays exempt;
+exit codes are unchanged; `gate --report` still refuses `allow` (exit 2). Conformance PART 36 (c5)–(c7) are
+reproduced in `AllowZeroMatchProcessTests`; `CANDOR_R952_OFF=1` restores the release.
+
 ### ⚠ Fixed — SOUNDNESS R990–R1000, R791, R792, R773, R905, R974, R706: how a binding or a collection gets its type
 
 One question — *what type does this value have?* — was answered by five binder sites that each answered a different
