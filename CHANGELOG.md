@@ -10,6 +10,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.40.1] — 2026-10-08
+
 ### ⚠ Fixed — SOUNDNESS R1048: a hand-written `next()` runs wherever the stdlib iterates the value
 
 Executed: of nine spellings that run a custom `Sequence`'s `next()` (which deletes a file), only `for x in Loud()`
