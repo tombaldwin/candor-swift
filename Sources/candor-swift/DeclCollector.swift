@@ -404,6 +404,10 @@ final class DeclCollector: SyntaxVisitor {
     static let r1010Off = ProcessInfo.processInfo.environment["CANDOR_R1010_OFF"] != nil   // SOUNDNESS R1010
     static let r1044Off = ProcessInfo.processInfo.environment["CANDOR_R1044_OFF"] != nil   // SOUNDNESS R1044
     static let r1044bOff = ProcessInfo.processInfo.environment["CANDOR_R1044B_OFF"] != nil // SOUNDNESS R1044 residual
+    static let r1044nOff = ProcessInfo.processInfo.environment["CANDOR_R1044N_OFF"] != nil // SOUNDNESS R1044 nested
+    static let r1072Off = ProcessInfo.processInfo.environment["CANDOR_R1072_OFF"] != nil   // SOUNDNESS R1072
+    static let r1073Off = ProcessInfo.processInfo.environment["CANDOR_R1073_OFF"] != nil   // SOUNDNESS R1073
+    static let r1081Off = ProcessInfo.processInfo.environment["CANDOR_R1081_OFF"] != nil   // SOUNDNESS R1081
     static let r991Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R991_OFF"] != nil
     static let r992Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R992_OFF"] != nil
     static let r993Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R993_OFF"] != nil
@@ -2177,6 +2181,14 @@ struct LocalGenericFacts {
     /// `-> InputSpan<Element>`) names the DECLARATION's parameter, not a type at the use site, so it answers
     /// nothing (R1010's rule, which a local type that happens to share the name must not defeat).
     var nonTypeNames: Set<String> = ["Self"]
+}
+
+/// SOUNDNESS R1044 nested — one generic argument of a local generic type's instantiation, with ITS OWN arguments
+/// when it is itself a local generic type whose arguments were read (`Box(v: Box(v: E()))` -> `[Box[E]]`). `args` is
+/// empty where they were not read, which is every answer the residual fix gave.
+struct LocalGenericArg: Equatable {
+    var name: String
+    var args: [LocalGenericArg?] = []
 }
 
 /// SOUNDNESS R1044 residual — `V`, `V?`, `V!`, `Optional<V>` written as a bare identifier with no arguments.

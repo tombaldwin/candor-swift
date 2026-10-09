@@ -1465,6 +1465,75 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         return j == labels.count
     }
 
+    /// SOUNDNESS R1081 — AN OPERATOR OVERLOAD IS ADMITTED ONLY WHERE ITS OPERANDS COULD BIND. A binary operator call was
+    /// edged to every project unit of that NAME on the operand's type or its supertypes, so `(x + 1) * 2 - x / 3` on an
+    /// `Int` charged `Fs` through `extension Shadow { static func + (a: Self, b: String) }` — a `String` parameter an
+    /// integer literal cannot bind (executed: no write). This refuses a target only on PROOF, per operand: a literal
+    /// whose kind the parameter's concrete type cannot take, or a typed operand of a concrete type that is neither the
+    /// parameter's type nor a recorded subtype of it. A parameter spelled with a type parameter (`Self`, `T`), a
+    /// protocol, or anything not known to be a concrete type proves nothing, and neither does an untyped operand —
+    /// those keep the edge (the over-approximation the release took), so an undecidable call never turns silent.
+    /// Only the EDGE is filtered; `resolved` is left to each site, as R1047 does.
+    let r1081Off = DeclCollector.r1081Off
+    let r1081Probe = CallCollector.veinBProbe
+    var fnInfoByQualR1081: [String: FnInfo] = [:]
+    for f in allFns where fnInfoByQualR1081[f.qual] == nil { fnInfoByQualR1081[f.qual] = f }
+    let protoNamesR1081 = protocolPaths.union(protocolMethods.keys)
+    let numericR1081: Set<String> = RAND_ROOTS.subtracting(["Bool"])
+    let platformConcreteR1081: Set<String> = RAND_ROOTS.union(["String", "Substring", "Character", "Data", "URL", "Date", "UUID"])
+    // A name that is ALSO a typealias anywhere in the scan proves nothing: the receiver's spelling can be the alias
+    // (`typealias DisposeKey = Bag<Disposable>.KeyType`, i.e. `BagKey`) while a same-named struct exists elsewhere
+    // (`CompositeDisposable.DisposeKey`) — measured on RxSwift, where it refused the real `==(BagKey,BagKey)`.
+    let aliasNamesR1081: Set<String> = surfaceAliases.union(typeAliases.keys)
+        .union(memberTypeAliasesAll.values.flatMap { $0.keys })
+    func concreteR1081(_ t: String, generics: Set<String>) -> Bool {
+        guard !generics.contains(t), !protoNamesR1081.contains(t), !aliasNamesR1081.contains(t),
+              !t.contains(".") else { return false }
+        return platformConcreteR1081.contains(t) || declaredTypes.contains(t)
+    }
+    /// Records a refusal on a stdlib scalar (`RAND_ROOTS`, not declared here): the operator is then the stdlib's own, so the
+    /// call is answered — no edge, and no hedge — exactly as the release answered it with the wrong edge. Returns false,
+    /// so it can sit in a `where` clause after a refused admission. On any other type a refusal leaves the call
+    /// unanswered and the inherited-member arm below decides whether to disclose.
+    var r1081Answered = false
+    func r1081Refused(_ type: String) -> Bool {
+        if !r1081Off, RAND_ROOTS.contains(type), !declaredTypes.contains(type) { r1081Answered = true }
+        return false
+    }
+    func operatorOperandsAdmit(_ call: Call, _ target: String) -> Bool {
+        guard !r1081Off, !call.operandLits.isEmpty, let f = fnInfoByQualR1081[target], f.paramSig.count == 2 else { return true }
+        let generics = f.genericParamNames.union(typeGenericParamNamesAI.values.joined())
+        for j in 0..<2 {
+            guard let pt = f.paramSig[j].type, concreteR1081(pt, generics: generics) else { continue }
+            let sups = supertypesOf[pt] ?? []
+            if let lit = call.operandLits[j] {
+                // Only a PLATFORM concrete type is judged against a literal: a project type's literal conformance can
+                // arrive through a refinement (`DoubleWidth: FixedWidthInteger` takes an integer literal), which the
+                // supertype index does not close over, so a project type never refuses a literal.
+                guard platformConcreteR1081.contains(pt) else { continue }
+                let ok: Bool
+                switch lit {
+                case "int":    ok = numericR1081.contains(pt) || sups.contains("ExpressibleByIntegerLiteral")
+                case "float":  ok = ["Double", "Float", "CGFloat"].contains(pt) || sups.contains("ExpressibleByFloatLiteral")
+                case "string": ok = ["String", "Substring", "Character"].contains(pt) || sups.contains("ExpressibleByStringLiteral")
+                                    || sups.contains("ExpressibleByStringInterpolation")
+                case "bool":   ok = pt == "Bool" || sups.contains("ExpressibleByBooleanLiteral")
+                default:       ok = true
+                }
+                if !ok {
+                    if r1081Probe { FileHandle.standardError.write("VBHIT\tR1081\t\(target) operand \(j) \(lit)-literal vs \(pt)\n".data(using: .utf8)!) }
+                    return false
+                }
+            } else if j < call.argTypes.count, let at = call.argTypes[j], at != pt, concreteR1081(at, generics: generics),
+                      subtypesOf[pt]?.contains(at) != true,
+                      !(["Double", "CGFloat"].contains(at) && ["Double", "CGFloat"].contains(pt)) {   // implicit conversion
+                if r1081Probe { FileHandle.standardError.write("VBHIT\tR1081\t\(target) operand \(j) \(at) vs \(pt)\n".data(using: .utf8)!) }
+                return false
+            }
+        }
+        return true
+    }
+
     /// SOUNDNESS R572 — THE ONE IMPLEMENTATION of "which project units can `<Type>.<member>` run at a
     /// call site with this argument shape". An OVERLOADED declaration's qual carries a SIGNATURE SUFFIX
     /// (`Impl.two(Int)` — see `overloads`/`overloadedBases` above), so a bare `resolveQual("Impl.two")`
@@ -1665,6 +1734,110 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for f in allFns { localGenerics.nonTypeNames.formUnion(f.genericParamNames) }
         localGenerics.memberLeaves = Set(localGenerics.memberReturns.keys.compactMap { $0.split(separator: ".").last.map(String.init) })
         localGenerics.fieldNames = Set(localGenerics.fieldParams.keys.compactMap { $0.split(separator: ".").last.map(String.init) })
+    }
+    // ── SOUNDNESS R1072 — A DEPENDENCY'S GENERIC TYPES, READ FROM ITS OWN SOURCES ───────────────────────────────
+    //
+    // `func f(_ b: Box<E>) { b.get().go() }` with `Box<V>` declared by a dependency: R1044's instantiation facts
+    // are built from the SCANNED files only, so `get() -> V` answered nothing and the hop could only be disclosed
+    // (R1066). Where the dependency's sources are readable (resolved `.build/checkouts`, a path dependency), the
+    // same collector runs over them and the same facts — parameter order, which member/field is which parameter,
+    // the inits — are offered to the files that IMPORT that module. A RESOLUTION, not a hedge: `E.go` is charged.
+    //
+    // Fenced so that a dependency fact never displaces or invents a local answer: a name the scan declares,
+    // extends or already has facts for keeps the local reading; a name two imported dependency modules both
+    // answer, or one module answers twice differently, answers nothing (the `lgOrderTmp` rule); platform
+    // container names (`Array`, `Optional`, …) are never taken from a dependency; and only facts about a type,
+    // never a free factory's return arguments, travel. Kill switch `CANDOR_R1072_OFF`.
+    let r1072Off = DeclCollector.r1044bOff || DeclCollector.r1072Off
+    var depLgByModule: [String: LocalGenericFacts?] = [:]
+    func depGenericFacts(_ m: String) -> LocalGenericFacts? {
+        if let c = depLgByModule[m] { return c }
+        var out: LocalGenericFacts? = nil
+        if let files = deps.moduleSwiftSources[m], !files.isEmpty {
+            var order: [String: [String]?] = [:]
+            var mrs: [(ty: String, leaf: String, param: String?)] = []
+            var fps: [(ty: String, field: String, param: String)] = []
+            var ins: [(ty: String, shape: LocalGenericInit)] = []
+            var ok = true
+            for path in files where path.hasSuffix(".swift") {
+                guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { ok = false; break }
+                let tree = Parser.parse(source: text)
+                let c = DeclCollector(file: "<dep:\(m)>/" + (path as NSString).lastPathComponent, tree: tree)
+                c.walk(tree)
+                c.finishBodyLocalTypes()
+                for (k, v) in c.lgOrder {
+                    if let e = order[k] { if e != v { order[k] = [String]?.none } } else { order[k] = v }
+                }
+                mrs.append(contentsOf: c.lgMemberReturns); fps.append(contentsOf: c.lgFieldParams); ins.append(contentsOf: c.lgInits)
+            }
+            if ok {
+                var f = LocalGenericFacts()
+                for (k, v) in order { if let o = v { f.order[k] = o } }
+                var mr: [String: Int?] = [:]
+                for (ty, leaf, g) in mrs {
+                    guard let o = f.order[ty] else { continue }
+                    let idx: Int? = g.flatMap { o.firstIndex(of: $0) }
+                    let k = "\(ty).\(leaf)"
+                    if let e = mr[k] { if e != idx { mr[k] = Int?.none } } else { mr[k] = idx }
+                }
+                for (k, v) in mr { if let i = v { f.memberReturns[k] = i } }
+                var fp: [String: Int?] = [:]
+                for (ty, fl, g) in fps {
+                    guard let o = f.order[ty], let i = o.firstIndex(of: g) else { continue }
+                    let k = "\(ty).\(fl)"
+                    if let e = fp[k] { if e != i { fp[k] = Int?.none } } else { fp[k] = i }
+                }
+                for (k, v) in fp { if let i = v { f.fieldParams[k] = i } }
+                for (ty, shape) in ins where f.order[ty] != nil { f.inits[ty, default: []].append(shape) }
+                out = f
+            }
+        }
+        depLgByModule[m] = out
+        return out
+    }
+    let lgLocalNames = Set(localGenerics.order.keys).union(localTypes).union(declaredTypes)
+        .union(PLATFORM_VALUE_TYPES).union(STDLIB_GENERIC_CONTAINERS)
+    var lgByImports: [[String]: LocalGenericFacts] = [:]
+    func localGenericsFor(file: String) -> LocalGenericFacts {
+        guard !r1072Off else { return localGenerics }
+        var closure = Set<String>(), queue = (fileImports[file] ?? []).filter {
+            !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !(ownTargetsByFile[file] ?? []).contains($0)
+        }
+        while let x = queue.popLast() {
+            guard closure.insert(x).inserted else { continue }
+            queue.append(contentsOf: deps.moduleReexports[x] ?? [])
+        }
+        let mods = closure.filter { !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) }.sorted()
+        if mods.isEmpty { return localGenerics }
+        if let c = lgByImports[mods] { return c }
+        var merged = localGenerics, owner: [String: String] = [:], poisoned = Set<String>()
+        for m in mods {
+            guard let f = depGenericFacts(m) else { continue }
+            for (ty, o) in f.order where !lgLocalNames.contains(ty) {
+                if let prev = owner[ty], prev != m { poisoned.insert(ty) } else { owner[ty] = m; merged.order[ty] = o }
+            }
+            for (k, i) in f.memberReturns {
+                let ty = String(k[..<(k.lastIndex(of: ".") ?? k.endIndex)])
+                if owner[ty] == m { merged.memberReturns[k] = i }
+            }
+            for (k, i) in f.fieldParams {
+                let ty = String(k[..<(k.lastIndex(of: ".") ?? k.endIndex)])
+                if owner[ty] == m { merged.fieldParams[k] = i }
+            }
+            for (ty, sh) in f.inits where owner[ty] == m { merged.inits[ty] = sh }
+        }
+        for ty in poisoned {
+            merged.order[ty] = nil; merged.inits[ty] = nil
+            merged.memberReturns = merged.memberReturns.filter { !$0.key.hasPrefix(ty + ".") }
+            merged.fieldParams = merged.fieldParams.filter { !$0.key.hasPrefix(ty + ".") }
+        }
+        merged.memberLeaves = Set(merged.memberReturns.keys.compactMap { $0.split(separator: ".").last.map(String.init) })
+        merged.fieldNames = Set(merged.fieldParams.keys.compactMap { $0.split(separator: ".").last.map(String.init) })
+        if CallCollector.veinBProbe, merged.order.count != localGenerics.order.count {
+            FileHandle.standardError.write("VBHIT\tR1072F\t\(file) +\(merged.order.count - localGenerics.order.count) types\n".data(using: .utf8)!)
+        }
+        lgByImports[mods] = merged
+        return merged
     }
     // SOUNDNESS R990–R992 — THE DECLARED-TYPE FACTS, resolved once every file's aliases are known.
     // A container alias declared twice with different right-hand sides (two `#if` arms, two scopes sharing a
@@ -2376,6 +2549,97 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         if case .proven(let p) = ownerProof(of: spelled, inFile: file, site: site) { return p }
         return nil
     }
+    /// SOUNDNESS R1066 — THE BLIND DEPENDENCY MODULES OF `file` WHOSE OWN SOURCES PUBLICLY DECLARE THE TYPE `spelled`
+    /// NAMES. Positive evidence only: a module (or one it `@_exported import`s) whose readable sources declare the
+    /// name `public`/`open` at file scope. Empty where no source answers — an unreadable dependency, a platform
+    /// type, a type this scan declares or extends (local wins) — and the release's silence then stands.
+    ///
+    /// NOT the ⟨0.39⟩ obligation-1 key, which is published for EVERY unresolved member call in a one-dependency
+    /// file, platform receivers included (`Iface#Date.addingTimeInterval`). That key cannot be narrowed to make it
+    /// evidence of the owner: where the dependency EXTENDS the platform type (`extension Date { func stamp() }`)
+    /// the same spelling is the only carrier of the member's effect to a downstream consumer (measured: stripping
+    /// it took `Fs` off the consumer, executed). So the key stays the floor, and ownership is asked here instead.
+    let r1066Off = ProcessInfo.processInfo.environment["CANDOR_R1066_OFF"] != nil
+    let r1066Probe = CallCollector.veinBProbe
+    var sourceProvenCache: [String: Set<String>] = [:]
+    func sourceProvenDepModules(of spelled: String, inFile file: String) -> Set<String> {
+        let ck = "\(file)\u{0}\(spelled)"
+        if let c = sourceProvenCache[ck] { return c }
+        var segs = spelled.split(separator: ".").map(String.init)
+        let imports = fileImports[file] ?? []
+        var cands = blindModules(inFile: file).subtracting(ownTargetsByFile[file] ?? [])
+        if segs.count > 1, imports.contains(segs[0]) {          // `Iface.Box`: the source named the module
+            cands = cands.intersection([segs[0]]); segs.removeFirst()
+        }
+        var out = Set<String>(), direct = Set<String>()
+        if let name = segs.first, !name.isEmpty, name.first?.isUppercase == true,
+           !localTypes.contains(name), !declaredTypes.contains(name), !protocolMethods.keys.contains(name) {
+            func declares(_ x: String) -> Bool {
+                !PLATFORM_MODULES.contains(x) && !KAPPA_MODULES.contains(x) && moduleDeclarations(x)?.names[name] == true
+            }
+            for m in cands.sorted() {
+                if declares(m) { direct.insert(m); continue }
+                var closure = Set<String>(), queue = [m]
+                while let x = queue.popLast() {
+                    guard closure.insert(x).inserted else { continue }
+                    queue.append(contentsOf: deps.moduleReexports[x] ?? [])
+                }
+                if closure.contains(where: declares) { out.insert(m) }
+            }
+        }
+        // A module that declares the name itself is the owner; one that only RE-EXPORTS a declarer
+        // (`_CryptoExtras` -> `Crypto`) is named only when no imported module declares it directly.
+        if !direct.isEmpty { out = direct }
+        sourceProvenCache[ck] = out
+        return out
+    }
+    /// SOUNDNESS R1071 — the blind dependency modules of `file` whose readable sources declare a PUBLIC member
+    /// `member` in an extension of the type `spelled` names (`extension Date { public func stamp() }`), for a
+    /// receiver type the dependency does not itself declare — a PLATFORM type, typically. Same candidate set,
+    /// re-export closure and direct-over-re-exporter rule as `sourceProvenDepModules`. The member is the
+    /// dependency's only where the platform does not also declare it; that cannot be read here, so a match
+    /// over-attributes in that case — an `invisible` naming a module the call may not reach, which is the
+    /// direction a disclosure is allowed to err in, never a charge.
+    let r1071Off = ProcessInfo.processInfo.environment["CANDOR_R1071_OFF"] != nil
+    var moduleExtCache: [String: [String: [String: Bool]]?] = [:]
+    func moduleExtensionMembers(_ m: String) -> [String: [String: Bool]]? {
+        if let c = moduleExtCache[m] { return c }
+        var out: [String: [String: Bool]]? = nil
+        if let files = deps.moduleSwiftSources[m], !files.isEmpty {
+            var all: [String: [String: Bool]] = [:], ok = true
+            for path in files where path.hasSuffix(".swift") {
+                guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { ok = false; break }
+                for (t, ms) in topLevelExtensionMembers(source: text).members {
+                    for (n, v) in ms { all[t, default: [:]][n] = (all[t]?[n] ?? false) || v }
+                }
+            }
+            if ok { out = all }
+        }
+        moduleExtCache[m] = out
+        return out
+    }
+    func sourceExtendingDepModules(of spelled: String, member: String, inFile file: String) -> Set<String> {
+        guard !r1071Off else { return [] }
+        var segs = spelled.split(separator: ".").map(String.init)
+        let imports = fileImports[file] ?? []
+        var cands = blindModules(inFile: file).subtracting(ownTargetsByFile[file] ?? [])
+        if segs.count > 1, imports.contains(segs[0]) { cands = cands.intersection([segs[0]]); segs.removeFirst() }
+        guard let name = segs.last, name.first?.isUppercase == true else { return [] }
+        func extends(_ x: String) -> Bool {
+            !PLATFORM_MODULES.contains(x) && !KAPPA_MODULES.contains(x) && moduleExtensionMembers(x)?[name]?[member] == true
+        }
+        var out = Set<String>(), direct = Set<String>()
+        for m in cands.sorted() {
+            if extends(m) { direct.insert(m); continue }
+            var closure = Set<String>(), queue = [m]
+            while let x = queue.popLast() {
+                guard closure.insert(x).inserted else { continue }
+                queue.append(contentsOf: deps.moduleReexports[x] ?? [])
+            }
+            if closure.contains(where: extends) { out.insert(m) }
+        }
+        return direct.isEmpty ? out : direct
+    }
     /// SOUNDNESS R532 — THE ABSTRACTION A RECEIVER SPELLING NAMES, once a GENERIC PARAMETER has been
     /// resolved to its bound. `nil` means "publish nothing for this receiver".
     ///
@@ -2841,6 +3105,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
 
     let localProtocolNames = Set(protocolMethods.keys)  // loop-invariant: build once, not per fn
+    let r1073Off = DeclCollector.r1073Off   // SOUNDNESS R1073
+    let r1073Probe = CallCollector.veinBProbe
     /// VEIN C — the accessor units (computed property / observer / lazy init / subscript bodies). The two
     /// down-walks below edge ONLY these: `resolveQual("Sub.task")` also answers a METHOD named `task`
     /// (`override func task(for:using:)`), and a property read never runs a method. Measured: without
@@ -3273,7 +3539,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                returns: returnsIdx,
                                metatypeReturns: metatypeReturnsIdx,                                  // R585
                                genericReturnArgs: genericReturnArgIdx,                               // R1044
-                               localGenerics: localGenerics,                                         // R1044 residual
+                               localGenerics: localGenericsFor(file: String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })),   // R1044 residual, R1072
                                globalMetatypes: globalMetatypesByModule[swiftModuleOf(f.loc)] ?? [:], // R585
                                globalMetatypeArrayElem: globalMetatypeArrayElemByModule[swiftModuleOf(f.loc)] ?? [:],
                                fieldMetatypes: fieldMetatypes,                                        // R585
@@ -3693,12 +3959,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 } else if overloadedBases.contains(call.path) {
                     for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
                         resolved = true
-                        guard extensionInitLabelsAdmit(call, t) else { continue }   // R1047
+                        guard extensionInitLabelsAdmit(call, t), operatorOperandsAdmit(call, t) else { continue }   // R1047, R1081
                         edges[f.qual, default: []].insert(t)
                         callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
                     }
                 } else if !typedTargets.isEmpty {
-                    for t in typedTargets where extensionInitLabelsAdmit(call, t) {   // R1047
+                    for t in typedTargets where extensionInitLabelsAdmit(call, t) && operatorOperandsAdmit(call, t) {   // R1047, R1081
                         edges[f.qual, default: []].insert(t)
                         callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
                     }
@@ -3712,6 +3978,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // `<Proto>.<member>` units — a member no conformed protocol defaults edges nothing.
                     let type = String(call.path[..<dot])
                     let member = String(call.path[call.path.index(after: dot)...])
+                    r1081Answered = false
                     for sup in supertypesOf[type] ?? [] {
                         let base = "\(sup).\(member)"
                         // AN OVERLOADED PROVIDED MEMBER MUST NOT VANISH. `resolveQual` can only name an
@@ -3728,19 +3995,21 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         // being dropped — the same over-approximate direction `matchOverloads` already
                         // takes everywhere else, never a guess at which one.
                         if overloadedBases.contains(base) {
-                            for t in matchOverloads(base, argc, call.argTypes, swiftModuleOf(f.loc)) {
+                            for t in matchOverloads(base, argc, call.argTypes, swiftModuleOf(f.loc))
+                                where operatorOperandsAdmit(call, t) || r1081Refused(type) {   // R1081
                                 edges[f.qual, default: []].insert(t)
                                 callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
                                 resolved = true
                             }
                         } else {
-                            for t in resolveQual(base) {
+                            for t in resolveQual(base) where operatorOperandsAdmit(call, t) || r1081Refused(type) {   // R1081
                                 edges[f.qual, default: []].insert(t)
                                 callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
                                 resolved = true
                             }
                         }
                     }
+                    if r1081Answered { resolved = true }   // SOUNDNESS R1081 — see `r1081Refused`
                     // No LOCAL supertype default resolved. If the type conforms to / inherits an EXTERNAL
                     // base (a super not declared locally — `final class Todo: Model` where Model is FluentKit's),
                     // the member is inherited from that external base's extension → it must NOT read silent (the
@@ -3763,7 +4032,54 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         // evidence, and a report that differs from ITSELF injects noise into every diff —
                         // it cost a false datapoint before anyone thought to run a report against itself.
                         // It also makes `gains` noisy between identical inputs, which is product-facing.
+                        // SOUNDNESS R1073 — A STDLIB OPERATOR ON A PLATFORM TYPE IS NOT BLAMED ON A LOCAL PROTOCOL.
+                        // `localTypes` holds a protocol only once something EXTENDS it (`pushType`, R555), so
+                        // `extension Int: AtomicPrimitive {}` over swift-nio's OWN `protocol AtomicPrimitive` left that
+                        // protocol here as an "external" base, and every stdlib operator on a typed `Int` (`x % y`,
+                        // `a == b`, `i &+ 1`) was hedged `dispatch:AtomicPrimitive.%` — 1,300+ reasons in swift-nio.
+                        // NARROW on purpose (a first cut that dropped every local protocol for every member moved 1,176
+                        // rows over a dozen unrelated protocols and was not taken): only an OPERATOR, only on a type
+                        // this scan does not DECLARE (a platform type it merely extends, so the operator is that type's
+                        // own), and only a local protocol that neither REQUIRES that operator nor provides it (an
+                        // extension member reached through the concrete type resolved in the loop above). What such a
+                        // protocol can still hide is what it inherits from a protocol this scan does not declare, so it
+                        // is replaced by those external ancestors, transitively, rather than dropped.
+                        let isOperator = member.first.map { !($0.isLetter || $0 == "_" || $0 == "`") } ?? false
+                        // The NARROWED set decides only the final hedge below: the R657 dependency ask and the Fluent
+                        // arm keep the release's set, so no join a chained report answers is skipped (measured: gating
+                        // the ask on the narrowed set dropped 19 `dep:` reasons on swift-certificates).
                         let extSupers = (supertypesOf[type] ?? []).filter { !localTypes.contains($0) }.sorted()
+                        let hedgeSupers: [String] = {
+                            let raw = supertypesOf[type] ?? []
+                            let legacy = extSupers
+                            // A stdlib SCALAR (`RAND_ROOTS`: the integer, floating-point and Bool types) the scan does not
+                            // declare, and whose operator no imported module's readable sources add in an `extension` of
+                            // it (that would be a dependency's overload, which the hedge may be covering).
+                            let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                            guard !r1073Off, isOperator, RAND_ROOTS.contains(type), !declaredTypes.contains(type),
+                                  !cc.droppedMember,
+                                  !(fileImports[file] ?? []).contains(where: { moduleExtensionMembers($0)?[type]?[member] != nil })
+                            else { return legacy }
+                            var out = Set<String>(), seen = Set<String>(), queue = Array(raw)
+                            while let x = queue.popLast() {
+                                guard seen.insert(x).inserted else { continue }
+                                let localProto = localProtocolNames.contains(x) || protocolPaths.contains(x)
+                                // A protocol the release already dropped (extended, so in `localTypes`) stays dropped,
+                                // with no ancestors: this may only narrow what the release hedged, never add to it.
+                                if localTypes.contains(x) { continue }
+                                if localProto, protocolMethods[x]?.contains(member) != true {
+                                    if r1073Probe, raw.contains(x) {
+                                        FileHandle.standardError.write("VBHIT\tR1073\t\(f.qual) \(type).\(member) via \(x)\n".data(using: .utf8)!)
+                                    }
+                                    // A stdlib/platform protocol ancestor is not an external base this arm ever blamed.
+                                    queue.append(contentsOf: (protocolSupers[x] ?? []).filter {
+                                        !LAYOUT_SUPERS_PUBLIC.contains($0) && !STD_SUPERS_PUBLIC.contains($0)
+                                            && PLATFORM_REFINES[$0] == nil && !PLATFORM_LEAVES.contains($0)
+                                    })
+                                } else if !localTypes.contains(x) { out.insert(x) }
+                            }
+                            return out.sorted()
+                        }()
                         // SOUNDNESS R657 — ASK THE CHAINED DEPENDENCY BEFORE ANSWERING FROM LOCAL
                         // KNOWLEDGE. This whole block exists because the member's body is INVISIBLE; a
                         // chained report (SPEC §2) means it is not, and both answers below are guesses
@@ -3857,7 +4173,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         } else if let eff = fluentEff {
                             direct[f.qual, default: []].insert(eff)
                             resolved = true
-                        } else if let sup = unknownSup {
+                        } else if let sup = ((r1073Off || unknownSup == nil) ? unknownSup
+                                                 : hedgeSupers.first(where: { !STD_PURE_PROTOCOLS.contains($0) })) {
                             direct[f.qual, default: []].insert("Unknown")
                             whyMap[f.qual, default: []].insert("dispatch:\(sup).\(member)")
                             resolved = true
@@ -4050,12 +4367,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         resolved = true
                     }
                 } else if overloadedBases.contains(call.path) {            // an overloaded FREE function
-                    for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
+                    for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc))
+                        where operatorOperandsAdmit(call, t) {   // R1081
                         edges[f.qual, default: []].insert(t)
                         callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
                         resolved = true
                     }
-                } else if let targets = freeFnByName[call.path], targets.count == 1 {
+                } else if let targets = freeFnByName[call.path], targets.count == 1, operatorOperandsAdmit(call, targets[0]) {   // R1081
                     edges[f.qual, default: []].insert(targets[0])
                     callsiteArgs[targets[0], default: []].append((f.qual, call.args)); callsiteArgTypes[targets[0], default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
                     resolved = true
@@ -4504,7 +4822,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         let ty = String(callee[..<dot])
                         let named = deps.chainedPkgs(importing: fileImports[file] ?? [])
                             .contains { deps.mentionedTypes.contains("\($0.pkg)#\(ty)") }
-                        if !named { continue }
+                        // R1066 — a STANDALONE instance hop whose type a blind dependency's own sources declare is the
+                        // same evidence by another route (no report to name it); it reaches the hedge below.
+                        if !named, r1066Off || !call.instanceHop
+                            || !deps.chainedPkgs(importing: fileImports[file] ?? []).isEmpty
+                            || sourceProvenDepModules(of: ty, inFile: file).isEmpty { continue }
                     }
                 }
                 // A MISS — on `returns` OR on the entry lookup that follows a `returns` HIT — falls back
@@ -4558,7 +4880,23 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                    !(localMemberLeaves.contains(call.leaf) || deps.anyChainedPackagePublishesLeaf(call.leaf)) {
                     continue
                 }
-                if chainedHere || r836Standalone {
+                // SOUNDNESS R1066 — …AND THE SAME INSTANCE HOP IN A STANDALONE SCAN, where the receiver's type is a blind
+                // dependency's by its own sources. `b.get().go()` with `b: Box<E>`: the chained arm above hedges it,
+                // the standalone arm did not, and the row's `[]` became a purity claim one package downstream — a
+                // consumer chaining this report joins the floor key `Iface#Box.get`, finds the dependency's pure
+                // `get`, and `deny Fs Unknown` passed over a call that runs `E.go` (executed). R836's reasoning,
+                // for the hop R836 did not reach; bounded by the leaf rule above and by SOURCE ownership, never
+                // by the file's import vote, so a platform receiver (`url.appendingPathComponent(…).path`) is
+                // untouched.
+                let r1066Standalone: Bool = {
+                    guard !chainedHere, !r1066Off, call.instanceHop, let cal = call.depCallee,
+                          let dot = cal.lastIndex(of: ".") else { return false }
+                    return !sourceProvenDepModules(of: String(cal[..<dot]), inFile: file).isEmpty
+                }()
+                if r1066Standalone, r1066Probe {
+                    FileHandle.standardError.write("VBHIT\tR1066H\t\(f.qual) \(call.depCallee ?? "?").\(call.leaf)\n".data(using: .utf8)!)
+                }
+                if chainedHere || r836Standalone || r1066Standalone {
                     direct[f.qual, default: []].insert("Unknown")
                     whyMap[f.qual, default: []].insert("dispatch:untyped cross-package receiver")
                 }
@@ -4774,6 +5112,24 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if (fileImports[file] ?? []).contains(owner) {
                     blindDirect[f.qual, default: []].insert(owner)
                 }
+            } else if !r1066Off, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
+                      case let owner = f.genericBounds[raw] ?? raw,
+                      case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                      case let mods = { () -> Set<String> in
+                          let t = sourceProvenDepModules(of: owner, inFile: file)
+                          return t.isEmpty ? sourceExtendingDepModules(of: owner, member: call.leaf, inFile: file) : t
+                      }(), !mods.isEmpty {
+                // SOUNDNESS R1071 — or whose sources EXTEND it (a platform type) with this public member.
+                // SOUNDNESS R1066 — A MEMBER CALL ON A RECEIVER WHOSE TYPE A BLIND DEPENDENCY'S OWN SOURCES DECLARE
+                // (`func f(_ b: Box<E>) { b.get() }`, `Box` public in the one dependency). SPEC §2 (`invisible`): an
+                // engine MUST disclose at least one of `invisible`/`Unknown` for a function that demonstrably calls
+                // an uncovered package, never silently pure — and the rows above withhold it for a member call
+                // because a bare receiver's module cannot be decided from the FILE (the reverted widening tagged
+                // an `NSPasteboard`). Here it is decided from the DEPENDENCY: its sources declare the type, so the
+                // member is that module's (or an extension of it, which is no less a reach into uncovered code).
+                // A platform type no dependency declares answers nothing and stays as it was. Non-gating (R133).
+                if r1066Probe { FileHandle.standardError.write("VBHIT\tR1066\t\(f.qual) \(owner).\(call.leaf) -> \(mods.sorted())\n".data(using: .utf8)!) }
+                blindDirect[f.qual, default: []].formUnion(mods)
             }
             // ── SOUNDNESS R705, THE DISCLOSURE ────────────────────────────────────────────────────────
             //

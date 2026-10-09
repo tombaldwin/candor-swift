@@ -808,6 +808,70 @@ public func topLevelTypeDeclarations(source: String) -> (names: [String: Bool], 
     return (names, opaque)
 }
 
+/// SOUNDNESS R1071 — the members a file's top-level EXTENSIONS declare, by the extended type's simple name:
+/// `extension Date { public func stamp() }` -> `["Date": ["stamp": true]]`. The flag is whether the member is
+/// visible to an importer (`public`/`open` on the member, or a `public`/`open` extension the member does not
+/// narrow). `private`/`fileprivate` members are not recorded. Functions and stored/computed properties only.
+/// `opaque` as in `topLevelTypeDeclarations`: a top-level macro expansion or an unread `#if` shape.
+public func topLevelExtensionMembers(source: String) -> (members: [String: [String: Bool]], opaque: Bool) {
+    var out: [String: [String: Bool]] = [:]
+    var opaque = false
+    func vis(_ mods: DeclModifierListSyntax) -> String? {
+        for m in mods {
+            let t = m.name.text
+            if ["public", "open", "private", "fileprivate", "internal", "package"].contains(t) { return t }
+        }
+        return nil
+    }
+    func note(_ ty: String, _ name: String, _ mods: DeclModifierListSyntax, extVis: String?) {
+        let v = vis(mods) ?? extVis
+        if v == "private" || v == "fileprivate" { return }
+        let pub = v == "public" || v == "open"
+        out[ty, default: [:]][name] = (out[ty]?[name] ?? false) || pub
+    }
+    func walkMembers(_ ty: String, _ items: MemberBlockItemListSyntax, _ extVis: String?) {
+        for item in items { walkMember(ty, item.decl, extVis) }
+    }
+    func walkMember(_ ty: String, _ d: DeclSyntax, _ extVis: String?) {
+        if let f = d.as(FunctionDeclSyntax.self) { note(ty, f.name.text, f.modifiers, extVis: extVis) }
+        else if let v = d.as(VariableDeclSyntax.self) {
+            for b in v.bindings { if let n = b.pattern.as(IdentifierPatternSyntax.self)?.identifier.text { note(ty, n, v.modifiers, extVis: extVis) } }
+        } else if let x = d.as(IfConfigDeclSyntax.self) {
+            for clause in x.clauses {
+                switch clause.elements {
+                case .decls(let ds)?: walkMembers(ty, ds, extVis)
+                case nil: break
+                default: opaque = true
+                }
+            }
+        } else if d.is(MacroExpansionDeclSyntax.self) { opaque = true }
+    }
+    func walk(_ items: CodeBlockItemListSyntax) {
+        for item in items { if let d = item.item.as(DeclSyntax.self) { walkDecl(d) } }
+    }
+    func walkDecl(_ d: DeclSyntax) {
+        if let e = d.as(ExtensionDeclSyntax.self) {
+            let full = e.extendedType.trimmedDescription.split(separator: "<").first.map(String.init) ?? ""
+            guard let ty = full.split(separator: ".").last.map(String.init), !ty.isEmpty else { return }
+            let ev = vis(e.modifiers)
+            if ev == "private" || ev == "fileprivate" { return }
+            walkMembers(ty, e.memberBlock.members, ev)
+        } else if d.is(MacroExpansionDeclSyntax.self) { opaque = true }
+        else if let x = d.as(IfConfigDeclSyntax.self) {
+            for clause in x.clauses {
+                switch clause.elements {
+                case .statements(let st)?: walk(st)
+                case .decls(let ds)?: for m in ds { walkDecl(m.decl) }
+                case nil: break
+                default: opaque = true
+                }
+            }
+        }
+    }
+    walk(Parser.parse(source: source).statements)
+    return (out, opaque)
+}
+
 /// The default `targetSources`: every file under the target's source directory, or nil when that
 /// directory cannot be located (`targetSourceDirs`' own conventions — `path:`, `Sources/<name>`,
 /// `Source/<name>`, `<name>/`). nil is read as "cannot prove this is Swift", never as "no sources".

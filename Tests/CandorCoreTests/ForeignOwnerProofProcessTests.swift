@@ -191,8 +191,13 @@ final class ForeignOwnerProofProcessTests: XCTestCase {
         XCTAssertEqual(relay["dispatchesOn"] as? [String], ["Leaf#LeafReaderD.readLeafD"],
                        "the key the one-import file publishes, now published from the two-import file")
         XCTAssertNil(row(d, "midCountD"), "a stdlib receiver (`Set`) is no candidate's type: no key, no row")
-        let off = try scan(root.appendingPathComponent("Mid"), env: ["CANDOR_VEIND_OFF": "1"])
+        // R1066 (candor-swift v044) attributes `invisible: [Leaf]` to this row independently of vein D — `Leaf`'s own
+        // sources declare `LeafReaderD` — so reproducing 344b57b's row needs both switches.
+        let off = try scan(root.appendingPathComponent("Mid"), env: ["CANDOR_VEIND_OFF": "1", "CANDOR_R1066_OFF": "1"])
         XCTAssertNil(row(off, "midRelay"), "CANDOR_VEIND_OFF=1 must reproduce 344b57b's ABSENT row")
+        let offD = try scan(root.appendingPathComponent("Mid"), env: ["CANDOR_VEIND_OFF": "1"])
+        XCTAssertEqual(row(offD, "midRelay")?["invisible"] as? [String], ["Leaf"],
+                       "R1066: with no key, the source-proven receiver is still attributed to its module")
     }
 
     func testUndecidedMemberCallIsDisclosedNotKeyed() throws {

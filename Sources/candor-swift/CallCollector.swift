@@ -163,6 +163,9 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// SOUNDNESS R1065 — a `<untyped>.` marker from `depInstanceMemberCallee`: its MISS discloses only where
               /// the member's leaf could have a body someone answers (a local type's member, or a chained package's).
               var instanceHop: Bool = false
+              /// SOUNDNESS R1081 — on a binary-operator call: each operand's LITERAL kind (`int`, `float`, `string`,
+              /// `bool`), nil where the operand is not a literal. Read only by the Driver's operand-type admission.
+              var operandLits: [String?] = []
               /// SOUNDNESS R847 — on an `argRef` call: the name is a binder's local in scope, so it can be
               /// no dependency declaration (the chained join skips it). Local resolution is unaffected.
               var argBoundLocal: Bool = false
@@ -601,6 +604,12 @@ final class CallCollector: SyntaxVisitor {
     let metatypeReturns: [String: String]
     let genericReturnArgs: [String: GenericReturnArg]   // SOUNDNESS R1044 — see DeclCollector.genericReturnArg
     let localGenerics: LocalGenericFacts                 // SOUNDNESS R1044 residual — see `localGenericArgs`
+    /// SOUNDNESS R1073 — this unit dropped a member call whose receiver it could not type (the `VBDROP` shape): no
+    /// edge, no key, no hedge. The Driver keeps the release's local-protocol operator hedge on such a unit, because
+    /// on swift-nio that hedge was the only thing keeping 12 such rows from reading pure (e.g. a generic
+    /// `backPressureStrategy.didConsume(…)` beside `buffer.count > 0`): withdrawing a false hedge must not uncover a
+    /// silence the hedge was standing in front of.
+    var droppedMember = false
     /// SOUNDNESS R1044 residual — each local name's ONE binding (annotation and/or initializer), from
     /// `prescanLocalGenericBindings`; a name bound twice anywhere in the unit is absent.
     var lgBindings: [String: (type: TypeSyntax?, initializer: ExprSyntax?)] = [:]
@@ -1608,14 +1617,33 @@ final class CallCollector: SyntaxVisitor {
     /// SOUNDNESS R1044 residual — the type a member call (`field: false`) or field read (`field: true`) on `base`
     /// yields when the member is declared as one of its owner's generic parameters, read off the instantiation.
     private func localGenericMemberType(_ base: ExprSyntax, _ member: String, field: Bool, _ depth: Int) -> String? {
+        guard let x = localGenericMemberArg(base, member, field: field, depth) else { return nil }
+        return x.name
+    }
+
+    /// The generic ARGUMENT (with its own arguments, when they were read) that a member call or field read on
+    /// `base` yields — `localGenericMemberType`'s answer before it is flattened to a name. SOUNDNESS R1044 nested
+    /// instantiation: `Box(v: Box(v: E())).get()` is a `Box<E>`, and the next `.get()` needs that `E`, which a
+    /// bare name (`Box`) had already lost.
+    private func localGenericMemberArg(_ base: ExprSyntax, _ member: String, field: Bool, _ depth: Int) -> LocalGenericArg? {
         guard !DeclCollector.r1044bOff, depth < 24,
               field ? localGenerics.fieldNames.contains(member) : localGenerics.memberLeaves.contains(member),
               let (owner, args) = localGenericArgs(base, depth + 1),
               let idx = field ? localGenerics.fieldParams["\(owner).\(member)"] : localGenerics.memberReturns["\(owner).\(member)"],
-              idx < args.count, let x = args[idx],
-              !x.split(separator: ".").contains(where: { localGenerics.nonTypeNames.contains(String($0)) }) else { return nil }
-        vbHit("R1044B", "\(owner).\(member) -> \(x)")
+              idx < args.count, let x = args[idx], !namesNonType(x.name) else { return nil }
+        vbHit("R1044B", "\(owner).\(member) -> \(x.name)")
         return x
+    }
+
+    /// The answer two readings of one generic position agree on: the type when the names match, its arguments
+    /// only when those match too. `nil` meets anything as `nil` (a position one reading could not answer).
+    static func lgMeet(_ x: LocalGenericArg?, _ y: LocalGenericArg?) -> LocalGenericArg? {
+        guard let x = x, let y = y, x.name == y.name else { return nil }
+        return x == y ? x : LocalGenericArg(name: x.name)
+    }
+
+    private func namesNonType(_ n: String) -> Bool {
+        n.split(separator: ".").contains(where: { localGenerics.nonTypeNames.contains(String($0)) })
     }
 
     /// SOUNDNESS R1044 residual — the generic ARGUMENTS of a value of a local generic type, from the expression
@@ -1624,24 +1652,53 @@ final class CallCollector: SyntaxVisitor {
     /// explicit — every init that fits the labels must agree), a factory whose return type writes them
     /// (`func mk() -> Box<E>`), or a parameter / local whose ONE binding annotates or initialises it. `nil` per
     /// argument where this cannot be read; `nil` overall where the owner is not a local generic type.
-    private func localGenericArgs(_ raw: ExprSyntax, _ depth: Int) -> (String, [String?])? {
+    private func localGenericArgs(_ raw: ExprSyntax, _ depth: Int) -> (String, [LocalGenericArg?])? {
         guard depth < 24 else { return nil }
         let e = Self.peel(raw)
         func simple(_ t: String) -> String { t.split(separator: ".").last.map(String.init) ?? t }
-        func fromType(_ t: TypeSyntax) -> (String, [String?])? {
+        func flat(_ n: String?) -> LocalGenericArg? { n.map { LocalGenericArg(name: $0) } }
+        // SOUNDNESS R1044 nested — one written generic argument, with ITS arguments when it is itself a local
+        // generic type written with the right number of them (`Box<Box<E>>`). Anything else is the bare name,
+        // which is what this read before.
+        func argOfType(_ t: TypeSyntax) -> LocalGenericArg? {
+            guard let n = typeName(t).name else { return nil }
+            guard !DeclCollector.r1044nOff, let inner = fromType(t), inner.0 == n || simple(n) == inner.0 else {
+                return LocalGenericArg(name: n)
+            }
+            vbHit("R1044N", "<\(n)<…>>")
+            return LocalGenericArg(name: n, args: inner.1)
+        }
+        func fromType(_ t: TypeSyntax) -> (String, [LocalGenericArg?])? {
             var x = desugaredType(t)
             if let a = x.as(AttributedTypeSyntax.self) { x = a.baseType }
             if let o = x.as(OptionalTypeSyntax.self) { x = o.wrappedType }
             else if let o = x.as(ImplicitlyUnwrappedOptionalTypeSyntax.self) { x = o.wrappedType }
+            // SOUNDNESS R1072 — a module-qualified spelling (`Iface.Box<E>`) names the same type by its simple name,
+            // the key the facts use; only a single-identifier qualifier, so `A.B.Box<E>` stays unread.
+            if !DeclCollector.r1072Off, let mt = x.as(MemberTypeSyntax.self), mt.baseType.is(IdentifierTypeSyntax.self),
+               mt.baseType.as(IdentifierTypeSyntax.self)?.genericArgumentClause == nil,
+               let gac = mt.genericArgumentClause, let order = localGenerics.order[mt.name.text],
+               order.count == gac.arguments.count {
+                return (mt.name.text, gac.arguments.map { $0.argument.as(TypeSyntax.self).flatMap(argOfType) })
+            }
             guard let id = x.as(IdentifierTypeSyntax.self), let gac = id.genericArgumentClause,
                   let order = localGenerics.order[id.name.text], order.count == gac.arguments.count else { return nil }
-            return (id.name.text, gac.arguments.map { $0.argument.as(TypeSyntax.self).flatMap { typeName($0).name } })
+            return (id.name.text, gac.arguments.map { $0.argument.as(TypeSyntax.self).flatMap(argOfType) })
         }
         // A stored field whose type WRITES its arguments (`let b: Box<E>`), read off `fieldTypeArgs` (R905's index).
-        func fromField(_ owner: String, _ f: String) -> (String, [String?])? {
+        func fromField(_ owner: String, _ f: String) -> (String, [LocalGenericArg?])? {
             guard let ft = fields[owner]?[f]?.name, let targs = fieldTypeArgs[owner]?[f],
                   let order = localGenerics.order[simple(ft)], order.count == targs.count else { return nil }
-            return (simple(ft), targs.map { Optional($0) })
+            return (simple(ft), targs.map { flat($0) })
+        }
+        // SOUNDNESS R1044 nested — a member call or field read whose declared type is one of its owner's generic
+        // parameters yields that ARGUMENT, and when the argument was itself read with its own arguments the value
+        // is an instance of a local generic type: `Box(v: Box(v: E())).get()` is `Box<E>`.
+        func fromPosition(_ base: ExprSyntax, _ member: String, field: Bool) -> (String, [LocalGenericArg?])? {
+            guard !DeclCollector.r1044nOff, let x = localGenericMemberArg(base, member, field: field, depth + 1),
+                  !x.args.isEmpty, let order = localGenerics.order[x.name], order.count == x.args.count else { return nil }
+            vbHit("R1044N", "\(member) -> \(x.name)")
+            return (x.name, x.args)
         }
         if let dr = e.as(DeclReferenceExprSyntax.self) {
             let n = dr.baseName.text
@@ -1657,16 +1714,18 @@ final class CallCollector: SyntaxVisitor {
         }
         if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base {
             let r = rootOf(base, depth + 1)
-            guard r.isVar || Self.peel(base).as(DeclReferenceExprSyntax.self)?.baseName.text == "self",
-                  let owner = r.root else { return nil }
-            return fromField(simple(owner), ma.declName.baseName.text) ?? fromField(owner, ma.declName.baseName.text)
+            if r.isVar || Self.peel(base).as(DeclReferenceExprSyntax.self)?.baseName.text == "self", let owner = r.root,
+               let a = fromField(simple(owner), ma.declName.baseName.text) ?? fromField(owner, ma.declName.baseName.text) {
+                return a
+            }
+            return fromPosition(base, ma.declName.baseName.text, field: true)
         }
         guard let call = e.as(FunctionCallExprSyntax.self) else { return nil }
         let callee = Self.peel(call.calledExpression)
         if let g = callee.as(GenericSpecializationExprSyntax.self),
            let n = g.expression.as(DeclReferenceExprSyntax.self)?.baseName.text,
            let order = localGenerics.order[n], order.count == g.genericArgumentClause.arguments.count {
-            return (n, g.genericArgumentClause.arguments.map { $0.argument.as(TypeSyntax.self).flatMap { typeName($0).name } })
+            return (n, g.genericArgumentClause.arguments.map { $0.argument.as(TypeSyntax.self).flatMap(argOfType) })
         }
         var ctorName: String? = nil
         if let dr = callee.as(DeclReferenceExprSyntax.self), dr.baseName.text.first?.isUppercase == true {
@@ -1678,18 +1737,26 @@ final class CallCollector: SyntaxVisitor {
         if let n = ctorName {
             guard let order = localGenerics.order[n], let shapes = localGenerics.inits[n] else { return nil }
             let labels = call.arguments.map { $0.label?.text }
-            var out: [String?]? = nil
+            var out: [LocalGenericArg?]? = nil
             for sh in shapes {
                 guard let m = alignWitnessArgs(labels, sh.labels, sh.sig) else { continue }
-                var a = [String?](repeating: nil, count: order.count), clash = Set<Int>()
+                var a = [LocalGenericArg?](repeating: nil, count: order.count), clash = Set<Int>()
                 for (pi, g) in sh.bind {
                     guard let gi = order.firstIndex(of: g), let ai = m[pi] else { continue }
-                    let r = rootOf(Array(call.arguments)[ai].expression, depth + 1)
+                    let ax = Array(call.arguments)[ai].expression
+                    let r = rootOf(ax, depth + 1)
                     guard r.isVar, let t = r.root else { continue }
-                    if let prev = a[gi], prev != t { clash.insert(gi) } else { a[gi] = t }
+                    // SOUNDNESS R1044 nested — the argument's OWN instantiation, kept only when it names the type
+                    // `rootOf` already answered (`Box(v: Box(v: E()))`: the inner `Box` carries `[E]`).
+                    var arg = LocalGenericArg(name: t)
+                    if !DeclCollector.r1044nOff, let inner = localGenericArgs(ax, depth + 1),
+                       inner.0 == t || inner.0 == simple(t) { arg.args = inner.1; vbHit("R1044N", "\(n)(\(t)<…>)") }
+                    // Two positions naming one type with different arguments still agree on the TYPE, which is
+                    // what the residual fix answered; only the arguments are dropped.
+                    if let prev = a[gi], prev.name != arg.name { clash.insert(gi) } else { a[gi] = a[gi].map { Self.lgMeet($0, arg) } ?? arg }
                 }
                 for gi in clash { a[gi] = nil }
-                if let o = out { out = zip(o, a).map { $0 == $1 ? $0 : nil } } else { out = a }
+                if let o = out { out = zip(o, a).map { Self.lgMeet($0, $1) } } else { out = a }
             }
             return out.map { (n, $0) }
         }
@@ -1697,7 +1764,11 @@ final class CallCollector: SyntaxVisitor {
             ?? callee.as(MemberAccessExprSyntax.self)?.declName.baseName.text
         if let l = leaf, let rt = returns[l], let args = localGenerics.returnArgs[l],
            let order = localGenerics.order[simple(rt)], order.count == args.count {
-            return (simple(rt), args.map { Optional($0) })
+            return (simple(rt), args.map { flat($0) })
+        }
+        if let ma = callee.as(MemberAccessExprSyntax.self), let base = ma.base,
+           returns[ma.declName.baseName.text] == nil || !DeclCollector.r1072Off {
+            return fromPosition(base, ma.declName.baseName.text, field: false)
         }
         return nil
     }
@@ -2129,6 +2200,16 @@ final class CallCollector: SyntaxVisitor {
                ma.declName.baseName.text.first?.isUppercase == true,
                let tp = conventionTypePath(ExprSyntax(ma)), tp.contains(".") {
                 return (tp, true, [ma.declName.baseName.text], false, false)
+            }
+            // SOUNDNESS R1072 — THE RECEIVER'S OWN ANSWER BEFORE THE LEAF'S. `returns` is keyed by the bare member name,
+            // so a local `Holder.get() -> P` typed EVERY `.get()` as `P` — including `b.get()` on a dependency's
+            // `Box<E>`, whose declaration this scan never saw and so could not poison the leaf (measured: the hop
+            // read `P.go`, pure, over a call that runs `E.go`). Where the receiver's instantiation is read and its
+            // type declares this member as a generic parameter, that is the answer; the leaf index stays the
+            // fallback.
+            if !DeclCollector.r1072Off, let ma = call.calledExpression.as(MemberAccessExprSyntax.self), let base = ma.base,
+               let x = localGenericMemberType(base, ma.declName.baseName.text, field: false, depth) {
+                return (x, true, [ma.declName.baseName.text], false, false)
             }
             if let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
                let rt = returns[ma.declName.baseName.text] {
@@ -8364,9 +8445,12 @@ final class CallCollector: SyntaxVisitor {
                     c.instanceHop = true
                     calls.append(c)
                 }
-                else if owner == nil, guessedOwner == nil, Self.veinBProbe, let b = ma.base {
+                else if owner == nil, guessedOwner == nil, let b = ma.base {
+                    droppedMember = true   // SOUNDNESS R1073 — see `droppedMember`
+                    if Self.veinBProbe {
                     FileHandle.standardError.write(
                         "VBDROP\t\(probeShape(b))\t\(member)\t\(String(b.trimmedDescription.prefix(60)).replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\t", with: " "))\n".data(using: .utf8)!)
+                    }
                 }
             }
         } else if node.calledExpression.is(ClosureExprSyntax.self) {
@@ -8803,9 +8887,38 @@ final class CallCollector: SyntaxVisitor {
             // resolution (arity ≥ 2) keeps the edge.
             let opArgs: [ArgKind] = [.opaque, .opaque], opTypes: [String?] = [lt.isVar ? lt.root : nil, rt.isVar ? rt.root : nil]
             var localOperand = false
-            for cand in [lt.root, rt.root] {
-                if let t = cand, lt.isVar || rt.isVar, localTypes.contains(t) {
-                    calls.append(Call(path: "\(t).\(opName)", leaf: opName, strArg: nil, typed: true, args: opArgs, argTypes: opTypes))
+            // SOUNDNESS R1081 — the operands' literal kinds, so the Driver can refuse an overload whose parameter
+            // a literal cannot bind (`x + 1` is not `static func + (a: Self, b: String)`).
+            let opLits: [String?] = [elems[i], (i + 2 < elems.count ? elems[i + 2] : nil)].map { e in
+                guard let e = e.map(Self.peel) else { return nil }
+                if e.is(IntegerLiteralExprSyntax.self) { return "int" }
+                if e.is(FloatLiteralExprSyntax.self) { return "float" }
+                if e.is(StringLiteralExprSyntax.self) { return "string" }
+                if e.is(BooleanLiteralExprSyntax.self) { return "bool" }
+                return nil
+            }
+            // SOUNDNESS R1081 — BOTH operands literals (`5 + "s"`): no operand was typed, so no call was recorded at all,
+            // and a project overload the literals bind (`extension Shadow { static func + (a: Self, b: String) }`
+            // with `extension Int: Shadow`) ran silently (executed). Each literal takes its DEFAULT type (Swift's own
+            // rule when nothing else constrains it); the Driver's operand admission then refuses any overload the
+            // literals cannot bind.
+            var cands = [lt.root, rt.root]
+            var candTypes = opTypes
+            // Only literals of DIFFERENT kinds (`5 + "s"`): no stdlib operator takes them, so a project overload is the
+            // only thing they can reach. Same-kind literals (`1 + 2`) are the stdlib's concrete operator, which Swift
+            // prefers over any protocol-extension overload — recording them moved ~2,300 corpus rows for nothing.
+            if !DeclCollector.r1081Off, lt.root == nil, rt.root == nil, opLits.allSatisfy({ $0 != nil }),
+               Set(opLits.compactMap { $0 }).count > 1 {
+                let dflt: [String: String] = ["int": "Int", "float": "Double", "string": "String", "bool": "Bool"]
+                cands = opLits.map { $0.flatMap { dflt[$0] } }
+                candTypes = cands
+            }
+            let litTyped = cands != [lt.root, rt.root]
+            for cand in cands {
+                if let t = cand, lt.isVar || rt.isVar || litTyped, localTypes.contains(t) {
+                    var c = Call(path: "\(t).\(opName)", leaf: opName, strArg: nil, typed: true, args: opArgs, argTypes: candTypes)
+                    c.operandLits = opLits
+                    calls.append(c)
                     localOperand = true; break
                 }
             }
@@ -8817,7 +8930,9 @@ final class CallCollector: SyntaxVisitor {
             // would edge a same-named local `func +(V,V)` via the unique-free-fn path (which ignores arg
             // types) — a fabrication. With confident local operand types, matchOverloads discriminates.
             if localOperand {
-                calls.append(Call(path: opName, leaf: opName, strArg: nil, typed: false, args: opArgs, argTypes: opTypes, unqualified: true))
+                var c = Call(path: opName, leaf: opName, strArg: nil, typed: false, args: opArgs, argTypes: opTypes, unqualified: true)
+                c.operandLits = opLits
+                calls.append(c)
             }
             // GENERIC / protocol-typed operand: `a + b` where `a: T: P` and `P` declares the operator —
             // dispatch to `P`'s conformers' operator WITNESSES via bounded CHA, the operator analog of the
