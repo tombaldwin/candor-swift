@@ -117,6 +117,30 @@ final class LocalProtocolOperatorHedgeProcessTests: XCTestCase {
         XCTAssertEqual(inf(by, "midDepOp"), ["Unknown"], "R1073: a dependency's operator extension keeps its hedge; got \(by["midDepOp"] ?? [:])")
     }
 
+    /// The `droppedMember` fence, as a one-variable fixture (it was evidenced by the swift-nio A/B alone). The two
+    /// functions differ only in a member call the collector DROPS (an untypeable receiver, `{ Writer() }()`). Executed
+    /// (`swiftagent-v045/fx/r1073`): `w.scribble()` writes. In `droppedMod` the operator hedge is the row's ONLY
+    /// disclosure, so the hedge stays; measured with the fence deleted, `droppedMod` went ABSENT over the write.
+    func testTheDroppedCallFenceKeepsTheHedgeThatIsTheRowsOnlyDisclosure() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = try ProcessHarness.makePackage("""
+        import Foundation
+        protocol Prim {}
+        extension Int: Prim {}
+        struct Writer { func scribble() { \(Self.FS) } }
+        func ctlMod(_ x: Int, _ y: Int) -> Int { x % y }
+        func droppedMod(_ x: Int, _ y: Int) -> Int { let w = { Writer() }(); w.scribble(); return x % y }
+        """)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let by = try ProcessHarness.fns(ofJson: ProcessHarness.run(bin, [root.path, "--json"]).out)
+        XCTAssertNil(ProcessHarness.chargedNothing(by, "ctlMod"), "R1073: stdlib `%` on Int; got \(by["ctlMod"] ?? [:])")
+        XCTAssertEqual(inf(by, "droppedMod"), ["Unknown"], "the fence keeps the hedge; got \(by["droppedMod"] ?? [:])")
+        XCTAssertEqual(by["droppedMod"]?["unknownWhy"] as? [String], ["dispatch:Prim.%"])
+        let pf = root.appendingPathComponent("p.policy")
+        try "deny Unknown droppedMod\n".write(to: pf, atomically: true, encoding: .utf8)
+        XCTAssertEqual(try ProcessHarness.run(bin, [root.path, "--policy", pf.path, "--json"]).code, 1, "the unit is not silent")
+    }
+
     func testTheOperatorFixtureTypechecks() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("candor-v044-tc1073-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }

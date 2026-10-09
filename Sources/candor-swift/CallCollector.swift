@@ -112,6 +112,9 @@ final class LocatorMoveScanner: SyntaxVisitor {
 enum ArgKind { case closure, named(String), opaque }
 struct Call { var path: String; var leaf: String; var strArg: String?; var typed: Bool; var args: [ArgKind] = []
               var argTypes: [String?] = []     // inferred simple type per positional arg (nil = unknown) — overloads
+              /// SOUNDNESS R1086 — on a binary-operator call, aligned with `argTypes`: the operand's type is a GUESS (an
+              /// unexplained hop, a convention). It may add a caller witness; it may never refuse an overload (R1081).
+              var argTypesGuessed: [Bool] = []
               /// SOUNDNESS R974 (c) — callee argument index -> THIS unit's parameter index, for an argument that
               /// is one of this unit's own parameters typed by one of its OWN generic parameters (`f(a, b)` inside
               /// `g<T: Equatable>(_ a: T, _ b: T)`): the callee's witness requirement passes through to the caller.
@@ -198,7 +201,12 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// SOUNDNESS R915 REACH — set only under `CANDOR_VEINB_PROBE` on a typed local call whose
               /// receiver root is a `rootOf` guess (`opaqueHop`): `<hop kind>\t<receiver spelling>`. The Driver
               /// prints what that call resolved to. Never read for an answer.
-              var r915Site: String? = nil }
+              var r915Site: String? = nil
+              /// SOUNDNESS R1071 — on a `<platext>.` marker: the call's parenthesised argument LABELS (`nil` =
+              /// unlabelled) and its trailing-closure count, so the Driver admits only an extension member whose
+              /// declaration those labels can call; `platextLabels == nil` is the PROPERTY spelling (no call).
+              var platextLabels: [String?]? = nil
+              var platextTrailing: Int = 0 }
                                                // the RESOLVED receiver root of an otherwise-unmatched member
                                                // call (`c.fetch()` where c: RatesClient, an external type) —
                                                // carried ONLY for the §2 CANDOR_DEPS join key (`pkg#Owner.leaf`);
@@ -306,6 +314,10 @@ final class CallCollector: SyntaxVisitor {
     /// SOUNDNESS R1032 — the same `<type leaf>.<member>` keys as `implicitMemberUnits`, built whatever R999's
     /// switch says: "does this scan have a body for `Owner.member`".
     let memberUnitKeys: Set<String>
+    /// SOUNDNESS R1071 — the member names some extension of a PLATFORM PROTOCOL provides (`extension Sequence {
+    /// func stampAll() }`), in this scan, in a chained report, or in an imported dependency's readable sources.
+    /// A member call whose leaf is here emits a `<platext>.` marker carrying the receiver's platform type (see there).
+    let platformExtLeaves: Set<String>
     /// SOUNDNESS R1048 — local types that conform (transitively) to a stdlib iteration protocol, or declare a
     /// `next`/`makeIterator`/`makeAsyncIterator` body.
     let iterableLocalTypes: Set<String>
@@ -841,6 +853,7 @@ final class CallCollector: SyntaxVisitor {
          implicitParams: [String: [[(label: String, type: String?)]]] = [:],
          implicitMemberUnits: Set<String> = [],
          memberUnitKeys: Set<String> = [],
+         platformExtLeaves: Set<String> = [],
          iterableLocalTypes: Set<String> = [],
          declaredTypes: Set<String>,
          localProtocols: Set<String>, protoBoundParams: [String: String] = [:],
@@ -941,6 +954,7 @@ final class CallCollector: SyntaxVisitor {
         self.implicitParams = implicitParams        // R999
         self.implicitMemberUnits = implicitMemberUnits
         self.memberUnitKeys = memberUnitKeys
+        self.platformExtLeaves = platformExtLeaves  // R1071
         self.iterableLocalTypes = iterableLocalTypes
         self.metatypeReturns = metatypeReturns                      // R585
         self.genericReturnArgs = genericReturnArgs                  // R1044
@@ -2514,6 +2528,26 @@ final class CallCollector: SyntaxVisitor {
         let r = rootOf(e)
         return r.isVar ? r.root : nil
     }
+
+    /// SOUNDNESS R1086 — IS THIS ARGUMENT / OPERAND TYPE A GUESS? `rootOf` answers the OUTER base for an unexplained
+    /// hop — `f.name`, where `name` is inherited from a dependency's class, keeps `Foo` (`opaqueHop`) — and a local
+    /// bound by the singleton convention (`let s = X.shared`) is typed by convention. The type is still recorded
+    /// (the caller-witness answering ADDS edges from it, as the release did); what it may not do is EXCLUDE a
+    /// candidate. R1081's operand admission refused the real `Foo.+(Foo, String)` for `f + f.name` because "`Foo` is
+    /// not `String`", and the row read `[]` over a call that writes (executed; v0.40.2 charged it). The operator call
+    /// carries the mask, and the admission reads a guessed operand as untyped. (Ordinary overload narrowing also reads
+    /// guessed argument types; masking it there was measured to reintroduce union fabrications, so it is left as the
+    /// release has it.)
+    private func typeIsGuess(_ e: ExprSyntax,
+                             _ r: (root: String?, isVar: Bool, path: [String], mono: Bool, opaqueHop: Bool)) -> Bool {
+        guard !Self.r1086Off, r.isVar else { return false }
+        if r.opaqueHop { vbHit("R1086", "hop \(r.root ?? "-")"); return true }
+        if let dr = Self.peel(e).as(DeclReferenceExprSyntax.self), conventionVars.contains(dr.baseName.text) {
+            vbHit("R1086", "convention \(r.root ?? "-")"); return true
+        }
+        return false
+    }
+    static let r1086Off = ProcessInfo.processInfo.environment["CANDOR_R1086_OFF"] != nil
 
     /// `privacy/1` finding 5 — the statically-visible AVFoundation media-type of a capture call. Reads the
     /// leading-dot member name of the `for:` argument on `AVCaptureDevice.default(for:)` / `.devices(for:)`
@@ -7117,6 +7151,42 @@ final class CallCollector: SyntaxVisitor {
     static let r1009Off = ProcessInfo.processInfo.environment["CANDOR_R1009_OFF"] != nil
     /// SOUNDNESS R1032 — §1b kill switch.
     static let r1032Off = ProcessInfo.processInfo.environment["CANDOR_R1032_OFF"] != nil
+    /// SOUNDNESS R1071 residual — the `<platext>.` marker (see the member-call visitor).
+    static let r1071Off = ProcessInfo.processInfo.environment["CANDOR_R1071P_OFF"] != nil
+    /// SOUNDNESS R1071 — the receiver's type AS THE SOURCE STATES IT, for the `<platext>.` marker: a literal's own
+    /// type, a binding recorded as an array / dictionary, or `rootOf`'s root where that is a resolution (not a
+    /// guess through an unexplained hop). nil = the source does not say, which the Driver answers with a disclosure.
+    private func platformReceiverType(_ b: ExprSyntax,
+                                      _ base: (root: String?, isVar: Bool, path: [String], mono: Bool, opaqueHop: Bool)) -> String? {
+        let e = Self.peel(b)
+        if e.is(ArrayExprSyntax.self) { return "Array" }
+        if e.is(DictionaryExprSyntax.self) { return "Dictionary" }
+        if e.is(StringLiteralExprSyntax.self) { return "String" }
+        if e.is(IntegerLiteralExprSyntax.self) { return "Int" }
+        if e.is(FloatLiteralExprSyntax.self) { return "Double" }
+        if e.is(BooleanLiteralExprSyntax.self) { return "Bool" }
+        // A parameter's WRITTEN type — the reading `containerKind` makes, so the two cannot disagree (§F1.3). Not
+        // `arrayElem`: that index also holds `Set<T>`, `AsyncStream<T>` and `TaskGroup<T>` elements, and reading it
+        // as `Array` would answer an `AsyncSequence` extension's member with "does not conform".
+        if let dr = e.as(DeclReferenceExprSyntax.self), let t = paramDeclTypesR996[dr.baseName.text],
+           !multiplyBoundNames.contains(dr.baseName.text) {
+            var d = desugaredType(expandTypeAliasHead(t, aliasExpander))
+            while true {   // `T?` / `T!` (a `x?.m()` receiver), `some P` / `any P`, `inout T`: the type it names
+                if let o = d.as(OptionalTypeSyntax.self) { d = o.wrappedType }
+                else if let o = d.as(ImplicitlyUnwrappedOptionalTypeSyntax.self) { d = o.wrappedType }
+                else if let o = d.as(SomeOrAnyTypeSyntax.self) { d = o.constraint }
+                else if let o = d.as(AttributedTypeSyntax.self) { d = o.baseType }
+                else { break }
+            }
+            if d.is(ArrayTypeSyntax.self) { return "Array" }
+            if d.is(DictionaryTypeSyntax.self) { return "Dictionary" }
+            if let id = d.as(IdentifierTypeSyntax.self) { return id.name.text }
+            if let m = d.as(MemberTypeSyntax.self) { return m.name.text }
+            return nil
+        }
+        if !base.opaqueHop, let r = base.root, r != Self.superMarker, base.isVar || r.first?.isUppercase == true { return r }
+        return nil
+    }
     /// SOUNDNESS R1032 — does a type THIS scan declares (or one of its local supertypes) carry its own body for
     /// `member`? Only then does the receiver's own member answer instead of the stdlib's. A LOCAL PROTOCOL
     /// receiver is left to its dispatch (a requirement named `shuffle` is answered by the conformers, and this
@@ -7663,6 +7733,16 @@ final class CallCollector: SyntaxVisitor {
                 calls.append(Call(path: name, leaf: name, strArg: lit, typed: false, args: argKinds(node),
                                   argTypes: argTypesOf(node), unqualified: true,
                                   argLabelled: node.arguments.contains { $0.label != nil }))
+                // SOUNDNESS R1071 — the IMPLICIT-SELF spelling of the `<platext>.` marker: `stampAll()` inside
+                // `extension Array { … }` is `self.stampAll()`, and a member shadows a free name in a type's scope.
+                if !Self.r1071Off, platformExtLeaves.contains(name), let et = enclosingType,
+                   !localFuncs.contains(name), !boundLocals.contains(name), vars[name] == nil {
+                    var c = Call(path: "<platext>.\(name)", leaf: name, strArg: nil, typed: false,
+                                 args: argKinds(node), argTypes: argTypesOf(node), extOwner: et)
+                    c.platextLabels = node.arguments.map { $0.label?.text }
+                    c.platextTrailing = (node.trailingClosure == nil ? 0 : 1) + node.additionalTrailingClosures.count
+                    calls.append(c)
+                }
                 // VEIN A(i) N-b — `FT_Boom()` where `typealias FT_Boom = TopBoom`: the Driver's ctor edge
                 // tests the RAW name, so the init never ran. ADDED beside the release's call, the type's own.
                 aiCtorCall(name, node, lit: lit)
@@ -7686,6 +7766,21 @@ final class CallCollector: SyntaxVisitor {
             if let hop = holdsHop {
                 calls.append(Call(path: "<holds>.\(member)", leaf: member, strArg: nil, typed: false,
                                   args: [], argTypes: [], ownerModule: spelledModule(of: ma.base), holdsHop: hop))
+            }
+            // SOUNDNESS R1071 — A MEMBER SOME EXTENSION OF A PLATFORM PROTOCOL PROVIDES, CALLED ON A RECEIVER THIS SCAN
+            // DOES NOT DECLARE. `a.stampAll()` with `a: [Int]` and `extension Sequence { func stampAll() }` (here, in a
+            // chained report, or in a dependency's sources) runs that extension, and nothing below could say so: the
+            // receiver's type is the PLATFORM's, and only the platform declares that `Array` is a `Sequence`. The
+            // marker carries the receiver's type as far as the source states it (nil where it does not), and the
+            // Driver answers it against the DERIVED conformance table (`StdlibConformances.swift`) — a resolution
+            // where the type is known, a disclosure where it is not. ADDED beside whatever the chain below records.
+            if !Self.r1071Off, platformExtLeaves.contains(member), let b = ma.base {
+                var c = Call(path: "<platext>.\(member)", leaf: member, strArg: nil, typed: false,
+                             args: argKinds(node), argTypes: argTypesOf(node),
+                             extOwner: platformReceiverType(b, base))
+                c.platextLabels = node.arguments.map { $0.label?.text }
+                c.platextTrailing = (node.trailingClosure == nil ? 0 : 1) + node.additionalTrailingClosures.count
+                calls.append(c)
             }
             // SOUNDNESS R1032 — `xs.randomElement()` / `xs.shuffled()` / `xs.shuffle()` draw entropy, and the κ
             // table keyed `Rand` on `<numeric>.random` only, so every collection spelling was ABSENT (executed:
@@ -8658,6 +8753,13 @@ final class CallCollector: SyntaxVisitor {
             // property read here wants the type the property is read FROM.
             let recvRoot = recv.root
             let prop = node.declName.baseName.text
+            // SOUNDNESS R1071 — the PROPERTY spelling of the `<platext>.` marker: `a.stampedCount` with
+            // `extension Collection { var stampedCount: Int { … } }` runs that getter on a `[Int]` exactly as the
+            // method spelling runs the method.
+            if !Self.r1071Off, platformExtLeaves.contains(prop), let b = node.base {
+                calls.append(Call(path: "<platext>.\(prop)", leaf: prop, strArg: nil, typed: false,
+                                  args: [], argTypes: [], extOwner: platformReceiverType(b, recv)))
+            }
             // SOUNDNESS R983 — the dotted twin of the simple `Inner.prop` edge below (see `nestedDottedKey`).
             if !Self.r983Off, let b = node.base, let dotted = nestedDottedKey(b) {
                 propertyEdges.insert("\(dotted).\(prop)")
@@ -8886,6 +8988,7 @@ final class CallCollector: SyntaxVisitor {
             // a binary operator takes two args — supply two opaque arg slots so overloaded operator
             // resolution (arity ≥ 2) keeps the edge.
             let opArgs: [ArgKind] = [.opaque, .opaque], opTypes: [String?] = [lt.isVar ? lt.root : nil, rt.isVar ? rt.root : nil]
+            let opGuessed: [Bool] = [typeIsGuess(elems[i], lt), i + 2 < elems.count && typeIsGuess(elems[i + 2], rt)]   // R1086
             var localOperand = false
             // SOUNDNESS R1081 — the operands' literal kinds, so the Driver can refuse an overload whose parameter
             // a literal cannot bind (`x + 1` is not `static func + (a: Self, b: String)`).
@@ -8916,7 +9019,8 @@ final class CallCollector: SyntaxVisitor {
             let litTyped = cands != [lt.root, rt.root]
             for cand in cands {
                 if let t = cand, lt.isVar || rt.isVar || litTyped, localTypes.contains(t) {
-                    var c = Call(path: "\(t).\(opName)", leaf: opName, strArg: nil, typed: true, args: opArgs, argTypes: candTypes)
+                    var c = Call(path: "\(t).\(opName)", leaf: opName, strArg: nil, typed: true, args: opArgs, argTypes: candTypes,
+                                 argTypesGuessed: litTyped ? [] : opGuessed)
                     c.operandLits = opLits
                     calls.append(c)
                     localOperand = true; break
@@ -8930,7 +9034,8 @@ final class CallCollector: SyntaxVisitor {
             // would edge a same-named local `func +(V,V)` via the unique-free-fn path (which ignores arg
             // types) — a fabrication. With confident local operand types, matchOverloads discriminates.
             if localOperand {
-                var c = Call(path: opName, leaf: opName, strArg: nil, typed: false, args: opArgs, argTypes: opTypes, unqualified: true)
+                var c = Call(path: opName, leaf: opName, strArg: nil, typed: false, args: opArgs, argTypes: opTypes,
+                             argTypesGuessed: opGuessed, unqualified: true)
                 c.operandLits = opLits
                 calls.append(c)
             }
