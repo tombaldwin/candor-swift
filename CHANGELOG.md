@@ -10,6 +10,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.40.2] — 2026-10-09
+
 ### ⚠ Fixed — SOUNDNESS R705 (unchained arm): an erased dispatch over an uncovered dependency's protocol discloses
 
 Executed: a local `Mine: Sink` (where `Sink` is an UNCHAINED dependency's protocol) deleted a file through
