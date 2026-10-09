@@ -1465,6 +1465,75 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         return j == labels.count
     }
 
+    /// SOUNDNESS R1081 — AN OPERATOR OVERLOAD IS ADMITTED ONLY WHERE ITS OPERANDS COULD BIND. A binary operator call was
+    /// edged to every project unit of that NAME on the operand's type or its supertypes, so `(x + 1) * 2 - x / 3` on an
+    /// `Int` charged `Fs` through `extension Shadow { static func + (a: Self, b: String) }` — a `String` parameter an
+    /// integer literal cannot bind (executed: no write). This refuses a target only on PROOF, per operand: a literal
+    /// whose kind the parameter's concrete type cannot take, or a typed operand of a concrete type that is neither the
+    /// parameter's type nor a recorded subtype of it. A parameter spelled with a type parameter (`Self`, `T`), a
+    /// protocol, or anything not known to be a concrete type proves nothing, and neither does an untyped operand —
+    /// those keep the edge (the over-approximation the release took), so an undecidable call never turns silent.
+    /// Only the EDGE is filtered; `resolved` is left to each site, as R1047 does.
+    let r1081Off = DeclCollector.r1081Off
+    let r1081Probe = CallCollector.veinBProbe
+    var fnInfoByQualR1081: [String: FnInfo] = [:]
+    for f in allFns where fnInfoByQualR1081[f.qual] == nil { fnInfoByQualR1081[f.qual] = f }
+    let protoNamesR1081 = protocolPaths.union(protocolMethods.keys)
+    let numericR1081: Set<String> = RAND_ROOTS.subtracting(["Bool"])
+    let platformConcreteR1081: Set<String> = RAND_ROOTS.union(["String", "Substring", "Character", "Data", "URL", "Date", "UUID"])
+    // A name that is ALSO a typealias anywhere in the scan proves nothing: the receiver's spelling can be the alias
+    // (`typealias DisposeKey = Bag<Disposable>.KeyType`, i.e. `BagKey`) while a same-named struct exists elsewhere
+    // (`CompositeDisposable.DisposeKey`) — measured on RxSwift, where it refused the real `==(BagKey,BagKey)`.
+    let aliasNamesR1081: Set<String> = surfaceAliases.union(typeAliases.keys)
+        .union(memberTypeAliasesAll.values.flatMap { $0.keys })
+    func concreteR1081(_ t: String, generics: Set<String>) -> Bool {
+        guard !generics.contains(t), !protoNamesR1081.contains(t), !aliasNamesR1081.contains(t),
+              !t.contains(".") else { return false }
+        return platformConcreteR1081.contains(t) || declaredTypes.contains(t)
+    }
+    /// Records a refusal on a stdlib scalar (`RAND_ROOTS`, not declared here): the operator is then the stdlib's own, so the
+    /// call is answered — no edge, and no hedge — exactly as the release answered it with the wrong edge. Returns false,
+    /// so it can sit in a `where` clause after a refused admission. On any other type a refusal leaves the call
+    /// unanswered and the inherited-member arm below decides whether to disclose.
+    var r1081Answered = false
+    func r1081Refused(_ type: String) -> Bool {
+        if !r1081Off, RAND_ROOTS.contains(type), !declaredTypes.contains(type) { r1081Answered = true }
+        return false
+    }
+    func operatorOperandsAdmit(_ call: Call, _ target: String) -> Bool {
+        guard !r1081Off, !call.operandLits.isEmpty, let f = fnInfoByQualR1081[target], f.paramSig.count == 2 else { return true }
+        let generics = f.genericParamNames.union(typeGenericParamNamesAI.values.joined())
+        for j in 0..<2 {
+            guard let pt = f.paramSig[j].type, concreteR1081(pt, generics: generics) else { continue }
+            let sups = supertypesOf[pt] ?? []
+            if let lit = call.operandLits[j] {
+                // Only a PLATFORM concrete type is judged against a literal: a project type's literal conformance can
+                // arrive through a refinement (`DoubleWidth: FixedWidthInteger` takes an integer literal), which the
+                // supertype index does not close over, so a project type never refuses a literal.
+                guard platformConcreteR1081.contains(pt) else { continue }
+                let ok: Bool
+                switch lit {
+                case "int":    ok = numericR1081.contains(pt) || sups.contains("ExpressibleByIntegerLiteral")
+                case "float":  ok = ["Double", "Float", "CGFloat"].contains(pt) || sups.contains("ExpressibleByFloatLiteral")
+                case "string": ok = ["String", "Substring", "Character"].contains(pt) || sups.contains("ExpressibleByStringLiteral")
+                                    || sups.contains("ExpressibleByStringInterpolation")
+                case "bool":   ok = pt == "Bool" || sups.contains("ExpressibleByBooleanLiteral")
+                default:       ok = true
+                }
+                if !ok {
+                    if r1081Probe { FileHandle.standardError.write("VBHIT\tR1081\t\(target) operand \(j) \(lit)-literal vs \(pt)\n".data(using: .utf8)!) }
+                    return false
+                }
+            } else if j < call.argTypes.count, let at = call.argTypes[j], at != pt, concreteR1081(at, generics: generics),
+                      subtypesOf[pt]?.contains(at) != true,
+                      !(["Double", "CGFloat"].contains(at) && ["Double", "CGFloat"].contains(pt)) {   // implicit conversion
+                if r1081Probe { FileHandle.standardError.write("VBHIT\tR1081\t\(target) operand \(j) \(at) vs \(pt)\n".data(using: .utf8)!) }
+                return false
+            }
+        }
+        return true
+    }
+
     /// SOUNDNESS R572 — THE ONE IMPLEMENTATION of "which project units can `<Type>.<member>` run at a
     /// call site with this argument shape". An OVERLOADED declaration's qual carries a SIGNATURE SUFFIX
     /// (`Impl.two(Int)` — see `overloads`/`overloadedBases` above), so a bare `resolveQual("Impl.two")`
@@ -3890,12 +3959,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 } else if overloadedBases.contains(call.path) {
                     for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
                         resolved = true
-                        guard extensionInitLabelsAdmit(call, t) else { continue }   // R1047
+                        guard extensionInitLabelsAdmit(call, t), operatorOperandsAdmit(call, t) else { continue }   // R1047, R1081
                         edges[f.qual, default: []].insert(t)
                         callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
                     }
                 } else if !typedTargets.isEmpty {
-                    for t in typedTargets where extensionInitLabelsAdmit(call, t) {   // R1047
+                    for t in typedTargets where extensionInitLabelsAdmit(call, t) && operatorOperandsAdmit(call, t) {   // R1047, R1081
                         edges[f.qual, default: []].insert(t)
                         callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
                     }
@@ -3909,6 +3978,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // `<Proto>.<member>` units — a member no conformed protocol defaults edges nothing.
                     let type = String(call.path[..<dot])
                     let member = String(call.path[call.path.index(after: dot)...])
+                    r1081Answered = false
                     for sup in supertypesOf[type] ?? [] {
                         let base = "\(sup).\(member)"
                         // AN OVERLOADED PROVIDED MEMBER MUST NOT VANISH. `resolveQual` can only name an
@@ -3925,19 +3995,21 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         // being dropped — the same over-approximate direction `matchOverloads` already
                         // takes everywhere else, never a guess at which one.
                         if overloadedBases.contains(base) {
-                            for t in matchOverloads(base, argc, call.argTypes, swiftModuleOf(f.loc)) {
+                            for t in matchOverloads(base, argc, call.argTypes, swiftModuleOf(f.loc))
+                                where operatorOperandsAdmit(call, t) || r1081Refused(type) {   // R1081
                                 edges[f.qual, default: []].insert(t)
                                 callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
                                 resolved = true
                             }
                         } else {
-                            for t in resolveQual(base) {
+                            for t in resolveQual(base) where operatorOperandsAdmit(call, t) || r1081Refused(type) {   // R1081
                                 edges[f.qual, default: []].insert(t)
                                 callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
                                 resolved = true
                             }
                         }
                     }
+                    if r1081Answered { resolved = true }   // SOUNDNESS R1081 — see `r1081Refused`
                     // No LOCAL supertype default resolved. If the type conforms to / inherits an EXTERNAL
                     // base (a super not declared locally — `final class Todo: Model` where Model is FluentKit's),
                     // the member is inherited from that external base's extension → it must NOT read silent (the
@@ -4295,12 +4367,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         resolved = true
                     }
                 } else if overloadedBases.contains(call.path) {            // an overloaded FREE function
-                    for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
+                    for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc))
+                        where operatorOperandsAdmit(call, t) {   // R1081
                         edges[f.qual, default: []].insert(t)
                         callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
                         resolved = true
                     }
-                } else if let targets = freeFnByName[call.path], targets.count == 1 {
+                } else if let targets = freeFnByName[call.path], targets.count == 1, operatorOperandsAdmit(call, targets[0]) {   // R1081
                     edges[f.qual, default: []].insert(targets[0])
                     callsiteArgs[targets[0], default: []].append((f.qual, call.args)); callsiteArgTypes[targets[0], default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
                     resolved = true

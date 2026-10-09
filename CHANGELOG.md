@@ -10,6 +10,19 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — SOUNDNESS R1081: an operator call reaches a project overload only where its operands could bind
+
+Executed: with `extension Int: Shadow` and `extension Shadow { static func + (a: Self, b: String) -> Self }` (a file
+write), `(x + 1) * 2 - x / 3` on an `Int` was charged `Fs` — an integer literal cannot bind a `String` parameter
+(no write). A binary-operator call now refuses a project overload only on PROOF per operand: a literal whose kind a
+PLATFORM parameter type cannot take, or a concretely typed operand that is neither the parameter's concrete type nor a
+recorded subtype (type parameters, protocols, typealias names, nested spellings and untyped operands prove nothing and
+keep the edge, so an undecidable call never turns silent; `Double`/`CGFloat` convert). A refused operator on a stdlib
+scalar is the stdlib's own and is answered without a hedge, as the release answered it. Kept, executed: `x + "s"`,
+`x + s` (`s: String`), `x + g()` (operand untyped). And `5 + "s"` — two literals of different kinds, which the release
+never recorded at all (ABSENT over a write) — now takes the literals' default types and is charged. Kill switch
+`CANDOR_R1081_OFF`.
+
 ### ⚠ Fixed — SOUNDNESS R1073: stdlib operators on an `Int` are not hedged through a local protocol it is extended to
 
 `extension Int: AtomicPrimitive {}` over swift-nio's own `protocol AtomicPrimitive` left that protocol among `Int`'s

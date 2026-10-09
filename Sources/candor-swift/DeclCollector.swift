@@ -407,6 +407,7 @@ final class DeclCollector: SyntaxVisitor {
     static let r1044nOff = ProcessInfo.processInfo.environment["CANDOR_R1044N_OFF"] != nil // SOUNDNESS R1044 nested
     static let r1072Off = ProcessInfo.processInfo.environment["CANDOR_R1072_OFF"] != nil   // SOUNDNESS R1072
     static let r1073Off = ProcessInfo.processInfo.environment["CANDOR_R1073_OFF"] != nil   // SOUNDNESS R1073
+    static let r1081Off = ProcessInfo.processInfo.environment["CANDOR_R1081_OFF"] != nil   // SOUNDNESS R1081
     static let r991Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R991_OFF"] != nil
     static let r992Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R992_OFF"] != nil
     static let r993Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R993_OFF"] != nil

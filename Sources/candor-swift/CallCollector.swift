@@ -163,6 +163,9 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// SOUNDNESS R1065 — a `<untyped>.` marker from `depInstanceMemberCallee`: its MISS discloses only where
               /// the member's leaf could have a body someone answers (a local type's member, or a chained package's).
               var instanceHop: Bool = false
+              /// SOUNDNESS R1081 — on a binary-operator call: each operand's LITERAL kind (`int`, `float`, `string`,
+              /// `bool`), nil where the operand is not a literal. Read only by the Driver's operand-type admission.
+              var operandLits: [String?] = []
               /// SOUNDNESS R847 — on an `argRef` call: the name is a binder's local in scope, so it can be
               /// no dependency declaration (the chained join skips it). Local resolution is unaffected.
               var argBoundLocal: Bool = false
@@ -8884,9 +8887,38 @@ final class CallCollector: SyntaxVisitor {
             // resolution (arity ≥ 2) keeps the edge.
             let opArgs: [ArgKind] = [.opaque, .opaque], opTypes: [String?] = [lt.isVar ? lt.root : nil, rt.isVar ? rt.root : nil]
             var localOperand = false
-            for cand in [lt.root, rt.root] {
-                if let t = cand, lt.isVar || rt.isVar, localTypes.contains(t) {
-                    calls.append(Call(path: "\(t).\(opName)", leaf: opName, strArg: nil, typed: true, args: opArgs, argTypes: opTypes))
+            // SOUNDNESS R1081 — the operands' literal kinds, so the Driver can refuse an overload whose parameter
+            // a literal cannot bind (`x + 1` is not `static func + (a: Self, b: String)`).
+            let opLits: [String?] = [elems[i], (i + 2 < elems.count ? elems[i + 2] : nil)].map { e in
+                guard let e = e.map(Self.peel) else { return nil }
+                if e.is(IntegerLiteralExprSyntax.self) { return "int" }
+                if e.is(FloatLiteralExprSyntax.self) { return "float" }
+                if e.is(StringLiteralExprSyntax.self) { return "string" }
+                if e.is(BooleanLiteralExprSyntax.self) { return "bool" }
+                return nil
+            }
+            // SOUNDNESS R1081 — BOTH operands literals (`5 + "s"`): no operand was typed, so no call was recorded at all,
+            // and a project overload the literals bind (`extension Shadow { static func + (a: Self, b: String) }`
+            // with `extension Int: Shadow`) ran silently (executed). Each literal takes its DEFAULT type (Swift's own
+            // rule when nothing else constrains it); the Driver's operand admission then refuses any overload the
+            // literals cannot bind.
+            var cands = [lt.root, rt.root]
+            var candTypes = opTypes
+            // Only literals of DIFFERENT kinds (`5 + "s"`): no stdlib operator takes them, so a project overload is the
+            // only thing they can reach. Same-kind literals (`1 + 2`) are the stdlib's concrete operator, which Swift
+            // prefers over any protocol-extension overload — recording them moved ~2,300 corpus rows for nothing.
+            if !DeclCollector.r1081Off, lt.root == nil, rt.root == nil, opLits.allSatisfy({ $0 != nil }),
+               Set(opLits.compactMap { $0 }).count > 1 {
+                let dflt: [String: String] = ["int": "Int", "float": "Double", "string": "String", "bool": "Bool"]
+                cands = opLits.map { $0.flatMap { dflt[$0] } }
+                candTypes = cands
+            }
+            let litTyped = cands != [lt.root, rt.root]
+            for cand in cands {
+                if let t = cand, lt.isVar || rt.isVar || litTyped, localTypes.contains(t) {
+                    var c = Call(path: "\(t).\(opName)", leaf: opName, strArg: nil, typed: true, args: opArgs, argTypes: candTypes)
+                    c.operandLits = opLits
+                    calls.append(c)
                     localOperand = true; break
                 }
             }
@@ -8898,7 +8930,9 @@ final class CallCollector: SyntaxVisitor {
             // would edge a same-named local `func +(V,V)` via the unique-free-fn path (which ignores arg
             // types) — a fabrication. With confident local operand types, matchOverloads discriminates.
             if localOperand {
-                calls.append(Call(path: opName, leaf: opName, strArg: nil, typed: false, args: opArgs, argTypes: opTypes, unqualified: true))
+                var c = Call(path: opName, leaf: opName, strArg: nil, typed: false, args: opArgs, argTypes: opTypes, unqualified: true)
+                c.operandLits = opLits
+                calls.append(c)
             }
             // GENERIC / protocol-typed operand: `a + b` where `a: T: P` and `P` declares the operator —
             // dispatch to `P`'s conformers' operator WITNESSES via bounded CHA, the operator analog of the
