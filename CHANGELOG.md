@@ -10,6 +10,17 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — SOUNDNESS R1044 (nested residual): a nested instantiation of a local generic type is read at every level
+
+Executed: `Box(v: Box(v: E())).get().get().go()` ran `E.go` (a file write) while the row was ABSENT — `deny Fs` and
+`deny Fs Unknown` exit 0. The residual fix read a value's generic arguments as bare names, so the inner `Box(v: E())`
+was a `Box` with no arguments and the second `.get()` answered nothing. Each argument now carries its own arguments
+(constructor, written specialisation, annotation, parameter type), and a member or field typed by a generic parameter
+yields that argument with them. Ten spellings flip `deny Fs` 0 → 1 (`.get().get()`, `.v.v`, `.get().v`, let-bound,
+annotated, specialised, parameter `Box<Box<E>>`, `Pair(…).second().get()`, three levels, an inner `let`); the pure
+nested instantiation, the other pair position and a generic-parameter argument shadowing a local type name stay
+uncharged. Kill switch `CANDOR_R1044N_OFF`.
+
 ## [0.40.2] — 2026-10-09
 
 ### ⚠ Fixed — SOUNDNESS R705 (unchained arm): an erased dispatch over an uncovered dependency's protocol discloses

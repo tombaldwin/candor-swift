@@ -1608,14 +1608,33 @@ final class CallCollector: SyntaxVisitor {
     /// SOUNDNESS R1044 residual — the type a member call (`field: false`) or field read (`field: true`) on `base`
     /// yields when the member is declared as one of its owner's generic parameters, read off the instantiation.
     private func localGenericMemberType(_ base: ExprSyntax, _ member: String, field: Bool, _ depth: Int) -> String? {
+        guard let x = localGenericMemberArg(base, member, field: field, depth) else { return nil }
+        return x.name
+    }
+
+    /// The generic ARGUMENT (with its own arguments, when they were read) that a member call or field read on
+    /// `base` yields — `localGenericMemberType`'s answer before it is flattened to a name. SOUNDNESS R1044 nested
+    /// instantiation: `Box(v: Box(v: E())).get()` is a `Box<E>`, and the next `.get()` needs that `E`, which a
+    /// bare name (`Box`) had already lost.
+    private func localGenericMemberArg(_ base: ExprSyntax, _ member: String, field: Bool, _ depth: Int) -> LocalGenericArg? {
         guard !DeclCollector.r1044bOff, depth < 24,
               field ? localGenerics.fieldNames.contains(member) : localGenerics.memberLeaves.contains(member),
               let (owner, args) = localGenericArgs(base, depth + 1),
               let idx = field ? localGenerics.fieldParams["\(owner).\(member)"] : localGenerics.memberReturns["\(owner).\(member)"],
-              idx < args.count, let x = args[idx],
-              !x.split(separator: ".").contains(where: { localGenerics.nonTypeNames.contains(String($0)) }) else { return nil }
-        vbHit("R1044B", "\(owner).\(member) -> \(x)")
+              idx < args.count, let x = args[idx], !namesNonType(x.name) else { return nil }
+        vbHit("R1044B", "\(owner).\(member) -> \(x.name)")
         return x
+    }
+
+    /// The answer two readings of one generic position agree on: the type when the names match, its arguments
+    /// only when those match too. `nil` meets anything as `nil` (a position one reading could not answer).
+    static func lgMeet(_ x: LocalGenericArg?, _ y: LocalGenericArg?) -> LocalGenericArg? {
+        guard let x = x, let y = y, x.name == y.name else { return nil }
+        return x == y ? x : LocalGenericArg(name: x.name)
+    }
+
+    private func namesNonType(_ n: String) -> Bool {
+        n.split(separator: ".").contains(where: { localGenerics.nonTypeNames.contains(String($0)) })
     }
 
     /// SOUNDNESS R1044 residual — the generic ARGUMENTS of a value of a local generic type, from the expression
@@ -1624,24 +1643,45 @@ final class CallCollector: SyntaxVisitor {
     /// explicit — every init that fits the labels must agree), a factory whose return type writes them
     /// (`func mk() -> Box<E>`), or a parameter / local whose ONE binding annotates or initialises it. `nil` per
     /// argument where this cannot be read; `nil` overall where the owner is not a local generic type.
-    private func localGenericArgs(_ raw: ExprSyntax, _ depth: Int) -> (String, [String?])? {
+    private func localGenericArgs(_ raw: ExprSyntax, _ depth: Int) -> (String, [LocalGenericArg?])? {
         guard depth < 24 else { return nil }
         let e = Self.peel(raw)
         func simple(_ t: String) -> String { t.split(separator: ".").last.map(String.init) ?? t }
-        func fromType(_ t: TypeSyntax) -> (String, [String?])? {
+        func flat(_ n: String?) -> LocalGenericArg? { n.map { LocalGenericArg(name: $0) } }
+        // SOUNDNESS R1044 nested — one written generic argument, with ITS arguments when it is itself a local
+        // generic type written with the right number of them (`Box<Box<E>>`). Anything else is the bare name,
+        // which is what this read before.
+        func argOfType(_ t: TypeSyntax) -> LocalGenericArg? {
+            guard let n = typeName(t).name else { return nil }
+            guard !DeclCollector.r1044nOff, let inner = fromType(t), inner.0 == n || simple(n) == inner.0 else {
+                return LocalGenericArg(name: n)
+            }
+            vbHit("R1044N", "<\(n)<…>>")
+            return LocalGenericArg(name: n, args: inner.1)
+        }
+        func fromType(_ t: TypeSyntax) -> (String, [LocalGenericArg?])? {
             var x = desugaredType(t)
             if let a = x.as(AttributedTypeSyntax.self) { x = a.baseType }
             if let o = x.as(OptionalTypeSyntax.self) { x = o.wrappedType }
             else if let o = x.as(ImplicitlyUnwrappedOptionalTypeSyntax.self) { x = o.wrappedType }
             guard let id = x.as(IdentifierTypeSyntax.self), let gac = id.genericArgumentClause,
                   let order = localGenerics.order[id.name.text], order.count == gac.arguments.count else { return nil }
-            return (id.name.text, gac.arguments.map { $0.argument.as(TypeSyntax.self).flatMap { typeName($0).name } })
+            return (id.name.text, gac.arguments.map { $0.argument.as(TypeSyntax.self).flatMap(argOfType) })
         }
         // A stored field whose type WRITES its arguments (`let b: Box<E>`), read off `fieldTypeArgs` (R905's index).
-        func fromField(_ owner: String, _ f: String) -> (String, [String?])? {
+        func fromField(_ owner: String, _ f: String) -> (String, [LocalGenericArg?])? {
             guard let ft = fields[owner]?[f]?.name, let targs = fieldTypeArgs[owner]?[f],
                   let order = localGenerics.order[simple(ft)], order.count == targs.count else { return nil }
-            return (simple(ft), targs.map { Optional($0) })
+            return (simple(ft), targs.map { flat($0) })
+        }
+        // SOUNDNESS R1044 nested — a member call or field read whose declared type is one of its owner's generic
+        // parameters yields that ARGUMENT, and when the argument was itself read with its own arguments the value
+        // is an instance of a local generic type: `Box(v: Box(v: E())).get()` is `Box<E>`.
+        func fromPosition(_ base: ExprSyntax, _ member: String, field: Bool) -> (String, [LocalGenericArg?])? {
+            guard !DeclCollector.r1044nOff, let x = localGenericMemberArg(base, member, field: field, depth + 1),
+                  !x.args.isEmpty, let order = localGenerics.order[x.name], order.count == x.args.count else { return nil }
+            vbHit("R1044N", "\(member) -> \(x.name)")
+            return (x.name, x.args)
         }
         if let dr = e.as(DeclReferenceExprSyntax.self) {
             let n = dr.baseName.text
@@ -1657,16 +1697,18 @@ final class CallCollector: SyntaxVisitor {
         }
         if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base {
             let r = rootOf(base, depth + 1)
-            guard r.isVar || Self.peel(base).as(DeclReferenceExprSyntax.self)?.baseName.text == "self",
-                  let owner = r.root else { return nil }
-            return fromField(simple(owner), ma.declName.baseName.text) ?? fromField(owner, ma.declName.baseName.text)
+            if r.isVar || Self.peel(base).as(DeclReferenceExprSyntax.self)?.baseName.text == "self", let owner = r.root,
+               let a = fromField(simple(owner), ma.declName.baseName.text) ?? fromField(owner, ma.declName.baseName.text) {
+                return a
+            }
+            return fromPosition(base, ma.declName.baseName.text, field: true)
         }
         guard let call = e.as(FunctionCallExprSyntax.self) else { return nil }
         let callee = Self.peel(call.calledExpression)
         if let g = callee.as(GenericSpecializationExprSyntax.self),
            let n = g.expression.as(DeclReferenceExprSyntax.self)?.baseName.text,
            let order = localGenerics.order[n], order.count == g.genericArgumentClause.arguments.count {
-            return (n, g.genericArgumentClause.arguments.map { $0.argument.as(TypeSyntax.self).flatMap { typeName($0).name } })
+            return (n, g.genericArgumentClause.arguments.map { $0.argument.as(TypeSyntax.self).flatMap(argOfType) })
         }
         var ctorName: String? = nil
         if let dr = callee.as(DeclReferenceExprSyntax.self), dr.baseName.text.first?.isUppercase == true {
@@ -1678,18 +1720,26 @@ final class CallCollector: SyntaxVisitor {
         if let n = ctorName {
             guard let order = localGenerics.order[n], let shapes = localGenerics.inits[n] else { return nil }
             let labels = call.arguments.map { $0.label?.text }
-            var out: [String?]? = nil
+            var out: [LocalGenericArg?]? = nil
             for sh in shapes {
                 guard let m = alignWitnessArgs(labels, sh.labels, sh.sig) else { continue }
-                var a = [String?](repeating: nil, count: order.count), clash = Set<Int>()
+                var a = [LocalGenericArg?](repeating: nil, count: order.count), clash = Set<Int>()
                 for (pi, g) in sh.bind {
                     guard let gi = order.firstIndex(of: g), let ai = m[pi] else { continue }
-                    let r = rootOf(Array(call.arguments)[ai].expression, depth + 1)
+                    let ax = Array(call.arguments)[ai].expression
+                    let r = rootOf(ax, depth + 1)
                     guard r.isVar, let t = r.root else { continue }
-                    if let prev = a[gi], prev != t { clash.insert(gi) } else { a[gi] = t }
+                    // SOUNDNESS R1044 nested — the argument's OWN instantiation, kept only when it names the type
+                    // `rootOf` already answered (`Box(v: Box(v: E()))`: the inner `Box` carries `[E]`).
+                    var arg = LocalGenericArg(name: t)
+                    if !DeclCollector.r1044nOff, let inner = localGenericArgs(ax, depth + 1),
+                       inner.0 == t || inner.0 == simple(t) { arg.args = inner.1; vbHit("R1044N", "\(n)(\(t)<…>)") }
+                    // Two positions naming one type with different arguments still agree on the TYPE, which is
+                    // what the residual fix answered; only the arguments are dropped.
+                    if let prev = a[gi], prev.name != arg.name { clash.insert(gi) } else { a[gi] = a[gi].map { Self.lgMeet($0, arg) } ?? arg }
                 }
                 for gi in clash { a[gi] = nil }
-                if let o = out { out = zip(o, a).map { $0 == $1 ? $0 : nil } } else { out = a }
+                if let o = out { out = zip(o, a).map { Self.lgMeet($0, $1) } } else { out = a }
             }
             return out.map { (n, $0) }
         }
@@ -1697,7 +1747,10 @@ final class CallCollector: SyntaxVisitor {
             ?? callee.as(MemberAccessExprSyntax.self)?.declName.baseName.text
         if let l = leaf, let rt = returns[l], let args = localGenerics.returnArgs[l],
            let order = localGenerics.order[simple(rt)], order.count == args.count {
-            return (simple(rt), args.map { Optional($0) })
+            return (simple(rt), args.map { flat($0) })
+        }
+        if let ma = callee.as(MemberAccessExprSyntax.self), let base = ma.base, returns[ma.declName.baseName.text] == nil {
+            return fromPosition(base, ma.declName.baseName.text, field: false)
         }
         return nil
     }
