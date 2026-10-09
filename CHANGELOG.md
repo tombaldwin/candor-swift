@@ -21,6 +21,21 @@ annotated, specialised, parameter `Box<Box<E>>`, `Pair(…).second().get()`, thr
 nested instantiation, the other pair position and a generic-parameter argument shadowing a local type name stay
 uncharged. Kill switch `CANDOR_R1044N_OFF`.
 
+### ⚠ Fixed — SOUNDNESS R1066: a member call on a receiver a blind dependency's own sources declare is attributed
+
+Executed: `func midBoxParam(_ b: Box<E>) { b.get().go() }`, with `Box` declared by an uncovered dependency, read
+`inferred: []` with no `invisible`; a consumer chaining this report joined the floor key `Iface#Box.get`, found the
+dependency's pure `get`, and `deny Fs Unknown` exited 0 over a call that runs `E.go`. A member call whose receiver
+type a blind dependency module (or one it re-exports) declares `public`/`open` in its readable sources now carries
+`invisible: [<module>]`, and the instance hop after it (`.get().go()`, next leaf declared by a local type) discloses
+`Unknown[dispatch:untyped cross-package receiver]` in a standalone scan as the chained scan already did. Downstream
+`deny Fs Unknown appBox` 0 → 1. Ownership is read from the dependency's SOURCES, not from the ⟨0.39⟩ `dispatchesOn`
+key, which stays as published: the key is also published for platform receivers (`Iface#Date.addingTimeInterval`),
+but where the dependency extends the platform type (`extension Date { func stamp() }`) the same spelling is the only
+route of the member's effect to a downstream consumer (measured: stripping it removed `Fs`). Platform receivers no
+dependency declares (`Date`, `Data`, `Encoder`, `FileHandle`, `URL`, `NSPasteboard`) are not attributed. Kill switch
+`CANDOR_R1066_OFF`.
+
 ## [0.40.2] — 2026-10-09
 
 ### ⚠ Fixed — SOUNDNESS R705 (unchained arm): an erased dispatch over an uncovered dependency's protocol discloses

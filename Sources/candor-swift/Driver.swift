@@ -2376,6 +2376,50 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         if case .proven(let p) = ownerProof(of: spelled, inFile: file, site: site) { return p }
         return nil
     }
+    /// SOUNDNESS R1066 — THE BLIND DEPENDENCY MODULES OF `file` WHOSE OWN SOURCES PUBLICLY DECLARE THE TYPE `spelled`
+    /// NAMES. Positive evidence only: a module (or one it `@_exported import`s) whose readable sources declare the
+    /// name `public`/`open` at file scope. Empty where no source answers — an unreadable dependency, a platform
+    /// type, a type this scan declares or extends (local wins) — and the release's silence then stands.
+    ///
+    /// NOT the ⟨0.39⟩ obligation-1 key, which is published for EVERY unresolved member call in a one-dependency
+    /// file, platform receivers included (`Iface#Date.addingTimeInterval`). That key cannot be narrowed to make it
+    /// evidence of the owner: where the dependency EXTENDS the platform type (`extension Date { func stamp() }`)
+    /// the same spelling is the only carrier of the member's effect to a downstream consumer (measured: stripping
+    /// it took `Fs` off the consumer, executed). So the key stays the floor, and ownership is asked here instead.
+    let r1066Off = ProcessInfo.processInfo.environment["CANDOR_R1066_OFF"] != nil
+    let r1066Probe = CallCollector.veinBProbe
+    var sourceProvenCache: [String: Set<String>] = [:]
+    func sourceProvenDepModules(of spelled: String, inFile file: String) -> Set<String> {
+        let ck = "\(file)\u{0}\(spelled)"
+        if let c = sourceProvenCache[ck] { return c }
+        var segs = spelled.split(separator: ".").map(String.init)
+        let imports = fileImports[file] ?? []
+        var cands = blindModules(inFile: file).subtracting(ownTargetsByFile[file] ?? [])
+        if segs.count > 1, imports.contains(segs[0]) {          // `Iface.Box`: the source named the module
+            cands = cands.intersection([segs[0]]); segs.removeFirst()
+        }
+        var out = Set<String>(), direct = Set<String>()
+        if let name = segs.first, !name.isEmpty, name.first?.isUppercase == true,
+           !localTypes.contains(name), !declaredTypes.contains(name), !protocolMethods.keys.contains(name) {
+            func declares(_ x: String) -> Bool {
+                !PLATFORM_MODULES.contains(x) && !KAPPA_MODULES.contains(x) && moduleDeclarations(x)?.names[name] == true
+            }
+            for m in cands.sorted() {
+                if declares(m) { direct.insert(m); continue }
+                var closure = Set<String>(), queue = [m]
+                while let x = queue.popLast() {
+                    guard closure.insert(x).inserted else { continue }
+                    queue.append(contentsOf: deps.moduleReexports[x] ?? [])
+                }
+                if closure.contains(where: declares) { out.insert(m) }
+            }
+        }
+        // A module that declares the name itself is the owner; one that only RE-EXPORTS a declarer
+        // (`_CryptoExtras` -> `Crypto`) is named only when no imported module declares it directly.
+        if !direct.isEmpty { out = direct }
+        sourceProvenCache[ck] = out
+        return out
+    }
     /// SOUNDNESS R532 — THE ABSTRACTION A RECEIVER SPELLING NAMES, once a GENERIC PARAMETER has been
     /// resolved to its bound. `nil` means "publish nothing for this receiver".
     ///
@@ -4504,7 +4548,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         let ty = String(callee[..<dot])
                         let named = deps.chainedPkgs(importing: fileImports[file] ?? [])
                             .contains { deps.mentionedTypes.contains("\($0.pkg)#\(ty)") }
-                        if !named { continue }
+                        // R1066 — a STANDALONE instance hop whose type a blind dependency's own sources declare is the
+                        // same evidence by another route (no report to name it); it reaches the hedge below.
+                        if !named, r1066Off || !call.instanceHop
+                            || !deps.chainedPkgs(importing: fileImports[file] ?? []).isEmpty
+                            || sourceProvenDepModules(of: ty, inFile: file).isEmpty { continue }
                     }
                 }
                 // A MISS — on `returns` OR on the entry lookup that follows a `returns` HIT — falls back
@@ -4558,7 +4606,23 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                    !(localMemberLeaves.contains(call.leaf) || deps.anyChainedPackagePublishesLeaf(call.leaf)) {
                     continue
                 }
-                if chainedHere || r836Standalone {
+                // SOUNDNESS R1066 — …AND THE SAME INSTANCE HOP IN A STANDALONE SCAN, where the receiver's type is a blind
+                // dependency's by its own sources. `b.get().go()` with `b: Box<E>`: the chained arm above hedges it,
+                // the standalone arm did not, and the row's `[]` became a purity claim one package downstream — a
+                // consumer chaining this report joins the floor key `Iface#Box.get`, finds the dependency's pure
+                // `get`, and `deny Fs Unknown` passed over a call that runs `E.go` (executed). R836's reasoning,
+                // for the hop R836 did not reach; bounded by the leaf rule above and by SOURCE ownership, never
+                // by the file's import vote, so a platform receiver (`url.appendingPathComponent(…).path`) is
+                // untouched.
+                let r1066Standalone: Bool = {
+                    guard !chainedHere, !r1066Off, call.instanceHop, let cal = call.depCallee,
+                          let dot = cal.lastIndex(of: ".") else { return false }
+                    return !sourceProvenDepModules(of: String(cal[..<dot]), inFile: file).isEmpty
+                }()
+                if r1066Standalone, r1066Probe {
+                    FileHandle.standardError.write("VBHIT\tR1066H\t\(f.qual) \(call.depCallee ?? "?").\(call.leaf)\n".data(using: .utf8)!)
+                }
+                if chainedHere || r836Standalone || r1066Standalone {
                     direct[f.qual, default: []].insert("Unknown")
                     whyMap[f.qual, default: []].insert("dispatch:untyped cross-package receiver")
                 }
@@ -4774,6 +4838,20 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if (fileImports[file] ?? []).contains(owner) {
                     blindDirect[f.qual, default: []].insert(owner)
                 }
+            } else if !r1066Off, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
+                      case let owner = f.genericBounds[raw] ?? raw,
+                      case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                      case let mods = sourceProvenDepModules(of: owner, inFile: file), !mods.isEmpty {
+                // SOUNDNESS R1066 — A MEMBER CALL ON A RECEIVER WHOSE TYPE A BLIND DEPENDENCY'S OWN SOURCES DECLARE
+                // (`func f(_ b: Box<E>) { b.get() }`, `Box` public in the one dependency). SPEC §2 (`invisible`): an
+                // engine MUST disclose at least one of `invisible`/`Unknown` for a function that demonstrably calls
+                // an uncovered package, never silently pure — and the rows above withhold it for a member call
+                // because a bare receiver's module cannot be decided from the FILE (the reverted widening tagged
+                // an `NSPasteboard`). Here it is decided from the DEPENDENCY: its sources declare the type, so the
+                // member is that module's (or an extension of it, which is no less a reach into uncovered code).
+                // A platform type no dependency declares answers nothing and stays as it was. Non-gating (R133).
+                if r1066Probe { FileHandle.standardError.write("VBHIT\tR1066\t\(f.qual) \(owner).\(call.leaf) -> \(mods.sorted())\n".data(using: .utf8)!) }
+                blindDirect[f.qual, default: []].formUnion(mods)
             }
             // ── SOUNDNESS R705, THE DISCLOSURE ────────────────────────────────────────────────────────
             //
