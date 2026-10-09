@@ -196,13 +196,19 @@ final class GenericInstantiationProcessTests: XCTestCase {
         func scanApp(_ env: [String: String]) throws -> [String: [String: Any]] {
             try ProcessHarness.fns(ofJson: ProcessHarness.run(bin, [app, "--json"], env: env).out)
         }
-        let by = try scanApp(["CANDOR_DEPS": deps])
+        // R1065 is the disclosure; Gen's sources are readable here (a path dependency), so R1072 RESOLVES the hop
+        // (`E.go`, `Fs`). The disclosure is pinned with R1072 off, the resolution with it on.
+        let by = try scanApp(["CANDOR_DEPS": deps, "CANDOR_R1072_OFF": "1"])
         for f in ["viaDepBoxGet", "viaDepBoxParam"] {
             XCTAssertEqual(inf(by, f), ["Unknown"], "R1065: \(f) discloses like the field spelling; got \(by[f] ?? [:])")
         }
+        let res = try scanApp(["CANDOR_DEPS": deps])
+        for f in ["viaDepBoxGet", "viaDepBoxParam"] {
+            XCTAssertEqual(inf(res, f), ["Fs"], "R1072: \(f) resolves from Gen's sources; got \(res[f] ?? [:])")
+        }
         XCTAssertEqual(inf(by, "viaDepConcrete"), ["Env"], "R1065: the dependency's `returns` answers the hop")
         XCTAssertTrue(inf(by, "ctlDepString").isEmpty, "a platform-only leaf is not hedged; got \(by["ctlDepString"] ?? [:])")
-        let off = try scanApp(["CANDOR_DEPS": deps, "CANDOR_R1065_OFF": "1"])
+        let off = try scanApp(["CANDOR_DEPS": deps, "CANDOR_R1065_OFF": "1", "CANDOR_R1072_OFF": "1"])
         XCTAssertTrue(inf(off, "viaDepBoxGet").isEmpty, "kill switch restores the release silence")
     }
 

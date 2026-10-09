@@ -78,8 +78,11 @@ final class DepDeclaredReceiverProcessTests: XCTestCase {
         """, root.appendingPathComponent("App/Sources/App/App.swift"))
         let mid = root.appendingPathComponent("Mid").path, app = root.appendingPathComponent("App").path
         let deps = root.appendingPathComponent("deps")
+        // This test pins the R1066 DISCLOSURE in isolation; R1072 (resolution from the dependency's sources) and R1071
+        // (extension members) are pinned in `DepSourceFactsProcessTests` and switched off here.
+        let base = ["CANDOR_R1072_OFF": "1", "CANDOR_R1071_OFF": "1"]
         func scanMid(_ env: [String: String] = [:]) throws -> (by: [String: [String: Any]], json: String) {
-            let r = try ProcessHarness.run(bin, [mid, "--json"], env: env)
+            let r = try ProcessHarness.run(bin, [mid, "--json"], env: base.merging(env) { _, b in b })
             return (try ProcessHarness.fns(ofJson: r.out), r.out)
         }
         let (by, midJson) = try scanMid()
@@ -105,7 +108,8 @@ final class DepDeclaredReceiverProcessTests: XCTestCase {
         func gateApp(_ policy: String) throws -> Int32 {
             let pf = root.appendingPathComponent("p.policy")
             try (policy + "\n").write(to: pf, atomically: true, encoding: .utf8)
-            return try ProcessHarness.run(bin, [app, "--policy", pf.path, "--json"], env: ["CANDOR_DEPS": deps.path]).code
+            return try ProcessHarness.run(bin, [app, "--policy", pf.path, "--json"],
+                                          env: base.merging(["CANDOR_DEPS": deps.path]) { _, b in b }).code
         }
         XCTAssertEqual(try gateApp("deny Fs Unknown appBox"), 1, "R1066: the downstream consumer is no longer silent")
         XCTAssertNotEqual(try gateApp("deny Fs Unknown appPure"), 1, "the pure instantiation passes downstream")

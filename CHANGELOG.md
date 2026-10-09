@@ -10,6 +10,26 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — SOUNDNESS R1072: a dependency's generic types are read from its own sources, so the hop is RESOLVED
+
+Executed: `func viaParam(_ b: Box<E>) { b.get().go() }` with `Box<V>` declared by a dependency ran `E.go` (a file
+write); R1066 disclosed it as `Unknown`, and a bare `deny Fs viaParam` still exited 0. Where the dependency's
+sources are readable (resolved checkouts, a path dependency), the R1044 instantiation collector now runs over them
+and its facts — parameter order, which member or field is which parameter, the inits — are offered to the files
+that import that module. `get()` is `E` and `E.go` is charged: `deny Fs` 0 → 1 on the parameter, constructor,
+module-qualified (`Iface.Box<E>`), nested and `Pair(…).second()` spellings, chained or not. A local type keeps its
+own reading (a name the scan declares never takes a dependency's facts); a name two imported dependency modules
+both declare answers nothing. A receiver whose instantiation is read now answers BEFORE the leaf-keyed `returns`
+index: a local `Holder.get() -> P` had typed every `.get()` as `P`, which silently hid the hop. Kill switch
+`CANDOR_R1072_OFF`.
+
+### ⚠ Fixed — SOUNDNESS R1071: a dependency's public extension member on a platform type is attributed
+
+Executed: `d.stamp()` where the dependency declares `extension Date { public func stamp() }` read `inferred: []`
+with no `invisible`. The dependency's readable sources are now read for the PUBLIC members its top-level extensions
+declare, and such a call carries `invisible: [<module>]`. Platform members no dependency declares
+(`addingTimeInterval`, `base64EncodedString`) are not attributed. Kill switch `CANDOR_R1071_OFF`.
+
 ### ⚠ Fixed — SOUNDNESS R1044 (nested residual): a nested instantiation of a local generic type is read at every level
 
 Executed: `Box(v: Box(v: E())).get().get().go()` ran `E.go` (a file write) while the row was ABSENT — `deny Fs` and

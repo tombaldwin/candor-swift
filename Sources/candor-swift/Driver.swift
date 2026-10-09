@@ -1666,6 +1666,110 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         localGenerics.memberLeaves = Set(localGenerics.memberReturns.keys.compactMap { $0.split(separator: ".").last.map(String.init) })
         localGenerics.fieldNames = Set(localGenerics.fieldParams.keys.compactMap { $0.split(separator: ".").last.map(String.init) })
     }
+    // ── SOUNDNESS R1072 — A DEPENDENCY'S GENERIC TYPES, READ FROM ITS OWN SOURCES ───────────────────────────────
+    //
+    // `func f(_ b: Box<E>) { b.get().go() }` with `Box<V>` declared by a dependency: R1044's instantiation facts
+    // are built from the SCANNED files only, so `get() -> V` answered nothing and the hop could only be disclosed
+    // (R1066). Where the dependency's sources are readable (resolved `.build/checkouts`, a path dependency), the
+    // same collector runs over them and the same facts — parameter order, which member/field is which parameter,
+    // the inits — are offered to the files that IMPORT that module. A RESOLUTION, not a hedge: `E.go` is charged.
+    //
+    // Fenced so that a dependency fact never displaces or invents a local answer: a name the scan declares,
+    // extends or already has facts for keeps the local reading; a name two imported dependency modules both
+    // answer, or one module answers twice differently, answers nothing (the `lgOrderTmp` rule); platform
+    // container names (`Array`, `Optional`, …) are never taken from a dependency; and only facts about a type,
+    // never a free factory's return arguments, travel. Kill switch `CANDOR_R1072_OFF`.
+    let r1072Off = DeclCollector.r1044bOff || DeclCollector.r1072Off
+    var depLgByModule: [String: LocalGenericFacts?] = [:]
+    func depGenericFacts(_ m: String) -> LocalGenericFacts? {
+        if let c = depLgByModule[m] { return c }
+        var out: LocalGenericFacts? = nil
+        if let files = deps.moduleSwiftSources[m], !files.isEmpty {
+            var order: [String: [String]?] = [:]
+            var mrs: [(ty: String, leaf: String, param: String?)] = []
+            var fps: [(ty: String, field: String, param: String)] = []
+            var ins: [(ty: String, shape: LocalGenericInit)] = []
+            var ok = true
+            for path in files where path.hasSuffix(".swift") {
+                guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { ok = false; break }
+                let tree = Parser.parse(source: text)
+                let c = DeclCollector(file: "<dep:\(m)>/" + (path as NSString).lastPathComponent, tree: tree)
+                c.walk(tree)
+                c.finishBodyLocalTypes()
+                for (k, v) in c.lgOrder {
+                    if let e = order[k] { if e != v { order[k] = [String]?.none } } else { order[k] = v }
+                }
+                mrs.append(contentsOf: c.lgMemberReturns); fps.append(contentsOf: c.lgFieldParams); ins.append(contentsOf: c.lgInits)
+            }
+            if ok {
+                var f = LocalGenericFacts()
+                for (k, v) in order { if let o = v { f.order[k] = o } }
+                var mr: [String: Int?] = [:]
+                for (ty, leaf, g) in mrs {
+                    guard let o = f.order[ty] else { continue }
+                    let idx: Int? = g.flatMap { o.firstIndex(of: $0) }
+                    let k = "\(ty).\(leaf)"
+                    if let e = mr[k] { if e != idx { mr[k] = Int?.none } } else { mr[k] = idx }
+                }
+                for (k, v) in mr { if let i = v { f.memberReturns[k] = i } }
+                var fp: [String: Int?] = [:]
+                for (ty, fl, g) in fps {
+                    guard let o = f.order[ty], let i = o.firstIndex(of: g) else { continue }
+                    let k = "\(ty).\(fl)"
+                    if let e = fp[k] { if e != i { fp[k] = Int?.none } } else { fp[k] = i }
+                }
+                for (k, v) in fp { if let i = v { f.fieldParams[k] = i } }
+                for (ty, shape) in ins where f.order[ty] != nil { f.inits[ty, default: []].append(shape) }
+                out = f
+            }
+        }
+        depLgByModule[m] = out
+        return out
+    }
+    let lgLocalNames = Set(localGenerics.order.keys).union(localTypes).union(declaredTypes)
+        .union(PLATFORM_VALUE_TYPES).union(STDLIB_GENERIC_CONTAINERS)
+    var lgByImports: [[String]: LocalGenericFacts] = [:]
+    func localGenericsFor(file: String) -> LocalGenericFacts {
+        guard !r1072Off else { return localGenerics }
+        var closure = Set<String>(), queue = (fileImports[file] ?? []).filter {
+            !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !(ownTargetsByFile[file] ?? []).contains($0)
+        }
+        while let x = queue.popLast() {
+            guard closure.insert(x).inserted else { continue }
+            queue.append(contentsOf: deps.moduleReexports[x] ?? [])
+        }
+        let mods = closure.filter { !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) }.sorted()
+        if mods.isEmpty { return localGenerics }
+        if let c = lgByImports[mods] { return c }
+        var merged = localGenerics, owner: [String: String] = [:], poisoned = Set<String>()
+        for m in mods {
+            guard let f = depGenericFacts(m) else { continue }
+            for (ty, o) in f.order where !lgLocalNames.contains(ty) {
+                if let prev = owner[ty], prev != m { poisoned.insert(ty) } else { owner[ty] = m; merged.order[ty] = o }
+            }
+            for (k, i) in f.memberReturns {
+                let ty = String(k[..<(k.lastIndex(of: ".") ?? k.endIndex)])
+                if owner[ty] == m { merged.memberReturns[k] = i }
+            }
+            for (k, i) in f.fieldParams {
+                let ty = String(k[..<(k.lastIndex(of: ".") ?? k.endIndex)])
+                if owner[ty] == m { merged.fieldParams[k] = i }
+            }
+            for (ty, sh) in f.inits where owner[ty] == m { merged.inits[ty] = sh }
+        }
+        for ty in poisoned {
+            merged.order[ty] = nil; merged.inits[ty] = nil
+            merged.memberReturns = merged.memberReturns.filter { !$0.key.hasPrefix(ty + ".") }
+            merged.fieldParams = merged.fieldParams.filter { !$0.key.hasPrefix(ty + ".") }
+        }
+        merged.memberLeaves = Set(merged.memberReturns.keys.compactMap { $0.split(separator: ".").last.map(String.init) })
+        merged.fieldNames = Set(merged.fieldParams.keys.compactMap { $0.split(separator: ".").last.map(String.init) })
+        if CallCollector.veinBProbe, merged.order.count != localGenerics.order.count {
+            FileHandle.standardError.write("VBHIT\tR1072F\t\(file) +\(merged.order.count - localGenerics.order.count) types\n".data(using: .utf8)!)
+        }
+        lgByImports[mods] = merged
+        return merged
+    }
     // SOUNDNESS R990–R992 — THE DECLARED-TYPE FACTS, resolved once every file's aliases are known.
     // A container alias declared twice with different right-hand sides (two `#if` arms, two scopes sharing a
     // simple owner name) is POISONED rather than chosen: the same never-guess rule `returnsTmp` applies.
@@ -2419,6 +2523,53 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         if !direct.isEmpty { out = direct }
         sourceProvenCache[ck] = out
         return out
+    }
+    /// SOUNDNESS R1071 — the blind dependency modules of `file` whose readable sources declare a PUBLIC member
+    /// `member` in an extension of the type `spelled` names (`extension Date { public func stamp() }`), for a
+    /// receiver type the dependency does not itself declare — a PLATFORM type, typically. Same candidate set,
+    /// re-export closure and direct-over-re-exporter rule as `sourceProvenDepModules`. The member is the
+    /// dependency's only where the platform does not also declare it; that cannot be read here, so a match
+    /// over-attributes in that case — an `invisible` naming a module the call may not reach, which is the
+    /// direction a disclosure is allowed to err in, never a charge.
+    let r1071Off = ProcessInfo.processInfo.environment["CANDOR_R1071_OFF"] != nil
+    var moduleExtCache: [String: [String: [String: Bool]]?] = [:]
+    func moduleExtensionMembers(_ m: String) -> [String: [String: Bool]]? {
+        if let c = moduleExtCache[m] { return c }
+        var out: [String: [String: Bool]]? = nil
+        if let files = deps.moduleSwiftSources[m], !files.isEmpty {
+            var all: [String: [String: Bool]] = [:], ok = true
+            for path in files where path.hasSuffix(".swift") {
+                guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { ok = false; break }
+                for (t, ms) in topLevelExtensionMembers(source: text).members {
+                    for (n, v) in ms { all[t, default: [:]][n] = (all[t]?[n] ?? false) || v }
+                }
+            }
+            if ok { out = all }
+        }
+        moduleExtCache[m] = out
+        return out
+    }
+    func sourceExtendingDepModules(of spelled: String, member: String, inFile file: String) -> Set<String> {
+        guard !r1071Off else { return [] }
+        var segs = spelled.split(separator: ".").map(String.init)
+        let imports = fileImports[file] ?? []
+        var cands = blindModules(inFile: file).subtracting(ownTargetsByFile[file] ?? [])
+        if segs.count > 1, imports.contains(segs[0]) { cands = cands.intersection([segs[0]]); segs.removeFirst() }
+        guard let name = segs.last, name.first?.isUppercase == true else { return [] }
+        func extends(_ x: String) -> Bool {
+            !PLATFORM_MODULES.contains(x) && !KAPPA_MODULES.contains(x) && moduleExtensionMembers(x)?[name]?[member] == true
+        }
+        var out = Set<String>(), direct = Set<String>()
+        for m in cands.sorted() {
+            if extends(m) { direct.insert(m); continue }
+            var closure = Set<String>(), queue = [m]
+            while let x = queue.popLast() {
+                guard closure.insert(x).inserted else { continue }
+                queue.append(contentsOf: deps.moduleReexports[x] ?? [])
+            }
+            if closure.contains(where: extends) { out.insert(m) }
+        }
+        return direct.isEmpty ? out : direct
     }
     /// SOUNDNESS R532 — THE ABSTRACTION A RECEIVER SPELLING NAMES, once a GENERIC PARAMETER has been
     /// resolved to its bound. `nil` means "publish nothing for this receiver".
@@ -3317,7 +3468,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                returns: returnsIdx,
                                metatypeReturns: metatypeReturnsIdx,                                  // R585
                                genericReturnArgs: genericReturnArgIdx,                               // R1044
-                               localGenerics: localGenerics,                                         // R1044 residual
+                               localGenerics: localGenericsFor(file: String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })),   // R1044 residual, R1072
                                globalMetatypes: globalMetatypesByModule[swiftModuleOf(f.loc)] ?? [:], // R585
                                globalMetatypeArrayElem: globalMetatypeArrayElemByModule[swiftModuleOf(f.loc)] ?? [:],
                                fieldMetatypes: fieldMetatypes,                                        // R585
@@ -4841,7 +4992,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             } else if !r1066Off, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
                       case let owner = f.genericBounds[raw] ?? raw,
                       case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
-                      case let mods = sourceProvenDepModules(of: owner, inFile: file), !mods.isEmpty {
+                      case let mods = { () -> Set<String> in
+                          let t = sourceProvenDepModules(of: owner, inFile: file)
+                          return t.isEmpty ? sourceExtendingDepModules(of: owner, member: call.leaf, inFile: file) : t
+                      }(), !mods.isEmpty {
+                // SOUNDNESS R1071 — or whose sources EXTEND it (a platform type) with this public member.
                 // SOUNDNESS R1066 — A MEMBER CALL ON A RECEIVER WHOSE TYPE A BLIND DEPENDENCY'S OWN SOURCES DECLARE
                 // (`func f(_ b: Box<E>) { b.get() }`, `Box` public in the one dependency). SPEC §2 (`invisible`): an
                 // engine MUST disclose at least one of `invisible`/`Unknown` for a function that demonstrably calls

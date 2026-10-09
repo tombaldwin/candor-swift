@@ -1664,6 +1664,14 @@ final class CallCollector: SyntaxVisitor {
             if let a = x.as(AttributedTypeSyntax.self) { x = a.baseType }
             if let o = x.as(OptionalTypeSyntax.self) { x = o.wrappedType }
             else if let o = x.as(ImplicitlyUnwrappedOptionalTypeSyntax.self) { x = o.wrappedType }
+            // SOUNDNESS R1072 — a module-qualified spelling (`Iface.Box<E>`) names the same type by its simple name,
+            // the key the facts use; only a single-identifier qualifier, so `A.B.Box<E>` stays unread.
+            if !DeclCollector.r1072Off, let mt = x.as(MemberTypeSyntax.self), mt.baseType.is(IdentifierTypeSyntax.self),
+               mt.baseType.as(IdentifierTypeSyntax.self)?.genericArgumentClause == nil,
+               let gac = mt.genericArgumentClause, let order = localGenerics.order[mt.name.text],
+               order.count == gac.arguments.count {
+                return (mt.name.text, gac.arguments.map { $0.argument.as(TypeSyntax.self).flatMap(argOfType) })
+            }
             guard let id = x.as(IdentifierTypeSyntax.self), let gac = id.genericArgumentClause,
                   let order = localGenerics.order[id.name.text], order.count == gac.arguments.count else { return nil }
             return (id.name.text, gac.arguments.map { $0.argument.as(TypeSyntax.self).flatMap(argOfType) })
@@ -1749,7 +1757,8 @@ final class CallCollector: SyntaxVisitor {
            let order = localGenerics.order[simple(rt)], order.count == args.count {
             return (simple(rt), args.map { flat($0) })
         }
-        if let ma = callee.as(MemberAccessExprSyntax.self), let base = ma.base, returns[ma.declName.baseName.text] == nil {
+        if let ma = callee.as(MemberAccessExprSyntax.self), let base = ma.base,
+           returns[ma.declName.baseName.text] == nil || !DeclCollector.r1072Off {
             return fromPosition(base, ma.declName.baseName.text, field: false)
         }
         return nil
@@ -2182,6 +2191,16 @@ final class CallCollector: SyntaxVisitor {
                ma.declName.baseName.text.first?.isUppercase == true,
                let tp = conventionTypePath(ExprSyntax(ma)), tp.contains(".") {
                 return (tp, true, [ma.declName.baseName.text], false, false)
+            }
+            // SOUNDNESS R1072 — THE RECEIVER'S OWN ANSWER BEFORE THE LEAF'S. `returns` is keyed by the bare member name,
+            // so a local `Holder.get() -> P` typed EVERY `.get()` as `P` — including `b.get()` on a dependency's
+            // `Box<E>`, whose declaration this scan never saw and so could not poison the leaf (measured: the hop
+            // read `P.go`, pure, over a call that runs `E.go`). Where the receiver's instantiation is read and its
+            // type declares this member as a generic parameter, that is the answer; the leaf index stays the
+            // fallback.
+            if !DeclCollector.r1072Off, let ma = call.calledExpression.as(MemberAccessExprSyntax.self), let base = ma.base,
+               let x = localGenericMemberType(base, ma.declName.baseName.text, field: false, depth) {
+                return (x, true, [ma.declName.baseName.text], false, false)
             }
             if let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
                let rt = returns[ma.declName.baseName.text] {
