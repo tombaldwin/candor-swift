@@ -601,6 +601,12 @@ final class CallCollector: SyntaxVisitor {
     let metatypeReturns: [String: String]
     let genericReturnArgs: [String: GenericReturnArg]   // SOUNDNESS R1044 — see DeclCollector.genericReturnArg
     let localGenerics: LocalGenericFacts                 // SOUNDNESS R1044 residual — see `localGenericArgs`
+    /// SOUNDNESS R1073 — this unit dropped a member call whose receiver it could not type (the `VBDROP` shape): no
+    /// edge, no key, no hedge. The Driver keeps the release's local-protocol operator hedge on such a unit, because
+    /// on swift-nio that hedge was the only thing keeping 12 such rows from reading pure (e.g. a generic
+    /// `backPressureStrategy.didConsume(…)` beside `buffer.count > 0`): withdrawing a false hedge must not uncover a
+    /// silence the hedge was standing in front of.
+    var droppedMember = false
     /// SOUNDNESS R1044 residual — each local name's ONE binding (annotation and/or initializer), from
     /// `prescanLocalGenericBindings`; a name bound twice anywhere in the unit is absent.
     var lgBindings: [String: (type: TypeSyntax?, initializer: ExprSyntax?)] = [:]
@@ -8436,9 +8442,12 @@ final class CallCollector: SyntaxVisitor {
                     c.instanceHop = true
                     calls.append(c)
                 }
-                else if owner == nil, guessedOwner == nil, Self.veinBProbe, let b = ma.base {
+                else if owner == nil, guessedOwner == nil, let b = ma.base {
+                    droppedMember = true   // SOUNDNESS R1073 — see `droppedMember`
+                    if Self.veinBProbe {
                     FileHandle.standardError.write(
                         "VBDROP\t\(probeShape(b))\t\(member)\t\(String(b.trimmedDescription.prefix(60)).replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\t", with: " "))\n".data(using: .utf8)!)
+                    }
                 }
             }
         } else if node.calledExpression.is(ClosureExprSyntax.self) {

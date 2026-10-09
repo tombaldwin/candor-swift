@@ -434,6 +434,8 @@ final class NameKeyedStateTests: XCTestCase {
         // VEIN B — scope and walk bookkeeping keyed by syntax node, or a flag read around one call.
         "elseTypeSnapshots": .notPerBinding, "reqFloor": .notPerBinding, "elemGuessRecv": .notPerBinding,
         "r915NestedDotted": .notPerBinding,
+        // R1073 — output flag: the unit dropped a member call (read once by the Driver after the walk)
+        "droppedMember": .notPerBinding,
         "elementWalkedGuess": .notPerBinding, "forElemGuess": .notPerBinding,
         // R853 — payload names bound by an enclosing `if`/`guard` whose `else` this is: scope bookkeeping
         "caseElseOut": .lexicallyScoped("the payload names an `if case`/`guard case` bound, inside that statement's `else`, where they are out of scope; saved and restored with the block"),

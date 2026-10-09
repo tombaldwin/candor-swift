@@ -3036,6 +3036,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
 
     let localProtocolNames = Set(protocolMethods.keys)  // loop-invariant: build once, not per fn
+    let r1073Off = DeclCollector.r1073Off   // SOUNDNESS R1073
+    let r1073Probe = CallCollector.veinBProbe
     /// VEIN C — the accessor units (computed property / observer / lazy init / subscript bodies). The two
     /// down-walks below edge ONLY these: `resolveQual("Sub.task")` also answers a METHOD named `task`
     /// (`override func task(for:using:)`), and a property read never runs a method. Measured: without
@@ -3958,7 +3960,54 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         // evidence, and a report that differs from ITSELF injects noise into every diff —
                         // it cost a false datapoint before anyone thought to run a report against itself.
                         // It also makes `gains` noisy between identical inputs, which is product-facing.
+                        // SOUNDNESS R1073 — A STDLIB OPERATOR ON A PLATFORM TYPE IS NOT BLAMED ON A LOCAL PROTOCOL.
+                        // `localTypes` holds a protocol only once something EXTENDS it (`pushType`, R555), so
+                        // `extension Int: AtomicPrimitive {}` over swift-nio's OWN `protocol AtomicPrimitive` left that
+                        // protocol here as an "external" base, and every stdlib operator on a typed `Int` (`x % y`,
+                        // `a == b`, `i &+ 1`) was hedged `dispatch:AtomicPrimitive.%` — 1,300+ reasons in swift-nio.
+                        // NARROW on purpose (a first cut that dropped every local protocol for every member moved 1,176
+                        // rows over a dozen unrelated protocols and was not taken): only an OPERATOR, only on a type
+                        // this scan does not DECLARE (a platform type it merely extends, so the operator is that type's
+                        // own), and only a local protocol that neither REQUIRES that operator nor provides it (an
+                        // extension member reached through the concrete type resolved in the loop above). What such a
+                        // protocol can still hide is what it inherits from a protocol this scan does not declare, so it
+                        // is replaced by those external ancestors, transitively, rather than dropped.
+                        let isOperator = member.first.map { !($0.isLetter || $0 == "_" || $0 == "`") } ?? false
+                        // The NARROWED set decides only the final hedge below: the R657 dependency ask and the Fluent
+                        // arm keep the release's set, so no join a chained report answers is skipped (measured: gating
+                        // the ask on the narrowed set dropped 19 `dep:` reasons on swift-certificates).
                         let extSupers = (supertypesOf[type] ?? []).filter { !localTypes.contains($0) }.sorted()
+                        let hedgeSupers: [String] = {
+                            let raw = supertypesOf[type] ?? []
+                            let legacy = extSupers
+                            // A stdlib SCALAR (`RAND_ROOTS`: the integer, floating-point and Bool types) the scan does not
+                            // declare, and whose operator no imported module's readable sources add in an `extension` of
+                            // it (that would be a dependency's overload, which the hedge may be covering).
+                            let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                            guard !r1073Off, isOperator, RAND_ROOTS.contains(type), !declaredTypes.contains(type),
+                                  !cc.droppedMember,
+                                  !(fileImports[file] ?? []).contains(where: { moduleExtensionMembers($0)?[type]?[member] != nil })
+                            else { return legacy }
+                            var out = Set<String>(), seen = Set<String>(), queue = Array(raw)
+                            while let x = queue.popLast() {
+                                guard seen.insert(x).inserted else { continue }
+                                let localProto = localProtocolNames.contains(x) || protocolPaths.contains(x)
+                                // A protocol the release already dropped (extended, so in `localTypes`) stays dropped,
+                                // with no ancestors: this may only narrow what the release hedged, never add to it.
+                                if localTypes.contains(x) { continue }
+                                if localProto, protocolMethods[x]?.contains(member) != true {
+                                    if r1073Probe, raw.contains(x) {
+                                        FileHandle.standardError.write("VBHIT\tR1073\t\(f.qual) \(type).\(member) via \(x)\n".data(using: .utf8)!)
+                                    }
+                                    // A stdlib/platform protocol ancestor is not an external base this arm ever blamed.
+                                    queue.append(contentsOf: (protocolSupers[x] ?? []).filter {
+                                        !LAYOUT_SUPERS_PUBLIC.contains($0) && !STD_SUPERS_PUBLIC.contains($0)
+                                            && PLATFORM_REFINES[$0] == nil && !PLATFORM_LEAVES.contains($0)
+                                    })
+                                } else if !localTypes.contains(x) { out.insert(x) }
+                            }
+                            return out.sorted()
+                        }()
                         // SOUNDNESS R657 — ASK THE CHAINED DEPENDENCY BEFORE ANSWERING FROM LOCAL
                         // KNOWLEDGE. This whole block exists because the member's body is INVISIBLE; a
                         // chained report (SPEC §2) means it is not, and both answers below are guesses
@@ -4052,7 +4101,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         } else if let eff = fluentEff {
                             direct[f.qual, default: []].insert(eff)
                             resolved = true
-                        } else if let sup = unknownSup {
+                        } else if let sup = ((r1073Off || unknownSup == nil) ? unknownSup
+                                                 : hedgeSupers.first(where: { !STD_PURE_PROTOCOLS.contains($0) })) {
                             direct[f.qual, default: []].insert("Unknown")
                             whyMap[f.qual, default: []].insert("dispatch:\(sup).\(member)")
                             resolved = true

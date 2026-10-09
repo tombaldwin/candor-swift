@@ -10,6 +10,20 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — SOUNDNESS R1073: stdlib operators on an `Int` are not hedged through a local protocol it is extended to
+
+`extension Int: AtomicPrimitive {}` over swift-nio's own `protocol AtomicPrimitive` left that protocol among `Int`'s
+"external" supertypes (`localTypes` holds a protocol only once something extends it), so every stdlib operator on a
+typed `Int` — `x % y`, `a == b`, `i &+ 1` — was disclosed `Unknown[dispatch:AtomicPrimitive.%]`, over 1,300 reasons
+in swift-nio. The hedge is withdrawn only for an OPERATOR on a stdlib scalar (`Int`…`UInt64`, `Double`, `Float`,
+`Bool`, `CGFloat`) the scan does not declare, through a local protocol that neither requires nor provides that
+operator, where no imported module's readable sources add that operator in an extension of the type, and where the
+unit dropped no member call (the hedge was the only disclosure standing in front of 12 such swift-nio rows). A local
+protocol that inherits a non-platform external protocol is replaced by that ancestor, so its hedge stays. It never
+adds a hedge the release did not have. Kept, executed: a user-declared effectful operator witness on `Int`, a
+protocol-typed operator dispatch, a protocol-extension operator reached through the concrete `Int`, a dependency's
+operator extension on `Int`, and an unbounded protocol dispatch's `Unknown`. Kill switch `CANDOR_R1073_OFF`.
+
 ### ⚠ Fixed — SOUNDNESS R1072: a dependency's generic types are read from its own sources, so the hop is RESOLVED
 
 Executed: `func viaParam(_ b: Box<E>) { b.get().go() }` with `Box<V>` declared by a dependency ran `E.go` (a file
