@@ -10,6 +10,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **Build fix (no behaviour change):** R1081's answered-flag is held in a reference box. CI's `swift:6.1` toolchain proved the old captured `var`'s `if` always-false and `-warnings-as-errors` failed the build; the local 6.4 toolchain did not warn.
+
 ### ⚠ Fixed — SOUNDNESS R1081: an operator call reaches a project overload only where its operands could bind
 
 Executed: with `extension Int: Shadow` and `extension Shadow { static func + (a: Self, b: String) -> Self }` (a file

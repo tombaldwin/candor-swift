@@ -1495,9 +1495,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// call is answered — no edge, and no hedge — exactly as the release answered it with the wrong edge. Returns false,
     /// so it can sit in a `where` clause after a refused admission. On any other type a refusal leaves the call
     /// unanswered and the inherited-member arm below decides whether to disclose.
-    var r1081Answered = false
+    // A reference box, not a captured `var`: the toolchain CI runs (swift:6.1) proved the old captured
+    // flag's `if` always-false — the write happens inside this helper, called from a `where` clause —
+    // and -warnings-as-errors failed the build. A class's stored property is opaque to that analysis.
+    final class R1081Flag { var answered = false }
+    let r1081Flag = R1081Flag()
     func r1081Refused(_ type: String) -> Bool {
-        if !r1081Off, RAND_ROOTS.contains(type), !declaredTypes.contains(type) { r1081Answered = true }
+        if !r1081Off, RAND_ROOTS.contains(type), !declaredTypes.contains(type) { r1081Flag.answered = true }
         return false
     }
     func operatorOperandsAdmit(_ call: Call, _ target: String) -> Bool {
@@ -3978,7 +3982,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // `<Proto>.<member>` units — a member no conformed protocol defaults edges nothing.
                     let type = String(call.path[..<dot])
                     let member = String(call.path[call.path.index(after: dot)...])
-                    r1081Answered = false
+                    r1081Flag.answered = false
                     for sup in supertypesOf[type] ?? [] {
                         let base = "\(sup).\(member)"
                         // AN OVERLOADED PROVIDED MEMBER MUST NOT VANISH. `resolveQual` can only name an
@@ -4009,7 +4013,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             }
                         }
                     }
-                    if r1081Answered { resolved = true }   // SOUNDNESS R1081 — see `r1081Refused`
+                    if r1081Flag.answered { resolved = true }   // SOUNDNESS R1081 — see `r1081Refused`
                     // No LOCAL supertype default resolved. If the type conforms to / inherits an EXTERNAL
                     // base (a super not declared locally — `final class Todo: Model` where Model is FluentKit's),
                     // the member is inherited from that external base's extension → it must NOT read silent (the
