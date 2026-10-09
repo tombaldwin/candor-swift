@@ -3401,6 +3401,75 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             }
         }
     }
+    // ── SOUNDNESS R1071 (residual) — WHO PROVIDES A MEMBER THROUGH AN EXTENSION OF A PLATFORM PROTOCOL ──
+    //
+    // `extension Sequence { public func stampAll() }` adds `stampAll` to every `Array`, `String`, `Set`, `Data`,
+    // `Range`… — types the platform declares conforming, and no report carries. R889 closed the PROJECT-type
+    // receiver (its `supers` name the extended protocol); a STDLIB receiver had nothing: `a.stampAll()` on
+    // `a: [Int]` was ABSENT whether the extension sat in this package, in a chained report (which carries
+    // `Sequence.stampAll` with its effects), or in an unchained dependency's sources (executed: the program
+    // wrote the file, every gate passed). The three provider kinds, by member leaf; a member call on such a
+    // leaf emits a `<platext>.` marker (CallCollector), answered in the call loop below against the DERIVED
+    // conformance table (`StdlibConformances.swift`, generated from the SDK's module interfaces).
+    let r1071pOff = CallCollector.r1071Off
+    let r1071Probe = ProcessInfo.processInfo.environment["CANDOR_R1071_PROBE"] != nil
+    /// A chained package's OWN type that shares a platform protocol's name is not the platform protocol.
+    func isDeclaredNonProtocol(_ key: String) -> Bool { deps.surface.knownKind(key).map { $0 != "protocol" } ?? false }
+    // leaf -> the units THIS scan's extensions of a platform protocol declare under it, with each one's labels
+    var platExtLocal: [String: [(proto: String, qual: String, labels: [String], accessor: Bool)]] = [:]
+    var platExtChained: [String: Set<String>] = [:]    // leaf -> platform protocols a chained report keys it under
+    var platExtSources: [String: Set<String>] = [:]    // leaf -> platform protocols a dependency's sources extend
+    if !r1071pOff {
+        for f in allFns {   // methods AND getters: a computed property an extension adds is read the same way
+            guard let et = f.enclosingType, STDLIB_PROTOCOLS.contains(et), !declaredTypes.contains(et) else { continue }
+            let simple = String(f.simpleQual.prefix { $0 != "(" && $0 != "#" })
+            guard simple.hasPrefix("\(et).") else { continue }
+            let labels = zip(f.paramLabels, f.paramSig).map { l, sig in l + (sig.hasDefault ? "=" : "") + (sig.variadic ? "..." : "") }
+            platExtLocal[String(simple.dropFirst(et.count + 1)), default: []].append((et, f.qual, labels, f.isAccessor))
+        }
+        for k in deps.byKey.keys {
+            guard let h = k.firstIndex(of: "#") else { continue }
+            let path = k[k.index(after: h)...]
+            guard let dot = path.firstIndex(of: ".") else { continue }
+            let owner = String(path[..<dot])
+            guard STDLIB_PROTOCOLS.contains(owner), !isDeclaredNonProtocol("\(k[..<h])#\(owner)") else { continue }
+            let leaf = String(path[path.index(after: dot)...].prefix { $0 != "(" && $0 != "#" })
+            if !leaf.isEmpty, !leaf.contains(".") { platExtChained[leaf, default: []].insert(owner) }
+        }
+        for m in deps.moduleSwiftSources.keys.sorted() {
+            for (t, ms) in moduleExtensionMembers(m) ?? [:] where STDLIB_PROTOCOLS.contains(t) {
+                for (n, isPublic) in ms where isPublic { platExtSources[n, default: []].insert(t) }
+            }
+        }
+    }
+    /// Can a call with these parenthesised LABELS (`nil` = unlabelled) and `trailing` trailing closures call a
+    /// declaration whose parameters are `decl` (`label`, `_`; `=` defaulted, `...` variadic)? Errs toward YES
+    /// wherever the alignment is unclear — a refused provider would be a silence, a refused platform member a
+    /// charge where the release had none.
+    func r1071LabelsAdmit(_ call: [String?], _ trailing: Int, _ decl: [String]) -> Bool {
+        var i = 0, trail = trailing
+        for spec in decl {
+            var label = spec
+            let variadic = label.hasSuffix("..."); if variadic { label.removeLast(3) }
+            let defaulted = label.hasSuffix("="); if defaulted { label.removeLast() }
+            if i < call.count, (call[i] ?? "_") == label {
+                i += 1
+                if variadic { while i < call.count, call[i] == nil { i += 1 } }
+            } else if defaulted || variadic {
+                continue
+            } else if i >= call.count, trail > 0 {
+                trail -= 1
+            } else {
+                return false
+            }
+        }
+        return i == call.count
+    }
+    // A constructor or subscript is not a member CALL on a receiver value (`Foo.init(…)` names a type), so it is not
+    // this marker's question.
+    let platformExtLeaves = Set(platExtLocal.keys).union(platExtChained.keys).union(platExtSources.keys)
+        .subtracting(["init", "subscript", "deinit"])
+    var r1071Pending: [(caller: String, targets: [String], why: String)] = []
     for f in allFns {
         locOf[f.qual] = f.loc
         if f.isMain { entryPoints.insert(f.qual) }
@@ -3507,6 +3576,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                implicitParams: implicitParamIdx,                                       // R999
                                implicitMemberUnits: implicitMemberUnits,                               // R999
                                memberUnitKeys: memberUnitKeys,                                         // R1032
+                               platformExtLeaves: platformExtLeaves,                                   // R1071
                                iterableLocalTypes: iterableLocalTypes,                                 // R1048
                                declaredTypes: declaredTypes,
                                localProtocols: localProtocolNames,
@@ -3849,6 +3919,93 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 }
                 if r843Probe, !targets.isEmpty {
                     FileHandle.standardError.write("R843HOLDS \(f.qual) \(hop).\(call.leaf) -> \(targets)\n".data(using: .utf8)!)
+                }
+                continue
+            }
+            // SOUNDNESS R1071 (residual) — the `<platext>.` marker: a member some extension of a platform
+            // protocol P provides, on a receiver this scan does not declare. The receiver's type, where the source
+            // states it, is asked of the DERIVED conformance table: conforms -> RESOLVED (an edge to this scan's
+            // body, the chained report's entry, or the unchained dependency named `invisible` exactly as R1071's
+            // platform-TYPE arm names it); provably does not -> nothing; the source does not say (no type, a
+            // type the platform modules do not declare, a protocol a conformer may extend past) -> DISCLOSED:
+            // `Unknown[dispatch:P.member]` where the provider can do anything, decided after the graph is built
+            // for a body here (`r1071Pending`) and from the entry for a chained one. A receiver whose own type
+            // declares the member is the concrete member's call, which Swift prefers, and is left to it.
+            if call.path.hasPrefix("<platext>.") {
+                guard !r1071pOff else { continue }
+                let leaf = call.leaf
+                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                let recv = call.extOwner.map { f.genericBounds[$0] ?? $0 }
+                // A PROTOCOL receiver (`<S: Sequence>`, `some Collection`, `any P`) is answered by refinement below;
+                // only a concrete type's own member displaces a protocol extension's.
+                if let t = recv, !STDLIB_PROTOCOLS.contains(t) {
+                    if declaredTypes.contains(t) { continue }
+                    if !resolveQual("\(t).\(leaf)").isEmpty || overloadedBases.contains("\(t).\(leaf)") { continue }
+                    if (fileImports[file] ?? []).contains(where: { moduleExtensionMembers($0)?[t]?[leaf] != nil }) { continue }
+                }
+                // nil = undecidable from here; true / false = the platform's own declarations decide it.
+                func conforms(_ p: String) -> Bool? {
+                    guard let t = recv else { return nil }
+                    if t == p || stdlibMayConform(t, to: p) { return true }
+                    return STDLIB_NOMINALS.contains(t) ? false : nil
+                }
+                let why = { (p: String) in "dispatch:\(p).\(leaf)" }
+                // THE PLATFORM'S OWN MEMBER OF THE SAME NAME: `xs.append(y)` in a package that adds
+                // `RangeReplaceableCollection.append(contentsOf: some Cursor)` is the stdlib's `append`, and a call
+                // whose labels the platform's declaration also admits is decided by argument TYPES this engine does
+                // not have — so it is never RESOLVED to the extension (that would charge the stdlib call with the
+                // extension's body), only disclosed where the extension's body can do anything.
+                let labels = call.platextLabels
+                let platformMayOwn = labels.map { ls in
+                    (STDLIB_MEMBER_LABELS[leaf] ?? []).contains { r1071LabelsAdmit(ls, call.platextTrailing, $0.isEmpty ? [] : $0.split(separator: ",").map(String.init)) }
+                } ?? STDLIB_PROPERTY_NAMES.contains(leaf)
+                var byProto: [String: [String]] = [:]
+                for u in platExtLocal[leaf] ?? [] {
+                    if let ls = labels {
+                        guard !u.accessor, r1071LabelsAdmit(ls, call.platextTrailing, u.labels) else { continue }
+                    } else if !u.accessor { continue }
+                    byProto[u.proto, default: []].append(u.qual)
+                }
+                for (p, targets) in byProto.sorted(by: { $0.key < $1.key }) {
+                    let v: Bool? = platformMayOwn && conforms(p) == true ? nil : conforms(p)
+                    if v == false { continue }
+                    let base = "\(p).\(leaf)"
+                    if v == true {
+                        if r1071Probe { FileHandle.standardError.write("VBHIT\tR1071P\tlocal \(f.qual) \(recv ?? "-") -> \(base)\n".data(using: .utf8)!) }
+                        for t in targets {
+                            edges[f.qual, default: []].insert(t)
+                            callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
+                        }
+                    } else if !targets.isEmpty {
+                        if r1071Probe { FileHandle.standardError.write("VBHIT\tR1071P\tlocal-undecided \(f.qual) \(recv ?? "-") -> \(base)\n".data(using: .utf8)!) }
+                        r1071Pending.append((f.qual, targets, why(p)))
+                    }
+                }
+                if let protos = platExtChained[leaf] {
+                    for (pkg, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {
+                        for p in protos.sorted() {
+                            guard let e = deps.lookup("\(pkg)#\(p).\(leaf)") else { continue }
+                            switch platformMayOwn && conforms(p) == true ? nil : conforms(p) {
+                            case .some(false): continue
+                            case .some(true):
+                                if r1071Probe { FileHandle.standardError.write("VBHIT\tR1071P\tchained \(f.qual) \(recv ?? "-") -> \(pkg)#\(p).\(leaf)\n".data(using: .utf8)!) }
+                                applyDepEntry(e, to: f.qual)
+                            case .none:
+                                if r1071Probe { FileHandle.standardError.write("VBHIT\tR1071P\tchained-undecided \(f.qual) \(recv ?? "-") -> \(pkg)#\(p).\(leaf)\n".data(using: .utf8)!) }
+                                if !e.effects.isEmpty || !e.invisible.isEmpty {
+                                    direct[f.qual, default: []].insert("Unknown")
+                                    whyMap[f.qual, default: []].insert(why(p))
+                                }
+                            }
+                        }
+                    }
+                }
+                for p in (platExtSources[leaf] ?? []).sorted() where conforms(p) != false {
+                    let mods = sourceExtendingDepModules(of: p, member: leaf, inFile: file)
+                    if !mods.isEmpty, r1071Probe {
+                        FileHandle.standardError.write("VBHIT\tR1071P\tsources \(f.qual) \(recv ?? "-") -> \(mods.sorted()) \(p).\(leaf)\n".data(using: .utf8)!)
+                    }
+                    blindDirect[f.qual, default: []].formUnion(mods)
                 }
                 continue
             }
@@ -5844,6 +6001,24 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     }
                     edges[site.caller, default: []].formUnion(ts)
                     }
+                }
+            }
+        }
+    }
+    // SOUNDNESS R1071 (residual) — the UNDECIDED receivers of a platform-protocol extension member this scan has a
+    // body for: disclosed where that body (transitively) can do anything at all, so a pure helper such as
+    // `extension Collection { var isNotEmpty }` costs nothing. A fixpoint, because a disclosure is itself an effect
+    // another pending provider's body may reach.
+    if !r1071Pending.isEmpty {
+        var changed = true
+        while changed {
+            changed = false
+            let pre = propagate(direct, over: edges)
+            for (caller, targets, why) in r1071Pending where !(whyMap[caller]?.contains(why) ?? false) {
+                if targets.contains(where: { !(pre[$0] ?? []).isEmpty }) {
+                    direct[caller, default: []].insert("Unknown")
+                    whyMap[caller, default: []].insert(why)
+                    changed = true
                 }
             }
         }

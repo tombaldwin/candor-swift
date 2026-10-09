@@ -714,3 +714,23 @@ let PLATFORM_LEAVES: Set<String> = [
 let PLATFORM_VALUE_TYPES: Set<String> = RAW_VALUE_BASE_TYPES.union([
     "Array", "Dictionary", "Set", "Optional", "Result", "Data", "URL", "Date", "UUID", "Substring",
 ])
+
+/// SOUNDNESS R1071 — the TRANSITIVE closure of `STDLIB_DIRECT_CONFORMANCES` (generated from the SDK's module
+/// interfaces, never hand-listed): every platform protocol a platform type or protocol MAY conform to / refine.
+let STDLIB_CONFORMANCE_CLOSURE: [String: Set<String>] = {
+    var out: [String: Set<String>] = [:]
+    for start in STDLIB_DIRECT_CONFORMANCES.keys {
+        var seen = Set<String>(), stack = STDLIB_DIRECT_CONFORMANCES[start] ?? []
+        while let n = stack.popLast() {
+            guard seen.insert(n).inserted else { continue }
+            stack.append(contentsOf: STDLIB_DIRECT_CONFORMANCES[n] ?? [])
+        }
+        out[start] = seen
+    }
+    return out
+}()
+/// Does the platform declare that `type` (a platform type or protocol, by simple name) may conform to `proto`?
+/// `false` for a name the platform modules do not declare — the caller decides what an unknown type means.
+func stdlibMayConform(_ type: String, to proto: String) -> Bool {
+    STDLIB_CONFORMANCE_CLOSURE[type]?.contains(proto) ?? false
+}

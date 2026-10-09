@@ -10,6 +10,38 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — SOUNDNESS R1071 (residual): an extension of a platform PROTOCOL reaches a standard-library receiver
+
+Executed (`swiftagent-v045/fx/r1071`, `fx/exec1`): a dependency's `extension Sequence { public func stampAll() }`
+(a file write) called as `a.stampAll()` on `a: [Int]` was ABSENT standalone, ABSENT chained on the dependency's report
+(which carries `Sequence.stampAll` `['Fs']`), and ABSENT one package further downstream — every `deny Fs` /
+`deny Fs Unknown` exited 0 and the built program wrote the file. The same shape inside ONE package was absent too, for
+every stdlib receiver (`[Int]`, `Set`, `String`, `Data`, `Range`, a literal, `<S: Sequence>`, `some Collection`, a
+computed property, the implicit-self call in `extension Array`): R889 had closed only a PROJECT-type receiver, and
+nothing knew that `Array` is a `Sequence` because only the platform says so.
+
+- The conformances are DERIVED, not listed: `tools/gen-stdlib-conformances.py` reads the SDK's module interfaces
+  (Swift, _Concurrency, _StringProcessing, Foundation, Dispatch) into `StdlibConformances.swift` — every public
+  type's and protocol's conformances (conditional ones included: "may conform") plus every platform member's
+  argument labels. `--check` reports drift against a new SDK.
+- A member call (or property read) whose leaf some extension of a platform protocol provides — in this scan, in a
+  chained report, or in an imported dependency's readable sources — is answered from the receiver's type as the
+  source states it: CONFORMS → resolved (an edge to this scan's body, the chained entry joined, the unchained
+  dependency named `invisible`); provably does NOT (a platform type the interfaces declare without it) → nothing;
+  UNSTATED (no type, a type the platform does not declare, a protocol a conformer may extend past) → disclosed,
+  `Unknown[dispatch:<P>.<member>]`, only where the extension's body can do anything (a pure helper costs nothing).
+- A concrete type's own member wins (Swift's rule). The extension member is admitted only where the call's argument
+  LABELS can call it (`b.append(1)` is not `append(contentsOf:)`), and a call whose labels the platform's own
+  same-named member also takes (`b.append(contentsOf: [1])`) is never RESOLVED to the extension — argument types this
+  engine does not have decide it — only disclosed.
+- Kill switch `CANDOR_R1071P_OFF` (byte-identical to the release on the 16-package corpus). Probe `CANDOR_R1071_PROBE`.
+- Corpus A/B vs the published v0.40.3 (16 packages, 29,933 post rows; reach 2,368): REMOVED 0, no element lost in any
+  field (partition calibrated by a seeded loss), bucket 3 (concrete effect lost) 0, bucket 1 0, bucket 2 (absent/pure →
+  `Unknown` only) 219 = 0.73% — a disclosure-adding change under the lower band; every new reason is
+  `dispatch:<platform protocol>.<member>`. A first cut that resolved by name alone charged `Db` on 24 GRDB rows through
+  `RangeReplaceableCollection.append(contentsOf: some Cursor)` on plain `Array.append` — the label and platform-member
+  rules above are that measurement.
+
 ## [0.40.3] — 2026-10-09
 
 - **Build fix (no behaviour change):** R1081's answered-flag is held in a reference box. CI's `swift:6.1` toolchain proved the old captured `var`'s `if` always-false and `-warnings-as-errors` failed the build; the local 6.4 toolchain did not warn.
