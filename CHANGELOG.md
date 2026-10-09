@@ -10,6 +10,31 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — SOUNDNESS R1086: R1081's operator admission refused a real overload on less than proof (a v0.40.3 regression)
+
+Executed (`swiftagent-v045/fx/r1081d`), both silent on v0.40.3 and charged on v0.40.2:
+- `f + f.name`, with `name` inherited from a DEPENDENCY's class: the operand's type is a `rootOf` guess (the outer
+  base `Foo`, kept through an unexplained hop), and `Foo.+(Foo, String)` was refused because "`Foo` is not `String`".
+  An operator call now records which operand types are guesses (an unexplained hop, a singleton-convention local),
+  and the admission reads a guessed operand as untyped. The type itself is still recorded, so the overload match and
+  the caller-witness answering are unchanged.
+- `x + "https://…"` with `extension URL: @retroactive ExpressibleByStringLiteral` in an imported package binds
+  `static func + (a: Self, b: URL)`. A literal now proves a PLATFORM parameter type unbindable only where every
+  non-platform module the caller's file imports (with its re-exports) has readable sources, none of which extends
+  that type with a conformance; otherwise the edge is kept, as v0.40.2 kept it.
+- `deny Fs viaHop` / `deny Fs viaLiteral` 0 → 1. Kill switch `CANDOR_R1086_OFF`.
+- Isolated corpus A/B (kill switch off vs on, 16 packages, reach 3,808): REMOVED 0, no concrete effect lost, bucket 2
+  = 3 rows (vapor's `a.isFailure || b.isFailure` now unions its local `||(Validator, Validator)` overloads, as v0.40.2
+  did); `invisible` lost on 29 vapor rows whose inferred set is unchanged, all from two calls traced in source —
+  `self.path + route.path` and `self.codingPath + [key]`, stdlib `Array.+` — whose refused operator had left them
+  unresolved and file-attributed to `RoutingKit` / `HTTPTypes`.
+- NOT changed, and why: ordinary method-overload narrowing also reads a guessed argument type. Masking it there too
+  was measured and reintroduced union fabrications (`BigString.UnicodeScalarView.init(stringLiteral:)` charged
+  `Rand`), so it is left as the release has it.
+
+R1073's `droppedMember` fence now has a one-variable fixture (`fx/r1073`, executed): with the fence deleted, a unit
+whose only disclosure was the operator hedge (`dispatch:Prim.%`) beside a dropped, effectful member call went ABSENT.
+
 ### ⚠ Fixed — SOUNDNESS R1071 (residual): an extension of a platform PROTOCOL reaches a standard-library receiver
 
 Executed (`swiftagent-v045/fx/r1071`, `fx/exec1`): a dependency's `extension Sequence { public func stampAll() }`

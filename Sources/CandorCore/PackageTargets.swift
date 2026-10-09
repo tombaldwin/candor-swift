@@ -872,6 +872,36 @@ public func topLevelExtensionMembers(source: String) -> (members: [String: [Stri
     return (out, opaque)
 }
 
+/// SOUNDNESS R1086 — the simple names of the types a file's top-level extensions give a CONFORMANCE
+/// (`extension URL: ExpressibleByStringLiteral { … }` -> `URL`), whatever the clause names. `opaque` as in
+/// `topLevelTypeDeclarations`: a top-level macro expansion or an unread `#if` shape, which proves nothing.
+public func topLevelExtensionConformances(source: String) -> (types: Set<String>, opaque: Bool) {
+    var out = Set<String>()
+    var opaque = false
+    func walk(_ items: CodeBlockItemListSyntax) {
+        for item in items { if let d = item.item.as(DeclSyntax.self) { walkDecl(d) } }
+    }
+    func walkDecl(_ d: DeclSyntax) {
+        if let e = d.as(ExtensionDeclSyntax.self) {
+            guard e.inheritanceClause != nil else { return }
+            let full = e.extendedType.trimmedDescription.split(separator: "<").first.map(String.init) ?? ""
+            if let ty = full.split(separator: ".").last.map(String.init), !ty.isEmpty { out.insert(ty) }
+        } else if d.is(MacroExpansionDeclSyntax.self) { opaque = true }
+        else if let x = d.as(IfConfigDeclSyntax.self) {
+            for clause in x.clauses {
+                switch clause.elements {
+                case .statements(let st)?: walk(st)
+                case .decls(let ds)?: for m in ds { walkDecl(m.decl) }
+                case nil: break
+                default: opaque = true
+                }
+            }
+        }
+    }
+    walk(Parser.parse(source: source).statements)
+    return (out, opaque)
+}
+
 /// The default `targetSources`: every file under the target's source directory, or nil when that
 /// directory cannot be located (`targetSourceDirs`' own conventions — `path:`, `Sources/<name>`,
 /// `Source/<name>`, `<name>/`). nil is read as "cannot prove this is Swift", never as "no sources".

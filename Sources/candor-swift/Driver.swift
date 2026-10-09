@@ -1329,6 +1329,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         return typed.isEmpty ? arityOK : typed
     }
 
+    /// SOUNDNESS R1086 — the operand types R1081 may REFUSE an operator overload on: a guessed slot (`Call.argTypesGuessed`)
+    /// matches any, as an unknown one does. The unmasked list still feeds the caller-witness answering, which adds.
+    func provenArgTypes(_ ts: [String?], _ guessed: [Bool]) -> [String?] {
+        guard !guessed.isEmpty, guessed.contains(true) else { return ts }
+        return ts.enumerated().map { j, t in j < guessed.count && guessed[j] ? nil : t }
+    }
     let matchOverloads: (String, Int, [String?], String) -> [String] = { base, argc, argTypes, callerModule in
         guard let cands = overloads[base] else { return [] }
         let kept = narrowByArgTypes(cands, argc, argTypes)
@@ -1498,11 +1504,45 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // A reference box, not a captured `var`: the toolchain CI runs (swift:6.1) proved the old captured
     // flag's `if` always-false — the write happens inside this helper, called from a `where` clause —
     // and -warnings-as-errors failed the build. A class's stored property is opaque to that analysis.
-    final class R1081Flag { var answered = false }
+    final class R1081Flag { var answered = false; var foreignImports: [String]? = [] }
     let r1081Flag = R1081Flag()
     func r1081Refused(_ type: String) -> Bool {
         if !r1081Off, RAND_ROOTS.contains(type), !declaredTypes.contains(type) { r1081Flag.answered = true }
         return false
+    }
+    /// SOUNDNESS R1086 — may a literal be refused against the PLATFORM type `pt` in the current caller's file? Only
+    /// where every non-platform module that file imports (and each module it re-exports) has readable sources, none of
+    /// which extends `pt` with a conformance. `foreignImports == nil` is "not computed" and proves nothing.
+    var r1086ConformanceCache: [String: Set<String>?] = [:]
+    func r1086ModuleConformedTypes(_ m: String) -> Set<String>? {
+        if let c = r1086ConformanceCache[m] { return c }
+        var out: Set<String>? = nil
+        if let files = deps.moduleSwiftSources[m], !files.isEmpty {
+            var all = Set<String>(), ok = true
+            for path in files where path.hasSuffix(".swift") {
+                guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { ok = false; break }
+                let r = topLevelExtensionConformances(source: text)
+                if r.opaque { ok = false; break }
+                all.formUnion(r.types)
+            }
+            if ok { out = all }
+        }
+        r1086ConformanceCache[m] = out
+        return out
+    }
+    func r1086LiteralProves(_ pt: String) -> Bool {
+        if CallCollector.r1086Off { return true }
+        guard let mods = r1081Flag.foreignImports else { return false }
+        var seen = Set<String>(), queue = mods
+        while let m = queue.popLast() {
+            guard seen.insert(m).inserted else { continue }
+            guard let types = r1086ModuleConformedTypes(m), !types.contains(pt) else {
+                if r1081Probe { FileHandle.standardError.write("VBHIT\tR1086\tliteral \(pt) via \(m)\n".data(using: .utf8)!) }
+                return false
+            }
+            queue.append(contentsOf: deps.moduleReexports[m] ?? [])
+        }
+        return true
     }
     func operatorOperandsAdmit(_ call: Call, _ target: String) -> Bool {
         guard !r1081Off, !call.operandLits.isEmpty, let f = fnInfoByQualR1081[target], f.paramSig.count == 2 else { return true }
@@ -1511,6 +1551,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             guard let pt = f.paramSig[j].type, concreteR1081(pt, generics: generics) else { continue }
             let sups = supertypesOf[pt] ?? []
             if let lit = call.operandLits[j] {
+                // SOUNDNESS R1086 — …and only where no DEPENDENCY could have given that platform type the literal
+                // conformance. `extension URL: @retroactive ExpressibleByStringLiteral` in an imported package makes
+                // `x + "https://…"` bind `static func + (a: Self, b: URL)` (executed), and nothing in this scan can see
+                // that conformance; a caller whose file imports a non-platform module proves nothing here.
+                guard r1086LiteralProves(pt) else { continue }
                 // Only a PLATFORM concrete type is judged against a literal: a project type's literal conformance can
                 // arrive through a refinement (`DoubleWidth: FixedWidthInteger` takes an integer literal), which the
                 // supertype index does not close over, so a project type never refuses a literal.
@@ -1528,7 +1573,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     if r1081Probe { FileHandle.standardError.write("VBHIT\tR1081\t\(target) operand \(j) \(lit)-literal vs \(pt)\n".data(using: .utf8)!) }
                     return false
                 }
-            } else if j < call.argTypes.count, let at = call.argTypes[j], at != pt, concreteR1081(at, generics: generics),
+            } else if j < call.argTypes.count, let at = provenArgTypes(call.argTypes, call.argTypesGuessed)[j], at != pt,   // R1086
+                      concreteR1081(at, generics: generics),
                       subtypesOf[pt]?.contains(at) != true,
                       !(["Double", "CGFloat"].contains(at) && ["Double", "CGFloat"].contains(pt)) {   // implicit conversion
                 if r1081Probe { FileHandle.standardError.write("VBHIT\tR1081\t\(target) operand \(j) \(at) vs \(pt)\n".data(using: .utf8)!) }
@@ -3862,6 +3908,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             }
             deferredCallbacks[f.qual] = (idxs, cc.callbackInvoked)
             if !undischargeable.isEmpty { undischargeableCallbacks[f.qual] = undischargeable }
+        }
+        // SOUNDNESS R1086 — a literal operand proves a platform parameter type unbindable only where the caller's file
+        // imports nothing but the platform and this project (see `operatorOperandsAdmit`).
+        r1081Flag.foreignImports = (fileImports[String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })] ?? []).filter {
+            !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !projectModules.contains($0)
         }
         for var call in cc.calls {
             // VEIN A(i) — A CANONICAL FULL PATH (a shared simple name) IS ASKED PRECISELY FIRST, AND THE

@@ -112,6 +112,9 @@ final class LocatorMoveScanner: SyntaxVisitor {
 enum ArgKind { case closure, named(String), opaque }
 struct Call { var path: String; var leaf: String; var strArg: String?; var typed: Bool; var args: [ArgKind] = []
               var argTypes: [String?] = []     // inferred simple type per positional arg (nil = unknown) — overloads
+              /// SOUNDNESS R1086 — on a binary-operator call, aligned with `argTypes`: the operand's type is a GUESS (an
+              /// unexplained hop, a convention). It may add a caller witness; it may never refuse an overload (R1081).
+              var argTypesGuessed: [Bool] = []
               /// SOUNDNESS R974 (c) — callee argument index -> THIS unit's parameter index, for an argument that
               /// is one of this unit's own parameters typed by one of its OWN generic parameters (`f(a, b)` inside
               /// `g<T: Equatable>(_ a: T, _ b: T)`): the callee's witness requirement passes through to the caller.
@@ -2525,6 +2528,26 @@ final class CallCollector: SyntaxVisitor {
         let r = rootOf(e)
         return r.isVar ? r.root : nil
     }
+
+    /// SOUNDNESS R1086 — IS THIS ARGUMENT / OPERAND TYPE A GUESS? `rootOf` answers the OUTER base for an unexplained
+    /// hop — `f.name`, where `name` is inherited from a dependency's class, keeps `Foo` (`opaqueHop`) — and a local
+    /// bound by the singleton convention (`let s = X.shared`) is typed by convention. The type is still recorded
+    /// (the caller-witness answering ADDS edges from it, as the release did); what it may not do is EXCLUDE a
+    /// candidate. R1081's operand admission refused the real `Foo.+(Foo, String)` for `f + f.name` because "`Foo` is
+    /// not `String`", and the row read `[]` over a call that writes (executed; v0.40.2 charged it). The operator call
+    /// carries the mask, and the admission reads a guessed operand as untyped. (Ordinary overload narrowing also reads
+    /// guessed argument types; masking it there was measured to reintroduce union fabrications, so it is left as the
+    /// release has it.)
+    private func typeIsGuess(_ e: ExprSyntax,
+                             _ r: (root: String?, isVar: Bool, path: [String], mono: Bool, opaqueHop: Bool)) -> Bool {
+        guard !Self.r1086Off, r.isVar else { return false }
+        if r.opaqueHop { vbHit("R1086", "hop \(r.root ?? "-")"); return true }
+        if let dr = Self.peel(e).as(DeclReferenceExprSyntax.self), conventionVars.contains(dr.baseName.text) {
+            vbHit("R1086", "convention \(r.root ?? "-")"); return true
+        }
+        return false
+    }
+    static let r1086Off = ProcessInfo.processInfo.environment["CANDOR_R1086_OFF"] != nil
 
     /// `privacy/1` finding 5 — the statically-visible AVFoundation media-type of a capture call. Reads the
     /// leading-dot member name of the `for:` argument on `AVCaptureDevice.default(for:)` / `.devices(for:)`
@@ -8965,6 +8988,7 @@ final class CallCollector: SyntaxVisitor {
             // a binary operator takes two args — supply two opaque arg slots so overloaded operator
             // resolution (arity ≥ 2) keeps the edge.
             let opArgs: [ArgKind] = [.opaque, .opaque], opTypes: [String?] = [lt.isVar ? lt.root : nil, rt.isVar ? rt.root : nil]
+            let opGuessed: [Bool] = [typeIsGuess(elems[i], lt), i + 2 < elems.count && typeIsGuess(elems[i + 2], rt)]   // R1086
             var localOperand = false
             // SOUNDNESS R1081 — the operands' literal kinds, so the Driver can refuse an overload whose parameter
             // a literal cannot bind (`x + 1` is not `static func + (a: Self, b: String)`).
@@ -8995,7 +9019,8 @@ final class CallCollector: SyntaxVisitor {
             let litTyped = cands != [lt.root, rt.root]
             for cand in cands {
                 if let t = cand, lt.isVar || rt.isVar || litTyped, localTypes.contains(t) {
-                    var c = Call(path: "\(t).\(opName)", leaf: opName, strArg: nil, typed: true, args: opArgs, argTypes: candTypes)
+                    var c = Call(path: "\(t).\(opName)", leaf: opName, strArg: nil, typed: true, args: opArgs, argTypes: candTypes,
+                                 argTypesGuessed: litTyped ? [] : opGuessed)
                     c.operandLits = opLits
                     calls.append(c)
                     localOperand = true; break
@@ -9009,7 +9034,8 @@ final class CallCollector: SyntaxVisitor {
             // would edge a same-named local `func +(V,V)` via the unique-free-fn path (which ignores arg
             // types) — a fabrication. With confident local operand types, matchOverloads discriminates.
             if localOperand {
-                var c = Call(path: opName, leaf: opName, strArg: nil, typed: false, args: opArgs, argTypes: opTypes, unqualified: true)
+                var c = Call(path: opName, leaf: opName, strArg: nil, typed: false, args: opArgs, argTypes: opTypes,
+                             argTypesGuessed: opGuessed, unqualified: true)
                 c.operandLits = opLits
                 calls.append(c)
             }
