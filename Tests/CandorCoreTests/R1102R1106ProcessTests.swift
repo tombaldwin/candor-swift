@@ -130,6 +130,125 @@ struct PS<State: Hashable>: Hashable {
         XCTAssertEqual(inferred(r, "PS.reset"), ["Rand"], "CONTROL: a write runs the setter")
     }
 
+    // ── R1105 audit (swiftagent-audit1105) — THE GETTER VIEW IS PER QUAL, NOT PER BINDING ────────────────────────
+    // A STATIC member and an INSTANCE member may share a name, and so a qual. The getter view `<qual>.<get>` was
+    // built from the getter-side bodies of the binding that HAD a setter side only, so a read of the other
+    // binding — a static computed getter, a static stored initializer (first touch) — reached neither body.
+    // EXECUTED (`swiftagent-audit1105/fx/loss`): `readStatic` runs the static getter and `readStaticName` the
+    // static initializer, each writing a marker; released 0.40.4 charged both `Fs`, the R1105 build read both
+    // absent with no `Unknown` and no `invisible` (SwiftyJSON `JSON.null`, wikipedia-ios
+    // `WMFDeveloperSettingsDataController.enableDailyTopReadNotifications`).
+    func testAStaticSharingAQualWithASetterSidePropertyKeepsItsGetter() throws {
+        let r = try rows(["a.swift": #"""
+import Foundation
+func mark() { FileManager.default.createFile(atPath: "/tmp/r1105s", contents: nil) }
+final class Store {
+  static var flag: Bool { mark(); return true }
+  var flag: Bool { get { true } set { _ = newValue } }
+}
+final class Layer {
+  static let name: String = { mark(); return "L" }()
+  var name: String? { didSet { _ = 1 } }
+}
+final class Pure {
+  static var flag: Bool { true }
+  var flag: Bool { get { true } set { mark() } }
+}
+func readStatic() -> Bool { Store.flag }
+func readStaticName() -> String { Layer.name }
+func readInstance(_ s: Store) -> Bool { s.flag }
+func readPureStatic() -> Bool { Pure.flag }
+func writeInstance(_ p: Pure) { p.flag = false }
+"""#])
+        XCTAssertEqual(inferred(r, "readStatic"), ["Fs"], "the static getter runs on this read (executed): \(r["readStatic"] ?? [:])")
+        XCTAssertEqual(inferred(r, "readStaticName"), ["Fs"], "the static initializer runs on first touch (executed): \(r["readStaticName"] ?? [:])")
+        // The getter view must still exclude every SETTER-side body: these two read, and only setters mark.
+        XCTAssertNil(r["readPureStatic"], "only the instance SETTER marks; a read of the static runs none: \(r["readPureStatic"] ?? [:])")
+        XCTAssertEqual(inferred(r, "writeInstance"), ["Fs"], "CONTROL: a write runs the setter")
+        // `s.flag` names the same qual; the view is the union of every GETTER-side body under it, and the static
+        // getter is one of them — a sound over-approximation of a read, never a setter.
+        XCTAssertEqual(inferred(r, "readInstance"), ["Fs"], "qual-level getter view: \(r["readInstance"] ?? [:])")
+    }
+
+    // ── R1105 audit (swiftagent-audit1105) — A PROJECTED BINDING `$model.flag` STORES THROUGH THE SETTER ───────────
+    // `Toggle(isOn: $viewModel.flag)` hands SwiftUI a `Binding` whose setter performs `viewModel.flag = newValue`, so
+    // every edit runs `flag`'s setter and observers. Neither 0.40.4 nor the R1105 build edged the projected spelling at
+    // all; 0.40.4 covered wikipedia-ios `WMFDeveloperSettingsView.body` (Rand/Net/Db) only through the union edge of
+    // the SEPARATE plain reads in the same body, which R1105 rightly narrowed. EXECUTED (`swiftagent-audit1105/fx/loss`):
+    // writing through `Panel.binding()` runs the `didSet`; `Panel.readOnly()` runs nothing.
+    func testAProjectedBindingIsAWriteOfTheProperty() throws {
+        let r = try rows(["a.swift": #"""
+import Foundation
+import SwiftUI
+func mark() { FileManager.default.createFile(atPath: "/tmp/r1105b", contents: nil) }
+final class Model: ObservableObject {
+  @Published var flag: Bool = false { didSet { mark() } }
+  var quiet: Bool = false
+}
+struct Panel: View {
+  @ObservedObject var model: Model
+  var body: some View { Toggle("x", isOn: $model.flag) }
+  func binding() -> Binding<Bool> { $model.flag }
+  func selfBinding() -> Binding<Bool> { self.$model.flag }
+  func quietBinding() -> Binding<Bool> { $model.quiet }
+  func readOnly() -> Bool { model.flag }
+  func closureArg() -> [Bool] { [model].map { $0.flag } }
+}
+"""#])
+        for fn in ["Panel.body", "Panel.binding", "Panel.selfBinding"] {
+            XCTAssertEqual(inferred(r, fn), ["Fs"], "\(fn): the binding's setter runs the didSet (executed): \(r[fn] ?? [:])")
+        }
+        XCTAssertNil(r["Panel.quietBinding"], "a property with no setter-side body has nothing to run")
+        XCTAssertNil(r["Panel.readOnly"], "CONTROL: a plain read runs no observer")
+        XCTAssertNil(r["Panel.closureArg"], "CONTROL: `$0` is a closure parameter, not a projection")
+    }
+
+    // ── R1105 audit (swiftagent-audit1105) — AN IMPLICIT-`self` CALL DISPATCHES TO THE SUBCLASS OVERRIDES ─────────
+    // `self.setupTabs()` was charged with every override (the typed-receiver class-CHA arm); the SAME call spelled
+    // `setupTabs()` reached the caller's own body only. PRE-EXISTING in released 0.40.4 and invisible there, because
+    // the union accessor edge R1105 removed happened to cover the same rows (iina `SidebarViewController.viewDidLoad`
+    // -> `PluginViewController.setupTabs` Env/Clock/Rand; SwiftSoup `TreeBuilder.processEndTag` -> `XmlTreeBuilder
+    // .process` Env). EXECUTED (`swiftagent-audit1105/fx/ovr`): `Sub().viewDidLoad()` writes the marker through the
+    // override; both 0.40.4 and the R1105 build reported `Base.viewDidLoad` absent.
+    func testAnImplicitSelfCallReachesSubclassOverrides() throws {
+        let r = try rows(["a.swift": #"""
+import Foundation
+func mark() { FileManager.default.createFile(atPath: "/tmp/r1105d", contents: nil) }
+class Base {
+  func viewDidLoad() { setupTabs() }
+  func viaSelf() { self.setupTabs() }
+  func setupTabs() { }
+  func viaSuperOnly() { }
+}
+class Sub: Base {
+  override func setupTabs() { mark() }
+  override func viaSuperOnly() { super.viaSuperOnly() }
+}
+final class Leaf: Base {
+  func callsOwn() { helper() }
+  func helper() { }
+}
+class Sibling: Base {
+  override func setupTabs() { super.setupTabs() }
+}
+struct Plain { func a() { b() }; func b() { } }
+protocol Q { }
+extension Q { func a() { b() }; func b() { } }
+final class QI: Q { func b() { mark() } }
+class Base2 { func a() { cfg(x: 1) }; func cfg(x: Int) { }; func p() { twin() }; private func twin() { } }
+class Sub2: Base2 { func cfg(y: String) { mark() }; private func twin() { mark() } }
+"""#])
+        XCTAssertEqual(inferred(r, "Base.viewDidLoad"), ["Fs"], "self may be a Sub (executed): \(r["Base.viewDidLoad"] ?? [:])")
+        XCTAssertEqual(inferred(r, "Base.viaSelf"), ["Fs"], "CONTROL: the explicit `self.` spelling, charged before")
+        XCTAssertNil(r["Sibling.setupTabs"], "`super.` is static dispatch — it never reaches Sub's override: \(r["Sibling.setupTabs"] ?? [:])")
+        XCTAssertNil(r["Sub.viaSuperOnly"])
+        XCTAssertNil(r["Leaf.callsOwn"], "a final class has no override to reach")
+        XCTAssertNil(r["Plain.a"])
+        XCTAssertNil(r["Base2.a"], "a same-named NEW method in a subclass is not an override: \(r["Base2.a"] ?? [:])")
+        XCTAssertNil(r["Base2.p"], "a private twin is not an override: \(r["Base2.p"] ?? [:])")
+        XCTAssertNil(r["Q.a"], "a protocol-extension member dispatches STATICALLY; QI.b is not its target: \(r["Q.a"] ?? [:])")
+    }
+
     // ── R1105 (c) — a member shadows a same-named global; an EXTENDED type's witness is not synthesized ─────────
     func testAFieldShadowsASameNamedGlobal() throws {
         let r = try rows(["g.swift": #"""

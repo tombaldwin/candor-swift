@@ -1074,6 +1074,17 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (t, ps) in c.typeGenericFnParams { typeGenericFnParamsAll[t, default: []].formUnion(ps) }   // R243
         unresolvedGenericFields.append(contentsOf: c.unresolvedGenericFields)
     }
+    // SOUNDNESS R1105 audit (swiftagent-audit1105) — THE GETTER VIEW IS A PROPERTY OF THE QUAL. A read of `T.p` edges
+    // `T.p.<get>` whenever ANY binding under `T.p` has a setter side, so every getter-side body under that qual must
+    // be in the view, from whichever binding and file it came: a static computed getter or a static stored
+    // initializer beside an instance `var p { get set }` / `{ didSet }` (SwiftyJSON `JSON.null`, wikipedia-ios
+    // `enableDailyTopReadNotifications`) was otherwise reached by no read at all — executed `Fs`, reported absent.
+    let classNamesAll = collectors.reduce(into: Set<String>()) { $0.formUnion($1.classNames) }   // R1105 audit
+    for c in collectors {
+        for g in c.pendingGetterViews where setterSideAccessorQuals.contains(String(g.qual.dropLast(GETTER_VIEW_SUFFIX.count))) {
+            allFns.append(g)
+        }
+    }
 
     // FINDING 1 — resolve the opaque/erased Sequence builder indexes now that the GLOBAL localTypes set is
     // complete. A leaf whose body returns an unambiguous CONCRETE LOCAL iterable → `seqBuilderConcrete` (the
@@ -1450,6 +1461,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         if byQual.contains(target) { return [target] }
         if let cands = qualBySimple[target] { return cands }
         return []
+    }
+    // R1105 audit — every `override func` unit, with the argument counts it accepts (required...total).
+    var overrideArity: [String: [(lo: Int, hi: Int)]] = [:]
+    for f in allFns where f.isOverride {
+        let hi = f.paramSig.contains { $0.variadic } ? Int.max : f.paramSig.count
+        overrideArity[f.qual, default: []].append((f.paramSig.filter { !$0.hasDefault && !$0.variadic }.count, hi))
     }
     CallCollector.localMutatingNames = localMutatingNames   // R1105 — read by every CallCollector below
     CallCollector.computedFieldNames = computedFieldNamesAll   // R1105 (c)
@@ -4655,6 +4672,38 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
                         resolved = true
                     }
+                }
+                // SOUNDNESS R1105 audit (swiftagent-audit1105) — AN IMPLICIT-`self` CALL IS A DYNAMIC DISPATCH. `self` may be
+                // any subclass of the caller's type, so `setupTabs()` runs `Sub.setupTabs` exactly as `self.setupTabs()`
+                // does — and the typed-receiver class-CHA arm above charged only the second spelling. Same query, same
+                // carve-outs, same PRECISE-OR-NOTHING shape: only real `<sub>.<member>` units are edged, and only below
+                // the CALLER's type (an override in a SIBLING class can never be the dynamic target). Not inside a
+                // protocol extension (a non-requirement member dispatches statically there; requirements are R904's),
+                // and not for a bare ARGUMENT, which names a value, not a call. `super.m()` never lands here.
+                if !CallCollector.r1105dOff, !call.argRef, memberFirst,
+                   !siblingOverloads.isEmpty || !siblingExact.isEmpty || !inheritedTargets.isEmpty,
+                   let et = f.enclosingType {
+                    let etShort = et.split(separator: ".").last.map(String.init) ?? et
+                    // ONLY A CLASS DECLARED HERE: a protocol extension's (local OR a dependency's, e.g. SwiftPM's
+                    // `extension FileSystem`) non-requirement member dispatches statically, and an extension of a
+                    // platform class names no override this scan can see the declaration of.
+                    if classNamesAll.contains(etShort), protocolMethods[etShort] == nil, !protocolPaths.contains(et),
+                       !STD_PURE_PROTOCOLS.contains(etShort), !RAW_VALUE_BASE_TYPES.contains(etShort) {
+                        for sub in (subtypesOf[etShort] ?? []).sorted() where sub != etShort {
+                            // only a declared `override` of matching arity: a same-named NEW method in a subclass
+                            // (`configure(cell:)` beside the base's `configure(header:)`, a `private` twin) never runs.
+                            let key = "\(sub).\(call.leaf)"
+                            let hits = Set(((overloads[key]?.map(\.qual) ?? []) + Array(resolveQual(key))).filter { q in
+                                overrideArity[q]?.contains { $0.lo <= argc && argc <= $0.hi } ?? false })
+                            if CallCollector.veinBProbe, !hits.isEmpty {
+                                FileHandle.standardError.write("R1105D\t\(f.qual)\t\(sub).\(call.leaf)\n".data(using: .utf8)!)
+                            }
+                            edges[f.qual, default: []].formUnion(hits)
+                        }
+                    }
+                }
+                if !siblingOverloads.isEmpty || !siblingExact.isEmpty || !inheritedTargets.isEmpty {
+                    // claimed by a member arm above — the chain below is the original `else if` continuation
                 } else if call.argRef, call.selfFieldRef, !CallCollector.r1105cOff {
                     // SOUNDNESS R1105 (c) — a bare argument naming a stored FIELD of the enclosing type is `self.n`
                     // (Swift finds the member first); it is not a reference to a same-named free function or global.

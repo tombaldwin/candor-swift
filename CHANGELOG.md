@@ -10,6 +10,19 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ R1105 audit (swiftagent-audit1105) — three silences the getter view exposed, closed
+
+- **The getter view is per QUAL.** A static member sharing a name with an instance `get/set` or `didSet` property
+  (`static var flag { … }` / `static let name = …` beside `var flag { get set }`) was reachable by no read: the
+  `.<get>` copy held only the setter-side binding's getter. Executed `Fs`, reported absent (SwiftyJSON `JSON.null`,
+  wikipedia-ios `enableDailyTopReadNotifications`). Kill switch `CANDOR_R1105Q_OFF`.
+- **A projected binding `$model.flag` is a write of `flag`.** SwiftUI runs the binding's setter, and with it the
+  property's setter and observers; the spelling was edged nowhere (0.40.4 covered it only through the union edge of
+  separate plain reads). Kill switch `CANDOR_R1105B_OFF`.
+- **An implicit-`self` call dispatches to subclass overrides**, as `self.m()` already did: only a class declared in the
+  scan, only a declared `override` of matching arity, never `super.`, never a protocol extension. PRE-EXISTING in
+  0.40.4, hidden there by the union accessor edges R1105 narrowed. Kill switch `CANDOR_R1105D_OFF`.
+
 ### ⚠ Fixed — SOUNDNESS R1101: two shapes crashed the whole scan (no report; 4 of 73 census packages could not be gated)
 
 - An alias cycle through the scan's own module (`public typealias Out = Kit.Out` in module `Kit`; xcodes'
