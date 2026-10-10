@@ -144,6 +144,13 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// closure-typed), and without this flag the fallback disclosed `native:RTLD_NOW` — a real
               /// boundary answer to a question that was never asked, since nothing here was CALLED.
               var argRef: Bool = false
+              /// SOUNDNESS R1104 (the misattribution half) — on an `argRef` call: the bare name is a NON-FUNCTION
+              /// field the enclosing type declares (`h.combine(k)` inside `Noisy.hash`), which Swift's lookup
+              /// finds before any module-scope function of that name. Local resolution is untouched (a COMPUTED
+              /// property's getter unit still answers through it); read only by the Driver's blind-module arm,
+              /// which otherwise named every uncovered import of the file as `invisible` for a stored-property
+              /// READ that reaches no package at all.
+              var selfFieldRef: Bool = false
               /// R130 — this call site passes at least one LABELLED argument. Read only by the Driver's
               /// `native:` disclosure arm: a C function imported into Swift has no argument labels at all,
               /// so `remove(at: index)` provably cannot bind to libc's `remove(_: UnsafePointer<CChar>)`.
@@ -370,6 +377,8 @@ final class CallCollector: SyntaxVisitor {
     /// VEIN A(i) / SOUNDNESS R790 — `typealias` declarations written INSIDE this unit's body. DeclCollector
     /// skips function bodies, so the module-wide alias table never held them; `prescanBodyAliases` fills this.
     var bodyAliases: [String: String] = [:]
+    /// R1101 — the spellings `canonicalTypeRef` is resolving on the current stack (cycle guard).
+    private var aiResolving: Set<String> = []
     /// VEIN A(i) §1b KILL SWITCH — restores the release's `dealias` and every arm this vein added.
     static let aiOff = ProcessInfo.processInfo.environment["CANDOR_AI_OFF"] != nil
     /// The SEEDED C3 (partition calibration ONLY): the plausible half-fix — a STRICTLY scoped alias lookup,
@@ -821,6 +830,10 @@ final class CallCollector: SyntaxVisitor {
                                           // SAME-NAMED module-level/sibling free fn — that fabricates the
                                           // free fn's effects onto a caller whose local `helper` shadows it.
     var propertyEdges: Set<String> = []   // `Type.member` candidates from property READS
+    /// SOUNDNESS R1105/R1106 — the subset of property references in a position that can only READ the property
+    /// (see `isReadOnlyPropertyUse`). The Driver resolves these exactly as `propertyEdges` and then edges each
+    /// accessor unit's GETTER view (`<qual>.<get>`, or nothing for observers-only) instead of the union.
+    var propertyReadEdges: Set<String> = []
     var callbackInvoked: Set<String> = [] // fn-typed params INVOKED — deferred to callback-flow
     let dynamicMemberTypes: Set<String>   // `@dynamicMemberLookup` types — dynamic access is Unknown
     let propertyWrapperTypes: Set<String> // `@propertyWrapper` types — confirm a wrapped-property edge
@@ -1344,6 +1357,15 @@ final class CallCollector: SyntaxVisitor {
     // aliases are inherited — the seeded C3), then file-level, and a type-nested alias outside its owners
     // only when every owner declares it onto the same target. A generic parameter in scope is never an alias.
     func canonicalTypeRef(_ spelled: String, scopedMembers: Bool = true) -> (spelling: String, local: Bool) {
+        // SOUNDNESS R1101 — an alias CYCLE that crosses the recursive arms (the project-module strip, the
+        // dotted walk) recursed without bound: `public typealias Out = Kit.Out` inside module `Kit` re-enters
+        // here with `Out` forever and the process dies on SIGSEGV (hummingbird, SwiftFormat, xcodes — no
+        // report at all). `hops` bounds only the loop below, never the recursion. A spelling already being
+        // resolved on this stack names no type this scan declares (a local hit returns before recursing),
+        // so the inner call answers "not local" and the outer one carries on with its own remaining arms.
+        if aiResolving.contains(spelled) { return (spelled, false) }
+        aiResolving.insert(spelled)
+        defer { aiResolving.remove(spelled) }
         var s = spelled, hops = 0
         while hops < 16 {
             hops += 1
@@ -7192,6 +7214,116 @@ final class CallCollector: SyntaxVisitor {
     /// receiver is left to its dispatch (a requirement named `shuffle` is answered by the conformers, and this
     /// scan does not record requirement names here) — the one spelling this arm declines to speak for. An
     /// untyped receiver (`nil`) or a platform/stdlib type answers no.
+    // ── SOUNDNESS R1105/R1106 — A READ RUNS THE GETTER, NOT THE OBSERVERS OR THE SETTER ──────────────────────────
+    //
+    // Every property reference edged the ONE accessor unit holding get, set, willSet and didSet alike, so a read
+    // was charged whatever the setter and observers do. The classifier below answers, per reference, whether the
+    // position can only READ: it is the conservative direction throughout — any position that may store through
+    // the reference (an assignment or compound-assignment target, `&`, a tuple target, or a METHOD called through
+    // the chain that may be `mutating`) keeps the union edge, and so does anything the walk does not recognise.
+    static let r1105Off = ProcessInfo.processInfo.environment["CANDOR_R1105_OFF"] != nil
+    /// R1105 (c) kill switches: a bare FIELD name read as a same-named global (`c`), and the synthesized-witness walk
+    /// into an extension-only type or a computed property (`w`).
+    static let r1105cOff = ProcessInfo.processInfo.environment["CANDOR_R1105C_OFF"] != nil
+    static let r1105wOff = ProcessInfo.processInfo.environment["CANDOR_R1105W_OFF"] != nil
+    /// Every method name the scan declares `mutating` (set once by the Driver before any body is walked).
+    nonisolated(unsafe) static var localMutatingNames: Set<String> = []
+    /// SOUNDNESS R1105 (c) — Type -> its computed properties (set once by the Driver; see DeclCollector).
+    nonisolated(unsafe) static var computedFieldNames: [String: Set<String>] = [:]
+    private func insertPropertyEdge(_ key: String, at node: Syntax) {
+        if !Self.r1105Off, isReadOnlyPropertyUse(node) {
+            propertyReadEdges.insert(key)
+            vbHit("R1105R", "\(key) [\(r1105Rule)] `\(String(statementText(node).prefix(160)))`")
+        } else { propertyEdges.insert(key) }
+    }
+    /// The enclosing statement's text, one line — for the R1105 reach probe's audit trail.
+    private func statementText(_ node: Syntax) -> String {
+        var cur = node
+        while let p = cur.parent, !p.is(CodeBlockItemSyntax.self), !p.is(MemberBlockItemSyntax.self) { cur = p }
+        return cur.trimmedDescription.split(whereSeparator: \.isNewline).joined(separator: " ")
+    }
+    /// SEEDED DEFECT for calibrating the A/B partition only: every method run through a chain is taken as
+    /// non-mutating, so a write through a mutating call is misread as a read. Never set outside a calibration.
+    static let r1105Seed = ProcessInfo.processInfo.environment["CANDOR_R1105_SEED"] != nil
+    /// The platform's binary operators that take NO `inout` operand. Any other operator — an assignment form, or a
+    /// custom operator, whose `inout` operand Swift passes WITHOUT `&` — may store through the reference.
+    private static let VALUE_BINARY_OPERATORS: Set<String> = [
+        "==", "!=", "<", ">", "<=", ">=", "===", "!==", "~=", "+", "-", "*", "/", "%", "&&", "||", "??",
+        "...", "..<", "&", "|", "^", "<<", ">>", "&+", "&-", "&*", "&<<", "&>>", ".==", ".!=", ".<", ".>", ".<=", ".>=",
+        ".&", ".|", ".^",
+    ]
+    private static let VALUE_PREFIX_OPERATORS: Set<String> = ["!", "-", "+", "~", "...", "..<", ".!"]
+    /// R1105 probe only — which rule answered the last `isReadOnlyPropertyUse` (`value`, `method`, `operator`).
+    private var r1105Rule = "value"
+    func isReadOnlyPropertyUse(_ start: Syntax) -> Bool {
+        r1105Rule = "value"
+        var cur = start
+        for _ in 0..<64 {
+            guard let p = cur.parent else { return false }
+            if let ma = p.as(MemberAccessExprSyntax.self), ma.base?.id == cur.id {
+                // the chain continues — and if THIS member is called, it is a method run on the chain's value
+                if let call = ma.parent?.as(FunctionCallExprSyntax.self), call.calledExpression.id == ma.id {
+                    r1105Rule = "method:\(ma.declName.baseName.text)"
+                    // `x.hash(into: &h)` runs `Hashable`'s requirement, which is non-mutating on every type: whatever
+                    // `x` is (a generic parameter, an optional), the call cannot store `x` back.
+                    if !Self.r1105Seed, ma.declName.baseName.text == "hash", !Self.localMutatingNames.contains("hash"), call.arguments.count == 1,
+                       call.arguments.first?.label?.text == "into" { return true }
+                    return methodCannotWriteBack(receiver: ma.base ?? ExprSyntax(ma), member: ma.declName.baseName.text)
+                }
+                cur = p; continue
+            }
+            if p.is(ForceUnwrapExprSyntax.self) || p.is(OptionalChainingExprSyntax.self) { cur = p; continue }
+            if let sc = p.as(SubscriptCallExprSyntax.self), sc.calledExpression.id == cur.id { cur = p; continue }
+            if p.is(InOutExprSyntax.self) { return false }
+            if p.is(LabeledExprSyntax.self), let list = p.parent?.as(LabeledExprListSyntax.self),
+               let tup = list.parent?.as(TupleExprSyntax.self) {
+                // a parenthesised or tuple operand — which may itself be an assignment target `(a.p, b) = …`
+                cur = Syntax(tup); continue
+            }
+            if let list = p.as(ExprListSyntax.self), list.parent?.is(SequenceExprSyntax.self) == true {
+                // An operand of either neighbouring operator (precedence is not folded here, so both are asked).
+                let els = Array(list)
+                guard let i = els.firstIndex(where: { $0.id == cur.id }) else { return false }
+                if i + 1 < els.count, els[i + 1].is(AssignmentExprSyntax.self) { return false }
+                if els.count > 1 { r1105Rule = "operator" }
+                for j in [i - 1, i + 1] where j >= 0 && j < els.count {
+                    if let b = els[j].as(BinaryOperatorExprSyntax.self), !Self.VALUE_BINARY_OPERATORS.contains(b.operator.text) {
+                        return false
+                    }
+                }
+                return true
+            }
+            if let inf = p.as(InfixOperatorExprSyntax.self) {
+                if inf.operator.is(AssignmentExprSyntax.self) { return inf.rightOperand.id == cur.id }
+                if let b = inf.operator.as(BinaryOperatorExprSyntax.self), !Self.VALUE_BINARY_OPERATORS.contains(b.operator.text) {
+                    return false
+                }
+                return true
+            }
+            if let po = p.as(PrefixOperatorExprSyntax.self) { return Self.VALUE_PREFIX_OPERATORS.contains(po.operator.text) }
+            if p.is(PostfixOperatorExprSyntax.self) { return false }
+            return true
+        }
+        return false
+    }
+    /// A method run through a property chain stores the chain back only if it is `mutating`. NOT mutating is
+    /// claimed only on evidence: no `mutating` declaration of the name anywhere in this scan or the platform, and
+    /// the receiver typed to a LOCAL type that declares the member itself, or to a PLATFORM type whose own
+    /// (generated) member table names it. An unknown receiver — a dependency's type, an untyped hop — keeps the
+    /// union edge.
+    private func methodCannotWriteBack(receiver: ExprSyntax, member: String) -> Bool {
+        if Self.r1105Seed { return true }
+        if Self.localMutatingNames.contains(member) || STDLIB_MUTATING_MEMBERS.contains(member) { return false }
+        let r = rootOf(receiver)
+        // a receiver type kept through an unexplained hop or taken on convention is a GUESS (R1086) and proves nothing
+        guard let t = r.root, !r.opaqueHop, !typeIsGuess(receiver, r) else { return false }
+        if localTypes.contains(t), !localProtocols.contains(t), receiverDeclaresOwnMember(t, member) { return true }
+        // a type DECLARED here answers only through its own members; a platform type this scan merely EXTENDS
+        // (`extension String`) still has the platform's members, which the generated table answers for
+        if declaredTypes.contains(t) || localProtocols.contains(t) { return false }
+        return (STDLIB_NOMINALS.contains(t) || PLATFORM_VALUE_TYPES.contains(t)) && STDLIB_MEMBER_LABELS[member] != nil
+    }
+
     private func receiverDeclaresOwnMember(_ root: String?, _ member: String) -> Bool {
         guard let r = root else { return false }
         if localProtocols.contains(r) { return true }
@@ -7319,9 +7451,11 @@ final class CallCollector: SyntaxVisitor {
                         // (assigned in init / no initializer) — the invoked value is unaddressable → Unknown.
                         unresolved = true; why.insert("dispatch:\(et).\(n)")
                     } else {
-                        calls.append(Call(path: n, leaf: n, strArg: nil, typed: false, unqualified: true, argRef: true,
-                                          argBoundLocal: binderShadow.contains(n)
-                                              || (casePayloadLocals.contains(n) && !caseElseOut.contains(n))))
+                        var c = Call(path: n, leaf: n, strArg: nil, typed: false, unqualified: true, argRef: true,
+                                     argBoundLocal: binderShadow.contains(n)
+                                         || (casePayloadLocals.contains(n) && !caseElseOut.contains(n)))
+                        if selfDeclaresField(n) { c.selfFieldRef = true }
+                        calls.append(c)
                     }
                 }
             } else if let ma = e.as(MemberAccessExprSyntax.self), let base = ma.base {
@@ -8762,7 +8896,7 @@ final class CallCollector: SyntaxVisitor {
             }
             // SOUNDNESS R983 — the dotted twin of the simple `Inner.prop` edge below (see `nestedDottedKey`).
             if !Self.r983Off, let b = node.base, let dotted = nestedDottedKey(b) {
-                propertyEdges.insert("\(dotted).\(prop)")
+                insertPropertyEdge("\(dotted).\(prop)", at: Syntax(node))   // R1105
             }
             // a protocol-typed PARAM base (`p.payload` where `p: HasPayload`) — `protoTyped` holds the
             // protocol, not `rootOf` (which leaves a proto param's root the bare name). Mirror the
@@ -8807,7 +8941,7 @@ final class CallCollector: SyntaxVisitor {
                 } else if let wrapper = wrappedProps[root]?[prop], propertyWrapperTypes.contains(wrapper) {
                     propertyEdges.insert("\(wrapper).wrappedValue")
                 }
-                propertyEdges.insert("\(root).\(prop)")
+                insertPropertyEdge("\(root).\(prop)", at: Syntax(node))   // R1105
             } else if let root = recvRoot, localProtocols.contains(root) {
                 // PROTOCOL PROPERTY-REQUIREMENT dispatch: `p.payload` where `p` is a protocol-typed
                 // receiver — resolve to the conformers' `payload` accessor units (bounded CHA) or honest
@@ -8930,7 +9064,7 @@ final class CallCollector: SyntaxVisitor {
                 // no accessor unit and adds nothing.
                 if !Self.r912Off, let et = enclosingType, !isBoundLocal(n), !localProtocols.contains(et) {
                     vbHit("R912", "\(et).\(n)")
-                    propertyEdges.insert("\(et).\(n)")
+                    insertPropertyEdge("\(et).\(n)", at: Syntax(node))   // R1105
                 }
                 // SOUNDNESS R904 — …AND INSIDE `extension P` THE READ IS A REQUIREMENT DISPATCH, as the explicit
                 // `self.env.count` already is (`protoPropReads`, the conformers' getters by bounded CHA).
@@ -8958,16 +9092,28 @@ final class CallCollector: SyntaxVisitor {
         // because its type didn't resolve) — then the bare read is the local, NOT `self.n`; edging to the
         // enclosing type's `n` accessor would FABRICATE its effect (regression). boundLocals tracks these.
         if let et = enclosingType, !isBoundLocal(n) {
-            propertyEdges.insert("\(et).\(n)")
+            insertPropertyEdge("\(et).\(n)", at: Syntax(node))   // R1105
             // SOUNDNESS R904 — the bare (non-base) read inside `extension P` dispatches as `self.n` does.
             if !Self.r904Off, localProtocols.contains(et), protoReqDeclares(et, n) {
                 vbHit("R904", "bare \(et).\(n)")
                 protoPropReads.append((et, n))
             }
         }
+        // SOUNDNESS R1105 (c) — a bare name the enclosing type declares as a FIELD is `self.n`: Swift's lookup finds
+        // the member before any module-scope global, so it is never a read of a same-named global. The base-position
+        // arm above already says so; this arm read `return package` inside a type with `var package` as the global
+        // `let package = Package(…)` of a manifest fixture (SwiftPM, charged Env; executed pure).
+        if !Self.r1105cOff, selfDeclaresField(n) { vbHit("R1105G", n); return .skipChildren }
         globalReads.insert(n)
         if !binderShadow.contains(n), !(casePayloadLocals.contains(n) && !caseElseOut.contains(n)) { depGlobalReads.insert(n) }
         return .skipChildren
+    }
+    /// SOUNDNESS R1104/R1105 — the enclosing type declares a field `n` (so a bare `n` here is `self.n`), and the type's
+    /// simple name is not shared with another declared type: `fields` is keyed by the simple name, so a shared one
+    /// cannot say whose field it is, and the release's reading stands there.
+    func selfDeclaresField(_ n: String) -> Bool {
+        guard let et = enclosingType, fields[et]?[n] != nil else { return false }
+        return (ai.pathsByLeaf[et.split(separator: ".").last.map(String.init) ?? et]?.count ?? 0) <= 1
     }
 
     // OPERATOR OVERLOAD `a + b` — SwiftParser leaves operators unfolded, so this is a SequenceExpr
@@ -9126,9 +9272,19 @@ final class CallCollector: SyntaxVisitor {
                 calls.append(Call(path: "\(x).\(w)", leaf: w, strArg: nil, typed: true,
                                   args: Array(repeating: .opaque, count: arity),
                                   argTypes: arity == 2 ? [x, x] : Array(repeating: nil, count: arity)))
-            } else {
+            } else if Self.r1105wOff || declaredTypes.contains(x) || declaredTypes.contains(String(x.split(separator: ".").last ?? ""))
+                        || { vbHit("R1105W", "extended-only \(x)"); return false }() {
                 // a synthesized witness compares every stored property (an enum: every payload)
-                for (_, fi) in fields[x] ?? [:] { if let fn = fi.name, !fi.isFunction { queue.append(dealias(fn)) } }
+                // SOUNDNESS R1105 (c) — …of a type DECLARED here, and only its STORED properties. A type this scan
+                // merely EXTENDS (`extension String: P { var frag: Frag? { … } }`) has the platform's own witness,
+                // not one synthesized over the extension's computed members, and a computed property is never
+                // compared or hashed by a synthesized conformance: vapor's `self.type.hash(into:)` on a `String`
+                // reached `URLQueryFragment.hash` through exactly that walk (executed pure).
+                let computed = Self.r1105wOff ? [] : (Self.computedFieldNames[x] ?? [])
+                if Self.veinBProbe, !(fields[x] ?? [:]).keys.filter(computed.contains).isEmpty { vbHit("R1105W", "computed \(x)") }
+                for (fname, fi) in fields[x] ?? [:] where !computed.contains(fname) {
+                    if let fn = fi.name, !fi.isFunction { queue.append(dealias(fn)) }
+                }
             }
         }
     }

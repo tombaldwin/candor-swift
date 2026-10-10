@@ -113,7 +113,7 @@ def params_of(text, start):
     return specs
 
 
-def parse(path, conforms, protocols, nominals, members, props):
+def parse(path, conforms, protocols, nominals, members, props, mutating):
     stack = []            # (indent, qualified type name) of the enclosing type / extension bodies
     for line in open(path, encoding="utf-8"):
         line = line.rstrip("\n")
@@ -126,6 +126,8 @@ def parse(path, conforms, protocols, nominals, members, props):
             fm = FUNC.search(line)
             if fm:
                 members.setdefault(fm.group("name"), set()).add(",".join(params_of(line, fm.end() - 1)))
+                if re.search(r"\bmutating\s+(?:[a-z_]+\s+)*func\b", line):
+                    mutating.add(fm.group("name"))
             pm = PROP.search(line)
             if pm:
                 props.add(pm.group("name"))
@@ -169,9 +171,9 @@ def parse(path, conforms, protocols, nominals, members, props):
 def main():
     sdk = subprocess.check_output(["xcrun", "--show-sdk-path"], text=True).strip()
     sdkver = subprocess.check_output(["xcrun", "--show-sdk-version"], text=True).strip()
-    conforms, protocols, nominals, members, props = {}, set(), set(), {}, set()
+    conforms, protocols, nominals, members, props, mutating = {}, set(), set(), {}, set(), set()
     for mod in MODULES:
-        parse(interface(sdk, mod), conforms, protocols, nominals, members, props)
+        parse(interface(sdk, mod), conforms, protocols, nominals, members, props, mutating)
     # Only public names: underscored types and protocols are implementation detail no source spells, and
     # an underscored SUPER is kept only where it is a protocol we also know (its own refinements matter).
     keep = lambda n: not n.split(".")[-1].startswith("_")
@@ -212,6 +214,13 @@ def main():
     lines += ["]", "", "/// Every public PROPERTY name the platform types and protocols declare.",
               "let STDLIB_PROPERTY_NAMES: Set<String> = ["]
     for n in sorted(props):
+        lines.append(f'    "{n}",')
+    lines += ["]", "",
+              "/// SOUNDNESS R1105 — every METHOD name some platform type or protocol declares `mutating`. A call of one of",
+              "/// these through a property chain may write the property back (running its setter and observers); a",
+              "/// platform method NOT in this set never does.",
+              "let STDLIB_MUTATING_MEMBERS: Set<String> = ["]
+    for n in sorted(mutating):
         lines.append(f'    "{n}",')
     lines += ["]", ""]
     text = "\n".join(lines)

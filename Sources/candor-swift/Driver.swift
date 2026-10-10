@@ -291,6 +291,22 @@ func swiftModuleOf(_ loc: String) -> String {
     return swiftModuleSegment(filePath)
 }
 
+/// SOUNDNESS R1105/R1106 — the qual suffix of an accessor's GETTER VIEW: the getter-side bodies of a property that
+/// also has a setter or observers, collected a second time so a READ can edge them alone. Not a Swift identifier,
+/// so it can name no declaration.
+let GETTER_VIEW_SUFFIX = ".<get>"
+
+/// SOUNDNESS R1101 (the SIGTRAP half) — the OWNER of a `returnDecls` key, which is either a bare function
+/// name or `Owner.name` (DeclCollector). An OPERATOR's name may itself be made of dots: swift-case-paths
+/// declares a free `func .. <Root, Value, AppendedValue>(…)`, keyed `..`, which `contains(".")` read as owner
+/// qualified and `split(separator: ".").first!` unwrapped as nil — the whole scan trapped with no report. An
+/// owner is an identifier, so a key that does not START with one is a bare key whatever dots it holds, and a
+/// member operator's key (`CasePath...`) splits at the FIRST dot, after the identifier.
+func returnDeclKeyOwner(_ k: String) -> String? {
+    guard let c = k.unicodeScalars.first, c == "_" || CharacterSet.letters.contains(c),
+          let dot = k.firstIndex(of: ".") else { return nil }
+    return String(k[..<dot])
+}
 func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepIndex = DepIndex(),
              xcodeLinksByFile: [String: [LocalProductRef]] = [:],
              xcodeModulesByFile: [String: [String]] = [:],
@@ -934,6 +950,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var seqConcreteTmp: [String: String?] = [:]
     var closureFields: [String: Set<String>] = [:]   // FINDING 2 — Type -> closure-property names (own unit)
     var mutableClosureFields: [String: Set<String>] = [:]   // R96 — the `var` subset of the above
+    var setterSideAccessorQuals: Set<String> = []            // R1105/R1106 — see DeclCollector
+    var localMutatingNames: Set<String> = []                 // R1105
+    var computedFieldNamesAll: [String: Set<String>] = [:]   // R1105 (c)
     // CONST-STRING PROPAGATION — module/global + static string constants, aggregated across files. Same
     // ambiguity rule: a name bound to ≥2 DIFFERENT literals (here, across files) → nil (never resolved).
     var constStrings: [String: String?] = [:]
@@ -946,6 +965,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         for (t, ps) in c.closureFields { closureFields[t, default: []].formUnion(ps) }
         for (t, ps) in c.mutableClosureFields { mutableClosureFields[t, default: []].formUnion(ps) }
+        setterSideAccessorQuals.formUnion(c.setterSideAccessorQuals)
+        localMutatingNames.formUnion(c.mutatingMethodNames)
+        for (t, ps) in c.computedFieldNames { computedFieldNamesAll[t, default: []].formUnion(ps) }
         for (k, v) in c.constStrings {
             if let existing = constStrings[k] {
                 if existing != v { constStrings[k] = String?.none }   // ambiguous across files — never guess
@@ -1428,6 +1450,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         if byQual.contains(target) { return [target] }
         if let cands = qualBySimple[target] { return cands }
         return []
+    }
+    CallCollector.localMutatingNames = localMutatingNames   // R1105 — read by every CallCollector below
+    CallCollector.computedFieldNames = computedFieldNamesAll   // R1105 (c)
+    // SOUNDNESS R1105/R1106 — the unit a READ of an accessor runs (see DeclCollector `setterSideAccessorQuals`).
+    let getterView: (Set<String>) -> Set<String> = { qs in
+        Set(qs.compactMap { q in
+            guard setterSideAccessorQuals.contains(q) else { return q }
+            let g = q + GETTER_VIEW_SUFFIX
+            return byQual.contains(g) ? g : nil
+        })
     }
 
     // SOUNDNESS R1047 — AN `extension String { init(randomAlphaNumericOfLength:) }` IS NOT EVERY `String(…)`.
@@ -1920,7 +1952,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     if !DeclCollector.r991Off || !DeclCollector.r990Off {
         for c in collectors {
             for (k, ts) in c.returnDecls {
-                let owner = k.contains(".") ? String(k.split(separator: ".").first!) : nil
+                let owner = returnDeclKeyOwner(k)
                 for (t, fnGens, scope) in ts {
                     var f = declaredFacts(t, expand: DeclCollector.r992Off ? nil : aliasExpander(owner))
                     // A fact that names a GENERIC PARAMETER (the function's, or — for a member — any type's
@@ -2000,8 +2032,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // `Connection` — and the binding's member calls went to the wrong type (measured: `subscribe` lost `Clock`).
     // An alias the owner declares that does not resolve to a recordable type POISONS the key: a bare member
     // alias name is never an answer outside the scope that declared it.
-    for k in Array(returnFactsIdx.keys) where k.contains(".") {
-        let owner = String(k.split(separator: ".").first!)
+    for k in Array(returnFactsIdx.keys) {
+        guard let owner = returnDeclKeyOwner(k) else { continue }
         guard let aliases = memberTypeAliasesAll[owner], var f = returnFactsIdx[k] else { continue }
         var poisoned = false
         func canon(_ n: String?) -> String? {
@@ -2610,6 +2642,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// the same spelling is the only carrier of the member's effect to a downstream consumer (measured: stripping
     /// it took `Fs` off the consumer, executed). So the key stays the floor, and ownership is asked here instead.
     let r1066Off = ProcessInfo.processInfo.environment["CANDOR_R1066_OFF"] != nil
+    /// SOUNDNESS R1104 — kill switch for both halves (the self-field argRef exemption and the unreadable-dependency
+    /// receiver attribution), for the A/B.
+    let r1104Off = ProcessInfo.processInfo.environment["CANDOR_R1104_OFF"] != nil
     let r1066Probe = CallCollector.veinBProbe
     var sourceProvenCache: [String: Set<String>] = [:]
     func sourceProvenDepModules(of spelled: String, inFile file: String) -> Set<String> {
@@ -2642,6 +2677,28 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         if !direct.isEmpty { out = direct }
         sourceProvenCache[ck] = out
         return out
+    }
+    /// SOUNDNESS R1104 — the blind dependency modules of `file` with NO READABLE SOURCES (not fetched), for a member
+    /// call whose receiver type `spelled` is not this scan's, not a generic parameter, and not a platform type the
+    /// generated SDK tables name. Empty otherwise. See the call site.
+    func unreadableDepModules(of spelled: String, inFile file: String, generics: Set<String>) -> Set<String> {
+        var segs = spelled.split(separator: ".").map(String.init)
+        let imports = fileImports[file] ?? []
+        var cands = blindModules(inFile: file).subtracting(ownTargetsByFile[file] ?? [])
+        if segs.count > 1, imports.contains(segs[0]) { cands = cands.intersection([segs[0]]); segs.removeFirst() }
+        guard let name = segs.first, !name.isEmpty, name.first?.isUppercase == true, name != "Self",
+              !PLATFORM_MODULES.contains(name), !KAPPA_MODULES.contains(name),   // `Swift.print` names a module
+              !localTypes.contains(name), !declaredTypes.contains(name), !protocolMethods.keys.contains(name),
+              !generics.contains(name), !typeGenericParamNamesAI.values.contains(where: { $0.contains(name) }),
+              !STDLIB_NOMINALS.contains(name), !STDLIB_PROTOCOLS.contains(name),
+              STDLIB_DIRECT_CONFORMANCES[name] == nil, !PLATFORM_VALUE_TYPES.contains(name),
+              !STD_PURE_PROTOCOLS.contains(name), !PLATFORM_PROTOCOL_NAMES.contains(name)
+        else { return [] }
+        // Only a module the file's own target DECLARES as a dependency (the manifest's, unfetched): an SDK framework
+        // the classifier does not cover (`Cocoa`, `WebKit`) is blind too and has no readable sources either, but it
+        // is not what an unresolved checkout hides, and its types are the platform's — the κ ledger answers for it.
+        let declared = declaredByFile[file] ?? []
+        return cands.filter { declared.contains($0) && moduleDeclarations($0) == nil }
     }
     /// SOUNDNESS R1071 — the blind dependency modules of `file` whose readable sources declare a PUBLIC member
     /// `member` in an extension of the type `spelled` names (`extension Date { public func stamp() }`), for a
@@ -3722,14 +3779,23 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // swift inherited-property-accessor vein: methods climbed, property/observer/subscript units did not).
         // Only when the own key doesn't resolve — an override on the subclass wins (its unit resolves first),
         // so we never fabricate over a real overriding accessor; a member no supertype defines edges nothing.
-        for pe in cc.propertyEdges {
+        // SOUNDNESS R1105/R1106 — a READ-position reference (`cc.propertyReadEdges`) resolves exactly as any other
+        // and then edges each accessor unit's GETTER VIEW: `<qual>.<get>` where the unit holds a setter-side body
+        // (nothing at all when it holds no getter-side body — a stored property's observers), the unit itself
+        // otherwise. A key both read and written in this body is in both sets and keeps the union.
+        let readKeys = cc.propertyReadEdges.subtracting(cc.propertyEdges)
+        for pe in cc.propertyEdges.union(readKeys) {
+            let view: (Set<String>) -> Set<String> = readKeys.contains(pe) ? getterView : { $0 }
             let ts = resolveQual(pe)
+            if CallCollector.veinBProbe, readKeys.contains(pe), view(ts) != ts {
+                FileHandle.standardError.write("R1105E\t\(f.qual)\t\(pe)\t\(ts.sorted())->\(view(ts).sorted())\n".data(using: .utf8)!)
+            }
             if !ts.isEmpty {
-                edges[f.qual, default: []].formUnion(ts)
+                edges[f.qual, default: []].formUnion(view(ts))
             } else if let dot = pe.lastIndex(of: "."), localTypes.contains(String(pe[..<dot])) {
                 let type = String(pe[..<dot]), member = String(pe[pe.index(after: dot)...])
                 for sup in supertypesOf[type] ?? [] {
-                    edges[f.qual, default: []].formUnion(resolveQual("\(sup).\(member)"))
+                    edges[f.qual, default: []].formUnion(view(resolveQual("\(sup).\(member)")))
                 }
             }
             // ── VEIN C (SOUNDNESS R903) — …AND DOWN, as a method call does. `b.pv` with `b: BaseP` runs
@@ -3755,7 +3821,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         if veinCProbe, !vcHits.isEmpty {
                             FileHandle.standardError.write("VEINC \(f.qual) \(type).\(member) -> \(vcHits.sorted()) locs=\(vcHits.sorted().map { locOf[$0] ?? "?" })\n".data(using: .utf8)!)
                         }
-                        edges[f.qual, default: []].formUnion(vcHits)
+                        edges[f.qual, default: []].formUnion(view(vcHits))
                     }
                 }
             }
@@ -4530,8 +4596,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     inheritedTargets = visibleHere(raw)
                 }
 
+                // SOUNDNESS R1105/R1106 — a bare name passed as an ARGUMENT (`take(settings)`, never `&settings`) is a
+                // READ when it names a property: it runs the getter view, not the observers or the setter. A
+                // stored property with observers only has no getter view, so the read resolves to nothing — still
+                // RESOLVED (it is a read of this type's own stored property), never handed to the arms below.
+                let argView: (Set<String>) -> Set<String> = call.argRef && !CallCollector.r1105Off ? getterView : { $0 }
                 if !siblingOverloads.isEmpty {                            // overloaded sibling
-                    for t in siblingOverloads.sorted() {
+                    resolved = true
+                    for t in argView(siblingOverloads).sorted() {
                         edges[f.qual, default: []].insert(t)
                         resolved = true
                     }
@@ -4539,7 +4611,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // an unqualified call inside a type body reaches the sibling method — resolved against the
                     // FULL enclosing path, so a nested type's sibling call hits its own member precisely (never
                     // a same-named sibling under a different parent).
-                    for t in siblingExact.sorted() {
+                    resolved = true
+                    if CallCollector.veinBProbe, argView(siblingExact) != siblingExact {
+                        FileHandle.standardError.write("R1105A\t\(f.qual)\t\(call.path)\t\(siblingExact.sorted())\n".data(using: .utf8)!)
+                    }
+                    for t in argView(siblingExact).sorted() {
                         edges[f.qual, default: []].insert(t)
                         resolved = true
                     }
@@ -4573,11 +4649,19 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // conformance spelled on `extension S: P`, and a nested `enum Outer { class S: B }`.
                     // `supertypesOf` is TRANSITIVE (built from the transitive `subtypesOf`), so one lookup
                     // covers the whole chain.
-                    for t in inheritedTargets.sorted() {
+                    resolved = true
+                    for t in argView(inheritedTargets).sorted() {
                         edges[f.qual, default: []].insert(t)
                         callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
                         resolved = true
                     }
+                } else if call.argRef, call.selfFieldRef, !CallCollector.r1105cOff {
+                    // SOUNDNESS R1105 (c) — a bare argument naming a stored FIELD of the enclosing type is `self.n`
+                    // (Swift finds the member first); it is not a reference to a same-named free function or global.
+                    // `hasher.combine(package)` in SwiftPM's `PackageContainerConstraint.hash` was edged to a manifest
+                    // fixture's `let package = Package(…)` and charged Env; SwiftSoup's `start` reached a free `start`.
+                    resolved = true
+                    if CallCollector.veinBProbe { FileHandle.standardError.write("R1105F\t\(f.qual)\t\(call.path)\n".data(using: .utf8)!) }
                 } else if overloadedBases.contains(call.path) {            // an overloaded FREE function
                     for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc))
                         where operatorOperandsAdmit(call, t) {   // R1081
@@ -5276,7 +5360,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                      + "extOwner=\(call.extOwner ?? "-") blind=\(blindModules(inFile: _pf).sorted()) "
                      + "foreignOwner=\(foreignOwnerModule(inFile: _pf) ?? "-")\n").data(using: .utf8)!)
             }
-            if !resolved && call.unqualified {
+            if !resolved && call.unqualified && !(call.argRef && call.selfFieldRef && !r1104Off) {   // R1104
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                 let blind = blindModules(inFile: file)
                 for m in effectiveImports(file) where blind.contains(m) {   // R827
@@ -5341,6 +5425,27 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // member is that module's (or an extension of it, which is no less a reach into uncovered code).
                 // A platform type no dependency declares answers nothing and stays as it was. Non-gating (R133).
                 if r1066Probe { FileHandle.standardError.write("VBHIT\tR1066\t\(f.qual) \(owner).\(call.leaf) -> \(mods.sorted())\n".data(using: .utf8)!) }
+                blindDirect[f.qual, default: []].formUnion(mods)
+            } else if !r1104Off, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
+                      case let owner = f.genericBounds[raw] ?? raw,
+                      case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                      case let mods = unreadableDepModules(of: owner, inFile: file, generics: f.genericParamNames),
+                      !mods.isEmpty {
+                // SOUNDNESS R1104 — R1066'S QUESTION WHEN THE DEPENDENCY HAS NO SOURCES TO ASK. A package scanned before
+                // `swift package resolve` has no `.build/checkouts`, so `sourceProvenDepModules` finds no declarer and the
+                // release's silence stood: `storage.coins.append(x)` on an `OrderedSet<Box>` read `inferred: []` with NO
+                // `invisible` (executed: it runs `Noisy.hash(into:)`, which writes a file), while the SETUP line promised
+                // "calls into those packages resolve … as `invisible`" and the same tree with checkouts present carried
+                // `invisible: [OrderedCollections]` on all four call shapes. SPEC §2 (`invisible`): at least one of
+                // `invisible`/`Unknown`, never silently pure.
+                //
+                // The receiver's type is not this scan's and not a platform type the generated SDK tables name, and the
+                // file imports a dependency module NOBODY CAN READ — so the type may be that module's and no evidence
+                // can say otherwise. Named are ONLY the unreadable candidates (a readable one that declares the type
+                // was R1066's answer above; one that does not is excluded by its own sources). Errs toward naming a
+                // module the call may not reach — e.g. an AppKit type the generated tables do not list — which is the
+                // direction a disclosure may err in. Non-gating (R133): `deny`/`pure` do not move.
+                if r1066Probe { FileHandle.standardError.write("VBHIT\tR1104\t\(f.qual) \(owner).\(call.leaf) -> \(mods.sorted())\n".data(using: .utf8)!) }
                 blindDirect[f.qual, default: []].formUnion(mods)
             }
             // ── SOUNDNESS R705, THE DISCLOSURE ────────────────────────────────────────────────────────

@@ -310,7 +310,9 @@ final class StdlibReturnAndWitnessProcessTests: XCTestCase {
         }
         XCTAssertNil(by["viaEncoder"]?["invisible"], "a PLATFORM protocol receiver is never attributed to Iface")
         XCTAssertNil(by["viaClock"]?["invisible"], "a platform call in the same file is never attributed to Iface")
-        let off = try run(["CANDOR_R706I_OFF": "1"])
+        // R1104's unreadable-dependency arm answers the same call when R706's is off (`Sink` is no platform type and
+        // `Iface` has no sources), so the release silence needs both switches.
+        let off = try run(["CANDOR_R706I_OFF": "1", "CANDOR_R1104_OFF": "1"])
         XCTAssertNil(off["viaAny"]?["invisible"], "kill switch restores the release silence")
     }
 

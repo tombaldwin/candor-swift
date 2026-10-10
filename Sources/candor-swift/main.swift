@@ -357,7 +357,7 @@ while let a = argIter.next() {
             refuseGateAndExit("candor-swift: --out requires a value")
         }
         outPrefix = v
-        noteRefusalPrefix(v)   // ⟨0.32⟩
+        noteRefusalPrefix(v, named: true)   // ⟨0.32⟩, R1102
     case "--json":
         // Print the §2 envelope to STDOUT instead of writing the report file(s)/sidecars (matching the
         // candor-scan reference). The §6.2 policy gate below STILL runs and keeps its exit codes —
