@@ -10,18 +10,7 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
-### ⚠ R1105 audit (swiftagent-audit1105) — three silences the getter view exposed, closed
-
-- **The getter view is per QUAL.** A static member sharing a name with an instance `get/set` or `didSet` property
-  (`static var flag { … }` / `static let name = …` beside `var flag { get set }`) was reachable by no read: the
-  `.<get>` copy held only the setter-side binding's getter. Executed `Fs`, reported absent (SwiftyJSON `JSON.null`,
-  wikipedia-ios `enableDailyTopReadNotifications`). Kill switch `CANDOR_R1105Q_OFF`.
-- **A projected binding `$model.flag` is a write of `flag`.** SwiftUI runs the binding's setter, and with it the
-  property's setter and observers; the spelling was edged nowhere (0.40.4 covered it only through the union edge of
-  separate plain reads). Kill switch `CANDOR_R1105B_OFF`.
-- **An implicit-`self` call dispatches to subclass overrides**, as `self.m()` already did: only a class declared in the
-  scan, only a declared `override` of matching arity, never `super.`, never a protocol extension. PRE-EXISTING in
-  0.40.4, hidden there by the union accessor edges R1105 narrowed. Kill switch `CANDOR_R1105D_OFF`.
+## [0.40.5] — 2026-10-11
 
 ### ⚠ Fixed — SOUNDNESS R1101: two shapes crashed the whole scan (no report; 4 of 73 census packages could not be gated)
 
@@ -68,6 +57,32 @@ argv order. (smoke's `--out` arming row and one config test now exclude the mark
   losses; 0 charges added outside the new `<get>` rows. The read classifier's method rule was calibrated with a
   seeded defect (`CANDOR_R1105_SEED`): an independent per-repo source check finds 273 mutating-method reads in the
   seeded arm and 0 in the real one.
+
+### ⚠ Fixed — the R1105/R1106 removals were independently audited, and the three losses the audit found are closed (SOUNDNESS R1099, R1100, R1107)
+
+Because R1105/R1106 REMOVE charges, the removals were audited by an independent SwiftSyntax checker that shares no
+engine code (seeded, and shown to fire before it was trusted). It confirmed 2,190 of 2,212 getter-view and 1,090 of
+1,095 field-shadow unit removals, a stratified sample was correct 69 of 70, and 17 `invisible` losses the lane's own
+accounting had left unexplained were explained as false disclosures. The removals it did NOT confirm were
+three real losses, each now fixed and executed:
+
+- **R1099 — the getter view is per QUALIFIED NAME (a regression R1105 introduced in this release cycle; it never
+  shipped).** A static member sharing a name with an instance `get/set` or `didSet` property (`static var flag { … }`
+  / `static let name = …` beside `var flag { get set }`) was reachable by no read: the `.<get>` copy held only the
+  setter-side binding's getter. Executed `Fs`, reported absent (SwiftyJSON `JSON.nullJSON`, wikipedia-ios
+  `WMFDailyTopReadNotificationDataController.shared`). Kill switch `CANDOR_R1105Q_OFF`.
+- **R1100 — a projected binding `$model.flag` is a write of `flag`.** SwiftUI runs the binding's setter, and with it
+  the property's setter and observers; the spelling was edged nowhere. 0.40.4 covered it only through the union edge
+  of separate plain reads, so R1105's narrowing would have exposed it (wikipedia-ios
+  `WMFDeveloperSettingsView.body` lost `Rand`/`Net`/`Db`). Kill switch `CANDOR_R1105B_OFF`.
+- **R1107 — an implicit-`self` call dispatches to subclass overrides**, as `self.m()` already did: only a class
+  declared in the scan, only a declared `override` of matching arity, never `super.`, never a protocol extension.
+  PRE-EXISTING: executed silent on published 0.40.4 as well (iina `SidebarViewController.viewDidLoad` lost
+  `Env`/`Clock`/`Rand`). Kill switch `CANDOR_R1105D_OFF`.
+
+Each fix's corpus A/B against the pre-audit engine (`71d15d7`), 73 packages: REMOVED 0. Still OPEN: 71 (row, effect) removals
+on `interfaceUnion` rows the audit could not adjudicate (SOUNDNESS R1108, direction unsettled; no executed silent
+instance is known).
 
 ## [0.40.4] — 2026-10-10
 
