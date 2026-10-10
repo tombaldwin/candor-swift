@@ -36,6 +36,7 @@ struct FnInfo {
     /// allowed) result names, as spelled. A bare `-> P` arrives through `retBoundTypeSpelling` and is moved
     /// here by the Driver once it is known to resolve to a protocol.
     var retProtocolSpelling: String? = nil
+    var isOverride = false   // R1105 audit — declared `override` (the implicit-`self` dispatch arm edges only these)
     var paramSig: [(type: String?, hasDefault: Bool, variadic: Bool)] = []  // ordered param signature for
                                       // PARAM-TYPE overload resolution: distinguishes same-name overloads
                                       // (`compare(_:Date)` vs `compare(_:DateComparisonType)`), including the
@@ -621,6 +622,15 @@ final class DeclCollector: SyntaxVisitor {
     /// `didSet`, `_modify`). A READ of such a property runs only its getter-side bodies, which are also collected
     /// under `<qual>.<get>` (see `GETTER_VIEW_SUFFIX`); the Driver edges a read there instead of to the union.
     var setterSideAccessorQuals: Set<String> = []
+    /// SOUNDNESS R1105 audit (swiftagent-audit1105) — the `<qual>.<get>` copies of every accessor body of a binding
+    /// with NO setter side (all of its bodies are getter-side: a getter, a lazy or static initializer). They are
+    /// not units on their own; the Driver adds them only when SOME binding under the same qual has a setter side
+    /// (`setterSideAccessorQuals`, unioned across files), because the getter view is a property of the QUAL, not
+    /// of one binding: `static var flag { … }` beside `var flag { get set }` share `T.flag`, and a read of the
+    /// static runs the static getter, which the per-binding copy above never collected.
+    var pendingGetterViews: [FnInfo] = []
+    /// R1105 audit — the simple names of the CLASSES this file declares (not structs, enums, protocols, extensions).
+    var classNames: Set<String> = []
     /// SOUNDNESS R1105 — every method name this scan declares `mutating` (any type, protocol or extension). A call
     /// of one through a property chain may write the property back.
     var mutatingMethodNames: Set<String> = []
@@ -1078,6 +1088,7 @@ final class DeclCollector: SyntaxVisitor {
         return nil
     }
     override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {
+        classNames.insert(node.name.text)   // R1105 audit — the implicit-`self` dispatch arm (Driver) asks only of a CLASS
         recordTypeGenerics(node.name.text, node.genericParameterClause, node.genericWhereClause)
         recordLocalGenericOrder(node.name.text, node.genericParameterClause)   // R1044 residual
         pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes,
@@ -1375,6 +1386,11 @@ final class DeclCollector: SyntaxVisitor {
                         g.qual = qual + GETTER_VIEW_SUFFIX
                         g.simpleQual = simpleQual + GETTER_VIEW_SUFFIX
                         fns.append(g)
+                    } else if !hasSetterSide, !CallCollector.r1105Off, !CallCollector.r1105qOff {
+                        var g = info   // R1105 audit — see `pendingGetterViews`
+                        g.qual = qual + GETTER_VIEW_SUFFIX
+                        g.simpleQual = simpleQual + GETTER_VIEW_SUFFIX
+                        pendingGetterViews.append(g)
                     }
                 }
                 // A property-wrapper attribute (`@Logged var count`): record the wrapper TYPE so a read/
@@ -1742,6 +1758,9 @@ final class DeclCollector: SyntaxVisitor {
         let tyPath = typeStack.isEmpty ? nil : typeStack.joined(separator: ".")
         var info = FnInfo(qual: tyPath.map { "\($0).\(name)" } ?? name, loc: loc(node))
         info.simpleQual = typeStack.last.map { "\($0).\(name)" } ?? name
+        if let fd = Syntax(node).as(FunctionDeclSyntax.self), fd.modifiers.contains(where: { $0.name.text == "override" }) {
+            info.isOverride = true   // R1105 audit
+        }
         info.enclosingType = typeStack.last
         info.enclosingTypePath = tyPath
         // SOUNDNESS R265 — the declaration's EFFECTIVE access, for the visibility filter on the

@@ -7226,6 +7226,12 @@ final class CallCollector: SyntaxVisitor {
     /// into an extension-only type or a computed property (`w`).
     static let r1105cOff = ProcessInfo.processInfo.environment["CANDOR_R1105C_OFF"] != nil
     static let r1105wOff = ProcessInfo.processInfo.environment["CANDOR_R1105W_OFF"] != nil
+    /// R1105 audit kill switch: the getter view built per BINDING only (a static sharing the qual is dropped).
+    static let r1105qOff = ProcessInfo.processInfo.environment["CANDOR_R1105Q_OFF"] != nil
+    /// R1105 audit kill switch: an implicit-`self` call edges the caller's own resolution only (no subclass overrides).
+    static let r1105dOff = ProcessInfo.processInfo.environment["CANDOR_R1105D_OFF"] != nil
+    /// R1105 audit kill switch: a projected binding `$model.flag` edges nothing (the 0.40.4 / R1105 behaviour).
+    static let r1105bOff = ProcessInfo.processInfo.environment["CANDOR_R1105B_OFF"] != nil
     /// Every method name the scan declares `mutating` (set once by the Driver before any body is walked).
     nonisolated(unsafe) static var localMutatingNames: Set<String> = []
     /// SOUNDNESS R1105 (c) — Type -> its computed properties (set once by the Driver; see DeclCollector).
@@ -8887,6 +8893,27 @@ final class CallCollector: SyntaxVisitor {
             // property read here wants the type the property is read FROM.
             let recvRoot = recv.root
             let prop = node.declName.baseName.text
+            // SOUNDNESS R1105 audit (swiftagent-audit1105) — A PROJECTED BINDING STORES THROUGH THE PROPERTY. `$model.flag`
+            // (`@ObservedObject` / `@StateObject` / `@Bindable` / `@Binding` projections) is a `Binding` whose setter
+            // performs `model.flag = newValue`; SwiftUI runs it on every edit, and with it `flag`'s setter and observers.
+            // Neither 0.40.4 nor R1105 edged this spelling; the release covered it only through the union edge of
+            // separate plain reads (wikipedia-ios `WMFDeveloperSettingsView.body`). The WRITE edge (the union unit),
+            // never the getter view. `$0` is a closure parameter, not a projection.
+            if !Self.r1105bOff, let et = enclosingType, let b = node.base.map({ Self.peel($0) }) {
+                var projected: String?
+                if let dr = b.as(DeclReferenceExprSyntax.self) { projected = dr.baseName.text }
+                else if let ma = b.as(MemberAccessExprSyntax.self), ma.base?.trimmedDescription == "self" {
+                    projected = ma.declName.baseName.text
+                }
+                if let pn = projected, pn.hasPrefix("$"), let c = pn.dropFirst().first, !c.isNumber,
+                   let ft = fields[et]?[String(pn.dropFirst())]?.name {
+                    let t = dealias(ft)
+                    if localTypes.contains(t) {
+                        vbHit("R1105B", "\(t).\(prop)")
+                        propertyEdges.insert("\(t).\(prop)")
+                    }
+                }
+            }
             // SOUNDNESS R1071 — the PROPERTY spelling of the `<platext>.` marker: `a.stampedCount` with
             // `extension Collection { var stampedCount: Int { … } }` runs that getter on a `[Int]` exactly as the
             // method spelling runs the method.
