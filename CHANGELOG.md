@@ -10,6 +10,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.40.4] — 2026-10-10
+
 ### ⚠ Fixed — SOUNDNESS R1086: R1081's operator admission refused a real overload on less than proof (a v0.40.3 regression)
 
 Executed (`swiftagent-v045/fx/r1081d`), both silent on v0.40.3 and charged on v0.40.2:
