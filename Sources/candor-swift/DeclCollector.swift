@@ -617,6 +617,16 @@ final class DeclCollector: SyntaxVisitor {
     // that already has an initializer, in `init` or anywhere else), so it stays fully resolved — that is
     // the precision R79/R85 depends on. See `closurePropertyInvocation` in CallCollector for the rule.
     var mutableClosureFields: [String: Set<String>] = [:]
+    /// SOUNDNESS R1105/R1106 — the full quals of accessor units that hold a SETTER-SIDE body (`set`, `willSet`,
+    /// `didSet`, `_modify`). A READ of such a property runs only its getter-side bodies, which are also collected
+    /// under `<qual>.<get>` (see `GETTER_VIEW_SUFFIX`); the Driver edges a read there instead of to the union.
+    var setterSideAccessorQuals: Set<String> = []
+    /// SOUNDNESS R1105 — every method name this scan declares `mutating` (any type, protocol or extension). A call
+    /// of one through a property chain may write the property back.
+    var mutatingMethodNames: Set<String> = []
+    /// SOUNDNESS R1105 (c) — Type -> the properties declared with a GETTER (computed), which a synthesized
+    /// `Equatable`/`Hashable` conformance never compares or hashes (it walks STORED properties only).
+    var computedFieldNames: [String: Set<String>] = [:]
     // CONST-STRING PROPAGATION — module/global and `static let` string CONSTANTS whose initializer is a
     // PLAIN string literal (`let apiBase = "https://api.openai.com/v1"`). Keyed by the SIMPLE bound name —
     // a bare reference / interpolation-prefix / concat-left uses the name only. VALUE is the literal, or
@@ -1250,12 +1260,21 @@ final class DeclCollector: SyntaxVisitor {
                 let propType = binding.typeAnnotation.flatMap { typeName($0.type).name }
                 // (body, the setter param to type as `propType`) — nil for a getter/lazy/static-init body.
                 var accessorBodies: [(body: Syntax, setterParam: String?)] = []
+                var setterSideBodies: Set<SyntaxIdentifier> = []   // R1105/R1106
                 if let ab = binding.accessorBlock {
+                    let computed: Bool
+                    if case .accessors(let l) = ab.accessors {
+                        computed = l.contains { ["get", "_read", "unsafeAddress"].contains($0.accessorSpecifier.text) }
+                    } else { computed = true }
+                    if computed { computedFieldNames[ty, default: []].insert(name) }
                     switch ab.accessors {
                     case .getter(let items): accessorBodies.append((Syntax(items), nil))
                     case .accessors(let list):
                         for acc in list {
                             guard let b = acc.body else { continue }
+                            if ["set", "willSet", "didSet", "_modify", "modify"].contains(acc.accessorSpecifier.text) {
+                                setterSideBodies.insert(Syntax(b).id)
+                            }
                             // set/willSet ⇒ `newValue`; didSet ⇒ `oldValue`; each renamable via `set(x)`.
                             let sp: String?
                             switch acc.accessorSpecifier.text {
@@ -1328,6 +1347,16 @@ final class DeclCollector: SyntaxVisitor {
                     // scan read is one possible value, not the value.
                     if node.bindingSpecifier.text == "var" { mutableClosureFields[ty, default: []].insert(name) }
                 }
+                // SOUNDNESS R1105/R1106 — ONE UNIT FOR EVERY ACCESSOR, AND A READ EDGED TO ALL OF THEM. A plain read
+                // of `settings` ran no `didSet`, and a read of a get/set property ran no `set`, yet both were charged
+                // whatever the observer or setter does (Whisky `Bottle.<` Fs from `didSet { saveSettings() }`, Ice
+                // `Hotkey.==`/`hash` Clock, TCA `PresentationState.hash` Rand from its setter — executed pure). The
+                // union unit `<qual>` is KEPT unchanged — it is the wire key a writer and every dependent consumer
+                // join on — and the getter-side bodies are collected a second time under `<qual>.<get>`, the unit a
+                // READ runs. A property with NO getter-side body (a stored property with observers) has no such
+                // unit, so a read of it edges nothing, which is what executing it does.
+                let hasSetterSide = !CallCollector.r1105Off && !setterSideBodies.isEmpty
+                if hasSetterSide { setterSideAccessorQuals.insert(qual) }
                 for (b, setterParam) in accessorBodies {
                     var info = FnInfo(qual: qual, loc: loc(binding))
                     info.simpleQual = simpleQual
@@ -1341,6 +1370,12 @@ final class DeclCollector: SyntaxVisitor {
                         if let pt = propType { info.params[sp] = pt }
                     }
                     fns.append(info)
+                    if hasSetterSide, !setterSideBodies.contains(b.id) {
+                        var g = info
+                        g.qual = qual + GETTER_VIEW_SUFFIX
+                        g.simpleQual = simpleQual + GETTER_VIEW_SUFFIX
+                        fns.append(g)
+                    }
                 }
                 // A property-wrapper attribute (`@Logged var count`): record the wrapper TYPE so a read/
                 // write of `count` edges to `<Wrapper>.wrappedValue`. Any uppercase-first @-attribute is a
@@ -1928,6 +1963,7 @@ final class DeclCollector: SyntaxVisitor {
     }
 
     override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
+        if node.modifiers.contains(where: { $0.name.text == "mutating" }) { mutatingMethodNames.insert(node.name.text) }
         // R243 — a MEMBER may carry the constraint instead of the extension:
         // `extension Gen { func run(_ v: [Int]) -> [Int] where F == (Int) -> Bool { v.filter(op) } }`.
         // Measured silent in exactly the same way as the extension-level spelling, so the clause is

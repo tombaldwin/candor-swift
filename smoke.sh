@@ -1155,7 +1155,7 @@ printf 'import Foundation\nfunc oa_reads() -> String { (try? String(contentsOfFi
 OA_ROW1='import json,sys
 d=json.load(open(sys.argv[1]))
 print("ROW1" if (d.get("functions")==[] and (d.get("analyzed") or {}).get("count")==0 and bool(d.get("unanalyzed"))) else "NOT-ROW1")'
-oa_reports() { ls "$W/oa/$1".*.json 2>/dev/null | grep -vE '\.(callgraph|hierarchy|locs)\.json$'; }
+oa_reports() { ls "$W/oa/$1".*.json 2>/dev/null | grep -vE '\.(callgraph|hierarchy|locs|refused)\.json$'; }   # R1102: the marker is not a report
 # (A) a clean run, then the same command with an unknown flag: every REPORT under the prefix must carry the
 # ⟨0.21⟩ Row-1 manifest-carrying empty. The §2.2 SIDECARS are deliberately NOT armed — whether they must is
 # an OPEN question against ⟨0.26⟩'s own manifest rules and must not be decided here (row A3 pins that).

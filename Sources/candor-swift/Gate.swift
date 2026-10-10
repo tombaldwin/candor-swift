@@ -432,7 +432,19 @@ func zeroRulePolicyRefusal(_ pol: ParsedPolicy, at path: String,
 nonisolated(unsafe) var refusalPrefix: String? = nil
 nonisolated(unsafe) var refusalTarget: String? = nil
 
-func noteRefusalPrefix(_ p: String) { if refusalPrefix == nil { refusalPrefix = p } }
+nonisolated(unsafe) var refusalPrefixNamed = false
+/// SOUNDNESS R1102 — the prefix the run WOULD HAVE WRITTEN is the one `--out` names, whichever side of the
+/// positional it was typed on. The latch was first-writer-wins over BOTH sources, so the everyday argv
+/// `candor-swift <dir> --out <p>` latched the DEFAULT `<dir>/.candor/report` first: a refusal wrote its marker
+/// into the scanned tree (which this run was never told it may write to) and left `<p>` — the prefix every
+/// consumer reads — with no marker, so a `gate --report <p>` read the previous run's reports as current. A
+/// NAMED prefix now outranks a default one; among named ones the first still wins.
+func noteRefusalPrefix(_ p: String, named: Bool = false) {
+    if refusalPrefix == nil || (named && !refusalPrefixNamed) {
+        refusalPrefix = p
+        refusalPrefixNamed = named
+    }
+}
 func noteRefusalTarget(_ t: String) { if refusalTarget == nil { refusalTarget = t } }
 
 func writeRefusalMarker(_ why: String) {

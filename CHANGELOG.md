@@ -10,6 +10,52 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ Fixed — SOUNDNESS R1101: two shapes crashed the whole scan (no report; 4 of 73 census packages could not be gated)
+
+- An alias cycle through the scan's own module (`public typealias Out = Kit.Out` in module `Kit`; xcodes'
+  `typealias ProcessOutput = XcodesKit.ProcessOutput`) recursed `canonicalTypeRef` without bound — SIGSEGV on
+  hummingbird, SwiftFormat and xcodes. A spelling already being resolved on the stack now answers "not local".
+- A free operator whose NAME is dots (`func .. (…)`, swift-case-paths) made the return-declaration key `..`,
+  read as `Owner.name` and force-unwrapped — SIGTRAP. An owner key now starts with an identifier.
+- Census: 69/73 → 73/73 packages scan (4,473 rows in the four that crashed).
+
+### ⚠ Fixed — SOUNDNESS R1102: a refusal's marker went into the scanned tree, not the `--out` prefix
+
+The ⟨0.32⟩ marker latch was first-writer-wins over the default prefix and `--out`, so `candor-swift <dir> --out p`
+wrote `<dir>/.candor/report.refused.json` and left `p` unmarked. A NAMED prefix now outranks the default, in either
+argv order. (smoke's `--out` arming row and one config test now exclude the marker from their report globs.)
+
+### ⚠ Fixed — SOUNDNESS R1104: an unfetched dependency's types read silently pure; a stored-field argument was misattributed
+
+- With `.build/checkouts` absent, a member call on a dependency's type (`storage.coins.append(x)` on an
+  `OrderedSet`) read `[]` with no `invisible` (executed: it runs a user `hash(into:)` that writes a file); the same
+  tree with checkouts carried `invisible: [OrderedCollections]`. R1066's question is now answered for a manifest-
+  declared dependency with no readable sources, for a receiver type that is not this scan's, not a generic
+  parameter and not in the generated platform tables. Non-gating (R133). Kill switch `CANDOR_R1104_OFF`.
+- A stored field passed as an argument (`h.combine(k)`) was recorded as a bare-name reference and, resolving to no
+  function, named every uncovered import as `invisible`. It is `self.k`.
+- Census A/B: `invisible` added on 866 existing rows + 288 new invisible-only rows; 0 gate flips by construction.
+
+### ⚠ Fixed — SOUNDNESS R1105/R1106: a READ was charged the property's observers and setter (removal direction)
+
+- One accessor unit held get, set, willSet and didSet, and every reference edged all of it: Whisky `Bottle.<` was
+  charged `didSet { saveSettings() }`'s Fs, Ice `Hotkey.==`/`hash` Clock, TCA `PresentationState.hash` its setter's
+  Rand (all executed pure). The union unit `T.p` is unchanged (writers and dependents join on it); the getter-side
+  bodies are also collected as `T.p.<get>`, and a reference in a position that can only READ edges that (nothing,
+  for observers on a stored property). Any assignment / compound / `&` / tuple target, a custom or postfix
+  operator, or a method through the chain that may be `mutating` (any `mutating` name in the scan or the generated
+  `STDLIB_MUTATING_MEMBERS`; an unknown or guessed receiver) keeps the union. 25 executed shapes in the tests.
+- (c) A bare FIELD name read as a same-named global (`hasher.combine(package)` → a manifest fixture's
+  `let package = Package(…)`, Env; SwiftSoup's `start` → a script's `let start = DispatchTime.now()`, Clock); and the
+  synthesized-witness walk entered a type merely EXTENDED here and its computed properties (vapor
+  `self.type.hash(into:)` on a `String` → `URLQueryFragment.hash`).
+- Kill switches `CANDOR_R1105_OFF` (getter view), `CANDOR_R1105C_OFF` (field shadow), `CANDOR_R1105W_OFF` (walk).
+- Census A/B vs published 0.40.4 (69 packages comparable): rows losing a concrete effect 2,306 (getter view) +
+  1,497 (field shadow) + 14 (walk), every one restored by its own kill switch; 0 unexplained concrete or `Unknown`
+  losses; 0 charges added outside the new `<get>` rows. The read classifier's method rule was calibrated with a
+  seeded defect (`CANDOR_R1105_SEED`): an independent per-repo source check finds 273 mutating-method reads in the
+  seeded arm and 0 in the real one.
+
 ## [0.40.4] — 2026-10-10
 
 ### ⚠ Fixed — SOUNDNESS R1086: R1081's operator admission refused a real overload on less than proof (a v0.40.3 regression)

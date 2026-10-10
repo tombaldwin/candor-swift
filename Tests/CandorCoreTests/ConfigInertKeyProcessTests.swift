@@ -118,12 +118,15 @@ final class ConfigInertKeyProcessTests: XCTestCase {
         // to enumerate first and copied a SIDECAR in as the baseline. It passed on macOS and failed the
         // Linux CI leg, which is the tell for an ordering assumption: `contentsOfDirectory` promises no
         // order, and two platforms obliged differently.
-        let sidecars = ["callgraph", "hierarchy", "locs"]
+        // …and the ⟨0.32⟩ REFUSAL MARKER: this first run refuses (the declared baseline is not there yet) and,
+        // since R1102, writes `rec.refused.json` beside the reports of the prefix it was given, not into the
+        // default prefix — it is a marker, not a report.
+        let sidecars = ["callgraph", "hierarchy", "locs", "refused"]
         let produced = try FileManager.default
             .contentsOfDirectory(at: root.appendingPathComponent(".candor"), includingPropertiesForKeys: nil)
             .first { u in
                 u.lastPathComponent.hasPrefix("rec.") && u.pathExtension == "json"
-                    && !sidecars.contains(where: { u.lastPathComponent.contains(".\($0).") })
+                    && !sidecars.contains(where: { u.lastPathComponent.contains(".\($0).") || u.lastPathComponent.hasSuffix(".\($0).json") })
             }
         XCTAssertNotNil(produced, "precondition: the scan wrote a report to copy as the baseline")
         // …and that it is the REPORT. Asserting only non-nil is what let a sidecar through: the copy

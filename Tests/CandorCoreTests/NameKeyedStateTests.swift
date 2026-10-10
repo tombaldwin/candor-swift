@@ -476,6 +476,9 @@ final class NameKeyedStateTests: XCTestCase {
         // filled once by `prescanBodyAliases` before the walk. `aliasScopeOwners` is derived from `ai` once.
         "ai": .notPerBinding,
         "bodyAliases": .notPerBinding,
+        "propertyReadEdges": .notPerBinding,   // R1105 — `Type.member` keys, like `propertyEdges`
+        "aiResolving": .notPerBinding,         // R1101 — a recursion guard over TYPE spellings
+        "r1105Rule": .notPerBinding,           // R1105 — reach-probe label of the last classification
         "aliasScopeOwners": .notPerBinding,
         // SOUNDNESS R951. The two maps keyed by a BINDING name feed only `comparisonWitnesses`, which ADDS
         // witness edges; a stale entry after a rebind can only over-charge (a witness of the old type's
