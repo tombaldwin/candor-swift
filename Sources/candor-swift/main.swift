@@ -1931,6 +1931,49 @@ do {
         }
         transitiveImplementors[sup] = seen
     }
+    // SOUNDNESS R1109 — AND THE TYPES THAT CONFORM ONLY THROUGH A REFINING PROTOCOL. `conformers` holds no
+    // protocol-to-protocol edge, so `struct Emphasis: RecurringInlineMarkup` (`RecurringInlineMarkup:
+    // InlineMarkup`) was in no implementor set of `InlineMarkup`, and the union for its `plainText`
+    // requirement covered only the types that spell `: InlineMarkup`. When those went pure the entry
+    // vanished while `Emphasis.plainText` still carried `Unknown` — and a protocol refined but conformed
+    // to by nobody directly (`PlainTextConvertibleMarkup`, which DECLARES `plainText`) had no entry at all.
+    // ADDITIVE and only on the TRANSITIVE union, which is published for REQUIREMENTS alone (`dispatches`
+    // below): an extension-only member of `P` is dispatched statically and a refining conformer's
+    // same-named method never runs through it. A refining protocol's own extension default stands in for
+    // a refining conformer that declares no witness, exactly as the in-scan CHA (Driver) does.
+    var unionProtocols = Set(conformers.keys)
+    // A refining protocol's extension member contributes only where some type conforming to it declares
+    // no member of that name — otherwise every conformer's own witness wins and the default never runs
+    // through `p.m()`. Keyed by protocol, the methods to SKIP; read inside `unionOver` below.
+    var r1109DefaultSkip: [String: Set<String>] = [:]
+    func tailOf(_ t: String) -> String { t.lastIndex(of: ".").map { String(t[t.index(after: $0)...]) } ?? t }
+    if !r1109Off {
+        for (p, subs) in analysis.subProtocolsOf {
+            let direct = Set(conformers[p] ?? [])
+            var add = Set<String>()
+            for q in subs {
+                var qTypes = Set<String>()
+                for c in conformers[q] ?? [] where !direct.contains(c) {
+                    qTypes.insert(c)
+                    qTypes.formUnion(transitiveImplementors[c] ?? [])
+                }
+                add.formUnion(qTypes)
+                if r1109DefaultSkip[q] == nil {
+                    let all = Set((conformers[q] ?? []).flatMap { [$0] + Array(transitiveImplementors[$0] ?? []) })
+                    var skip = Set<String>()
+                    for (m, _) in ownerMethods[tailOf(q)] ?? [] where
+                        all.allSatisfy({ c in (ownerMethods[tailOf(c)] ?? []).contains { $0.method == m } }) {
+                        skip.insert(m)
+                    }
+                    r1109DefaultSkip[q] = skip
+                }
+                add.insert(q)   // the refining protocol's own extension members (its defaults), less `skip`
+            }
+            if add.isEmpty { continue }
+            transitiveImplementors[p, default: []].formUnion(add)
+            unionProtocols.insert(p)
+        }
+    }
     // COLLECTED, THEN SORTED BY HASH — never appended straight into `effectors`. `conformers` is a
     // `[String: [String]]` and `byMethod` a `[String: …]`, and Swift seeds Dictionary hashing PER
     // PROCESS, so appending inside those two loops made the emission ORDER of the union entries differ
@@ -1952,7 +1995,8 @@ do {
     // one test process share a hash seed, so a double-scan test could pass while the defect was live.
     // The hash is a total order here: it is `pkg#proto.method` and (proto, method) is a key pair.
     var unionEntries: [Effector] = []
-    for (proto, conformerTypes) in conformers {
+    for proto in unionProtocols {
+        let conformerTypes = conformers[proto] ?? []
         // TWO UNIONS, and the first is v0.39.3's exactly: over the DIRECT conformers. The second (R867) is
         // over the TRANSITIVE implementor set, and it is used only for a member that is DYNAMICALLY
         // DISPATCHED — every member of a class (a `final` one has no override to contribute) and the
@@ -1967,6 +2011,7 @@ do {
                 // the family's never-guess rule (Driver.swift) says SKIP it rather than guess.
                 if (ownersByTail[t]?.count ?? 0) > 1 { continue }
                 for (method, qual) in ownerMethods[t] ?? [] {
+                    if r1109DefaultSkip[t]?.contains(method) == true { continue }   // SOUNDNESS R1109, above
                     var cur = byMethod[method] ?? (inf: [], inv: [])
                     cur.inf.formUnion(inferred[qual] ?? [])
                     cur.inv.formUnion(invisibleAcc[qual] ?? [])
@@ -2001,7 +2046,11 @@ do {
         // sources or chained `types` declare the name) and not which: each of them gets an entry carrying
         // `Unknown` alone. The consumer that joins the true key is told the call is undetermined, where
         // it used to read the miss as purity; no concrete effect is keyed under a package it may not own.
-        guard let ownerPkg = analysis.abstractionOwnerPkg[proto] else {
+        // SOUNDNESS R1109 — a LOCAL protocol refined here but conformed to by nobody directly has no
+        // conformance file, so the obligation-2 vote never saw it; LOCAL WINS (Driver), so it is ours.
+        let localOwner: String? = (!r1109Off && conformerTypes.isEmpty && analysis.protocolNames.contains(proto))
+            ? pkgName : nil
+        guard let ownerPkg = analysis.abstractionOwnerPkg[proto] ?? localOwner else {
             guard let possible = analysis.abstractionUndecidedPkgs[proto] else { continue }
             for (method, eff) in byMethod where !(eff.inf.isEmpty && eff.inv.isEmpty) {
                 for p in possible.sorted() {

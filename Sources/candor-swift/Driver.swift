@@ -19,6 +19,10 @@ import CandorCore
 private let driverR867Off = ProcessInfo.processInfo.environment["CANDOR_R867_OFF"] != nil
 /// VEIN C §1b KILL SWITCH (R903, R876).
 private let veinCOff = ProcessInfo.processInfo.environment["CANDOR_VEINC_OFF"] != nil
+/// SOUNDNESS R1109 §1b KILL SWITCH (main.swift reads the same variable for the producer's union) and REACH
+/// PROBE: one stderr line per sub-protocol witness edge actually added.
+let r1109Off = ProcessInfo.processInfo.environment["CANDOR_R1109_OFF"] != nil
+private let r1109Probe = ProcessInfo.processInfo.environment["CANDOR_R1109_PROBE"] != nil
 /// VEIN C REACH PROBE (§E1): one stderr line per down-walk edge actually added.
 private let veinCProbe = ProcessInfo.processInfo.environment["CANDOR_VEINC_PROBE"] != nil
 private let KNOWN_BUILTIN_DECL_ATTRS: Set<String> = [
@@ -45,6 +49,10 @@ struct Analysis {
     /// dispatch CHA and its `impls.count == conf.count` guard) — the SIDECAR is a separate output, so
     /// writing them there cannot reach CHA.
     var protocolSupers: [String: Set<String>]
+    /// SOUNDNESS R1109 — protocol -> every protocol that REFINES it, transitively (`protocol Q: P` and
+    /// `protocol R: Q` give `P -> {Q, R}`): the inverse of `protocolSupers`. A type conforming to `Q`
+    /// implements `P`'s requirements too, and `conformers[P]` cannot say so (see the CHA loops).
+    var subProtocolsOf: [String: [String]]
     var protocolNames: Set<String>
     /// SOUNDNESS R867 — local protocol -> its REQUIREMENTS (the members a call on an existential or a bound
     /// DISPATCHES on). The producer's union entry is published beside a real `P.m` only for these: an
@@ -1286,6 +1294,52 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // `Job.emit` doesn't resolve and the call read pure — fall back to the default body on a conformed super.
     var supertypesOf: [String: Set<String>] = [:]
     for (sup, subs) in subtypesOf { for s in subs { supertypesOf[s, default: []].insert(sup) } }
+    // SOUNDNESS R1109 — THE REFINING PROTOCOLS of each protocol, transitively. `conformers[P]` holds the
+    // types that SPELL `: P`, and protocol inheritance is kept OUT of it on purpose (`protocolSupers`, see
+    // DeclCollector) — so a type that conforms to `P` only THROUGH a refinement, `struct Deep: Recurring`
+    // with `protocol Recurring: Inline`, was in no implementor set of `Inline` at all: not in the in-scan
+    // CHA below, not in the producer's union entry (main.swift). It IS an implementor — `x.text` on an
+    // `x: any Inline` holding a `Deep` runs `Deep.text` — so the requirement's dispatch read only the direct
+    // conformers. MEASURED, executed: swift-markdown `InlineMarkup.plainText` (Emphasis/Strong/Strikethrough
+    // conform via `RecurringInlineMarkup`); the fixture's `show(_ x: any Inline) { x.text }` performs `Fs`
+    // through `Deep` and read `[]` in-package and on the chained consumer. Kill switch `CANDOR_R1109_OFF`.
+    var subProtocolsOf: [String: [String]] = [:]
+    if !r1109Off {
+        var refinedBy: [String: Set<String>] = [:]
+        for (q, sups) in protocolSupers { for sup in sups where sup != q { refinedBy[sup, default: []].insert(q) } }
+        for p in refinedBy.keys {
+            var seen = Set<String>(), frontier = Array(refinedBy[p] ?? [])
+            while let q = frontier.popLast() {
+                if q == p || !seen.insert(q).inserted { continue }
+                frontier.append(contentsOf: refinedBy[q] ?? [])
+            }
+            subProtocolsOf[p] = seen.sorted()
+        }
+    }
+    /// SOUNDNESS R1109 — the witnesses of `P.member` supplied by types that conform to `P` only through a
+    /// refining protocol. PRECISE-OR-NOTHING and ADDITIVE, R867's rule: only real units are edged, no
+    /// `Unknown` is added and nothing the direct-conformer CHA decided is changed. A refining conformer
+    /// that declares no witness of its own is answered by the REFINING protocol's extension default where
+    /// one exists (`extension Recurring { var text … }`), which is the body Swift runs for it; `P`'s own
+    /// default and its supers' are already edged by the callers. `own` resolves a conformer's member,
+    /// `sub` a subclass of one (the property loop filters that to real accessor units, as VEIN C does).
+    func subProtocolWitnesses(_ p: String, _ member: String,
+                              own: (String) -> Set<String>, sub: (String) -> Set<String>,
+                              stored: (String) -> Bool) -> Set<String> {
+        var out = Set<String>()
+        let direct = Set(conformers[p] ?? [])
+        for q in subProtocolsOf[p] ?? [] {
+            var missing = false
+            for c in (conformers[q] ?? []).sorted() where !direct.contains(c) {
+                let ts = own("\(c).\(member)")
+                if ts.isEmpty, !stored(c) { missing = true }
+                out.formUnion(ts)
+                for s in (subtypesOf[c] ?? []).sorted() where s != c { out.formUnion(sub("\(s).\(member)")) }
+            }
+            if missing { out.formUnion(own("\(q).\(member)")) }
+        }
+        return out
+    }
     // SOUNDNESS R915 (A) — every `Outer.Inner` ADJACENT pair of a declared type path (`A.B.C` gives
     // `A.B` and `B.C`), so a member hop that names a NESTED TYPE (`Outer.Inner.make()`) is read as that
     // type rather than as a value hop that keeps `Outer`.
@@ -5765,6 +5819,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     }
                 }
             }
+            // SOUNDNESS R1109 — …and a type conforming to `d.proto` only through a REFINING protocol.
+            if !r1109Off {
+                let mod = swiftModuleOf(f.loc)
+                let resolve: (String) -> Set<String> = { memberTargets($0, d.argc, d.argTypes, mod) }
+                let ts = subProtocolWitnesses(d.proto, d.member, own: resolve, sub: resolve, stored: { _ in false })
+                if r1109Probe, !ts.subtracting(edges[f.qual] ?? []).isEmpty {
+                    FileHandle.standardError.write("R1109 \(f.qual) \(d.proto).\(d.member) -> \(ts.sorted())\n".data(using: .utf8)!)
+                }
+                edges[f.qual, default: []].formUnion(ts)
+            }
         }
         // CHA for protocol PROPERTY/subscript reads — identical bounded resolution to method dispatch,
         // but the conformer units are accessor units (`Type.payload` / `Type.subscript`). A conformer
@@ -5804,6 +5868,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             guard protoOrSuperDeclares(d.proto, d.member) else { continue }
             if let path = localProtocolWirePath(d.proto) {     // ⟨0.39⟩ obligation 1, property/subscript half
                 dispatchDirect[f.qual, default: []].insert("\(pkgName)#\(path).\(d.member)")
+            }
+            // SOUNDNESS R1109 — the property/subscript twin of the method loop's refining-protocol arm. BEFORE the
+            // bound guard below, which `continue`s: a protocol conformed to ONLY through refinements has zero
+            // direct conformers, discloses `Unknown` there, and must still carry the witnesses it does know.
+            if !r1109Off {
+                let ts = subProtocolWitnesses(d.proto, d.member, own: { resolveQual($0) },
+                    sub: { resolveQual($0).filter { veinCAccessorQuals.contains($0) } },
+                    stored: { fields[$0]?[d.member] != nil })
+                if r1109Probe, !ts.subtracting(edges[f.qual] ?? []).isEmpty {
+                    FileHandle.standardError.write("R1109 \(f.qual) \(d.proto).\(d.member) -> \(ts.sorted())\n".data(using: .utf8)!)
+                }
+                edges[f.qual, default: []].formUnion(ts)
             }
             let conf = conformers[d.proto] ?? []
             guard chaWithinBound(conf.count, d.proto, d.member, f.qual) else { continue }
@@ -6342,7 +6418,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         protocolResults: protocolResults)
     return Analysis(
         allFns: allFns, conformers: conformers, declaredTypes: declaredTypes,
-        protocolSupers: protocolSupers, protocolNames: Set(protocolMethods.keys), protocolMethods: protocolMethods,
+        protocolSupers: protocolSupers, subProtocolsOf: subProtocolsOf, protocolNames: Set(protocolMethods.keys), protocolMethods: protocolMethods,
         importCounts: importCounts,
         uncoveredCounts: uncoveredCounts, coverageNotDeclared: coverageNotDeclared,
         direct: direct, edges: edges, whyMap: whyMap,

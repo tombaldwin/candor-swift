@@ -10,6 +10,26 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ A type conforming to a protocol only through a refining protocol is an implementor of it (SOUNDNESS R1109)
+
+`struct Deep: Recurring` with `protocol Recurring: Inline` implements `Inline`'s requirements, so `x.text` on an
+`x: any Inline` (or a `T: Inline`) holding a `Deep` runs `Deep.text`. The protocol CHA only knew the types that
+spell `: Inline`, so `Deep` was in no implementor set — not the in-scan dispatch, and not the published
+`interfaceUnion` entry a chained consumer joins. Now both cover conformers of every refining protocol (and
+their subclasses), plus a refining protocol's extension default where some conformer of it declares no witness
+of its own; a local protocol refined but conformed to by nobody directly (`PlainTextConvertibleMarkup`) now gets
+its entry. Requirements only: an extension-only member is still dispatched statically. Kill switch
+`CANDOR_R1109_OFF`.
+
+Found adjudicating R1105's `interfaceUnion` removals (R1108): swift-markdown `InlineMarkup.plainText` lost
+`Unknown` in 0.40.5 while `Emphasis`/`Strong`/`Strikethrough` (via `RecurringInlineMarkup`) still carry it, so a
+consumer's `deny Unknown` over `m.plainText` passed. Pre-existing; in 0.40.4 the direct conformers' R1105
+over-charges hid it. Executed fixture: `show(_ x: any Inline) { x.text }` over `Deep()` writes a file; the
+chained `deny Fs show` went 1 → 0 from 0.40.4 to 0.40.5 and is 1 again here. Corpus A/B vs published 0.40.5
+(73 packages): REMOVED 0, no value lost at any join key, 2,554 inferred values added on real rows (1,752 rows
+pure → concrete) and 913 union entries added; every one of the 8,767 new dispatch edges is a declared
+refining conformer or refining default of a protocol whose requirement it is (independent source parse).
+
 ## [0.40.5] — 2026-10-11
 
 ### ⚠ Fixed — SOUNDNESS R1101: two shapes crashed the whole scan (no report; 4 of 73 census packages could not be gated)
