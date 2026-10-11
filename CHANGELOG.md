@@ -10,6 +10,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.40.6] — 2026-10-11
+
 ### ⚠ A type conforming to a protocol only through a refining protocol is an implementor of it (SOUNDNESS R1109)
 
 `struct Deep: Recurring` with `protocol Recurring: Inline` implements `Inline`'s requirements, so `x.text` on an
