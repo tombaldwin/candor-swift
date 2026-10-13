@@ -10,6 +10,16 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.40.9] — 2026-10-13
+
+- **Version-only cut to keep the family on one build line — no change to candor-swift since 0.40.8.** The
+  source is identical to the v0.40.8 tag (`a0fadfd`); only the engine's version constant moves. candor-rust carries scan-only fixes that close silent under-reports (operators reached through a cast,
+  a reference-to-primitive impl or a macro-made impl; glob-imported types; a bin calling its own library;
+  `macro_rules!` names defined twice; `pub` trait default bodies; R1150–R1157, R1159–R1162) and drops the
+  `Rand` charge on `getrandom::Error`'s methods, and candor-spec carries the register only (`SPEC.md` and
+  `conformance/` are unchanged since 0.40.8).
+
+
 ## [0.40.8] — 2026-10-13
 
 - **Version-only cut to keep the family on one build line — no change to candor-swift since 0.40.7.** The
