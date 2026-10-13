@@ -10,6 +10,20 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ A user `Equatable` / `Comparable` / `Hashable` witness handed to a CHAINED package is now disclosed
+  (SOUNDNESS R974 (a)).** A dependency's `func same<T: Equatable>(_ a: T, _ b: T) -> Bool { a == b }` runs the
+  caller's `==`, and its report cannot say so (the row is pure; ⟨0.39⟩ `dispatchesOn` has no spelling for a
+  stdlib-owned requirement), so `same(Noisy(), Noisy())` read ABSENT under chaining while it wrote a file
+  (executed). A call that reaches a chained package now adds `Unknown`
+  (`dispatch:<Equatable|Comparable|Hashable>.<witness> witness passed to a chained package`) where an argument
+  carries a hand-written witness — its own type, a written generic argument, an array/dictionary literal's
+  elements, or a synthesized conformance's stored properties — that can do anything. A disclosure, not a
+  charge: `deny Fs Unknown` moves, `deny Fs` does not. A pure witness costs nothing; an unchained scan is
+  unchanged (it already names the dependency `invisible`). Over-discloses on a chained generic that never
+  compares its argument (nothing on the wire says it does not). `CANDOR_R974A_OFF=1` restores the old
+  behaviour. Chained corpus A/B against 0.40.9 (27 consumers): 9 rows gained a reason on a row that already
+  carried `Unknown`, 0 effects added or lost, 0 gate flips; standalone (73 packages): unchanged.
+
 ## [0.40.9] — 2026-10-13
 
 - **Version-only cut to keep the family on one build line — no change to candor-swift since 0.40.8.** The

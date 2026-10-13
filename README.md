@@ -130,11 +130,14 @@ What "resolved-pure" means here, precisely, because it is narrower than it sound
   project body and is charged normally — including when it is reached through a generic or a container:
   `a == b` inside `<T: Equatable>` (R951), `Set`/`Dictionary` operations (R974 b), and
   `a.hash(into:)` / `Hasher.combine(a)` inside `<T: Hashable>` (R1045) all reach the caller's witness.
-- **Across a chain, equality and hashing ARE treated as resolved-pure (R974 a).** A dependency's
-  `func same<T: Equatable>(_ a: T, _ b: T) -> Bool { a == b }` publishes no row, so a consumer calling it
-  with its own effectful `==` is not charged. The one-tree scan charges it. This is the §4 permission
-  exercised for `Equatable`/`Hashable` requirements reached in ANOTHER package; closing it needs a ⟨0.39⟩
-  `dispatchesOn` key for a stdlib-owned requirement, which the spec does not yet spell.
+- **Across a chain, equality, ordering and hashing are DISCLOSED, not charged (R974 a).** A dependency's
+  `func same<T: Equatable>(_ a: T, _ b: T) -> Bool { a == b }` publishes no row, so the consumer cannot know
+  it compares. Where a call reaches a chained package and an argument carries a hand-written `==`, `<` or
+  `hash(into:)` that can do anything, the caller gets `Unknown`
+  (`dispatch:<P>.<witness> witness passed to a chained package`); the one-tree scan charges the effect itself.
+  It over-discloses on a chained generic that never compares its argument. A RESOLUTION (charging the
+  caller) needs the producer to publish which requirements a generic body applies to which parameter — a
+  wire field the spec does not have.
 - **The iteration protocols are in the
   set ONLY for the synthesized-requirement fallback.** SPEC §4 forbids extending resolved-pure to
   iterators, and this engine does not: a hand-written `next()`/`makeIterator()` is charged wherever the

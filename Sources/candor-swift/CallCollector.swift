@@ -170,6 +170,8 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// labelled or `inout` argument answers R951/R1048's `<idx>:<req>` the way a positional one does.
               /// `nil` = not recorded; read ONLY by the caller-witness answering.
               var witnessArgs: (labels: [String?], types: [String?])? = nil
+              /// SOUNDNESS R974 (a) — see `CallCollector.argumentWitnesses`. Empty = none (or not recorded).
+              var argWitnesses: [String] = []
               /// SOUNDNESS R1065 — a `<untyped>.` marker from `depInstanceMemberCallee`: its MISS discloses only where
               /// the member's leaf could have a body someone answers (a local type's member, or a chained package's).
               var instanceHop: Bool = false
@@ -7356,6 +7358,11 @@ final class CallCollector: SyntaxVisitor {
                 })
                 for j in callsBefore..<calls.count where calls[j].witnessArgs == nil { calls[j].witnessArgs = w }
             }
+            // SOUNDNESS R974 (a) — the argument-carried witnesses, for the Driver's chained-call disclosure.
+            if !Self.r974aOff, callsBefore < calls.count, !node.arguments.isEmpty {
+                let aw = argumentWitnesses(node.arguments)
+                if !aw.isEmpty { for j in callsBefore..<calls.count where calls[j].argWitnesses.isEmpty { calls[j].argWitnesses = aw } }
+            }
             // SOUNDNESS R1047 — every unqualified call this node produced carries its argument labels.
             if node.trailingClosure == nil, node.additionalTrailingClosures.isEmpty, callsBefore < calls.count {
                 let labels = node.arguments.map { $0.label?.text }
@@ -9286,7 +9293,20 @@ final class CallCollector: SyntaxVisitor {
         if let t = r.root, r.isVar, !r.opaqueHop, localTypes.contains(t), !(opWitnessTypes[w]?.contains(t) ?? false) {
             targets.append(t)   // synthesized: walked into its stored properties below
         }
-        var seen = Set<String>(), queue = targets
+        for x in witnessOwners(w, seeds: targets, probe: true) {
+            if Self.r951Probe { FileHandle.standardError.write("R951HIT \(x).\(w)\n".data(using: .utf8)!) }
+            calls.append(Call(path: "\(x).\(w)", leaf: w, strArg: nil, typed: true,
+                              args: Array(repeating: .opaque, count: arity),
+                              argTypes: arity == 2 ? [x, x] : Array(repeating: nil, count: arity)))
+        }
+    }
+    /// R951's witness walk, shared by the comparison edge above and R974 (a)'s chained-call disclosure below: from
+    /// `seeds`, the local types that DECLARE witness `w`, a type without its own witness walked into its STORED
+    /// properties (its synthesized conformance compares each). `probe` keeps R1105W's REACH lines counting only
+    /// the comparison edge, as they did before this was extracted.
+    private func witnessOwners(_ w: String, seeds: [String], probe: Bool) -> [String] {
+        var out: [String] = []
+        var seen = Set<String>(), queue = seeds
         while let x = queue.popLast() {
             guard seen.insert(x).inserted, seen.count < 32, localTypes.contains(x) else { continue }
             // A SHARED simple name (`Index`, `Storage`) names several types and the spelling here does not say
@@ -9295,12 +9315,9 @@ final class CallCollector: SyntaxVisitor {
             // the name is one type (or already a full path the canonicaliser handed on).
             if !x.contains("."), (ai.pathsByLeaf[x]?.count ?? 0) > 1 { continue }
             if opWitnessTypes[w]?.contains(x) ?? false {
-                if Self.r951Probe { FileHandle.standardError.write("R951HIT \(x).\(w)\n".data(using: .utf8)!) }
-                calls.append(Call(path: "\(x).\(w)", leaf: w, strArg: nil, typed: true,
-                                  args: Array(repeating: .opaque, count: arity),
-                                  argTypes: arity == 2 ? [x, x] : Array(repeating: nil, count: arity)))
+                out.append(x)
             } else if Self.r1105wOff || declaredTypes.contains(x) || declaredTypes.contains(String(x.split(separator: ".").last ?? ""))
-                        || { vbHit("R1105W", "extended-only \(x)"); return false }() {
+                        || { if probe { vbHit("R1105W", "extended-only \(x)") }; return false }() {
                 // a synthesized witness compares every stored property (an enum: every payload)
                 // SOUNDNESS R1105 (c) — …of a type DECLARED here, and only its STORED properties. A type this scan
                 // merely EXTENDS (`extension String: P { var frag: Frag? { … } }`) has the platform's own witness,
@@ -9308,12 +9325,51 @@ final class CallCollector: SyntaxVisitor {
                 // compared or hashed by a synthesized conformance: vapor's `self.type.hash(into:)` on a `String`
                 // reached `URLQueryFragment.hash` through exactly that walk (executed pure).
                 let computed = Self.r1105wOff ? [] : (Self.computedFieldNames[x] ?? [])
-                if Self.veinBProbe, !(fields[x] ?? [:]).keys.filter(computed.contains).isEmpty { vbHit("R1105W", "computed \(x)") }
+                if probe, Self.veinBProbe, !(fields[x] ?? [:]).keys.filter(computed.contains).isEmpty { vbHit("R1105W", "computed \(x)") }
                 for (fname, fi) in fields[x] ?? [:] where !computed.contains(fname) {
                     if let fn = fi.name, !fi.isFunction { queue.append(dealias(fn)) }
                 }
             }
         }
+        return out
+    }
+    /// SOUNDNESS R974 (a) — the user `Equatable`/`Comparable`/`Hashable` witnesses a call's ARGUMENTS carry, as
+    /// `<Type>.<witness>` (`Noisy.==`, `Noisy.<`, `Noisy.hash`). Read only by the Driver, and only for a call that
+    /// reached a CHAINED package: that package's generic body may run them and its report cannot say so (no
+    /// `dispatchesOn` spelling exists for a stdlib-owned requirement), so the Driver DISCLOSES where one of them
+    /// can do anything. The seeds are what the source states about each argument: its tracked type, the written
+    /// generic arguments of a parameter / annotated local, and an array or dictionary literal's elements.
+    static let r974aOff = r974Off || ProcessInfo.processInfo.environment["CANDOR_R974A_OFF"] != nil
+    fileprivate func argumentWitnesses(_ args: LabeledExprListSyntax) -> [String] {
+        guard !Self.r974aOff else { return [] }
+        var seeds: [String] = []
+        func seed(_ raw: ExprSyntax, depth: Int) {
+            let e = Self.peel(raw)
+            if let dr = e.as(DeclReferenceExprSyntax.self) {
+                let n = dr.baseName.text
+                seeds.append(contentsOf: (paramTypeArgsR951[n] ?? localTypeArgs[n] ?? []).map { dealias($0) })
+            }
+            if depth < 3, let arr = e.as(ArrayExprSyntax.self) {
+                for el in arr.elements { seed(el.expression, depth: depth + 1) }
+            }
+            if depth < 3, let dict = e.as(DictionaryExprSyntax.self), case .elements(let els) = dict.content {
+                for el in els { seed(el.key, depth: depth + 1); seed(el.value, depth: depth + 1) }
+            }
+            let r = rootOf(e)
+            if let t = r.root, r.isVar, !r.opaqueHop { seeds.append(t) }
+        }
+        for a in args {
+            var e = Self.peel(a.expression)
+            if let io = e.as(InOutExprSyntax.self) { e = Self.peel(io.expression) }
+            if e.is(ClosureExprSyntax.self) { continue }
+            seed(e, depth: 0)
+        }
+        guard seeds.contains(where: { localTypes.contains($0) }) else { return [] }
+        var out: [String] = []
+        for w in ["==", "<", "hash"] {
+            for x in witnessOwners(w, seeds: seeds, probe: false) where !out.contains("\(x).\(w)") { out.append("\(x).\(w)") }
+        }
+        return out
     }
     // ── SOUNDNESS R974 (b) — A STDLIB CONTAINER OPERATION RUNS ITS ELEMENT'S `Equatable`/`Hashable` WITNESSES ───
     //

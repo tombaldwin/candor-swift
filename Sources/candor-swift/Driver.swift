@@ -3062,7 +3062,46 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // (6ab26e4) by asking the same question, so it is a duplication defect and not a swift accident.
     // Every field of `DepEntry` a consumer can inherit is applied HERE and nowhere else; adding one to
     // `DepEntry` and not to this function is the next instance of the same bug.
+    /// SOUNDNESS R974 (a) — a call no join answered that may still land in a chained package: an UNQUALIFIED call
+    /// (a free function or constructor) or a member call on a receiver whose type the source states, where the
+    /// name is not this scan's, not a generic parameter, not one the stdlib/platform tables name — the same
+    /// exclusions R1104 applies to "could this type be a dependency's" — and not REFUTED by the dependencies'
+    /// own sources: when every chained module the file imports was read in full and none declares the type (nor
+    /// its chained report names it), the type is not theirs (`ObservedObject`, a platform type the tables miss).
+    /// An untyped receiver is not guessed onto a dependency here — the `<untyped>.` machinery owns that question.
+    func r974aUnanswered(_ call: Call, _ f: FnInfo, _ file: String) -> Bool {
+        let name: String
+        if call.unqualified {
+            if call.leaf.first?.isUppercase != true {
+                return !CallCollector.PURE_STDLIB_FREE_FNS.contains(call.leaf)
+                    && !["print", "debugPrint", "dump"].contains(call.leaf) && !f.genericParamNames.contains(call.leaf)
+            }
+            name = call.leaf
+        } else {
+            guard let owner = call.extOwner else { return false }
+            name = String(owner.prefix { $0 != "." && $0 != "<" })
+        }
+        guard !name.isEmpty, name != "Self", !localTypes.contains(name), !declaredTypes.contains(name),
+              !f.genericParamNames.contains(name), !typeGenericParamNamesAI.values.contains(where: { $0.contains(name) }),
+              !PLATFORM_MODULES.contains(name), !KAPPA_MODULES.contains(name),
+              !STDLIB_NOMINALS.contains(name), !STDLIB_PROTOCOLS.contains(name), STDLIB_DIRECT_CONFORMANCES[name] == nil,
+              !PLATFORM_VALUE_TYPES.contains(name), !STD_PURE_PROTOCOLS.contains(name), !PLATFORM_PROTOCOL_NAMES.contains(name)
+        else { return false }
+        let chained = deps.chainedPkgs(importing: fileImports[file] ?? [])
+        if chained.contains(where: { deps.mentionedTypes.contains("\($0.pkg)#\(name)") || deps.surface.typeKeysSeen.contains("\($0.pkg)#\(name)") }) {
+            return true
+        }
+        let mods = chained.flatMap { $0.modules }
+        let refuted = !mods.isEmpty && mods.allSatisfy { m in
+            guard let d = moduleDeclarations(m), !d.opaque else { return false }
+            return d.names[name] == nil
+        }
+        return !refuted
+    }
+    let r974aProbe = ProcessInfo.processInfo.environment["CANDOR_R974A_PROBE"] != nil
+    var depApplyTick = 0   // SOUNDNESS R974 (a) — counts joins, so a call can tell it reached a chained entry
     func applyDepEntry(_ de: DepEntry, to qual: String) {
+        depApplyTick += 1
         // ⟨0.39⟩ OBLIGATION 3 — THE JOIN UNIONS, PER KEY. A worklist rather than recursion because a
         // chained entry reached through `dispatchesOn` may itself dispatch (the abstraction's owner is not
         // always the implementor's owner — that is R504's four-package chain), and Swift's local functions
@@ -4210,6 +4249,36 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // the per-fn `invisible` disclosure can name the blind modules in the fn's import scope. A call
             // that DOES resolve to a local unit is covered by transitive propagation of that unit's invisible.
             var resolved = false
+            // SOUNDNESS R974 (a) — A USER WITNESS HANDED TO A CHAINED PACKAGE. A dependency's
+            // `func same<T: Equatable>(_ a: T, _ b: T) -> Bool { a == b }` runs the CALLER's `==`, and its report cannot
+            // say so: the row is pure (its instantiation is its callers'), and ⟨0.39⟩'s `dispatchesOn` has no spelling
+            // for a stdlib-owned requirement. So `same(Noisy(), Noisy())` read ABSENT under chaining while it wrote a
+            // file (executed), and the unchained scan's `invisible` was the only thing that ever said otherwise. The
+            // in-package answer (R951's caller-witness edge) needs the callee's body, which a chained call does not have.
+            //
+            // A DISCLOSURE, NOT A CHARGE: nothing here knows the dependency compares (SPEC §4 ⟨0.39⟩ refuses the
+            // "escaping value" charge as a minted edge). It fires only where the call REACHED a chained package — a
+            // join answered it, or it resolved nowhere in a file that imports one — and only where one of the
+            // argument-carried witnesses can do anything (decided after the graph, `r1071Pending`), so a pure `==`
+            // costs nothing. A call answered by this scan's own body is R951's and is left to it.
+            let r974aTick = depApplyTick
+            defer {
+                if !CallCollector.r974aOff, !call.argWitnesses.isEmpty, !call.path.hasPrefix("<"), !call.argRef,
+                   case let r974aFile = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                   depApplyTick != r974aTick || (!resolved && !deps.chainedPkgs(importing: fileImports[r974aFile] ?? []).isEmpty
+                                                 && r974aUnanswered(call, f, r974aFile)) {
+                    for w in call.argWitnesses {
+                        let targets = Array(resolveQual(w))
+                        guard !targets.isEmpty, let dot = w.lastIndex(of: ".") else { continue }
+                        let member = String(w[w.index(after: dot)...])
+                        let proto = member == "==" ? "Equatable" : member == "<" ? "Comparable" : "Hashable"
+                        if CallCollector.veinBProbe || r974aProbe {
+                            FileHandle.standardError.write("R974ACHAIN \(f.qual) \(call.path) owner=\(call.extOwner ?? "-") unq=\(call.unqualified) join=\(depApplyTick != r974aTick) -> \(w)\n".data(using: .utf8)!)
+                        }
+                        r1071Pending.append((f.qual, targets, "dispatch:\(proto).\(member) witness passed to a chained package"))
+                    }
+                }
+            }
             /// SOUNDNESS R651 — **THE RECEIVER'S TYPE IS IN `localTypes` ONLY BECAUSE THIS PACKAGE
             /// EXTENDS IT.** `CallCollector` sets `extOwner` on a TYPED call at exactly one site — the
             /// typed-local-receiver branch, and only when `declaredTypes` does NOT hold the root — so
@@ -6297,6 +6366,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             let pre = propagate(direct, over: edges)
             for (caller, targets, why) in r1071Pending where !(whyMap[caller]?.contains(why) ?? false) {
                 if targets.contains(where: { !(pre[$0] ?? []).isEmpty }) {
+                    if r974aProbe, why.hasSuffix(" witness passed to a chained package") {
+                        FileHandle.standardError.write("R974AHEDGE \(caller) \(why)\n".data(using: .utf8)!)
+                    }
                     direct[caller, default: []].insert("Unknown")
                     whyMap[caller, default: []].insert(why)
                     changed = true
