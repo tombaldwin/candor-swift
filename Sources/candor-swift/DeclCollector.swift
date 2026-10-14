@@ -336,6 +336,11 @@ final class DeclCollector: SyntaxVisitor {
     /// SOUNDNESS R905 (the platform-element half) — Type -> field -> the field type's DIRECT generic arguments
     /// (`NSCache<NSString, StorageObject<T>>` -> `["NSString", "StorageObject"]`), annotated or constructed.
     var fieldTypeArgs: [String: [String: [String]]] = [:]
+    /// SOUNDNESS R1176 — Type -> stored field -> the stdlib container it is WRITTEN as (`[T]`, `Set<T>`, `[K: V]`) and
+    /// every generic argument that spelling names (`genericArgumentNames`, transitive). Read by CallCollector's
+    /// container-witness model for a field read through implicit or explicit `self` (`items.contains(x)` inside
+    /// `GBox<T>`), which `containerKind` answered only for parameters and annotated locals.
+    var fieldContainersR1176: [String: [String: (kind: String, args: [String])]] = [:]
     /// SOUNDNESS R534 — A PARAMETER'S DECLARED TYPE, SEEING THROUGH `T!`.
     ///
     /// `ImplicitlyUnwrappedOptionalTypeSyntax` is its own node kind, NOT an `OptionalTypeSyntax`, and the
@@ -400,6 +405,11 @@ final class DeclCollector: SyntaxVisitor {
     /// SOUNDNESS R990–R998 §1b KILL SWITCHES — each restores the release's reading of one binder, so the
     /// value-typing fixtures can be SHOWN to fail without a revert. `CANDOR_VT_OFF` turns every one off.
     static let vtOff = ProcessInfo.processInfo.environment["CANDOR_VT_OFF"] != nil
+    /// SOUNDNESS R1176 / R1175 kill switches (R1176: the five in-package witness shapes; R1175: the deterministic,
+    /// untruncated witness walk; R1175C: a CLASS operand's witnesses instead of a walk into its stored properties).
+    static let r1176Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R1176_OFF"] != nil
+    static let r1175Off = ProcessInfo.processInfo.environment["CANDOR_R1175_OFF"] != nil
+    static let r1175cOff = r1175Off || ProcessInfo.processInfo.environment["CANDOR_R1175C_OFF"] != nil
     static let r990Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R990_OFF"] != nil
     static let r905HOff = ProcessInfo.processInfo.environment["CANDOR_R905H_OFF"] != nil   // SOUNDNESS R905 residual
     static let r1010Off = ProcessInfo.processInfo.environment["CANDOR_R1010_OFF"] != nil   // SOUNDNESS R1010
@@ -1447,6 +1457,9 @@ final class DeclCollector: SyntaxVisitor {
                     if let val = dictValueName(ann.type) { fieldDictValue[ty, default: [:]][name] = val }
                     let targs = directGenericArgumentNames(ann.type)
                     if !targs.isEmpty { fieldTypeArgs[ty, default: [:]][name] = targs }   // R905
+                    if !Self.r1176Off, let k = stdlibContainerKindR1176(ann.type) {   // SOUNDNESS R1176
+                        fieldContainersR1176[ty, default: [:]][name] = (k, genericArgumentNames(ann.type))
+                    }
                 } else if let initVal = binding.initializer?.value,
                           let call = initVal.as(FunctionCallExprSyntax.self),
                           let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self) {
@@ -2254,6 +2267,20 @@ func bareGenericName(_ t: TypeSyntax) -> String? {
     else if let o = x.as(ImplicitlyUnwrappedOptionalTypeSyntax.self) { x = o.wrappedType }
     guard let id = x.as(IdentifierTypeSyntax.self), id.genericArgumentClause == nil else { return nil }
     return id.name.text
+}
+
+/// SOUNDNESS R1176 — the stdlib container a WRITTEN type is (`[T]`/`Array<T>`, `Set<T>`, `[K: V]`/`Dictionary<K, V>`),
+/// seeing through one level of Optional; nil for anything else.
+func stdlibContainerKindR1176(_ t: TypeSyntax) -> String? {
+    var x = desugaredType(t)
+    if let o = x.as(OptionalTypeSyntax.self) { x = desugaredType(o.wrappedType) }
+    else if let o = x.as(ImplicitlyUnwrappedOptionalTypeSyntax.self) { x = desugaredType(o.wrappedType) }
+    if x.is(ArrayTypeSyntax.self) { return "array" }
+    if x.is(DictionaryTypeSyntax.self) { return "dictionary" }
+    if let id = x.as(IdentifierTypeSyntax.self), id.name.text == "Set", id.genericArgumentClause?.arguments.count == 1 {
+        return "set"
+    }
+    return nil
 }
 
 func directGenericArgumentNames(_ t: TypeSyntax) -> [String] {

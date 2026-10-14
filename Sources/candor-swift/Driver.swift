@@ -406,6 +406,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var fieldArrayElemNested: [String: [String: String]] = [:]   // R278
     var fieldDictValue: [String: [String: String]] = [:]
     var fieldTypeArgs: [String: [String: [String]]] = [:]   // SOUNDNESS R905
+    var fieldContainersR1176: [String: [String: (kind: String, args: [String])]] = [:]   // SOUNDNESS R1176
     var opaqueFields: [String: Set<String>] = [:]
     var caseAssocAll: [String: Set<String>] = [:]
     var caseAssocMetatypeAll: [String: Set<String>] = [:]   // R585 (b10)
@@ -1021,6 +1022,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (t, fs) in c.fieldArrayElemNested { fieldArrayElemNested[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.fieldDictValue { fieldDictValue[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.fieldTypeArgs { fieldTypeArgs[t, default: [:]].merge(fs) { a, _ in a } }   // R905
+        for (t, fs) in c.fieldContainersR1176 { fieldContainersR1176[t, default: [:]].merge(fs) { a, _ in a } }   // R1176
         for (t, fs) in c.opaqueFields { opaqueFields[t, default: []].formUnion(fs) }
         for (cn, ts) in c.caseAssoc { caseAssocAll[cn, default: []].formUnion(ts) }
         for (cn, ts) in c.caseAssocMetatype { caseAssocMetatypeAll[cn, default: []].formUnion(ts) }   // R585
@@ -2501,7 +2503,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var callsiteArgs: [String: [(caller: String, args: [ArgKind])]] = [:]
     /// SOUNDNESS R951 — the argument TYPES at each resolved call site, beside `callsiteArgs`; and the
     /// comparison witnesses each unit needs from its caller's instantiation (`CallCollector.genericWitnessReqs`).
-    var callsiteArgTypes: [String: [(caller: String, types: [String?], forward: [Int: Int], wit: (labels: [String?], types: [String?])?)]] = [:]
+    var callsiteArgTypes: [String: [(caller: String, types: [String?], forward: [Int: Int], wit: (labels: [String?], types: [String?])?, own: WitnessOwnersR1176?)]] = [:]
     var genericWitnessReqsByUnit: [String: Set<String>] = [:]
     var deferredCallbacks: [String: (indexes: Set<Int>, names: Set<String>)] = [:]
 
@@ -3586,6 +3588,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // `declaredTypes` because those are the spellings the canonicaliser hands on for it (R266/R132): the
     // unit keys' own prefixes, never a guessed leaf. Protocols keep their leaf (the dispatch machinery is
     // keyed by it). Nothing here moves under `CANDOR_AI_OFF=1`.
+    // SOUNDNESS R1175 (C) — each local class's local SUBCLASSES, transitive: `isEqual`/`hash` dispatch dynamically.
+    var classSubtypesR1175: [String: Set<String>] = [:]
+    for (c, sups) in classSupertypesR906 { for s in sups { classSubtypesR1175[s, default: []].insert(c) } }
     // SOUNDNESS R951 — op -> the local types declaring that comparison witness as a static member.
     var opWitnessTypesR951: [String: Set<String>] = [:]
     for f in allFns {
@@ -3867,7 +3872,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                    a.genericNames = g
                                    return a
                                }(),
-                               opWitnessTypes: opWitnessTypesR951)
+                               opWitnessTypes: opWitnessTypesR951,
+                               fieldContainersR1176: fieldContainersR1176,                             // R1176
+                               classNamesR1175: classNamesAll, classSubtypesR1175: classSubtypesR1175) // R1175
         // The locator-move set is flow-INSENSITIVE and must be complete before the first call is collected
         // (a rebind later in the text, or earlier in time inside a loop, still invalidates the claim). The
         // parameter names go with it: a body binder that SHADOWS a parameter is the same hazard, and the
@@ -4201,7 +4208,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         if r1071Probe { FileHandle.standardError.write("VBHIT\tR1071P\tlocal \(f.qual) \(recv ?? "-") -> \(base)\n".data(using: .utf8)!) }
                         for t in targets {
                             edges[f.qual, default: []].insert(t)
-                            callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
+                            callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
                         }
                     } else if !targets.isEmpty {
                         if r1071Probe { FileHandle.standardError.write("VBHIT\tR1071P\tlocal-undecided \(f.qual) \(recv ?? "-") -> \(base)\n".data(using: .utf8)!) }
@@ -4271,7 +4278,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         let targets = Array(resolveQual(w))
                         guard !targets.isEmpty, let dot = w.lastIndex(of: ".") else { continue }
                         let member = String(w[w.index(after: dot)...])
-                        let proto = member == "==" ? "Equatable" : member == "<" ? "Comparable" : "Hashable"
+                        // R1175 (C): a class's `isEqual(_:)` override is its `Equatable` witness
+                        let proto = member == "==" || member == "isEqual" ? "Equatable" : member == "<" ? "Comparable" : "Hashable"
                         if CallCollector.veinBProbe || r974aProbe {
                             FileHandle.standardError.write("R974ACHAIN \(f.qual) \(call.path) owner=\(call.extOwner ?? "-") unq=\(call.unqualified) join=\(depApplyTick != r974aTick) -> \(w)\n".data(using: .utf8)!)
                         }
@@ -4313,7 +4321,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                !localTypes.contains(modName),                       // a real type shadows a module name
                let inMod = freeFnByModule[modName]?[call.leaf], inMod.count == 1 {
                 edges[f.qual, default: []].insert(inMod[0])
-                callsiteArgs[inMod[0], default: []].append((f.qual, call.args)); callsiteArgTypes[inMod[0], default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
+                callsiteArgs[inMod[0], default: []].append((f.qual, call.args)); callsiteArgTypes[inMod[0], default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
                 resolved = true
             } else if call.extOwner == CallCollector.superMarker {
                 // `super.m()` — resolve on the SUPERTYPE chain, never on the enclosing type: for an
@@ -4327,7 +4335,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     for sup in supertypesOf[et] ?? [] where sup != et {
                         for t in resolveQual("\(sup).\(member)") {
                             edges[f.qual, default: []].insert(t)
-                            callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
+                            callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
                             resolved = true
                         }
                     }
@@ -4371,7 +4379,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // VEIN A(i) — the exact overload set of a canonical FULL path (see the loop head).
                     for t in matchOverloadsPath(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
                         resolved = true
                     }
                 } else if overloadedBases.contains(call.path) {
@@ -4379,12 +4387,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         resolved = true
                         guard extensionInitLabelsAdmit(call, t), operatorOperandsAdmit(call, t) else { continue }   // R1047, R1081
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
                     }
                 } else if !typedTargets.isEmpty {
                     for t in typedTargets where extensionInitLabelsAdmit(call, t) && operatorOperandsAdmit(call, t) {   // R1047, R1081
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
                     }
                     resolved = true
                 } else if let dot = call.path.lastIndex(of: "."),
@@ -4416,13 +4424,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             for t in matchOverloads(base, argc, call.argTypes, swiftModuleOf(f.loc))
                                 where operatorOperandsAdmit(call, t) || r1081Refused(type) {   // R1081
                                 edges[f.qual, default: []].insert(t)
-                                callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
+                                callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
                                 resolved = true
                             }
                         } else {
                             for t in resolveQual(base) where operatorOperandsAdmit(call, t) || r1081Refused(type) {   // R1081
                                 edges[f.qual, default: []].insert(t)
-                                callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
+                                callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
                                 resolved = true
                             }
                         }
@@ -4792,7 +4800,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     resolved = true
                     for t in argView(inheritedTargets).sorted() {
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
                         resolved = true
                     }
                 }
@@ -4838,12 +4846,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc))
                         where operatorOperandsAdmit(call, t) {   // R1081
                         edges[f.qual, default: []].insert(t)
-                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
                         resolved = true
                     }
                 } else if let targets = freeFnByName[call.path], targets.count == 1, operatorOperandsAdmit(call, targets[0]) {   // R1081
                     edges[f.qual, default: []].insert(targets[0])
-                    callsiteArgs[targets[0], default: []].append((f.qual, call.args)); callsiteArgTypes[targets[0], default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs))
+                    callsiteArgs[targets[0], default: []].append((f.qual, call.args)); callsiteArgTypes[targets[0], default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
                     resolved = true
                 } else if localTypes.contains(call.path), overloadedBases.contains("\(call.path).init") {
                     // R1047 — `resolved` keeps the release's answer (a matched overload); only the EDGE is filtered.
@@ -6287,6 +6295,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         return found ?? nil
     }
+    // SOUNDNESS R1176 — unit -> its enclosing type's simple name: a receiver's generic arguments answer only a method of
+    // the type they were read for.
+    var enclosingLeafR1176: [String: String] = [:]
+    if !CallCollector.r1176Off {
+        for f in allFns { if let et = f.enclosingType { enclosingLeafR1176[f.qual] = CallCollector.leafR1176(et) } }
+    }
     if !CallCollector.r951Off, !CallCollector.r974Off {
         var changed = true, rounds = 0
         while changed, rounds < 32 {
@@ -6309,6 +6323,33 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         }
                     }
                 }
+                // SOUNDNESS R1176 — the forwards a GENERIC TYPE's method makes: a requirement on the receiver's
+                // argument k is the caller's own `s<k>` when the receiver is its `self`, or the caller's `s<j>` when
+                // the receiver's argument k is written as the caller's type parameter j; a requirement on argument
+                // i is the caller's `s<j>` when that argument is typed by the caller's type parameter j.
+                if !CallCollector.r1176Off {
+                    for site in callsiteArgTypes[callee] ?? [] {
+                        guard let own = site.own else { continue }
+                        for req in reqs {
+                            let parts = req.split(separator: ":", maxSplits: 1).map(String.init)
+                            guard parts.count == 2 else { continue }
+                            var mine: [String] = []
+                            if parts[0].hasPrefix("s"), let k = Int(parts[0].dropFirst()) {
+                                if own.recvSelf, enclosingLeafR1176[site.caller] != nil,
+                                   enclosingLeafR1176[site.caller] == enclosingLeafR1176[callee] { mine.append("s\(k):\(parts[1])") }
+                                if let j = own.recvTypeGen[k], own.recvOwner.map({ $0 == enclosingLeafR1176[callee] }) ?? false {
+                                    mine.append("s\(j):\(parts[1])")
+                                }
+                            } else if let idx = Int(parts[0]) {
+                                var pos: [Int] = []
+                                if idx < site.types.count || (site.wit?.labels.allSatisfy { $0 == nil } ?? false) { pos.append(idx) }
+                                if let p = witnessPos(callee, site.wit?.labels, idx), !pos.contains(p) { pos.append(p) }
+                                for p in pos { if let j = own.argTypeGen[p] { mine.append("s\(j):\(parts[1])") } }
+                            }
+                            for m in mine where genericWitnessReqsByUnit[site.caller, default: []].insert(m).inserted { changed = true }
+                        }
+                    }
+                }
             }
         }
     }
@@ -6317,6 +6358,31 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             for site in callsiteArgTypes[callee] ?? [] {
                 for req in reqs {
                     let parts = req.split(separator: ":", maxSplits: 1).map(String.init)
+                    // SOUNDNESS R1176 — the witnesses the call site's ARGUMENT (or receiver argument) carries, read off
+                    // its written type, generic arguments, literal elements and synthesized stored properties.
+                    if !CallCollector.r1176Off, parts.count == 2, let own = site.own {
+                        var lists: [[String]] = []
+                        if parts[0].hasPrefix("s"), let k = Int(parts[0].dropFirst()) {
+                            if k < own.recv.count, own.recvOwner.map({ $0 == enclosingLeafR1176[callee] }) ?? false { lists.append(own.recv[k]) }
+                        } else if let idx = Int(parts[0]) {
+                            if idx < own.args.count, idx < site.types.count || (site.wit?.labels.allSatisfy { $0 == nil } ?? false) {
+                                lists.append(own.args[idx])
+                            }
+                            if let p = witnessPos(callee, site.wit?.labels, idx), p < own.args.count { lists.append(own.args[p]) }
+                        }
+                        let module = swiftModuleOf(locOf[site.caller] ?? "")
+                        for e in lists.joined() where e.hasPrefix("\(parts[1])|") {
+                            let path = String(e.dropFirst(parts[1].count + 1))
+                            let owner = String(path[..<(path.lastIndex(of: ".") ?? path.endIndex)])
+                            let ts = overloadedBases.contains(path) ? Set(matchOverloads(path, path.hasSuffix(".isEqual") ? 1 : (parts[1] == "hash" ? 1 : 2),
+                                                                                       path.hasSuffix(".isEqual") || parts[1] == "hash" ? [nil] : [owner, owner], module))
+                                                                  : resolveQual(path)
+                            if CallCollector.r951Probe, !ts.isEmpty {
+                                FileHandle.standardError.write("R1176CALLER \(site.caller) -> \(callee) \(path)\n".data(using: .utf8)!)
+                            }
+                            edges[site.caller, default: []].formUnion(ts)
+                        }
+                    }
                     guard parts.count == 2, let idx = Int(parts[0]) else { continue }
                     var xs: [String] = []
                     if idx < site.types.count, let x = site.types[idx], localTypes.contains(x) { xs.append(x) }

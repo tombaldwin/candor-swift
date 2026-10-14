@@ -10,6 +10,30 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ The report no longer differs between identical runs, and the comparison-witness walk is complete
+  (SOUNDNESS R1175).** The walk from a compared type to the `==`/`<`/`hash` witnesses it runs stopped after 32
+  types and visited each type's stored properties in `Dictionary` order, which Swift seeds per process. So the set
+  of witnesses reached changed from run to run (published 0.40.10: wikipedia-ios 2 distinct reports in 10 identical
+  runs, iina 2 in 10; every other corpus project stable), and a witness more than 32 types deep was never reached
+  (executed: a synthesized `==` 34 types down writes a file; the release read `[]`, `deny Fs` 0 → 1 now). The walk is
+  now uncapped (its `seen` set bounds it) and visited in sorted order: 10 of 10 identical runs give byte-identical
+  reports on both projects, and three full-corpus runs (73 projects, 219 files) are byte-identical.
+  **And a CLASS is no longer walked into its stored properties** — a class has no synthesized `==` or `hash`, so the
+  walk fabricated edges (`self == other` in a view controller reached `WMFProject.==`, the edge that came and went).
+  A class operand now reaches the `static func ==` its local hierarchy declares and any `isEqual(_:)` / `hash`
+  override in the hierarchy (dynamic dispatch), which also closes a silence: an `NSObject` subclass's effectful
+  `isEqual` override run by `==` was absent (executed, `deny Fs` 0 → 1). Kill switches: `CANDOR_R1175_OFF=1`
+  (both halves), `CANDOR_R1175C_OFF=1` (the class half).
+- **⚠ Five in-package spellings of a comparison now reach the user witness they run (SOUNDNESS R1176).** Each was
+  ABSENT over an effectful `==`/`hash` (executed): `[T] == [T]` inside a generic the caller instantiates; `Set(xs)`;
+  a generic instantiated with a type whose witness is SYNTHESIZED (`Wrap { var n: Noisy }`); a method of a generic
+  TYPE (`GBox<Noisy>().add(x)` running `items.contains(x)`), including through `self` and through another generic
+  type's field; and an unannotated `var s = Set<Noisy>()` (or `[Noisy]()`, `[K: V]()`, an array literal of one
+  constructed type). Resolved per call site from what the argument or receiver is written as — never a union over
+  the package. Corpus (73 projects) vs 0.40.10: no row lost a concrete effect or an `Unknown`, no row removed,
+  ~1,250 new witness edges, 0 rows gained a concrete effect, 58 rows newly carry `Unknown` reached through a real
+  witness that already discloses (0.04%). Kill switch: `CANDOR_R1176_OFF=1`.
+
 ## [0.40.10] — 2026-10-14
 
 - **⚠ A user `Equatable` / `Comparable` / `Hashable` witness handed to a CHAINED package is now disclosed

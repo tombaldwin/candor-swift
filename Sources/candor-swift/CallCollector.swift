@@ -110,6 +110,26 @@ final class LocatorMoveScanner: SyntaxVisitor {
 /// One argument's disposition at a call site: a closure literal (its body is already charged to
 /// the passer lexically), a named reference (resolvable to a unit), or opaque.
 enum ArgKind { case closure, named(String), opaque }
+/// SOUNDNESS R1176 — what a call site says about the comparison witnesses its callee may run on the caller's behalf,
+/// for the Driver's caller-witness answering (`genericWitnessReqs`). Each entry is `<w>|<Type.member>`: the requested
+/// witness (`==`, `<`, `hash`) and a member that answers it (`Noisy.==`, a synthesized type's stored-property
+/// witness, a class's `isEqual` override).
+///   · `args[i]`   — the witnesses argument i carries (its type, its written generic arguments, a literal's elements),
+///                   so a requirement `<i>:<w>` reaches through `[T]`, `T?` and a synthesized wrapper, not only a
+///                   bare `T` whose argument type declares the witness itself;
+///   · `recv[k]`   — the same for generic argument k of the RECEIVER (`GBox<Noisy>().add(x)`), answering `s<k>:<w>`
+///                   on a method of a generic TYPE; `recvOwner` is the type those arguments belong to;
+///   · `recvSelf`  — the receiver is this unit's own `self`, so `s<k>:<w>` passes through to the caller unchanged;
+///   · `argTypeGen[i] = k` / `recvTypeGen[j] = k` — argument i (receiver argument j) is typed by THIS unit's type's
+///                   generic parameter k, so the requirement becomes this unit's `s<k>:<w>`.
+struct WitnessOwnersR1176 {
+    var args: [[String]] = []
+    var recv: [[String]] = []
+    var recvOwner: String? = nil
+    var recvSelf = false
+    var argTypeGen: [Int: Int] = [:]
+    var recvTypeGen: [Int: Int] = [:]
+}
 struct Call { var path: String; var leaf: String; var strArg: String?; var typed: Bool; var args: [ArgKind] = []
               var argTypes: [String?] = []     // inferred simple type per positional arg (nil = unknown) — overloads
               /// SOUNDNESS R1086 — on a binary-operator call, aligned with `argTypes`: the operand's type is a GUESS (an
@@ -172,6 +192,8 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               var witnessArgs: (labels: [String?], types: [String?])? = nil
               /// SOUNDNESS R974 (a) — see `CallCollector.argumentWitnesses`. Empty = none (or not recorded).
               var argWitnesses: [String] = []
+              /// SOUNDNESS R1176 — see `WitnessOwnersR1176`. nil = nothing recorded.
+              var wOwnersR1176: WitnessOwnersR1176? = nil
               /// SOUNDNESS R1065 — a `<untyped>.` marker from `depInstanceMemberCallee`: its MISS discloses only where
               /// the member's leaf could have a body someone answers (a local type's member, or a chained package's).
               var instanceHop: Bool = false
@@ -356,6 +378,14 @@ final class CallCollector: SyntaxVisitor {
     /// from the Driver. A local `Equatable` type NOT in it has a SYNTHESIZED witness, which compares its
     /// stored properties.
     let opWitnessTypes: [String: Set<String>]
+    /// SOUNDNESS R1176 — see `DeclCollector.fieldContainersR1176`.
+    let fieldContainersR1176: [String: [String: (kind: String, args: [String])]]
+    /// SOUNDNESS R1176 — an unannotated local's container kind and written generic arguments, read off its
+    /// initializer (`var s = Set<Noisy>()`, `[Noisy]()`, `[K: V]()`). A name bound to two different kinds is dropped.
+    var localInitContainersR1176: [String: (kind: String, args: [String])] = [:]
+    /// SOUNDNESS R1175 — the scan's declared CLASS simple names, and each local class's local SUBCLASSES (transitive).
+    let classNamesR1175: Set<String>
+    let classSubtypesR1175: [String: Set<String>]
     /// R951 — `let x: [Noisy] = …` / `var t: Tiny<Noisy>`: the generic arguments of annotated locals.
     var localTypeArgs: [String: [String]] = [:]
     /// SOUNDNESS R905 (residual) — local name -> (platform generic owner, its written generic arguments), for a
@@ -373,6 +403,7 @@ final class CallCollector: SyntaxVisitor {
     let genericParamNamesFn: Set<String>            // SOUNDNESS R974 (c) — this function's own generic parameters
     let genericBoundsR951: [String: String]
     static let r951Off = ProcessInfo.processInfo.environment["CANDOR_R951_OFF"] != nil
+    static let r1176Off = DeclCollector.r1176Off   // SOUNDNESS R1176
     static let r951Probe = ProcessInfo.processInfo.environment["CANDOR_R951_PROBE"] != nil
     /// VEIN A(i) — the scope `canonicalTypeRef` resolves a type spelling in. See `AiTypeIndex`.
     let ai: AiTypeIndex
@@ -917,8 +948,13 @@ final class CallCollector: SyntaxVisitor {
          closureFields: [String: Set<String>], mutableClosureFields: [String: Set<String>] = [:],
          moduleConstStrings: [String: String] = [:],
          importedModules: Set<String> = [], projectModules: Set<String> = [], deps: DepIndex = DepIndex(),
-         ai: AiTypeIndex = AiTypeIndex(), opWitnessTypes: [String: Set<String>] = [:]) {
+         ai: AiTypeIndex = AiTypeIndex(), opWitnessTypes: [String: Set<String>] = [:],
+         fieldContainersR1176: [String: [String: (kind: String, args: [String])]] = [:],
+         classNamesR1175: Set<String> = [], classSubtypesR1175: [String: Set<String>] = [:]) {
         self.opWitnessTypes = opWitnessTypes
+        self.fieldContainersR1176 = fieldContainersR1176
+        self.classNamesR1175 = classNamesR1175
+        self.classSubtypesR1175 = classSubtypesR1175
         self.paramTypeArgsR951 = info.paramTypeArgs
         self.paramIndexR951 = info.paramIndex
         self.paramTypesR951 = info.params
@@ -7358,6 +7394,10 @@ final class CallCollector: SyntaxVisitor {
                 })
                 for j in callsBefore..<calls.count where calls[j].witnessArgs == nil { calls[j].witnessArgs = w }
             }
+            // SOUNDNESS R1176 — the per-argument and receiver witnesses, for the Driver's caller-witness answering.
+            if !Self.r1176Off, callsBefore < calls.count, let o = witnessOwnersR1176(node) {
+                for j in callsBefore..<calls.count where calls[j].wOwnersR1176 == nil { calls[j].wOwnersR1176 = o }
+            }
             // SOUNDNESS R974 (a) — the argument-carried witnesses, for the Driver's chained-call disclosure.
             if !Self.r974aOff, callsBefore < calls.count, !node.arguments.isEmpty {
                 let aw = argumentWitnesses(node.arguments)
@@ -7411,6 +7451,7 @@ final class CallCollector: SyntaxVisitor {
         // VECTOR 4 — `coll.sorted()` / `.max()` / `.min()` over a local element type runs its `<`.
         edgeComparableWitness(node)
         modelContainerWitnesses(node)   // SOUNDNESS R974 (b)
+        modelSetInitWitnesses(node)     // SOUNDNESS R1176
         // A LOCAL function/method passed BY REFERENCE as an argument (`xs.map(loadFree)`,
         // `xs.map(self.load)`) may be INVOKED by the callee, so its effects are reachable here. The
         // precise callback-flow only resolves a LOCAL callee's invoked params; a non-local HOF (map/
@@ -9274,16 +9315,40 @@ final class CallCollector: SyntaxVisitor {
     }
     private func comparisonWitnesses(_ w: String, _ operand: ExprSyntax, argIndex: Int? = nil, arity: Int = 2) {
         var targets: [String] = []
-        if let dr = Self.peel(operand).as(DeclReferenceExprSyntax.self) {
-            let n = dr.baseName.text
+        // SOUNDNESS R1176 — a stored field of the enclosing type read through `self` (`items`, `self.items`).
+        let selfField = Self.r1176Off ? nil : selfFieldRefR1176(operand)
+        if let n = selfField ?? Self.peel(operand).as(DeclReferenceExprSyntax.self)?.baseName.text {
             // SOUNDNESS R974 (b) — `argIndex` narrows to ONE generic argument (a dictionary's KEY is argument 0).
-            let targs = paramTypeArgsR951[n] ?? localTypeArgs[n] ?? []
+            let targs = selfField != nil ? (selfFieldContainerR1176(n)?.args ?? [])
+                : (paramTypeArgsR951[n] ?? localTypeArgs[n] ?? (Self.r1176Off ? nil : localInitContainersR1176[n]?.args) ?? [])
             for (i, x) in targs.enumerated() where argIndex == nil || i == argIndex { targets.append(dealias(x)) }
-            if let idx = paramIndexR951[n], let t = paramTypesR951[n] ?? vars[n], !localTypes.contains(t),
+            if selfField == nil, let idx = paramIndexR951[n], let t = paramTypesR951[n] ?? vars[n], !localTypes.contains(t),
                genericBoundsR951[t] != nil {
                 // R974 (a) REACH — a unit whose own body needs its CALLER's witness: the population a cross-package
                 // answer (a wire field, or a hedge) would have to speak for.
                 if genericWitnessReqs.insert("\(idx):\(w)").inserted { vbHit("R974A", "\(idx):\(w)") }
+            }
+            // SOUNDNESS R1176 — the instantiation the comparison runs is NAMED BY A GENERIC PARAMETER somewhere in
+            // the operand's written type, not only when the operand IS that parameter: `a == b` over `a: [T]`,
+            // `Set(xs)` over `xs: [T]`, `items.contains(x)` over `GBox<T>.items: [T]`. A parameter of THIS function
+            // is the caller's argument (`<idx>:<w>`); a parameter of the enclosing TYPE is the receiver's
+            // (`s<k>:<w>`). Both are answered per call site by the Driver, never by a union over the package.
+            if !Self.r1176Off {
+                let sel = targs.enumerated().filter { argIndex == nil || $0.offset == argIndex }.map { $0.element }
+                if selfField == nil, let idx = paramIndexR951[n], sel.contains(where: { genericParamNamesFn.contains($0) }),
+                   genericWitnessReqs.insert("\(idx):\(w)").inserted { vbHit("R1176", "fn \(idx):\(w)") }
+                var tparams = sel
+                if selfField == nil, paramIndexR951[n] != nil, let td = paramDeclTypesR996[n], let g = bareGenericName(td) {
+                    tparams.append(g)   // `x: T`, T the TYPE's parameter
+                }
+                if let f = selfField, let et = enclosingType,
+                   let k = localGenerics.fieldParams["\(et).\(f)"] ?? localGenerics.fieldParams["\(Self.leafR1176(et)).\(f)"],
+                   genericWitnessReqs.insert("s\(k):\(w)").inserted { vbHit("R1176", "self field s\(k):\(w)") }
+                for t in tparams where !genericParamNamesFn.contains(t) {
+                    if let k = typeGenericIndexR1176(t), genericWitnessReqs.insert("s\(k):\(w)").inserted {
+                        vbHit("R1176", "type s\(k):\(w)")
+                    }
+                }
             }
         }
         let r = rootOf(operand)
@@ -9293,29 +9358,97 @@ final class CallCollector: SyntaxVisitor {
         if let t = r.root, r.isVar, !r.opaqueHop, localTypes.contains(t), !(opWitnessTypes[w]?.contains(t) ?? false) {
             targets.append(t)   // synthesized: walked into its stored properties below
         }
-        for x in witnessOwners(w, seeds: targets, probe: true) {
-            if Self.r951Probe { FileHandle.standardError.write("R951HIT \(x).\(w)\n".data(using: .utf8)!) }
-            calls.append(Call(path: "\(x).\(w)", leaf: w, strArg: nil, typed: true,
-                              args: Array(repeating: .opaque, count: arity),
-                              argTypes: arity == 2 ? [x, x] : Array(repeating: nil, count: arity)))
+        for path in witnessOwners(w, seeds: targets, probe: true) {
+            if Self.r951Probe { FileHandle.standardError.write("R951HIT \(path)\n".data(using: .utf8)!) }
+            calls.append(Self.witnessCallR1176(path, w, arity: arity))
         }
+    }
+    /// The edge for one witness path: `Noisy.==` (binary, typed by its owner), `Noisy.hash` (unary), or a class's
+    /// `isEqual` override (one argument), which `NSObject`'s `==` runs.
+    static func witnessCallR1176(_ path: String, _ w: String, arity: Int) -> Call {
+        let leaf = String(path.split(separator: ".").last ?? Substring(w))
+        let owner = path.hasSuffix(".\(leaf)") ? String(path.dropLast(leaf.count + 1)) : path
+        if leaf == "isEqual" {
+            return Call(path: path, leaf: leaf, strArg: nil, typed: true, args: [.opaque], argTypes: [nil])
+        }
+        return Call(path: path, leaf: leaf, strArg: nil, typed: true, args: Array(repeating: .opaque, count: arity),
+                    argTypes: arity == 2 ? [owner, owner] : Array(repeating: nil, count: arity))
+    }
+    static func leafR1176(_ t: String) -> String { t.split(separator: ".").last.map(String.init) ?? t }
+    /// SOUNDNESS R1176 — `t` is generic parameter k of the enclosing TYPE (its declared order).
+    private func typeGenericIndexR1176(_ t: String) -> Int? {
+        guard let et = enclosingType else { return nil }
+        return (localGenerics.order[et] ?? localGenerics.order[Self.leafR1176(et)])?.firstIndex(of: t)
+    }
+    /// SOUNDNESS R1176 — `items` (implicit self) or `self.items`, where the enclosing type declares stored field `items`
+    /// and no binder in this unit shadows the name.
+    private func selfFieldRefR1176(_ raw: ExprSyntax) -> String? {
+        guard let et = enclosingType else { return nil }
+        let e = Self.peel(raw)
+        var n: String? = nil
+        if let ma = e.as(MemberAccessExprSyntax.self), let b = ma.base.map(Self.peel)?.as(DeclReferenceExprSyntax.self),
+           b.baseName.text == "self" {
+            n = ma.declName.baseName.text
+        } else if let dr = e.as(DeclReferenceExprSyntax.self) {
+            let x = dr.baseName.text
+            guard vars[x] == nil, !isBoundLocal(x), !binderShadow.contains(x), paramIndexR951[x] == nil,
+                  localTypeArgs[x] == nil, localInitContainersR1176[x] == nil, !multiplyBoundNames.contains(x) else { return nil }
+            n = x
+        }
+        guard let f = n else { return nil }
+        let declares = fields[et]?[f] != nil || fields[Self.leafR1176(et)]?[f] != nil
+            || fieldContainersR1176[et]?[f] != nil || fieldContainersR1176[Self.leafR1176(et)]?[f] != nil
+        return declares ? f : nil
+    }
+    private func selfFieldContainerR1176(_ f: String) -> (kind: String, args: [String])? {
+        guard let et = enclosingType else { return nil }
+        return fieldContainersR1176[et]?[f] ?? fieldContainersR1176[Self.leafR1176(et)]?[f]
+    }
+    /// SOUNDNESS R1175 — `x` is a CLASS this scan declares, named unambiguously (a shared simple name keeps the walk).
+    private func knownClassR1175(_ x: String) -> String? {
+        let leaf = Self.leafR1176(x)
+        guard classNamesR1175.contains(leaf), (ai.pathsByLeaf[leaf]?.count ?? 0) <= 1 else { return nil }
+        return leaf
     }
     /// R951's witness walk, shared by the comparison edge above and R974 (a)'s chained-call disclosure below: from
     /// `seeds`, the local types that DECLARE witness `w`, a type without its own witness walked into its STORED
     /// properties (its synthesized conformance compares each). `probe` keeps R1105W's REACH lines counting only
     /// the comparison edge, as they did before this was extracted.
+    ///
+    /// Returns MEMBER PATHS (`Noisy.==`, `LoudObj.isEqual`).
+    ///
+    /// SOUNDNESS R1175 — THE WALK IS COMPLETE AND ORDER-FREE. It stopped after 32 types and visited each type's fields
+    /// in `Dictionary` order, which Swift seeds per process — so which witnesses a comparison reached changed from
+    /// one run to the next (wikipedia-ios `isRootTabView` gained `WMFProject.==` in 3 of 6 identical runs), and a
+    /// witness 33 types deep was never reached at all (executed: `deep` writes a file, the release read `[]`). The
+    /// `seen` set already bounds it; the fields are visited sorted.
+    /// SOUNDNESS R1175 (C) — A CLASS HAS NO SYNTHESIZED `==` OR `hash`. Comparing two instances runs a `static func ==`
+    /// some class in its hierarchy declares, or — for an `NSObject` subclass — `isEqual(_:)`, dynamically dispatched,
+    /// so any override in the hierarchy (`hash` likewise). It never compares the stored properties, which is what the
+    /// walk charged: `self == other` in a view controller reached every model type its fields held.
     private func witnessOwners(_ w: String, seeds: [String], probe: Bool) -> [String] {
         var out: [String] = []
+        func add(_ p: String) { if !out.contains(p) { out.append(p) } }
         var seen = Set<String>(), queue = seeds
         while let x = queue.popLast() {
-            guard seen.insert(x).inserted, seen.count < 32, localTypes.contains(x) else { continue }
+            guard seen.insert(x).inserted, !DeclCollector.r1175Off || seen.count < 32, localTypes.contains(x) else { continue }
             // A SHARED simple name (`Index`, `Storage`) names several types and the spelling here does not say
             // which; edging `Index.<` would union every `*.Index.<` in the package — the over-charge measured on
             // swift-nio's `BetterHTTPParser.validateHeaderLength` in this change's first A/B. Followed only when
             // the name is one type (or already a full path the canonicaliser handed on).
             if !x.contains("."), (ai.pathsByLeaf[x]?.count ?? 0) > 1 { continue }
-            if opWitnessTypes[w]?.contains(x) ?? false {
-                out.append(x)
+            // (C) is asked FIRST: a class that declares its own `==` is still an `NSObject` whose `Set`/`Dictionary`
+            // operations run the inherited `Equatable` witness — `isEqual(_:)` — so both are its witnesses (a union).
+            if !DeclCollector.r1175cOff, let cls = knownClassR1175(x) {
+                if probe { vbHit("R1175C", "class \(cls) \(w)") }
+                let family = [cls] + (classSupertypes[cls] ?? []).sorted() + (classSubtypesR1175[cls] ?? []).sorted()
+                for c in family {
+                    if opWitnessTypes[w]?.contains(c) ?? false { add("\(c).\(w)") }
+                    if w == "==", memberUnitKeys.contains("\(c).isEqual") { add("\(c).isEqual") }
+                    if w == "hash", memberUnitKeys.contains("\(c).hash") { add("\(c).hash") }
+                }
+            } else if opWitnessTypes[w]?.contains(x) ?? false {
+                add("\(x).\(w)")
             } else if Self.r1105wOff || declaredTypes.contains(x) || declaredTypes.contains(String(x.split(separator: ".").last ?? ""))
                         || { if probe { vbHit("R1105W", "extended-only \(x)") }; return false }() {
                 // a synthesized witness compares every stored property (an enum: every payload)
@@ -9326,8 +9459,15 @@ final class CallCollector: SyntaxVisitor {
                 // reached `URLQueryFragment.hash` through exactly that walk (executed pure).
                 let computed = Self.r1105wOff ? [] : (Self.computedFieldNames[x] ?? [])
                 if probe, Self.veinBProbe, !(fields[x] ?? [:]).keys.filter(computed.contains).isEmpty { vbHit("R1105W", "computed \(x)") }
-                for (fname, fi) in fields[x] ?? [:] where !computed.contains(fname) {
+                let fs = fields[x] ?? [:]
+                let ordered = DeclCollector.r1175Off ? Array(fs) : fs.sorted { $0.key < $1.key }
+                for (fname, fi) in ordered where !computed.contains(fname) {
                     if let fn = fi.name, !fi.isFunction { queue.append(dealias(fn)) }
+                    // SOUNDNESS R1176 — a container-typed field compares its ELEMENTS (`var n: [Noisy]`), whose
+                    // names `fields` does not hold.
+                    if !Self.r1176Off, let c = fieldContainersR1176[x]?[fname] ?? fieldContainersR1176[Self.leafR1176(x)]?[fname] {
+                        for a in c.args { queue.append(dealias(a)) }
+                    }
                 }
             }
         }
@@ -9367,9 +9507,114 @@ final class CallCollector: SyntaxVisitor {
         guard seeds.contains(where: { localTypes.contains($0) }) else { return [] }
         var out: [String] = []
         for w in ["==", "<", "hash"] {
-            for x in witnessOwners(w, seeds: seeds, probe: false) where !out.contains("\(x).\(w)") { out.append("\(x).\(w)") }
+            for p in witnessOwners(w, seeds: seeds, probe: false) where !out.contains(p) { out.append(p) }
         }
         return out
+    }
+    /// SOUNDNESS R1176 — the types one argument expression says it carries: its tracked type, the written generic
+    /// arguments of a parameter / local / self field, an array or dictionary literal's elements (the same seeds
+    /// R974 (a)'s `argumentWitnesses` reads, per argument).
+    private func argSeedsR1176(_ raw: ExprSyntax, depth: Int = 0) -> [String] {
+        var seeds: [String] = []
+        var e = Self.peel(raw)
+        if let io = e.as(InOutExprSyntax.self) { e = Self.peel(io.expression) }
+        if e.is(ClosureExprSyntax.self) { return [] }
+        if let f = selfFieldRefR1176(e), let c = selfFieldContainerR1176(f) { seeds.append(contentsOf: c.args.map { dealias($0) }) }
+        if let dr = e.as(DeclReferenceExprSyntax.self) {
+            let n = dr.baseName.text
+            seeds.append(contentsOf: (paramTypeArgsR951[n] ?? localTypeArgs[n] ?? localInitContainersR1176[n]?.args ?? []).map { dealias($0) })
+        }
+        if depth < 3, let arr = e.as(ArrayExprSyntax.self) {
+            for el in arr.elements { seeds.append(contentsOf: argSeedsR1176(el.expression, depth: depth + 1)) }
+        }
+        if depth < 3, let dict = e.as(DictionaryExprSyntax.self), case .elements(let els) = dict.content {
+            for el in els {
+                seeds.append(contentsOf: argSeedsR1176(el.key, depth: depth + 1))
+                seeds.append(contentsOf: argSeedsR1176(el.value, depth: depth + 1))
+            }
+        }
+        let r = rootOf(e)
+        if let t = r.root, r.isVar, !r.opaqueHop { seeds.append(t) }
+        return seeds
+    }
+    /// `<w>|<path>` for every witness `seeds` reach (see `WitnessOwnersR1176`).
+    private func ownersR1176(_ seeds: [String]) -> [String] {
+        guard seeds.contains(where: { localTypes.contains($0) }) else { return [] }
+        var out: [String] = []
+        for w in ["==", "<", "hash"] { for p in witnessOwners(w, seeds: seeds, probe: false) { out.append("\(w)|\(p)") } }
+        return out
+    }
+    /// SOUNDNESS R1176 — fills `Call.wOwnersR1176` for the calls one call expression produced.
+    fileprivate func witnessOwnersR1176(_ node: FunctionCallExprSyntax) -> WitnessOwnersR1176? {
+        guard !Self.r1176Off else { return nil }
+        var o = WitnessOwnersR1176()
+        var any = false
+        for (i, a) in node.arguments.enumerated() {
+            let ow = ownersR1176(argSeedsR1176(a.expression))
+            o.args.append(ow); if !ow.isEmpty { any = true }
+            // the argument is typed by this unit's TYPE's generic parameter: a parameter `x: T`, or a self field `v: T`
+            var e = Self.peel(a.expression)
+            if let io = e.as(InOutExprSyntax.self) { e = Self.peel(io.expression) }
+            if let f = selfFieldRefR1176(e), let et = enclosingType,
+               let k = localGenerics.fieldParams["\(et).\(f)"] ?? localGenerics.fieldParams["\(Self.leafR1176(et)).\(f)"] {
+                o.argTypeGen[i] = k; any = true
+            } else if let n = e.as(DeclReferenceExprSyntax.self)?.baseName.text, paramIndexR951[n] != nil,
+                      let td = paramDeclTypesR996[n], let g = bareGenericName(td), !genericParamNamesFn.contains(g),
+                      let k = typeGenericIndexR1176(g) {
+                o.argTypeGen[i] = k; any = true
+            }
+        }
+        // the receiver: `b.add(x)` with `b: GBox<Noisy>`, a constructor `GBox<Noisy>(…)`, or this unit's own `self`
+        let callee = Self.peel(node.calledExpression)
+        var recvExpr: ExprSyntax? = nil
+        if let ma = callee.as(MemberAccessExprSyntax.self), let b = ma.base {
+            if Self.peel(b).as(DeclReferenceExprSyntax.self)?.baseName.text == "self" { o.recvSelf = true; any = true }
+            else { recvExpr = b }
+        } else if callee.is(DeclReferenceExprSyntax.self), enclosingType != nil,
+                  callee.as(DeclReferenceExprSyntax.self)?.baseName.text.first?.isUppercase == false {
+            o.recvSelf = true; any = true   // a bare `add(x)` inside a method is `self.add(x)` (or a free function)
+        }
+        if callee.is(GenericSpecializationExprSyntax.self)
+            || (callee.as(DeclReferenceExprSyntax.self)?.baseName.text.first?.isUppercase ?? false) {
+            recvExpr = ExprSyntax(node)
+        }
+        if let r = recvExpr, !localGenerics.order.isEmpty, let (owner, args) = localGenericArgs(r, 0) {
+            o.recvOwner = owner
+            for (k, x) in args.enumerated() {
+                guard let x = x else { o.recv.append([]); continue }
+                var names: [String] = []
+                func flat(_ a: LocalGenericArg) { names.append(a.name); for y in a.args { if let y = y { flat(y) } } }
+                flat(x)
+                if let g = typeGenericIndexR1176(x.name), !genericParamNamesFn.contains(x.name) { o.recvTypeGen[k] = g }
+                let ow = ownersR1176(names.map { dealias($0) })
+                o.recv.append(ow)
+                if !ow.isEmpty || o.recvTypeGen[k] != nil { any = true }
+            }
+        }
+        return any ? o : nil
+    }
+    /// SOUNDNESS R1176 — `Set(xs)` / `Set<E>(xs)` hashes (and, on a collision, compares) every element of `xs`.
+    private func modelSetInitWitnesses(_ node: FunctionCallExprSyntax) {
+        guard !Self.r1176Off, node.arguments.count == 1, node.arguments.first?.label == nil, node.trailingClosure == nil,
+              !localTypes.contains("Set") else { return }
+        let callee = Self.peel(node.calledExpression)
+        var spec: [String] = []
+        if let g = callee.as(GenericSpecializationExprSyntax.self), Self.peel(g.expression).as(DeclReferenceExprSyntax.self)?.baseName.text == "Set" {
+            for a in g.genericArgumentClause.arguments { if let t = a.argument.as(TypeSyntax.self) { spec.append(contentsOf: [typeName(t).name].compactMap { $0 } + genericArgumentNames(t)) } }
+        } else if callee.as(DeclReferenceExprSyntax.self)?.baseName.text != "Set" { return }
+        let arg = node.arguments.first!.expression
+        if Self.peel(arg).is(ClosureExprSyntax.self) { return }
+        vbHit("R1176", "Set(init)")
+        comparisonWitnesses("hash", arg, arity: 1); comparisonWitnesses("==", arg)
+        var seeds = spec.map { dealias($0) }
+        if let arr = Self.peel(arg).as(ArrayExprSyntax.self) {
+            for el in arr.elements { seeds.append(contentsOf: argSeedsR1176(el.expression, depth: 1)) }
+        } else if !(Self.peel(arg).is(DeclReferenceExprSyntax.self)) {
+            seeds.append(contentsOf: argSeedsR1176(arg))
+        }
+        for w in ["hash", "=="] {
+            for path in witnessOwners(w, seeds: seeds, probe: true) { calls.append(Self.witnessCallR1176(path, w, arity: w == "hash" ? 1 : 2)) }
+        }
     }
     // ── SOUNDNESS R974 (b) — A STDLIB CONTAINER OPERATION RUNS ITS ELEMENT'S `Equatable`/`Hashable` WITNESSES ───
     //
@@ -9391,6 +9636,9 @@ final class CallCollector: SyntaxVisitor {
     private enum ContainerKind { case set, dictionary, array }
     /// What stdlib container a receiver is, read from its WRITTEN type (a parameter's or annotated local's).
     private func containerKind(_ base: ExprSyntax) -> ContainerKind? {
+        func kindOf(_ k: String) -> ContainerKind? { k == "set" ? .set : k == "dictionary" ? .dictionary : k == "array" ? .array : nil }
+        // SOUNDNESS R1176 — a stored field read through `self`, by its WRITTEN type.
+        if !Self.r1176Off, let f = selfFieldRefR1176(base) { return selfFieldContainerR1176(f).flatMap { kindOf($0.kind) } }
         guard let dr = Self.peel(base).as(DeclReferenceExprSyntax.self) else { return nil }
         let n = dr.baseName.text
         if let t = paramDeclTypesR996[n], !multiplyBoundNames.contains(n) {
@@ -9403,6 +9651,8 @@ final class CallCollector: SyntaxVisitor {
         if vars[n] == "Set", arrayElem[n] != nil { return .set }
         if dictElem[n] != nil, localTypeArgs[n] != nil { return .dictionary }
         if arrayElem[n] != nil, localTypeArgs[n] != nil { return .array }
+        // SOUNDNESS R1176 — an unannotated local whose initializer writes the container (`var s = Set<Noisy>()`).
+        if !Self.r1176Off, paramIndexR951[n] == nil, localTypeArgs[n] == nil, let c = localInitContainersR1176[n] { return kindOf(c.kind) }
         return nil
     }
     /// SOUNDNESS R974 (c) — see `Call.genericForward`.
@@ -9447,18 +9697,72 @@ final class CallCollector: SyntaxVisitor {
         guard !Self.r951Off else { return }
         final class V: SyntaxVisitor {
             var out: [String: [String]] = [:]
+            var cont: [String: (kind: String, args: [String])] = [:], poisoned: Set<String> = []
             override func visit(_ node: PatternBindingSyntax) -> SyntaxVisitorContinueKind {
                 if let n = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text,
                    let t = node.typeAnnotation?.type {
                     let a = genericArgumentNames(t)
                     if !a.isEmpty { out[n, default: []].append(contentsOf: a) }
+                } else if !CallCollector.r1176Off, let n = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text,
+                          let v = node.initializer?.value {
+                    // SOUNDNESS R1176 — `Set<E>()`, `Array<E>()`, `Dictionary<K, V>()`, `[E]()`, `[K: V]()`: the
+                    // initializer writes the container and its arguments as fully as an annotation would.
+                    if let c = Self.writtenContainer(v) {
+                        if let prev = cont[n], prev.kind != c.kind { poisoned.insert(n) }
+                        else { cont[n] = (c.kind, (cont[n]?.args ?? []) + c.args.filter { !(cont[n]?.args ?? []).contains($0) }) }
+                    } else if cont[n] != nil { poisoned.insert(n) }
                 }
                 return .visitChildren
+            }
+            static func writtenContainer(_ raw: ExprSyntax) -> (kind: String, args: [String])? {
+                // an array LITERAL every element of which constructs one named type (`[Noisy(v: 1), Noisy(v: 2)]`)
+                if let lit = CallCollector.peel(raw).as(ArrayExprSyntax.self), !lit.elements.isEmpty {
+                    let ctors = lit.elements.map { el -> String? in
+                        guard let c = CallCollector.peel(el.expression).as(FunctionCallExprSyntax.self),
+                              let dr = CallCollector.peel(c.calledExpression).as(DeclReferenceExprSyntax.self),
+                              dr.baseName.text.first?.isUppercase == true else { return nil }
+                        return dr.baseName.text
+                    }
+                    if let first = ctors.first ?? nil, ctors.allSatisfy({ $0 == first }) { return ("array", [first]) }
+                    return nil
+                }
+                guard let call = CallCollector.peel(raw).as(FunctionCallExprSyntax.self), call.arguments.isEmpty,
+                      call.trailingClosure == nil else { return nil }
+                let c = CallCollector.peel(call.calledExpression)
+                if let g = c.as(GenericSpecializationExprSyntax.self),
+                   let name = CallCollector.peel(g.expression).as(DeclReferenceExprSyntax.self)?.baseName.text {
+                    let tys = g.genericArgumentClause.arguments.compactMap { $0.argument.as(TypeSyntax.self) }
+                    guard tys.count == g.genericArgumentClause.arguments.count else { return nil }
+                    let kind: String
+                    switch (name, tys.count) {
+                    case ("Set", 1): kind = "set"
+                    case ("Array", 1): kind = "array"
+                    case ("Dictionary", 2): kind = "dictionary"
+                    default: return nil
+                    }
+                    var args: [String] = []
+                    for t in tys { if let n = typeName(t).name { args.append(n) }; args.append(contentsOf: genericArgumentNames(t)) }
+                    return (kind, args)
+                }
+                func typeRef(_ e: ExprSyntax) -> String? {
+                    let x = CallCollector.peel(e)
+                    if let dr = x.as(DeclReferenceExprSyntax.self), dr.baseName.text.first?.isUppercase == true { return dr.baseName.text }
+                    return nil
+                }
+                if let a = c.as(ArrayExprSyntax.self), a.elements.count == 1, let t = typeRef(a.elements.first!.expression) {
+                    return ("array", [t])
+                }
+                if let d = c.as(DictionaryExprSyntax.self), case .elements(let els) = d.content, els.count == 1,
+                   let k = typeRef(els.first!.key), let v = typeRef(els.first!.value) {
+                    return ("dictionary", [k, v])
+                }
+                return nil
             }
         }
         let v = V(viewMode: .sourceAccurate)
         v.walk(body)
         localTypeArgs = v.out
+        if !Self.r1176Off { for (n, c) in v.cont where !v.poisoned.contains(n) && v.out[n] == nil { localInitContainersR1176[n] = c } }
     }
 
     /// SOUNDNESS R905 (residual) — fills `localPlatformGenerics`. Only owners the platform tables name, so this
