@@ -10,6 +10,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.40.10] — 2026-10-14
+
 - **⚠ A user `Equatable` / `Comparable` / `Hashable` witness handed to a CHAINED package is now disclosed
   (SOUNDNESS R974 (a)).** A dependency's `func same<T: Equatable>(_ a: T, _ b: T) -> Bool { a == b }` runs the
   caller's `==`, and its report cannot say so (the row is pure; ⟨0.39⟩ `dispatchesOn` has no spelling for a
