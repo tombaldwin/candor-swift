@@ -10,6 +10,42 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.40.11] — 2026-10-15
+
+**A 0.40.10 report could differ between two identical runs on the same project.** Which `==`/`<`/`hash` witnesses a
+comparison reached depended on Swift's per-process `Dictionary` seed, so on some projects (measured: wikipedia-ios
+and iina, 2 distinct reports in 10 identical runs each) a gate or a baseline diff could change verdict with no change
+to the code. 0.40.11 gives byte-identical reports run to run (R1175). The other entries close **silent
+under-reports**: an effectful `==`/`hash`/`isEqual` that a comparison really runs — more than 32 types deep, through an
+`NSObject` subclass's `isEqual` override, or through one of five in-package generic spellings — was missing from the
+caller's row. Each was filed from a fixture that was executed and performed the effect while the report omitted it.
+SOUNDNESS R1175, R1176 and R1185 close here.
+
+- ⚠ **Gates that change verdict on real code.** Measured against the published 0.40.10 binary over the 73-project
+  corpus, standalone, and over 27 consumers with their dependencies chained (`bin/corpus-ab.py`). Each gate is
+  scoped to the function named. No corpus row gains a concrete effect, so **no `deny <E>` gate on a concrete effect
+  moves**; the R1175/R1176 fixtures are where `deny Fs` goes from pass to fail. `deny Unknown` now **fails where
+  0.40.10 passed** over functions whose comparison now reaches a user witness that already discloses `Unknown`
+  (39 rows standalone and 31 chained, plus 19 and 9 protocol interface-union rows):
+  - periphery's `SourceGraph.add`, `markRetained`, `isEquatable`, `isHashable`, `inheritedDeclarations` and
+    `inheritedTypeReferences`, and the mutators and retainers that call them; SwiftSoup's
+    `Element.isHotAttributeKey`, `ensureDynamicAttributeValueIndexKey`, `markAttributeValueQueryIndexDirty(_)` and
+    `HtmlTreeBuilder.removeFromActiveFormattingElements`; swift-package-manager's `Environment` initialisers, `index`
+    and subscript, `gitNetworkTimeoutOverrides` and `SwiftBuildSystemMessageHandler.EmittedTasks.insert`/`contains`;
+    Carthage's `DependencyGraph.addNode(DependencyNode)`, `orderedNodes`, `updateEdges` and
+    `FetchCache.needsFetch`/`updateLastFetchTime`; vapor's `ContentConfiguration.default` and `use`; Sourcery's
+    `Protocol.hash`; CodeEdit's `ProjectNavigatorViewController.outlineViewItemDidCollapse`; NetNewsWire's
+    `SidebarOutlineDataSource.commonAccountsFor`; SwiftFormat's `FormatString.cast`.
+
+  **Nothing passes where 0.40.10 failed**: no row is removed and no concrete effect or `Unknown` is lost in either
+  arm. Counts, standalone: ADDED 45, REMOVED 0, CHANGED 1,344; chained: ADDED 23, REMOVED 0, CHANGED 291. Because the
+  0.40.10 side of this comparison is itself one of its possible reports, a project it reported nondeterministically
+  can show a different 0.40.10 verdict on a re-run; the 0.40.11 side cannot. Five sampled gates were re-run on the
+  published binary and on this release's build: `deny Unknown` over periphery's `SourceGraph.isEquatable`, Carthage's
+  `DependencyGraph.addNode(DependencyNode)` and SwiftSoup's `Element.markAttributeValueQueryIndexDirty(_)` pass on
+  0.40.10 and fail now; over swift-package-manager's `gitNetworkTimeoutOverrides` it goes from exit 2 (incomplete) to
+  exit 1; `deny Fs Net DependencyGraph.addNode` passes on both.
+
 - **⚠ The report no longer differs between identical runs, and the comparison-witness walk is complete
   (SOUNDNESS R1175).** The walk from a compared type to the `==`/`<`/`hash` witnesses it runs stopped after 32
   types and visited each type's stored properties in `Dictionary` order, which Swift seeds per process. So the set
