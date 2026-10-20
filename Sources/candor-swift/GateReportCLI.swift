@@ -912,7 +912,7 @@ func runGateReportCLI(_ args: [String]) -> Never {
                 + "add a `policy` key to .candor/config. `gate` applies a policy to an existing report; "
                 + "with no policy there is no verdict to give.")
     }
-    guard let policyText = try? String(contentsOfFile: policyPath, encoding: .utf8) else {
+    guard let policyText = readPolicyText(policyPath) else {
         gateDie("candor-swift gate: policy \(policyPath) could not be read — failing (exit 2), policy NOT evaluated")
     }
     // ⟨0.19⟩ `unknown-alias` expansion for an `Unknown[<alias>]` filter, anchored to the POLICY file

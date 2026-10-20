@@ -3594,8 +3594,20 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // SOUNDNESS R951 — op -> the local types declaring that comparison witness as a static member.
     var opWitnessTypesR951: [String: Set<String>] = [:]
     for f in allFns {
+        // The member's own name, `simpleQual` minus its `Type.` prefix — NOT the last `.`-separated piece, which
+        // reads a declared `static func ..<` as `<` (an operator may itself contain dots).
+        let sq = f.enclosingType.flatMap { et in f.simpleQual.hasPrefix(et + ".") ? String(f.simpleQual.dropFirst(et.count + 1)) : nil }
+            ?? String(f.simpleQual.split(separator: ".").last ?? "")
+        let leaf = String(sq.prefix { $0 != "(" && $0 != "#" })
+        // SOUNDNESS R1251 — a DERIVED spelling (`!=`, `>`, `<=`, `>=`, `..<`, `...`) runs the operand's witness only
+        // when its type has no operator OF ITS OWN by that spelling: Swift prefers a concrete `static func !=` (or a
+        // free `func > (a: T, b: T)`) to the protocol-extension default. Recorded per spelling — a member's owner,
+        // and every parameter type of a FREE overload — so the comparison edge can tell the two apart.
+        if !CallCollector.r1251Off, CallCollector.witnessOp(leaf) != nil, leaf != "==", leaf != "<" {
+            if let et = f.enclosingType { opWitnessTypesR951[leaf, default: []].insert(et) }
+            else { for p in f.paramSig { if let t = p.type { opWitnessTypesR951[leaf, default: []].insert(t) } } }
+        }
         guard let et = f.enclosingType else { continue }
-        let leaf = String((f.simpleQual.split(separator: ".").last.map(String.init) ?? "").prefix { $0 != "(" && $0 != "#" })
         if leaf == "==" || leaf == "<" { opWitnessTypesR951[leaf, default: []].insert(et) }
         // SOUNDNESS R974 (b) — a declared `hash(into:)` is the Hashable witness container operations run.
         if leaf == "hash", f.paramLabels == ["into"] { opWitnessTypesR951["hash", default: []].insert(et) }

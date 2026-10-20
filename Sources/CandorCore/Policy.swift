@@ -562,7 +562,20 @@ func policyDestClassPolicyError(_ token: String, _ line: String) -> PolicyError 
                 gateReason: policyDestClassTokenError(token, line))
 }
 
+/// SOUNDNESS R1224 — a policy file's text EXACTLY as its bytes spell it. `String(contentsOfFile:encoding: .utf8)`
+/// silently drops a U+FEFF at byte offset 0 (measured, macOS Foundation: the BOM is gone and a SECOND one at
+/// offset 3 survives), so the BOM rule lived in a platform decoder nobody chose. This reader keeps every scalar
+/// and `parsePolicy` applies the rule itself. Invalid UTF-8 is still unreadable (nil), as before.
+public func readPolicyText(_ path: String) -> String? {
+    guard let d = try? Data(contentsOf: URL(fileURLWithPath: path)), String(data: d, encoding: .utf8) != nil else { return nil }
+    return String(decoding: d, as: UTF8.self)
+}
+
 public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) -> ParsedPolicy {
+    // SOUNDNESS R1224 (Tom's ruling) — a U+FEFF at BYTE OFFSET 0 is an encoding mark, stripped before the lines are
+    // split. Anywhere else it is an ordinary token character: the line's first token is not a rule kind and the
+    // line is IGNORED (disclosed), never silently repaired. One scalar, once — a second BOM is not at offset 0.
+    let text = text.unicodeScalars.first == "\u{FEFF}" ? String(String.UnicodeScalarView(text.unicodeScalars.dropFirst())) : text
     var deny: [DenyRule] = [], allow: [AllowRule] = [], forbid: [ForbidRule] = [], only: [OnlyRule] = []
     var errors: [PolicyError] = []
     var usedAliases = Set<String>()

@@ -47,7 +47,7 @@ if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "parsepolicy" {
         exit(2)
     }
     let polPath = CommandLine.arguments[2]
-    guard let polText = try? String(contentsOfFile: polPath, encoding: .utf8) else {
+    guard let polText = readPolicyText(polPath) else {
         FileHandle.standardError.write("candor-swift: cannot read policy \(polPath)\n".data(using: .utf8)!)
         exit(2)
     }
@@ -2282,7 +2282,7 @@ if peekListPath == nil, let pp = policyPath {
     // so §3.1 binds it exactly as it binds the gate: over a policy no route will honour, `outOfScope: []`
     // claims a look taken against rules that never stood — and the `denied` set it would look for is the
     // parser's SALVAGE of an unhonourable file, which is the rewriting `gateRefusals` exists to refuse.
-    // candor-java already withheld here; this engine, candor-rust and candor-ts did not.
+    // When this rung landed only candor-java withheld here; all four engines do now (this is swift's half).
     // ⟨0.32⟩ …AND PARSED WITH THE POLICY'S OWN VOCABULARY, which this read used to drop (`aliases: [:]`).
     //
     // A VERIFIED FAIL-OPEN, and its shape is that a STRICTLY STRONGER POLICY ANSWERED WEAKER. Measured
@@ -2304,7 +2304,7 @@ if peekListPath == nil, let pp = policyPath {
     // disclosure apply the SAME rule is the clause the ⟨0.30⟩ note below cites — it was being honoured on
     // the rule's SHAPE and missed on the rule's WORDS.
     let peekAliases = parseUnknownAliases(discoverConfig(targetPath: pp)?.text).aliases
-    let parsedForPeek = (try? String(contentsOfFile: pp, encoding: .utf8))
+    let parsedForPeek = readPolicyText(pp)
         .map { parsePolicy($0, aliases: peekAliases) }
     // ⟨0.30⟩ THE RULES, not a flat set of effect NAMES. §6.2 already requires the gate and the disclosure
     // to apply the SAME rule, and the name set was wrong in BOTH directions once ⟨0.30⟩ made this block
@@ -2999,7 +2999,7 @@ policyBlock: if let pp = policyPath {
         gateUnevaluated = unevaluated
         return true
     }
-    guard let text = try? String(contentsOfFile: pp, encoding: .utf8) else {
+    guard let text = readPolicyText(pp) else {
         if refuseUnlessAViolationStands("candor-swift: policy \(pp) could not be read; gate NOT enforced",
                                         unevaluated: refusedPolicyRules(nil, at: pp, causes: [])) {
             break policyBlock

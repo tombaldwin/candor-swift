@@ -16,6 +16,39 @@ final class PolicyTests: XCTestCase {
         XCTAssertEqual(p.deny.map(\.scope), ["", "io"])
     }
 
+    // SOUNDNESS R1224 (Tom's ruling) — a U+FEFF at byte offset 0 is stripped; anywhere else it is a token character.
+    func testByteZeroBOMIsStrippedAndTheRuleEvaluated() {
+        let p = parsePolicy("\u{FEFF}deny Fs io\n")
+        XCTAssertEqual(p.deny.map(\.effects), [["Fs"]])
+        XCTAssertEqual(p.deny.map(\.scope), ["io"])
+        XCTAssertTrue(p.ignored.isEmpty)
+    }
+
+    func testMidFileBOMLineIsIgnoredNotRepaired() {
+        let p = parsePolicy("deny Net\n\u{FEFF}deny Fs io\n")
+        XCTAssertEqual(p.deny.map(\.effects), [["Net"]])
+        XCTAssertEqual(p.ignored.map(\.line), [2])
+        // a SECOND BOM is not at offset 0
+        let q = parsePolicy("\u{FEFF}\u{FEFF}deny Fs io\n")
+        XCTAssertTrue(q.deny.isEmpty)
+        XCTAssertEqual(q.ignored.map(\.line), [1])
+    }
+
+    /// The reader hands `parsePolicy` the file's bytes as written: Foundation's `String(contentsOfFile:)` drops a
+    /// leading BOM itself (measured, macOS), which would make the parser strip the SECOND one of `EF BB BF EF BB BF`.
+    func testPolicyReaderKeepsTheBOMForTheParser() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("r1224-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let bom: [UInt8] = [0xEF, 0xBB, 0xBF], rule = Array("deny Fs io\n".utf8)
+        let one = dir.appendingPathComponent("one"), two = dir.appendingPathComponent("two"), bad = dir.appendingPathComponent("bad")
+        try Data(bom + rule).write(to: one); try Data(bom + bom + rule).write(to: two); try Data([0xFF, 0xFE] + rule).write(to: bad)
+        XCTAssertEqual(readPolicyText(one.path)?.unicodeScalars.first, "\u{FEFF}")
+        XCTAssertEqual(parsePolicy(try XCTUnwrap(readPolicyText(one.path))).deny.count, 1)
+        XCTAssertEqual(parsePolicy(try XCTUnwrap(readPolicyText(two.path))).deny.count, 0)
+        XCTAssertNil(readPolicyText(bad.path), "invalid UTF-8 stays unreadable")
+    }
+
     func testBareCRLinesParseAsSeparateRules() {
         // classic-Mac line endings: \r alone must BREAK lines — treating it as an in-line separator
         // glued every rule after the first into the first rule's tokens (sweep [16]/[17]).

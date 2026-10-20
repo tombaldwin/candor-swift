@@ -875,7 +875,7 @@ private func loadDenyOrDie(_ policyPath: String, who: String) -> [DenyRule] {
 /// (the same subset mistake the reference engine's first draft made, recorded on
 /// `zeroRulePolicyRefusal`).
 private func loadPolicyOrDie(_ policyPath: String, who: String) -> ParsedPolicy {
-    guard let text = try? String(contentsOfFile: policyPath, encoding: .utf8) else {
+    guard let text = readPolicyText(policyPath) else {
         fixDie("candor-swift \(who): policy `\(policyPath)` could not be read — no fix computed")
     }
     return parsePolicy(text)

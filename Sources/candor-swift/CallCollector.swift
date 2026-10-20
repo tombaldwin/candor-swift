@@ -8015,7 +8015,7 @@ final class CallCollector: SyntaxVisitor {
                           rootOf(b).root == "Hasher", !declaredTypes.contains("Hasher"),
                           let a = node.arguments.first?.expression {
                     vbHit("R1045", "combine")
-                    comparisonWitnesses("hash", a, arity: 1)
+                    comparisonWitnesses("hash", a, arity: 1, directEdge: false)   // R1251: the edge is `Hasher.combine`
                 }
             }
             // SOUNDNESS R866 — A COMPOSITION-TYPED PARAMETER asks each of its dependency-declared members as the
@@ -9282,7 +9282,7 @@ final class CallCollector: SyntaxVisitor {
                 || (i + 2 < elems.count && Self.peel(elems[i + 2]).is(NilLiteralExprSyntax.self))
             if !Self.r951Off, !nilOperand, let w = Self.witnessOp(opName) {
                 for operandExpr in [elems[i], (i + 2 < elems.count ? elems[i + 2] : nil)].compactMap({ $0 }) {
-                    comparisonWitnesses(w, operandExpr)
+                    comparisonWitnesses(w, operandExpr, spelled: opName)
                 }
             }
             i += 2
@@ -9311,9 +9311,32 @@ final class CallCollector: SyntaxVisitor {
     static func witnessOp(_ op: String) -> String? {
         if op == "==" || op == "!=" { return "==" }
         if ["<", ">", "<=", ">="].contains(op) { return "<" }
+        // SOUNDNESS R1251 — `a..<b` / `a...b` over a `Comparable` bound check `lowerBound <= upperBound` (a
+        // `_precondition`, kept in `-O`): executed, both run the bound type's `<`.
+        if !r1251Off, op == "..<" || op == "..." { return "<" }
         return nil
     }
-    private func comparisonWitnesses(_ w: String, _ operand: ExprSyntax, argIndex: Int? = nil, arity: Int = 2) {
+    // ── SOUNDNESS R1251 — A DERIVED SPELLING RUNS THE WITNESS, NOT A UNIT OF ITS OWN NAME ────────────────────────
+    //
+    // The operator visitor edges the operator AS SPELLED (`Eqo.!=`, `Cmp.>`), and the exclusion below skipped the
+    // operand's own type whenever it declared the witness, on the reasoning that the direct edge already reached it.
+    // That holds only when the spelling IS the witness: `!=`, `>`, `<=`, `>=`, `..<`, `...` are stdlib defaults that
+    // CALL `==`/`<`, so `Eqo.!=` named no unit and a declared `==` that writes a file read pure through bare
+    // `a != b` (executed). The same skip silenced `hasher.combine(x)`, whose direct edge is `Hasher.combine`, never
+    // `x`'s `hash(into:)`. `spelled` is the operator as written; `directEdge` says the caller's own edge reaches
+    // `t.w`. A type with an operator OF ITS OWN by the spelled name runs that (Swift prefers it to the default), so
+    // it is still skipped — the over-charge control.
+    static let r1251Off = ProcessInfo.processInfo.environment["CANDOR_R1251_OFF"] != nil
+    private func ownsSpelledOpR1251(_ t: String, _ op: String) -> Bool {
+        guard let owners = opWitnessTypes[op] else { return false }
+        if owners.contains(t) || owners.contains(Self.leafR1176(t)) { return true }
+        if let cls = knownClassR1175(t) {   // inherited from a superclass this scan declares
+            return (classSupertypes[cls] ?? []).contains { owners.contains($0) }
+        }
+        return false
+    }
+    private func comparisonWitnesses(_ w: String, _ operand: ExprSyntax, argIndex: Int? = nil, arity: Int = 2,
+                                     spelled: String? = nil, directEdge: Bool = true) {
         var targets: [String] = []
         // SOUNDNESS R1176 — a stored field of the enclosing type read through `self` (`items`, `self.items`).
         let selfField = Self.r1176Off ? nil : selfFieldRefR1176(operand)
@@ -9355,8 +9378,14 @@ final class CallCollector: SyntaxVisitor {
         // `opaqueHop`: the root is the OUTER base kept by convention (`self.registrations.count` -> the
         // enclosing type), not the operand's type — walking ITS fields charged swift-nio's `Selector.deinit`
         // with `NIODeadline.==` on this change's first cut.
-        if let t = r.root, r.isVar, !r.opaqueHop, localTypes.contains(t), !(opWitnessTypes[w]?.contains(t) ?? false) {
-            targets.append(t)   // synthesized: walked into its stored properties below
+        if let t = r.root, r.isVar, !r.opaqueHop, localTypes.contains(t) {
+            let derived = !Self.r1251Off && spelled.map { $0 != w } ?? false
+            let reachedDirectly = (opWitnessTypes[w]?.contains(t) ?? false) && !derived && (directEdge || Self.r1251Off)
+            if derived, ownsSpelledOpR1251(t, spelled!) {
+                // the type's own operator answers — its direct edge is real
+            } else if !reachedDirectly {
+                targets.append(t)   // declared: edged by `witnessOwners`; synthesized: walked into its stored properties
+            }
         }
         for path in witnessOwners(w, seeds: targets, probe: true) {
             if Self.r951Probe { FileHandle.standardError.write("R951HIT \(path)\n".data(using: .utf8)!) }

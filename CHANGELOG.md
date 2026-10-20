@@ -10,6 +10,20 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ A derived comparison now reaches the type's declared `==`/`<` (SOUNDNESS R1251).** Bare `a != b`, `a > b`,
+  `a <= b`, `a >= b`, `a..<b` and `a...b` over a type that declares its own `==` or `<` read pure: the operator was
+  edged by its spelled name (`T.!=`, a unit that does not exist) and the witness edge skipped the type because it
+  declared the witness. `hasher.combine(x)` took the same skip past `x`'s `hash(into:)`. Each now charges the
+  witness the stdlib default runs (executed on a fixture: every new charge writes a file). A type with an operator
+  of its OWN by the spelled name — a member, one inherited from a superclass, or a free overload — runs that one
+  and is not charged the witness; this removes one fabrication (`Sub != Sub` charged `Base.==` when `Base`
+  declares `!=`). Gates can go 0→1. `CANDOR_R1251_OFF=1` restores the previous behaviour.
+- **A policy file's byte-order mark is handled by the parser, not by Foundation (SOUNDNESS R1224).** A U+FEFF at
+  byte offset 0 is stripped before the lines are split; anywhere else it is a token character and its line is
+  ignored (disclosed). Every policy reader (`--policy` on a scan, `gate --report`, `fix`/`fix-gate`, `parsepolicy`,
+  the out-of-scope peek) now reads the bytes as written. Verdicts are unchanged on macOS, where Foundation already
+  dropped a leading BOM; the rule no longer depends on the platform decoder.
+
 ## [0.40.13] — 2026-10-19
 
 - **Version-only cut to keep the family on one build line — no change to candor-swift since 0.40.12.** The source is
