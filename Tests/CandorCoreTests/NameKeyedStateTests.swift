@@ -489,7 +489,7 @@ final class NameKeyedStateTests: XCTestCase {
         "paramTypesR951": .deliberatelyKept("R951: a shadowed parameter type can only add a caller-side witness edge"),
         "genericBoundsR951": .immutableIndex,
         "opWitnessTypes": .immutableIndex,
-        "fieldContainersR1176": .immutableIndex, "classNamesR1175": .immutableIndex, "classSubtypesR1175": .immutableIndex,
+        "fieldContainersR1176": .immutableIndex, "enumPayloadsR1272": .immutableIndex, "classNamesR1175": .immutableIndex, "classSubtypesR1175": .immutableIndex,
         "localInitContainersR1176": .deliberatelyKept("R1176: localTypeArgs's twin for an initializer; a stale entry adds a witness edge, never removes one"),
         "genericWitnessReqs": .notPerBinding,
     ]

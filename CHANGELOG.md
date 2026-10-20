@@ -15,9 +15,25 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   edged by its spelled name (`T.!=`, a unit that does not exist) and the witness edge skipped the type because it
   declared the witness. `hasher.combine(x)` took the same skip past `x`'s `hash(into:)`. Each now charges the
   witness the stdlib default runs (executed on a fixture: every new charge writes a file). A type with an operator
-  of its OWN by the spelled name — a member, one inherited from a superclass, or a free overload — runs that one
-  and is not charged the witness; this removes one fabrication (`Sub != Sub` charged `Base.==` when `Base`
-  declares `!=`). Gates can go 0→1. `CANDOR_R1251_OFF=1` restores the previous behaviour.
+  of its OWN by the spelled name that takes the type on BOTH sides — a member, one inherited from a superclass, a
+  free overload, or one in an unconstrained protocol extension the type conforms to — runs that one and is not
+  charged the witness; this removes one fabrication (`Sub != Sub` charged `Base.==` when `Base` declares `!=`).
+  Gates can go 0→1. `CANDOR_R1251_OFF=1` restores the previous behaviour.
+- **⚠ An operator with a different right-hand type no longer stands in for the witness (SOUNDNESS R1270, R1259).**
+  The first cut of R1251 recorded an "owner" from the operator's NAME, so `static func != (lhs: S, rhs: Int)`, a
+  free `func != (S, String)`, a generic `!= <T: BinaryInteger>(S, T)` or a superclass's `!= (Base, Int)` made
+  `S != S` read pure — including where 0.40.13 charged the synthesized field `==` (executed: it runs). Ownership now
+  needs both operands to be the type (`Self` or its name, `?` allowed), no generic parameter or `where` clause of
+  the operator's own or its extension's. The same reading closes R1251's residual (a type DECLARING `<`/`==` plus a
+  different-right-hand `>`/`!=`) and the witness side: a type whose only declared `==`/`<` takes a foreign operand
+  keeps that edge AND is walked as synthesized. An operator in an unconstrained PROTOCOL EXTENSION the
+  (non-generic) type conforms to now answers instead of the witness, removing an over-charge (R1259: `TP > TP`
+  charged `TP.<`, which never runs). A shared simple name no longer lends a nested type its namesake's operator.
+  Gates go 0→1 on the silent shapes and 1→0 on R1259. `CANDOR_R1270_OFF=1` restores the first cut.
+- **⚠ An enum's synthesized `==`/`<`/`hash` compares its PAYLOADS (SOUNDNESS R1272).** The witness walk visited a
+  synthesized type's stored properties and never an enum's associated values, so `.one(a) < .one(b)` over
+  `case one(Cmp)` read pure while `Cmp.<` ran (executed). Payload types are now walked, except a generic
+  parameter of the enum or an enclosing type. Gates can go 0→1. `CANDOR_R1272_OFF=1` restores the previous walk.
 - **A policy file's byte-order mark is handled by the parser, not by Foundation (SOUNDNESS R1224).** A U+FEFF at
   byte offset 0 is stripped before the lines are split; anywhere else it is a token character and its line is
   ignored (disclosed). Every policy reader (`--policy` on a scan, `gate --report`, `fix`/`fix-gate`, `parsepolicy`,

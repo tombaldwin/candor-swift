@@ -407,6 +407,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var fieldDictValue: [String: [String: String]] = [:]
     var fieldTypeArgs: [String: [String: [String]]] = [:]   // SOUNDNESS R905
     var fieldContainersR1176: [String: [String: (kind: String, args: [String])]] = [:]   // SOUNDNESS R1176
+    var enumPayloadsR1272Raw: [(enumName: String, payload: String, scopes: [String])] = []   // SOUNDNESS R1272
     var opaqueFields: [String: Set<String>] = [:]
     var caseAssocAll: [String: Set<String>] = [:]
     var caseAssocMetatypeAll: [String: Set<String>] = [:]   // R585 (b10)
@@ -1023,6 +1024,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (t, fs) in c.fieldDictValue { fieldDictValue[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.fieldTypeArgs { fieldTypeArgs[t, default: [:]].merge(fs) { a, _ in a } }   // R905
         for (t, fs) in c.fieldContainersR1176 { fieldContainersR1176[t, default: [:]].merge(fs) { a, _ in a } }   // R1176
+        enumPayloadsR1272Raw.append(contentsOf: c.enumPayloadsR1272)   // R1272
         for (t, fs) in c.opaqueFields { opaqueFields[t, default: []].formUnion(fs) }
         for (cn, ts) in c.caseAssoc { caseAssocAll[cn, default: []].formUnion(ts) }
         for (cn, ts) in c.caseAssocMetatype { caseAssocMetatypeAll[cn, default: []].formUnion(ts) }   // R585
@@ -3591,8 +3593,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // SOUNDNESS R1175 (C) — each local class's local SUBCLASSES, transitive: `isEqual`/`hash` dispatch dynamically.
     var classSubtypesR1175: [String: Set<String>] = [:]
     for (c, sups) in classSupertypesR906 { for s in sups { classSubtypesR1175[s, default: []].insert(c) } }
+    // SOUNDNESS R1272 — enum -> payload types, minus the generic parameters of the enum and its enclosing types
+    // (known module-wide only now; a `case one(Element)` inside `Tiny<Element>` names no type).
+    var enumPayloadsR1272: [String: [String]] = [:]
+    for e in enumPayloadsR1272Raw where !e.scopes.contains(where: { typeGenericParamNamesAI[$0]?.contains(e.payload) ?? false })
+        && !(enumPayloadsR1272[e.enumName]?.contains(e.payload) ?? false) {
+        enumPayloadsR1272[e.enumName, default: []].append(e.payload)
+    }
     // SOUNDNESS R951 — op -> the local types declaring that comparison witness as a static member.
     var opWitnessTypesR951: [String: Set<String>] = [:]
+    var selfWitnessR1270: [String: Set<String>] = [:], hetWitnessR1270: [String: Set<String>] = [:]
     for f in allFns {
         // The member's own name, `simpleQual` minus its `Type.` prefix — NOT the last `.`-separated piece, which
         // reads a declared `static func ..<` as `<` (an operator may itself contain dots).
@@ -3603,15 +3613,30 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // when its type has no operator OF ITS OWN by that spelling: Swift prefers a concrete `static func !=` (or a
         // free `func > (a: T, b: T)`) to the protocol-extension default. Recorded per spelling — a member's owner,
         // and every parameter type of a FREE overload — so the comparison edge can tell the two apart.
+        // SOUNDNESS R1270 — …and only an operator whose BOTH operands are that type answers `T op T`: a different
+        // right-hand type (`!= (S, Int)`), a generic one, or a constrained one made `S` an "owner" and silenced the
+        // default's witness (executed). `opOperandR1270` is that strict reading; `CANDOR_R1270_OFF=1` restores 3cc78e7.
         if !CallCollector.r1251Off, CallCollector.witnessOp(leaf) != nil, leaf != "==", leaf != "<" {
-            if let et = f.enclosingType { opWitnessTypesR951[leaf, default: []].insert(et) }
-            else { for p in f.paramSig { if let t = p.type { opWitnessTypesR951[leaf, default: []].insert(t) } } }
+            if DeclCollector.r1270Off {
+                if let et = f.enclosingType { opWitnessTypesR951[leaf, default: []].insert(et) }
+                else { for p in f.paramSig { if let t = p.type { opWitnessTypesR951[leaf, default: []].insert(t) } } }
+            } else if let t = f.opOperandR1270 {
+                opWitnessTypesR951[leaf, default: []].insert(t)
+            }
         }
         guard let et = f.enclosingType else { continue }
-        if leaf == "==" || leaf == "<" { opWitnessTypesR951[leaf, default: []].insert(et) }
+        if leaf == "==" || leaf == "<" {
+            opWitnessTypesR951[leaf, default: []].insert(et)
+            // SOUNDNESS R1270 (witness side) — which declarations COULD be the witness. A type whose only `==`/`<`
+            // has a different operand type keeps its edge (the union never removes) AND is walked as synthesized.
+            if DeclCollector.r1270Off || f.opSelfOperandsLooseR1270 { selfWitnessR1270[leaf, default: []].insert(et) }
+            else { hetWitnessR1270[leaf, default: []].insert(et) }
+        }
         // SOUNDNESS R974 (b) — a declared `hash(into:)` is the Hashable witness container operations run.
         if leaf == "hash", f.paramLabels == ["into"] { opWitnessTypesR951["hash", default: []].insert(et) }
     }
+    // SOUNDNESS R1270 (witness side) — `<op>~het`: types declaring `==`/`<` ONLY with a foreign operand type.
+    for (op, ts) in hetWitnessR1270 { opWitnessTypesR951["\(op)~het"] = ts.subtracting(selfWitnessR1270[op] ?? []) }
     var aiBase = AiTypeIndex()
     var aiSharedPaths = Set<String>()      // the FULL paths added above — the canonicaliser's precise spellings
     if !CallCollector.aiOff {
@@ -3886,6 +3911,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                }(),
                                opWitnessTypes: opWitnessTypesR951,
                                fieldContainersR1176: fieldContainersR1176,                             // R1176
+                               enumPayloadsR1272: enumPayloadsR1272,                                   // R1272
                                classNamesR1175: classNamesAll, classSubtypesR1175: classSubtypesR1175) // R1175
         // The locator-move set is flow-INSENSITIVE and must be complete before the first call is collected
         // (a rebind later in the text, or earlier in time inside a loop, still invalidates the claim). The

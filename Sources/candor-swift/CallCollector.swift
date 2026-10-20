@@ -380,6 +380,8 @@ final class CallCollector: SyntaxVisitor {
     let opWitnessTypes: [String: Set<String>]
     /// SOUNDNESS R1176 — see `DeclCollector.fieldContainersR1176`.
     let fieldContainersR1176: [String: [String: (kind: String, args: [String])]]
+    /// SOUNDNESS R1272 — see `DeclCollector.enumPayloadsR1272`.
+    let enumPayloadsR1272: [String: [String]]
     /// SOUNDNESS R1176 — an unannotated local's container kind and written generic arguments, read off its
     /// initializer (`var s = Set<Noisy>()`, `[Noisy]()`, `[K: V]()`). A name bound to two different kinds is dropped.
     var localInitContainersR1176: [String: (kind: String, args: [String])] = [:]
@@ -950,9 +952,11 @@ final class CallCollector: SyntaxVisitor {
          importedModules: Set<String> = [], projectModules: Set<String> = [], deps: DepIndex = DepIndex(),
          ai: AiTypeIndex = AiTypeIndex(), opWitnessTypes: [String: Set<String>] = [:],
          fieldContainersR1176: [String: [String: (kind: String, args: [String])]] = [:],
+         enumPayloadsR1272: [String: [String]] = [:],
          classNamesR1175: Set<String> = [], classSubtypesR1175: [String: Set<String>] = [:]) {
         self.opWitnessTypes = opWitnessTypes
         self.fieldContainersR1176 = fieldContainersR1176
+        self.enumPayloadsR1272 = enumPayloadsR1272
         self.classNamesR1175 = classNamesR1175
         self.classSubtypesR1175 = classSubtypesR1175
         self.paramTypeArgsR951 = info.paramTypeArgs
@@ -9329,9 +9333,22 @@ final class CallCollector: SyntaxVisitor {
     static let r1251Off = ProcessInfo.processInfo.environment["CANDOR_R1251_OFF"] != nil
     private func ownsSpelledOpR1251(_ t: String, _ op: String) -> Bool {
         guard let owners = opWitnessTypes[op] else { return false }
-        if owners.contains(t) || owners.contains(Self.leafR1176(t)) { return true }
-        if let cls = knownClassR1175(t) {   // inherited from a superclass this scan declares
-            return (classSupertypes[cls] ?? []).contains { owners.contains($0) }
+        // SOUNDNESS R1271 (the half this check owns) — the LEAF answers only when it names one type: `Box.KeyT` must
+        // not inherit a top-level `KeyT`'s `!=` (owning is the removal direction).
+        if owners.contains(t) { return true }
+        if (DeclCollector.r1270Off || (ai.pathsByLeaf[Self.leafR1176(t)]?.count ?? 0) <= 1), owners.contains(Self.leafR1176(t)) { return true }
+        if let cls = knownClassR1175(t), (classSupertypes[cls] ?? []).contains(where: { owners.contains($0) }) {
+            return true   // inherited from a superclass this scan declares
+        }
+        // SOUNDNESS R1259 — an operator in an (unconstrained) PROTOCOL EXTENSION the type conforms to is more
+        // specific than the stdlib's `Equatable`/`Comparable` default, so it is what `t op t` runs (executed:
+        // `extension PGt { static func > (Self, Self) }` runs, `TP.<` never does). Only the operand types that
+        // conform UNCONDITIONALLY: a generic type may conform through a constrained extension, which the
+        // supertype table does not distinguish, so it keeps the witness edge.
+        if !DeclCollector.r1270Off, localGenerics.order[t] == nil, localGenerics.order[Self.leafR1176(t)] == nil,
+           (ai.pathsByLeaf[Self.leafR1176(t)]?.count ?? 0) <= 1 {
+            let sups = (supertypesAll[t] ?? []).union(supertypesAll[Self.leafR1176(t)] ?? [])
+            if sups.contains(where: { localProtocols.contains($0) && owners.contains($0) }) { return true }
         }
         return false
     }
@@ -9381,6 +9398,7 @@ final class CallCollector: SyntaxVisitor {
         if let t = r.root, r.isVar, !r.opaqueHop, localTypes.contains(t) {
             let derived = !Self.r1251Off && spelled.map { $0 != w } ?? false
             let reachedDirectly = (opWitnessTypes[w]?.contains(t) ?? false) && !derived && (directEdge || Self.r1251Off)
+                && !(opWitnessTypes["\(w)~het"]?.contains(t) ?? false)   // R1270: a foreign-operand `==` is not the witness
             if derived, ownsSpelledOpR1251(t, spelled!) {
                 // the type's own operator answers — its direct edge is real
             } else if !reachedDirectly {
@@ -9459,6 +9477,14 @@ final class CallCollector: SyntaxVisitor {
         var out: [String] = []
         func add(_ p: String) { if !out.contains(p) { out.append(p) } }
         var seen = Set<String>(), queue = seeds
+        // SOUNDNESS R1270 (witness side) — a type whose only declared `==`/`<` takes a FOREIGN operand (`== (S, Int)`)
+        // still has a synthesized witness: the edge to the declared operator is KEPT (a union never removes) and the
+        // type is walked as synthesized below.
+        func foreignOnly(_ x: String) -> Bool {
+            guard opWitnessTypes["\(w)~het"]?.contains(x) ?? false else { return false }
+            add("\(x).\(w)")
+            return true
+        }
         while let x = queue.popLast() {
             guard seen.insert(x).inserted, !DeclCollector.r1175Off || seen.count < 32, localTypes.contains(x) else { continue }
             // A SHARED simple name (`Index`, `Storage`) names several types and the spelling here does not say
@@ -9476,7 +9502,7 @@ final class CallCollector: SyntaxVisitor {
                     if w == "==", memberUnitKeys.contains("\(c).isEqual") { add("\(c).isEqual") }
                     if w == "hash", memberUnitKeys.contains("\(c).hash") { add("\(c).hash") }
                 }
-            } else if opWitnessTypes[w]?.contains(x) ?? false {
+            } else if opWitnessTypes[w]?.contains(x) ?? false, !foreignOnly(x) {
                 add("\(x).\(w)")
             } else if Self.r1105wOff || declaredTypes.contains(x) || declaredTypes.contains(String(x.split(separator: ".").last ?? ""))
                         || { if probe { vbHit("R1105W", "extended-only \(x)") }; return false }() {
@@ -9498,6 +9524,12 @@ final class CallCollector: SyntaxVisitor {
                         for a in c.args { queue.append(dealias(a)) }
                     }
                 }
+                // SOUNDNESS R1272 — an enum's synthesized witness compares (hashes) its cases' PAYLOADS: `.one(a) <
+                // .one(b)` runs `a < b` (executed). The comment above always said so; `fields` never held them.
+                // Keyed by the enum's SIMPLE name, so a full path asks its leaf only when that leaf names one type.
+                let payloads = enumPayloadsR1272[x]
+                    ?? ((ai.pathsByLeaf[Self.leafR1176(x)]?.count ?? 0) <= 1 ? enumPayloadsR1272[Self.leafR1176(x)] : nil)
+                for p in payloads ?? [] { queue.append(dealias(p)) }
             }
         }
         return out

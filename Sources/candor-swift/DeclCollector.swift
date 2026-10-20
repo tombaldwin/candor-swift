@@ -36,6 +36,15 @@ struct FnInfo {
     /// allowed) result names, as spelled. A bare `-> P` arrives through `retBoundTypeSpelling` and is moved
     /// here by the Driver once it is known to resolve to a protocol.
     var retProtocolSpelling: String? = nil
+    /// SOUNDNESS R1270 — for a two-parameter function whose BOTH operands are the type it answers for, that type:
+    /// a member's enclosing type (written `Self` or its own name), or a free function's one operand type. nil for
+    /// anything that cannot answer `T op T` for EVERY `T` value — a different right-hand type, an own generic
+    /// parameter, a `where` clause on the function or its extension, a written instantiation. See `selfOperandType`.
+    var opOperandR1270: String? = nil
+    /// SOUNDNESS R1270 (witness side) — a member whose two operands are BOTH written as its own type (`Self` or its
+    /// name, any generic arguments, any `where` clause): the only shape that can be a `==`/`<` WITNESS. A declared
+    /// `static func == (lhs: S, rhs: Int)` is not, and must not stand in for `S`'s synthesized one.
+    var opSelfOperandsLooseR1270 = false
     var isOverride = false   // R1105 audit — declared `override` (the implicit-`self` dispatch arm edges only these)
     var paramSig: [(type: String?, hasDefault: Bool, variadic: Bool)] = []  // ordered param signature for
                                       // PARAM-TYPE overload resolution: distinguishes same-name overloads
@@ -341,6 +350,13 @@ final class DeclCollector: SyntaxVisitor {
     /// container-witness model for a field read through implicit or explicit `self` (`items.contains(x)` inside
     /// `GBox<T>`), which `containerKind` answered only for parameters and annotated locals.
     var fieldContainersR1176: [String: [String: (kind: String, args: [String])]] = [:]
+    /// SOUNDNESS R1272 — enum -> every type its cases' associated values name (`case one(Cmp)`, `case many([Cmp])`
+    /// give `Cmp`), in declaration order. A SYNTHESIZED `Equatable`/`Comparable`/`Hashable` conformance of an enum
+    /// compares or hashes these payloads, and `fields` never held them, so R951's walk read such an enum pure.
+    /// Each entry is (enum simple name, payload type name, every enclosing type's simple name): the Driver drops a
+    /// payload that is a GENERIC PARAMETER of one of them (`case one(Element)` in `Tiny<Element>`), which `dealias`
+    /// would otherwise turn into any unrelated `typealias Element` in the module (vein A(i)'s N-d coincidence).
+    var enumPayloadsR1272: [(enumName: String, payload: String, scopes: [String])] = []
     /// SOUNDNESS R534 — A PARAMETER'S DECLARED TYPE, SEEING THROUGH `T!`.
     ///
     /// `ImplicitlyUnwrappedOptionalTypeSyntax` is its own node kind, NOT an `OptionalTypeSyntax`, and the
@@ -963,6 +979,17 @@ final class DeclCollector: SyntaxVisitor {
     // SINGLE-associated-value form is recorded; an unambiguous case name (one assoc type project-wide)
     // is bindable, an ambiguous one (`.success(A)` vs `.success(B)`) is left unbound — never guess.
     override func visit(_ node: EnumCaseDeclSyntax) -> SyntaxVisitorContinueKind {
+        if !Self.r1272Off, let ty = typeStack.last {   // SOUNDNESS R1272 — every payload, any arity
+            let scopes = typeStack.flatMap { $0.split(separator: ".").map(String.init) }
+            let leaf = ty.split(separator: ".").last.map(String.init) ?? ty
+            for el in node.elements {
+                for p in el.parameterClause?.parameters ?? [] {
+                    for n in [typeName(p.type).name].compactMap({ $0 }) + genericArgumentNames(p.type) {
+                        enumPayloadsR1272.append((leaf, n, scopes))
+                    }
+                }
+            }
+        }
         for el in node.elements {
             guard let params = el.parameterClause?.parameters, params.count == 1 else { continue }
             // SOUNDNESS R585 (b10) — `case c(CBase.Type)`. `typeName` answers nil for a metatype, so the
@@ -1767,6 +1794,65 @@ final class DeclCollector: SyntaxVisitor {
         return n   // a constructed type name; the driver gates it on being a known LOCAL type
     }
 
+    // ── SOUNDNESS R1270 — AN OPERATOR ANSWERS `T op T` ONLY IF BOTH OPERANDS ARE `T` ─────────────────────────────
+    //
+    // R1251 records a type as OWNING a derived spelling (`!=`, `>`, …) so a comparison over it is not charged the
+    // stdlib default's witness. It recorded the owner from the operator's NAME, so `static func != (lhs: S, rhs:
+    // Int)`, a free `func != (S, String)`, a generic `!= <T: BinaryInteger>(S, T)`, or a superclass's `!= (Base, Int)`
+    // made `S` an owner — and none of them can answer `S != S`, where the default runs `S.==` (executed: the field
+    // `==` writes a file; v0.40.13 charged it, 3cc78e7 read it pure). Owning is the REMOVAL direction, so this is
+    // strict: two parameters, no generic parameter or `where` clause of the function's own, no `where` clause on its
+    // extension (a protocol extension's operator applies only where that clause holds), and each operand written
+    // as the type itself — `Self`, its own name (optionally `?`), or that name over the TYPE's own generic
+    // parameters. A free function's two operands must be the same plain name. Anything else answers nil, which
+    // only ever keeps the witness edge (an over-charge at worst, never a silence).
+    static let r1270Off = ProcessInfo.processInfo.environment["CANDOR_R1270_OFF"] != nil
+    static let r1272Off = ProcessInfo.processInfo.environment["CANDOR_R1272_OFF"] != nil
+    private func selfOperandType(_ sig: FunctionSignatureSyntax, ownGenerics: Bool, ownWhere: Bool, node: Syntax) -> String? {
+        let ps = Array(sig.parameterClause.parameters)
+        guard ps.count == 2, !ownGenerics, !ownWhere, ps.allSatisfy({ $0.ellipsis == nil && $0.defaultValue == nil }) else { return nil }
+        // the nearest enclosing declaration group, and the generic parameters it declares
+        var group: Syntax? = node.parent
+        while let g = group, !(g.is(StructDeclSyntax.self) || g.is(ClassDeclSyntax.self) || g.is(EnumDeclSyntax.self)
+                                || g.is(ActorDeclSyntax.self) || g.is(ProtocolDeclSyntax.self) || g.is(ExtensionDeclSyntax.self)) {
+            group = g.parent
+        }
+        if let ext = group?.as(ExtensionDeclSyntax.self), ext.genericWhereClause != nil { return nil }
+        let typeParams: Set<String> = Set(
+            (group?.as(StructDeclSyntax.self)?.genericParameterClause ?? group?.as(ClassDeclSyntax.self)?.genericParameterClause
+             ?? group?.as(EnumDeclSyntax.self)?.genericParameterClause ?? group?.as(ActorDeclSyntax.self)?.genericParameterClause)?
+                .parameters.map { $0.name.text } ?? [])
+        func peel(_ t: TypeSyntax) -> TypeSyntax {
+            if let o = t.as(OptionalTypeSyntax.self) { return peel(o.wrappedType) }
+            if let a = t.as(AttributedTypeSyntax.self), a.specifiers.isEmpty || a.specifiers.allSatisfy({
+                $0.as(SimpleTypeSpecifierSyntax.self).map { ["borrowing", "consuming"].contains($0.specifier.text) } ?? false }) {
+                return peel(a.baseType)
+            }
+            return t
+        }
+        let a = peel(ps[0].type), b = peel(ps[1].type)
+        if let owner = typeStack.last {
+            let leaf = owner.split(separator: ".").last.map(String.init) ?? owner
+            func isSelf(_ t: TypeSyntax) -> Bool {
+                let (name, args): (String, GenericArgumentClauseSyntax?)
+                if let id = t.as(IdentifierTypeSyntax.self) { (name, args) = (id.name.text, id.genericArgumentClause) }
+                else if let m = t.as(MemberTypeSyntax.self), t.trimmedDescription.replacingOccurrences(of: " ", with: "").hasSuffix(owner) {
+                    (name, args) = (m.name.text, m.genericArgumentClause)
+                } else { return false }
+                if name == "Self" { return args == nil }
+                guard name == leaf else { return false }
+                guard let args else { return true }
+                return args.arguments.allSatisfy {
+                    guard let at = $0.argument.as(TypeSyntax.self)?.as(IdentifierTypeSyntax.self) else { return false }
+                    return at.genericArgumentClause == nil && typeParams.contains(at.name.text)
+                }
+            }
+            return isSelf(a) && isSelf(b) ? owner : nil
+        }
+        guard let ia = a.as(IdentifierTypeSyntax.self), let ib = b.as(IdentifierTypeSyntax.self),
+              ia.genericArgumentClause == nil, ib.genericArgumentClause == nil, ia.name.text == ib.name.text else { return nil }
+        return ia.name.text
+    }
     private func collect(_ name: String, sig: FunctionSignatureSyntax, body: CodeBlockSyntax?, node: some SyntaxProtocol) {
         let tyPath = typeStack.isEmpty ? nil : typeStack.joined(separator: ".")
         var info = FnInfo(qual: tyPath.map { "\($0).\(name)" } ?? name, loc: loc(node))
@@ -1824,6 +1910,24 @@ final class DeclCollector: SyntaxVisitor {
         // are already unioned above, and a second reader of the generic clause is the two-copies-of-one-
         // question shape this register keeps paying for (R346/R347).
         info.genericBounds = genericBounds
+        if !Self.r1270Off {
+            info.opOperandR1270 = selfOperandType(sig, ownGenerics: !info.genericParamNames.isEmpty,
+                                                  ownWhere: whereClause != nil, node: Syntax(node))
+            if let owner = typeStack.last {
+                let leaf = owner.split(separator: ".").last.map(String.init) ?? owner
+                let ps = Array(sig.parameterClause.parameters)
+                func named(_ t: TypeSyntax) -> String? {
+                    var t = t
+                    while true {
+                        if let o = t.as(OptionalTypeSyntax.self) { t = o.wrappedType; continue }
+                        if let a = t.as(AttributedTypeSyntax.self) { t = a.baseType; continue }
+                        break
+                    }
+                    return t.as(IdentifierTypeSyntax.self)?.name.text ?? t.as(MemberTypeSyntax.self)?.name.text
+                }
+                info.opSelfOperandsLooseR1270 = ps.count == 2 && ps.allSatisfy { named($0.type).map { $0 == "Self" || $0 == leaf } ?? false }
+            }
+        }
         for (idx, p) in sig.parameterClause.parameters.enumerated() {
             let pname = (p.secondName ?? p.firstName).text
             let t = Self.parameterTypeName(p.type)
