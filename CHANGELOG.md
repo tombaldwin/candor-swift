@@ -10,6 +10,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.40.14] — 2026-10-21
+
 - **⚠ A derived comparison now reaches the type's declared `==`/`<` (SOUNDNESS R1251).** Bare `a != b`, `a > b`,
   `a <= b`, `a >= b`, `a..<b` and `a...b` over a type that declares its own `==` or `<` read pure: the operator was
   edged by its spelled name (`T.!=`, a unit that does not exist) and the witness edge skipped the type because it
