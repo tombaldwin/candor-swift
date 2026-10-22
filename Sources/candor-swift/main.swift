@@ -1895,6 +1895,12 @@ for qual in reportQuals.sorted() {
 /// SOUNDNESS R867 §1b KILL SWITCH and REACH PROBE (see the emission site below).
 let r867Off = ProcessInfo.processInfo.environment["CANDOR_R867_OFF"] != nil
 let r867Probe = ProcessInfo.processInfo.environment["CANDOR_R867_PROBE"] != nil
+/// SOUNDNESS R1357/R1368 §1b KILL SWITCH — `CANDOR_R1357_OFF=1` restores v0.40.15's union exactly: the
+/// projection onto `inferred`/`invisible` alone, emitted iff that is non-empty, with no bound. See below.
+let r1357Off = ProcessInfo.processInfo.environment["CANDOR_R1357_OFF"] != nil
+/// …and its REACH probe: one `R1357HIT <kind> <hash>` stderr line per union this change touches (`dsp` gained
+/// a member, `pure` newly emitted, `broad` hedged past the bound), so a corpus A/B can say what it reached.
+let r1357Probe = ProcessInfo.processInfo.environment["CANDOR_R1357_PROBE"] != nil
 do {
     // index: bare owner-type -> the (method, qual) pairs it owns (built once from the report quals);
     // ownersByTail tracks the DISTINCT full owner paths per bare tail, for the ambiguity guard below.
@@ -1910,10 +1916,11 @@ do {
     }
     // SOUNDNESS R867 — what each REAL entry already carries, by hash, so a union entry is emitted beside
     // it exactly when the union says something the real entry does not (see the emission site below).
-    var realByHash: [String: (inf: Set<String>, inv: Set<String>)] = [:]
+    var realByHash: [String: (inf: Set<String>, inv: Set<String>, dsp: Set<String>)] = [:]
     for ef in effectors {
-        var cur = realByHash[ef.hash] ?? (inf: [], inv: [])
+        var cur = realByHash[ef.hash] ?? (inf: [], inv: [], dsp: [])
         cur.inf.formUnion(ef.inferred.toNames()); cur.inv.formUnion(ef.invisible ?? [])
+        cur.dsp.formUnion(ef.dispatchesOn ?? [])
         realByHash[ef.hash] = cur
     }
     // SOUNDNESS R867 — THE TRANSITIVE implementor set. `conformers[P]` lists only the types that SPELL
@@ -2002,8 +2009,13 @@ do {
         // DISPATCHED — every member of a class (a `final` one has no override to contribute) and the
         // REQUIREMENTS of a local protocol. For an extension-only protocol member the v0.39.3 union is
         // kept byte-for-byte, so this change can add to it nowhere it was not already asked to speak.
-        func unionOver(_ types: Set<String>) -> [String: (inf: Set<String>, inv: Set<String>)] {
-            var byMethod: [String: (inf: Set<String>, inv: Set<String>)] = [:]
+        // A UNION IS ITS CONTRIBUTORS' ROWS, ON EVERY CHANNEL A ROW IS EMITTED ON (SOUNDNESS R1357). It was a
+        // projection onto `inferred` and `invisible` alone, so the THIRD channel a row is emitted on —
+        // `dispatchesOn`, ⟨0.39⟩ obligation 1 — never reached the wire through a union, and a union whose
+        // contributors were pure apart from a further dispatch was not emitted at all. SPEC §4 ⟨0.40⟩ rule 1,
+        // spelling (a): the union of the contributors' TRANSITIVE member sets, which `dispatchAcc` already is.
+        func unionOver(_ types: Set<String>) -> [String: (inf: Set<String>, inv: Set<String>, dsp: Set<String>)] {
+            var byMethod: [String: (inf: Set<String>, inv: Set<String>, dsp: Set<String>)] = [:]
             for t in types {
                 // AMBIGUOUS bare type name: two DISTINCT types share tail `t` (e.g. `A.Foo` and `B.Foo`), so
                 // `ownerMethods[t]` merges both — the union would pull an unrelated same-named type's method (a
@@ -2012,9 +2024,10 @@ do {
                 if (ownersByTail[t]?.count ?? 0) > 1 { continue }
                 for (method, qual) in ownerMethods[t] ?? [] {
                     if r1109DefaultSkip[t]?.contains(method) == true { continue }   // SOUNDNESS R1109, above
-                    var cur = byMethod[method] ?? (inf: [], inv: [])
+                    var cur = byMethod[method] ?? (inf: [], inv: [], dsp: [])
                     cur.inf.formUnion(inferred[qual] ?? [])
                     cur.inv.formUnion(invisibleAcc[qual] ?? [])
+                    if !r1357Off { cur.dsp.formUnion(dispatchAcc[qual] ?? []) }
                     byMethod[method] = cur
                 }
             }
@@ -2035,11 +2048,30 @@ do {
             }
             return false
         }
-        var byMethod: [String: (inf: Set<String>, inv: Set<String>, dyn: Bool)] = [:]
-        for (method, eff) in directUnion { byMethod[method] = (eff.inf, eff.inv, false) }
+        var byMethod: [String: (inf: Set<String>, inv: Set<String>, dsp: Set<String>, dyn: Bool)] = [:]
+        for (method, eff) in directUnion { byMethod[method] = (eff.inf, eff.inv, eff.dsp, false) }
         for (method, eff) in transitiveUnion where dispatches(method) {
-            let old = directUnion[method] ?? (inf: [], inv: [])
-            byMethod[method] = (eff.inf.union(old.inf), eff.inv.union(old.inv), true)
+            let old = directUnion[method] ?? (inf: [], inv: [], dsp: [])
+            byMethod[method] = (eff.inf.union(old.inf), eff.inv.union(old.inv), eff.dsp.union(old.dsp), true)
+        }
+        // SOUNDNESS R1368 — PAST THE BOUND THE UNION IS PUBLISHED BROAD (SPEC §4 ⟨0.40⟩: "never published pure
+        // and never omitted"). The producer's own in-scan dispatch over a local protocol's requirement reads
+        // `Unknown` + `dispatch:<P>.<m>` past 12 conformers (Driver's `chaWithinBound`, the shared decision);
+        // the union over the same conformers was emitted with no bound at all, so 13 PURE conformers published
+        // nothing and a chained consumer read pure where the one-tree scan read Unknown. SAME COUNT as the
+        // in-scan decision — `conformers[proto].count` — and the same reason string, so the two cannot drift.
+        // ALSO for a union keyed under a FOREIGN owner: a consumer's own join (`unionOwnImplementors`) bounds
+        // only ITS conformers, so a dependency's 13 would otherwise reach it as a narrow pure union. A LOCAL
+        // CLASS is not bounded, because the in-scan class CHA is not (precise-or-nothing), and a published
+        // union more hedged than the producer's own scan for that is a change this row does not license.
+        // The hedge ADDS: a broad union keeps every contributor effect it carried, so no consumer charged
+        // through it before stops being charged. The ZERO-conformer half of `chaWithinBound` is deliberately
+        // not mirrored (a refining-only protocol's union carries its R1109 witnesses), see the CHANGELOG.
+        func pastBound(_ method: String, _ owner: String) -> Bool {
+            if r1357Off { return false }
+            let isLocalRequirement = analysis.protocolNames.contains(proto) && byMethod[method]?.dyn == true
+            guard isLocalRequirement || owner != pkgName else { return false }
+            return conformerTypes.count > 12
         }
         // ⟨0.39⟩ obligation 2 — whose namespace this entry belongs in. UNDECIDABLE OWNER ⇒ NO ENTRY.
         // VEIN D — …except where the owner is proven to be one of a few DEPENDENCY packages (a candidate's
@@ -2052,7 +2084,7 @@ do {
             ? pkgName : nil
         guard let ownerPkg = analysis.abstractionOwnerPkg[proto] ?? localOwner else {
             guard let possible = analysis.abstractionUndecidedPkgs[proto] else { continue }
-            for (method, eff) in byMethod where !(eff.inf.isEmpty && eff.inv.isEmpty) {
+            for (method, eff) in byMethod where !(eff.inf.isEmpty && eff.inv.isEmpty && eff.dsp.isEmpty) {
                 for p in possible.sorted() {
                     var ef = Effector(fn: "\(proto).\(method)", loc: "",
                         inferred: EffectSet(names: ["Unknown"]), direct: EffectSet(names: [String]()),
@@ -2064,8 +2096,14 @@ do {
             continue
         }
         for (method, eff) in byMethod {
-            if eff.inf.isEmpty && eff.inv.isEmpty { continue }   // pure across all conformers — silence = purity
             let hash = "\(ownerPkg)#\(proto).\(method)"
+            let broad = pastBound(method, ownerPkg)
+            // The union's own key MAY be omitted (§4 ⟨0.40⟩ rule 1): a contributor forwarding on the member the
+            // union is keyed under adds nothing the consumer's join of that key does not already hold.
+            let dsp = eff.dsp.subtracting([hash])
+            // pure across all conformers AND naming no further member AND within the bound — silence = purity,
+            // exactly the rule a row is emitted by (`reportQuals` above).
+            if eff.inf.isEmpty && eff.inv.isEmpty && dsp.isEmpty && !broad { continue }
             // SOUNDNESS R867 — A REAL ENTRY UNDER THE SAME HASH IS NOT THE UNION, AND MUST NOT SUPPRESS IT.
             // This line read `if emitted.contains(hash) { continue }`: "a real entry already claims this
             // hash". A real `Base.m` entry is `Base.m`'s OWN BODY — and for a non-final class (or a protocol
@@ -2103,16 +2141,31 @@ do {
             // §1b KILL SWITCH — `CANDOR_R867_OFF=1` restores the suppression (and the direct-only
             // implementor set above), i.e. exactly v0.39.3, so the fixtures can be SHOWN to fail.
             if let real = realByHash[hash] {
-                if r867Off || !eff.dyn || (eff.inf.isSubset(of: real.inf) && eff.inv.isSubset(of: real.inv)) { continue }
+                if r867Off || !eff.dyn || (eff.inf.isSubset(of: real.inf) && eff.inv.isSubset(of: real.inv)
+                                           && dsp.isSubset(of: real.dsp) && !broad) { continue }
                 if r867Probe {
                     FileHandle.standardError.write("R867HIT \(hash) union=\(eff.inf.sorted()) real=\(real.inf.sorted())\n"
                         .data(using: .utf8)!)
                 }
             }
+            let inf = broad ? eff.inf.union(["Unknown"]) : eff.inf
             var ef = Effector(fn: "\(proto).\(method)", loc: "",
-                inferred: EffectSet(names: eff.inf), direct: EffectSet(names: [String]()),
-                unresolved: eff.inf.contains("Unknown"), hash: hash, calls: [String]())
+                inferred: EffectSet(names: inf), direct: EffectSet(names: [String]()),
+                unresolved: inf.contains("Unknown"), hash: hash, calls: [String]())
             if !eff.inv.isEmpty { ef.invisible = eff.inv.sorted() }
+            if !dsp.isEmpty { ef.dispatchesOn = dsp.sorted() }
+            // The hedge's reason, on the union's own key (§3.1 ⟨0.40⟩ "the union's own dispatch hedge"). Only
+            // where the hedge is the WHOLE of the union's `Unknown`: a contributor's own `Unknown` has reasons
+            // this loop does not hold, and a partial `unknownWhy` would PROJECT to a strict subset — a false
+            // green for a narrowed filter — where today's absent one reads as the `unresolved` catch-all.
+            if broad && !eff.inf.contains("Unknown") { ef.unknownWhy = ["dispatch:\(proto).\(method)"] }
+            if r1357Probe {
+                let kinds = (dsp.isEmpty ? [] : ["dsp"]) + (eff.inf.isEmpty && eff.inv.isEmpty ? ["pure"] : [])
+                    + (broad ? ["broad"] : [])
+                for k in kinds {
+                    FileHandle.standardError.write("R1357HIT \(k) \(hash)\n".data(using: .utf8)!)
+                }
+            }
             ef.interfaceUnion = true
             unionEntries.append(ef)
         }
