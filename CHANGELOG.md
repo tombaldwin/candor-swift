@@ -52,7 +52,9 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
       (`dispatch` 57, `callback` 2), so a reason-scoped `deny Unknown[dispatch]` can go 0 → 1 on those rows.
     - The only loss is 5 `unknownWhy` tokens on swift-certificates rows that keep `Unknown`. One `dep:` key is
       respelled.
-    - With the kill switch set, the corpus A/B is 0/0/0.
+    - Kill switch: with `CANDOR_R1357_OFF=1`, d4920d1's build gave a corpus A/B of 0/0/0. On the final build,
+      swift-numerics, swift-markdown and GRDB, scanned standalone, give the same `functions[]` as 0.40.15 byte
+      for byte.
 
 ## [0.40.15] — 2026-10-22
 
