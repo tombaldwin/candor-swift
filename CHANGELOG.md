@@ -10,44 +10,49 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
-- **⚠ A chained consumer now carries the effect of its own implementor of a member a dependency's union
-  contributor dispatches on, and a union past the 12-implementor bound is published with its hedge (SOUNDNESS
-  R1357, R1368; SPEC §4 ⟨0.40⟩).** One rule had been applied to only part of a row. A union entry was built from
-  its contributors' `inferred` and `invisible` and emitted only when those were non-empty, with no bound. Two
-  things followed. A contributor's `dispatchesOn` never reached the union, and a union that was pure apart from a
-  further dispatch was not published at all. And 13 pure conformers of a local protocol published nothing, while
-  the producer's own scan reads `Unknown` + `dispatch:<P>.<m>` there. The union now carries its contributors'
-  transitive `dispatchesOn` (spelling (a), own key omitted) and is emitted by the same rule a row is. Past the bound
-  it adds `Unknown`. That applies to a local protocol requirement with more than 12 conformers, the same count the
-  in-scan decision uses, and it carries `unknownWhy: [dispatch:<P>.<m>]` when the hedge is the union's only
-  `Unknown`. No union loses an effect. A `super.m()` that reads a dependency's override union (the base body is
-  pure) does not follow the union's new members, because `super.` runs the base body only (executed: no write).
-  `CANDOR_R1357_OFF=1` restores 0.40.15. `CANDOR_R1357_PROBE=1` prints the reach.
-  - **Gates.** PART 102: all 12 swift `*_far_via`/`*_far_direct` cells now read `deny Fs` 1 and `deny Fs Unknown`
-    1. Three of them were SILENT (0 / 0) over executed code that writes the file. PART 103 `c_13`: `deny Unknown`
-    0 → 1, which matches the one-tree answer. `deny Fs Unknown` on PART 102 `l_bare_none` goes 1 → 0 (a consumer
-    with no implementor, owner chained, which passes the dependency's pure `Nop`). The same goes for
-    `l_bare_near_*` and `f_bare_near_direct` (`Mine.mapv` pure). These are removals, each traced to a pure body,
-    with the published union carrying the key. The unchained-owner `invisible` survives a newly published pure
-    union's hit (R764). That is pinned in `UnionPublicationProcessTests` and calibrated: making union entries
-    count as coverage reddens it.
-  - **Corpus**, measured against the published 0.40.15 binary with `bin/corpus-ab.py`. There were 38 SwiftPM
-    packages, each scanned with its corpus dependencies chained in topological order and scanned by the same
-    binary. Rows went 83,933 → 84,416: **ADDED 447, REMOVED 0, CHANGED 23,015** (`inferred` CHANGED 48).
-    REACH: `R1357HIT` 24,497 hits across 30 entries. Buckets: 3 and 3u (an effect or `Unknown` lost) are **0**,
-    2 (newly `Unknown` only) is **0**, and 1 (newly concrete) is **2**. The loss audit found only 5 `unknownWhy`
-    tokens on swift-certificates rows. Those rows keep `Unknown`, and one `dep:swift-crypto#ASN1ImplicitlyTaggable.init(…)`
-    is respelled `…init` beside the union's own reasons. Producer side: 21,658 unions gained `dispatchesOn`, 153
-    pure unions are newly published with members, and 303 unions newly carry `Unknown` (293 pure ones past the
-    bound plus 10 that carried effects, in GRDB, RxSwift and swift-protobuf). On consumers, no row newly carries
-    `Unknown`. 1,303 rows that already carried it gained reasons, and 10 of them gained a reason class
-    (`dispatch` 8, `callback` 3). The 2 new concrete charges are swift-format's
-    `DiagnosticsEngine.consumeParserDiagnostic` and `diagnosticMessage(…)` gaining `Log` (`deny Log` exit 2 → 1;
-    both already carried `Unknown`). They come through swift-syntax's `DiagnosticMessage.message` union into its
-    `SyntaxProtocol.init` union. That union already carried `Log` at 0.40.15, from
-    `SyntaxParseable.init(stringInterpolation:)`, because its key conflates every initialiser. It is a CHA
-    over-charge (not executed) inherited from that pre-existing key. With the kill switch set the A/B is
-    0/0/0.
+- **⚠ A chained consumer now carries the effect of its own implementor of a member that a dependency's union
+  contributor dispatches on. Past the bounded-CHA limit a union is published with its hedge (SOUNDNESS R1357, R1368,
+  R1375, R1376; SPEC §4 ⟨0.40⟩).** One rule had been applied to only part of a row. A union entry was built from its
+  contributors' `inferred` and `invisible`, was emitted only when those were non-empty, and ignored the bound. Four
+  silences followed.
+  - A contributor's `dispatchesOn` never reached the union, and a union pure apart from a further dispatch was not
+    published at all (R1357).
+  - 13 pure conformers of a local protocol published nothing (R1368).
+  - A requirement that no conformer declares, because all of them take the extension default, published nothing
+    (R1375).
+  - A protocol conformed to only through a refining protocol published its witnesses without the in-scan hedge
+    (R1376).
+
+  The producer's own scan reads `Unknown` + `dispatch:<P>.<m>` in the last three cases. A narrow union now carries
+  its contributors' transitive `dispatchesOn` (spelling (a), own key omitted) and is emitted by the rule a row is.
+  Outside the bound it adds `Unknown`, with `unknownWhy: [dispatch:<P>.<m>]` when the hedge is its only `Unknown`.
+  The bound is the in-scan predicate exactly, `count == 0 || count > 12` direct conformers, and it applies to local
+  protocol requirements only. A broad union keeps the effects it carried and names no further member, per rule 4.
+  Naming them had minted a `Log` on swift-format. A `super.m()` that reads a dependency's override union does not
+  follow its new members. `CANDOR_R1357_OFF=1` restores 0.40.15. `CANDOR_R1357_PROBE=1` prints the reach.
+  - **Gates.**
+    - PART 102: all 12 swift far cells now read `deny Fs` 1 and `deny Fs Unknown` 1. Three of them were 0 / 0 over
+      executed code that writes the file.
+    - PART 103 `c_13`: `deny Unknown` goes 0 → 1, as the one-tree scan reads.
+    - On a real producer, a consumer's `ParserFixIt` implementor reached through swift-syntax's
+      `FixItMessage.fixItID` goes from `deny Fs` / `deny Fs Unknown` 0 / 0 to 1 / 1.
+    - Going 1 → 0: `deny Fs Unknown` on PART 102 `l_bare_none`, `l_bare_near_*` and `f_bare_near_direct`. In each
+      the consumer's hedge on a key with no union is replaced by the published pure union, and every implementor it
+      joins is a pure body.
+  - **R764.** An unchained owner's `invisible` survives the hit of a newly published pure union, pinned and
+    calibrated in `UnionPublicationProcessTests`.
+  - **Corpus**, measured against the published 0.40.15 binary with `bin/corpus-ab.py`. 38 SwiftPM packages, each
+    scanned with its corpus dependencies chained by the same binary.
+    - Rows went 83,933 → 84,651: ADDED 610, REMOVED 0, CHANGED 21,380 (wide).
+    - Buckets: 1, 2, 3 and 3u are all **0**. No row gains or loses a concrete effect or `Unknown`, so no `deny E`
+      or `deny Unknown` gate on a function moves.
+    - Producer side: 19,809 unions gained `dispatchesOn`. 151 pure unions are newly published with members. 514
+      unions newly carry `Unknown` (459 newly published, 55 existing). 282 of those come from R1375/R1376.
+    - Consumer side: 1,402 rows that already carried `Unknown` gained reasons. 58 of them gained a reason class
+      (`dispatch` 57, `callback` 2), so a reason-scoped `deny Unknown[dispatch]` can go 0 → 1 on those rows.
+    - The only loss is 5 `unknownWhy` tokens on swift-certificates rows that keep `Unknown`. One `dep:` key is
+      respelled.
+    - With the kill switch set, the corpus A/B is 0/0/0.
 
 ## [0.40.15] — 2026-10-22
 
