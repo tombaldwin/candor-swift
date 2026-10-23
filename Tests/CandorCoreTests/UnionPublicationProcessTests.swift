@@ -353,4 +353,48 @@ final class UnionPublicationProcessTests: XCTestCase {
         XCTAssertEqual(u?["inferred"] as? [String], ["Fs", "Unknown"], "got \(u ?? [:])")
         XCTAssertTrue(eff(app, "c_b").isSuperset(of: ["Fs", "Unknown"]), "got \(app["c_b"] ?? [:])")
     }
+
+    // ── R1375: PAST THE BOUND, A REQUIREMENT NO CONFORMER DECLARES IS STILL PUBLISHED BROAD ─────────────────
+    // All 13 conformers take the (pure) extension default, so no conformer DECLARES `put` and the union loop,
+    // which walks declared methods, never saw it. One tree reads Unknown + dispatch:Sink.put.
+    func testPastTheBoundARequirementNobodyDeclaresIsPublishedBroad() throws {
+        let dep = "import Foundation\npublic protocol Sink { func put() -> Int }\n"
+            + "extension Sink { public func put() -> Int { 0 } }\n"
+            + (1...13).map { "public struct K\($0): Sink { public init() {} }\n" }.joined()
+        let (app, _, deps, root) = try scan([("Dep", [], dep), ("App", ["Dep"], Self.cb)], chain: ["Dep"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let u = deps["Dep"]?.unions["Dep#Sink.put"]
+        XCTAssertEqual(u?["inferred"] as? [String], ["Unknown"], "R1375: got \(u ?? [:])")
+        XCTAssertEqual(u?["unknownWhy"] as? [String], ["dispatch:Sink.put"])
+        XCTAssertTrue(eff(app, "c_b").contains("Unknown"), "R1375: chained must hedge as one tree does; got \(app["c_b"] ?? [:])")
+    }
+
+    // ── R1376: A PROTOCOL CONFORMED TO ONLY THROUGH A REFINEMENT CARRIES THE ZERO-CONFORMER HEDGE ─────────────
+    func testARefiningOnlyProtocolsUnionCarriesTheHedge() throws {
+        let dep = "import Foundation\npublic protocol P1 { func m() -> Int }\npublic protocol P2: P1 {}\n"
+            + "public struct S: P2 { public init() {}; public func m() -> Int { \(Self.FS); return 1 } }\n"
+        let app = "import Foundation\nimport Dep\n\npublic func c1(_ p: any P1) -> Int { \(Self.ENV); return p.m() }\n"
+        let (a, _, deps, root) = try scan([("Dep", [], dep), ("App", ["Dep"], app)], chain: ["Dep"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let u = deps["Dep"]?.unions["Dep#P1.m"]
+        XCTAssertEqual(Set(u?["inferred"] as? [String] ?? []), ["Fs", "Unknown"], "R1376: witness kept, hedge added; got \(u ?? [:])")
+        XCTAssertTrue(eff(a, "c1").isSuperset(of: ["Env", "Fs", "Unknown"]), "R1376: got \(a["c1"] ?? [:])")
+    }
+
+    // ── RULE 4: A BROAD UNION NAMES NOTHING FURTHER (the swift-format over-charge's channel) ─────────────
+    // 13 conformers whose `put` dispatches `Mapper.mapv`. Past the bound the producer's own scan edges no
+    // conformer, so it reads Unknown, and the chained consumer reads the same: the hedge, not the consumer's
+    // own `Mine.mapv` joined through a member the broad union does not name.
+    func testABroadUnionCarriesNoDispatchesOn() throws {
+        let api = Self.apiAbstractions + (1...13).map {
+            "public struct D\($0): Sink { public init() {}; public func put(_ v: any Mapper) -> Int { v.mapv(\($0)) } }\n"
+        }.joined()
+        let (app, _, deps, root) = try scan([("Api", [], "import Foundation\n" + api), ("App", ["Api"], Self.app(far: true))],
+                                            chain: ["Api"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let u = deps["Api"]?.unions["Api#Sink.put"]
+        XCTAssertEqual(u?["inferred"] as? [String], ["Unknown"], "got \(u ?? [:])")
+        XCTAssertNil(u?["dispatchesOn"], "rule 4: a broad union names nothing further; got \(u ?? [:])")
+        XCTAssertTrue(eff(app, "c_direct").contains("Unknown"), "the dispatch stays disclosed; got \(app["c_direct"] ?? [:])")
+    }
 }

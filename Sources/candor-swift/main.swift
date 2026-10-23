@@ -2068,13 +2068,38 @@ do {
         // dispatch through a foreign protocol is not bounded either (13 local conformers edge all 13), so the
         // foreign half is a separate finding, not this row's. A LOCAL CLASS is not bounded, because the
         // in-scan class CHA is not (precise-or-nothing). The hedge ADDS: a broad union keeps every
-        // contributor effect it carried, so no consumer charged through it before stops being charged. The
-        // ZERO-conformer half of `chaWithinBound` is deliberately not mirrored (a refining-only protocol's
-        // union carries its R1109 witnesses).
+        // contributor effect it carried, so no consumer charged through it before stops being charged.
+        //
+        // SOUNDNESS R1376 — AND THE ZERO-CONFORMER HALF. `chaWithinBound` is `count == 0 || count > 12`: a local
+        // protocol conformed to only through a REFINING protocol has no direct conformer, so the in-scan dispatch
+        // reads `Unknown` (and edges the R1109 witnesses). Its union carried the witnesses alone, and a chained
+        // consumer read them as the whole answer. Now it carries the same hedge, so `outsideBound` is the
+        // in-scan predicate exactly.
+        let isLocalProtocol = analysis.protocolNames.contains(proto)
+        let outsideBound = !r1357Off && isLocalProtocol && (conformerTypes.count > 12 || conformerTypes.isEmpty)
         func pastBound(_ method: String) -> Bool {
-            if r1357Off { return false }
-            guard analysis.protocolNames.contains(proto), byMethod[method]?.dyn == true else { return false }
-            return conformerTypes.count > 12
+            outsideBound && byMethod[method]?.dyn == true
+        }
+        // SOUNDNESS R1375 — A REQUIREMENT NO CONFORMER DECLARES. `byMethod` is built from the methods the
+        // conformers DECLARE, so a requirement every conformer takes from the extension default (or that none
+        // implements) never reached the bound above, and 13 such conformers published nothing while the
+        // one-tree scan reads `Unknown` + `dispatch:<P>.<m>`. Outside the bound, every requirement of the
+        // protocol and of its local super-protocols (the member space `dispatches` reads) gets an entry: a
+        // pure one, which the emission rule below publishes broad. A requirement already present under any
+        // spelling (an overload-suffixed `m(Int)`, a `#1`) is left as it is.
+        if outsideBound {
+            var reqs = Set<String>(), seen = Set<String>(), frontier = [proto]
+            while let cur = frontier.popLast() {
+                guard seen.insert(cur).inserted else { continue }
+                reqs.formUnion(analysis.protocolMethods[cur] ?? [])
+                frontier.append(contentsOf: (protocolSupers[cur] ?? []).filter { analysis.protocolNames.contains($0) })
+            }
+            func bareName(_ m: String) -> String {
+                let a = m.firstIndex(of: "(").map { String(m[..<$0]) } ?? m
+                return a.firstIndex(of: "#").map { String(a[..<$0]) } ?? a
+            }
+            let present = Set(byMethod.keys.map(bareName))
+            for r in reqs where !present.contains(r) { byMethod[r] = (inf: [], inv: [], dsp: [], dyn: true) }
         }
         // ⟨0.39⟩ obligation 2 — whose namespace this entry belongs in. UNDECIDABLE OWNER ⇒ NO ENTRY.
         // VEIN D — …except where the owner is proven to be one of a few DEPENDENCY packages (a candidate's
@@ -2103,7 +2128,14 @@ do {
             let broad = pastBound(method)
             // The union's own key MAY be omitted (§4 ⟨0.40⟩ rule 1): a contributor forwarding on the member the
             // union is keyed under adds nothing the consumer's join of that key does not already hold.
-            let dsp = eff.dsp.subtracting([hash])
+            // A BROAD union NAMES NOTHING FURTHER (SPEC §4 ⟨0.40⟩ rule 4): its hedge already discloses everything
+            // a dispatch through it reaches, and the producer's own scan past the bound edges no contributor, so
+            // it cannot have named their members. Carrying them anyway made a chained consumer MORE resolved than
+            // the one-tree answer, and through an over-wide key it minted a charge: swift-format's
+            // `DiagnosticsEngine.consumeParserDiagnostic` (`message.message` on `any DiagnosticMessage`, a broad
+            // union in swift-syntax) reached `SyntaxProtocol.init`'s Log, and scan-time `deny Log` went 0 -> 1
+            // over code that never logs. A broad union published no `dispatchesOn` at 0.40.15 either.
+            let dsp = broad ? [] : eff.dsp.subtracting([hash])
             // pure across all conformers AND naming no further member AND within the bound — silence = purity,
             // exactly the rule a row is emitted by (`reportQuals` above).
             if eff.inf.isEmpty && eff.inv.isEmpty && dsp.isEmpty && !broad { continue }
