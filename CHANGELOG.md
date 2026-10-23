@@ -49,7 +49,7 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
     - Producer side: 19,809 unions gained `dispatchesOn`. 151 pure unions are newly published with members. 514
       unions newly carry `Unknown` (459 newly published, 55 existing). 282 of those come from R1375/R1376.
     - Consumer side: 1,402 rows that already carried `Unknown` gained reasons. 58 of them gained a reason class
-      (`dispatch` 57, `callback` 2), so a reason-scoped `deny Unknown[dispatch]` can go 0 → 1 on those rows.
+      (`dispatch` 57, `callback` 2). All 58 already carried an unresolved `dep:` class, so a reason-scoped `deny Unknown[dispatch]` there was already refused (exit 2) or 1; it moves 2 → 1 or stays 1, never 0 → 1.
     - The only loss is 5 `unknownWhy` tokens on swift-certificates rows that keep `Unknown`. One `dep:` key is
       respelled.
     - Kill switch: with `CANDOR_R1357_OFF=1`, d4920d1's build gave a corpus A/B of 0/0/0. On the final build,
