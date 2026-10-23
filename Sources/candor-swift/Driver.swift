@@ -4402,8 +4402,17 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {   // R565
                                 // R867 — `lookupStatic`: a `super.` call is statically dispatched, so the
                                 // override union published beside the base's body is not its answer.
-                                if let de = deps.lookupStatic("\(p)#\(sup).\(member)") {
+                                if var de = deps.lookupStatic("\(p)#\(sup).\(member)") {
                                     if joinDebug { FileHandle.standardError.write("JOINSITE super \(f.qual) \(p)#\(sup).\(member)\n".data(using: .utf8)!) }
+                                    // SOUNDNESS R1357 — where the base body is pure (no real entry), the static
+                                    // index still holds the subclass-override UNION (R867's floor), and since
+                                    // R1357 a union names its contributors' further members. Those members are
+                                    // reached by a DYNAMIC dispatch through the union, never by `super.m()`,
+                                    // which runs the base's own (pure) body: joining them charged SwiftLint's
+                                    // `NestingRule.Visitor.visit(ClosureExprSyntax)` (`super.visit(node)`)
+                                    // with swift-syntax's `SyntaxProtocol.init` Log. The union's own content
+                                    // is applied exactly as on v0.40.15; only the new members are not followed.
+                                    if deps.lookupOwn("\(p)#\(sup).\(member)") == nil { de.dispatchesOn = [] }
                                     applyDepEntry(de, to: f.qual)
                                     resolved = true
                                 }

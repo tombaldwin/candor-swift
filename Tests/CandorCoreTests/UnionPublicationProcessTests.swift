@@ -267,6 +267,44 @@ final class UnionPublicationProcessTests: XCTestCase {
                        "Mine.other writes and nobody dispatches it: joining it is a minted edge; got \(app["c_direct"] ?? [:])")
     }
 
+    // ── A `super.m()` DOES NOT REACH THE OVERRIDE UNION'S FURTHER MEMBERS (the corpus A/B's over-charge) ──
+    //
+    // `V.visit` is pure, so the dependency publishes no real `Api#V.visit` and the static index keeps the
+    // subclass-override union (R867's floor). Since R1357 that union names `Api#Mapper.mapv`, which `S1.visit`
+    // dispatches. `C.visit`'s `super.visit()` runs `V.visit` alone (Swift dispatches `super.` statically), so the
+    // consumer's own `Mine.mapv` Fs MUST NOT arrive. The dynamic call `c_dyn(v) { v.visit() }` is the
+    // control: it does run `S1.visit` for an `S1`, so it MUST carry Fs.
+    func testASuperCallDoesNotFollowTheOverrideUnionsFurtherMembers() throws {
+        let api = Self.apiAbstractions + """
+        open class V { public init() {}; open func visit(_ m: any Mapper) -> Int { 0 } }
+        public final class S1: V { public override func visit(_ m: any Mapper) -> Int { m.mapv(1) } }
+
+        """
+        let app = """
+        import Foundation
+        import Api
+
+        public struct Mine: Mapper {
+            public init() {}
+            public func mapv(_ x: Int) -> Int { \(Self.FS); return x }
+            public func other() -> Int { 0 }
+        }
+        public final class C: V {
+            public override func visit(_ m: any Mapper) -> Int { \(Self.ENV); return super.visit(Mine()) }
+        }
+        public func c_dyn(_ v: V) -> Int { v.visit(Mine()) }
+
+        """
+        let (app_, _, deps, root) = try scan([("Api", [], api), ("App", ["Api"], app)], chain: ["Api"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        XCTAssertEqual(deps["Api"]?.unions["Api#V.visit"]?["dispatchesOn"] as? [String], ["Api#Mapper.mapv"],
+                       "fixture: the override union names the further member")
+        XCTAssertTrue(eff(app_, "c_dyn").contains("Fs"), "CONTROL: a dynamic `v.visit` runs S1.visit; got \(app_["c_dyn"] ?? [:])")
+        XCTAssertTrue(eff(app_, "C.visit").contains("Env"), "carrier lost")
+        XCTAssertFalse(eff(app_, "C.visit").contains("Fs"),
+                       "`super.visit` runs V.visit, which is pure: Mine.mapv's Fs is a minted edge; got \(app_["C.visit"] ?? [:])")
+    }
+
     // ── R1368: PAST THE BOUND THE UNION IS PUBLISHED BROAD (PART 103) ─────────────────────────────────
     private static func sinks(_ n: Int, effectful: Int? = nil) -> String {
         "import Foundation\npublic protocol Sink { func put() -> Int }\n" + (1...n).map { k in

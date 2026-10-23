@@ -10,6 +10,45 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ A chained consumer now carries the effect of its own implementor of a member a dependency's union
+  contributor dispatches on, and a union past the 12-implementor bound is published with its hedge (SOUNDNESS
+  R1357, R1368; SPEC §4 ⟨0.40⟩).** One rule had been applied to only part of a row. A union entry was built from
+  its contributors' `inferred` and `invisible` and emitted only when those were non-empty, with no bound. Two
+  things followed. A contributor's `dispatchesOn` never reached the union, and a union that was pure apart from a
+  further dispatch was not published at all. And 13 pure conformers of a local protocol published nothing, while
+  the producer's own scan reads `Unknown` + `dispatch:<P>.<m>` there. The union now carries its contributors'
+  transitive `dispatchesOn` (spelling (a), own key omitted) and is emitted by the same rule a row is. Past the bound
+  it adds `Unknown`. That applies to a local protocol requirement with more than 12 conformers, the same count the
+  in-scan decision uses, and it carries `unknownWhy: [dispatch:<P>.<m>]` when the hedge is the union's only
+  `Unknown`. No union loses an effect. A `super.m()` that reads a dependency's override union (the base body is
+  pure) does not follow the union's new members, because `super.` runs the base body only (executed: no write).
+  `CANDOR_R1357_OFF=1` restores 0.40.15. `CANDOR_R1357_PROBE=1` prints the reach.
+  - **Gates.** PART 102: all 12 swift `*_far_via`/`*_far_direct` cells now read `deny Fs` 1 and `deny Fs Unknown`
+    1. Three of them were SILENT (0 / 0) over executed code that writes the file. PART 103 `c_13`: `deny Unknown`
+    0 → 1, which matches the one-tree answer. `deny Fs Unknown` on PART 102 `l_bare_none` goes 1 → 0 (a consumer
+    with no implementor, owner chained, which passes the dependency's pure `Nop`). The same goes for
+    `l_bare_near_*` and `f_bare_near_direct` (`Mine.mapv` pure). These are removals, each traced to a pure body,
+    with the published union carrying the key. The unchained-owner `invisible` survives a newly published pure
+    union's hit (R764). That is pinned in `UnionPublicationProcessTests` and calibrated: making union entries
+    count as coverage reddens it.
+  - **Corpus**, measured against the published 0.40.15 binary with `bin/corpus-ab.py`. There were 38 SwiftPM
+    packages, each scanned with its corpus dependencies chained in topological order and scanned by the same
+    binary. Rows went 83,933 → 84,416: **ADDED 447, REMOVED 0, CHANGED 23,015** (`inferred` CHANGED 48).
+    REACH: `R1357HIT` 24,497 hits across 30 entries. Buckets: 3 and 3u (an effect or `Unknown` lost) are **0**,
+    2 (newly `Unknown` only) is **0**, and 1 (newly concrete) is **2**. The loss audit found only 5 `unknownWhy`
+    tokens on swift-certificates rows. Those rows keep `Unknown`, and one `dep:swift-crypto#ASN1ImplicitlyTaggable.init(…)`
+    is respelled `…init` beside the union's own reasons. Producer side: 21,658 unions gained `dispatchesOn`, 153
+    pure unions are newly published with members, and 303 unions newly carry `Unknown` (293 pure ones past the
+    bound plus 10 that carried effects, in GRDB, RxSwift and swift-protobuf). On consumers, no row newly carries
+    `Unknown`. 1,303 rows that already carried it gained reasons, and 10 of them gained a reason class
+    (`dispatch` 8, `callback` 3). The 2 new concrete charges are swift-format's
+    `DiagnosticsEngine.consumeParserDiagnostic` and `diagnosticMessage(…)` gaining `Log` (`deny Log` exit 2 → 1;
+    both already carried `Unknown`). They come through swift-syntax's `DiagnosticMessage.message` union into its
+    `SyntaxProtocol.init` union. That union already carried `Log` at 0.40.15, from
+    `SyntaxParseable.init(stringInterpolation:)`, because its key conflates every initialiser. It is a CHA
+    over-charge (not executed) inherited from that pre-existing key. With the kill switch set the A/B is
+    0/0/0.
+
 ## [0.40.15] — 2026-10-22
 
 - **Version-only cut to keep the family on one build line — no change to candor-swift since 0.40.14.** Only the

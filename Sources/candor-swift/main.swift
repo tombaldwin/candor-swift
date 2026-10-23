@@ -2060,17 +2060,20 @@ do {
         // the union over the same conformers was emitted with no bound at all, so 13 PURE conformers published
         // nothing and a chained consumer read pure where the one-tree scan read Unknown. SAME COUNT as the
         // in-scan decision — `conformers[proto].count` — and the same reason string, so the two cannot drift.
-        // ALSO for a union keyed under a FOREIGN owner: a consumer's own join (`unionOwnImplementors`) bounds
-        // only ITS conformers, so a dependency's 13 would otherwise reach it as a narrow pure union. A LOCAL
-        // CLASS is not bounded, because the in-scan class CHA is not (precise-or-nothing), and a published
-        // union more hedged than the producer's own scan for that is a change this row does not license.
-        // The hedge ADDS: a broad union keeps every contributor effect it carried, so no consumer charged
-        // through it before stops being charged. The ZERO-conformer half of `chaWithinBound` is deliberately
-        // not mirrored (a refining-only protocol's union carries its R1109 witnesses), see the CHANGELOG.
-        func pastBound(_ method: String, _ owner: String) -> Bool {
+        // ONLY a LOCAL protocol's REQUIREMENT, which is exactly where the in-scan bound applies. NOT a union
+        // keyed under a FOREIGN owner: this package cannot tell a foreign protocol's requirements from every
+        // other method its conformers happen to declare (`dispatches` answers `true` for all of them), so the
+        // first cut of this change hedged keys like `swift-asn1#Hashable.==` and `…#Hashable.ed25519` and a
+        // corpus A/B saw the hedges arrive at real consumers (swift-certificates). The producer's own in-scan
+        // dispatch through a foreign protocol is not bounded either (13 local conformers edge all 13), so the
+        // foreign half is a separate finding, not this row's. A LOCAL CLASS is not bounded, because the
+        // in-scan class CHA is not (precise-or-nothing). The hedge ADDS: a broad union keeps every
+        // contributor effect it carried, so no consumer charged through it before stops being charged. The
+        // ZERO-conformer half of `chaWithinBound` is deliberately not mirrored (a refining-only protocol's
+        // union carries its R1109 witnesses).
+        func pastBound(_ method: String) -> Bool {
             if r1357Off { return false }
-            let isLocalRequirement = analysis.protocolNames.contains(proto) && byMethod[method]?.dyn == true
-            guard isLocalRequirement || owner != pkgName else { return false }
+            guard analysis.protocolNames.contains(proto), byMethod[method]?.dyn == true else { return false }
             return conformerTypes.count > 12
         }
         // ⟨0.39⟩ obligation 2 — whose namespace this entry belongs in. UNDECIDABLE OWNER ⇒ NO ENTRY.
@@ -2097,7 +2100,7 @@ do {
         }
         for (method, eff) in byMethod {
             let hash = "\(ownerPkg)#\(proto).\(method)"
-            let broad = pastBound(method, ownerPkg)
+            let broad = pastBound(method)
             // The union's own key MAY be omitted (§4 ⟨0.40⟩ rule 1): a contributor forwarding on the member the
             // union is keyed under adds nothing the consumer's join of that key does not already hold.
             let dsp = eff.dsp.subtracting([hash])
