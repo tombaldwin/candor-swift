@@ -10,6 +10,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.40.16] — 2026-10-24
+
 - **⚠ A chained consumer now carries the effect of its own implementor of a member that a dependency's union
   contributor dispatches on. Past the bounded-CHA limit a union is published with its hedge (SOUNDNESS R1357, R1368,
   R1375, R1376; SPEC §4 ⟨0.40⟩).** One rule had been applied to only part of a row. A union entry was built from its
