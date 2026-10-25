@@ -9817,7 +9817,8 @@ final class CallCollector: SyntaxVisitor {
                 comparisonWitnesses("hash", base, arity: 1); comparisonWitnesses("==", base)
             } else if stdlibWitnessSite("seq", m, labels: labels).contains("==") { comparisonWitnesses("==", base) }
         case .array:
-            let ws = stdlibWitnessSite("seq", m, labels: labels)
+            var ws = stdlibWitnessSite("seq", m, labels: labels)
+            if Self.operatorReferenceWitness(node) == "==" { ws.append("==") }   // `a.elementsEqual(b, by: ==)`
             if ws.contains("==") { vbHit("R974", "array \(m)"); comparisonWitnesses("==", base) }
             if ws.contains("hash") { comparisonWitnesses("hash", base, arity: 1) }
         case .dictionary:
@@ -10368,9 +10369,26 @@ final class CallCollector: SyntaxVisitor {
     // lexically) over a LOCAL element type edges to `Element.<`. A stdlib `[Int]`/`[String]` element has
     // no local `<` unit (resolveQual drops it) → stays pure. matchOverloads/resolveQual route the typed
     // `Element.<` call; a PURE `<` contributes nothing.
+    /// The witness an OPERATOR passed as a function value runs (`xs.sorted(by: <)`, `xs.max(by: >)`,
+    /// `a.elementsEqual(b, by: ==)`): the platform calls it on the elements, so it is the element's `<` / `==`.
+    /// The release charged `sorted(by: <)` only because its name list ignored labels; the derived table excludes
+    /// the closure form, and without this the operator form went SILENT (found on the round-2 corpus A/B as a lost
+    /// SwiftLint reason, executed on a fixture: `[Cmp].sorted(by: <)` and `.max(by: <)` CHARGED on 0.40.17).
+    static func operatorReferenceWitness(_ node: FunctionCallExprSyntax) -> String? {
+        for a in node.arguments {
+            guard let dr = peel(a.expression).as(DeclReferenceExprSyntax.self) else { continue }
+            switch dr.baseName.text {
+            case "<", ">", "<=", ">=": return "<"
+            case "==", "!=": return "=="
+            default: continue
+            }
+        }
+        return nil
+    }
     private func edgeComparableWitness(_ node: FunctionCallExprSyntax) {
         guard let ma = node.calledExpression.as(MemberAccessExprSyntax.self),
-              stdlibWitnessSite("seq", ma.declName.baseName.text, labels: node.arguments.map { $0.label?.text }).contains("<"),
+              stdlibWitnessSite("seq", ma.declName.baseName.text, labels: node.arguments.map { $0.label?.text }).contains("<")
+                || Self.operatorReferenceWitness(node) == "<",
               let base = ma.base else { return }
         // a `(by:)`/`(into:)` etc. closure form supplies its own comparator — no implicit `<` runs.
         if node.arguments.contains(where: { Self.peel($0.expression).is(ClosureExprSyntax.self) })

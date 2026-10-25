@@ -299,6 +299,25 @@ def fixtures(d):
             App=("import Foundation\nimport A\nimport B\nfunc eff() { %s }\n"
                  "func callerFn() { %s; let f = eff; _ = f }\ncallerFn()\n") % (E("eff"), BEG),
             chained=["A", "B"]),
+        # N5: the OPERATOR passed as the comparator runs the element's `<` (positive twin of N6). The derived table
+        # excludes `sorted(by:)` (a closure parameter); the first round-2 cut lost this form — CHARGED on 0.40.17.
+        "N5_sorted_by_operator_ref_compares": dict(
+            A="public func aTouch() {}\n",
+            B="import A\npublic func bTouch() {}\n",
+            App=("import Foundation\nimport A\nimport B\nstruct C: Comparable { let v: Int\n"
+                 "  static func < (a: C, b: C) -> Bool { %s; return a.v < b.v } }\n"
+                 "func callerFn() { %s; _ = [C(v: 2), C(v: 1)].sorted(by: <); _ = [C(v: 1), C(v: 2)].max(by: <) }\ncallerFn()\n") % (E("C.<"), BEG),
+            chained=["A", "B"]),
+        # N6: a comparator FUNCTION that never calls the element's `<` — 0.40.17 charged `C.<` by name (FABRICATED).
+        "N6_sorted_by_pure_fn_no_compare": dict(
+            A="public func aTouch() {}\n",
+            B="import A\npublic func bTouch() {}\n",
+            App=("import Foundation\nimport A\nimport B\nstruct C: Comparable { let v: Int\n"
+                 "  static func < (a: C, b: C) -> Bool { %s; return a.v < b.v } }\n"
+                 "func byV(_ a: C, _ b: C) -> Bool { a.v > b.v }\n"
+                 "func liveFn() { _ = C(v: 1) < C(v: 2) }\n"
+                 "func callerFn() { %s; _ = [C(v: 2), C(v: 1)].sorted(by: byV) }\ncallerFn(); liveFn()\n") % (E("C.<"), BEG),
+            chained=["A", "B"]),
         # ── SIDECAR-DELETED arm (FABLE-REVIEW §3.5): K6's both-chained charge with every chained report's
         # `.callgraph.json`/`.hierarchy.json` sidecar removed before App is scanned. ──
         "S1_sidecar_deleted_open_class": dict(
