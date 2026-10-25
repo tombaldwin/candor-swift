@@ -149,5 +149,330 @@
    "incomplete": null,
    "unknownWhy": null
   }
+ },
+ "K12_rekey_open_subclass_no_join": {
+  "gt": false,
+  "g1": 0,
+  "g2": 0,
+  "verdict": "CLEAN",
+  "row": null
+ },
+ "K12p_rekey_open_subclass_joins": {
+  "gt": true,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "CHARGED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "K13_nhop_stored_property_joins": {
+  "gt": true,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "CHARGED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "K13n_nhop_stored_property_rekey_no_join": {
+  "gt": false,
+  "g1": 0,
+  "g2": 0,
+  "verdict": "CLEAN",
+  "row": null
+ },
+ "K14_sibling_subtree_field_no_join": {
+  "gt": false,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "FABRICATED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "K14l_sibling_subtree_local_no_join": {
+  "gt": false,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "FABRICATED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "K14p_subtree_subclass_joins": {
+  "gt": true,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "CHARGED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "K14a_ancestor_override_joins": {
+  "gt": true,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "CHARGED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "K14h_heldvalue_same_class_joins": {
+  "gt": true,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "CHARGED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "K15_unrelated_class_override_no_join": {
+  "gt": false,
+  "g1": 0,
+  "g2": 0,
+  "verdict": "CLEAN",
+  "row": null
+ },
+ "K16_final_receiver_no_join": {
+  "gt": false,
+  "g1": 0,
+  "g2": 0,
+  "verdict": "CLEAN",
+  "row": null
+ },
+ "K17_indirect_subclass_heldvalue_joins": {
+  "gt": true,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "CHARGED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "K18_protocol_conformer_subclass_joins": {
+  "gt": true,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "CHARGED",
+  "row": {
+   "inferred": [
+    "Fs",
+    "Unknown"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": [
+    "dispatch:P.m"
+   ]
+  }
+ },
+ "R1437a_open_member_self_dispatch": {
+  "gt": true,
+  "g1": 0,
+  "g2": 0,
+  "verdict": "SILENT",
+  "row": null
+ },
+ "R1437b_property_key_two_hops": {
+  "gt": true,
+  "g1": 0,
+  "g2": 0,
+  "verdict": "SILENT",
+  "row": null
+ },
+ "R1437b2_format_key_two_hops": {
+  "gt": true,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "CHARGED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "R1437c_super_strips_heldvalue_key": {
+  "gt": true,
+  "g1": 0,
+  "g2": 0,
+  "verdict": "SILENT",
+  "row": null
+ },
+ "R1437d_super_into_self_dispatch": {
+  "gt": true,
+  "g1": 0,
+  "g2": 0,
+  "verdict": "SILENT",
+  "row": null
+ },
+ "N1_closure_stored_never_applied": {
+  "gt": false,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "FABRICATED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "N2_keypath_stored_never_applied": {
+  "gt": false,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "FABRICATED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "N3_array_literal_no_compare": {
+  "gt": false,
+  "g1": 0,
+  "g2": 0,
+  "verdict": "CLEAN",
+  "row": null
+ },
+ "N3p_array_contains_compares": {
+  "gt": true,
+  "g1": 0,
+  "g2": 0,
+  "verdict": "SILENT",
+  "row": null
+ },
+ "N4_local_fn_reference_never_called": {
+  "gt": false,
+  "g1": 0,
+  "g2": 0,
+  "verdict": "CLEAN",
+  "row": null
+ },
+ "N5_sorted_by_operator_ref_compares": {
+  "gt": true,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "CHARGED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "N6_sorted_by_pure_fn_no_compare": {
+  "gt": false,
+  "g1": 0,
+  "g2": 0,
+  "verdict": "CLEAN",
+  "row": null
+ },
+ "S1_sidecar_deleted_open_class": {
+  "gt": true,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "CHARGED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "S2_sidecar_deleted_plain_effect": {
+  "gt": true,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "CHARGED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "S1_sidecar_present_open_class": {
+  "gt": true,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "CHARGED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "S2_sidecar_present_plain_effect": {
+  "gt": true,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "CHARGED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": null
+  }
  }
 }
