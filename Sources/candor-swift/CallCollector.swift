@@ -149,6 +149,10 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               // effects fabricates. Suppressing the type itself, as the first version of this fix did,
               // took the dep join with it and made an Fs-performing function read PURE.
               var opaqueRecv: Bool = false
+              /// SOUNDNESS R1416 — the receiver is a VALUE the caller holds (a parameter, local or property), not
+              /// `self` and not a construction: only such a receiver may be a subclass declared outside this scan.
+              var recvValue: Bool = false
+              var recvSelf: Bool = false       // R1416 — the receiver is spelled `self`
               /// ⟨0.23⟩ The NAME of the dependency factory this receiver was bound from — the other half
               /// of the `<untyped>.` marker. Half 1 needed only "no key could be formed"; half 2 needs to
               /// say WHICH function's return type would have formed it, and the callee name is the only
@@ -8348,13 +8352,23 @@ final class CallCollector: SyntaxVisitor {
                 if Self.r651Probe, r651ForeignExtended {
                     FileHandle.standardError.write("R651HIT \(rt).\(member)\n".data(using: .utf8)!)
                 }
-                calls.append(Call(path: "\(rt).\(member)", leaf: member, strArg: lit, typed: true,
+                var typedCall = Call(path: "\(rt).\(member)", leaf: member, strArg: lit, typed: true,
                                   args: argKinds(node), argTypes: argTypesOf(node),
                                   conventionOwner: r839Convention, ownerModule: spelledModule(of: ma.base),
                                   extOwner: r651ForeignExtended ? rt : nil,
                                   holdsHop: holdsHop, guessHop: r839Convention,
                                   r915Site: Self.veinBProbe && base.opaqueHop
-                                    ? "\(extOnly ? "ext" : "decl")\t\(ma.base.map { guessHopKind($0) } ?? "nobase")\t\(ma.base.map { String($0.trimmedDescription.prefix(60)) } ?? "")" : nil))
+                                    ? "\(extOnly ? "ext" : "decl")\t\(ma.base.map { guessHopKind($0) } ?? "nobase")\t\(ma.base.map { String($0.trimmedDescription.prefix(60)) } ?? "")" : nil)
+                if let b = ma.base.map(Self.peel) {
+                    if let dr = b.as(DeclReferenceExprSyntax.self) {
+                        let n = dr.baseName.text
+                        typedCall.recvValue = n != "self" && n.first?.isLowercase == true
+                        typedCall.recvSelf = n == "self"
+                    } else if let inner = b.as(MemberAccessExprSyntax.self) {
+                        typedCall.recvValue = !(inner.base.map(Self.peel)?.is(FunctionCallExprSyntax.self) ?? false)
+                    }
+                }
+                calls.append(typedCall)
                 if let b = ma.base, let dotted = nestedDottedKey(b) {
                     calls.append(Call(path: "\(dotted).\(member)", leaf: member, strArg: lit, typed: true,
                                       args: argKinds(node), argTypes: argTypesOf(node)))

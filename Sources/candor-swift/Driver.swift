@@ -19,6 +19,7 @@ import CandorCore
 private let driverR867Off = ProcessInfo.processInfo.environment["CANDOR_R867_OFF"] != nil
 /// SOUNDNESS R1416 — kill switch for the `open`-class half of ⟨0.39⟩ obligation 1 (call-target round 1).
 private let r1416Off = ProcessInfo.processInfo.environment["CANDOR_R1416_OFF"] != nil
+private let r1416Probe = ProcessInfo.processInfo.environment["CANDOR_R1416_PROBE"] != nil   // reach: one line per key formed
 /// VEIN C §1b KILL SWITCH (R903, R876).
 private let veinCOff = ProcessInfo.processInfo.environment["CANDOR_VEINC_OFF"] != nil
 /// SOUNDNESS R1109 §1b KILL SWITCH (main.swift reads the same variable for the producer's union) and REACH
@@ -1827,12 +1828,20 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
     }
 
+    /// SOUNDNESS R1416 — a SELF-key is published only on a unit a subclass cannot replace. An `open` member's base body
+    /// runs on a foreign subclass's instance mostly through that subclass's own `super.` call, where `self` is the
+    /// CALLER's class and a key would make the consumer join every sibling subclass it has (measured on the corpus
+    /// A/B: SwiftLint's `super.visit(token)` joined all of its SyntaxRewriter subclasses, 83 rows). The template
+    /// method that is not open (`walk`, `rewrite`, a `public` accessor) carries the key.
+    func isOpenMember(_ q: String) -> Bool { declVisibility[q]?.access == "open" || openMemberQuals.contains(q) }
+
     /// SOUNDNESS R1416 — the obligation-1 key for a dispatch on `owner.member` when `owner` is an `open` class this
     /// package declares and the member the call reaches is itself `open` (so a package outside this scan may
     /// override it). `targets` are the units the call resolved to; nil when nothing about the call is open.
     func openMemberKey(_ owner: String, _ member: String, _ targets: Set<String>) -> String? {
         guard !r1416Off, let path = openClassWirePath(owner),
               targets.contains(where: { declVisibility[$0]?.access == "open" || openMemberQuals.contains($0) }) else { return nil }
+        if r1416Probe { FileHandle.standardError.write("R1416KEY \(pkgName)#\(path).\(member)\n".data(using: .utf8)!) }
         return "\(pkgName)#\(path).\(member)"
     }
 
@@ -2426,6 +2435,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// clause requires the member to REACH the caller transitively and a pure intermediary omitted breaks
     /// a consumer's walk one hop short.
     var dispatchDirect: [String: Set<String>] = [:]
+    // SOUNDNESS R1416 — an IMPLICIT-`self` dispatch on an `open` member names the member on the unit's own row, but
+    // it is a fact about `self`, not about the unit's callers: a caller inherits it only through a receiver whose
+    // static type is itself an `open` class (so the value may be a subclass declared outside this scan). Kept
+    // apart from `dispatchDirect`, whose keys propagate over EVERY edge — measured on the corpus A/B, propagating
+    // `SyntaxVisitor.walk`'s self-dispatch over swift-syntax's whole graph (an over-wide `SyntaxProtocol.init`
+    // edge reaches `ParseDiagnosticsGenerator.diagnostics`, whose `walk` is on a `public` class's own instance)
+    // charged 1,189 SwiftLint rows with its own visitors' effects.
+    var openSelfKeys: [String: Set<String>] = [:]
+    var openSelfEdges: [(caller: String, targets: Set<String>)] = []   // implicit-self calls inside an open class
+    var openRecvEdges: [(caller: String, owner: String, targets: Set<String>)] = []   // `b.x`, `b` typed by an open class
     // The κ-unknown modules this code imports (the ledger's set, hoisted for per-fn `invisible` attribution):
     // not a platform-frontier module, not a κ tier, not an internal target — effects through them are
     // INVISIBLE. A module a chained sibling report COVERS is exempt (SPEC §2 rule 3): the report — even an
@@ -4014,7 +4033,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     }
                     // SOUNDNESS R1416 — the accessor twin of the method arm's key.
                     if let k = openMemberKey(type, member, ts.filter { veinCAccessorQuals.contains($0) }) {
-                        dispatchDirect[f.qual, default: []].insert(k)
+                        // ROW-ONLY (a self-key): a property read here does not say whether the receiver is a held
+                        // value, `self` or a construction, so the key is published on this row and not propagated.
+                        if r1416Probe { FileHandle.standardError.write("R1416SITE read \(f.qual) \(k)\n".data(using: .utf8)!) }
+                        openSelfKeys[f.qual, default: []].insert(k)
                     }
                 }
             }
@@ -4451,6 +4473,23 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                     // with swift-syntax's `SyntaxProtocol.init` Log. The union's own content
                                     // is applied exactly as on v0.40.15; only the new members are not followed.
                                     if deps.lookupOwn("\(p)#\(sup).\(member)") == nil { de.dispatchesOn = [] }
+                                    // SOUNDNESS R1416 — a SELF-key the base body carries (`<pkg>#<Base>.m`, Base one of this
+                                    // class's supertypes) is NOT followed through a `super.` call. `self` there is this
+                                    // class's own instance, so joining every subclass the consumer has charges siblings;
+                                    // and the entry is the bare key's union of every overload, so the self-dispatch may
+                                    // not be in the body that runs at all (measured: SwiftLint's `super.visit(token)`
+                                    // reached `SyntaxRewriter.visit(TokenSyntax)`, which returns its argument, and was
+                                    // charged with 78 rows of its sibling rewriters' effects). The release followed
+                                    // neither; this keeps that, and names the residual: a consumer subclass's `super.`
+                                    // into a base body that self-dispatches to the consumer's own override is silent.
+                                    if !r1416Off, !de.dispatchesOn.isEmpty {
+                                        let sups = supertypesOf[et] ?? []
+                                        de.dispatchesOn = de.dispatchesOn.filter { k in
+                                            guard let h = k.firstIndex(of: "#"), let dot = k.lastIndex(of: "."), h < dot else { return true }
+                                            let ty = String(k[k.index(after: h)..<dot])
+                                            return !(sups.contains(ty) || sups.contains(String(ty.split(separator: ".").last ?? Substring(ty))))
+                                        }
+                                    }
                                     applyDepEntry(de, to: f.qual)
                                     resolved = true
                                 }
@@ -4718,10 +4757,19 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             edges[f.qual, default: []].formUnion(resolveQual("\(sub).\(member)"))
                         }
                     }
-                    // SOUNDNESS R1416 — and name the member when an override outside this scan could also run.
-                    if let k = openMemberKey(owner, member, typedTargets.union(supertypesOf[owner].map { sups in
-                        Set(sups.flatMap { resolveQual("\($0).\(member)") }) } ?? [])) {
-                        dispatchDirect[f.qual, default: []].insert(k)
+                    // SOUNDNESS R1416 — and name the member when an override outside this scan could also run: on
+                    // a held VALUE that key is the caller's (it propagates), on `self` it is a self-key (it reaches a
+                    // caller only through an open-typed receiver), on a construction it is nothing (the type is exact).
+                    let openTargets = typedTargets.union(supertypesOf[owner].map { sups in
+                        Set(sups.flatMap { resolveQual("\($0).\(member)") }) } ?? [])
+                    if call.recvValue || call.recvSelf, let k = openMemberKey(owner, member, openTargets) {
+                        if r1416Probe { FileHandle.standardError.write("R1416SITE \(call.recvSelf ? "self" : "call") \(f.qual) \(k)\n".data(using: .utf8)!) }
+                        if call.recvSelf { if !isOpenMember(f.qual) { openSelfKeys[f.qual, default: []].insert(k) } }
+                        else { dispatchDirect[f.qual, default: []].insert(k) }
+                    }
+                    if !r1416Off, openClassWirePath(owner) != nil {
+                        if call.recvValue, let op = openClassWirePath(owner) { openRecvEdges.append((f.qual, op, openTargets)) }
+                        else if call.recvSelf { openSelfEdges.append((f.qual, openTargets)) }
                     }
                 }
             } else if call.unqualified {
@@ -4922,9 +4970,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             edges[f.qual, default: []].formUnion(hits)
                         }
                         // SOUNDNESS R1416 — `self` may also be a subclass declared outside this scan.
-                        if let k = openMemberKey(et, call.leaf, siblingExact.union(siblingOverloads).union(inheritedTargets)) {
-                            dispatchDirect[f.qual, default: []].insert(k)
+                        let selfTargets = siblingExact.union(siblingOverloads).union(inheritedTargets)
+                        if !isOpenMember(f.qual), let k = openMemberKey(et, call.leaf, selfTargets) {
+                            openSelfKeys[f.qual, default: []].insert(k)
                         }
+                        if !r1416Off, openClassWirePath(et) != nil { openSelfEdges.append((f.qual, selfTargets)) }
                     }
                 }
                 if !siblingOverloads.isEmpty || !siblingExact.isEmpty || !inheritedTargets.isEmpty {
@@ -6121,7 +6171,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if let path = localProtocolWirePath(d.proto) {
                     dispatchDirect[f.qual, default: []].insert("\(pkgName)#\(path).\(d.member)")
                 } else if let k = openMemberKey(d.proto, d.member, resolveQual("\(d.proto).\(d.member)")) {
-                    dispatchDirect[f.qual, default: []].insert(k)
+                    openSelfKeys[f.qual, default: []].insert(k)   // row-only, as the property-read key above
                 }
             }
             for c in subtypesOf[d.proto] ?? [] {
@@ -6591,7 +6641,35 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // it no walk. (candor-java takes the other branch, and had to: on the JVM the closure is
     // unserialisable — jooq-3.19.10 died with 8 GB of heap. Swift protocols are not JVM interfaces; the
     // corpus A/B for this change is in the commit message.)
-    let dispatchAcc = propagate(dispatchDirect, over: edges)
+    // SOUNDNESS R1416 — self-keys flow along implicit-self calls inside an open class, then into a caller ONLY through a
+    // receiver typed by an open class (where they become that caller's own keys and propagate as any other). The
+    // unit's own row always carries them (`dispatchAcc` below): a consumer may call it on its own subclass.
+    var selfChanged = true
+    while selfChanged {
+        selfChanged = false
+        for e in openSelfEdges where !isOpenMember(e.caller) {
+            let add = e.targets.reduce(into: Set<String>()) { $0.formUnion(openSelfKeys[$1] ?? []) }
+            if !add.isSubset(of: openSelfKeys[e.caller] ?? []) { openSelfKeys[e.caller, default: []].formUnion(add); selfChanged = true }
+        }
+    }
+    // …RE-KEYED TO THE RECEIVER'S STATIC TYPE. `format.rewrite(x)` with `format: BasicFormat` runs `rewrite`'s
+    // self-dispatch on a BasicFormat, so only a subclass of BasicFormat can supply the override: the key is
+    // `<pkg>#BasicFormat.visit`, not `rewrite`'s own `<pkg>#SyntaxRewriter.visit` — which a consumer would join
+    // against every SyntaxRewriter subclass it has (measured: SwiftLint's rewriters, 1,400 rows).
+    for e in openRecvEdges {
+        let add = e.targets.reduce(into: Set<String>()) { acc, t in
+            for k in openSelfKeys[t] ?? [] {
+                guard let dot = k.lastIndex(of: ".") else { continue }
+                acc.insert("\(pkgName)#\(e.owner)\(k[dot...])")
+            }
+        }
+        if !add.isEmpty {
+            if r1416Probe { FileHandle.standardError.write("R1416RECV \(e.caller) <- \(e.targets.sorted().prefix(3)) \(add.sorted().prefix(3))\n".data(using: .utf8)!) }
+            dispatchDirect[e.caller, default: []].formUnion(add)
+        }
+    }
+    var dispatchAcc = propagate(dispatchDirect, over: edges)
+    for (q, ks) in openSelfKeys { dispatchAcc[q, default: []].formUnion(ks) }
 
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): a LOUD stderr line naming the count (like rust/java), so a
     // human sees the incompleteness even when they don't read the JSON. The machine-legible disclosure
