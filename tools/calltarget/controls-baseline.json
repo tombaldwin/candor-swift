@@ -1,0 +1,132 @@
+{
+ "K1_subscript_req_unchained_owner": {
+  "gt": true,
+  "g1": 0,
+  "g2": 0,
+  "verdict": "DISCLOSED",
+  "row": {
+   "inferred": [],
+   "invisible": [
+    "A"
+   ],
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "K2_operator_unchained_owner": {
+  "gt": true,
+  "g1": 0,
+  "g2": 0,
+  "verdict": "DISCLOSED",
+  "row": {
+   "inferred": [],
+   "invisible": [
+    "A"
+   ],
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "K3_open_class_unchained_owner": {
+  "gt": true,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "CHARGED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": [
+    "A"
+   ],
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "K4_open_class_effect_in_unchained_third": {
+  "gt": true,
+  "g1": 0,
+  "g2": 0,
+  "verdict": "DISCLOSED",
+  "row": {
+   "inferred": [],
+   "invisible": [
+    "B"
+   ],
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "K5_open_class_owner_unchained_sub_chained": {
+  "gt": true,
+  "g1": 0,
+  "g2": 0,
+  "verdict": "DISCLOSED",
+  "row": {
+   "inferred": [],
+   "invisible": [
+    "A"
+   ],
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "K6_open_class_both_chained": {
+  "gt": true,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "CHARGED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "K7_open_accessor_row_hit_consumer_sub": {
+  "gt": true,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "CHARGED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "K8_open_accessor_row_hit_unchained_sub": {
+  "gt": true,
+  "g1": 0,
+  "g2": 0,
+  "verdict": "DISCLOSED",
+  "row": {
+   "inferred": [],
+   "invisible": [
+    "B"
+   ],
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ },
+ "K9_subscript_req_hit_unchained_owner": {
+  "gt": true,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "CHARGED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": [
+    "A"
+   ],
+   "incomplete": null,
+   "unknownWhy": null
+  }
+ }
+}
