@@ -128,5 +128,26 @@
    "incomplete": null,
    "unknownWhy": null
   }
+ },
+ "K10_self_key_exact_receiver_no_join": {
+  "gt": false,
+  "g1": 0,
+  "g2": 0,
+  "verdict": "CLEAN",
+  "row": null
+ },
+ "K11_self_key_held_value_joins": {
+  "gt": true,
+  "g1": 1,
+  "g2": 1,
+  "verdict": "CHARGED",
+  "row": {
+   "inferred": [
+    "Fs"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": null
+  }
  }
 }

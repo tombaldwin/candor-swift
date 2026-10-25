@@ -92,6 +92,23 @@ def fixtures(d):
                  "func dispFn(_ p: any P) -> Int { return p[0] }\n"
                  "func callerFn() { %s; _ = dispFn(BImpl()) }\ncallerFn()\n") % BEG,
             chained=["B"]),
+        # K10 (FABRICATION control, from the corpus A/B): a self-dispatching template method run on an EXACT
+        # receiver the library constructs itself. App's own subclass's effect must NOT be charged to `callerFn`.
+        "K10_self_key_exact_receiver_no_join": dict(
+            A=("open class V { public init() {}\n  open func visit() { print(\"RAN:V.visit\") }\n  public func walk() { visit() } }\n"
+               "public final class Gen: V { public override init() {} }\npublic func run() { Gen().walk() }\n"),
+            B="import A\npublic func bTouch() {}\n",
+            App=("import Foundation\nimport A\nimport B\nfinal class Mine: V { override func visit() { %s } }\n"
+                 "func liveFn() { Mine().walk() }\nfunc callerFn() { %s; run() }\ncallerFn(); liveFn()\n") % (E("Mine.visit"), BEG),
+            chained=["A", "B"]),
+        # K11: the same template method reached through a HELD VALUE typed by the open class: App's subclass runs.
+        "K11_self_key_held_value_joins": dict(
+            A=("open class V { public init() {}\n  open func visit() { print(\"RAN:V.visit\") }\n  public func walk() { visit() } }\n"
+               "public func format(using v: V) { v.walk() }\n"),
+            B="import A\npublic func bTouch() {}\n",
+            App=("import Foundation\nimport A\nimport B\nfinal class Mine: V { override func visit() { %s } }\n"
+                 "func callerFn() { %s; format(using: Mine()) }\ncallerFn()\n") % (E("Mine.visit"), BEG),
+            chained=["A", "B"]),
     }
 
 def pkg(dir_, name, deps, src):
