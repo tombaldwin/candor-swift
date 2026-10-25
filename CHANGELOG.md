@@ -10,6 +10,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.40.17] — 2026-10-25
+
 - ⚠ **Dependency hook calls join through one lookup, and a library names its `open` class members
   (call-target round 1; SOUNDNESS R1415, R1416, R1310).** Three per-hook dependency channels (stringify, `deinit`,
   property) are replaced by one map and one entry point, which operators, comparison and hash witnesses (including a
