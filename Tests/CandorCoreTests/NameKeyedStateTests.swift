@@ -427,8 +427,9 @@ final class NameKeyedStateTests: XCTestCase {
         "resolvedHomePaths": .notPerBinding,
         "lastResolvedHomePath": .notPerBinding,
         "protoDispatches": .notPerBinding, "protoPropReads": .notPerBinding,
-        "stringifyDispatches": .notPerBinding, "stringifyExternal": .notPerBinding,
-        "deinitExternal": .notPerBinding, "propertyExternal": .notPerBinding,
+        "stringifyDispatches": .notPerBinding,
+        // R1415 — output: the one dependency-member candidate map (and its overload-precise keys)
+        "externalMembers": .notPerBinding, "externalMemberPrecise": .notPerBinding,
         "globalReads": .notPerBinding, "depGlobalReads": .notPerBinding,
         // R853 — scope bookkeeping: `binderShadow` before a statement's conditions, keyed by the statement
         "binderSnapshots": .notPerBinding, "caseSnapshots": .notPerBinding,

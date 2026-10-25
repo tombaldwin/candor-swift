@@ -762,25 +762,37 @@ final class CallCollector: SyntaxVisitor {
     // become `Unknown` here: interpolation is pervasive in Swift, and a conformer that doesn't declare a
     // `description` uses the stdlib's PURE default — so this rung is precise-or-nothing, never a flood.
     var stringifyDispatches: [(proto: String, member: String)] = []
-    // IMPLICIT STRINGIFICATION over an operand whose type is NOT declared in the analysed code —
-    // `"\(e)"` where `e: DepLib.Entry`. Neither index above can name the witness (a dep type is in
-    // neither `localTypes` nor `localProtocols`), so the site recorded NOTHING and an effectful
-    // dependency `description` was absorbed silently. `Type.member` candidates, resolved ONLY against a
-    // chained sibling report in the Driver (`<Module>#<Type>.<member>`, the key the dep's own report
-    // already carries) — with no dep report loaded nothing consults this set, so the unchained analysis
-    // is byte-identical. See candor-spec/SOUNDNESS-VEIN-crossing-the-scan-boundary.md.
-    var stringifyExternal: Set<String> = []
-    // DEINIT GLUE (R33) over a type declared OUTSIDE the analysed code — a chained DEPENDENCY's class,
-    // constructed and held as a non-escaping local, whose `deinit` runs at scope exit. `Type.deinit`
-    // candidates, resolved ONLY against a sibling report in the Driver (`<Module>#<Type>.deinit`).
-    var deinitExternal: Set<String> = []
-    // A PROPERTY ACCESSOR READ on a type declared OUTSIDE the analysed code — `l.v` where `L` is a chained
-    // dependency's type and `v` is a computed/lazy/static property whose body performs I/O. `Type.member`
-    // candidates, resolved ONLY against a sibling report in the Driver (`<Module>#<Type>.<member>`, which
-    // is exactly the key the dep's own report already carries, `unitKind: "accessor"`). With no dep report
-    // loaded nothing consults this set, so the unchained analysis is byte-identical. Sibling of
-    // `stringifyExternal`/`deinitExternal`; see candor-spec/SCAN-BOUNDARY-WORK-QUEUE.md §3c.
-    var propertyExternal: Set<String> = []
+    // SOUNDNESS R1415 — ONE CHANNEL FOR "A BODY OF A DEPENDENCY'S TYPE RUNS HERE WITHOUT BEING SPELLED".
+    //
+    // Every implicit site the scan already recognises — a stringification, a `deinit`, a property read, and since
+    // call-target round 1 an operator, a comparison/hash witness, a subscript, `callAsFunction`, a literal's
+    // `init`, an iteration's `next`/`makeIterator` and a generic `init` requirement — edges its LOCAL type's
+    // unit through the in-scan indexes. When the operand's type belongs to a chained DEPENDENCY it is in none of
+    // them, and the site recorded NOTHING, not even `Unknown`. The dependency's own report already holds the
+    // answer under `<Module>#<Type>.<member>`; this map is the one place every such site records the question.
+    //
+    // It replaces three per-hook sets (`stringifyExternal`, `deinitExternal`, `propertyExternal`) that each
+    // carried the same `Type.member` candidate to the same Driver join; extending them one hook at a time would
+    // have made nine. Value: the hook kinds that asked (`prop` keeps the ⟨0.40⟩ surface walk on a miss; every
+    // other kind is precise-or-nothing). Resolved ONLY against a chained sibling report in the Driver; with no
+    // dependency report loaded nothing consults it, so the unchained analysis is byte-identical. A pure witness
+    // or a synthesized one is ABSENT from the dependency's report, so the join self-filters.
+    var externalMembers: [String: Set<String>] = [:]
+    /// SOUNDNESS R1415 — candidates whose dependency key may carry an overload suffix the site can name (a
+    /// literal's `init(String)`): asked FIRST, the bare key (every overload's union) only when none answers.
+    var externalMemberPrecise: [String: Set<String>] = [:]
+    static let r1415Off = ProcessInfo.processInfo.environment["CANDOR_R1415_OFF"] != nil
+    /// SOUNDNESS R1415 — a NEW hook kind's external candidate: a confidently-typed operand whose type this scan
+    /// does not declare. Kinds that predate round 1 record through their original sites unchanged.
+    func noteExternalMember(_ type: String, _ member: String, kind: String, module: String?, precise: [String] = []) {
+        guard !Self.r1415Off, !type.isEmpty, !type.hasPrefix("<"), !localTypes.contains(type),
+              type.first?.isUppercase == true, !genericParamNamesFn.contains(type),
+              !PLATFORM_VALUE_TYPES.contains(type) else { return }
+        let cand = "\(type).\(member)"
+        externalMembers[cand, default: []].insert(kind)
+        if !precise.isEmpty { externalMemberPrecise[cand, default: []].formUnion(precise.map { "\(type).\($0)" }) }
+        noteExternalCandidate(cand, module: module)
+    }
     var globalReads: Set<String> = []     // bare-name reads — candidate edges to GLOBAL initializer units
     var boundLocals: Set<String> = []     // EVERY local binding name (even literal/unresolved-type ones,
                                           // which `vars` drops) — so a bare read / fn-ref of a SHADOWING
@@ -6455,6 +6467,12 @@ final class CallCollector: SyntaxVisitor {
             } else { iterateLocal(t, releaseForIn: true) }
             return
         }
+        // SOUNDNESS R1415 — iterating a value of a DEPENDENCY's type runs its `makeIterator`/`next`.
+        if let t = r.root, r.isVar, !r.opaqueHop {
+            for m in ["makeIterator", "next", "makeAsyncIterator"] {
+                noteExternalMember(t, m, kind: "iter", module: spelledModule(of: sequence))
+            }
+        }
         // SOUNDNESS R1048 — `for x in s` over a PARAMETER whose type the caller decides (`<S: Sequence>`,
         // `some Sequence`, `any Sequence`): the iterator that runs is the caller's argument's.
         if !Self.r1048Off, iterationReqOnParam(sequence) { return }
@@ -7608,6 +7626,17 @@ final class CallCollector: SyntaxVisitor {
                 vbHit("R256", "\(et).\(name)")
                 unresolved = true
                 why.insert("dispatch:\(et).\(name)")
+            }
+            // SOUNDNESS R1415 — `f()` on a VALUE of a dependency's type desugars to `f.callAsFunction()`.
+            if !fnTyped.contains(name), fnValueAlias[name] == nil, !opaqueFnLocals.contains(name),
+               let t = vars[name].map({ dealias($0) }), !t.contains("->") {
+                noteExternalMember(t, "callAsFunction", kind: "call", module: nil)
+            }
+            // SOUNDNESS R1415 — `X(k: 1)` where `X`'s bound is a DEPENDENCY's protocol runs a conformer's `init`
+            // requirement: the producer's union under `Lib#P.init`. (A LOCAL protocol bound is R563's arm below.)
+            if vars[name] == nil, !isBoundLocal(name), let b = genericBoundsR951[name].map({ dealias($0) }),
+               typeReceiverProto(name) == nil {
+                noteExternalMember(b, "init", kind: "initReq", module: nil)
             }
             if chargeContentsCtor(name, node, lit: lit, shadowable: true) {
                 // `Data`/`String(contentsOfFile:|contentsOf:)` — classified by the SHARED family function
@@ -8987,7 +9016,7 @@ final class CallCollector: SyntaxVisitor {
             if let b = node.base, let p = reqFloor[Self.peel(b).id] ?? reqFloor[b.id] { protoPropReads.append((p, node.declName.baseName.text)) }
             // SOUNDNESS R866 — the property-read twin of the composition arm in the member-call visitor.
             for c in foreignCompositionMembers(node.base) where !Self.METATYPE_MEMBERS.contains(prop) {
-                propertyExternal.insert("\(c).\(prop)")
+                externalMembers["\(c).\(prop)", default: []].insert("prop")
                 noteExternalCandidate("\(c).\(prop)", module: nil)
             }
             if let baseDR = node.base.map({ Self.peel($0) })?.as(DeclReferenceExprSyntax.self),
@@ -9064,7 +9093,7 @@ final class CallCollector: SyntaxVisitor {
                 // `.Protocol` are metatype and initializer spellings, never property accessors, so no
                 // accessor unit can legitimately answer them; excluding them removes the whole class
                 // rather than the one collision that surfaced.
-                propertyExternal.insert("\(root).\(prop)")
+                externalMembers["\(root).\(prop)", default: []].insert("prop")
                 noteExternalCandidate("\(root).\(prop)", module: spelledModule(of: node.base))
             }
         }
@@ -9251,6 +9280,16 @@ final class CallCollector: SyntaxVisitor {
                     localOperand = true; break
                 }
             }
+            // SOUNDNESS R1415 — the operator over a DEPENDENCY's type: a static member operator that type declares
+            // (`Lib#T.==`, `Lib#T.+`, `Lib#T.+=`) is in its report, not in `localTypes`. Not against `nil`, which
+            // compares through `_OptionalNilComparisonType` and runs no witness.
+            let nilSide = Self.peel(elems[i]).is(NilLiteralExprSyntax.self)
+                || (i + 2 < elems.count && Self.peel(elems[i + 2]).is(NilLiteralExprSyntax.self))
+            if !nilSide {
+                for (operandExpr, r) in [(elems[i], lt)] + (i + 2 < elems.count ? [(elems[i + 2], rt)] : []) where r.isVar {
+                    if let t = r.root { noteExternalMember(t, opName, kind: "op", module: spelledModule(of: operandExpr)) }
+                }
+            }
             // When an operand is a LOCAL-typed value, ALSO try the FREE operator overload: a custom
             // operator is most often a TOP-LEVEL `func + (a: V, b: V)` (a free fn named `+`), NOT a static
             // member `V.+` — so the typed edge above (member form) missed it and an effectful free operator
@@ -9404,6 +9443,9 @@ final class CallCollector: SyntaxVisitor {
             } else if !reachedDirectly {
                 targets.append(t)   // declared: edged by `witnessOwners`; synthesized: walked into its stored properties
             }
+        } else if let t = r.root, r.isVar, !r.opaqueHop {
+            // SOUNDNESS R1415 — the witness of a DEPENDENCY's type (`Lib#T.==`, `Lib#T.<`, `Lib#T.hash`).
+            noteExternalMember(t, w, kind: "witness", module: spelledModule(of: operand))
         }
         for path in witnessOwners(w, seeds: targets, probe: true) {
             if Self.r951Probe { FileHandle.standardError.write("R951HIT \(path)\n".data(using: .utf8)!) }
@@ -9486,7 +9528,13 @@ final class CallCollector: SyntaxVisitor {
             return true
         }
         while let x = queue.popLast() {
-            guard seen.insert(x).inserted, !DeclCollector.r1175Off || seen.count < 32, localTypes.contains(x) else { continue }
+            guard seen.insert(x).inserted, !DeclCollector.r1175Off || seen.count < 32 else { continue }
+            // SOUNDNESS R1415 — a seed or a stored field whose type a DEPENDENCY declares: its witness is in that
+            // dependency's report. Only on the paths that EDGE (`probe`); the R1176 forwarding summaries do not.
+            guard localTypes.contains(x) else {
+                if probe { noteExternalMember(x, w, kind: "witness", module: nil) }
+                continue
+            }
             // A SHARED simple name (`Index`, `Storage`) names several types and the spelling here does not say
             // which; edging `Index.<` would union every `*.Index.<` in the package — the over-charge measured on
             // swift-nio's `BetterHTTPParser.validateHeaderLength` in this change's first A/B. Followed only when
@@ -9969,6 +10017,10 @@ final class CallCollector: SyntaxVisitor {
             propertyEdges.insert("\(rt).subscript")
         } else if let rt = base.root, localProtocols.contains(rt) {
             protoPropReads.append((rt, "subscript"))
+        } else if let rt = base.root, base.isVar, !base.opaqueHop, node.arguments.first?.label?.text != "keyPath" {
+            // SOUNDNESS R1415 — a subscript of a DEPENDENCY's type, concrete (`Lib#T.subscript`), a protocol
+            // requirement (`Lib#P.subscript`, the published union) or an open class's (overrides unioned).
+            noteExternalMember(rt, "subscript", kind: "subscript", module: spelledModule(of: node.calledExpression))
         }
         return .visitChildren
     }
@@ -10143,7 +10195,7 @@ final class CallCollector: SyntaxVisitor {
             // chained DEPENDENCY's type. Record the `Type.member` candidate; the Driver joins it against
             // a sibling report only (`<Module>#<Type>.<member>`) and drops it otherwise, so a stdlib or
             // unchained operand contributes exactly nothing, as today.
-            stringifyExternal.insert("\(x).\(member)")
+            externalMembers["\(x).\(member)", default: []].insert("stringify")
             noteExternalCandidate("\(x).\(member)", module: spelledModule(of: operand))
         }
     }
@@ -10208,7 +10260,18 @@ final class CallCollector: SyntaxVisitor {
     // resolution and drops it if `W` declares no init — synthesised/external → no fabrication; a PURE
     // init contributes nothing). The literal TYPE is supplied so a 1-arg overload matcher can route.
     private func edgeLiteralInit(annotation: TypeSyntax, value: ExprSyntax) {
-        guard let t = typeName(annotation).name, localTypes.contains(dealias(t)) else { return }
+        guard let t = typeName(annotation).name else { return }
+        guard localTypes.contains(dealias(t)) else {
+            // SOUNDNESS R1415 — the literal coerces through a DEPENDENCY type's `init(<literal>:)`. The overload
+            // the literal binds is asked by its parameter type first; the bare key (every init's union) after.
+            if let k = literalKind(Self.peel(value)) {
+                let precise: [String: [String]] = ["String": ["init(String)", "init(StringLiteralType)"],
+                    "Int": ["init(Int)", "init(IntegerLiteralType)"], "Double": ["init(Double)", "init(FloatLiteralType)"],
+                    "Bool": ["init(Bool)", "init(BooleanLiteralType)"]]
+                noteExternalMember(dealias(t), "init", kind: "literal", module: nil, precise: precise[k] ?? [])
+            }
+            return
+        }
         let lt = literalKind(Self.peel(value))
         guard lt != nil else { return }
         let ty = dealias(t)
@@ -10246,7 +10309,10 @@ final class CallCollector: SyntaxVisitor {
             || node.trailingClosure != nil { return }
         guard let elem0 = elementTypeOf(base)?.name else { return }
         let elem = (!Self.aiOff && ai.enabled) ? dealias(elem0) : elem0     // R153(c) / VEIN A(i)
-        guard localTypes.contains(elem) else { return }
+        guard localTypes.contains(elem) else {
+            noteExternalMember(elem, "<", kind: "witness", module: nil)   // SOUNDNESS R1415 — a dependency's `<`
+            return
+        }
         // the `<` witness is EITHER a `static func <` member (`Element.<`) OR a top-level free
         // `func <(a: Element, b: Element)` — emit both forms, exactly as the binary-operator visitor does.
         // The free form is gated on a CONFIDENT local element type (argTypes), so matchOverloads routes by
@@ -10428,7 +10494,7 @@ final class CallCollector: SyntaxVisitor {
             // joined against the sibling report ONLY, in the Driver; with no dep report loaded
             // nothing consults it. Self-filtering the same way: a struct or a class with no (or a
             // pure) `deinit` has no entry in the dep report, so the join adds nothing.
-            deinitExternal.insert("\(t).deinit")
+            externalMembers["\(t).deinit", default: []].insert("deinit")
         }
     }
 

@@ -17,6 +17,8 @@ import CandorCore
 // `@resultBuilder`/`@globalActor` type (handled separately, see their own tables), is exempted.
 /// SOUNDNESS R867 §1b KILL SWITCH (the in-scan twin; main.swift reads the same variable for the producer).
 private let driverR867Off = ProcessInfo.processInfo.environment["CANDOR_R867_OFF"] != nil
+/// SOUNDNESS R1416 — kill switch for the `open`-class half of ⟨0.39⟩ obligation 1 (call-target round 1).
+private let r1416Off = ProcessInfo.processInfo.environment["CANDOR_R1416_OFF"] != nil
 /// VEIN C §1b KILL SWITCH (R903, R876).
 private let veinCOff = ProcessInfo.processInfo.environment["CANDOR_VEINC_OFF"] != nil
 /// SOUNDNESS R1109 §1b KILL SWITCH (main.swift reads the same variable for the producer's union) and REACH
@@ -1092,6 +1094,29 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // initializer beside an instance `var p { get set }` / `{ didSet }` (SwiftyJSON `JSON.null`, wikipedia-ios
     // `enableDailyTopReadNotifications`) was otherwise reached by no read at all — executed `Fs`, reported absent.
     let classNamesAll = collectors.reduce(into: Set<String>()) { $0.formUnion($1.classNames) }   // R1105 audit
+    // SOUNDNESS R1416 — ⟨0.39⟩ OBLIGATION 1 FOR AN `open` CLASS MEMBER. A dispatch on an `open` member of an
+    // `open` class this package declares can run an override declared in a package this scan never sees — the
+    // consumer's own subclass — exactly as a protocol requirement can run a conformer declared there. The
+    // protocol half has published `dispatchesOn` since ⟨0.39⟩; the class half published NOTHING, so
+    // `dispFn(_ b: Base) { b.m() }` over a pure `Base.m` was ABSENT from the library's report and its chained
+    // consumer's `callerFn` read pure while the subclass it passed wrote a file (calltarget matrix cause C,
+    // executed). The key is the receiver's class in the ⟨0.23⟩ wire spelling (the `typeSurface.types` path), and
+    // the consumer's existing §2 join already unions its own subclasses under it (measured with a doctored row
+    // before this was written). Only `open` members: a `public` member of an `open` class cannot be overridden
+    // outside its module, and every module of this package is in the scan.
+    var openClassPaths = Set<String>(), typePathsByLeaf: [String: Set<String>] = [:]
+    for sc in surfaceCollectors {
+        for t in sc.types {
+            if t.kind == "open" { openClassPaths.insert(t.path) }
+            typePathsByLeaf[String(t.path.split(separator: ".").last ?? Substring(t.path)), default: []].insert(t.path)
+        }
+    }
+    let openMemberQuals = collectors.reduce(into: Set<String>()) { $0.formUnion($1.openMemberQuals) }
+    func openClassWirePath(_ spelled: String) -> String? {
+        if openClassPaths.contains(spelled) { return spelled }
+        guard let c = typePathsByLeaf[spelled], c.count == 1, let only = c.first, openClassPaths.contains(only) else { return nil }
+        return only
+    }
     for c in collectors {
         for g in c.pendingGetterViews where setterSideAccessorQuals.contains(String(g.qual.dropLast(GETTER_VIEW_SUFFIX.count))) {
             allFns.append(g)
@@ -1800,6 +1825,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             return cp == v.owner || cp.hasPrefix(v.owner + ".") || v.owner.hasPrefix(cp + ".")
         default: return true
         }
+    }
+
+    /// SOUNDNESS R1416 — the obligation-1 key for a dispatch on `owner.member` when `owner` is an `open` class this
+    /// package declares and the member the call reaches is itself `open` (so a package outside this scan may
+    /// override it). `targets` are the units the call resolved to; nil when nothing about the call is open.
+    func openMemberKey(_ owner: String, _ member: String, _ targets: Set<String>) -> String? {
+        guard !r1416Off, let path = openClassWirePath(owner),
+              targets.contains(where: { declVisibility[$0]?.access == "open" || openMemberQuals.contains($0) }) else { return nil }
+        return "\(pkgName)#\(path).\(member)"
     }
 
     /// R134 — the project units an UNQUALIFIED (implicit-self) call to `leaf` can run when the enclosing
@@ -3978,6 +4012,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         }
                         edges[f.qual, default: []].formUnion(view(vcHits))
                     }
+                    // SOUNDNESS R1416 — the accessor twin of the method arm's key.
+                    if let k = openMemberKey(type, member, ts.filter { veinCAccessorQuals.contains($0) }) {
+                        dispatchDirect[f.qual, default: []].insert(k)
+                    }
                 }
             }
         }
@@ -4680,6 +4718,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             edges[f.qual, default: []].formUnion(resolveQual("\(sub).\(member)"))
                         }
                     }
+                    // SOUNDNESS R1416 — and name the member when an override outside this scan could also run.
+                    if let k = openMemberKey(owner, member, typedTargets.union(supertypesOf[owner].map { sups in
+                        Set(sups.flatMap { resolveQual("\($0).\(member)") }) } ?? [])) {
+                        dispatchDirect[f.qual, default: []].insert(k)
+                    }
                 }
             } else if call.unqualified {
                 // an UNQUALIFIED `name(…)` call: a free function, a constructor, or a self-sibling method. A
@@ -4877,6 +4920,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                 FileHandle.standardError.write("R1105D\t\(f.qual)\t\(sub).\(call.leaf)\n".data(using: .utf8)!)
                             }
                             edges[f.qual, default: []].formUnion(hits)
+                        }
+                        // SOUNDNESS R1416 — `self` may also be a subclass declared outside this scan.
+                        if let k = openMemberKey(et, call.leaf, siblingExact.union(siblingOverloads).union(inheritedTargets)) {
+                            dispatchDirect[f.qual, default: []].insert(k)
                         }
                     }
                 }
@@ -5973,6 +6020,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // `resolveQual` came back empty AND `fields` still knows the member, it is a declared-here
         // stored property (pure, accounted for); empty AND absent from `fields` means the requirement
         // is satisfied somewhere this loop never looked, which is the honest-Unknown case.
+        // SOUNDNESS R1310/R1312 — `p.description` on a LOCAL protocol that does not itself declare `description`
+        // (it inherits `CustomStringConvertible`'s) is the explicit spelling of the dispatch `"\(p)"` already
+        // makes. It was dropped below by the requirement guard and read pure in one tree as well as chained; it is
+        // routed to the stringification dispatch, the one rule both spellings now share.
+        var stringifyViaRead: [(proto: String, member: String)] = []
         for d in cc.protoPropReads {
             // Same two-halved member space as the method loop above: an extension-provided COMPUTED property
             // (or `subscript`) is a real `P.<member>` accessor unit whose body runs, and no conformer
@@ -5989,7 +6041,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 }
                 frontier.append(contentsOf: protocolSupers[cur] ?? [])
             }
-            guard protoOrSuperDeclares(d.proto, d.member) else { continue }
+            guard protoOrSuperDeclares(d.proto, d.member) else {
+                if !r1416Off, d.member == "description" || d.member == "debugDescription" { stringifyViaRead.append((d.proto, d.member)) }
+                continue
+            }
             if let path = localProtocolWirePath(d.proto) {     // ⟨0.39⟩ obligation 1, property/subscript half
                 dispatchDirect[f.qual, default: []].insert("\(pkgName)#\(path).\(d.member)")
             }
@@ -6059,7 +6114,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // here would flood every program's report (the usability catastrophe the vein write-up warns
         // against). RESIDUAL, recorded not repaired: a conformer declared OUTSIDE the analysed code whose
         // `description` is effectful is still missed.
-        for d in cc.stringifyDispatches {
+        for d in cc.stringifyDispatches + stringifyViaRead {
+            // SOUNDNESS R1310 — ⟨0.40⟩'s formatting clause: obligation 1 names the member under the RECEIVER's
+            // abstraction even when every visible conformer is pure (`ConvLib#Converter.description`, SPEC §4).
+            if !r1416Off {
+                if let path = localProtocolWirePath(d.proto) {
+                    dispatchDirect[f.qual, default: []].insert("\(pkgName)#\(path).\(d.member)")
+                } else if let k = openMemberKey(d.proto, d.member, resolveQual("\(d.proto).\(d.member)")) {
+                    dispatchDirect[f.qual, default: []].insert(k)
+                }
+            }
             for c in subtypesOf[d.proto] ?? [] {
                 let ts = resolveQual("\(c).\(d.member)")
                 if !ts.isEmpty {
@@ -6099,17 +6163,21 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // a PURE computed one are absent from the dep report — and it is a candidate set rather than a
         // `propertyEdges` entry precisely so a local type sharing a dependency type's name resolves to
         // its OWN unit and can never inherit the dependency's (candor-spec SCAN-BOUNDARY-WORK-QUEUE §3c).
-        if !deps.isEmpty, !(cc.stringifyExternal.isEmpty && cc.deinitExternal.isEmpty
-                            && cc.propertyExternal.isEmpty) {
+        if !deps.isEmpty, !cc.externalMembers.isEmpty {
             let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
-            for cand in cc.stringifyExternal.union(cc.deinitExternal).union(cc.propertyExternal) {
+            for (cand, kinds) in cc.externalMembers.sorted(by: { $0.key < $1.key }) {
+                let isProp = kinds.contains("prop")
                 var hits: [DepEntry] = []
                 // R846 — the module the source spelled, when every recording of this candidate spelled one
                 // and they agree; otherwise every chained package.
                 let cmods = cc.externalCandidateOpen.contains(cand) ? [] : (cc.externalCandidateModules[cand] ?? [])
                 let candTiers = joinTiers(file, module: cmods.count == 1 ? cmods.first : nil)
+                let precise = (cc.externalMemberPrecise[cand] ?? []).sorted()
                 for (ti, tier) in candTiers.enumerated() where hits.isEmpty {
                     for (p, _) in tier {   // R565
+                        // R1415 — an overload the site names exactly answers before the union of every overload.
+                        let exact = precise.compactMap { deps.lookup("\(p)#\($0)") }
+                        if !exact.isEmpty { hits.append(contentsOf: exact); continue }
                         if let e = deps.lookup("\(p)#\(cand)") { hits.append(e) }
                     }
                     if ti == 0, !hits.isEmpty { discloseOtherAnswers(cand, tiers: candTiers, why: "dispatch:\(cand)", f.qual) }
@@ -6118,8 +6186,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // over-fire this join has had (`String.init`, see `METATYPE_MEMBERS`) was invisible in
                 // the diff and obvious in this line. Same reason `CANDOR_TYPESURFACE_DEBUG` exists.
                 if ProcessInfo.processInfo.environment["CANDOR_DEPMEMBER_DEBUG"] != nil {
-                    let kind = cc.propertyExternal.contains(cand) ? "prop"
-                        : (cc.deinitExternal.contains(cand) ? "deinit" : "stringify")
+                    let kind = kinds.sorted().joined(separator: "+")
                     FileHandle.standardError.write(
                         "DEPMEMBER-\(hits.count == 1 ? "HIT " : "MISS") \(kind) \(f.qual) :: \(cand)\n"
                             .data(using: .utf8)!)
@@ -6134,7 +6201,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // ⟨0.40⟩ a PROPERTY read on a dependency type walks as a member call does: an inherited
                 // computed property, or one forwarded through `@dynamicMemberLookup` (R890), is not a
                 // purity claim.
-                if !r843Off, hits.isEmpty, cc.propertyExternal.contains(cand), let dot = cand.lastIndex(of: ".") {
+                if !r843Off, hits.isEmpty, isProp, let dot = cand.lastIndex(of: ".") {
                     sourceTypedWalk(String(cand[..<dot]), String(cand[cand.index(after: dot)...]),
                                     tiers: candTiers, to: f.qual, guessed: false)
                 }

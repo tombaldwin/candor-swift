@@ -55,7 +55,13 @@ final class ImplicitStringifyProcessTests: XCTestCase {
                            + "it must not read silent-pure")
         }
         // (b) a PURE `description` contributes nothing — the rung adds an edge, never an effect.
-        XCTAssertNil(by["describePureProto"], "a pure conformer witness must contribute nothing")
+        // SOUNDNESS R1310 (call-target round 1): the row is no longer ABSENT — SPEC §4 ⟨0.40⟩'s formatting clause makes
+        // the producer name the member under the RECEIVER's abstraction even when every visible conformer is pure, so
+        // a consumer's own conformer joins. It still carries no EFFECT.
+        XCTAssertEqual(by["describePureProto"]?["inferred"] as? [String] ?? [], [],
+                       "a pure conformer witness must contribute no effect")
+        XCTAssertEqual(by["describePureProto"]?["dispatchesOn"] as? [String], ["App#Tag.description"],
+                       "obligation 1: the dispatched member is named on the otherwise-pure row")
         // (c) a plain String / Int operand has no local witness at all — no edge, no Unknown.
         XCTAssertNil(by["describeString"], "interpolating a String must stay pure")
         XCTAssertNil(by["describeInt"], "interpolating an Int must stay pure")

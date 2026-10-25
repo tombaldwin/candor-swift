@@ -295,6 +295,9 @@ func memberAliasRecordable(_ u: String, _ localTypes: Set<String>) -> String? {
 }
 
 final class DeclCollector: SyntaxVisitor {
+    /// SOUNDNESS R1416 — accessor units (computed property / subscript) declared `open`. Their `FnInfo.access` stays
+    /// the R265 default, which the visibility arms read, so openness is recorded beside it rather than through it.
+    var openMemberQuals: Set<String> = []
     var file: String
     var converter: SourceLocationConverter
     var fns: [FnInfo] = []
@@ -1405,6 +1408,7 @@ final class DeclCollector: SyntaxVisitor {
                 // unit, so a read of it edges nothing, which is what executing it does.
                 let hasSetterSide = !CallCollector.r1105Off && !setterSideBodies.isEmpty
                 if hasSetterSide { setterSideAccessorQuals.insert(qual) }
+                if node.modifiers.contains(where: { $0.name.text == "open" }) { openMemberQuals.insert(qual) }   // R1416
                 for (b, setterParam) in accessorBodies {
                     var info = FnInfo(qual: qual, loc: loc(binding))
                     info.simpleQual = simpleQual
@@ -2183,6 +2187,7 @@ final class DeclCollector: SyntaxVisitor {
                 }
             }
         }
+        if node.modifiers.contains(where: { $0.name.text == "open" }) { openMemberQuals.insert("\(tyPath).subscript") }   // R1416
         for (b, setterParam) in bodies {
             var info = FnInfo(qual: "\(tyPath).subscript", loc: loc(node))
             info.simpleQual = "\(ty).subscript"
