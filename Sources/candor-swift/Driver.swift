@@ -22,6 +22,7 @@ private let r1416Off = ProcessInfo.processInfo.environment["CANDOR_R1416_OFF"] !
 private let r1416Probe = ProcessInfo.processInfo.environment["CANDOR_R1416_PROBE"] != nil   // reach: one line per key formed
 /// CALL-TARGET ROUND 2 — kill switch for the obligation-3 join's transitive implementor set (`unionOwnImplementors`).
 private let ctSubtreeOff = ProcessInfo.processInfo.environment["CANDOR_CT2_SUBTREE_OFF"] != nil
+private let ctSubtreeProbe = ProcessInfo.processInfo.environment["CANDOR_CT2_SUBTREE_PROBE"] != nil   // reach: one line per join that adds
 /// VEIN C §1b KILL SWITCH (R903, R876).
 private let veinCOff = ProcessInfo.processInfo.environment["CANDOR_VEINC_OFF"] != nil
 /// SOUNDNESS R1109 §1b KILL SWITCH (main.swift reads the same variable for the producer's union) and REACH
@@ -3108,27 +3109,44 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // second copy of it: too many implementors is disclosed indeterminacy, never a partial union read
         // as the whole set. `chaWithinBound` discloses on `false` itself.
         guard chaWithinBound(conf.count, proto, member, qual) else { return }
-        for c in conf { edges[qual, default: []].formUnion(resolveQual("\(c).\(member)")) }
-        // CALL-TARGET ROUND 2 — THE SAME IMPLEMENTOR SET THE IN-SCAN DISPATCH UNIONS, NOT ONLY THE TYPES THAT
-        // SPELL `: <key's type>`. `conformers` is the DIRECT spelled-inheritance index, so a consumer's
+        var floor = Set<String>()
+        for c in conf { floor.formUnion(resolveQual("\(c).\(member)")) }
+        edges[qual, default: []].formUnion(floor)
+        // CALL-TARGET ROUND 2 (SOUNDNESS R1446) — THE SAME IMPLEMENTOR SET THE IN-SCAN DISPATCH UNIONS, NOT ONLY THE
+        // TYPES THAT SPELL `: <key's type>`. `conformers` is the DIRECT spelled-inheritance index, so a consumer's
         // `final class Mine: Mid { override func m() }` with `class Mid: Base {}` (Base the dependency's open
         // class) was in no set the join asked: `dispFn(Mine())` read pure CHAINED while the same source in one
-        // tree charges it (`subtypesOf` is transitive) — EXECUTED, controls K17 (SILENT on 0.40.17) and K14p
-        // (a subclass of the held field's own class); the protocol twin K18 (a conforming class's subclass
-        // overrides the witness, R867 in one tree) disclosed `dispatch:P.m` where a resolution exists. So the
-        // two in-scan arms that widen the direct set are applied here unchanged: R867's subclass subtree of
-        // every direct conformer and R1109's conformers through a refining protocol. PRECISE-OR-NOTHING and
-        // ADDITIVE, as they are in scan: only real `<sub>.<member>` units, never an `Unknown`, nothing bounded.
+        // tree charges it — EXECUTED, controls K17 (SILENT on 0.40.17) and K14p; the protocol twin K18 (a
+        // conforming class's subclass overrides the witness, R867 in one tree) disclosed where a resolution
+        // exists. So R867's subclass subtree of every direct implementor and R1109's conformers through a
+        // refining protocol are added here.
+        //
+        // BOUNDED BY SPEC §4's COUNT, WHICH IS UNITS. The release's guard above counts direct subclass TYPES and is
+        // kept as the floor's own test, unchanged. The ADDITIONS are bounded by the number of implementing or
+        // overriding UNITS the whole set reaches (floor ∪ additions), which is what §4's bounded-CHA paragraph
+        // counts: SwiftLint's `SyntaxRewriter` has a handful of direct subclasses and 261 `visit` overrides below
+        // them, and an unbounded transitive union would join every rule's rewriter at one call (the round-1
+        // 1,189-row first-cut shape, approached from the consumer). Past 12 the additions are NOT edged and the
+        // dispatch is disclosed (`chaWithinBound` adds `Unknown` + `dispatch:`); the floor is never withdrawn, so
+        // nothing the release charged moves.
         if ctSubtreeOff { return }
         let direct = Set(conf)
+        var added = Set<String>()
         for c in conf.sorted() {
             for sub in (subtypesOf[c] ?? []).sorted() where sub != c && !direct.contains(sub) {
-                edges[qual, default: []].formUnion(resolveQual("\(sub).\(member)"))
+                added.formUnion(resolveQual("\(sub).\(member)"))
             }
         }
         if !r1109Off {
-            edges[qual, default: []].formUnion(
-                subProtocolWitnesses(proto, member, own: { resolveQual($0) }, sub: { resolveQual($0) }, stored: { _ in false }))
+            added.formUnion(subProtocolWitnesses(proto, member, own: { resolveQual($0) }, sub: { resolveQual($0) }, stored: { _ in false }))
+        }
+        added.subtract(floor)
+        guard !added.isEmpty else { return }
+        if ctSubtreeProbe {
+            FileHandle.standardError.write("CT2SUBTREE \(qual) \(key) floor=\(floor.count) added=\(added.count)\n".data(using: .utf8)!)
+        }
+        if chaWithinBound(floor.count + added.count, proto, member, qual) {
+            edges[qual, default: []].formUnion(added)
         }
     }
 

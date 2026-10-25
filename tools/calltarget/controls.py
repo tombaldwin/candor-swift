@@ -226,6 +226,17 @@ def fixtures(d):
                  "final class Mine: Mid { override func m() { %s } }\n"
                  "func callerFn() { %s; dispFn(Mine()) }\ncallerFn()\n") % (E("Mine.m"), BEG),
             chained=["A", "B"]),
+        # K19 (R1446's BOUND): 13 indirect overriding subclasses under one direct one — past SPEC §4's 12 UNITS the
+        # transitive additions must DISCLOSE, not union (SwiftLint: a few direct `SyntaxRewriter` subclasses, 261
+        # `visit` overrides below them). Executed: the effectful one runs.
+        "K19_indirect_subclasses_past_bound_disclose": dict(
+            A="open class Base { public init() {}\n  open func m() { print(\"RAN:Base.m\") } }\npublic func dispFn(_ b: Base) { b.m() }\n",
+            B="import A\npublic func bTouch() {}\n",
+            App=("import Foundation\nimport A\nimport B\nclass Mid: Base {}\n"
+                 "final class Mine: Mid { override func m() { %s } }\n"
+                 + "".join("final class P%d: Mid { override func m() { print(\"RAN:P%d\") } }\n" % (i, i) for i in range(12))
+                 + "func callerFn() { %s; dispFn(Mine()) }\ncallerFn()\n") % (E("Mine.m"), BEG),
+            chained=["A", "B"]),
         # ── R1437 residuals (FABLE-REVIEW §1.3 a–d), executed, positive: the effect DOES run ──
         # R1437a: an `open` member that self-dispatches carries no self-key.
         "R1437a_open_member_self_dispatch": dict(
