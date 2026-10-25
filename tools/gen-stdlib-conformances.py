@@ -168,6 +168,84 @@ def parse(path, conforms, protocols, nominals, members, props, mutating):
             stack.append((ind, None))   # a function / accessor body: nothing nested in it is a type here
 
 
+# ── CALL-TARGET ROUND 2 — THE WITNESS SITE TABLE ─────────────────────────────────────────────────────────────
+# Which platform members RUN a user type's `==` / `<` / `hash(into:)` witness, read from the declarations rather
+# than listed. A member declared in an extension of a sequence protocol CONSTRAINED by `Element : Equatable`
+# (`Comparable`, `Hashable`) can only have been written against that requirement, so it may invoke it on the
+# receiver's elements; every member of `Set` taking an element (or a sequence of them) hashes it; every member of
+# `Dictionary` taking a `Key` hashes the key; a free generic function over `T : Comparable` compares its
+# arguments. A declaration with a CLOSURE parameter is excluded: its comparator is the closure (`sorted(by:)`),
+# charged lexically. Keyed `<kind>.<name>`; each entry's label specs (`params_of`) let the engine match the
+# SPELLED call (`a.index(of:)` runs `==`, `a.index(after:)` does not), so the name alone never decides.
+SEQ_FAMILY = {"Sequence", "Collection", "BidirectionalCollection", "MutableCollection", "RangeReplaceableCollection",
+              "RandomAccessCollection", "Array", "ArraySlice", "ContiguousArray"}
+WITNESS_OF = (("Comparable", ["<"]), ("Equatable", ["=="]), ("Hashable", ["hash", "=="]))
+TOP_EXT = re.compile(r"^(?:@[^\s(]+(?:\([^)]*\))?\s+)*extension\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?P<rest>[^{]*)\{\s*$")
+TOP_STRUCT = re.compile(r"^(?:@[^\s(]+(?:\([^)]*\))?\s+)*public\s+struct\s+(?P<name>Set|Dictionary)\s*<[^>]*>(?P<rest>[^{]*)\{\s*$")
+WFUNC = re.compile(r"\b(?:public|open)\s+(?:[a-z_]+\s+)*func\s+(?P<name>[A-Za-z][A-Za-z0-9_]*)\s*(?P<gen><[^(]*>)?\s*\(")
+CLOSURE_PARAM = re.compile(r"\([^()]*\)\s*(?:async\s+)?(?:throws(?:\([^)]*\))?\s+)?(?:rethrows\s+)?->")
+OWN = r"(?:(?:__owned|__shared|consuming|borrowing|inout)\s+)?"
+
+
+def param_clause(text, start):
+    depth, i = 0, start
+    while i < len(text):
+        if text[i] in "([<":
+            depth += 1
+        elif text[i] in ")]>" and not (text[i] == ">" and text[i - 1] == "-"):
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    return text[start + 1:i]
+
+
+def witness_sites(path, sites):
+    top = None   # (kind, where-clause) of the enclosing top-level extension / Set / Dictionary declaration
+    for raw in open(path, encoding="utf-8"):
+        line = strip(raw.rstrip("\n"))
+        if not raw.startswith(" ") and line.strip():
+            m = TOP_EXT.match(line) or TOP_STRUCT.match(line)
+            top = (m.group("name"), m.group("rest")) if m else None
+            fm = WFUNC.search(line)
+            if fm and not top and not line.lstrip().startswith("@available(*, unavailable"):
+                clause = param_clause(line, fm.end() - 1)
+                if not CLOSURE_PARAM.search(clause):
+                    whole = (fm.group("gen") or "") + line[fm.end():]
+                    for proto, ws in WITNESS_OF:
+                        m2 = re.search(r"<(?P<t>[A-Z]\w*)\s*(?::[^>]*)?>", fm.group("gen") or "")
+                        t = m2.group("t") if m2 else None
+                        if t and re.search(r"\b" + t + r"\s*:\s*[^,{]*\b" + proto + r"\b", whole) \
+                                and re.search(r":\s*" + OWN + t + r"\b", clause):
+                            e = sites.setdefault("free." + fm.group("name"), [set(), set()])
+                            e[0].update(ws); e[1].add(",".join(params_of(line, fm.end() - 1)))
+            continue
+        if top is None or not raw.startswith("  ") or raw.startswith("   "):
+            continue
+        fm = WFUNC.search(line)
+        if not fm or "@available(*, unavailable" in line:
+            continue
+        clause = param_clause(line, fm.end() - 1)
+        if CLOSURE_PARAM.search(clause):
+            continue
+        kind, where = top
+        hits = []
+        if kind in SEQ_FAMILY:
+            for proto, ws in WITNESS_OF:
+                if re.search(r"\bElement\s*:\s*" + proto + r"\b", where):
+                    hits.append(("seq", ws))
+        if kind == "Set" and re.search(r":\s*" + OWN + r"(?:Element|Set<Element>|Self|S)\b", clause):
+            hits.append(("set", ["hash", "=="]))
+        if kind == "Dictionary" and re.search(r":\s*" + OWN + r"Key\b", clause):
+            hits.append(("dict", ["hash", "=="]))
+        for k, ws in hits:
+            e = sites.setdefault(k + "." + fm.group("name"), [set(), set()])
+            e[0].update(ws); e[1].add(",".join(params_of(line, fm.end() - 1)))
+
+
+WITNESS_MODULES = ["Swift", "_StringProcessing"]
+
+
 def main():
     sdk = subprocess.check_output(["xcrun", "--show-sdk-path"], text=True).strip()
     sdkver = subprocess.check_output(["xcrun", "--show-sdk-version"], text=True).strip()
@@ -222,6 +300,21 @@ def main():
               "let STDLIB_MUTATING_MEMBERS: Set<String> = ["]
     for n in sorted(mutating):
         lines.append(f'    "{n}",')
+    lines += ["]", ""]
+    sites = {}
+    for mod in WITNESS_MODULES:
+        witness_sites(interface(sdk, mod), sites)
+    lines += ["/// CALL-TARGET ROUND 2 — every platform member that RUNS a user type's `==` / `<` / `hash(into:)` witness, keyed",
+              "/// `<seq|set|dict|free>.<name>`: `seq` = declared in an extension of a sequence protocol constrained by the",
+              "/// element's `Equatable`/`Comparable`/`Hashable`; `set` = a `Set` member taking an element; `dict` = a",
+              "/// `Dictionary` member taking a `Key`; `free` = a generic free function over a bounded `T`. Closure forms excluded.",
+              "let STDLIB_WITNESS_SITES: [String: [String]] = ["]
+    for k in sorted(sites):
+        lines.append(f'    "{k}": [' + ", ".join(f'"{w}"' for w in sorted(sites[k][0])) + "],")
+    lines += ["]", "", "/// …and each site's declarations' external labels, `STDLIB_MEMBER_LABELS`' spelling.",
+              "let STDLIB_WITNESS_SITE_LABELS: [String: [String]] = ["]
+    for k in sorted(sites):
+        lines.append(f'    "{k}": [' + ", ".join(f'"{x}"' for x in sorted(sites[k][1])) + "],")
     lines += ["]", ""]
     text = "\n".join(lines)
     if "--check" in sys.argv:

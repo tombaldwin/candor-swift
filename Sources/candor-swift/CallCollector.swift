@@ -6486,7 +6486,10 @@ final class CallCollector: SyntaxVisitor {
         // its callee leaf: if its body returns a CONCRETE LOCAL iterable, edge to that type's next/makeIterator
         // (precise); otherwise the concrete iterator is genuinely unknowable → honest Unknown, never pure.
         let peeled = Self.peel(sequence)
-        guard let call = peeled.as(FunctionCallExprSyntax.self) else { return }
+        guard let call = peeled.as(FunctionCallExprSyntax.self) else {
+            if Self.ct2Fallback != nil, ct2UnresolvedOperand(sequence) { siteFallback("iterate", "makeIterator") }   // CALL-TARGET ROUND 2 (measured, not shipped)
+            return
+        }
         // Resolve the builder's KEY (`Type.method`, or a bare free-fn name) — the same simple-qual key the
         // DeclCollector recorded — so a same-named builder on another type never cross-resolves.
         var key: String? = nil
@@ -6506,7 +6509,10 @@ final class CallCollector: SyntaxVisitor {
                 key = "\(et).\(leaf)"
             } else { key = leaf }
         }
-        guard let key else { return }
+        guard let key else {
+            if Self.ct2Fallback != nil, ct2UnresolvedOperand(sequence) { siteFallback("iterate", "makeIterator") }   // CALL-TARGET ROUND 2 (measured, not shipped)
+            return
+        }
         if let concrete = seqBuilderConcrete[key] {
             for m in ["makeIterator", "next"] {
                 calls.append(Call(path: "\(concrete).\(m)", leaf: m, strArg: nil, typed: true, args: [], argTypes: []))
@@ -6514,6 +6520,8 @@ final class CallCollector: SyntaxVisitor {
         } else if opaqueSeqBuilders.contains(key) {
             unresolved = true
             why.insert("callback:opaque-sequence:\(key)") // opaque iteration (makeIterator/next on an unresolved iterator) — owner-less, ≈ opaque callback; canonical `callback:` (SPEC §4 ⟨0.7⟩)
+        } else if Self.ct2Fallback != nil, ct2UnresolvedOperand(sequence) {
+            siteFallback("iterate", "makeIterator")   // CALL-TARGET ROUND 2 (measured, not shipped)
         }
     }
 
@@ -7477,6 +7485,7 @@ final class CallCollector: SyntaxVisitor {
         // VECTOR 4 — `coll.sorted()` / `.max()` / `.min()` over a local element type runs its `<`.
         edgeComparableWitness(node)
         modelContainerWitnesses(node)   // SOUNDNESS R974 (b)
+        modelFreeWitnessCall(node)      // call-target round 2 — `max(a, b)`, `min(…)`, `abs(x)`
         modelSetInitWitnesses(node)     // SOUNDNESS R1176
         // A LOCAL function/method passed BY REFERENCE as an argument (`xs.map(loadFree)`,
         // `xs.map(self.load)`) may be INVOKED by the callee, so its effects are reachable here. The
@@ -8777,6 +8786,7 @@ final class CallCollector: SyntaxVisitor {
                 }
                 else if owner == nil, guessedOwner == nil, let b = ma.base {
                     droppedMember = true   // SOUNDNESS R1073 — see `droppedMember`
+                    siteFallback("explicit", member)   // CALL-TARGET ROUND 2 (measured, not shipped) — the `:8735` drop
                     if Self.veinBProbe {
                     FileHandle.standardError.write(
                         "VBDROP\t\(probeShape(b))\t\(member)\t\(String(b.trimmedDescription.prefix(60)).replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\t", with: " "))\n".data(using: .utf8)!)
@@ -9445,6 +9455,12 @@ final class CallCollector: SyntaxVisitor {
             }
         }
         let r = rootOf(operand)
+        // CALL-TARGET ROUND 2 (measured, not shipped) — an operand with no type at all: no written generic argument,
+        // no root, not a literal, not a generic parameter whose caller answers (`genericWitnessReqs` above).
+        if Self.ct2Fallback != nil, targets.isEmpty, ct2UnresolvedOperand(operand),
+           !(Self.peel(operand).as(DeclReferenceExprSyntax.self).map { paramIndexR951[$0.baseName.text] != nil } ?? false) {
+            siteFallback("eq", w)
+        }
         // `opaqueHop`: the root is the OUTER base kept by convention (`self.registrations.count` -> the
         // enclosing type), not the operand's type — walking ITS fields charged swift-nio's `Selector.deinit`
         // with `NIODeadline.==` on this change's first cut.
@@ -9746,16 +9762,11 @@ final class CallCollector: SyntaxVisitor {
     // through a comparison OPERATOR, so every one of these was ABSENT over a witness that reads the environment
     // (executed). The witnesses are R951's: the receiver's WRITTEN generic arguments, through the same
     // resolver (synthesized conformances walked into their stored properties, a shared simple name refused).
-    // The member names are the stdlib's own non-closure forms; a predicate form (`contains(where:)`) runs the
-    // closure instead and is excluded by the closure check.
+    // The members are the stdlib's own non-closure forms, read from `STDLIB_WITNESS_SITES` (call-target round 2:
+    // DERIVED from the SDK's interfaces, matched on the spelled labels — see WitnessSites.swift; the release's three
+    // hand lists of 6, 17 and 3 names are deleted). A predicate form (`contains(where:)`) runs the closure instead
+    // and is excluded by the closure check.
     static let r974Off = DeclCollector.vtOff || ProcessInfo.processInfo.environment["CANDOR_R974_OFF"] != nil
-    private static let EQUATABLE_ELEMENT_MEMBERS: Set<String> =
-        ["contains", "firstIndex", "lastIndex", "elementsEqual", "starts", "split"]
-    private static let SET_HASHING_MEMBERS: Set<String> =
-        ["insert", "contains", "remove", "update", "union", "formUnion", "intersection", "formIntersection",
-         "subtracting", "subtract", "symmetricDifference", "formSymmetricDifference", "isSubset", "isSuperset",
-         "isDisjoint", "isStrictSubset", "isStrictSuperset"]
-    private static let DICT_KEY_MEMBERS: Set<String> = ["updateValue", "removeValue", "index"]
     private enum ContainerKind { case set, dictionary, array }
     /// What stdlib container a receiver is, read from its WRITTEN type (a parameter's or annotated local's).
     private func containerKind(_ base: ExprSyntax) -> ContainerKind? {
@@ -9798,16 +9809,19 @@ final class CallCollector: SyntaxVisitor {
               !node.arguments.contains(where: { Self.peel($0.expression).is(ClosureExprSyntax.self) }),
               let kind = containerKind(base) else { return }
         let m = ma.declName.baseName.text
+        let labels = node.arguments.map { $0.label?.text }
         switch kind {
         case .set:
-            if Self.SET_HASHING_MEMBERS.contains(m) {
+            if !stdlibWitnessSite("set", m, labels: labels).isEmpty {
                 vbHit("R974", "set \(m)")
                 comparisonWitnesses("hash", base, arity: 1); comparisonWitnesses("==", base)
-            } else if Self.EQUATABLE_ELEMENT_MEMBERS.contains(m) { comparisonWitnesses("==", base) }
+            } else if stdlibWitnessSite("seq", m, labels: labels).contains("==") { comparisonWitnesses("==", base) }
         case .array:
-            if Self.EQUATABLE_ELEMENT_MEMBERS.contains(m) { vbHit("R974", "array \(m)"); comparisonWitnesses("==", base) }
+            let ws = stdlibWitnessSite("seq", m, labels: labels)
+            if ws.contains("==") { vbHit("R974", "array \(m)"); comparisonWitnesses("==", base) }
+            if ws.contains("hash") { comparisonWitnesses("hash", base, arity: 1) }
         case .dictionary:
-            if Self.DICT_KEY_MEMBERS.contains(m) {
+            if !stdlibWitnessSite("dict", m, labels: labels).isEmpty {
                 vbHit("R974", "dict \(m)")
                 comparisonWitnesses("hash", base, argIndex: 0, arity: 1)
                 comparisonWitnesses("==", base, argIndex: 0)
@@ -10195,8 +10209,46 @@ final class CallCollector: SyntaxVisitor {
     /// candor-spec/SOUNDNESS-VEIN-implicit-stringify.md). Record a stringify dispatch; the Driver resolves
     /// it by CHA over the protocol's conformers, edging ONLY to `description` accessor units that
     /// genuinely exist — a conformer with no (or a pure) `description` contributes nothing.
+    // ── CALL-TARGET ROUND 2 — THE DISCLOSURE FALLBACK, MEASURED NOT SHIPPED (proposal §1.3 options A and B) ──
+    // At an implicit site this collector RECOGNISES but whose operand it cannot type, the release emits nothing:
+    // no edge and no `Unknown`. `CANDOR_CT2_FALLBACK` makes it emit a `<site>.<class>.<member>` marker that the
+    // Driver turns into `Unknown` (`dispatch:<untyped>.<member>`), so the cost of each option can be priced on the
+    // corpus. Its value is a set of letters: `A` = option A (every class), `B` = option B (iterate / callback / IO /
+    // convert / deferred / drop only — formatting, equality, hashing stay under §4's MAY), `X` = the EXPLICIT
+    // untyped member call the collector drops (the `VBDROP` site, R1073), which is neither option's: §1.1 says an
+    // unresolved explicit call already discloses, and here it does not. OFF (unset) by default; nothing ships on it.
+    static let ct2Fallback: String? = ProcessInfo.processInfo.environment["CANDOR_CT2_FALLBACK"]
+    static let ct2FallbackProbe = ProcessInfo.processInfo.environment["CANDOR_CT2_FALLBACK_PROBE"] != nil
+    private func siteFallback(_ cls: String, _ member: String) {
+        guard let opt = Self.ct2Fallback else { return }
+        let optionAOnly = cls == "format" || cls == "eq"
+        let admit = cls == "explicit" ? opt.contains("X") : optionAOnly ? opt.contains("A") : (opt.contains("A") || opt.contains("B"))
+        if Self.ct2FallbackProbe { FileHandle.standardError.write("CT2SITE \(cls) \(member) admit=\(admit)\n".data(using: .utf8)!) }
+        guard admit else { return }
+        calls.append(Call(path: "<site>.\(cls).\(member)", leaf: member, strArg: nil, typed: false, args: [], argTypes: []))
+    }
+    /// The operand's static type says nothing about which witness runs: no type at all, or an existential the
+    /// platform owns (`Any`, `AnyObject`, `AnyHashable`, `any Error`, `any CustomStringConvertible`, …) whose dynamic
+    /// value may be a user type. A generic parameter is NOT counted: its caller decides (cause D, R974's deferred rung).
+    private func ct2UnresolvedOperand(_ operand: ExprSyntax) -> Bool {
+        if Self.isLiteralOperand(operand) { return false }
+        guard let t = rootOf(operand).root else { return true }
+        let bare = t.hasPrefix("any ") ? String(t.dropFirst(4)) : t
+        return ["Any", "AnyObject", "AnyHashable"].contains(bare) || STDLIB_PROTOCOLS.contains(bare)
+    }
+    /// A bare literal (or `nil`): its type is the literal's default, never a user type.
+    private static func isLiteralOperand(_ e: ExprSyntax) -> Bool {
+        let p = peel(e)
+        return p.is(StringLiteralExprSyntax.self) || p.is(IntegerLiteralExprSyntax.self) || p.is(FloatLiteralExprSyntax.self)
+            || p.is(BooleanLiteralExprSyntax.self) || p.is(NilLiteralExprSyntax.self)
+    }
+
     private func edgeStringWitness(_ operand: ExprSyntax, reflecting: Bool) {
         let member = reflecting ? "debugDescription" : "description"
+        if Self.ct2Fallback != nil, localTypeOfOperand(operand) == nil, dispatchTypeOfOperand(operand) == nil,
+           ct2UnresolvedOperand(operand) {
+            siteFallback("format", member)   // a formatting site over an operand whose witness this collector cannot name
+        }
         if let t = localTypeOfOperand(operand) {
             propertyEdges.insert("\(t).\(member)")
         } else if let d = dispatchTypeOfOperand(operand) {
@@ -10308,16 +10360,18 @@ final class CallCollector: SyntaxVisitor {
         return nil
     }
 
-    // VECTOR 4 — `Comparable` via `sorted()` / `max()` / `min()`. Ordering an array of a local type runs
+    // VECTOR 4 — `Comparable` via `sorted()` / `sort()` / `max()` / `min()` / `lexicographicallyPrecedes(_:)` — every
+    // `seq` site of `STDLIB_WITNESS_SITES` that runs `<` (call-target round 2; the release's hand list named three and
+    // missed the in-place `sort()`, executed SILENT, matrix H09). Ordering an array of a local type runs
     // that type's `<` (its `Comparable` witness, most often a `static func <`). `coll.sorted()` /
     // `.max()` / `.min()` (the NO-CLOSURE forms — a `(by:)` closure supplies its OWN comparator, charged
     // lexically) over a LOCAL element type edges to `Element.<`. A stdlib `[Int]`/`[String]` element has
     // no local `<` unit (resolveQual drops it) → stays pure. matchOverloads/resolveQual route the typed
     // `Element.<` call; a PURE `<` contributes nothing.
-    private static let COMPARABLE_ORDERERS: Set<String> = ["sorted", "max", "min"]
     private func edgeComparableWitness(_ node: FunctionCallExprSyntax) {
         guard let ma = node.calledExpression.as(MemberAccessExprSyntax.self),
-              Self.COMPARABLE_ORDERERS.contains(ma.declName.baseName.text), let base = ma.base else { return }
+              stdlibWitnessSite("seq", ma.declName.baseName.text, labels: node.arguments.map { $0.label?.text }).contains("<"),
+              let base = ma.base else { return }
         // a `(by:)`/`(into:)` etc. closure form supplies its own comparator — no implicit `<` runs.
         if node.arguments.contains(where: { Self.peel($0.expression).is(ClosureExprSyntax.self) })
             || node.trailingClosure != nil { return }
@@ -10335,6 +10389,24 @@ final class CallCollector: SyntaxVisitor {
                           args: [.opaque, .opaque], argTypes: [elem, elem]))
         calls.append(Call(path: "<", leaf: "<", strArg: nil, typed: false,
                           args: [.opaque, .opaque], argTypes: [elem, elem], unqualified: true))
+    }
+
+    // CALL-TARGET ROUND 2 — a FREE generic platform function over a bounded `T` runs its arguments' witness:
+    // `max(a, b)` / `min(…)` run `T.<` (`T : Comparable`), `abs(x)` too. The release had no site for them at all, so
+    // `max(Cmp(2), Cmp(1))` read pure while the element's `<` wrote a file (executed, matrix H11, SOUNDNESS R1249). Each
+    // argument goes through `comparisonWitnesses`, the one resolver the operator and container sites use (a local
+    // type's witness, a synthesized one walked, a dependency's through R1415's channel). A project function of the same
+    // name shadows the platform's and is the call's target instead.
+    private func modelFreeWitnessCall(_ node: FunctionCallExprSyntax) {
+        guard let dr = node.calledExpression.as(DeclReferenceExprSyntax.self), node.trailingClosure == nil,
+              !node.arguments.contains(where: { Self.peel($0.expression).is(ClosureExprSyntax.self) }) else { return }
+        let name = dr.baseName.text
+        guard !localFreeFns.contains(name), !localFuncs.contains(name) else { return }
+        let ws = stdlibWitnessSite("free", name, labels: node.arguments.map { $0.label?.text })
+        guard !ws.isEmpty else { return }
+        for a in node.arguments {   // no edge of the call reaches `T.<` itself, so the witness is never "reached directly"
+            for w in ws { comparisonWitnesses(w, a.expression, arity: w == "hash" ? 1 : 2, directEdge: false) }
+        }
     }
 
     // VECTOR 2 — explicit stringification calls that run an operand's `description`/`debugDescription`:

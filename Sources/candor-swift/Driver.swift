@@ -20,6 +20,8 @@ private let driverR867Off = ProcessInfo.processInfo.environment["CANDOR_R867_OFF
 /// SOUNDNESS R1416 — kill switch for the `open`-class half of ⟨0.39⟩ obligation 1 (call-target round 1).
 private let r1416Off = ProcessInfo.processInfo.environment["CANDOR_R1416_OFF"] != nil
 private let r1416Probe = ProcessInfo.processInfo.environment["CANDOR_R1416_PROBE"] != nil   // reach: one line per key formed
+/// CALL-TARGET ROUND 2 — kill switch for the obligation-3 join's transitive implementor set (`unionOwnImplementors`).
+private let ctSubtreeOff = ProcessInfo.processInfo.environment["CANDOR_CT2_SUBTREE_OFF"] != nil
 /// VEIN C §1b KILL SWITCH (R903, R876).
 private let veinCOff = ProcessInfo.processInfo.environment["CANDOR_VEINC_OFF"] != nil
 /// SOUNDNESS R1109 §1b KILL SWITCH (main.swift reads the same variable for the producer's union) and REACH
@@ -3107,6 +3109,27 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // as the whole set. `chaWithinBound` discloses on `false` itself.
         guard chaWithinBound(conf.count, proto, member, qual) else { return }
         for c in conf { edges[qual, default: []].formUnion(resolveQual("\(c).\(member)")) }
+        // CALL-TARGET ROUND 2 — THE SAME IMPLEMENTOR SET THE IN-SCAN DISPATCH UNIONS, NOT ONLY THE TYPES THAT
+        // SPELL `: <key's type>`. `conformers` is the DIRECT spelled-inheritance index, so a consumer's
+        // `final class Mine: Mid { override func m() }` with `class Mid: Base {}` (Base the dependency's open
+        // class) was in no set the join asked: `dispFn(Mine())` read pure CHAINED while the same source in one
+        // tree charges it (`subtypesOf` is transitive) — EXECUTED, controls K17 (SILENT on 0.40.17) and K14p
+        // (a subclass of the held field's own class); the protocol twin K18 (a conforming class's subclass
+        // overrides the witness, R867 in one tree) disclosed `dispatch:P.m` where a resolution exists. So the
+        // two in-scan arms that widen the direct set are applied here unchanged: R867's subclass subtree of
+        // every direct conformer and R1109's conformers through a refining protocol. PRECISE-OR-NOTHING and
+        // ADDITIVE, as they are in scan: only real `<sub>.<member>` units, never an `Unknown`, nothing bounded.
+        if ctSubtreeOff { return }
+        let direct = Set(conf)
+        for c in conf.sorted() {
+            for sub in (subtypesOf[c] ?? []).sorted() where sub != c && !direct.contains(sub) {
+                edges[qual, default: []].formUnion(resolveQual("\(sub).\(member)"))
+            }
+        }
+        if !r1109Off {
+            edges[qual, default: []].formUnion(
+                subProtocolWitnesses(proto, member, own: { resolveQual($0) }, sub: { resolveQual($0) }, stored: { _ in false }))
+        }
     }
 
     // THE ONE APPLY SITE for a chained dependency entry (SPEC §2). It was three, and they had drifted:
@@ -3755,23 +3778,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// wherever the alignment is unclear — a refused provider would be a silence, a refused platform member a
     /// charge where the release had none.
     func r1071LabelsAdmit(_ call: [String?], _ trailing: Int, _ decl: [String]) -> Bool {
-        var i = 0, trail = trailing
-        for spec in decl {
-            var label = spec
-            let variadic = label.hasSuffix("..."); if variadic { label.removeLast(3) }
-            let defaulted = label.hasSuffix("="); if defaulted { label.removeLast() }
-            if i < call.count, (call[i] ?? "_") == label {
-                i += 1
-                if variadic { while i < call.count, call[i] == nil { i += 1 } }
-            } else if defaulted || variadic {
-                continue
-            } else if i >= call.count, trail > 0 {
-                trail -= 1
-            } else {
-                return false
-            }
-        }
-        return i == call.count
+        declLabelsAdmit(call, trailing, decl)   // the one implementation (WitnessSites.swift)
     }
     // A constructor or subscript is not a member CALL on a receiver value (`Foo.init(…)` names a type), so it is not
     // this marker's question.
@@ -4196,6 +4203,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !projectModules.contains($0)
         }
         for var call in cc.calls {
+            // CALL-TARGET ROUND 2 — the measured-not-shipped disclosure fallback (`CallCollector.siteFallback`, emitted
+            // only under `CANDOR_CT2_FALLBACK`): a recognised site whose operand could not be typed discloses.
+            if call.path.hasPrefix("<site>.") {
+                direct[f.qual, default: []].insert("Unknown")
+                whyMap[f.qual, default: []].insert("dispatch:<untyped>.\(call.leaf)")
+                if CallCollector.ct2FallbackProbe {
+                    FileHandle.standardError.write("CT2ROW \(f.qual) \(call.path)\n".data(using: .utf8)!)
+                }
+                continue
+            }
             // VEIN A(i) — A CANONICAL FULL PATH (a shared simple name) IS ASKED PRECISELY FIRST, AND THE
             // RELEASE'S SPELLING IS THE FLOOR. The exact unit or the exact overload set answers it (R266/
             // R132: the namesake's member is not reached); where neither exists — an inherited member, a
