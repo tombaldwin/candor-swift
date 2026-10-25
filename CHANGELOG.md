@@ -10,6 +10,20 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **Dependency hook calls join through one lookup, and a library names its `open` class members
+  (call-target round 1; SOUNDNESS R1415, R1416, R1310).** Three per-hook dependency channels (stringify, `deinit`,
+  property) are replaced by one map and one entry point, which operators, comparison and hash witnesses (including a
+  dependency-typed field of a local synthesized type), `sorted`/`max`/`min`, subscripts, `callAsFunction`, literal
+  `init`, `for`-`in` and a generic `init` requirement now use too, so a consumer's call into a dependency's
+  effectful member reaches the dependency's row. A library's dispatch on an `open` member of an `open` class now
+  publishes `dispatchesOn: <pkg>#<Class>.<member>`, so a consumer's own subclass is joined (it read absent in both
+  reports on 0.40.16); formatting a value typed by a local protocol publishes `<pkg>#<Proto>.description`. A dispatch
+  on `self` is published only as a row key re-keyed through an `open`-typed held value: propagated like a protocol
+  key it charged 1,189 SwiftLint rows (now pinned as control K10). Call-target matrix: 437 → 328 silent
+  measurements, 0 new fabrications. Corpus (38 chained packages, against 0.40.16): 0 rows removed, 2 rows gain a
+  concrete effect — one genuine, one an over-charge of the consumer union's scoping (R1436, known). The matrix is
+  committed under `tools/calltarget/` (one command, not in CI). Kill switches: `CANDOR_R1415_OFF`, `CANDOR_R1416_OFF`.
+
 ## [0.40.16] — 2026-10-24
 
 - **⚠ A chained consumer now carries the effect of its own implementor of a member that a dependency's union
