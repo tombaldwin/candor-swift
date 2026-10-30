@@ -307,6 +307,22 @@
    ]
   }
  },
+ "K19_indirect_subclasses_past_bound_disclose": {
+  "gt": true,
+  "g1": 0,
+  "g2": 1,
+  "verdict": "DISCLOSED",
+  "row": {
+   "inferred": [
+    "Unknown"
+   ],
+   "invisible": null,
+   "incomplete": null,
+   "unknownWhy": [
+    "dispatch:Base.m"
+   ]
+  }
+ },
  "R1437a_open_member_self_dispatch": {
   "gt": true,
   "g1": 0,
