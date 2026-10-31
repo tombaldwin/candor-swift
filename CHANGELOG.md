@@ -10,6 +10,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.40.18] — 2026-10-31
+
 - ⚠ **Platform members that run a user type's `==`, `<` or `hash(into:)` are read from the SDK, not from four hand
   lists, and a chained consumer's subclass two levels down is joined (call-target round 2).** Gates that can now go
   from exit 0 to exit 1: `deny E` over code that sorts in place (`a.sort()`), calls the free `max`/`min`/`abs`,
