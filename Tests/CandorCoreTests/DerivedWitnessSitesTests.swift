@@ -70,6 +70,12 @@ final class DerivedWitnessSitesTests: XCTestCase {
             }
             return String(rest[rest.index(after: open)..<min(i, rest.endIndex)])
         }
+        /// Module qualification is `Swift::Sequence` in a 27.x SDK's interface and `Swift.Sequence` in the older SDK on
+        /// CI's macos-15 (where the `::`-only strip left every `extension Swift.X` unparsed: 3 sites, not ~100).
+        func unqualify(_ s: String) -> String {
+            s.replacingOccurrences(of: #"\b\w+::"#, with: "", options: .regularExpression)
+                .replacingOccurrences(of: #"\b(?:Swift|_StringProcessing|_Concurrency)\."#, with: "", options: .regularExpression)
+        }
         var expected: [String: Set<String>] = [:]
         for module in ["Swift", "_StringProcessing"] {
             var owner: String? = nil, whereClause = ""
@@ -78,7 +84,7 @@ final class DerivedWitnessSitesTests: XCTestCase {
                 if !line.hasPrefix(" "), !line.isEmpty {
                     owner = nil; whereClause = ""
                     // `extension Swift::Sequence where Self.Element : Swift::Equatable {` / `public struct Set<Element> … {`
-                    let unq = line.replacingOccurrences(of: #"\b\w+::"#, with: "", options: .regularExpression)
+                    let unq = unqualify(line)
                     if line.hasSuffix("{"), let r = unq.range(of: #"^(?:@\S+\s+)*extension (\w+)\b"#, options: .regularExpression) {
                         let name = String(unq[r].split(separator: " ").last!)
                         if !unq[r.upperBound...].hasPrefix(".") { owner = name; whereClause = String(unq[r.upperBound...]) }
@@ -107,7 +113,7 @@ final class DerivedWitnessSitesTests: XCTestCase {
                         expected["seq.\(name)", default: []].formUnion(ws)
                     }
                 }
-                let unqParams = params.replacingOccurrences(of: #"\b\w+::"#, with: "", options: .regularExpression)
+                let unqParams = unqualify(params)
                 if o == "Set", unqParams.range(of: #":\s*(?:__owned\s+|consuming\s+)?(?:Element|Set<Element>|Self|S)\b"#, options: .regularExpression) != nil {
                     expected["set.\(name)", default: []].formUnion(["hash", "=="])
                 }
