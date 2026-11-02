@@ -177,4 +177,37 @@ final class SpelledReceiverProcessTests: XCTestCase {
         let off = try scan(Self.typeGenericParam, env: ["CANDOR_R1463_OFF": "1"])
         XCTAssertNil(off["Pool.put"], "kill switch: the release reading (ABSENT); got \(off["Pool.put"] ?? [:])")
     }
+
+    // An OPTIONAL container field is `Optional` unless the receiver unwraps it (executed: `xs.zap()` on `[Int]?` runs
+    // `Optional.zap`). The first cut of this change resolved it to `Array.zap` — a wrong member.
+    static let optField = """
+    import Foundation
+    extension Array { func zap() { _ = URLSession.shared.dataTask(with: URL(string: "https://e.example")!) } }
+    extension Optional { func zap() { try? FileManager.default.removeItem(atPath: "/nonexistent/candor-r1463") } }
+    struct H { var xs: [Int]? = nil
+      func f1() { xs.zap() }
+      func f2() { self.xs.zap() }
+      func f3() { xs?.zap() } }
+    """
+    func testAnOptionalContainerFieldIsOptionalUnlessUnwrapped() throws {
+        let by = try scan(Self.optField)
+        XCTAssertEqual(calls(by, "H.f1"), ["Optional.zap"], "got \(by["H.f1"] ?? [:])")
+        XCTAssertEqual(calls(by, "H.f2"), ["Optional.zap"], "got \(by["H.f2"] ?? [:])")
+        XCTAssertEqual(calls(by, "H.f3"), ["Array.zap"], "got \(by["H.f3"] ?? [:])")
+    }
+
+    // A bare `rawValue` inside an enum with a raw type is the enum's own property (executed: the global below does
+    // NOT run from `E.message`, and DOES run from `NoRaw.m`). Pinned here in-package; the chained leaf join that
+    // charged SwiftLint's `enum …: String { var message { rawValue } }` is the same lookup.
+    static let rawEnum = """
+    import Foundation
+    var rawValue: String { try? FileManager.default.removeItem(atPath: "/nonexistent/candor-r1463"); return "g" }
+    enum E: String { case a = "x"; var message: String { rawValue } }
+    enum NoRaw { case a; var m: String { rawValue } }
+    """
+    func testARawEnumsBareRawValueIsItsOwnProperty() throws {
+        let by = try scan(Self.rawEnum)
+        XCTAssertNil(by["E.message"], "got \(by["E.message"] ?? [:])")
+        XCTAssertEqual(inf(by, "NoRaw.m"), ["Fs"], "control: no raw type, the global is the callee; got \(by["NoRaw.m"] ?? [:])")
+    }
 }

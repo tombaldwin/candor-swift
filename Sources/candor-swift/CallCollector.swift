@@ -389,6 +389,7 @@ final class CallCollector: SyntaxVisitor {
     let opWitnessTypes: [String: Set<String>]
     /// SOUNDNESS R1176 — see `DeclCollector.fieldContainersR1176`.
     let fieldContainersR1176: [String: [String: (kind: String, args: [String])]]
+    let optionalContainerFieldsR1463: [String: Set<String>]   // SOUNDNESS R1463 — see the DeclCollector index
     /// SOUNDNESS R1272 — see `DeclCollector.enumPayloadsR1272`.
     let enumPayloadsR1272: [String: [String]]
     /// SOUNDNESS R1176 — an unannotated local's container kind and written generic arguments, read off its
@@ -974,10 +975,12 @@ final class CallCollector: SyntaxVisitor {
          importedModules: Set<String> = [], projectModules: Set<String> = [], deps: DepIndex = DepIndex(),
          ai: AiTypeIndex = AiTypeIndex(), opWitnessTypes: [String: Set<String>] = [:],
          fieldContainersR1176: [String: [String: (kind: String, args: [String])]] = [:],
+         optionalContainerFieldsR1463: [String: Set<String>] = [:],
          enumPayloadsR1272: [String: [String]] = [:],
          classNamesR1175: Set<String> = [], classSubtypesR1175: [String: Set<String>] = [:]) {
         self.opWitnessTypes = opWitnessTypes
         self.fieldContainersR1176 = fieldContainersR1176
+        self.optionalContainerFieldsR1463 = optionalContainerFieldsR1463
         self.enumPayloadsR1272 = enumPayloadsR1272
         self.classNamesR1175 = classNamesR1175
         self.classSubtypesR1175 = classSubtypesR1175
@@ -7306,6 +7309,17 @@ final class CallCollector: SyntaxVisitor {
     /// (`[T]?`) is NOT a container here: `o.map {…}` on it is `Optional.map`, and `containerKind` refuses it.
     /// SOUNDNESS R1463 — `Signal<Int, Never>.Observer(…)`: the dotted constructor path `dottedTypePath` reads for the
     /// unspecialised spelling, read through the generic argument clause (which holds only types).
+    /// SOUNDNESS R1463 — does the receiver expression unwrap an optional (`xs?` / `xs!`) at its outermost level?
+    static func isOptionalUnwrapped(_ raw: ExprSyntax) -> Bool {
+        var e = raw
+        while true {
+            if e.is(OptionalChainingExprSyntax.self) || e.is(ForceUnwrapExprSyntax.self) { return true }
+            if let t = e.as(TryExprSyntax.self) { e = t.expression; continue }
+            if let a = e.as(AwaitExprSyntax.self) { e = a.expression; continue }
+            if let p = e.as(TupleExprSyntax.self), p.elements.count == 1, let only = p.elements.first { e = only.expression; continue }
+            return false
+        }
+    }
     private func genericSpecTypePathR1463(_ ma: MemberAccessExprSyntax) -> String? {
         guard !Self.r1463Off, let b = ma.base, let g = Self.peel(b).as(GenericSpecializationExprSyntax.self),
               let head = dottedTypePath(Syntax(Self.peel(g.expression))) else { return nil }
@@ -7322,6 +7336,13 @@ final class CallCollector: SyntaxVisitor {
             guard r.root != nil else { return nil }
             vbHit("R1463", "generic \(tp)")
             return r
+        }
+        // An OPTIONAL container field is the container only through `?` / `!` (peeled above): `xs.m()` on
+        // `var xs: [T]?` is `Optional.m` — the receiver's own spelled type, so that is the answer.
+        if let f = selfFieldRefR1176(raw), let et = enclosingType,
+           optionalContainerFieldsR1463[et]?.contains(f) == true || optionalContainerFieldsR1463[Self.leafR1176(et)]?.contains(f) == true,
+           !Self.isOptionalUnwrapped(raw) {
+            vbHit("R1463", "container Optional"); return ("Optional", true, [], false, false)
         }
         switch containerKind(raw) {
         case .array?: vbHit("R1463", "container Array"); return ("Array", true, [], false, false)

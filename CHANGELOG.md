@@ -20,7 +20,10 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   no longer erases the receiver's type before it resolves. Resolving those receivers withdrew three wrong-owner hedges
   that had been covering real silences, so two are closed with it: a stored `[Element]` and a method parameter typed
   by the enclosing type's generic parameter now dispatch over its bound (the declaration's, or the method's own
-  extension clause — never another extension's `where`). Rows can gain effects; `CANDOR_R1463_OFF` /
+  extension clause — never another extension's `where`). An OPTIONAL container field (`var xs: [T]?`) resolves to
+  `Optional` unless the receiver unwraps it. A bare `rawValue` inside an enum with a raw type is the enum's own
+  property and no longer joins a dependency member or global of that name (it charged a pure `rawValue` read with
+  whatever the dependency's same-named member did). Rows can gain effects; `CANDOR_R1463_OFF` /
   `CANDOR_R1455_SHADOW_OFF` restore the release reading.
 
 ## [0.40.18] — 2026-10-31

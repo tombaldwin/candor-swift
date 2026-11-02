@@ -413,6 +413,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var fieldDictValue: [String: [String: String]] = [:]
     var fieldTypeArgs: [String: [String: [String]]] = [:]   // SOUNDNESS R905
     var fieldContainersR1176: [String: [String: (kind: String, args: [String])]] = [:]   // SOUNDNESS R1176
+    var optionalContainerFieldsR1463: [String: Set<String>] = [:]                       // SOUNDNESS R1463
     var enumPayloadsR1272Raw: [(enumName: String, payload: String, scopes: [String])] = []   // SOUNDNESS R1272
     var opaqueFields: [String: Set<String>] = [:]
     var caseAssocAll: [String: Set<String>] = [:]
@@ -1030,6 +1031,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (t, fs) in c.fieldDictValue { fieldDictValue[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.fieldTypeArgs { fieldTypeArgs[t, default: [:]].merge(fs) { a, _ in a } }   // R905
         for (t, fs) in c.fieldContainersR1176 { fieldContainersR1176[t, default: [:]].merge(fs) { a, _ in a } }   // R1176
+        for (t, fs) in c.optionalContainerFieldsR1463 { optionalContainerFieldsR1463[t, default: []].formUnion(fs) }   // R1463
         enumPayloadsR1272Raw.append(contentsOf: c.enumPayloadsR1272)   // R1272
         for (t, fs) in c.opaqueFields { opaqueFields[t, default: []].formUnion(fs) }
         for (cn, ts) in c.caseAssoc { caseAssocAll[cn, default: []].formUnion(ts) }
@@ -3989,6 +3991,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                }(),
                                opWitnessTypes: opWitnessTypesR951,
                                fieldContainersR1176: fieldContainersR1176,                             // R1176
+                               optionalContainerFieldsR1463: optionalContainerFieldsR1463,             // R1463
                                enumPayloadsR1272: enumPayloadsR1272,                                   // R1272
                                classNamesR1175: classNamesAll, classSubtypesR1175: classSubtypesR1175) // R1175
         // The locator-move set is flow-INSENSITIVE and must be complete before the first call is collected
@@ -4111,7 +4114,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // stay distinct units first. Falls back to the plain name match, so a module that declares no such
         // global still reaches a uniquely-named one elsewhere exactly as before.
         let readerModule = swiftModuleOf(f.loc)
-        for name in cc.globalReads where name != f.qual {
+        // SOUNDNESS R1463 — see the `rawValue` guard at the member-join site: a bare `rawValue` inside an enum with a raw
+        // type is the enum's own synthesized property, never a dependency global of that name.
+        let rawEnumSelf: Bool = !CallCollector.r1463Off && f.enclosingType.map { et in
+            declaredTypes.contains(et) && (supertypesOf[et] ?? []).contains(where: { RAW_VALUE_BASE_TYPES.contains($0) }) } == true
+        for name in cc.globalReads where name != f.qual && !(rawEnumSelf && name == "rawValue") {
             // R847 — a bare read a binder holds locally is never a dependency declaration; only the
             // chained arm below consults this (the local arms above see every read, as before).
             let depReadable = CallCollector.r847Off || cc.depGlobalReads.contains(name)
@@ -5582,6 +5589,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 let memberTiers = joinTiers(file, module: call.unqualified ? nil : call.ownerModule)
                 for (ti, tier) in memberTiers.enumerated() where hits.isEmpty {
                 for (p, mods) in tier {
+                    // SOUNDNESS R1463 — `rawValue` read bare inside an enum with a RAW TYPE is that enum's own
+                    // synthesized property: Swift's member lookup on implicit `self` finds it before anything at
+                    // module scope, and a call of it cannot compile. The `pkg#rawValue` leaf key (minted for every
+                    // dependency member of that name) charged SwiftLint's `enum …: String { var message { rawValue } }`
+                    // with swift-syntax's `EnumCaseElementSyntax.rawValue` (executed fixture: a pure enum read Env).
+                    if call.unqualified, !CallCollector.r1463Off, call.path == "rawValue", let et = f.enclosingType,
+                       declaredTypes.contains(et), (supertypesOf[et] ?? []).contains(where: { RAW_VALUE_BASE_TYPES.contains($0) }) {
+                        continue
+                    }
                     if call.unqualified {
                         // R847 — a bare identifier passed as an ARGUMENT (`String(next)`) is a function
                         // REFERENCE; the only dependency declaration a bare name can reference is a FREE

@@ -358,6 +358,10 @@ final class DeclCollector: SyntaxVisitor {
     /// container-witness model for a field read through implicit or explicit `self` (`items.contains(x)` inside
     /// `GBox<T>`), which `containerKind` answered only for parameters and annotated locals.
     var fieldContainersR1176: [String: [String: (kind: String, args: [String])]] = [:]
+    /// SOUNDNESS R1463 — stored properties whose written type is an OPTIONAL (or `!`) of a stdlib container. Their
+    /// `fieldContainersR1176` entry peels the optional, which is right for a witness question and wrong for "what does
+    /// `xs.m()` call": on `var xs: [T]?` that is `Optional.m`, and only `xs?.m()` reaches `Array.m`.
+    var optionalContainerFieldsR1463: [String: Set<String>] = [:]
     /// SOUNDNESS R1272 — enum -> every type its cases' associated values name (`case one(Cmp)`, `case many([Cmp])`
     /// give `Cmp`), in declaration order. A SYNTHESIZED `Equatable`/`Comparable`/`Hashable` conformance of an enum
     /// compares or hashes these payloads, and `fields` never held them, so R951's walk read such an enum pure.
@@ -1513,6 +1517,10 @@ final class DeclCollector: SyntaxVisitor {
                     if !targs.isEmpty { fieldTypeArgs[ty, default: [:]][name] = targs }   // R905
                     if !Self.r1176Off, let k = stdlibContainerKindR1176(ann.type) {   // SOUNDNESS R1176
                         fieldContainersR1176[ty, default: [:]][name] = (k, genericArgumentNames(ann.type))
+                        let d = desugaredType(ann.type)
+                        if d.is(OptionalTypeSyntax.self) || d.is(ImplicitlyUnwrappedOptionalTypeSyntax.self) {
+                            optionalContainerFieldsR1463[ty, default: []].insert(name)
+                        }
                     }
                 } else if let initVal = binding.initializer?.value,
                           let call = initVal.as(FunctionCallExprSyntax.self),
