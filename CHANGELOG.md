@@ -10,6 +10,16 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- ⚠ **A member call whose receiver's type the source spells is resolved instead of dropped (SOUNDNESS R1463, R1455
+  classes T0/T1).** `"/path".wipe()` over a project `extension String { func wipe() }` that deletes the file read
+  ABSENT (executed; `deny Fs` passed) while `let p = "/path"; p.wipe()` charged `Fs`. A literal receiver now takes its
+  default literal type, `Box<Int>.make()` the unspecialised type, a binding written as `[T]` / `[K: V]` / `Set<T>`
+  (parameter, annotated local, `self` field) or a variadic parameter the stdlib container, and the call goes through
+  the same arms the typed twin does (a project or dependency extension's unit is edged; a stdlib member resolves to
+  nothing, as for the twin). A closure parameter named like the call's own receiver (`coder.append { coder in … }`)
+  no longer erases the receiver's type before it resolves. Rows can gain effects; `CANDOR_R1463_OFF` /
+  `CANDOR_R1455_SHADOW_OFF` restore the release reading.
+
 ## [0.40.18] — 2026-10-31
 
 - ⚠ **Platform members that run a user type's `==`, `<` or `hash(into:)` are read from the SDK, not from four hand

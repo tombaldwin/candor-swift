@@ -438,6 +438,8 @@ final class NameKeyedStateTests: XCTestCase {
         "r915NestedDotted": .notPerBinding,
         // R1073 — output flag: the unit dropped a member call (read once by the Driver after the walk)
         "droppedMember": .notPerBinding,
+        // R1455 probe — the unit's qual/loc labels for the measurement-only partition probe (no behaviour)
+        "r1455Qual": .notPerBinding, "r1455Loc": .notPerBinding,
         "elementWalkedGuess": .notPerBinding, "forElemGuess": .notPerBinding,
         // R853 — payload names bound by an enclosing `if`/`guard` whose `else` this is: scope bookkeeping
         "caseElseOut": .lexicallyScoped("the payload names an `if case`/`guard case` bound, inside that statement's `else`, where they are out of scope; saved and restored with the block"),

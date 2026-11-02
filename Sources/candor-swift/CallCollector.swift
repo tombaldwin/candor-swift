@@ -241,7 +241,12 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// unlabelled) and its trailing-closure count, so the Driver admits only an extension member whose
               /// declaration those labels can call; `platextLabels == nil` is the PROPERTY spelling (no call).
               var platextLabels: [String?]? = nil
-              var platextTrailing: Int = 0 }
+              var platextTrailing: Int = 0
+              /// SOUNDNESS R1463 — the receiver's owner was read from its own SPELLING (a literal, a stdlib container
+              /// binding, a specialised type reference — `spelledReceiverRoot`), so it names a platform nominal this
+              /// package does not own: no ⟨0.39⟩ obligation-1 key is minted for it (`DepLib#Array.makeIterator`
+              /// names an owner no producer has — the `DepLib#String.lowercased` class `RAW_VALUE_BASE_TYPES` fences).
+              var spelledRecvR1463: Bool = false }
                                                // the RESOLVED receiver root of an otherwise-unmatched member
                                                // call (`c.fetch()` where c: RatesClient, an external type) —
                                                // carried ONLY for the §2 CANDOR_DEPS join key (`pkg#Owner.leaf`);
@@ -6627,6 +6632,41 @@ final class CallCollector: SyntaxVisitor {
 
     // Names a closure binds: explicit `{ (a, b) in … }`/`{ a, b in … }` → those names; shorthand
     // `{ $0.… }` with no signature → `$0`/`$1`/`$2` (we can't tell arity, so clear the common few).
+    /// SOUNDNESS R1455 (T1) §1b kill switch — restores clearing the closure parameters BEFORE the receiver resolves.
+    static let r1455ShadowOff = ProcessInfo.processInfo.environment["CANDOR_R1455_SHADOW_OFF"] != nil
+    /// SOUNDNESS R1455 (T1) — A CLOSURE PARAMETER THAT SHARES THE RECEIVER'S NAME DOES NOT SCOPE OVER THE RECEIVER.
+    ///
+    /// `coder.appendConstructedNode(identifier: id) { coder in … }` — the swift-asn1 serialising idiom, and the
+    /// shape of every `inout` builder that hands itself to a closure. `typeClosureParams` clears each closure
+    /// parameter's binding so an outer same-named value cannot leak INTO the body, and it ran before the call's
+    /// own receiver was resolved: the receiver `coder`, evaluated in the ENCLOSING scope, read the cleared binding,
+    /// had no root, and the call was dropped (no edge, no `Unknown`). Executed: `c.node { c in … }` was ABSENT over
+    /// a `node` that deletes a file, while `c.node { d in … }` charged `Fs`. Only where the receiver chain's HEAD
+    /// identifier is one of this call's own closure parameters is the clearing moved to the end of this visit —
+    /// after the receiver and arguments are resolved, still before any closure body is walked — so the body keeps
+    /// exactly the clearing it had.
+    private func receiverShadowedByOwnClosure(_ node: FunctionCallExprSyntax) -> Bool {
+        guard !Self.r1455ShadowOff, let ma = node.calledExpression.as(MemberAccessExprSyntax.self), var e = ma.base else {
+            return false
+        }
+        var head: String? = nil
+        while head == nil {
+            e = Self.peel(e)
+            if let d = e.as(DeclReferenceExprSyntax.self) { head = d.baseName.text; break }
+            if let m = e.as(MemberAccessExprSyntax.self), let b = m.base { e = b; continue }
+            if let c = e.as(FunctionCallExprSyntax.self) { e = c.calledExpression; continue }
+            if let sc = e.as(SubscriptCallExprSyntax.self) { e = sc.calledExpression; continue }
+            return false
+        }
+        guard let h = head, h != "self", h != "Self" else { return false }
+        var closures: [ClosureExprSyntax] = []
+        if let tc = node.trailingClosure { closures.append(tc) }
+        for atc in node.additionalTrailingClosures { closures.append(atc.closure) }
+        for arg in node.arguments { if let c = Self.peel(arg.expression).as(ClosureExprSyntax.self) { closures.append(c) } }
+        let hit = closures.contains { c in closureParamNames(c).contains { $0.name == h } }
+        if hit { vbHit("R1455S", h) }
+        return hit
+    }
     private func closureParamNames(_ closure: ClosureExprSyntax) -> [(name: String, annotated: String?, metatype: String?)] {
         if let params = closure.signature?.parameterClause?.as(ClosureParameterClauseSyntax.self) {
             return params.parameters.map { p in
@@ -7243,6 +7283,58 @@ final class CallCollector: SyntaxVisitor {
         }
     }
 
+    /// SOUNDNESS R1463 / R1455 (classes T0 and T1) — §1b kill switch: restores the release's untyped receiver.
+    static let r1463Off = ProcessInfo.processInfo.environment["CANDOR_R1463_OFF"] != nil
+    /// SOUNDNESS R1463 / R1455 T0-T1 — THE RECEIVER'S TYPE AS ITS OWN SPELLING STATES IT, where `rootOf` gave none.
+    ///
+    /// `"/path".wipe()` over a project `extension String { func wipe() }` that deletes the file was ABSENT from
+    /// `functions[]` (executed: the file is gone, `deny Fs` passed), while the bound twin `let p = "/path";
+    /// p.wipe()` charged `Fs` through R579's literal binder. A member call on an untyped receiver is dropped with
+    /// no edge and no `Unknown` (R1455's `droppedMember`), so every spelling below whose type the SOURCE states and
+    /// `rootOf` does not read was a silence. Each answer is the one the release already gives the same value
+    /// through a typed binding, so the chain below treats it identically — κ, the typed-local arm (a project
+    /// extension's unit), the §2 owner join — and nothing new is invented about what a platform member does:
+    ///
+    ///  - a LITERAL receiver: Swift types a literal receiver by its default literal type (`literalKind`);
+    ///  - an explicitly SPECIALISED type reference (`Box<Int>.make()`, `EventLoopPromise<V>.makeX(…)`): the generic
+    ///    argument clause holds only types, so the receiver is the unspecialised type (R1046's rule, for members);
+    ///  - a binding WRITTEN as a stdlib container (`[T]`, `[K: V]`, `Set<T>`, an annotated local, a `self` field —
+    ///    `containerKind`, the one reader of that fact) or a VARIADIC parameter (an `Array` of its element).
+    ///
+    /// A container member a project/dependency `extension Array {…}` provides now resolves to that unit; a stdlib
+    /// member (`append`, `contains`) resolves to no unit, as it does for the typed twin. An Optional binding
+    /// (`[T]?`) is NOT a container here: `o.map {…}` on it is `Optional.map`, and `containerKind` refuses it.
+    /// SOUNDNESS R1463 — `Signal<Int, Never>.Observer(…)`: the dotted constructor path `dottedTypePath` reads for the
+    /// unspecialised spelling, read through the generic argument clause (which holds only types).
+    private func genericSpecTypePathR1463(_ ma: MemberAccessExprSyntax) -> String? {
+        guard !Self.r1463Off, let b = ma.base, let g = Self.peel(b).as(GenericSpecializationExprSyntax.self),
+              let head = dottedTypePath(Syntax(Self.peel(g.expression))) else { return nil }
+        return "\(head).\(ma.declName.baseName.text)"
+    }
+    private func spelledReceiverRoot(_ raw: ExprSyntax) -> (root: String?, isVar: Bool, path: [String], mono: Bool, opaqueHop: Bool)? {
+        guard !Self.r1463Off else { return nil }
+        let e = Self.peel(raw)
+        if let k = literalKind(e) { vbHit("R1463", "literal \(k)"); return (k, true, [], false, false) }
+        if let g = e.as(GenericSpecializationExprSyntax.self),
+           let tp = dottedTypePath(Syntax(Self.peel(g.expression))),
+           Self.typeLikeName(tp.split(separator: ".").last.map(String.init) ?? "") {
+            let r = rootOf(g.expression)
+            guard r.root != nil else { return nil }
+            vbHit("R1463", "generic \(tp)")
+            return r
+        }
+        switch containerKind(raw) {
+        case .array?: vbHit("R1463", "container Array"); return ("Array", true, [], false, false)
+        case .dictionary?: vbHit("R1463", "container Dictionary"); return ("Dictionary", true, [], false, false)
+        case .set?: vbHit("R1463", "container Set"); return ("Set", true, [], false, false)
+        case nil: break
+        }
+        if let dr = e.as(DeclReferenceExprSyntax.self), variadicParamsR915.contains(dr.baseName.text),
+           !multiplyBoundNames.contains(dr.baseName.text) {
+            vbHit("R1463", "variadic Array"); return ("Array", true, [], false, false)
+        }
+        return nil
+    }
     /// SOUNDNESS R1009 — §1b kill switch.
     static let r1009Off = ProcessInfo.processInfo.environment["CANDOR_R1009_OFF"] != nil
     /// SOUNDNESS R1032 — §1b kill switch.
@@ -7473,7 +7565,9 @@ final class CallCollector: SyntaxVisitor {
         // for the vein this position closes and `constructionEscapes` for the gate that keeps a
         // factory's returned product uncharged.
         noteConstructionForDeinitGlue(node)
-        typeClosureParams(node)
+        // SOUNDNESS R1455 (T1, the shadowed receiver) — see `receiverShadowedByOwnClosure`.
+        let deferClosureTyping = receiverShadowedByOwnClosure(node)
+        if !deferClosureTyping { typeClosureParams(node) }
         typeEnumCaseBinding(node)
         // VECTOR 2 — `String(describing: x)` / `String(reflecting: x)` and `print(x)` / `debugPrint(x)`
         // stringify their operands through `description` / `debugDescription`. Edge each LOCAL-typed
@@ -7987,10 +8081,22 @@ final class CallCollector: SyntaxVisitor {
             let member = ma.declName.baseName.text
             // VEIN A(i) — `Yard.Boom()` / `M.TopBoom()`: a DOTTED constructor of a local type was recorded only
             // as the member `Boom` of `Yard` (no such unit), so the init's effect was dropped. Additive.
-            if Self.typeLikeName(member), let tp = dottedTypePath(Syntax(ma)), tp.contains(".") {
+            if Self.typeLikeName(member), let tp = dottedTypePath(Syntax(ma)) ?? genericSpecTypePathR1463(ma), tp.contains(".") {
                 aiCtorCall(tp, node, lit: lit)
             }
-            let base = ma.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [], mono: false, opaqueHop: false)
+            let base0 = ma.base.map { rootOf($0) } ?? (root: nil, isVar: false, path: [], mono: false, opaqueHop: false)
+            // SOUNDNESS R1463 / R1455 T0-T1 — see `spelledReceiverRoot`. Asked ONLY where the release formed NO owner from
+            // `rootOf`'s answer (no root, or the bare-name fallback: a lowercase name that is not a tracked value — the
+            // `releaseOwner` test below), so every receiver the release typed keeps exactly the answer it had.
+            let releaseUntyped = base0.root.map { r in !(base0.isVar || r.first?.isUppercase == true) } ?? true
+            // …and `self.names.wipeAll()` over a stored `var names: [String]`: `rootOf` keeps the OUTER base (`Holder`)
+            // through a field it recorded with no type name (`opaqueHop`), which keyed a member `Holder` does not have
+            // and published nothing (executed: ABSENT, while the implicit-self `names.wipeAll()` resolves here). The
+            // field's WRITTEN type establishes the hop, so it is answered from that (`containerKind`'s `self` arm).
+            let selfContainerHop = !Self.r1463Off && base0.opaqueHop && ma.base.map { selfFieldRefR1176($0) != nil } == true
+            let spelled = releaseUntyped || selfContainerHop ? ma.base.flatMap { spelledReceiverRoot($0) } : nil
+            let base = spelled ?? base0
+            let spelledRecv = spelled != nil
             // R429 — the WRITTEN receiver name, before `dealias` collapses a `#if`-duplicated
             // alias to whichever arm happened to be recorded last.
             let rawBaseRoot = ma.base.flatMap { rootOfUnaliased($0).root }
@@ -8265,6 +8371,10 @@ final class CallCollector: SyntaxVisitor {
                 // resolveQual soft edge) NOT a typed call, so a STD array method (`xs.forEach`, no
                 // `Array.forEach` unit) drops SILENTLY — no spurious Unknown, no fabrication.
                 propertyEdges.insert("Array.\(member)")
+                // SOUNDNESS R1463 — `arrayElem` also holds a `Set<T>`'s element, so a SET receiver landed here and was
+                // edged only to `Array.<member>`, a unit it cannot call; its own `extension Set` member was dropped
+                // (executed: ABSENT). ADDED beside the release's edge, never instead of it.
+                if !Self.r1463Off, containerKind(ExprSyntax(baseDR)) == .set { propertyEdges.insert("Set.\(member)") }
             } else if let rt = base.root, localTypes.contains(rt),
                       // A LOCAL PROTOCOL IS NOT A CONCRETE TYPE, even though `localTypes` holds its name.
                       // `visit(ExtensionDeclSyntax)` calls `pushType` on whatever it extends, so `extension
@@ -8732,7 +8842,9 @@ final class CallCollector: SyntaxVisitor {
                 // (`RatesCore.Client`, `Outer.Inner` — `qualifiedOwner`) is established, not guessed, and so
                 // is the floor's module-keyed join beside it (the precise owner answers the call).
                 let guessed = (base.opaqueHop && qualifiedOwner == nil) || baseIsConventionVar
-                calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), opaqueRecv: base.mono, conventionOwner: !Self.r567aOff && conventionOwner != nil && conventionOwner == primary, ownerModule: recvModule, extOwner: primary, holdsHop: holdsHop, guessHop: guessed))
+                var memberCall = Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), opaqueRecv: base.mono, conventionOwner: !Self.r567aOff && conventionOwner != nil && conventionOwner == primary, ownerModule: recvModule, extOwner: primary, holdsHop: holdsHop, guessHop: guessed)
+                memberCall.spelledRecvR1463 = spelledRecv
+                calls.append(memberCall)
                 // THE FLOOR, where the resolution differs from what the release keyed (`RatesCore.Client`
                 // was keyed on the MODULE and joined its leaf union; `Outer.Inner.shared` on `Outer`).
                 // Kept so nothing the release answered stops being answered; it is the release's own
@@ -8811,6 +8923,7 @@ final class CallCollector: SyntaxVisitor {
             unresolved = true
             why.insert("callback:computed") // a computed/unresolved callee value (subscript, optional-chained, …) — owner-less unresolved invocation; canonical `callback:` (SPEC §4 ⟨0.7⟩)
         }
+        if deferClosureTyping { typeClosureParams(node) }   // R1455 — after the receiver resolved; before the bodies walk
         return .visitChildren
     }
 

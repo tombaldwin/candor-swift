@@ -144,7 +144,7 @@ enum R1455 {
                     if let v = it.item.as(VariableDeclSyntax.self) {
                         for b in v.bindings where patternNames(b.pattern).contains(name) {
                             let tuple = b.pattern.is(TuplePatternSyntax.self)
-                            return "local-var:\(b.typeAnnotation != nil ? "annotated" : "init=\(initKind(b.initializer?.value))")\(tuple ? ":destructured" : "")"
+                            return "local-var:\(b.typeAnnotation.map { "annotated[" + String($0.type.trimmedDescription.prefix(40)) + "]" } ?? "init=\(initKind(b.initializer?.value))")\(tuple ? ":destructured" : "")"
                         }
                     }
                     if let g = it.item.as(StmtSyntax.self)?.as(GuardStmtSyntax.self) {
@@ -186,19 +186,19 @@ enum R1455 {
             }
             if let fn = p.as(FunctionDeclSyntax.self) {
                 for prm in fn.signature.parameterClause.parameters where (prm.secondName ?? prm.firstName).text == name {
-                    return "param:\(String(prm.type.trimmedDescription.prefix(24)))"
+                    return "param:\(String(prm.type.trimmedDescription.prefix(40)))"
                 }
             }
             if let ini = p.as(InitializerDeclSyntax.self) {
                 for prm in ini.signature.parameterClause.parameters where (prm.secondName ?? prm.firstName).text == name {
-                    return "param:\(String(prm.type.trimmedDescription.prefix(24)))"
+                    return "param:\(String(prm.type.trimmedDescription.prefix(40)))"
                 }
             }
             if let blk = p.as(MemberBlockSyntax.self) {
                 for m in blk.members {
                     if let v = m.decl.as(VariableDeclSyntax.self) {
                         for b in v.bindings where patternNames(b.pattern).contains(name) {
-                            return "field:\(b.typeAnnotation != nil ? "annotated" : "init=\(initKind(b.initializer?.value))")"
+                            return "field:\(b.typeAnnotation.map { "annotated[" + String($0.type.trimmedDescription.prefix(40)) + "]" } ?? "init=\(initKind(b.initializer?.value))")"
                         }
                     }
                 }

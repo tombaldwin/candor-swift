@@ -5223,7 +5223,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             if !resolved, !call.typed || r651Extended, !call.unqualified, !call.opaqueRecv,
                let owner = call.extOwner,
                !localTypes.contains(owner) || r651Extended, !STD_PURE_PROTOCOLS.contains(owner),
-               !RAW_VALUE_BASE_TYPES.contains(owner) {
+               !RAW_VALUE_BASE_TYPES.contains(owner),
+               // SOUNDNESS R1463 — see `Call.spelledRecvR1463`: a platform nominal read off the receiver's spelling.
+               !(call.spelledRecvR1463 && STDLIB_NOMINALS.contains(owner)) {
                 // SOUNDNESS R651 REACH — the CHA/obligation-1 half, counted separately from the §2 join
                 // below because they move different fields (`inferred` via a local override vs
                 // `dispatchesOn`), and a diff keyed on effects alone cannot see the second.
