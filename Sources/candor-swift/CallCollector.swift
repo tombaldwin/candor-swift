@@ -670,6 +670,7 @@ final class CallCollector: SyntaxVisitor {
     /// `backPressureStrategy.didConsume(…)` beside `buffer.count > 0`): withdrawing a false hedge must not uncover a
     /// silence the hedge was standing in front of.
     var droppedMember = false
+    var r1455Qual = "", r1455Loc = ""   // SOUNDNESS R1455 — probe labels (see R1455Probe.swift); no behaviour
     /// SOUNDNESS R1044 residual — each local name's ONE binding (annotation and/or initializer), from
     /// `prescanLocalGenericBindings`; a name bound twice anywhere in the unit is absent.
     var lgBindings: [String: (type: TypeSyntax?, initializer: ExprSyntax?)] = [:]
@@ -976,6 +977,7 @@ final class CallCollector: SyntaxVisitor {
         self.classNamesR1175 = classNamesR1175
         self.classSubtypesR1175 = classSubtypesR1175
         self.paramTypeArgsR951 = info.paramTypeArgs
+        self.r1455Qual = info.qual; self.r1455Loc = info.loc   // SOUNDNESS R1455 probe only
         self.paramIndexR951 = info.paramIndex
         self.paramTypesR951 = info.params
         self.paramDeclTypesR996 = info.paramDeclTypes
@@ -8786,7 +8788,16 @@ final class CallCollector: SyntaxVisitor {
                 }
                 else if owner == nil, guessedOwner == nil, let b = ma.base {
                     droppedMember = true   // SOUNDNESS R1073 — see `droppedMember`
+                    if let only = R1455.hedgeOnly {   // SOUNDNESS R1455 pricing arm — hedge only the named classes
+                        let ln = R1455.line(qual: "", loc: "", member: member, shape: probeShape(b), base: b)
+                            .trimmingCharacters(in: .newlines).split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+                        if let cls = ln.last, only.contains(cls) { siteFallback("explicit", member) }
+                    } else {
                     siteFallback("explicit", member)   // CALL-TARGET ROUND 2 (measured, not shipped) — the `:8735` drop
+                    }
+                    if R1455.probe {
+                        FileHandle.standardError.write(R1455.line(qual: r1455Qual, loc: r1455Loc, member: member, shape: probeShape(b), base: b).data(using: .utf8)!)
+                    }
                     if Self.veinBProbe {
                     FileHandle.standardError.write(
                         "VBDROP\t\(probeShape(b))\t\(member)\t\(String(b.trimmedDescription.prefix(60)).replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\t", with: " "))\n".data(using: .utf8)!)
