@@ -139,4 +139,42 @@ final class SpelledReceiverProcessTests: XCTestCase {
         // Inside the closure `s` is the closure's own `Other`: the outer `Ser.leaf` (Exec) must not be charged.
         XCTAssertFalse(inf(by, "w_shadowInner").contains("Exec"), "got \(by["w_shadowInner"] ?? [:])")
     }
+
+    // ── EXPOSED by the resolution: a stored `[Element]` under a type-level generic bound ─────────────────────────
+    // `self.reducers.reduce(.none) { … $1._reduce(…) }` (a real composable-architecture shape) was covered in the
+    // release only by a WRONG-OWNER hedge (`Array.reduce` read as the enclosing protocol's `reduce`). Resolving the
+    // receiver withdrew that hedge and exposed the element closure's dispatch, which was silent in BOTH arms
+    // (executed: `Many(rs: [E()]).d()` deletes the file; `deny Fs Many.d` exited 0 on v0.40.18).
+    static let genericElem = """
+    import Foundation
+    protocol R { func run() -> Int }
+    struct E: R { func run() -> Int { try? FileManager.default.removeItem(atPath: "/nonexistent/candor-r1463"); return 1 } }
+    struct Many<Element: R> { var rs: [Element]
+      func d() { rs.forEach { _ = $0.run() } }
+      func a() -> Int { self.rs.reduce(0) { $0 + $1.run() } } }
+    """
+    func testAGenericElementFieldDispatchesOverItsBound() throws {
+        let by = try scan(Self.genericElem)
+        XCTAssertEqual(inf(by, "Many.d"), ["Fs"], "got \(by["Many.d"] ?? [:])")
+        XCTAssertEqual(inf(by, "Many.a"), ["Fs"], "got \(by["Many.a"] ?? [:])")
+        let off = try scan(Self.genericElem, env: ["CANDOR_R1463_OFF": "1"])
+        XCTAssertNil(off["Many.d"], "kill switch: the release reading (ABSENT); got \(off["Many.d"] ?? [:])")
+    }
+
+    // …and a METHOD PARAMETER typed by the enclosing type's generic parameter (swift-nio's `Pool.put`, covered in the
+    // release only by a false operator hedge R1073 keeps while a member call is dropped). Executed: deletes the file.
+    static let typeGenericParam = """
+    import Foundation
+    protocol PE { init(); func ev() }
+    struct PB: PE { init() {}; func ev() { try? FileManager.default.removeItem(atPath: "/nonexistent/candor-r1463") } }
+    class Pool<Element: PE> { func put(_ e: Element) { e.ev() }
+      func own<Element: Equatable>(_ e: Element) -> Bool { e == e } }
+    """
+    func testAMethodParameterTypedByTheTypesGenericDispatchesOverItsBound() throws {
+        let by = try scan(Self.typeGenericParam)
+        XCTAssertEqual(inf(by, "Pool.put"), ["Fs"], "got \(by["Pool.put"] ?? [:])")
+        XCTAssertNil(by["Pool.own"], "a method's OWN generic parameter shadows the type's; got \(by["Pool.own"] ?? [:])")
+        let off = try scan(Self.typeGenericParam, env: ["CANDOR_R1463_OFF": "1"])
+        XCTAssertNil(off["Pool.put"], "kill switch: the release reading (ABSENT); got \(off["Pool.put"] ?? [:])")
+    }
 }

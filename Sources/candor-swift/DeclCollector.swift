@@ -307,6 +307,11 @@ final class DeclCollector: SyntaxVisitor {
     /// SOUNDNESS R585 (b6) — `type -> field -> the ELEMENT type of a `[X.Type]`-typed field.`
     var fieldMetatypeArrayElem: [String: [String: String]] = [:]
     var typeGenericBounds: [String: [String: String]] = [:]  // Type -> its generic param -> protocol bound
+    /// SOUNDNESS R1463 — the bounds the type DECLARATION states (`<T: P>` and its own `where T: P`), never an
+    /// extension's: `typeGenericBounds` merges every extension's `where T == X` type-wide, last writer winning, so two
+    /// constrained extensions (`where Inner == AnyDisposable` / `where Inner == CompositeDisposable`) would type each
+    /// other's members. Read for a stored element type and, with the method's OWN extension clause, for a parameter.
+    var typeDeclGenericBounds: [String: [String: String]] = [:]
     // Type -> the RAW generic parameter names its own declaration introduces (`struct Box<T>` -> {"Box":
     // {"T"}}), recorded regardless of whether a bound is known yet. A conditional-conformance extension
     // (`extension Box: Greeter2 where T: Greeter2`) supplies the BOUND for a param the type declaration
@@ -1063,7 +1068,19 @@ final class DeclCollector: SyntaxVisitor {
                                     memberLevel: Bool = false) {
         for gp in clause?.parameters ?? [] {
             typeGenericParamNames[name, default: []].insert(gp.name.text)
-            if let it = gp.inheritedType, let b = typeName(it).name { typeGenericBounds[name, default: [:]][gp.name.text] = b }
+            if let it = gp.inheritedType, let b = typeName(it).name {
+                typeGenericBounds[name, default: [:]][gp.name.text] = b
+                typeDeclGenericBounds[name, default: [:]][gp.name.text] = b   // R1463
+            }
+        }
+        if clause != nil, !memberLevel {   // R1463 — the declaration's own `where T: P`
+            for req in whereClause?.requirements ?? [] {
+                if case .conformanceRequirement(let c) = req.requirement,
+                   let l = typeName(c.leftType).name, let r = typeName(c.rightType).name,
+                   typeGenericParamNames[name]?.contains(l) == true {
+                    typeDeclGenericBounds[name, default: [:]][l] = r
+                }
+            }
         }
         for req in whereClause?.requirements ?? [] {
             switch req.requirement {
@@ -1484,7 +1501,13 @@ final class DeclCollector: SyntaxVisitor {
                     }
                     if let inner = nestedArrayElementName(ann.type) {   // R278 — `[[T]]`, asked first
                         fieldArrayElemNested[ty, default: [:]][name] = inner
-                    } else if let elem = arrayElementName(ann.type) { fieldArrayElem[ty, default: [:]][name] = elem }
+                    } else if let elem = arrayElementName(ann.type) {
+                        // SOUNDNESS R1463 (exposed) — an ELEMENT typed as the enclosing type's generic parameter
+                        // resolves to its bound, as the scalar field above does: `struct Many<E: R> { var rs: [E] }`
+                        // left `rs.forEach { $0.run() }` ABSENT (executed: `run` deletes a file) while `var x: E` with
+                        // `x.run()` charged. Kill switch `CANDOR_R1463_OFF`.
+                        fieldArrayElem[ty, default: [:]][name] = CallCollector.r1463Off ? elem : (typeDeclGenericBounds[ty]?[elem] ?? elem)
+                    }
                     if let val = dictValueName(ann.type) { fieldDictValue[ty, default: [:]][name] = val }
                     let targs = directGenericArgumentNames(ann.type)
                     if !targs.isEmpty { fieldTypeArgs[ty, default: [:]][name] = targs }   // R905
@@ -1908,6 +1931,38 @@ final class DeclCollector: SyntaxVisitor {
             guard case .conformanceRequirement(let conf) = req.requirement,
                   let lhs = typeName(conf.leftType).name, let rhs = typeName(conf.rightType).name else { continue }
             genericBounds[lhs] = rhs   // `where T: P` — same binding as `<T: P>`
+        }
+        // SOUNDNESS R1463 (exposed) — …AND THE ENCLOSING TYPE'S GENERIC PARAMETERS, which a method's parameter may be
+        // typed by: `class Pool<Element: PE> { func put(_ e: Element) { e.ev() } }` was ABSENT over a conformer whose
+        // `ev` deletes a file (executed), while the stored-property spelling `var x: Element` dispatched over the bound.
+        // In swift-nio's `Pool.put` the release covered it only with a false operator hedge that R1073 keeps while a
+        // member call is dropped; resolving that drop withdrew the hedge. A method's own generic parameter of the same
+        // name shadows the type's (Swift's own scoping). Kill switch `CANDOR_R1463_OFF`.
+        // The bounds are the DECLARATION's, overridden by the method's OWN enclosing extension clause (`extension S where
+        // T == X` / `where T: P`) — never another extension's (see `typeDeclGenericBounds`).
+        if !CallCollector.r1463Off, let owner = typeStack.last {
+            var tb = typeDeclGenericBounds[owner] ?? [:]
+            var anc: Syntax? = Syntax(node).parent
+            while let a = anc, !a.is(ExtensionDeclSyntax.self), !a.is(StructDeclSyntax.self), !a.is(ClassDeclSyntax.self),
+                  !a.is(EnumDeclSyntax.self), !a.is(ActorDeclSyntax.self) { anc = a.parent }
+            if let ext = anc?.as(ExtensionDeclSyntax.self) {
+                for req in ext.genericWhereClause?.requirements ?? [] {
+                    switch req.requirement {
+                    case .conformanceRequirement(let c):
+                        if let l = typeName(c.leftType).name, let r = typeName(c.rightType).name,
+                           typeGenericParamNames[owner]?.contains(l) == true { tb[l] = r }
+                    case .sameTypeRequirement(let st):
+                        if let lt = typeSyntax(st.leftType), let rt = typeSyntax(st.rightType),
+                           let l = typeName(lt).name, let r = typeName(rt).name, !typeName(rt).isFunction,
+                           desugaredType(rt).is(IdentifierTypeSyntax.self),
+                           typeGenericParamNames[owner]?.contains(l) == true, typeGenericParamNames[owner]?.contains(r) != true {
+                            tb[l] = r
+                        }
+                    default: continue
+                    }
+                }
+            }
+            for (gp, b) in tb where genericBounds[gp] == nil && !info.genericParamNames.contains(gp) { genericBounds[gp] = b }
         }
         // R532 — published, so the Driver can tell a TYPE NAME from a TYPE-PARAMETER NAME at the one
         // place ⟨0.39⟩ spells one onto the wire. Set here rather than recomputed there: both spellings

@@ -139,14 +139,17 @@ public func topBare(_ b: Backend) { b.store() }
     func testAnAliasIsScopedAndAGenericParameterIsNeverOne() throws {
         let root = try ProcessHarness.makeFilesPackage(["a.swift": Self.aliasScope], name: "T")
         defer { try? FileManager.default.removeItem(at: root) }
-        let on = try rows(root), off = try rows(root, env: Self.off)
+        // SOUNDNESS R1463 — `Kind` now types `x` as its BOUND (`Goer`), so the release's fabrication is restored only
+        // with that switch off too; the row is published PURE with its ⟨0.39⟩ `dispatchesOn: Goer.go` key (Safe.go).
+        let releaseEnv = Self.off.merging(["CANDOR_R1463_OFF": "1"]) { a, _ in a }
+        let on = try rows(root), off = try rows(root, env: releaseEnv)
         XCTAssertEqual(off["Box.runParam"], ["Fs"], "the release's FABRICATION (N-d), as the switch restores it")
-        XCTAssertNil(on["Box.runParam"], "`Kind` is Box's generic parameter, not `Owner.Kind`: nothing runs Danger.go")
+        XCTAssertEqual(on["Box.runParam"] ?? [], [], "`Kind` is Box's generic parameter, not `Owner.Kind`: nothing runs Danger.go")
         XCTAssertEqual(on["Owner.storeUse"], ["Fs"], "a κ alias used inside its own type still charges")
         XCTAssertNil(on["Other.viaOwnAlias"], "its own alias (Safe) is what it calls")
         XCTAssertEqual(on["outsideQualified"], ["Fs"], "`Owner.Kind` spelled from outside is Danger")
         XCTAssertEqual(try gate(root, "deny Fs Box.runParam"), 0)
-        XCTAssertEqual(try gate(root, "deny Fs Box.runParam", env: Self.off), 1)
+        XCTAssertEqual(try gate(root, "deny Fs Box.runParam", env: releaseEnv), 1)
     }
 
     /// The seeded C3 is CHARGED by the real engine and LOST by the seeded half-fix — the guard has teeth.

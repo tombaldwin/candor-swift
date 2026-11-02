@@ -17,7 +17,10 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   (parameter, annotated local, `self` field) or a variadic parameter the stdlib container, and the call goes through
   the same arms the typed twin does (a project or dependency extension's unit is edged; a stdlib member resolves to
   nothing, as for the twin). A closure parameter named like the call's own receiver (`coder.append { coder in … }`)
-  no longer erases the receiver's type before it resolves. Rows can gain effects; `CANDOR_R1463_OFF` /
+  no longer erases the receiver's type before it resolves. Resolving those receivers withdrew three wrong-owner hedges
+  that had been covering real silences, so two are closed with it: a stored `[Element]` and a method parameter typed
+  by the enclosing type's generic parameter now dispatch over its bound (the declaration's, or the method's own
+  extension clause — never another extension's `where`). Rows can gain effects; `CANDOR_R1463_OFF` /
   `CANDOR_R1455_SHADOW_OFF` restore the release reading.
 
 ## [0.40.18] — 2026-10-31
