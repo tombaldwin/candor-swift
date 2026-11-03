@@ -10,6 +10,22 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **`candor-swift accepts` — a PROPOSED policy that refreshes (or adopts) the `accept` lines (SPEC §6.2 ⟨0.41⟩, ported from
+  candor-java; PART 106).** `candor-swift accepts [--report <locator>] [--policy <file>] [--json] [--adopt --because <reason>]`
+  prints the policy it read with three changes and nothing else: a STALE entry's line deleted (exactly the lines the gate
+  calls `AS-EFF-012`), an accepted entry wider than the rows it accepted NARROWED to them (an `Unknown` to
+  `Unknown[<the rows' classes>]`), and an EXCEEDED entry left as it is with one comment line proposing the wider
+  replacement — it never widens a line. Under `--adopt --because <reason>` it also appends one `accept` line, carrying only
+  the reason the operator typed, per violation row no entry names (none for a `(hash, fn)` twin, a positional or unwritable
+  `fn`, or an `Unknown` with no class). It writes NO file and never writes a refusal marker; `--json` prints the plan whose
+  `text` is those bytes, and `after` is the gate's own verdict over the proposal. It decides nothing itself: `gate --report`
+  was split into `gateCore` (parse, refusals, report, rules, settlement, returning the rows), `gate` prints from it exactly
+  as before (byte-identical over 390 policy/verb tuples), and `accepts` reads the same facts from it and gates its own
+  proposal with it. It answers only over a complete analysis (an unreadable report or policy, a whole-policy refusal or an
+  incomplete analysis is exit 2 with no proposal; a refusal because the policy holds no rules names the shell-redirect
+  trap). `--strict` and any other flag, and `accept` written as a verb, are exit-2 usage errors (the last one names
+  `accepts`).
+
 - **`accept` lines: a known policy violation, written down where a reviewer reads it (SPEC §6.2 ⟨0.41⟩, ported from
   candor-java; PART 105).** `accept <fn> [<Effect>…] for <rule tokens…> because <reason>` takes ONE named verdict row
   out of `violations` and lists it in a new `accepted` verdict key, on `scan --policy` and `gate --report` alike

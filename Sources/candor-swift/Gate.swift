@@ -319,6 +319,11 @@ struct GateAcceptOutcome {
     var acceptedUnits: Set<String>
     /// the stale-entry rows (also present in `violations`).
     var stale: [GateViolation]
+    /// what the settlement decided per entry, and the rows and twin names it decided over (nil: no entry).
+    /// Read by the `accepts` verb, which must see the SAME facts the gate acted on and never re-derive them.
+    var settlement: AcceptSettlement? = nil
+    var rows: [AcceptRow] = []
+    var twins: Set<String> = []
 }
 
 /// ⟨0.41⟩ THE ONE SEAM between the gate's rows and the policy's `accept` entries (SPEC §6.2 ⟨0.41⟩), called by
@@ -331,10 +336,6 @@ struct GateAcceptOutcome {
 /// they speak in their own voice and must not look as though they ran a second gate.
 func settleGateAccepts(_ pol: ParsedPolicy, _ gi: GateInput, violations: [GateViolation], producers: [String],
                        unevaluated: [Unevaluated], who: String = "candor-swift", announce: Bool = true) -> GateAcceptOutcome {
-    guard !pol.accepts.isEmpty else {
-        return GateAcceptOutcome(violations: violations, acceptedRowCount: 0, acceptedUnits: [], stale: [])
-    }
-    precondition(producers.count == violations.count, "evaluateGate must report one producing rule line per row")
     let rows = zip(violations, producers).map { v, key in
         AcceptRow(ruleKey: key, code: v.rule, name: v.fn, hash: v.hash, effects: v.effects, classes: v.reasonClass)
     }
@@ -344,6 +345,13 @@ func settleGateAccepts(_ pol: ParsedPolicy, _ gi: GateInput, violations: [GateVi
     var keysByName: [String: Set<String>] = [:]
     for k in Set(gi.inferred.keys).union(gi.edges.keys) { keysByName[gi.display[k] ?? k, default: []].insert(k) }
     let twins = Set(keysByName.filter { $0.value.count > 1 }.keys)
+    // The rows and twins are handed back even with no entry: `accepts --adopt` over a policy with no `accept` line
+    // is the initial adoption, and it must see the same rows and the same twins the gate would.
+    guard !pol.accepts.isEmpty else {
+        return GateAcceptOutcome(violations: violations, acceptedRowCount: 0, acceptedUnits: [], stale: [],
+                                 settlement: nil, rows: rows, twins: twins)
+    }
+    precondition(producers.count == violations.count, "evaluateGate must report one producing rule line per row")
     let s = settleAccepts(pol.accepts, rows: rows, unevaluated: Set(unevaluated.map { acceptRuleKey($0.rule) }),
                           twinNames: twins, who: who)
     var remaining: [GateViolation] = []
@@ -367,7 +375,7 @@ func settleGateAccepts(_ pol: ParsedPolicy, _ gi: GateInput, violations: [GateVi
         }
     }
     return GateAcceptOutcome(violations: remaining + stale, acceptedRowCount: s.acceptedRows.count,
-                             acceptedUnits: units, stale: stale)
+                             acceptedUnits: units, stale: stale, settlement: s, rows: rows, twins: twins)
 }
 
 /// SPEC §3.3.1 ⟨0.28⟩ (4) — was `--json` (the REPORT stream) requested? Set once in the scan CLI before

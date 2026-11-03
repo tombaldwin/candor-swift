@@ -116,6 +116,21 @@ if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "parsepolicy" {
 if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "fix" || CommandLine.arguments[1] == "fix-gate" {
     runFixCLI(CommandLine.arguments)
 }
+// ⟨0.41⟩ SPEC §6.2 `accepts` — a PROPOSED policy that refreshes (or, under `--adopt --because`, adopts) the policy's
+// `accept` lines. A read-only query over a report a scan wrote; a subcommand, before the scan flag loop. Writes no file.
+if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "accepts" {
+    runAcceptsCLI(CommandLine.arguments)
+}
+// ⟨0.41⟩ SPEC §6.2: `accept` is a policy LINE kind, one letter short of the verb `accepts`. Typed as a verb it would be
+// read as a scan target and fail somewhere unrelated, or worse run; it is a usage error that names the verb. (A directory
+// really named `accept` is scanned as ./accept.)
+if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "accept" {
+    FileHandle.standardError.write(
+        ("candor-swift: `accept` is a policy LINE kind (`accept <fn> <effects> for <rule> because <reason>`), not a verb. "
+         + "The verb that refreshes or adopts those lines is `accepts`: candor-swift accepts [--report <locator>] "
+         + "[--policy <file>] [--json] [--adopt --because <reason>]\n").data(using: .utf8)!)
+    exit(2)
+}
 // `unverified` (integrations/FIX-SPEC.md) — the provable-purity disclosure: pure/deny layers that PASS but
 // contain Unknown. A read-only query over a report a scan wrote; a subcommand, before the scan flag loop.
 if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "unverified" {

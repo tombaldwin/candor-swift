@@ -212,6 +212,8 @@ public struct AcceptItem {
 public struct AcceptSettlement {
     /// indices into the `rows` handed in that an entry took out of `violations`.
     public var acceptedRows: Set<Int> = []
+    /// entry line -> the indices into `rows` that entry took out of `violations` DIRECTLY (what `accepts` narrows to).
+    public var directRows: [Int: [Int]] = [:]
     /// the `accepted` list, sorted by `line`, then `fn` and `hash` by code point.
     public var items: [AcceptItem] = []
     /// entries whose rule was evaluated and which accepted nothing, covered nothing and are not ambiguous.
@@ -255,6 +257,7 @@ public func settleAccepts(_ entries: [AcceptEntry], rows: [AcceptRow], unevaluat
             direct[e.line, default: []].append(i)
         }
     }
+    s.directRows = direct
     var items: [AcceptItem] = []
     for e in entries {
         if unevaluated.contains(e.ruleKey) {

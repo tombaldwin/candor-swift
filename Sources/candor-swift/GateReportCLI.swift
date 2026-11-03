@@ -28,7 +28,7 @@ private func gateDie(_ msg: String) -> Never { refuseGateAndExit(msg) }
 
 /// One §2 report entry, as far as the ⟨0.24⟩ gate is concerned. Every field is read VERBATIM off the
 /// wire: this is `S` and `D` as the producer wrote them, not a re-derivation.
-private struct GateReportEntry {
+struct GateReportEntry {
     let fn: String
     /// ⟨0.32⟩ the §2.2 JOIN KEY. Empty when the report carries none — a hand-authored report, or one from
     /// a producer older than the key — in which case the name is all there is and `entryKey` falls back
@@ -49,7 +49,7 @@ private struct GateReportEntry {
 /// The §2 ENVELOPE facts the gate VERDICT carries, none of which live in the `functions` array: the
 /// ⟨0.21⟩ completeness manifest (`analyzed.count`, `unanalyzed`) and the ⟨0.15⟩ κ-coverage ledger.
 /// Read from the SAME file(s) as the entries, in one pass — no sidecar, no second locator.
-private struct GateReportEnvelope {
+struct GateReportEnvelope {
     var analyzedCount = 0
     var unanalyzed: [(path: String, reason: String)] = []
     /// ⟨0.30⟩ the peek's findings, carried BY the report — this route cannot peek (it has no target, only
@@ -779,6 +779,290 @@ func wholePolicyRefusals(_ pol: ParsedPolicy, _ policyPath: String) -> [Unevalua
     return policyRefusals
 }
 
+/// What one evaluation of a policy over a report decided, BEFORE anything is printed or written. `runGateReportCLI`
+/// prints and exits from it; the `accepts` verb (Accepts.swift) reads the same facts from it and gates its own
+/// proposal with it, so "the same parse and the same matching" holds by construction (SPEC §6.2 ⟨0.41⟩).
+struct GateCore {
+    var pol: ParsedPolicy
+    var policyVocabulary: (config: String, aliases: [String: [String]])?
+    var env: GateReportEnvelope
+    var gi: GateInput
+    /// the rules this route cannot decide (their `accept` entries are `unjudged`)
+    var refused: [Unevaluated]
+    /// the rows the deny/pure rule lines made, BEFORE `accept` entries were applied
+    var evaluated: (violations: [GateViolation], producers: [String])
+    var outcome: GateAcceptOutcome
+    /// the rows that stand: what `outcome` left, plus one AS-EFF-012 row per stale entry
+    var violations: [GateViolation]
+    var unpeeked: [String]
+    var crossPolicy: [String]
+    var crossPolicyPredates033: Bool
+    /// the verdict is INCOMPLETE (an exit-2 cause stands), whether or not a violation dominates it
+    var incomplete: Bool { !env.unanalyzed.isEmpty || !env.outOfScope.isEmpty || !unpeeked.isEmpty || !crossPolicy.isEmpty }
+    var exitCode: Int32 { !violations.isEmpty ? 1 : (incomplete ? 2 : 0) }
+}
+
+enum GateCoreOutcome {
+    /// the gate could not be evaluated as written: exit 2 with this reason (and the rules it left unevaluated)
+    case refusal(String, [Unevaluated], alsoUnanalyzed: Int)
+    case answered(GateCore)
+}
+
+/// Everything `gate --report` decides from a policy's TEXT and a report locator, up to (and not including) the
+/// printing of the verdict. Refusals are RETURNED, never exited on, so a caller that must not exit (the `accepts`
+/// verb) can read them. `announce` false silences the human-channel notes the gate prints on the way; the refusal
+/// text itself is the caller's to print.
+func gateCore(policyPath: String, policyText: String, reportFlag: String?, announce: Bool) -> GateCoreOutcome {
+    func emit(_ d: Data) { if announce { FileHandle.standardError.write(d) } }
+    func die(_ msg: String) -> GateCoreOutcome { .refusal(msg, [], alsoUnanalyzed: 0) }
+    // ⟨0.19⟩ `unknown-alias` expansion for an `Unknown[<alias>]` filter, anchored to the POLICY file
+    // exactly as `parsepolicy` anchors it — an alias is part of the policy's own vocabulary, not of the
+    // report. The ⟨0.20⟩ `net-partner` list is deliberately NOT loaded: `netClass` is read verbatim from
+    // the report, so re-classifying its hosts through THIS machine's config would be the re-derivation
+    // §3.1 ⟨0.24⟩ forbids (and would make the verdict depend on the consumer's CWD).
+    let vocabConfig = discoverConfig(targetPath: policyPath)
+    let parsedAliases = parseUnknownAliases(vocabConfig?.text)
+    let pol = parsePolicy(policyText, aliases: parsedAliases.aliases)
+    // ⟨0.24⟩ SPEC §3.1: the config file is named in the verdict only when its vocabulary PARTICIPATED.
+    // ⟨0.24⟩ …and `aliases` maps each consumed alias to the CLASSES it expanded to — see
+    // `consumedAliasVocabulary`, shared with the scan route so the two documents cannot disagree.
+    let policyVocabulary: (config: String, aliases: [String: [String]])? =
+        pol.usedAliases.isEmpty ? nil
+        : vocabConfig.map { (config: $0.path,
+                             aliases: consumedAliasVocabulary(pol, parsedAliases.aliases)) }
+    // ⟨0.24⟩ AN UNRECOGNISED REASON-CLASS TOKEN IS A POLICY ERROR (SPEC §6.2) — the UNREADABLE-POLICY
+    // posture, so exit 2 with NO verdict document, before the report is even opened. Not a refusal in the
+    // §3.1 answerability sense: nothing about THIS report is at issue, the policy could not be read as
+    // written at all, and §3.1's byte-equality then holds on a broken policy by there being nothing to
+    // disagree about. See `policyClassTokenError` (Policy.swift) for the two measured harms.
+    // ⟨0.24⟩ the ALIAS DEFINITION's own tokens take the same rule (candor-spec `be0b9a9`): a typo in the
+    // vocabulary the policy is written AGAINST fails open identically, and more quietly.
+    // ⟨0.24⟩ …and ONLY when a rule of THIS policy consumed the definition — the same gate the scan route
+    // applies, from the same function, because a definition no token expands cannot change a verdict and
+    // config discovery walks PARENTS (one bad token above the repo would otherwise red-refuse the whole
+    // subtree). See `partitionAliasErrors`.
+    let aliasErrors = partitionAliasErrors(parsedAliases.errors, consumedBy: pol)
+    if announce { discloseUnconsumedAliasErrors(aliasErrors.disclosed) }
+    let policyErrors = aliasErrors.refusing.map(\.message) + pol.gateRefusals
+    if !policyErrors.isEmpty { return die(policyErrors.joined(separator: "\n")) }
+    // ⟨0.28⟩ A CONFIGURED POLICY THAT YIELDED ZERO RULES (SPEC §6.2) — THE SIBLING OF THE SCAN CLI'S CHECK,
+    // and one predicate serves both (`zeroRulePolicyRefusal`, Gate.swift, where the measurement and the
+    // every-rule-vector argument are recorded). §6.2 states the defect was measured on this verb too and
+    // that "a route is not covered by its sibling": the scan CLI got the rung in `5552a36` and THIS route
+    // kept exiting 0 with `{"ok":true,"violations":[]}` over a README — measured on this engine
+    // 2026-08-11, for all three input forms (every line ignored / empty file / comments only).
+    //
+    // It matters MORE here than on the scan route. `gate --report` is the supply-chain surface: the verb an
+    // adopter points at a report someone else produced, in the CI step whose whole job is to decide whether
+    // that dependency may land. A mistyped `--policy` path there gates nothing and says `ok: true`.
+    //
+    // AN OUTRIGHT REFUSAL, not `refuseUnlessAViolationStands`'s dominance dance, because on this route no
+    // certain violation can stand beside it: the only findings this verb produces come from `evaluateGate`
+    // over `denyOnly`, which has nothing to evaluate when there are zero rules, and there is no AS-EFF-005
+    // baseline on the report wire. So this takes the posture of the two branches it sits between (an
+    // unreadable policy, an unhonourable token): exit 2 with the refusal document, before the report is
+    // even opened — nothing about the REPORT is at issue.
+    //
+    // The two rows this could have got wrong were MEASURED against a rebuild of the pre-change tree rather
+    // than assumed: an `allow`-only and a `forbid`-only policy ALREADY refuse on this route (exit 2), one
+    // branch below, for their own unrelated and specific reasons — the AS-EFF-008 surface-completeness
+    // marker does not ride the report wire, and a report carries no entry for a pure function so `forbid`
+    // cannot match on NAME. Both name their own cause in the `reason`, not this one, and they must keep
+    // doing so: reading the deny vector alone here would relabel every allowlist gate as an absent one.
+    if let zr = zeroRulePolicyRefusal(pol, at: policyPath, who: "candor-swift gate") {
+        return .refusal(zr.why, zr.unevaluated, alsoUnanalyzed: 0)
+    }
+
+    // THE POLICY-LEVEL REFUSALS. Whole-policy, not per-rule: enforcing the answerable half and exiting 0
+    // is gateless-green — the user believes a rule is enforced that never ran.
+    //
+    // ⟨0.24⟩ **COLLECTED, NOT EXITED ON** (SPEC §3.1, candor-spec `1503368`, which removes this carve-out).
+    // These used to return 2 here, before the report was even opened, so a firing `deny Fs` standing beside
+    // a `forbid` rule exited 2 with the certain violation absent from the document — the same harm the
+    // precedence fix closed one rung up, surviving under a different rule kind. Lemma 2 does not care WHICH
+    // kind of refusal stands beside the firing rule. The whole-policy granularity governs which rules go
+    // UNEVALUATED; it was never a licence to suppress a violation that was evaluated and certain.
+    //
+    // The `allow`/`forbid` rules themselves are still never evaluated: `denyOnly` below hands
+    // `evaluateGate` the deny rules alone, so no AS-EFF-008 can be certified off a wire that does not carry
+    // the surface-completeness marker.
+    //
+    // ⟨0.24⟩ **ONE ENTRY PER RULE, KEYED ON THE RAW LINE** (SPEC §3.1, candor-spec `fc4b5f6`). The refusal
+    // is still decided whole-policy — every `forbid` is unanswerable for the same reason — but the
+    // DISCLOSURE is per rule, because the operator's question is *which* and an aggregate answers *how
+    // many*. candor-java emits `"forbid (× 2)"` and loses which two; that satisfies a naive reading of
+    // "disclose which rules" while answering the other one.
+    let policyRefusals = wholePolicyRefusals(pol, policyPath)
+    // ⟨0.29⟩ `only: []` STATED, not left to the default. The refused kinds are REMOVED here, not merely
+    // disclosed beside the verdict — a kind left in the object is a kind the evaluator walks, and the
+    // disclosure would then stand next to the very evaluation it says did not happen. The java arm of
+    // this port shipped exactly that defect for one build because its removal site was fifty lines from
+    // where the kind was added; relying on a default parameter to be right is the same bet.
+    let denyOnly = ParsedPolicy(deny: pol.deny, allow: [], forbid: [], only: [])
+
+    let locator = reportFlag.map(resolveReportLocator) ?? discoverReportPrefix()
+    guard let prefix = locator else {
+        return die("candor-swift gate: no report — pass --report <locator> or run from a repo with a .candor/ "
+                + "dir (scan: candor-swift <dir>)")
+    }
+    // ⟨0.32⟩ SPEC §3.3.1 — did the most recent attempt over these reports REFUSE?
+    //
+    // Checked BEFORE they are read, because the answer does not depend on them: they may parse perfectly
+    // and describe real code, and still be the output of a scan whose successor refused. This verb cannot
+    // compute that — the hazard is an EVENT witnessed only by the refusing run — so the refusing run
+    // writes it down and this reads it.
+    if let m = refusalMarkerFor(prefix) {
+        return die("candor-swift gate: the most recent scan over `\(m.prefix)` REFUSED — these reports are "
+                + "from an earlier run and this verb will not certify them. Cause: \(m.reason). "
+                + "Re-scan \(m.target.isEmpty ? "the target" : m.target); a completing run clears the marker.")
+    }
+    guard let env = loadGateReport(prefix: prefix) else {
+        return die("candor-swift gate: no readable report at `\(prefix)` — nothing to gate (scan: candor-swift <dir>)")
+    }
+    // ⟨0.24⟩ A REPORT THAT JUDGED NOTHING IS NOT AN ALL-CLEAR (SPEC §2's three-row table, bound to this
+    // verb by §3.1: "a report presented DIRECTLY to the gate with `analyzed.count: 0` makes the same claim
+    // as a chained one, and must be read the same way … the obligation is on the reading, not on the route
+    // by which the report arrived"). The chained half of this rule lives in Deps.swift, on the COVERAGE
+    // decision; here there is no coverage decision to hang it on — the report IS the whole input — so what
+    // the rule buys is the DISCLOSURE beside the verdict.
+    //
+    // NOT THE EXIT CODE AND NOT THE VERDICT DOCUMENT, and the spec is explicit about both after the first
+    // spelling of this clause contradicted itself (SPEC §3.1 ⟨0.24⟩, corrected 2026-07-28). §3.1 makes
+    // byte-equality with `scan --policy`'s `--gate-json` the acceptance test, and a scan of an empty facade
+    // package exits 0 with a clean verdict — so diverging here would SPLIT THE VERB this rung exists to
+    // keep single. And §3.3 enumerates exactly two exit-2 causes (a broken gate CONFIG; an INCOMPLETE
+    // analysis of the target's OWN code); a judged-nothing DEPENDENCY is neither, so refusing would mint a
+    // third. Beyond conformance, a verdict is an ASSERTION: the consumer has no evidence of any effect
+    // here, so manufacturing one would be the fabrication mirror of the silent under-report.
+    //
+    // MEASURED before this landed, on a count-0 report with `deny Net`: exit 0 printing
+    // `candor-swift: policy ✓` and NOTHING ELSE — a human reading "no violations" had nothing telling them
+    // the gate had judged nothing at all. The machine channel was already right: `analyzed.count: 0` rides
+    // the verdict document, which is what ⟨0.21⟩ put it there for. What was missing was the human one.
+    if env.judgedNothing {
+        emit(
+            ("candor-swift gate: the report at `\(prefix)` judged NOTHING (⟨0.24⟩ `analyzed.count` is 0, "
+             + "absent with no entries, or unreadable) — a report with no judgment in it is not an "
+             + "all-clear, so a green verdict below certifies NOTHING: absence from `functions` licenses "
+             + "no purity claim about any unit. Re-scan the sources you meant to gate "
+             + "(candor-swift <src> --out \(prefix)), or gate the report of the package that has them.\n")
+                .data(using: .utf8)!)
+    }
+    let gi = gateInputFromReport(env)
+
+    // ⟨0.24⟩ THE PRECEDENCE: **violation (1) > refusal (2) > incomplete (2)** (SPEC §3.1), and the first
+    // rung is FORCED by Lemma 2 rather than chosen.
+    //
+    // The third refusal — the only one that depends on the REPORT rather than on the policy alone — is
+    // COMPUTED here and ACTED ON below, AFTER the gate has run. It used to exit 2 on this line, before
+    // `evaluateGate` was ever called, so a policy carrying a firing `deny Fs` PLUS one unanswerable
+    // scoped rule exited 2 and wrote NO document: **the certain violation was deleted from the
+    // machine-consumer channel by a rule it had nothing to do with.** MEASURED 2026-07-28 on
+    // `deny Fs` + `deny Net[unknown-host] app` over a two-entry report — exit 2, no `--gate-json` file,
+    // the `Fs` finding gone from every machine channel. Byte-identical in harm to the ⟨0.21⟩
+    // incomplete-analysis path one rung down, and it takes the same fix: compute the verdict FIRST,
+    // decide the exit FROM it.
+    //
+    // WHY THE VIOLATION IS SAFE TO REPORT even though a rule went unanswered: if one rule FIRES on
+    // evidence the report carries, the policy is REJECTED, and `Reject` is upward-closed (PAPER3 Lemma
+    // 2) — however the unanswerable rule would have resolved CANNOT UN-REJECT IT. Exit 1 is therefore not
+    // merely fail-closed here, it is CERTAIN, and it is strictly more informative than exit 2 because it
+    // NAMES the violation. All four engines had this backwards, and the spec clause pinning
+    // "refusal > violation" was corrected within the hour of being written (candor-spec `7271c69`) —
+    // uniform engine agreement was the evidence for the wrong ruling.
+    //
+    // The refusal is NOT swallowed: when a violation dominates, every unanswerable rule is still
+    // disclosed on stderr below. Exit 1 reports the violation it is sure of; it does not conceal the part
+    // it could not read.
+    let refused = policyRefusals + unanswerableScopedFilters(pol.deny, gi)
+    let evaluated = evaluateGate(denyOnly, gi)
+    let gateZeroMatchRules = evaluated.zeroMatch
+    // ⟨0.41⟩ SPEC §6.2 `accept`: the rows an entry takes out of `violations`, settled over the rows each rule LINE
+    // made. `refused` (the rules this route cannot decide: `forbid`, `only`, `allow`, an unanswerable filter) makes
+    // its entries `unjudged`. AFTER this point an accepted row is not an established violation: if nothing else
+    // stands beside a refused rule, the SOLE-refusal arm below fires (exit 2), exactly as it does for no rows at all.
+    let outcome = settleGateAccepts(pol, gi, violations: evaluated.violations, producers: evaluated.producers,
+                                    unevaluated: refused, announce: announce)
+    let violations = outcome.violations
+    // ⟨0.24⟩ §3.1 — an unanswerable condition is DISCLOSED, never scored as a satisfied one. A rule whose
+    // scope binds nothing was silently green: `deny Net ordrs` (one character wrong) passed where
+    // `deny Net orders` failed, and `unverified` then reported the layer as PROVABLY clean.
+    for raw in gateZeroMatchRules {
+        emit(
+            ("candor: policy rule matched NO function — `\(raw)`. It was evaluated and bound nothing, so it "
+             + "cannot have caught anything. Legitimate when one policy is shared across repos; a typo'd "
+             + "layer name otherwise.\n").data(using: .utf8)!)
+    }
+    if violations.isEmpty, !refused.isEmpty {
+        // SOLE refusal: nothing certain to report, so the gate genuinely could not be evaluated as
+        // written. Exit 2 — and ⟨0.24⟩ the refusal DOCUMENT, so a CI wrapper reading `--gate-json`
+        // unconditionally cannot re-read the previous run's green verdict as today's.
+        // Every unanswerable rule, joined — the message is the document's `reason`, so the human and the
+        // machine channel carry the SAME disclosure rather than two drifting statements of it. ⟨0.24⟩ and
+        // the SAME rules ride the refusal document as `unevaluated`, per rule and keyed on the raw line:
+        // a prose `reason` is not a field a consumer can read a rule list out of.
+        return .refusal("candor-swift gate: " + refused.map(\.why).joined(separator: "\n    "), refused,
+                        alsoUnanalyzed: env.unanalyzed.count)
+    }
+    if !refused.isEmpty {
+        emit(
+            ("candor-swift gate: NOTE — \(refused.count) policy rule(s) could not be evaluated over this "
+             + "report and are NOT answered by the verdict below. The verdict stands anyway: a rule FIRED "
+             + "on evidence this report carries, and no resolution of an unanswered rule can un-reject a "
+             + "rejected policy (SPEC §3.1, PAPER3 Lemma 2). Unanswered:\n").data(using: .utf8)!)
+        for u in refused { emit("    \(u.why)\n".data(using: .utf8)!) }
+    }
+    // read this SAME value, so they cannot disagree about a run. That split is not hypothetical: the
+    // sibling port measured a document saying `ok: false` while the process exited 0, and the ⟨0.28⟩
+    // REPORT-sink rung shipped its own version of it.
+    //
+    // **DOES THIS POLICY'S ANSWER DEPEND ON THE CODE THE PRODUCER LEFT UNREAD?** — the ONE place that
+    // question is asked on this route, and now the ONLY carve-out the rule has. `mergeGateReport` used to
+    // start a second one off the producer's history (`outOfScope` present ⇒ that scan was asked), and
+    // that was the verified fail-open: see the note there. What survives is the condition about the
+    // QUESTION rather than about the producer — only a `deny`/`pure` rule's answer depends on code
+    // outside the scan's scope, which is the same short-circuit the producer's own peek applies
+    // (`peekRules` in main.swift is its DENY list), so keying on it here is what makes the two routes
+    // answer the same way.
+    //
+    // `pol.deny` IS THE RIGHT LIST AND `pure` IS IN IT — the parser appends a `pure` line as a DenyRule
+    // with an EMPTY effect list (Policy.swift), so the strictest policy the grammar has arms this rule
+    // like any other. Reading the question off a flattened set of effect NAMES instead would find `pure`
+    // contributing nothing and silently disarm it; that is not hypothetical, it is what this engine's own
+    // peek did until ⟨0.30⟩ measured `pure` passing where `deny Exec` exited 2 on the same tree.
+    //
+    // MEASURED AS DEFENSIVE rather than load-bearing on this engine, 2026-08-24: a policy with no deny
+    // rule cannot reach this line today, because every shape that produces one exits 2 earlier and for an
+    // unrelated reason (an empty/comment-only file, a `forbid`/`only` line and a valueless `allow` all
+    // trip the yielded-NO-RULES refusal; a well-formed `allow` trips this verb's uniform allow-refusal).
+    // Written out anyway, because a guard that states its own condition survives the removal of a refusal
+    // three screens up that exists for something else.
+    //
+    // APPLIED TO THE VALUE, ONCE, and never repeated at the exit arm: `unpeeked` feeds BOTH the verdict
+    // DOCUMENT written below and the exit arm at the bottom, so a condition stated at only one of them
+    // lets the two disagree about a run — a document reading `ok: false, incomplete: true` beside exit 0.
+    // candor-rust had exactly that drift on its scan route, and the ⟨0.28⟩ REPORT-sink rung shipped its
+    // own version of it.
+    let unpeeked = pol.deny.isEmpty ? [] : env.unpeeked
+    // ⟨0.33⟩ THE FOURTH CAUSE, computed ONCE through the SAME helper `ReportCompleteness` arms for
+    // `unverified`/`fix-gate` (`CandorCore.unaskedCrossPolicyRules`, FixCLI.swift's `armingUnread`), so
+    // this route and its advisory siblings cannot drift into two readings of the condition (⟨0.24⟩; PART
+    // 67 is the standing example of what a second computation costs). Fed to BOTH the exit arm below and
+    // the verdict document, so the two cannot disagree about a run — the same discipline `unpeeked` above
+    // states in its own comment.
+    // ⟨0.34⟩ ONE CALL, BOTH FACTS — `crossPolicy` feeds the exit arm and the verdict document exactly as
+    // before; `crossPolicyPredates033` rides beside it from the SAME computation, so the two cannot
+    // disagree about which reports contributed the gap.
+    let crossPolicyResult = unaskedCrossPolicyRules(pol.deny, against: env.scannedUnderOfPeeked)
+    let crossPolicy = crossPolicyResult.rules
+    let crossPolicyPredates033 = crossPolicyResult.oldCaused
+    return .answered(GateCore(pol: pol, policyVocabulary: policyVocabulary, env: env, gi: gi, refused: refused,
+                              evaluated: (evaluated.violations, evaluated.producers), outcome: outcome,
+                              violations: violations, unpeeked: unpeeked, crossPolicy: crossPolicy,
+                              crossPolicyPredates033: crossPolicyPredates033))
+}
+
+
 func runGateReportCLI(_ args: [String]) -> Never {
     let usage = "usage: candor-swift gate --report <locator> --policy <file> [--json] [--gate-json <file>]"
     // ── SPEC §3.3.1 ⟨0.27⟩ ARM FIRST, AND NEVER OVER AN INPUT.
@@ -915,209 +1199,22 @@ func runGateReportCLI(_ args: [String]) -> Never {
     guard let policyText = readPolicyText(policyPath) else {
         gateDie("candor-swift gate: policy \(policyPath) could not be read — failing (exit 2), policy NOT evaluated")
     }
-    // ⟨0.19⟩ `unknown-alias` expansion for an `Unknown[<alias>]` filter, anchored to the POLICY file
-    // exactly as `parsepolicy` anchors it — an alias is part of the policy's own vocabulary, not of the
-    // report. The ⟨0.20⟩ `net-partner` list is deliberately NOT loaded: `netClass` is read verbatim from
-    // the report, so re-classifying its hosts through THIS machine's config would be the re-derivation
-    // §3.1 ⟨0.24⟩ forbids (and would make the verdict depend on the consumer's CWD).
-    let vocabConfig = discoverConfig(targetPath: policyPath)
-    let parsedAliases = parseUnknownAliases(vocabConfig?.text)
-    let pol = parsePolicy(policyText, aliases: parsedAliases.aliases)
-    // ⟨0.24⟩ SPEC §3.1: the config file is named in the verdict only when its vocabulary PARTICIPATED.
-    // ⟨0.24⟩ …and `aliases` maps each consumed alias to the CLASSES it expanded to — see
-    // `consumedAliasVocabulary`, shared with the scan route so the two documents cannot disagree.
-    let policyVocabulary: (config: String, aliases: [String: [String]])? =
-        pol.usedAliases.isEmpty ? nil
-        : vocabConfig.map { (config: $0.path,
-                             aliases: consumedAliasVocabulary(pol, parsedAliases.aliases)) }
-    // ⟨0.24⟩ AN UNRECOGNISED REASON-CLASS TOKEN IS A POLICY ERROR (SPEC §6.2) — the UNREADABLE-POLICY
-    // posture, so exit 2 with NO verdict document, before the report is even opened. Not a refusal in the
-    // §3.1 answerability sense: nothing about THIS report is at issue, the policy could not be read as
-    // written at all, and §3.1's byte-equality then holds on a broken policy by there being nothing to
-    // disagree about. See `policyClassTokenError` (Policy.swift) for the two measured harms.
-    // ⟨0.24⟩ the ALIAS DEFINITION's own tokens take the same rule (candor-spec `be0b9a9`): a typo in the
-    // vocabulary the policy is written AGAINST fails open identically, and more quietly.
-    // ⟨0.24⟩ …and ONLY when a rule of THIS policy consumed the definition — the same gate the scan route
-    // applies, from the same function, because a definition no token expands cannot change a verdict and
-    // config discovery walks PARENTS (one bad token above the repo would otherwise red-refuse the whole
-    // subtree). See `partitionAliasErrors`.
-    let aliasErrors = partitionAliasErrors(parsedAliases.errors, consumedBy: pol)
-    discloseUnconsumedAliasErrors(aliasErrors.disclosed)
-    let policyErrors = aliasErrors.refusing.map(\.message) + pol.gateRefusals
-    if !policyErrors.isEmpty { gateDie(policyErrors.joined(separator: "\n")) }
-    // ⟨0.28⟩ A CONFIGURED POLICY THAT YIELDED ZERO RULES (SPEC §6.2) — THE SIBLING OF THE SCAN CLI'S CHECK,
-    // and one predicate serves both (`zeroRulePolicyRefusal`, Gate.swift, where the measurement and the
-    // every-rule-vector argument are recorded). §6.2 states the defect was measured on this verb too and
-    // that "a route is not covered by its sibling": the scan CLI got the rung in `5552a36` and THIS route
-    // kept exiting 0 with `{"ok":true,"violations":[]}` over a README — measured on this engine
-    // 2026-08-11, for all three input forms (every line ignored / empty file / comments only).
-    //
-    // It matters MORE here than on the scan route. `gate --report` is the supply-chain surface: the verb an
-    // adopter points at a report someone else produced, in the CI step whose whole job is to decide whether
-    // that dependency may land. A mistyped `--policy` path there gates nothing and says `ok: true`.
-    //
-    // AN OUTRIGHT REFUSAL, not `refuseUnlessAViolationStands`'s dominance dance, because on this route no
-    // certain violation can stand beside it: the only findings this verb produces come from `evaluateGate`
-    // over `denyOnly`, which has nothing to evaluate when there are zero rules, and there is no AS-EFF-005
-    // baseline on the report wire. So this takes the posture of the two branches it sits between (an
-    // unreadable policy, an unhonourable token): exit 2 with the refusal document, before the report is
-    // even opened — nothing about the REPORT is at issue.
-    //
-    // The two rows this could have got wrong were MEASURED against a rebuild of the pre-change tree rather
-    // than assumed: an `allow`-only and a `forbid`-only policy ALREADY refuse on this route (exit 2), one
-    // branch below, for their own unrelated and specific reasons — the AS-EFF-008 surface-completeness
-    // marker does not ride the report wire, and a report carries no entry for a pure function so `forbid`
-    // cannot match on NAME. Both name their own cause in the `reason`, not this one, and they must keep
-    // doing so: reading the deny vector alone here would relabel every allowlist gate as an absent one.
-    if let zr = zeroRulePolicyRefusal(pol, at: policyPath, who: "candor-swift gate") {
-        refuseGateAndExit(zr.why, unevaluated: zr.unevaluated)
-    }
-
-    // THE POLICY-LEVEL REFUSALS. Whole-policy, not per-rule: enforcing the answerable half and exiting 0
-    // is gateless-green — the user believes a rule is enforced that never ran.
-    //
-    // ⟨0.24⟩ **COLLECTED, NOT EXITED ON** (SPEC §3.1, candor-spec `1503368`, which removes this carve-out).
-    // These used to return 2 here, before the report was even opened, so a firing `deny Fs` standing beside
-    // a `forbid` rule exited 2 with the certain violation absent from the document — the same harm the
-    // precedence fix closed one rung up, surviving under a different rule kind. Lemma 2 does not care WHICH
-    // kind of refusal stands beside the firing rule. The whole-policy granularity governs which rules go
-    // UNEVALUATED; it was never a licence to suppress a violation that was evaluated and certain.
-    //
-    // The `allow`/`forbid` rules themselves are still never evaluated: `denyOnly` below hands
-    // `evaluateGate` the deny rules alone, so no AS-EFF-008 can be certified off a wire that does not carry
-    // the surface-completeness marker.
-    //
-    // ⟨0.24⟩ **ONE ENTRY PER RULE, KEYED ON THE RAW LINE** (SPEC §3.1, candor-spec `fc4b5f6`). The refusal
-    // is still decided whole-policy — every `forbid` is unanswerable for the same reason — but the
-    // DISCLOSURE is per rule, because the operator's question is *which* and an aggregate answers *how
-    // many*. candor-java emits `"forbid (× 2)"` and loses which two; that satisfies a naive reading of
-    // "disclose which rules" while answering the other one.
-    let policyRefusals = wholePolicyRefusals(pol, policyPath)
-    // ⟨0.29⟩ `only: []` STATED, not left to the default. The refused kinds are REMOVED here, not merely
-    // disclosed beside the verdict — a kind left in the object is a kind the evaluator walks, and the
-    // disclosure would then stand next to the very evaluation it says did not happen. The java arm of
-    // this port shipped exactly that defect for one build because its removal site was fifty lines from
-    // where the kind was added; relying on a default parameter to be right is the same bet.
-    let denyOnly = ParsedPolicy(deny: pol.deny, allow: [], forbid: [], only: [])
-
-    let locator = reportFlag.map(resolveReportLocator) ?? discoverReportPrefix()
-    guard let prefix = locator else {
-        gateDie("candor-swift gate: no report — pass --report <locator> or run from a repo with a .candor/ "
-                + "dir (scan: candor-swift <dir>)")
-    }
-    // ⟨0.32⟩ SPEC §3.3.1 — did the most recent attempt over these reports REFUSE?
-    //
-    // Checked BEFORE they are read, because the answer does not depend on them: they may parse perfectly
-    // and describe real code, and still be the output of a scan whose successor refused. This verb cannot
-    // compute that — the hazard is an EVENT witnessed only by the refusing run — so the refusing run
-    // writes it down and this reads it.
-    if let m = refusalMarkerFor(prefix) {
-        gateDie("candor-swift gate: the most recent scan over `\(m.prefix)` REFUSED — these reports are "
-                + "from an earlier run and this verb will not certify them. Cause: \(m.reason). "
-                + "Re-scan \(m.target.isEmpty ? "the target" : m.target); a completing run clears the marker.")
-    }
-    guard let env = loadGateReport(prefix: prefix) else {
-        gateDie("candor-swift gate: no readable report at `\(prefix)` — nothing to gate (scan: candor-swift <dir>)")
-    }
-    // ⟨0.24⟩ A REPORT THAT JUDGED NOTHING IS NOT AN ALL-CLEAR (SPEC §2's three-row table, bound to this
-    // verb by §3.1: "a report presented DIRECTLY to the gate with `analyzed.count: 0` makes the same claim
-    // as a chained one, and must be read the same way … the obligation is on the reading, not on the route
-    // by which the report arrived"). The chained half of this rule lives in Deps.swift, on the COVERAGE
-    // decision; here there is no coverage decision to hang it on — the report IS the whole input — so what
-    // the rule buys is the DISCLOSURE beside the verdict.
-    //
-    // NOT THE EXIT CODE AND NOT THE VERDICT DOCUMENT, and the spec is explicit about both after the first
-    // spelling of this clause contradicted itself (SPEC §3.1 ⟨0.24⟩, corrected 2026-07-28). §3.1 makes
-    // byte-equality with `scan --policy`'s `--gate-json` the acceptance test, and a scan of an empty facade
-    // package exits 0 with a clean verdict — so diverging here would SPLIT THE VERB this rung exists to
-    // keep single. And §3.3 enumerates exactly two exit-2 causes (a broken gate CONFIG; an INCOMPLETE
-    // analysis of the target's OWN code); a judged-nothing DEPENDENCY is neither, so refusing would mint a
-    // third. Beyond conformance, a verdict is an ASSERTION: the consumer has no evidence of any effect
-    // here, so manufacturing one would be the fabrication mirror of the silent under-report.
-    //
-    // MEASURED before this landed, on a count-0 report with `deny Net`: exit 0 printing
-    // `candor-swift: policy ✓` and NOTHING ELSE — a human reading "no violations" had nothing telling them
-    // the gate had judged nothing at all. The machine channel was already right: `analyzed.count: 0` rides
-    // the verdict document, which is what ⟨0.21⟩ put it there for. What was missing was the human one.
-    if env.judgedNothing {
-        FileHandle.standardError.write(
-            ("candor-swift gate: the report at `\(prefix)` judged NOTHING (⟨0.24⟩ `analyzed.count` is 0, "
-             + "absent with no entries, or unreadable) — a report with no judgment in it is not an "
-             + "all-clear, so a green verdict below certifies NOTHING: absence from `functions` licenses "
-             + "no purity claim about any unit. Re-scan the sources you meant to gate "
-             + "(candor-swift <src> --out \(prefix)), or gate the report of the package that has them.\n")
-                .data(using: .utf8)!)
-    }
-    let gi = gateInputFromReport(env)
-
-    // ⟨0.24⟩ THE PRECEDENCE: **violation (1) > refusal (2) > incomplete (2)** (SPEC §3.1), and the first
-    // rung is FORCED by Lemma 2 rather than chosen.
-    //
-    // The third refusal — the only one that depends on the REPORT rather than on the policy alone — is
-    // COMPUTED here and ACTED ON below, AFTER the gate has run. It used to exit 2 on this line, before
-    // `evaluateGate` was ever called, so a policy carrying a firing `deny Fs` PLUS one unanswerable
-    // scoped rule exited 2 and wrote NO document: **the certain violation was deleted from the
-    // machine-consumer channel by a rule it had nothing to do with.** MEASURED 2026-07-28 on
-    // `deny Fs` + `deny Net[unknown-host] app` over a two-entry report — exit 2, no `--gate-json` file,
-    // the `Fs` finding gone from every machine channel. Byte-identical in harm to the ⟨0.21⟩
-    // incomplete-analysis path one rung down, and it takes the same fix: compute the verdict FIRST,
-    // decide the exit FROM it.
-    //
-    // WHY THE VIOLATION IS SAFE TO REPORT even though a rule went unanswered: if one rule FIRES on
-    // evidence the report carries, the policy is REJECTED, and `Reject` is upward-closed (PAPER3 Lemma
-    // 2) — however the unanswerable rule would have resolved CANNOT UN-REJECT IT. Exit 1 is therefore not
-    // merely fail-closed here, it is CERTAIN, and it is strictly more informative than exit 2 because it
-    // NAMES the violation. All four engines had this backwards, and the spec clause pinning
-    // "refusal > violation" was corrected within the hour of being written (candor-spec `7271c69`) —
-    // uniform engine agreement was the evidence for the wrong ruling.
-    //
-    // The refusal is NOT swallowed: when a violation dominates, every unanswerable rule is still
-    // disclosed on stderr below. Exit 1 reports the violation it is sure of; it does not conceal the part
-    // it could not read.
-    let refused = policyRefusals + unanswerableScopedFilters(pol.deny, gi)
-    let evaluated = evaluateGate(denyOnly, gi)
-    let gateZeroMatchRules = evaluated.zeroMatch
-    // ⟨0.41⟩ SPEC §6.2 `accept`: the rows an entry takes out of `violations`, settled over the rows each rule LINE
-    // made. `refused` (the rules this route cannot decide: `forbid`, `only`, `allow`, an unanswerable filter) makes
-    // its entries `unjudged`. AFTER this point an accepted row is not an established violation: if nothing else
-    // stands beside a refused rule, the SOLE-refusal arm below fires (exit 2), exactly as it does for no rows at all.
-    let violations = settleGateAccepts(pol, gi, violations: evaluated.violations, producers: evaluated.producers,
-                                       unevaluated: refused).violations
-    // ⟨0.24⟩ §3.1 — an unanswerable condition is DISCLOSED, never scored as a satisfied one. A rule whose
-    // scope binds nothing was silently green: `deny Net ordrs` (one character wrong) passed where
-    // `deny Net orders` failed, and `unverified` then reported the layer as PROVABLY clean.
-    for raw in gateZeroMatchRules {
-        FileHandle.standardError.write(
-            ("candor: policy rule matched NO function — `\(raw)`. It was evaluated and bound nothing, so it "
-             + "cannot have caught anything. Legitimate when one policy is shared across repos; a typo'd "
-             + "layer name otherwise.\n").data(using: .utf8)!)
-    }
-    if violations.isEmpty, !refused.isEmpty {
-        // SOLE refusal: nothing certain to report, so the gate genuinely could not be evaluated as
-        // written. Exit 2 — and ⟨0.24⟩ the refusal DOCUMENT, so a CI wrapper reading `--gate-json`
-        // unconditionally cannot re-read the previous run's green verdict as today's.
-        if !env.unanalyzed.isEmpty {
+    let core: GateCore
+    switch gateCore(policyPath: policyPath, policyText: policyText, reportFlag: reportFlag, announce: true) {
+    case .refusal(let why, let unevaluated, let alsoUnanalyzed):
+        if alsoUnanalyzed > 0 {
             // Refusal (2) outranks incomplete (2) — the same exit, and the refusal is the reason no
             // verdict exists. The manifest still gets said, on the human channel.
             FileHandle.standardError.write(
-                ("candor-swift gate: (the report ALSO declares \(env.unanalyzed.count) unanalyzed unit(s) — "
+                ("candor-swift gate: (the report ALSO declares \(alsoUnanalyzed) unanalyzed unit(s) — "
                  + "that alone would have been exit 2)\n").data(using: .utf8)!)
         }
-        // Every unanswerable rule, joined — the message is the document's `reason`, so the human and the
-        // machine channel carry the SAME disclosure rather than two drifting statements of it. ⟨0.24⟩ and
-        // the SAME rules ride the refusal document as `unevaluated`, per rule and keyed on the raw line:
-        // a prose `reason` is not a field a consumer can read a rule list out of.
-        refuseGateAndExit("candor-swift gate: " + refused.map(\.why).joined(separator: "\n    "),
-                          unevaluated: refused)
+        refuseGateAndExit(why, unevaluated: unevaluated)
+    case .answered(let c): core = c
     }
-    if !refused.isEmpty {
-        FileHandle.standardError.write(
-            ("candor-swift gate: NOTE — \(refused.count) policy rule(s) could not be evaluated over this "
-             + "report and are NOT answered by the verdict below. The verdict stands anyway: a rule FIRED "
-             + "on evidence this report carries, and no resolution of an unanswered rule can un-reject a "
-             + "rejected policy (SPEC §3.1, PAPER3 Lemma 2). Unanswered:\n").data(using: .utf8)!)
-        for u in refused { FileHandle.standardError.write("    \(u.why)\n".data(using: .utf8)!) }
-    }
+    let pol = core.pol, env = core.env, refused = core.refused, violations = core.violations
+    let policyVocabulary = core.policyVocabulary
+    let unpeeked = core.unpeeked, crossPolicy = core.crossPolicy, crossPolicyPredates033 = core.crossPolicyPredates033
     // Diagnostics go to STDERR exactly as the scan routes them, so `gate … --json | jq` sees pure JSON.
     for v in violations { FileHandle.standardError.write(("[\(v.rule)] \(v.detail)\n").data(using: .utf8)!) }
     // `--json` IS `--gate-json -`: the same document, from the same writer the scan uses, so a consumer
@@ -1128,50 +1225,6 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // kept their per-flag shape, so exit 0 and exit 1 still double-wrote while exit 2 was clean. That
     // asymmetry is why PART 36 (b6) passed: it poses the refusal path only.
     // ⟨0.32⟩ THE UNREAD CLASSES, DECIDED ONCE — the verdict document below and the exit arm at the bottom
-    // read this SAME value, so they cannot disagree about a run. That split is not hypothetical: the
-    // sibling port measured a document saying `ok: false` while the process exited 0, and the ⟨0.28⟩
-    // REPORT-sink rung shipped its own version of it.
-    //
-    // **DOES THIS POLICY'S ANSWER DEPEND ON THE CODE THE PRODUCER LEFT UNREAD?** — the ONE place that
-    // question is asked on this route, and now the ONLY carve-out the rule has. `mergeGateReport` used to
-    // start a second one off the producer's history (`outOfScope` present ⇒ that scan was asked), and
-    // that was the verified fail-open: see the note there. What survives is the condition about the
-    // QUESTION rather than about the producer — only a `deny`/`pure` rule's answer depends on code
-    // outside the scan's scope, which is the same short-circuit the producer's own peek applies
-    // (`peekRules` in main.swift is its DENY list), so keying on it here is what makes the two routes
-    // answer the same way.
-    //
-    // `pol.deny` IS THE RIGHT LIST AND `pure` IS IN IT — the parser appends a `pure` line as a DenyRule
-    // with an EMPTY effect list (Policy.swift), so the strictest policy the grammar has arms this rule
-    // like any other. Reading the question off a flattened set of effect NAMES instead would find `pure`
-    // contributing nothing and silently disarm it; that is not hypothetical, it is what this engine's own
-    // peek did until ⟨0.30⟩ measured `pure` passing where `deny Exec` exited 2 on the same tree.
-    //
-    // MEASURED AS DEFENSIVE rather than load-bearing on this engine, 2026-08-24: a policy with no deny
-    // rule cannot reach this line today, because every shape that produces one exits 2 earlier and for an
-    // unrelated reason (an empty/comment-only file, a `forbid`/`only` line and a valueless `allow` all
-    // trip the yielded-NO-RULES refusal; a well-formed `allow` trips this verb's uniform allow-refusal).
-    // Written out anyway, because a guard that states its own condition survives the removal of a refusal
-    // three screens up that exists for something else.
-    //
-    // APPLIED TO THE VALUE, ONCE, and never repeated at the exit arm: `unpeeked` feeds BOTH the verdict
-    // DOCUMENT written below and the exit arm at the bottom, so a condition stated at only one of them
-    // lets the two disagree about a run — a document reading `ok: false, incomplete: true` beside exit 0.
-    // candor-rust had exactly that drift on its scan route, and the ⟨0.28⟩ REPORT-sink rung shipped its
-    // own version of it.
-    let unpeeked = pol.deny.isEmpty ? [] : env.unpeeked
-    // ⟨0.33⟩ THE FOURTH CAUSE, computed ONCE through the SAME helper `ReportCompleteness` arms for
-    // `unverified`/`fix-gate` (`CandorCore.unaskedCrossPolicyRules`, FixCLI.swift's `armingUnread`), so
-    // this route and its advisory siblings cannot drift into two readings of the condition (⟨0.24⟩; PART
-    // 67 is the standing example of what a second computation costs). Fed to BOTH the exit arm below and
-    // the verdict document, so the two cannot disagree about a run — the same discipline `unpeeked` above
-    // states in its own comment.
-    // ⟨0.34⟩ ONE CALL, BOTH FACTS — `crossPolicy` feeds the exit arm and the verdict document exactly as
-    // before; `crossPolicyPredates033` rides beside it from the SAME computation, so the two cannot
-    // disagree about which reports contributed the gap.
-    let crossPolicyResult = unaskedCrossPolicyRules(pol.deny, against: env.scannedUnderOfPeeked)
-    let crossPolicy = crossPolicyResult.rules
-    let crossPolicyPredates033 = crossPolicyResult.oldCaused
     var verdictSinks: [String] = []
     if wantJson { verdictSinks.append("-") }
     if let gp = gateJsonPath, !verdictSinks.contains(gp) { verdictSinks.append(gp) }

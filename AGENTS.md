@@ -137,6 +137,7 @@ reports; candor-swift itself carries a few query subcommands, over a report a sc
     candor-swift fix        <fn> <Effect> [--report <locator>] --policy <file> [--json]   # the boundary FIX (JSON)
     candor-swift fix-gate   [--report <locator>] --policy <file> [--json]                 # a fix for EVERY crossing (JSON)
     candor-swift unverified [--report <locator>] --policy <file> [--json] [--strict]      # pure/deny layers that PASS but are Unknown (not PROVABLY clean)
+    candor-swift accepts    [--report <locator>] [--policy <file>] [--json] [--adopt --because <reason>]   # a PROPOSED policy: stale `accept` lines deleted, over-wide ones narrowed, exceeded ones proposed in a comment (writes no file)
     candor-swift tour [<N>]                                             # the N most surprising transitive reaches (default 10; no policy)
     candor-swift gains      <current> <baseline> [--json]              # effects the surface GAINED since the baseline (supply-chain alarm)
     candor-swift privacy-manifest [--verify [<plist>]] [--xml]      # generate/verify the Apple privacy manifest from the sensor reach (privacy/2); --xml = a paste-ready Info.plist fragment (on --verify, only the MISSING keys)
