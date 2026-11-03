@@ -1806,5 +1806,22 @@ else
     || bad "R532 narrowing: unwrap -> $(r532 unwrap "$PJ2") (want Net) — a body-local declaration made a scan-global name-keyed index ambiguous and deleted a real charge"
 fi
 
+# ---- an unknown first word is a scan target, and a refusal over a target that does not exist leaves NOTHING behind
+# (found 2026-11-03: `candor-swift bogusverb --report x` created bogusverb/.candor/report.refused.json in the cwd).
+BINA="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"; LT="$W/litter"; rm -rf "$LT"; mkdir -p "$LT/empty" "$LT/real/.candor"
+( cd "$LT/empty" && "$BINA" bogusverb --report x --policy p >/dev/null 2>&1; echo "$?" > "$LT/rc1" )
+[ "$(cat "$LT/rc1")" = 2 ] && [ -z "$(ls -A "$LT/empty")" ] \
+  && ok "unknown first word + unknown flag: exit 2 and no directory created in the cwd" \
+  || bad "unknown first word + unknown flag: rc=$(cat "$LT/rc1"), cwd now holds: $(ls -A "$LT/empty")"
+( cd "$LT/empty" && "$BINA" bogusverb >/dev/null 2>&1; echo "$?" > "$LT/rc2" )
+[ "$(cat "$LT/rc2")" = 2 ] && [ -z "$(ls -A "$LT/empty")" ] \
+  && ok "unknown first word alone: exit 2 (no such path) and nothing created" \
+  || bad "unknown first word alone: rc=$(cat "$LT/rc2"), cwd now holds: $(ls -A "$LT/empty")"
+# the control: a REAL directory with a bare-word name still gets its marker (the fix must not silence the marker for real targets)
+( cd "$LT" && "$BINA" real --zzz >/dev/null 2>&1 )
+[ -f "$LT/real/.candor/report.refused.json" ] \
+  && ok "a real bare-word target still gets its refusal marker (the marker is not silenced for existing targets)" \
+  || bad "a real bare-word target lost its refusal marker — the litter fix over-reached"
+
 echo; echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

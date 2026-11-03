@@ -533,6 +533,10 @@ func noteRefusalTarget(_ t: String) { if refusalTarget == nil { refusalTarget = 
 
 func writeRefusalMarker(_ why: String) {
     guard let pfx = refusalPrefix else { return }
+    // A DEFAULT prefix hangs off the positional, and a positional that names nothing (`candor-swift bogusverb --report x`,
+    // a verb of a newer build handed to an older one) has no reports for a marker to supersede: writing it would
+    // CREATE `bogusverb/.candor/` in the cwd. A NAMED prefix (`--out`) is a declaration and is written wherever it points.
+    if !refusalPrefixNamed, let t = refusalTarget, !FileManager.default.fileExists(atPath: t) { return }
     let doc: [String: Any] = [
         "candor": ["spec": specVersion],
         "refused": true,

@@ -10,6 +10,11 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **A refusal over a scan target that does not exist no longer creates `<target>/.candor/report.refused.json`.** `candor-swift
+  bogusverb --report x` (a verb of a newer build handed to this one) read the bare word as the scan target and, on the unknown
+  flag, wrote the refusal marker into a directory it created in the cwd. The default-prefix marker is now written only when the
+  target exists (a `--out` prefix is still written wherever it points); a real bare-word directory keeps its marker.
+
 - **`candor-swift accepts` — a PROPOSED policy that refreshes (or adopts) the `accept` lines (SPEC §6.2 ⟨0.41⟩, ported from
   candor-java; PART 106).** `candor-swift accepts [--report <locator>] [--policy <file>] [--json] [--adopt --because <reason>]`
   prints the policy it read with three changes and nothing else: a STALE entry's line deleted (exactly the lines the gate
