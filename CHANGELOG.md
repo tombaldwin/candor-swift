@@ -10,6 +10,23 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **`accept` lines: a known policy violation, written down where a reviewer reads it (SPEC §6.2 ⟨0.41⟩, ported from
+  candor-java; PART 105).** `accept <fn> [<Effect>…] for <rule tokens…> because <reason>` takes ONE named verdict row
+  out of `violations` and lists it in a new `accepted` verdict key, on `scan --policy` and `gate --report` alike
+  (byte-equal across the routes). `<fn>` is compared by exact string, the rule tokens must equal a `deny`/`pure`/`forbid`
+  line's RAW tokens, every concrete effect of the row must be listed, and an `Unknown` is covered only by an
+  `Unknown[<classes>]` naming every class of the row; `allow`/`only` rows cannot be accepted. A line that is malformed
+  in any other way is ignored with a warning, listed in `ignored`, and the violation stays; a typo'd effect or class
+  token is the exit-2 policy error. A STALE entry (its rule ran and it accepted nothing) is an `AS-EFF-012` violation
+  whose message says to delete the line; an entry the unit has outgrown is `exceeded` and stays red; two units sharing
+  a name with different hashes make it `ambiguous` and accept neither; an entry for a rule the route cannot evaluate
+  (`forbid`/`only` on `gate --report`) is `unjudged`. An accepted row is not an established violation, so accepted rows
+  beside an unevaluated rule or an incomplete analysis exit 2. The human channel prints `N violation(s) accepted by
+  policy; M new` on every run with an accepted row. `unverified` no longer reports `ok` over a unit with an accepted
+  violation; `fix-gate --strict` follows the gate on a stale entry. A policy with no `accept` line is byte-identical to
+  before. Positional keys (a `#<n>` overload/global suffix, bare `<main>`) are refused; none of this engine's rows is
+  nested under another, so the nested-unit rule has nothing to apply to here.
+
 - ⚠ **A member call whose receiver's type the source spells is resolved instead of dropped (SOUNDNESS R1463, R1455
   classes T0/T1).** `"/path".wipe()` over a project `extension String { func wipe() }` that deletes the file read
   ABSENT (executed; `deny Fs` passed) while `let p = "/path"; p.wipe()` charged `Fs`. A literal receiver now takes its

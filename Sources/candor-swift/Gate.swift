@@ -151,6 +151,15 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
     // ⟨0.21⟩ COMPLETENESS MANIFEST (Gap 2): the machine-legible incompleteness — the units candor couldn't
     // analyze, so a CI/agent reading the JSON learns WHY the gate can't certify (the stderr line alone hid
     // this from a machine). `incomplete:true` + the list; the caller exits 2 (could-not-fully-evaluate).
+    // ⟨0.41⟩ SPEC §6.2: `accepted` rides VERDICT documents only — the exit-0/1 shape — and "a refusal or an incomplete
+    // verdict makes no claim about violations, so it makes none about which were accepted". An incomplete run with
+    // nothing left in `violations` is exit 2, so ONLY THEN are `accepted` and (for a policy that carries `accept`
+    // entries) the `violations` key withheld; a policy without the directive keeps the `violations: []` every
+    // engine has always written, byte for byte. An incomplete run that ALSO holds a violation is exit 1 and keeps both.
+    let exitTwo = incomplete && violations.isEmpty
+    if let acc = lastGateAccepted {
+        if exitTwo { dict["violations"] = nil } else { dict["accepted"] = acc }
+    }
     if incomplete {
         dict["incomplete"] = true
         if !unanalyzed.isEmpty {
@@ -293,6 +302,73 @@ nonisolated(unsafe) var gateUnevaluated: [Unevaluated] = []
 /// evaluates, which is also why the refusal document (written when the gate never evaluated) can never
 /// carry it.
 nonisolated(unsafe) var lastGateZeroMatch: [String] = []
+
+/// ⟨0.41⟩ SPEC §6.2 `accepted` — the verdict items for the policy's `accept` entries, stashed by the one
+/// `settleGateAccepts` call a run performs and read by `writeGateVerdict`, the same shape and safety argument as
+/// `lastGateZeroMatch` above (so neither route can forget it). NIL means no `accept` line became an entry: the
+/// key is OMITTED and the verdict keeps its pre-⟨0.41⟩ bytes.
+nonisolated(unsafe) var lastGateAccepted: [[String: Any]]? = nil
+
+/// What `settleGateAccepts` hands back.
+struct GateAcceptOutcome {
+    /// the rows that stay in `violations`, plus one AS-EFF-012 row per stale entry.
+    var violations: [GateViolation]
+    /// how many rows an entry took out of `violations`.
+    var acceptedRowCount: Int
+    /// the names of the units those rows were about.
+    var acceptedUnits: Set<String>
+    /// the stale-entry rows (also present in `violations`).
+    var stale: [GateViolation]
+}
+
+/// ⟨0.41⟩ THE ONE SEAM between the gate's rows and the policy's `accept` entries (SPEC §6.2 ⟨0.41⟩), called by
+/// `scan --policy`, `gate --report` and the two advisory verbs that reason about acceptance, so the match exists
+/// once. `producers` is `evaluateGate`'s parallel list of the rule LINE each row came from; `unevaluated` the rules
+/// THIS route could not decide (their entries are `unjudged`). A policy without a valid `accept` entry returns
+/// `violations` untouched and stashes nothing, which is what keeps its verdict byte-identical.
+///
+/// `announce` prints the human-channel count and the per-entry remedies; the advisory verbs pass false, because
+/// they speak in their own voice and must not look as though they ran a second gate.
+func settleGateAccepts(_ pol: ParsedPolicy, _ gi: GateInput, violations: [GateViolation], producers: [String],
+                       unevaluated: [Unevaluated], who: String = "candor-swift", announce: Bool = true) -> GateAcceptOutcome {
+    guard !pol.accepts.isEmpty else {
+        return GateAcceptOutcome(violations: violations, acceptedRowCount: 0, acceptedUnits: [], stale: [])
+    }
+    precondition(producers.count == violations.count, "evaluateGate must report one producing rule line per row")
+    let rows = zip(violations, producers).map { v, key in
+        AcceptRow(ruleKey: key, code: v.rule, name: v.fn, hash: v.hash, effects: v.effects, classes: v.reasonClass)
+    }
+    // (hash, fn) TWINS — two units of THIS run sharing a name. The report route keys every map by the §2.2 join
+    // key (`hash`), so more than one key under a name IS the twin case; the scan route keys by name, where it
+    // cannot arise. Counted over every key the gate holds (an entry with an effect or an edge).
+    var keysByName: [String: Set<String>] = [:]
+    for k in Set(gi.inferred.keys).union(gi.edges.keys) { keysByName[gi.display[k] ?? k, default: []].insert(k) }
+    let twins = Set(keysByName.filter { $0.value.count > 1 }.keys)
+    let s = settleAccepts(pol.accepts, rows: rows, unevaluated: Set(unevaluated.map { acceptRuleKey($0.rule) }),
+                          twinNames: twins, who: who)
+    var remaining: [GateViolation] = []
+    var units = Set<String>()
+    for (i, v) in violations.enumerated() {
+        if s.acceptedRows.contains(i) { units.insert(v.fn) } else { remaining.append(v) }
+    }
+    var stale: [GateViolation] = []
+    for e in s.stale {
+        stale.append((rule: "AS-EFF-012", fn: e.fn, hash: "", effects: e.effects, detail: staleAcceptDetail(e),
+                      reasonClass: [], netClass: [], origin: ""))
+    }
+    lastGateAccepted = s.items.map(\.json)
+    if announce {
+        for n in s.notes { FileHandle.standardError.write((n + "\n").data(using: .utf8)!) }
+        if !s.acceptedRows.isEmpty {
+            // SPEC §6.2: a human channel MUST print the accepted COUNT on every run with at least one accepted row.
+            FileHandle.standardError.write(
+                ("\(who): \(s.acceptedRows.count) violation(s) accepted by policy; \(remaining.count + stale.count) new\n")
+                    .data(using: .utf8)!)
+        }
+    }
+    return GateAcceptOutcome(violations: remaining + stale, acceptedRowCount: s.acceptedRows.count,
+                             acceptedUnits: units, stale: stale)
+}
 
 /// SPEC §3.3.1 ⟨0.28⟩ (4) — was `--json` (the REPORT stream) requested? Set once in the scan CLI before
 /// the pre-pass, so every exit-2 path downstream can decide *what to write on exit-2* the same way
@@ -637,7 +713,7 @@ func gateInputFromScan(inferred: [String: Set<String>],
 /// SOUNDNESS R952 §1b KILL SWITCH — restores the release's exemption of every `allow` from the zero-match pass.
 let r952Off = ProcessInfo.processInfo.environment["CANDOR_R952_OFF"] != nil
 
-func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateViolation], zeroMatch: [String]) {
+func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateViolation], zeroMatch: [String], producers: [String]) {
     let inferred = gi.inferred
     let hostsAcc = gi.hosts, cmdsAcc = gi.cmds, pathsAcc = gi.paths, tablesAcc = gi.tables
     let incompleteAcc = gi.surfaceIncomplete, cg = gi.edges, reasonClassAcc = gi.reasonClasses
@@ -656,6 +732,11 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
     // the caller has none, and `""` is omitted from the wire.
     func unitOf(_ k: String) -> String { gi.hash[k] ?? "" }
     var gateViolations: [GateViolation] = []
+    // ⟨0.41⟩ the RULE LINE each row came from, parallel to `gateViolations` — SPEC §6.2 `accept` matches per
+    // producing LINE, before any de-duplication, so the row alone ("rule code + fn + effects") is not enough: a
+    // row two lines make must be covered by an entry for EACH.
+    var producers: [String] = []
+    func emit(_ raw: String, _ v: GateViolation) { gateViolations.append(v); producers.append(acceptRuleKey(raw)) }
         // ZERO-MATCH DISCLOSURE. A rule whose SCOPE binds no function is scored as satisfied — so a
         // one-character typo in a layer name (`deny Net ordrs`) turns a failing gate green and
         // `unverified` then calls the layer "PROVABLY clean". The asymmetry is the tell: a typo'd EFFECT
@@ -761,7 +842,7 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
                     let rc = hits.contains("Unknown") ? (reasonClassAcc[qual].map { $0.sorted() } ?? []) : []
                     // ⟨0.20⟩ when Net is denied, report ALL of the fn's destination classes (transitive).
                     let nc = hits.contains("Net") ? (gi.netClasses[qual] ?? []) : []
-                    gateViolations.append((rule: "AS-EFF-006", fn: nameOf(qual), hash: unitOf(qual), effects: hits,
+                    emit(r.raw, (rule: "AS-EFF-006", fn: nameOf(qual), hash: unitOf(qual), effects: hits,
                         detail: "`\(nameOf(qual))` performs { \(hits.joined(separator: ", ")) }, forbidden by policy: `\(r.raw)`",
                         reasonClass: rc, netClass: nc, origin: ""))
                 }
@@ -791,11 +872,11 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
                     let why = surface.isEmpty
                         ? "performs \(r.effect) with no visible literal — the surface cannot be certified"
                         : "reaches a structurally-invisible \(r.effect) endpoint a visible literal cannot mask"
-                    gateViolations.append((rule: "AS-EFF-008", fn: nameOf(qual), hash: unitOf(qual), effects: [r.effect], detail: "`\(nameOf(qual))` \(why): `\(r.raw)`", reasonClass: [], netClass: [], origin: ""))
+                    emit(r.raw, (rule: "AS-EFF-008", fn: nameOf(qual), hash: unitOf(qual), effects: [r.effect], detail: "`\(nameOf(qual))` \(why): `\(r.raw)`", reasonClass: [], netClass: [], origin: ""))
                 } else {
                     let bad = surface.filter { !literalAllowed(r.effect, $0, r.values) }.sorted()
                     if !bad.isEmpty {
-                        gateViolations.append((rule: "AS-EFF-008", fn: nameOf(qual), hash: unitOf(qual), effects: [r.effect],
+                        emit(r.raw, (rule: "AS-EFF-008", fn: nameOf(qual), hash: unitOf(qual), effects: [r.effect],
                             detail: "`\(nameOf(qual))` reaches { \(bad.joined(separator: ", ")) } outside the allowlist: `\(r.raw)`", reasonClass: [], netClass: [], origin: ""))
                     }
                 }
@@ -807,7 +888,7 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
                 while let cur = stack.popLast() {
                     if !seen.insert(cur).inserted { continue }
                     if scopeMatches(nameOf(cur), r.to) {
-                        gateViolations.append((rule: "AS-EFF-009", fn: nameOf(fn), hash: unitOf(fn), effects: [],
+                        emit(r.raw, (rule: "AS-EFF-009", fn: nameOf(fn), hash: unitOf(fn), effects: [],
                             detail: "`\(nameOf(fn))` (scope `\(r.from)`) transitively reaches `\(nameOf(cur))` in forbidden scope `\(r.to)`: `\(r.raw)`",
                             reasonClass: [], netClass: [], origin: ""))
                         break
@@ -835,7 +916,7 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
                         // ⟨0.29⟩ ITS OWN CODE, not `forbid`'s — a rule code is what a CI suppression
                         // keys on, and these two are opposite constructs. Sharing 009 would make an
                         // existing `forbid` suppression silently mute `only` violations nobody accepted.
-                        gateViolations.append((rule: "AS-EFF-011", fn: nameOf(fn), hash: unitOf(fn), effects: [],
+                        emit(r.raw, (rule: "AS-EFF-011", fn: nameOf(fn), hash: unitOf(fn), effects: [],
                             detail: "`\(nameOf(fn))` reaches `\(nameOf(cur))`, which this permission rule does not permit: `\(r.raw)`",
                             reasonClass: [], netClass: [], origin: ""))
                         break
@@ -844,5 +925,5 @@ func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateVio
                 }
             }
         }
-    return (gateViolations, zeroMatch)
+    return (gateViolations, zeroMatch, producers)
 }

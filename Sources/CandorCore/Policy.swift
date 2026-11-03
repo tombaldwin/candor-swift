@@ -448,11 +448,17 @@ public struct ParsedPolicy {
     /// ⟨0.28⟩ the lines the parse DROPPED without refusing — see `IgnoredLine`. Rides the verdict
     /// document as `ignored`, omitted when empty.
     public var ignored: [IgnoredLine]
+    /// ⟨0.41⟩ the VALID `accept` entries (SPEC §6.2 ⟨0.41⟩), in source order — directives, not rules: never
+    /// counted by the zero-rule check, never fired, and absent from every rule vector above, which are exactly
+    /// what they were without them. Empty on every policy without an `accept` line, which is what keeps every
+    /// verdict of such a policy byte-identical.
+    public var accepts: [AcceptEntry]
     public init(deny: [DenyRule], allow: [AllowRule], forbid: [ForbidRule], only: [OnlyRule] = [],
                 errors: [PolicyError] = [],
-                usedAliases: [String] = [], ignored: [IgnoredLine] = []) {
+                usedAliases: [String] = [], ignored: [IgnoredLine] = [], accepts: [AcceptEntry] = []) {
         self.deny = deny; self.allow = allow; self.forbid = forbid; self.only = only
         self.errors = errors; self.usedAliases = usedAliases; self.ignored = ignored
+        self.accepts = accepts
     }
     /// ⟨0.24⟩ The refusal texts, in order — the GATE's view of `errors`. Empty means every line the
     /// engine could not honour is a report-only one, which is the ambiguous middle §6.2 leaves permissive.
@@ -580,6 +586,9 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
     var errors: [PolicyError] = []
     var usedAliases = Set<String>()
     var ignored: [IgnoredLine] = []
+    // ⟨0.41⟩ `accept` lines are held until every rule line has been read (an entry may name a rule that comes
+    // AFTER it) and resolved once, after the loop: see `resolveAccepts`.
+    var pendingAccepts: [PendingAccept] = []
     var lineNo = 0
     // Split LINES on \n / \r\n / bare \r — the three forms Java's Files.readAllLines (the reference parser)
     // breaks on. Splitting on \n ONLY let a classic-Mac (bare-\r) file collapse to ONE line: \r is also an
@@ -750,14 +759,24 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
                 continue
             }
             only.append(OnlyRule(from: from, to: to, raw: line))
+        // ⟨0.41⟩ A DIRECTIVE, NOT A RULE — held, then resolved against the rules this parse produced.
+        case "accept":
+            pendingAccepts.append(PendingAccept(lineNo: lineNo, text: String(rawLine), line: line, tokens: t))
         default:
             errors.append(warnRule("unknown rule kind `\(t[0])`", line, kind: "rule-kind", token: t[0],
                                    accepted: ["deny", "pure", "allow", "forbid", "only"]))
             ignore("unknown rule kind `\(t[0])`")
         }
     }
+    var accepts: [AcceptEntry] = []
+    if !pendingAccepts.isEmpty {
+        accepts = resolveAccepts(pendingAccepts, deny: deny, allow: allow, forbid: forbid, only: only,
+                                 aliases: aliases, errors: &errors, ignored: &ignored)
+        // The dropped accept lines were appended after the loop; `ignored` is documented as file order.
+        ignored.sort { $0.line < $1.line }
+    }
     return ParsedPolicy(deny: deny, allow: allow, forbid: forbid, only: only, errors: errors,
-                        usedAliases: usedAliases.sorted(), ignored: ignored)
+                        usedAliases: usedAliases.sorted(), ignored: ignored, accepts: accepts)
 }
 
 /// §6.2 scope match: segment run, last segment a prefix. Segments split on BOTH `.` and `::` (empty

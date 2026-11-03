@@ -1075,7 +1075,14 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // disclosed on stderr below. Exit 1 reports the violation it is sure of; it does not conceal the part
     // it could not read.
     let refused = policyRefusals + unanswerableScopedFilters(pol.deny, gi)
-    let (violations, gateZeroMatchRules) = evaluateGate(denyOnly, gi)
+    let evaluated = evaluateGate(denyOnly, gi)
+    let gateZeroMatchRules = evaluated.zeroMatch
+    // ⟨0.41⟩ SPEC §6.2 `accept`: the rows an entry takes out of `violations`, settled over the rows each rule LINE
+    // made. `refused` (the rules this route cannot decide: `forbid`, `only`, `allow`, an unanswerable filter) makes
+    // its entries `unjudged`. AFTER this point an accepted row is not an established violation: if nothing else
+    // stands beside a refused rule, the SOLE-refusal arm below fires (exit 2), exactly as it does for no rows at all.
+    let violations = settleGateAccepts(pol, gi, violations: evaluated.violations, producers: evaluated.producers,
+                                       unevaluated: refused).violations
     // ⟨0.24⟩ §3.1 — an unanswerable condition is DISCLOSED, never scored as a satisfied one. A rule whose
     // scope binds nothing was silently green: `deny Net ordrs` (one character wrong) passed where
     // `deny Net orders` failed, and `unverified` then reported the layer as PROVABLY clean.
@@ -1286,6 +1293,37 @@ func runGateReportCLI(_ args: [String]) -> Never {
     // this run can support. See the note at the violation branch for what printing it earlier said.
     FileHandle.standardError.write("candor-swift: policy ✓\n".data(using: .utf8)!)
     exit(0)
+}
+
+/// ⟨0.41⟩ SPEC §6.2: THE ADVISORY VERBS' VIEW OF `accept` — `unverified` MUST NOT describe a unit with an accepted
+/// violation as clean, and `fix-gate` must not exit 0 beside an `accept` entry the gate fails on (a STALE one,
+/// AS-EFF-012). Both verbs read the same report the gate would, so the answer is the GATE's own — the same
+/// `evaluateGate` + `settleGateAccepts` over the same bytes — never a second match.
+///
+/// These verbs ACCEPT NOTHING themselves: they still list the hole or plan the remedy for a crossing a policy line
+/// took out of the gate, which is the pessimistic direction §6.2 requires ("MUST NOT accept anything the gate would
+/// not"). `unreviewable` is true when the policy carries entries but the report cannot be re-read by the gate's
+/// loader: then neither fact can be established, and the caller withdraws its all-clear rather than guess.
+struct AcceptReview {
+    var acceptedUnits: Set<String> = []
+    var stale: [GateViolation] = []
+    var unreviewable = false
+}
+func reviewAcceptsOverReport(_ pol: ParsedPolicy, prefix: String, unevaluated: [Unevaluated]) -> AcceptReview {
+    var r = AcceptReview()
+    if pol.accepts.isEmpty { return r }
+    guard let env = loadGateReport(prefix: prefix) else { r.unreviewable = true; return r }
+    let gi = gateInputFromReport(env)
+    let denyOnly = ParsedPolicy(deny: pol.deny, allow: [], forbid: [], only: [])
+    let evaluated = evaluateGate(denyOnly, gi)
+    // The settle seam stashes the verdict's `accepted` list module-wide; an advisory verb writes no verdict, and the
+    // stash is cleared so a later writer in this process could not pick it up.
+    let o = settleGateAccepts(pol, gi, violations: evaluated.violations, producers: evaluated.producers,
+                              unevaluated: unevaluated, announce: false)
+    lastGateAccepted = nil
+    r.acceptedUnits = o.acceptedUnits
+    r.stale = o.stale
+    return r
 }
 
 /// ⟨0.32⟩ SPEC §2.2's join key: the report's `hash` when it carries one, the bare name when it does not.

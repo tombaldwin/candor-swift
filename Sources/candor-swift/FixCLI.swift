@@ -618,7 +618,7 @@ private func mergeCompleteness(_ obj: [String: Any], path: String, entryCount: I
 // certify "no crossings" over a policy nobody finished evaluating. One rule for both, and it is the
 // fail-safe one: a consumer writing `if (r.ok)` gets undefined.
 func emitAdvisoryAnswer(_ body: [String: Any], ok: Bool, completeness c: ReportCompleteness,
-                        strict: Bool, unevaluated: [UnansweredRule] = []) -> Never {
+                        strict: Bool, unevaluated: [UnansweredRule] = [], withdrawOk: Bool = false) -> Never {
     var out = body
     if !unevaluated.isEmpty { out["unevaluated"] = unevaluated.map { $0.toJSON() } }
     // ⟨0.28⟩ THE DOCUMENT GATE AND THE EXIT ARGUMENT ARE NOW DIFFERENT PREDICATES, deliberately.
@@ -637,7 +637,10 @@ func emitAdvisoryAnswer(_ body: [String: Any], ok: Bool, completeness c: ReportC
         emitJSON(out)
         exit(refuses ? (strict ? 2 : 0) : (strict && !ok ? 1 : 0))
     }
-    out["ok"] = ok
+    // ⟨0.41⟩ SPEC §6.2: `unverified` MUST NOT describe a unit with an ACCEPTED violation as clean. `ok` is OMITTED
+    // (not set false: `false` would assert an unverified hole beside a list that names none) and the EXIT does not
+    // move — this verb answers about Unknown holes, not about violations.
+    if !withdrawOk { out["ok"] = ok }
     emitJSON(out)
     exit(strict && !ok ? 1 : 0)
 }
@@ -1296,9 +1299,31 @@ func runUnverifiedCLI(_ args: [String]) -> Never {
     // still ship: an unverified layer this report DID see is worth naming whether or not another file
     // went unread. Same for a rule the gate could not evaluate (§3.2): the holes ship, `unevaluated`
     // rides beside them, and `--strict` matches the gate's exit 2.
-    emitAdvisoryAnswer(["unverified": holes.map { $0.toJSON() }],
-                       ok: ok, completeness: uvComp, strict: q.strict,
-                       unevaluated: unanswered)
+    // ⟨0.41⟩ SPEC §6.2 `accept`: a unit whose violation a policy line took out of the gate is NOT described as
+    // clean — an accepted violation is still a violation, only a reviewed one. The units come from the gate's own
+    // rows (`reviewAcceptsOverReport`), never a second match. This verb accepts nothing itself.
+    let review = reviewAcceptsOverReport(pol, prefix: prefix,
+                                         unevaluated: unanswered.map { Unevaluated(rule: $0.rule, why: $0.why) })
+    var uvBody: [String: Any] = ["unverified": holes.map { $0.toJSON() }]
+    let withdrawn = !review.acceptedUnits.isEmpty || review.unreviewable
+    if withdrawn {
+        uvBody["accepted"] = review.acceptedUnits.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }
+        if review.unreviewable {
+            FileHandle.standardError.write(
+                ("candor-swift unverified: the policy carries `accept` lines but the gate's loader could not re-read "
+                 + "this report, so whether any unit has an accepted violation is UNKNOWN — `ok` is withheld rather than "
+                 + "guessed.\n").data(using: .utf8)!)
+        }
+    }
+    if !review.acceptedUnits.isEmpty && holes.isEmpty {
+        FileHandle.standardError.write(
+            ("candor-swift unverified: no Unknown holes — but \(review.acceptedUnits.count) function(s) carry a violation "
+             + "that a policy `accept` line took out of the gate (\(review.acceptedUnits.sorted().joined(separator: ", "))). "
+             + "NOT described as clean: an accepted violation is still a violation, only a reviewed one.\n")
+                .data(using: .utf8)!)
+    }
+    emitAdvisoryAnswer(uvBody, ok: ok, completeness: uvComp, strict: q.strict,
+                       unevaluated: unanswered, withdrawOk: withdrawn)
 }
 
 // Dispatched from main.swift when argv[1] is `tour` (before the scan flag loop). §3.3.1 canonical grammar,
@@ -1708,9 +1733,21 @@ func runFixCLI(_ args: [String]) -> Never {
         // ⟨0.24⟩ …and over a report declaring `unanalyzed`, `ok` is OMITTED and `--strict` exits 2 — see
         // `emitAdvisoryAnswer`. The remedies still ship: a crossing this report DID see needs the same
         // hoist whether or not another file went unread.
-        emitAdvisoryAnswer(["remedies": remedies.map { $0.toJSON() }],
-                           ok: ok, completeness: fgComp, strict: q.strict,
-                           unevaluated: unanswered)
+        // ⟨0.41⟩ SPEC §6.2 `accept`: this verb ACCEPTS NOTHING — it still plans a remedy for a crossing a policy
+        // line took out of the gate, the pessimistic direction §6.2 requires ("MUST NOT accept anything the gate
+        // would not"). But the gate also FAILS on a STALE entry (AS-EFF-012, exit 1), and a verb whose `--strict`
+        // exit read 0 beside that would be the more optimistic one — so a stale entry is an outstanding finding here
+        // too, and the remedy it names is deleting the line.
+        let review = reviewAcceptsOverReport(pol, prefix: prefix,
+                                             unevaluated: unanswered.map { Unevaluated(rule: $0.rule, why: $0.why) })
+        for st in review.stale { FileHandle.standardError.write("[\(st.rule)] \(st.detail)\n".data(using: .utf8)!) }
+        var fgBody: [String: Any] = ["remedies": remedies.map { $0.toJSON() }]
+        if !review.stale.isEmpty {
+            fgBody["staleAccepts"] = review.stale.map { ["fn": $0.fn, "detail": $0.detail] as [String: Any] }
+        }
+        // an unreviewable report cannot have its stale entries counted: do not certify
+        emitAdvisoryAnswer(fgBody, ok: ok && review.stale.isEmpty && !review.unreviewable,
+                           completeness: fgComp, strict: q.strict, unevaluated: unanswered)
     }
 }
 

@@ -3191,7 +3191,10 @@ policyBlock: if let pp = policyPath {
                                           // `hash` is built from, so the two routes agree by construction.
                                           package: pkgName)
     let scanGateResult = evaluateGate(scanPolicy, scanGateInput)
-    gateViolations += scanGateResult.violations
+    // ⟨0.41⟩ SPEC §6.2 `accept`: this route decides EVERY rule kind from the live signature, so no entry is
+    // `unjudged` here; a stale one becomes an AS-EFF-012 row in the same list the exit code and the verdict read.
+    gateViolations += settleGateAccepts(scanPolicy, scanGateInput, violations: scanGateResult.violations,
+                                        producers: scanGateResult.producers, unevaluated: []).violations
     let gateZeroMatchRules = scanGateResult.zeroMatch
     // ⟨0.29⟩ THE NAME RULES STOP AT THE SCAN BOUNDARY, AND NOW SAY SO. `forbid A -> B` and
     // `only A -> B …` match over the call graph; a chained dependency contributes EFFECTS, not EDGES, so a
