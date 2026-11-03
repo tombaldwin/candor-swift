@@ -13,6 +13,8 @@ pass=0; fail=0
 ok()   { echo "  ok   $1"; pass=$((pass+1)); }
 bad()  { echo "  FAIL $1"; fail=$((fail+1)); }
 
+# ⟨0.41⟩ SPEC §3.3: --help lists every verb the binary accepts, `accepts` included (conformance PART 43 derives its verb matrix from it).
+"$BIN" --help 2>&1 | grep -q 'unverified  accepts' && ok "--help lists the accepts verb" || bad "--help lists the accepts verb"
 "$BIN" conformance/Cases.swift --out "$W/r" 2>/dev/null
 RPT=$(ls "$W"/r.*.Swift.json 2>/dev/null | grep -v callgraph | grep -v hierarchy | head -1)
 EXPECTED="${CANDOR_SPEC:-../candor-spec}/conformance/expected.json"

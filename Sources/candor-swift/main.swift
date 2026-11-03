@@ -461,6 +461,7 @@ while let a = argIter.next() {
           fix <fn> <Effect>         the boundary hoist that would clear a violation
           fix-gate                  every policy crossing + its remedy
           unverified                pure/deny scopes that PASS but contain Unknown (--strict: exit 1)
+          accepts                   a PROPOSED policy: stale `accept` lines deleted, over-wide ones narrowed (writes no file; --adopt --because <reason> adds lines)
           privacy-manifest          the Info.plist usage keys the sensor reach requires; --verify diffs one
           gate --policy <file>      apply a policy to an EXISTING report, with NO scan — the supply-chain
                                     gate. Same exit codes and same verdict shape as a scan's --policy
@@ -470,7 +471,7 @@ while let a = argIter.next() {
                                     (exit 2): the report wire does not carry the evidence they need.
 
         ALL ACTIONS
-          path  tour  gains  fix  fix-gate  unverified  privacy-manifest  gate  parsepolicy
+          path  tour  gains  fix  fix-gate  unverified  accepts  privacy-manifest  gate  parsepolicy
 
           Query actions follow the same grammar as every candor engine: the report is DISCOVERED
           by default (walk up from CWD for a .candor/ dir; CANDOR_REPORT overrides). --report <locator>

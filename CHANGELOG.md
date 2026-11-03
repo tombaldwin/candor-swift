@@ -10,6 +10,9 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **`--help` lists `accepts`** (in the action block and under ALL ACTIONS). The verb existed but the help, which conformance PART 43
+  derives its verb matrix from, did not name it (SPEC §3.3: `--help` MUST list what the binary accepts).
+
 - **A refusal over a scan target that does not exist no longer creates `<target>/.candor/report.refused.json`.** `candor-swift
   bogusverb --report x` (a verb of a newer build handed to this one) read the bare word as the scan target and, on the unknown
   flag, wrote the refusal marker into a directory it created in the cwd. The default-prefix marker is now written only when the
