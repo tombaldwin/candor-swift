@@ -10,6 +10,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.41.0] — 2026-11-03
+
 - **`--help` lists `accepts`** (in the action block and under ALL ACTIONS). The verb existed but the help, which conformance PART 43
   derives its verb matrix from, did not name it (SPEC §3.3: `--help` MUST list what the binary accepts).
 
