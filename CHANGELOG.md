@@ -10,6 +10,9 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- `candor-swift accepts` with no report: still refuses (the current scan, not the baseline, is what the CI gate judges), but now names the config's `baseline` it did not use and why, and prints the two commands that work (`candor-swift . --out .candor/report`, then `candor-swift accepts --report .candor/report …`). The policy already came from `.candor/config`.
+- `candor-swift accepts`: every violation the proposal leaves red now carries its reason and remedy on stderr, grouped by reason (positional key, `(hash, fn)` twin, unwritable name, `Unknown` with no reason class, ambiguous entry). The JSON plan is unchanged.
+
 ## [0.41.0] — 2026-11-03
 
 - **`--help` lists `accepts`** (in the action block and under ALL ACTIONS). The verb existed but the help, which conformance PART 43

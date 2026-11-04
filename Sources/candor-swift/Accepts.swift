@@ -110,6 +110,47 @@ private func acceptsItem(_ line: Int, _ fn: String, _ rule: String, _ because: S
     return m
 }
 
+/// Does `accepts` have a report to read with no `--report`? `CANDOR_REPORT` counts as named (the operator chose it; the gate's
+/// own wording stays for a locator that matches nothing), and so does a recorded REFUSAL over the discovered prefix (the gate
+/// says that one). Otherwise the discovered prefix must name at least one report.
+private func acceptsReportDiscoverable() -> Bool {
+    if let env = ProcessInfo.processInfo.environment["CANDOR_REPORT"], !env.isEmpty { return true }
+    guard let prefix = discoverReportPrefix() else { return false }
+    return refusalMarkerFor(prefix) != nil || looksLikeReport(prefix)
+}
+
+/// ⟨0.41.1⟩ `accepts` with no report named and none discovered. The refusal says which report each choice would judge and prints
+/// commands that run. It does not fall back to the config's `baseline`: that is the PREVIOUS recorded scan, and a refresh against
+/// it would delete the entries of code written since and adopt only what the baseline held — a proposal the CI gate, which judges
+/// the CURRENT scan, would then contradict. The policy is discovered as the gate discovers it, so it is not the missing piece.
+private func acceptsNoReportMessage() -> String {
+    var base = ProcessInfo.processInfo.environment["CANDOR_BASELINE"].flatMap { $0.isEmpty ? nil : $0 }
+    if base == nil, let b = loadCandorConfig(targetPath: ".", lenient: true)["baseline"], !b.isEmpty { base = b }
+    let cur = ".candor/report"
+    var m = "candor-swift accepts: no report to judge — no report files found (and no --report / CANDOR_REPORT).\n"
+        + "  `accepts` reads a REPORT; it does not scan. The report that matches what CI gates is the CURRENT scan:\n"
+        + "      candor-swift . --out \(cur)     # exits 1 when the policy has violations, but the report is still written (`|| true` under `set -e`)\n"
+        + "      candor-swift accepts --report \(cur) --adopt --because <reason>\n"
+    if let b = base {
+        m += "  The config's baseline `\(b)` is the PREVIOUS recorded scan, so it is not used unasked (a refresh against it deletes "
+            + "entries for code written since). To judge it on purpose: candor-swift accepts --report \(b) ...\n"
+    }
+    return m
+}
+
+/// ⟨0.41.1⟩ Every violation the proposal leaves red because NO line could be written for it, with the reason and the remedy, so
+/// "after the proposal the gate exits 1 with N violation(s)" is never a number with no cause. Human channel only: the plan is
+/// unchanged. Up to five names per reason, then a count.
+private let acceptsRefusedWhy: [(key: String, why: String, remedy: String)] = [
+    ("positional", "keyed by POSITION (`<main>`, or a `#<n>` ordinal), which an `accept` line cannot name — an unrelated edit would re-point it at a different unit",
+     "give it a NAME (move the top-level code into a named function), re-scan, and run `accepts` again; or fix the violation"),
+    ("twin", "a (hash, fn) TWIN — two units with this name and different hashes, so no line could name one of them",
+     "rename one of the two, or gate the modules separately; or fix the violation"),
+    ("unwritable", "named with a `#` or whitespace, which cannot be written on a policy line", "rename it, or fix the violation"),
+    ("noclass", "carries an `Unknown` whose reason class this report does not carry, so no `Unknown[…]` line would cover it",
+     "re-scan with the current engine so the report carries its reason classes, then run `accepts` again; or fix the violation"),
+]
+
 func runAcceptsCLI(_ args: [String]) -> Never {
     // ---- the flags, validated FIRST: a usage error costs nothing and writes nothing ----------------------------
     var reportFlag: String?, policyFlag: String?
@@ -155,6 +196,11 @@ func runAcceptsCLI(_ args: [String]) -> Never {
     if adopt {
         guard let r = acceptsReason(rawBecause!) else { exit(2) }
         because = r
+    }
+    // ---- no report named and none discovered: still a refusal, but one that names the commands that work -------------
+    if reportFlag == nil, !acceptsReportDiscoverable() {
+        acceptsErr(acceptsNoReportMessage().trimmingCharacters(in: .newlines))
+        exit(2)
     }
     guard let policyPath = policyFlag ?? discoverPolicy() else {
         acceptsErr("candor-swift accepts: a policy is required — pass `--policy <file>`, set CANDOR_POLICY, or add a `policy` key to "
@@ -246,7 +292,8 @@ func runAcceptsCLI(_ args: [String]) -> Never {
             if u.unk && u.cls.isEmpty {
                 // The row's classes are not determinable: no `Unknown[...]` line could name them, so no wider line is proposed.
                 acceptsErr("candor-swift accepts: line \(L) (`\(e.fn)`) is EXCEEDED by an `Unknown` whose reason classes this report does "
-                           + "not carry — no wider line can be written for it; kept as is, and the row stays red.")
+                           + "not carry — no wider line can be written for it; kept as is, and the row stays red. Remedy: re-scan with the current engine so "
+                           + "the report carries its reason classes, then run `accepts` again; or fix the violation.")
                 continue
             }
             let prop = acceptsCanon(u.conc, u.unk ? u.cls : nil)
@@ -265,8 +312,12 @@ func runAcceptsCLI(_ args: [String]) -> Never {
             proposalComment[L] = acceptsMark + " exceeded (adds " + addList.joined(separator: " ") + ")" + acceptsReplace + text
         case "unjudged":
             unjudged.append(acceptsItem(L, e.fn, e.ruleKey, nil))
+        case "ambiguous":
+            // kept byte for byte — and said, so the row it leaves red has a cause
+            acceptsErr("candor-swift accepts: line \(L) (`\(e.fn)`) is AMBIGUOUS — two units share that name with different hashes, so the "
+                       + "entry accepts NEITHER; kept as written. Remedy: rename one of the two, or gate the modules separately.")
         default:
-            break           // ambiguous, or a state the gate did not name: kept byte for byte
+            break           // a state the gate did not name: kept byte for byte
         }
     }
 
@@ -274,15 +325,19 @@ func runAcceptsCLI(_ args: [String]) -> Never {
     struct Cand { var line: Int; var fn: String; var hash: String; var rule: String; var effects: [String] }
     var cands: [Cand] = []
     var seen = Set<String>()
+    var refused: [String: Set<String>] = [:]      // reason key -> the fns no entry could be written for
     for r in rows {
         guard let line = ruleLine[r.ruleKey] else { continue }
         if entries.contains(where: { $0.fn == r.name && $0.ruleKey == r.ruleKey }) { continue }
         if !seen.insert(r.ruleKey + "\u{0}" + r.name).inserted { continue }
-        if core.outcome.twins.contains(r.name) { continue }
-        if isAcceptPositionalKey(r.name) || r.name.unicodeScalars.contains(where: { $0 == "#" || " \t\n\r\u{0C}\u{0B}".unicodeScalars.contains($0) }) { continue }
+        if core.outcome.twins.contains(r.name) { refused["twin", default: []].insert(r.name); continue }
+        if isAcceptPositionalKey(r.name) { refused["positional", default: []].insert(r.name); continue }
+        if r.name.unicodeScalars.contains(where: { $0 == "#" || " \t\n\r\u{0C}\u{0B}".unicodeScalars.contains($0) }) {
+            refused["unwritable", default: []].insert(r.name); continue
+        }
         var conc = Set(r.effects)
         let unk = conc.remove("Unknown") != nil
-        if unk && r.classes.isEmpty { continue }
+        if unk && r.classes.isEmpty { refused["noclass", default: []].insert(r.name); continue }
         cands.append(Cand(line: line, fn: r.name, hash: r.hash, rule: r.ruleKey,
                           effects: acceptsCanon(conc, unk ? Set(r.classes) : nil)))
     }
@@ -358,6 +413,13 @@ func runAcceptsCLI(_ args: [String]) -> Never {
     for u in unjudged {
         acceptsErr("candor-swift accepts: line \(u["line"]!) (`\(u["fn"]!)` under `\(u["policyRule"]!)`) kept UNJUDGED — this route cannot "
                    + "evaluate that rule, so nothing is known about the entry. Gate at scan time.")
+    }
+    for w in acceptsRefusedWhy {
+        let fns = (refused[w.key] ?? []).sorted(by: byCP)
+        if fns.isEmpty { continue }
+        let shown = fns.prefix(5).map { "`\($0)`" }
+        acceptsErr("candor-swift accepts: \(fns.count) violation(s) get NO accept line — \(w.why): \(shown.joined(separator: ", "))"
+                   + (fns.count > shown.count ? ", … and \(fns.count - shown.count) more" : "") + ". Remedy: \(w.remedy).")
     }
     for ln in ignoredLines.sorted() {
         acceptsErr("candor-swift accepts: line \(ln) is IGNORED by the gate and kept as written — repairing it is yours.")

@@ -1001,7 +1001,7 @@ func resolveReportLocator(_ locator: String) -> String {
 // (canonical, report discovered). A QUIET probe — it must not emit the not-found chatter, so a canonical
 // first positional (a fn substring) simply reads as "not a report". Mirrors candor-java's `looksLikeReport`
 // so the surplus-1 trailing-policy case (`fix doNet Net policy.txt`) parses identically in both engines.
-private func looksLikeReport(_ tok: String) -> Bool {
+func looksLikeReport(_ tok: String) -> Bool {
     let fm = FileManager.default
     var isDir: ObjCBool = false
     if tok.hasSuffix(".json") {

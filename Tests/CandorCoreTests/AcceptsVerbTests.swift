@@ -136,4 +136,59 @@ final class AcceptsVerbTests: XCTestCase {
         XCTAssertTrue(r.out.contains("exceeded (adds Unknown[unresolved])"), r.out)
         XCTAssertFalse(r.out.contains("Unknown[]"), r.out)
     }
+
+    // ---- ⟨0.41.1⟩ field fixes ---------------------------------------------------------------------------------------
+
+    /// `accepts` with no report still refuses (the current scan, not the baseline, is what the CI gate judges), but
+    /// the refusal names the baseline it did not use and why, and prints the two commands that work here.
+    func testNoReportStillRefusesAndNamesTheUnusedBaselineAndTheTwoCommandsThatWork() throws {
+        let proj = dir.appendingPathComponent("proj")
+        try FileManager.default.createDirectory(at: proj.appendingPathComponent(".candor"), withIntermediateDirectories: true)
+        try "deny Fs dao\n".write(to: proj.appendingPathComponent(".candor/policy"), atomically: true, encoding: .utf8)
+        try "policy .candor/policy\nbaseline .candor/baseline.json\n".write(to: proj.appendingPathComponent(".candor/config"), atomically: true, encoding: .utf8)
+        let r = try ProcessHarness.run(bin, ["accepts", "--adopt", "--because", "x"], env: ["CANDOR_REPORT": ""], cwd: proj)
+        XCTAssertEqual(r.code, 2, r.err)
+        XCTAssertEqual(r.out, "", "a refusal prints no proposal")
+        XCTAssertTrue(r.err.contains(".candor/baseline.json") && r.err.contains("PREVIOUS") && r.err.contains("not used"), "names the baseline and why: \(r.err)")
+        XCTAssertTrue(r.err.contains("candor-swift . --out .candor/report"), "the command that writes the current scan: \(r.err)")
+        XCTAssertTrue(r.err.contains("candor-swift accepts --report .candor/report --adopt --because"), "then accepts over it: \(r.err)")
+        // No config: the same two commands, no baseline sentence.
+        let bare = dir.appendingPathComponent("bare")
+        try FileManager.default.createDirectory(at: bare, withIntermediateDirectories: true)
+        let b = try ProcessHarness.run(bin, ["accepts", "--policy", try policy("nb.pol", "deny Fs dao\n")], env: ["CANDOR_REPORT": ""], cwd: bare)
+        XCTAssertEqual(b.code, 2, b.err)
+        XCTAssertTrue(b.err.contains("candor-swift . --out .candor/report") && !b.err.contains("PREVIOUS"), b.err)
+        // An explicit --report that matches nothing keeps the loader's own wording.
+        let e = try ProcessHarness.run(bin, ["accepts", "--report", p("nothing-here"), "--policy", try policy("ne.pol", "deny Fs dao\n")], env: ["CANDOR_REPORT": ""], cwd: proj)
+        XCTAssertEqual(e.code, 2, e.err)
+        XCTAssertFalse(e.err.contains("PREVIOUS"), "an explicit locator is not rewritten: \(e.err)")
+    }
+
+    /// Every row the proposal leaves red because no line could be written for it says why and what to do.
+    func testEveryRowLeftRedCarriesItsReasonAndARemedy() throws {
+        try """
+        {"candor": {"version": "t", "toolchain": "swiftsyntax", "spec": "0.40"},
+         "functions": [
+           {"fn": "dao.f#0", "hash": "m", "inferred": ["Fs"], "direct": ["Fs"], "calls": []},
+           {"fn": "dao.t", "hash": "t1", "inferred": ["Fs"], "direct": ["Fs"], "calls": []},
+           {"fn": "dao.t", "hash": "t2", "inferred": ["Fs"], "direct": ["Fs"], "calls": []},
+           {"fn": "dao.sp ace", "hash": "sp", "inferred": ["Fs"], "direct": ["Fs"], "calls": []},
+           {"fn": "dao.w", "hash": "w1", "inferred": ["Fs"], "direct": ["Fs"], "calls": []},
+           {"fn": "dao.w", "hash": "w2", "inferred": ["Fs"], "direct": ["Fs"], "calls": []}],
+         "analyzed": {"count": 6}}
+        """.write(to: dir.appendingPathComponent("rr.json"), atomically: true, encoding: .utf8)
+        let pol = try policy("rr.pol", "deny Fs dao\naccept dao.t Fs for deny Fs dao because twin\n")
+        let r = try ProcessHarness.run(bin, ["accepts", "--report", p("rr.json"), "--policy", pol, "--adopt", "--because", "x"])
+        XCTAssertEqual(r.code, 0, r.err)
+        for tok in ["dao.f#0", "dao.w", "dao.sp ace"] {
+            XCTAssertTrue(r.err.split(separator: "\n").contains { $0.contains("`\(tok)`") && $0.contains("Remedy:") },
+                          "`\(tok)` must carry its reason AND a remedy on stderr:\n\(r.err)")
+        }
+        XCTAssertTrue(r.err.contains("POSITION"), r.err)
+        XCTAssertTrue(r.err.split(separator: "\n").contains { $0.contains("line 2") && $0.contains("AMBIGUOUS") && $0.contains("Remedy:") },
+                      "the ambiguous entry says what it is:\n\(r.err)")
+        let j = try ProcessHarness.run(bin, ["accepts", "--report", p("rr.json"), "--policy", pol, "--json"])
+        let d = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(j.out.utf8)) as? [String: Any])
+        XCTAssertEqual(Set(d.keys), ["mode", "text", "removed", "narrowed", "proposals", "unnamed", "unjudged", "ignored", "after"], "the JSON plan is unchanged")
+    }
 }
