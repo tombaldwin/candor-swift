@@ -10,6 +10,11 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.41.2] — 2026-11-05
+
+- **No change to candor-swift.** The version moves with the 0.41.2 family patch (a candor-java fix).
+
+
 ## [0.41.1] — 2026-11-04
 
 - `candor-swift accepts` with no report: still refuses (the current scan, not the baseline, is what the CI gate judges), but now names the config's `baseline` it did not use and why, and prints the two commands that work (`candor-swift . --out .candor/report`, then `candor-swift accepts --report .candor/report …`). The policy already came from `.candor/config`.
