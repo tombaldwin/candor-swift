@@ -12,7 +12,7 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## [0.41.2] — 2026-11-05
 
-- **No change to candor-swift.** The version moves with the 0.41.2 family patch (a candor-java fix).
+- **No change to candor-swift.** The version moves with the 0.41.2 family patch (candor-java and candor-ts fixes).
 
 
 ## [0.41.1] — 2026-11-04
