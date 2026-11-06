@@ -10,6 +10,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.41.3] — 2026-11-06
+
 - **No change to candor-swift.** The version moves with the 0.41.3 family patch (a candor-java fix).
 
 
