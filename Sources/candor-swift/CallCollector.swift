@@ -129,6 +129,11 @@ struct WitnessOwnersR1176 {
     var recvSelf = false
     var argTypeGen: [Int: Int] = [:]
     var recvTypeGen: [Int: Int] = [:]
+    /// SOUNDNESS R1490 residual (3) — the receiver's own tracked type (`FDesc().shout3()`), answering an `r:@<P>~<w>`
+    /// requirement (a protocol extension's `self`); and the caller's parameter index when the receiver is one of its own
+    /// generic-typed parameters, so the requirement forwards as `<idx>:@<P>~<w>`.
+    var recvTypeR1490: String? = nil
+    var recvParamR1490: Int? = nil
 }
 struct Call { var path: String; var leaf: String; var strArg: String?; var typed: Bool; var args: [ArgKind] = []
               var argTypes: [String?] = []     // inferred simple type per positional arg (nil = unknown) — overloads
@@ -378,6 +383,7 @@ final class CallCollector: SyntaxVisitor {
     let fieldTypeArgs: [String: [String: [String]]]  // SOUNDNESS R905 — Type -> field -> direct generic args
     let opaqueFields: [String: Set<String>]         // Type -> fields whose type is monomorphized
     let existentialFieldsR1473: [String: Set<String>]   // SOUNDNESS R1473 — see DeclCollector
+    let protocolSupersR1490: [String: Set<String>]      // SOUNDNESS R1490 residual (3) — local protocol -> protocols it refines
     let localTypes: Set<String>
     /// The modules THIS FILE imports, and the modules the SCANNED PROJECT itself defines. Together they
     /// decide whether a dotted callee (`Foundation.Process()`) is a MODULE-QUALIFIED SPELLING of a free
@@ -808,12 +814,64 @@ final class CallCollector: SyntaxVisitor {
     /// annotated local spelled `[any P]` / `[P]` (not `[some P]`, not `[T]`), or nil. The loop or closure binder over it
     /// then holds an existential exactly as `let x: any P` does; R1473 left these binders at release behaviour.
     func existentialElemR1490(_ raw: ExprSyntax) -> String? {
-        guard !Self.r1490Off, !Self.r1473Off, let n = Self.peel(raw).as(DeclReferenceExprSyntax.self)?.baseName.text else { return nil }
+        guard !Self.r1490Off, !Self.r1473Off else { return nil }
+        if let p = existentialArrayFieldR1490(raw) { return p }
+        guard let n = Self.peel(raw).as(DeclReferenceExprSyntax.self)?.baseName.text else { return nil }
         if let p = existentialArrayLocalsR1490[n] { return p }
         guard paramIndexR951[n] != nil, !isBoundLocal(n), !binderShadow.contains(n), let t = paramDeclTypesR996[n],
               let el = arrayElementType(t), let p = existentialAnnotationR1473(el),
               !genericParamNamesFn.contains(p), genericBoundsR951[p] == nil else { return nil }
         return p
+    }
+    /// SOUNDNESS R1490 residual (5) — `xs` / `self.xs` naming a STORED property of the enclosing type declared as an array of a
+    /// platform-protocol existential (`DeclCollector` records it as `[]<field>\u{1}<P>`), or nil. A local, parameter or
+    /// binder of that name shadows the field (Swift's lookup order). EXECUTED: `for x in xs { x.description }` over a
+    /// stored `[any CustomStringConvertible]` ran the conformer's `description` and read ABSENT.
+    static let r1490r5Off = ProcessInfo.processInfo.environment["CANDOR_R1490R5_OFF"] != nil
+    // ── SOUNDNESS R1498 residual — A LOOP OVER AN ARRAY OF TUPLES ──────────────────────────────────────────────────────
+    // R1498 typed a tuple's slots for an annotated local, a parameter, a field and a returned tuple, and mapped `for (a, _)
+    // in xs` over `xs: [(Loud, Int)]` as not covered: the element is a tuple, which no element index holds, so `a` was
+    // cleared and `a.eff()` read ABSENT (executed). Parameters and annotated locals spelled `[(A, B)]` only.
+    static let r1498fOff = ProcessInfo.processInfo.environment["CANDOR_R1498F_OFF"] != nil
+    static let r1504Off = ProcessInfo.processInfo.environment["CANDOR_R1504_OFF"] != nil   // R656's property and ctor halves
+    static let r1505Off = ProcessInfo.processInfo.environment["CANDOR_R1505_OFF"] != nil   // see DeclCollector.uniformCtorElementR1505
+    /// SOUNDNESS R1492 residual — R1492 (P) keyed a declaration's field TYPES and container ELEMENTS by its full path too, so
+    /// a unit in `extension A.B.T` finds them; the field's written GENERIC ARGUMENTS (`var gen: Box<Loud>`, R905) stayed under
+    /// the short name, so `gen.v.eff()` there read ABSENT (executed) while the same body in `extension TopT` charged.
+    static let r1492fOff = ProcessInfo.processInfo.environment["CANDOR_R1492F_OFF"] != nil
+    var arrayTupleLocalsR1498: [String: [String: String]] = [:]
+    func arrayTupleSlotsR1498(_ seq: ExprSyntax) -> [String: String]? {
+        guard !Self.r1498fOff, let n = Self.peel(seq).as(DeclReferenceExprSyntax.self)?.baseName.text else { return nil }
+        var slots: [String: String]? = nil
+        if let s = arrayTupleLocalsR1498[n] { slots = s }
+        else if paramIndexR951[n] != nil, !isBoundLocal(n), !binderShadow.contains(n), let t = paramDeclTypesR996[n],
+                let el = arrayElementType(t) { slots = tupleElements(el) }
+        guard let s0 = slots else { return nil }
+        let s = s0.filter { !genericParamNamesFn.contains($0.value) && genericBoundsR951[$0.value] == nil }
+        return s.isEmpty ? nil : s
+    }
+    func existentialArrayFieldR1490(_ raw: ExprSyntax) -> String? {
+        guard !Self.r1490r5Off, let et = enclosingType else { return nil }
+        let e = Self.peel(raw)
+        var name: String? = nil
+        if let dr = e.as(DeclReferenceExprSyntax.self) {
+            let n = dr.baseName.text
+            guard vars[n] == nil, !isBoundLocal(n), !binderShadow.contains(n), paramIndexR951[n] == nil,
+                  !paramNamesR851.contains(n) else { return nil }
+            name = n
+        } else if let ma = e.as(MemberAccessExprSyntax.self), ma.base.map({ Self.peel($0).trimmedDescription }) == "self" {
+            name = ma.declName.baseName.text
+        }
+        guard let n = name else { return nil }
+        for t in [et, Self.leafR1176(et)] {
+            if opaqueFields[t]?.contains(n) == true { return nil }
+            if let hit = existentialFieldsR1473[t]?.first(where: { $0.hasPrefix("[]\(n)\u{1}") }) {
+                let p = String(hit.dropFirst(n.count + 3))
+                guard STDLIB_PROTOCOLS.contains(p), !declaredTypes.contains(p), !localProtocols.contains(p) else { return nil }
+                return p
+            }
+        }
+        return nil
     }
     /// SOUNDNESS R1473 — the subset of `stringifyDispatches` whose operand is a declared existential (see
     /// `edgeStringWitness`); the Driver discloses these when chained.
@@ -891,6 +949,7 @@ final class CallCollector: SyntaxVisitor {
     // argument type is unknown resolves nothing, never a union over the package. The `@` keeps these requirements apart
     // from R951's operator witnesses, which the R1176 owner lists answer by a different rule.
     static let r1490Off = ProcessInfo.processInfo.environment["CANDOR_R1490_OFF"] != nil
+    static let r1502Off = ProcessInfo.processInfo.environment["CANDOR_R1502_OFF"] != nil   // see the Driver's property-edge loop
     static let r1490Probe = ProcessInfo.processInfo.environment["CANDOR_R1490_PROBE"] != nil
     /// The witness member names requirement `m` of platform protocol `p` (or of a platform protocol `p` refines) is answered
     /// by; empty when `m` is no requirement there. `hashValue`'s default witness calls `hash(into:)` (executed), so either
@@ -955,11 +1014,14 @@ final class CallCollector: SyntaxVisitor {
     /// parameter by (a)'s caller-witness requirement, a concrete type by its own unit or its dependency's report row.
     fileprivate func topLevelCoderR1490(_ node: FunctionCallExprSyntax, _ ma: MemberAccessExprSyntax, _ member: String) {
         guard !Self.r1490Off, let b = ma.base, let first = node.arguments.first, first.label == nil else { return }
+        if codingContainerCallR1490(node, b, first, member) { return }
         let r = rootOf(b)
         guard let coder = r.root, !r.opaqueHop, let spec = Self.topLevelCodersR1490[coder], spec.member == member,
               !localTypes.contains(coder), !declaredTypes.contains(coder) else { return }
         if spec.encoding {
-            if let p = stdExistentialRecvR1473(first.expression), p == "Encodable" {
+            if !Self.r1490r1Off {
+                answerValueWitnessR1490(first.expression, "encode")   // R1490 residual (1): adds `[FEnc]` / `FEnc?` values
+            } else if let p = stdExistentialRecvR1473(first.expression), p == "Encodable" {
                 stdReqReads.append((p, "encode"))
             } else if let t = typeAtR1490(first.expression) {
                 answerConcreteWitnessR1490(t, "encode")
@@ -975,6 +1037,82 @@ final class CallCollector: SyntaxVisitor {
             if Self.r1490Probe { FileHandle.standardError.write("R1490CODER \(coder).decode \(t)\n".data(using: .utf8)!) }
         }
     }
+    // ── SOUNDNESS R1490 residual (1) — A CODING CONTAINER'S `encode` / `decode` RUNS THE VALUE'S OWN WITNESS ─────────────
+    // Inside a hand-written `encode(to:)`, `var c = encoder.container(keyedBy: K.self); try c.encode(inner, forKey: .i)` runs
+    // `inner`'s `encode(to:)`; `singleValueContainer()` / `unkeyedContainer()` the same; `c.decode(T.self, forKey:)` runs
+    // `T.init(from:)` (EXECUTED: each wrote its marker and read ABSENT). The container's TYPE is never tracked (`c` has no
+    // root), so the receiver is recognised by where it came from: a binder initialised by one of the SDK's container
+    // factories, a value annotated with one of the six container protocols/structs, or the factory call itself as the
+    // receiver. The value is then answered exactly as R1490 (d)'s top-level coder answers it (existential, generic,
+    // concrete local, concrete chained); an `Int`/`String` or any platform value answers nothing.
+    static let r1490r1Off = ProcessInfo.processInfo.environment["CANDOR_R1490R1_OFF"] != nil
+    static let r1490r2Off = ProcessInfo.processInfo.environment["CANDOR_R1490R2_OFF"] != nil   // see the Driver's synthesized walk
+    static let r1490r6Off = ProcessInfo.processInfo.environment["CANDOR_R1490R6_OFF"] != nil   // see the Driver's `answerWitnessR1490`
+    var codingContainerLocalsR1490: Set<String> = []
+    static let codingContainerFactoriesR1490: Set<String> = [
+        "container", "singleValueContainer", "unkeyedContainer", "nestedContainer", "nestedUnkeyedContainer"]
+    static let codingContainerTypesR1490: Set<String> = [
+        "KeyedEncodingContainer", "KeyedDecodingContainer", "SingleValueEncodingContainer", "SingleValueDecodingContainer",
+        "UnkeyedEncodingContainer", "UnkeyedDecodingContainer"]
+    static func codingContainerTypeR1490(_ n: String?) -> Bool { n.map { codingContainerTypesR1490.contains($0) } ?? false }
+    /// `x.container(keyedBy:)` and the other SDK factories (through `try`, `try!`, `try?`, parentheses).
+    func isCodingContainerExprR1490(_ raw: ExprSyntax) -> Bool {
+        var e = Self.peel(raw)
+        if let t = e.as(TryExprSyntax.self) { e = Self.peel(t.expression) }
+        guard let call = e.as(FunctionCallExprSyntax.self), let ma = Self.peel(call.calledExpression).as(MemberAccessExprSyntax.self),
+              ma.base != nil, Self.codingContainerFactoriesR1490.contains(ma.declName.baseName.text) else { return false }
+        let labels = call.arguments.map { $0.label?.text }
+        switch ma.declName.baseName.text {
+        case "container": return labels == ["keyedBy"]
+        case "singleValueContainer", "unkeyedContainer": return labels.isEmpty
+        case "nestedContainer": return labels == ["keyedBy", "forKey"]
+        case "nestedUnkeyedContainer": return labels == ["forKey"]
+        default: return false
+        }
+    }
+    private func isCodingContainerRecvR1490(_ b: ExprSyntax) -> Bool {
+        if isCodingContainerExprR1490(b) { return true }
+        guard let n = Self.peel(b).as(DeclReferenceExprSyntax.self)?.baseName.text else { return false }
+        if codingContainerLocalsR1490.contains(n) { return true }
+        if paramIndexR951[n] != nil, !isBoundLocal(n), !binderShadow.contains(n), let t = paramDeclTypesR996[n],
+           Self.codingContainerTypeR1490(typeName(t).name) { return true }
+        return false
+    }
+    /// Returns true when the call was a coding container's encode/decode (answered or not).
+    private func codingContainerCallR1490(_ node: FunctionCallExprSyntax, _ b: ExprSyntax, _ first: LabeledExprSyntax,
+                                          _ member: String) -> Bool {
+        guard !Self.r1490r1Off, ["encode", "encodeIfPresent", "encodeConditional", "decode", "decodeIfPresent"].contains(member),
+              isCodingContainerRecvR1490(b) else { return false }
+        if member.hasPrefix("encode") {
+            answerValueWitnessR1490(first.expression, "encode")
+            if Self.r1490Probe { FileHandle.standardError.write("R1490CONT encode \(first.expression.trimmedDescription.prefix(60))\n".data(using: .utf8)!) }
+        } else {
+            guard let mt = Self.peel(first.expression).as(MemberAccessExprSyntax.self), mt.declName.baseName.text == "self",
+                  let tb = mt.base else { return true }
+            var te = Self.peel(tb)
+            if let arr = te.as(ArrayExprSyntax.self), arr.elements.count == 1, let el = arr.elements.first { te = Self.peel(el.expression) }
+            if let opt = te.as(OptionalChainingExprSyntax.self) { te = Self.peel(opt.expression) }
+            guard let t = typeNameOfExpr(te), !STDLIB_NOMINALS.contains(t) else { return true }
+            answerConcreteWitnessR1490(t, "init(Decoder)")
+            if Self.r1490Probe { FileHandle.standardError.write("R1490CONT decode \(t)\n".data(using: .utf8)!) }
+        }
+        return true
+    }
+    /// The value an encoder is handed: R1490 (d)'s rule (declared existential, concrete type, generic parameter), plus the
+    /// ELEMENT of an array/optional value whose own type is the stdlib's (`[FEnc]` runs each element's `encode(to:)`).
+    private func answerValueWitnessR1490(_ v: ExprSyntax, _ w: String) {
+        if let p = stdExistentialRecvR1473(v), p == "Encodable" {
+            stdReqReads.append((p, w))
+        } else if let t = typeAtR1490(v), !STDLIB_NOMINALS.contains(t) {
+            answerConcreteWitnessR1490(t, w)
+        } else if !Self.r1490r1Off, Self.peel(v).as(DeclReferenceExprSyntax.self)?.baseName.text != "self",
+                  let el = elementTypeOf(v), !el.mono, !STDLIB_NOMINALS.contains(el.name),
+                  !STDLIB_PROTOCOLS.contains(el.name), !localProtocols.contains(el.name), !genericParamNamesFn.contains(el.name) {
+            answerConcreteWitnessR1490(dealias(el.name), w)
+        } else {
+            genericRequirementR1490(v, w)
+        }
+    }
     /// A concrete type's witness `w`: this scan's unit (a soft keyed edge, dropped when the type declares none), or the
     /// chained report's row under `<Type>.<w>`.
     private func answerConcreteWitnessR1490(_ t: String, _ w: String) {
@@ -982,6 +1120,16 @@ final class CallCollector: SyntaxVisitor {
             // only a type this scan DECLARES: an extended platform type's coder witness is the platform's
             if declaredTypes.contains(t) || declaredTypes.contains(Self.leafR1176(t)) { propertyEdges.insert("\(t).\(w)") }
         } else if !STDLIB_PROTOCOLS.contains(t), !localProtocols.contains(t) {
+            if w == "init(Decoder)", !Self.r1502Off {
+                // SOUNDNESS R1502 (chained half) — a dependency type whose one hand-written initializer is `init(from:)`
+                // publishes it under the bare `T.init`; the suffixed key exists only beside a second initializer. The
+                // suffixed key is asked first (R1415's precise-before-union rule); the bare key, the union of the
+                // type's initializers (SPEC ⟨0.25⟩), only when it misses.
+                externalMembers["\(t).init", default: []].insert("witness")
+                externalMemberPrecise["\(t).init", default: []].insert("\(t).init(Decoder)")
+                noteExternalCandidate("\(t).init", module: nil)
+                return
+            }
             externalMembers["\(t).\(w)", default: []].insert("witness")
             noteExternalCandidate("\(t).\(w)", module: nil)
         }
@@ -1037,6 +1185,7 @@ final class CallCollector: SyntaxVisitor {
     func genericRequirementR1490(_ base: ExprSyntax?, _ member: String) {
         guard !Self.r1490Off, !Self.r951Off, let base, !Self.METATYPE_MEMBERS.contains(member) else { return }
         let e = Self.peel(base)
+        if e.as(DeclReferenceExprSyntax.self)?.baseName.text == "self" { selfRequirementR1490(member); return }
         var req: String? = nil, proto: String? = nil
         if let n = e.as(DeclReferenceExprSyntax.self)?.baseName.text, let idx = paramIndexR951[n],
            !isBoundLocal(n), !binderShadow.contains(n), let t = paramTypesR951[n] {
@@ -1056,6 +1205,41 @@ final class CallCollector: SyntaxVisitor {
         if ws.isEmpty { ws = Self.bridgeWitnessesR1490(p, member) }   // (c) `E: Error` `.localizedDescription`
         for w in ws where genericWitnessReqs.insert("\(r):@\(w.proto)~\(w.witness)").inserted {
             if Self.r1490Probe { FileHandle.standardError.write("R1490REQ \(r):@\(w.proto)~\(w.witness) \(p).\(member)\n".data(using: .utf8)!) }
+        }
+    }
+    // ── SOUNDNESS R1490 residual (3) — `self` INSIDE A PROTOCOL EXTENSION IS THE CALLER'S `Self` ─────────────────────────
+    // `extension CustomStringConvertible { func shout() -> String { self.description } }`, `extension Encodable { func json()
+    // { JSONEncoder().encode(self) } }`, and a bare `description` in `extension LP` (`protocol LP: CustomStringConvertible`)
+    // run the RECEIVER's witness: `FDesc().shout()` wrote FDesc's file and read ABSENT (executed). R1473 refused `self` on
+    // purpose (a CHA over every conformer fabricated); this is the per-call-site rule R1490 (a) uses for a generic
+    // parameter: the requirement is recorded as `r:@<P>~<w>` and answered at each call site from the RECEIVER's own tracked
+    // type (`WitnessOwnersR1176.recvTypeR1490`), forwarded through the caller's own `self` (another extension member) or its
+    // generic parameter. A receiver of unknown type resolves nothing — never a union over the package.
+    static let r1490r3Off = ProcessInfo.processInfo.environment["CANDOR_R1490R3_OFF"] != nil
+    /// The PLATFORM protocols whose requirements `self` answers inside the enclosing declaration: the protocol a platform
+    /// protocol extension extends, or every platform protocol a LOCAL protocol refines. Empty in a type's own body.
+    func selfPlatformProtocolsR1490() -> [String] {
+        guard !Self.r1490r3Off, let et = enclosingType else { return [] }
+        if STDLIB_PROTOCOLS.contains(et), !declaredTypes.contains(et), !localProtocols.contains(et) { return [et] }
+        guard localProtocols.contains(et) else { return [] }
+        var out = Set<String>(), seen = Set<String>(), frontier = [et]
+        while let q = frontier.popLast() {
+            guard seen.insert(q).inserted else { continue }
+            for s in (supertypesAll[q] ?? []).union(protocolSupersR1490[q] ?? []) {
+                if STDLIB_PROTOCOLS.contains(s), !declaredTypes.contains(s), !localProtocols.contains(s) { out.insert(s) }
+                else if localProtocols.contains(s) { frontier.append(s) }
+            }
+        }
+        return out.sorted()
+    }
+    func selfRequirementR1490(_ member: String) {
+        guard !Self.r1490r3Off, !Self.METATYPE_MEMBERS.contains(member) else { return }
+        for p in selfPlatformProtocolsR1490() {
+            var ws = Self.stdlibRequirementWitnesses(p, member).map { (proto: p, witness: $0) }
+            if ws.isEmpty { ws = Self.bridgeWitnessesR1490(p, member) }
+            for w in ws where genericWitnessReqs.insert("r:@\(w.proto)~\(w.witness)").inserted {
+                if Self.r1490Probe { FileHandle.standardError.write("R1490REQ r:@\(w.proto)~\(w.witness) self.\(member)\n".data(using: .utf8)!) }
+            }
         }
     }
     // SOUNDNESS R1415 — ONE CHANNEL FOR "A BODY OF A DEPENDENCY'S TYPE RUNS HERE WITHOUT BEING SPELLED".
@@ -1237,6 +1421,7 @@ final class CallCollector: SyntaxVisitor {
          fieldTypeArgs: [String: [String: [String]]] = [:],
          opaqueFields: [String: Set<String>] = [:],
          existentialFieldsR1473: [String: Set<String>] = [:],
+         protocolSupersR1490: [String: Set<String>] = [:],
          enumCaseValueType: [String: String],
          metatypeEnumCaseValueType: [String: String] = [:],
          /// SOUNDNESS R704 (b1) — the unit's METATYPE PARAMETERS whose base neither bound map claimed,
@@ -1341,6 +1526,7 @@ final class CallCollector: SyntaxVisitor {
         self.fieldTypeArgs = fieldTypeArgs          // R905
         self.opaqueFields = opaqueFields
         self.existentialFieldsR1473 = existentialFieldsR1473
+        self.protocolSupersR1490 = protocolSupersR1490
         self.localTypes = localTypes
         self.declaredTypes = declaredTypes
         self.localProtocols = localProtocols
@@ -6081,6 +6267,8 @@ final class CallCollector: SyntaxVisitor {
         homeAnchoredLocals.removeValue(forKey: name)
         existentialLocalsR1473.removeValue(forKey: name)   // SOUNDNESS R1473
         existentialArrayLocalsR1490.removeValue(forKey: name)   // SOUNDNESS R1490
+        codingContainerLocalsR1490.remove(name)                 // SOUNDNESS R1490 residual (1)
+        arrayTupleLocalsR1498.removeValue(forKey: name)          // SOUNDNESS R1498 residual (for-in)
     }
 
     /// A BINDER THAT **CAN** TYPE THE NEW BINDING STILL HAS TO INVALIDATE THE OLD ONE, and the branches
@@ -7045,7 +7233,17 @@ final class CallCollector: SyntaxVisitor {
                     FileHandle.standardError.write("R585HIT forin \(name) -> \(me)\n".data(using: .utf8)!)
                 }
                 metatypeBinders[name] = me
+            } else if let slots = arrayTupleSlotsR1498(node.sequence) {
+                tupleElem[name] = slots   // SOUNDNESS R1498 residual — `for t in xs` over `[(a: A, n: Int)]`: `t.a` / `t.0`
             } else { clearBinding(name) }
+        } else if let tup = node.pattern.as(TuplePatternSyntax.self), let slots = arrayTupleSlotsR1498(node.sequence) {
+            // SOUNDNESS R1498 residual — `for (a, _) in xs` over `xs: [(Loud, Int)]`: each binder takes its slot's type
+            // (EXECUTED: `a.eff()` wrote the marker and read ABSENT). The tuple TYPE is written in the source; nothing is
+            // inferred, and a slot typed by a generic parameter was dropped where the slots were read.
+            for (idx, el) in tup.elements.enumerated() {
+                guard let nm = el.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
+                if let t = slots[String(idx)] { if !bindCallableElement(nm, t) { vars[nm] = t } } else { clearBinding(nm) }
+            }
         } else if let tup = node.pattern.as(TuplePatternSyntax.self), tup.elements.count == 2,
                   let slots = zipElementSlots(node.sequence) {
             // SOUNDNESS R349 — `for (g, _) in zip(v, w)`. The arm below requires the SECOND binder to be
@@ -10059,6 +10257,20 @@ final class CallCollector: SyntaxVisitor {
                     propertyEdges.insert("\(wrapper).wrappedValue")
                 }
                 insertPropertyEdge("\(root).\(prop)", at: Syntax(node))   // R1105
+                // SOUNDNESS R1504 — R656'S PROPERTY HALF. `pushType` puts an EXTENDED type in `localTypes`, so with any
+                // `extension DT { }` in the consumer (EMPTY included) a read of a dependency type's computed property
+                // took this local branch, edged a key no unit answers, and never reached the dependency candidate below:
+                // `d.prop` / `DT().prop` / `self.prop` read ABSENT chained while the dependency's report carried
+                // `DT.prop` [Fs] (executed; published 0.41.3 too). R656 closed the METHOD half with exactly this predicate
+                // (`declaredTypes`, and not through an unexplained hop). The candidate self-filters: a stored or pure
+                // property, and any member the extension itself declares, has no dependency row.
+                if !Self.r1504Off, !kappaClassified, !recv.opaqueHop, !declaredTypes.contains(root),
+                   !declaredTypes.contains(Self.leafR1176(root)), !Self.METATYPE_MEMBERS.contains(prop),
+                   recv.isVar || root.first?.isUppercase == true, !STDLIB_PROTOCOLS.contains(root) {
+                    vbHit("R1504", "prop \(root).\(prop)")
+                    externalMembers["\(root).\(prop)", default: []].insert("prop")
+                    noteExternalCandidate("\(root).\(prop)", module: spelledModule(of: node.base))
+                }
                 // SOUNDNESS R1490 (e) — `x.hashValue` on a type that writes only `hash(into:)` runs it: the stdlib's
                 // default `hashValue` hashes through `hash(into:)` (executed). The key drops when the type declares none.
                 if !Self.r1490Off, prop == "hashValue" { insertPropertyEdge("\(root).hash", at: Syntax(node)) }
@@ -10234,6 +10446,7 @@ final class CallCollector: SyntaxVisitor {
                     vbHit("R904", "\(et).\(n)")
                     protoPropReads.append((et, n))
                 }
+                if !r1472SelfBound, !isBoundLocal(n), vars[n] == nil, paramIndexR951[n] == nil { selfRequirementR1490(n) }   // R1490 residual (3)
                 if let et = enclosingType, fields[et]?[n] != nil { return .skipChildren }
                 if r1472Bound { return .skipChildren }   // SOUNDNESS R1472 — the closure parameter, never a global
                 globalReads.insert(n)
@@ -10260,6 +10473,7 @@ final class CallCollector: SyntaxVisitor {
                 vbHit("R904", "bare \(et).\(n)")
                 protoPropReads.append((et, n))
             }
+            if vars[n] == nil, paramIndexR951[n] == nil { selfRequirementR1490(n) }   // R1490 residual (3)
         }
         // SOUNDNESS R1105 (c) — a bare name the enclosing type declares as a FIELD is `self.n`: Swift's lookup finds
         // the member before any module-scope global, so it is never a read of a same-named global. The base-position
@@ -10798,7 +11012,17 @@ final class CallCollector: SyntaxVisitor {
         var recvExpr: ExprSyntax? = nil
         if let ma = callee.as(MemberAccessExprSyntax.self), let b = ma.base {
             if Self.peel(b).as(DeclReferenceExprSyntax.self)?.baseName.text == "self" { o.recvSelf = true; any = true }
-            else { recvExpr = b }
+            else {
+                recvExpr = b
+                if !Self.r1490r3Off {   // SOUNDNESS R1490 residual (3)
+                    if let t = typeAtR1490(b) { o.recvTypeR1490 = t; any = true }
+                    else if let n = Self.peel(b).as(DeclReferenceExprSyntax.self)?.baseName.text, let idx = paramIndexR951[n],
+                            !isBoundLocal(n), !binderShadow.contains(n), let t = paramTypesR951[n],
+                            monoNames.contains(n) || genericParamNamesFn.contains(t) {
+                        o.recvParamR1490 = idx; any = true
+                    }
+                }
+            }
         } else if callee.is(DeclReferenceExprSyntax.self), enclosingType != nil,
                   callee.as(DeclReferenceExprSyntax.self)?.baseName.text.first?.isUppercase == false {
             o.recvSelf = true; any = true   // a bare `add(x)` inside a method is `self.add(x)` (or a free function)
@@ -12316,6 +12540,10 @@ final class CallCollector: SyntaxVisitor {
             if binding.typeAnnotation == nil, let iv = binding.initializer?.value, let hop = holdsHopOf(iv) {
                 holdsVars[name] = hop   // ⟨0.40⟩ (cleared by `shadowName` above on every rebind)
             }
+            if !Self.r1490r1Off, binding.typeAnnotation.map({ Self.codingContainerTypeR1490(typeName($0.type).name) })
+                ?? binding.initializer.map({ isCodingContainerExprR1490($0.value) }) ?? false {
+                codingContainerLocalsR1490.insert(name)                                           // SOUNDNESS R1490 residual (1)
+            }
             if let ann = binding.typeAnnotation, let p = existentialAnnotationR1473(ann.type) {
                 existentialLocalsR1473[name] = p                                                  // SOUNDNESS R1473
             } else if !Self.r1490Off, let ann = binding.typeAnnotation, let el = arrayElementType(ann.type),
@@ -12326,6 +12554,9 @@ final class CallCollector: SyntaxVisitor {
             }
             if let ann = binding.typeAnnotation {
                 if !tupleElements(ann.type).isEmpty { tupleElem[name] = tupleElements(ann.type) }  // `let p: (A, B)`
+                if !Self.r1498fOff, let el = arrayElementType(ann.type), !tupleElements(el).isEmpty {
+                    arrayTupleLocalsR1498[name] = tupleElements(el)                                // R1498 residual: `[(A, B)]`
+                }
                 let t = typeName(ann.type)
                 // R178 — `|| isCallableTypeName(t.name)`: `let l: Cb = f` and `let l: Cb? = h.cb` are
                 // function-typed locals whose `isFunction` flag reads false because `typeName` cannot

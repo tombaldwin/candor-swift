@@ -10,6 +10,27 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R1504 — an `extension` on a dependency type no longer silences its constructors and properties.** R656
+  closed the method-call half: with ANY `extension DT { }` in the consumer (an empty one included), `DT(v: 1)`, `d.prop`,
+  `DT().prop`, and `self.prop` / `self.init(v:)` inside that extension still read ABSENT chained, while the same consumer
+  without the extension charged them (executed; published 0.41.3 too). An extension-only owner's property read now also
+  records the dependency candidate, and a constructor whose local initializers admit none of its labels asks the chained
+  reports, as the unextended consumer does. Gates can turn red. Kill switch `CANDOR_R1504_OFF`.
+- **⚠ SOUNDNESS R1490 residuals, R1502, R1503 — more platform-protocol witnesses reached.** (1) a coding container's
+  `encode(_:forKey:)` / `encode(_:)` / `decode(_:forKey:)` inside a hand-written `encode(to:)` / `init(from:)`, and an
+  array value handed to a coder; (2) a SYNTHESIZED `Encodable` / `Decodable` conformer's stored properties (honouring a
+  nested `CodingKeys`; computed and static members are not encoded); (3) `self` in a protocol extension (`extension
+  Encodable { JSONEncoder().encode(self) }`, `self.description`, a bare requirement in `extension LP` with `LP` refining a
+  platform protocol), answered at each call site from the receiver's type; (5) a stored `[any P]` field iterated; (6) a
+  platform type this scan itself conforms (`extension Int: LocalizedError`); R1502 `decode(T.self, from:)` where `T`'s one
+  hand-written initializer is `init(from:)` (its unit is the bare `T.init`); R1503 a dependency type the consumer EXTENDS
+  lost every R1490 answer chained. Each was ABSENT over an executed file write. Gates can turn red. Kill switches
+  `CANDOR_R1490R1_OFF`, `R1490R2_OFF`, `R1490R3_OFF`, `R1490R5_OFF`, `R1490R6_OFF` (also R1503), `CANDOR_R1502_OFF`.
+- **⚠ SOUNDNESS R1498 / R1492 residuals, R1505 — receiver typing.** `for (a, _) in xs` / `for t in xs` over a parameter or
+  annotated local `[(A, B)]` (`CANDOR_R1498F_OFF`); a field's written generic argument (`var gen: Box<Loud>`) read from
+  `extension A.B.T` (`CANDOR_R1492F_OFF`); an unannotated stored property initialised by an array literal of one
+  constructor, `var xs = [Loud()]` (`CANDOR_R1505_OFF`). Each was silent over an executed file write.
+
 - **⚠ SOUNDNESS R1499 — a hop the platform declares is not the local class.** `final class TLoc: Thread { func
   removeAllObjects() }` with `l.threadDictionary.removeAllObjects()`: the unexplained hop kept `TLoc` (R567's floor) and
   charged `TLoc.removeAllObjects`, which never runs (executed: `threadDictionary` is Thread's `NSMutableDictionary`). On a

@@ -428,6 +428,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var enumPayloadsR1272Raw: [(enumName: String, payload: String, scopes: [String])] = []   // SOUNDNESS R1272
     var opaqueFields: [String: Set<String>] = [:]
     var existentialFieldsR1473: [String: Set<String>] = [:]   // SOUNDNESS R1473
+    var storedFieldsR1490: [String: [String]] = [:]           // SOUNDNESS R1490 residual (2)
+    var codingKeysR1490: [String: Set<String>] = [:]          // SOUNDNESS R1490 residual (2)
     var caseAssocAll: [String: Set<String>] = [:]
     var caseAssocMetatypeAll: [String: Set<String>] = [:]   // R585 (b10)
     var staticFactoryFields: [(type: String, field: String, leaf: String)] = []
@@ -1069,6 +1071,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         enumPayloadsR1272Raw.append(contentsOf: c.enumPayloadsR1272)   // R1272
         for (t, fs) in c.opaqueFields { opaqueFields[t, default: []].formUnion(fs) }
         for (t, fs) in c.existentialFieldsR1473 { existentialFieldsR1473[t, default: []].formUnion(fs) }   // R1473
+        for (t, fs) in c.storedFieldsR1490 where storedFieldsR1490[t] == nil { storedFieldsR1490[t] = fs }   // R1490 residual (2)
+        for (t, ks) in c.codingKeysR1490 { codingKeysR1490[t, default: []].formUnion(ks) }                 // R1490 residual (2)
         for (cn, ts) in c.caseAssoc { caseAssocAll[cn, default: []].formUnion(ts) }
         for (cn, ts) in c.caseAssocMetatype { caseAssocMetatypeAll[cn, default: []].formUnion(ts) }   // R585
         for (pn, ms) in c.protocolMethods { protocolMethods[pn, default: []].formUnion(ms) }
@@ -1753,6 +1757,25 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             ($0.0 == "_" ? nil : $0.0, $0.1.hasDefault, $0.1.variadic) }
     }
     let r1047Off = ProcessInfo.processInfo.environment["CANDOR_R1047_OFF"] != nil
+    // SOUNDNESS R1504 — R656'S CONSTRUCTOR HALF. With any `extension DT { }` in the consumer (EMPTY included), `DT(v: 1)`
+    // and `self.init(v: w)` inside that extension took the LOCAL constructor arms (`localTypes` holds every extended type),
+    // R1047's label filter correctly admitted no local init, and the arm still set `resolved` — so the dependency join
+    // that answers the same call for a consumer WITHOUT the extension never ran, and the call read ABSENT while
+    // `DT.init(v:)` wrote a file (executed; published 0.41.3 too). For an EXTENSION-ONLY owner whose local inits admit none
+    // of the call's labels, the call is the dependency's: it is asked of the chained reports the way the unextended
+    // consumer asks it (`<pkg>#<Owner>.init`, R1415's union key), and only a hit marks it resolved — no new disclosure.
+    func extensionOnlyCtorDepJoinR1504(_ owner: String, _ f: FnInfo) -> Bool {
+        guard !CallCollector.r1504Off, !deps.isEmpty, !owner.contains("."), !declaredTypes.contains(owner),
+              !STDLIB_NOMINALS.contains(owner), !PLATFORM_VALUE_TYPES.contains(owner) else { return false }
+        let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+        var hits: [DepEntry] = []
+        for tier in joinTiers(file, module: nil) where hits.isEmpty {
+            for (p, _) in tier { if let e = deps.lookup("\(p)#\(owner).init") { hits.append(e) } }
+        }
+        if CallCollector.veinBProbe { FileHandle.standardError.write("VBHIT\tR1504\tctor \(f.qual) \(owner).init n=\(hits.count)\n".data(using: .utf8)!) }
+        for e in hits { applyDepEntry(e, to: f.qual) }
+        return !hits.isEmpty
+    }
     func extensionInitLabelsAdmit(_ call: Call, _ target: String) -> Bool {
         // The OWNER: an unqualified ctor's path is the type (`String`); a typed call's is `String.init`.
         let owner = call.path.hasSuffix(".init") ? String(call.path.dropLast(5)) : call.path
@@ -4150,6 +4173,82 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 "R1473HIT \(site) \(f.qual) \(p).\(m) edges=\(ts.sorted()) disclosed=\(disclosed)\n".data(using: .utf8)!)
         }
     }
+    // ── SOUNDNESS R1490 residual (2) — A SYNTHESIZED `Codable` CONFORMANCE RUNS ITS STORED PROPERTIES' WITNESSES ─────────
+    // `struct Syn: Encodable { var inner: FEnc }` has no `encode(to:)` unit: the compiler synthesizes one that encodes each
+    // stored property (the ones a nested `CodingKeys` names, when it declares one), and the same for `init(from:)`.
+    // EXECUTED: `JSONEncoder().encode(Syn())` ran `FEnc.encode(to:)`, and `decode(SynD.self, from:)` ran `FDec.init(from:)`,
+    // while both callers read ABSENT — R1490 (d) asked the unit `Syn.encode`, which does not exist. Asked only where that
+    // unit is missing on a type DECLARED here and recorded as conforming to `Encodable`/`Decodable`/`Codable`. Each stored
+    // property's type (and an array's/optional's/dictionary's element) answers the way R1490 answers a concrete type: its
+    // own unit, its own synthesized walk (bounded, cycle-safe), or the chained report's row; a field DECLARED `any
+    // Encodable` takes R1473's existential dispatch. A platform or stdlib field type answers nothing (its witness is the
+    // SDK's), and a generic-parameter field (`let t: T`) is a residual — its instantiation is the caller's.
+    let r1490r2Off = CallCollector.r1490r2Off
+    func codableConformsR1490(_ t: String, _ p: String) -> Bool {
+        for q in [p, "Codable"] {
+            let s = subtypesOf[q] ?? []
+            if s.contains(t) || s.contains(CallCollector.leafR1176(t)) { return true }
+        }
+        return false
+    }
+    /// The units `w` (`encode` / `init(Decoder)`) of a LOCAL type answers directly, with R1502's bare-qual decode answer.
+    func codableUnitR1490(_ t: String, _ w: String) -> Set<String> {
+        var ts = resolveQual("\(t).\(w)")
+        if ts.isEmpty, w == "init(Decoder)", !CallCollector.r1502Off {
+            for q in resolveQual("\(t).init") {
+                guard let fi = fnInfoByQualR1081[q], fi.paramSig.count == 1, fi.paramSig[0].type == "Decoder",
+                      fi.paramLabels.first == "from" else { continue }
+                ts.insert(q)
+            }
+        }
+        return ts
+    }
+    func synthesizedCodableR1490(_ type: String, _ w: String, caller: String, _ seen: inout Set<String>) {
+        guard !r1490r2Off, w == "encode" || w == "init(Decoder)", seen.count < 64, seen.insert(type).inserted,
+              localTypes.contains(type), declaredTypes.contains(type) || declaredTypes.contains(CallCollector.leafR1176(type)),
+              codableConformsR1490(type, w == "encode" ? "Encodable" : "Decodable") else { return }
+        let keys = [type, CallCollector.leafR1176(type)]
+        guard let stored = keys.lazy.compactMap({ storedFieldsR1490[$0] }).first else { return }
+        let ck = keys.lazy.compactMap({ codingKeysR1490[$0] }).first
+        let file = String((locOf[caller] ?? "").prefix { $0 != ":" })
+        for name in stored where ck?.contains(name) ?? true {
+            var tys: [String] = []
+            if let fi = keys.lazy.compactMap({ fields[$0]?[name] }).first, !fi.isFunction, let n = fi.name { tys.append(n) }
+            if let el = keys.lazy.compactMap({ fieldArrayElem[$0]?[name] }).first { tys.append(el) }
+            if let dv = keys.lazy.compactMap({ fieldDictValue[$0]?[name] }).first { tys.append(dv) }
+            if let c = keys.lazy.compactMap({ fieldContainersR1176[$0]?[name] }).first { tys.append(contentsOf: c.args) }
+            let opaque = keys.contains { opaqueFields[$0]?.contains(name) == true }
+            for t in tys where !opaque {
+                if w == "encode", t == "Encodable", keys.contains(where: { existentialFieldsR1473[$0]?.contains(name) == true }),
+                   let f = fnInfoByQualR1081[caller] {
+                    stdlibRequirementDispatchR1473("Encodable", "encode", f, site: "synth")
+                    continue
+                }
+                guard !STDLIB_NOMINALS.contains(t), !STDLIB_PROTOCOLS.contains(t), !localProtocolNames.contains(t),
+                      !PLATFORM_VALUE_TYPES.contains(t) else { continue }
+                if localTypes.contains(t) {
+                    let hit = codableUnitR1490(t, w)
+                    if !hit.isEmpty { edges[caller, default: []].formUnion(hit) }
+                    else { synthesizedCodableR1490(t, w, caller: caller, &seen) }
+                    if CallCollector.r1490Probe {
+                        FileHandle.standardError.write("R1490SYNTH \(caller) \(type).\(name): \(t).\(w) -> \(hit.sorted())\n".data(using: .utf8)!)
+                    }
+                } else if !deps.isEmpty, !declaredTypes.contains(t) {
+                    var hits: [DepEntry] = []
+                    for tier in joinTiers(file, module: nil) where hits.isEmpty {
+                        for (p, _) in tier {
+                            if let e = deps.lookup("\(p)#\(t).\(w)") { hits.append(e) }
+                            else if w == "init(Decoder)", !CallCollector.r1502Off, let e = deps.lookup("\(p)#\(t).init") { hits.append(e) }
+                        }
+                    }
+                    for e in hits { applyDepEntry(e, to: caller) }
+                    if CallCollector.r1490Probe, !hits.isEmpty {
+                        FileHandle.standardError.write("R1490SYNTH chained \(caller) \(type).\(name): \(t).\(w)\n".data(using: .utf8)!)
+                    }
+                }
+            }
+        }
+    }
     for f in allFns {
         locOf[f.qual] = f.loc
         if f.isMain { entryPoints.insert(f.qual) }
@@ -4333,6 +4432,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                fieldTypeArgs: fieldTypeArgs,                                           // R905
                                opaqueFields: opaqueFields,
                                existentialFieldsR1473: existentialFieldsR1473,   // R1473
+                               protocolSupersR1490: protocolSupers,                // R1490 residual (3)
                                enumCaseValueType: enumCaseValueType,
                                metatypeEnumCaseValueType: metatypeEnumCaseValueType,   // R585
                                metatypeParamsForeign: metatypeParamsForeign,            // R704 (b1)
@@ -4400,7 +4500,19 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         let readKeys = cc.propertyReadEdges.subtracting(cc.propertyEdges)
         for pe in cc.propertyEdges.union(readKeys) {
             let view: (Set<String>) -> Set<String> = readKeys.contains(pe) ? getterView : { $0 }
-            let ts = resolveQual(pe)
+            var ts = resolveQual(pe)
+            // SOUNDNESS R1502 — R1490 (d) keyed a decoder's `T.init(from:)` as `T.init(Decoder)`, the OVERLOAD-SUFFIXED
+            // qual, which exists only when `T` declares a second initializer. A type whose one hand-written initializer
+            // is `init(from:)` carries the bare qual `T.init`, so `JSONDecoder().decode(T.self, from:)` edged nothing
+            // and read ABSENT while `init(from:)` wrote a file (executed). Only a unit whose signature IS
+            // `init(from: Decoder)` answers: a type whose single hand-written init is another one (its `init(from:)`
+            // synthesized) must edge nothing.
+            if ts.isEmpty, pe.hasSuffix(".init(Decoder)") || pe.hasSuffix(".encode"), let dot = pe.lastIndex(of: "."),
+               case let owner = String(pe[..<dot]), localTypes.contains(owner) {
+                let w = String(pe[pe.index(after: dot)...])
+                if w == "init(Decoder)" { ts = codableUnitR1490(owner, w) }
+                if ts.isEmpty { var seen = Set<String>(); synthesizedCodableR1490(owner, w, caller: f.qual, &seen) }   // residual (2)
+            }
             if CallCollector.veinBProbe, readKeys.contains(pe), view(ts) != ts {
                 FileHandle.standardError.write("R1105E\t\(f.qual)\t\(pe)\t\(ts.sorted())->\(view(ts).sorted())\n".data(using: .utf8)!)
             }
@@ -4836,6 +4948,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     } else if !targets.isEmpty {
                         if r1071Probe { FileHandle.standardError.write("VBHIT\tR1071P\tlocal-undecided \(f.qual) \(recv ?? "-") -> \(base)\n".data(using: .utf8)!) }
                         r1071Pending.append((f.qual, targets, why(p)))
+                        // SOUNDNESS R1490 residual (3) — the receiver's type is not decided HERE, but a concrete receiver
+                        // that compiles against this member and declares no member of its own of that name (both checked
+                        // above) does conform; the body's `self` requirement is answered from that receiver at this site.
+                        if !CallCollector.r1490r3Off, let t = recv, !STDLIB_PROTOCOLS.contains(t) {
+                            for t2 in targets {
+                                callsiteArgTypes[t2, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
+                            }
+                        }
                     }
                 }
                 if let protos = platExtChained[leaf] {
@@ -5054,16 +5174,24 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         resolved = true
                     }
                 } else if overloadedBases.contains(call.path) {
+                    var admitted = 0
                     for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
                         resolved = true
                         guard extensionInitLabelsAdmit(call, t), operatorOperandsAdmit(call, t) else { continue }   // R1047, R1081
-                        edges[f.qual, default: []].insert(t)
+                        edges[f.qual, default: []].insert(t); admitted += 1
                         callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
                     }
+                    if admitted == 0, call.leaf == "init", call.path.hasSuffix(".init") {   // SOUNDNESS R1504
+                        _ = extensionOnlyCtorDepJoinR1504(String(call.path.dropLast(5)), f)
+                    }
                 } else if !typedTargets.isEmpty {
+                    var admitted = 0
                     for t in typedTargets where extensionInitLabelsAdmit(call, t) && operatorOperandsAdmit(call, t) {   // R1047, R1081
-                        edges[f.qual, default: []].insert(t)
+                        edges[f.qual, default: []].insert(t); admitted += 1
                         callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
+                    }
+                    if admitted == 0, call.leaf == "init", call.path.hasSuffix(".init") {   // SOUNDNESS R1504
+                        _ = extensionOnlyCtorDepJoinR1504(String(call.path.dropLast(5)), f)
                     }
                     resolved = true
                 } else if let dot = call.path.lastIndex(of: "."),
@@ -5568,10 +5696,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     resolved = true
                 } else if localTypes.contains(call.path), overloadedBases.contains("\(call.path).init") {
                     // R1047 — `resolved` keeps the release's answer (a matched overload); only the EDGE is filtered.
+                    var admitted = 0
                     for t in matchOverloads("\(call.path).init", argc, call.argTypes, swiftModuleOf(f.loc)) {
-                        if extensionInitLabelsAdmit(call, t) { edges[f.qual, default: []].insert(t) }
+                        if extensionInitLabelsAdmit(call, t) { edges[f.qual, default: []].insert(t); admitted += 1 }
                         resolved = true
                     }
+                    if admitted == 0 { _ = extensionOnlyCtorDepJoinR1504(call.path, f) }   // SOUNDNESS R1504
                 } else if localTypes.contains(call.path) {
                     // `_ = C0()` — a constructor call edges to the declared init (the fuzzer's init_wired
                     // form caught this silent-pure hole on the harness's FIRST run: effects wired in an
@@ -5580,7 +5710,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // so mark resolved REGARDLESS of whether an explicit `init` unit exists — a synthesized
                     // init has no unit to edge to but the construction is still local; without this the caller
                     // was falsely tagged `invisible` (the over-disclosure regression, sweep [36]).
-                    edges[f.qual, default: []].formUnion(resolveQual("\(call.path).init").filter { extensionInitLabelsAdmit(call, $0) })
+                    let admittedR1504 = resolveQual("\(call.path).init").filter { extensionInitLabelsAdmit(call, $0) }
+                    edges[f.qual, default: []].formUnion(admittedR1504)
+                    if admittedR1504.isEmpty { _ = extensionOnlyCtorDepJoinR1504(call.path, f) }   // SOUNDNESS R1504
                     resolved = true
                 } else if !call.argRef, !call.argLabelled,
                           NATIVE_DISCLOSURE_C_FREE_FNS.contains(call.path),
@@ -7086,6 +7218,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // SOUNDNESS R1176 — unit -> its enclosing type's simple name: a receiver's generic arguments answer only a method of
     // the type they were read for.
     var enclosingLeafR1176: [String: String] = [:]
+    // SOUNDNESS R1490 residual (3) — unit -> its enclosing declaration's name, and whether that is a protocol (an
+    // extension of a platform or a local protocol), where `self` is the caller's.
+    var enclosingTypeR1490: [String: String] = [:]
+    for f in allFns { if let et = f.enclosingType { enclosingTypeR1490[f.qual] = et } }
+    func selfIsProtocolR1490(_ et: String) -> Bool {
+        (STDLIB_PROTOCOLS.contains(et) && !declaredTypes.contains(et)) || localProtocolNames.contains(et)
+    }
     if !CallCollector.r1176Off {
         for f in allFns { if let et = f.enclosingType { enclosingLeafR1176[f.qual] = CallCollector.leafR1176(et) } }
     }
@@ -7122,7 +7261,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             let parts = req.split(separator: ":", maxSplits: 1).map(String.init)
                             guard parts.count == 2 else { continue }
                             var mine: [String] = []
-                            if parts[0].hasPrefix("s"), let k = Int(parts[0].dropFirst()) {
+                            if parts[0] == "r" {   // SOUNDNESS R1490 residual (3) — a protocol extension's `self`
+                                if own.recvSelf, let cet = enclosingTypeR1490[site.caller], selfIsProtocolR1490(cet) {
+                                    mine.append("r:\(parts[1])")
+                                }
+                                if let k = own.recvParamR1490 { mine.append("\(k):\(parts[1])") }
+                            } else if parts[0].hasPrefix("s"), let k = Int(parts[0].dropFirst()) {
                                 if own.recvSelf, enclosingLeafR1176[site.caller] != nil,
                                    enclosingLeafR1176[site.caller] == enclosingLeafR1176[callee] { mine.append("s\(k):\(parts[1])") }
                                 if let j = own.recvTypeGen[k], own.recvOwner.map({ $0 == enclosingLeafR1176[callee] }) ?? false {
@@ -7160,8 +7304,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// A LOCAL type answers `P`'s requirement only where this scan records it conforming to `P` (or to a platform protocol
     /// refining `P`). MEASURED: without it a union-resolved `self.init(_storage: RigidSet(...))` handed swift-collections'
     /// noncopyable `RigidSet` — no `Sequence` at all — to a sibling `init<S: Sequence>` overload's `underestimatedCount`.
-    func conformsR1490(_ type: String, _ p: String) -> Bool {
-        for q in [p] + (stdlibRefinersR1473[p] ?? []).sorted() {
+    func conformsR1490(_ type: String, _ p: String, viaLocalRefiners: Bool = true) -> Bool {
+        // R1490 residual (3): a type conforming only through a LOCAL refining protocol (`struct L3: LP3`, `protocol LP3:
+        // CustomStringConvertible`) is a conformer too — R1109's refinement index, the same set in-scan dispatch uses.
+        let viaLocal = CallCollector.r1490r3Off || !viaLocalRefiners ? [] : (subProtocolsOf[p] ?? [])
+        for q in [p] + (stdlibRefinersR1473[p] ?? []).sorted() + viaLocal {
             if (subtypesOf[q] ?? []).contains(type) || (subtypesOf[q] ?? []).contains(CallCollector.leafR1176(type)) { return true }
         }
         return false
@@ -7171,15 +7318,33 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // A type this scan only EXTENDS (`extension Range: RangeExpression2`) answers a platform requirement with the
         // platform's own witness: a local same-named member is another overload (measured: swift-collections'
         // container-based `Range.relative(to:)` was edged for the stdlib `RangeExpression.relative(to:)` the generic runs).
-        if localTypes.contains(type) {
-            guard declaredTypes.contains(type) || declaredTypes.contains(CallCollector.leafR1176(type)) else { return }
+        // SOUNDNESS R1490 residual (6) — …UNLESS THIS SCAN ITSELF DECLARES THE CONFORMANCE (`extension Int: LocalizedError
+        // { var errorDescription … }`). Swift rejects a redundant conformance, so a platform type this scan conforms to P
+        // did not conform before, and P's witness is the one declared here (executed: `gErrD(5)` ran the extension's
+        // `errorDescription` and read ABSENT in one tree). Only for an `@<P>~<w>` requirement, where P is known. A type
+        // only extended WITHOUT that conformance is the dependency's or the platform's: its witness is asked of the
+        // chained reports below (the consumer's `extension FDesc: LP3 {}` made a chained `FDesc` local and dropped it).
+        let extendedOnly = localTypes.contains(type) && !declaredTypes.contains(type) && !declaredTypes.contains(CallCollector.leafR1176(type))
+        // DIRECT conformance only: `extension Range: RangeExpression2 {}` with `protocol RangeExpression2: RangeExpression`
+        // is a NEW conformance to the local refiner, not to `RangeExpression`, whose witness stays the platform's
+        // (measured on the A/B: swift-collections' container-based `Range.relative` was edged — the fabrication R1490's
+        // first cut had, reintroduced through the refinement index).
+        let extConforms = extendedOnly && !CallCollector.r1490r6Off
+            && proto.map { conformsR1490(type, $0, viaLocalRefiners: false) } == true
+        if localTypes.contains(type), !extendedOnly || extConforms || CallCollector.r1490r6Off {
+            guard declaredTypes.contains(type) || declaredTypes.contains(CallCollector.leafR1176(type)) || extConforms else { return }
             if let p = proto, !conformsR1490(type, p) { return }
-            let ts = resolveQual("\(type).\(w)")
+            var ts = resolveQual("\(type).\(w)")
+            if ts.isEmpty, w == "init(Decoder)" || w == "encode" {   // SOUNDNESS R1502 / R1490 residual (2)
+                ts = codableUnitR1490(type, w)
+                if ts.isEmpty { var seen = Set<String>(); synthesizedCodableR1490(type, w, caller: caller, &seen) }
+            }
             if !ts.isEmpty { edges[caller, default: []].formUnion(ts) }
             if CallCollector.r1490Probe, !ts.isEmpty {
                 FileHandle.standardError.write("R1490HIT local \(how) \(caller) \(type).\(w) -> \(ts.sorted())\n".data(using: .utf8)!)
             }
-            return
+            // an extended-only type whose witness is not declared here is still the dependency's (R1490 residual (6))
+            if !(ts.isEmpty && extendedOnly && !CallCollector.r1490r6Off) { return }
         }
         guard !deps.isEmpty, !declaredTypes.contains(type) else { return }
         let file = String((locOf[caller] ?? "").prefix { $0 != ":" })
@@ -7199,6 +7364,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     let parts = req.split(separator: ":", maxSplits: 1).map(String.init)
                     // SOUNDNESS R1176 — the witnesses the call site's ARGUMENT (or receiver argument) carries, read off
                     // its written type, generic arguments, literal elements and synthesized stored properties.
+                    if parts.count == 2, parts[0] == "r", let own = site.own, let t = own.recvTypeR1490 {   // R1490 residual (3)
+                        let sw = splitWitnessR1490(parts[1])
+                        answerWitnessR1490(t, sw.witness, proto: sw.proto, caller: site.caller, how: "self")
+                    }
                     if !CallCollector.r1176Off, parts.count == 2, let own = site.own {
                         var lists: [[String]] = []
                         if parts[0].hasPrefix("s"), let k = Int(parts[0].dropFirst()) {

@@ -331,6 +331,18 @@ final class DeclCollector: SyntaxVisitor {
     /// file's generic bounds and associated-type bounds are merged.
     var assocMemberFields: [(ty: String, path: String, field: String, param: String, assoc: String)] = []
     /// R1492 — also key a field fact by the full path (a nested declaration), so `extension A.B.T` finds it.
+    /// SOUNDNESS R1505 — the one type every element of an array literal constructs (`[A(), A(x: 1)]` -> `A`), or nil.
+    static func uniformCtorElementR1505(_ arr: ArrayExprSyntax) -> String? {
+        var t: String? = nil
+        for el in arr.elements {
+            guard let call = el.expression.as(FunctionCallExprSyntax.self),
+                  let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self),
+                  ctor.baseName.text.first?.isUppercase == true else { return nil }
+            if let t0 = t, t0 != ctor.baseName.text { return nil }
+            t = ctor.baseName.text
+        }
+        return t
+    }
     private func r1492Path(_ ty: String, _ path: String) -> Bool { !CallCollector.r1492POff && path != ty && path.contains(".") }
     private func setFieldR1492(_ ty: String, _ path: String, _ name: String, _ v: (name: String?, isFunction: Bool)) {
         fields[ty, default: [:]][name] = v
@@ -385,6 +397,11 @@ final class DeclCollector: SyntaxVisitor {
     /// (`let c: any Collection`, `var d: CustomStringConvertible?`). Not a generic parameter resolved to its bound, not
     /// `some P`, and not a type INFERRED from an initializer — only the spelling is evidence of an existential.
     var existentialFieldsR1473: [String: Set<String>] = [:]
+    /// SOUNDNESS R1490 residual (2) — Type (simple AND full path) -> its STORED INSTANCE properties in declaration order (no
+    /// `static`/`class`, no getter: a body with only `willSet`/`didSet` is stored) — the members a SYNTHESIZED `Codable`
+    /// conformance encodes and decodes. And Type -> the case names of a nested `enum CodingKeys`, which narrows that set.
+    var storedFieldsR1490: [String: [String]] = [:]
+    var codingKeysR1490: [String: Set<String>] = [:]
     var fieldArrayElem: [String: [String: String]] = [:]  // Type -> field -> ELEMENT type (`[T]` field)
     var fieldArrayElemNested: [String: [String: String]] = [:]  // R278 — `[[T]]` field -> INNER element `T`
     var fieldDictValue: [String: [String: String]] = [:]  // Type -> field -> VALUE type (`[K: V]` field)
@@ -1225,6 +1242,14 @@ final class DeclCollector: SyntaxVisitor {
     }
     override func visitPost(_ node: StructDeclSyntax) { typeStack.removeLast(); accessStack.removeLast(); selfElementStack.removeLast() }
     override func visit(_ node: EnumDeclSyntax) -> SyntaxVisitorContinueKind {
+        if !CallCollector.r1490r2Off, node.name.text == "CodingKeys", let owner = typeStack.last {   // SOUNDNESS R1490 residual (2)
+            var cases = Set<String>()
+            for m in node.memberBlock.members {
+                if let c = m.decl.as(EnumCaseDeclSyntax.self) { for el in c.elements { cases.insert(el.name.text) } }
+            }
+            codingKeysR1490[typeStack.joined(separator: "."), default: []].formUnion(cases)
+            codingKeysR1490[owner, default: []].formUnion(cases)
+        }
         recordTypeGenerics(node.name.text, node.genericParameterClause, node.genericWhereClause)
         recordLocalGenericOrder(node.name.text, node.genericParameterClause)   // R1044 residual
         pushType(node.name.text, inheritance: node.inheritanceClause, attributes: node.attributes,
@@ -1389,6 +1414,13 @@ final class DeclCollector: SyntaxVisitor {
                 }
                 let qual = "\(tyPath).\(name)"          // fully-qualified nested path
                 let simpleQual = "\(ty).\(name)"
+                if !CallCollector.r1490r2Off, !isStatic, binding.accessorBlock.map({ ab -> Bool in
+                    guard case .accessors(let list) = ab.accessors else { return false }   // a getter body
+                    return list.allSatisfy { ["willSet", "didSet"].contains($0.accessorSpecifier.text) }
+                }) ?? true {
+                    storedFieldsR1490[tyPath, default: []].append(name)                 // SOUNDNESS R1490 residual (2)
+                    if tyPath != ty { storedFieldsR1490[ty, default: []].append(name) }
+                }
                 // CONST-STRING PROPAGATION — a `static let NAME = "literal"` type member. Keyed by SIMPLE
                 // name (a bare/interpolation/concat reference names it without the type path). Only static
                 // (a global-equivalent, fixed once); an instance stored `let` is per-object and reached via
@@ -1602,6 +1634,16 @@ final class DeclCollector: SyntaxVisitor {
                         // `x.run()` charged. Kill switch `CANDOR_R1463_OFF`.
                         fieldArrayElem[ty, default: [:]][name] = CallCollector.r1463Off ? elem : (typeDeclGenericBounds[ty]?[elem] ?? elem)
                         if r1492Path(ty, tyPath) { fieldArrayElem[tyPath, default: [:]][name] = fieldArrayElem[ty]![name]! }
+                        // SOUNDNESS R1490 residual (5) — a stored ARRAY OF A PLATFORM-PROTOCOL EXISTENTIAL (`var xs: [any P]`,
+                        // `[P]`): its loop/closure binders hold an existential exactly as a parameter's do (R1490 (f)). Not
+                        // `[T]` with `T` the type's generic parameter (resolved to its bound above, but monomorphized), not
+                        // `[some P]`. Recorded in the R1473 set under `[]<field>\u{1}<P>` so no plumbing changes.
+                        if !CallCollector.r1490r5Off, typeDeclGenericBounds[ty]?[elem] == nil,
+                           typeGenericParamNames[ty]?.contains(elem) != true, STDLIB_PROTOCOLS.contains(elem),
+                           !ann.type.trimmedDescription.contains("some ") {
+                            existentialFieldsR1473[ty, default: []].insert("[]\(name)\u{1}\(elem)")
+                            if r1492Path(ty, tyPath) { existentialFieldsR1473[tyPath, default: []].insert("[]\(name)\u{1}\(elem)") }
+                        }
                     }
                     if let val = dictValueName(ann.type) {
                         fieldDictValue[ty, default: [:]][name] = val
@@ -1609,6 +1651,7 @@ final class DeclCollector: SyntaxVisitor {
                     }
                     let targs = directGenericArgumentNames(ann.type)
                     if !targs.isEmpty { fieldTypeArgs[ty, default: [:]][name] = targs }   // R905
+                    if !targs.isEmpty, !CallCollector.r1492fOff, r1492Path(ty, tyPath) { fieldTypeArgs[tyPath, default: [:]][name] = targs }   // R1492 residual
                     if !Self.r1176Off, let k = stdlibContainerKindR1176(ann.type) {   // SOUNDNESS R1176
                         fieldContainersR1176[ty, default: [:]][name] = (k, genericArgumentNames(ann.type))
                         let d = desugaredType(ann.type)
@@ -1616,6 +1659,14 @@ final class DeclCollector: SyntaxVisitor {
                             optionalContainerFieldsR1463[ty, default: []].insert(name)
                         }
                     }
+                } else if !CallCollector.r1505Off, let arr = binding.initializer?.value.as(ArrayExprSyntax.self),
+                          let elem = Self.uniformCtorElementR1505(arr) {
+                    // SOUNDNESS R1505 — `var handlers = [Loud()]`: an UNANNOTATED stored property initialised by an array
+                    // literal of one constructor recorded no element type, so `for x in handlers { x.eff() }` and
+                    // `handlers.first?.eff()` read ABSENT (executed) while the annotated `[Loud]` spelling charged. The
+                    // literal names its element type; only a literal whose EVERY element constructs the same type counts.
+                    fieldArrayElem[ty, default: [:]][name] = elem
+                    if r1492Path(ty, tyPath) { fieldArrayElem[tyPath, default: [:]][name] = elem }
                 } else if let initVal = binding.initializer?.value,
                           let call = initVal.as(FunctionCallExprSyntax.self),
                           let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self) {
@@ -1644,6 +1695,7 @@ final class DeclCollector: SyntaxVisitor {
                         $0.argument.as(TypeSyntax.self).flatMap { typeName($0).name } }
                     if targs.count == g.genericArgumentClause.arguments.count {
                         fieldTypeArgs[ty, default: [:]][name] = targs   // R905
+                        if !CallCollector.r1492fOff, r1492Path(ty, tyPath) { fieldTypeArgs[tyPath, default: [:]][name] = targs }   // R1492 residual
                     }
                 } else if !Self.r905HOff, let initVal = binding.initializer?.value,
                           let call = initVal.as(FunctionCallExprSyntax.self),
@@ -1660,6 +1712,7 @@ final class DeclCollector: SyntaxVisitor {
                         $0.argument.as(TypeSyntax.self).flatMap { typeName($0).name } }
                     if targs.count == g.genericArgumentClause.arguments.count {
                         fieldTypeArgs[ty, default: [:]][name] = targs
+                        if !CallCollector.r1492fOff, r1492Path(ty, tyPath) { fieldTypeArgs[tyPath, default: [:]][name] = targs }   // R1492 residual
                     }
                 } else if let initVal = binding.initializer?.value,
                           let ma = initVal.as(MemberAccessExprSyntax.self),

@@ -296,6 +296,7 @@ final class NameKeyedStateTests: XCTestCase {
         "fieldDictValue": .immutableIndex,
         "opaqueFields": .immutableIndex, "localTypes": .immutableIndex,
         "existentialFieldsR1473": .immutableIndex,   // SOUNDNESS R1473 — keyed by TYPE, then field name
+        "protocolSupersR1490": .immutableIndex,      // SOUNDNESS R1490 residual (3) — keyed by PROTOCOL name
         "declaredTypes": .immutableIndex, "enclosingMembers": .immutableIndex,
         "localFreeFns": .immutableIndex, "localProtocols": .immutableIndex,
         // SOUNDNESS R563 — keyed by a GENERIC PARAMETER name and by `"<Proto>.<member>"`, both supplied
@@ -429,6 +430,8 @@ final class NameKeyedStateTests: XCTestCase {
         "homeAnchoredLocals": .clearedOnRebind(scoped: false),
         "existentialLocalsR1473": .clearedOnRebind(scoped: false),   // SOUNDNESS R1473
         "existentialArrayLocalsR1490": .clearedOnRebind(scoped: false),   // SOUNDNESS R1490 (f)
+        "codingContainerLocalsR1490": .clearedOnRebind(scoped: false),   // SOUNDNESS R1490 residual (1)
+        "arrayTupleLocalsR1498": .clearedOnRebind(scoped: false),        // SOUNDNESS R1498 residual (for-in over `[(A, B)]`)
         "existentialClosureParamsR1490": .notPerBinding,   // SOUNDNESS R1490 (f) — keyed by closure node, like monoClosureParams
         // Path VALUES and a per-call flag — not keyed by any binding name.
         "resolvedHomePaths": .notPerBinding,
