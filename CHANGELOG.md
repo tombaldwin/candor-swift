@@ -10,6 +10,12 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SOUNDNESS (row pending) — `Self()` constructs the enclosing type.** `var h = Self(); h.update(x)` in a protocol
+  extension (swift-crypto's `HashFunction.hash(bufferPointer:)`), `Self().m()`, and a parameter or local annotated `Self`
+  typed the value as the literal `Self`, which no unit carries, so every call on it was dropped — in a struct or class as
+  well as a protocol extension (executed). They now resolve as `self` does. Gates can turn red. Kill switch
+  `CANDOR_SELFCTOR_OFF`.
+
 - **⚠ SOUNDNESS R1491 — a `let` copy of a member read carries the member's type.** `let r = l.w; r.eff()` was silent
   over an executed file write while `l.w.eff()` and `if let r = l.w` both charged: the plain `let` binder typed an
   unannotated member-access initializer (`l.w`, `self.w`, `l.w.v`, `Loc.sw`; stored or computed, generic or not) as

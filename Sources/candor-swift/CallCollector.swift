@@ -1982,6 +1982,13 @@ final class CallCollector: SyntaxVisitor {
             // to the enclosing type for member resolution — so `Self.decode(…)` is a precise typed call on the
             // type, not a guessed bare member that would either drop or mis-link to a same-named sibling.
             if n == "self" || n == "Self" { return (enclosingType, true, [], false, false) }
+            // THE `Self` SPELLING IN THIS UNIT (row pending — found by the R1486 hedge-removal accounting). A
+            // parameter or local this body annotated `Self` is a value of the enclosing type, exactly as `self`
+            // is; the name stayed the literal `Self`, which no unit carries, so every call on it was dropped.
+            if !Self.selfCtorOff, vars[n] == "Self", let et = enclosingType {
+                vbHit("SELFCTOR", "var \(n) -> \(et)")
+                return (et, true, [n], monoNames.contains(n), opaqueVars.contains(n))
+            }
             if let t = vars[n] { return (t, true, [n], monoNames.contains(n), opaqueVars.contains(n)) }   // R610
             // IMPLICIT SELF: a bare identifier inside a method body can be a FIELD of the
             // enclosing type (`handler.log(s)` ≡ `self.handler.log(s)`) — the protocol-field probe
@@ -2257,6 +2264,13 @@ final class CallCollector: SyntaxVisitor {
                 let n = ctor.baseName.text
                 // `Proc()` where `typealias Proc = Process` — the ctor types the value as the aliased
                 // type so its members classify (`p.run()`→Exec). Dealiased by the wrapper (R97).
+                // THE `Self` SPELLING (row pending): `Self()` constructs the enclosing type — `var h = Self();
+                // h.update(x)` in `extension HashFunction` runs the conformer's `update` (swift-crypto's
+                // `HashFunction.hash(bufferPointer:)`, executed in miniature). Typed `Self`, no unit matched.
+                if n == "Self", !Self.selfCtorOff, let et = enclosingType {
+                    vbHit("SELFCTOR", "ctor -> \(et)")
+                    return (et, true, [n], false, false)
+                }
                 if n.first?.isUppercase == true { return (n, true, [n], false, false) }
                 if let rt = returns[n] { return (rt, true, [n], false, false) }
                 if let b = genericReturnBinding(call, leaf: n, depth) { return b }   // SOUNDNESS R1044
@@ -3305,6 +3319,8 @@ final class CallCollector: SyntaxVisitor {
     private static let r610Off = ProcessInfo.processInfo.environment["CANDOR_R610_OFF"] != nil
     /// SOUNDNESS R1491 KILL SWITCH — the plain `let r = a.b` binder types nothing again (the release reading).
     static let r1491Off = ProcessInfo.processInfo.environment["CANDOR_R1491_OFF"] != nil
+    /// The `Self` spelling (row pending) §1b KILL SWITCH: `CANDOR_SELFCTOR_OFF=1` restores the literal `Self` root.
+    static let selfCtorOff = ProcessInfo.processInfo.environment["CANDOR_SELFCTOR_OFF"] != nil
     /// SOUNDNESS R1492 KILL SWITCH — no full-path field index for `extension A.B.T`, no associated-type field typing.
     static let r1492Off = ProcessInfo.processInfo.environment["CANDOR_R1492_OFF"] != nil
     /// R1492 per-mechanism switches (each also off under `CANDOR_R1492_OFF`): P the full-path field index, A the
