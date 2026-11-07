@@ -29,6 +29,12 @@ private let veinCOff = ProcessInfo.processInfo.environment["CANDOR_VEINC_OFF"] !
 /// PROBE: one stderr line per sub-protocol witness edge actually added.
 let r1109Off = ProcessInfo.processInfo.environment["CANDOR_R1109_OFF"] != nil
 private let r1109Probe = ProcessInfo.processInfo.environment["CANDOR_R1109_PROBE"] != nil
+/// SOUNDNESS R1486 §1b KILL SWITCH — a concrete type's PROVIDER supertypes include the protocols its conformed protocols
+/// refine (see `providerSupers`). `CANDOR_R1486_OFF=1` restores the direct-supertype walk.
+private let r1486Off = ProcessInfo.processInfo.environment["CANDOR_R1486_OFF"] != nil
+/// SOUNDNESS R1485 §1b KILL SWITCH — a platform (Objective-C imported) class reaches the members a LOCAL extension or
+/// retroactive conformance gives `NSObject` (see `objcRootSupers`). `CANDOR_R1485_OFF=1` restores the release.
+let r1485Off = ProcessInfo.processInfo.environment["CANDOR_R1485_OFF"] != nil
 /// VEIN C REACH PROBE (§E1): one stderr line per down-walk edge actually added.
 private let veinCProbe = ProcessInfo.processInfo.environment["CANDOR_VEINC_PROBE"] != nil
 private let KNOWN_BUILTIN_DECL_ATTRS: Set<String> = [
@@ -1355,6 +1361,72 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             }
             subProtocolsOf[p] = seen.sorted()
         }
+    }
+    /// SOUNDNESS R1486 — THE PROVIDER SUPERTYPES OF A CONCRETE TYPE: every supertype `supertypesOf` records, plus
+    /// every protocol one of those REFINES, transitively. `protocolSupers` is kept out of `conformers` on purpose
+    /// (R1109: a refining protocol is not an implementor of what it refines), so `supertypesOf[NSa]` for
+    /// `struct NSa: NP` with `protocol NP: SP` held `NP` and never `SP` — and `extension SP { var parent }`, which
+    /// Swift provides to `NSa`, was unreachable through a concrete receiver. MEASURED, executed: `s.parent` with
+    /// `s: NSa` writes a file and the caller was ABSENT from `functions[]` (silent); the METHOD twin
+    /// `s.parentM()` was hedged `dispatch:NP.parentM` only because `NP` is not in `localTypes`. Used ONLY by the
+    /// two provided-member lookups (the accessor climb and the protocol-extension-default arm), which edge real
+    /// `<Sup>.<member>` units and nothing else, so a protocol that provides no such member adds nothing.
+    func providerSupers(_ t: String) -> [String] {
+        let direct = supertypesOf[t] ?? []
+        guard !r1486Off else { return Array(direct) }
+        var out = direct, queue = Array(direct).sorted()
+        while let x = queue.popLast() {
+            for s in (protocolSupers[x] ?? []).sorted() where out.insert(s).inserted { queue.append(s) }
+        }
+        if CallCollector.veinBProbe, out.count > direct.count {
+            FileHandle.standardError.write("VBHIT\tR1486\t\(t) +\(out.subtracting(direct).sorted())\n".data(using: .utf8)!)
+        }
+        return out.sorted()
+    }
+    /// SOUNDNESS R1485 — A PLATFORM CLASS INHERITS WHAT THIS SCAN GIVES `NSObject`. RxSwift's own spelling is
+    /// `extension NSObject: ReactiveCompatible {}` (a retroactive conformance on the Objective-C ROOT class) with
+    /// `extension ReactiveCompatible { var rx: Reactive<Self> }`, and every RxCocoa member is reached as
+    /// `base.rx.…` on a UIKit/AppKit/Foundation class — `NumberFormatter().rx.controlProperty(…)`. Those classes
+    /// are imported from Objective-C, so neither the scan nor the generated platform table (built from Swift
+    /// module interfaces) lists their superclass, `supertypesOf` has no entry, and the `rx` hop and every call
+    /// behind it were dropped — silent over an executed file write (the receiver `NSObject()` itself, and a LOCAL
+    /// subclass, both resolved).
+    ///
+    /// NO CLASS HIERARCHY IS NEEDED, because the question is narrower than "what does this class inherit": it is
+    /// "which body runs for a member that a LOCAL `NSObject` extension provides". Every Objective-C class
+    /// imported into Swift that can carry such a member descends from `NSObject` (the only other root, `NSProxy`,
+    /// does not compile against an `NSObject` extension member at all), and the call compiled. So for a receiver
+    /// whose type is (a) not declared or extended here, (b) not a Swift-declared platform nominal the generated
+    /// table does know (those are answered BY the table: only one listing `NSObject` among its ancestors
+    /// qualifies), (c) not a protocol, and (d) not a nested (dotted) name — an imported `UIControl.Event` is a
+    /// struct — this answers `NSObject` plus every supertype the scan records for it. Consumers edge only REAL
+    /// `<Root>.<member>` units and are ADDITIVE (nothing they decided before changes), so a member no local
+    /// `NSObject` path provides adds nothing. The residual is a same-named member the platform class declares
+    /// natively, which this would union in: a fabrication on a name collision, never a silence.
+    let objcRoots: [String] = r1485Off ? [] : ["NSObject", "NSObjectProtocol"].filter { localTypes.contains($0) }
+    var objcRootSupersAll = Set<String>()
+    for r in objcRoots { objcRootSupersAll.insert(r); objcRootSupersAll.formUnion(supertypesOf[r] ?? []) }
+    func stdlibInheritsNSObject(_ t: String) -> Bool {
+        var seen = Set<String>(), queue = [t]
+        while let x = queue.popLast() {
+            guard seen.insert(x).inserted else { continue }
+            if x == "NSObject" { return true }
+            queue.append(contentsOf: STDLIB_DIRECT_CONFORMANCES[x] ?? [])
+        }
+        return false
+    }
+    /// Is `t` a platform class this scan can only know as an Objective-C import (the predicate above, minus the
+    /// requirement that this scan extend `NSObject` — a CONSUMER asks it of a dependency that does).
+    func isObjcPlatformClass(_ t: String) -> Bool {
+        guard !r1485Off, t != "NSObject", let c = t.first, c.isUppercase, !t.contains("."), !t.contains("<"),
+              !localTypes.contains(t), !declaredTypes.contains(t), supertypesOf[t] == nil,
+              !STDLIB_PROTOCOLS.contains(t), protocolMethods[t] == nil, !protocolPaths.contains(t)
+        else { return false }
+        return !STDLIB_NOMINALS.contains(t) || stdlibInheritsNSObject(t)
+    }
+    func objcRootSupers(_ t: String) -> Set<String> {
+        guard !objcRootSupersAll.isEmpty, isObjcPlatformClass(t) else { return [] }
+        return objcRootSupersAll
     }
     /// SOUNDNESS R1109 — the witnesses of `P.member` supplied by types that conform to `P` only through a
     /// refining protocol. PRECISE-OR-NOTHING and ADDITIVE, R867's rule: only real units are edged, no
@@ -4070,6 +4142,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                genericCallableFields: genericCallableFields, // R256
                                classSupertypes: classSupertypesR906,         // R906
                                supertypesAll: DeclCollector.r915COff ? [:] : supertypesOf,   // R915 (C)
+                               objcRootSupers: objcRootSupers,                                // R1485
                                nestedTypePairs: nestedTypePairsR915,                          // R915 (A)
                                memberTypeAliases: memberTypeAliasesR915,                      // R915 (B)
                                returns: returnsIdx,
@@ -4159,8 +4232,59 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 edges[f.qual, default: []].formUnion(view(ts))
             } else if let dot = pe.lastIndex(of: "."), localTypes.contains(String(pe[..<dot])) {
                 let type = String(pe[..<dot]), member = String(pe[pe.index(after: dot)...])
-                for sup in supertypesOf[type] ?? [] {
-                    edges[f.qual, default: []].formUnion(view(resolveQual("\(sup).\(member)")))
+                // R1486 — refined protocols too, EXCEPT where the type (or a supertype it spells) STORES a field of that
+                // name: a stored property shadows a protocol extension's member, so `values` read inside RxSwift's
+                // `ControlProperty` (`let values`) is that field, not `extension ObservableConvertibleType { var values }`
+                // (measured on the corpus A/B: the first cut edged it and fabricated `Clock`).
+                let directSups = supertypesOf[type] ?? []
+                let stores = fields[type]?[member] != nil || directSups.contains { fields[$0]?[member] != nil }
+                let provSups = stores ? Array(directSups) : providerSupers(type)
+                var provided = false
+                for sup in provSups {
+                    let hit = view(resolveQual("\(sup).\(member)"))
+                    if !hit.isEmpty { provided = true }
+                    edges[f.qual, default: []].formUnion(hit)
+                }
+                // SOUNDNESS R1486 — …AND ASK THE CHAINED DEPENDENCY, as the method arm does (R657). `s.parent` with
+                // `struct S: DepP` (or `S: NP`, `protocol NP: DepP`) and `extension DepP { var parent … }` in a chained
+                // package: the method twin `s.parentM()` joined `<pkg>#DepP.parentM` and charged the dependency's row,
+                // the read asked nothing and was ABSENT (executed). Only when no LOCAL provider answered and the name
+                // is not a stored field this scan records; one answering package is applied, several are unioned
+                // (SPEC §2 ⟨0.25⟩), none changes nothing. A RESOLUTION: no `Unknown` is added on a miss.
+                let extProv = provSups.filter { !localTypes.contains($0) && !declaredTypes.contains($0)
+                    && !STD_PURE_PROTOCOLS.contains($0) }
+                // NOT ON THE ENCLOSING TYPE. A bare name inside a method forms a SOFT implicit-`self` key (`Sub.grandFn`)
+                // whenever the collector cannot prove it is a local, on the understanding that resolution drops it; a
+                // dependency answering by NAME turns that into a charge. Measured (AmbiguousChainKeyProcessTests): an
+                // `if let grandFn` binder, which no function-wide binder index records, read `Grand.grandFn`'s `Env`.
+                // So only a read on ANOTHER type's receiver asks; `self.m` / bare `m` stays as the release left it.
+                let boundHere = type == f.enclosingType
+                if !r1486Off, !provided, !boundHere, fields[type]?[member] == nil, !extProv.isEmpty, !deps.isEmpty {
+                    let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                    var hits: [DepEntry] = []
+                    for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {
+                        for k in [type] + extProv { if let e = deps.lookup("\(p)#\(k).\(member)") { hits.append(e) } }
+                    }
+                    if CallCollector.veinBProbe, !hits.isEmpty {
+                        FileHandle.standardError.write("VBHIT\tR1486\tdep-read \(f.qual) \(type).\(member) n=\(hits.count)\n".data(using: .utf8)!)
+                    }
+                    for de in hits { applyDepEntry(de, to: f.qual) }
+                    provided = !hits.isEmpty
+                }
+                // PRICING PROBE ONLY (no behaviour): a read the method arm would have HEDGED (`dispatch:<Sup>.<member>`)
+                // and the property arm leaves unanswered — the would-be reach of a property hedge.
+                if CallCollector.veinBProbe, !provided, fields[type]?[member] == nil, !extProv.isEmpty {
+                    FileHandle.standardError.write("VBHIT\tR1486H\t\(f.qual)\t\(type).\(member)\t\(extProv.joined(separator: ","))\n".data(using: .utf8)!)
+                }
+            } else if let dot = pe.lastIndex(of: ".") {
+                // SOUNDNESS R1485 — a platform class reading a member a local `NSObject` path provides.
+                let type = String(pe[..<dot]), member = String(pe[pe.index(after: dot)...])
+                for sup in objcRootSupers(type).sorted() {
+                    let hit = view(resolveQual("\(sup).\(member)"))
+                    if CallCollector.veinBProbe, !hit.isEmpty {
+                        FileHandle.standardError.write("VBHIT\tR1485\tread \(f.qual) \(type).\(member) -> \(hit.sorted())\n".data(using: .utf8)!)
+                    }
+                    edges[f.qual, default: []].formUnion(hit)
                 }
             }
             // ── VEIN C (SOUNDNESS R903) — …AND DOWN, as a method call does. `b.pv` with `b: BaseP` runs
@@ -4558,6 +4682,28 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // the per-fn `invisible` disclosure can name the blind modules in the fn's import scope. A call
             // that DOES resolve to a local unit is covered by transitive propagation of that unit's invisible.
             var resolved = false
+            // SOUNDNESS R1485 — a member call on a PLATFORM CLASS (`n.sibM()`, `n: NumberFormatter`, `NumberFormatter.s()`)
+            // whose member a local `NSObject` path provides: `extension NSObject { func sibM() }`, or `extension NSObject: P`
+            // with `extension P { func sibM() }` — RxSwift's `rx`. The collector keys such a call on the receiver's own
+            // type (`extOwner`), which nothing here declares, so it reached only the dependency join and was dropped.
+            // ADDITIVE: only real `<Root>.<member>` units are edged and `resolved` is untouched, so every arm below
+            // (the dependency join, the blind-module disclosure) sees the call exactly as it did.
+            if !call.typed, !call.unqualified, !call.path.hasPrefix("<"), let rawOwner = call.extOwner,
+               rawOwner != CallCollector.superMarker {
+                let owner = f.genericBounds[rawOwner] ?? rawOwner
+                for sup in objcRootSupers(owner).sorted() {
+                    let base = "\(sup).\(call.leaf)"
+                    let hit = overloadedBases.contains(base)
+                        ? Set(matchOverloads(base, argc, call.argTypes, swiftModuleOf(f.loc))) : resolveQual(base)
+                    if CallCollector.veinBProbe, !hit.isEmpty {
+                        FileHandle.standardError.write("VBHIT\tR1485\tcall \(f.qual) \(owner).\(call.leaf) -> \(hit.sorted())\n".data(using: .utf8)!)
+                    }
+                    for t in hit.sorted() {
+                        edges[f.qual, default: []].insert(t)
+                        callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
+                    }
+                }
+            }
             // SOUNDNESS R974 (a) — A USER WITNESS HANDED TO A CHAINED PACKAGE. A dependency's
             // `func same<T: Equatable>(_ a: T, _ b: T) -> Bool { a == b }` runs the CALLER's `==`, and its report cannot
             // say so: the row is pure (its instantiation is its callers'), and ⟨0.39⟩'s `dispatchesOn` has no spelling
@@ -4733,8 +4879,17 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     let type = String(call.path[..<dot])
                     let member = String(call.path[call.path.index(after: dot)...])
                     r1081Flag.answered = false
-                    for sup in supertypesOf[type] ?? [] {
+                    // SOUNDNESS R1486 — the provider climb includes the protocols the type's protocols REFINE. A member
+                    // found ONLY there is EDGED and does NOT count as resolved: the release's hedge below still fires.
+                    // Measured (swift-crypto, A/B vs 1d351eb): letting it resolve removed 11 rows' `dispatch:` hedges
+                    // (`SHA3_256.hash(data:)` -> `HashFunction.hash`, correctly), and in at least 5 of them the wrong-reason
+                    // `Unknown` was the only thing covering a different, pre-existing dropped call (`self.backing.…` on an
+                    // RSA key whose backing type is a fileprivate typealias declared in three files; `self.backing =
+                    // try .init()` on an associated type) whose callee performs C calls. Removing a hedge waits for those.
+                    let directSups = supertypesOf[type] ?? []
+                    for sup in providerSupers(type) {
                         let base = "\(sup).\(member)"
+                        let countsAsResolved = directSups.contains(sup)
                         // AN OVERLOADED PROVIDED MEMBER MUST NOT VANISH. `resolveQual` can only name an
                         // UNAMBIGUOUS simple->full mapping (`qualBySimple[base].count == 1`); a protocol
                         // extension declaring a second, unrelated overload of the same base name
@@ -4753,13 +4908,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                 where operatorOperandsAdmit(call, t) || r1081Refused(type) {   // R1081
                                 edges[f.qual, default: []].insert(t)
                                 callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
-                                resolved = true
+                                if countsAsResolved { resolved = true }
                             }
                         } else {
                             for t in resolveQual(base) where operatorOperandsAdmit(call, t) || r1081Refused(type) {   // R1081
                                 edges[f.qual, default: []].insert(t)
                                 callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
-                                resolved = true
+                                if countsAsResolved { resolved = true }
                             }
                         }
                     }
@@ -4911,6 +5066,19 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                 if hits.count > 1, !joinUnionOff {
                                     for de in hits { applyDepEntry(de, to: f.qual) }
                                     break
+                                }
+                            }
+                        }
+                        // SOUNDNESS R1486 — …and ask on the PROVIDER supertypes a refinement reaches (`NP: DepP` asks
+                        // `<pkg>#DepP.m`) when the release's keys found nothing. Applied as a union and NOT counted as
+                        // resolved, for the reason the local climb above gives: the release's hedge still fires.
+                        if depAnswer == nil, !r1486Off, !deps.isEmpty {
+                            let refined = providerSupers(type).filter {
+                                !localTypes.contains($0) && !STD_PURE_PROTOCOLS.contains($0) && !extSupers.contains($0) }
+                            if !refined.isEmpty {
+                                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                                for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {
+                                    for k in refined { if let e = deps.lookup("\(p)#\(k).\(member)") { applyDepEntry(e, to: f.qual) } }
                                 }
                             }
                         }
@@ -5821,6 +5989,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if !r843Off, hits.isEmpty, !call.unqualified, let owner = call.extOwner {
                     sourceTypedWalk(dispatchAbstraction(owner, f) ?? owner, call.leaf, tiers: memberTiers,
                                     to: f.qual, guessed: call.guessHop)
+                    // SOUNDNESS R1485 — ACROSS THE SCAN BOUNDARY: a chained package that extends `NSObject` (a method,
+                    // or a conformance whose protocol extension provides one) gives it to every platform class, and
+                    // the consumer's `n.sibM()` on a `NumberFormatter` asked only `<pkg>#NumberFormatter.sibM`, which no
+                    // report publishes — silent (executed). Walk the dependency's `NSObject` node as well; the walk only
+                    // ADDS entries a package publishes, and `resolved` is untouched.
+                    let abs = dispatchAbstraction(owner, f) ?? owner
+                    if isObjcPlatformClass(abs) {
+                        if CallCollector.veinBProbe {
+                            FileHandle.standardError.write("VBHIT\tR1485\tchained \(f.qual) \(abs).\(call.leaf)\n".data(using: .utf8)!)
+                        }
+                        sourceTypedWalk("NSObject", call.leaf, tiers: memberTiers, to: f.qual, guessed: call.guessHop)
+                    }
                 }
                 // SOUNDNESS R910 — see `ownerKeyPkg`. After the walk, so nothing it decides is changed.
                 if hits.isEmpty, !call.unqualified, let owner = call.extOwner {

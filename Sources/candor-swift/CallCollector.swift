@@ -611,6 +611,9 @@ final class CallCollector: SyntaxVisitor {
     /// member hop the type does not record is declared (an inherited stored field, a protocol-extension
     /// property such as Kingfisher's `kf`).
     let supertypesAll: [String: Set<String>]
+    /// SOUNDNESS R1485 — `NSObject` plus its recorded supertypes for a receiver type that is a platform
+    /// (Objective-C imported) class, `[]` otherwise (Driver's `objcRootSupers`).
+    let objcRootSupers: (String) -> Set<String>
     /// SOUNDNESS R915 (A) — adjacent `Outer.Inner` pairs of declared type paths.
     let nestedTypePairs: Set<String>
     /// SOUNDNESS R915 (B) — type -> member alias -> its one underlying type.
@@ -1014,6 +1017,7 @@ final class CallCollector: SyntaxVisitor {
          genericCallableFields: [String: Set<String>] = [:],
          classSupertypes: [String: Set<String>] = [:],
          supertypesAll: [String: Set<String>] = [:],
+         objcRootSupers: @escaping (String) -> Set<String> = { _ in [] },
          nestedTypePairs: Set<String> = [],
          memberTypeAliases: [String: [String: String]] = [:],
          returns: [String: String],
@@ -1145,6 +1149,7 @@ final class CallCollector: SyntaxVisitor {
         self.genericCallableFields = Self.r256Off ? [:] : genericCallableFields // R256
         self.classSupertypes = classSupertypes                                  // R906
         self.supertypesAll = supertypesAll                                      // R915 (C)
+        self.objcRootSupers = objcRootSupers                                    // R1485
         self.nestedTypePairs = nestedTypePairs                                  // R915 (A)
         self.memberTypeAliases = memberTypeAliases                              // R915 (B)
         self.variadicParamsR915 = Set(info.paramIndex.compactMap { (n, i) in
@@ -1783,7 +1788,9 @@ final class CallCollector: SyntaxVisitor {
         guard !DeclCollector.r915Off, fields[rt]?[member] == nil else { return nil }
         var names: Set<String> = []
         let mono = false
-        for sup in (supertypesAll[rt] ?? []).sorted() where sup != rt {
+        // SOUNDNESS R1485 — a platform class with no recorded supertypes inherits what this scan gives `NSObject`.
+        let sups = supertypesAll[rt] ?? objcRootSupers(rt)
+        for sup in sups.sorted() where sup != rt {
             guard let f = fields[sup]?[member] else { continue }
             if f.isFunction { return nil }
             guard let n = f.name else { return nil }
@@ -1797,7 +1804,7 @@ final class CallCollector: SyntaxVisitor {
         }
         guard names.count == 1, let n = names.first,
               localTypes.contains(dealias(n)) || localProtocols.contains(dealias(n)) else { return nil }
-        vbHit("R915C", "\(rt).\(member) -> \(n)")
+        vbHit(supertypesAll[rt] == nil ? "R1485" : "R915C", "\(rt).\(member) -> \(n)")
         return (n, mono)
     }
 
@@ -9598,6 +9605,12 @@ final class CallCollector: SyntaxVisitor {
                 calls.append(Call(path: "<platext>.\(prop)", leaf: prop, strArg: nil, typed: false,
                                   args: [], argTypes: [], extOwner: platformReceiverType(b, recv)))
             }
+            // SOUNDNESS R1485 — the PROPERTY spelling on a platform class: `n.nsProp` with `n: NumberFormatter` and
+            // `extension NSObject { var nsProp … }` (or a protocol `NSObject` conforms to here). ADDITIVE: the key is
+            // resolved by the Driver against the `NSObject` path only (`objcRootSupers`), the arms below run as before.
+            if let root = recvRoot, !recv.opaqueHop, !objcRootSupers(root).isEmpty {
+                insertPropertyEdge("\(root).\(prop)", at: Syntax(node))
+            }
             // SOUNDNESS R983 — the dotted twin of the simple `Inner.prop` edge below (see `nestedDottedKey`).
             if !Self.r983Off, let b = node.base, let dotted = nestedDottedKey(b) {
                 insertPropertyEdge("\(dotted).\(prop)", at: Syntax(node))   // R1105
@@ -9717,16 +9730,19 @@ final class CallCollector: SyntaxVisitor {
         // fact read off the syntax tree, not the scoped `binderShadow` state (R847/R853's six review rounds were
         // about THAT set's scope); see `boundByEnclosingClosureParam`.
         //
-        // ONLY THE GLOBAL READ. The implicit-`self` member edges below (`<Type>.n`, R912/R904) are the same false
-        // reading of the same name, and are DELIBERATELY KEPT: measured on the corpus, removing them uncovered a
-        // silence the false member edge was covering for the wrong reason (RxSwift `countDownDuration`, whose real
-        // callee behind `base.rx.controlPropertyWithDefaultEvents(…)` gets no edge at all). That half waits for
-        // the silence it covers to be closed first.
+        // …AND THE IMPLICIT-`self` MEMBER EDGES (`<Type>.n`, R912/R904/the bare arm), the same false reading of the
+        // same name (SOUNDNESS R1472 defect C). Held back by R1472 because removing them uncovered a silence the false
+        // edge was covering for the wrong reason — RxSwift `Reactive.countDownDuration`, whose setter closure's
+        // `value` parameter edged `Reactive.value` while its real callee behind `base.rx.controlPropertyWithDefault…`
+        // got no edge at all. R1485 closes that silence (a platform class reaches `NSObject`'s `rx`), so the false edge
+        // is withheld here. `CANDOR_R1472C_OFF=1` keeps it (the 1d351eb reading).
         let r1472Bound = !Self.r1472Off && boundByEnclosingClosureParam(node, n)
         if r1472Bound {
             vbHit("R1472", "\(n) et=\(enclosingType ?? "-")")
             r1472Withheld.insert(n)
         }
+        let r1472SelfBound = r1472Bound && !Self.r1472cOff
+        if r1472SelfBound, let et = enclosingType { vbHit("R1472C", "\(et).\(n)") }
         // skip when shadowed by a local binding, or when this reference is the callee/base of a call
         // or member access (those expression forms charge through their own visitors).
         // SOUNDNESS R358 — `arrayElemNested` IS A LOCAL BINDING TOO, and this guard never heard of it.
@@ -9790,13 +9806,13 @@ final class CallCollector: SyntaxVisitor {
                 // spelling in the middle of the three was ABSENT over a getter that reads the environment (executed).
                 // The edge is the same soft `Type.member` key the other two spellings form; a stored property has
                 // no accessor unit and adds nothing.
-                if !Self.r912Off, let et = enclosingType, !isBoundLocal(n), !localProtocols.contains(et) {
+                if !Self.r912Off, !r1472SelfBound, let et = enclosingType, !isBoundLocal(n), !localProtocols.contains(et) {
                     vbHit("R912", "\(et).\(n)")
                     insertPropertyEdge("\(et).\(n)", at: Syntax(node))   // R1105
                 }
                 // SOUNDNESS R904 — …AND INSIDE `extension P` THE READ IS A REQUIREMENT DISPATCH, as the explicit
                 // `self.env.count` already is (`protoPropReads`, the conformers' getters by bounded CHA).
-                if !Self.r904Off, let et = enclosingType, localProtocols.contains(et), !isBoundLocal(n),
+                if !Self.r904Off, !r1472SelfBound, let et = enclosingType, localProtocols.contains(et), !isBoundLocal(n),
                    protoReqDeclares(et, n) {
                     vbHit("R904", "\(et).\(n)")
                     protoPropReads.append((et, n))
@@ -9820,7 +9836,7 @@ final class CallCollector: SyntaxVisitor {
         // ...unless `n` is a LOCAL binding (a literal/arithmetic-bound `let n = …` that `vars` drops
         // because its type didn't resolve) — then the bare read is the local, NOT `self.n`; edging to the
         // enclosing type's `n` accessor would FABRICATE its effect (regression). boundLocals tracks these.
-        if let et = enclosingType, !isBoundLocal(n) {
+        if !r1472SelfBound, let et = enclosingType, !isBoundLocal(n) {
             insertPropertyEdge("\(et).\(n)", at: Syntax(node))   // R1105
             // SOUNDNESS R904 — the bare (non-base) read inside `extension P` dispatches as `self.n` does.
             if !Self.r904Off, localProtocols.contains(et), protoReqDeclares(et, n) {
@@ -9841,6 +9857,8 @@ final class CallCollector: SyntaxVisitor {
     /// SOUNDNESS R1472 §1b kill switch (`CANDOR_R1472_OFF=1` restores v0.41.3's reading) and reach probe
     /// (`CANDOR_R1472_PROBE=1`: the Driver prints `R1472EDGE` for every global edge the skip withheld).
     static let r1472Off = ProcessInfo.processInfo.environment["CANDOR_R1472_OFF"] != nil
+    /// SOUNDNESS R1472 defect C §1b kill switch: keep the implicit-`self` member edges for a closure-parameter name.
+    static let r1472cOff = ProcessInfo.processInfo.environment["CANDOR_R1472C_OFF"] != nil
     static let r1472Probe = ProcessInfo.processInfo.environment["CANDOR_R1472_PROBE"] != nil
     /// SOUNDNESS R1472 — the bare names the closure-parameter skip withheld in this unit (read once by the Driver).
     var r1472Withheld: Set<String> = []

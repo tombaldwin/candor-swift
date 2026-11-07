@@ -10,6 +10,30 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R1472 (defect C) — a closure parameter's name is not `self.<name>` either.** RxCocoa's
+  `Reactive.countDownDuration` passes `setter: { picker, value in … = value }`; the bare `value` (the parameter) edged the
+  unrelated member `Reactive.value` through the implicit-`self` arms and charged its effects. R1472 withheld only the
+  global read, because that false edge was then the only charge on `countDownDuration`; R1485 gives its real callee an
+  edge, so the member edge is withheld too. Gates can turn GREEN where the only charge was the false member (`deny E`
+  1→0, executed). Kill switch `CANDOR_R1472C_OFF`.
+- **⚠ SOUNDNESS R1485 — a platform class reaches what this scan gives `NSObject`.** RxSwift's `extension NSObject:
+  ReactiveCompatible {}` gives every Objective-C class `rx`, and RxCocoa reaches its helpers as `base.rx.controlProperty…(…)`
+  on a UIKit/AppKit/Foundation class. Those classes are imported from Objective-C, so no supertype was recorded and the
+  `rx` hop, and every call behind it, was dropped: `NumberFormatter().rx.…` and `extension Reactive where Base:
+  NumberFormatter { base.rx.… }` were silent over an executed file write (the receiver `NSObject()` and a local subclass
+  resolved). A receiver type the scan does not declare or extend, that is not a protocol, not a nested name and not a
+  Swift platform nominal the generated table knows to be outside `NSObject`, now reaches the members a local `NSObject`
+  extension or retroactive conformance provides: the `rx`-style hop, a method or property declared on `NSObject`, and a
+  member of a protocol `NSObject` conforms to here. No class hierarchy is needed: every class that can carry such a
+  member descends from `NSObject`. Additive (real units only). A chained consumer's call on a platform class also walks
+  the dependency's `NSObject` node. Gates can turn red (`deny E` 0→1). Kill switch `CANDOR_R1485_OFF`.
+- **⚠ SOUNDNESS R1486 — a concrete type is provided what the protocols its protocols refine declare.** `struct S: NP` with
+  `protocol NP: SP` and `extension SP { var parent … }`: `s.parent` was silent over an executed file write (the method
+  twin was hedged `Unknown` only because `NP` was not extended). The provided-member lookups now climb protocol
+  refinement. A property read on a local type whose provider is a CHAINED package's protocol extension now asks the
+  dependency, as the method arm already did (`struct S: DepP` reading `DepP`'s extension property was silent); the method
+  arm edges (and asks the dependency on) the refined supertypes too, and keeps the release's `dispatch:` hedge rather than
+  removing it. Gates can turn red (`deny E` 0→1); no `Unknown` is removed. Kill switch `CANDOR_R1486_OFF`.
 - **⚠ SOUNDNESS R1480 — an implicit member is resolved in every position whose type the source writes.** R999 read the
   contextual type of `.now()` only where it IS the argument, initializer or return value, so `schedule(deadline: .now() +
   d)` (swift-nio `SelectableEventLoop.scheduleTask(in:)`), `x < .now()`, `c ? .now() : .zero`, `x ?? .now()`, `[.now()]`,
