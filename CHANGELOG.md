@@ -53,6 +53,26 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   member whose own extension (or R1463 function bounds) binds the parameter now reads the field at that bound. A
   typing the type DECLARATION itself states (`struct Att<Node: SP>`) is kept: narrowing it gains precision, not
   soundness. Gates can turn red (`deny E` 0→1). Kill switch `CANDOR_R1481_OFF`.
+- **⚠ SOUNDNESS R1490 — platform-protocol witnesses R1473 did not reach.** Each shape below produced no row and no
+  `Unknown`, in one tree and chained, while the conformer's witness wrote a file (executed):
+  (a) a requirement read on a generic or opaque parameter (`<T: CustomStringConvertible>` / `some P` `.description`,
+  `T: Hashable` `.hashValue`, `T: LocalizedError` `.errorDescription`, a generic type's `let t: T` field) — now answered
+  at each CALL SITE from the argument's own type, the way R951 answers `==` (a site whose argument type is unknown
+  resolves nothing; no union over the package); (b) a dependency's type passed to a local generic
+  (`eqGen(FEq(), FEq())`) — the caller-witness answer now asks the chained report under `<Type>.<witness>`;
+  (c) `e.localizedDescription` and `e as NSError` — Foundation's error bridge runs `LocalizedError.errorDescription` /
+  `failureReason` and `CustomNSError.errorDomain` / `errorCode` / `errorUserInfo` (executed; `as NSError` also edges the
+  remaining `LocalizedError` witnesses, which the returned NSError answers when read); (d) `JSONEncoder` /
+  `PropertyListEncoder` `.encode(x)` (the value's `encode(to:)`) and `JSONDecoder` / `PropertyListDecoder`
+  `.decode(T.self, from:)` (`T.init(from:)`); (e) a concrete `x.hashValue` over a hand-written `hash(into:)`;
+  (f) a `for` or closure binder over `[any P]`, and a closure parameter annotated `any P`. In one tree each edges the
+  witness unit; chained, a concrete or instantiated type joins its dependency row, and an existential discloses
+  `Unknown[dispatch:…]` under R1473's bound. Not modelled: a container's `encode(_:forKey:)`, a synthesized
+  `Codable` conformer's stored properties, `self` in a protocol extension, a platform type this scan only extends.
+  Gates can turn red. Corpus (39 chained entries vs af160cd): ADDED 7, REMOVED 0, CHANGED 35; 0 new concrete
+  charges; 2 functions newly `Unknown` at the gate (each inherits a witness unit's existing `Unknown` over a real new
+  edge); every added edge checked against the source by an independent checker. Kill switch `CANDOR_R1490_OFF`.
+
 - **⚠ SOUNDNESS R1473 — a requirement of a platform protocol called through an existential runs a conformer's
   witness.** `x.description` on `x: any CustomStringConvertible` (or bare `CustomStringConvertible`), `x.hashValue` /
   `x.hash(into:)` on `any Hashable`, `it.next()` on `any IteratorProtocol`, `s.makeIterator()` on `any Sequence`,

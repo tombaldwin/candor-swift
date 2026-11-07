@@ -3953,15 +3953,30 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// protocol `p`. `site` names the spelling, for the probe.
     func stdlibRequirementDispatchR1473(_ p: String, _ m: String, _ f: FnInfo, site: String) {
         guard !r1473Off, STDLIB_PROTOCOLS.contains(p), !declaredTypes.contains(p) else { return }
-        let ws = stdlibRequirementWitnessesR1473(p, m)
+        var ws = stdlibRequirementWitnessesR1473(p, m)
+        // SOUNDNESS R1490 (c) — no requirement, but a BRIDGE member (`e.localizedDescription` on an `Error` existential):
+        // each witness is edged on the conformers of the protocol that owns it, and only those.
+        let bridge = (CallCollector.r1490Off || !ws.isEmpty) ? [] : CallCollector.bridgeWitnessesR1490(p, m)
+        if !bridge.isEmpty { ws = bridge.map { $0.witness } }
         guard !ws.isEmpty else { return }
-        var owners: Set<String> = [p]
-        for q in [p] + (stdlibRefinersR1473[p] ?? []).sorted() {
-            owners.insert(q)
-            owners.formUnion(subtypesOf[q] ?? [])
+        func ownersOf(_ p: String) -> Set<String> {
+            var owners: Set<String> = [p]
+            for q in [p] + (stdlibRefinersR1473[p] ?? []).sorted() {
+                owners.insert(q)
+                owners.formUnion(subtypesOf[q] ?? [])
+            }
+            return owners
         }
         var ts = Set<String>()
-        for o in owners.sorted() { for w in ws { ts.formUnion(resolveQual("\(o).\(w)")) } }
+        if bridge.isEmpty {
+            let owners = ownersOf(p)
+            for o in owners.sorted() { for w in ws { ts.formUnion(resolveQual("\(o).\(w)")) } }
+        } else {
+            for (q, w) in bridge { for o in ownersOf(q).sorted() { ts.formUnion(resolveQual("\(o).\(w)")) } }
+            if CallCollector.r1490Probe {
+                FileHandle.standardError.write("R1490HIT bridge \(f.qual) \(p).\(m) edges=\(ts.sorted())\n".data(using: .utf8)!)
+            }
+        }
         ts.remove(f.qual)
         if !ts.isEmpty { edges[f.qual, default: []].formUnion(ts) }
         let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
@@ -3969,7 +3984,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         let disclosed = chained && ws.contains { deps.anyChainedPackagePublishesLeaf($0) }
         if disclosed {
             direct[f.qual, default: []].insert("Unknown")
-            whyMap[f.qual, default: []].insert("dispatch:\(p).\(m)")
+            whyMap[f.qual, default: []].insert("dispatch:\(p).\(m == "#nsbridge" ? "asNSError" : m)")   // R1490: the cast has no member name
         }
         if r1473Probe {
             FileHandle.standardError.write(
@@ -6941,6 +6956,57 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             }
         }
     }
+    // SOUNDNESS R1490 (a)(b) — A CALLER-WITNESS REQUIREMENT ANSWERED BY THE ARGUMENT'S OWN TYPE, LOCAL OR CHAINED.
+    // R951 answered `<idx>:<w>` only where the argument type is LOCAL, so `eqGen(FEq(), FEq())` with `FEq` in a chained
+    // package read pure while `FEq.==` wrote a file (executed), and an `@<w>` requirement (`genericRequirementR1490`) had no
+    // answer at all. A local type edges its witness UNIT (`resolveQual`, which drops a key the type does not declare: a
+    // synthesized witness edges nothing); a type this scan does not declare is asked of the chained reports under
+    // `<Type>.<w>` (the `joinTiers` the member join uses), and a report with no row for it — a pure or synthesized
+    // witness, or a platform type — answers nothing. A RESOLUTION: it adds edges and dependency entries, never removes.
+    let r1490Off = CallCollector.r1490Off
+    var r1490Asked = Set<String>()
+    /// `@<P>~<w>` (an R1490 requirement) -> (P, w); R951's plain `<w>` -> (nil, w).
+    func splitWitnessR1490(_ req: String) -> (proto: String?, witness: String) {
+        guard req.hasPrefix("@") else { return (nil, req) }
+        let body = req.dropFirst()
+        guard let t = body.firstIndex(of: "~") else { return (nil, String(body)) }
+        return (String(body[..<t]), String(body[body.index(after: t)...]))
+    }
+    /// A LOCAL type answers `P`'s requirement only where this scan records it conforming to `P` (or to a platform protocol
+    /// refining `P`). MEASURED: without it a union-resolved `self.init(_storage: RigidSet(...))` handed swift-collections'
+    /// noncopyable `RigidSet` — no `Sequence` at all — to a sibling `init<S: Sequence>` overload's `underestimatedCount`.
+    func conformsR1490(_ type: String, _ p: String) -> Bool {
+        for q in [p] + (stdlibRefinersR1473[p] ?? []).sorted() {
+            if (subtypesOf[q] ?? []).contains(type) || (subtypesOf[q] ?? []).contains(CallCollector.leafR1176(type)) { return true }
+        }
+        return false
+    }
+    func answerWitnessR1490(_ type: String, _ w: String, proto: String? = nil, caller: String, how: String) {
+        guard !r1490Off, !STDLIB_PROTOCOLS.contains(type), !localProtocolNames.contains(type), r1490Asked.insert("\(caller)\u{1}\(type)\u{1}\(w)").inserted else { return }
+        // A type this scan only EXTENDS (`extension Range: RangeExpression2`) answers a platform requirement with the
+        // platform's own witness: a local same-named member is another overload (measured: swift-collections'
+        // container-based `Range.relative(to:)` was edged for the stdlib `RangeExpression.relative(to:)` the generic runs).
+        if localTypes.contains(type) {
+            guard declaredTypes.contains(type) || declaredTypes.contains(CallCollector.leafR1176(type)) else { return }
+            if let p = proto, !conformsR1490(type, p) { return }
+            let ts = resolveQual("\(type).\(w)")
+            if !ts.isEmpty { edges[caller, default: []].formUnion(ts) }
+            if CallCollector.r1490Probe, !ts.isEmpty {
+                FileHandle.standardError.write("R1490HIT local \(how) \(caller) \(type).\(w) -> \(ts.sorted())\n".data(using: .utf8)!)
+            }
+            return
+        }
+        guard !deps.isEmpty, !declaredTypes.contains(type) else { return }
+        let file = String((locOf[caller] ?? "").prefix { $0 != ":" })
+        var hits: [DepEntry] = []
+        for tier in joinTiers(file, module: nil) where hits.isEmpty {
+            for (p, _) in tier { if let e = deps.lookup("\(p)#\(type).\(w)") { hits.append(e) } }
+        }
+        for e in hits { applyDepEntry(e, to: caller) }
+        if CallCollector.r1490Probe, !hits.isEmpty {
+            FileHandle.standardError.write("R1490HIT chained \(how) \(caller) \(type).\(w)\n".data(using: .utf8)!)
+        }
+    }
     if !CallCollector.r951Off {
         for (callee, reqs) in genericWitnessReqsByUnit {
             for site in callsiteArgTypes[callee] ?? [] {
@@ -6958,6 +7024,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             }
                             if let p = witnessPos(callee, site.wit?.labels, idx), p < own.args.count { lists.append(own.args[p]) }
                         }
+                        if parts[1].hasPrefix("@") {   // SOUNDNESS R1490 — the argument's own type
+                            for e in lists.joined() where e.hasPrefix("@|") {
+                                let sw = splitWitnessR1490(parts[1])
+                                answerWitnessR1490(String(e.dropFirst(2)), sw.witness, proto: sw.proto, caller: site.caller, how: "own")
+                            }
+                        }
                         let module = swiftModuleOf(locOf[site.caller] ?? "")
                         for e in lists.joined() where e.hasPrefix("\(parts[1])|") {
                             let path = String(e.dropFirst(parts[1].count + 1))
@@ -6972,6 +7044,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         }
                     }
                     guard parts.count == 2, let idx = Int(parts[0]) else { continue }
+                    // SOUNDNESS R1490 — every typed argument at this position answers, local or chained; `#iter` keeps
+                    // R1048's local-only rule below.
+                    if !r1490Off, parts[1] != "#iter" {
+                        var ys: [String] = []
+                        if idx < site.types.count, let y = site.types[idx] { ys.append(y) }
+                        if let p = witnessPos(callee, site.wit?.labels, idx), let w = site.wit, p < w.types.count, let y = w.types[p] { ys.append(y) }
+                        let sw = splitWitnessR1490(parts[1])
+                        for y in ys where parts[1].hasPrefix("@") || !localTypes.contains(y) {
+                            answerWitnessR1490(y, sw.witness, proto: sw.proto, caller: site.caller, how: "site")
+                        }
+                        if parts[1].hasPrefix("@") { continue }
+                    }
                     var xs: [String] = []
                     if idx < site.types.count, let x = site.types[idx], localTypes.contains(x) { xs.append(x) }
                     if let p = witnessPos(callee, site.wit?.labels, idx), let w = site.wit, p < w.types.count,
