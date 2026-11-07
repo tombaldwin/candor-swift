@@ -246,6 +246,40 @@ def witness_sites(path, sites):
 WITNESS_MODULES = ["Swift", "_StringProcessing"]
 
 
+# ── SOUNDNESS R1473 — THE REQUIREMENTS OF EACH PLATFORM PROTOCOL ─────────────────────────────────────────────
+# `x.description` on `x: any CustomStringConvertible`, `it.next()` on `any IteratorProtocol`: the body that runs
+# is a CONFORMER's witness, and only for a member the protocol REQUIRES. A member a protocol EXTENSION provides
+# (`Sequence.map`) is dispatched statically to that extension, so a conformer's same-named method never runs
+# through the existential — edging it would fabricate. The requirement set is therefore read from the protocol
+# bodies the interfaces publish (a requirement is the one declaration form with no `public` keyword and no
+# body), never listed by hand. Underscored requirements are implementation detail no source spells.
+PROTO_HEAD = re.compile(r"^(?:@[^\s(]+(?:\([^)]*\))?\s+)*public\s+protocol\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b.*\{\s*$")
+REQ = re.compile(r"^  (?:@[^\s(]+(?:\([^)]*\))?\s+)*(?:(?:static|class|mutating|nonmutating|__consuming|consuming|borrowing|"
+                 r"override|optional|isolated|nonisolated)\s+)*(?:(?P<kw>func|var)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*|[-+*/%=<>!&|^~?.]+)"
+                 r"|(?P<sub>subscript)\b|(?P<init>init)\b)")
+
+
+def protocol_requirements(path, reqs):
+    cur = None
+    for raw in open(path, encoding="utf-8"):
+        line = raw.rstrip("\n")
+        if cur is None:
+            m = PROTO_HEAD.match(line)
+            if m:
+                cur = m.group("name")
+                reqs.setdefault(cur, set())
+            continue
+        if line.startswith("}"):
+            cur = None
+            continue
+        m = REQ.match(line)
+        if not m:
+            continue
+        name = m.group("name") or m.group("sub") or m.group("init")
+        if name and not name.startswith("_"):
+            reqs[cur].add(name)
+
+
 def main():
     sdk = subprocess.check_output(["xcrun", "--show-sdk-path"], text=True).strip()
     sdkver = subprocess.check_output(["xcrun", "--show-sdk-version"], text=True).strip()
@@ -315,6 +349,16 @@ def main():
               "let STDLIB_WITNESS_SITE_LABELS: [String: [String]] = ["]
     for k in sorted(sites):
         lines.append(f'    "{k}": [' + ", ".join(f'"{x}"' for x in sorted(sites[k][1])) + "],")
+    lines += ["]", ""]
+    reqs = {}
+    for mod in MODULES:
+        protocol_requirements(interface(sdk, mod), reqs)
+    lines += ["/// SOUNDNESS R1473 — each platform protocol's own REQUIREMENTS (members a conformer's witness answers; not the",
+              "/// members a protocol extension provides), read from the protocol bodies. Refinements are not folded in:",
+              "/// `STDLIB_DIRECT_CONFORMANCES` carries them.",
+              "let STDLIB_PROTOCOL_REQUIREMENTS: [String: [String]] = ["]
+    for k in sorted(x for x in reqs if keep(x) and reqs[x]):
+        lines.append(f'    "{k}": [' + ", ".join(f'"{x}"' for x in sorted(reqs[k])) + "],")
     lines += ["]", ""]
     text = "\n".join(lines)
     if "--check" in sys.argv:

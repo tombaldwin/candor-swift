@@ -149,6 +149,8 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               // effects fabricates. Suppressing the type itself, as the first version of this fix did,
               // took the dep join with it and made an Fs-performing function read PURE.
               var opaqueRecv: Bool = false
+              /// SOUNDNESS R1473 — the PLATFORM protocol this receiver is DECLARED as (`stdExistentialRecvR1473`), else nil.
+              var stdExistentialR1473: String? = nil
               /// SOUNDNESS R1416 — the receiver is a VALUE the caller holds (a parameter, local or property), not
               /// `self` and not a construction: only such a receiver may be a subclass declared outside this scan.
               var recvValue: Bool = false
@@ -372,6 +374,7 @@ final class CallCollector: SyntaxVisitor {
     let fieldDictValue: [String: [String: String]]  // Type -> field -> [K: V] value
     let fieldTypeArgs: [String: [String: [String]]]  // SOUNDNESS R905 — Type -> field -> direct generic args
     let opaqueFields: [String: Set<String>]         // Type -> fields whose type is monomorphized
+    let existentialFieldsR1473: [String: Set<String>]   // SOUNDNESS R1473 — see DeclCollector
     let localTypes: Set<String>
     /// The modules THIS FILE imports, and the modules the SCANNED PROJECT itself defines. Together they
     /// decide whether a dotted callee (`Foundation.Process()`) is a MODULE-QUALIFIED SPELLING of a free
@@ -774,6 +777,81 @@ final class CallCollector: SyntaxVisitor {
     // become `Unknown` here: interpolation is pervasive in Swift, and a conformer that doesn't declare a
     // `description` uses the stdlib's PURE default — so this rung is precise-or-nothing, never a flood.
     var stringifyDispatches: [(proto: String, member: String)] = []
+    /// SOUNDNESS R1473 — a PROPERTY read on a value spelled as a PLATFORM protocol (`x.description` on
+    /// `x: any CustomStringConvertible`, `e.errorDescription` on `any LocalizedError`). The local-protocol arm
+    /// (`protoPropReads`) never sees these, and the dependency-member candidate below them is answered by no report.
+    /// The Driver answers it with the method call's rule (`stdlibRequirementDispatchR1473`).
+    var stdReqReads: [(proto: String, member: String)] = []
+    /// SOUNDNESS R1473 — LOCALS that are existentials BY THEIR OWN SPELLING: `let x: any P = …` / `var x: P` / `x: P?`
+    /// (not `some P`), or bound from a cast `y as? P` / `y as! P` / `y as P`, which yields an existential whatever `y`
+    /// was. `vars` cannot answer this: `let c = mkSome()` (a `some Collection` result) and `var copy = self` inside
+    /// `extension OptionSet` are typed by the protocol's name there too, and both hold ONE caller- or
+    /// callee-chosen type. Cleared on every rebind (`shadowName`).
+    var existentialLocalsR1473: [String: String] = [:]
+    /// SOUNDNESS R1473 — the subset of `stringifyDispatches` whose operand is a declared existential (see
+    /// `edgeStringWitness`); the Driver discloses these when chained.
+    var stringifyExistentialR1473: [(proto: String, member: String)] = []
+    /// The operand is a name a `catch` clause binds (and nothing rebinds): an `any Error` existential.
+    private func catchOperandR1473(_ raw: ExprSyntax) -> Bool {
+        guard let n = Self.peel(raw).as(DeclReferenceExprSyntax.self)?.baseName.text else { return false }
+        return vars[n] == nil && !isBoundLocal(n) && catchBindings[n] != nil
+    }
+    static let r1473Off = ProcessInfo.processInfo.environment["CANDOR_R1473_OFF"] != nil
+    /// SOUNDNESS R1473 — THE PLATFORM PROTOCOL A RECEIVER IS DECLARED AS, or nil: a parameter, a local or a stored
+    /// property of the enclosing type whose written type is `P` / `any P` (optional or not). NOT `self` (inside
+    /// `extension Collection` it is the caller's `Self`), NOT `some P` (`monoNames`), and NOT a generic parameter
+    /// resolved to its bound — `struct Box<Base: Collection> { let base: Base }` records `base` as `Collection` in
+    /// `fields` and marks it in `opaqueFields`, and a parameter `t: T` keeps the spelling `T`. Each of those is
+    /// monomorphized by the CALLER, so this package's conformers are not its witnesses. MEASURED first without this
+    /// predicate (the rootOf `mono` flag alone): `base.index(after:)` in a generic struct and `self.count` in a
+    /// protocol extension were CHA'd onto every collection in swift-algorithms — the fabrication this excludes.
+    func stdExistentialRecvR1473(_ raw: ExprSyntax?) -> String? {
+        guard !Self.r1473Off, let raw else { return nil }
+        let e = Self.peel(raw)
+        var name: String? = nil, viaSelf = false
+        if let dr = e.as(DeclReferenceExprSyntax.self) { name = dr.baseName.text }
+        else if let ma = e.as(MemberAccessExprSyntax.self),
+                ma.base.map({ Self.peel($0).trimmedDescription }) == "self" {
+            name = ma.declName.baseName.text; viaSelf = true
+        }
+        guard let n = name, !["self", "Self", "super"].contains(n) else { return nil }
+        var spelled: String? = nil
+        if !viaSelf, isBoundLocal(n) || (vars[n] != nil && paramTypesR951[n] == nil) {
+            spelled = monoNames.contains(n) ? nil : existentialLocalsR1473[n]
+        } else if !viaSelf, let p = paramTypesR951[n] {
+            spelled = monoNames.contains(n) ? nil : p
+        } else if let et = enclosingType, let fi = fields[et]?[n], !fi.isFunction, !(opaqueFields[et]?.contains(n) ?? false),
+                  existentialFieldsR1473[et]?.contains(n) == true {
+            spelled = fi.name
+        }
+        // …and the spelling must NAME the protocol: a generic parameter may be called `Collection`
+        // (`func concat<Collection: Swift.Collection>(_ c: Collection)`, RxSwift), and inside `extension OptionSet` a
+        // `var copy = self` is typed by the enclosing protocol's name while holding the caller's `Self` (swift-system).
+        guard let p = spelled, STDLIB_PROTOCOLS.contains(p), !declaredTypes.contains(p), !localProtocols.contains(p),
+              !genericParamNamesFn.contains(p), genericBoundsR951[p] == nil, typeGenericIndexR1176(p) == nil,
+              p != enclosingType
+        else { return nil }
+        return p
+    }
+    /// SOUNDNESS R1473 — the platform protocol a binding ANNOTATION spells as an existential (`any P`, `P`, `P?`), or nil.
+    private func existentialAnnotationR1473(_ t: TypeSyntax) -> String? {
+        guard !Self.r1473Off, !isOpaqueParam(t) else { return nil }
+        let tn = typeName(t)
+        guard !tn.isFunction, let n = tn.name, STDLIB_PROTOCOLS.contains(n) else { return nil }
+        return n
+    }
+    /// SOUNDNESS R1473 — the platform protocol an initializer CASTS to (`y as? P`, `y as! P`, `y as P`), or nil.
+    private func existentialCastR1473(_ raw: ExprSyntax) -> String? {
+        guard !Self.r1473Off else { return nil }
+        let e = Self.peel(raw)
+        var target: TypeSyntax? = nil
+        if let a = e.as(AsExprSyntax.self) { target = a.type }
+        else if let seq = e.as(SequenceExprSyntax.self) {
+            let elems = Array(seq.elements)
+            if elems.count == 3, elems[1].is(UnresolvedAsExprSyntax.self) { target = elems[2].as(TypeExprSyntax.self)?.type }
+        }
+        return target.flatMap { existentialAnnotationR1473($0) }
+    }
     // SOUNDNESS R1415 — ONE CHANNEL FOR "A BODY OF A DEPENDENCY'S TYPE RUNS HERE WITHOUT BEING SPELLED".
     //
     // Every implicit site the scan already recognises — a stringification, a `deinit`, a property read, and since
@@ -950,6 +1028,7 @@ final class CallCollector: SyntaxVisitor {
          fieldDictValue: [String: [String: String]],
          fieldTypeArgs: [String: [String: [String]]] = [:],
          opaqueFields: [String: Set<String>] = [:],
+         existentialFieldsR1473: [String: Set<String>] = [:],
          enumCaseValueType: [String: String],
          metatypeEnumCaseValueType: [String: String] = [:],
          /// SOUNDNESS R704 (b1) — the unit's METATYPE PARAMETERS whose base neither bound map claimed,
@@ -1052,6 +1131,7 @@ final class CallCollector: SyntaxVisitor {
         self.fieldDictValue = fieldDictValue
         self.fieldTypeArgs = fieldTypeArgs          // R905
         self.opaqueFields = opaqueFields
+        self.existentialFieldsR1473 = existentialFieldsR1473
         self.localTypes = localTypes
         self.declaredTypes = declaredTypes
         self.localProtocols = localProtocols
@@ -5632,6 +5712,7 @@ final class CallCollector: SyntaxVisitor {
         // key — a fabrication from a name collision, which is the exact class NameKeyedStateTests exists
         // to force a decision about, and it caught this one.
         homeAnchoredLocals.removeValue(forKey: name)
+        existentialLocalsR1473.removeValue(forKey: name)   // SOUNDNESS R1473
     }
 
     /// A BINDER THAT **CAN** TYPE THE NEW BINDING STILL HAS TO INVALIDATE THE OLD ONE, and the branches
@@ -9207,6 +9288,7 @@ final class CallCollector: SyntaxVisitor {
                 let guessed = (base.opaqueHop && qualifiedOwner == nil) || baseIsConventionVar
                 var memberCall = Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node), opaqueRecv: base.mono, conventionOwner: !Self.r567aOff && conventionOwner != nil && conventionOwner == primary, ownerModule: recvModule, extOwner: primary, holdsHop: holdsHop, guessHop: guessed)
                 memberCall.spelledRecvR1463 = spelledRecv
+                memberCall.stdExistentialR1473 = stdExistentialRecvR1473(ma.base)
                 calls.append(memberCall)
                 // THE FLOOR, where the resolution differs from what the release keyed (`RatesCore.Client`
                 // was keyed on the MODULE and joined its leaf union; `Outer.Inner.shared` on `Outer`).
@@ -9376,6 +9458,7 @@ final class CallCollector: SyntaxVisitor {
             // — see `rebindTyped`, and note the protocol-unwrap branch below READS `protoTyped` for the
             // initializer's own name, which the carve-out is exactly what preserves.
             rebindTyped(name, through: initVal)
+            if let p = existentialCastR1473(initVal) { existentialLocalsR1473[name] = p }   // SOUNDNESS R1473
             // R178 — `if let c = cb` / `guard let c = cb` / `while let c = cb`, the binder family this
             // row was filed on. FIRST, ahead of every typing branch: a callable has no nominal type for
             // them to find, so without this the chain fell through to `clearBinding` and `c()` resolved
@@ -9531,6 +9614,11 @@ final class CallCollector: SyntaxVisitor {
             for c in foreignCompositionMembers(node.base) where !Self.METATYPE_MEMBERS.contains(prop) {
                 externalMembers["\(c).\(prop)", default: []].insert("prop")
                 noteExternalCandidate("\(c).\(prop)", module: nil)
+            }
+            // SOUNDNESS R1473 — see `stdReqReads` and `stdExistentialRecvR1473`. BESIDE the chain below, which still
+            // records the dependency-member candidate exactly as before.
+            if !Self.METATYPE_MEMBERS.contains(prop), let p = stdExistentialRecvR1473(node.base) {
+                stdReqReads.append((p, prop))
             }
             if let baseDR = node.base.map({ Self.peel($0) })?.as(DeclReferenceExprSyntax.self),
                let proto = protoTyped[baseDR.baseName.text] {
@@ -10804,7 +10892,15 @@ final class CallCollector: SyntaxVisitor {
             // a CONCRETE local type from a typed catch (`catch let e as MyError`) is a precise witness —
             // the same soft property edge as the plain concrete path; anything else DISPATCHES.
             if localTypes.contains(d) { propertyEdges.insert("\(d).\(member)") }
-            else { stringifyDispatches.append((d, member)) }
+            else {
+                stringifyDispatches.append((d, member))
+                // SOUNDNESS R1473 — the operand is a DECLARED platform-protocol existential (or a catch binding,
+                // which is `any Error`): the chained disclosure's population. Not a generic or `self` operand.
+                if !Self.r1473Off, STDLIB_PROTOCOLS.contains(d),
+                   stdExistentialRecvR1473(operand) == d || catchOperandR1473(operand) {
+                    stringifyExistentialR1473.append((d, member))
+                }
+            }
         } else if let x = externalTypeOfOperand(operand) {
             // The operand has a confidently-resolved type that is NOT declared here — most often a
             // chained DEPENDENCY's type. Record the `Type.member` candidate; the Driver joins it against
@@ -11731,6 +11827,11 @@ final class CallCollector: SyntaxVisitor {
             }
             if binding.typeAnnotation == nil, let iv = binding.initializer?.value, let hop = holdsHopOf(iv) {
                 holdsVars[name] = hop   // ⟨0.40⟩ (cleared by `shadowName` above on every rebind)
+            }
+            if let ann = binding.typeAnnotation, let p = existentialAnnotationR1473(ann.type) {
+                existentialLocalsR1473[name] = p                                                  // SOUNDNESS R1473
+            } else if binding.typeAnnotation == nil, let iv = binding.initializer?.value, let p = existentialCastR1473(iv) {
+                existentialLocalsR1473[name] = p                                                  // SOUNDNESS R1473
             }
             if let ann = binding.typeAnnotation {
                 if !tupleElements(ann.type).isEmpty { tupleElem[name] = tupleElements(ann.type) }  // `let p: (A, B)`

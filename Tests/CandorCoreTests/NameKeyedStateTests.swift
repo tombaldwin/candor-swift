@@ -293,6 +293,7 @@ final class NameKeyedStateTests: XCTestCase {
         "fieldArrayElem": .immutableIndex, "fieldArrayElemNested": .immutableIndex,
         "fieldDictValue": .immutableIndex,
         "opaqueFields": .immutableIndex, "localTypes": .immutableIndex,
+        "existentialFieldsR1473": .immutableIndex,   // SOUNDNESS R1473 — keyed by TYPE, then field name
         "declaredTypes": .immutableIndex, "enclosingMembers": .immutableIndex,
         "localFreeFns": .immutableIndex, "localProtocols": .immutableIndex,
         // SOUNDNESS R563 — keyed by a GENERIC PARAMETER name and by `"<Proto>.<member>"`, both supplied
@@ -423,11 +424,14 @@ final class NameKeyedStateTests: XCTestCase {
         // Desktop key. Unscoped like `vars`: the collector walks one function at a time and `shadowName`
         // fires on every binder, so a stale entry cannot outlive its scope.
         "homeAnchoredLocals": .clearedOnRebind(scoped: false),
+        "existentialLocalsR1473": .clearedOnRebind(scoped: false),   // SOUNDNESS R1473
         // Path VALUES and a per-call flag — not keyed by any binding name.
         "resolvedHomePaths": .notPerBinding,
         "lastResolvedHomePath": .notPerBinding,
         "protoDispatches": .notPerBinding, "protoPropReads": .notPerBinding,
         "stringifyDispatches": .notPerBinding,
+        "stdReqReads": .notPerBinding,   // SOUNDNESS R1473
+        "stringifyExistentialR1473": .notPerBinding,   // SOUNDNESS R1473
         // R1415 — output: the one dependency-member candidate map (and its overload-precise keys)
         "externalMembers": .notPerBinding, "externalMemberPrecise": .notPerBinding,
         "globalReads": .notPerBinding, "depGlobalReads": .notPerBinding,
