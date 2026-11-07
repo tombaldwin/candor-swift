@@ -10,6 +10,12 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R1498 — a tuple's element carries its type.** `let t = (A(), 1); t.0.eff()`, labelled slots, a
+  tuple-typed stored property (`l.tup.0`, `self.tup.0`, bare `tup.0`), a call declared to return a tuple (`mkPair().0`,
+  `let p = mkPair()`), a copy (`let t = l.tup`) and a destructuring of any of them (`let (x, _) = l.tup`) were silent over
+  an executed file write: only an annotated local, a parameter and a destructured tuple LITERAL were typed. A tuple
+  return's slots follow the ordinary return index's never-guess rule. Not covered: `for (a, _) in xs` over an array of
+  tuples. Gates can turn red (`deny E` 0→1). Kill switch `CANDOR_R1498_OFF`.
 - **⚠ SOUNDNESS R1497 — a `fileprivate typealias` answers in its own file.** Two files may each declare `fileprivate
   typealias K = …`; the module-wide alias table kept the last file's target, so a call through `K` in every other file
   went to the wrong type — silent where that type is pure (executed), fabricated where it is not (executed). A top-level

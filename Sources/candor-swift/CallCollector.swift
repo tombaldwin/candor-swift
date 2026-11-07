@@ -370,6 +370,7 @@ final class CallCollector: SyntaxVisitor {
     /// type `$0` as `T` — so the compact representation buys containment with a fabrication.
     var arrayElemNested: [String: String] = [:]
     let fieldDictValue: [String: [String: String]]  // Type -> field -> [K: V] value
+    let tupleFactsR1498: TupleFactsR1498            // SOUNDNESS R1498 — tuple-typed fields and returns
     let fieldTypeArgs: [String: [String: [String]]]  // SOUNDNESS R905 — Type -> field -> direct generic args
     let opaqueFields: [String: Set<String>]         // Type -> fields whose type is monomorphized
     let localTypes: Set<String>
@@ -952,6 +953,7 @@ final class CallCollector: SyntaxVisitor {
          fieldMetatypeArrayElem: [String: [String: String]] = [:],
          fieldArrayElem: [String: [String: String]], fieldArrayElemNested: [String: [String: String]],
          fieldDictValue: [String: [String: String]],
+         tupleFactsR1498: TupleFactsR1498 = TupleFactsR1498(),
          fieldTypeArgs: [String: [String: [String]]] = [:],
          opaqueFields: [String: Set<String>] = [:],
          enumCaseValueType: [String: String],
@@ -1054,6 +1056,7 @@ final class CallCollector: SyntaxVisitor {
         self.fieldArrayElem = fieldArrayElem
         self.fieldArrayElemNested = fieldArrayElemNested
         self.fieldDictValue = fieldDictValue
+        self.tupleFactsR1498 = tupleFactsR1498
         self.fieldTypeArgs = fieldTypeArgs          // R905
         self.opaqueFields = opaqueFields
         self.localTypes = localTypes
@@ -1658,6 +1661,54 @@ final class CallCollector: SyntaxVisitor {
     /// `monoNames`. It travels WITH the resolution rather than being re-derived at the call site,
     /// because the same receiver spelling can resolve through vars, a field, or a subscript element,
     /// and only the resolving branch knows which one answered.
+    /// SOUNDNESS R1498 — THE SLOTS OF A TUPLE-VALUED EXPRESSION, or nil. `rootOf` answers one NAMED type, and a tuple
+    /// has none, so a tuple reached anywhere but an annotated local or a parameter (`tupleElem`) typed nothing and every
+    /// call on one of its elements was dropped: `let t = (A(), 1); t.0.eff()`, `l.tup.0.eff()`, `mkPair().0.eff()`,
+    /// `let (x, _) = l.tup` — silent over an executed file write. Answers a tuple LITERAL (each element through
+    /// `rootOf`), a local/parameter already in `tupleElem`, a tuple-typed FIELD (`TupleFactsR1498.fields`; bare or on a
+    /// typed receiver), and a call whose declared return is a tuple (`TupleFactsR1498.returns`, by leaf, never-guess).
+    /// Cheap to ask: it is called only on the BASE of a member access, so a non-tuple base returns before any walk.
+    private func tupleSlotsOf(_ raw: ExprSyntax, _ depth: Int = 0) -> [String: String]? {
+        guard !Self.r1498Off, depth <= 200 else { return nil }
+        let e = Self.peel(raw)
+        if let tup = e.as(TupleExprSyntax.self) {
+            guard tup.elements.count >= 2 else { return nil }
+            var out: [String: String] = [:]
+            for (i, el) in tup.elements.enumerated() {
+                let r = rootOf(el.expression, depth + 1)
+                guard r.isVar, let t = r.root else { continue }
+                out[String(i)] = t
+                if let label = el.label?.text { out[label] = t }
+            }
+            return out.isEmpty ? nil : out
+        }
+        if let dr = e.as(DeclReferenceExprSyntax.self) {
+            let n = dr.baseName.text
+            if let s = tupleElem[n] { return s }
+            // implicit `self.` — a local, a parameter or a binder of that name shadows the field (Swift's lookup order)
+            guard vars[n] == nil, !isBoundLocal(n), !binderShadow.contains(n), !paramNamesR851.contains(n),
+                  let et = enclosingType else { return nil }
+            return tupleFactsR1498.fields[et]?[n]
+        }
+        if let ma = e.as(MemberAccessExprSyntax.self), let b = ma.base {
+            let member = ma.declName.baseName.text
+            // only a member some tuple-typed field declares is worth resolving the base for
+            guard tupleFieldNamesR1498.contains(member) else { return nil }
+            let inner = rootOf(b, depth + 1)
+            guard let rt = inner.root else { return nil }
+            return tupleFactsR1498.fields[rt]?[member]
+        }
+        if let call = e.as(FunctionCallExprSyntax.self) {
+            let leaf: String?
+            if let dr = call.calledExpression.as(DeclReferenceExprSyntax.self) { leaf = dr.baseName.text }
+            else if let ma = call.calledExpression.as(MemberAccessExprSyntax.self) { leaf = ma.declName.baseName.text }
+            else { leaf = nil }
+            if let l = leaf, let s = tupleFactsR1498.returns[l] { return s }
+        }
+        return nil
+    }
+    private lazy var tupleFieldNamesR1498: Set<String> = Set(tupleFactsR1498.fields.values.flatMap { $0.keys })
+
     private func rootOf(_ raw: ExprSyntax, _ depth: Int = 0) -> (root: String?, isVar: Bool, path: [String], mono: Bool, opaqueHop: Bool) {
         // R97 — THE SINGLE PLACE A RESOLVED TYPE NAME IS DEALIASED. `dealias` used to be spelled by each
         // arm that felt like it: of the 23 sites that bind a name to a type, exactly ONE called it, and
@@ -2112,6 +2163,12 @@ final class CallCollector: SyntaxVisitor {
             if let baseDR = ma.base?.as(DeclReferenceExprSyntax.self),
                let elemType = tupleElem[baseDR.baseName.text]?[ma.declName.baseName.text] {
                 return (elemType, true, [], false, false)
+            }
+            // SOUNDNESS R1498 — …and a slot of any OTHER tuple-valued expression: a tuple-typed field (`l.tup.0`,
+            // `self.tup.0`, bare `tup.0`), a tuple literal, a call whose declared return is a tuple (`mkPair().0`).
+            if let b = ma.base, let slot = tupleSlotsOf(b, depth + 1)?[ma.declName.baseName.text] {
+                vbHit("R1498", "slot .\(ma.declName.baseName.text) -> \(slot)")
+                return (slot, true, [], false, false)
             }
             let inner = ma.base.map { rootOf($0, depth + 1) } ?? (root: nil, isVar: false, path: [], mono: false, opaqueHop: false)
             let member = ma.declName.baseName.text
@@ -3325,6 +3382,9 @@ final class CallCollector: SyntaxVisitor {
     static let r1491Off = ProcessInfo.processInfo.environment["CANDOR_R1491_OFF"] != nil
     /// SOUNDNESS R1497 §1b KILL SWITCH — `CANDOR_R1497_OFF=1` restores the module-wide last-writer file alias table.
     static let r1497Off = ProcessInfo.processInfo.environment["CANDOR_R1497_OFF"] != nil
+    /// SOUNDNESS R1498 §1b KILL SWITCH — `CANDOR_R1498_OFF=1`: a tuple-valued expression other than an annotated local or
+    /// parameter, or a destructured tuple literal, types nothing again (the release reading).
+    static let r1498Off = ProcessInfo.processInfo.environment["CANDOR_R1498_OFF"] != nil
     /// The `Self` spelling (row pending) §1b KILL SWITCH: `CANDOR_SELFCTOR_OFF=1` restores the literal `Self` root.
     static let selfCtorOff = ProcessInfo.processInfo.environment["CANDOR_SELFCTOR_OFF"] != nil
     /// SOUNDNESS R1492 KILL SWITCH — no full-path field index for `extension A.B.T`, no associated-type field typing.
@@ -11704,6 +11764,28 @@ final class CallCollector: SyntaxVisitor {
                 }
                 continue
             }
+            // SOUNDNESS R1498 — `let (x, _) = l.tup` / `= mkPair()` / `= t` / `let (x, y): (A, B) = …`: a tuple pattern
+            // over a NON-literal initializer bound nothing (the arm above reads a literal's elements), so `x.eff()` was
+            // dropped. Each identifier takes its position's slot; the scaffolding is the literal arm's.
+            if !Self.r1498Off, let tp = binding.pattern.as(TuplePatternSyntax.self), let v0 = binding.initializer?.value,
+               let slots = binding.typeAnnotation.map({ tupleElements($0.type) }).flatMap({ $0.isEmpty ? nil : $0 })
+                    ?? tupleSlotsOf(v0) {
+                for n in Self.patternNames(PatternSyntax(tp)) {
+                    scopeBindingType(Syntax(node), n)
+                    shadowName(n); rebindTyped(n, through: v0)
+                }
+                markBinders(PatternSyntax(tp))
+                for (i, pe) in tp.elements.enumerated() {
+                    guard let n = pe.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
+                    boundLocals.insert(n)
+                    literalLocals.insert(n)
+                    if let t = slots[String(i)] {
+                        vars[n] = t
+                        vbHit("R1498", "destructure \(n) -> \(t)")
+                    } else { clearBinding(n) }
+                }
+                continue
+            }
             // VECTOR 3 — `let v: W = "lit"` / `let _: W = 42` / `= [..]`: a literal at a type-annotated
             // binding coerces through `W`'s `ExpressibleBy*Literal` init, which RUNS. Edge to `W.init` when
             // `W` is local + the value is a bare literal (a non-literal initializer is an ordinary init).
@@ -12089,6 +12171,11 @@ final class CallCollector: SyntaxVisitor {
                     // has one, which are the two spellings `MemberAccessExprSyntax` can carry.
                     // Unrecorded slots simply do not answer — nothing is inferred and nothing is guessed.
                     clearBinding(name)
+                    // SOUNDNESS R1498 — and the SCALAR slots (`let t = (A(), 1); t.0.eff()`), which `rootOf` reads.
+                    if !Self.r1498Off, let slots = tupleSlotsOf(v0) {
+                        tupleElem[name] = slots
+                        vbHit("R1498", "literal \(name)")
+                    }
                     for (i, el) in tup.elements.enumerated() {
                         var keys = ["\(i)"]
                         if let label = el.label?.text { keys.append(label) }
@@ -12221,6 +12308,17 @@ final class CallCollector: SyntaxVisitor {
                     }
                 }
             }
+            // SOUNDNESS R1498 — `let t = (A(), 1)` / `= l.tup` / `= mkPair()` / `= other`: the binding IS a tuple, so
+            // record its SLOTS (`t.0`, `t.label`), as an annotated `let t: (A, Int)` already is. `tupleSlotsOf` answers
+            // only for an expression DECLARED tuple-valued, so it outranks the arms above, whose answer for a member
+            // copy is R567's guess (`l.tup` reads as `L`, the base): that typing is cleared, as R349's slot arm does.
+            if !Self.r1498Off, binding.typeAnnotation == nil, binding.accessorBlock == nil,
+               let v0 = binding.initializer?.value, tupleElem[name] == nil,
+               let slots = tupleSlotsOf(v0) {
+                clearBindingTypeOnly(name)
+                tupleElem[name] = slots
+                vbHit("R1498", "bind \(name) -> \(slots.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" })")
+            }
         }
         // The initializers were walked above; everything else is walked here, after the binding moved.
         for binding in node.bindings {
@@ -12234,6 +12332,12 @@ final class CallCollector: SyntaxVisitor {
 
 private extension TokenKind {
     var isIdentifier: Bool { if case .identifier = self { return true }; return false }
+}
+
+/// SOUNDNESS R1498 — the tuple facts the Driver merged: `fields` Type -> field -> slots, `returns` fn leaf -> slots.
+struct TupleFactsR1498 {
+    var fields: [String: [String: [String: String]]] = [:]
+    var returns: [String: [String: String]] = [:]
 }
 
 /// VEIN A(i) — the type-identity scope a `CallCollector` resolves a spelling in. Built once by the Driver

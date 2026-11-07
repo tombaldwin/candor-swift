@@ -420,6 +420,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var fieldMetatypeArrayElem: [String: [String: String]] = [:]
     var fieldArrayElemNested: [String: [String: String]] = [:]   // R278
     var fieldDictValue: [String: [String: String]] = [:]
+    var fieldTupleElemR1498: [String: [String: [String: String]]] = [:]   // SOUNDNESS R1498
+    var returnTupleTmpR1498: [String: [String: String]?] = [:]            // SOUNDNESS R1498
     var fieldTypeArgs: [String: [String: [String]]] = [:]   // SOUNDNESS R905
     var fieldContainersR1176: [String: [String: (kind: String, args: [String])]] = [:]   // SOUNDNESS R1176
     var optionalContainerFieldsR1463: [String: Set<String>] = [:]                       // SOUNDNESS R1463
@@ -1052,6 +1054,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (t, fs) in c.fieldMetatypeArrayElem { fieldMetatypeArrayElem[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.fieldArrayElemNested { fieldArrayElemNested[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.fieldDictValue { fieldDictValue[t, default: [:]].merge(fs) { a, _ in a } }
+        for (t, fs) in c.fieldTupleElemR1498 { fieldTupleElemR1498[t, default: [:]].merge(fs) { a, _ in a } }   // R1498
+        for (k, v) in c.returnTupleTmpR1498 {   // R1498 — same ambiguity rule as `returnsTmp`
+            if let existing = returnTupleTmpR1498[k] {
+                if existing != v { returnTupleTmpR1498[k] = .some(nil) }
+            } else {
+                returnTupleTmpR1498[k] = v
+            }
+        }
         for (t, fs) in c.fieldTypeArgs { fieldTypeArgs[t, default: [:]].merge(fs) { a, _ in a } }   // R905
         for (t, fs) in c.fieldContainersR1176 { fieldContainersR1176[t, default: [:]].merge(fs) { a, _ in a } }   // R1176
         for (t, fs) in c.optionalContainerFieldsR1463 { optionalContainerFieldsR1463[t, default: []].formUnion(fs) }   // R1463
@@ -2004,6 +2014,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         returnsTmp[leaf] = String?.none
     }
     for (k, v) in returnsTmp { if let t = v { returnsIdx[k] = t } }
+    // SOUNDNESS R1498 — the tuple-return slots, for a leaf no ordinary (or metatype) return also answers.
+    var tupleFactsR1498 = TupleFactsR1498()
+    tupleFactsR1498.fields = fieldTupleElemR1498
+    for (k, v) in returnTupleTmpR1498 where returnsTmp[k] == nil && metatypeReturnsTmp[k] == nil {
+        if let s = v { tupleFactsR1498.returns[k] = s }
+    }
     // SOUNDNESS R1044 — a leaf whose ONLY declarations return their argument's generic type, and that no ordinary
     // return also answers (a leaf both indexes speak for is ambiguous and neither may answer).
     for (k, v) in genericReturnArgTmp { if let g = v, returnsIdx[k] == nil { genericReturnArgIdx[k] = g } }
@@ -4153,6 +4169,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                fieldMetatypeArrayElem: fieldMetatypeArrayElem,
                                fieldArrayElem: fieldArrayElem, fieldArrayElemNested: fieldArrayElemNested,
                                fieldDictValue: fieldDictValue,
+                               tupleFactsR1498: tupleFactsR1498,                                      // R1498
                                fieldTypeArgs: fieldTypeArgs,                                           // R905
                                opaqueFields: opaqueFields,
                                enumCaseValueType: enumCaseValueType,

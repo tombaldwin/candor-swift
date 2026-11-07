@@ -438,6 +438,8 @@ final class NameKeyedStateTests: XCTestCase {
         "binderSnapshots": .notPerBinding, "caseSnapshots": .notPerBinding,
         // VEIN B — scope and walk bookkeeping keyed by syntax node, or a flag read around one call.
         "elseTypeSnapshots": .notPerBinding, "reqFloor": .notPerBinding, "elemGuessRecv": .notPerBinding,
+        // SOUNDNESS R1498 — the tuple-typed FIELD and RETURN facts, keyed by type / fn leaf, and a lazy name set over them.
+        "tupleFactsR1498": .immutableIndex, "tupleFieldNamesR1498": .immutableIndex,
         "r915NestedDotted": .notPerBinding,
         // R1073 — output flag: the unit dropped a member call (read once by the Driver after the walk)
         "droppedMember": .notPerBinding,

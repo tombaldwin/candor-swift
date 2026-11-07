@@ -308,6 +308,12 @@ final class DeclCollector: SyntaxVisitor {
     /// a key that held none of the declaration's stored properties: the hop kept the outer type and the call was
     /// dropped (swift-crypto's RSA `self.backing.signature(…)`). The Driver unions the dotted paths into `fields`.
     var fieldsByPath: [String: [String: (name: String?, isFunction: Bool)]] = [:]
+    /// SOUNDNESS R1498 — a stored property of TUPLE type: `Type -> field -> slot ("0", "1", label) -> element type`
+    /// (`tupleElements`). `fields` records no name for a tuple, so `l.tup.0.eff()` resolved against nothing. Keyed by
+    /// the simple name and, as `fieldsByPath`, by the full path.
+    var fieldTupleElemR1498: [String: [String: [String: String]]] = [:]
+    /// SOUNDNESS R1498 — fn leaf -> its declared TUPLE return's slots; `nil` = two declarations disagree (never guess).
+    var returnTupleTmpR1498: [String: [String: String]?] = [:]
     /// SOUNDNESS R1492 — `protocol -> associatedtype -> its single nominal bound` (`associatedtype K: KP`).
     var assocTypeBounds: [String: [String: String]] = [:]
     /// SOUNDNESS R1492 — a stored property spelled `Param.Assoc` where `Param` is a generic parameter of the
@@ -1539,6 +1545,13 @@ final class DeclCollector: SyntaxVisitor {
                         unresolvedGenericFields.append((ty, name, tn))
                     }
                     setFieldR1492(ty, tyPath, name, info)
+                    if !CallCollector.r1498Off {   // SOUNDNESS R1498 — a tuple-typed stored property's slots
+                        let te = tupleElements(ann.type).filter { typeGenericParamNames[ty]?.contains($0.value) != true }
+                        if !te.isEmpty {
+                            fieldTupleElemR1498[ty, default: [:]][name] = te
+                            if r1492Path(ty, tyPath) { fieldTupleElemR1498[tyPath, default: [:]][name] = te }
+                        }
+                    }
                     // SOUNDNESS R585 (b4/b6) — a stored property of METATYPE type, and of ARRAY-of-
                     // metatype type. `fields` records "the type of the value", which for a metatype is
                     // no answer at all (`typeName` returns nil), so `struct Box { let t: CBase.Type;
@@ -1784,6 +1797,20 @@ final class DeclCollector: SyntaxVisitor {
         // metatype map may only ADD where nothing answered (see the Driver's build of
         // `metatypeReturnsIdx`), so this is the conservative half of that rule, not a second authority.
         if metatypeReturnsTmp[name] != nil { metatypeReturnsTmp[name] = String?.none }
+        // SOUNDNESS R1498 — a TUPLE return's slots, under the same never-guess rule (a leaf declared twice with
+        // different slots answers nothing; the Driver also drops a leaf any ordinary return answers). A slot spelled
+        // by a generic parameter of the function or its owner is not a type and is left out.
+        if !CallCollector.r1498Off, let rc = sig.returnClause {
+            let te = tupleElements(rc.type).filter { !generics.contains($0.value)
+                && (typeStack.last.flatMap { typeGenericParamNames[$0] }?.contains($0.value) != true) }
+            if !te.isEmpty {
+                if let existing = returnTupleTmpR1498[name] {
+                    if existing != te { returnTupleTmpR1498[name] = .some(nil) }
+                } else {
+                    returnTupleTmpR1498[name] = te
+                }
+            }
+        }
         guard let rt = sig.returnClause.map({ typeName($0.type) }), let tn = rt.name else { return }
         // SOUNDNESS R1010 — `-> T` where `T` is the function's OWN generic parameter names no type: the leaf is
         // POISONED (never typed), not typed as whatever local declaration happens to be spelled `T`. The owner's
