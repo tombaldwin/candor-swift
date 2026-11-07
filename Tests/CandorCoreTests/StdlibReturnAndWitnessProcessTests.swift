@@ -142,8 +142,12 @@ final class StdlibReturnAndWitnessProcessTests: XCTestCase {
         XCTAssertEqual(inf(by, "viaBucket"), ["Fs"], "R1045: hash(into:) on T runs Noisy.hash; got \(by["viaBucket"] ?? [:])")
         XCTAssertEqual(inf(by, "viaMix"), ["Fs"], "R1045: Hasher.combine(T) runs Noisy.hash; got \(by["viaMix"] ?? [:])")
         XCTAssertNil(ProcessHarness.chargedNothing(by, "viaPlain"), "R1045: a synthesized pure witness charges nothing")
-        let off = try scan(Self.hashing, env: ["CANDOR_R1045_OFF": "1"])
-        XCTAssertNil(ProcessHarness.chargedNothing(off, "viaBucket"), "kill switch restores the release silence")
+        // SOUNDNESS R1490 (a) answers `a.hash(into:)` on `T: Hashable` too (a platform requirement read on a generic
+        // parameter), so the release silence needs both switches; R1045 alone off must still charge it.
+        let off = try scan(Self.hashing, env: ["CANDOR_R1045_OFF": "1", "CANDOR_R1490_OFF": "1"])
+        XCTAssertNil(ProcessHarness.chargedNothing(off, "viaBucket"), "kill switches restore the release silence")
+        let off1045 = try scan(Self.hashing, env: ["CANDOR_R1045_OFF": "1"])
+        XCTAssertEqual(inf(off1045, "viaBucket"), ["Fs"], "R1490 answers the same requirement independently")
     }
 
     // ── R1046 — an explicitly specialised constructor is the constructor, not a computed callee ─────────

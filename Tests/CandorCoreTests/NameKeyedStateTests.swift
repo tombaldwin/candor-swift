@@ -425,6 +425,8 @@ final class NameKeyedStateTests: XCTestCase {
         // fires on every binder, so a stale entry cannot outlive its scope.
         "homeAnchoredLocals": .clearedOnRebind(scoped: false),
         "existentialLocalsR1473": .clearedOnRebind(scoped: false),   // SOUNDNESS R1473
+        "existentialArrayLocalsR1490": .clearedOnRebind(scoped: false),   // SOUNDNESS R1490 (f)
+        "existentialClosureParamsR1490": .notPerBinding,   // SOUNDNESS R1490 (f) — keyed by closure node, like monoClosureParams
         // Path VALUES and a per-call flag — not keyed by any binding name.
         "resolvedHomePaths": .notPerBinding,
         "lastResolvedHomePath": .notPerBinding,
