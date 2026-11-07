@@ -307,7 +307,8 @@ final class NameKeyedStateTests: XCTestCase {
         // parameter name; a rebind is answered by `vars`/`binderShadow` at the one reader of each.
         "compositionParams": .immutableIndex, "protoReqFieldTypes": .immutableIndex, "protoReqProps": .immutableIndex,
         "genericCallableFields": .immutableIndex, "classSupertypes": .immutableIndex,
-        "supertypesAll": .immutableIndex, "nestedTypePairs": .immutableIndex, "memberTypeAliases": .immutableIndex,   // R915
+        "supertypesAll": .immutableIndex, "objcRootSupers": .immutableIndex,   // R1485
+        "nestedTypePairs": .immutableIndex, "memberTypeAliases": .immutableIndex,   // R915
         "paramNamesR851": .immutableIndex, "variadicParamsR915": .immutableIndex,
         // SOUNDNESS R584 — the CLASS twin of the row above: the same key space (a generic-parameter name,
         // or a metatype PARAMETER's name standing for one), the same Driver-supplied declaration indexes,

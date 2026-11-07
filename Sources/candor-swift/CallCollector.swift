@@ -608,6 +608,9 @@ final class CallCollector: SyntaxVisitor {
     /// member hop the type does not record is declared (an inherited stored field, a protocol-extension
     /// property such as Kingfisher's `kf`).
     let supertypesAll: [String: Set<String>]
+    /// SOUNDNESS R1485 — `NSObject` plus its recorded supertypes for a receiver type that is a platform
+    /// (Objective-C imported) class, `[]` otherwise (Driver's `objcRootSupers`).
+    let objcRootSupers: (String) -> Set<String>
     /// SOUNDNESS R915 (A) — adjacent `Outer.Inner` pairs of declared type paths.
     let nestedTypePairs: Set<String>
     /// SOUNDNESS R915 (B) — type -> member alias -> its one underlying type.
@@ -936,6 +939,7 @@ final class CallCollector: SyntaxVisitor {
          genericCallableFields: [String: Set<String>] = [:],
          classSupertypes: [String: Set<String>] = [:],
          supertypesAll: [String: Set<String>] = [:],
+         objcRootSupers: @escaping (String) -> Set<String> = { _ in [] },
          nestedTypePairs: Set<String> = [],
          memberTypeAliases: [String: [String: String]] = [:],
          returns: [String: String],
@@ -1065,6 +1069,7 @@ final class CallCollector: SyntaxVisitor {
         self.genericCallableFields = Self.r256Off ? [:] : genericCallableFields // R256
         self.classSupertypes = classSupertypes                                  // R906
         self.supertypesAll = supertypesAll                                      // R915 (C)
+        self.objcRootSupers = objcRootSupers                                    // R1485
         self.nestedTypePairs = nestedTypePairs                                  // R915 (A)
         self.memberTypeAliases = memberTypeAliases                              // R915 (B)
         self.variadicParamsR915 = Set(info.paramIndex.compactMap { (n, i) in
@@ -1703,7 +1708,9 @@ final class CallCollector: SyntaxVisitor {
         guard !DeclCollector.r915Off, fields[rt]?[member] == nil else { return nil }
         var names: Set<String> = []
         let mono = false
-        for sup in (supertypesAll[rt] ?? []).sorted() where sup != rt {
+        // SOUNDNESS R1485 — a platform class with no recorded supertypes inherits what this scan gives `NSObject`.
+        let sups = supertypesAll[rt] ?? objcRootSupers(rt)
+        for sup in sups.sorted() where sup != rt {
             guard let f = fields[sup]?[member] else { continue }
             if f.isFunction { return nil }
             guard let n = f.name else { return nil }
@@ -1717,7 +1724,7 @@ final class CallCollector: SyntaxVisitor {
         }
         guard names.count == 1, let n = names.first,
               localTypes.contains(dealias(n)) || localProtocols.contains(dealias(n)) else { return nil }
-        vbHit("R915C", "\(rt).\(member) -> \(n)")
+        vbHit(supertypesAll[rt] == nil ? "R1485" : "R915C", "\(rt).\(member) -> \(n)")
         return (n, mono)
     }
 
@@ -9514,6 +9521,12 @@ final class CallCollector: SyntaxVisitor {
             if !Self.r1071Off, platformExtLeaves.contains(prop), let b = node.base {
                 calls.append(Call(path: "<platext>.\(prop)", leaf: prop, strArg: nil, typed: false,
                                   args: [], argTypes: [], extOwner: platformReceiverType(b, recv)))
+            }
+            // SOUNDNESS R1485 — the PROPERTY spelling on a platform class: `n.nsProp` with `n: NumberFormatter` and
+            // `extension NSObject { var nsProp … }` (or a protocol `NSObject` conforms to here). ADDITIVE: the key is
+            // resolved by the Driver against the `NSObject` path only (`objcRootSupers`), the arms below run as before.
+            if let root = recvRoot, !recv.opaqueHop, !objcRootSupers(root).isEmpty {
+                insertPropertyEdge("\(root).\(prop)", at: Syntax(node))
             }
             // SOUNDNESS R983 — the dotted twin of the simple `Inner.prop` edge below (see `nestedDottedKey`).
             if !Self.r983Off, let b = node.base, let dotted = nestedDottedKey(b) {

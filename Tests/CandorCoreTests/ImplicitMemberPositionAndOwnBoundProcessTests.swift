@@ -139,7 +139,9 @@ extension Reactive where Base: NumberFormatter {
         for fn in ["Reactive.pickerPure", "Reactive.otherPure", "Reactive.plainPure"] {
             XCTAssertNil(on[fn], "\(fn): pure (executed) — must stay uncharged")
         }
-        let (off, _) = try rows(Self.rxSource, env: ["CANDOR_R1481_OFF": "1"])
+        // R1485 OFF as well: with R1481 off `base` reads the merged bound `NumberFormatter`, a platform class, and R1485
+        // then reaches the same `.rx` helper through it — right answer, wrong reason, which would hide R1481's own row.
+        let (off, _) = try rows(Self.rxSource, env: ["CANDOR_R1481_OFF": "1", "CANDOR_R1485_OFF": "1"])
         for fn in ["Reactive.cdNoParam", "Reactive.otherCD"] { XCTAssertNil(off[fn], "\(fn): silent with R1481 off") }
     }
 
