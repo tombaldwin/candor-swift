@@ -10,6 +10,12 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R1472 (defect C) — a closure parameter's name is not `self.<name>` either.** RxCocoa's
+  `Reactive.countDownDuration` passes `setter: { picker, value in … = value }`; the bare `value` (the parameter) edged the
+  unrelated member `Reactive.value` through the implicit-`self` arms and charged its effects. R1472 withheld only the
+  global read, because that false edge was then the only charge on `countDownDuration`; R1485 gives its real callee an
+  edge, so the member edge is withheld too. Gates can turn GREEN where the only charge was the false member (`deny E`
+  1→0, executed). Kill switch `CANDOR_R1472C_OFF`.
 - **⚠ SOUNDNESS R1485 — a platform class reaches what this scan gives `NSObject`.** RxSwift's `extension NSObject:
   ReactiveCompatible {}` gives every Objective-C class `rx`, and RxCocoa reaches its helpers as `base.rx.controlProperty…(…)`
   on a UIKit/AppKit/Foundation class. Those classes are imported from Objective-C, so no supertype was recorded and the
