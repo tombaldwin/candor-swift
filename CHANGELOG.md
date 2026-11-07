@@ -10,6 +10,10 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R1486 (method path) — a member found on a refined protocol resolves the call.** The method arm edged the
+  refined provider and kept the release's `dispatch:` hedge, because that wrong-reason `Unknown` was the only cover for
+  other dropped calls in swift-crypto; R1492 and the `Self()` fix (the entry below) close those at their own sites, so the hedge is
+  removed (`deny E Unknown` 1→0 over a pure provided member, executed). Kill switch `CANDOR_R1486_HEDGE=1` restores it.
 - **⚠ SOUNDNESS (row pending) — `Self()` constructs the enclosing type.** `var h = Self(); h.update(x)` in a protocol
   extension (swift-crypto's `HashFunction.hash(bufferPointer:)`), `Self().m()`, and a parameter or local annotated `Self`
   typed the value as the literal `Self`, which no unit carries, so every call on it was dropped — in a struct or class as

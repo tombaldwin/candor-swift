@@ -15,7 +15,8 @@ final class RefinedProtocolProviderProcessTests: XCTestCase {
     public protocol SP { }
     extension SP { public var parent: Int? { FileManager.default.createFile(atPath: "/tmp/r1481-c", contents: nil); return nil }
                    public func parentM() -> Int? { FileManager.default.createFile(atPath: "/tmp/r1481-c", contents: nil); return nil }
-                   public var pureRefined: Int { 4 } }
+                   public var pureRefined: Int { 4 }
+                   public func pureM() -> Int { 4 } }
     public protocol NP: SP {}
     public struct NSa: NP {}
     public struct NSb: NP, Hashable {}
@@ -26,6 +27,7 @@ final class RefinedProtocolProviderProcessTests: XCTestCase {
     func callA(_ s: NSa) -> Int? { s.parentM() }
     func callB(_ s: NSb) -> Int? { s.parentM() }
     func purePa(_ s: NSa) -> Int { s.pureRefined }
+    func purePM(_ s: NSa) -> Int { s.pureM() }
     """
 
     private func scan(_ root: URL, env: [String: String] = [:]) throws -> [String: [String: Any]] {
@@ -42,12 +44,16 @@ final class RefinedProtocolProviderProcessTests: XCTestCase {
         for fn in ["useA", "useB", "useC"] {
             XCTAssertEqual(ProcessHarness.inferred(by, fn), ["Fs"], "\(fn) writes the marker (executed) — \(by[fn] ?? [:])")
         }
-        // The METHOD arm edges the refined provider and KEEPS the release's hedge (a hedge is not removed here: see
-        // the Driver's note on what such a hedge was found covering in the corpus).
+        // The METHOD arm edges the refined provider and RESOLVES, as the property arm does: the release's wrong-reason
+        // `dispatch:NP.parentM` hedge is gone (R1486 method path; `CANDOR_R1486_HEDGE=1` restores it).
         for fn in ["callA", "callB"] {
-            XCTAssertEqual(ProcessHarness.inferred(by, fn), ["Fs", "Unknown"], "\(fn) — \(by[fn] ?? [:])")
+            XCTAssertEqual(ProcessHarness.inferred(by, fn), ["Fs"], "\(fn) — \(by[fn] ?? [:])")
         }
         XCTAssertNil(ProcessHarness.inferred(by, "purePa"), "a pure refined-protocol property stays pure — \(by["purePa"] ?? [:])")
+        XCTAssertNil(ProcessHarness.inferred(by, "purePM"), "a pure refined-protocol method resolves pure — \(by["purePM"] ?? [:])")
+        let kept = try scan(root, env: ["CANDOR_R1486_HEDGE": "1"])
+        XCTAssertEqual(ProcessHarness.inferred(kept, "callA"), ["Fs", "Unknown"], "the kept hedge: \(kept["callA"] ?? [:])")
+        XCTAssertEqual(ProcessHarness.inferred(kept, "purePM"), ["Unknown"], "the kept hedge: \(kept["purePM"] ?? [:])")
         // The gate at the caller, and the kill switch: the property reads were ABSENT, the methods hedged only.
         let off = try scan(root, env: ["CANDOR_R1486_OFF": "1"])
         XCTAssertNil(ProcessHarness.inferred(off, "useA"), "the release was silent: \(off["useA"] ?? [:])")
@@ -59,6 +65,12 @@ final class RefinedProtocolProviderProcessTests: XCTestCase {
         let out = root.appendingPathComponent("g").path
         XCTAssertEqual(try ProcessHarness.run(bin, [root.path, "--policy", pol.path, "--out", out]).code, 1)
         XCTAssertEqual(try ProcessHarness.run(bin, [root.path, "--policy", pol.path, "--out", out], env: ["CANDOR_R1486_OFF": "1"]).code, 0)
+        // A RESOLUTION, at the caller: `deny Unknown purePM` went 1 -> 0 (the body is pure); `deny Fs callA` stays 1.
+        try "deny Unknown purePM\n".write(to: pol, atomically: true, encoding: .utf8)
+        XCTAssertEqual(try ProcessHarness.run(bin, [root.path, "--policy", pol.path, "--out", out]).code, 0)
+        XCTAssertEqual(try ProcessHarness.run(bin, [root.path, "--policy", pol.path, "--out", out], env: ["CANDOR_R1486_HEDGE": "1"]).code, 1)
+        try "deny Fs callA\n".write(to: pol, atomically: true, encoding: .utf8)
+        XCTAssertEqual(try ProcessHarness.run(bin, [root.path, "--policy", pol.path, "--out", out]).code, 1)
     }
 
     /// ACROSS THE SCAN BOUNDARY: the provided member lives in a CHAINED package's protocol extension.

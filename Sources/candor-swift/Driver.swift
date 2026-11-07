@@ -32,6 +32,9 @@ private let r1109Probe = ProcessInfo.processInfo.environment["CANDOR_R1109_PROBE
 /// SOUNDNESS R1486 §1b KILL SWITCH — a concrete type's PROVIDER supertypes include the protocols its conformed protocols
 /// refine (see `providerSupers`). `CANDOR_R1486_OFF=1` restores the direct-supertype walk.
 private let r1486Off = ProcessInfo.processInfo.environment["CANDOR_R1486_OFF"] != nil
+/// SOUNDNESS R1486 method-path hedge §1b KILL SWITCH — `CANDOR_R1486_HEDGE=1` restores the kept `dispatch:` hedge on a
+/// member found only on a REFINED protocol (it then edges AND hedges, as b079d4f did).
+private let r1486HedgeKept = ProcessInfo.processInfo.environment["CANDOR_R1486_HEDGE"] != nil
 /// SOUNDNESS R1485 §1b KILL SWITCH — a platform (Objective-C imported) class reaches the members a LOCAL extension or
 /// retroactive conformance gives `NSObject` (see `objcRootSupers`). `CANDOR_R1485_OFF=1` restores the release.
 let r1485Off = ProcessInfo.processInfo.environment["CANDOR_R1485_OFF"] != nil
@@ -4862,17 +4865,17 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     let type = String(call.path[..<dot])
                     let member = String(call.path[call.path.index(after: dot)...])
                     r1081Flag.answered = false
-                    // SOUNDNESS R1486 — the provider climb includes the protocols the type's protocols REFINE. A member
-                    // found ONLY there is EDGED and does NOT count as resolved: the release's hedge below still fires.
-                    // Measured (swift-crypto, A/B vs 1d351eb): letting it resolve removed 11 rows' `dispatch:` hedges
-                    // (`SHA3_256.hash(data:)` -> `HashFunction.hash`, correctly), and in at least 5 of them the wrong-reason
-                    // `Unknown` was the only thing covering a different, pre-existing dropped call (`self.backing.…` on an
-                    // RSA key whose backing type is a fileprivate typealias declared in three files; `self.backing =
-                    // try .init()` on an associated type) whose callee performs C calls. Removing a hedge waits for those.
+                    // SOUNDNESS R1486 — the provider climb includes the protocols the type's protocols REFINE, and a
+                    // member found there RESOLVES the call, exactly as the property path (above) lets it. The first cut
+                    // kept the release's `dispatch:` hedge on top (measured, swift-crypto vs 1d351eb: resolving removed 11
+                    // rows' hedges and in at least 5 of them the wrong-reason `Unknown` was the only cover for a DIFFERENT
+                    // dropped call — RSA `self.backing.…`, an associated-type `.init()`). R1492 closed those drops at
+                    // their own sites; re-measured on b079d4f the hedge covers one row corpus-wide, whose own C call is
+                    // still disclosed `invisible` (SOUNDNESS R1486, A/B in the commit). `CANDOR_R1486_HEDGE=1` restores it.
                     let directSups = supertypesOf[type] ?? []
                     for sup in providerSupers(type) {
                         let base = "\(sup).\(member)"
-                        let countsAsResolved = directSups.contains(sup)
+                        let countsAsResolved = !r1486HedgeKept || directSups.contains(sup)
                         // AN OVERLOADED PROVIDED MEMBER MUST NOT VANISH. `resolveQual` can only name an
                         // UNAMBIGUOUS simple->full mapping (`qualBySimple[base].count == 1`); a protocol
                         // extension declaring a second, unrelated overload of the same base name
