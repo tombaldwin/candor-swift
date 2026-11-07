@@ -10,6 +10,36 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R1499 — a hop the platform declares is not the local class.** `final class TLoc: Thread { func
+  removeAllObjects() }` with `l.threadDictionary.removeAllObjects()`: the unexplained hop kept `TLoc` (R567's floor) and
+  charged `TLoc.removeAllObjects`, which never runs (executed: `threadDictionary` is Thread's `NSMutableDictionary`). On a
+  local class whose only foreign ancestry is a platform class, an instance member no local declaration names is the
+  platform's, and its type is never a type this scan declares; such a type's member is reachable through it only as an
+  `override` or by Objective-C dynamic dispatch, so the floor edge is dropped when every local declaration of the member
+  name is a plain member of a declared type (an extension of a platform type or a local protocol keeps it). The same hop
+  now also reaches a member a local extension gives a platform type (`extension NSMutableDictionary { func zapAll() }`),
+  which was silent. Gates can turn GREEN (`deny E` 1→0, executed) and red (0→1, executed). Kill switch `CANDOR_R1499_OFF`.
+- **⚠ SOUNDNESS R1498 — a tuple's element carries its type.** `let t = (A(), 1); t.0.eff()`, labelled slots, a
+  tuple-typed stored property (`l.tup.0`, `self.tup.0`, bare `tup.0`), a call declared to return a tuple (`mkPair().0`,
+  `let p = mkPair()`), a copy (`let t = l.tup`) and a destructuring of any of them (`let (x, _) = l.tup`) were silent over
+  an executed file write: only an annotated local, a parameter and a destructured tuple LITERAL were typed. A tuple
+  return's slots follow the ordinary return index's never-guess rule. Not covered: `for (a, _) in xs` over an array of
+  tuples. Gates can turn red (`deny E` 0→1). Kill switch `CANDOR_R1498_OFF`.
+- **⚠ SOUNDNESS R1497 — a `fileprivate typealias` answers in its own file.** Two files may each declare `fileprivate
+  typealias K = …`; the module-wide alias table kept the last file's target, so a call through `K` in every other file
+  went to the wrong type — silent where that type is pure (executed), fabricated where it is not (executed). A top-level
+  `private`/`fileprivate` alias now answers only in its declaring file, and a module-visible alias outranks another
+  file's fileprivate one. Gates can turn red and green. Kill switch `CANDOR_R1497_OFF`.
+- **⚠ SOUNDNESS R1486 (method path) — a member found on a refined protocol resolves the call.** The method arm edged the
+  refined provider and kept the release's `dispatch:` hedge, because that wrong-reason `Unknown` was the only cover for
+  other dropped calls in swift-crypto; R1492 and the `Self()` fix (the entry below) close those at their own sites, so the hedge is
+  removed (`deny E Unknown` 1→0 over a pure provided member, executed). Kill switch `CANDOR_R1486_HEDGE=1` restores it.
+- **⚠ SOUNDNESS (row pending) — `Self()` constructs the enclosing type.** `var h = Self(); h.update(x)` in a protocol
+  extension (swift-crypto's `HashFunction.hash(bufferPointer:)`), `Self().m()`, and a parameter or local annotated `Self`
+  typed the value as the literal `Self`, which no unit carries, so every call on it was dropped — in a struct or class as
+  well as a protocol extension (executed). They now resolve as `self` does. Gates can turn red. Kill switch
+  `CANDOR_SELFCTOR_OFF`.
+
 - **⚠ SOUNDNESS R1491 — a `let` copy of a member read carries the member's type.** `let r = l.w; r.eff()` was silent
   over an executed file write while `l.w.eff()` and `if let r = l.w` both charged: the plain `let` binder typed an
   unannotated member-access initializer (`l.w`, `self.w`, `l.w.v`, `Loc.sw`; stored or computed, generic or not) as

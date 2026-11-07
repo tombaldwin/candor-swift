@@ -129,6 +129,9 @@ func optFree(_ a: SynD, _ b: SynD) -> Bool { a != b }
 
     func testAProtocolExtensionOperatorAnswersInsteadOfTheWitness() throws {
         let on = try rows()
-        for fn in Self.controls { XCTAssertNil(on[fn], "\(fn): no witness runs (executed) — got \(on[fn] ?? [])") }
+        // CHARGED NOTHING, not ABSENT: with `lhs: Self` typed (the `Self` spelling fix) `pgt`/`qne` edge their real
+        // callee, the protocol-extension operator (`PGt.>`), and publish its `key` dispatch — a ⟨0.39⟩ dispatch-only row
+        // (`ProcessHarness.chargedNothing`'s note). The claim the control makes is that no witness's effect arrives.
+        for fn in Self.controls { XCTAssertEqual(on[fn] ?? [], [], "\(fn): no witness runs (executed) — got \(on[fn] ?? [])") }
     }
 }

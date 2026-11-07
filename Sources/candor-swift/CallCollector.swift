@@ -235,6 +235,8 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// hop that kept the outer base's type, or a local laundered from either. A lookup on such an
               /// owner — hit or miss — that no trusted surface answers keeps the guess and ADDS `Unknown`.
               var guessHop: Bool = false
+              /// SOUNDNESS R1499 — the receiver is a guess through a platform-declared hop (`platformHopExprsR1499`).
+              var platformHopR1499: Bool = false
               /// SOUNDNESS R915 REACH — set only under `CANDOR_VEINB_PROBE` on a typed local call whose
               /// receiver root is a `rootOf` guess (`opaqueHop`): `<hop kind>\t<receiver spelling>`. The Driver
               /// prints what that call resolved to. Never read for an answer.
@@ -372,6 +374,7 @@ final class CallCollector: SyntaxVisitor {
     /// type `$0` as `T` — so the compact representation buys containment with a fabrication.
     var arrayElemNested: [String: String] = [:]
     let fieldDictValue: [String: [String: String]]  // Type -> field -> [K: V] value
+    let tupleFactsR1498: TupleFactsR1498            // SOUNDNESS R1498 — tuple-typed fields and returns
     let fieldTypeArgs: [String: [String: [String]]]  // SOUNDNESS R905 — Type -> field -> direct generic args
     let opaqueFields: [String: Set<String>]         // Type -> fields whose type is monomorphized
     let existentialFieldsR1473: [String: Set<String>]   // SOUNDNESS R1473 — see DeclCollector
@@ -668,6 +671,10 @@ final class CallCollector: SyntaxVisitor {
     /// SOUNDNESS R915 (B) — the unit's variadic parameter names (see `rootOf`).
     let variadicParamsR915: Set<String>
     private var elemGuessVars: Set<String> = []
+    /// SOUNDNESS R1499 — receiver expressions (`l.threadDictionary`) whose root is a `rootOf` guess through an INSTANCE
+    /// hop on a platform-rooted local class (see `platformRootedClassesR1499`), and locals bound from one.
+    private var platformHopExprsR1499: Set<SyntaxIdentifier> = []
+    private var platformHopVarsR1499: Set<String> = []
     let returns: [String: String]   // unambiguous factory return types (the candor-scan move)
     /// SOUNDNESS R585 — the four DECLARATION-side metatype indexes (b4 field, b6 array element,
     /// b7 global, b9 return). Each is the metatype twin of an existing index that `typeName` cannot
@@ -1226,6 +1233,7 @@ final class CallCollector: SyntaxVisitor {
          fieldMetatypeArrayElem: [String: [String: String]] = [:],
          fieldArrayElem: [String: [String: String]], fieldArrayElemNested: [String: [String: String]],
          fieldDictValue: [String: [String: String]],
+         tupleFactsR1498: TupleFactsR1498 = TupleFactsR1498(),
          fieldTypeArgs: [String: [String: [String]]] = [:],
          opaqueFields: [String: Set<String>] = [:],
          existentialFieldsR1473: [String: Set<String>] = [:],
@@ -1329,6 +1337,7 @@ final class CallCollector: SyntaxVisitor {
         self.fieldArrayElem = fieldArrayElem
         self.fieldArrayElemNested = fieldArrayElemNested
         self.fieldDictValue = fieldDictValue
+        self.tupleFactsR1498 = tupleFactsR1498
         self.fieldTypeArgs = fieldTypeArgs          // R905
         self.opaqueFields = opaqueFields
         self.existentialFieldsR1473 = existentialFieldsR1473
@@ -1793,6 +1802,10 @@ final class CallCollector: SyntaxVisitor {
                 if let u = ai.memberAliases[owner]?[s] { return u }
             }
         }
+        if !Self.r1497Off, let file = ai.file, let u = ai.fileScopedAliases[file]?[s] {   // R1497
+            if ai.fileAliases[s] != u { vbHit("R1497", "\(s) -> \(u) not \(ai.fileAliases[s] ?? "-")") }
+            return u
+        }
         if let u = ai.fileAliases[s] { return u }
         if let ts = ai.nestedAliasTargets[s] {
             if ts.count == 1 { return ts.first }
@@ -1930,6 +1943,54 @@ final class CallCollector: SyntaxVisitor {
     /// `monoNames`. It travels WITH the resolution rather than being re-derived at the call site,
     /// because the same receiver spelling can resolve through vars, a field, or a subscript element,
     /// and only the resolving branch knows which one answered.
+    /// SOUNDNESS R1498 — THE SLOTS OF A TUPLE-VALUED EXPRESSION, or nil. `rootOf` answers one NAMED type, and a tuple
+    /// has none, so a tuple reached anywhere but an annotated local or a parameter (`tupleElem`) typed nothing and every
+    /// call on one of its elements was dropped: `let t = (A(), 1); t.0.eff()`, `l.tup.0.eff()`, `mkPair().0.eff()`,
+    /// `let (x, _) = l.tup` — silent over an executed file write. Answers a tuple LITERAL (each element through
+    /// `rootOf`), a local/parameter already in `tupleElem`, a tuple-typed FIELD (`TupleFactsR1498.fields`; bare or on a
+    /// typed receiver), and a call whose declared return is a tuple (`TupleFactsR1498.returns`, by leaf, never-guess).
+    /// Cheap to ask: it is called only on the BASE of a member access, so a non-tuple base returns before any walk.
+    private func tupleSlotsOf(_ raw: ExprSyntax, _ depth: Int = 0) -> [String: String]? {
+        guard !Self.r1498Off, depth <= 200 else { return nil }
+        let e = Self.peel(raw)
+        if let tup = e.as(TupleExprSyntax.self) {
+            guard tup.elements.count >= 2 else { return nil }
+            var out: [String: String] = [:]
+            for (i, el) in tup.elements.enumerated() {
+                let r = rootOf(el.expression, depth + 1)
+                guard r.isVar, let t = r.root else { continue }
+                out[String(i)] = t
+                if let label = el.label?.text { out[label] = t }
+            }
+            return out.isEmpty ? nil : out
+        }
+        if let dr = e.as(DeclReferenceExprSyntax.self) {
+            let n = dr.baseName.text
+            if let s = tupleElem[n] { return s }
+            // implicit `self.` — a local, a parameter or a binder of that name shadows the field (Swift's lookup order)
+            guard vars[n] == nil, !isBoundLocal(n), !binderShadow.contains(n), !paramNamesR851.contains(n),
+                  let et = enclosingType else { return nil }
+            return tupleFactsR1498.fields[et]?[n]
+        }
+        if let ma = e.as(MemberAccessExprSyntax.self), let b = ma.base {
+            let member = ma.declName.baseName.text
+            // only a member some tuple-typed field declares is worth resolving the base for
+            guard tupleFieldNamesR1498.contains(member) else { return nil }
+            let inner = rootOf(b, depth + 1)
+            guard let rt = inner.root else { return nil }
+            return tupleFactsR1498.fields[rt]?[member]
+        }
+        if let call = e.as(FunctionCallExprSyntax.self) {
+            let leaf: String?
+            if let dr = call.calledExpression.as(DeclReferenceExprSyntax.self) { leaf = dr.baseName.text }
+            else if let ma = call.calledExpression.as(MemberAccessExprSyntax.self) { leaf = ma.declName.baseName.text }
+            else { leaf = nil }
+            if let l = leaf, let s = tupleFactsR1498.returns[l] { return s }
+        }
+        return nil
+    }
+    private lazy var tupleFieldNamesR1498: Set<String> = Set(tupleFactsR1498.fields.values.flatMap { $0.keys })
+
     private func rootOf(_ raw: ExprSyntax, _ depth: Int = 0) -> (root: String?, isVar: Bool, path: [String], mono: Bool, opaqueHop: Bool) {
         // R97 — THE SINGLE PLACE A RESOLVED TYPE NAME IS DEALIASED. `dealias` used to be spelled by each
         // arm that felt like it: of the 23 sites that bind a name to a type, exactly ONE called it, and
@@ -2258,6 +2319,13 @@ final class CallCollector: SyntaxVisitor {
             // to the enclosing type for member resolution — so `Self.decode(…)` is a precise typed call on the
             // type, not a guessed bare member that would either drop or mis-link to a same-named sibling.
             if n == "self" || n == "Self" { return (enclosingType, true, [], false, false) }
+            // THE `Self` SPELLING IN THIS UNIT (row pending — found by the R1486 hedge-removal accounting). A
+            // parameter or local this body annotated `Self` is a value of the enclosing type, exactly as `self`
+            // is; the name stayed the literal `Self`, which no unit carries, so every call on it was dropped.
+            if !Self.selfCtorOff, vars[n] == "Self", let et = enclosingType {
+                vbHit("SELFCTOR", "var \(n) -> \(et)")
+                return (et, true, [n], monoNames.contains(n), opaqueVars.contains(n))
+            }
             if let t = vars[n] { return (t, true, [n], monoNames.contains(n), opaqueVars.contains(n)) }   // R610
             // IMPLICIT SELF: a bare identifier inside a method body can be a FIELD of the
             // enclosing type (`handler.log(s)` ≡ `self.handler.log(s)`) — the protocol-field probe
@@ -2378,6 +2446,12 @@ final class CallCollector: SyntaxVisitor {
                let elemType = tupleElem[baseDR.baseName.text]?[ma.declName.baseName.text] {
                 return (elemType, true, [], false, false)
             }
+            // SOUNDNESS R1498 — …and a slot of any OTHER tuple-valued expression: a tuple-typed field (`l.tup.0`,
+            // `self.tup.0`, bare `tup.0`), a tuple literal, a call whose declared return is a tuple (`mkPair().0`).
+            if let b = ma.base, let slot = tupleSlotsOf(b, depth + 1)?[ma.declName.baseName.text] {
+                vbHit("R1498", "slot .\(ma.declName.baseName.text) -> \(slot)")
+                return (slot, true, [], false, false)
+            }
             let inner = ma.base.map { rootOf($0, depth + 1) } ?? (root: nil, isVar: false, path: [], mono: false, opaqueHop: false)
             let member = ma.declName.baseName.text
             // WALK THROUGH A FIELD: if the chain so far is a local type with `member` as a stored
@@ -2486,6 +2560,17 @@ final class CallCollector: SyntaxVisitor {
                     return (h.name, true, inner.path + [member], h.mono, inner.opaqueHop)
                 }
             }
+            // SOUNDNESS R1499 — the hop is an INSTANCE member no local declaration explains, on a class whose only
+            // foreign ancestry is a platform class: the platform declares it, so its type is the platform's, never
+            // the local class's. The guess below is kept (the floor); the site is marked for the call arm.
+            // ONLY THE FIRST HOP, and only a NAME no local declaration carries: a second hop (`.cellImageView.kf`) or a
+            // member some local type or extension declares (`kf`, a local protocol extension's property) may be typed
+            // by THIS scan — Kingfisher's `cell.cellImageView.kf.cancelDownloadTask()` lost its only `Unknown` to the
+            // first cut, which flagged every hop of the chain.
+            if !Self.r1499Off, inner.isVar, !inner.opaqueHop, let rt = inner.root,
+               Self.platformRootedClassesR1499.contains(rt), !Self.localPropertyNamesR1499.contains(member) {
+                platformHopExprsR1499.insert(expr.id)
+            }
             return (inner.root, inner.isVar, inner.path + [member], inner.mono, true)
         }
         if let call = expr.as(FunctionCallExprSyntax.self) {
@@ -2533,6 +2618,13 @@ final class CallCollector: SyntaxVisitor {
                 let n = ctor.baseName.text
                 // `Proc()` where `typealias Proc = Process` — the ctor types the value as the aliased
                 // type so its members classify (`p.run()`→Exec). Dealiased by the wrapper (R97).
+                // THE `Self` SPELLING (row pending): `Self()` constructs the enclosing type — `var h = Self();
+                // h.update(x)` in `extension HashFunction` runs the conformer's `update` (swift-crypto's
+                // `HashFunction.hash(bufferPointer:)`, executed in miniature). Typed `Self`, no unit matched.
+                if n == "Self", !Self.selfCtorOff, let et = enclosingType {
+                    vbHit("SELFCTOR", "ctor -> \(et)")
+                    return (et, true, [n], false, false)
+                }
                 if n.first?.isUppercase == true { return (n, true, [n], false, false) }
                 if let rt = returns[n] { return (rt, true, [n], false, false) }
                 if let b = genericReturnBinding(call, leaf: n, depth) { return b }   // SOUNDNESS R1044
@@ -3581,6 +3673,21 @@ final class CallCollector: SyntaxVisitor {
     private static let r610Off = ProcessInfo.processInfo.environment["CANDOR_R610_OFF"] != nil
     /// SOUNDNESS R1491 KILL SWITCH — the plain `let r = a.b` binder types nothing again (the release reading).
     static let r1491Off = ProcessInfo.processInfo.environment["CANDOR_R1491_OFF"] != nil
+    /// SOUNDNESS R1497 §1b KILL SWITCH — `CANDOR_R1497_OFF=1` restores the module-wide last-writer file alias table.
+    static let r1497Off = ProcessInfo.processInfo.environment["CANDOR_R1497_OFF"] != nil
+    /// SOUNDNESS R1498 §1b KILL SWITCH — `CANDOR_R1498_OFF=1`: a tuple-valued expression other than an annotated local or
+    /// parameter, or a destructured tuple literal, types nothing again (the release reading).
+    static let r1498Off = ProcessInfo.processInfo.environment["CANDOR_R1498_OFF"] != nil
+    /// SOUNDNESS R1499 §1b KILL SWITCH — `CANDOR_R1499_OFF=1`: a member call through an unexplained hop on a local subclass
+    /// of a platform class keeps the release's floor edge to the local class's own same-named member.
+    static let r1499Off = ProcessInfo.processInfo.environment["CANDOR_R1499_OFF"] != nil
+    /// SOUNDNESS R1499 — local DECLARED classes whose superclass chain leaves the scan at a platform (Objective-C) class
+    /// and that spell no other foreign supertype (Driver `platformRootedClassesR1499`). Set once before collection.
+    nonisolated(unsafe) static var platformRootedClassesR1499: Set<String> = []
+    /// SOUNDNESS R1499 — every property name a local type or extension declares (stored or computed).
+    nonisolated(unsafe) static var localPropertyNamesR1499: Set<String> = []
+    /// The `Self` spelling (row pending) §1b KILL SWITCH: `CANDOR_SELFCTOR_OFF=1` restores the literal `Self` root.
+    static let selfCtorOff = ProcessInfo.processInfo.environment["CANDOR_SELFCTOR_OFF"] != nil
     /// SOUNDNESS R1492 KILL SWITCH — no full-path field index for `extension A.B.T`, no associated-type field typing.
     static let r1492Off = ProcessInfo.processInfo.environment["CANDOR_R1492_OFF"] != nil
     /// R1492 per-mechanism switches (each also off under `CANDOR_R1492_OFF`): P the full-path field index, A the
@@ -5745,6 +5852,7 @@ final class CallCollector: SyntaxVisitor {
         metatypeDictValue.removeValue(forKey: name)   // R615 — ditto
         guessElem.remove(name)        // R618 — moves with `arrayElem`
         elemGuessVars.remove(name)    // R618 — moves with `vars`
+        platformHopVarsR1499.remove(name)   // R1499 — moves with `vars`
         opaqueVars.remove(name)          // R610 — the guess flag travels with the binding it describes
         protoTyped.removeValue(forKey: name)
         arrayElem.removeValue(forKey: name)
@@ -5878,7 +5986,7 @@ final class CallCollector: SyntaxVisitor {
         return false
     }
 
-    private static func patternNames(_ pattern: PatternSyntax) -> [String] {
+    static func patternNames(_ pattern: PatternSyntax) -> [String] {
         patternBinders(pattern).map { $0.identifier.text }
     }
 
@@ -9203,6 +9311,12 @@ final class CallCollector: SyntaxVisitor {
                                   holdsHop: holdsHop, guessHop: r839Convention,
                                   r915Site: Self.veinBProbe && base.opaqueHop
                                     ? "\(extOnly ? "ext" : "decl")\t\(ma.base.map { guessHopKind($0) } ?? "nobase")\t\(ma.base.map { String($0.trimmedDescription.prefix(60)) } ?? "")" : nil)
+                if !Self.r1499Off, base.opaqueHop, let b = ma.base.map(Self.peel),
+                   platformHopExprsR1499.contains(b.id)
+                    || (b.as(DeclReferenceExprSyntax.self).map { platformHopVarsR1499.contains($0.baseName.text) } ?? false) {
+                    typedCall.platformHopR1499 = true
+                    vbHit("R1499", "\(rt).\(member)")
+                }
                 if let b = ma.base.map(Self.peel) {
                     if let dr = b.as(DeclReferenceExprSyntax.self) {
                         let n = dr.baseName.text
@@ -12046,6 +12160,28 @@ final class CallCollector: SyntaxVisitor {
                 }
                 continue
             }
+            // SOUNDNESS R1498 — `let (x, _) = l.tup` / `= mkPair()` / `= t` / `let (x, y): (A, B) = …`: a tuple pattern
+            // over a NON-literal initializer bound nothing (the arm above reads a literal's elements), so `x.eff()` was
+            // dropped. Each identifier takes its position's slot; the scaffolding is the literal arm's.
+            if !Self.r1498Off, let tp = binding.pattern.as(TuplePatternSyntax.self), let v0 = binding.initializer?.value,
+               let slots = binding.typeAnnotation.map({ tupleElements($0.type) }).flatMap({ $0.isEmpty ? nil : $0 })
+                    ?? tupleSlotsOf(v0) {
+                for n in Self.patternNames(PatternSyntax(tp)) {
+                    scopeBindingType(Syntax(node), n)
+                    shadowName(n); rebindTyped(n, through: v0)
+                }
+                markBinders(PatternSyntax(tp))
+                for (i, pe) in tp.elements.enumerated() {
+                    guard let n = pe.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { continue }
+                    boundLocals.insert(n)
+                    literalLocals.insert(n)
+                    if let t = slots[String(i)] {
+                        vars[n] = t
+                        vbHit("R1498", "destructure \(n) -> \(t)")
+                    } else { clearBinding(n) }
+                }
+                continue
+            }
             // VECTOR 3 — `let v: W = "lit"` / `let _: W = 42` / `= [..]`: a literal at a type-annotated
             // binding coerces through `W`'s `ExpressibleBy*Literal` init, which RUNS. Edge to `W.init` when
             // `W` is local + the value is a bare literal (a non-literal initializer is an ordinary init).
@@ -12439,6 +12575,11 @@ final class CallCollector: SyntaxVisitor {
                     // has one, which are the two spellings `MemberAccessExprSyntax` can carry.
                     // Unrecorded slots simply do not answer — nothing is inferred and nothing is guessed.
                     clearBinding(name)
+                    // SOUNDNESS R1498 — and the SCALAR slots (`let t = (A(), 1); t.0.eff()`), which `rootOf` reads.
+                    if !Self.r1498Off, let slots = tupleSlotsOf(v0) {
+                        tupleElem[name] = slots
+                        vbHit("R1498", "literal \(name)")
+                    }
                     for (i, el) in tup.elements.enumerated() {
                         var keys = ["\(i)"]
                         if let label = el.label?.text { keys.append(label) }
@@ -12565,11 +12706,23 @@ final class CallCollector: SyntaxVisitor {
                         let info = rootOf(v0)
                         if info.isVar, let t = info.root {
                             vars[name] = t
+                            if platformHopExprsR1499.contains(v.id) { platformHopVarsR1499.insert(name) }   // R1499
                             if info.opaqueHop, !Self.r610Off { opaqueVars.insert(name) }   // R610
                             vbHit("R1491", "\(name) -> \(t)\(info.opaqueHop ? " (guess)" : "")")
                         }
                     }
                 }
+            }
+            // SOUNDNESS R1498 — `let t = (A(), 1)` / `= l.tup` / `= mkPair()` / `= other`: the binding IS a tuple, so
+            // record its SLOTS (`t.0`, `t.label`), as an annotated `let t: (A, Int)` already is. `tupleSlotsOf` answers
+            // only for an expression DECLARED tuple-valued, so it outranks the arms above, whose answer for a member
+            // copy is R567's guess (`l.tup` reads as `L`, the base): that typing is cleared, as R349's slot arm does.
+            if !Self.r1498Off, binding.typeAnnotation == nil, binding.accessorBlock == nil,
+               let v0 = binding.initializer?.value, tupleElem[name] == nil,
+               let slots = tupleSlotsOf(v0) {
+                clearBindingTypeOnly(name)
+                tupleElem[name] = slots
+                vbHit("R1498", "bind \(name) -> \(slots.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" })")
             }
         }
         // The initializers were walked above; everything else is walked here, after the binding moved.
@@ -12586,6 +12739,12 @@ private extension TokenKind {
     var isIdentifier: Bool { if case .identifier = self { return true }; return false }
 }
 
+/// SOUNDNESS R1498 — the tuple facts the Driver merged: `fields` Type -> field -> slots, `returns` fn leaf -> slots.
+struct TupleFactsR1498 {
+    var fields: [String: [String: [String: String]]] = [:]
+    var returns: [String: [String: String]] = [:]
+}
+
 /// VEIN A(i) — the type-identity scope a `CallCollector` resolves a spelling in. Built once by the Driver
 /// (indexes) and per unit (`enclosingTypePath`, `genericNames`). `enabled` false = the release's `dealias`.
 struct AiTypeIndex {
@@ -12594,6 +12753,12 @@ struct AiTypeIndex {
     var pathsByLeaf: [String: Set<String>] = [:]
     var protocolPaths: Set<String> = []
     var fileAliases: [String: String] = [:]
+    /// SOUNDNESS R1497 — file -> the top-level `fileprivate`/`private` aliases it declares, and the unit's own file.
+    /// Two files may each declare `fileprivate typealias K = …`; `fileAliases` (merged module-wide) held the last
+    /// file's target, so a call through K in every other file went to the wrong type: silent where that type is pure
+    /// (executed), fabricated where it is not.
+    var fileScopedAliases: [String: [String: String]] = [:]
+    var file: String? = nil
     var memberAliases: [String: [String: String]] = [:]
     var memberAliasesByPath: [String: [String: String]] = [:]   // SOUNDNESS R1492
     var nestedAliasTargets: [String: Set<String>] = [:]

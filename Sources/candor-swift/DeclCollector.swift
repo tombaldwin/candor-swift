@@ -46,6 +46,9 @@ struct FnInfo {
     /// `static func == (lhs: S, rhs: Int)` is not, and must not stand in for `S`'s synthesized one.
     var opSelfOperandsLooseR1270 = false
     var isOverride = false   // R1105 audit — declared `override` (the implicit-`self` dispatch arm edges only these)
+    /// SOUNDNESS R1499 — reachable by Objective-C dynamic dispatch (`@objc`, `@IBAction`, `dynamic`, or a member of an
+    /// `@objcMembers` type): an `AnyObject`-typed receiver can call it with no `override` in sight.
+    var isObjcR1499 = false
     var paramSig: [(type: String?, hasDefault: Bool, variadic: Bool)] = []  // ordered param signature for
                                       // PARAM-TYPE overload resolution: distinguishes same-name overloads
                                       // (`compare(_:Date)` vs `compare(_:DateComparisonType)`), including the
@@ -308,6 +311,19 @@ final class DeclCollector: SyntaxVisitor {
     /// a key that held none of the declaration's stored properties: the hop kept the outer type and the call was
     /// dropped (swift-crypto's RSA `self.backing.signature(…)`). The Driver unions the dotted paths into `fields`.
     var fieldsByPath: [String: [String: (name: String?, isFunction: Bool)]] = [:]
+    /// SOUNDNESS R1498 — a stored property of TUPLE type: `Type -> field -> slot ("0", "1", label) -> element type`
+    /// (`tupleElements`). `fields` records no name for a tuple, so `l.tup.0.eff()` resolved against nothing. Keyed by
+    /// the simple name and, as `fieldsByPath`, by the full path.
+    var fieldTupleElemR1498: [String: [String: [String: String]]] = [:]
+    /// SOUNDNESS R1498 — fn leaf -> its declared TUPLE return's slots; `nil` = two declarations disagree (never guess).
+    var returnTupleTmpR1498: [String: [String: String]?] = [:]
+    /// SOUNDNESS R1499 — every inherited type a declaration SPELLS, with its position: `first` is the first entry of a
+    /// type DEFINITION's clause (the only place Swift admits a superclass), `generic` when it carries `<…>`. An
+    /// extension's entries are never `first`. Read by the Driver's `platformRootedClassesR1499`.
+    var inheritSpellingsR1499: [String: [(name: String, first: Bool, generic: Bool)]] = [:]
+    var objcMembersTypesR1499: Set<String> = []
+    /// SOUNDNESS R1499 — every property NAME a type context here declares (annotated or not, stored or computed).
+    var memberVarNamesR1499: Set<String> = []
     /// SOUNDNESS R1492 — `protocol -> associatedtype -> its single nominal bound` (`associatedtype K: KP`).
     var assocTypeBounds: [String: [String: String]] = [:]
     /// SOUNDNESS R1492 — a stored property spelled `Param.Assoc` where `Param` is a generic parameter of the
@@ -503,6 +519,10 @@ final class DeclCollector: SyntaxVisitor {
     /// FILE-LEVEL aliases alone (N-d: `typeAliases` flattens type-nested ones into the same table).
     var declaredTypePaths: Set<String> = []
     var fileTypeAliases: [String: String] = [:]
+    /// SOUNDNESS R1497 — the FILE-SCOPED subset of `fileTypeAliases`: a top-level `fileprivate`/`private typealias`,
+    /// visible only in this file. Two files may each declare one under the same name (legal Swift); the
+    /// module-wide table above is merged last-writer-wins, so every other file read the last file's target.
+    var filePrivateTypeAliases: Set<String> = []
     /// SOUNDNESS R266 — declared supertypes keyed on the SUBTYPE'S FULL NESTED PATH, the precise twin of
     /// `conformers` (which is keyed on SHORT names on both sides). Two same-short-named types —
     /// `enum Outer { class S: Base }` beside an unrelated top-level `class S: Other` — merge in
@@ -954,6 +974,16 @@ final class DeclCollector: SyntaxVisitor {
         typeStack.append(name)
         accessStack.append(accessModifier(modifiers))
         selfElementStack.append(nil)   // extensions with a `where Element: P` overwrite this below
+        if !CallCollector.r1499Off {   // SOUNDNESS R1499
+            if attributes?.contains(where: { $0.as(AttributeSyntax.self)?.attributeName.trimmedDescription == "objcMembers" }) == true {
+                objcMembersTypesR1499.insert(name)
+            }
+            for (i, it) in (inheritance?.inheritedTypes ?? []).enumerated() {
+                let spelled = it.type.trimmedDescription
+                let nm = typeName(it.type).name ?? spelled
+                inheritSpellingsR1499[name, default: []].append((nm, i == 0 && !isExtension, spelled.contains("<")))
+            }
+        }
         localTypes.insert(name)
         localTypePaths.insert(typeStack.joined(separator: "."))
         // An `extension` does not DECLARE the type — it adds to whatever (possibly platform) type already
@@ -1058,6 +1088,9 @@ final class DeclCollector: SyntaxVisitor {
         if let underlying = t.name {
             typeAliases[node.name.text] = underlying
             if typeStack.isEmpty { fileTypeAliases[node.name.text] = underlying }   // VEIN A(i) N-d
+            if typeStack.isEmpty, ["private", "fileprivate"].contains(accessModifier(node.modifiers)) {   // R1497
+                filePrivateTypeAliases.insert(node.name.text)
+            }
             if let owner = typeStack.last { memberTypeAliases[owner, default: [:]][node.name.text, default: []].insert(underlying) }
             if !CallCollector.r1492MOff, !typeStack.isEmpty {
                 memberTypeAliasesByPath[typeStack.joined(separator: "."), default: [:]][node.name.text, default: []].insert(underlying)
@@ -1326,6 +1359,9 @@ final class DeclCollector: SyntaxVisitor {
     // BODY that runs (the fuzz probe found all four silently pure — the TS engine's property-arrow
     // hole, Swift edition). Each body collects under `Type.property`; duplicate quals union.
     override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
+        if !typeStack.isEmpty, !CallCollector.r1499Off {   // SOUNDNESS R1499
+            for b in node.bindings { for n in CallCollector.patternNames(b.pattern) { memberVarNamesR1499.insert(n) } }
+        }
         if let ty = typeStack.last {
             let tyPath = typeStack.joined(separator: ".")
             let isStatic = node.modifiers.contains { $0.name.text == "static" || $0.name.text == "class" }
@@ -1540,6 +1576,13 @@ final class DeclCollector: SyntaxVisitor {
                         unresolvedGenericFields.append((ty, name, tn))
                     }
                     setFieldR1492(ty, tyPath, name, info)
+                    if !CallCollector.r1498Off {   // SOUNDNESS R1498 — a tuple-typed stored property's slots
+                        let te = tupleElements(ann.type).filter { typeGenericParamNames[ty]?.contains($0.value) != true }
+                        if !te.isEmpty {
+                            fieldTupleElemR1498[ty, default: [:]][name] = te
+                            if r1492Path(ty, tyPath) { fieldTupleElemR1498[tyPath, default: [:]][name] = te }
+                        }
+                    }
                     // SOUNDNESS R585 (b4/b6) — a stored property of METATYPE type, and of ARRAY-of-
                     // metatype type. `fields` records "the type of the value", which for a metatype is
                     // no answer at all (`typeName` returns nil), so `struct Box { let t: CBase.Type;
@@ -1785,6 +1828,20 @@ final class DeclCollector: SyntaxVisitor {
         // metatype map may only ADD where nothing answered (see the Driver's build of
         // `metatypeReturnsIdx`), so this is the conservative half of that rule, not a second authority.
         if metatypeReturnsTmp[name] != nil { metatypeReturnsTmp[name] = String?.none }
+        // SOUNDNESS R1498 — a TUPLE return's slots, under the same never-guess rule (a leaf declared twice with
+        // different slots answers nothing; the Driver also drops a leaf any ordinary return answers). A slot spelled
+        // by a generic parameter of the function or its owner is not a type and is left out.
+        if !CallCollector.r1498Off, let rc = sig.returnClause {
+            let te = tupleElements(rc.type).filter { !generics.contains($0.value)
+                && (typeStack.last.flatMap { typeGenericParamNames[$0] }?.contains($0.value) != true) }
+            if !te.isEmpty {
+                if let existing = returnTupleTmpR1498[name] {
+                    if existing != te { returnTupleTmpR1498[name] = .some(nil) }
+                } else {
+                    returnTupleTmpR1498[name] = te
+                }
+            }
+        }
         guard let rt = sig.returnClause.map({ typeName($0.type) }), let tn = rt.name else { return }
         // SOUNDNESS R1010 — `-> T` where `T` is the function's OWN generic parameter names no type: the leaf is
         // POISONED (never typed), not typed as whatever local declaration happens to be spelled `T`. The owner's
@@ -1945,6 +2002,12 @@ final class DeclCollector: SyntaxVisitor {
         info.simpleQual = typeStack.last.map { "\($0).\(name)" } ?? name
         if let fd = Syntax(node).as(FunctionDeclSyntax.self), fd.modifiers.contains(where: { $0.name.text == "override" }) {
             info.isOverride = true   // R1105 audit
+        }
+        if let fd = Syntax(node).as(FunctionDeclSyntax.self),   // R1499
+           fd.attributes.contains(where: { a in a.as(AttributeSyntax.self).map { ["objc", "IBAction", "NSManaged"].contains($0.attributeName.trimmedDescription) } ?? false })
+            || fd.modifiers.contains(where: { $0.name.text == "dynamic" })
+            || typeStack.last.map({ objcMembersTypesR1499.contains($0) }) == true {
+            info.isObjcR1499 = true
         }
         info.enclosingType = typeStack.last
         info.enclosingTypePath = tyPath

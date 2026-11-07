@@ -32,6 +32,9 @@ private let r1109Probe = ProcessInfo.processInfo.environment["CANDOR_R1109_PROBE
 /// SOUNDNESS R1486 §1b KILL SWITCH — a concrete type's PROVIDER supertypes include the protocols its conformed protocols
 /// refine (see `providerSupers`). `CANDOR_R1486_OFF=1` restores the direct-supertype walk.
 private let r1486Off = ProcessInfo.processInfo.environment["CANDOR_R1486_OFF"] != nil
+/// SOUNDNESS R1486 method-path hedge §1b KILL SWITCH — `CANDOR_R1486_HEDGE=1` restores the kept `dispatch:` hedge on a
+/// member found only on a REFINED protocol (it then edges AND hedges, as b079d4f did).
+private let r1486HedgeKept = ProcessInfo.processInfo.environment["CANDOR_R1486_HEDGE"] != nil
 /// SOUNDNESS R1485 §1b KILL SWITCH — a platform (Objective-C imported) class reaches the members a LOCAL extension or
 /// retroactive conformance gives `NSObject` (see `objcRootSupers`). `CANDOR_R1485_OFF=1` restores the release.
 let r1485Off = ProcessInfo.processInfo.environment["CANDOR_R1485_OFF"] != nil
@@ -417,6 +420,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var fieldMetatypeArrayElem: [String: [String: String]] = [:]
     var fieldArrayElemNested: [String: [String: String]] = [:]   // R278
     var fieldDictValue: [String: [String: String]] = [:]
+    var fieldTupleElemR1498: [String: [String: [String: String]]] = [:]   // SOUNDNESS R1498
+    var returnTupleTmpR1498: [String: [String: String]?] = [:]            // SOUNDNESS R1498
     var fieldTypeArgs: [String: [String: [String]]] = [:]   // SOUNDNESS R905
     var fieldContainersR1176: [String: [String: (kind: String, args: [String])]] = [:]   // SOUNDNESS R1176
     var optionalContainerFieldsR1463: [String: Set<String>] = [:]                       // SOUNDNESS R1463
@@ -506,6 +511,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var typeAliases: [String: String] = [:]
     var declaredTypePathsAI: Set<String> = []                    // VEIN A(i)
     var fileTypeAliasesAI: [String: String] = [:]                // VEIN A(i) N-d
+    var fileScopedAliasesR1497: [String: [String: String]] = [:]  // SOUNDNESS R1497 — file -> its fileprivate aliases
+    var moduleVisibleFileAliasesR1497: [String: String] = [:]
     var typeGenericParamNamesAI: [String: Set<String>] = [:]     // VEIN A(i) N-d
     var typeAliasArms: [String: Set<String>] = [:]   // R429 — every arm of a `#if`-duplicated alias
     var memberTypeAliasesAll: [String: [String: Set<String>]] = [:]   // R915 (B) — see DeclCollector
@@ -1048,6 +1055,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (t, fs) in c.fieldMetatypeArrayElem { fieldMetatypeArrayElem[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.fieldArrayElemNested { fieldArrayElemNested[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.fieldDictValue { fieldDictValue[t, default: [:]].merge(fs) { a, _ in a } }
+        for (t, fs) in c.fieldTupleElemR1498 { fieldTupleElemR1498[t, default: [:]].merge(fs) { a, _ in a } }   // R1498
+        for (k, v) in c.returnTupleTmpR1498 {   // R1498 — same ambiguity rule as `returnsTmp`
+            if let existing = returnTupleTmpR1498[k] {
+                if existing != v { returnTupleTmpR1498[k] = .some(nil) }
+            } else {
+                returnTupleTmpR1498[k] = v
+            }
+        }
         for (t, fs) in c.fieldTypeArgs { fieldTypeArgs[t, default: [:]].merge(fs) { a, _ in a } }   // R905
         for (t, fs) in c.fieldContainersR1176 { fieldContainersR1176[t, default: [:]].merge(fs) { a, _ in a } }   // R1176
         for (t, fs) in c.optionalContainerFieldsR1463 { optionalContainerFieldsR1463[t, default: []].formUnion(fs) }   // R1463
@@ -1074,6 +1089,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (a, u) in c.typeAliases { typeAliases[a] = u }   // last-writer-wins (a redeclared alias is rare)
         declaredTypePathsAI.formUnion(c.declaredTypePaths)
         for (a, u) in c.fileTypeAliases { fileTypeAliasesAI[a] = u }
+        // SOUNDNESS R1497 — a FILE-SCOPED alias answers in its own file only (see `AiTypeIndex.fileScopedAliases`).
+        for a in c.filePrivateTypeAliases { if let u = c.fileTypeAliases[a] { fileScopedAliasesR1497[c.file, default: [:]][a] = u } }
+        for (a, u) in c.fileTypeAliases where !c.filePrivateTypeAliases.contains(a) { moduleVisibleFileAliasesR1497[a] = u }
         for (t, ns) in c.typeGenericParamNames { typeGenericParamNamesAI[t, default: []].formUnion(ns) }
         // R429 — …and the ARMS, unioned. The line above is the last-writer-wins the row was filed
         // against; it stays because 26 call sites read `dealias` as single-valued and a multi-valued
@@ -1648,6 +1666,64 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         overrideArity[f.qual, default: []].append((f.paramSig.filter { !$0.hasDefault && !$0.variadic }.count, hi))
     }
     CallCollector.localMutatingNames = localMutatingNames   // R1105 — read by every CallCollector below
+    // SOUNDNESS R1499 — LOCAL CLASSES ROOTED AT A PLATFORM CLASS, AND WHO DECLARES A MEMBER NAME.
+    // `final class TLoc: Thread { func removeAllObjects() }` and `l.threadDictionary.removeAllObjects()`: `rootOf` keeps
+    // `TLoc` across the unexplained hop (R567's floor) and the call charged `TLoc.removeAllObjects` — executed, no such
+    // call happens: `threadDictionary` is Thread's, an `NSMutableDictionary`. A class qualifies when walking its
+    // superclass chain (the FIRST entry of each definition's clause) leaves the scan at a platform class spelled with no
+    // generic arguments, and no class on the chain spells any other foreign supertype (a foreign PROTOCOL's requirement
+    // can be witnessed by a non-`override` member and reached through a foreign-typed hop: a table view's data source).
+    var inheritR1499: [String: [(name: String, first: Bool, generic: Bool)]] = [:]
+    for c in collectors { for (t, l) in c.inheritSpellingsR1499 { inheritR1499[t, default: []].append(contentsOf: l) } }
+    var platformRootedR1499 = Set<String>()
+    if !CallCollector.r1499Off {
+        // …AND EVERY CLASS ON THE CHAIN IS DECLARED IN A FILE THAT IMPORTS ONLY PLATFORM MODULES (or this scan's own).
+        // `isObjcPlatformClass` cannot tell a platform class from a DEPENDENCY's (SwiftLint's `ElementCollector:
+        // SyntaxAnyVisitor` passed it, measured): a dependency's property can be typed by a generic parameter or `Self`
+        // and so be a local type after all (R567's self-typed hop), which a platform SDK property is not.
+        let ownModules = Set(allFns.map { swiftModuleOf($0.loc) }).subtracting([""])
+        var declFiles: [String: Set<String>] = [:]
+        for c in collectors { for t in c.declaredTypes { declFiles[t, default: []].insert(c.file) } }
+        let platformOnlyFile: (String) -> Bool = { file in
+            (fileImports[file] ?? []).allSatisfy { PLATFORM_MODULES.contains($0) || ownModules.contains($0) }
+        }
+        for t in classNamesAll where declaredTypes.contains(t) {
+            var x = t, seen = Set<String>(), ok = false
+            while seen.insert(x).inserted {
+                guard let fs = declFiles[x], !fs.isEmpty, fs.allSatisfy(platformOnlyFile) else { break }
+                let sp = inheritR1499[x] ?? []
+                if sp.contains(where: { !$0.first && !localTypes.contains($0.name) && !STD_PURE_PROTOCOLS.contains($0.name) }) { break }
+                let firsts = sp.filter { $0.first }
+                guard firsts.count == 1, let s = firsts.first, !s.generic else { break }
+                if classNamesAll.contains(s.name), declaredTypes.contains(s.name) { x = s.name; continue }
+                if !localTypes.contains(s.name), isObjcPlatformClass(s.name) { ok = true }
+                break
+            }
+            if ok { platformRootedR1499.insert(t) }
+        }
+    }
+    CallCollector.platformRootedClassesR1499 = platformRootedR1499
+    CallCollector.localPropertyNamesR1499 = Set(fields.values.flatMap { $0.keys }).union(computedFieldNamesAll.values.joined())
+        .union(collectors.flatMap { $0.memberVarNamesR1499 })
+    var leafOwnersR1499: [String: [(owner: String, dynamicReach: Bool)]] = [:]
+    if !CallCollector.r1499Off {
+        for f in allFns {
+            guard let et = f.enclosingType else { continue }
+            let head = f.simpleQual.prefix { $0 != "(" && $0 != "#" }
+            let leaf = head.split(separator: ".").last.map(String.init) ?? String(head)
+            leafOwnersR1499[leaf, default: []].append((et, f.isOverride || f.isObjcR1499))
+        }
+    }
+    /// R1499 — a call marked `platformHopR1499` on `owner.leaf` can reach NO local body. The hop's static type is one the
+    /// PLATFORM declares, so it is never a type this scan DECLARES; such a type's member is reachable through it only
+    /// as an `override` of a platform member or by Objective-C dynamic dispatch (`@objc`/`dynamic`/`@objcMembers`). So the
+    /// floor is dropped only when every local declaration of `leaf` is a plain member of a DECLARED type; one on an
+    /// extension of a platform type or a local protocol (a platform type can conform to it) keeps the release floor.
+    let r1499Unreachable: (String, String) -> Bool = { owner, leaf in
+        let owners = leafOwnersR1499[leaf] ?? []
+        return !owners.isEmpty && owners.allSatisfy { !$0.dynamicReach && declaredTypes.contains($0.owner)
+            && protocolMethods[$0.owner] == nil && !protocolPaths.contains($0.owner) }
+    }
     CallCollector.computedFieldNames = computedFieldNamesAll   // R1105 (c)
     // SOUNDNESS R1105/R1106 — the unit a READ of an accessor runs (see DeclCollector `setterSideAccessorQuals`).
     let getterView: (Set<String>) -> Set<String> = { qs in
@@ -1998,6 +2074,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         returnsTmp[leaf] = String?.none
     }
     for (k, v) in returnsTmp { if let t = v { returnsIdx[k] = t } }
+    // SOUNDNESS R1498 — the tuple-return slots, for a leaf no ordinary (or metatype) return also answers.
+    var tupleFactsR1498 = TupleFactsR1498()
+    tupleFactsR1498.fields = fieldTupleElemR1498
+    for (k, v) in returnTupleTmpR1498 where returnsTmp[k] == nil && metatypeReturnsTmp[k] == nil {
+        if let s = v { tupleFactsR1498.returns[k] = s }
+    }
     // SOUNDNESS R1044 — a leaf whose ONLY declarations return their argument's generic type, and that no ordinary
     // return also answers (a leaf both indexes speak for is ambiguous and neither may answer).
     for (k, v) in genericReturnArgTmp { if let g = v, returnsIdx[k] == nil { genericReturnArgIdx[k] = g } }
@@ -3897,6 +3979,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         aiBase.pathsByLeaf = typePathsBySimple
         aiBase.protocolPaths = protocolPaths
         aiBase.fileAliases = fileTypeAliasesAI
+        // SOUNDNESS R1497 — a module-visible file-level alias outranks a fileprivate one from ANOTHER file in the shared
+        // table (Swift would never resolve the latter there); the per-file table answers a unit's own file first.
+        if !CallCollector.r1497Off {
+            aiBase.fileScopedAliases = fileScopedAliasesR1497
+            for (a, u) in moduleVisibleFileAliasesR1497 { aiBase.fileAliases[a] = u }
+        }
         aiBase.memberAliases = memberTypeAliasesAll.mapValues { $0.compactMapValues { $0.count == 1 ? $0.first : nil } }
         aiBase.memberAliasesByPath = memberTypeAliasesByPathAll.mapValues { $0.compactMapValues { $0.count == 1 ? $0.first : nil } }
         for (_, m) in memberTypeAliasesAll { for (a, u) in m { aiBase.nestedAliasTargets[a, default: []].formUnion(u) } }
@@ -4241,6 +4329,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                fieldMetatypeArrayElem: fieldMetatypeArrayElem,
                                fieldArrayElem: fieldArrayElem, fieldArrayElemNested: fieldArrayElemNested,
                                fieldDictValue: fieldDictValue,
+                               tupleFactsR1498: tupleFactsR1498,                                      // R1498
                                fieldTypeArgs: fieldTypeArgs,                                           // R905
                                opaqueFields: opaqueFields,
                                existentialFieldsR1473: existentialFieldsR1473,   // R1473
@@ -4267,6 +4356,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                ai: {
                                    guard aiBase.enabled else { return aiBase }
                                    var a = aiBase
+                                   a.file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })   // R1497
                                    let path = f.enclosingTypePath ?? f.enclosingType
                                    a.enclosingTypePath = path
                                    var g = Set(f.genericBounds.keys)
@@ -4600,6 +4690,27 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !projectModules.contains($0)
         }
         for var call in cc.calls {
+            // SOUNDNESS R1499 — see `r1499Unreachable`: the release's floor edge would name a local body this call cannot run.
+            if call.platformHopR1499, call.typed, let dot = call.path.lastIndex(of: ".") {
+                // …AND WHAT IT CAN RUN: a member a LOCAL EXTENSION gives a platform type (`extension NSMutableDictionary
+                // { func zapAll() }` reached as `l.threadDictionary.zapAll()`, executed) — the hop's type is the
+                // platform's, so those are its candidates. Edged as a union, beside whatever the floor does; the
+                // release reached none of them (the floor named the local class, whose same-named member is pure).
+                for (owner, _) in leafOwnersR1499[call.leaf] ?? [] where localTypes.contains(owner)
+                    && !declaredTypes.contains(owner) && protocolMethods[owner] == nil && !protocolPaths.contains(owner) {
+                    let hit = resolveQual("\(owner).\(call.leaf)")
+                    if !hit.isEmpty, CallCollector.veinBProbe {
+                        FileHandle.standardError.write("VBHIT\tR1499\text \(f.qual) \(owner).\(call.leaf)\n".data(using: .utf8)!)
+                    }
+                    edges[f.qual, default: []].formUnion(hit)
+                }
+                if r1499Unreachable(String(call.path[..<dot]), call.leaf) {
+                    if CallCollector.veinBProbe {
+                        FileHandle.standardError.write("VBHIT\tR1499\tdrop \(f.qual) \(call.path)\n".data(using: .utf8)!)
+                    }
+                    continue
+                }
+            }
             // CALL-TARGET ROUND 2 — the measured-not-shipped disclosure fallback (`CallCollector.siteFallback`, emitted
             // only under `CANDOR_CT2_FALLBACK`): a recognised site whose operand could not be typed discloses.
             if call.path.hasPrefix("<site>.") {
@@ -4965,17 +5076,17 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     let type = String(call.path[..<dot])
                     let member = String(call.path[call.path.index(after: dot)...])
                     r1081Flag.answered = false
-                    // SOUNDNESS R1486 — the provider climb includes the protocols the type's protocols REFINE. A member
-                    // found ONLY there is EDGED and does NOT count as resolved: the release's hedge below still fires.
-                    // Measured (swift-crypto, A/B vs 1d351eb): letting it resolve removed 11 rows' `dispatch:` hedges
-                    // (`SHA3_256.hash(data:)` -> `HashFunction.hash`, correctly), and in at least 5 of them the wrong-reason
-                    // `Unknown` was the only thing covering a different, pre-existing dropped call (`self.backing.…` on an
-                    // RSA key whose backing type is a fileprivate typealias declared in three files; `self.backing =
-                    // try .init()` on an associated type) whose callee performs C calls. Removing a hedge waits for those.
+                    // SOUNDNESS R1486 — the provider climb includes the protocols the type's protocols REFINE, and a
+                    // member found there RESOLVES the call, exactly as the property path (above) lets it. The first cut
+                    // kept the release's `dispatch:` hedge on top (measured, swift-crypto vs 1d351eb: resolving removed 11
+                    // rows' hedges and in at least 5 of them the wrong-reason `Unknown` was the only cover for a DIFFERENT
+                    // dropped call — RSA `self.backing.…`, an associated-type `.init()`). R1492 closed those drops at
+                    // their own sites; re-measured on b079d4f the hedge covers one row corpus-wide, whose own C call is
+                    // still disclosed `invisible` (SOUNDNESS R1486, A/B in the commit). `CANDOR_R1486_HEDGE=1` restores it.
                     let directSups = supertypesOf[type] ?? []
                     for sup in providerSupers(type) {
                         let base = "\(sup).\(member)"
-                        let countsAsResolved = directSups.contains(sup)
+                        let countsAsResolved = !r1486HedgeKept || directSups.contains(sup)
                         // AN OVERLOADED PROVIDED MEMBER MUST NOT VANISH. `resolveQual` can only name an
                         // UNAMBIGUOUS simple->full mapping (`qualBySimple[base].count == 1`); a protocol
                         // extension declaring a second, unrelated overload of the same base name
