@@ -1517,6 +1517,10 @@ final class CallCollector: SyntaxVisitor {
                 if let u = ai.memberAliases[owner]?[s] { return u }
             }
         }
+        if !Self.r1497Off, let file = ai.file, let u = ai.fileScopedAliases[file]?[s] {   // R1497
+            if ai.fileAliases[s] != u { vbHit("R1497", "\(s) -> \(u) not \(ai.fileAliases[s] ?? "-")") }
+            return u
+        }
         if let u = ai.fileAliases[s] { return u }
         if let ts = ai.nestedAliasTargets[s] {
             if ts.count == 1 { return ts.first }
@@ -3319,6 +3323,8 @@ final class CallCollector: SyntaxVisitor {
     private static let r610Off = ProcessInfo.processInfo.environment["CANDOR_R610_OFF"] != nil
     /// SOUNDNESS R1491 KILL SWITCH — the plain `let r = a.b` binder types nothing again (the release reading).
     static let r1491Off = ProcessInfo.processInfo.environment["CANDOR_R1491_OFF"] != nil
+    /// SOUNDNESS R1497 §1b KILL SWITCH — `CANDOR_R1497_OFF=1` restores the module-wide last-writer file alias table.
+    static let r1497Off = ProcessInfo.processInfo.environment["CANDOR_R1497_OFF"] != nil
     /// The `Self` spelling (row pending) §1b KILL SWITCH: `CANDOR_SELFCTOR_OFF=1` restores the literal `Self` root.
     static let selfCtorOff = ProcessInfo.processInfo.environment["CANDOR_SELFCTOR_OFF"] != nil
     /// SOUNDNESS R1492 KILL SWITCH — no full-path field index for `extension A.B.T`, no associated-type field typing.
@@ -12238,6 +12244,12 @@ struct AiTypeIndex {
     var pathsByLeaf: [String: Set<String>] = [:]
     var protocolPaths: Set<String> = []
     var fileAliases: [String: String] = [:]
+    /// SOUNDNESS R1497 — file -> the top-level `fileprivate`/`private` aliases it declares, and the unit's own file.
+    /// Two files may each declare `fileprivate typealias K = …`; `fileAliases` (merged module-wide) held the last
+    /// file's target, so a call through K in every other file went to the wrong type: silent where that type is pure
+    /// (executed), fabricated where it is not.
+    var fileScopedAliases: [String: [String: String]] = [:]
+    var file: String? = nil
     var memberAliases: [String: [String: String]] = [:]
     var memberAliasesByPath: [String: [String: String]] = [:]   // SOUNDNESS R1492
     var nestedAliasTargets: [String: Set<String>] = [:]

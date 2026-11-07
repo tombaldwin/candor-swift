@@ -508,6 +508,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var typeAliases: [String: String] = [:]
     var declaredTypePathsAI: Set<String> = []                    // VEIN A(i)
     var fileTypeAliasesAI: [String: String] = [:]                // VEIN A(i) N-d
+    var fileScopedAliasesR1497: [String: [String: String]] = [:]  // SOUNDNESS R1497 — file -> its fileprivate aliases
+    var moduleVisibleFileAliasesR1497: [String: String] = [:]
     var typeGenericParamNamesAI: [String: Set<String>] = [:]     // VEIN A(i) N-d
     var typeAliasArms: [String: Set<String>] = [:]   // R429 — every arm of a `#if`-duplicated alias
     var memberTypeAliasesAll: [String: [String: Set<String>]] = [:]   // R915 (B) — see DeclCollector
@@ -1075,6 +1077,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (a, u) in c.typeAliases { typeAliases[a] = u }   // last-writer-wins (a redeclared alias is rare)
         declaredTypePathsAI.formUnion(c.declaredTypePaths)
         for (a, u) in c.fileTypeAliases { fileTypeAliasesAI[a] = u }
+        // SOUNDNESS R1497 — a FILE-SCOPED alias answers in its own file only (see `AiTypeIndex.fileScopedAliases`).
+        for a in c.filePrivateTypeAliases { if let u = c.fileTypeAliases[a] { fileScopedAliasesR1497[c.file, default: [:]][a] = u } }
+        for (a, u) in c.fileTypeAliases where !c.filePrivateTypeAliases.contains(a) { moduleVisibleFileAliasesR1497[a] = u }
         for (t, ns) in c.typeGenericParamNames { typeGenericParamNamesAI[t, default: []].formUnion(ns) }
         // R429 — …and the ARMS, unioned. The line above is the last-writer-wins the row was filed
         // against; it stays because 26 call sites read `dealias` as single-valued and a multi-valued
@@ -3898,6 +3903,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         aiBase.pathsByLeaf = typePathsBySimple
         aiBase.protocolPaths = protocolPaths
         aiBase.fileAliases = fileTypeAliasesAI
+        // SOUNDNESS R1497 — a module-visible file-level alias outranks a fileprivate one from ANOTHER file in the shared
+        // table (Swift would never resolve the latter there); the per-file table answers a unit's own file first.
+        if !CallCollector.r1497Off {
+            aiBase.fileScopedAliases = fileScopedAliasesR1497
+            for (a, u) in moduleVisibleFileAliasesR1497 { aiBase.fileAliases[a] = u }
+        }
         aiBase.memberAliases = memberTypeAliasesAll.mapValues { $0.compactMapValues { $0.count == 1 ? $0.first : nil } }
         aiBase.memberAliasesByPath = memberTypeAliasesByPathAll.mapValues { $0.compactMapValues { $0.count == 1 ? $0.first : nil } }
         for (_, m) in memberTypeAliasesAll { for (a, u) in m { aiBase.nestedAliasTargets[a, default: []].formUnion(u) } }
@@ -4167,6 +4178,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                ai: {
                                    guard aiBase.enabled else { return aiBase }
                                    var a = aiBase
+                                   a.file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })   // R1497
                                    let path = f.enclosingTypePath ?? f.enclosingType
                                    a.enclosingTypePath = path
                                    var g = Set(f.genericBounds.keys)

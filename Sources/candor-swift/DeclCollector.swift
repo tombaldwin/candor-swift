@@ -499,6 +499,10 @@ final class DeclCollector: SyntaxVisitor {
     /// FILE-LEVEL aliases alone (N-d: `typeAliases` flattens type-nested ones into the same table).
     var declaredTypePaths: Set<String> = []
     var fileTypeAliases: [String: String] = [:]
+    /// SOUNDNESS R1497 — the FILE-SCOPED subset of `fileTypeAliases`: a top-level `fileprivate`/`private typealias`,
+    /// visible only in this file. Two files may each declare one under the same name (legal Swift); the
+    /// module-wide table above is merged last-writer-wins, so every other file read the last file's target.
+    var filePrivateTypeAliases: Set<String> = []
     /// SOUNDNESS R266 — declared supertypes keyed on the SUBTYPE'S FULL NESTED PATH, the precise twin of
     /// `conformers` (which is keyed on SHORT names on both sides). Two same-short-named types —
     /// `enum Outer { class S: Base }` beside an unrelated top-level `class S: Other` — merge in
@@ -1054,6 +1058,9 @@ final class DeclCollector: SyntaxVisitor {
         if let underlying = t.name {
             typeAliases[node.name.text] = underlying
             if typeStack.isEmpty { fileTypeAliases[node.name.text] = underlying }   // VEIN A(i) N-d
+            if typeStack.isEmpty, ["private", "fileprivate"].contains(accessModifier(node.modifiers)) {   // R1497
+                filePrivateTypeAliases.insert(node.name.text)
+            }
             if let owner = typeStack.last { memberTypeAliases[owner, default: [:]][node.name.text, default: []].insert(underlying) }
             if !CallCollector.r1492MOff, !typeStack.isEmpty {
                 memberTypeAliasesByPath[typeStack.joined(separator: "."), default: [:]][node.name.text, default: []].insert(underlying)

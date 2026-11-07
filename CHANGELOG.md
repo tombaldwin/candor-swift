@@ -10,6 +10,11 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R1497 — a `fileprivate typealias` answers in its own file.** Two files may each declare `fileprivate
+  typealias K = …`; the module-wide alias table kept the last file's target, so a call through `K` in every other file
+  went to the wrong type — silent where that type is pure (executed), fabricated where it is not (executed). A top-level
+  `private`/`fileprivate` alias now answers only in its declaring file, and a module-visible alias outranks another
+  file's fileprivate one. Gates can turn red and green. Kill switch `CANDOR_R1497_OFF`.
 - **⚠ SOUNDNESS R1486 (method path) — a member found on a refined protocol resolves the call.** The method arm edged the
   refined provider and kept the release's `dispatch:` hedge, because that wrong-reason `Unknown` was the only cover for
   other dropped calls in swift-crypto; R1492 and the `Self()` fix (the entry below) close those at their own sites, so the hedge is
