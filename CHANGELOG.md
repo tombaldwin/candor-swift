@@ -10,6 +10,34 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R1491 — a `let` copy of a member read carries the member's type.** `let r = l.w; r.eff()` was silent
+  over an executed file write while `l.w.eff()` and `if let r = l.w` both charged: the plain `let` binder typed an
+  unannotated member-access initializer (`l.w`, `self.w`, `l.w.v`, `Loc.sw`; stored or computed, generic or not) as
+  nothing, so every call on the binding was dropped. It is now typed exactly as the `if let` binder and the direct
+  spelling type it, through the same resolver and with the same guess flag (R610) for a hop the scan cannot explain.
+  Gates can turn red (`deny E` 0→1). Kill switch `CANDOR_R1491_OFF`.
+- **⚠ SOUNDNESS R1492 — four routes by which a call on a stored property was dropped.** (P) A method in `extension
+  A.B.T { … }` read `self.field` against the key `A.B.T` while the declaration's stored properties were keyed `T`, so
+  the hop kept the outer type: `self.backing.signature(…)` edged the enclosing method itself. Field facts are now also
+  keyed by the declaring type's full path. (M) A member `typealias` declared in one type was applied inside every type
+  sharing its simple name (`P384._VOPRF.PrivateKey`'s `BackingPrivateKey` inside `_RSA.Signing.PrivateKey`); for a
+  shared owner name only the alias that owner's own path declares is in scope. (A) A field typed by a generic
+  parameter's associated type (`var backing: Parameters.BackingPrivateKey`) is typed by the associated type's local
+  protocol bound and dispatches over its conformers. (I) An implicit `.init(…)` whose context is a generic parameter or
+  local protocol (`self.backing = try .init()`) dispatches over the conformers' initializers, as `T.init()` does.
+  Exposed by the corpus A/B and fixed with it: (L) a full-path field's type spelled by a type nested in the declaring
+  type (`var position: Position` inside `Lexer.Cursor`) resolves to that nested type, not to an unrelated top-level
+  `Position`; and `String(reflecting: x)` / `debugPrint(x)` on a type with only `description` now edges `description`
+  (Swift's fallback) — the old wrong-reason `invisible` on a swift-certificates diagnostic had been its only cover;
+  and an unresolved `self.init(…)` inside an extension of a type only extended here (a dependency's type) now
+  discloses the dependency module as `invisible`, as the unqualified `T(…)` spelling already did (swift-certificates
+  `Time.makeTime` had carried `invisible: [SwiftASN1]` only through a wrong overload edge).
+  Most of the removed hedges were wrong-reason: the hop that kept the outer type had produced fabricated
+  self-recursion edges and `dispatch:` hedges on protocols the real receiver never touches.
+  Executed fixtures `deny Fs` 0→1 at the caller; controls (a same-named type with a pure same-named field, a nested
+  alias onto a pure type, an associated type with only pure conformers) stay pure. Kill switches `CANDOR_R1492_OFF`
+  (all), `CANDOR_R1492P_OFF` / `_A_` / `_I_` / `_M_` (`CANDOR_R1492A_OFF` etc.).
+
 - **⚠ SOUNDNESS R1472 (defect C) — a closure parameter's name is not `self.<name>` either.** RxCocoa's
   `Reactive.countDownDuration` passes `setter: { picker, value in … = value }`; the bare `value` (the parameter) edged the
   unrelated member `Reactive.value` through the implicit-`self` arms and charged its effects. R1472 withheld only the

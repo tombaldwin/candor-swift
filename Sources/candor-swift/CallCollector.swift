@@ -1480,6 +1480,15 @@ final class CallCollector: SyntaxVisitor {
     }
     /// The owners whose member aliases are in scope here, innermost first: the enclosing type path's
     /// segments, then each one's supertypes (an alias declared in a superclass or a protocol is a member).
+    /// R1492 — each enclosing segment's full path (`PrivateKey` -> `_RSA.Signing.PrivateKey`), innermost first.
+    private lazy var r1492OwnerPaths: [String: String] = {
+        var out: [String: String] = [:]
+        let segs = (ai.enclosingTypePath ?? enclosingType)?.split(separator: ".").map(String.init) ?? []
+        for i in stride(from: segs.count - 1, through: 0, by: -1) where out[segs[i]] == nil {
+            out[segs[i]] = segs[0...i].joined(separator: ".")
+        }
+        return out
+    }()
     private lazy var aliasScopeOwners: [String] = {
         var out: [String] = []
         let chain = ai.enclosingTypePath.map { $0.split(separator: ".").map(String.init).reversed() }
@@ -1494,7 +1503,20 @@ final class CallCollector: SyntaxVisitor {
     }()
     private func aliasInScope(_ s: String, scopedMembers: Bool = true) -> String? {
         if Self.aiNdOff { return typeAliases[s] }
-        if scopedMembers { for owner in aliasScopeOwners { if let u = ai.memberAliases[owner]?[s] { return u } } }
+        if scopedMembers {
+            for owner in aliasScopeOwners {
+                // SOUNDNESS R1492 — an owner NAME several declared types share (`PrivateKey`: swift-crypto has a dozen)
+                // keys `memberAliases` for all of them at once, so `P384._VOPRF.PrivateKey`'s `BackingPrivateKey` was
+                // read inside `extension _RSA.Signing.PrivateKey` and typed RSA's `self.backing` as a P-384 key. For a
+                // shared owner on this unit's own path, only the alias that path itself declares is in scope.
+                if !Self.r1492MOff, let path = r1492OwnerPaths[owner], (ai.pathsByLeaf[owner]?.count ?? 0) > 1 {
+                    if let u = ai.memberAliasesByPath[path]?[s] { return u }
+                    if ai.memberAliases[owner]?[s] != nil { vbHit("R1492M", "\(path).\(s) not \(owner)'s") }
+                    continue
+                }
+                if let u = ai.memberAliases[owner]?[s] { return u }
+            }
+        }
         if let u = ai.fileAliases[s] { return u }
         if let ts = ai.nestedAliasTargets[s] {
             if ts.count == 1 { return ts.first }
@@ -3281,6 +3303,16 @@ final class CallCollector: SyntaxVisitor {
     /// SOUNDNESS R610 §1b KILL SWITCH — stops the `opaqueHop` guess flag travelling into `vars`, i.e.
     /// restores the laundered binding, and the if-let arm of `ReceiverChainOwnerKeyProcessTests` reds.
     private static let r610Off = ProcessInfo.processInfo.environment["CANDOR_R610_OFF"] != nil
+    /// SOUNDNESS R1491 KILL SWITCH — the plain `let r = a.b` binder types nothing again (the release reading).
+    static let r1491Off = ProcessInfo.processInfo.environment["CANDOR_R1491_OFF"] != nil
+    /// SOUNDNESS R1492 KILL SWITCH — no full-path field index for `extension A.B.T`, no associated-type field typing.
+    static let r1492Off = ProcessInfo.processInfo.environment["CANDOR_R1492_OFF"] != nil
+    /// R1492 per-mechanism switches (each also off under `CANDOR_R1492_OFF`): P the full-path field index, A the
+    /// associated-type field typing, I the protocol context for an implicit `.init`, M the path-scoped member alias.
+    static let r1492POff = r1492Off || ProcessInfo.processInfo.environment["CANDOR_R1492P_OFF"] != nil
+    static let r1492AOff = r1492Off || ProcessInfo.processInfo.environment["CANDOR_R1492A_OFF"] != nil
+    static let r1492IOff = r1492Off || ProcessInfo.processInfo.environment["CANDOR_R1492I_OFF"] != nil
+    static let r1492MOff = r1492Off || ProcessInfo.processInfo.environment["CANDOR_R1492M_OFF"] != nil
     /// SOUNDNESS R651 §1b KILL SWITCH — stops the typed-local-receiver branch marking an EXTENSION-ONLY
     /// owner, i.e. restores the silencing exactly, so `ExtensionOnDependencyTypeProcessTests` can be
     /// SHOWN to fail rather than asserted to.
@@ -5018,8 +5050,26 @@ final class CallCollector: SyntaxVisitor {
             }
         }
         if let t, implicitMemberHasBody(t, member) { return t }
+        // SOUNDNESS R1492 — `self.backing = try .init()` where `backing` is typed by a generic parameter (or its
+        // associated type) bounded by a LOCAL protocol: the position's context is that parameter, which the scoped
+        // reading above refuses (a protocol is no context for an ordinary member), so the call was DROPPED while
+        // the spelled `T.init()` / `T()` reach every conformer's initializer. Asked for `init` alone, where the
+        // instantiator's choice is one of the protocol's conformers; the walk is `P.init(…)`, the spelling that
+        // already dispatches over them. Only when the release's question had no answer at all.
+        if !Self.r1492IOff, member == "init", t == nil {
+            r1492InitAsk = true; defer { r1492InitAsk = false }
+            let saved = r1480RunTypes; defer { r1480RunTypes = saved }
+            if let p = implicitPositionContext(start, depth: 0, chain: true), localProtocols.contains(p) {
+                vbHit("R1492I", "\(p).init")
+                return p
+            }
+        }
         return nil
     }
+    /// R1492 — a protocol context is walked as `P.init(…)` (the CHA spelling), never as the constructor `P(…)`.
+    private func r1492Protocol(_ t: String) -> Bool { !Self.r1492IOff && localProtocols.contains(t) }
+    /// SOUNDNESS R1492 — true only while `implicitMemberResolved` asks for a protocol context for `.init`.
+    private var r1492InitAsk = false
 
     /// SOUNDNESS R1480 kill switch — restores R999's position set (no chains, operands, defaults, literals).
     static let r1480Off = ProcessInfo.processInfo.environment["CANDOR_R1480_OFF"] != nil
@@ -5290,6 +5340,12 @@ final class CallCollector: SyntaxVisitor {
     /// `scopedContextType` there: innermost nesting type first, a unique declared type otherwise, never an
     /// ambiguous shared name, a protocol, or a generic parameter in scope.
     private func scopedContextType(_ n: String) -> String? {
+        // SOUNDNESS R1492 — the `.init(…)` question only (see `implicitMemberResolved`): a generic parameter's
+        // LOCAL protocol bound, or a local protocol, IS the context whose conformers' initializers may run.
+        if r1492InitAsk {
+            let b = protoBoundParams[n] ?? typeBoundParams[n] ?? genericBoundsR951[n] ?? n
+            return localProtocols.contains(b) ? b : nil
+        }
         let gens = ai.genericNames.union(protoBoundParams.keys).union(typeBoundParams.keys)
             .union(genericBoundsR951.keys).union(["Self"])
         if gens.contains(n) || gens.contains(String(n.split(separator: ".").first ?? "")) { return nil }
@@ -7910,7 +7966,8 @@ final class CallCollector: SyntaxVisitor {
             // `T.init(…)`: the explicit-`.init` arm also edges every SUBCLASS's `init` (`class Obs` + `Del: Obs`,
             // `Obs.init()` charged `Del.init`'s Clock — executed: only `Obs.init` runs), and R1480 must not carry that
             // over-charge into positions the release never resolved. R999's own positions keep the release's walk.
-            if !Self.r1480Off, ma.declName.baseName.text == "init", !implicitMemberIsR999Position(Syntax(node)) {
+            if !Self.r1480Off, ma.declName.baseName.text == "init", !(r1492Protocol(t)),
+               !implicitMemberIsR999Position(Syntax(node)) {
                 vbHit("R1480", "ctor \(t)")
                 walk(node.with(\.calledExpression, b))
                 return .skipChildren
@@ -10818,6 +10875,15 @@ final class CallCollector: SyntaxVisitor {
         }
         if let t = localTypeOfOperand(operand) {
             propertyEdges.insert("\(t).\(member)")
+            // SOUNDNESS R1492 (exposed) — `String(reflecting: x)` / `debugPrint(x)` run `debugDescription` only when the
+            // type HAS one; otherwise Swift falls back to `description`. A type with only `description` got an edge to
+            // a unit that does not exist, so `String(reflecting: c)` read pure over an executed `description` (the
+            // describing/interpolation twins charged). Found when R1492 removed the wrong-reason `invisible` that had
+            // been the only cover on swift-certificates' `IssuerHasNotSignedCertificate.description`.
+            if reflecting, !Self.r1492Off {
+                let leaf = t.split(separator: ".").last.map(String.init) ?? t
+                if !memberUnitKeys.contains("\(leaf).debugDescription") { propertyEdges.insert("\(t).description") }
+            }
         } else if let d = dispatchTypeOfOperand(operand) {
             // a CONCRETE local type from a typed catch (`catch let e as MyError`) is a precise witness —
             // the same soft property edge as the plain concrete path; anything else DISPATCHES.
@@ -12113,6 +12179,24 @@ final class CallCollector: SyntaxVisitor {
                             }
                         }
                     }
+                    // SOUNDNESS R1491 — THE SCALAR HALF "FILED, NOT FIXED" ABOVE, AND IT WAS A SILENCE.
+                    // `let r = l.w; r.eff()` read ABSENT over an executed file write while `l.w.eff()` and
+                    // `if let r = l.w` both charged: a member-access copy (`l.w`, `self.w`, `l.w.v`,
+                    // `Loc.sw`, stored or computed alike) typed NOTHING, so every call on the binding was
+                    // dropped. The speculative fabrication the paragraph above guarded against — `rootOf`
+                    // handing back the BASE's type for an unexplained hop — is exactly what `opaqueHop`
+                    // (R567) flags and R610 carries into `opaqueVars`, so the binding gets the SAME reading
+                    // the direct spelling gets, guess flag included. That is what `visit(OptionalBinding…)`
+                    // and the call-initializer arm of this chain have always done with `rootOf`; this arm
+                    // was the one binder that declined. Container facts are asked first, as above.
+                    else if !Self.r1491Off, v.is(MemberAccessExprSyntax.self) {
+                        let info = rootOf(v0)
+                        if info.isVar, let t = info.root {
+                            vars[name] = t
+                            if info.opaqueHop, !Self.r610Off { opaqueVars.insert(name) }   // R610
+                            vbHit("R1491", "\(name) -> \(t)\(info.opaqueHop ? " (guess)" : "")")
+                        }
+                    }
                 }
             }
         }
@@ -12139,6 +12223,7 @@ struct AiTypeIndex {
     var protocolPaths: Set<String> = []
     var fileAliases: [String: String] = [:]
     var memberAliases: [String: [String: String]] = [:]
+    var memberAliasesByPath: [String: [String: String]] = [:]   // SOUNDNESS R1492
     var nestedAliasTargets: [String: Set<String>] = [:]
     var supertypes: [String: Set<String>] = [:]
     var enclosingTypePath: String? = nil

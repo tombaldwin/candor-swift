@@ -302,6 +302,24 @@ final class DeclCollector: SyntaxVisitor {
     var converter: SourceLocationConverter
     var fns: [FnInfo] = []
     var fields: [String: [String: (name: String?, isFunction: Bool)]] = [:] // Type -> field -> info
+    /// SOUNDNESS R1492 — the same facts keyed by the declaring type's FULL PATH (`_RSA.Signing.PrivateKey`), written
+    /// beside every `fields` write. `fields` keys a declaration by its SIMPLE name (`PrivateKey`) and an `extension
+    /// _RSA.Signing.PrivateKey { … }` by the DOTTED spelling, so a method in the extension read `self.backing` against
+    /// a key that held none of the declaration's stored properties: the hop kept the outer type and the call was
+    /// dropped (swift-crypto's RSA `self.backing.signature(…)`). The Driver unions the dotted paths into `fields`.
+    var fieldsByPath: [String: [String: (name: String?, isFunction: Bool)]] = [:]
+    /// SOUNDNESS R1492 — `protocol -> associatedtype -> its single nominal bound` (`associatedtype K: KP`).
+    var assocTypeBounds: [String: [String: String]] = [:]
+    /// SOUNDNESS R1492 — a stored property spelled `Param.Assoc` where `Param` is a generic parameter of the
+    /// declaring type (`private var backing: Parameters.BackingPrivateKey`). Resolved in the Driver once every
+    /// file's generic bounds and associated-type bounds are merged.
+    var assocMemberFields: [(ty: String, path: String, field: String, param: String, assoc: String)] = []
+    /// R1492 — also key a field fact by the full path (a nested declaration), so `extension A.B.T` finds it.
+    private func r1492Path(_ ty: String, _ path: String) -> Bool { !CallCollector.r1492POff && path != ty && path.contains(".") }
+    private func setFieldR1492(_ ty: String, _ path: String, _ name: String, _ v: (name: String?, isFunction: Bool)) {
+        fields[ty, default: [:]][name] = v
+        if r1492Path(ty, path) { fieldsByPath[path, default: [:]][name] = v }
+    }
     /// SOUNDNESS R585 (b4) — `type -> field -> the type whose METATYPE the field holds`.
     var fieldMetatypes: [String: [String: String]] = [:]
     /// SOUNDNESS R585 (b6) — `type -> field -> the ELEMENT type of a `[X.Type]`-typed field.`
@@ -608,6 +626,8 @@ final class DeclCollector: SyntaxVisitor {
     /// (`Zip8`) and every sink's `parent.scheduler` was typed as that operator. Swift's lookup finds the
     /// member alias of the enclosing type first; this is that scope.
     var memberTypeAliases: [String: [String: Set<String>]] = [:]
+    /// SOUNDNESS R1492 — the same, keyed by the owner's FULL path (`P384._VOPRF.PrivateKey`), for a SHARED owner name.
+    var memberTypeAliasesByPath: [String: [String: Set<String>]] = [:]
     /// SOUNDNESS R429 — EVERY underlying type recorded for an alias NAME, not just the last one written.
     /// `typeAliases` is a plain map and the Driver merges it last-writer-wins, so a `#if`/`#else` pair
     /// declaring one alias over two different types kept only the arm written LAST — and the losing
@@ -1035,6 +1055,9 @@ final class DeclCollector: SyntaxVisitor {
             typeAliases[node.name.text] = underlying
             if typeStack.isEmpty { fileTypeAliases[node.name.text] = underlying }   // VEIN A(i) N-d
             if let owner = typeStack.last { memberTypeAliases[owner, default: [:]][node.name.text, default: []].insert(underlying) }
+            if !CallCollector.r1492MOff, !typeStack.isEmpty {
+                memberTypeAliasesByPath[typeStack.joined(separator: "."), default: [:]][node.name.text, default: []].insert(underlying)
+            }
             // ONLY INSIDE A `#if`, and the corpus is why. The first cut recorded every declaration, and
             // `typeAliasArms` is keyed by the BARE name and unioned across files — so two UNRELATED
             // aliases sharing a name in different scopes (`extension A { typealias Value = … }` beside
@@ -1224,7 +1247,14 @@ final class DeclCollector: SyntaxVisitor {
         // R578 — the protocol's ASSOCIATED TYPES and primary associated types: names that are not types.
         var assocTypes = Set<String>()
         for member in node.memberBlock.members {
-            if let a = member.decl.as(AssociatedTypeDeclSyntax.self) { assocTypes.insert(a.name.text) }
+            if let a = member.decl.as(AssociatedTypeDeclSyntax.self) {
+                assocTypes.insert(a.name.text)
+                // SOUNDNESS R1492 — ONE nominal bound only; a composition or no bound leaves it unrecorded.
+                if !CallCollector.r1492AOff, let inh = a.inheritanceClause?.inheritedTypes, inh.count == 1,
+                   let b = typeName(inh.first!.type).name, !typeName(inh.first!.type).isFunction {
+                    assocTypeBounds[node.name.text, default: [:]][a.name.text] = b
+                }
+            }
         }
         for p in node.primaryAssociatedTypeClause?.primaryAssociatedTypes ?? [] { assocTypes.insert(p.name.text) }
         lgAssocNames.formUnion(assocTypes)   // SOUNDNESS R1044 residual — see `LocalGenericFacts.nonTypeNames`
@@ -1478,6 +1508,14 @@ final class DeclCollector: SyntaxVisitor {
                     // …and that resolution is MONOMORPHIZED — the instantiator of `Pipe` picks one
                     // conformer — so it is recorded as opaque, exactly like a `some P` parameter. `any P`
                     // was written as a type here and stays erased (a real existential field).
+                    // SOUNDNESS R1492 — `var backing: Parameters.BackingPrivateKey`: a generic parameter's ASSOCIATED
+                    // type. Resolved after the merge (the parameter's bound and the protocol's associated-type bound
+                    // are routinely declared in other files); see `assocMemberFields`.
+                    if !CallCollector.r1492AOff, let mt = ann.type.as(MemberTypeSyntax.self),
+                       let g = mt.baseType.as(IdentifierTypeSyntax.self)?.name.text, mt.genericArgumentClause == nil,
+                       typeGenericParamNames[ty]?.contains(g) == true {
+                        assocMemberFields.append((ty, tyPath, name, g, mt.name.text))
+                    }
                     if let tn = info.name, let bound = typeGenericBounds[ty]?[tn] {
                         info = (bound, info.isFunction)
                         opaqueFields[ty, default: []].insert(name)
@@ -1493,7 +1531,7 @@ final class DeclCollector: SyntaxVisitor {
                         // extension read silent-pure: the field never resolved to `Greeter2` at all).
                         unresolvedGenericFields.append((ty, name, tn))
                     }
-                    fields[ty, default: [:]][name] = info
+                    setFieldR1492(ty, tyPath, name, info)
                     // SOUNDNESS R585 (b4/b6) — a stored property of METATYPE type, and of ARRAY-of-
                     // metatype type. `fields` records "the type of the value", which for a metatype is
                     // no answer at all (`typeName` returns nil), so `struct Box { let t: CBase.Type;
@@ -1505,14 +1543,19 @@ final class DeclCollector: SyntaxVisitor {
                     }
                     if let inner = nestedArrayElementName(ann.type) {   // R278 — `[[T]]`, asked first
                         fieldArrayElemNested[ty, default: [:]][name] = inner
+                        if r1492Path(ty, tyPath) { fieldArrayElemNested[tyPath, default: [:]][name] = inner }
                     } else if let elem = arrayElementName(ann.type) {
                         // SOUNDNESS R1463 (exposed) — an ELEMENT typed as the enclosing type's generic parameter
                         // resolves to its bound, as the scalar field above does: `struct Many<E: R> { var rs: [E] }`
                         // left `rs.forEach { $0.run() }` ABSENT (executed: `run` deletes a file) while `var x: E` with
                         // `x.run()` charged. Kill switch `CANDOR_R1463_OFF`.
                         fieldArrayElem[ty, default: [:]][name] = CallCollector.r1463Off ? elem : (typeDeclGenericBounds[ty]?[elem] ?? elem)
+                        if r1492Path(ty, tyPath) { fieldArrayElem[tyPath, default: [:]][name] = fieldArrayElem[ty]![name]! }
                     }
-                    if let val = dictValueName(ann.type) { fieldDictValue[ty, default: [:]][name] = val }
+                    if let val = dictValueName(ann.type) {
+                        fieldDictValue[ty, default: [:]][name] = val
+                        if r1492Path(ty, tyPath) { fieldDictValue[tyPath, default: [:]][name] = val }
+                    }
                     let targs = directGenericArgumentNames(ann.type)
                     if !targs.isEmpty { fieldTypeArgs[ty, default: [:]][name] = targs }   // R905
                     if !Self.r1176Off, let k = stdlibContainerKindR1176(ann.type) {   // SOUNDNESS R1176
@@ -1526,7 +1569,7 @@ final class DeclCollector: SyntaxVisitor {
                           let call = initVal.as(FunctionCallExprSyntax.self),
                           let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self) {
                     if ctor.baseName.text.first?.isUppercase == true {
-                        fields[ty, default: [:]][name] = (ctor.baseName.text, false)
+                        setFieldR1492(ty, tyPath, name, (ctor.baseName.text, false))
                     } else {
                         // `static let shared = build()` — a free FACTORY (lowercase leaf), not a ctor.
                         // Record the leaf; resolve to the vended type once the returns index exists so
@@ -1545,7 +1588,7 @@ final class DeclCollector: SyntaxVisitor {
                     // `self.stateMachine.x()` kept the OUTER type (swift-nio's negotiation handlers joined
                     // their own `channelRead` instead of the state machine's). The value IS a `Machine` —
                     // R905's rule for a local binder, applied to the stored property.
-                    fields[ty, default: [:]][name] = (ctor.baseName.text, false)
+                    setFieldR1492(ty, tyPath, name, (ctor.baseName.text, false))
                     let targs = g.genericArgumentClause.arguments.compactMap {
                         $0.argument.as(TypeSyntax.self).flatMap { typeName($0).name } }
                     if targs.count == g.genericArgumentClause.arguments.count {
@@ -1561,7 +1604,7 @@ final class DeclCollector: SyntaxVisitor {
                     // FACTORY that vends its receiver's own specialisation (the SDK's declaration, pinned by
                     // `swiftc -typecheck`). The R915 (D) arm above reads only the constructor spelling, so the
                     // field stayed untyped and `table.anyObject?.go()` / `map.object(forKey:)?.go()` read nothing.
-                    fields[ty, default: [:]][name] = (owner, false)
+                    setFieldR1492(ty, tyPath, name, (owner, false))
                     let targs = g.genericArgumentClause.arguments.compactMap {
                         $0.argument.as(TypeSyntax.self).flatMap { typeName($0).name } }
                     if targs.count == g.genericArgumentClause.arguments.count {
@@ -1585,7 +1628,7 @@ final class DeclCollector: SyntaxVisitor {
                     // otherwise be typed as its OWNER and resolve calls to the owner's methods, fabricating
                     // effects. A simple `Type.member` only: a nested `Type.Inner.value` would give the wrong
                     // root, so `base` must be a bare identifier.
-                    fields[ty, default: [:]][name] = (base.baseName.text, false)
+                    setFieldR1492(ty, tyPath, name, (base.baseName.text, false))
                 }
             }
         } else if isFileScopeBinding(node) {
