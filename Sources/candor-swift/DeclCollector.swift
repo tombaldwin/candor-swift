@@ -46,6 +46,9 @@ struct FnInfo {
     /// `static func == (lhs: S, rhs: Int)` is not, and must not stand in for `S`'s synthesized one.
     var opSelfOperandsLooseR1270 = false
     var isOverride = false   // R1105 audit — declared `override` (the implicit-`self` dispatch arm edges only these)
+    /// SOUNDNESS R1499 — reachable by Objective-C dynamic dispatch (`@objc`, `@IBAction`, `dynamic`, or a member of an
+    /// `@objcMembers` type): an `AnyObject`-typed receiver can call it with no `override` in sight.
+    var isObjcR1499 = false
     var paramSig: [(type: String?, hasDefault: Bool, variadic: Bool)] = []  // ordered param signature for
                                       // PARAM-TYPE overload resolution: distinguishes same-name overloads
                                       // (`compare(_:Date)` vs `compare(_:DateComparisonType)`), including the
@@ -314,6 +317,13 @@ final class DeclCollector: SyntaxVisitor {
     var fieldTupleElemR1498: [String: [String: [String: String]]] = [:]
     /// SOUNDNESS R1498 — fn leaf -> its declared TUPLE return's slots; `nil` = two declarations disagree (never guess).
     var returnTupleTmpR1498: [String: [String: String]?] = [:]
+    /// SOUNDNESS R1499 — every inherited type a declaration SPELLS, with its position: `first` is the first entry of a
+    /// type DEFINITION's clause (the only place Swift admits a superclass), `generic` when it carries `<…>`. An
+    /// extension's entries are never `first`. Read by the Driver's `platformRootedClassesR1499`.
+    var inheritSpellingsR1499: [String: [(name: String, first: Bool, generic: Bool)]] = [:]
+    var objcMembersTypesR1499: Set<String> = []
+    /// SOUNDNESS R1499 — every property NAME a type context here declares (annotated or not, stored or computed).
+    var memberVarNamesR1499: Set<String> = []
     /// SOUNDNESS R1492 — `protocol -> associatedtype -> its single nominal bound` (`associatedtype K: KP`).
     var assocTypeBounds: [String: [String: String]] = [:]
     /// SOUNDNESS R1492 — a stored property spelled `Param.Assoc` where `Param` is a generic parameter of the
@@ -960,6 +970,16 @@ final class DeclCollector: SyntaxVisitor {
         typeStack.append(name)
         accessStack.append(accessModifier(modifiers))
         selfElementStack.append(nil)   // extensions with a `where Element: P` overwrite this below
+        if !CallCollector.r1499Off {   // SOUNDNESS R1499
+            if attributes?.contains(where: { $0.as(AttributeSyntax.self)?.attributeName.trimmedDescription == "objcMembers" }) == true {
+                objcMembersTypesR1499.insert(name)
+            }
+            for (i, it) in (inheritance?.inheritedTypes ?? []).enumerated() {
+                let spelled = it.type.trimmedDescription
+                let nm = typeName(it.type).name ?? spelled
+                inheritSpellingsR1499[name, default: []].append((nm, i == 0 && !isExtension, spelled.contains("<")))
+            }
+        }
         localTypes.insert(name)
         localTypePaths.insert(typeStack.joined(separator: "."))
         // An `extension` does not DECLARE the type — it adds to whatever (possibly platform) type already
@@ -1335,6 +1355,9 @@ final class DeclCollector: SyntaxVisitor {
     // BODY that runs (the fuzz probe found all four silently pure — the TS engine's property-arrow
     // hole, Swift edition). Each body collects under `Type.property`; duplicate quals union.
     override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
+        if !typeStack.isEmpty, !CallCollector.r1499Off {   // SOUNDNESS R1499
+            for b in node.bindings { for n in CallCollector.patternNames(b.pattern) { memberVarNamesR1499.insert(n) } }
+        }
         if let ty = typeStack.last {
             let tyPath = typeStack.joined(separator: ".")
             let isStatic = node.modifiers.contains { $0.name.text == "static" || $0.name.text == "class" }
@@ -1971,6 +1994,12 @@ final class DeclCollector: SyntaxVisitor {
         info.simpleQual = typeStack.last.map { "\($0).\(name)" } ?? name
         if let fd = Syntax(node).as(FunctionDeclSyntax.self), fd.modifiers.contains(where: { $0.name.text == "override" }) {
             info.isOverride = true   // R1105 audit
+        }
+        if let fd = Syntax(node).as(FunctionDeclSyntax.self),   // R1499
+           fd.attributes.contains(where: { a in a.as(AttributeSyntax.self).map { ["objc", "IBAction", "NSManaged"].contains($0.attributeName.trimmedDescription) } ?? false })
+            || fd.modifiers.contains(where: { $0.name.text == "dynamic" })
+            || typeStack.last.map({ objcMembersTypesR1499.contains($0) }) == true {
+            info.isObjcR1499 = true
         }
         info.enclosingType = typeStack.last
         info.enclosingTypePath = tyPath

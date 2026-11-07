@@ -1664,6 +1664,64 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         overrideArity[f.qual, default: []].append((f.paramSig.filter { !$0.hasDefault && !$0.variadic }.count, hi))
     }
     CallCollector.localMutatingNames = localMutatingNames   // R1105 — read by every CallCollector below
+    // SOUNDNESS R1499 — LOCAL CLASSES ROOTED AT A PLATFORM CLASS, AND WHO DECLARES A MEMBER NAME.
+    // `final class TLoc: Thread { func removeAllObjects() }` and `l.threadDictionary.removeAllObjects()`: `rootOf` keeps
+    // `TLoc` across the unexplained hop (R567's floor) and the call charged `TLoc.removeAllObjects` — executed, no such
+    // call happens: `threadDictionary` is Thread's, an `NSMutableDictionary`. A class qualifies when walking its
+    // superclass chain (the FIRST entry of each definition's clause) leaves the scan at a platform class spelled with no
+    // generic arguments, and no class on the chain spells any other foreign supertype (a foreign PROTOCOL's requirement
+    // can be witnessed by a non-`override` member and reached through a foreign-typed hop: a table view's data source).
+    var inheritR1499: [String: [(name: String, first: Bool, generic: Bool)]] = [:]
+    for c in collectors { for (t, l) in c.inheritSpellingsR1499 { inheritR1499[t, default: []].append(contentsOf: l) } }
+    var platformRootedR1499 = Set<String>()
+    if !CallCollector.r1499Off {
+        // …AND EVERY CLASS ON THE CHAIN IS DECLARED IN A FILE THAT IMPORTS ONLY PLATFORM MODULES (or this scan's own).
+        // `isObjcPlatformClass` cannot tell a platform class from a DEPENDENCY's (SwiftLint's `ElementCollector:
+        // SyntaxAnyVisitor` passed it, measured): a dependency's property can be typed by a generic parameter or `Self`
+        // and so be a local type after all (R567's self-typed hop), which a platform SDK property is not.
+        let ownModules = Set(allFns.map { swiftModuleOf($0.loc) }).subtracting([""])
+        var declFiles: [String: Set<String>] = [:]
+        for c in collectors { for t in c.declaredTypes { declFiles[t, default: []].insert(c.file) } }
+        let platformOnlyFile: (String) -> Bool = { file in
+            (fileImports[file] ?? []).allSatisfy { PLATFORM_MODULES.contains($0) || ownModules.contains($0) }
+        }
+        for t in classNamesAll where declaredTypes.contains(t) {
+            var x = t, seen = Set<String>(), ok = false
+            while seen.insert(x).inserted {
+                guard let fs = declFiles[x], !fs.isEmpty, fs.allSatisfy(platformOnlyFile) else { break }
+                let sp = inheritR1499[x] ?? []
+                if sp.contains(where: { !$0.first && !localTypes.contains($0.name) && !STD_PURE_PROTOCOLS.contains($0.name) }) { break }
+                let firsts = sp.filter { $0.first }
+                guard firsts.count == 1, let s = firsts.first, !s.generic else { break }
+                if classNamesAll.contains(s.name), declaredTypes.contains(s.name) { x = s.name; continue }
+                if !localTypes.contains(s.name), isObjcPlatformClass(s.name) { ok = true }
+                break
+            }
+            if ok { platformRootedR1499.insert(t) }
+        }
+    }
+    CallCollector.platformRootedClassesR1499 = platformRootedR1499
+    CallCollector.localPropertyNamesR1499 = Set(fields.values.flatMap { $0.keys }).union(computedFieldNamesAll.values.joined())
+        .union(collectors.flatMap { $0.memberVarNamesR1499 })
+    var leafOwnersR1499: [String: [(owner: String, dynamicReach: Bool)]] = [:]
+    if !CallCollector.r1499Off {
+        for f in allFns {
+            guard let et = f.enclosingType else { continue }
+            let head = f.simpleQual.prefix { $0 != "(" && $0 != "#" }
+            let leaf = head.split(separator: ".").last.map(String.init) ?? String(head)
+            leafOwnersR1499[leaf, default: []].append((et, f.isOverride || f.isObjcR1499))
+        }
+    }
+    /// R1499 — a call marked `platformHopR1499` on `owner.leaf` can reach NO local body. The hop's static type is one the
+    /// PLATFORM declares, so it is never a type this scan DECLARES; such a type's member is reachable through it only
+    /// as an `override` of a platform member or by Objective-C dynamic dispatch (`@objc`/`dynamic`/`@objcMembers`). So the
+    /// floor is dropped only when every local declaration of `leaf` is a plain member of a DECLARED type; one on an
+    /// extension of a platform type or a local protocol (a platform type can conform to it) keeps the release floor.
+    let r1499Unreachable: (String, String) -> Bool = { owner, leaf in
+        let owners = leafOwnersR1499[leaf] ?? []
+        return !owners.isEmpty && owners.allSatisfy { !$0.dynamicReach && declaredTypes.contains($0.owner)
+            && protocolMethods[$0.owner] == nil && !protocolPaths.contains($0.owner) }
+    }
     CallCollector.computedFieldNames = computedFieldNamesAll   // R1105 (c)
     // SOUNDNESS R1105/R1106 — the unit a READ of an accessor runs (see DeclCollector `setterSideAccessorQuals`).
     let getterView: (Set<String>) -> Set<String> = { qs in
@@ -4529,6 +4587,27 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !projectModules.contains($0)
         }
         for var call in cc.calls {
+            // SOUNDNESS R1499 — see `r1499Unreachable`: the release's floor edge would name a local body this call cannot run.
+            if call.platformHopR1499, call.typed, let dot = call.path.lastIndex(of: ".") {
+                // …AND WHAT IT CAN RUN: a member a LOCAL EXTENSION gives a platform type (`extension NSMutableDictionary
+                // { func zapAll() }` reached as `l.threadDictionary.zapAll()`, executed) — the hop's type is the
+                // platform's, so those are its candidates. Edged as a union, beside whatever the floor does; the
+                // release reached none of them (the floor named the local class, whose same-named member is pure).
+                for (owner, _) in leafOwnersR1499[call.leaf] ?? [] where localTypes.contains(owner)
+                    && !declaredTypes.contains(owner) && protocolMethods[owner] == nil && !protocolPaths.contains(owner) {
+                    let hit = resolveQual("\(owner).\(call.leaf)")
+                    if !hit.isEmpty, CallCollector.veinBProbe {
+                        FileHandle.standardError.write("VBHIT\tR1499\text \(f.qual) \(owner).\(call.leaf)\n".data(using: .utf8)!)
+                    }
+                    edges[f.qual, default: []].formUnion(hit)
+                }
+                if r1499Unreachable(String(call.path[..<dot]), call.leaf) {
+                    if CallCollector.veinBProbe {
+                        FileHandle.standardError.write("VBHIT\tR1499\tdrop \(f.qual) \(call.path)\n".data(using: .utf8)!)
+                    }
+                    continue
+                }
+            }
             // CALL-TARGET ROUND 2 — the measured-not-shipped disclosure fallback (`CallCollector.siteFallback`, emitted
             // only under `CANDOR_CT2_FALLBACK`): a recognised site whose operand could not be typed discloses.
             if call.path.hasPrefix("<site>.") {

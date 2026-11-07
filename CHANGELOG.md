@@ -10,6 +10,15 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R1499 — a hop the platform declares is not the local class.** `final class TLoc: Thread { func
+  removeAllObjects() }` with `l.threadDictionary.removeAllObjects()`: the unexplained hop kept `TLoc` (R567's floor) and
+  charged `TLoc.removeAllObjects`, which never runs (executed: `threadDictionary` is Thread's `NSMutableDictionary`). On a
+  local class whose only foreign ancestry is a platform class, an instance member no local declaration names is the
+  platform's, and its type is never a type this scan declares; such a type's member is reachable through it only as an
+  `override` or by Objective-C dynamic dispatch, so the floor edge is dropped when every local declaration of the member
+  name is a plain member of a declared type (an extension of a platform type or a local protocol keeps it). The same hop
+  now also reaches a member a local extension gives a platform type (`extension NSMutableDictionary { func zapAll() }`),
+  which was silent. Gates can turn GREEN (`deny E` 1→0, executed) and red (0→1, executed). Kill switch `CANDOR_R1499_OFF`.
 - **⚠ SOUNDNESS R1498 — a tuple's element carries its type.** `let t = (A(), 1); t.0.eff()`, labelled slots, a
   tuple-typed stored property (`l.tup.0`, `self.tup.0`, bare `tup.0`), a call declared to return a tuple (`mkPair().0`,
   `let p = mkPair()`), a copy (`let t = l.tup`) and a destructuring of any of them (`let (x, _) = l.tup`) were silent over

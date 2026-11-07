@@ -233,6 +233,8 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// hop that kept the outer base's type, or a local laundered from either. A lookup on such an
               /// owner — hit or miss — that no trusted surface answers keeps the guess and ADDS `Unknown`.
               var guessHop: Bool = false
+              /// SOUNDNESS R1499 — the receiver is a guess through a platform-declared hop (`platformHopExprsR1499`).
+              var platformHopR1499: Bool = false
               /// SOUNDNESS R915 REACH — set only under `CANDOR_VEINB_PROBE` on a typed local call whose
               /// receiver root is a `rootOf` guess (`opaqueHop`): `<hop kind>\t<receiver spelling>`. The Driver
               /// prints what that call resolved to. Never read for an answer.
@@ -666,6 +668,10 @@ final class CallCollector: SyntaxVisitor {
     /// SOUNDNESS R915 (B) — the unit's variadic parameter names (see `rootOf`).
     let variadicParamsR915: Set<String>
     private var elemGuessVars: Set<String> = []
+    /// SOUNDNESS R1499 — receiver expressions (`l.threadDictionary`) whose root is a `rootOf` guess through an INSTANCE
+    /// hop on a platform-rooted local class (see `platformRootedClassesR1499`), and locals bound from one.
+    private var platformHopExprsR1499: Set<SyntaxIdentifier> = []
+    private var platformHopVarsR1499: Set<String> = []
     let returns: [String: String]   // unambiguous factory return types (the candor-scan move)
     /// SOUNDNESS R585 — the four DECLARATION-side metatype indexes (b4 field, b6 array element,
     /// b7 global, b9 return). Each is the metatype twin of an existing index that `typeName` cannot
@@ -2278,6 +2284,17 @@ final class CallCollector: SyntaxVisitor {
                     return (h.name, true, inner.path + [member], h.mono, inner.opaqueHop)
                 }
             }
+            // SOUNDNESS R1499 — the hop is an INSTANCE member no local declaration explains, on a class whose only
+            // foreign ancestry is a platform class: the platform declares it, so its type is the platform's, never
+            // the local class's. The guess below is kept (the floor); the site is marked for the call arm.
+            // ONLY THE FIRST HOP, and only a NAME no local declaration carries: a second hop (`.cellImageView.kf`) or a
+            // member some local type or extension declares (`kf`, a local protocol extension's property) may be typed
+            // by THIS scan — Kingfisher's `cell.cellImageView.kf.cancelDownloadTask()` lost its only `Unknown` to the
+            // first cut, which flagged every hop of the chain.
+            if !Self.r1499Off, inner.isVar, !inner.opaqueHop, let rt = inner.root,
+               Self.platformRootedClassesR1499.contains(rt), !Self.localPropertyNamesR1499.contains(member) {
+                platformHopExprsR1499.insert(expr.id)
+            }
             return (inner.root, inner.isVar, inner.path + [member], inner.mono, true)
         }
         if let call = expr.as(FunctionCallExprSyntax.self) {
@@ -3385,6 +3402,14 @@ final class CallCollector: SyntaxVisitor {
     /// SOUNDNESS R1498 §1b KILL SWITCH — `CANDOR_R1498_OFF=1`: a tuple-valued expression other than an annotated local or
     /// parameter, or a destructured tuple literal, types nothing again (the release reading).
     static let r1498Off = ProcessInfo.processInfo.environment["CANDOR_R1498_OFF"] != nil
+    /// SOUNDNESS R1499 §1b KILL SWITCH — `CANDOR_R1499_OFF=1`: a member call through an unexplained hop on a local subclass
+    /// of a platform class keeps the release's floor edge to the local class's own same-named member.
+    static let r1499Off = ProcessInfo.processInfo.environment["CANDOR_R1499_OFF"] != nil
+    /// SOUNDNESS R1499 — local DECLARED classes whose superclass chain leaves the scan at a platform (Objective-C) class
+    /// and that spell no other foreign supertype (Driver `platformRootedClassesR1499`). Set once before collection.
+    nonisolated(unsafe) static var platformRootedClassesR1499: Set<String> = []
+    /// SOUNDNESS R1499 — every property name a local type or extension declares (stored or computed).
+    nonisolated(unsafe) static var localPropertyNamesR1499: Set<String> = []
     /// The `Self` spelling (row pending) §1b KILL SWITCH: `CANDOR_SELFCTOR_OFF=1` restores the literal `Self` root.
     static let selfCtorOff = ProcessInfo.processInfo.environment["CANDOR_SELFCTOR_OFF"] != nil
     /// SOUNDNESS R1492 KILL SWITCH — no full-path field index for `extension A.B.T`, no associated-type field typing.
@@ -5551,6 +5576,7 @@ final class CallCollector: SyntaxVisitor {
         metatypeDictValue.removeValue(forKey: name)   // R615 — ditto
         guessElem.remove(name)        // R618 — moves with `arrayElem`
         elemGuessVars.remove(name)    // R618 — moves with `vars`
+        platformHopVarsR1499.remove(name)   // R1499 — moves with `vars`
         opaqueVars.remove(name)          // R610 — the guess flag travels with the binding it describes
         protoTyped.removeValue(forKey: name)
         arrayElem.removeValue(forKey: name)
@@ -5684,7 +5710,7 @@ final class CallCollector: SyntaxVisitor {
         return false
     }
 
-    private static func patternNames(_ pattern: PatternSyntax) -> [String] {
+    static func patternNames(_ pattern: PatternSyntax) -> [String] {
         patternBinders(pattern).map { $0.identifier.text }
     }
 
@@ -8989,6 +9015,12 @@ final class CallCollector: SyntaxVisitor {
                                   holdsHop: holdsHop, guessHop: r839Convention,
                                   r915Site: Self.veinBProbe && base.opaqueHop
                                     ? "\(extOnly ? "ext" : "decl")\t\(ma.base.map { guessHopKind($0) } ?? "nobase")\t\(ma.base.map { String($0.trimmedDescription.prefix(60)) } ?? "")" : nil)
+                if !Self.r1499Off, base.opaqueHop, let b = ma.base.map(Self.peel),
+                   platformHopExprsR1499.contains(b.id)
+                    || (b.as(DeclReferenceExprSyntax.self).map { platformHopVarsR1499.contains($0.baseName.text) } ?? false) {
+                    typedCall.platformHopR1499 = true
+                    vbHit("R1499", "\(rt).\(member)")
+                }
                 if let b = ma.base.map(Self.peel) {
                     if let dr = b.as(DeclReferenceExprSyntax.self) {
                         let n = dr.baseName.text
@@ -12302,6 +12334,7 @@ final class CallCollector: SyntaxVisitor {
                         let info = rootOf(v0)
                         if info.isVar, let t = info.root {
                             vars[name] = t
+                            if platformHopExprsR1499.contains(v.id) { platformHopVarsR1499.insert(name) }   // R1499
                             if info.opaqueHop, !Self.r610Off { opaqueVars.insert(name) }   // R610
                             vbHit("R1491", "\(name) -> \(t)\(info.opaqueHop ? " (guess)" : "")")
                         }

@@ -141,6 +141,8 @@ final class NameKeyedStateTests: XCTestCase {
         // "this binding's type came from such an element", moving with `vars` (as `opaqueVars` does).
         "guessElem": .clearedOnRebind(scoped: false),
         "elemGuessVars": .clearedOnRebind(scoped: false),
+        // SOUNDNESS R1499 — "this binding's guessed type came through a platform-declared hop", moving with `vars`.
+        "platformHopVarsR1499": .clearedOnRebind(scoped: false),
         // R278 — `[[T]]`'s INNER element, for a binder whose own element is a container. Keyed by the
         // binding name and cleared with `arrayElem` in the same call, for the same reason: a stale entry
         // would hand a later binder over the same name somebody else's element type, which is the
@@ -438,6 +440,7 @@ final class NameKeyedStateTests: XCTestCase {
         "binderSnapshots": .notPerBinding, "caseSnapshots": .notPerBinding,
         // VEIN B — scope and walk bookkeeping keyed by syntax node, or a flag read around one call.
         "elseTypeSnapshots": .notPerBinding, "reqFloor": .notPerBinding, "elemGuessRecv": .notPerBinding,
+        "platformHopExprsR1499": .notPerBinding,   // R1499 — keyed by syntax node, as `elemGuessRecv`
         // SOUNDNESS R1498 — the tuple-typed FIELD and RETURN facts, keyed by type / fn leaf, and a lazy name set over them.
         "tupleFactsR1498": .immutableIndex, "tupleFieldNamesR1498": .immutableIndex,
         "r915NestedDotted": .notPerBinding,
