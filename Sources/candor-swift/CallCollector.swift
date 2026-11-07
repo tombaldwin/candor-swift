@@ -4985,16 +4985,67 @@ final class CallCollector: SyntaxVisitor {
     /// The contextual TYPE an implicit member expression rooted at `start` is resolved against, or nil.
     private func implicitMemberContext(_ start: Syntax) -> String? {
         guard !Self.r999Off else { return nil }
-        var cur = start
-        while let p = cur.parent, p.is(TryExprSyntax.self) || p.is(AwaitExprSyntax.self)
-                || p.is(ForceUnwrapExprSyntax.self)
-                || (p.as(TupleExprSyntax.self)?.elements.count == 1) || (p.is(LabeledExprListSyntax.self)
-                    && p.parent?.as(TupleExprSyntax.self)?.elements.count == 1) {
-            cur = p.is(LabeledExprListSyntax.self) ? (p.parent ?? p) : p
+        return implicitPositionContext(start, depth: 0, chain: true)
+    }
+
+    /// The type an implicit member `.member` rooted at `start` is walked on, or nil: R999's context when the member
+    /// has a body there, else (R1480) a LOCAL type recorded for another operand of the same arithmetic run that does
+    /// declare it — `x - .now()` whose position is a `Double` but whose operator takes `x`'s `Deadline`.
+    private func implicitMemberResolved(_ start: Syntax, _ member: String) -> String? {
+        r1480RunTypes = []
+        let t = implicitMemberContext(start)
+        func isLocal(_ x: String) -> Bool {
+            let leaf = x.split(separator: ".").last.map(String.init) ?? x
+            return localTypes.contains(leaf) || localTypes.contains(x) || declaredTypes.contains(leaf)
         }
-        if let le = cur.parent?.as(LabeledExprSyntax.self), le.parent?.parent?.is(TupleExprSyntax.self) == true,
-           (le.parent?.as(LabeledExprListSyntax.self)?.count ?? 0) == 1 {
-            cur = Syntax(le.parent!.parent!)
+        // a LOCAL context that declares the member is the answer; a non-local one is asked only after a local
+        // operand of the same run that declares it (the scan can see that body, and not the platform's)
+        if let t, isLocal(t), implicitMemberHasBody(t, member) { return t }
+        if !r1480Disabled {
+            for o in r1480RunTypes where o != t && isLocal(o) {
+                let leaf = o.split(separator: ".").last.map(String.init) ?? o
+                if implicitMemberUnits.contains("\(leaf).\(member)") {
+                    vbHit("R1480", "run-sibling \(o).\(member)")
+                    return o
+                }
+            }
+        }
+        if let t, implicitMemberHasBody(t, member) { return t }
+        return nil
+    }
+
+    /// SOUNDNESS R1480 kill switch — restores R999's position set (no chains, operands, defaults, literals).
+    static let r1480Off = ProcessInfo.processInfo.environment["CANDOR_R1480_OFF"] != nil
+    /// SOUNDNESS R1481 kill switch — restores the type-wide (merged) typing of a generic-parameter-typed field.
+    static let r1481Off = ProcessInfo.processInfo.environment["CANDOR_R1481_OFF"] != nil
+
+    /// The contextual type of the expression POSITION `start` occupies. `chain` is true only when `start` is the root of
+    /// an implicit member expression: SE-0287 looks the root up in the contextual type of the WHOLE chain
+    /// (`.now().advanced(by: 1)`), which is a fact about implicit members and not about a parenthesised operand.
+    private func implicitPositionContext(_ start: Syntax, depth: Int, chain: Bool) -> String? {
+        guard depth < 8 else { return nil }
+        var cur = start
+        while true {
+            let before = cur.id
+            while let p = cur.parent, p.is(TryExprSyntax.self) || p.is(AwaitExprSyntax.self)
+                    || p.is(ForceUnwrapExprSyntax.self)
+                    || (p.as(TupleExprSyntax.self)?.elements.count == 1) || (p.is(LabeledExprListSyntax.self)
+                        && p.parent?.as(TupleExprSyntax.self)?.elements.count == 1) {
+                cur = p.is(LabeledExprListSyntax.self) ? (p.parent ?? p) : p
+            }
+            if let le = cur.parent?.as(LabeledExprSyntax.self), le.parent?.parent?.is(TupleExprSyntax.self) == true,
+               (le.parent?.as(LabeledExprListSyntax.self)?.count ?? 0) == 1 {
+                cur = Syntax(le.parent!.parent!)
+            }
+            // SOUNDNESS R1480 — an IMPLICIT MEMBER CHAIN (`.now().advanced(by: d)`, `.shared.child`, `.make()!`):
+            // the root is looked up in the contextual type of the chain's END, so climb to it.
+            if chain, !r1480Disabled, let p = cur.parent {
+                if let ma = p.as(MemberAccessExprSyntax.self), ma.base?.id == cur.id { cur = p }
+                else if let fc = p.as(FunctionCallExprSyntax.self), fc.calledExpression.id == cur.id { cur = p }
+                else if let sc = p.as(SubscriptCallExprSyntax.self), sc.calledExpression.id == cur.id { cur = p }
+                else if p.is(OptionalChainingExprSyntax.self) { cur = p }
+            }
+            if cur.id == before { break }
         }
         guard let p = cur.parent else { return nil }
         func scalar(_ t: TypeSyntax) -> String? {
@@ -5005,6 +5056,29 @@ final class CallCollector: SyntaxVisitor {
         if let ic = p.as(InitializerClauseSyntax.self), let pb = ic.parent?.as(PatternBindingSyntax.self),
            let ann = pb.typeAnnotation {
             return scalar(ann.type)
+        }
+        if !r1480Disabled {
+            // SOUNDNESS R1480 — a parameter's DEFAULT VALUE, `func f(d: T = .now())`: the parameter's declared type.
+            // Charged where the spelled default `= T.now()` already is (the declaring unit).
+            if let ic = p.as(InitializerClauseSyntax.self), let fp = ic.parent?.as(FunctionParameterSyntax.self) {
+                return scalar(fp.type)
+            }
+            // SOUNDNESS R1480 — an ELEMENT of an array literal whose own position is an annotated `[T]` binding or a
+            // function's declared `[T]` return: the element type.
+            if let ae = p.as(ArrayElementSyntax.self), let arr = ae.parent?.parent?.as(ArrayExprSyntax.self) {
+                return arrayLiteralElementContext(arr).flatMap { scalar($0) }
+            }
+            // SOUNDNESS R1480 — an OPERAND of an operator sequence (`.now() + d`, `x < .now()`, `c ? .now() : .zero`,
+            // `x ?? .now()`, `(.now() + d) as T`).
+            if let list = p.as(ExprListSyntax.self), let seq = list.parent?.as(SequenceExprSyntax.self),
+               let i = Array(list).firstIndex(where: { $0.id == cur.id }) {
+                return sequenceOperandContext(seq, Array(list), operand: i, ternaryThen: false, depth: depth)
+            }
+            if let tern = p.as(UnresolvedTernaryExprSyntax.self), tern.thenExpression.id == cur.id,
+               let list = tern.parent?.as(ExprListSyntax.self), let seq = list.parent?.as(SequenceExprSyntax.self),
+               let i = Array(list).firstIndex(where: { $0.id == tern.id }) {
+                return sequenceOperandContext(seq, Array(list), operand: i, ternaryThen: true, depth: depth)
+            }
         }
         // `f(label: .m)` — the declared parameter type, agreed by every overload that has the label.
         if let le = p.as(LabeledExprSyntax.self), let list = le.parent?.as(LabeledExprListSyntax.self),
@@ -5038,32 +5112,170 @@ final class CallCollector: SyntaxVisitor {
         if let list = p.as(ExprListSyntax.self), list.parent?.is(SequenceExprSyntax.self) == true {
             let els = Array(list)
             if els.count == 3, els[1].is(AssignmentExprSyntax.self), els[2].id == cur.id {
-                // Only a type this scan RECORDED for the left side: a typed local, or a recorded stored field
-                // (implicit `self`, `self.f`, or a field of a typed receiver). `rootOf` is not asked for the
-                // whole left side — for a member it does not record it answers with the BASE's type, which
-                // is a receiver-typing fallback and would name the wrong type here.
-                let lhs = Self.peel(els[0])
-                if let dr = lhs.as(DeclReferenceExprSyntax.self) {
-                    let n = dr.baseName.text
-                    if let t = vars[n] { return scopedContextType(t) }
-                    if !isBoundLocal(n), let et = enclosingType, let f = fields[et]?[n], !f.isFunction {
-                        return f.name.flatMap { scopedContextType($0) }
-                    }
-                    return nil
-                }
-                if let ma = lhs.as(MemberAccessExprSyntax.self), let base = ma.base {
-                    let owner: String? = Self.peel(base).as(DeclReferenceExprSyntax.self)?.baseName.text == "self"
-                        ? enclosingType : { let r = rootOf(base); return r.isVar ? r.root : nil }()
-                    // Only the enclosing type's own fields: a field of ANOTHER type is spelled in that type's
-                    // scope, which this unit cannot resolve.
-                    if let o = owner, o == enclosingType, let f = fields[o]?[ma.declName.baseName.text], !f.isFunction {
-                        return f.name.flatMap { scopedContextType($0) }
-                    }
-                }
-                return nil
+                return recordedValueType(els[0])
             }
         }
         return nil
+    }
+
+    /// The type this scan RECORDED for a value expression: a typed local, or a recorded stored field (implicit
+    /// `self`, `self.f`, or a field of a typed receiver). `rootOf` is not asked for a whole member expression — for a
+    /// member it does not record it answers with the BASE's type, which is a receiver-typing fallback and would name
+    /// the wrong type as a context. (R999's assignment arm, shared with R1480's comparison operand.)
+    private func recordedValueType(_ e: ExprSyntax) -> String? {
+        let lhs = Self.peel(e)
+        if let dr = lhs.as(DeclReferenceExprSyntax.self) {
+            let n = dr.baseName.text
+            if let t = vars[n] { return scopedContextType(t) }
+            if !isBoundLocal(n), let et = enclosingType, let f = fields[et]?[n], !f.isFunction {
+                return f.name.flatMap { scopedContextType($0) }
+            }
+            // SOUNDNESS R1480 — a typed GLOBAL (`gd = .now() + d`), read as `rootOf` reads one: after locals and fields.
+            if !r1480Disabled, !isBoundLocal(n), let t = globalTypes[n] { return scopedContextType(t) }
+            return nil
+        }
+        if let ma = lhs.as(MemberAccessExprSyntax.self), let base = ma.base {
+            let owner: String? = Self.peel(base).as(DeclReferenceExprSyntax.self)?.baseName.text == "self"
+                ? enclosingType : { let r = rootOf(base); return r.isVar ? r.root : nil }()
+            // Only the enclosing type's own fields: a field of ANOTHER type is spelled in that type's
+            // scope, which this unit cannot resolve.
+            if let o = owner, o == enclosingType, let f = fields[o]?[ma.declName.baseName.text], !f.isFunction {
+                return f.name.flatMap { scopedContextType($0) }
+            }
+        }
+        return nil
+    }
+
+    // ── SOUNDNESS R1480 — IMPLICIT MEMBERS IN OPERATOR AND LITERAL POSITIONS ──────────────────────────────────
+    //
+    // R999 read the contextual type only where the implicit member IS the argument / initializer / return value.
+    // `schedule(deadline: .now() + d)` (swift-nio `SelectableEventLoop.scheduleTask(in:)`), `x < .now()`,
+    // `c ? .now() : .zero`, `[.now()]`, `func f(d: T = .now())` and `.now().advanced(by: 1)` were all ABSENT over a
+    // body that executes the clock read, while the spelled `Deadline.now()` twin of each was charged. The operand's
+    // context is read from the SOURCE only, the way R999 reads it:
+    //   • an arithmetic run (`+ - * / …` and any operator this table does not name) takes the context of the run's
+    //     own position — the argument, binding, return or assignment it sits in;
+    //   • a comparison operand takes the RECORDED type of the operand on the other side (`x < .now()`);
+    //   • `?? .m` takes the recorded type of the left side, else the position's context;
+    //   • a ternary branch takes the context of the whole conditional; a condition, a range bound, a `&&`/`||`
+    //     operand and a compound-assignment right side take none.
+    // A LOCAL context type still walks only a member it has a body for (`implicitMemberHasBody`), so a
+    // heterogeneous operand (`deadline - .seconds(1)`) on a local type the member is not declared on reaches nothing.
+
+    /// Recorded types of the OTHER operands of the arithmetic run the last asked implicit member sits in (R1480).
+    private var r1480RunTypes: [String] = []
+    /// R1480 — true only while asking whether R999 ALONE (the release's positions) types an implicit member.
+    private var r1480LegacyAsk = false
+    private var r1480Disabled: Bool { Self.r1480Off || r1480LegacyAsk }
+    /// Is `start` an implicit member R999's own positions already resolved? (Then its rewrite is the release's.)
+    private func implicitMemberIsR999Position(_ start: Syntax) -> Bool {
+        r1480LegacyAsk = true; defer { r1480LegacyAsk = false }
+        let saved = r1480RunTypes; defer { r1480RunTypes = saved }
+        return implicitMemberContext(start) != nil
+    }
+
+    private enum SeqOp { case assign, compoundAssign, ternary, logical, comparison, coalesce, cast, range, arith }
+
+    private func seqOp(_ e: ExprSyntax) -> SeqOp? {
+        if e.is(AssignmentExprSyntax.self) { return .assign }
+        if e.is(UnresolvedTernaryExprSyntax.self) { return .ternary }
+        if e.is(UnresolvedAsExprSyntax.self) || e.is(UnresolvedIsExprSyntax.self) { return .cast }
+        guard let b = e.as(BinaryOperatorExprSyntax.self) else { return nil }
+        switch b.operator.text {
+        case "||", "&&": return .logical
+        case "==", "!=", "<", "<=", ">", ">=", "===", "!==", "~=": return .comparison
+        case "??": return .coalesce
+        case "...", "..<": return .range
+        case "+=", "-=", "*=", "/=", "%=", "<<=", ">>=", "&=", "|=", "^=", "&+=", "&-=", "&*=", "&<<=", "&>>=":
+            return .compoundAssign
+        default: return .arith
+        }
+    }
+
+    private func seqPrec(_ o: SeqOp) -> Int {
+        switch o {
+        case .assign, .compoundAssign: return 0
+        case .ternary: return 1
+        case .logical: return 2
+        case .comparison: return 4
+        case .coalesce: return 5
+        case .cast: return 6
+        case .range: return 7
+        case .arith: return 8
+        }
+    }
+
+    private func sequenceOperandContext(_ seq: SequenceExprSyntax, _ els: [ExprSyntax], operand i: Int,
+                                        ternaryThen: Bool, depth: Int) -> String? {
+        let n = els.count
+        // the span of operands bound tighter than `minPrec` around index `k` (operands sit at even indices)
+        func span(_ k: Int, above minPrec: Int) -> (Int, Int) {
+            var lo = k, hi = k
+            while lo >= 2, let o = seqOp(els[lo - 1]), seqPrec(o) > minPrec { lo -= 2 }
+            while hi + 2 < n, let o = seqOp(els[hi + 1]), seqPrec(o) > minPrec { hi += 2 }
+            return (lo, hi)
+        }
+        func typed(_ lo: Int, _ hi: Int) -> String? { lo == hi ? recordedValueType(els[lo]) : nil }
+        // the context of the expression occupying els[lo...hi]
+        func outer(_ lo: Int, _ hi: Int) -> String? {
+            let l = lo > 0 ? seqOp(els[lo - 1]) : nil, r = hi + 1 < n ? seqOp(els[hi + 1]) : nil
+            if l == nil, r == nil {
+                vbHit("R1480", "seq-whole")
+                return implicitPositionContext(Syntax(seq), depth: depth + 1, chain: false)
+            }
+            if case .assign? = l, lo == 2 { return recordedValueType(els[0]) }
+            if case .ternary? = l {   // an else-branch: the whole conditional's context
+                let (c0, _) = span(lo - 2, above: 1)
+                let (_, e1) = span(lo, above: 1)
+                return outer(c0, e1)
+            }
+            if let a = els[hi + 1 < n ? hi + 1 : lo].as(UnresolvedAsExprSyntax.self), a.questionOrExclamationMark == nil,
+               hi + 2 < n, let te = els[hi + 2].as(TypeExprSyntax.self) {
+                let f = declaredFacts(te.type, expand: aliasExpander)
+                return f.isFunction || f.hasContainerFact ? nil : f.scalar.flatMap { scopedContextType($0) }
+            }
+            if case .coalesce? = l {   // the right side of `??`
+                let (a, b) = span(lo - 2, above: 5)
+                if let t = typed(a, b) { return t }
+                let (c0, _) = span(lo - 2, above: 4)
+                return outer(c0, hi)
+            }
+            return nil   // a condition, a range bound, a logical / comparison / `is` operand, a compound-assign RHS
+        }
+        if ternaryThen {   // `i` is the ternary operator itself: condition to its left, else-branch to its right
+            guard i >= 1, i + 1 < n else { return nil }
+            return outer(span(i - 1, above: 1).0, span(i + 1, above: 1).1)
+        }
+        let (lo, hi) = span(i, above: 7)   // the arithmetic run the operand belongs to
+        r1480RunTypes += stride(from: lo, through: hi, by: 2).filter { $0 != i }.compactMap { recordedValueType(els[$0]) }
+        let l = lo > 0 ? seqOp(els[lo - 1]) : nil, r = hi + 1 < n ? seqOp(els[hi + 1]) : nil
+        if case .comparison? = r, hi + 2 < n { let (a, b) = span(hi + 2, above: 7); return typed(a, b) }
+        if case .comparison? = l, lo >= 2 { let (a, b) = span(lo - 2, above: 7); return typed(a, b) }
+        return outer(lo, hi)
+    }
+
+    /// The element TYPE of an array literal whose position is an annotated `[T]` binding or a FUNCTION's `[T]` return.
+    private func arrayLiteralElementContext(_ arr: ArrayExprSyntax) -> TypeSyntax? {
+        var cur = Syntax(arr)
+        while let p = cur.parent, p.is(TryExprSyntax.self) || p.is(AwaitExprSyntax.self) { cur = p }
+        guard let p = cur.parent else { return nil }
+        var t: TypeSyntax? = nil
+        if let ic = p.as(InitializerClauseSyntax.self), let pb = ic.parent?.as(PatternBindingSyntax.self) {
+            t = pb.typeAnnotation?.type
+        } else if p.is(ReturnStmtSyntax.self) || (p.is(CodeBlockItemSyntax.self)
+                    && (p.parent?.as(CodeBlockItemListSyntax.self)?.count ?? 0) == 1) {
+            var a: Syntax? = p.parent
+            while let x = a {
+                if x.is(ClosureExprSyntax.self) || x.is(AccessorBlockSyntax.self) { return nil }
+                if let fd = x.as(FunctionDeclSyntax.self) {
+                    guard p.is(ReturnStmtSyntax.self) || fd.body?.statements.count == 1 else { return nil }
+                    t = fd.signature.returnClause?.type; break
+                }
+                a = x.parent
+            }
+        }
+        if let o = t?.as(OptionalTypeSyntax.self) { t = o.wrappedType }
+        return t?.as(ArrayTypeSyntax.self)?.element
     }
 
     /// A context type NAME written in THIS unit's scope (an annotation, the enclosing function's return, a
@@ -7684,9 +7896,18 @@ final class CallCollector: SyntaxVisitor {
         }
         // SOUNDNESS R999 — `.mk()` / `.init(…)` called with a contextual type: walk the qualified call instead.
         if let ma = node.calledExpression.as(MemberAccessExprSyntax.self), ma.base == nil,
-           let t = implicitMemberContext(Syntax(node)), implicitMemberHasBody(t, ma.declName.baseName.text),
+           let t = implicitMemberResolved(Syntax(node), ma.declName.baseName.text),
            let b = Self.typeExpression(t) {
             vbHit("R999", "call \(t).\(ma.declName.baseName.text)")
+            // SOUNDNESS R1480 — `.init(…)` in a position only R1480 reads is walked as the CONSTRUCTOR call `T(…)`, not
+            // `T.init(…)`: the explicit-`.init` arm also edges every SUBCLASS's `init` (`class Obs` + `Del: Obs`,
+            // `Obs.init()` charged `Del.init`'s Clock — executed: only `Obs.init` runs), and R1480 must not carry that
+            // over-charge into positions the release never resolved. R999's own positions keep the release's walk.
+            if !Self.r1480Off, ma.declName.baseName.text == "init", !implicitMemberIsR999Position(Syntax(node)) {
+                vbHit("R1480", "ctor \(t)")
+                walk(node.with(\.calledExpression, b))
+                return .skipChildren
+            }
             walk(node.with(\.calledExpression, ExprSyntax(ma.with(\.base, b))))
             return .skipChildren
         }
@@ -9230,7 +9451,7 @@ final class CallCollector: SyntaxVisitor {
     override func visit(_ node: MemberAccessExprSyntax) -> SyntaxVisitorContinueKind {
         // SOUNDNESS R999 — `.unix` read with a contextual type: walk its qualified spelling instead.
         if node.base == nil, node.parent?.as(FunctionCallExprSyntax.self)?.calledExpression.id != node.id,
-           let t = implicitMemberContext(Syntax(node)), implicitMemberHasBody(t, node.declName.baseName.text),
+           let t = implicitMemberResolved(Syntax(node), node.declName.baseName.text),
            let b = Self.typeExpression(t) {
             vbHit("R999", "read \(t).\(node.declName.baseName.text)")
             walk(MemberAccessExprSyntax(base: b, period: .periodToken(), declName: node.declName))

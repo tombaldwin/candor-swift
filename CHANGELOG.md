@@ -10,6 +10,25 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R1480 — an implicit member is resolved in every position whose type the source writes.** R999 read the
+  contextual type of `.now()` only where it IS the argument, initializer or return value, so `schedule(deadline: .now() +
+  d)` (swift-nio `SelectableEventLoop.scheduleTask(in:)`), `x < .now()`, `c ? .now() : .zero`, `x ?? .now()`, `[.now()]`,
+  `(.now() + d) as T`, `gd = .now() + d` on a typed global, a parameter default `= .now()` and an implicit member chain
+  `.now().advanced(by: 1)` were all silent over an executed clock read while the spelled `Deadline.now()` was charged.
+  An operand of an arithmetic run takes the run's position context (a local type must declare the member; a local
+  operand of the same run that declares it is asked before a non-local context); a comparison operand takes the
+  recorded type of the other side; a ternary branch takes the conditional's context; a chain's root takes the chain's.
+  Conditions, range bounds, logical operands and compound-assignment right sides take none. A closure's return position
+  stays disclosed (`callback:` `Unknown`), not resolved. An implicit `.init(…)` in a position only R1480 reads is walked as
+  the constructor call `T(…)`, so it does not inherit the explicit-`.init` arm's subclass-`init` edges. Gates can turn red
+  (`deny E` 0→1). Kill switch `CANDOR_R1480_OFF`.
+- **⚠ SOUNDNESS R1481 — a field typed by the type's generic parameter takes the reading member's own extension bound.**
+  `struct Reactive<Base> { let base: Base }` was typed once, type-wide, by whichever constrained extension's `where Base:`
+  clause merged last, so `extension Reactive where Base: Picker { var v: Int { base.rx.go(…) } }` read `base` as a
+  different extension's `NumberFormatter`, the call joined nothing and `v` was silent over an executed file write. A
+  member whose own extension (or R1463 function bounds) binds the parameter now reads the field at that bound. A
+  typing the type DECLARATION itself states (`struct Att<Node: SP>`) is kept: narrowing it gains precision, not
+  soundness. Gates can turn red (`deny E` 0→1). Kill switch `CANDOR_R1481_OFF`.
 - **⚠ SOUNDNESS R1455 (class T4, closure-parameter and shorthand sub-tiers) — a closure parameter is typed by its callee's
   declaration.** `printer.withIndentation { p in p.print(…) }` / `Host().with { $0.wipe() }`: an unannotated closure
   parameter was untyped, so member calls on it were dropped (no edge, no `Unknown`) and a callee that performs an effect

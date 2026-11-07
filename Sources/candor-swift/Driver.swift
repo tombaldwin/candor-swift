@@ -467,6 +467,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // a conditional-conformance extension living anywhere (later in the same file, or another file), so
     // the merge has to complete before `unresolvedGenericFields` below can be retried.
     var typeGenericBoundsAll: [String: [String: String]] = [:]
+    /// SOUNDNESS R1481 — merged `DeclCollector.typeDeclGenericBounds`: the bounds a type's DECLARATION states.
+    var typeDeclGenericBoundsAll: [String: [String: String]] = [:]
     /// R243 — merged `DeclCollector.typeGenericFnParams`: Type -> generic params a SAME-TYPE requirement
     /// binds to a FUNCTION TYPE. Same merge-then-retry ordering as `typeGenericBoundsAll`, and for the
     /// same reason: the constraining extension can live in any file.
@@ -1091,6 +1093,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         globalMetatypeArrayElemByModule[cMod, default: [:]].merge(c.globalMetatypeArrayElem) { a, _ in a }
         globalFactories.append(contentsOf: c.globalFactories.map { (cMod, $0.name, $0.leaf) })
         for (t, bs) in c.typeGenericBounds { typeGenericBoundsAll[t, default: [:]].merge(bs) { a, _ in a } }
+        for (t, bs) in c.typeDeclGenericBounds { typeDeclGenericBoundsAll[t, default: [:]].merge(bs) { a, _ in a } }   // R1481
         for (t, ps) in c.typeGenericFnParams { typeGenericFnParamsAll[t, default: []].formUnion(ps) }   // R243
         unresolvedGenericFields.append(contentsOf: c.unresolvedGenericFields)
     }
@@ -2304,6 +2307,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
     // SOUNDNESS R256 — fields whose param is bound BOTH ways; see CallCollector.genericCallableFields.
     var genericCallableFields: [String: Set<String>] = [:]
+    // SOUNDNESS R1481 — `type -> field -> the generic PARAMETER its declared type names` (see the per-unit retyping).
+    var genericParamFieldsR1481: [String: [String: String]] = [:]
+    for (ty, field, param) in unresolvedGenericFields + lgFieldParamsAll { genericParamFieldsR1481[ty, default: [:]][field] = param }
     for (ty, field, param) in unresolvedGenericFields where fields[ty]?[field]?.name == param {
         if let bound = typeGenericBoundsAll[ty]?[param] {
             fields[ty, default: [:]][field] = (bound, false)
@@ -3908,7 +3914,35 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if let v = facts.dictValue { f.dictParams[pn] = v }
             }
         }
-        let cc = CallCollector(info: f, fields: fields, localTypes: localTypes,
+        // SOUNDNESS R1481 — A STORED FIELD TYPED BY THE TYPE'S GENERIC PARAMETER TAKES THIS MEMBER'S OWN BOUND.
+        // `fields` types `struct Reactive<Base> { let base: Base }` ONCE, from `typeGenericBoundsAll` — every
+        // extension's `where Base: X` merged type-wide, last writer winning. So `extension Reactive where Base: Picker
+        // { var v: Int { base.rx.go(…) } }` read `base` as whatever a DIFFERENT extension (`where Base:
+        // NumberFormatter`) bound, the call joined nothing, and `v` was ABSENT over an executed file write (RxSwift's
+        // `base.rx.controlProperty…` shape). R1463 already gave each member its own bounds (`FnInfo.genericBounds`:
+        // the declaration's, overridden by the member's OWN extension clause); a generic-typed FIELD now reads them too.
+        // A member whose own bounds do not name the parameter, or that declares a generic of the same name, keeps the
+        // release's typing. Kill switch `CANDOR_R1481_OFF`.
+        var unitFields = fields
+        if !CallCollector.r1481Off, let et = f.enclosingType, let gfs = genericParamFieldsR1481[et] {
+            for (field, param) in gfs.sorted(by: { $0.key < $1.key }) where !f.genericParamNames.contains(param) {
+                // a FUNCTION carries R1463's bounds; an ACCESSOR unit carries none, so its own extension clause is read
+                // A field the DECLARATION's own bound types (`struct Att<Node: SP> { let node: Node }`) is already
+                // typed by a fact true in every member; narrowing it to the extension's `Node == S` gains precision,
+                // not soundness, and moves the read off the protocol onto arms that do not all climb as far (a
+                // concrete receiver reaching an INHERITED protocol's extension member reads nothing — measured on
+                // swift-syntax `Attached.localNameDescription`). Only a typing the declaration does NOT state — one
+                // a different extension's clause wrote — is replaced.
+                guard let own = f.genericBounds[param] ?? ownExtensionBoundR1481(body, param),
+                      let cur = fields[et]?[field], !cur.isFunction, cur.name != own,
+                      cur.name != typeDeclGenericBoundsAll[et]?[param] else { continue }
+                if CallCollector.veinBProbe {
+                    FileHandle.standardError.write("VBHIT\tR1481\t\(f.qual) \(field): \(cur.name ?? "-") -> \(own)\n".data(using: .utf8)!)
+                }
+                unitFields[et, default: [:]][field] = (own, false)
+            }
+        }
+        let cc = CallCollector(info: f, fields: unitFields, localTypes: localTypes,
                                globalTypes: effectiveGlobalTypes,
                                globalArrayElem: globalArrayElemByModule[swiftModuleOf(f.loc)] ?? [:],
                                globalDictValue: globalDictValueByModule[swiftModuleOf(f.loc)] ?? [:],   // R994
@@ -6853,4 +6887,28 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         unanalyzed: unanalyzed,
         typeSurfaceReturns: returnsNonProtocol,
         typeSurface040: surface040)
+}
+
+/// SOUNDNESS R1481 — the bound the member's OWN enclosing extension clause gives the type parameter `param`
+/// (`extension Reactive where Base: Picker` / `where Base == Picker`), or nil when the innermost enclosing
+/// declaration is not an extension or its clause does not name `param`.
+func ownExtensionBoundR1481(_ body: Syntax, _ param: String) -> String? {
+    var a: Syntax? = body.parent
+    while let x = a, !x.is(ExtensionDeclSyntax.self), !x.is(StructDeclSyntax.self), !x.is(ClassDeclSyntax.self),
+          !x.is(EnumDeclSyntax.self), !x.is(ActorDeclSyntax.self), !x.is(ProtocolDeclSyntax.self) { a = x.parent }
+    guard let ext = a?.as(ExtensionDeclSyntax.self) else { return nil }
+    var out: String? = nil
+    for req in ext.genericWhereClause?.requirements ?? [] {
+        switch req.requirement {
+        case .conformanceRequirement(let c):
+            if typeName(c.leftType).name == param, let r = typeName(c.rightType).name { out = r }
+        case .sameTypeRequirement(let st):
+            if case .type(let lt) = st.leftType, case .type(let rt) = st.rightType, typeName(lt).name == param,
+               !typeName(rt).isFunction, desugaredType(rt).is(IdentifierTypeSyntax.self), let r = typeName(rt).name {
+                out = r
+            }
+        default: continue
+        }
+    }
+    return out
 }

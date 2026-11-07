@@ -442,6 +442,8 @@ final class NameKeyedStateTests: XCTestCase {
         "droppedMember": .notPerBinding,
         // R1455 probe — the unit's qual/loc labels for the measurement-only partition probe (no behaviour)
         "r1455Qual": .notPerBinding, "r1455Loc": .notPerBinding,
+        // R1480 — scratch for one implicit-member lookup: the recorded types of the operand's arithmetic run, reset per ask
+        "r1480RunTypes": .notPerBinding, "r1480LegacyAsk": .notPerBinding,
         "elementWalkedGuess": .notPerBinding, "forElemGuess": .notPerBinding,
         // R853 — payload names bound by an enclosing `if`/`guard` whose `else` this is: scope bookkeeping
         "caseElseOut": .lexicallyScoped("the payload names an `if case`/`guard case` bound, inside that statement's `else`, where they are out of scope; saved and restored with the block"),
