@@ -10,6 +10,20 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R1473 — a requirement of a platform protocol called through an existential runs a conformer's
+  witness.** `x.description` on `x: any CustomStringConvertible` (or bare `CustomStringConvertible`), `x.hashValue` /
+  `x.hash(into:)` on `any Hashable`, `it.next()` on `any IteratorProtocol`, `s.makeIterator()` on `any Sequence`,
+  `x.encode(to:)`, `x.id`, `x.debugDescription`, and property requirements of any platform protocol
+  (`e.errorDescription` on `any LocalizedError`, `decoder.codingPath`) produced no row and no `Unknown`, in one tree and
+  chained, while the conformer's witness wrote a file (executed). Chained, `"\(x)"` over such an existential was silent
+  too. Now, for a receiver DECLARED as the protocol (a parameter, an annotated or cast-bound local, an annotated stored
+  property — not `self`, `some P` or a generic parameter): in one tree the call edges this scan's conformers' witness
+  units for a member the protocol REQUIRES (`STDLIB_PROTOCOL_REQUIREMENTS`, now derived by
+  `tools/gen-stdlib-conformances.py` from the SDK interfaces); chained, it discloses `Unknown[dispatch:P.member]` when a
+  chained report publishes a body under that member's name — the `any RandomNumberGenerator` / `any Decoder` behaviour.
+  Gates can turn red (`deny E` / `deny Unknown` 0→1). Corpus (39 chained entries vs 672d819): ADDED 2, REMOVED 0,
+  CHANGED 8, 0 new concrete charges, 3 functions newly `Unknown`. Kill switch `CANDOR_R1473_OFF`.
+
 - **⚠ SOUNDNESS R1455 (class T4, closure-parameter and shorthand sub-tiers) — a closure parameter is typed by its callee's
   declaration.** `printer.withIndentation { p in p.print(…) }` / `Host().with { $0.wipe() }`: an unannotated closure
   parameter was untyped, so member calls on it were dropped (no edge, no `Unknown`) and a callee that performs an effect

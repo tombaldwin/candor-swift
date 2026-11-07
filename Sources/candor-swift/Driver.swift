@@ -416,6 +416,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var optionalContainerFieldsR1463: [String: Set<String>] = [:]                       // SOUNDNESS R1463
     var enumPayloadsR1272Raw: [(enumName: String, payload: String, scopes: [String])] = []   // SOUNDNESS R1272
     var opaqueFields: [String: Set<String>] = [:]
+    var existentialFieldsR1473: [String: Set<String>] = [:]   // SOUNDNESS R1473
     var caseAssocAll: [String: Set<String>] = [:]
     var caseAssocMetatypeAll: [String: Set<String>] = [:]   // R585 (b10)
     var staticFactoryFields: [(type: String, field: String, leaf: String)] = []
@@ -1034,6 +1035,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (t, fs) in c.optionalContainerFieldsR1463 { optionalContainerFieldsR1463[t, default: []].formUnion(fs) }   // R1463
         enumPayloadsR1272Raw.append(contentsOf: c.enumPayloadsR1272)   // R1272
         for (t, fs) in c.opaqueFields { opaqueFields[t, default: []].formUnion(fs) }
+        for (t, fs) in c.existentialFieldsR1473 { existentialFieldsR1473[t, default: []].formUnion(fs) }   // R1473
         for (cn, ts) in c.caseAssoc { caseAssocAll[cn, default: []].formUnion(ts) }
         for (cn, ts) in c.caseAssocMetatype { caseAssocMetatypeAll[cn, default: []].formUnion(ts) }   // R585
         for (pn, ms) in c.protocolMethods { protocolMethods[pn, default: []].formUnion(ms) }
@@ -3811,6 +3813,91 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     let platformExtLeaves = Set(platExtLocal.keys).union(platExtChained.keys).union(platExtSources.keys)
         .subtracting(["init", "subscript", "deinit"])
     var r1071Pending: [(caller: String, targets: [String], why: String)] = []
+    // ── SOUNDNESS R1473 — A REQUIREMENT OF A PLATFORM PROTOCOL, CALLED THROUGH AN EXISTENTIAL ─────────────────────
+    //
+    // `x.description` on `x: any CustomStringConvertible`, `x.hash(into:)` / `x.hashValue` on `any Hashable`,
+    // `it.next()` on `any IteratorProtocol`, `e.errorDescription` on `any LocalizedError`: the body that runs is a
+    // CONFORMER's witness. Executed (both arms, every shape writes a file): no row and no `Unknown`, in one tree AND
+    // chained. Two gaps, one question:
+    //   · a METHOD call reached the imported-protocol CHA arm and stopped at its `STD_PURE_PROTOCOLS` carve-out —
+    //     a carve-out about SYNTHESIZED requirements (pure), applied to the hand-written witnesses a scan HAS;
+    //   · a PROPERTY read on a platform-protocol existential had no in-scan dispatch at all (only the chained
+    //     member join, which a platform protocol never answers) — `any Decoder`'s `codingPath` as much as
+    //     `any CustomStringConvertible`'s `description`.
+    // The reference arms (`any RandomNumberGenerator`, `any Decoder` method calls) charge in one tree and disclose
+    // chained; this is their answer, given to the rest of the platform protocols.
+    //
+    // A RESOLUTION IN ONE TREE: only a member the protocol REQUIRES (`STDLIB_PROTOCOL_REQUIREMENTS`, derived from the
+    // SDK interfaces), edged to the witness UNITS of this scan's conformers — direct, through a local refinement, or
+    // through a platform protocol that refines it (`struct S: Collection` answers `any Sequence`). A member a
+    // protocol extension provides (`Sequence.map`) is statically dispatched, so a conformer's same-named method never
+    // runs and is never edged (executed: `s.map` on `any Sequence` does not run a conformer's own `map`); a
+    // synthesized witness has no unit and edges nothing. `hashValue`'s default witness calls `hash(into:)` (executed:
+    // `x.hashValue` ran a `hash(into:)` that writes a file), so `hashValue` edges both; `hash(into:)` edges a
+    // hand-written `hashValue` too — an ASSUMPTION, not executed here: the over-approximation for a type that writes
+    // only the deprecated `hashValue`.
+    //
+    // ONLY A RECEIVER DECLARED AS THE PROTOCOL (`CallCollector.stdExistentialRecvR1473`). Keyed on the resolved
+    // receiver type, the first cut CHA'd swift-algorithms' `base.index(after:)` (a generic struct's `Base: Collection`
+    // field) and every `self.count` in `extension Collection` onto all of that package's collections: 101 added rows,
+    // 333 changed, every one a fabrication — the corpus A/B, not a fixture, found it.
+    //
+    // A DISCLOSURE CHAINED: the producer omits platform supertypes from `typeSurface.supers` (SPEC §2 ⟨0.40⟩ permits
+    // it: "a member reached only through one of them falls to the member miss, and is disclosed"), so a chained
+    // package's conformers cannot be named. R859's bound, word for word: the file imports a chained package and some
+    // chained report publishes a body under the leaf — a package whose dependencies publish no row under that leaf
+    // costs nothing.
+    let r1473Off = ProcessInfo.processInfo.environment["CANDOR_R1473_OFF"] != nil
+    let r1473Probe = ProcessInfo.processInfo.environment["CANDOR_R1473_PROBE"] != nil
+    var stdlibRefinersR1473: [String: Set<String>] = [:]   // platform protocol -> the platform protocols refining it
+    for q in STDLIB_PROTOCOLS {
+        var seen = Set<String>(), frontier = STDLIB_DIRECT_CONFORMANCES[q] ?? []
+        while let s = frontier.popLast() {
+            guard seen.insert(s).inserted else { continue }
+            frontier.append(contentsOf: STDLIB_DIRECT_CONFORMANCES[s] ?? [])
+        }
+        for s in seen where STDLIB_PROTOCOLS.contains(s) { stdlibRefinersR1473[s, default: []].insert(q) }
+    }
+    /// The witness member names a requirement `m` of platform protocol `p` (or of one `p` refines) is answered by;
+    /// empty when `m` is no requirement there.
+    func stdlibRequirementWitnessesR1473(_ p: String, _ m: String) -> [String] {
+        var seen = Set<String>(), frontier = [p]
+        while let q = frontier.popLast() {
+            guard seen.insert(q).inserted else { continue }
+            if (STDLIB_PROTOCOL_REQUIREMENTS[q] ?? []).contains(m) {
+                return m == "hashValue" ? ["hashValue", "hash"] : m == "hash" ? ["hash", "hashValue"] : [m]
+            }
+            frontier.append(contentsOf: (STDLIB_DIRECT_CONFORMANCES[q] ?? []).filter { STDLIB_PROTOCOLS.contains($0) })
+        }
+        return []
+    }
+    /// Charge (in one tree) and disclose (chained) a requirement `m` read or called on a value DECLARED as platform
+    /// protocol `p`. `site` names the spelling, for the probe.
+    func stdlibRequirementDispatchR1473(_ p: String, _ m: String, _ f: FnInfo, site: String) {
+        guard !r1473Off, STDLIB_PROTOCOLS.contains(p), !declaredTypes.contains(p) else { return }
+        let ws = stdlibRequirementWitnessesR1473(p, m)
+        guard !ws.isEmpty else { return }
+        var owners: Set<String> = [p]
+        for q in [p] + (stdlibRefinersR1473[p] ?? []).sorted() {
+            owners.insert(q)
+            owners.formUnion(subtypesOf[q] ?? [])
+        }
+        var ts = Set<String>()
+        for o in owners.sorted() { for w in ws { ts.formUnion(resolveQual("\(o).\(w)")) } }
+        ts.remove(f.qual)
+        if !ts.isEmpty { edges[f.qual, default: []].formUnion(ts) }
+        let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+        let chained = !deps.chainedPkgs(importing: fileImports[file] ?? []).isEmpty
+        let disclosed = chained && ws.contains { deps.anyChainedPackagePublishesLeaf($0) }
+        if disclosed {
+            direct[f.qual, default: []].insert("Unknown")
+            whyMap[f.qual, default: []].insert("dispatch:\(p).\(m)")
+        }
+        if r1473Probe {
+            FileHandle.standardError.write(
+                "R1473HIT \(site) \(f.qual) \(p).\(m) edges=\(ts.sorted()) disclosed=\(disclosed)\n".data(using: .utf8)!)
+        }
+    }
     for f in allFns {
         locOf[f.qual] = f.loc
         if f.isMain { entryPoints.insert(f.qual) }
@@ -3963,6 +4050,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                fieldDictValue: fieldDictValue,
                                fieldTypeArgs: fieldTypeArgs,                                           // R905
                                opaqueFields: opaqueFields,
+                               existentialFieldsR1473: existentialFieldsR1473,   // R1473
                                enumCaseValueType: enumCaseValueType,
                                metatypeEnumCaseValueType: metatypeEnumCaseValueType,   // R585
                                metatypeParamsForeign: metatypeParamsForeign,            // R704 (b1)
@@ -5234,6 +5322,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // `dispatch:<P>.<member>`. The fix is at the END of this call's processing, where whether
             // anything ANSWERED is known; see the R705 disclosure there. `resolved` is what tells them
             // apart, which is why the hedge cannot live in this arm.
+            // SOUNDNESS R1473 — the population the `STD_PURE_PROTOCOLS` carve-out below silences: a requirement of one
+            // of those protocols called on a value DECLARED as the protocol itself (`CallCollector.stdExistentialRecvR1473`:
+            // an existential — not `self`, `some P` or a generic parameter, whose witness is the caller's).
+            if !call.unqualified, !call.path.hasPrefix("<"), let owner = call.stdExistentialR1473,
+               STD_PURE_PROTOCOLS.contains(owner) {
+                stdlibRequirementDispatchR1473(owner, call.leaf, f, site: "call")
+            }
             if !resolved, !call.typed || r651Extended, !call.unqualified, !call.opaqueRecv,
                let owner = call.extOwner,
                !localTypes.contains(owner) || r651Extended, !STD_PURE_PROTOCOLS.contains(owner),
@@ -6135,6 +6230,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // makes. It was dropped below by the requirement guard and read pure in one tree as well as chained; it is
         // routed to the stringification dispatch, the one rule both spellings now share.
         var stringifyViaRead: [(proto: String, member: String)] = []
+        // SOUNDNESS R1473 — the property half of the platform-protocol requirement dispatch (see its definition).
+        for d in cc.stdReqReads { stdlibRequirementDispatchR1473(d.proto, d.member, f, site: "prop") }
         for d in cc.protoPropReads {
             // Same two-halved member space as the method loop above: an extension-provided COMPUTED property
             // (or `subscript`) is a real `P.<member>` accessor unit whose body runs, and no conformer
@@ -6245,6 +6342,26 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         edges[f.qual, default: []].formUnion(resolveQual("\(sup).\(d.member)"))
                     }
                 }
+            }
+            // SOUNDNESS R1473 — THE RESIDUAL THE PARAGRAPH ABOVE RECORDED, CLOSED FOR THE CHAINED CASE. A PLATFORM
+            // protocol's conformers in a chained package are not on the wire (`typeSurface.supers` omits platform
+            // supertypes), so `"\(x)"` over `x: any CustomStringConvertible` read ABSENT chained while the dependency's
+            // `description` wrote a file (executed), and charged in one tree. Disclosed under R859's bound, as the
+            // explicit `x.description` read now is: the file imports a chained package and some chained report
+            // publishes a `description`/`debugDescription` body. Only a DECLARED existential operand or a catch binding
+            // (`stringifyExistentialR1473`) — a generic or `self` operand is the caller's. A LOCAL protocol has no
+            // chained conformer — a dependency cannot conform to a protocol this package declares — so it stays
+            // precise-or-nothing.
+            if !r1473Off, cc.stringifyExistentialR1473.contains(where: { $0 == d }),
+               !localProtocolNames.contains(d.proto), !declaredTypes.contains(d.proto),
+               case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+               !deps.chainedPkgs(importing: fileImports[file] ?? []).isEmpty,
+               deps.anyChainedPackagePublishesLeaf(d.member) {
+                if r1473Probe {
+                    FileHandle.standardError.write("R1473HIT stringify \(f.qual) \(d.proto).\(d.member) disclosed=true\n".data(using: .utf8)!)
+                }
+                direct[f.qual, default: []].insert("Unknown")
+                whyMap[f.qual, default: []].insert("dispatch:\(d.proto).\(d.member)")
             }
         }
         // DESUGARED EDGES ACROSS THE SCAN BOUNDARY. Two mechanisms that run without any call being

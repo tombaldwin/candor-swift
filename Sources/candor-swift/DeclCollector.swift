@@ -347,6 +347,10 @@ final class DeclCollector: SyntaxVisitor {
     /// spelled `some P`. Whoever instantiates `Pipe` picks the single conforming type, so the conformers
     /// visible here are not this field's candidate witnesses. Consumed only by the Driver's CHA arm.
     var opaqueFields: [String: Set<String>] = [:]         // Type -> field names
+    /// SOUNDNESS R1473 — Type -> stored properties whose ANNOTATION spells a platform protocol as an existential
+    /// (`let c: any Collection`, `var d: CustomStringConvertible?`). Not a generic parameter resolved to its bound, not
+    /// `some P`, and not a type INFERRED from an initializer — only the spelling is evidence of an existential.
+    var existentialFieldsR1473: [String: Set<String>] = [:]
     var fieldArrayElem: [String: [String: String]] = [:]  // Type -> field -> ELEMENT type (`[T]` field)
     var fieldArrayElemNested: [String: [String: String]] = [:]  // R278 — `[[T]]` field -> INNER element `T`
     var fieldDictValue: [String: [String: String]] = [:]  // Type -> field -> VALUE type (`[K: V]` field)
@@ -1478,6 +1482,10 @@ final class DeclCollector: SyntaxVisitor {
                     // …and that resolution is MONOMORPHIZED — the instantiator of `Pipe` picks one
                     // conformer — so it is recorded as opaque, exactly like a `some P` parameter. `any P`
                     // was written as a type here and stays erased (a real existential field).
+                    if let tn = info.name, typeGenericBounds[ty]?[tn] == nil, !info.isFunction, !isOpaqueParam(ann.type),
+                       STDLIB_PROTOCOLS.contains(tn), typeGenericParamNames[ty]?.contains(tn) != true {
+                        existentialFieldsR1473[ty, default: []].insert(name)   // SOUNDNESS R1473
+                    }
                     if let tn = info.name, let bound = typeGenericBounds[ty]?[tn] {
                         info = (bound, info.isFunction)
                         opaqueFields[ty, default: []].insert(name)
