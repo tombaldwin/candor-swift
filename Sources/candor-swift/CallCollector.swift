@@ -9042,6 +9042,8 @@ final class CallCollector: SyntaxVisitor {
                 }
                 else if owner == nil, guessedOwner == nil, let b = ma.base {
                     droppedMember = true   // SOUNDNESS R1073 — see `droppedMember`
+                    // SOUNDNESS R1472 — THE SKIP MUST NOT MAKE THIS DROP CHEAPER (see `r1472DroppedMembers`).
+                    if !Self.r1472Off { r1472DroppedMembers.append(member) }
                     if let only = R1455.hedgeOnly {   // SOUNDNESS R1455 pricing arm — hedge only the named classes
                         let ln = R1455.line(qual: "", loc: "", member: member, shape: probeShape(b), base: b)
                             .trimmingCharacters(in: .newlines).split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
@@ -9397,6 +9399,25 @@ final class CallCollector: SyntaxVisitor {
     // only when the name is a known global unit (so an ordinary identifier never fabricates an edge).
     override func visit(_ node: DeclReferenceExprSyntax) -> SyntaxVisitorContinueKind {
         let n = node.baseName.text
+        // SOUNDNESS R1472 — A NAME AN ENCLOSING CLOSURE'S PARAMETER BINDS IS THAT PARAMETER, TYPED OR NOT. Swift
+        // resolves a bare identifier to the innermost binding, and a closure parameter is in scope for the whole
+        // closure body, so `{ channel in channel… }` never reads a global named `channel`. A TYPED parameter already
+        // leaves through the `vars` arm just below (R1455 T4); an UNTYPED one fell through to `globalReads`, whose
+        // local arm matches a global unit by bare name anywhere in the scan — swift-nio's `DatagramBootstrap.bind`
+        // read the `NIOChatClient` example executable's top-level `channel` and was charged `Net`/`Clock`. A lexical
+        // fact read off the syntax tree, not the scoped `binderShadow` state (R847/R853's six review rounds were
+        // about THAT set's scope); see `boundByEnclosingClosureParam`.
+        //
+        // ONLY THE GLOBAL READ. The implicit-`self` member edges below (`<Type>.n`, R912/R904) are the same false
+        // reading of the same name, and are DELIBERATELY KEPT: measured on the corpus, removing them uncovered a
+        // silence the false member edge was covering for the wrong reason (RxSwift `countDownDuration`, whose real
+        // callee behind `base.rx.controlPropertyWithDefaultEvents(…)` gets no edge at all). That half waits for
+        // the silence it covers to be closed first.
+        let r1472Bound = !Self.r1472Off && boundByEnclosingClosureParam(node, n)
+        if r1472Bound {
+            vbHit("R1472", "\(n) et=\(enclosingType ?? "-")")
+            r1472Withheld.insert(n)
+        }
         // skip when shadowed by a local binding, or when this reference is the callee/base of a call
         // or member access (those expression forms charge through their own visitors).
         // SOUNDNESS R358 — `arrayElemNested` IS A LOCAL BINDING TOO, and this guard never heard of it.
@@ -9472,6 +9493,7 @@ final class CallCollector: SyntaxVisitor {
                     protoPropReads.append((et, n))
                 }
                 if let et = enclosingType, fields[et]?[n] != nil { return .skipChildren }
+                if r1472Bound { return .skipChildren }   // SOUNDNESS R1472 — the closure parameter, never a global
                 globalReads.insert(n)
                 if !binderShadow.contains(n), !(casePayloadLocals.contains(n) && !caseElseOut.contains(n)) { depGlobalReads.insert(n) }
                 return .skipChildren
@@ -9502,9 +9524,48 @@ final class CallCollector: SyntaxVisitor {
         // arm above already says so; this arm read `return package` inside a type with `var package` as the global
         // `let package = Package(…)` of a manifest fixture (SwiftPM, charged Env; executed pure).
         if !Self.r1105cOff, selfDeclaresField(n) { vbHit("R1105G", n); return .skipChildren }
+        if r1472Bound { return .skipChildren }   // SOUNDNESS R1472 — the closure parameter, never a global
         globalReads.insert(n)
         if !binderShadow.contains(n), !(casePayloadLocals.contains(n) && !caseElseOut.contains(n)) { depGlobalReads.insert(n) }
         return .skipChildren
+    }
+    /// SOUNDNESS R1472 §1b kill switch (`CANDOR_R1472_OFF=1` restores v0.41.3's reading) and reach probe
+    /// (`CANDOR_R1472_PROBE=1`: the Driver prints `R1472EDGE` for every global edge the skip withheld).
+    static let r1472Off = ProcessInfo.processInfo.environment["CANDOR_R1472_OFF"] != nil
+    static let r1472Probe = ProcessInfo.processInfo.environment["CANDOR_R1472_PROBE"] != nil
+    /// SOUNDNESS R1472 — the bare names the closure-parameter skip withheld in this unit (read once by the Driver).
+    var r1472Withheld: Set<String> = []
+    /// SOUNDNESS R1472 — every explicit member call this unit DROPPED (R1455's `droppedMember`: no edge, no `Unknown`).
+    /// A row that v0.41.3 charged through a false edge to a same-named global could be hiding a real effect behind such
+    /// a drop, the false charge covering it for the wrong reason: swift-nio's `connectToTarget` reaches its real `Net`
+    /// through `channel.connect(to:)` on an untyped closure parameter. Where the skip removed a global edge the release
+    /// formed, the Driver discloses every such drop in the unit (not only those on the parameter: the false charge
+    /// covered the whole row), so the removal never leaves a dropped call silent in a row the release charged.
+    var r1472DroppedMembers: [String] = []
+    /// SOUNDNESS R1472 — is the bare reference `node` (spelling `n`) bound by a parameter of a closure that
+    /// LEXICALLY encloses it? Walks the syntax parents: a closure counts only when the reference sits in its BODY
+    /// (`statements`) — a capture-list initializer (`[c = channel]`) is evaluated outside the parameters' scope.
+    /// The walk stops at a type declaration: a local type's members cannot capture an enclosing closure's
+    /// parameters, so beyond that boundary the name means something else (a member or a global), and the reading
+    /// that stands is the release's. Shorthand `$0` is never a global and is left to the paths below.
+    func boundByEnclosingClosureParam(_ node: DeclReferenceExprSyntax, _ n: String) -> Bool {
+        guard n != "_", !n.hasPrefix("$"), node.argumentNames == nil else { return false }
+        var cur = Syntax(node)
+        while let p = cur.parent {
+            if p.is(StructDeclSyntax.self) || p.is(ClassDeclSyntax.self) || p.is(EnumDeclSyntax.self)
+                || p.is(ActorDeclSyntax.self) || p.is(ExtensionDeclSyntax.self) || p.is(ProtocolDeclSyntax.self) {
+                return false
+            }
+            if let c = p.as(ClosureExprSyntax.self), c.statements.id == cur.id,
+               let clause = c.signature?.parameterClause {
+                if let params = clause.as(ClosureParameterClauseSyntax.self),
+                   params.parameters.contains(where: { ($0.secondName ?? $0.firstName).text == n }) { return true }
+                if let shorthand = clause.as(ClosureShorthandParameterListSyntax.self),
+                   shorthand.contains(where: { $0.name.text == n }) { return true }
+            }
+            cur = p
+        }
+        return false
     }
     /// SOUNDNESS R1104/R1105 — the enclosing type declares a field `n` (so a bare `n` here is `self.n`), and the type's
     /// simple name is not shared with another declared type: `fields` is keyed by the simple name, so a shared one

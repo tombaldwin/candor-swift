@@ -431,6 +431,8 @@ final class NameKeyedStateTests: XCTestCase {
         // R1415 — output: the one dependency-member candidate map (and its overload-precise keys)
         "externalMembers": .notPerBinding, "externalMemberPrecise": .notPerBinding,
         "globalReads": .notPerBinding, "depGlobalReads": .notPerBinding,
+        // R1472 — output: the bare names the closure-parameter skip withheld, and the unit's dropped member calls
+        "r1472Withheld": .notPerBinding, "r1472DroppedMembers": .notPerBinding,
         // R853 — scope bookkeeping: `binderShadow` before a statement's conditions, keyed by the statement
         "binderSnapshots": .notPerBinding, "caseSnapshots": .notPerBinding,
         // VEIN B — scope and walk bookkeeping keyed by syntax node, or a flag read around one call.

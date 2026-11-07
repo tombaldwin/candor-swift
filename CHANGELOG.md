@@ -18,6 +18,18 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   parameters, associated types, member typealiases, ambiguous nested names, foreign supertypes that list the member, and
   disagreeing overloads refuse (the release's reading). Gates can turn red (`deny E` 0→1). Kill switch
   `CANDOR_R1455T4_OFF`.
+- **⚠ SOUNDNESS R1472 — a bare read of a closure parameter is that parameter, typed or not.** `o.map { channel in
+  channel + 1 }`: an untyped closure parameter read bare fell through to the global-read join, whose local arm
+  matches a global by name anywhere in the scan, so swift-nio's `DatagramBootstrap.bind`/`connect` were charged
+  `Net`/`Clock` from the `NIOChatClient` example executable's top-level `channel`. A name an enclosing closure's
+  parameter binds now reaches no global (Swift's innermost-binding rule, read off the syntax tree; a local type's
+  members are outside it). Gates can turn green (`deny E` 1→0) where the charge was false. The same false reading
+  as an implicit-`self` member (`<Type>.<name>`) is kept for now: removing it uncovered a separate silence the false
+  member edge was covering (RxSwift `countDownDuration`). **The removal does not make a silence cheaper:** the false charge could be covering a real effect behind a
+  call this engine drops (R1455: no edge, no `Unknown`), so in a function where the skip removed an edge the release
+  formed, every such dropped call now discloses (`Unknown`, `dispatch:<untyped>.<member>`). swift-nio's
+  `HappyEyeballsConnectorRunner.connectToTarget` reaches its real `Net` through `channel.connect(to:)` on an untyped
+  closure parameter. Kill switch `CANDOR_R1472_OFF`.
 
 ## [0.41.3] — 2026-11-06
 

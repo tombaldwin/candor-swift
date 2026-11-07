@@ -4125,6 +4125,39 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // type is the enum's own synthesized property, never a dependency global of that name.
         let rawEnumSelf: Bool = !CallCollector.r1463Off && f.enclosingType.map { et in
             declaredTypes.contains(et) && (supertypesOf[et] ?? []).contains(where: { RAW_VALUE_BASE_TYPES.contains($0) }) } == true
+        // SOUNDNESS R1472 — the global edge v0.41.3 formed for a bare name the closure-parameter skip now withholds, by
+        // the SAME arms the loop below runs (own module, any module, then a chained dependency's global); nil if none.
+        func r1472ReleaseEdge(_ name: String) -> String? {
+            if name == f.qual { return nil }
+            if let inMod = globalsByModule[readerModule]?[name], inMod.count == 1 { return inMod[0] }
+            if globalUnitNames.contains(name) { return name }
+            if !deps.isEmpty, CallCollector.r847Off {
+                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) where bareNameDepEntry(p, name, f) != nil {
+                    return "\(p)#\(name)"
+                }
+            }
+            return nil
+        }
+        if CallCollector.r1472Probe {
+            for name in cc.r1472Withheld.sorted() {
+                if let t = r1472ReleaseEdge(name) {
+                    let tm = locOf[t].map(swiftModuleOf) ?? (t.contains("#") ? "dep" : "?")
+                    FileHandle.standardError.write("R1472EDGE\t\(f.qual)\t\(name)\t\(t)\treader=\(readerModule)\ttarget=\(tm)\n".data(using: .utf8)!)
+                }
+            }
+        }
+        // …and the floor: where the skip removed an edge the release formed, every call this unit DROPPED discloses
+        // (`CallCollector.r1472DroppedMembers`). Same marker and reason as the X-arm disclosure of a dropped call.
+        if !cc.r1472DroppedMembers.isEmpty, cc.r1472Withheld.contains(where: { r1472ReleaseEdge($0) != nil }) {
+            for member in Set(cc.r1472DroppedMembers).sorted() {
+                direct[f.qual, default: []].insert("Unknown")
+                whyMap[f.qual, default: []].insert("dispatch:<untyped>.\(member)")
+                if CallCollector.r1472Probe {
+                    FileHandle.standardError.write("R1472HEDGE\t\(f.qual)\t\(member)\n".data(using: .utf8)!)
+                }
+            }
+        }
         for name in cc.globalReads where name != f.qual && !(rawEnumSelf && name == "rawValue") {
             // R847 — a bare read a binder holds locally is never a dependency declaration; only the
             // chained arm below consults this (the local arms above see every read, as before).
