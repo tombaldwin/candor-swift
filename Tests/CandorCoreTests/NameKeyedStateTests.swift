@@ -494,6 +494,9 @@ final class NameKeyedStateTests: XCTestCase {
         "aiResolving": .notPerBinding,         // R1101 — a recursion guard over TYPE spellings
         "r1105Rule": .notPerBinding,           // R1105 — reach-probe label of the last classification
         "aliasScopeOwners": .notPerBinding,
+        // SOUNDNESS R1492 — the unit's enclosing-path owners (derived from `ai` once, like `aliasScopeOwners`) and the
+        // flag that scopes ONE `.init` context question; neither is keyed by a binding name.
+        "r1492OwnerPaths": .notPerBinding, "r1492InitAsk": .notPerBinding,
         // SOUNDNESS R951. The two maps keyed by a BINDING name feed only `comparisonWitnesses`, which ADDS
         // witness edges; a stale entry after a rebind can only over-charge (a witness of the old type's
         // arguments), never silence, so they are kept rather than cleared — the hedge direction.

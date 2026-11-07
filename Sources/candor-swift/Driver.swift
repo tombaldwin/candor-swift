@@ -485,6 +485,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // two-phase shape one level down (see `DeclCollector.unresolvedGenericFields`'s doc for the ordering
     // hazard this exists to close).
     var unresolvedGenericFields: [(ty: String, field: String, param: String)] = []
+    var memberTypeAliasesByPathAll: [String: [String: Set<String>]] = [:]                          // R1492
+    var r1492PathKeys: Set<String> = []                                                            // R1492
+    var assocTypeBoundsAll: [String: [String: String]] = [:]                                          // R1492
+    var assocMemberFieldsAll: [(ty: String, path: String, field: String, param: String, assoc: String)] = []   // R1492
     var protocolMethods: [String: Set<String>] = [:]
     var protocolFnTypedMembers: Set<String> = []   // SOUNDNESS R563 — see DeclCollector
     var protocolPropTypesAll: [String: [String: String]] = [:]   // SOUNDNESS R578 — see DeclCollector
@@ -1033,6 +1037,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         allFns.append(contentsOf: c.fns)
         for (t, fs) in c.fields { fields[t, default: [:]].merge(fs) { a, _ in a } }
+        // SOUNDNESS R1492 — a declaration's stored properties under its FULL path, so the `extension A.B.T { … }`
+        // spelling (whose units' enclosing type IS that dotted path) finds them. Dotted keys only; a simple key
+        // keeps the release's merged reading. See `DeclCollector.fieldsByPath`.
+        for (p, fs) in c.fieldsByPath { fields[p, default: [:]].merge(fs) { a, _ in a }; r1492PathKeys.insert(p) }
+        for (p, bs) in c.assocTypeBounds { assocTypeBoundsAll[p, default: [:]].merge(bs) { a, _ in a } }
+        assocMemberFieldsAll.append(contentsOf: c.assocMemberFields)
         for (t, fs) in c.fieldArrayElem { fieldArrayElem[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.fieldMetatypes { fieldMetatypes[t, default: [:]].merge(fs) { a, _ in a } }   // R585
         for (t, fs) in c.fieldMetatypeArrayElem { fieldMetatypeArrayElem[t, default: [:]].merge(fs) { a, _ in a } }
@@ -1073,6 +1083,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (a, u) in c.typeAliasArms { typeAliasArms[a, default: []].formUnion(u) }
         for (t, m) in c.memberTypeAliases {                                  // R915 (B)
             for (a, u) in m { memberTypeAliasesAll[t, default: [:]][a, default: []].formUnion(u) }
+        }
+        for (t, m) in c.memberTypeAliasesByPath {                            // R1492
+            for (a, u) in m { memberTypeAliasesByPathAll[t, default: [:]][a, default: []].formUnion(u) }
         }
         fnTypeAliasesRaw.formUnion(c.fnTypeAliases)          // R178
         dynamicMemberTypes.formUnion(c.dynamicMemberTypes)
@@ -2384,6 +2397,57 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // SOUNDNESS R1481 — `type -> field -> the generic PARAMETER its declared type names` (see the per-unit retyping).
     var genericParamFieldsR1481: [String: [String: String]] = [:]
     for (ty, field, param) in unresolvedGenericFields + lgFieldParamsAll { genericParamFieldsR1481[ty, default: [:]][field] = param }
+    // SOUNDNESS R1492 — A FIELD'S TYPE IS SPELLED IN ITS DECLARING TYPE'S SCOPE. `var position: Position` inside
+    // `Lexer.Cursor` names `Lexer.Cursor.Position`, but the unit reading it sits in `extension Lexer.Cursor`, and a bare
+    // `Position` there resolved to an unrelated top-level `Position` (or to nothing): the call on the field went to the
+    // wrong type or was dropped (swift-syntax `Lexer.Cursor.advance(matching:_:)`, executed). For the full-path keys
+    // above only, a simple spelling that names a type nested in the declaring path (innermost first) is rewritten to
+    // that path. The simple-name keys keep the release's reading.
+    if !CallCollector.r1492POff {
+        for key in r1492PathKeys {
+            let segs = key.split(separator: ".").map(String.init)
+            for (fname, f) in fields[key] ?? [:] {
+                guard let n = f.name, !n.contains("."), !f.isFunction else { continue }
+                var i = segs.count
+                while i > 0 {
+                    let cand = segs[0..<i].joined(separator: ".") + "." + n
+                    if localTypePaths.contains(cand) {
+                        if CallCollector.veinBProbe {
+                            FileHandle.standardError.write("VBHIT\tR1492L\t\(key).\(fname): \(n) -> \(cand)\n".data(using: .utf8)!)
+                        }
+                        fields[key]![fname] = (cand, false); break
+                    }
+                    i -= 1
+                }
+            }
+        }
+    }
+    // SOUNDNESS R1492 — `private var backing: Parameters.BackingPrivateKey` with `Parameters: KeyParams` and
+    // `protocol KeyParams { associatedtype BackingPrivateKey: BackedKey }`: the field holds SOME conformer of
+    // `BackedKey`, which the instantiator picks — so it is typed by that bound and marked monomorphized, exactly
+    // as a field typed by the parameter itself is (`unresolvedGenericFields` below). Before this every
+    // `self.backing.x()` keyed `Parameters.BackingPrivateKey.x`, which names no unit, and was dropped (swift-crypto
+    // `OpenSSLMLDSAPrivateKeyImpl.init()`'s `self.backing = try .init()`, executed). Only a bound this scan
+    // DECLARES (a local protocol or type) types it; the associated type is looked up on the parameter's bound and
+    // that protocol's refined protocols, and two disagreeing answers leave it unrecorded.
+    for (ty, path, field, param, assoc) in assocMemberFieldsAll {
+        guard let pb = typeGenericBoundsAll[ty]?[param] else { continue }
+        var seen: Set<String> = [], frontier = [pb], answers: Set<String> = []
+        while let cur = frontier.popLast() {
+            guard seen.insert(cur).inserted else { continue }
+            if let b = assocTypeBoundsAll[cur]?[assoc] { answers.insert(b) }
+            frontier.append(contentsOf: protocolSupers[cur] ?? [])
+        }
+        guard answers.count == 1, let b = answers.first,
+              localTypes.contains(b) || protocolPaths.contains(b) || protocolMethods[b] != nil else { continue }
+        for key in Set([ty, path]) where fields[key]?[field].map({ !$0.isFunction && ($0.name == assoc || $0.name?.hasSuffix(".\(assoc)") == true) }) == true {
+            fields[key]![field] = (b, false)
+            opaqueFields[key, default: []].insert(field)
+        }
+        if CallCollector.veinBProbe {
+            FileHandle.standardError.write("VBHIT\tR1492A\t\(ty).\(field): \(param).\(assoc) -> \(b)\n".data(using: .utf8)!)
+        }
+    }
     for (ty, field, param) in unresolvedGenericFields where fields[ty]?[field]?.name == param {
         if let bound = typeGenericBoundsAll[ty]?[param] {
             fields[ty, default: [:]][field] = (bound, false)
@@ -2860,8 +2924,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     let r1104Off = ProcessInfo.processInfo.environment["CANDOR_R1104_OFF"] != nil
     let r1066Probe = CallCollector.veinBProbe
     var sourceProvenCache: [String: Set<String>] = [:]
-    func sourceProvenDepModules(of spelled: String, inFile file: String) -> Set<String> {
-        let ck = "\(file)\u{0}\(spelled)"
+    func sourceProvenDepModules(of spelled: String, inFile file: String, extendedInit: Bool = false) -> Set<String> {
+        let ck = "\(file)\u{0}\(spelled)\(extendedInit ? "\u{0}i" : "")"   // R1492: see `unreadableDepModules`
         if let c = sourceProvenCache[ck] { return c }
         var segs = spelled.split(separator: ".").map(String.init)
         let imports = fileImports[file] ?? []
@@ -2871,7 +2935,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         var out = Set<String>(), direct = Set<String>()
         if let name = segs.first, !name.isEmpty, name.first?.isUppercase == true,
-           !localTypes.contains(name), !declaredTypes.contains(name), !protocolMethods.keys.contains(name) {
+           extendedInit || !localTypes.contains(name), !declaredTypes.contains(name), !protocolMethods.keys.contains(name) {
             func declares(_ x: String) -> Bool {
                 !PLATFORM_MODULES.contains(x) && !KAPPA_MODULES.contains(x) && moduleDeclarations(x)?.names[name] == true
             }
@@ -2894,14 +2958,20 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// SOUNDNESS R1104 — the blind dependency modules of `file` with NO READABLE SOURCES (not fetched), for a member
     /// call whose receiver type `spelled` is not this scan's, not a generic parameter, and not a platform type the
     /// generated SDK tables name. Empty otherwise. See the call site.
-    func unreadableDepModules(of spelled: String, inFile file: String, generics: Set<String>) -> Set<String> {
+    /// `extendedInit` (SOUNDNESS R1492, exposed): an UNRESOLVED `self.init(…)` inside `extension T` where `T` is only
+    /// EXTENDED here (`extension GeneralizedTime { init(_ c: …) { try self.init(year: …) } }`) delegates to the
+    /// dependency's own initializer — no local unit answered it — so `T` being in `localTypes` is no evidence the
+    /// call stays in this scan. swift-certificates' `Time.makeTime` had read `invisible: [SwiftASN1]` only through a
+    /// wrong overload edge; with the right overload its real reach into SwiftASN1 was undisclosed.
+    func unreadableDepModules(of spelled: String, inFile file: String, generics: Set<String>,
+                              extendedInit: Bool = false) -> Set<String> {
         var segs = spelled.split(separator: ".").map(String.init)
         let imports = fileImports[file] ?? []
         var cands = blindModules(inFile: file).subtracting(ownTargetsByFile[file] ?? [])
         if segs.count > 1, imports.contains(segs[0]) { cands = cands.intersection([segs[0]]); segs.removeFirst() }
         guard let name = segs.first, !name.isEmpty, name.first?.isUppercase == true, name != "Self",
               !PLATFORM_MODULES.contains(name), !KAPPA_MODULES.contains(name),   // `Swift.print` names a module
-              !localTypes.contains(name), !declaredTypes.contains(name), !protocolMethods.keys.contains(name),
+              extendedInit || !localTypes.contains(name), !declaredTypes.contains(name), !protocolMethods.keys.contains(name),
               !generics.contains(name), !typeGenericParamNamesAI.values.contains(where: { $0.contains(name) }),
               !STDLIB_NOMINALS.contains(name), !STDLIB_PROTOCOLS.contains(name),
               STDLIB_DIRECT_CONFORMANCES[name] == nil, !PLATFORM_VALUE_TYPES.contains(name),
@@ -3828,6 +3898,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         aiBase.protocolPaths = protocolPaths
         aiBase.fileAliases = fileTypeAliasesAI
         aiBase.memberAliases = memberTypeAliasesAll.mapValues { $0.compactMapValues { $0.count == 1 ? $0.first : nil } }
+        aiBase.memberAliasesByPath = memberTypeAliasesByPathAll.mapValues { $0.compactMapValues { $0.count == 1 ? $0.first : nil } }
         for (_, m) in memberTypeAliasesAll { for (a, u) in m { aiBase.nestedAliasTargets[a, default: []].formUnion(u) } }
         aiBase.supertypes = supertypesOf
         for (_, ps) in typePathsBySimple where ps.count > 1 {
@@ -6153,7 +6224,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                       case let owner = f.genericBounds[raw] ?? raw,
                       case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
                       case let mods = { () -> Set<String> in
-                          let t = sourceProvenDepModules(of: owner, inFile: file)
+                          let t = sourceProvenDepModules(of: owner, inFile: file, extendedInit: !CallCollector.r1492Off
+                                                             && call.leaf == "init" && owner == f.enclosingType)
                           return t.isEmpty ? sourceExtendingDepModules(of: owner, member: call.leaf, inFile: file) : t
                       }(), !mods.isEmpty {
                 // SOUNDNESS R1071 — or whose sources EXTEND it (a platform type) with this public member.
@@ -6170,7 +6242,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             } else if !r1104Off, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
                       case let owner = f.genericBounds[raw] ?? raw,
                       case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
-                      case let mods = unreadableDepModules(of: owner, inFile: file, generics: f.genericParamNames),
+                      case let mods = unreadableDepModules(of: owner, inFile: file, generics: f.genericParamNames,
+                                                           extendedInit: !CallCollector.r1492Off && call.leaf == "init"
+                                                               && owner == f.enclosingType),
                       !mods.isEmpty {
                 // SOUNDNESS R1104 — R1066'S QUESTION WHEN THE DEPENDENCY HAS NO SOURCES TO ASK. A package scanned before
                 // `swift package resolve` has no `.build/checkouts`, so `sourceProvenDepModules` finds no declarer and the
