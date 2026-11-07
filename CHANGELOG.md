@@ -10,6 +10,15 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R1455 (class T4, closure-parameter and shorthand sub-tiers) — a closure parameter is typed by its callee's
+  declaration.** `printer.withIndentation { p in p.print(…) }` / `Host().with { $0.wipe() }`: an unannotated closure
+  parameter was untyped, so member calls on it were dropped (no edge, no `Unknown`) and a callee that performs an effect
+  left the caller silent. Where the callee is declared in the scan on an established owner, and every declaration that
+  could be the callee agrees on a concrete written type, the parameter now gets its annotated twin's binding; generic
+  parameters, associated types, member typealiases, ambiguous nested names, foreign supertypes that list the member, and
+  disagreeing overloads refuse (the release's reading). Gates can turn red (`deny E` 0→1). Kill switch
+  `CANDOR_R1455T4_OFF`.
+
 ## [0.41.3] — 2026-11-06
 
 - **No change to candor-swift.** The version moves with the 0.41.3 family patch (a candor-java fix).

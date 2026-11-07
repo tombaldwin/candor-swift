@@ -398,6 +398,7 @@ final class CallCollector: SyntaxVisitor {
     /// SOUNDNESS R1175 — the scan's declared CLASS simple names, and each local class's local SUBCLASSES (transitive).
     let classNamesR1175: Set<String>
     let classSubtypesR1175: [String: Set<String>]
+    let closureSigsT4: ClosureSigIndexT4   // SOUNDNESS R1455 T4 — see R1455T4.swift
     /// R951 — `let x: [Noisy] = …` / `var t: Tiny<Noisy>`: the generic arguments of annotated locals.
     var localTypeArgs: [String: [String]] = [:]
     /// SOUNDNESS R905 (residual) — local name -> (platform generic owner, its written generic arguments), for a
@@ -977,7 +978,9 @@ final class CallCollector: SyntaxVisitor {
          fieldContainersR1176: [String: [String: (kind: String, args: [String])]] = [:],
          optionalContainerFieldsR1463: [String: Set<String>] = [:],
          enumPayloadsR1272: [String: [String]] = [:],
-         classNamesR1175: Set<String> = [], classSubtypesR1175: [String: Set<String>] = [:]) {
+         classNamesR1175: Set<String> = [], classSubtypesR1175: [String: Set<String>] = [:],
+         closureSigsT4: ClosureSigIndexT4 = ClosureSigIndexT4()) {
+        self.closureSigsT4 = closureSigsT4
         self.opWitnessTypes = opWitnessTypes
         self.fieldContainersR1176 = fieldContainersR1176
         self.optionalContainerFieldsR1463 = optionalContainerFieldsR1463
@@ -6865,6 +6868,9 @@ final class CallCollector: SyntaxVisitor {
         }()
         for closure in closures {
             let params = closureParamNames(closure)
+            // SOUNDNESS R1455 T4 — the callee's declared closure-parameter types, asked only for the arm of last
+            // resort below (every typing arm above keeps its answer).
+            let declaredT4: [String?]? = declaredClosureParamTypesT4(node, closure, arity: params.count)
             // R997 — `d.forEach { k, v in v.run() }`: a TWO-parameter closure over a dictionary's element
             // DESTRUCTURES the tuple, so parameter 1 is the value itself. Only for a single-element
             // iterator (not `reduce`, whose index 1 is the whole tuple, nor a pair iterator).
@@ -6982,12 +6988,127 @@ final class CallCollector: SyntaxVisitor {
                         FileHandle.standardError.write(
                             "R349TUPLE \(iteratorMethod ?? "?") -> \(slots)\n".data(using: .utf8)!)
                     }
+                } else if p.annotated == nil, let ts = declaredT4, i < ts.count, let t = ts[i] {
+                    // SOUNDNESS R1455 T4 — the binding its annotated twin `{ (p: T) in … }` gets, cleared first so
+                    // nothing of an outer same-named binding survives beside it.
+                    clearBindingTypeOnly(p.name)
+                    vbHit("R1455T4", "\(p.name.hasPrefix("$") ? "shorthand" : "param") \(t)")
+                    if !bindCallableElement(p.name, t) { vars[p.name] = t }
                 } else {
                     clearBindingTypeOnly(p.name)             // every other param — CLEARED, never leak
                     // (the FLAGS are cleared in visit(ClosureExprSyntax), inside the closure's save)
                 }
             }
         }
+    }
+
+    /// SOUNDNESS R1455 T4 — THE CLOSURE PARAMETER TYPES THE CALLEE DECLARES, or nil. See R1455T4.swift for the rule.
+    /// `arity` is the closure's own parameter count (3 for a signature-less closure, whose `$0`/`$1`/`$2` are cleared
+    /// by default — any index past the declared arity is simply not typed).
+    private func declaredClosureParamTypesT4(_ node: FunctionCallExprSyntax, _ closure: ClosureExprSyntax, arity: Int) -> [String?]? {
+        guard !ClosureSigIndexT4.off, !closureSigsT4.isEmpty else { return t4why(1) }
+        let explicitSig = closure.signature?.parameterClause != nil
+        // 1. the callee's leaf and its ESTABLISHED owner
+        var leaf: String, owner: String?
+        let callee = Self.peel(node.calledExpression)
+        if let ma = callee.as(MemberAccessExprSyntax.self) {
+            guard let base = ma.base else { return t4why(2) }                       // `.foo { }` — implicit member: no
+            leaf = ma.declName.baseName.text
+            if let d = Self.peel(base).as(DeclReferenceExprSyntax.self), d.baseName.text == "super" { return t4why(3) }
+            var r = rootOf(base)
+            if r.root == nil, let sp = spelledReceiverRoot(base) { r = sp }
+            guard let root = r.root, root != Self.superMarker, !r.opaqueHop,
+                  r.isVar || root.first?.isUppercase == true else { return t4why(101) }
+            owner = root
+        } else if let d = callee.as(DeclReferenceExprSyntax.self) {
+            let n = d.baseName.text
+            if n.first?.isUppercase == true {
+                leaf = "init"; owner = dealias(n)                               // `Foo(…) { }` — a constructor
+            } else {
+                // a bare call: implicit `self`'s member, else a free function — never a local that shares the name
+                guard vars[n] == nil, !isBoundLocal(n), !localFuncs.contains(n), !fnTyped.contains(n),
+                      !opaqueFnLocals.contains(n) else { return t4why(102) }
+                leaf = n; owner = enclosingType
+            }
+        } else { return t4why(103) }
+        guard let all = closureSigsT4.byLeaf[leaf] else { return t4why(4) }
+        // 2. the owners whose declarations could be the callee: the owner and its supertypes, all declared here
+        func simple(_ t: String) -> String { t.split(separator: ".").last.map(String.init) ?? t }
+        var rel: Set<String> = []
+        if let o = owner {
+            let so = simple(o)
+            guard localTypes.contains(so) || localProtocols.contains(so) else { return t4why(5) }
+            rel.insert(so)
+            for sup in supertypesAll[so] ?? [] {
+                let ss = simple(sup)
+                if localTypes.contains(ss) || localProtocols.contains(ss) { rel.insert(ss); continue }
+                if STD_PURE_PROTOCOLS.contains(ss) { continue }
+                // A foreign supertype can supply an overload this scan cannot see. A PLATFORM one is answerable:
+                // the generated table lists every member name the platform modules declare, so a leaf it does not
+                // list cannot be one. Anything else (a dependency's or an unlisted SDK's type) refuses.
+                if STDLIB_PROTOCOLS.contains(ss) || STDLIB_NOMINALS.contains(ss), STDLIB_MEMBER_LABELS[leaf] == nil { continue }
+                return t4why(104)
+            }
+            // a stored property of that name on a related owner (a closure-typed field called with a closure)
+            if let fo = closureSigsT4.fieldOwnersByLeaf[leaf], !fo.isDisjoint(with: rel) { return t4why(6) }
+        }
+        var cands = all.filter { c in c.owner.map { rel.contains(simple($0)) } ?? false }
+        if owner != nil, leaf != "init", cands.isEmpty, callee.is(DeclReferenceExprSyntax.self) {
+            // bare name with no member on implicit self: the free functions of that name
+            cands = all.filter { $0.owner == nil }
+        } else if owner == nil {
+            cands = all.filter { $0.owner == nil }
+        }
+        guard !cands.isEmpty else { return t4why(7) }
+        // 3. which declared position the closure binds, per candidate; every fitting candidate must agree
+        let parenLabels: [String?] = node.arguments.map { $0.label?.text }
+        let parenIndex: Int? = node.arguments.firstIndex { Self.peel($0.expression).as(ClosureExprSyntax.self) == closure }
+            .map { node.arguments.distance(from: node.arguments.startIndex, to: $0) }
+        let isTrailing = node.trailingClosure == closure
+        let additional = node.additionalTrailingClosures.first { $0.closure == closure }
+        guard parenIndex != nil || isTrailing || additional != nil else { return t4why(8) }
+        var answer: [String?]? = nil
+        for c in cands {
+            if c.unreadable { return t4why(9) }
+            guard let map = alignWitnessArgs(parenLabels, c.labels, c.sig) else { continue }   // labels do not fit
+            var pos: Int? = nil
+            if let ai = parenIndex {
+                pos = map.first { $0.value == ai }?.key
+                guard pos != nil else { return t4why(10) }
+            } else {
+                // trailing closures fill the positions after the last parenthesised one (SE-0286 forward scan)
+                let start = (map.keys.max() ?? -1) + 1
+                var i = start
+                func takesClosure(_ k: Int) -> Bool { c.fnParams[k] != nil || c.opaquePositions.contains(k) }
+                if isTrailing {
+                    while i < c.labels.count, !takesClosure(i) {
+                        guard c.sig[i].hasDefault || c.sig[i].variadic else { break }
+                        i += 1
+                    }
+                    guard i < c.labels.count, takesClosure(i) else { continue }        // no position: not the callee
+                    // a DEFAULTED closure position followed by a required one is SE-0286's backward-match case
+                    if c.sig[i].hasDefault, (i + 1 ..< c.labels.count).contains(where: { takesClosure($0) && !c.sig[$0].hasDefault }) {
+                        return t4why(105)
+                    }
+                    pos = i
+                } else if let a = additional {
+                    guard let k = (start ..< c.labels.count).first(where: { c.labels[$0] == a.label.text }) else { continue }
+                    pos = k
+                }
+            }
+            guard let k = pos else { return t4why(11) }
+            if c.opaquePositions.contains(k) { return t4why(12) }
+            guard let ps = c.fnParams[k] else { continue }                         // a concrete non-function: not it
+            if explicitSig, ps.count != arity { return t4why(13) }
+            if let a = answer { if a.count != ps.count || zip(a, ps).contains(where: { $0 != $1 }) { return t4why(14) } }
+            else { answer = ps }
+        }
+        return answer
+    }
+    static let t4Debug = ProcessInfo.processInfo.environment["CANDOR_R1455T4_DEBUG"] != nil
+    private func t4why(_ k: Int) -> [String?]? {
+        if Self.t4Debug { FileHandle.standardError.write("T4WHY\t\(k)\t\(r1455Qual)\n".data(using: .utf8)!) }
+        return nil
     }
 
     // `case .active(let c):` / `if case .active(let c) = …` — an enum case pattern is parsed as a call

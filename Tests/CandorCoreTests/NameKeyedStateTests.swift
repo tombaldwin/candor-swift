@@ -493,7 +493,7 @@ final class NameKeyedStateTests: XCTestCase {
         "genericBoundsR951": .immutableIndex,
         "opWitnessTypes": .immutableIndex,
         "fieldContainersR1176": .immutableIndex,
-        "optionalContainerFieldsR1463": .immutableIndex, "enumPayloadsR1272": .immutableIndex, "classNamesR1175": .immutableIndex, "classSubtypesR1175": .immutableIndex,
+        "optionalContainerFieldsR1463": .immutableIndex, "enumPayloadsR1272": .immutableIndex, "classNamesR1175": .immutableIndex, "classSubtypesR1175": .immutableIndex, "closureSigsT4": .immutableIndex,
         "localInitContainersR1176": .deliberatelyKept("R1176: localTypeArgs's twin for an initializer; a stale entry adds a witness edge, never removes one"),
         "genericWitnessReqs": .notPerBinding,
     ]

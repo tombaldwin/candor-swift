@@ -3422,6 +3422,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
 
     let localProtocolNames = Set(protocolMethods.keys)  // loop-invariant: build once, not per fn
+    // SOUNDNESS R1455 T4 — the callee-declared closure-parameter index (R1455T4.swift).
+    let closureSigsT4 = ClosureSigIndexT4.build(allFns, localTypes: localTypes, localProtocols: localProtocolNames,
+                                                typeGenerics: typeGenericParamNamesAI,
+                                                nonTypeNames: localGenerics.nonTypeNames,
+                                                memberTypeAliases: memberTypeAliasesR915, fnTypeAliases: fnTypeAliases,
+                                                typeAliases: typeAliases, localTypePaths: localTypePaths, fields: fields)
     let r1073Off = DeclCollector.r1073Off   // SOUNDNESS R1073
     let r1073Probe = CallCollector.veinBProbe
     /// VEIN C — the accessor units (computed property / observer / lazy init / subscript bodies). The two
@@ -3993,7 +3999,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                fieldContainersR1176: fieldContainersR1176,                             // R1176
                                optionalContainerFieldsR1463: optionalContainerFieldsR1463,             // R1463
                                enumPayloadsR1272: enumPayloadsR1272,                                   // R1272
-                               classNamesR1175: classNamesAll, classSubtypesR1175: classSubtypesR1175) // R1175
+                               classNamesR1175: classNamesAll, classSubtypesR1175: classSubtypesR1175, // R1175
+                               closureSigsT4: closureSigsT4)                                          // R1455 T4
         // The locator-move set is flow-INSENSITIVE and must be complete before the first call is collected
         // (a rebind later in the text, or earlier in time inside a loop, still invalidates the claim). The
         // parameter names go with it: a body binder that SHADOWS a parameter is the same hazard, and the

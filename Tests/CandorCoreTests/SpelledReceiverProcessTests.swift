@@ -87,7 +87,9 @@ final class SpelledReceiverProcessTests: XCTestCase {
         let by = try scan(Self.shapes)
         // `Ser.node` also invokes its closure argument, so the row carries that callback's `Unknown` beside `Fs`.
         XCTAssertTrue(inf(by, "e_shadow").contains("Fs"), "the receiver `c` is the outer parameter; got \(by["e_shadow"] ?? [:])")
-        let off = try scan(Self.shapes, env: ["CANDOR_R1455_SHADOW_OFF": "1"])
+        // R1455 T4 also types the closure's `c` from `node`'s declared `(inout Ser) -> Void`, which reaches the same
+        // `Ser.node` on the shadow-off reading; both switches restore the release's drop.
+        let off = try scan(Self.shapes, env: ["CANDOR_R1455_SHADOW_OFF": "1", "CANDOR_R1455T4_OFF": "1"])
         XCTAssertNil(off["e_shadow"], "kill switch restores the release's drop; got \(off["e_shadow"] ?? [:])")
         XCTAssertEqual(try gate(Self.shapes, "deny Fs e_shadow"), 1)
     }
