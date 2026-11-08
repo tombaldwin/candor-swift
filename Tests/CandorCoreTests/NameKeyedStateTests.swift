@@ -442,7 +442,7 @@ final class NameKeyedStateTests: XCTestCase {
         "stringifyExistentialR1473": .notPerBinding,   // SOUNDNESS R1473
         // R1415 — output: the one dependency-member candidate map (and its overload-precise keys)
         "externalMembers": .notPerBinding, "externalMemberPrecise": .notPerBinding,
-        "globalReads": .notPerBinding, "depGlobalReads": .notPerBinding,
+        "globalReads": .notPerBinding, "depGlobalReads": .notPerBinding, "globalReadsUnshadowedR1514": .notPerBinding,
         // R1472 — output: the bare names the closure-parameter skip withheld, and the unit's dropped member calls
         "r1472Withheld": .notPerBinding, "r1472DroppedMembers": .notPerBinding,
         // R853 — scope bookkeeping: `binderShadow` before a statement's conditions, keyed by the statement

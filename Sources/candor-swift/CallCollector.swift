@@ -7350,6 +7350,14 @@ final class CallCollector: SyntaxVisitor {
                 metatypeBinders[name] = me
             } else if let slots = arrayTupleSlotsR1498(node.sequence) {
                 tupleElem[name] = slots   // SOUNDNESS R1498 residual — `for t in xs` over `[(a: A, n: Int)]`: `t.a` / `t.0`
+            } else if !Self.r1514DOff, let v = dictValueOf(node.sequence) {
+                // SOUNDNESS R1514 (exposed) — `for e in dict { e.value.m() }`: the element is the `(key:, value:)` tuple,
+                // and the plain binder was left untyped, so `e.value.m()` was DROPPED (executed: ABSENT) while the
+                // `for (_, v) in dict` twin charged. In swift-nio's NIOChatServer the only charge on such a loop was a
+                // false lazy-global edge to a file-scope `let channel` that R1514 removes. The value slot is typed;
+                // the key is left unrecorded.
+                vbHit("R1514D", "for \(name) -> value \(v)")
+                tupleElem[name] = ["value": v, "1": v]
             } else { clearBinding(name) }
         } else if let tup = node.pattern.as(TuplePatternSyntax.self), let slots = arrayTupleSlotsR1498(node.sequence) {
             // SOUNDNESS R1498 residual — `for (a, _) in xs` over `xs: [(Loud, Int)]`: each binder takes its slot's type
@@ -10565,6 +10573,7 @@ final class CallCollector: SyntaxVisitor {
                 if let et = enclosingType, fields[et]?[n] != nil { return .skipChildren }
                 if r1472Bound { return .skipChildren }   // SOUNDNESS R1472 — the closure parameter, never a global
                 globalReads.insert(n)
+                if !r1514Bound(node, n) { globalReadsUnshadowedR1514.insert(n) }   // SOUNDNESS R1514
                 if !binderShadow.contains(n), !(casePayloadLocals.contains(n) && !caseElseOut.contains(n)) { depGlobalReads.insert(n) }
                 return .skipChildren
             }
@@ -10597,8 +10606,33 @@ final class CallCollector: SyntaxVisitor {
         if !Self.r1105cOff, selfDeclaresField(n) { vbHit("R1105G", n); return .skipChildren }
         if r1472Bound { return .skipChildren }   // SOUNDNESS R1472 — the closure parameter, never a global
         globalReads.insert(n)
+        if !r1514Bound(node, n) { globalReadsUnshadowedR1514.insert(n) }   // SOUNDNESS R1514
         if !binderShadow.contains(n), !(casePayloadLocals.contains(n) && !caseElseOut.contains(n)) { depGlobalReads.insert(n) }
         return .skipChildren
+    }
+    /// SOUNDNESS R1514 — A NAME THIS UNIT'S PARAMETER OR A BINDER IN SCOPE HOLDS IS THAT BINDING, NEVER A GLOBAL. The
+    /// lazy-global-read edge took any bare read no TYPED local index recorded (`vars`, the container maps,
+    /// `literalLocals`) as a read of a module-scope global of that name, so a parameter or binder those indexes do not
+    /// type — `_ t: X.Type`, `_ t: P & Q`, `_ t: Any.Type`, a `for t in`, `while let t = it.next()`, `catch let t` —
+    /// edged to `let t = …` and inherited its initializer's effects (executed pure; Clock/Fs fabricated). Swift
+    /// resolves a bare name to the innermost binding: a parameter is in scope for the whole body, and `binderShadow`
+    /// is the SCOPED set every binder writes and every scope restores (R847), so a read of the global AFTER an inner
+    /// block, loop, closure or `catch` that bound the name still edges (`gAfterFor`, `gAfterBlock`, `gAfterCatch`),
+    /// and a closure inside the body that reads a DIFFERENT global keeps its edge. Kill switch `CANDOR_R1514_OFF`.
+    static let r1514Off = ProcessInfo.processInfo.environment["CANDOR_R1514_OFF"] != nil
+    /// R1514 (exposed): `for e in dict` types `e.value`. Off under `CANDOR_R1514D_OFF` (not under `CANDOR_R1514_OFF`, so
+    /// the global-edge removal can be measured with the uncovered silence closed or not).
+    static let r1514DOff = ProcessInfo.processInfo.environment["CANDOR_R1514D_OFF"] != nil
+    /// R1514 — the bare reads made where NO parameter or binder held the name. The Driver's LOCAL global-read arms
+    /// edge only these. The chained-dependency arm keeps reading `globalReads`/`depGlobalReads` unchanged: its binder
+    /// proof is R847's, which is held out by default (`CANDOR_R847_ON`), and a closure parameter is R1472's (it keeps
+    /// its own kill switch and its dropped-call disclosure), so neither default moves here.
+    var globalReadsUnshadowedR1514: Set<String> = []
+    private func r1514Bound(_ node: DeclReferenceExprSyntax, _ n: String) -> Bool {
+        guard !Self.r1514Off, paramNamesR851.contains(n) || binderShadow.contains(n),
+              !boundByEnclosingClosureParam(node, n) else { return false }
+        vbHit("R1514", n)
+        return true
     }
     /// SOUNDNESS R1472 §1b kill switch (`CANDOR_R1472_OFF=1` restores v0.41.3's reading) and reach probe
     /// (`CANDOR_R1472_PROBE=1`: the Driver prints `R1472EDGE` for every global edge the skip withheld).

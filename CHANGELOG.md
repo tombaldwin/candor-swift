@@ -10,6 +10,15 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R1514: a parameter or loop/`catch` binder no longer reads a same-named global.** The lazy-global read
+  edge treated a bare name as a module-scope global unless a TYPED local index held it. So `func f(_ t: X.Type) { _ = t }`
+  (and the same with `P & Q`, `Any.Type` or `T.Type` parameters), `for t in`, `while let t = …` and `catch let t`
+  sitting next to a file-scope `let t = …` inherited the global initializer's effects (executed: no initializer ran).
+  A parameter, or a binder in scope, now shadows the global for the in-scan edge. A read after the binder's scope
+  ends still edges. The chained-dependency join keeps its current default (its binder proof is R847, opt-in). Removing
+  that false edge exposed a silence that it had been covering: `for e in dict { e.value.m() }` dropped the call while
+  `for (_, v) in dict` charged. The loop element's `value` is now typed. Kill switches `CANDOR_R1514_OFF` and
+  `CANDOR_R1514D_OFF` (the dictionary element).
 - **⚠ SOUNDNESS R1513: a nested type whose simple name another type shares now reads its own facts.** With
   `enum A { struct NT { var l: Loud; func p() { l.eff() } } }` beside `enum Z { struct NT { var l: Quiet } }`, every
   side map keyed by the simple name `NT` (stored, metatype, container and tuple fields, member returns, supertypes,

@@ -4809,10 +4809,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // R847 — a bare read a binder holds locally is never a dependency declaration; only the
             // chained arm below consults this (the local arms above see every read, as before).
             let depReadable = CallCollector.r847Off || cc.depGlobalReads.contains(name)
+            // SOUNDNESS R1514 — a name every read of which a parameter or binder in scope held is that binding; the
+            // local arms edge only a read made unshadowed (`globalReadsUnshadowedR1514`). The dependency arm is as before.
+            let localReadable = CallCollector.r1514Off || cc.globalReadsUnshadowedR1514.contains(name)
             if let inMod = globalsByModule[readerModule]?[name], inMod.count == 1 {
-                edges[f.qual, default: []].insert(inMod[0])
+                if localReadable { edges[f.qual, default: []].insert(inMod[0]) }
             } else if globalUnitNames.contains(name) {
-                edges[f.qual, default: []].insert(name)
+                if localReadable { edges[f.qual, default: []].insert(name) }
             } else if !deps.isEmpty, depReadable {
                 // The global may belong to a chained DEPENDENCY module. Reading it still forces its
                 // initializer — swift globals are lazy — and the dep's report records that unit under
