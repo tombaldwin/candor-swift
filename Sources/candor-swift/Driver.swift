@@ -2267,10 +2267,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // and `-> Int` on another is poisoned exactly as `returnsTmp` poisons it, and the `Owner.mk` keys are
     // what then still answer for each type.
     var returnFactsTmp: [String: DeclaredFacts?] = [:]
+    // SOUNDNESS R1513 — a path-keyed member return (`A.NT.mk`) belongs to the declaration `NT`, not to `A`.
+    var returnDeclPathOwnerR1513: [String: (owner: String, path: String, member: String)] = [:]
+    for c in collectors { returnDeclPathOwnerR1513.merge(c.returnDeclPathOwnerR1513) { a, _ in a } }
+    func returnDeclOwnerR1513(_ k: String) -> String? { returnDeclPathOwnerR1513[k]?.owner ?? returnDeclKeyOwner(k) }
     if !DeclCollector.r991Off || !DeclCollector.r990Off {
         for c in collectors {
             for (k, ts) in c.returnDecls {
-                let owner = returnDeclKeyOwner(k)
+                let owner = returnDeclOwnerR1513(k)
                 for (t, fnGens, scope) in ts {
                     var f = declaredFacts(t, expand: DeclCollector.r992Off ? nil : aliasExpander(owner))
                     // A fact that names a GENERIC PARAMETER (the function's, or — for a member — any type's
@@ -2366,7 +2370,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // An alias the owner declares that does not resolve to a recordable type POISONS the key: a bare member
     // alias name is never an answer outside the scope that declared it.
     for k in Array(returnFactsIdx.keys) {
-        guard let owner = returnDeclKeyOwner(k) else { continue }
+        guard let owner = returnDeclOwnerR1513(k) else { continue }
         guard let aliases = memberTypeAliasesAll[owner], var f = returnFactsIdx[k] else { continue }
         var poisoned = false
         func canon(_ n: String?) -> String? {
@@ -4264,7 +4268,71 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             }
         }
     }
-    for f in allFns {
+    // SOUNDNESS R1513 (I) — a type read by its FULL path (an `extension A.T` unit; the overlay below for a bare name) climbs the
+    // supertypes R266 already keys by path. `supertypesOf` is keyed by the SIMPLE name, so it holds every same-named
+    // type's supertypes merged: `enum IA { class CT: LBase }` beside `enum IZ { class CT: QBase }` gave `CT` both
+    // bases, the inherited `l` two disagreeing types, and the implicit-self call on it was dropped (executed). Only
+    // path keys the simple index does not already hold are added, so every existing answer stands.
+    var supertypesAllR1513 = supertypesOf
+    if !CallCollector.r1513IOff {
+        for (p, sups) in supertypePathsOf where p.contains(".") && supertypesAllR1513[p] == nil && !sups.isEmpty {
+            supertypesAllR1513[p] = sups
+        }
+    }
+    // SOUNDNESS R1513 (S, L) — A SHARED SIMPLE NAME READS THE FACTS OF THE TYPE THIS UNIT'S SCOPE NESTS.
+    // `enum A { struct NT { var l: Loud; func p() { l.eff() } } }` beside `enum Z { struct NT { var l: Quiet } }`:
+    // every per-type fact table is keyed by the SIMPLE name `NT` and held both declarations merged, last writer
+    // winning, so `A.NT.p` read `Z.NT`'s `l` and `l.eff()` was ABSENT over an executed file write (and the reverse
+    // order fabricated). In Swift a bare `NT` anywhere inside `A` — the unit's own type (S) or a spelled type (L:
+    // `func f(_ t: NT)`, `NT.s`, a field typed `In`) — names `A.NT`, whose facts R1492 (and R1513 (R)) also keep under
+    // the FULL path. For each unit, every shared name a scope of the unit nests (innermost first) has its fact
+    // entries OVERLAID by the path's: a member the path declares answers with the path's fact; a member it does not
+    // keeps the release's merged answer, and the KEY stays the simple name, so call resolution (which unions every
+    // same-named type's members — over-approximate, never a drop) is untouched. Renaming the unit's type to its path
+    // instead was built and measured: it dropped the inherited-accessor climb that needs the simple key (SwiftLint
+    // `ViolationsSyntaxVisitor.locationConverter`, a real Fs). Cached per scope path (units arrive grouped by type).
+    var r1513Children: [String: [String]] = [:]
+    var r1513ReturnKeys: [String: [(member: String, key: String)]] = [:]
+    if !CallCollector.r1513SOff || !CallCollector.r1513LOff {
+        for p in localTypePaths {
+            guard let dot = p.lastIndex(of: ".") else { continue }
+            let leaf = String(p[p.index(after: dot)...])
+            if (typePathsBySimple[leaf]?.count ?? 0) > 1 { r1513Children[String(p[..<dot]), default: []].append(leaf) }
+        }
+        for (k, v) in returnDeclPathOwnerR1513 where returnFactsIdx[k] != nil { r1513ReturnKeys[v.path, default: []].append((v.member, k)) }
+    }
+    func r1513Lexical(_ f: FnInfo) -> [String: String] {
+        guard let scope = f.enclosingTypePath ?? f.enclosingType, scope.contains(".") || r1513Children[scope] != nil
+        else { return [:] }
+        var lex: [String: String] = [:]
+        var parts = scope.split(separator: ".").map(String.init)
+        let own = f.enclosingType.map { $0.split(separator: ".").last.map(String.init) ?? $0 }
+        while !parts.isEmpty {
+            let pre = parts.joined(separator: ".")
+            for leaf in r1513Children[pre] ?? [] where lex[leaf] == nil {
+                let isOwn = leaf == own && "\(pre).\(leaf)" == scope
+                if isOwn ? CallCollector.r1513SOff : CallCollector.r1513LOff { continue }
+                lex[leaf] = "\(pre).\(leaf)"
+            }
+            parts.removeLast()
+        }
+        return lex
+    }
+    func r1513Overlay<V>(_ t: [String: [String: V]], _ lex: [String: String]) -> [String: [String: V]] {
+        var out = t
+        for (leaf, p) in lex { if let pf = t[p] { out[leaf] = (t[leaf] ?? [:]).merging(pf) { _, path in path } } }
+        return out
+    }
+    struct R1513Facts {
+        var fields: [String: [String: (name: String?, isFunction: Bool)]]
+        var fieldMetatypes: [String: [String: String]], fieldMetatypeArrayElem: [String: [String: String]]
+        var fieldArrayElem: [String: [String: String]], fieldArrayElemNested: [String: [String: String]]
+        var fieldDictValue: [String: [String: String]], fieldTypeArgs: [String: [String: [String]]]
+        var tupleFacts: TupleFactsR1498, supertypes: [String: Set<String>], returnFacts: [String: DeclaredFacts]
+    }
+    var r1513Cache: (scope: String, lex: [String: String], facts: R1513Facts)? = nil
+    for f0 in allFns {
+        var f = f0
         locOf[f.qual] = f.loc
         if f.isMain { entryPoints.insert(f.qual) }
         edges[f.qual] = edges[f.qual] ?? []
@@ -4343,7 +4411,6 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // A = [Ctx]`) gets the facts the spelled-out `[Ctx]` gets. DeclCollector reads one file and the
         // alias may live in another, so this is asked here, once all are known. ADDITIVE: a parameter
         // DeclCollector already gave a container record keeps it.
-        var f = f
         if !DeclCollector.r992Off {
             for (pn, t) in f.paramDeclTypes where f.arrayParams[pn] == nil && f.dictParams[pn] == nil
                 && f.arrayParamsNested[pn] == nil {
@@ -4370,7 +4437,38 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // the declaration's, overridden by the member's OWN extension clause); a generic-typed FIELD now reads them too.
         // A member whose own bounds do not name the parameter, or that declares a generic of the same name, keeps the
         // release's typing. Kill switch `CANDOR_R1481_OFF`.
-        var unitFields = fields
+        // SOUNDNESS R1513 (S, L) — see `r1513Lexical` above.
+        let r1513Lex = r1513Lexical(f)
+        var r1513Facts = R1513Facts(fields: fields, fieldMetatypes: fieldMetatypes, fieldMetatypeArrayElem: fieldMetatypeArrayElem,
+                                    fieldArrayElem: fieldArrayElem, fieldArrayElemNested: fieldArrayElemNested,
+                                    fieldDictValue: fieldDictValue, fieldTypeArgs: fieldTypeArgs, tupleFacts: tupleFactsR1498,
+                                    supertypes: supertypesAllR1513, returnFacts: returnFactsIdx)
+        if !r1513Lex.isEmpty {
+            let scope = f.enclosingTypePath ?? f.enclosingType ?? ""
+            if let c = r1513Cache, c.scope == scope, c.lex == r1513Lex { r1513Facts = c.facts } else {
+                r1513Facts.fields = r1513Overlay(fields, r1513Lex)
+                r1513Facts.fieldMetatypes = r1513Overlay(fieldMetatypes, r1513Lex)
+                r1513Facts.fieldMetatypeArrayElem = r1513Overlay(fieldMetatypeArrayElem, r1513Lex)
+                r1513Facts.fieldArrayElem = r1513Overlay(fieldArrayElem, r1513Lex)
+                r1513Facts.fieldArrayElemNested = r1513Overlay(fieldArrayElemNested, r1513Lex)
+                r1513Facts.fieldDictValue = r1513Overlay(fieldDictValue, r1513Lex)
+                r1513Facts.fieldTypeArgs = r1513Overlay(fieldTypeArgs, r1513Lex)
+                r1513Facts.tupleFacts.fields = r1513Overlay(tupleFactsR1498.fields, r1513Lex)
+                for (leaf, p) in r1513Lex {
+                    // (I) the path's own supertypes, when R266 recorded any — the merged simple entry gave an inherited
+                    // field every same-named subtype's bases, two disagreeing answers, and no answer at all.
+                    if !CallCollector.r1513IOff, let sups = supertypePathsOf[p], !sups.isEmpty { r1513Facts.supertypes[leaf] = sups }
+                    for (m, k) in r1513ReturnKeys[p] ?? [] { r1513Facts.returnFacts["\(leaf).\(m)"] = returnFactsIdx[k] }
+                }
+                r1513Cache = (scope, r1513Lex, r1513Facts)
+            }
+            if CallCollector.veinBProbe {
+                for (leaf, p) in r1513Lex.sorted(by: { $0.key < $1.key }) {
+                    FileHandle.standardError.write("VBHIT\tR1513\t\(f.qual): \(leaf) -> \(p)\n".data(using: .utf8)!)
+                }
+            }
+        }
+        var unitFields = r1513Facts.fields
         if !CallCollector.r1481Off, let et = f.enclosingType, let gfs = genericParamFieldsR1481[et] {
             for (field, param) in gfs.sorted(by: { $0.key < $1.key }) where !f.genericParamNames.contains(param) {
                 // a FUNCTION carries R1463's bounds; an ACCESSOR unit carries none, so its own extension clause is read
@@ -4394,7 +4492,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                globalArrayElem: globalArrayElemByModule[swiftModuleOf(f.loc)] ?? [:],
                                globalDictValue: globalDictValueByModule[swiftModuleOf(f.loc)] ?? [:],   // R994
                                containerAliases: containerAliasIdx,                                    // R992
-                               returnFacts: returnFactsIdx,                                            // R990/R991
+                               returnFacts: r1513Facts.returnFacts,                                    // R990/R991, R1513
                                implicitParams: implicitParamIdx,                                       // R999
                                implicitMemberUnits: implicitMemberUnits,                               // R999
                                memberUnitKeys: memberUnitKeys,                                         // R1032
@@ -4429,7 +4527,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                protoReqProps: protoReqPropsFlat,             // R904
                                genericCallableFields: genericCallableFields, // R256
                                classSupertypes: classSupertypesR906,         // R906
-                               supertypesAll: DeclCollector.r915COff ? [:] : supertypesOf,   // R915 (C)
+                               supertypesAll: DeclCollector.r915COff ? [:] : r1513Facts.supertypes,   // R915 (C), R1513 (I)
                                objcRootSupers: objcRootSupers,                                // R1485
                                nestedTypePairs: nestedTypePairsR915,                          // R915 (A)
                                memberTypeAliases: memberTypeAliasesR915,                      // R915 (B)
@@ -4439,12 +4537,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                localGenerics: localGenericsFor(file: String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })),   // R1044 residual, R1072
                                globalMetatypes: globalMetatypesByModule[swiftModuleOf(f.loc)] ?? [:], // R585
                                globalMetatypeArrayElem: globalMetatypeArrayElemByModule[swiftModuleOf(f.loc)] ?? [:],
-                               fieldMetatypes: fieldMetatypes,                                        // R585
-                               fieldMetatypeArrayElem: fieldMetatypeArrayElem,
-                               fieldArrayElem: fieldArrayElem, fieldArrayElemNested: fieldArrayElemNested,
-                               fieldDictValue: fieldDictValue,
-                               tupleFactsR1498: tupleFactsR1498,                                      // R1498
-                               fieldTypeArgs: fieldTypeArgs,                                           // R905
+                               fieldMetatypes: r1513Facts.fieldMetatypes,                             // R585, R1513
+                               fieldMetatypeArrayElem: r1513Facts.fieldMetatypeArrayElem,
+                               fieldArrayElem: r1513Facts.fieldArrayElem, fieldArrayElemNested: r1513Facts.fieldArrayElemNested,
+                               fieldDictValue: r1513Facts.fieldDictValue,
+                               tupleFactsR1498: r1513Facts.tupleFacts,                                // R1498
+                               fieldTypeArgs: r1513Facts.fieldTypeArgs,                                // R905
                                opaqueFields: opaqueFields,
                                existentialFieldsR1473: existentialFieldsR1473,   // R1473
                                protocolSupersR1490: protocolSupers,                // R1490 residual (3)

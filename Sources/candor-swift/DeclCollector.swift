@@ -344,6 +344,12 @@ final class DeclCollector: SyntaxVisitor {
         return t
     }
     private func r1492Path(_ ty: String, _ path: String) -> Bool { !CallCollector.r1492POff && path != ty && path.contains(".") }
+    /// R1513 — the same predicate for the tables R1492 left keyed by the simple name only (closure fields, member returns).
+    private func r1513Path(_ ty: String, _ path: String) -> Bool { !CallCollector.r1513ROff && path != ty && path.contains(".") }
+    /// SOUNDNESS R1513 — the owner (as `typeGenericParamNamesAI` keys it: the declaration's SIMPLE name) of a
+    /// `returnDecls` key written under a nested declaration's FULL path. `returnDeclKeyOwner` splits at the
+    /// first dot, which names the outermost type for a path key.
+    var returnDeclPathOwnerR1513: [String: (owner: String, path: String, member: String)] = [:]
     private func setFieldR1492(_ ty: String, _ path: String, _ name: String, _ v: (name: String?, isFunction: Bool)) {
         fields[ty, default: [:]][name] = v
         if r1492Path(ty, path) { fieldsByPath[path, default: [:]][name] = v }
@@ -1534,6 +1540,13 @@ final class DeclCollector: SyntaxVisitor {
                     info.isAccessor = true
                     fns.append(info)
                     closureFields[ty, default: []].insert(name)
+                    // SOUNDNESS R1513 — also under the FULL path of a nested declaration, beside R1492's field facts: a
+                    // unit that reads its own type by path (`extension A.T`, or an in-body unit of a SHARED name)
+                    // asked `closureFields["A.T"]`, found nothing, and hedged a call the default closure performs.
+                    if r1513Path(ty, tyPath) {
+                        closureFields[tyPath, default: []].insert(name)
+                        if node.bindingSpecifier.text == "var" { mutableClosureFields[tyPath, default: []].insert(name) }
+                    }
                     // R96 — record REASSIGNABILITY from the declaration, not from whether this scan
                     // happened to see a write. A `var` permits an external store, so the default this
                     // scan read is one possible value, not the value.
@@ -2393,6 +2406,14 @@ final class DeclCollector: SyntaxVisitor {
             returnDecls[node.name.text, default: []].append((rc.type, gens, scope))
             if let owner = typeStack.last {
                 returnDecls["\(owner).\(node.name.text)", default: []].append((rc.type, gens, scope))
+                // SOUNDNESS R1513 — and under the nested declaration's FULL path: `Owner.leaf` is POISONED the moment
+                // two same-named types (`A.T`, `Z.T`) declare `leaf` with different returns, and the path key is
+                // the one that still answers for each (`mk().eff()` in `A.T` was dropped, executed).
+                if let sc = scope, r1513Path(owner, sc) {
+                    let k = "\(sc).\(node.name.text)"
+                    returnDecls[k, default: []].append((rc.type, gens, scope))
+                    returnDeclPathOwnerR1513[k] = (owner, sc, node.name.text)
+                }
             }
         }
         recordOpaqueSeqReturn(node.name.text, node.signature, body: node.body)

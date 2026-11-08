@@ -10,6 +10,18 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R1513: a nested type whose simple name another type shares now reads its own facts.** With
+  `enum A { struct NT { var l: Loud; func p() { l.eff() } } }` beside `enum Z { struct NT { var l: Quiet } }`, every
+  side map keyed by the simple name `NT` (stored, metatype, container and tuple fields, member returns, supertypes,
+  member type aliases) held both types merged, last writer winning, so `A.NT.p` read `Z.NT`'s `l` and the call was
+  ABSENT (executed); the reverse order fabricated the loud type's field onto the quiet one. Inside any scope that nests
+  a shared name — the type's own body, or a bare `NT` spelled elsewhere in `A` (`func f(_ t: NT)`, `NT.s`) — that
+  name's facts are now read from the nested declaration's full path, and call resolution is unchanged. Closure fields
+  and member returns are now keyed by path as well, which fixes the same drop in `extension A.NT { … }`. An inherited
+  field now climbs the supertypes recorded for the type's own path. A member type alias is read only from the
+  enclosing type's own path, so a file-level `fileprivate typealias` is no longer replaced by a same-named alias that
+  belongs to another type (swift-crypto `_RSA.Signing.PublicKey`). Gates can turn red, and some fabricated charges go
+  away. Kill switch `CANDOR_R1513_OFF`, per mechanism `CANDOR_R1513{S,L,R,I,A}_OFF`.
 - **⚠ SOUNDNESS R1506: a value built from a metatype now carries its type.** For `var meta: Loud.Type`,
   `meta.init().eff()` resolved the `init` but left the value it returns untyped, so `.eff()` was dropped (executed: ABSENT).
   The same held for every other spelling of a metatype value reaching `init`: a local (annotated or `= Loud.self`), a

@@ -2257,7 +2257,17 @@ final class CallCollector: SyntaxVisitor {
     /// `dealias`.
     private func memberAliasScoped(_ name: String) -> String {
         guard !DeclCollector.r915Off, !localTypes.contains(name), let et = enclosingType,
-              let u0 = memberTypeAliases[et]?[name] else { return name }
+              var u0 = memberTypeAliases[et]?[name] else { return name }
+        // SOUNDNESS R1513 (A) — `memberTypeAliases` is keyed by the owner's SIMPLE name, so every `PublicKey` in
+        // swift-crypto lent its `typealias BackingPublicKey = …` to all of them: inside `_RSA.Signing.PublicKey`, whose
+        // `BackingPublicKey` is a FILE-level `fileprivate` alias, R1513's own-path field fact `backing: BackingPublicKey`
+        // was read through VOPRF's member alias and typed as `PublicKey` (the A/B found it). R1492 (M) scoped the same
+        // table for `aliasInScope`; this is the other reader. For an owner name several declared types share, only the
+        // alias THIS unit's own path declares is in scope; none, and the name is left for the file-level lookup.
+        if !Self.r1513AOff, let path = r1492OwnerPaths[et], (ai.pathsByLeaf[et]?.count ?? 0) > 1 {
+            guard let own = ai.memberAliasesByPath[path]?[name] else { vbHit("R1513A", "\(path).\(name) not \(et)'s"); return name }
+            u0 = own
+        }
         guard let u = memberAliasRecordable(resolveMemberAliasChain(u0, memberTypeAliases), localTypes) else {
             return name   // not an answer: the release's reading stands
         }
@@ -3940,6 +3950,18 @@ final class CallCollector: SyntaxVisitor {
     private static let r610Off = ProcessInfo.processInfo.environment["CANDOR_R610_OFF"] != nil
     /// SOUNDNESS R1491 KILL SWITCH — the plain `let r = a.b` binder types nothing again (the release reading).
     static let r1491Off = ProcessInfo.processInfo.environment["CANDOR_R1491_OFF"] != nil
+    /// SOUNDNESS R1513 KILL SWITCH — a nested type's facts are read under its SIMPLE name again (last writer wins
+    /// across same-named types). Per-mechanism switches, each also off under `CANDOR_R1513_OFF`: S an in-body unit
+    /// of a shared name reads its own type's facts by path, L any other shared name a scope of the unit nests does too
+    /// (both: the Driver's `r1513Lexical` overlay), R closure fields and member returns are also keyed by path, I a
+    /// path-keyed type climbs its path-keyed supertypes.
+    static let r1513Off = ProcessInfo.processInfo.environment["CANDOR_R1513_OFF"] != nil
+    static let r1513SOff = r1513Off || ProcessInfo.processInfo.environment["CANDOR_R1513S_OFF"] != nil
+    static let r1513LOff = r1513Off || ProcessInfo.processInfo.environment["CANDOR_R1513L_OFF"] != nil
+    static let r1513ROff = r1513Off || ProcessInfo.processInfo.environment["CANDOR_R1513R_OFF"] != nil
+    static let r1513IOff = r1513Off || ProcessInfo.processInfo.environment["CANDOR_R1513I_OFF"] != nil
+    /// R1513 (A): a shared owner name's member alias is read from this unit's own path only (`memberAliasScoped`).
+    static let r1513AOff = r1513Off || ProcessInfo.processInfo.environment["CANDOR_R1513A_OFF"] != nil
     /// SOUNDNESS R1497 §1b KILL SWITCH — `CANDOR_R1497_OFF=1` restores the module-wide last-writer file alias table.
     static let r1497Off = ProcessInfo.processInfo.environment["CANDOR_R1497_OFF"] != nil
     /// SOUNDNESS R1498 §1b KILL SWITCH — `CANDOR_R1498_OFF=1`: a tuple-valued expression other than an annotated local or
@@ -5636,6 +5658,12 @@ final class CallCollector: SyntaxVisitor {
         }
         if let ma = callee.as(MemberAccessExprSyntax.self), let base = ma.base {
             guard let root = rootOf(base, depth + 1).root, root != Self.superMarker else { return nil }
+            // SOUNDNESS R1513 — a receiver typed by a nested type's FULL path asks the path key first; the leaf key
+            // is shared by every same-named type and is poisoned the moment two of them disagree.
+            if !Self.r1513ROff, root.contains("."), let f = returnFacts["\(root).\(ma.declName.baseName.text)"] {
+                vbHit("R1513R", "\(root).\(ma.declName.baseName.text)")
+                return f
+            }
             let owner = root.split(separator: ".").last.map(String.init) ?? root
             return returnFacts["\(owner).\(ma.declName.baseName.text)"]
         }
