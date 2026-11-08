@@ -1702,6 +1702,12 @@ final class DeclCollector: SyntaxVisitor {
                     let targs = directGenericArgumentNames(ann.type)
                     if !targs.isEmpty { fieldTypeArgs[ty, default: [:]][name] = targs }   // R905
                     if !targs.isEmpty, !CallCollector.r1492fOff, r1492Path(ty, tyPath) { fieldTypeArgs[tyPath, default: [:]][name] = targs }   // R1492 residual
+                    // SOUNDNESS R1523 — the field's WRITTEN instantiation (`G<L, [Int]>`, `G<L>.Iterator`), head first, under a
+                    // key no field name can spell, so it rides `fieldTypeArgs` (and R1513's overlay) with no new plumbing.
+                    if !CallCollector.r1523TOff, let tp = typePositionArgsR1523(ann.type) {
+                        fieldTypeArgs[ty, default: [:]]["\u{1}R1523" + name] = [tp.head] + tp.args
+                        if !CallCollector.r1492fOff, r1492Path(ty, tyPath) { fieldTypeArgs[tyPath, default: [:]]["\u{1}R1523" + name] = [tp.head] + tp.args }
+                    }
                     if !Self.r1176Off, let k = stdlibContainerKindR1176(ann.type) {   // SOUNDNESS R1176
                         fieldContainersR1176[ty, default: [:]][name] = (k, genericArgumentNames(ann.type))
                         let d = desugaredType(ann.type)
@@ -2684,6 +2690,59 @@ func stdlibContainerKindR1176(_ t: TypeSyntax) -> String? {
     if x.is(DictionaryTypeSyntax.self) { return "dictionary" }
     if let id = x.as(IdentifierTypeSyntax.self), id.name.text == "Set", id.genericArgumentClause?.arguments.count == 1 {
         return "set"
+    }
+    return nil
+}
+
+/// SOUNDNESS R1523 — the PLATFORM generic types whose arguments are ELEMENTS, not a base the type iterates: iterating
+/// `[L]`, `Set<L>`, `AnySequence<L>` or `Optional<L>` yields `L` values and never runs `L`'s own iterator. A DENYLIST of
+/// platform names only — a name missing here is read as a wrapper (charged), the direction that cannot hide an effect.
+let ELEMENT_GENERIC_TYPES_R1523: Set<String> = [
+    "Array", "ContiguousArray", "ArraySlice", "Set", "Dictionary", "Optional", "CollectionOfOne", "Repeated",
+    "EmptyCollection", "AnySequence", "AnyIterator", "AnyCollection", "AnyBidirectionalCollection",
+    "AnyRandomAccessCollection", "UnfoldSequence", "UnfoldFirstSequence", "StrideTo", "StrideThrough", "KeyValuePairs",
+    "Range", "ClosedRange", "PartialRangeFrom", "PartialRangeUpTo", "PartialRangeThrough", "Result", "Task",
+    "UnsafePointer", "UnsafeMutablePointer", "UnsafeBufferPointer", "UnsafeMutableBufferPointer", "Unmanaged",
+    "AsyncStream", "AsyncThrowingStream", "CheckedContinuation", "UnsafeContinuation", "TaskGroup", "ThrowingTaskGroup",
+    "Published", "Binding", "State", "StateObject", "ObservedObject", "Just", "Future", "AnyPublisher",
+    "PassthroughSubject", "CurrentValueSubject", "NSCache", "NSMapTable", "NSHashTable",
+    "KeyPath", "WritableKeyPath", "ReferenceWritableKeyPath", "PartialKeyPath",
+]
+
+/// SOUNDNESS R1523 — a WRITTEN type read as a generic instantiation and its arguments: `G<A, B>`, `G<A>.Iterator`
+/// (a type nested in the instantiation), `Module.G<A>`, through `inout`/attributes and one Optional. `args` is every
+/// argument name, recursing into an argument that is itself a non-element generic (`G<H<A>>` gives `H`, `A`); an
+/// element-generic argument (`[A]`, `Set<A>`) contributes nothing below it. nil for a non-generic or element-generic head.
+func typePositionArgsR1523(_ t: TypeSyntax) -> (head: String, args: [String])? {
+    var x = desugaredType(t)
+    if let a = x.as(AttributedTypeSyntax.self) { x = desugaredType(a.baseType) }
+    if let o = x.as(OptionalTypeSyntax.self) { x = desugaredType(o.wrappedType) }
+    else if let o = x.as(ImplicitlyUnwrappedOptionalTypeSyntax.self) { x = desugaredType(o.wrappedType) }
+    func flatten(_ a: TypeSyntax, _ depth: Int) -> [String] {
+        guard depth < 8 else { return [] }
+        let y = desugaredType(a)
+        var name: String? = nil, clause: GenericArgumentClauseSyntax? = nil
+        if let id = y.as(IdentifierTypeSyntax.self) { name = id.name.text; clause = id.genericArgumentClause }
+        else if let mt = y.as(MemberTypeSyntax.self) {
+            clause = mt.genericArgumentClause
+            name = clause != nil ? mt.name.text : typeName(y).name
+        }
+        guard let n = name else { return [] }
+        guard let c = clause else { return [n] }
+        if ELEMENT_GENERIC_TYPES_R1523.contains(n) { return [] }
+        return [n] + c.arguments.compactMap { $0.argument.as(TypeSyntax.self) }.flatMap { flatten($0, depth + 1) }
+    }
+    // the innermost generic instantiation along a member-type path: `G<A>.Iterator`, `M.G<A>`, `G<A>.Inner.Deeper`
+    var cur: TypeSyntax? = x
+    while let c = cur {
+        var name: String? = nil, clause: GenericArgumentClauseSyntax? = nil
+        if let id = c.as(IdentifierTypeSyntax.self) { name = id.name.text; clause = id.genericArgumentClause }
+        else if let mt = c.as(MemberTypeSyntax.self) {
+            guard let cl = mt.genericArgumentClause else { cur = mt.baseType; continue }
+            name = mt.name.text; clause = cl
+        }
+        guard let n = name, let cl = clause, !ELEMENT_GENERIC_TYPES_R1523.contains(n) else { return nil }
+        return (n, cl.arguments.compactMap { $0.argument.as(TypeSyntax.self) }.flatMap { flatten($0, 0) })
     }
     return nil
 }

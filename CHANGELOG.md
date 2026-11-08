@@ -10,6 +10,20 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R1523: a wrapper type written over a local sequence now runs that sequence's iterator.**
+  `func f(_ i: inout InterspersedSequence<LoudSeq>.Iterator) { _ = i.next() }` ran `LoudSeq`'s iterator (executed: it
+  wrote a file) and read `[]` with swift-algorithms chained and in one tree. 0.41.3 covered the call only by a
+  wrong-reason same-name `Unknown`, which R1513 removed, so `deny Unknown` went from 1 to 0. Three routes now charge
+  the local iterable's own `makeIterator`/`next` bodies. (T) A parameter, annotated local or stored field whose written
+  type instantiates a generic the scan does not declare (`G<L>`, `G<L>.Iterator`, nested `G<H<L>>`) iterates `L` when
+  it is iterated, when an iterating member is called on it (`next`, `makeIterator`, `map`, …), or when it is passed to
+  foreign code. This is R1048's existing rule for a local iterable value, applied to the type spelling. Element-generic
+  platform types (`[L]`, `Set<L>`, `AnySequence<L>`, `Optional<L>`) are excluded. (P) In one tree, a parameter written
+  `G<L>.Iterator` is an instance of `G<L>` for R1515's caller-witness answer. (S) In one tree, `L().m()` declared
+  `-> G<Self>` is a `G<L>`. Known over-approximation: a dependency's element-generic type (`Bag<Element>` holding `L`
+  values) is read as a wrapper and charged `L`'s iterator. Kill switches `CANDOR_R1523_OFF`, `CANDOR_R1523T_OFF`,
+  `CANDOR_R1523P_OFF`, `CANDOR_R1523S_OFF`.
+
 - **⚠ SOUNDNESS R1514: a parameter or loop/`catch` binder no longer reads a same-named global.** The lazy-global read
   edge treated a bare name as a module-scope global unless a TYPED local index held it. So `func f(_ t: X.Type) { _ = t }`
   (and the same with `P & Q`, `Any.Type` or `T.Type` parameters), `for t in`, `while let t = …` and `catch let t`

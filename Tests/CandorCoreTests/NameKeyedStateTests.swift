@@ -351,6 +351,9 @@ final class NameKeyedStateTests: XCTestCase {
         "lgBindings": .deliberatelyKept(
             "R1044 residual: built flow-insensitively by a prescan that DROPS any name bound twice or by a closure/"
             + "pattern binder, and read only where `multiplyBoundNames` says the name has one binder in the unit"),
+        "annotatedLocalsR1523": .deliberatelyKept(
+            "R1523: `lgBindings`' own prescan (a name bound twice or by a closure/pattern binder is DROPPED), kept for the "
+            + "written annotation only, and read only where `multiplyBoundNames` says the name has one binder in the unit"),
         "localPlatformGenerics": .deliberatelyKept(
             "R905: built flow-insensitively by a prescan that DROPS any name bound twice, by a closure parameter, "
             + "or by a non-`let` binder, so no rebind can leave a stale entry behind"),
