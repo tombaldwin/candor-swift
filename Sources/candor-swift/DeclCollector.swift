@@ -330,6 +330,10 @@ final class DeclCollector: SyntaxVisitor {
     /// declaring type (`private var backing: Parameters.BackingPrivateKey`). Resolved in the Driver once every
     /// file's generic bounds and associated-type bounds are merged.
     var assocMemberFields: [(ty: String, path: String, field: String, param: String, assoc: String)] = []
+    /// SOUNDNESS R1515 — a stored property spelled `G.Assoc`, `G.Assoc?` or `[G.Assoc]` (`var iterator: Base.Iterator`),
+    /// G a single identifier: which generic parameter (of this type or an ENCLOSING one) it is resolved against is
+    /// decided by the CallCollector, which knows the lexical path. `wrap` is "", "?" or "[]".
+    var assocFieldsR1515: [(ty: String, path: String, field: String, param: String, assoc: String, wrap: String)] = []
     /// R1492 — also key a field fact by the full path (a nested declaration), so `extension A.B.T` finds it.
     /// SOUNDNESS R1505 — the one type every element of an array literal constructs (`[A(), A(x: 1)]` -> `A`), or nil.
     static func uniformCtorElementR1505(_ arr: ArrayExprSyntax) -> String? {
@@ -1623,6 +1627,16 @@ final class DeclCollector: SyntaxVisitor {
                        typeGenericParamNames[ty]?.contains(g) == true {
                         assocMemberFields.append((ty, tyPath, name, g, mt.name.text))
                     }
+                    if !CallCollector.r1515BOff {   // SOUNDNESS R1515 — see `assocFieldsR1515`
+                        var x = desugaredType(ann.type), wrap = ""
+                        if let o = x.as(OptionalTypeSyntax.self) { x = o.wrappedType; wrap = "?" }
+                        else if let o = x.as(ImplicitlyUnwrappedOptionalTypeSyntax.self) { x = o.wrappedType; wrap = "?" }
+                        else if let a = x.as(ArrayTypeSyntax.self) { x = a.element; wrap = "[]" }
+                        if let mt = x.as(MemberTypeSyntax.self), mt.genericArgumentClause == nil,
+                           let gid = mt.baseType.as(IdentifierTypeSyntax.self), gid.genericArgumentClause == nil {
+                            assocFieldsR1515.append((ty, tyPath, name, gid.name.text, mt.name.text, wrap))
+                        }
+                    }
                     if let tn = info.name, let bound = typeGenericBounds[ty]?[tn] {
                         info = (bound, info.isFunction)
                         opaqueFields[ty, default: []].insert(name)
@@ -2637,6 +2651,9 @@ struct LocalGenericFacts {
     /// `-> InputSpan<Element>`) names the DECLARATION's parameter, not a type at the use site, so it answers
     /// nothing (R1010's rule, which a local type that happens to share the name must not defeat).
     var nonTypeNames: Set<String> = ["Self"]
+    /// SOUNDNESS R1515 — `"Type.field"` / `"Full.Path.field"` -> a field spelled `G.Assoc` (see `assocFieldsR1515`).
+    struct AssocFieldR1515: Equatable { var param: String; var assoc: String; var wrap: String; var path: String }
+    var assocFieldsR1515: [String: AssocFieldR1515] = [:]
 }
 
 /// SOUNDNESS R1044 nested — one generic argument of a local generic type's instantiation, with ITS OWN arguments

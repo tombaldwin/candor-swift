@@ -496,6 +496,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var r1492PathKeys: Set<String> = []                                                            // R1492
     var assocTypeBoundsAll: [String: [String: String]] = [:]                                          // R1492
     var assocMemberFieldsAll: [(ty: String, path: String, field: String, param: String, assoc: String)] = []   // R1492
+    var assocFieldsAllR1515: [(ty: String, path: String, field: String, param: String, assoc: String, wrap: String)] = []
     var protocolMethods: [String: Set<String>] = [:]
     var protocolFnTypedMembers: Set<String> = []   // SOUNDNESS R563 — see DeclCollector
     var protocolPropTypesAll: [String: [String: String]] = [:]   // SOUNDNESS R578 — see DeclCollector
@@ -1052,6 +1053,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (p, fs) in c.fieldsByPath { fields[p, default: [:]].merge(fs) { a, _ in a }; r1492PathKeys.insert(p) }
         for (p, bs) in c.assocTypeBounds { assocTypeBoundsAll[p, default: [:]].merge(bs) { a, _ in a } }
         assocMemberFieldsAll.append(contentsOf: c.assocMemberFields)
+        assocFieldsAllR1515.append(contentsOf: c.assocFieldsR1515)
         for (t, fs) in c.fieldArrayElem { fieldArrayElem[t, default: [:]].merge(fs) { a, _ in a } }
         for (t, fs) in c.fieldMetatypes { fieldMetatypes[t, default: [:]].merge(fs) { a, _ in a } }   // R585
         for (t, fs) in c.fieldMetatypeArrayElem { fieldMetatypeArrayElem[t, default: [:]].merge(fs) { a, _ in a } }
@@ -2126,6 +2128,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             if let e = fp[k] { if e != i { fp[k] = Int?.none } } else { fp[k] = i }
         }
         for (k, v) in fp { if let i = v { localGenerics.fieldParams[k] = i } }
+        // SOUNDNESS R1515 — the associated-type fields, under the declaring type's simple name and its full path; a key
+        // two declarations answer differently answers nothing.
+        if !CallCollector.r1515BOff {
+            var af: [String: LocalGenericFacts.AssocFieldR1515?] = [:]
+            for x in assocFieldsAllR1515 {
+                let v = LocalGenericFacts.AssocFieldR1515(param: x.param, assoc: x.assoc, wrap: x.wrap, path: x.path)
+                for k in Set(["\(x.ty).\(x.field)", "\(x.path).\(x.field)"]) {
+                    if let e = af[k] { if e != v { af[k] = LocalGenericFacts.AssocFieldR1515?.none } } else { af[k] = v }
+                }
+            }
+            for (k, v) in af { if let a = v { localGenerics.assocFieldsR1515[k] = a } }
+        }
         for (ty, shape) in lgInitsAll where localGenerics.order[ty] != nil {
             localGenerics.inits[ty, default: []].append(shape)
         }
@@ -7331,6 +7345,20 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         return found ?? nil
     }
+    // SOUNDNESS R1515 (A) — the Driver twin of `CallCollector.nestedTypePathR1515`: `spelled` written inside local type `t`.
+    var pathsByLeafR1515: [String: Set<String>] = [:]
+    for p in localTypePaths { pathsByLeafR1515[String(p.split(separator: ".").last ?? Substring(p)), default: []].insert(p) }
+    func nestedTypePathR1515(_ t: String, _ spelled: String) -> String? {
+        let tp = localTypePaths.contains(t) ? t : ((pathsByLeafR1515[t]?.count == 1 ? pathsByLeafR1515[t]?.first : nil) ?? t)
+        if spelled.contains("."), localTypePaths.contains(spelled) { return spelled }
+        var segs = tp.split(separator: ".").map(String.init)
+        while !segs.isEmpty {
+            let cand = segs.joined(separator: ".") + "." + spelled
+            if localTypePaths.contains(cand) { return cand }
+            segs.removeLast()
+        }
+        return nil
+    }
     // SOUNDNESS R1176 — unit -> its enclosing type's simple name: a receiver's generic arguments answer only a method of
     // the type they were read for.
     var enclosingLeafR1176: [String: String] = [:]
@@ -7473,6 +7501,56 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             FileHandle.standardError.write("R1490HIT chained \(how) \(caller) \(type).\(w)\n".data(using: .utf8)!)
         }
     }
+    // SOUNDNESS R1515 — see `CallCollector.assocRequirementR1515`.
+    func parseAssocReqR1515(_ head: String) -> (k: Int, assoc: String, owner: String)? {
+        guard head.hasPrefix("s"), let c = head.firstIndex(of: "^"), let at = head.firstIndex(of: "@"), c < at,
+              let k = Int(head[head.index(after: head.startIndex)..<c]) else { return nil }
+        return (k, String(head[head.index(after: c)..<at]), String(head[head.index(after: at)...]))
+    }
+    /// The local type that is `x`'s associated type `assoc`: what its `makeIterator` is declared to return (a nested
+    /// spelling read in `x`'s own scope), else a type nested in `x` by that name, else `x` itself when `x` is an iterator
+    /// with no `makeIterator` of its own (`Iterator == Self`). nil — answering nothing — for anything else.
+    func assocTypeR1515(_ x: String, _ assoc: String) -> String? {
+        guard let bound = CallCollector.assocBoundsR1515[assoc] else { return nil }
+        let leaf = CallCollector.leafR1176(x)
+        for m in bound.makers {
+            for key in Set(["\(x).\(m)", "\(leaf).\(m)"]) {
+                guard let it = returnFactsIdx[key]?.scalar else { continue }
+                if let p = nestedTypePathR1515(x, it) { return p }
+                if localTypes.contains(it) { return it }
+            }
+        }
+        if let p = nestedTypePathR1515(x, assoc) { return p }
+        if assoc == "Iterator", memberUnitKeys.contains("\(leaf).next"), !memberUnitKeys.contains("\(leaf).makeIterator"),
+           localTypes.contains(x) { return x }
+        return nil
+    }
+    /// The spelling `localTypes` / `declaredTypes` hold for a full path: the path itself, or a UNIQUE leaf (a nested type
+    /// whose simple name no other type shares is keyed by that name).
+    func localSpellingR1515(_ p: String) -> String {
+        if localTypes.contains(p) { return p }
+        let leaf = CallCollector.leafR1176(p)
+        if localTypes.contains(leaf), pathsByLeafR1515[leaf]?.count == 1 { return leaf }
+        return p
+    }
+    var r1515Asked = Set<String>()
+    func answerAssocR1515(_ caller: String, _ x: LocalGenericArg, _ assoc: String, _ proto: String?, _ w: String, _ depth: Int) {
+        guard depth < 8, r1515Asked.insert("\(caller)\u{1}\(x.name)\u{1}\(assoc)\u{1}\(w)\u{1}\(x.args.count)").inserted,
+              let a = assocTypeR1515(x.name, assoc).map(localSpellingR1515) else { return }
+        if CallCollector.r1490Probe { FileHandle.standardError.write("R1515HIT \(caller) \(x.name).\(assoc) -> \(a).\(w)\n".data(using: .utf8)!) }
+        answerWitnessR1490(a, w, proto: proto, caller: caller, how: "assoc")
+        // the witness's OWN associated-type requirements, instantiated by x's arguments (`Sq<Sq<Loud>>`)
+        guard !x.args.isEmpty else { return }
+        for u in resolveQual("\(a).\(w)") {
+            for req in genericWitnessReqsByUnit[u] ?? [] {
+                let ps = req.split(separator: ":", maxSplits: 1).map(String.init)
+                guard ps.count == 2, let b = parseAssocReqR1515(ps[0]), b.owner == CallCollector.leafR1176(x.name),
+                      b.k < x.args.count, let y = x.args[b.k] else { continue }
+                let sw = splitWitnessR1490(ps[1])
+                answerAssocR1515(caller, y, b.assoc, sw.proto, sw.witness, depth + 1)
+            }
+        }
+    }
     if !CallCollector.r951Off {
         for (callee, reqs) in genericWitnessReqsByUnit {
             for site in callsiteArgTypes[callee] ?? [] {
@@ -7483,6 +7561,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     if parts.count == 2, parts[0] == "r", let own = site.own, let t = own.recvTypeR1490 {   // R1490 residual (3)
                         let sw = splitWitnessR1490(parts[1])
                         answerWitnessR1490(t, sw.witness, proto: sw.proto, caller: site.caller, how: "self")
+                    }
+                    // SOUNDNESS R1515 — `s<k>^<Assoc>@<Owner>`: the receiver instance's argument k, its associated type.
+                    if !CallCollector.r1515BOff, parts.count == 2, let inst = site.own?.instR1515, let a = parseAssocReqR1515(parts[0]),
+                       CallCollector.leafR1176(inst.owner) == a.owner, a.k < inst.args.count, let x = inst.args[a.k] {
+                        let sw = splitWitnessR1490(parts[1])
+                        answerAssocR1515(site.caller, x, a.assoc, sw.proto, sw.witness, 0)
                     }
                     if !CallCollector.r1176Off, parts.count == 2, let own = site.own {
                         var lists: [[String]] = []
@@ -7542,7 +7626,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         guard iterableLocalTypes.contains(x) else { continue }
                         var owners = [x]
                         for m in ["makeIterator", "makeAsyncIterator"] {
-                            if let it = returnFactsIdx["\(x).\(m)"]?.scalar, localTypes.contains(it) { owners.append(it) }
+                            guard let it = returnFactsIdx["\(x).\(m)"]?.scalar else { continue }
+                            if !CallCollector.r1515AOff, let p = nestedTypePathR1515(x, it) { owners.append(p); continue }   // R1515 (A)
+                            if localTypes.contains(it) { owners.append(it) }
                         }
                         for o in owners {
                             for m in ["makeIterator", "next", "makeAsyncIterator"] {

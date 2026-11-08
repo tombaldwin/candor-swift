@@ -134,6 +134,10 @@ struct WitnessOwnersR1176 {
     /// generic-typed parameters, so the requirement forwards as `<idx>:@<P>~<w>`.
     var recvTypeR1490: String? = nil
     var recvParamR1490: Int? = nil
+    /// SOUNDNESS R1515 — the receiver as an INSTANCE of a local generic type: its generic owner (for a value of a
+    /// non-generic type nested in a generic one, the OUTER type, whose parameters it is written with) and the
+    /// arguments it was instantiated with, nested where read. Answers `s<k>^<Assoc>@<owner>:@<P>~<w>`.
+    var instR1515: (owner: String, args: [LocalGenericArg?])? = nil
 }
 struct Call { var path: String; var leaf: String; var strArg: String?; var typed: Bool; var args: [ArgKind] = []
               var argTypes: [String?] = []     // inferred simple type per positional arg (nil = unknown) — overloads
@@ -1186,6 +1190,7 @@ final class CallCollector: SyntaxVisitor {
         guard !Self.r1490Off, !Self.r951Off, let base, !Self.METATYPE_MEMBERS.contains(member) else { return }
         let e = Self.peel(base)
         if e.as(DeclReferenceExprSyntax.self)?.baseName.text == "self" { selfRequirementR1490(member); return }
+        assocRequirementR1515(base, member)   // SOUNDNESS R1515
         var req: String? = nil, proto: String? = nil
         if let n = e.as(DeclReferenceExprSyntax.self)?.baseName.text, let idx = paramIndexR951[n],
            !isBoundLocal(n), !binderShadow.contains(n), let t = paramTypesR951[n] {
@@ -1206,6 +1211,127 @@ final class CallCollector: SyntaxVisitor {
         for w in ws where genericWitnessReqs.insert("\(r):@\(w.proto)~\(w.witness)").inserted {
             if Self.r1490Probe { FileHandle.standardError.write("R1490REQ \(r):@\(w.proto)~\(w.witness) \(p).\(member)\n".data(using: .utf8)!) }
         }
+    }
+    // ── SOUNDNESS R1515 — A STORED `G.Iterator` RUNS THE CALLER'S ITERATOR ───────────────────────────────────────────────
+    // `struct WU<Base: Sequence> { struct UniqIt { var iterator: Base.Iterator; mutating func next() { iterator.next() } } }`
+    // and `WU<LoudSeq>.UniqIt(…).next()`: the program ran `LoudSeq.It.next` (executed) and nothing was charged — R1048's
+    // caller witness `#iter` is recorded only for a PARAMETER, and R1490 (a)'s `s<k>` only for a field typed by the
+    // parameter ITSELF. The value `iterator` holds is the instantiator's `Base.Iterator`, so the requirement is recorded as
+    // `s<k>^<Assoc>@<Owner>:@<P>~<w>` — generic parameter k of `Owner` (the declaring type, or the ENCLOSING generic type
+    // a nested type borrows `Base` from), its associated type `Assoc`, the protocol that bounds it and the witness — and
+    // the Driver answers it at each call site whose receiver is an instance of `Owner` with known arguments
+    // (`WitnessOwnersR1176.instR1515`): the argument's own `makeIterator` return (or nested `Iterator`), then its `next`.
+    // A RESOLUTION: an argument whose iterator is not a local declared type answers nothing, never a union.
+    static let assocBoundsR1515: [String: (proto: String, makers: [String])] = [
+        "Iterator": ("IteratorProtocol", ["makeIterator"]), "AsyncIterator": ("AsyncIteratorProtocol", ["makeAsyncIterator"]),
+    ]
+    private func assocFieldR1515(_ f: String) -> LocalGenericFacts.AssocFieldR1515? {
+        guard let et = enclosingType else { return nil }
+        let leaf = Self.leafR1176(et)
+        return localGenerics.assocFieldsR1515["\(ai.enclosingTypePath ?? et).\(f)"] ?? localGenerics.assocFieldsR1515["\(et).\(f)"]
+            ?? ((ai.pathsByLeaf[leaf]?.count ?? 0) <= 1 ? localGenerics.assocFieldsR1515["\(leaf).\(f)"] : nil)
+    }
+    /// The generic type (innermost first along the lexical path) that declares parameter `g`, and its index.
+    private func genericOwnerR1515(_ g: String) -> (owner: String, k: Int)? {
+        guard !genericParamNamesFn.contains(g), let et = enclosingType else { return nil }
+        var segs = (ai.enclosingTypePath ?? et).split(separator: ".").map(String.init)
+        while let leaf = segs.last {
+            let p = segs.joined(separator: ".")
+            if let o = localGenerics.order[p] ?? localGenerics.order[leaf], let i = o.firstIndex(of: g) { return (leaf, i) }
+            segs.removeLast()
+        }
+        return nil
+    }
+    func assocRequirementR1515(_ base: ExprSyntax, _ member: String) {
+        guard !Self.r1515BOff, enclosingType != nil else { return }
+        var e = Self.peel(base)
+        var viaSubscript = false
+        if let sc = e.as(SubscriptCallExprSyntax.self) { e = Self.peel(sc.calledExpression); viaSubscript = true }
+        var param: String? = nil, assoc: String? = nil
+        if let f = selfFieldRefR1176(e), let a = assocFieldR1515(f), (a.wrap == "[]") == viaSubscript {
+            param = a.param; assoc = a.assoc
+        } else if !viaSubscript, let n = e.as(DeclReferenceExprSyntax.self)?.baseName.text, !multiplyBoundNames.contains(n),
+                  paramIndexR951[n] == nil, let b = lgBindings[n] {
+            // a local holding the parameter's iterator: `var it: Base.Iterator = …` or `var it = base.makeIterator()`
+            if let t = b.type, let mt = desugaredType(t).as(MemberTypeSyntax.self), mt.genericArgumentClause == nil,
+               let g = mt.baseType.as(IdentifierTypeSyntax.self), g.genericArgumentClause == nil {
+                param = g.name.text; assoc = mt.name.text
+            } else if b.type == nil, let ini = b.initializer.map(Self.peel)?.as(FunctionCallExprSyntax.self), ini.arguments.isEmpty,
+                      let ma = Self.peel(ini.calledExpression).as(MemberAccessExprSyntax.self), let mb = ma.base,
+                      let f = selfFieldRefR1176(mb), let et = enclosingType,
+                      let k = localGenerics.fieldParams["\(et).\(f)"] ?? localGenerics.fieldParams["\(Self.leafR1176(et)).\(f)"],
+                      let o = localGenerics.order[et] ?? localGenerics.order[Self.leafR1176(et)], k < o.count,
+                      let hit = Self.assocBoundsR1515.first(where: { $0.value.makers.contains(ma.declName.baseName.text) }) {
+                param = o[k]; assoc = hit.key
+            }
+        }
+        guard let g = param, let a = assoc, let bound = Self.assocBoundsR1515[a], let (owner, k) = genericOwnerR1515(g) else { return }
+        for w in Self.stdlibRequirementWitnesses(bound.proto, member) {
+            let req = "s\(k)^\(a)@\(owner):@\(bound.proto)~\(w)"
+            if genericWitnessReqs.insert(req).inserted { vbHit("R1515B", "req \(req)") }
+        }
+    }
+    /// SOUNDNESS R1515 — the receiver `raw` as an instance of a local generic type: R1044's own reading
+    /// (`localGenericArgs`), else a value of a non-generic type nested in one — `G<A>.Inner(…)`, a binding of it, or a
+    /// member of a `G<A>` instance whose declared return is a type nested in `G` (`Sq(base: x).makeIterator()`).
+    func genericInstanceR1515(_ raw: ExprSyntax, _ depth: Int = 0) -> (owner: String, args: [LocalGenericArg?])? {
+        guard !Self.r1515BOff, depth < 12, !localGenerics.order.isEmpty else { return nil }
+        if let x = localGenericArgs(raw, 0) { return x }
+        let e = Self.peel(raw)
+        func nestedNonGeneric(_ owner: String, _ t: String) -> Bool {
+            let leaf = t.split(separator: ".").last.map(String.init) ?? t
+            guard localGenerics.order[t] == nil, localGenerics.order[leaf] == nil else { return false }
+            if t.contains(".") { return t.split(separator: ".").dropLast().last.map(String.init) == owner }
+            return ai.localTypePaths.contains(where: { $0.hasSuffix(".\(owner).\(leaf)") || $0 == "\(owner).\(leaf)" })
+        }
+        if let dr = e.as(DeclReferenceExprSyntax.self) {
+            let n = dr.baseName.text
+            guard !multiplyBoundNames.contains(n), let b = lgBindings[n] else { return nil }
+            // `var i: WU<LoudSeq>.UniqIt = …` — the annotation names the outer instantiation
+            if let t = b.type {
+                guard let mt = desugaredType(t).as(MemberTypeSyntax.self), mt.genericArgumentClause == nil,
+                      let id = mt.baseType.as(IdentifierTypeSyntax.self), let gac = id.genericArgumentClause,
+                      let order = localGenerics.order[id.name.text], order.count == gac.arguments.count,
+                      nestedNonGeneric(id.name.text, mt.name.text) else { return nil }
+                vbHit("R1515B", "inst \(id.name.text)<…>.\(mt.name.text) (annotation)")
+                return (id.name.text, gac.arguments.map { a in a.argument.as(TypeSyntax.self).flatMap { typeName($0).name }.map { LocalGenericArg(name: $0) } })
+            }
+            guard let ini = b.initializer else { return nil }
+            return genericInstanceR1515(ini, depth + 1)
+        }
+        guard let call = e.as(FunctionCallExprSyntax.self), let ma = Self.peel(call.calledExpression).as(MemberAccessExprSyntax.self),
+              let mb = ma.base else { return nil }
+        let m = ma.declName.baseName.text
+        // `G<A>.Inner(…)` / `G<A>.Inner.init(…)`
+        var ctorBase: ExprSyntax? = nil, inner = m
+        if m == "init", let ma2 = Self.peel(mb).as(MemberAccessExprSyntax.self), let b2 = ma2.base { ctorBase = b2; inner = ma2.declName.baseName.text }
+        else if m.first?.isUppercase == true { ctorBase = mb }
+        if let cb = ctorBase, let g = Self.peel(cb).as(GenericSpecializationExprSyntax.self),
+           let gn = Self.peel(g.expression).as(DeclReferenceExprSyntax.self)?.baseName.text,
+           let order = localGenerics.order[gn], order.count == g.genericArgumentClause.arguments.count, nestedNonGeneric(gn, inner) {
+            let args = g.genericArgumentClause.arguments.map { a -> LocalGenericArg? in
+                a.argument.as(TypeSyntax.self).flatMap { typeName($0).name }.map { LocalGenericArg(name: $0) }
+            }
+            vbHit("R1515B", "inst \(gn)<…>.\(inner)")
+            return (gn, args)
+        }
+        // a member of an instance whose declared return is a type nested in the instance's generic owner
+        if call.arguments.isEmpty, let inst = genericInstanceR1515(mb, depth + 1),
+           let rt = returnFacts["\(inst.owner).\(m)"]?.scalar, nestedNonGeneric(inst.owner, rt) {
+            vbHit("R1515B", "inst \(inst.owner).\(m) -> \(rt)")
+            return inst
+        }
+        return nil
+    }
+    /// SOUNDNESS R1515 — the owners an implicit iteration's calls carry: the iterated value as an instance (above), and
+    /// R1490's receiver arguments so the iterable's own `s<k>:@P~w` requirements (`base.makeIterator()`) answer too.
+    func iterationOwnersR1515(_ seq: ExprSyntax?) -> WitnessOwnersR1176? {
+        guard !Self.r1515BOff, let seq, let inst = genericInstanceR1515(seq) else { return nil }
+        var o = WitnessOwnersR1176()
+        o.instR1515 = inst
+        o.recvOwner = inst.owner
+        o.recv = inst.args.map { x in x.map { genericParamNamesFn.contains($0.name) ? [] : ["@|\(dealias($0.name))"] } ?? [] }
+        return o
     }
     // ── SOUNDNESS R1490 residual (3) — `self` INSIDE A PROTOCOL EXTENSION IS THE CALLER'S `Self` ─────────────────────────
     // `extension CustomStringConvertible { func shout() -> String { self.description } }`, `extension Encodable { func json()
@@ -2650,6 +2776,14 @@ final class CallCollector: SyntaxVisitor {
                 return (c.spelling, false, [tp], false, false)
             }
         }
+        // SOUNDNESS R1515 (T) — `WU<LoudSeq>.UniqIt` names the local nested type `WU.UniqIt`: the generic arguments are the
+        // OUTER type's and the nested path is the type, exactly as the unspecialised `WU.UniqIt` the arm above answers.
+        // Before this the value `WU<LoudSeq>.UniqIt(…)` had no type and `i.next()` was dropped (executed: ABSENT).
+        if !Self.r1515TOff, let ma = expr.as(MemberAccessExprSyntax.self), Self.typeLikeName(ma.declName.baseName.text),
+           let tp = genericSpecTypePathR1463(ma), tp.contains(".") {
+            let c = canonicalTypeRef(tp)
+            if c.local { vbHit("R1515T", "\(tp) -> \(c.spelling)"); return (c.spelling, false, [tp], false, false) }
+        }
         if let ma = expr.as(MemberAccessExprSyntax.self) {
             // SOUNDNESS R905 (residual) — a platform generic container's element PROPERTY (`table.anyObject`
             // over `NSHashTable<G>`) is the receiver's generic argument, read off the platform's declaration
@@ -2831,6 +2965,12 @@ final class CallCollector: SyntaxVisitor {
                tp.split(separator: ".").last?.first?.isUppercase == true {
                 vbHit("R905", "ctor \(tp)")
                 return (tp, true, [tp], false, false)
+            }
+            // SOUNDNESS R1515 (T) — `WU<LoudSeq>.UniqIt(…)` constructs the nested `WU.UniqIt` (see the type arm above).
+            if !Self.r1515TOff, let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
+               Self.typeLikeName(ma.declName.baseName.text), let tp = genericSpecTypePathR1463(ma), tp.contains(".") {
+                let c = canonicalTypeRef(tp)
+                if c.local { vbHit("R1515T", "ctor \(tp) -> \(c.spelling)"); return (c.spelling, true, [tp], false, false) }
             }
             if let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self) {
                 let n = ctor.baseName.text
@@ -7477,7 +7617,7 @@ final class CallCollector: SyntaxVisitor {
                 for m in ["makeIterator", "next"] {
                     calls.append(Call(path: "\(t).\(m)", leaf: m, strArg: nil, typed: true, args: [], argTypes: []))
                 }
-            } else { iterateLocal(t, releaseForIn: true) }
+            } else { iterateLocal(t, releaseForIn: true, seq: sequence) }
             return
         }
         // SOUNDNESS R1415 — iterating a value of a DEPENDENCY's type runs its `makeIterator`/`next`.
@@ -8372,20 +8512,52 @@ final class CallCollector: SyntaxVisitor {
     /// call to a member the type lacks falls to the external-supertype fallback, which DISCLOSES
     /// `dispatch:<Super>.next` — the first cut of this added that `Unknown` to 105 swift-collections rows over
     /// types whose iterator is a synthesized or stdlib one.
-    private func iterateLocal(_ t: String, releaseForIn: Bool = false) {
+    private func iterateLocal(_ t: String, releaseForIn: Bool = false, seq: ExprSyntax? = nil) {
         vbHit("R1048", "iterate \(t)")
+        let ownR1515 = iterationOwnersR1515(seq)
         var owners = [t]
         for m in ["makeIterator", "makeAsyncIterator"] {
-            if let it = returnFacts["\(t).\(m)"]?.scalar, localTypes.contains(it), !owners.contains(it) { owners.append(it) }
+            guard let it = returnFacts["\(t).\(m)"]?.scalar else { continue }
+            // SOUNDNESS R1515 (A) — the iterator type a NESTED spelling names is the iterable's own nested type
+            // (Swift's lexical lookup from inside `t`), keyed by its full path: `struct S: Sequence { struct It … }`
+            // beside another type's `It` edged the ambiguous `It.next`, which resolved nothing (executed: ABSENT).
+            if !Self.r1515AOff, let p = nestedTypePathR1515(t, it) {
+                if !owners.contains(p) { owners.append(p); vbHit("R1515A", "iterate \(t) -> \(p)") }
+                continue
+            }
+            if localTypes.contains(it), !owners.contains(it) { owners.append(it) }
         }
         for o in owners {
             for m in ["makeIterator", "next", "makeAsyncIterator"] {
                 let floor = releaseForIn && o == t && (m == "makeIterator" || m == "next")
-                guard floor || memberUnitKeys.contains("\(o).\(m)") else { continue }
-                calls.append(Call(path: "\(o).\(m)", leaf: m, strArg: nil, typed: true, args: [], argTypes: []))
+                // `memberUnitKeys` is `<leaf type>.<member>`: a path-keyed owner (R1515 (A)) is asked by its leaf
+                let key = Self.r1515AOff ? o : (o.split(separator: ".").last.map(String.init) ?? o)
+                guard floor || memberUnitKeys.contains("\(key).\(m)") else { continue }
+                var c = Call(path: "\(o).\(m)", leaf: m, strArg: nil, typed: true, args: [], argTypes: [])
+                c.wOwnersR1176 = ownR1515
+                calls.append(c)
             }
         }
     }
+    /// SOUNDNESS R1515 (A) — the full path of the type `spelled` names when written inside local type `t`'s own
+    /// declaration: `t`'s nested type of that name, innermost first (`S.It` for `It` inside `S`), or a full path as
+    /// written. nil when the spelling names no type nested in `t` (a top-level iterator keeps the release's key).
+    func nestedTypePathR1515(_ t: String, _ spelled: String) -> String? {
+        let tp = (ai.localTypePaths.contains(t) ? t : (ai.pathsByLeaf[t].flatMap { $0.count == 1 ? $0.first : nil })) ?? t
+        if spelled.contains("."), ai.localTypePaths.contains(spelled) { return spelled }
+        var segs = tp.split(separator: ".").map(String.init)
+        while !segs.isEmpty {
+            let cand = segs.joined(separator: ".") + "." + spelled
+            if ai.localTypePaths.contains(cand) { return cand }
+            segs.removeLast()
+        }
+        return nil
+    }
+    /// SOUNDNESS R1515 — §1b kill switches: (A) the nested iterator path; (B) the associated-type field requirement.
+    static let r1515Off = ProcessInfo.processInfo.environment["CANDOR_R1515_OFF"] != nil
+    static let r1515AOff = r1515Off || ProcessInfo.processInfo.environment["CANDOR_R1515A_OFF"] != nil
+    static let r1515BOff = r1515Off || ProcessInfo.processInfo.environment["CANDOR_R1515B_OFF"] != nil
+    static let r1515TOff = r1515Off || ProcessInfo.processInfo.environment["CANDOR_R1515T_OFF"] != nil
     /// SOUNDNESS R1048 — a PARAMETER whose type is not a local concrete type is iterated with the CALLER's
     /// instantiation: recorded as R951's caller-witness requirement `<idx>:#iter`, which the Driver answers at
     /// every call site whose argument is a local iterable type.
@@ -8403,7 +8575,7 @@ final class CallCollector: SyntaxVisitor {
         guard !Self.r1048Off, calleeIsForeign else { return }
         for a in node.arguments {
             if let t = rootOf(a.expression).root, iterableLocalTypes.contains(t),
-               !Self.peel(a.expression).is(ClosureExprSyntax.self) { iterateLocal(t) }
+               !Self.peel(a.expression).is(ClosureExprSyntax.self) { iterateLocal(t, seq: a.expression) }
         }
     }
 
@@ -8643,7 +8815,17 @@ final class CallCollector: SyntaxVisitor {
         if localProtocols.contains(r) { return true }
         guard localTypes.contains(r) else { return false }
         let owners = [r] + Array(supertypesAll[r] ?? []) + Array(classSupertypes[r] ?? [])
-        return owners.contains { memberUnitKeys.contains("\($0).\(member)") }
+        if owners.contains(where: { memberUnitKeys.contains("\($0).\(member)") }) { return true }
+        // SOUNDNESS R1515 (A) — a stored CLOSURE property called (`self._makeAsyncIterator()`) is the receiver's own
+        // member too: invoking it does not iterate the receiver (swift-nio `AnyAsyncSequence.makeAsyncIterator`).
+        if !Self.r1515AOff, owners.contains(where: { fields[$0]?[member]?.isFunction == true }) { return true }
+        // SOUNDNESS R1515 (A) — `memberUnitKeys` is `<leaf type>.<member>`: a NESTED receiver (`Node.Sequence`) asked by
+        // its full path never matched, so `self.init(xs)` inside it read as a stdlib member ITERATING `self`. Inert before
+        // (a nested type's iteration edged nothing); (A) makes that iteration reach, so the receiver's own member must too.
+        if !Self.r1515AOff, r.contains("."), let leaf = r.split(separator: ".").last {
+            return memberUnitKeys.contains("\(leaf).\(member)")
+        }
+        return false
     }
 
     /// SOUNDNESS R1000/R999 §1b KILL SWITCHES (also off under `CANDOR_VT_OFF`).
@@ -9298,7 +9480,7 @@ final class CallCollector: SyntaxVisitor {
             if !Self.r1048Off, let b = ma.base {
                 if let t = base.root, iterableLocalTypes.contains(t), !["makeIterator", "next", "makeAsyncIterator"].contains(member),
                    !receiverDeclaresOwnMember(t, member) {
-                    iterateLocal(t)
+                    iterateLocal(t, seq: b)
                 } else if STDLIB_ITERATING_MEMBERS.contains(member) {
                     _ = iterationReqOnParam(b)
                 }
@@ -11180,6 +11362,7 @@ final class CallCollector: SyntaxVisitor {
             || (callee.as(DeclReferenceExprSyntax.self)?.baseName.text.first?.isUppercase ?? false) {
             recvExpr = ExprSyntax(node)
         }
+        if !Self.r1515BOff, let r = recvExpr, let inst = genericInstanceR1515(r) { o.instR1515 = inst; any = true }   // R1515
         if let r = recvExpr, !localGenerics.order.isEmpty, let (owner, args) = localGenericArgs(r, 0) {
             o.recvOwner = owner
             for (k, x) in args.enumerated() {
