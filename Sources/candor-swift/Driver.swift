@@ -2313,6 +2313,21 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
     var returnFactsIdx: [String: DeclaredFacts] = [:]
     for (k, v) in returnFactsTmp { if let f = v { returnFactsIdx[k] = f } }
+    // SOUNDNESS R1506 — `Owner.member` keys whose EVERY declaration returns exactly `Self`. `returnFactsIdx` poisons `Self`
+    // (it names no type), so this is the one index that can say "this receiver's own member hands back the receiver's
+    // type". Keyed by the declaring type (or extension) as `returnDecls` keys it; any other return under the key poisons.
+    var selfRetTmpR1506: [String: Bool] = [:]
+    if !CallCollector.r1506Off {
+        for c in collectors {
+            for (k, ts) in c.returnDecls where returnDeclKeyOwner(k) != nil {
+                for (t, _, _) in ts {
+                    let isSelf = t.as(IdentifierTypeSyntax.self).map { $0.name.text == "Self" && $0.genericArgumentClause == nil } ?? false
+                    selfRetTmpR1506[k] = (selfRetTmpR1506[k] ?? true) && isSelf
+                }
+            }
+        }
+    }
+    CallCollector.selfReturnKeysR1506 = Set(selfRetTmpR1506.filter { $0.value }.keys)
     // (member-alias canonicalisation of `returnFactsIdx` happens below, once `memberTypeAliasesR915` exists)
     // R585 (b9) — and a leaf the ORDINARY returns index already answers is left to it: this map may
     // add a resolution where there was none, never replace one (the R584 additive rule).

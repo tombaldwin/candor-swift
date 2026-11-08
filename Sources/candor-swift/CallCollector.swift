@@ -1815,6 +1815,28 @@ final class CallCollector: SyntaxVisitor {
     /// `vars` shadow guard, same `localTypes` additive guard, and the caller emits the same UNQUALIFIED
     /// call `EffBase(…)` written literally emits — so the Driver's `localTypes` ctor arm resolves
     /// `EffBase.init` identically. Every other class-half spelling is answered in `rootOfUnaliased`.
+    /// SOUNDNESS R1506 — the type a metatype-valued `init` base denotes, or nil. `X.self` is peeled (it is the
+    /// identity on a type expression). A protocol-bound spelling (a generic parameter `T: P`, a metatype binder over
+    /// a local protocol `P`, `any P.Type`) answers `P`, whose value reaches the bounded conformer CHA as a `P`-typed
+    /// value does. Anything else must resolve to a TYPE-POSITION root that is not a guessed static-chain hop and that
+    /// is spelled as a type — an unresolved lowercase name falls back to `(name, false)` in `rootOf` and is refused.
+    private func metatypeInitRootR1506(_ raw: ExprSyntax, _ depth: Int) -> String? {
+        var b = Self.peel(raw)
+        while let m = b.as(MemberAccessExprSyntax.self), m.declName.baseName.text == "self", let inner = m.base {
+            b = Self.peel(inner)
+        }
+        if let dr = b.as(DeclReferenceExprSyntax.self) {
+            let n = dr.baseName.text
+            if n == "self" || n == "super" { return nil }          // `self.init(…)` / `super.init(…)` delegate
+            if n == "Self" { return enclosingType }
+            if let p = typeReceiverProto(n) { return p }
+        }
+        let r = rootOf(b, depth + 1)
+        guard let t = r.root, !r.isVar, !r.opaqueHop, t != Self.superMarker,
+              Self.typeLikeName(t.split(separator: ".").last.map(String.init) ?? "") else { return nil }
+        return genericParamNamesFn.contains(t) ? (protoBoundParams[t] ?? typeBoundParams[t] ?? t) : t
+    }
+
     private func typeReceiverType(_ spelling: String) -> String? {
         guard vars[spelling] == nil, !localTypes.contains(spelling) else { return nil }
         if !Self.r584Off, let t = typeBoundParams[spelling] { return t }
@@ -2811,6 +2833,16 @@ final class CallCollector: SyntaxVisitor {
                     vbHit("SELFCTOR", "ctor -> \(et)")
                     return (et, true, [n], false, false)
                 }
+                // SOUNDNESS R1506 — `T()` for a generic parameter `T: P` constructs a conformer of `P`: the value is
+                // `P`-typed, as `T.init()` / `t.init()` are. Only where the name is not itself a local type.
+                // A FUNCTION's own generic parameter only: a TYPE's parameter may be pinned by a constrained extension
+                // (`extension ScopedDisposable where Inner == AnyDisposable { … Inner(d) … }`), where the bound is the
+                // wrong type and re-routes the overload match (measured on the corpus A/B, ReactiveSwift).
+                if !Self.r1506Off, n.first?.isUppercase == true, !localTypes.contains(n), vars[n] == nil,
+                   genericParamNamesFn.contains(n), let p = protoBoundParams[n] ?? typeBoundParams[n] {
+                    vbHit("R1506", "ctor \(n) -> \(p)")
+                    return (p, true, [n], false, false)
+                }
                 if n.first?.isUppercase == true { return (n, true, [n], false, false) }
                 if let rt = returns[n] { return (rt, true, [n], false, false) }
                 if let b = genericReturnBinding(call, leaf: n, depth) { return b }   // SOUNDNESS R1044
@@ -2878,7 +2910,39 @@ final class CallCollector: SyntaxVisitor {
                ma.declName.baseName.text == "init", let b = ma.base,
                let tp = dottedTypePath(Syntax(Self.peel(b))),
                Self.typeLikeName(tp.split(separator: ".").last.map(String.init) ?? "") {
+                // SOUNDNESS R1506 — `Self.init(…)` constructs the ENCLOSING type, exactly as `Self(…)` does (the
+                // SELFCTOR arm above); the literal spelling `Self` names no unit.
+                if !Self.r1506Off, tp == "Self", let et = enclosingType {
+                    vbHit("R1506", "Self.init -> \(et)")
+                    return (et, true, [tp], false, false)
+                }
+                // …and `T.init(…)` for a generic parameter `T: P` / `T: EffBase` constructs a value of the BOUND, as
+                // `T()` and `t.init(…)` do (the type-parameter name itself names no unit).
+                if !Self.r1506Off, !tp.contains("."), !localTypes.contains(tp), vars[tp] == nil,
+                   genericParamNamesFn.contains(tp), let bd = protoBoundParams[tp] ?? typeBoundParams[tp] {   // fn-level, as `T()`
+                    vbHit("R1506", "T.init -> \(bd)")
+                    return (bd, true, [tp], false, false)
+                }
                 return (tp, true, [tp], false, false)
+            }
+            // SOUNDNESS R1506 — `<metatype value>.init(…)` CONSTRUCTS A VALUE OF THE TYPE THAT METATYPE DENOTES.
+            // The arm above reads only a TYPE LITERAL base, so `meta.init().eff()` for `var meta: Loud.Type` typed
+            // nothing and the `.eff()` was dropped (executed: the effect runs, the row was ABSENT) — and so was every
+            // other spelling of a metatype value: a local, a global, a parameter, an array element, a factory's
+            // return, `type(of: x)`, `X.self`, and a generic `T.Type` / `T`. The `init` call itself already resolved
+            // (it is the member-call arm's job, with the subclass fan-out over `required init`); only the VALUE it
+            // returns was untyped. ONE RULE, at the one authority for "what type does this spelling denote": the
+            // base resolves to a TYPE-POSITION root (`isVar: false`, not a guessed static-chain hop), and the value
+            // has that type — exactly what the literal `Loud.init()` / `Loud()` gets, so the subclass fan-out and the
+            // protocol CHA downstream answer it as they answer the literal.
+            // A TYPE-LITERAL base (`TopCrane.init()`) is the arm above's, and stays its alone (so `CANDOR_AI_OFF` still
+            // isolates that mechanism); this one answers a metatype VALUE.
+            if !Self.r1506Off, let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
+               ma.declName.baseName.text == "init", let b = ma.base,
+               !(dottedTypePath(Syntax(Self.peel(b))).map { Self.typeLikeName($0.split(separator: ".").last.map(String.init) ?? "") } ?? false),
+               let t = metatypeInitRootR1506(b, depth) {
+                vbHit("R1506", "init -> \(t)")
+                return (t, true, [t], false, false)
             }
             // SOUNDNESS R838 (the constructor spelling) — `Stream.Iterator()` / `BufferedStream<Int>.Iterator()`
             // constructs a NESTED type a dependency declares. The arm above answers only a LOCAL nested
@@ -2903,6 +2967,23 @@ final class CallCollector: SyntaxVisitor {
             }
             if let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
                let rt = returns[ma.declName.baseName.text] {
+                // SOUNDNESS R1506 — a `-> Self` member returns the RECEIVER's type (`Loud.mkSelf()`, `meta.mkSelf()`,
+                // `x.copy()`); the literal `Self` names no unit, so the chained call was dropped (executed).
+                // ONLY where the receiver's OWN type (or a local supertype / protocol it conforms to) declares that member
+                // returning `Self`: `returns` is keyed by the bare leaf across the module, so `xs.filter { … }` on an
+                // Array is answered "Self" merely because some local type declares `filter() -> Self`.
+                if !Self.r1506Off, rt == "Self", let b = ma.base {
+                    let r = rootOf(b, depth + 1)
+                    let m = ma.declName.baseName.text
+                    func leaf(_ x: String) -> String { x.split(separator: ".").last.map(String.init) ?? x }
+                    if let t = r.root, t != Self.superMarker, !r.opaqueHop, t != "Self",
+                       Self.typeLikeName(leaf(t)),
+                       ([t] + Array(supertypesAll[t] ?? [])).contains(where: {
+                           Self.selfReturnKeysR1506.contains("\($0).\(m)") || Self.selfReturnKeysR1506.contains("\(leaf($0)).\(m)") }) {
+                        vbHit("R1506", "-> Self on \(t)")
+                        return (t, true, [ma.declName.baseName.text], r.mono, false)
+                    }
+                }
                 return (rt, true, [ma.declName.baseName.text], false, false)
             }
             if let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
@@ -3876,6 +3957,12 @@ final class CallCollector: SyntaxVisitor {
     static let selfCtorOff = ProcessInfo.processInfo.environment["CANDOR_SELFCTOR_OFF"] != nil
     /// SOUNDNESS R1492 KILL SWITCH — no full-path field index for `extension A.B.T`, no associated-type field typing.
     static let r1492Off = ProcessInfo.processInfo.environment["CANDOR_R1492_OFF"] != nil
+    /// SOUNDNESS R1506 §1b KILL SWITCH — `CANDOR_R1506_OFF=1`: `<metatype value>.init(…)`, `Self.init(…)` and a
+    /// `-> Self` member on a typed receiver type nothing again, and `any P.Type` is not a metatype annotation (the
+    /// release reading).
+    static let r1506Off = ProcessInfo.processInfo.environment["CANDOR_R1506_OFF"] != nil
+    /// SOUNDNESS R1506 — `Owner.member` keys whose every declaration returns exactly `Self` (Driver). Set once before collection.
+    nonisolated(unsafe) static var selfReturnKeysR1506: Set<String> = []
     /// R1492 per-mechanism switches (each also off under `CANDOR_R1492_OFF`): P the full-path field index, A the
     /// associated-type field typing, I the protocol context for an implicit `.init`, M the path-scoped member alias.
     static let r1492POff = r1492Off || ProcessInfo.processInfo.environment["CANDOR_R1492P_OFF"] != nil

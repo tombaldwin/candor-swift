@@ -950,7 +950,25 @@ final class DeclCollector: SyntaxVisitor {
             // for a type member, applied to a module-scope (or tuple-element) global.
             globalTypes[name] = base.baseName.text
             if isPublicGlobal { globalPublic.insert(name) }
+        } else if let mb = Self.metatypeLiteralR1506(initVal) {
+            // SOUNDNESS R1506 — `let gMeta = Loud.self`: the UNANNOTATED spelling of R585's b7 global (same residual).
+            globalMetatypes[name] = mb
         }
+    }
+    /// SOUNDNESS R1506 — the type a metatype LITERAL initializer names (`Loud.self`, `A.B.self`), or nil. Type-spelled
+    /// components only: `x.self` on a VALUE is legal Swift and names no metatype. Read sites still pass the base through
+    /// `metatypeBaseResolvable` / `metatypeBaseAnswerable`, exactly as an annotated `Loud.Type` does.
+    static func metatypeLiteralR1506(_ e: ExprSyntax) -> String? {
+        guard !CallCollector.r1506Off, let ma = e.as(MemberAccessExprSyntax.self), ma.declName.baseName.text == "self",
+              var cur = ma.base else { return nil }
+        var parts: [String] = []
+        while true {
+            if let dr = cur.as(DeclReferenceExprSyntax.self) { parts.insert(dr.baseName.text, at: 0); break }
+            guard let m = cur.as(MemberAccessExprSyntax.self), let b = m.base else { return nil }
+            parts.insert(m.declName.baseName.text, at: 0); cur = b
+        }
+        guard parts.allSatisfy({ CallCollector.typeLikeName($0) }) else { return nil }
+        return parts.joined(separator: ".")
     }
 
     /// The access modifier written on a declaration, or "" when it has none. `open` and `package` are
@@ -1620,9 +1638,14 @@ final class DeclCollector: SyntaxVisitor {
                     // no answer at all (`typeName` returns nil), so `struct Box { let t: CBase.Type;
                     // func go() { t.validate() } }` read silent-pure. Recorded beside `fields` rather
                     // than inside it for `globalMetatypes`' reason: the two answer different questions.
-                    if let mb = metatypeBaseName(ann.type) { fieldMetatypes[ty, default: [:]][name] = mb }
-                    else if let me = metatypeArrayElementName(ann.type) {
+                    if let mb = metatypeBaseName(ann.type) {
+                        fieldMetatypes[ty, default: [:]][name] = mb
+                        // SOUNDNESS R1506 — and by the FULL PATH, as R1492 keys `fields`: `extension A.B.T { … meta… }`
+                        // reads `fieldMetatypes["A.B.T"]`, which held nothing (executed: `cMeta` ABSENT).
+                        if !CallCollector.r1506Off, r1492Path(ty, tyPath) { fieldMetatypes[tyPath, default: [:]][name] = mb }
+                    } else if let me = metatypeArrayElementName(ann.type) {
                         fieldMetatypeArrayElem[ty, default: [:]][name] = me
+                        if !CallCollector.r1506Off, r1492Path(ty, tyPath) { fieldMetatypeArrayElem[tyPath, default: [:]][name] = me }
                     }
                     if let inner = nestedArrayElementName(ann.type) {   // R278 — `[[T]]`, asked first
                         fieldArrayElemNested[ty, default: [:]][name] = inner
@@ -1667,6 +1690,11 @@ final class DeclCollector: SyntaxVisitor {
                     // literal names its element type; only a literal whose EVERY element constructs the same type counts.
                     fieldArrayElem[ty, default: [:]][name] = elem
                     if r1492Path(ty, tyPath) { fieldArrayElem[tyPath, default: [:]][name] = elem }
+                } else if let initVal = binding.initializer?.value, let mb = Self.metatypeLiteralR1506(initVal) {
+                    // SOUNDNESS R1506 — `var meta = Loud.self`: the UNANNOTATED spelling of R585's b4 field, which
+                    // recorded nothing, so `meta.init().eff()` and `meta.make()` read ABSENT (executed).
+                    fieldMetatypes[ty, default: [:]][name] = mb
+                    if r1492Path(ty, tyPath) { fieldMetatypes[tyPath, default: [:]][name] = mb }
                 } else if let initVal = binding.initializer?.value,
                           let call = initVal.as(FunctionCallExprSyntax.self),
                           let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self) {

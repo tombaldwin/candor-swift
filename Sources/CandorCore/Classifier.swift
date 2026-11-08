@@ -2810,8 +2810,18 @@ public func metatypeBaseName(_ t: TypeSyntax) -> String? {
     if let mt = t.as(MetatypeTypeSyntax.self), mt.metatypeSpecifier.text == "Type" {
         return typeName(mt.baseType).name
     }
+    // SOUNDNESS R1506 — `any P.Type`, the EXISTENTIAL METATYPE: a value holding the metatype of some conformer of `P`.
+    // It parses as `any` wrapping `P.Type`, so the arm above never saw it and `t.make()` / `t.init()` on a parameter
+    // annotated so was ABSENT (executed). Its base is `P`, which reaches the same bounded conformer CHA `_ t: P.Type`
+    // gets for a generic `P`. (`(any P).Type` is a TUPLE-wrapped base and is not this spelling.)
+    if r1506OffCore == false, let sa = t.as(SomeOrAnyTypeSyntax.self), sa.someOrAnySpecifier.text == "any",
+       sa.constraint.is(MetatypeTypeSyntax.self) {
+        return metatypeBaseName(sa.constraint)
+    }
     return nil
 }
+/// SOUNDNESS R1506 §1b KILL SWITCH (the CandorCore half; `CallCollector.r1506Off` reads the same variable).
+public let r1506OffCore = ProcessInfo.processInfo.environment["CANDOR_R1506_OFF"] != nil
 
 /// SOUNDNESS R585 — the ELEMENT of an array of metatypes (`[X.Type]`), or nil. The array spellings
 /// `arrayElementName` answers for ordinary types, asked of the metatype question instead.

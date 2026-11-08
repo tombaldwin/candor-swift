@@ -10,6 +10,14 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R1506: a value built from a metatype now carries its type.** For `var meta: Loud.Type`,
+  `meta.init().eff()` resolved the `init` but left the value it returns untyped, so `.eff()` was dropped (executed: ABSENT).
+  The same held for every other spelling of a metatype value reaching `init`: a local (annotated or `= Loud.self`), a
+  global, a parameter, an array element, a factory's return, `type(of: x)`, `X.self`, a generic `T.Type` / `T` / `T()`
+  bound to a protocol, `any P.Type`, `Self.init()`, and a `Base.Type` holding a subclass. It also held for a `-> Self`
+  member (`Loud.mkSelf().eff()`), for a stored property or global with no annotation initialised `= Loud.self`, and for a
+  metatype field read from `extension A.B.T`. The value now gets the type the literal `Loud()` gives it, including the
+  subclass fan-out and the protocol's conformer set. Gates can turn red. Kill switch `CANDOR_R1506_OFF`.
 - **⚠ SOUNDNESS R1504 — an `extension` on a dependency type no longer silences its constructors and properties.** R656
   closed the method-call half: with ANY `extension DT { }` in the consumer (an empty one included), `DT(v: 1)`, `d.prop`,
   `DT().prop`, and `self.prop` / `self.init(v:)` inside that extension still read ABSENT chained, while the same consumer
