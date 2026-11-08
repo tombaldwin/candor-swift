@@ -10,6 +10,23 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SOUNDNESS R1526: a local collection with no iterator of its own is iterated through its collection witnesses.**
+  The stdlib iterates `struct C: BidirectionalCollection` that declares no `makeIterator` with `IndexingIterator`,
+  which runs `startIndex`, `endIndex`, `subscript`, `index(after:)` and the Index's `==`. R1048 edged only
+  `makeIterator`/`next`, which such a type does not declare, so every spelling read ABSENT while the program performed
+  the effect (executed): `for _ in C()`, `Array(C())`, `C().map {…}`, `C().reversed()`, `C().count`, a generic
+  `<S: Collection>` callee, and `C().combinations(ofCount: 2)` with swift-algorithms chained (29 cells). A plain
+  for-in over a concrete local value edges exactly the `IndexingIterator` set. Everywhere else the value is handed to
+  code that may call any requirement of the iteration protocols the type conforms to, so every declared witness of
+  those requirements (the derived `STDLIB_PROTOCOL_REQUIREMENTS`, filtered to the requirement's own overload shape:
+  `init()` and not `init(count:)`, `subscript(Index)` and not `subscript(column: String)`) is edged, with the Index's
+  `==`/`<`/`<=`/`>`/`>=`. The MUTATING requirements (`append`, `replaceSubrange`, `swapAt`, …) are edged only where
+  the value is handed over for mutation (`&c`, or a mutating stdlib member such as `c.reverse()`). Only a VALUE
+  receiver hands the collection over, never a type path (`BigString._Chunk.Index(…)`). A member that witnesses no
+  requirement is never edged. Known over-approximation: outside a plain for-in, a
+  requirement witness the generic code never calls is still charged (`index(before:)` under `combinations`). Kill
+  switches `CANDOR_R1526_OFF` and `CANDOR_R1526{C,I,M,G,P,W,S}_OFF`.
+
 - **⚠ SOUNDNESS R1523: a wrapper type written over a local sequence now runs that sequence's iterator.**
   `func f(_ i: inout InterspersedSequence<LoudSeq>.Iterator) { _ = i.next() }` ran `LoudSeq`'s iterator (executed: it
   wrote a file) and read `[]` with swift-algorithms chained and in one tree. 0.41.3 covered the call only by a

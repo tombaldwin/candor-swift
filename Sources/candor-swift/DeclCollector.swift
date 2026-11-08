@@ -49,6 +49,9 @@ struct FnInfo {
     /// SOUNDNESS R1499 — reachable by Objective-C dynamic dispatch (`@objc`, `@IBAction`, `dynamic`, or a member of an
     /// `@objcMembers` type): an `AnyObject`-typed receiver can call it with no `override` in sight.
     var isObjcR1499 = false
+    /// SOUNDNESS R1526 — a SUBSCRIPT's parameter types as written (`Index`, `Range<Index>`), so the collection witness
+    /// set can tell `subscript(position: Index)` from `subscript(column: String)`. nil for every other unit.
+    var subscriptParamsR1526: [String]? = nil
     var paramSig: [(type: String?, hasDefault: Bool, variadic: Bool)] = []  // ordered param signature for
                                       // PARAM-TYPE overload resolution: distinguishes same-name overloads
                                       // (`compare(_:Date)` vs `compare(_:DateComparisonType)`), including the
@@ -2494,6 +2497,7 @@ final class DeclCollector: SyntaxVisitor {
             info.enclosingTypePath = tyPath
             info.body = b
             info.isAccessor = true
+            info.subscriptParamsR1526 = node.parameterClause.parameters.map { $0.type.trimmedDescription }
             if let sp = setterParam {
                 info.paramNames.insert(sp)                   // a binder even when its type didn't resolve
                 if let et = elemType { info.params[sp] = et }

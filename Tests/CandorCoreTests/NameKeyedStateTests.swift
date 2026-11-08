@@ -344,6 +344,7 @@ final class NameKeyedStateTests: XCTestCase {
         "memberUnitKeys": .immutableIndex, "genericReturnArgs": .immutableIndex,   // R1032 / R1044
         "platformExtLeaves": .immutableIndex,   // R1071 — member names, not binding names
         "iterableLocalTypes": .immutableIndex,                                     // R1048
+        "collWitnessR1526": .immutableIndex,   // R1526 — keyed by local TYPE names, built once by the Driver
         "autoclosureParams": .deliberatelyKept(
             "R1009: read only together with `fnTyped`, and only where `isBoundLocal`/`binderShadow` say no binder "
             + "has claimed the name — a rebind falls back to the general callback arm"),

@@ -146,6 +146,11 @@ What "resolved-pure" means here, precisely, because it is narrower than it sound
   `contains`, …) on a local iterable, and `Array(s)`/`Set(s)`/`zip` (SOUNDNESS R1048). The caller's
   argument is aligned to the parameter BY LABEL (a labelled, defaulted-skip or `inout` argument answers like a
   positional one), and the same alignment serves R951's comparison witnesses and R974 (c)'s forwarding.
+  A local COLLECTION that declares no iterator is iterated by the stdlib's `IndexingIterator`, so the same routes
+  charge its collection witnesses instead (SOUNDNESS R1526): a plain for-in edges `startIndex`, `endIndex`,
+  `subscript`, `index(after:)` and the Index's `==`; any other route (a generic or foreign callee, a stdlib member or
+  property such as `count`) edges every declared witness of the collection-protocol requirements and the Index's
+  comparison operators.
 
 ## Development
 

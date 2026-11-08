@@ -374,6 +374,9 @@ final class CallCollector: SyntaxVisitor {
     /// SOUNDNESS R1048 — local types that conform (transitively) to a stdlib iteration protocol, or declare a
     /// `next`/`makeIterator`/`makeAsyncIterator` body.
     let iterableLocalTypes: Set<String>
+    /// SOUNDNESS R1526 — local collection type -> the exact units the stdlib runs when it iterates it or a generic
+    /// algorithm takes it (see `CollWitnessR1526`). Built by the Driver from the derived protocol requirements.
+    let collWitnessR1526: [String: CollWitnessR1526]
     let fieldArrayElem: [String: [String: String]]  // Type -> field -> [T] element (self.field loops)
     let fieldArrayElemNested: [String: [String: String]]  // R278 — Type -> field -> INNER element of `[[T]]`
     /// R278 — LOCALS and PARAMETERS whose type is a container OF containers, mapped to the INNER
@@ -1533,6 +1536,7 @@ final class CallCollector: SyntaxVisitor {
          memberUnitKeys: Set<String> = [],
          platformExtLeaves: Set<String> = [],
          iterableLocalTypes: Set<String> = [],
+         collWitnessR1526: [String: CollWitnessR1526] = [:],
          declaredTypes: Set<String>,
          localProtocols: Set<String>, protoBoundParams: [String: String] = [:],
          typeBoundParams: [String: String] = [:],
@@ -1650,6 +1654,7 @@ final class CallCollector: SyntaxVisitor {
         self.memberUnitKeys = memberUnitKeys
         self.platformExtLeaves = platformExtLeaves  // R1071
         self.iterableLocalTypes = iterableLocalTypes
+        self.collWitnessR1526 = collWitnessR1526    // R1526
         self.metatypeReturns = metatypeReturns                      // R585
         self.genericReturnArgs = genericReturnArgs                  // R1044
         self.localGenerics = localGenerics                          // R1044 residual
@@ -8542,7 +8547,7 @@ final class CallCollector: SyntaxVisitor {
     /// call to a member the type lacks falls to the external-supertype fallback, which DISCLOSES
     /// `dispatch:<Super>.next` — the first cut of this added that `Unknown` to 105 swift-collections rows over
     /// types whose iterator is a synthesized or stdlib one.
-    private func iterateLocal(_ t: String, releaseForIn: Bool = false, seq: ExprSyntax? = nil) {
+    private func iterateLocal(_ t: String, releaseForIn: Bool = false, seq: ExprSyntax? = nil, collR1526: Bool = true, mutatesR1526: Bool = false) {
         vbHit("R1048", "iterate \(t)")
         let ownR1515 = iterationOwnersR1515(seq)
         var owners = [t]
@@ -8568,6 +8573,53 @@ final class CallCollector: SyntaxVisitor {
                 calls.append(c)
             }
         }
+        if collR1526 { iterateCollectionR1526(t, forIn: releaseForIn, mutates: mutatesR1526) }
+    }
+    /// SOUNDNESS R1526 — §1b kill switches: (C) the collection's own witnesses; (I) its Index's comparison witnesses;
+    /// (M) an explicit `makeIterator()` on a collection that declares none; (G) the Driver's `#iter` answer.
+    static let r1526Off = ProcessInfo.processInfo.environment["CANDOR_R1526_OFF"] != nil
+    static let r1526COff = r1526Off || ProcessInfo.processInfo.environment["CANDOR_R1526C_OFF"] != nil
+    static let r1526IOff = r1526Off || ProcessInfo.processInfo.environment["CANDOR_R1526I_OFF"] != nil
+    static let r1526MOff = r1526Off || ProcessInfo.processInfo.environment["CANDOR_R1526M_OFF"] != nil
+    static let r1526GOff = r1526Off || ProcessInfo.processInfo.environment["CANDOR_R1526G_OFF"] != nil
+    static let r1526POff = r1526Off || ProcessInfo.processInfo.environment["CANDOR_R1526P_OFF"] != nil
+    static let r1526SOff = r1526Off || ProcessInfo.processInfo.environment["CANDOR_R1526S_OFF"] != nil
+    /// R1526 (S) — `member` is a requirement of a stdlib collection protocol, `t` declares no unit of that name itself, and
+    /// only a LOCAL extension of a stdlib collection protocol does (so `receiverDeclaresOwnMember` answered by name).
+    func stdlibNamesakeR1526(_ t: String, _ member: String) -> Bool {
+        let protos = ["Sequence", "Collection", "BidirectionalCollection", "RandomAccessCollection", "MutableCollection",
+                      "RangeReplaceableCollection"]
+        guard protos.contains(where: { (STDLIB_PROTOCOL_REQUIREMENTS[$0] ?? []).contains(member) }),
+              !memberUnitKeys.contains("\(t).\(member)"), fields[t]?[member] == nil else { return false }
+        let sups = (supertypesAll[t] ?? []).union(classSupertypes[t] ?? [])
+        guard !sups.contains(where: { !protos.contains($0) && memberUnitKeys.contains("\($0).\(member)") }) else { return false }
+        return protos.contains { sups.contains($0) && memberUnitKeys.contains("\($0).\(member)") }
+    }
+    static let r1526WOff = r1526Off || ProcessInfo.processInfo.environment["CANDOR_R1526W_OFF"] != nil
+    /// R1526 (P) — the stdlib `Sequence`/`Collection`/`BidirectionalCollection` PROPERTIES whose implementation runs
+    /// the receiver's witnesses (or hands it to a wrapper that does: `lazy`).
+    static let collPropsR1526: Set<String> = ["count", "first", "last", "isEmpty", "indices", "underestimatedCount", "lazy"]
+    /// SOUNDNESS R1526 — A LOCAL COLLECTION IS ITERATED THROUGH ITS COLLECTION WITNESSES, NOT A `next()` OF ITS OWN.
+    /// `struct C: BidirectionalCollection` that declares no `makeIterator` is iterated by the stdlib's
+    /// `IndexingIterator`, which runs `startIndex`, `endIndex`, `subscript`, `index(after:)` and the Index's `==`;
+    /// R1048 edged only `makeIterator`/`next`, which such a type does not declare, so every spelling was ABSENT —
+    /// `for _ in C()`, `Array(C())`, `C().map {…}`, `C().reversed()`, a generic `<S: Collection>` parameter,
+    /// `LoudColl().combinations(ofCount: 2)` over a chained swift-algorithms (executed: each wrote its file).
+    /// A plain `for … in` on a concrete local value runs exactly the `IndexingIterator` set (`forIn`). Everywhere
+    /// else the value is handed to code that may call ANY requirement of the iteration protocols the type conforms
+    /// to (a generic algorithm, a wrapper, a stdlib member), so every declared witness of those requirements is
+    /// edged, with the Index's `==`/`<`/`<=`/`>`/`>=`. The set is the Driver's, read off the derived
+    /// `STDLIB_PROTOCOL_REQUIREMENTS`: a member that witnesses no such requirement is never edged. A RESOLUTION —
+    /// each edge is a real declared unit, never an `Unknown`.
+    func iterateCollectionR1526(_ t: String, forIn: Bool, mutates: Bool = false) {
+        guard !Self.r1048Off, let cw = collWitnessR1526[t] else { return }
+        var qs: [String] = []
+        if !Self.r1526COff { qs += forIn ? cw.iterNarrow : cw.broad }
+        if !Self.r1526COff, !forIn, mutates { qs += cw.mutating }
+        if !Self.r1526IOff { qs += forIn ? cw.indexNarrow : cw.indexBroad }
+        guard !qs.isEmpty else { return }
+        vbHit("R1526", "\(forIn ? "iterate" : "hand") \(t) \(qs.count)")
+        for q in qs { calls.append(Call(path: q, leaf: CollWitnessR1526.member(q), strArg: nil, typed: true, args: [], argTypes: [])) }
     }
     /// SOUNDNESS R1515 (A) — the full path of the type `spelled` names when written inside local type `t`'s own
     /// declaration: `t`'s nested type of that name, innermost first (`S.It` for `It` inside `S`), or a full path as
@@ -8605,7 +8657,9 @@ final class CallCollector: SyntaxVisitor {
         guard !Self.r1048Off, calleeIsForeign else { return }
         for a in node.arguments {
             if let t = rootOf(a.expression).root, iterableLocalTypes.contains(t),
-               !Self.peel(a.expression).is(ClosureExprSyntax.self) { iterateLocal(t, seq: a.expression) }
+               !Self.peel(a.expression).is(ClosureExprSyntax.self) {
+                iterateLocal(t, seq: a.expression, mutatesR1526: a.expression.is(InOutExprSyntax.self))   // R1526: `&c` may be mutated
+            }
             else { iterateTypeArgsR1523(a.expression, "arg") }   // SOUNDNESS R1523
         }
     }
@@ -9571,7 +9625,20 @@ final class CallCollector: SyntaxVisitor {
             if !Self.r1048Off, let b = ma.base {
                 if let t = base.root, iterableLocalTypes.contains(t), !["makeIterator", "next", "makeAsyncIterator"].contains(member),
                    !receiverDeclaresOwnMember(t, member) {
-                    iterateLocal(t, seq: b)
+                    // SOUNDNESS R1526 — only a VALUE receiver hands the collection over: `BigString._Chunk.Index(…)` roots at
+                    // `BigString` as a TYPE path, and the first corpus cut edged all 47 of BigString's witnesses from it.
+                    iterateLocal(t, seq: b, collR1526: base.isVar, mutatesR1526: STDLIB_MUTATING_MEMBERS.contains(member))
+                } else if !Self.r1526SOff, base.isVar, let t = base.root, collWitnessR1526[t] != nil, stdlibNamesakeR1526(t, member) {
+                    // SOUNDNESS R1526 (S) — `m.partition(by:)` on a local collection, where a LOCAL `extension
+                    // MutableCollection` declares only a same-named `partition(subrange:by:)`: `receiverDeclaresOwnMember` is
+                    // name-only, so the stdlib requirement that runs read as the extension's (executed, one tree: ABSENT).
+                    // The name is a stdlib collection REQUIREMENT the type does not declare itself: its witnesses run.
+                    iterateCollectionR1526(t, forIn: false, mutates: STDLIB_MUTATING_MEMBERS.contains(member))
+                } else if !Self.r1526MOff, member == "makeIterator", node.arguments.isEmpty, base.isVar, let t = base.root,
+                          collWitnessR1526[t] != nil, !receiverDeclaresOwnMember(t, member) {
+                    // SOUNDNESS R1526 (M) — `C().makeIterator()` on a collection that declares none is the stdlib's
+                    // `IndexingIterator` over `C`: its `next()` runs exactly the for-in set.
+                    iterateCollectionR1526(t, forIn: true)
                 } else if STDLIB_ITERATING_MEMBERS.contains(member) {
                     // SOUNDNESS R1523 — `i.next()` / `s.map {…}` on a value written `G<Local>` / `G<Local>.Iterator`
                     iterateTypeArgsR1523(b, "member \(member)")
@@ -10581,6 +10648,14 @@ final class CallCollector: SyntaxVisitor {
                         propertyEdges.insert("\(t).\(prop)")
                     }
                 }
+            }
+            // SOUNDNESS R1526 (P) — the PROPERTY spelling of a stdlib algorithm on a local collection: `c.count`,
+            // `c.last`, `c.first`, `c.isEmpty`, `c.indices`, `c.lazy` on a type that declares no such member run the
+            // stdlib's `Collection`/`BidirectionalCollection` extension, which calls the type's own witnesses
+            // (`count` walks `index(after:)` to `endIndex`; `last` is `index(before: endIndex)`). Executed: ABSENT before.
+            if !Self.r1526POff, recv.isVar, let t = recvRoot, collWitnessR1526[t] != nil, Self.collPropsR1526.contains(prop),
+               !receiverDeclaresOwnMember(t, prop), fields[t]?[prop] == nil {
+                iterateCollectionR1526(t, forIn: false)
             }
             // SOUNDNESS R1071 — the PROPERTY spelling of the `<platext>.` marker: `a.stampedCount` with
             // `extension Collection { var stampedCount: Int { … } }` runs that getter on a `[Int]` exactly as the
@@ -13421,4 +13496,29 @@ struct AiTypeIndex {
     var supertypes: [String: Set<String>] = [:]
     var enclosingTypePath: String? = nil
     var genericNames: Set<String> = []
+}
+
+/// SOUNDNESS R1526 — the units the stdlib runs for a LOCAL collection type: full quals, so each call resolves to
+/// exactly that declaration. `iterNarrow`/`indexNarrow`: what `IndexingIterator` runs (a for-in over a type that
+/// declares no `makeIterator`). `broad`/`indexBroad`: every declared witness of an iteration-protocol requirement
+/// the type conforms to, and every comparison witness of its Index — what a generic algorithm may call.
+struct CollWitnessR1526 {
+    var iterNarrow: [String] = [], broad: [String] = [], indexNarrow: [String] = [], indexBroad: [String] = []
+    /// The MUTATING requirements' witnesses (`append`, `replaceSubrange`, `swapAt`, `init`, …), edged only where the value is
+    /// handed over for mutation: an `inout` argument or a mutating stdlib member on it. Code that receives the value by
+    /// copy can only mutate a copy it made. The first corpus cut edged swift-crypto's `SecureBytes.reserveCapacity` (whose
+    /// `Backing.create` overload union already reads `Rand`) into 519 rows that only read the bytes.
+    var mutating: [String] = []
+    static let mutatingReqs: Set<String> = ["partition", "swapAt", "withContiguousMutableStorageIfAvailable", "append", "init",
+        "insert", "remove", "removeAll", "removeFirst", "removeSubrange", "replaceSubrange", "reserveCapacity"]
+    /// The member name of a full qual: `Outer.C.index(Idx)#1` -> `index`, `Idx.<` -> `<`.
+    static func member(_ q: String) -> String {
+        let head = String(q.prefix { $0 != "(" && $0 != "#" })
+        if let r = head.range(of: ".", options: .backwards) {
+            let m = String(head[r.upperBound...])
+            // an operator spelled with dots (`..<`) — not one of ours, but read it whole
+            return m.isEmpty ? head : m
+        }
+        return head
+    }
 }

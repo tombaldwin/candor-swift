@@ -4027,6 +4027,92 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
     // SOUNDNESS R1270 (witness side) — `<op>~het`: types declaring `==`/`<` ONLY with a foreign operand type.
     for (op, ts) in hetWitnessR1270 { opWitnessTypesR951["\(op)~het"] = ts.subtracting(selfWitnessR1270[op] ?? []) }
+    // SOUNDNESS R1526 — each LOCAL collection type's iteration witnesses (see `CallCollector.iterateCollectionR1526`).
+    // The requirement names are the derived `STDLIB_PROTOCOL_REQUIREMENTS` of the collection protocols the type
+    // conforms to (transitively, `subtypesOf`); only units the type DECLARES are listed, by full qual.
+    var collWitnessR1526: [String: CollWitnessR1526] = [:]
+    /// R1526 — does unit `f` (member `m` of a local collection) have the SHAPE of a collection-protocol requirement? The derived
+    /// table names requirements by base name only, and a type's other overloads of that name are not witnesses: the first
+    /// corpus cut edged swift-crypto's `SecureBytes.init(count:)` (random bytes) into every `==` and GRDB's
+    /// `Row.subscript(column: String)` into every iteration. A label list per overloaded name, and a subscript whose
+    /// parameter is the Index (or a range of it); an unknown Index type admits every subscript (the sound side).
+    func requirementShapeR1526(_ m: String, _ f: FnInfo, _ idx: Set<String>) -> Bool {
+        let l = f.paramLabels
+        switch m {
+        case "init": return l.isEmpty || l == ["_"] || l == ["repeating", "count"]
+        case "index": return l == ["after"] || l == ["before"] || l == ["_", "offsetBy"] || l == ["_", "offsetBy", "limitedBy"]
+        case "formIndex": return l == ["after"] || l == ["before"] || l == ["_", "offsetBy"] || l == ["_", "offsetBy", "limitedBy"]
+        case "distance": return l == ["from", "to"]
+        case "subscript":
+            guard !idx.isEmpty, let ps = f.subscriptParamsR1526 else { return true }
+            guard ps.count == 1, let p = ps.first else { return false }
+            let core = p.replacingOccurrences(of: " ", with: "")
+            return idx.contains { i in core == i || core == "Index" || core == "Range<\(i)>" || core == "Range<Index>" }
+                || core.hasPrefix("Range<") || core.hasPrefix("someRangeExpression") || core.hasPrefix("(UnboundedRange")
+        default: return true
+        }
+    }
+    if !CallCollector.r1526Off {
+        let collProtos = ["Sequence", "Collection", "BidirectionalCollection", "RandomAccessCollection",
+                          "MutableCollection", "RangeReplaceableCollection"]
+        var byOwnerMember: [String: [FnInfo]] = [:], byPathMember: [String: [FnInfo]] = [:]
+        for f in allFns {
+            guard let et = f.enclosingType else { continue }
+            let sq = f.simpleQual.hasPrefix(et + ".") ? String(f.simpleQual.dropFirst(et.count + 1))
+                : String(f.simpleQual.split(separator: ".").last ?? "")
+            let m = String(sq.prefix { $0 != "(" && $0 != "#" })
+            byOwnerMember["\(et).\(m)", default: []].append(f)
+            if let tp = f.enclosingTypePath { byPathMember["\(tp).\(m)", default: []].append(f) }
+        }
+        for t in iterableLocalTypes.sorted() {
+            let protos = collProtos.filter { subtypesOf[$0]?.contains(t) ?? false }
+            guard protos.contains(where: { $0 != "Sequence" }) else { continue }   // a collection, not a bare Sequence
+            var reqs = Set<String>()
+            for p in protos { reqs.formUnion(STDLIB_PROTOCOL_REQUIREMENTS[p] ?? []) }
+            reqs.remove("makeIterator")   // R1048's own edge
+            var cw = CollWitnessR1526(), idxTypes = Set<String>()
+            let declaresIterator = memberUnitKeys.contains("\(t).makeIterator")
+            for m in ["index", "formIndex"] {
+                for f in byOwnerMember["\(t).\(m)"] ?? [] where f.paramLabels.first == "after" || f.paramLabels.first == "before" {
+                    if let it = f.paramSig.first?.type { idxTypes.insert(it) }
+                }
+            }
+            if let s = returnFactsIdx["\(t).startIndex"]?.scalar { idxTypes.insert(s) }
+            for m in reqs.sorted() {
+                for f in byOwnerMember["\(t).\(m)"] ?? [] where requirementShapeR1526(m, f, idxTypes) {
+                    if CollWitnessR1526.mutatingReqs.contains(m) { cw.mutating.append(f.qual) } else { cw.broad.append(f.qual) }
+                    guard !declaresIterator else { continue }
+                    let narrow: Bool
+                    switch m {
+                    case "startIndex", "endIndex": narrow = true
+                    case "index", "formIndex": narrow = f.paramLabels == ["after"]
+                    // a subscript's getter and setter share one unit and record no parameter signature: every one
+                    case "subscript": narrow = !(f.subscriptParamsR1526?.first?.hasPrefix("Range<") ?? false)
+                    default: narrow = false
+                    }
+                    if narrow { cw.iterNarrow.append(f.qual) }
+                }
+            }
+            // the Index's comparison witnesses: a type nested in `t` first (`C.Index`), else by its simple name
+            for i in idxTypes.sorted() where localTypes.contains(i) {
+                for op in ["==", "<", "<=", ">", ">="] {
+                    // keyed by the collection's FULL path (`BigSubstring.UTF16View.Index`): the bare leaf `Index` unions every
+                    // type of that name in the scan (the first cut edged swift-collections' `RigidSet.Index.==`)
+                    let tPaths = Set((byOwnerMember.first { $0.key.hasPrefix("\(t).") }?.value ?? []).compactMap(\.enclosingTypePath))
+                    let nested = tPaths.compactMap { byPathMember["\($0).\(i).\(op)"] }.flatMap { $0 }
+                    let us = !nested.isEmpty ? nested : (byPathMember["\(t).\(i).\(op)"] ?? byOwnerMember["\(i).\(op)"] ?? [])
+                    for f in us {
+                        cw.indexBroad.append(f.qual)
+                        if op == "==", !declaresIterator { cw.indexNarrow.append(f.qual) }
+                    }
+                }
+            }
+            func dedup(_ xs: [String]) -> [String] { var seen = Set<String>(); return xs.filter { seen.insert($0).inserted } }
+            cw.broad = dedup(cw.broad); cw.iterNarrow = dedup(cw.iterNarrow); cw.mutating = dedup(cw.mutating)
+            cw.indexBroad = dedup(cw.indexBroad); cw.indexNarrow = dedup(cw.indexNarrow)
+            if !(cw.broad.isEmpty && cw.indexBroad.isEmpty && cw.mutating.isEmpty) { collWitnessR1526[t] = cw }
+        }
+    }
     var aiBase = AiTypeIndex()
     var aiSharedPaths = Set<String>()      // the FULL paths added above — the canonicaliser's precise spellings
     if !CallCollector.aiOff {
@@ -4512,6 +4598,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                memberUnitKeys: memberUnitKeys,                                         // R1032
                                platformExtLeaves: platformExtLeaves,                                   // R1071
                                iterableLocalTypes: iterableLocalTypes,                                 // R1048
+                               collWitnessR1526: collWitnessR1526,                                     // R1526
                                declaredTypes: declaredTypes,
                                localProtocols: localProtocolNames,
                                // SOUNDNESS R563 — the unit's GENERIC PARAMETERS that are bound to a LOCAL
@@ -7487,6 +7574,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             if CallCollector.r1490Probe, !ts.isEmpty {
                 FileHandle.standardError.write("R1490HIT local \(how) \(caller) \(type).\(w) -> \(ts.sorted())\n".data(using: .utf8)!)
             }
+            collectionWitnessR1526(type, w, declared: !ts.isEmpty, caller: caller)
             // an extended-only type whose witness is not declared here is still the dependency's (R1490 residual (6))
             if !(ts.isEmpty && extendedOnly && !CallCollector.r1490r6Off) { return }
         }
@@ -7500,6 +7588,36 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         if CallCollector.r1490Probe, !hits.isEmpty {
             FileHandle.standardError.write("R1490HIT chained \(how) \(caller) \(type).\(w)\n".data(using: .utf8)!)
         }
+    }
+    // SOUNDNESS R1526 (W) — A COLLECTION REQUIREMENT ANSWERED ON A LOCAL COLLECTION. R1490 answers `s<k>:@Collection~endIndex`
+    // with the type's own `endIndex` only; the generic code that read it then COMPARES the index it got (`current ==
+    // base.endIndex` in swift-algorithms' `CycledSequence.Iterator.next`), which runs the Index's `==`/`<` and was never a
+    // recorded requirement — and a requirement the type does not declare (`count`, `isEmpty`, `formIndex`, `swapAt`) runs
+    // the stdlib default, whose body calls the type's other witnesses, and answered nothing (executed, one tree: ABSENT).
+    // So an index-producing requirement also edges the Index's comparison witnesses, and an undeclared one edges the
+    // collection's witness set (`makeIterator`: `IndexingIterator`'s, the for-in set). Every edge is a declared unit.
+    func collectionWitnessR1526(_ type: String, _ w: String, declared: Bool, caller: String) {
+        guard !CallCollector.r1526WOff, let cw = collWitnessR1526[type] ?? collWitnessR1526[CallCollector.leafR1176(type)] else { return }
+        let iterReqs: Set<String> = ["makeIterator", "underestimatedCount", "withContiguousStorageIfAvailable", "count", "distance",
+            "endIndex", "formIndex", "index", "indices", "isEmpty", "startIndex", "subscript", "partition", "swapAt",
+            "withContiguousMutableStorageIfAvailable", "append", "insert", "remove", "removeAll", "removeFirst",
+            "removeSubrange", "replaceSubrange", "reserveCapacity"]
+        guard iterReqs.contains(w) else { return }
+        var qs: [String] = []
+        if !CallCollector.r1526IOff, ["startIndex", "endIndex", "index", "formIndex", "indices"].contains(w) { qs += cw.indexBroad }
+        if !declared {
+            if w == "makeIterator" {
+                if !CallCollector.r1526COff { qs += cw.iterNarrow }
+                if !CallCollector.r1526IOff { qs += cw.indexNarrow }
+            } else {
+                if !CallCollector.r1526COff { qs += cw.broad }
+                if !CallCollector.r1526COff, CollWitnessR1526.mutatingReqs.contains(w) { qs += cw.mutating }
+                if !CallCollector.r1526IOff { qs += cw.indexBroad }
+            }
+        }
+        guard !qs.isEmpty else { return }
+        edges[caller, default: []].formUnion(qs)
+        if CallCollector.r1490Probe { FileHandle.standardError.write("R1526HIT \(caller) \(type).\(w) +\(qs.count)\n".data(using: .utf8)!) }
     }
     // SOUNDNESS R1515 — see `CallCollector.assocRequirementR1515`.
     func parseAssocReqR1515(_ head: String) -> (k: Int, assoc: String, owner: String)? {
@@ -7535,8 +7653,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
     var r1515Asked = Set<String>()
     func answerAssocR1515(_ caller: String, _ x: LocalGenericArg, _ assoc: String, _ proto: String?, _ w: String, _ depth: Int) {
-        guard depth < 8, r1515Asked.insert("\(caller)\u{1}\(x.name)\u{1}\(assoc)\u{1}\(w)\u{1}\(x.args.count)").inserted,
-              let a = assocTypeR1515(x.name, assoc).map(localSpellingR1515) else { return }
+        guard depth < 8, r1515Asked.insert("\(caller)\u{1}\(x.name)\u{1}\(assoc)\u{1}\(w)\u{1}\(x.args.count)").inserted else { return }
+        guard let a = assocTypeR1515(x.name, assoc).map(localSpellingR1515) else {
+            // SOUNDNESS R1526 (W) — a local collection with no iterator of its own: its `Iterator` is the stdlib's
+            // `IndexingIterator`, whose `next` runs the collection's for-in witness set.
+            if assoc == "Iterator", w == "next" { collectionWitnessR1526(x.name, "makeIterator", declared: false, caller: caller) }
+            return
+        }
         if CallCollector.r1490Probe { FileHandle.standardError.write("R1515HIT \(caller) \(x.name).\(assoc) -> \(a).\(w)\n".data(using: .utf8)!) }
         answerWitnessR1490(a, w, proto: proto, caller: caller, how: "assoc")
         // the witness's OWN associated-type requirements, instantiated by x's arguments (`Sq<Sq<Loud>>`)
@@ -7634,6 +7757,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             for m in ["makeIterator", "next", "makeAsyncIterator"] {
                                 edges[site.caller, default: []].formUnion(resolveQual("\(o).\(m)"))
                             }
+                        }
+                        // SOUNDNESS R1526 (G) — the argument is a local COLLECTION: the callee's generic code may run
+                        // any of its collection witnesses (`CallCollector.iterateCollectionR1526`, the broad set).
+                        if !CallCollector.r1526GOff, let cw = collWitnessR1526[x] {
+                            var qs = CallCollector.r1526COff ? [] : cw.broad
+                            if !CallCollector.r1526IOff { qs += cw.indexBroad }
+                            edges[site.caller, default: []].formUnion(qs)
                         }
                         continue
                     }
