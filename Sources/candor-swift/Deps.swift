@@ -586,8 +586,28 @@ private let r567bOff = ProcessInfo.processInfo.environment["CANDOR_R567B_OFF"] !
 /// the pre-fix behaviour, so `DepFreeNameShadowProcessTests` can be SHOWN to fail without a revert.
 private let r616Off = ProcessInfo.processInfo.environment["CANDOR_R616_OFF"] != nil
 
+/// §1b KILL SWITCH for SOUNDNESS R1551 — restores the pre-⟨0.42⟩ key derivation (split inside the
+/// disambiguator; bare key only from the leaf's first `(`), i.e. exactly the pre-fix key set.
+private let r1551Off = ProcessInfo.processInfo.environment["CANDOR_R1551_OFF"] != nil
+/// …and its REACH probe: one `R1551HIT <pkg>#<qual>` stderr line per chained entry whose segmentation the
+/// ⟨0.42⟩ rule changes (a separator inside its disambiguator, or a bare `#<N>`), so a corpus A/B can say
+/// how many producer entries the change reached.
+private let r1551Probe = ProcessInfo.processInfo.environment["CANDOR_R1551_PROBE"] != nil
+
+/// ⟨0.42⟩ SOUNDNESS R1551 — split OUTSIDE the disambiguator (CandorCore `nameSegments`). The old split
+/// made `Box.act(Models.Inner.Rec)`'s leaf `Rec)`, so the R567(b) bare-path key below never saw the `(`
+/// and a consumer's `Box.act(r)` joined NOTHING: `[]`, no `Unknown`, no `invisible`, `deny Fs` exit 0
+/// over a call that reads a file — while the same text with an unqualified `Rec` joined.
 private func qualSegments(_ qual: String) -> [String] {
-    qual.split(whereSeparator: { $0 == "." || $0 == ":" }).map(String.init)
+    r1551Off ? legacySegments(qual) : nameSegments(qual)
+}
+
+/// The OWNER part of a `pkg#Owner.member…` key — everything before the last separator OUTSIDE the
+/// disambiguator (R1551: `lastIndex(of: ".")` on `Dep#Box.make(Models.Rec)` answered `Dep#Box.make(Models`).
+private func ownerOfKey(_ k: String) -> String? {
+    let probe = r1551Off ? k : barePath(k)
+    guard let dot = probe.lastIndex(of: "."), probe[..<dot].contains("#") else { return nil }
+    return String(probe[..<dot])
 }
 
 /// Load the sibling reports named by `spec` (whitespace/colon/comma-separated paths — the family
@@ -706,9 +726,7 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
                 idx.insertReturn(key: fnKey, ty)
                 // R832 — both ends name a type the producer declares: the factory's owner and its answer.
                 idx.mentionedTypes.insert(ty)
-                if let dot = fnKey.lastIndex(of: "."), fnKey[..<dot].contains("#") {
-                    idx.mentionedTypes.insert(String(fnKey[..<dot]))
-                }
+                if let owner = ownerOfKey(fnKey) { idx.mentionedTypes.insert(owner) }
             }
         }
         for pkg in (obj?["packages"] as? [String]) ?? [] where !pkg.isEmpty { register(pkg) }
@@ -720,7 +738,7 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
             for k in ((ts["types"] as? [String: Any]) ?? [:]).keys where k.contains("#") { idx.mentionedTypes.insert(k) }
             for (k, v) in (ts["returnsProtocol"] as? [String: Any]) ?? [:] {
                 if let v = v as? String, v.contains("#") { idx.mentionedTypes.insert(v) }
-                if let dot = k.lastIndex(of: "."), k[..<dot].contains("#") { idx.mentionedTypes.insert(String(k[..<dot])) }
+                if let owner = ownerOfKey(k) { idx.mentionedTypes.insert(owner) }
             }
         }
 
@@ -866,6 +884,10 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
             // disclosure, never to silence.
             let segs = qualSegments(qual)
             guard let leaf = segs.last else { continue }
+            if r1551Probe, !r1551Off,
+               segs != legacySegments(qual) || (leaf.firstIndex(of: "(") == nil && barePath(leaf) != leaf) {
+                FileHandle.standardError.write("R1551HIT\t\(pkg)#\(qual)\n".data(using: .utf8)!)
+            }
             var keys: [String] = ["\(pkg)#\(leaf)"]
             if segs.count >= 2 { keys.append("\(pkg)#\(segs[segs.count - 2]).\(leaf)") }
             let full = "\(pkg)#\(segs.joined(separator: "."))"
@@ -925,9 +947,13 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
             // §1b KILL SWITCH — `CANDOR_R567B_OFF=1` restores the free-function-only restriction, i.e.
             // exactly the pre-fix key set, so `OverloadedDepMemberKeyProcessTests` can be SHOWN to fail
             // without a revert (a gate that has never failed has not been shown to be a gate).
-            if let paren = leaf.firstIndex(of: "("), paren != leaf.startIndex,
-               !(r567bOff && segs.count > 1) {
-                let bare = String(leaf[..<paren])
+            // ⟨0.42⟩ R1551 — the bare leaf is the leaf with its DISAMBIGUATOR removed (CandorCore
+            // `barePath`): the parenthesised group AND a positional `#<N>` — `act(Int)#1` and a global's
+            // `cfg#1` are members of the bare path too, and a consumer can spell neither suffix.
+            let bareLeaf: String? = r1551Off
+                ? leaf.firstIndex(of: "(").flatMap { $0 != leaf.startIndex ? String(leaf[..<$0]) : nil }
+                : { let b = barePath(leaf); return (b != leaf && !b.isEmpty) ? b : nil }()
+            if let bare = bareLeaf, !(r567bOff && segs.count > 1) {
                 let bareSegs = segs.dropLast() + [bare]
                 var bareKeys: [String] = ["\(pkg)#\(bare)"]
                 if bareSegs.count >= 2 {
@@ -943,9 +969,7 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
             // spells it bare — the same reason the key list above carries both.
             if segs.count == 1 {
                 idx.freeLeaves.insert("\(pkg)#\(leaf)")
-                if let paren = leaf.firstIndex(of: "("), paren != leaf.startIndex {
-                    idx.freeLeaves.insert("\(pkg)#\(String(leaf[..<paren]))")
-                }
+                if let bare = bareLeaf { idx.freeLeaves.insert("\(pkg)#\(bare)") }
             }
             let overrideUnion = isUnionEntry && hash.map { realHashesInReport.contains($0) } == true
             for k in keys { idx.insert(key: k, entry, overrideUnion: overrideUnion, interfaceUnion: isUnionEntry) }

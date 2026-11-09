@@ -1922,10 +1922,28 @@ do {
     // ownersByTail tracks the DISTINCT full owner paths per bare tail, for the ambiguity guard below.
     var ownerMethods: [String: [(method: String, qual: String)]] = [:]
     var ownersByTail: [String: Set<String>] = [:]
+    // SOUNDNESS R1560 — SPLIT OUTSIDE THE DISAMBIGUATOR (§2 ⟨0.42⟩). `lastIndex(of: ".")` on an overloaded
+    // implementor `Impl.run(Models.Rec)` answered owner `Impl.run(Models`, method `Rec)`, so `Impl` owned no
+    // `run` here and the ⟨0.39⟩ union entry `Runner.run` was never published: a chained consumer's
+    // `x.run(…)` through `any Runner` read `[]` (and, with R1551 closed, `Unknown`) over an implementor that
+    // writes a file — while the same text with an unqualified parameter type published `Runner.run(Rec)`.
+    // Kill switch `CANDOR_R1560_OFF` restores the old split.
+    let r1560Off = ProcessInfo.processInfo.environment["CANDOR_R1560_OFF"] != nil
     for qual in reportQuals {
-        guard let dot = qual.lastIndex(of: ".") else { continue }
-        let owner = String(qual[qual.startIndex..<dot])
-        let method = String(qual[qual.index(after: dot)...])
+        let owner: String, method: String
+        if r1560Off {
+            guard let dot = qual.lastIndex(of: ".") else { continue }
+            owner = String(qual[qual.startIndex..<dot])
+            method = String(qual[qual.index(after: dot)...])
+        } else {
+            let segs = nameSegments(qual)
+            guard segs.count >= 2 else { continue }
+            owner = segs.dropLast().joined(separator: ".")
+            method = segs[segs.count - 1]
+            if ProcessInfo.processInfo.environment["CANDOR_R1551_PROBE"] != nil, segs != legacySegments(qual) {
+                FileHandle.standardError.write("R1560HIT\t\(qual)\n".data(using: .utf8)!)
+            }
+        }
         let tail = owner.lastIndex(of: ".").map { String(owner[owner.index(after: $0)...]) } ?? owner
         ownerMethods[tail, default: []].append((method, qual))
         ownersByTail[tail, default: []].insert(owner)

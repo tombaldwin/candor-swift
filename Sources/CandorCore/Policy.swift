@@ -779,6 +779,79 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
                         usedAliases: usedAliases.sorted(), ignored: ignored, accepts: accepts)
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ⟨0.42⟩ CO-PATH UNITS — SPEC §2 ⟨0.42⟩ and §6.2 Scope matching ⟨0.42⟩ (SOUNDNESS R1549, R1550, R1551).
+// A co-path unit's `fn` ends in a DISAMBIGUATOR: a balanced parenthesised group opened directly after the
+// last segment's name, optionally followed by `#<N>`, or a `#<N>` alone (`cfg#1`). This engine's own
+// producer writes `Box.act(Models.Inner.Rec)` and `Box.act(Int)#1`, and other engines' reports chained in
+// write `bank.Bank.pay(ua.user.User)` and `m::S::act(tm::Tr)`. The group's CONTENT carries the separators
+// `.` and `::`, and every reader of a name below used to split on them — so `Inner` was a path segment of
+// a function that lives in `Box`. Three readers, three defects, one rule:
+//   - `scopeMatches` (R1549, fail-closed): `deny Fs Inner` fired on a function that merely TAKES the type;
+//   - `scopeMatchesPermitted` (R1550, SILENT): `only callEff -> Inner` was satisfied by that callee;
+//   - the chained key derivation in `loadDepReports` (R1551, SILENT): the leaf was `Rec)`, so no bare-path
+//     key `Dep#Box.act` existed and a consumer's `Box.act(r)` joined nothing and read PURE.
+// A parenthesised group that BEGINS a segment (candor-scan's tuple self type
+// `row::convert::(T1,T2)::from_row_opt`) is a path segment, not a disambiguator, and keeps the old split.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+/// §1b KILL SWITCHES, one per reader, so each fix can be SHOWN to fail without a revert.
+public let r1549Off = ProcessInfo.processInfo.environment["CANDOR_R1549_OFF"] != nil
+public let r1550Off = ProcessInfo.processInfo.environment["CANDOR_R1550_OFF"] != nil
+
+/// The pre-⟨0.42⟩ segmentation: every `.` and `:` is a separator, empty parts dropped.
+public func legacySegments(_ name: String) -> [String] {
+    name.split(whereSeparator: { $0 == "." || $0 == ":" }).map(String.init)
+}
+
+/// Where `name`'s disambiguator starts, or nil if it has none. The disambiguator is a trailing `#<N>`
+/// (decimal), preceded optionally by a balanced `( … )` group that ENDS the remaining name and opens
+/// directly after a name character (not after a separator, and not at the start).
+public func disambiguatorStart(_ name: String) -> String.Index? {
+    var end = name.endIndex
+    var hashStart: String.Index? = nil
+    if let h = name.lastIndex(of: "#") {
+        let digits = name[name.index(after: h)...]
+        if !digits.isEmpty, digits.allSatisfy({ $0.isASCII && $0.isNumber }), h != name.startIndex {
+            hashStart = h; end = h
+        }
+    }
+    let body = name[..<end]
+    guard body.last == ")" else { return hashStart }
+    var depth = 0
+    var j = body.index(before: body.endIndex)
+    while true {
+        let c = body[j]
+        if c == ")" { depth += 1 } else if c == "(" {
+            depth -= 1
+            if depth == 0 {
+                guard j != body.startIndex else { return hashStart }
+                let prev = body[body.index(before: j)]
+                return (prev == "." || prev == ":") ? hashStart : j
+            }
+        }
+        if j == body.startIndex { return hashStart }   // unbalanced: no group
+        j = body.index(before: j)
+    }
+}
+
+/// The ⟨0.42⟩ BARE PATH: `name` with its disambiguator removed.
+public func barePath(_ name: String) -> String {
+    disambiguatorStart(name).map { String(name[..<$0]) } ?? name
+}
+
+/// §6.2 ⟨0.42⟩ segmentation: split on `.`/`:` OUTSIDE the disambiguator only, which stays attached to the
+/// last segment — `Box.act(Models.Inner.Rec)` is `["Box", "act(Models.Inner.Rec)"]`. A scope is segmented
+/// by the same rule.
+public func nameSegments(_ name: String) -> [String] {
+    guard let d = disambiguatorStart(name) else { return legacySegments(name) }
+    var segs = legacySegments(String(name[..<d]))
+    let tail = String(name[d...])
+    if segs.isEmpty { return [tail] }
+    segs[segs.count - 1] += tail
+    return segs
+}
+
 /// §6.2 scope match: segment run, last segment a prefix. Segments split on BOTH `.` and `::` (empty
 /// parts filtered), mirroring Rust/Java's `name_segments` — so a shared `::`-scoped policy (Rust/Swift
 /// path syntax) matches Swift names too, not just dotted ones. Splitting on `:` is safe: a `:` only ever
@@ -794,8 +867,10 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
 /// reach. The `from` side keeps the prefix rule — it selects what the rule BINDS, so more is safer.
 public func scopeMatchesPermitted(_ name: String, _ scope: String) -> Bool {
     if scope.isEmpty { return false }   // an empty permitted scope permits nothing, never everything
-    let segs = name.split(whereSeparator: { $0 == "." || $0 == ":" }).map(String.init)
-    let parts = scope.split(whereSeparator: { $0 == "." || $0 == ":" }).map(String.init)
+    // ⟨0.42⟩ R1550 — segmented OUTSIDE the disambiguator (see `nameSegments`): splitting inside it let
+    // `only callEff -> Inner` be satisfied by `Box.act(Models.Inner.Rec)`, a callee that lives in `Box`.
+    let segs = r1550Off ? legacySegments(name) : nameSegments(name)
+    let parts = r1550Off ? legacySegments(scope) : nameSegments(scope)
     if parts.isEmpty || parts.count > segs.count { return false }
     outer: for i in 0...(segs.count - parts.count) {
         for (k, p) in parts.enumerated() where segs[i + k] != p { continue outer }
@@ -819,8 +894,9 @@ public func scopeMatches(_ name: String, _ scope: String) -> Bool {
     if scope.isEmpty { return true }
     let trimmed = scope.trimmingCharacters(in: .whitespaces)
     let exact = trimmed.hasSuffix("::") || trimmed.hasSuffix(".")
-    let segs = name.split(whereSeparator: { $0 == "." || $0 == ":" }).map(String.init)
-    let parts = scope.split(whereSeparator: { $0 == "." || $0 == ":" }).map(String.init)
+    // ⟨0.42⟩ R1549 — segmented OUTSIDE the disambiguator (see `nameSegments`).
+    let segs = r1549Off ? legacySegments(name) : nameSegments(name)
+    let parts = r1549Off ? legacySegments(scope) : nameSegments(scope)
     if parts.isEmpty || parts.count > segs.count { return false }
     let last = parts[parts.count - 1], initParts = parts.dropLast()
     outer: for i in 0...(segs.count - parts.count) {

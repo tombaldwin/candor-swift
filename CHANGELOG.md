@@ -10,6 +10,30 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SPEC ⟨0.42⟩ co-path units: a name's overload disambiguator is part of its last segment (SOUNDNESS R1551,
+  R1549, R1550, R1560).** This engine spells an overload `Box.act(Models.Inner.Rec)`, and the parameter list
+  can carry `.` and `::`. Four readers split the whole name on those separators, so `Inner` became a path
+  segment of a function that lives in `Box`.
+  - **R1551 (silent).** The chained key derivation's leaf was `Rec)`. No bare-path key `Dep#Box.act` existed,
+    so a consumer's `Box.act(r)` joined nothing and read `[]`: no `Unknown`, no `invisible`, and `deny Fs`
+    exited 0 over a call that reads a file (executed). The same text with an unqualified `Rec` joined. The
+    leaf is now split outside the disambiguator, and the bare key also drops a positional `#<N>`. Every
+    qualified, nested, generic and dictionary parameter spelling joins, for static, instance and free members,
+    and so do identical-signature members spelled `act(Models.Rec)#1`. As with R567(b), the call joins the
+    UNION of the overloads, so the caller of a pure sibling overload is charged too.
+  - **R1560 (silent, producer).** The ⟨0.39⟩ union index split `Impl.run(Models.Rec)` the same way. No
+    `Runner.run` union entry was published for a protocol whose implementor overloads the member with a
+    qualified parameter type, so a chained consumer's `x.run(…)` through `any Runner` read `[]` (executed).
+    It now reads `Fs`.
+  - **R1549 (fail-closed).** `deny Fs Inner` no longer fires on a function that only takes the type, on the
+    scan route or `gate --report`.
+  - **R1550 (silent).** `only callEff -> Inner` is no longer satisfied by a callee in `Box`.
+  - Scopes are segmented by the same rule. `Box.act` binds every member, `Box.act(Models.Inner.Rec)` binds
+    that member only, and a group that begins a segment (`row::convert::(T1,T2)::from_row_opt`) is still a
+    path segment.
+  - Kill switches: `CANDOR_R1551_OFF`, `CANDOR_R1560_OFF`, `CANDOR_R1549_OFF`, `CANDOR_R1550_OFF`. Reach
+    probe: `CANDOR_R1551_PROBE` prints `R1551HIT` and `R1560HIT` lines.
+
 - **⚠ SOUNDNESS R1526: a local collection with no iterator of its own is iterated through its collection witnesses.**
   The stdlib iterates `struct C: BidirectionalCollection` that declares no `makeIterator` with `IndexingIterator`,
   which runs `startIndex`, `endIndex`, `subscript`, `index(after:)` and the Index's `==`. R1048 edged only
