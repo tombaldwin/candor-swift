@@ -229,8 +229,20 @@ final class CoPathUnitsProcessTests: XCTestCase {
         XCTAssertEqual(try gate("deny Fs Inner"), 0, "R1549: `Inner` is a parameter type, not a path segment")
         XCTAssertEqual(try gate("only callEff -> Inner"), 1, "R1550: `Inner` does not permit a call into `Box`")
         XCTAssertEqual(try gate("only callEff -> Box"), 0, "CONTROL: the real owner permits it")
-        XCTAssertEqual(try gate("deny Fs Inner", ["CANDOR_R1549_OFF": "1"]), 1, "§1b: R1549's switch restores the split")
-        XCTAssertEqual(try gate("only callEff -> Inner", ["CANDOR_R1550_OFF": "1"]), 0,
-                       "§1b: R1550's switch restores the false green")
+        // §1b — R1549 and R1550 are the GATE's own switches (the scope matcher reads them), so a policy run under either
+        // CONSULTS it and is refused at exit 2 (SPEC §3.3 (e)): what they restore can no longer be read off an exit code.
+        // The refusal names the switch, which is the check that the matcher really reached the read.
+        func refusedNaming(_ policy: String, _ name: String) throws {
+            let pol = fx.root.appendingPathComponent("p-\(UUID().uuidString).policy")
+            try (policy + "\n").write(to: pol, atomically: true, encoding: .utf8)
+            let gj = fx.root.appendingPathComponent("gj-\(UUID().uuidString).json")
+            let r = try ProcessHarness.runRaw(bin, [fx.root.appendingPathComponent("one").path, "--policy", pol.path, "--gate-json", gj.path,
+                                                    "--out", fx.root.appendingPathComponent("g").path], env: [name: "1"])
+            XCTAssertEqual(r.code, 2, "§1b: `\(policy)` under \(name) must be refused: \(r.err)")
+            let d = try JSONSerialization.jsonObject(with: Data(contentsOf: gj)) as? [String: Any]
+            XCTAssertEqual(d?["switches"] as? [String], [name])
+        }
+        try refusedNaming("deny Fs Inner", "CANDOR_R1549_OFF")
+        try refusedNaming("only callEff -> Inner", "CANDOR_R1550_OFF")
     }
 }

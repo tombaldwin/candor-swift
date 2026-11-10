@@ -75,7 +75,21 @@ final class R817BindListenProcessTests: XCTestCase {
             let arm = try XCTUnwrap(Self.arms.first { $0.name == name })
             let root = try ProcessHarness.makeFilesPackage(["a.swift": arm.body], name: "T")
             defer { try? FileManager.default.removeItem(at: root) }
-            XCTAssertEqual(try scan(root, policy: policy, env: off).0, released, "\(name) under CANDOR_R817_OFF")
+            // The release's verdict is no longer readable off a policy run: a `scan --policy` that consulted the switch refuses
+            // (exit 2, SPEC §3.3 (e)), and `gate --report` refuses every `allow` rule. What the switch changes is the ROW, which
+            // the report route discloses (§3.4 (a)): the switched row differs from the default row and the report names the switch.
+            _ = (policy, released)
+            let (_, on) = try scan(root)
+            let r = try ProcessHarness.runRaw(try ProcessHarness.binaryURL(for: Self.self), [root.path, "--json"], env: off)
+            let rep = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any])
+            XCTAssertEqual(rep["switches"] as? [String], ["CANDOR_R817_OFF"], "\(name): the report names the switch")
+            let offRow = (rep["functions"] as? [[String: Any]])?.first { ($0["fn"] as? String).map { $0 == "f" || $0.hasSuffix(".f") } ?? false }
+            func key(_ r: [String: Any]?) -> String { "\(r?["hosts"] ?? [])|\(r?["incomplete"] ?? [])|\(r?["inferred"] ?? [])" }
+            XCTAssertNotEqual(key(offRow), key(on), "\(name) under CANDOR_R817_OFF: the switch must MOVE the row")
+            let pf = root.appendingPathComponent("pol-off")
+            try (policy + "\n").write(to: pf, atomically: true, encoding: .utf8)
+            XCTAssertEqual(try ProcessHarness.runRaw(try ProcessHarness.binaryURL(for: Self.self), [root.path, "--json", "--policy", pf.path], env: off).code, 2,
+                           "\(name): a policy run under CANDOR_R817_OFF is refused")
         }
     }
 }

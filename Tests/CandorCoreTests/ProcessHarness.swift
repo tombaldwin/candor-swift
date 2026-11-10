@@ -170,7 +170,51 @@ enum ProcessHarness {
     /// Run the binary with a SANITIZED environment (no inherited CANDOR_* leaks into a fixture scan)
     /// plus the given overrides. `cwd` pins the working directory (the config-anchoring tests must
     /// prove the CWD does NOT matter). Reads BEFORE the exit wait (pipe-buffer deadlock guard).
+    ///
+    /// ⟨0.42⟩ (SOUNDNESS R1634) A POLICY RUN UNDER A RESULT-MOVING SWITCH NOW REFUSES (exit 2, SPEC §3.3 (e)), so the ~130 tests
+    /// that switched a fix off to measure what the RELEASE's gate said can no longer read that from `scan --policy`. They are
+    /// ablation measurements, and the report route (`--json`/`--out`, where §3.4 (a) makes the switch a disclosure and nothing
+    /// refuses) is where an ablation belongs. So a policy run whose `env` carries a switch is done in two steps: scan WITHOUT
+    /// the policy under the switch, then `gate --report` over that report in a CLEAN environment. The `switches` key is removed
+    /// from the report between the steps — the one thing this does that production never does, and the reason it lives here
+    /// in the harness and not in the engine: it asks "what would the release's verdict be", which the engine rightly refuses
+    /// to answer. `ResultMovingSwitchesTests` runs the real refusal through `runRaw` instead.
+    static let operatorVariables: Set<String> = ["CANDOR_POLICY", "CANDOR_CONFIG", "CANDOR_DEPS", "CANDOR_BASELINE", "CANDOR_REPORT",
+                                                 "CANDOR_UNKNOWN_RATCHET"]
     static func run(_ binary: URL, _ args: [String], env: [String: String] = [:], cwd: URL? = nil) throws -> (out: String, err: String, code: Int32) {
+        let switched = env.keys.contains { $0.hasPrefix("CANDOR_") && !operatorVariables.contains($0) }
+        guard switched, let pi = args.firstIndex(of: "--policy"), pi + 1 < args.count, args.first != "gate", args.first != "unverified" else {
+            return try runRaw(binary, args, env: env, cwd: cwd)
+        }
+        let policy = args[pi + 1]
+        var scanArgs = args
+        // The policy STAYS on the scan: the peek that reads the excluded files is armed by it, and a report scanned without one
+        // is incomplete under every `deny` (⟨0.32⟩). The scan then refuses at exit 2 — AFTER writing its report (§3.4 (c)).
+        if let gi = scanArgs.firstIndex(of: "--gate-json"), gi + 1 < scanArgs.count { scanArgs.removeSubrange(gi...(gi + 1)) }
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("candor-ablate-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let wantsJson = scanArgs.contains("--json")
+        if !wantsJson {
+            if let oi = scanArgs.firstIndex(of: "--out"), oi + 1 < scanArgs.count { scanArgs.removeSubrange(oi...(oi + 1)) }
+            scanArgs += ["--out", tmp.appendingPathComponent("r").path]
+        }
+        let scan = try runRaw(binary, scanArgs, env: env, cwd: cwd)
+        var reportData: Data?
+        if wantsJson { reportData = Data(scan.out.utf8) }
+        else if let hit = try FileManager.default.contentsOfDirectory(atPath: tmp.path)
+            .first(where: { $0.hasSuffix(".Swift.json") && !$0.hasSuffix(".callgraph.json") && !$0.hasSuffix(".hierarchy.json") }) {
+            reportData = try Data(contentsOf: tmp.appendingPathComponent(hit))
+        }
+        guard let data = reportData, !data.isEmpty, var doc = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return scan }
+        doc["switches"] = nil
+        let rep = tmp.appendingPathComponent("ablated.Swift.json")
+        try JSONSerialization.data(withJSONObject: doc).write(to: rep)
+        let g = try runRaw(binary, ["gate", "--report", rep.path, "--policy", policy], env: [:], cwd: cwd)
+        return (scan.out, scan.err + g.err, g.code)
+    }
+
+    static func runRaw(_ binary: URL, _ args: [String], env: [String: String] = [:], cwd: URL? = nil) throws -> (out: String, err: String, code: Int32) {
         let p = Process()
         p.executableURL = binary
         p.arguments = args
